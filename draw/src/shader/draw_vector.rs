@@ -33,6 +33,8 @@ script_mod! {
 
         vertex: fn() {
             let pos = vec2(self.geom.x, self.geom.y);
+            // uv.y <= 1 is cap coverage; round-cap carriers use
+            // uv.y = 1 + cap_axis, where cap_axis runs 0..1 from centre to tip.
             let g_uv = unpack2f16(self.geom.uv)
             let g_color = unpack4u8(self.geom.color)
             let g_p0s = unpack2f16(self.geom.p0s)
@@ -254,6 +256,10 @@ script_mod! {
             }
             let color = self.get_color();
             var alpha = 0.0;
+            let cap = self.v_tcoord.y;
+            let cap_axis = max(cap - 1.0, 0.0);
+            let round_sd = 1.0 - length(vec2(self.v_tcoord.x * 2.0 - 1.0, cap_axis));
+            let round_fw = length(vec2(dFdx(round_sd), dFdy(round_sd)));
             // Wide analytic fill fringe. Its tcoord.x is signed across the
             // nominal edge (0 exactly on the path, positive inside, negative
             // outside). Dividing by its screen derivative recovers signed
@@ -264,7 +270,13 @@ script_mod! {
             //
             // stroke_mult = 2e6 is reserved for this mode. Ordinary fills
             // keep their established 1e6 sentinel.
-            if self.v_stroke_mult > 1.5e6 {
+            if cap > 1.0 {
+                alpha = clamp(round_sd / max(round_fw, 0.001), 0.0, 1.0)
+                    * self.get_stroke_mask();
+                if alpha * color.w <= 0.004 {
+                    discard()
+                }
+            } else if self.v_stroke_mult > 1.5e6 {
                 let sd = self.v_tcoord.x;
                 let fw = length(vec2(dFdx(sd), dFdy(sd)));
                 alpha = clamp(0.5 + sd / max(fw, 0.001), 0.0, 1.0);
@@ -278,10 +290,10 @@ script_mod! {
             } else {
                 let sd = 1.0 - abs(self.v_tcoord.x * 2.0 - 1.0);
                 let fw = length(vec2(dFdx(sd), dFdy(sd)));
-                let cap = self.v_tcoord.y;
                 let cap_fw = length(vec2(dFdx(cap), dFdy(cap)));
                 let cap_alpha = smoothstep(0.0, max(cap_fw, 0.001), cap);
-                alpha = clamp(sd / max(fw, 0.001), 0.0, 1.0) * cap_alpha * self.get_stroke_mask();
+                alpha = clamp(sd / max(fw, 0.001), 0.0, 1.0)
+                    * cap_alpha * self.get_stroke_mask();
             }
             return color * alpha
         }

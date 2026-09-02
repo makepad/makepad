@@ -1128,6 +1128,8 @@ script_mod! {
             let off = self.geom.off
             let road_params = self.geom.params
             let road_depth = self.geom.depth
+            // uv.y <= 1 is cap coverage; round-cap carriers use
+            // uv.y = 1 + cap_axis, where cap_axis runs 0..1 from centre to tip.
             let road_uv = self.geom.uv
             let expanded = floor(road_params.x / 1024.0)
             let meta = road_params.x - expanded * 1024.0
