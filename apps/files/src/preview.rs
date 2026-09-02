@@ -107,10 +107,13 @@ impl PreviewHost {
     /// change — that is how arrow keys dial through previews.
     pub fn retarget(&mut self, cx: &Cx, path: &Path) -> bool {
         let fs = crate::vfs::vfs();
-        if self.hosted.is_none() || fs.is_demo() || fs.is_dir(path) {
+        if self.hosted.is_none() || fs.is_dir(path) {
             return false;
         }
-        makepad_wm_api::preview(cx, &fs.real_path(path))
+        let Ok(native) = fs.native_path(path) else {
+            return false;
+        };
+        makepad_wm_api::preview(cx, &native)
     }
 
     /// Quick Look `path` in its associated viewer. External viewers are a
@@ -122,7 +125,9 @@ impl PreviewHost {
             return preview;
         }
         let app = viewer_for(path);
-        let real = fs.real_path(path);
+        let Ok(real) = fs.native_path(path) else {
+            return Preview::NoViewer(format!("External previews are unavailable for {name}"));
+        };
         let path = real.as_path();
         if makepad_wm_api::hosted(cx) {
             // No `close` first: the WM keeps the viewer warm and retargets it,
@@ -195,11 +200,10 @@ impl PreviewHost {
 /// process standalone, and the desktop's own opener when neither can.
 pub fn open_file(cx: &Cx, path: &Path) -> String {
     let name = crate::model::display_name(path);
-    if crate::vfs::vfs().is_demo() {
-        return format!("Opening {name} is not in this demo");
-    }
     let app = viewer_for(path);
-    let real = crate::vfs::vfs().real_path(path);
+    let Ok(real) = crate::vfs::vfs().native_path(path) else {
+        return format!("Opening {name} is not available on this filesystem");
+    };
     let path = real.as_path();
     if makepad_wm_api::open(cx, path) {
         return format!("Opening {} in {}", name, app);
@@ -215,10 +219,9 @@ pub fn open_file(cx: &Cx, path: &Path) -> String {
 /// of ours claims the file.
 pub fn open_file_with(cx: &Cx, path: &Path, app: &str) -> String {
     let name = crate::model::display_name(path);
-    if crate::vfs::vfs().is_demo() {
-        return format!("Open With for {name} is not in this demo");
-    }
-    let real = crate::vfs::vfs().real_path(path);
+    let Ok(real) = crate::vfs::vfs().native_path(path) else {
+        return format!("Open With for {name} is not available on this filesystem");
+    };
     let path = real.as_path();
     if app.is_empty() {
         return match os_open(path) {

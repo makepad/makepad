@@ -772,7 +772,7 @@ impl TreemapView {
         if root.as_os_str().is_empty() {
             return;
         }
-        crate::sizecache::forget(&root);
+        let _ = crate::vfs::vfs().forget_scan_cache(&root);
         self.begin(cx, &root, true);
     }
 
@@ -861,10 +861,10 @@ impl TreemapView {
             // The saved map first, and off the UI thread: decoding a home
             // directory's worth of tree is a tenth of a second of work that
             // has no business happening between two frames.
-            let cached = if fresh || crate::vfs::is_demo() {
+            let cached = if fresh {
                 None
             } else {
-                crate::sizecache::load(&root)
+                crate::vfs::vfs().load_scan_cache(&root).ok().flatten()
             };
             if let Some(cached) = cached {
                 let _ = sender.send(ScanMessage {
@@ -1592,14 +1592,20 @@ impl TreemapView {
     /// tree so it happens here, where the tree is; the file write is somebody
     /// else's problem, on a thread nobody is waiting for.
     fn save_cache(&self) {
-        if crate::vfs::is_demo() {
+        if crate::vfs::vfs().is_demo() {
             return;
         }
         let Some(bytes) = crate::sizecache::encode(&self.root, &self.tree, self.scanned_at) else {
             return;
         };
         let root = self.root.clone();
-        thread::spawn(move || crate::sizecache::store(&root, &bytes));
+        if crate::vfs::vfs().is_instant() {
+            let _ = crate::vfs::vfs().store_scan_cache(&root, &bytes);
+        } else {
+            thread::spawn(move || {
+                let _ = crate::vfs::vfs().store_scan_cache(&root, &bytes);
+            });
+        }
     }
 
     /// `path` as the chain of names between the mapped folder and it.

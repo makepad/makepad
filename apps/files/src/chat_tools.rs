@@ -248,14 +248,14 @@ pub fn resolve(raw: &str, home: &Path, cwd: &Path) -> Result<PathBuf, String> {
     }
     // Then for real: canonicalising is what follows a symlink, and a link out
     // of the home is exactly the case the lexical check cannot see.
-    let real = match wanted.canonicalize() {
+    let real = match vfs().canonicalize(&wanted) {
         Ok(real) => real,
         // The demo filesystem has no paths on disk at all, and neither does a
         // path that is simply not there; both are the same answer here.
         Err(_) if crate::vfs::is_demo() => wanted.clone(),
         Err(error) => return Err(format!("{}: {error}", wanted.display())),
     };
-    let real_home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    let real_home = vfs().canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
     if !within(&real, &real_home) {
         return Err(format!(
             "refused: {} leads outside {} — this assistant only looks inside the home folder",
@@ -544,7 +544,7 @@ fn measure(
     }
     // Never walk through a link: the tree below it is somebody else's, and it
     // can lead straight back to where we started.
-    if !vfs().is_demo() && std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+    if vfs().is_symlink(path).unwrap_or(false) {
         return (0, 0, true);
     }
     if model::skip_for_scan(path, &vfs().home()) {
