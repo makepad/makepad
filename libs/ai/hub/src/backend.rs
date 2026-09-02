@@ -1580,6 +1580,7 @@ pub fn backend_compiled(name: &str) -> bool {
         "woosh" => cfg!(feature = "audio"),
         "ace" => cfg!(feature = "audio"),
         "beats" => cfg!(feature = "beats-native"),
+        "stems" => cfg!(feature = "stems-native"),
         "trellis" => cfg!(feature = "mesh"),
         "paint" | "paint-test" => cfg!(feature = "paint"),
         "matte-native" => cfg!(feature = "matte-native"),
@@ -1898,6 +1899,13 @@ pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, Asset
         #[cfg(not(feature = "beats-native"))]
         "beats" => Err(AssetAiError::Unavailable(format!(
             "model {} needs a build with the 'beats-native' cargo feature",
+            spec.id
+        ))),
+        #[cfg(feature = "stems-native")]
+        "stems" => Ok(Box::new(crate::stems_backend::StemsBackend::new(&spec.id))),
+        #[cfg(not(feature = "stems-native"))]
+        "stems" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a build with the 'stems-native' cargo feature",
             spec.id
         ))),
         #[cfg(not(feature = "audio"))]

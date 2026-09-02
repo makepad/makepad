@@ -1,0 +1,21 @@
+[package]
+name = "makepad-dj-pack"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "AI-hub stem baker and static Asset Store snapshot packer for the web DJ"
+
+[[bin]]
+name = "makepad-dj-pack"
+path = "src/main.rs"
+
+[dependencies]
+makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false }
+makepad-ai-stems = { path = "../../libs/ai/models/stems" }
+makepad-asset-client = { path = "../../libs/asset/client" }
+makepad-asset-data = { path = "../../libs/asset/data" }
+makepad-asset-store = { path = "../../libs/asset/store" }
+makepad-audio-decode = { path = "../../libs/audio_decode" }
+makepad-audio-encode = { path = "../../libs/audio_encode" }
+makepad-audio-lyrics = { path = "../../libs/audio_lyrics" }
+makepad-audio-sidechannels = { path = "../../libs/audio_sidechannels" }

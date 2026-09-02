@@ -35,6 +35,7 @@ default = [
     "rig-native",
     "splat-native",
     "beats-native",
+    "stems-native",
     "notes-native",
 ]
 # Box-provisioned Python/Torch reference backends (FlashWorld, Music3,
@@ -102,6 +103,9 @@ rig-native = ["dep:makepad-ai-rig", "dep:makepad-ai-common", "dep:makepad-gltf"]
 local = ["dep:makepad-ai-common"]
 # Native Beat This! audio -> beat/downbeat JSON analysis.
 beats-native = ["dep:makepad-ai-beats", "dep:makepad-ai-common"]
+# Native BS-RoFormer music source separation. Clients use the featureless hub
+# slice; only fleet service builds compile and load this model.
+stems-native = ["dep:makepad-ai-stems", "dep:makepad-ai-common"]
 # Native Spotify Basic Pitch audio -> notes/MIDI transcription. The model is
 # tiny and has a CPU fallback, so this lane is available without a GPU.
 notes-native = ["dep:makepad-ai-notes"]
@@ -142,6 +146,7 @@ makepad-render = { path = "../../render", optional = true }
 makepad-ai-llm = { path = "../../ai/llm", optional = true }
 makepad-ai-speech = { path = "../../ai/models/speech", default-features = false, optional = true }
 makepad-ai-beats = { path = "../../ai/models/beats", optional = true }
+makepad-ai-stems = { path = "../../ai/models/stems", optional = true }
 makepad-ai-notes = { path = "../../ai/models/notes", optional = true }
 makepad-system-speech = { path = "../../system_speech", optional = true }
 makepad-video = { package = "makepad-platform-video", path = "../../../platform/video", optional = true }
