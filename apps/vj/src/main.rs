@@ -184,7 +184,7 @@ use crate::lyrics::{
 };
 use crate::stems::{StemsJob, StemsMsg, StemsPool};
 use crate::columns::{Column, ColumnLayout};
-use crate::console::{ClipLatch, Console};
+use crate::console::{ClipLatch, Console, ConsoleView};
 use crate::preprocess::{Group as PrepGroup, Pass as PrepPass, PreprocessSettings, PASSES};
 use crate::track_tags::TrackTags;
 use crate::wave_analysis::{
@@ -17313,6 +17313,44 @@ p2 {}
         }
     }
 
+    /// The chevron opens and closes the strip; the chips pick what the
+    /// opened area shows. Both save, because the operator set them.
+    fn handle_console(&mut self, cx: &mut Cx, actions: &Actions) {
+        let mut changed = false;
+        for (path, open) in
+            [(ids!(console_chevron_down), true), (ids!(console_chevron_up), false)]
+        {
+            if self.ui.button(cx, path).clicked(actions) && self.console.open != open {
+                self.console.open = open;
+                changed = true;
+            }
+        }
+        for (index, chip) in
+            [ids!(console_view_0), ids!(console_view_1), ids!(console_view_2)]
+                .into_iter()
+                .enumerate()
+        {
+            if self.ui.button(cx, chip).clicked(actions) {
+                let view = ConsoleView::from_index(index);
+                if self.console.view != view {
+                    self.console.view = view;
+                    changed = true;
+                }
+                // Picking a pane while it is shut opens it: nobody chooses
+                // what to see in something they cannot see.
+                if !self.console.open {
+                    self.console.open = true;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.paint_console(cx);
+            self.resync_layout(cx);
+            self.save_preprocess_settings();
+        }
+    }
+
     /// A list tab was pressed. Wide, the explorer and queue tabs both mean
     /// the pair; the loops tab is a page at every width.
     fn handle_lists_tabs(&mut self, cx: &mut Cx, actions: &Actions) {
@@ -18282,10 +18320,11 @@ p2 {}
         // lines: they are the same dialog, and two files would be two things
         // to keep in step for no gain.
         let body = format!(
-            "{}explorer_columns {}\nqueue_columns {}\n",
+            "{}explorer_columns {}\nqueue_columns {}\n{}",
             self.prep.to_text(),
             self.explorer_columns.to_text(),
             self.queue_columns.to_text(),
+            self.console.to_text(),
         );
         let _ = crate::durable::write_file(&path, body);
     }
@@ -18304,7 +18343,7 @@ p2 {}
                         self.explorer_columns = ColumnLayout::from_text(value)
                     }
                     "queue_columns" => self.queue_columns = ColumnLayout::from_text(value),
-                    _ => {}
+                    _ => self.console.apply_line(key, value),
                 }
             }
         }
@@ -25908,6 +25947,7 @@ impl MatchEvent for App {
         self.handle_deck_tabs(cx, actions);
         self.handle_deck_sections(cx, actions);
         self.handle_lists_tabs(cx, actions);
+        self.handle_console(cx, actions);
         if self.ui.button(cx, ids!(loop_score_play)).clicked(actions) {
             self.play_loop_score_preview(cx);
         }
