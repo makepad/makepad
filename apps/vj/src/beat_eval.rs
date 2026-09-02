@@ -2131,8 +2131,26 @@ fn one_track_diagnostics() {
     // Where inside the analysis the period comes from, stage by stage.
     let envelopes = super::build_envelopes(&pcm);
     let hop_rate = envelopes.sample_rate / envelopes.hop as f64;
-    let grid = analyze(&pcm).grid;
-    eprintln!("published grid: {:.4} BPM, first beat {:.4}s", grid.bpm, grid.first_beat_secs);
+    let analysis = analyze(&pcm);
+    let grid = analysis.grid;
+    eprintln!(
+        "published grid: {:.4} BPM, first beat {:.4}s, downbeat phase {}, confidence {:.3}, \
+         {} arrangement changes at {:?}",
+        grid.bpm,
+        grid.first_beat_secs,
+        grid.downbeat_phase,
+        grid.confidence,
+        analysis.changes_secs.len(),
+        analysis.changes_secs.iter().map(|s| (s * 10.0).round() / 10.0).collect::<Vec<_>>(),
+    );
+    match crate::loop_splat::build_splat(&analysis, None) {
+        Some(splat) => eprintln!(
+            "loop splat: {} sections, bars per column {:?}",
+            splat.sections.len(),
+            splat.bars_per_col
+        ),
+        None => eprintln!("loop splat: REFUSED (has_grid {}, confidence {:.3} < 0.35?)", grid.has_grid(), grid.confidence),
+    }
     let report = evaluate(&path, &pcm);
     let oracle_period = 60.0 / report.oracle_bpm;
     let beats = seconds / oracle_period;

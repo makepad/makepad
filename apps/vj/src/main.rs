@@ -72,7 +72,12 @@ mod lanes;
 // a coding agent polls after saving one. See apps/vj/LIVECODING.md.
 mod livecode;
 mod loop_detect;
+mod loop_blocks;
 mod loop_scan;
+mod loop_splat;
+mod loop_splat_model;
+mod loop_transcribe;
+mod loop_splat_view;
 // Karaoke: whisper over the separated vocals stem, cached beside the stems.
 mod lyrics;
 // Word-level karaoke timing: cross-attention DTW + teacher forcing + onset
@@ -86,10 +91,12 @@ mod midi_learn;
 mod mix;
 mod mixer;
 mod models;
+mod notes_map;
 // Two-deck music mode: deck DSP, off-thread track analysis, deck surface.
 mod music_dsp;
 mod music_import_ui;
 mod music_view;
+mod score_preview;
 mod stems;
 mod wave_analysis;
 mod pads;
@@ -103,8 +110,8 @@ mod side_channels;
 mod views;
 
 use crate::apc40::{
-    palette_velocity, thumb_color, Apc40State, ApcAction, ApcSurface, LedDiff, LedFrame, PadLed,
-    PAD_COUNT,
+    palette_velocity, splat_led_frame, thumb_color, Apc40State, ApcAction, ApcSurface, LedDiff,
+    LedFrame, PadLed, PAD_COUNT,
 };
 use crate::beat_sync::{
     BeatClock, BeatFit, BeatLockState, BeatSnapshot, BeatSyncAnalyzer,
@@ -114,6 +121,12 @@ use crate::catalog::{BrowseModel, CatCmd, CatGen, TileMedia, TileThumb};
 use crate::cue::{CueCmd, CueEngine, CueGen, CueItem, CueScheduleId, SlotId};
 use crate::loop_detect::{
     analyze_video_loop, FrameSignature, LoopDetection, LoopKind, MotionSummary,
+};
+use crate::loop_splat::{build_splat, SplatPart, StemLevels};
+use crate::loop_splat_model::{splat_deck, splat_row, splat_view_model, SplatCoverage};
+use crate::loop_splat_view::{
+    LoopSplatAction, SplatCellView, SplatRowView, SplatViewModel, VjLoopSplatWidgetRefExt,
+    SPLAT_ROWS,
 };
 use crate::autopilot::{AutoCmd, AutoDeckObs, AutoLoad, AutoObs, AutoPilot, AutoStyle};
 use crate::blend::MixBrain;
@@ -153,7 +166,7 @@ use crate::lanes::{LatestWins, AUDIO_LANE};
 use crate::media::{DecodeDone, DecodeJob, DecodePool, SlotPlayer};
 use crate::mixer::{
     TrackStems,
-    CueMode, CueReadState, Mixer, TrackPcm, VideoTransitionError, VideoTransitionId,
+    CueMode, CueReadState, MixCmd, Mixer, TrackPcm, VideoTransitionError, VideoTransitionId,
     VideoTransitionPhase,
 };
 use crate::pads::{PadCmd, PadEngine, PadItem};
@@ -2844,6 +2857,409 @@ impl SungWorker {
     }
 }
 
+struct SplatRefineDone {
+    deck: DeckId,
+    gen: u64,
+    grid: Option<Arc<crate::loop_splat::SplatGrid>>,
+}
+
+struct SplatRefineWorker {
+    tx: std::sync::mpsc::Sender<SplatRefineDone>,
+    rx: std::sync::mpsc::Receiver<SplatRefineDone>,
+}
+
+impl SplatRefineWorker {
+    fn new() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        Self { tx, rx }
+    }
+
+    fn submit(
+        &self,
+        deck: DeckId,
+        gen: u64,
+        stems: Arc<TrackStems>,
+        pcm: Arc<TrackPcm>,
+        analysis: Arc<TrackAnalysis>,
+    ) -> bool {
+        let tx = self.tx.clone();
+        std::thread::Builder::new()
+            .name("loop-splat-refine".to_string())
+            .spawn(move || {
+                let levels = Arc::new(splat_stem_levels(&stems, &pcm, &analysis));
+                let grid = build_splat(&analysis, Some(&levels)).map(Arc::new);
+                let _ = tx.send(SplatRefineDone { deck, gen, grid });
+            })
+            .is_ok()
+    }
+
+    fn poll(&self) -> Vec<SplatRefineDone> {
+        self.rx.try_iter().collect()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LoopScoreKey {
+    deck: DeckId,
+    row: SplatRowView,
+    col: u8,
+    load_gen: u64,
+    start_frame: usize,
+    end_frame: usize,
+    sample_rate: u32,
+    bars: u8,
+    bpm_bits: u64,
+    basic_pitch: bool,
+}
+
+impl std::hash::Hash for LoopScoreKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.deck.index().hash(state);
+        self.row.hash(state);
+        self.col.hash(state);
+        self.load_gen.hash(state);
+        self.start_frame.hash(state);
+        self.end_frame.hash(state);
+        self.sample_rate.hash(state);
+        self.bars.hash(state);
+        self.bpm_bits.hash(state);
+        self.basic_pitch.hash(state);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoopScoreSignature {
+    Empty,
+    Selected { key: LoopScoreKey, source_ready: bool, lyrics_ready: bool },
+}
+
+#[derive(Clone, Debug)]
+enum LoopScoreTranscription {
+    Drums(Vec<makepad_score_view::build::DrumHit>),
+    Pitched {
+        notes: Vec<makepad_score_view::build::PitchedNote>,
+        engine: LoopScorePitchEngine,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoopScorePitchEngine {
+    BasicPitch,
+    PitchTracker,
+}
+
+impl LoopScoreTranscription {
+    fn blocks(&self, bars: u8) -> crate::loop_blocks::CellBlocks {
+        match self {
+            Self::Drums(hits) => crate::loop_blocks::drum_blocks(hits, bars),
+            Self::Pitched { notes, .. } => crate::loop_blocks::pitched_blocks(notes, bars),
+        }
+    }
+
+    fn pitch_engine(&self) -> Option<LoopScorePitchEngine> {
+        match self {
+            Self::Drums(_) => None,
+            Self::Pitched { engine, .. } => Some(*engine),
+        }
+    }
+}
+
+struct LoopScoreDone {
+    key: LoopScoreKey,
+    transcription: Arc<LoopScoreTranscription>,
+    blocks: Arc<crate::loop_blocks::CellBlocks>,
+}
+
+struct LoopScoreJob {
+    key: LoopScoreKey,
+    pcm: Arc<TrackPcm>,
+    stems: Option<(Arc<TrackStems>, usize)>,
+    clock: crate::loop_transcribe::LoopClock,
+    lyrics: Vec<makepad_score_view::build::LyricWord>,
+    notes_model: Option<std::path::PathBuf>,
+}
+
+fn loop_score_lyric_words(
+    lyrics: Option<&TrackLyrics>,
+    start_secs: f64,
+    end_secs: f64,
+    bpm: f64,
+) -> Vec<makepad_score_view::build::LyricWord> {
+    let Some(lyrics) = lyrics else { return Vec::new() };
+    if !start_secs.is_finite()
+        || !end_secs.is_finite()
+        || end_secs < start_secs
+        || !bpm.is_finite()
+        || bpm <= 0.0
+    {
+        return Vec::new();
+    }
+    let beats_per_second = bpm / 60.0;
+    let mut output = Vec::new();
+    for line in &lyrics.lines {
+        for (index, text) in line.text.split_whitespace().enumerate() {
+            let Some(&onset) = line.words.get(index) else { break };
+            if !onset.is_finite() || onset < start_secs || onset > end_secs {
+                continue;
+            }
+            let end = line
+                .words
+                .get(index + 1)
+                .copied()
+                .filter(|end| end.is_finite())
+                .unwrap_or(line.end_secs)
+                .max(onset)
+                .min(end_secs);
+            output.push(makepad_score_view::build::LyricWord {
+                onset_beats: (onset - start_secs) * beats_per_second,
+                end_beats: (end - start_secs) * beats_per_second,
+                text: text.to_string(),
+            });
+        }
+    }
+    output.sort_by(|left, right| left.onset_beats.total_cmp(&right.onset_beats));
+    output
+}
+
+#[cfg(test)]
+mod loop_score_lyric_tests {
+    use super::*;
+
+    #[test]
+    fn loop_score_words_are_clipped_and_converted_to_beats() {
+        let lyrics = TrackLyrics {
+            backend: "test".into(),
+            model: "test".into(),
+            language: "en".into(),
+            duration_secs: 20.0,
+            onset: Default::default(),
+            lines: vec![crate::lyrics::LyricLine {
+                start_secs: 9.8,
+                end_secs: 12.5,
+                text: "before sing it after".into(),
+                words: vec![9.8, 10.25, 10.75, 12.1],
+                confident: true,
+            }],
+        };
+        let words = loop_score_lyric_words(Some(&lyrics), 10.0, 12.0, 120.0);
+        assert_eq!(words.len(), 2);
+        assert_eq!(words[0].text, "sing");
+        assert!((words[0].onset_beats - 0.5).abs() < 1e-9);
+        assert!((words[0].end_beats - 1.5).abs() < 1e-9);
+        assert_eq!(words[1].text, "it");
+        assert!((words[1].onset_beats - 1.5).abs() < 1e-9);
+        assert!((words[1].end_beats - 4.0).abs() < 1e-9);
+    }
+}
+
+struct LoopScoreWorker {
+    tx: std::sync::mpsc::Sender<LoopScoreDone>,
+    rx: std::sync::mpsc::Receiver<LoopScoreDone>,
+    pending: VecDeque<LoopScoreJob>,
+    active: Vec<LoopScoreKey>,
+    next_thread: u64,
+    notes_model: Arc<
+        std::sync::Mutex<Option<(std::path::PathBuf, makepad_ai_notes::NotesModel)>>,
+    >,
+}
+
+impl LoopScoreWorker {
+    const MAX_ACTIVE: usize = 2;
+
+    fn new() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        Self {
+            tx,
+            rx,
+            pending: VecDeque::new(),
+            active: Vec::new(),
+            next_thread: 0,
+            notes_model: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    fn submit(&mut self, job: LoopScoreJob) -> bool {
+        if self.active.contains(&job.key) || self.pending.iter().any(|pending| pending.key == job.key) {
+            return true;
+        }
+        self.pending.push_back(job);
+        self.fill();
+        true
+    }
+
+    fn fill(&mut self) {
+        while self.active.len() < Self::MAX_ACTIVE {
+            let Some(job) = self.pending.pop_front() else { break };
+            let key = job.key;
+            let tx = self.tx.clone();
+            let notes_model = self.notes_model.clone();
+            let thread = self.next_thread;
+            self.next_thread = self.next_thread.wrapping_add(1);
+            let spawned = std::thread::Builder::new()
+                .name(format!("loop-score-{thread}"))
+                .spawn(move || {
+                let mono = copy_loop_mono(
+                    &job.pcm,
+                    job.stems.as_ref().map(|(stems, stem)| (stems.as_ref(), *stem)),
+                    key.start_frame,
+                    key.end_frame,
+                );
+                let transcription = Arc::new(match key.row {
+                    SplatRowView::Drums | SplatRowView::Mix => LoopScoreTranscription::Drums(
+                        crate::loop_transcribe::transcribe_drums(&mono, key.sample_rate, &job.clock),
+                    ),
+                    SplatRowView::Bass | SplatRowView::Vocals | SplatRowView::Other => {
+                        let basic_pitch = job.notes_model.as_ref().map(|path| {
+                            let mono_22k = crate::notes_map::resample_to_basic_pitch(
+                                &mono,
+                                key.sample_rate,
+                            );
+                            let mut cached = notes_model
+                                .lock()
+                                .map_err(|_| "Basic Pitch model lock poisoned".to_string())?;
+                            if cached.as_ref().is_none_or(|(loaded_path, _)| loaded_path != path) {
+                                *cached = Some((
+                                    path.clone(),
+                                    makepad_ai_notes::NotesModel::load(path)?,
+                                ));
+                            }
+                            let transcription = cached
+                                .as_mut()
+                                .expect("Basic Pitch cache loaded")
+                                .1
+                                .transcribe(&mono_22k)?;
+                            let lane = match key.row {
+                                SplatRowView::Bass => crate::notes_map::PitchLane::Bass,
+                                SplatRowView::Vocals => crate::notes_map::PitchLane::Melody,
+                                SplatRowView::Other => crate::notes_map::PitchLane::Other,
+                                _ => unreachable!(),
+                            };
+                            Ok::<_, String>(crate::notes_map::map_notes(
+                                &transcription.notes,
+                                job.clock.bpm,
+                                lane,
+                            ))
+                        });
+                        match basic_pitch.transpose() {
+                            Ok(Some(notes)) => LoopScoreTranscription::Pitched {
+                                notes,
+                                engine: LoopScorePitchEngine::BasicPitch,
+                            },
+                            Ok(None) => LoopScoreTranscription::Pitched {
+                                notes: crate::loop_transcribe::transcribe_monophonic(
+                                    &mono,
+                                    key.sample_rate,
+                                    &job.clock,
+                                ),
+                                engine: LoopScorePitchEngine::PitchTracker,
+                            },
+                            Err(error) => {
+                                log!("Basic Pitch loop transcription failed: {error}");
+                                LoopScoreTranscription::Pitched {
+                                    notes: crate::loop_transcribe::transcribe_monophonic(
+                                        &mono,
+                                        key.sample_rate,
+                                        &job.clock,
+                                    ),
+                                    engine: LoopScorePitchEngine::PitchTracker,
+                                }
+                            }
+                        }
+                    }
+                });
+                let blocks = Arc::new(transcription.blocks(key.bars));
+                let _ = tx.send(LoopScoreDone { key, transcription, blocks });
+            });
+            if spawned.is_ok() {
+                self.active.push(key);
+            }
+        }
+    }
+
+    fn poll(&mut self) -> Vec<LoopScoreDone> {
+        let completed: Vec<_> = self.rx.try_iter().collect();
+        for done in &completed {
+            self.active.retain(|key| *key != done.key);
+        }
+        self.fill();
+        completed
+    }
+
+    fn discard_stale(&mut self, load_gens: [u64; 2]) {
+        self.pending.retain(|job| load_gens[job.key.deck.index()] == job.key.load_gen);
+    }
+}
+
+fn splat_stem_levels(
+    stems: &TrackStems,
+    pcm: &TrackPcm,
+    analysis: &TrackAnalysis,
+) -> StemLevels {
+    StemLevels::from_stems(
+        analysis.grid.beat_secs,
+        analysis.grid.first_beat_secs,
+        pcm.sample_rate,
+        pcm.frames.len(),
+        |stem, frame| {
+            let chunk = frame / stems.chunk_frames;
+            let offset = frame - chunk * stems.chunk_frames;
+            let sample = stems.lanes[stem.index()].get(chunk)?.as_ref()?.get(offset)?;
+            let scale = crate::mixer::STEM_CHUNK_HEADROOM / 32768.0;
+            Some([sample[0] as f32 * scale, sample[1] as f32 * scale])
+        },
+    )
+}
+
+fn stem_span_ready(stems: &TrackStems, stem: usize, start: usize, end: usize) -> bool {
+    if start >= end {
+        return true;
+    }
+    let first = start / stems.chunk_frames;
+    let last = (end - 1) / stems.chunk_frames;
+    for chunk in first..=last {
+        let Some(Some(block)) = stems.lanes[stem].get(chunk) else { return false };
+        let needed_end = if chunk == last {
+            end - chunk * stems.chunk_frames
+        } else {
+            stems.chunk_frames
+        };
+        if block.len() < needed_end {
+            return false;
+        }
+    }
+    true
+}
+
+fn copy_loop_mono(
+    pcm: &TrackPcm,
+    stems: Option<(&TrackStems, usize)>,
+    start: usize,
+    end: usize,
+) -> Vec<f32> {
+    let mut mono = Vec::with_capacity(end.saturating_sub(start));
+    match stems {
+        Some((stems, stem)) => {
+            let scale = crate::mixer::STEM_CHUNK_HEADROOM / 32768.0 * 0.5;
+            for frame in start..end {
+                let chunk = frame / stems.chunk_frames;
+                let offset = frame - chunk * stems.chunk_frames;
+                let sample = stems.lanes[stem][chunk]
+                    .as_ref()
+                    .and_then(|block| block.get(offset))
+                    .copied()
+                    .unwrap_or([0, 0]);
+                mono.push((sample[0] as f32 + sample[1] as f32) * scale);
+            }
+        }
+        None => {
+            for sample in &pcm.frames[start..end] {
+                mono.push((sample[0] as f32 + sample[1] as f32) * (0.5 / 32768.0));
+            }
+        }
+    }
+    mono
+}
+
 /// What the scan dialog can put back. Taken when the dialog opens, dropped
 /// on OK, spent on CANCEL — the undo the deleted X button used to carry in
 /// `marks_stash`, now covering the yellow row and the settings as well.
@@ -2878,6 +3294,9 @@ struct DeckRefs {
     loop_in: ButtonRef,
     loop_out: ButtonRef,
     loop_scan: ButtonRef,
+    jump_back: ButtonRef,
+    jump_fwd: ButtonRef,
+    phase_flip: ButtonRef,
     mute: ButtonRef,
     sync: ButtonRef,
     keylock: ButtonRef,
@@ -2926,6 +3345,9 @@ impl DeckRefs {
             loop_in: ui.button(cx, ids.loop_in),
             loop_out: ui.button(cx, ids.loop_out),
             loop_scan: ui.button(cx, ids.loop_scan),
+            jump_back: ui.button(cx, ids.jump_back),
+            jump_fwd: ui.button(cx, ids.jump_fwd),
+            phase_flip: ui.button(cx, ids.phase_flip),
             mute: ui.button(cx, ids.mute),
             sync: ui.button(cx, ids.sync),
             keylock: ui.button(cx, ids.keylock),
@@ -3026,6 +3448,9 @@ struct MusicDeckIds {
     loop_in: &'static [LiveId],
     loop_out: &'static [LiveId],
     loop_scan: &'static [LiveId],
+    jump_back: &'static [LiveId],
+    jump_fwd: &'static [LiveId],
+    phase_flip: &'static [LiveId],
     mute: &'static [LiveId],
     sync: &'static [LiveId],
     keylock: &'static [LiveId],
@@ -3077,6 +3502,9 @@ impl MusicDeckIds {
                 loop_in: ids!(deck_a_loop_in),
                 loop_out: ids!(deck_a_loop_out),
                 loop_scan: ids!(deck_a_loop_scan),
+                jump_back: ids!(deck_a_jump_back),
+                jump_fwd: ids!(deck_a_jump_fwd),
+                phase_flip: ids!(deck_a_phase_flip),
                 mute: ids!(deck_a_mute),
                 sync: ids!(deck_a_sync),
                 keylock: ids!(deck_a_keylock),
@@ -3156,6 +3584,9 @@ impl MusicDeckIds {
                 loop_in: ids!(deck_b_loop_in),
                 loop_out: ids!(deck_b_loop_out),
                 loop_scan: ids!(deck_b_loop_scan),
+                jump_back: ids!(deck_b_jump_back),
+                jump_fwd: ids!(deck_b_jump_fwd),
+                phase_flip: ids!(deck_b_phase_flip),
                 mute: ids!(deck_b_mute),
                 sync: ids!(deck_b_sync),
                 keylock: ids!(deck_b_keylock),
@@ -5421,6 +5852,21 @@ const CATEGORY_WIDTH: f64 = 96.0;
 const CATEGORY_NARROW_WIDTH: f64 = 68.0;
 #[derive(Script, ScriptHook)]
 pub struct App {
+    /// The hub's local model store (install state, licence acks, weight
+    /// paths) for the models the DJ page runs in-process. Opened lazily;
+    /// `None` after a failed open so the page keeps working without it.
+    #[rust]
+    hub_models: Option<Option<makepad_ai_hub::local::LocalModels>>,
+    /// Salamander is decoded on a worker after the hub verifies every WAV;
+    /// only the completed immutable bank crosses into mixer audio state.
+    #[rust]
+    drum_bank_loaded: bool,
+    #[rust]
+    drum_bank_requested: Option<PathBuf>,
+    #[rust]
+    drum_bank_rx: Option<
+        std::sync::mpsc::Receiver<Result<(Arc<makepad_drumkit::SampleBank>, String), String>>,
+    >,
     #[live]
     ui: WidgetRef,
     #[rust]
@@ -6126,6 +6572,42 @@ pub struct App {
     deck_found_scores: [Vec<f32>; 2],
     #[rust]
     deck_analysis: [Option<Arc<TrackAnalysis>>; 2],
+    /// Which deck the loop-splat grid and controller surface address.
+    #[rust(DeckId::A)]
+    splat_focus: DeckId,
+    /// Last pure model pushed to the widget; controller LEDs reuse it.
+    #[rust]
+    splat_model: SplatViewModel,
+    #[rust]
+    deck_splat_snapshot_seen: [bool; 2],
+    /// Model-rate separation frontier and completion flag per deck.
+    #[rust]
+    deck_stem_coverage: [Option<(usize, bool)>; 2],
+    /// The expensive full-track levels returned with the refined grid.
+    #[rust]
+    #[rust]
+    deck_splat_refining: [Option<u64>; 2],
+    #[rust(SplatRefineWorker::new())]
+    splat_refine: SplatRefineWorker,
+    /// The selected loop's notation panel and its latest-wins DSP worker.
+    #[rust]
+    loop_score_open: bool,
+    #[rust]
+    loop_score_signature: Option<LoopScoreSignature>,
+    #[rust]
+    loop_score_presented: Option<LoopScoreKey>,
+    #[rust]
+    loop_score_has_lyrics: bool,
+    /// Whether the score preview repeats the loop.
+    #[rust(true)]
+    loop_score_loop: bool,
+    /// Raw transcriptions and their compact roll geometry share one key.
+    #[rust]
+    loop_score_transcriptions: HashMap<LoopScoreKey, Arc<LoopScoreTranscription>>,
+    #[rust]
+    splat_blocks: HashMap<LoopScoreKey, Arc<crate::loop_blocks::CellBlocks>>,
+    #[rust(LoopScoreWorker::new())]
+    loop_score_worker: LoopScoreWorker,
     /// The waveform pyramid per deck: one texture holding every zoom level.
     #[rust]
     deck_zoom_tex: [Option<crate::music_view::WavePyramid>; 2],
@@ -6278,11 +6760,11 @@ pub struct App {
     /// Whether the status bar is standing on two lines.
     #[rust]
     status_bar_wrapped: bool,
-    /// Whether the explorer and the queue are taking turns, and which of
-    /// them is up. Explorer first: it is where a set starts.
-    #[rust]
+    /// Whether the bottom panels are taking turns, and which one is up.
+    /// The loop splat is the default; explorer and queue remain one tap away.
+    #[rust(true)]
     lists_tabbed: bool,
-    #[rust]
+    #[rust(2usize)]
     lists_shown: usize,
     /// How far the tabs have to go at this width, so the strips are only
     /// rebuilt on an actual change.
@@ -6357,6 +6839,10 @@ pub struct App {
     /// One-shot initial sync of the models row once the surface is live.
     #[rust]
     models_row_synced: bool,
+    /// The shared hub panel has been populated at least once. From then on
+    /// its install workers are pumped even if the containing modal closes.
+    #[rust]
+    hub_model_panel_ready: bool,
     /// Thumb-load profile: (boot instant, last print, decoded at last print).
     #[rust]
     thumb_prof: Option<(std::time::Instant, std::time::Instant, u64)>,
@@ -11088,6 +11574,636 @@ p2 {}
         self.video_pump = cx.new_next_frame();
     }
 
+    fn set_loop_score_empty(&mut self, cx: &mut Cx, title: &str) {
+        self.mixer.score_preview_stop();
+        self.loop_score_has_lyrics = false;
+        self.ui.label(cx, ids!(loop_score_title)).set_text(cx, title);
+        let widget = self.ui.widget(cx, ids!(loop_score));
+        if let Some(mut score) = widget.borrow_mut::<makepad_score_view::ScoreView>() {
+            score.clear(cx);
+        };
+    }
+
+    fn set_loop_score_title(&mut self, cx: &mut Cx, key: LoopScoreKey) {
+        let engine = self
+            .loop_score_transcriptions
+            .get(&key)
+            .and_then(|transcription| transcription.pitch_engine())
+            .or_else(|| {
+                matches!(key.row, SplatRowView::Bass | SplatRowView::Vocals | SplatRowView::Other)
+                    .then_some(if key.basic_pitch {
+                        LoopScorePitchEngine::BasicPitch
+                    } else {
+                        LoopScorePitchEngine::PitchTracker
+                    })
+            });
+        let title = self.loop_score_title_with_drum_status(key, self.loop_score_has_lyrics, engine);
+        self.ui.label(cx, ids!(loop_score_title)).set_text(cx, &title);
+    }
+
+    fn loop_score_title_with_drum_status(
+        &self,
+        key: LoopScoreKey,
+        has_lyrics: bool,
+        engine: Option<LoopScorePitchEngine>,
+    ) -> String {
+        let mut title = Self::loop_score_title(key, has_lyrics, engine);
+        if !self.drum_bank_loaded {
+            title.push_str(" · install the drum kit (INSTALL MODELS)");
+        }
+        title
+    }
+
+    fn loop_score_title(
+        key: LoopScoreKey,
+        has_lyrics: bool,
+        engine: Option<LoopScorePitchEngine>,
+    ) -> String {
+        let bpm = f64::from_bits(key.bpm_bits);
+        let suffix = match key.row {
+            SplatRowView::Vocals if has_lyrics => " · melody + lyrics",
+            SplatRowView::Vocals | SplatRowView::Other => " · melody (approx.)",
+            SplatRowView::Mix => " · drums from mix (approx.)",
+            SplatRowView::Drums | SplatRowView::Bass => "",
+        };
+        let engine = match engine {
+            Some(LoopScorePitchEngine::BasicPitch) => " · basic pitch",
+            Some(LoopScorePitchEngine::PitchTracker) => " · pitch tracker",
+            None => "",
+        };
+        format!(
+            "{} · section {} · {} bars · {:.0} bpm{}{}",
+            key.row.label(),
+            key.col + 1,
+            key.bars,
+            bpm,
+            suffix,
+            engine,
+        )
+    }
+
+    /// The presented cell's transcription, if the worker has delivered it.
+    fn presented_loop_score(&self) -> Option<(LoopScoreKey, Arc<LoopScoreTranscription>)> {
+        let key = self.loop_score_presented?;
+        let transcription = self.loop_score_transcriptions.get(&key)?.clone();
+        Some((key, transcription))
+    }
+
+    fn loop_score_preview_progress(
+        key: LoopScoreKey,
+        sample_rate: f64,
+        position: u64,
+    ) -> Option<(f64, f32)> {
+        let bpm = f64::from_bits(key.bpm_bits);
+        if !bpm.is_finite() || bpm <= 0.0 || !sample_rate.is_finite() || sample_rate <= 0.0 {
+            return None;
+        }
+        let whole = position as f64 / sample_rate * bpm / 60.0 / 4.0;
+        let phase = (whole / f64::from(key.bars.max(1))).clamp(0.0, 1.0) as f32;
+        Some((whole, phase))
+    }
+
+    fn loop_score_preview_marker(&self, deck: DeckId) -> Option<(usize, usize, f32)> {
+        let (playing, position) = self.mixer.score_preview_state();
+        let key = self.loop_score_presented?;
+        if !playing || key.deck != deck {
+            return None;
+        }
+        let sample_rate = self
+            .mixer
+            .output_sample_rate()
+            .unwrap_or(key.sample_rate.max(1) as f64);
+        let (_, phase) = Self::loop_score_preview_progress(key, sample_rate, position)?;
+        let row = SplatRowView::ALL.iter().position(|row| *row == key.row)?;
+        Some((row, key.col as usize, phase))
+    }
+
+    fn refresh_loop_score_preview(&mut self, cx: &mut Cx) {
+        let presented = self
+            .loop_score_presented
+            .filter(|key| self.loop_score_transcriptions.contains_key(key));
+        let (playing, position) = self.mixer.score_preview_state();
+        let progress = presented.and_then(|key| {
+            if !playing {
+                return None;
+            }
+            let sample_rate = self
+                .mixer
+                .output_sample_rate()
+                .unwrap_or(key.sample_rate.max(1) as f64);
+            Self::loop_score_preview_progress(key, sample_rate, position)
+        });
+        let widget = self.ui.widget(cx, ids!(loop_score));
+        if let Some(mut score) = widget.borrow_mut::<makepad_score_view::ScoreView>() {
+            score.set_playhead(cx, progress.map(|(whole, _)| whole));
+        }
+        let Some(key) = presented else {
+            self.refresh_splat_preview(cx);
+            return;
+        };
+        let Some((whole, _)) = progress else {
+            self.set_loop_score_title(cx, key);
+            self.refresh_splat_preview(cx);
+            return;
+        };
+        let beats = whole * 4.0;
+        let bar = (beats / 4.0).floor() as u64 + 1;
+        let beat = beats.rem_euclid(4.0).floor() as u64 + 1;
+        let engine = self
+            .loop_score_transcriptions
+            .get(&key)
+            .and_then(|transcription| transcription.pitch_engine());
+        self.ui.label(cx, ids!(loop_score_title)).set_text(
+            cx,
+            &format!(
+                "▶ bar {bar} · beat {beat}   {}",
+                self.loop_score_title_with_drum_status(
+                    key,
+                    self.loop_score_has_lyrics,
+                    engine,
+                )
+            ),
+        );
+        self.refresh_splat_preview(cx);
+    }
+
+    fn play_loop_score_preview(&mut self, cx: &mut Cx) {
+        let Some((key, transcription)) = self.presented_loop_score() else { return };
+        let sample_rate = self
+            .mixer
+            .output_sample_rate()
+            .unwrap_or(48_000.0)
+            .round()
+            .clamp(1.0, u32::MAX as f64) as u32;
+        let bpm = f64::from_bits(key.bpm_bits);
+        let bars = u32::from(key.bars);
+        let sequence = match transcription.as_ref() {
+            LoopScoreTranscription::Drums(hits) => crate::score_preview::sequence_from_drums(
+                hits,
+                bpm,
+                bars,
+                sample_rate,
+                self.loop_score_loop,
+            ),
+            LoopScoreTranscription::Pitched { notes, .. } => crate::score_preview::sequence_from_notes(
+                notes,
+                bpm,
+                bars,
+                sample_rate,
+                self.loop_score_loop,
+            ),
+        };
+        self.mixer.score_preview_play(Arc::new(sequence));
+        self.refresh_loop_score_preview(cx);
+        self.schedule_music_frame(cx);
+    }
+
+    fn apply_loop_score_transcription(
+        &mut self,
+        cx: &mut Cx,
+        key: LoopScoreKey,
+        transcription: &LoopScoreTranscription,
+        lyrics: &[makepad_score_view::build::LyricWord],
+    ) {
+        let options = makepad_score_view::build::BuildOptions {
+            bars: u32::from(key.bars),
+            beats_per_bar: 4,
+            bpm: Some(f64::from_bits(key.bpm_bits)),
+            title: None,
+            ..Default::default()
+        };
+        let score = match (key.row, transcription) {
+            (SplatRowView::Drums | SplatRowView::Mix, LoopScoreTranscription::Drums(hits)) => {
+                makepad_score_view::build::build_drum_score(hits, &options)
+            }
+            (SplatRowView::Bass, LoopScoreTranscription::Pitched { notes, .. }) => {
+                makepad_score_view::build::build_bass_tab_score(
+                    notes,
+                    &[28, 33, 38, 43],
+                    &options,
+                )
+            }
+            (SplatRowView::Vocals, LoopScoreTranscription::Pitched { notes, .. }) => {
+                makepad_score_view::build::build_pitched_score_with_lyrics(
+                    notes,
+                    lyrics,
+                    &options,
+                )
+            }
+            (SplatRowView::Other, LoopScoreTranscription::Pitched { notes, .. }) => {
+                makepad_score_view::build::build_pitched_score(notes, &options)
+            }
+            _ => return,
+        };
+        self.loop_score_has_lyrics = key.row == SplatRowView::Vocals && !score.lyrics.is_empty();
+        self.set_loop_score_title(cx, key);
+        let widget = self.ui.widget(cx, ids!(loop_score));
+        if let Some(mut view) = widget.borrow_mut::<makepad_score_view::ScoreView>() {
+            view.set_score(cx, score);
+        };
+    }
+
+    fn loop_score_job(
+        &self,
+        deck: DeckId,
+        row: SplatRowView,
+        col: u8,
+        notes_model: Option<std::path::PathBuf>,
+    ) -> Option<(LoopScoreKey, bool, Option<LoopScoreJob>)> {
+        let row_index = splat_row(row).index();
+        let splat = self.decks.splat(deck)?;
+        let cell = splat.grid.cells[row_index].get(col as usize).copied().flatten()?;
+        let bpm = splat.grid.bpm;
+        let index = deck.index();
+        let pcm = self.deck_tracks[index].as_ref()?.0.clone();
+        let rate = pcm.sample_rate.max(1);
+        let start_frame = (cell.span.start_secs.max(0.0) * rate as f64).floor() as usize;
+        let end_frame = (cell.span.end_secs.max(0.0) * rate as f64).ceil() as usize;
+        let start_frame = start_frame.min(pcm.frames.len());
+        let end_frame = end_frame.clamp(start_frame, pcm.frames.len());
+        let stem = splat_row(row).stem().map(|stem| stem.index());
+        let stems = self.deck_stems[index].clone();
+        let source_ready = stem.is_none()
+            || stems
+                .as_ref()
+                .is_some_and(|stems| stem_span_ready(stems, stem.unwrap(), start_frame, end_frame));
+        let notes_model = matches!(row, SplatRowView::Bass | SplatRowView::Vocals | SplatRowView::Other)
+            .then_some(notes_model)
+            .flatten();
+        let key = LoopScoreKey {
+            deck,
+            row,
+            col,
+            load_gen: self.decks.deck(deck).load_gen,
+            start_frame,
+            end_frame,
+            sample_rate: rate,
+            bars: cell.bars,
+            bpm_bits: bpm.to_bits(),
+            basic_pitch: notes_model.is_some(),
+        };
+        let lyrics = if row == SplatRowView::Vocals {
+            loop_score_lyric_words(
+                self.deck_lyrics[index].as_deref(),
+                cell.span.start_secs,
+                cell.span.end_secs,
+                bpm,
+            )
+        } else {
+            Vec::new()
+        };
+        let job = source_ready.then(|| LoopScoreJob {
+            key,
+            pcm,
+            stems: stem.map(|stem| (stems.expect("ready stem source"), stem)),
+            clock: crate::loop_transcribe::LoopClock {
+                bpm,
+                bars: u32::from(cell.bars),
+                beats_per_bar: 4,
+            },
+            lyrics,
+            notes_model,
+        });
+        Some((key, source_ready, job))
+    }
+
+    fn collect_loop_score_results(&mut self) {
+        let load_gens = [
+            self.decks.deck(DeckId::A).load_gen,
+            self.decks.deck(DeckId::B).load_gen,
+        ];
+        self.loop_score_worker.discard_stale(load_gens);
+        self.loop_score_transcriptions
+            .retain(|key, _| load_gens[key.deck.index()] == key.load_gen);
+        self.splat_blocks
+            .retain(|key, _| load_gens[key.deck.index()] == key.load_gen);
+        for done in self.loop_score_worker.poll() {
+            if load_gens[done.key.deck.index()] != done.key.load_gen {
+                continue;
+            }
+            self.loop_score_transcriptions.insert(done.key, done.transcription);
+            self.splat_blocks.insert(done.key, done.blocks);
+        }
+    }
+
+    fn schedule_splat_blocks(&mut self, model: &mut SplatViewModel) {
+        let deck = self.splat_focus;
+        let notes_model = self.hub_model_path("basic-pitch", "model");
+        let mut jobs = Vec::new();
+        for row in 0..crate::loop_splat_view::SPLAT_ROWS {
+            for col in 0..model.cols {
+                if !matches!(
+                    model.cells[row][col],
+                    SplatCellView::Ready { .. }
+                        | SplatCellView::Queued { .. }
+                        | SplatCellView::Playing { .. }
+                ) {
+                    continue;
+                }
+                let row_view = SplatRowView::ALL[row];
+                let Some((key, source_ready, job)) =
+                    self.loop_score_job(deck, row_view, col as u8, notes_model.clone())
+                else {
+                    continue;
+                };
+                if let Some(blocks) = self.splat_blocks.get(&key) {
+                    model.blocks[row][col] = Some(blocks.clone());
+                } else if source_ready {
+                    if let Some(job) = job {
+                        jobs.push(job);
+                    }
+                }
+            }
+        }
+        for job in jobs {
+            self.loop_score_worker.submit(job);
+        }
+    }
+
+    /// The hub model store, opened on first use.
+    fn hub_models(&mut self) -> Option<&mut makepad_ai_hub::local::LocalModels> {
+        if self.hub_models.is_none() {
+            let opened = match makepad_ai_hub::local::LocalModels::open() {
+                Ok(models) => Some(models),
+                Err(error) => {
+                    log!("hub models unavailable: {error}");
+                    None
+                }
+            };
+            self.hub_models = Some(opened);
+        }
+        self.hub_models.as_mut().and_then(|slot| slot.as_mut())
+    }
+
+    /// Where an installed, licence-acknowledged hub model file lives, by
+    /// model id and file role — `None` means "run without it".
+    fn hub_model_path(&mut self, model_id: &str, role: &str) -> Option<std::path::PathBuf> {
+        let models = self.hub_models()?;
+        if !models.license_acknowledged(model_id) {
+            return None;
+        }
+        models.installed_path(model_id, role)
+    }
+
+    /// Pick up a verified Salamander install, decode it away from the UI and
+    /// audio threads, then hand the immutable bank to mixer audio state.
+    fn pump_drum_bank(&mut self, cx: &mut Cx) {
+        let completed = self.drum_bank_rx.as_ref().and_then(|receiver| {
+            match receiver.try_recv() {
+                Ok(result) => Some(result),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("drum bank loader disconnected".to_string()))
+                }
+            }
+        });
+        if let Some(completed) = completed {
+            self.drum_bank_rx = None;
+            match completed {
+                Ok((bank, summary)) => {
+                    self.mixer.run_cmd(MixCmd::SetDrumBank(bank));
+                    self.drum_bank_loaded = true;
+                    log!("drum kit: {summary}");
+                    if let Some(key) = self.loop_score_presented {
+                        self.set_loop_score_title(cx, key);
+                    }
+                }
+                Err(error) => log!("drum kit load failed: {error}"),
+            }
+        }
+        if self.drum_bank_loaded || self.drum_bank_rx.is_some() {
+            return;
+        }
+        let ready_dir = {
+            let Some(models) = self.hub_models() else { return };
+            if !models.license_acknowledged("salamander-drumkit") {
+                return;
+            }
+            models.installed_dir("salamander-drumkit")
+        };
+        let Some(dir) = ready_dir else { return };
+        if self.drum_bank_requested.as_ref() == Some(&dir) {
+            return;
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.drum_bank_requested = Some(dir.clone());
+        self.drum_bank_rx = Some(receiver);
+        if let Err(error) = std::thread::Builder::new()
+            .name("salamander-drumkit-load".to_string())
+            .spawn(move || {
+                let result = makepad_drumkit::SampleBank::load(&dir).map(|bank| {
+                    let summary = bank.summary();
+                    (Arc::new(bank), summary)
+                });
+                let _ = sender.send(result);
+            })
+        {
+            self.drum_bank_rx = None;
+            log!("drum kit loader could not start: {error}");
+        }
+    }
+
+    fn pump_loop_score(&mut self, cx: &mut Cx) {
+        self.collect_loop_score_results();
+        if !self.loop_score_open {
+            return;
+        }
+        self.place_loop_score_panel(cx);
+        let selected = {
+            let widget = self.ui.vj_loop_splat(cx, ids!(loop_splat));
+            widget.borrow().and_then(|splat| splat.selected())
+        };
+        let Some((row, col)) = selected else {
+            if self.loop_score_signature != Some(LoopScoreSignature::Empty) {
+                self.loop_score_signature = Some(LoopScoreSignature::Empty);
+                self.loop_score_presented = None;
+                self.set_loop_score_empty(cx, "select a loop cell");
+            }
+            return;
+        };
+
+        let deck = self.splat_focus;
+        let notes_model = self.hub_model_path("basic-pitch", "model");
+        let Some((key, source_ready, job)) =
+            self.loop_score_job(deck, row, col, notes_model)
+        else {
+            if self.loop_score_signature != Some(LoopScoreSignature::Empty) {
+                self.loop_score_signature = Some(LoopScoreSignature::Empty);
+                self.loop_score_presented = None;
+                self.set_loop_score_empty(cx, "track audio unavailable");
+            }
+            return;
+        };
+        let lyrics_ready = row == SplatRowView::Vocals && self.deck_lyrics[deck.index()].is_some();
+        let signature = LoopScoreSignature::Selected { key, source_ready, lyrics_ready };
+        if self.loop_score_signature != Some(signature) {
+            self.mixer.score_preview_stop();
+            self.loop_score_signature = Some(signature);
+            self.loop_score_presented = None;
+            self.loop_score_has_lyrics = false;
+            if !source_ready {
+                self.set_loop_score_empty(cx, "stems still separating…");
+            } else {
+                self.set_loop_score_title(cx, key);
+            }
+        }
+        if !source_ready {
+            return;
+        }
+        if let Some(transcription) = self.loop_score_transcriptions.get(&key).cloned() {
+            if self.loop_score_presented != Some(key) {
+                let lyrics = job.as_ref().map(|job| job.lyrics.as_slice()).unwrap_or(&[]);
+                self.apply_loop_score_transcription(cx, key, &transcription, lyrics);
+                self.loop_score_presented = Some(key);
+            }
+        } else if let Some(job) = job {
+            self.loop_score_worker.submit(job);
+        }
+    }
+
+    /// Float the score card over the deck lanes without taking layout space
+    /// from the loop splat below. The deck rect supplies the stable top edge;
+    /// the full responsive page body supplies the centring width.
+    /// The score popup covers the whole deck region above the loop grid.
+    fn place_loop_score_panel(&mut self, cx: &mut Cx) {
+        let deck = self.ui.view(cx, ids!(deck_region)).area().rect(cx);
+        if deck.size.x <= 0.0 || deck.size.y <= 0.0 {
+            return;
+        }
+        let panel = self.ui.view(cx, ids!(loop_score_panel));
+        let mut panel_ref = panel.borrow_mut();
+        if let Some(view) = panel_ref.as_mut() {
+            view.walk.abs_pos = Some(deck.pos);
+            view.walk.width = Size::Fixed(deck.size.x);
+            view.walk.height = Size::Fixed(deck.size.y);
+        }
+    }
+
+    fn handle_splat_action(&mut self, cx: &mut Cx, action: LoopSplatAction) {
+        if action == LoopSplatAction::ToggleScore {
+            self.loop_score_open = !self.loop_score_open;
+            self.ui
+                .view(cx, ids!(loop_score_panel))
+                .set_visible(cx, self.loop_score_open);
+            self.loop_score_signature = None;
+            self.loop_score_presented = None;
+            if self.loop_score_open {
+                self.place_loop_score_panel(cx);
+                self.pump_loop_score(cx);
+            } else {
+                self.mixer.score_preview_stop();
+            }
+            return;
+        }
+        if let LoopSplatAction::FocusDeck(deck) = action {
+            self.mixer.score_preview_stop();
+            self.splat_focus = match deck {
+                crate::loop_splat_view::SplatDeck::A => DeckId::A,
+                crate::loop_splat_view::SplatDeck::B => DeckId::B,
+            };
+            self.refresh_loop_score_preview(cx);
+            self.refresh_splat_surface(cx);
+            return;
+        }
+        let deck = self.splat_focus;
+        match action {
+            LoopSplatAction::Cell { row, col, timed, part } => {
+                let Some(row_index) =
+                    SplatRowView::ALL.iter().position(|candidate| *candidate == row)
+                else {
+                    return;
+                };
+                if self.splat_model.deck != splat_deck(deck)
+                    || (col as usize) >= self.splat_model.cols
+                {
+                    return;
+                }
+                match self.splat_model.cells[row_index][col as usize] {
+                    // Clicking the slot that is sounding (or queued) stops the
+                    // row; clicking ANOTHER slot of the same cell switches to
+                    // that sub-loop instead, so halves and quarters can be
+                    // played one after the other.
+                    SplatCellView::Queued { part: current, .. }
+                    | SplatCellView::Playing { part: current, .. }
+                        if current == part =>
+                    {
+                        let cmds = self.decks.splat_stop_row(deck, splat_row(row), timed);
+                        self.run_deck_cmds(cx, cmds);
+                        return;
+                    }
+                    SplatCellView::Queued { .. }
+                    | SplatCellView::Playing { .. }
+                    | SplatCellView::Ready { .. } => {}
+                    SplatCellView::Empty | SplatCellView::Silent => return,
+                }
+                let Some(splat) = self.decks.splat(deck) else { return };
+                let enabled = splat.enabled;
+                let playing = self.decks.deck(deck).playing;
+                let mut cmds = Vec::new();
+                if !enabled {
+                    cmds.extend(self.decks.splat_enable(deck, true));
+                }
+                cmds.extend(self.decks.splat_launch(deck, splat_row(row), col, part));
+                if !playing {
+                    cmds.extend(self.decks.play_pause(deck));
+                }
+                self.run_deck_cmds(cx, cmds);
+            }
+            LoopSplatAction::StopRow { row, timed } => {
+                let cmds = self.decks.splat_stop_row(deck, splat_row(row), timed);
+                self.run_deck_cmds(cx, cmds);
+            }
+            LoopSplatAction::LaunchColumn { col, timed } => {
+                let Some(splat) = self.decks.splat(deck) else { return };
+                if col as usize >= splat.grid.sections.len() {
+                    return;
+                }
+                // The section button toggles: a running section stops (stem rows only).
+                let live_rows: Vec<SplatRowView> = SplatRowView::ALL[..SPLAT_ROWS - 1]
+                    .iter()
+                    .enumerate()
+                    .filter(|(row, _)| {
+                        self.splat_model.deck == splat_deck(deck)
+                            && matches!(
+                                self.splat_model.cells[*row][col as usize],
+                                SplatCellView::Playing { .. } | SplatCellView::Queued { .. }
+                            )
+                    })
+                    .map(|(_, row)| *row)
+                    .collect();
+                if !live_rows.is_empty() {
+                    let mut cmds = Vec::new();
+                    for row in live_rows {
+                        cmds.extend(self.decks.splat_stop_row(deck, splat_row(row), timed));
+                    }
+                    self.run_deck_cmds(cx, cmds);
+                    return;
+                }
+                let enabled = splat.enabled;
+                let playing = self.decks.deck(deck).playing;
+                let mut cmds = Vec::new();
+                if !enabled {
+                    cmds.extend(self.decks.splat_enable(deck, true));
+                }
+                cmds.extend(self.decks.splat_scene(deck, col));
+                if !playing {
+                    cmds.extend(self.decks.play_pause(deck));
+                }
+                self.run_deck_cmds(cx, cmds);
+            }
+            LoopSplatAction::ToggleEnabled => {
+                let Some(enabled) = self.decks.splat(deck).map(|splat| splat.enabled) else {
+                    return;
+                };
+                let cmds = self.decks.splat_enable(deck, !enabled);
+                self.run_deck_cmds(cx, cmds);
+            }
+            LoopSplatAction::FocusDeck(_)
+            | LoopSplatAction::ToggleScore
+            | LoopSplatAction::None => {}
+        }
+    }
+
     fn dispatch_apc_action(&mut self, cx: &mut Cx, action: ApcAction) {
         match action {
             ApcAction::Pad { surface, pad, index, pressed } => {
@@ -11100,6 +12216,40 @@ p2 {}
                     // this physical pad was reused.
                     self.release_apc_sfx_pad(pad);
                 }
+                if surface == ApcSurface::Music && self.decks.splat(self.splat_focus).is_some() {
+                    let row = index / 8;
+                    let col = index % 8;
+                    let Some(row) = SplatRowView::ALL.get(row).copied() else { return };
+                    let launchable = SplatRowView::ALL
+                        .iter()
+                        .position(|candidate| *candidate == row)
+                        .is_some_and(|row| {
+                            col < self.splat_model.cols
+                                && matches!(
+                                    self.splat_model.cells[row][col],
+                                    SplatCellView::Ready { .. }
+                                        | SplatCellView::Queued { .. }
+                                        | SplatCellView::Playing { .. }
+                                                )
+                        });
+                    if !launchable {
+                        return;
+                    }
+                    let widget = self.ui.vj_loop_splat(cx, ids!(loop_splat));
+                    if let Some(mut splat) = widget.borrow_mut() {
+                        splat.set_selected(cx, row, col as u8);
+                    }
+                    self.handle_splat_action(
+                        cx,
+                        LoopSplatAction::Cell {
+                            row,
+                            col: col as u8,
+                            timed: false,
+                            part: SplatPart::WHOLE,
+                        },
+                    );
+                    return;
+                }
                 let Some(asset) = self.apc_asset_at(surface, index) else { return };
                 match surface {
                     ApcSurface::Video => self.video_tile_clicked(cx, asset, false),
@@ -11111,6 +12261,24 @@ p2 {}
                         self.run_pad_cmds(cmds);
                         self.grids_dirty = true;
                     }
+                }
+            }
+            ApcAction::Scene { surface, row, pressed } => {
+                if pressed
+                    && surface == ApcSurface::Music
+                    && self.decks.splat(self.splat_focus).is_some()
+                {
+                    if let Some(row) = SplatRowView::ALL.get(row as usize).copied() {
+                        self.handle_splat_action(cx, LoopSplatAction::StopRow { row, timed: false });
+                    }
+                }
+            }
+            ApcAction::ClipStop { surface, col, pressed } => {
+                if pressed
+                    && surface == ApcSurface::Music
+                    && self.decks.splat(self.splat_focus).is_some()
+                {
+                    self.handle_splat_action(cx, LoopSplatAction::LaunchColumn { col, timed: false });
                 }
             }
             ApcAction::Surface(_) => self.show_apc_surface(cx),
@@ -11173,6 +12341,18 @@ p2 {}
                 let cmds = self.decks.set_stem(deck, stem, value * 2.0);
                 self.run_deck_cmds(cx, cmds);
                 self.sync_deck_knobs(cx, deck);
+            }
+            ApcAction::BankLeft => {
+                self.handle_splat_action(
+                    cx,
+                    LoopSplatAction::FocusDeck(crate::loop_splat_view::SplatDeck::A),
+                );
+            }
+            ApcAction::BankRight => {
+                self.handle_splat_action(
+                    cx,
+                    LoopSplatAction::FocusDeck(crate::loop_splat_view::SplatDeck::B),
+                );
             }
             ApcAction::BankChanged => {
                 if self.apc.surface == ApcSurface::Video {
@@ -11244,60 +12424,70 @@ p2 {}
     }
 
     fn sync_apc_leds(&mut self) {
-        let count = self.apc_item_count();
+        let splat_showing = self.apc.surface == ApcSurface::Music
+            && self.splat_model.cols != 0
+            && self.splat_model.deck == splat_deck(self.splat_focus)
+            && self.decks.splat(self.splat_focus).is_some();
+        let count = if splat_showing { PAD_COUNT } else { self.apc_item_count() };
         self.apc.clamp_bank(count);
-        let mut frame = LedFrame { surface: self.apc.surface, ..Default::default() };
-        for pad in 0..PAD_COUNT {
-            let index = self.apc.bank + pad;
-            // Resolve the same asset a press on this pad would trigger
-            // (local-first mixed lists / the banked video window) so LEDs
-            // never point at a different clip than the pad plays.
-            let Some(asset) = self.apc_asset_at(self.apc.surface, index) else { continue };
-            let tile = match self.apc.surface {
-                ApcSurface::Video => self.video_model.tiles().iter().find(|t| t.asset == asset),
-                ApcSurface::Music => self.music_model.tiles().iter().find(|t| t.asset == asset),
-                ApcSurface::Sfx => self.sfx_model.tiles().iter().find(|t| t.asset == asset),
-            };
-            // The pad wears the clip's thumbnail colour once that is known.
-            let color = tile
-                .and_then(|tile| tile.revision)
-                .and_then(|rev| self.thumb_leds.get(&rev).copied());
-            let mut state = tile
-                .map(|tile| match tile.state {
-                    catalog::TileState::Ready => color.map_or(PadLed::Ready, PadLed::Color),
-                    catalog::TileState::Failed(_) => PadLed::Failed,
-                    catalog::TileState::Listed | catalog::TileState::Resolving => PadLed::Queued,
-                })
-                .unwrap_or(PadLed::Ready);
-            match self.apc.surface {
-                ApcSurface::Video => {
-                    if self.cue.live().is_some_and(|item| item.asset == asset) {
-                        state = color.map_or(PadLed::Live, PadLed::LiveColor);
-                    } else if self.cue.next().is_some_and(|item| item.asset == asset) {
-                        state = color.map_or(PadLed::Queued, PadLed::NextColor);
+        let mut frame = if splat_showing {
+            splat_led_frame(&self.splat_model, self.apc.surface)
+        } else {
+            LedFrame { surface: self.apc.surface, ..Default::default() }
+        };
+        if !splat_showing {
+            for pad in 0..PAD_COUNT {
+                let index = self.apc.bank + pad;
+                // Resolve the same asset a press on this pad would trigger
+                // (local-first mixed lists / the banked video window) so LEDs
+                // never point at a different clip than the pad plays.
+                let Some(asset) = self.apc_asset_at(self.apc.surface, index) else { continue };
+                let tile = match self.apc.surface {
+                    ApcSurface::Video => self.video_model.tiles().iter().find(|t| t.asset == asset),
+                    ApcSurface::Music => self.music_model.tiles().iter().find(|t| t.asset == asset),
+                    ApcSurface::Sfx => self.sfx_model.tiles().iter().find(|t| t.asset == asset),
+                };
+                // The pad wears the clip's thumbnail colour once that is known.
+                let color = tile
+                    .and_then(|tile| tile.revision)
+                    .and_then(|rev| self.thumb_leds.get(&rev).copied());
+                let mut state = tile
+                    .map(|tile| match tile.state {
+                        catalog::TileState::Ready => color.map_or(PadLed::Ready, PadLed::Color),
+                        catalog::TileState::Failed(_) => PadLed::Failed,
+                        catalog::TileState::Listed | catalog::TileState::Resolving => PadLed::Queued,
+                    })
+                    .unwrap_or(PadLed::Ready);
+                match self.apc.surface {
+                    ApcSurface::Video => {
+                        if self.cue.live().is_some_and(|item| item.asset == asset) {
+                            state = color.map_or(PadLed::Live, PadLed::LiveColor);
+                        } else if self.cue.next().is_some_and(|item| item.asset == asset) {
+                            state = color.map_or(PadLed::Queued, PadLed::NextColor);
+                        }
                     }
-                }
-                ApcSurface::Music => {
-                    for deck in [DeckId::A, DeckId::B] {
-                        let deck = self.decks.deck(deck);
-                        let loaded = match &deck.load {
-                            DeckLoad::Loading { item, .. }
-                            | DeckLoad::Loaded { item }
-                            | DeckLoad::Failed { item, .. } => Some(item.asset),
-                            DeckLoad::Empty => None,
-                        };
-                        if loaded == Some(asset) {
-                            state = if deck.playing { PadLed::Live } else { PadLed::Queued };
+                    ApcSurface::Music => {
+                        for deck in [DeckId::A, DeckId::B] {
+                            let deck = self.decks.deck(deck);
+                            let loaded = match &deck.load {
+                                DeckLoad::Loading { item, .. }
+                                | DeckLoad::Loaded { item }
+                                | DeckLoad::Failed { item, .. } => Some(item.asset),
+                                DeckLoad::Empty => None,
+                            };
+                            if loaded == Some(asset) {
+                                state = if deck.playing { PadLed::Live } else { PadLed::Queued };
+                            }
+                        }
+                    }
+                    ApcSurface::Sfx => {
+                        if self.pads.playing_voices(&asset) > 0 {
+                            state = PadLed::Live;
                         }
                     }
                 }
-                ApcSurface::Sfx => {
-                    if self.pads.playing_voices(&asset) > 0 {
-                        state = PadLed::Live;
-                    }
-                }
+                frame.pads[pad] = state;
             }
-            frame.pads[pad] = state;
         }
         frame.video_playing = self
             .cue
@@ -12129,7 +13319,10 @@ p2 {}
                                 self.ui.modal(cx, ids!(loop_scan_modal)).close(cx);
                             }
                             self.deck_zoom_tex[deck.index()] = None;
-                                            self.deck_stems[deck.index()] = None;
+                            self.deck_stems[deck.index()] = None;
+                            self.deck_stem_coverage[deck.index()] = None;
+                            self.deck_splat_refining[deck.index()] = None;
+                            self.deck_splat_snapshot_seen[deck.index()] = false;
                             self.deck_stem_tex[deck.index()] = None;
                             self.deck_stem_tiles[deck.index()] = Vec::new();
                             // The old track's words must not sit over the new
@@ -12205,11 +13398,29 @@ p2 {}
                 DeckCmd::SetStemGain { deck, stem, gain } => {
                     self.mixer.set_deck_stem_gain(deck, stem, gain)
                 }
+                DeckCmd::SplatSet { deck, grid } => self.mixer.set_deck_splat(deck, grid),
+                DeckCmd::SplatEnable { deck, on } => {
+                    self.mixer.set_deck_splat_enabled(deck, on)
+                }
+                DeckCmd::SplatLaunch { deck, row, col, part } => {
+                    self.mixer.splat_launch(deck, row, col, part)
+                }
+                DeckCmd::SplatStopRow { deck, row, timed } => {
+                    self.mixer.splat_stop_row(deck, row, timed)
+                }
+                DeckCmd::SplatLaunchScene { deck, col } => {
+                    self.mixer.splat_launch_scene(deck, col)
+                }
+                DeckCmd::SplatStopAll { deck, timed } => self.mixer.splat_stop_all(deck, timed),
                 DeckCmd::SwapVoices => {
                     self.mixer.swap_decks();
                     self.deck_tracks.swap(0, 1);
                     self.deck_analysis.swap(0, 1);
                     self.deck_zoom_tex.swap(0, 1);
+                    self.deck_stem_tex.swap(0, 1);
+                    self.deck_stem_coverage.swap(0, 1);
+                    self.deck_splat_refining = [None; 2];
+                    self.deck_splat_snapshot_seen.swap(0, 1);
                     self.sync_deck_controls(cx);
                 }
                 DeckCmd::UnloadTrack { deck } => {
@@ -12223,6 +13434,9 @@ p2 {}
                     self.deck_analysis[index] = None;
                     self.deck_zoom_tex[index] = None;
                     self.deck_stems[index] = None;
+                    self.deck_stem_coverage[index] = None;
+                    self.deck_splat_refining[index] = None;
+                    self.deck_splat_snapshot_seen[index] = false;
                     self.deck_stem_tex[index] = None;
                     self.deck_stem_tiles[index] = Vec::new();
                     self.deck_lyrics[index] = None;
@@ -12273,21 +13487,66 @@ p2 {}
         }
     }
 
+    /// The operator says the grid is on the wrong pulse: flip it half a beat
+    /// everywhere it lives — the engine (sync), the analysis (loop grid,
+    /// autopilot map) and the sidecar, so the next load starts corrected.
+    fn flip_deck_beat_phase(&mut self, cx: &mut Cx, deck: DeckId) {
+        let Some((grid, cmds)) = self.decks.flip_beat_phase(deck) else { return };
+        self.run_deck_cmds(cx, cmds);
+        let index = deck.index();
+        let Some(analysis) = self.deck_analysis[index].as_ref() else { return };
+        let mut flipped = (**analysis).clone();
+        flipped.grid = grid;
+        let flipped = Arc::new(flipped);
+        self.deck_analysis[index] = Some(flipped.clone());
+        let gen = self.decks.deck(deck).load_gen;
+        if let Some(splat) = build_splat(&flipped, None) {
+            let cmds = self.decks.splat_set(deck, Arc::new(splat));
+            self.run_deck_cmds(cx, cmds);
+            if self.deck_stem_coverage[index].is_some_and(|(_, complete)| complete) {
+                self.submit_splat_refinement(deck, gen);
+            }
+        }
+        let shape = crate::track_shape::track_shape(
+            &flipped.tiles.overview,
+            flipped.duration_secs,
+            &flipped.grid,
+        );
+        self.autopilot.shape_ready(gen, shape);
+        if let Some(item) = self.decks.deck(deck).item() {
+            let key = match self.local_by_asset.get(&item.asset) {
+                Some(path) => AnalysisKey::from_path(path),
+                None => AnalysisKey::from_blob(item.media_blob),
+            };
+            let analysis = flipped.clone();
+            std::thread::spawn(move || crate::wave_analysis::store_analysis(&key, &analysis));
+        }
+        self.push_deck_wave(cx, deck);
+        self.refresh_splat_surface(cx);
+    }
+
     /// Hand a freshly decoded track to the analysis worker. The key is the
     /// content digest, so a track that has been on a deck before comes back
     /// from its sidecar instead of being analysed again.
     fn submit_analysis(&mut self, deck: DeckId, pcm: Arc<TrackPcm>) {
-        let state = self.decks.deck(deck);
-        let Some(item) = state.item() else { return };
-        let key = match self.local_by_asset.get(&item.asset) {
-            Some(path) => AnalysisKey::from_path(path),
-            None => AnalysisKey::from_blob(item.media_blob),
+        let (gen, key) = {
+            let state = self.decks.deck(deck);
+            let Some(item) = state.item() else { return };
+            let key = match self.local_by_asset.get(&item.asset) {
+                Some(path) => AnalysisKey::from_path(path),
+                None => AnalysisKey::from_blob(item.media_blob),
+            };
+            (state.load_gen, key)
         };
+        // Hub state belongs to the UI thread. Resolve the acknowledged model
+        // path here and hand only the path to the analysis worker.
+        let beats_model = self.hub_model_path("beat-this", "weights");
         self.analysis.submit(AnalysisJob {
             deck,
-            gen: state.load_gen,
+            gen,
             key,
             pcm,
+            beats_model,
         });
     }
 
@@ -12407,6 +13666,7 @@ p2 {}
         }
         self.pump_analysis(cx);
         self.pump_stems(cx);
+        self.pump_loop_score(cx);
         self.pump_loop_scan(cx);
         // Last, and only when everything above found nothing to do.
         self.pump_prefetch();
@@ -13645,7 +14905,9 @@ p2 {}
     }
 
     fn set_music_import_status(&mut self, cx: &mut Cx, text: &str) {
-        self.ui.label(cx, ids!(music_import_status)).set_text(cx, text);
+        let label = self.ui.label(cx, ids!(music_import_status));
+        label.set_visible(cx, !text.is_empty());
+        label.set_text(cx, text);
         self.ui.redraw(cx);
     }
 
@@ -15494,10 +16756,7 @@ p2 {}
         self.ui.redraw(cx);
     }
 
-    /// The explorer and the queue take turns when they can no longer stand
-    /// side by side.
-    ///
-    /// Physical width in, like the rest of the chain.
+    /// The explorer, queue and loop splat always take turns behind tabs.
     fn sync_lists_tabs(&mut self, cx: &mut Cx, event: &Event) {
         let Event::WindowGeomChange(ev) = event else { return };
         let Some(main_id) = self.ui.window(cx, ids!(main_window)).window_id() else {
@@ -15506,12 +16765,7 @@ p2 {}
         if ev.window_id != main_id || !cx.windows.is_valid(main_id) {
             return;
         }
-        let native = cx.windows[main_id].native_dpi_factor();
-        let physical = ev.new_geom.inner_size * ev.new_geom.dpi_factor;
-        // The width the LISTS get, which is a third of the window once they
-        // stand beside the decks.
-        let span = console_scale::lists_span(physical.x, physical.y, native);
-        let tabbed = console_scale::console_lists_tabbed(span, physical.y, native);
+        let tabbed = true;
         if tabbed == self.lists_tabbed {
             return;
         }
@@ -15526,7 +16780,10 @@ p2 {}
         if strip.visible() != tabbed {
             strip.set_visible(cx, tabbed);
         }
-        for (index, list) in [ids!(library_drop), ids!(queue_drop)].into_iter().enumerate() {
+        for (index, list) in [ids!(library_drop), ids!(queue_drop), ids!(loops_drop)]
+            .into_iter()
+            .enumerate()
+        {
             let visible = !tabbed || index == self.lists_shown;
             let view = self.ui.widget(cx, list);
             if view.visible() != visible {
@@ -15534,7 +16791,10 @@ p2 {}
             }
         }
         if tabbed {
-            for (index, tab) in [ids!(lists_tab_0), ids!(lists_tab_1)].into_iter().enumerate() {
+            for (index, tab) in [ids!(lists_tab_0), ids!(lists_tab_1), ids!(lists_tab_2)]
+                .into_iter()
+                .enumerate()
+            {
                 self.paint_lit(cx, tab, index == self.lists_shown);
             }
         }
@@ -15545,7 +16805,10 @@ p2 {}
         if !self.lists_tabbed {
             return;
         }
-        for (index, tab) in [ids!(lists_tab_0), ids!(lists_tab_1)].into_iter().enumerate() {
+        for (index, tab) in [ids!(lists_tab_0), ids!(lists_tab_1), ids!(lists_tab_2)]
+            .into_iter()
+            .enumerate()
+        {
             if self.ui.button(cx, tab).clicked(actions) && self.lists_shown != index {
                 self.lists_shown = index;
                 self.paint_lists_tabs(cx);
@@ -18016,6 +19279,10 @@ p2 {}
                 continue;
             }
             self.run_deck_cmds(cx, cmds);
+            if let Some(grid) = build_splat(&done.analysis, None) {
+                let cmds = self.decks.splat_set(done.deck, Arc::new(grid));
+                self.run_deck_cmds(cx, cmds);
+            }
             self.deck_zoom_tex[index] =
                 crate::music_view::zoom_texture(cx, &done.analysis.tiles);
             // The autopilot's map of this record: computed once per
@@ -18029,6 +19296,9 @@ p2 {}
             self.autopilot.shape_ready(done.gen, shape);
             self.autopilot.changes_ready(done.gen, done.analysis.changes_secs.clone());
             self.deck_analysis[index] = Some(done.analysis);
+            if self.deck_stem_coverage[index].is_some_and(|(_, complete)| complete) {
+                self.submit_splat_refinement(done.deck, done.gen);
+            }
             // A parked scan fires only if it is still parked against THIS
             // load: a track swap between the ask and the grid landing must
             // not spend the operator's scan on a track they never asked to
@@ -18252,6 +19522,125 @@ p2 {}
 
     // ---- first-use model install (stem splitter + whisper) ----
 
+    const DJ_HUB_MODELS: [&'static str; 3] = [
+        "basic-pitch",
+        "beat-this",
+        "salamander-drumkit",
+    ];
+
+    fn hub_models_missing(&mut self) -> bool {
+        let Some(models) = self.hub_models() else { return false };
+        Self::DJ_HUB_MODELS.iter().any(|model_id| {
+            models.spec(model_id).is_some()
+                && (!matches!(
+                    models.install_state(model_id),
+                    makepad_ai_hub::local::InstallState::Installed
+                ) || !models.license_acknowledged(model_id))
+        })
+    }
+
+    fn humanise_model_id(model_id: &str) -> String {
+        model_id
+            .split('-')
+            .map(|word| {
+                let mut chars = word.chars();
+                chars
+                    .next()
+                    .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn refresh_hub_model_rows(&mut self, cx: &mut Cx) {
+        use makepad_ai_hub::local::InstallState;
+        use makepad_ai_hub::registry::LicenseRestriction;
+        use makepad_ai_hub_ui::{ModelInstallPanel, ModelRowInstallState, ModelRowState};
+
+        let panel_widget = self.ui.widget(cx, ids!(hub_model_install_panel));
+        let previous: HashMap<String, ModelRowInstallState> = panel_widget
+            .borrow::<ModelInstallPanel>()
+            .map(|panel| {
+                panel
+                    .rows()
+                    .iter()
+                    .map(|row| (row.model_id.clone(), row.state.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let Some(models) = self.hub_models() else { return };
+        let rows = Self::DJ_HUB_MODELS
+            .iter()
+            .filter_map(|model_id| {
+                let spec = models.spec(model_id)?;
+                let bytes_total = spec.files.iter().filter_map(|file| file.size).sum();
+                let old_state = previous.get(*model_id);
+                let (bytes_done, state) = match models.install_state(model_id) {
+                    InstallState::NotInstalled { .. } => (
+                        0,
+                        match old_state {
+                            Some(ModelRowInstallState::Failed(error)) => {
+                                ModelRowInstallState::Failed(error.clone())
+                            }
+                            _ => ModelRowInstallState::NotInstalled,
+                        },
+                    ),
+                    InstallState::Partial { bytes_done, .. } => (
+                        bytes_done,
+                        if matches!(old_state, Some(ModelRowInstallState::Downloading)) {
+                            ModelRowInstallState::Downloading
+                        } else {
+                            ModelRowInstallState::NotInstalled
+                        },
+                    ),
+                    InstallState::Installed => (bytes_total, ModelRowInstallState::Installed),
+                };
+                let (license_name, restriction) = spec
+                    .license
+                    .as_ref()
+                    .map(|license| {
+                        let restriction = match license.restriction {
+                            LicenseRestriction::None => "none",
+                            LicenseRestriction::NonCommercial => "non-commercial",
+                            LicenseRestriction::Community => "community",
+                            LicenseRestriction::Restricted => "restricted",
+                        };
+                        (license.name.clone(), restriction.to_string())
+                    })
+                    .unwrap_or_else(|| ("Licence unavailable".to_string(), "restricted".to_string()));
+                Some(ModelRowState {
+                    model_id: (*model_id).to_string(),
+                    name: Self::humanise_model_id(&spec.id),
+                    bytes_total,
+                    bytes_done,
+                    state,
+                    license_name,
+                    restriction,
+                })
+            })
+            .collect();
+        if let Some(mut panel) = panel_widget.borrow_mut::<ModelInstallPanel>() {
+            panel.set_rows(cx, rows);
+            self.hub_model_panel_ready = true;
+        };
+    }
+
+    fn pump_hub_model_install(&mut self, cx: &mut Cx) {
+        if !self.hub_model_panel_ready {
+            return;
+        }
+        let panel = self.ui.widget(cx, ids!(hub_model_install_panel));
+        if let Some(models) = self.hub_models() {
+            if let Some(mut panel) =
+                panel.borrow_mut::<makepad_ai_hub_ui::ModelInstallPanel>()
+            {
+                panel.pump(cx, models);
+            }
+        }
+        self.refresh_models_row(cx);
+    }
+
     /// A queued hot-reload fires the moment its slot's previous chain
     /// settles — a save burst always ends on the newest revision.
     fn pump_fx_slot_reloads(&mut self) {
@@ -18275,10 +19664,12 @@ p2 {}
             self.refresh_models_row(cx);
             return;
         }
-        if models::missing().is_empty() {
+        let hub_missing = self.hub_models_missing();
+        if models::missing().is_empty() && !hub_missing {
             self.refresh_models_row(cx);
             return;
         }
+        self.refresh_hub_model_rows(cx);
         self.ui.modal(cx, ids!(models_license_modal)).open(cx);
         self.ui.redraw(cx);
     }
@@ -18308,10 +19699,16 @@ p2 {}
         }
         let installing = self.model_install.is_some();
         let missing = models::missing();
+        let hub_missing = self.hub_models_missing();
         let text = if !self.model_install_note.is_empty() {
             self.model_install_note.clone()
         } else if missing.is_empty() {
-            String::new()
+            if hub_missing {
+                "Basic Pitch, Beat This! and the Salamander drum kit are available for loop scores and beat analysis"
+                    .to_string()
+            } else {
+                String::new()
+            }
         } else {
             let names = missing
                 .iter()
@@ -18324,13 +19721,13 @@ p2 {}
                 bytes as f64 / 1.0e9
             )
         };
-        let show = installing || !missing.is_empty() || !text.is_empty();
+        let show = installing || !missing.is_empty() || hub_missing || !text.is_empty();
         let row = self.ui.view(cx, ids!(models_row));
         if row.visible() != show {
             row.set_visible(cx, show);
         }
         let button = &self.music_refs.models_install;
-        button.set_visible(cx, installing || !missing.is_empty());
+        button.set_visible(cx, installing || !missing.is_empty() || hub_missing);
         button.set_text(cx, if installing { "CANCEL" } else { "INSTALL MODELS" });
         self.music_refs.models_state.set_text(cx, &text);
     }
@@ -18488,8 +19885,36 @@ p2 {}
         self.prefetch.release(finished, Instant::now());
     }
 
+    fn submit_splat_refinement(&mut self, deck: DeckId, gen: u64) {
+        let index = deck.index();
+        if self.deck_splat_refining[index] == Some(gen) {
+            return;
+        }
+        if let (Some(stems), Some((pcm, _)), Some(analysis)) = (
+            self.deck_stems[index].clone(),
+            self.deck_tracks[index].clone(),
+            self.deck_analysis[index].clone(),
+        ) {
+            if self.splat_refine.submit(deck, gen, stems, pcm, analysis) {
+                self.deck_splat_refining[index] = Some(gen);
+            }
+        }
+    }
+
     fn pump_stems(&mut self, cx: &mut Cx) {
         let mut touched = [false; 2];
+        for done in self.splat_refine.poll() {
+            if self.deck_splat_refining[done.deck.index()] == Some(done.gen) {
+                self.deck_splat_refining[done.deck.index()] = None;
+            }
+            if self.decks.deck(done.deck).load_gen != done.gen {
+                continue;
+            }
+            if let Some(grid) = done.grid {
+                let cmds = self.decks.splat_set(done.deck, grid);
+                self.run_deck_cmds(cx, cmds);
+            }
+        }
         // Two sources, one vocabulary: the local separator and the fetched
         // side-channel publish the same chunks and the same status lines, so
         // everything below this point is blind to which one served the deck.
@@ -18523,6 +19948,11 @@ p2 {}
                     }
                     self.deck_stem_status[deck.index()] = "stems: live".to_string();
                     self.deck_stem_busy[deck.index()] = None;
+                    if self.deck_stem_coverage[deck.index()]
+                        .is_some_and(|(_, complete)| complete)
+                    {
+                        self.submit_splat_refinement(deck, gen);
+                    }
                 }
                 StemsMsg::Coverage { deck, gen, digest, model_frames, complete } => {
                     // The separation worker is the only place the track's
@@ -18535,12 +19965,18 @@ p2 {}
                     if self.decks.deck(deck).load_gen != gen {
                         continue;
                     }
-                    self.deck_track_digest[deck.index()] = Some(digest.clone());
+                    let index = deck.index();
+                    let covered_frames = usize::try_from(model_frames).unwrap_or(usize::MAX);
+                    self.deck_stem_coverage[index] = Some((covered_frames, complete));
+                    self.deck_track_digest[index] = Some(digest.clone());
                     // A track this machine separated end to end is worth
                     // giving back — before the dispatch gate below, which
                     // stops at the SECOND report of the same coverage.
                     if complete {
                         self.arm_stems_write_back(deck, &digest, model_frames);
+                    }
+                    if complete {
+                        self.submit_splat_refinement(deck, gen);
                     }
                     // Words already in hand for this digest — the other deck
                     // played it, or an earlier load did. Hang them now: the
@@ -19010,8 +20446,10 @@ p2 {}
     /// sync decision is made.
     fn observe_decks(&mut self) {
         for deck in [DeckId::A, DeckId::B] {
-            let (position, _duration, playing) = self.mixer.deck_position(deck);
-            self.decks.observe(deck, position, playing);
+            let snapshot = self.mixer.deck_snapshot(deck);
+            self.decks
+                .observe(deck, snapshot.position_secs, snapshot.playing);
+            self.decks.observe_splat(deck, snapshot.splat);
         }
     }
 
@@ -19100,6 +20538,112 @@ p2 {}
         true
     }
 
+    fn refresh_splat_surface(&mut self, cx: &mut Cx) {
+        let other = self.splat_focus.other();
+        if matches!(self.decks.deck(self.splat_focus).load, DeckLoad::Empty)
+            && self.decks.deck(other).is_loaded()
+        {
+            self.splat_focus = other;
+        }
+        let deck = self.splat_focus;
+        let index = deck.index();
+        // Idempotent recovery: a cached analysis can land before the deck reports
+        // loaded, and `splat_set` refuses an unloaded deck — build the grid here
+        // once both are present, instead of waiting for an event that already passed.
+        if self.decks.splat(deck).is_none() && self.decks.deck(deck).is_loaded() {
+            if let Some(analysis) = self.deck_analysis[index].clone() {
+                if let Some(grid) = build_splat(&analysis, None) {
+                    let cmds = self.decks.splat_set(deck, Arc::new(grid));
+                    self.run_deck_cmds(cx, cmds);
+                    let gen = self.decks.deck(deck).load_gen;
+                    if self.deck_stem_coverage[index].is_some_and(|(_, complete)| complete) {
+                        self.submit_splat_refinement(deck, gen);
+                    }
+                }
+            }
+        }
+        let duration_secs = self.decks.deck(deck).duration_secs;
+        let mut model = match self.decks.splat(deck) {
+            Some(splat) => {
+                let (covered_frames, complete) =
+                    self.deck_stem_coverage[index].unwrap_or((0, false));
+                let coverage = SplatCoverage {
+                    stems_present: self.deck_stems[index].is_some(),
+                    covered_frames,
+                    complete,
+                    model_rate: crate::stems::STEMS_RATE,
+                };
+                splat_view_model(
+                    deck,
+                    &splat.grid,
+                    splat.enabled,
+                    self.deck_splat_snapshot_seen[index].then_some(&splat.last),
+                    &coverage,
+                    duration_secs,
+                )
+            }
+            None => SplatViewModel::empty(splat_deck(deck)),
+        };
+        model.preview = self.loop_score_preview_marker(deck);
+        model.status = self.splat_status(deck, model.cols);
+        self.schedule_splat_blocks(&mut model);
+        let active = model.cols != 0;
+        self.paint_lit(cx, ids!(splat_deck_a), deck == DeckId::A);
+        self.paint_lit(cx, ids!(splat_deck_b), deck == DeckId::B);
+        self.paint_lit(cx, ids!(splat_on), active && model.enabled);
+        self.paint_lit(cx, ids!(splat_score), self.loop_score_open);
+        self.splat_model = model.clone();
+        let mix = self.deck_zoom_tex[index].clone();
+        let stems = self.deck_stem_tex[index].clone();
+        let splat = self.ui.vj_loop_splat(cx, ids!(loop_splat));
+        if let Some(mut splat) = splat.borrow_mut() {
+            splat.set_model(cx, model);
+            splat.set_waves(cx, mix, stems);
+        };
+    }
+
+    /// What the loop grid is still waiting for on this deck, if anything.
+    fn splat_status(&self, deck: DeckId, cols: usize) -> Option<(String, Option<f32>)> {
+        let index = deck.index();
+        if !self.decks.deck(deck).is_loaded() {
+            return None;
+        }
+        if cols == 0 {
+            return Some(match self.deck_analysis[index] {
+                None => ("analysing the beat grid…".to_string(), None),
+                Some(_) => ("no steady beat found — this track cannot be split into loops".to_string(), Some(0.0)),
+            });
+        }
+        let complete = self.deck_stem_coverage[index].is_some_and(|(_, complete)| complete);
+        if complete && self.deck_stems[index].is_some() {
+            return None;
+        }
+        let progress = self.deck_stem_coverage[index].and_then(|(covered, _)| {
+            let (pcm, _) = self.deck_tracks[index].as_ref()?;
+            let total = pcm.frames.len() as f64 * f64::from(crate::stems::STEMS_RATE)
+                / f64::from(pcm.sample_rate.max(1));
+            (total > 0.0).then(|| (covered as f64 / total).clamp(0.0, 1.0) as f32)
+        });
+        let text = if self.deck_stem_status[index].is_empty() {
+            "separating stems…".to_string()
+        } else {
+            self.deck_stem_status[index].clone()
+        };
+        Some((text, progress))
+    }
+
+    fn refresh_splat_preview(&mut self, cx: &mut Cx) {
+        let preview = self.loop_score_preview_marker(self.splat_focus);
+        if self.splat_model.preview == preview {
+            return;
+        }
+        self.splat_model.preview = preview;
+        let splat = self.ui.vj_loop_splat(cx, ids!(loop_splat));
+        if let Some(mut splat) = splat.borrow_mut() {
+            splat.set_model(cx, self.splat_model.clone());
+        };
+    }
+
     /// One pass over everything the deck surface shows.
     fn refresh_music_surface(&mut self, cx: &mut Cx) {
         if !self.ensure_music_refs(cx) {
@@ -19111,7 +20655,15 @@ p2 {}
             // One mixer lock per deck per frame: the audio callback
             // `try_lock`s and goes silent on contention, so the UI must not
             // grab it three times for three fields.
-            let (position, duration, playing, scratching) = self.mixer.deck_snapshot(deck);
+            let snapshot = self.mixer.deck_snapshot(deck);
+            let (position, duration, playing, scratching) = (
+                snapshot.position_secs,
+                snapshot.duration_secs,
+                snapshot.playing,
+                snapshot.scratching,
+            );
+            self.deck_splat_snapshot_seen[index] = snapshot.splat.is_some();
+            self.decks.observe_splat(deck, snapshot.splat);
             let state = self.decks.deck(deck);
             let (title, artist) = match &state.load {
                 DeckLoad::Empty => ("empty".to_string(), String::new()),
@@ -19141,6 +20693,9 @@ p2 {}
             let cue_secs = state.cue_secs;
             let loop_beats = state.loop_beats;
             let loop_armed = state.loop_armed.is_some();
+            let refined_by_beats = self.deck_analysis[index]
+                .as_ref()
+                .is_some_and(|analysis| analysis.refined_by_beats());
             // A bookmark rides the same channel as a zero-length span: the
             // band and its out edge draw nothing, the green chip draws at
             // its point, and the save click works unchanged.
@@ -19188,7 +20743,12 @@ p2 {}
             }
             let grid_text = match grid {
                 Some(grid) if grid.has_grid() => {
-                    format!("grid {:.1} BPM · {:.0}%", grid.bpm, grid.confidence * 100.0)
+                    format!(
+                        "grid {:.1} BPM · {:.0}%{}",
+                        grid.bpm,
+                        grid.confidence * 100.0,
+                        if refined_by_beats { " · beat this" } else { "" },
+                    )
                 }
                 _ if loaded => "analysing…".to_string(),
                 _ => String::new(),
@@ -19311,6 +20871,7 @@ p2 {}
             };
             self.music_refs.decks[index] = refs;
         }
+        self.refresh_splat_surface(cx);
         self.paint_lit(cx, ids!(auto_sync), self.decks.auto_sync);
         // The QUANT chip mirrors the engine every pass (set_value diffs, so
         // an unchanged unit costs nothing). Without a push it would read
@@ -19473,7 +21034,7 @@ p2 {}
             if narrow {
                 script_apply_eval!(cx, button, {
                     width: 22
-                    align: Align{x: 0.5, y: 0.5}
+                    align +: {x: 0.5 y: 0.5}
                 });
             } else {
                 let wide = self.chip_wide[index];
@@ -19483,7 +21044,7 @@ p2 {}
                 if wide > 1.0 {
                     script_apply_eval!(cx, button, {
                         width: #(wide)
-                        align: Align{x: 0.0, y: 0.5}
+                        align +: {x: 0.0 y: 0.5}
                     });
                 }
             }
@@ -21177,6 +22738,17 @@ p2 {}
             if refs.loop_scan.clicked(actions) {
                 self.open_loop_scan_modal(cx, deck);
             }
+            for (button, sign) in [(&refs.jump_back, -1.0), (&refs.jump_fwd, 1.0)] {
+                if let Some(modifiers) = button.clicked_modifiers(actions) {
+                    self.deck_hands_on();
+                    let bars = if modifiers.shift { 16.0 } else { 4.0 };
+                    let cmds = self.decks.beat_jump(deck, sign * bars * 4.0);
+                    self.run_deck_cmds(cx, cmds);
+                }
+            }
+            if refs.phase_flip.clicked(actions) {
+                self.flip_deck_beat_phase(cx, deck);
+            }
             if refs.hp.clicked(actions) {
                 let on = !self.phones_deck[deck.index()];
                 self.phones_deck[deck.index()] = on;
@@ -21959,6 +23531,7 @@ p2 {}
         self.push_wave_positions(cx);
         self.push_phones_playhead(cx);
         self.track_crossfade(cx);
+        self.refresh_loop_score_preview(cx);
         self.schedule_music_frame(cx);
     }
 
@@ -21966,14 +23539,15 @@ p2 {}
     fn schedule_music_frame(&mut self, cx: &mut Cx) {
         let moving = self.xfade_target.is_some()
             || [DeckId::A, DeckId::B].iter().any(|deck| {
-                let (_, _, playing, scratching) = self.mixer.deck_snapshot(*deck);
-                playing || scratching
+                let snapshot = self.mixer.deck_snapshot(*deck);
+                snapshot.playing || snapshot.scratching
             })
             // The pre-listen playhead moves at display cadence too.
             || self
                 .mixer
                 .preview_position()
-                .is_some_and(|(_, _, playing, _)| playing);
+                .is_some_and(|(_, _, playing, _)| playing)
+            || self.mixer.score_preview_state().0;
         if moving {
             self.music_pump = cx.new_next_frame();
             // Karaoke lives on the PROGRAM, which normally only redraws when
@@ -21990,7 +23564,7 @@ p2 {}
     /// display cadence during a scratch, so it stays uniform-only work.
     fn push_wave_positions(&mut self, cx: &mut Cx) {
         for deck in [DeckId::A, DeckId::B] {
-            let (position, _, _, _) = self.mixer.deck_snapshot(deck);
+            let position = self.mixer.deck_snapshot(deck).position_secs;
             let position = position + crate::lyrics::display_offset_secs();
             let widget = self.music_refs.decks[deck.index()].lyrics.clone();
             {
@@ -22006,8 +23580,14 @@ p2 {}
             return;
         };
         for deck in [DeckId::A, DeckId::B] {
-            let (position, _duration, playing, scratching) = self.mixer.deck_snapshot(deck);
-            scroll.set_position(cx, deck, position, playing, scratching);
+            let snapshot = self.mixer.deck_snapshot(deck);
+            scroll.set_position(
+                cx,
+                deck,
+                snapshot.position_secs,
+                snapshot.playing,
+                snapshot.scratching,
+            );
         }
     }
 
@@ -22346,6 +23926,7 @@ p2 {}
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         self.status_text = "starting…".to_string();
+        self.paint_lit(cx, ids!(loop_score_loop), self.loop_score_loop);
         // THE GRID IS FULL BEFORE THE FIRST FRAME. The effect library is
         // compiled in, so its art is generated here — ahead of any store,
         // any socket, any listing.
@@ -22791,6 +24372,42 @@ impl MatchEvent for App {
         self.handle_deck_tabs(cx, actions);
         self.handle_deck_sections(cx, actions);
         self.handle_lists_tabs(cx, actions);
+        if self.ui.button(cx, ids!(loop_score_play)).clicked(actions) {
+            self.play_loop_score_preview(cx);
+        }
+        if self.ui.button(cx, ids!(loop_score_stop)).clicked(actions) {
+            self.mixer.score_preview_stop();
+            self.refresh_loop_score_preview(cx);
+        }
+        if self.ui.button(cx, ids!(loop_score_loop)).clicked(actions) {
+            self.loop_score_loop = !self.loop_score_loop;
+            self.paint_lit(cx, ids!(loop_score_loop), self.loop_score_loop);
+            if self.mixer.score_preview_state().0 {
+                self.play_loop_score_preview(cx);
+            }
+        }
+        if self.ui.button(cx, ids!(loop_score_close)).clicked(actions) {
+            self.mixer.score_preview_stop();
+            self.refresh_splat_preview(cx);
+            self.loop_score_open = false;
+            self.loop_score_signature = None;
+            self.loop_score_presented = None;
+            self.ui.view(cx, ids!(loop_score_panel)).set_visible(cx, false);
+        }
+        let splat_action = self.ui.vj_loop_splat(cx, ids!(loop_splat)).splat_action(actions);
+        self.handle_splat_action(cx, splat_action);
+        if self.ui.button(cx, ids!(splat_deck_a)).clicked(actions) {
+            self.handle_splat_action(cx, LoopSplatAction::FocusDeck(crate::loop_splat_view::SplatDeck::A));
+        }
+        if self.ui.button(cx, ids!(splat_deck_b)).clicked(actions) {
+            self.handle_splat_action(cx, LoopSplatAction::FocusDeck(crate::loop_splat_view::SplatDeck::B));
+        }
+        if self.ui.button(cx, ids!(splat_on)).clicked(actions) {
+            self.handle_splat_action(cx, LoopSplatAction::ToggleEnabled);
+        }
+        if self.ui.button(cx, ids!(splat_score)).clicked(actions) {
+            self.handle_splat_action(cx, LoopSplatAction::ToggleScore);
+        }
         let (sfx_down, sfx_up) = self.grid_hits(cx, actions, ids!(sfx_grid));
         for (asset, _taps) in sfx_down {
             self.selected_pad = Some(asset);
@@ -23795,6 +25412,8 @@ impl AppMain for App {
         crate::flow_warp::script_mod(vm);
         crate::nv12_view::script_mod(vm);
         crate::flow_tween::script_mod(vm);
+        makepad_score_view::script_mod(vm);
+        makepad_ai_hub_ui::script_mod(vm);
         crate::music_view::script_mod(vm);
         crate::effects::script_mod(vm);
         crate::fx_thumbs::script_mod(vm);
@@ -24050,6 +25669,13 @@ impl AppMain for App {
                 self.started = true;
                 self.app_start_instant = Some(Instant::now());
                 self.archive.set_cache_parent(&service::session_config_from_env().cache_parent);
+                // Test instances run muted: VJ_MUTE=1 zeroes the master at
+                // launch so hidden bridge-driven windows never play on the
+                // operator's speakers. The slider follows so the UI tells the truth.
+                if std::env::var_os("VJ_MUTE").is_some() {
+                    self.mixer.set_master(0.0);
+                    self.set_drop_slider(cx, ids!(master_slider), 0.0);
+                }
             }
         }
         if self.poll_timer.is_event(event).is_some() {
@@ -24152,6 +25778,8 @@ impl AppMain for App {
         }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+        self.pump_hub_model_install(cx);
+        self.pump_drum_bank(cx);
         self.sync_video_pad_window(cx);
     }
 }

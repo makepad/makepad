@@ -14,6 +14,7 @@
 //! the deck engine routes to the mixer's vinyl ramps.
 
 use crate::decks::DeckId;
+use crate::loop_splat_view::{DrawSplatBlock, DrawSplatCell, VjLoopSplat};
 use crate::wave_analysis::{TrackGrid, WaveTiles, ZOOM_COLS_PER_SEC};
 use makepad_asset_data::AssetId;
 use makepad_widgets::*;
@@ -205,6 +206,254 @@ const SCRATCH_IDLE_SECS: f64 = 0.045;
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
+
+    set_type_default() do #(DrawSplatCell::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        tex_mix: texture_2d(float)
+        tex_stems: texture_2d(float)
+        time: uniform(0.0)
+
+        mix_level_at: fn(column: float, base_row: float, level_cols: float, scale: float) -> vec4 {
+            let c = clamp(floor(column / scale), 0.0, max(level_cols - 1.0, 0.0))
+            let wrap = floor(c / self.tex_w)
+            let u = (c - wrap * self.tex_w + 0.5) / self.tex_w
+            let v = (base_row + wrap + 0.5) / self.tex_h
+            return self.tex_mix.sample_as_bgra(vec2(u, v))
+        }
+
+        mix_span: fn(column: float) -> vec4 {
+            let lo = self.mix_level_at(column, self.lo_row, self.lo_cols, self.lo_scale)
+            if self.lod_blend <= 0.0 {
+                if self.lo_scale <= 1.0 {
+                    let base = floor(column - 0.5)
+                    let f = column - 0.5 - base
+                    let a = self.mix_level_at(base, self.lo_row, self.lo_cols, 1.0)
+                    let b = self.mix_level_at(base + 1.0, self.lo_row, self.lo_cols, 1.0)
+                    return a * (1.0 - f) + b * f
+                }
+                return lo
+            }
+            let hi = self.mix_level_at(column, self.hi_row, self.hi_cols, self.hi_scale)
+            return lo * (1.0 - self.lod_blend) + hi * self.lod_blend
+        }
+
+        stem_level_at: fn(column: float, base_row: float, level_cols: float, scale: float) -> vec4 {
+            let c = clamp(floor(column / scale), 0.0, max(level_cols - 1.0, 0.0))
+            let wrap = floor(c / self.tex_w)
+            let u = (c - wrap * self.tex_w + 0.5) / self.tex_w
+            let v = (base_row + wrap + 0.5) / self.tex_h
+            return self.tex_stems.sample_as_bgra(vec2(u, v))
+        }
+
+        stem_span: fn(column: float) -> vec4 {
+            let lo = self.stem_level_at(column, self.lo_row, self.lo_cols, self.lo_scale)
+            if self.lod_blend <= 0.0 {
+                return lo
+            }
+            let hi = self.stem_level_at(column, self.hi_row, self.hi_cols, self.hi_scale)
+            return lo * (1.0 - self.lod_blend) + hi * self.lod_blend
+        }
+
+        playing_progress: fn(base: vec4) -> vec4 {
+            let playing = step(3.5, self.state)
+            let p = self.pos * self.rect_size
+            let w = self.rect_size.x
+            let h = self.rect_size.y
+            let x0 = clamp(self.part_x0 * w, 0.0, w)
+            let x1 = clamp(self.part_x1 * w, x0, w)
+            let y0 = clamp(self.part_y0 * h, 0.0, h)
+            let y1 = clamp(self.part_y1 * h, y0, h)
+            let inside_y = step(y0 + 2.0, p.y) * step(p.y, y1 - 2.0)
+            let play_x = x0 + 2.0
+                + clamp(self.phase, 0.0, 1.0) * max(x1 - x0 - 4.0, 0.0)
+            let played = step(x0 + 2.0, p.x) * step(p.x, play_x) * inside_y * playing
+            let filled = base.mix(vec4(1.0, 1.0, 1.0, 1.0), played * 0.18)
+            // A dark one-pixel edge around the white two-pixel hairline
+            // keeps it crisp over both pale hits and saturated waveforms.
+            let distance = abs(p.x - play_x)
+            let edge = (1.0 - smoothstep(1.5, 2.0, distance)) * inside_y * playing
+            let line = (1.0 - smoothstep(0.75, 1.0, distance)) * inside_y * playing
+            let edged = filled.mix(vec4(0.0, 0.0, 0.0, 1.0), edge * 0.55)
+            return edged.mix(vec4(1.0, 1.0, 1.0, 1.0), line * 0.95)
+        }
+
+        countdown: fn(base: vec4) -> vec4 {
+            let armed = step(2.5, self.state) - step(3.5, self.state)
+            let p = self.pos * self.rect_size
+            let w = self.rect_size.x
+            let h = self.rect_size.y
+            let x0 = clamp(self.part_x0 * w, 0.0, w)
+            let x1 = clamp(self.part_x1 * w, x0, w)
+            let y0 = clamp(self.part_y0 * h, 0.0, h)
+            let y1 = clamp(self.part_y1 * h, y0, h)
+            let fill_x = x0 + 3.0
+                + clamp(self.bar_phase, 0.0, 1.0) * max(x1 - x0 - 6.0, 0.0)
+            let strip = step(y0 + 3.0, p.y) * step(p.y, min(y0 + 6.0, y1 - 2.0))
+                * step(x0 + 3.0, p.x) * step(p.x, x1 - 3.0) * armed
+            let filled = strip * step(p.x, fill_x)
+            let track = base.mix(vec4(0.0, 0.0, 0.0, 1.0), strip * 0.45)
+            return track.mix(vec4(1.0, 1.0, 1.0, 1.0), filled * 0.95)
+        }
+
+        pixel: fn() {
+            let w = self.rect_size.x
+            let h = self.rect_size.y
+            let p = self.pos * self.rect_size
+            let sdf = Sdf2d.viewport(p)
+            let rgb = self.color.xyz
+            let part_x0 = clamp(self.part_x0 * w, 0.0, w)
+            let part_x1 = clamp(self.part_x1 * w, part_x0, w)
+            let part_y0 = clamp(self.part_y0 * h, 0.0, h)
+            let part_y1 = clamp(self.part_y1 * h, part_y0, h)
+            sdf.box(1.0, 1.0, w - 2.0, h - 2.0, 3.0)
+            if self.state < 0.5 {
+                sdf.stroke(vec4(rgb.x, rgb.y, rgb.z, 0.10), 1.0)
+                return sdf.result
+            }
+
+            let is_mix = step(3.5, self.channel)
+            let wave_available = self.has_mix
+                * mix(self.has_stems, 1.0, is_mix)
+                * step(0.001, self.span_cols)
+            if wave_available < 0.5 {
+                // Analysis is still pending: retain the old flat state fill.
+                if self.state < 1.5 {
+                    sdf.stroke(vec4(rgb.x, rgb.y, rgb.z, 0.25), 1.0)
+                } else if self.state < 2.5 {
+                    sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.45))
+                    sdf.stroke(vec4(rgb.x, rgb.y, rgb.z, 0.68), 1.0)
+                } else {
+                    sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.05))
+                    sdf.stroke(vec4(rgb.x, rgb.y, rgb.z, 0.68), 1.0)
+                    sdf.box(
+                        part_x0 + 1.0,
+                        part_y0 + 1.0,
+                        max(part_x1 - part_x0 - 2.0, 1.0),
+                        max(part_y1 - part_y0 - 2.0, 1.0),
+                        1.0
+                    )
+                    if self.state < 3.5 {
+                    let pulse = 0.5 + 0.5 * sin(self.time * 12.5663706)
+                    sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.34 + pulse * 0.34))
+                    sdf.stroke(vec4(1.0, 1.0, 1.0, 0.45 + pulse * 0.5), 2.0)
+                    } else {
+                        sdf.fill(vec4(rgb.x * 0.82, rgb.y * 0.82, rgb.z * 0.82, 0.92))
+                        sdf.stroke(vec4(1.0, 1.0, 1.0, 0.95), 2.0)
+                    }
+                }
+                return self.countdown(self.playing_progress(sdf.result))
+            }
+
+            // The rounded pad remains quiet behind the waveform; state is
+            // carried by its outline and by the envelope itself.
+            if self.state < 1.5 {
+                sdf.stroke(vec4(rgb.x, rgb.y, rgb.z, 0.25), 1.0)
+            } else if self.state < 2.5 {
+                sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.07))
+                sdf.stroke(vec4(rgb.x, rgb.y, rgb.z, 0.68), 1.0)
+            } else {
+                sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.03))
+                sdf.stroke(vec4(rgb.x, rgb.y, rgb.z, 0.68), 1.0)
+                sdf.box(
+                    part_x0 + 1.0,
+                    part_y0 + 1.0,
+                    max(part_x1 - part_x0 - 2.0, 1.0),
+                    max(part_y1 - part_y0 - 2.0, 1.0),
+                    1.0
+                )
+                if self.state < 3.5 {
+                    // Up next: a pulsing white frame, and the bar countdown
+                    // strip along the active slot's top edge.
+                    let pulse = 0.5 + 0.5 * sin(self.time * 12.5663706)
+                    sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.08))
+                    sdf.stroke(vec4(1.0, 1.0, 1.0, 0.45 + pulse * 0.5), 2.0)
+                } else {
+                    sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.10))
+                    sdf.stroke(vec4(1.0, 1.0, 1.0, 0.95), 2.0)
+                }
+            }
+
+            let inner_w = max(w - 8.0, 1.0)
+            let inner_x = clamp((p.x - 4.0) / inner_w, 0.0, 1.0)
+            let column = self.span_start + inner_x * self.span_cols
+            let tile = self.mix_span(column)
+            let stems = self.stem_span(column)
+            let present = max(stems.x + stems.y + stems.z + stems.w, 0.0001)
+            let c0 = 1.0 - step(0.5, self.channel)
+            let c1 = step(0.5, self.channel) - step(1.5, self.channel)
+            let c2 = step(1.5, self.channel) - step(2.5, self.channel)
+            let c3 = step(2.5, self.channel) - step(3.5, self.channel)
+            let stem_level = (stems.x * c0 + stems.y * c1 + stems.z * c2 + stems.w * c3) / present
+            let level = clamp(mix(tile.w * stem_level, tile.w, is_mix), 0.0, 1.0) * 0.80
+
+            // Symmetric envelope with a one-pixel feather and a four-pixel
+            // inset, so the wave never spills through the rounded corners.
+            let active = step(2.5, self.state)
+            let part_h = max(self.part_y1 - self.part_y0, 0.001)
+            let part_y = clamp((self.pos.y - self.part_y0) / part_h, 0.0, 1.0)
+            let display_y = mix(self.pos.y, part_y, active)
+            let display_h = mix(h, part_y1 - part_y0, active)
+            let inner_scale = max(display_h - 8.0, 1.0) / max(display_h, 1.0)
+            let y = abs(display_y - 0.5) * 2.0
+            let feather = 2.0 / max(h, 2.0)
+            let envelope = (1.0 - smoothstep(
+                level * inner_scale - feather,
+                level * inner_scale + feather,
+                y
+            )) * step(0.002, level)
+            let in_x = smoothstep(3.0, 4.0, p.x)
+                * (1.0 - smoothstep(w - 4.0, w - 3.0, p.x))
+            let part_mask = step(part_x0, p.x) * step(p.x, part_x1)
+                * step(part_y0, p.y) * step(p.y, part_y1)
+            let cover = envelope * in_x * mix(1.0, part_mask, active)
+
+            let pulse = 0.5 + 0.5 * sin(self.time * 12.5663706)
+            let part_w = max(self.part_x1 - self.part_x0, 0.001)
+            let part_x = clamp((self.pos.x - self.part_x0) / part_w, 0.0, 1.0)
+            let played = step(part_x, clamp(self.phase, 0.0, 1.0))
+            let silent = 1.0 - step(1.5, self.state)
+            let ready = step(1.5, self.state) - step(2.5, self.state)
+            let queued = step(2.5, self.state) - step(3.5, self.state)
+            let playing = step(3.5, self.state)
+            let alpha = (silent * 0.20
+                + ready * 0.35
+                + queued * (0.45 + pulse * 0.40)
+                + playing * (0.55 + played * 0.35))
+                * mix(1.0, 0.55, self.has_blocks)
+            let gain = 1.0 + playing * played * 0.12
+            let wave = vec4(
+                min(rgb.x * gain, 1.0),
+                min(rgb.y * gain, 1.0),
+                min(rgb.z * gain, 1.0),
+                alpha
+            )
+            return self.countdown(self.playing_progress(sdf.result.mix(wave, cover)))
+        }
+    }
+
+    set_type_default() do #(DrawSplatBlock::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        pixel: fn() {
+            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+            sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, 1.0)
+            sdf.fill(vec4(self.color.xyz, self.alpha))
+            return sdf.result
+        }
+    }
+
+    mod.widgets.VjLoopSplatBase = #(VjLoopSplat::register_widget(vm))
+    mod.widgets.VjLoopSplat = set_type_default() do mod.widgets.VjLoopSplatBase{
+        width: Fill
+        height: Fill
+        draw_text +: {
+            color: #xf4f7fa
+            text_style: theme.font_bold{font_size: 10}
+        }
+        draw_small +: {
+            color: #xaab4be
+            text_style: theme.font_bold{font_size: 8}
+        }
+    }
 
     // ---- one zoomed waveform lane ----------------------------------------
     set_type_default() do #(DrawWaveLane::script_shader(vm)){
@@ -1515,19 +1764,26 @@ script_mod! {
         }
 
 
-        // The console proper: the decks over the two lists.
-        //
-        // Down while the window has the height for it. On a WIDE, SHORT
-        // window — a console squeezed against the bottom of the screen —
-        // `App::sync_page_body_flow` turns this row-wise instead, and the
-        // lists stand to the right of deck B. The room a short window is
-        // missing is vertical; the room it has going spare is horizontal,
-        // so the lists take the room that actually exists.
-        page_body := View{
+        // The console proper and its floating score card share an overlay.
+        // The page body remains the responsive in-flow surface; the card is
+        // its later sibling, so it neither takes deck/list space nor yields
+        // pointer hits to the waveform underneath.
+        View{
             width: Fill
             height: Fill
-            flow: Down
-            spacing: 6
+            flow: Overlay
+
+            // Down while the window has the height for it. On a WIDE, SHORT
+            // window — a console squeezed against the bottom of the screen —
+            // `App::sync_page_body_flow` turns this row-wise instead, and the
+            // lists stand to the right of deck B. The room a short window is
+            // missing is vertical; the room it has going spare is horizontal,
+            // so the lists take the room that actually exists.
+            page_body := View{
+                width: Fill
+                height: Fill
+                flow: Down
+                spacing: 6
             // ---- deck region: knobs | lanes + transport | knobs ----
             // Three columns, each as tall as the region. The MIDDLE one carries
             // the zoomed lanes ABOVE the transport strip, which is what makes the
@@ -1602,6 +1858,9 @@ script_mod! {
                         spacing: 4
                         align: Align{x: 0.0, y: 0.5}
                         deck_a_sync := MusicButton{width: Fill height: 22 text: "SYNC"}
+                        // The analyser's grid can sit on the off pulse: same tempo,
+                        // sync exactly half a beat out. This flips it.
+                        deck_a_phase_flip := MusicButton{width: 26 height: 22 padding: 0 align: Align{x: 0.5, y: 0.5} text: "½"}
                         deck_a_keylock := MusicButton{width: 44 height: 22 text: "KEY"}
                         // The key steps in whole semitones, so it steps: a fader
                         // with twelve detents a side would be a worse way to ask
@@ -1867,6 +2126,14 @@ script_mod! {
                         // Green when live — monitoring, never program.
                         deck_a_hp := MusicIconButton{
                             draw_icon +: { svg: crate_resource("self:resources/icons/headphones.svg") }
+                        }
+                        // Beat jump: four bars back / forward on the deck's own
+                        // grid (shift: sixteen), so a synced deck stays in phase.
+                        deck_a_jump_back := MusicIconButton{
+                            draw_icon +: { svg: crate_resource("self:resources/icons/rewind.svg") }
+                        }
+                        deck_a_jump_fwd := MusicIconButton{
+                            draw_icon +: { svg: crate_resource("self:resources/icons/fast_forward.svg") }
                         }
                         deck_a_loop := MusicIconButton{
                             draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
@@ -2135,6 +2402,7 @@ script_mod! {
                         deck_b_key_up := MusicButton{width: 22 height: 22 padding: 0 align: Align{x: 0.5, y: 0.5} text: "+"}
                         deck_b_key_down := MusicButton{width: 22 height: 22 padding: 0 align: Align{x: 0.5, y: 0.5} text: "-"}
                         deck_b_keylock := MusicButton{width: 44 height: 22 text: "KEY"}
+                        deck_b_phase_flip := MusicButton{width: 26 height: 22 padding: 0 align: Align{x: 0.5, y: 0.5} text: "½"}
                         deck_b_sync := MusicButton{width: Fill height: 22 text: "SYNC"}
                     }
                     View{
@@ -2389,6 +2657,12 @@ script_mod! {
                         }
                         // The mirror of deck A's phones latch: hp then CUE,
                         // reading inward like the rest of the row.
+                        deck_b_jump_back := MusicIconButton{
+                            draw_icon +: { svg: crate_resource("self:resources/icons/rewind.svg") }
+                        }
+                        deck_b_jump_fwd := MusicIconButton{
+                            draw_icon +: { svg: crate_resource("self:resources/icons/fast_forward.svg") }
+                        }
                         deck_b_hp := MusicIconButton{
                             draw_icon +: { svg: crate_resource("self:resources/icons/headphones.svg") }
                         }
@@ -2431,6 +2705,7 @@ script_mod! {
                     align: Align{x: 0.0, y: 0.5}
                     lists_tab_0 := MusicButton{width: 74 height: 22 text: "explorer"}
                     lists_tab_1 := MusicButton{width: 62 height: 22 text: "queue"}
+                    lists_tab_2 := MusicButton{width: 62 height: 22 text: "loops"}
                 }
                 View{
                     width: Fill
@@ -2533,7 +2808,10 @@ script_mod! {
                         // refusal nobody could read looks exactly like a drop
                         // that did nothing. A Fill line cannot be squeezed, and
                         // an empty one costs a few pixels of height.
+                        // Only on screen while it has something to say: an empty
+                        // label still costs a row between the search and the list.
                         music_import_status := MusicLabel{
+                            visible: false
                             width: Fill
                             text: ""
                             draw_text.color: #xff5c39
@@ -2634,6 +2912,96 @@ script_mod! {
                             phones_dock_player := mod.widgets.VjPhonesPlayer{}
                         }
                     }
+                    loops_drop := RoundedView{
+                        width: Fill
+                        height: Fill
+                        flow: Down
+                        spacing: 4
+                        draw_bg +: {
+                            color: #x00000000
+                            border_color: #x00000000
+                            border_size: 1.0
+                            border_radius: 8.0
+                        }
+                        // The loop page's own row, where the explorer keeps its
+                        // search: which deck the grid shows, the engine switch,
+                        // and the score popup.
+                        View{
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 6
+                            align: Align{x: 0.0, y: 0.5}
+                            splat_deck_a := MusicButton{width: 26 height: 22 text: "A"}
+                            splat_deck_b := MusicButton{width: 26 height: 22 text: "B"}
+                            splat_on := MusicButton{width: 36 height: 22 text: "ON"}
+                            View{width: Fill height: Fit}
+                            splat_score := MusicButton{width: 52 height: 22 text: "score"}
+                        }
+                        loop_splat := mod.widgets.VjLoopSplat{}
+                    }
+                }
+            }
+            }
+
+            loop_score_panel := RoundedView{
+                visible: false
+                width: 700
+                height: 240
+                flow: Down
+                padding: Inset{left: 6.0 right: 6.0 bottom: 6.0}
+                cursor: MouseCursor.Default
+                capture_overload: true
+                draw_bg +: {
+                    color: #x171c22
+                    border_color: #x38424d
+                    border_size: 1.0
+                    border_radius: 8.0
+                }
+                View{
+                    width: Fill
+                    height: 24
+                    flow: Right
+                    spacing: 4
+                    align: Align{x: 0.0 y: 0.5}
+                    loop_score_title := Label{
+                        width: Fill
+                        height: 18
+                        text: "select a loop cell"
+                        draw_text.color: #xf4f7fa
+                        draw_text.text_style: theme.font_bold{font_size: 10}
+                    }
+                    loop_score_play := MusicButton{
+                        width: 28
+                        height: 22
+                        padding: 0
+                        text: "▶"
+                    }
+                    loop_score_stop := MusicButton{
+                        width: 28
+                        height: 22
+                        padding: 0
+                        text: "■"
+                    }
+                    loop_score_loop := MusicChipButton{
+                        height: 22
+                        text: "LOOP"
+                    }
+                    loop_score_close := MusicButton{
+                        width: 24
+                        height: 22
+                        text: "×"
+                    }
+                }
+                loop_score := mod.widgets.ScoreView{
+                    width: Fill
+                    height: Fill
+                    fit: ScoreFit.Content
+                    hide_labels: true
+                    // The app is dark; the score uses its designed dark
+                    // palette (charcoal paper, warm ink), never an inversion.
+                    dark: true
+                    draw_bg +: {color: #x20211f}
                 }
             }
         }
@@ -2909,6 +3277,16 @@ script_mod! {
                         draw_text.color: #x8e9aa7
                         draw_text.text_style.font_size: 9
                     }
+                    Label{
+                        width: Fill
+                        text: "MORE MODELS"
+                        draw_text.color: #xff5c39
+                        draw_text.text_style: theme.font_bold{font_size: 10}
+                    }
+                    hub_model_install_panel := mod.widgets.ModelInstallPanel{
+                        width: Fill
+                        height: 220
+                    }
                     View{
                         width: Fill
                         height: Fit
@@ -3017,7 +3395,7 @@ pub struct WaveLevel {
 /// The whole waveform store for one track: a stack of max-reduced levels in
 /// one texture. Scrolling, zooming and the playhead are uniform changes
 /// against this; only new audio appends anything.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct WavePyramid {
     pub texture: Texture,
     pub width: usize,
