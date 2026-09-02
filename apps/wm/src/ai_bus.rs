@@ -111,8 +111,8 @@ impl AiBus {
     pub fn os_manifest(apps: &[(String, String)]) -> ServiceManifest {
         let mut brief = String::from(
             "The desktop itself: which apps exist and run, starting and focusing them. \
-             Apps that are not running have no tools until `os.launch` starts them \
-             (their tools appear on the next turn). Known apps: ",
+             Apps that are not running have no tools until `os.launch` starts them; a running app's \
+             tools are already in your table — call them, never launch it again. Known apps: ",
         );
         brief.push_str(
             &apps.iter().map(|(id, label)| format!("{label} (`{id}`)")).collect::<Vec<_>>().join(", "),
@@ -127,7 +127,7 @@ impl AiBus {
             ))
             .with_tool(ToolDef::new(
                 "launch",
-                "Start an app (or focus it if it is already running). Its tools become available on the next turn.",
+                "Start an app that is NOT running (see the running list). A running app's tools are already available — call them directly instead of launching.",
                 r#"{"type":"object","properties":{"app":{"type":"string","description":"the app id from os.list"}},"required":["app"]}"#,
                 Risk::Act,
             ))

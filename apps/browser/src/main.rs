@@ -461,7 +461,12 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
-        self.ai_port = AiServicePort::open(cx, ai::manifest());
+        // A warm-pool standby is not a running Browser: its service opens on
+        // `WmEvent::Adopted`, never while dormant — the assistant must not
+        // steer a page nobody can see.
+        if !makepad_wm_api::warm_start() {
+            self.ai_port = AiServicePort::open(cx, ai::manifest());
+        }
         match makepad_cef::startup_phases() {
             Some((bundle_ms, exec_gap_ms)) => log!(
                 "browser: window up at {} ms after main (app bundle prepared in {} ms, exec-to-main gap {} ms)",
@@ -641,6 +646,12 @@ impl AppMain for App {
         // kill that follows its grace. A warm-pool browser needs no waking —
         // CEF paints nothing until a tile presents it.
         if let Event::Custom(json) = event {
+            match makepad_wm_api::WmEvent::parse(json) {
+                Some(makepad_wm_api::WmEvent::Adopted) if self.ai_port.is_none() => {
+                    self.ai_port = AiServicePort::open(cx, ai::manifest());
+                }
+                _ => {}
+            }
             if let Some(makepad_wm_api::WmEvent::CloseRequested) = makepad_wm_api::WmEvent::parse(json) {
                 cx.quit();
                 return;

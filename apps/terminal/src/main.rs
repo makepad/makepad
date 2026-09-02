@@ -118,9 +118,15 @@ impl MatchEvent for App {
                 .window(cx, ids!(main_window))
                 .set_title(cx, &format!("{} \u{2014} preview", name));
         }
-        self.ai_port = AiServicePort::open(cx, ai::manifest());
-        self.refresh_ai_context(cx);
+        // A warm-pool standby is not a running Terminal: its service opens
+        // when the window manager adopts it into a tile (`WmEvent::Adopted`),
+        // never while it is dormant — the assistant must not drive a shell
+        // nobody can see.
+        if !makepad_wm_api::warm_start() {
+            self.open_ai_port(cx);
+        }
     }
+
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         for action in actions {
@@ -238,6 +244,8 @@ impl App {
                 }
             }
             WmEvent::CloseRequested => cx.quit(),
+            // Adopted into a real tile: now it is a running Terminal.
+            WmEvent::Adopted => self.open_ai_port(cx),
             _ => {}
         }
     }
@@ -306,5 +314,17 @@ mod tests {
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
         let cmd = preview_command(Path::new("/no/such/file's.txt"));
         assert_eq!(cmd, "less -R -- '/no/such/file'\\''s.txt'");
+    }
+}
+
+impl App {
+    /// The service toward the assistant: at startup for a real launch, on
+    /// adoption for a warm-pool standby, never twice.
+    fn open_ai_port(&mut self, cx: &mut Cx) {
+        if self.ai_port.is_some() {
+            return;
+        }
+        self.ai_port = AiServicePort::open(cx, ai::manifest());
+        self.refresh_ai_context(cx);
     }
 }

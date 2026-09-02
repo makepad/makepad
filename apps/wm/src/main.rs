@@ -2048,21 +2048,21 @@ impl App {
                         )
                     }
                     Some(def) => {
-                        self.launch_app(cx, &def.id);
+                        // Already up: say so plainly, so the model calls the
+                        // app's tools instead of waiting for it to appear.
+                        let running = def.policy == LaunchPolicy::OrFocus && self.client_for_app(&def.id).is_some();
+                        if let (true, Some(client)) = (running, self.client_for_app(&def.id)) {
+                            self.focus_client(cx, client);
+                        } else {
+                            self.launch_app(cx, &def.id);
+                        }
                         // The person is talking to the chat: the new
                         // window takes the layout's focus, not their keys
                         // — including the focus a tile that has not drawn
                         // yet would otherwise claim on its first frame.
                         self.pending_focus = None;
                         self.focus_pane(cx);
-                        ToolResult::ok(
-                            id,
-                            format!(
-                                "{} is opening (or coming to the front); its tools appear on the next turn",
-                                def.label
-                            ),
-                            "tools appear on the next turn",
-                        )
+                        os_launch_answer(id, &def.label, running)
                     }
                 },
             },
@@ -3393,6 +3393,17 @@ fn bare_key(m: &KeyModifiers) -> bool {
     !m.shift && !m.control && !m.alt && !m.logo
 }
 
+/// The `os.launch` answer: an app that was already running is in front
+/// now and its tools are ready this turn; one that is starting connects
+/// in a moment (the engine holds this result until it does).
+fn os_launch_answer(call_id: &str, label: &str, already_running: bool) -> ToolResult {
+    if already_running {
+        ToolResult::ok(call_id, format!("{label} is already running and now in front; its tools are available now"), "already running")
+    } else {
+        ToolResult::ok(call_id, format!("{label} is starting; its tools become available once it connects"), "starting")
+    }
+}
+
 /// The registry's ids, for a refusal that names what exists.
 fn known_app_ids() -> String {
     clients::registry()
@@ -3452,6 +3463,14 @@ mod os_service_tests {
         assert_eq!(result.note, "2 apps, 1 running");
         assert!(result.data.contains(r#""id":"files""#) && result.data.contains(r#""running":true"#));
         assert!(result.data.starts_with('[') && result.data.ends_with(']'));
+    }
+
+    #[test]
+    fn a_launch_answer_says_running_or_starting() {
+        let running = os_launch_answer("c1", "Photos", true);
+        assert!(running.text.contains("already running") && running.note == "already running");
+        let starting = os_launch_answer("c2", "Photos", false);
+        assert!(starting.text.contains("starting") && starting.note == "starting");
     }
 
     #[test]
