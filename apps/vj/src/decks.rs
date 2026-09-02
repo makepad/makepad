@@ -230,6 +230,13 @@ const SYNC_RATE_MAX: f64 = 1.25;
 pub const BEND_COARSE: f64 = 0.04;
 pub const BEND_FINE: f64 = 0.02;
 
+/// How far one trim press moves the tempo, as a fraction of the track's
+/// own. Absolute, NOT a share of the selected range: a step that means
+/// half a percent on one range and a twentieth of that on another is a
+/// button nobody can learn.
+pub const TRIM_COARSE: f64 = 0.005;
+pub const TRIM_FINE: f64 = 0.0005;
+
 pub const RATE_MIN: f64 = 0.25;
 pub const RATE_MAX: f64 = 4.0;
 /// How far the key can be shifted, in semitones either way. An octave: past
@@ -2155,12 +2162,18 @@ impl DeckEngine {
         vec![DeckCmd::SetRate { deck, rate }]
     }
 
-    /// Nudge the pitch by a small step (the ± buttons / an encoder).
-    pub fn nudge_pitch(&mut self, deck: DeckId, steps: f64) -> Vec<DeckCmd> {
-        let state = self.deck(deck);
-        let range = state.pitch_range.fraction();
-        let fraction = state.pitch / range + steps * 0.01;
-        self.set_pitch(deck, fraction)
+    /// Trim the tempo permanently by a small step: `direction` is +1 to
+    /// speed up, -1 to slow down.
+    ///
+    /// The step is a share of the TRACK's tempo, not of the selected range,
+    /// so widening the range changes how far the fader reaches and not what
+    /// this button does. It stops at the end of the range rather than
+    /// running past it.
+    pub fn trim_pitch(&mut self, deck: DeckId, direction: f64, fine: bool) -> Vec<DeckCmd> {
+        let step = if fine { TRIM_FINE } else { TRIM_COARSE };
+        let range = self.deck(deck).pitch_range.fraction();
+        let want = self.deck(deck).pitch + direction.signum() * step;
+        self.set_pitch(deck, want / range)
     }
 
     pub fn toggle_pitch_range(&mut self, deck: DeckId) -> Vec<DeckCmd> {
@@ -3491,6 +3504,63 @@ mod tests {
         );
     }
 
+    // ---- permanent tempo trim -------------------------------------------
+
+    #[test]
+    fn a_trim_steps_the_same_tempo_whatever_the_range_is() {
+        // The whole point. A nudge used to step a percent of the RANGE, so
+        // the same button moved the music by 0.08% on a narrow range and
+        // 0.5% on a wide one, and an operator could not learn what it did.
+        let mut narrow = DeckEngine::new();
+        narrow.trim_pitch(DeckId::A, 1.0, false);
+        let a = narrow.deck(DeckId::A).rate;
+
+        let mut wide = DeckEngine::new();
+        wide.toggle_pitch_range(DeckId::A);
+        assert_ne!(
+            wide.deck(DeckId::A).pitch_range.fraction(),
+            narrow.deck(DeckId::A).pitch_range.fraction(),
+            "the two decks must actually differ for this to prove anything"
+        );
+        wide.trim_pitch(DeckId::A, 1.0, false);
+        let b = wide.deck(DeckId::A).rate;
+
+        assert!((a - b).abs() < 1e-12, "{a} against {b}");
+        assert!((a - (1.0 + TRIM_COARSE)).abs() < 1e-12, "half a percent of tempo: {a}");
+    }
+
+    #[test]
+    fn a_fine_trim_is_a_tenth_of_a_coarse_one() {
+        let mut decks = DeckEngine::new();
+        decks.trim_pitch(DeckId::A, 1.0, true);
+        assert!((decks.deck(DeckId::A).rate - (1.0 + TRIM_FINE)).abs() < 1e-12);
+        assert!((TRIM_COARSE - TRIM_FINE * 10.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_trim_stops_at_the_end_of_the_range_rather_than_running_past_it() {
+        let mut decks = DeckEngine::new();
+        let range = decks.deck(DeckId::A).pitch_range.fraction();
+        for _ in 0..1000 {
+            decks.trim_pitch(DeckId::A, 1.0, false);
+        }
+        assert!(
+            (decks.deck(DeckId::A).pitch - range).abs() < 1e-12,
+            "trimmed to {} with a range of {range}",
+            decks.deck(DeckId::A).pitch
+        );
+    }
+
+    #[test]
+    fn a_trim_down_and_back_up_returns_to_where_it_started() {
+        let mut decks = DeckEngine::new();
+        decks.set_pitch(DeckId::A, 0.25);
+        let was = decks.deck(DeckId::A).pitch;
+        decks.trim_pitch(DeckId::A, -1.0, false);
+        decks.trim_pitch(DeckId::A, 1.0, false);
+        assert!((decks.deck(DeckId::A).pitch - was).abs() < 1e-12);
+    }
+
     fn rate_of(cmds: &[DeckCmd], want: DeckId) -> Option<f64> {
         cmds.iter().rev().find_map(|cmd| match cmd {
             DeckCmd::SetRate { deck, rate } if *deck == want => Some(*rate),
@@ -4140,9 +4210,14 @@ mod tests {
         let cmds = engine.reset_pitch(DeckId::A);
         assert_eq!(cmds, vec![DeckCmd::SetRate { deck: DeckId::A, rate: 1.0 }]);
         assert!((engine.deck(DeckId::A).pitch).abs() < 1e-12);
-        // Nudges step in whole percent of the range.
-        engine.nudge_pitch(DeckId::A, 1.0);
-        assert!((engine.deck(DeckId::A).rate - 1.0016).abs() < 1e-9, "{}", engine.deck(DeckId::A).rate);
+        // A trim steps a share of the TRACK's tempo, so the wider range
+        // above does not change what one press does.
+        engine.trim_pitch(DeckId::A, 1.0, false);
+        assert!(
+            (engine.deck(DeckId::A).rate - (1.0 + TRIM_COARSE)).abs() < 1e-9,
+            "{}",
+            engine.deck(DeckId::A).rate
+        );
     }
 
     #[test]

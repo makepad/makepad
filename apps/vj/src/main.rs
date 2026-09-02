@@ -13629,6 +13629,22 @@ p2 {}
             self.ui
                 .slider(cx, pitch_id)
                 .set_value(cx, (state.pitch / range).clamp(-1.0, 1.0));
+            // One wheel notch over the tempo fader is half a percent of the
+            // TRACK's tempo, whatever range is selected. The fader's own
+            // step is a share of its travel, so without this a notch means
+            // 0.2% on a narrow range and 0.4% on a wide one -- the same
+            // gesture doing different things, which is a control nobody can
+            // learn. Shift still gives a fifth of it; the shared fader's
+            // ladder is 0.2/1/4/10 and changing that is every other
+            // slider's business, not this one's.
+            // Divided by the fader's SPAN as well: its scroll step is
+            // normalised over the whole travel, and this one runs -1..1, so
+            // a step of one would move it by two.
+            let step = crate::decks::TRIM_COARSE / range / 2.0;
+            let mut fader = self.ui.widget(cx, pitch_id);
+            script_apply_eval!(cx, fader, {
+                scroll_step: #(step)
+            });
         }
         let pos = self.decks.crossfader as f64;
         self.ui.slider(cx, ids!(xfader)).set_value(cx, pos);
