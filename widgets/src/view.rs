@@ -17,6 +17,7 @@ use {
 script_mod! {
     use mod.prelude.widgets_internal.*
 
+    mod.widgets.EventOrder = #(EventOrder::script_api(vm))
     mod.widgets.ViewBase = set_type_default() do #(View::register_widget(vm))
 }
 
