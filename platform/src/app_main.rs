@@ -269,6 +269,9 @@ macro_rules! _app_main_event_closure {
             std::rc::Rc::new(std::cell::RefCell::new(None));
         Box::new(move |cx: &mut Cx, event: &Event| {
             if let Event::Startup = event {
+                // Font resource registration happens inside AppMain::script_mod,
+                // so freeze the app_main! choice before that code can run.
+                cx.freeze_font_set();
                 $crate::startup_trace("Startup: script_mod begin");
                 *app.borrow_mut() = Some(cx.with_vm(|vm| {
                     let value = <$app as AppMain>::script_mod(vm);
@@ -331,7 +334,33 @@ macro_rules! _app_main_event_closure {
 
 #[macro_export]
 macro_rules! app_main {
-    ( $ app: ident) => {
+    ( $app:ident ) => {
+        #[cfg(target_arch = "wasm32")]
+        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_MANIFEST);
+        #[cfg(not(target_arch = "wasm32"))]
+        $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST);
+    };
+    ( $app:ident, font_set: Latin ) => {
+        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_MANIFEST);
+    };
+    ( $app:ident, font_set: International ) => {
+        $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST);
+    };
+    (@impl $app:ident, $font_set:expr, $manifest:expr) => {
+        // The payload is line-oriented UTF-8. Lane B reads this section from
+        // freshly linked wasm before any optional custom-section stripping.
+        #[used]
+        #[cfg_attr(target_arch = "wasm32", link_section = "makepad.font-assets.v1")]
+        #[cfg_attr(
+            all(not(target_arch = "wasm32"), target_vendor = "apple"),
+            link_section = "__DATA,__mp_font_v1"
+        )]
+        #[cfg_attr(
+            all(not(target_arch = "wasm32"), not(target_vendor = "apple")),
+            link_section = ".makepad.font-assets.v1"
+        )]
+        static MAKEPAD_FONT_ASSETS_V1: [u8; ($manifest).len()] = *$manifest;
+
         #[cfg(not(any(target_os = "android", target_env = "ohos")))]
         fn main() {
             app_main();
@@ -352,6 +381,7 @@ macro_rules! app_main {
             let mut cx = std::rc::Rc::new(std::cell::RefCell::new(Cx::new(
                 $crate::_app_main_event_closure!($app),
             )));
+            cx.borrow_mut().set_font_set($font_set);
             $crate::startup_trace("Cx::new (vm + std script)");
             let studio_http = $crate::resolve_studio_http();
             cx.borrow_mut().init_websockets(&studio_http);
@@ -403,6 +433,7 @@ macro_rules! app_main {
             Cx::android_entry(activity, || {
                 let studio_http = $crate::resolve_studio_http();
                 let mut cx = Box::new(Cx::new($crate::_app_main_event_closure!($app)));
+                cx.set_font_set($font_set);
                 cx.init_websockets(&studio_http);
                 cx.init_cx_os();
                 cx
@@ -417,6 +448,7 @@ macro_rules! app_main {
         ) -> $crate::napi_ohos::Result<()> {
             Cx::ohos_init(exports, env, || {
                 let mut cx = Box::new(Cx::new($crate::_app_main_event_closure!($app)));
+                cx.set_font_set($font_set);
                 let studio_http = $crate::resolve_studio_http();
                 cx.init_websockets(&studio_http);
                 cx.init_cx_os();
@@ -433,6 +465,7 @@ macro_rules! app_main {
         pub extern "C" fn create_wasm_app() -> u32 {
             Cx::init_log();
             let mut cx = Box::new(Cx::new($crate::_app_main_event_closure!($app)));
+            cx.set_font_set($font_set);
             let studio_http = $crate::resolve_studio_http();
             cx.init_websockets(&studio_http);
             cx.init_cx_os();
@@ -453,6 +486,34 @@ macro_rules! app_main {
             cx.os.from_wasm.take().unwrap().release_ownership()
         }
     };
+}
+
+#[cfg(test)]
+mod font_set_macro_compile_test {
+    #![allow(dead_code, unused_mut)]
+
+    use crate::*;
+
+    #[derive(Script, ScriptHook)]
+    struct ExplicitFontApp {}
+
+    impl AppMain for ExplicitFontApp {
+        fn script_mod(_vm: &mut ScriptVm) -> ScriptValue {
+            NIL
+        }
+
+        fn handle_event(&mut self, _cx: &mut Cx, _event: &Event) {}
+    }
+
+    app_main!(ExplicitFontApp, font_set: International);
+
+    #[test]
+    fn explicit_font_set_macro_form_compiles_with_international_manifest() {
+        assert_eq!(
+            MAKEPAD_FONT_ASSETS_V1.as_slice(),
+            FontSet::International.manifest_bytes()
+        );
+    }
 }
 
 #[cfg(target_env = "ohos")]

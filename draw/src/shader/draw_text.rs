@@ -7,7 +7,7 @@ use {
         text::{
             color::Color,
             font::FontId,
-            font_family::FontFamilyId,
+            font_family::{FontDiagnostics, FontFamilyId},
             fonts::Fonts,
             geom::{Point, Rect as TextRect, Size, Transform},
             layouter::{
@@ -3434,11 +3434,16 @@ pub struct FontFamily {
     id: LiveId,
     #[rust]
     members: Vec<FontMemberDef>,
+    #[rust]
+    diagnostic_role: String,
+    #[rust]
+    diagnostic_set: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FontMemberDef {
     handle: ScriptHandle,
+    id: String,
     asc: f32,
     desc: f32,
     weight: f32,
@@ -3483,6 +3488,11 @@ impl FontFamily {
             FontFamilyDefinition {
                 font_ids,
                 expected_member_count: self.members.len(),
+                diagnostics: FontDiagnostics {
+                    role: self.diagnostic_role.clone(),
+                    set: self.diagnostic_set.clone(),
+                    tried: self.members.iter().map(|member| member.id.clone()).collect(),
+                },
             },
         );
     }
@@ -3574,6 +3584,18 @@ impl ScriptHook for FontFamily {
         // Use the object index as the unique id
         self.id = LiveId(obj.index() as u64);
         self.members.clear();
+        let selected_set = vm.cx().font_set().as_str().to_string();
+        let map = vm.bx.heap.map_ref(obj);
+        self.diagnostic_role = map
+            .get(&id!(_font_role).into())
+            .and_then(|entry| entry.value.as_id())
+            .and_then(|id| id.as_string(|name| name.map(str::to_owned)))
+            .unwrap_or_else(|| "custom".to_string());
+        self.diagnostic_set = map
+            .get(&id!(_font_set).into())
+            .and_then(|entry| entry.value.as_id())
+            .and_then(|id| id.as_string(|name| name.map(str::to_owned)))
+            .unwrap_or(selected_set);
 
         let len = vm.bx.heap.vec_len(obj);
         for i in 0..len {
@@ -3582,6 +3604,11 @@ impl ScriptHook for FontFamily {
             if let Some(ref handle_ref) = member.res {
                 self.members.push(FontMemberDef {
                     handle: handle_ref.as_handle(),
+                    id: kv
+                        .key
+                        .as_id()
+                        .and_then(|id| id.as_string(|name| name.map(str::to_owned)))
+                        .unwrap_or_else(|| format!("resource_{}", handle_ref.as_handle().index())),
                     asc: member.asc,
                     desc: member.desc,
                     weight: member.weight,

@@ -63,6 +63,8 @@ pub struct Cx {
     pub script_vm: Option<Box<ScriptVmBase>>,
     pub script_data: CxScriptData,
     pub package_root: Option<String>,
+    pub(crate) font_set: crate::font_policy::FontSet,
+    pub(crate) font_set_frozen: bool,
 
     pub debug_trace_active: bool,
 
@@ -283,8 +285,6 @@ pub struct WebParams {
     pub search: String,
     #[live]
     pub hash: String,
-    #[live]
-    pub small_font_aliases: bool,
 }
 
 #[derive(Clone, Debug, Default, Script, ScriptHook)]
@@ -394,6 +394,35 @@ impl OsType {
 }
 
 impl Cx {
+    /// Select the application's font policy before script/theme registration.
+    /// Once startup begins the choice is immutable because compiled package
+    /// metadata and registered resource handles must continue to agree.
+    pub fn set_font_set(&mut self, font_set: crate::font_policy::FontSet) -> bool {
+        if self.font_set_frozen {
+            crate::error!(
+                "font set is immutable after script registration (kept {}, rejected {})",
+                self.font_set.as_str(),
+                font_set.as_str()
+            );
+            return false;
+        }
+        self.font_set = font_set;
+        true
+    }
+
+    pub fn font_set(&self) -> crate::font_policy::FontSet {
+        self.font_set
+    }
+
+    #[doc(hidden)]
+    pub fn freeze_font_set(&mut self) {
+        self.font_set_frozen = true;
+    }
+
+    pub fn is_font_set_frozen(&self) -> bool {
+        self.font_set_frozen
+    }
+
     pub fn new(event_handler: Box<dyn FnMut(&mut Cx, &Event)>) -> Self {
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         crate::os::termination_signal::install();
@@ -448,6 +477,8 @@ impl Cx {
 
         Self {
             package_root: None,
+            font_set: crate::font_policy::FontSet::target_default(),
+            font_set_frozen: false,
             demo_time_repaint: false,
             null_texture,
             null_cube_texture,

@@ -74,6 +74,7 @@ mod video_session;
 pub mod ui_runner;
 
 pub mod display_context;
+pub mod font_policy;
 
 #[macro_use]
 mod app_main;
@@ -123,6 +124,11 @@ pub use {
         cx::{Cx, CxRef, LinuxWindowParams, OsType},
         cx_api::{AccessibilityUpdatePayload, CxOsApi, CxOsOp, CxThreadPriority, OpenUrlInPlace},
         display_context::{DisplayContext, SystemBarAppearance},
+        font_policy::{
+            FontAsset, FontChain, FontPolicy, FontRole, FontSet,
+            FONT_ASSET_MANIFEST_SECTION, INTERNATIONAL_FONT_ASSET_MANIFEST,
+            LATIN_FONT_ASSET_MANIFEST, UI_SYMBOL_FALLBACK,
+        },
         draw_list::{CxDrawCall, CxDrawItem, CxDrawListPool, CxRectArea, DrawList, DrawListId},
         draw_matrix::DrawMatrix,
         draw_pass::{

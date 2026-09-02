@@ -1720,6 +1720,7 @@ mod tests {
                 FontFamilyDefinition {
                     font_ids: vec![font_id],
                     expected_member_count: 1,
+                    diagnostics: Default::default(),
                 },
             );
         }

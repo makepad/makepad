@@ -1,0 +1,8 @@
+format=makepad.font-assets.v1
+set=Latin
+asset=makepad_widgets/resources/IBMPlexSans-Text.ttf
+asset=makepad_widgets/resources/IBMPlexSans-SemiBold.ttf
+asset=makepad_widgets/resources/IBMPlexSans-Italic.ttf
+asset=makepad_widgets/resources/IBMPlexSans-BoldItalic.ttf
+asset=makepad_widgets/resources/LiberationMono-Regular.ttf
+asset=makepad_widgets/resources/fa-solid-900.ttf
