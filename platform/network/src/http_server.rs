@@ -156,7 +156,9 @@ pub struct HttpServer {
     /// Returns the comma-separated methods accepted for a known request path.
     /// Unsupported methods are rejected before application dispatch (and, for
     /// POST, before the declared body is allocated or read). Returning `None`
-    /// leaves unknown paths to the application, including upgrade requests.
+    /// leaves unknown paths to the application. Configuring a method policy
+    /// disables WebSocket upgrades; servers with WebSocket routes leave it
+    /// unset and enforce any route policy in the application.
     pub allowed_methods: Option<fn(&str) -> Option<&'static str>>,
 }
 
@@ -405,16 +407,14 @@ pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHan
                             deadline,
                         );
                     }
-                    if headers.sec_websocket_key.is_some()
-                        && (http_server.allowed_methods.is_none() || allow.is_some())
-                    {
-                        if headers.verb != "GET" {
-                            return http_error_out_until(
-                                tcp_stream,
-                                405,
-                                Some("GET"),
-                                deadline,
-                            );
+                    let is_websocket_upgrade = headers.verb == "GET"
+                        && headers.sec_websocket_key.is_some()
+                        && headers
+                            .header("Upgrade")
+                            .is_some_and(|value| value.eq_ignore_ascii_case("websocket"));
+                    if is_websocket_upgrade {
+                        if http_server.allowed_methods.is_some() {
+                            return http_error_out_until(tcp_stream, 404, None, deadline);
                         }
                         return handle_web_socket(
                             http_server,

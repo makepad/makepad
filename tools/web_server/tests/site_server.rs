@@ -360,6 +360,15 @@ fn check_static_and_navigation_contracts_work_end_to_end() {
     assert_eq!(options.status, 204);
     assert!(options.headers.contains("Access-Control-Allow-Origin: *"));
     assert_eq!(get(address, "/missing.wasm", "").status, 404);
+    assert_eq!(
+        get(
+            address,
+            "/ws",
+            "Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: fixture\r\n",
+        )
+        .status,
+        404
+    );
     assert_eq!(post(address, "/index.html", b"ignored").status, 405);
     for (raw, allow) in [
         (

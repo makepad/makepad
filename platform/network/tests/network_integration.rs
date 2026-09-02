@@ -431,6 +431,51 @@ fn http_server_rejects_disallowed_methods_before_dispatch() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn sec_websocket_key_does_not_steal_an_ordinary_post() {
+    let _guard = test_guard();
+    let port = find_free_port().expect("allocate local test port");
+    let listen_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let runtime = NetworkRuntime::new(NetworkConfig::default());
+    let (request_sender, request_receiver) = mpsc::channel::<HttpServerRequest>();
+    runtime
+        .start_http_server(HttpServer {
+            listen_address,
+            request: request_sender,
+            post_max_size: 16,
+            post_max_size_overrides: Vec::new(),
+            pre_admit_posts: false,
+            client_ip_resolver: None,
+            trusted_proxy: None,
+            allowed_methods: None,
+        })
+        .unwrap();
+
+    let handler = std::thread::spawn(move || {
+        let HttpServerRequest::Post { headers, body, response } = request_receiver
+            .recv_timeout(Duration::from_secs(3))
+            .expect("POST request reached dispatcher")
+        else {
+            panic!("Sec-WebSocket-Key stole an ordinary POST");
+        };
+        assert_eq!(headers.path, "/submit");
+        assert_eq!(body, b"ok");
+        response
+            .send(HttpServerResponse::new(
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+                Vec::new(),
+            ))
+            .unwrap();
+    });
+    let response = raw_server_request(
+        listen_address,
+        b"POST /submit HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nSec-WebSocket-Key: fixture\r\nContent-Length: 2\r\n\r\nok",
+    );
+    assert!(response.starts_with("HTTP/1.1 204"), "{response:?}");
+    handler.join().unwrap();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn http_server_rejects_ambiguous_framing_and_unsupported_methods_before_get_consumer() {
     let _guard = test_guard();
     let port = find_free_port().expect("allocate local test port");

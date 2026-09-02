@@ -338,7 +338,13 @@ impl HttpServerHeaders {
             return Err(HttpHeadError::BadRequest);
         }
 
-        let path = parse_origin_target(target, sec_websocket_key.is_none())
+        let is_websocket_upgrade = verb == "GET"
+            && sec_websocket_key.is_some()
+            && lines.iter().skip(1).any(|line| {
+                split_header_line(line, "Upgrade")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+            });
+        let path = parse_origin_target(target, !is_websocket_upgrade)
             .ok_or(HttpHeadError::BadRequest)?;
         let path_no_slash = path
             .0
