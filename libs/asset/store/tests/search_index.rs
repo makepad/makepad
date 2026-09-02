@@ -6,8 +6,8 @@
 mod common;
 use common::*;
 use makepad_asset_store::{
-    AssetAnnotation, SearchFilters, SearchQuery, SearchViewer, ServerError, ViewerScope,
-    Visibility,
+    AssetAnnotation, AssetServerCore, Budgets, SearchFilters, SearchQuery, SearchViewer,
+    ServerError, ViewerScope, Visibility,
 };
 use makepad_asset_data::{AssetId, AssetRevisionRef};
 
@@ -351,8 +351,10 @@ fn cursor_tampering_and_hostile_bytes_fail_closed() {
 
 #[test]
 fn mid_transaction_failure_rolls_back_the_whole_reindex() {
-    let (root, core) = open_core("rollback");
-    let db = root.join("catalog.sqlite3");
+    let root = test_root("rollback");
+    let mut budgets = Budgets::default_v1();
+    budgets.max_search_index_terms = 4;
+    let core = AssetServerCore::open(&root, budgets).unwrap();
     let search = core.search();
     let (id_a, rev_a) = publish_prop(&core, "rik2", 1, b"glb a", b"thumb a", NOW);
     let mut aa = ann("alpha beta");
@@ -363,18 +365,15 @@ fn mid_transaction_failure_rolls_back_the_whole_reindex() {
         .set_asset_alias(&alias, &AssetRevisionRef { asset_id: id_a, revision: rev_a }, NOW + 1)
         .unwrap();
 
-    // Annotation path: the posting insert fires AFTER the upsert and the
-    // delete-old-index statements in the same transaction. Failing it must
-    // roll all of them back.
-    let g0 = read_generation(&db);
-    raw::exec(
-        &db,
-        "CREATE TRIGGER boom BEFORE INSERT ON search_postings
-         BEGIN SELECT RAISE(ABORT, 'boom'); END",
-    );
-    let err = search.set_annotation(&id_a, &ann("gamma delta"), NOW + 2).unwrap_err();
-    assert!(matches!(err, ServerError::Db { .. }), "{err}");
-    assert_eq!(read_generation(&db), g0, "failed tx must not advance the generation");
+    // Annotation path: term-budget admission fires after the annotation
+    // upsert and the delete-old-index statements in the same transaction.
+    // Failing it must roll all of them back.
+    let g0 = search.generation().unwrap();
+    let err = search
+        .set_annotation(&id_a, &ann("gamma delta epsilon zeta theta"), NOW + 2)
+        .unwrap_err();
+    assert!(matches!(err, ServerError::OverBudget { .. }), "{err}");
+    assert_eq!(search.generation().unwrap(), g0, "failed tx must not advance the generation");
     assert_eq!(search.annotation(&id_a).unwrap().unwrap().title, "alpha beta");
     assert_eq!(search.search(&q("alpha"), &ANYONE, None).unwrap().total, 1);
     assert_eq!(search.search(&q("gamma"), &ANYONE, None).unwrap().total, 0);
@@ -384,11 +383,10 @@ fn mid_transaction_failure_rolls_back_the_whole_reindex() {
     let page = search.search(&q("lamp"), &ANYONE, None).unwrap();
     assert_eq!((page.total, page.hits[0].live), (1, true), "alias index intact");
 
-    // With the fault removed the identical write lands, advancing the
-    // generation exactly once; alias postings survive an annotation rebuild.
-    raw::exec(&db, "DROP TRIGGER boom");
-    search.set_annotation(&id_a, &ann("gamma delta"), NOW + 3).unwrap();
-    assert_eq!(read_generation(&db), g0 + 1);
+    // A within-budget write lands, advancing the generation exactly once;
+    // alias postings survive an annotation rebuild.
+    search.set_annotation(&id_a, &ann("gamma delta epsilon zeta"), NOW + 3).unwrap();
+    assert_eq!(search.generation().unwrap(), g0 + 1);
     assert_eq!(search.search(&q("gamma"), &ANYONE, None).unwrap().total, 1);
     assert_eq!(search.search(&q("alpha"), &ANYONE, None).unwrap().total, 0);
     assert_eq!(search.search(&q("lamp"), &ANYONE, None).unwrap().total, 1);
@@ -398,29 +396,24 @@ fn mid_transaction_failure_rolls_back_the_whole_reindex() {
     // terms and the generation all stay exactly as before.
     let (id_b, rev_b) = publish_prop(&core, "rik2", 2, b"glb b", b"thumb b", NOW);
     search.set_annotation(&id_b, &ann("omega"), NOW + 4).unwrap();
-    let g1 = read_generation(&db);
-    raw::exec(
-        &db,
-        "CREATE TRIGGER boom2 BEFORE INSERT ON search_alias_postings
-         BEGIN SELECT RAISE(ABORT, 'boom'); END",
-    );
-    let alias_b = "rik2/props/blamp".parse().unwrap();
+    let g1 = search.generation().unwrap();
+    let alias_b = "rik2/props/large/brass/blamp".parse().unwrap();
     let err = core
         .catalog()
         .set_asset_alias(&alias_b, &AssetRevisionRef { asset_id: id_b, revision: rev_b }, NOW + 5)
         .unwrap_err();
-    assert!(matches!(err, ServerError::Db { .. }), "{err}");
+    assert!(matches!(err, ServerError::OverBudget { .. }), "{err}");
     assert_eq!(core.catalog().resolve_asset_alias(&alias_b).unwrap(), None);
-    assert_eq!(read_generation(&db), g1);
+    assert_eq!(search.generation().unwrap(), g1);
     assert_eq!(search.search(&q("blamp"), &ANYONE, None).unwrap().total, 0);
     let page = search.search(&q("omega"), &ANYONE, None).unwrap();
     assert_eq!((page.hits[0].live, page.hits[0].alias.as_deref()), (false, None));
 
-    raw::exec(&db, "DROP TRIGGER boom2");
+    let alias_b = "rik2/props/blamp".parse().unwrap();
     core.catalog()
         .set_asset_alias(&alias_b, &AssetRevisionRef { asset_id: id_b, revision: rev_b }, NOW + 6)
         .unwrap();
-    assert_eq!(read_generation(&db), g1 + 1);
+    assert_eq!(search.generation().unwrap(), g1 + 1);
     let page = search.search(&q("blamp"), &ANYONE, None).unwrap();
     assert_eq!(
         (page.total, page.hits[0].live, page.hits[0].alias.as_deref()),

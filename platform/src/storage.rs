@@ -29,6 +29,7 @@ pub enum StorageOp {
     List,
     GetRange,
     Stat,
+    Estimate,
 }
 
 impl StorageOp {
@@ -41,6 +42,7 @@ impl StorageOp {
             3 => Self::List,
             4 => Self::GetRange,
             5 => Self::Stat,
+            6 => Self::Estimate,
             _ => return None,
         })
     }
@@ -61,6 +63,14 @@ pub struct StorageStat {
     pub len: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Best-effort storage usage and quota for the current origin or native
+/// storage volume.
+pub struct StorageEstimate {
+    pub usage: u64,
+    pub quota: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// Successful payload of a storage response.
 pub enum StorageResult {
@@ -69,6 +79,7 @@ pub enum StorageResult {
     Value(Option<Vec<u8>>),
     List(StorageList),
     Stat(Option<StorageStat>),
+    Estimate(StorageEstimate),
     /// Successful `set` or `delete`.
     Unit,
 }
@@ -80,6 +91,7 @@ pub enum StorageError {
     InvalidKey(String),
     InvalidListLimit { limit: u32, max: u32 },
     ValueTooLarge { size: usize, max: usize },
+    QuotaExceeded(String),
     Io(String),
     Unsupported(String),
     Backend(String),
@@ -95,6 +107,7 @@ impl std::fmt::Display for StorageError {
             | Self::Unsupported(message)
             | Self::Backend(message)
             | Self::Protocol(message) => f.write_str(message),
+            Self::QuotaExceeded(message) => f.write_str(message),
             Self::InvalidListLimit { limit, max } => {
                 write!(f, "storage list limit {limit} is outside 1..={max}")
             }
@@ -199,6 +212,12 @@ impl StorageHandle {
     /// Returns a value's byte length without reading its contents.
     pub fn stat(&self, cx: &mut Cx, key: &str) -> StorageRequestId {
         self.submit(cx, StorageRequestKind::Stat { key: key.into() })
+    }
+
+    /// Estimates total storage usage and quota without escaping this
+    /// namespace-bound capability.
+    pub fn estimate(&self, cx: &mut Cx) -> StorageRequestId {
+        self.submit(cx, StorageRequestKind::Estimate)
     }
 
     fn submit(&self, cx: &mut Cx, kind: StorageRequestKind) -> StorageRequestId {
@@ -318,6 +337,7 @@ impl StorageRequest {
                 }
                 Ok(())
             }
+            StorageRequestKind::Estimate => Ok(()),
         }
     }
 }
@@ -347,6 +367,7 @@ pub(crate) enum StorageRequestKind {
     Stat {
         key: String,
     },
+    Estimate,
 }
 
 impl StorageRequestKind {
@@ -358,6 +379,7 @@ impl StorageRequestKind {
             Self::List { .. } => StorageOp::List,
             Self::GetRange { .. } => StorageOp::GetRange,
             Self::Stat { .. } => StorageOp::Stat,
+            Self::Estimate => StorageOp::Estimate,
         }
     }
 }
@@ -646,7 +668,151 @@ pub(crate) mod native {
                     Err(error) => Err(io_error("stat", error)),
                 }
             }
+            StorageRequestKind::Estimate => storage_estimate(root),
         }
+    }
+
+    fn storage_estimate(root: &Path) -> Result<StorageResult, StorageError> {
+        let usage = tree_usage(root)?;
+        let probe = root
+            .ancestors()
+            .find(|path| path.exists())
+            .ok_or_else(|| StorageError::Io("storage estimate has no existing ancestor".into()))?;
+        let available = volume_available_bytes(probe)?;
+        Ok(StorageResult::Estimate(StorageEstimate {
+            usage,
+            quota: usage.saturating_add(available),
+        }))
+    }
+
+    fn tree_usage(path: &Path) -> Result<u64, StorageError> {
+        let entries = match fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(io_error("estimate usage", error)),
+        };
+        let mut total = 0u64;
+        for entry in entries {
+            let entry = entry.map_err(|error| io_error("estimate usage entry", error))?;
+            let metadata = entry
+                .metadata()
+                .map_err(|error| io_error("estimate usage metadata", error))?;
+            total = total.saturating_add(if metadata.is_dir() {
+                tree_usage(&entry.path())?
+            } else {
+                metadata.len()
+            });
+        }
+        Ok(total)
+    }
+
+    #[cfg(all(
+        unix,
+        target_pointer_width = "64",
+        not(any(target_os = "macos", target_os = "ios", target_os = "tvos"))
+    ))]
+    fn volume_available_bytes(path: &Path) -> Result<u64, StorageError> {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        #[repr(C)]
+        struct StatVfs {
+            block_size: usize,
+            fragment_size: usize,
+            blocks: u64,
+            blocks_free: u64,
+            blocks_available: u64,
+            files: u64,
+            files_free: u64,
+            files_available: u64,
+            filesystem_id: usize,
+            flags: usize,
+            name_max: usize,
+            spare: [u64; 32],
+        }
+        unsafe extern "C" {
+            fn statvfs(path: *const std::ffi::c_char, out: *mut StatVfs) -> std::ffi::c_int;
+        }
+
+        let path = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| StorageError::Io("storage estimate path contains NUL".into()))?;
+        let mut stat: StatVfs = unsafe { std::mem::zeroed() };
+        if unsafe { statvfs(path.as_ptr(), &mut stat) } != 0 {
+            return Err(io_error("estimate free space", std::io::Error::last_os_error()));
+        }
+        Ok(stat
+            .fragment_size
+            .max(stat.block_size) as u64
+            * stat.blocks_available)
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+    fn volume_available_bytes(path: &Path) -> Result<u64, StorageError> {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        #[repr(C)]
+        struct StatFs {
+            block_size: u32,
+            io_size: i32,
+            blocks: u64,
+            blocks_free: u64,
+            blocks_available: u64,
+            files: u64,
+            files_free: u64,
+            filesystem_id: [i32; 2],
+            owner: u32,
+            filesystem_type: u32,
+            flags: u32,
+            filesystem_subtype: u32,
+            filesystem_type_name: [u8; 16],
+            mount_on_name: [u8; 1024],
+            mount_from_name: [u8; 1024],
+            flags_ext: u32,
+            reserved: [u32; 7],
+        }
+        unsafe extern "C" {
+            fn statfs(path: *const std::ffi::c_char, out: *mut StatFs) -> std::ffi::c_int;
+        }
+
+        let path = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| StorageError::Io("storage estimate path contains NUL".into()))?;
+        let mut stat: StatFs = unsafe { std::mem::zeroed() };
+        if unsafe { statfs(path.as_ptr(), &mut stat) } != 0 {
+            return Err(io_error(
+                "estimate free space",
+                std::io::Error::last_os_error(),
+            ));
+        }
+        Ok((stat.block_size as u64).saturating_mul(stat.blocks_available))
+    }
+
+    #[cfg(windows)]
+    fn volume_available_bytes(path: &Path) -> Result<u64, StorageError> {
+        use std::os::windows::ffi::OsStrExt;
+        unsafe extern "system" {
+            fn GetDiskFreeSpaceExW(
+                directory: *const u16,
+                available: *mut u64,
+                total: *mut u64,
+                free: *mut u64,
+            ) -> i32;
+        }
+        let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut available = 0;
+        let mut total = 0;
+        let mut free = 0;
+        if unsafe { GetDiskFreeSpaceExW(path.as_ptr(), &mut available, &mut total, &mut free) } == 0 {
+            return Err(io_error("estimate free space", std::io::Error::last_os_error()));
+        }
+        Ok(available)
+    }
+
+    #[cfg(not(any(windows, all(unix, target_pointer_width = "64"))))]
+    fn volume_available_bytes(_path: &Path) -> Result<u64, StorageError> {
+        Err(StorageError::Unsupported(
+            "native storage quota estimate is unsupported on this target".into(),
+        ))
     }
 
     fn atomic_write(path: &Path, value: &[u8]) -> Result<(), StorageError> {
@@ -1079,6 +1245,31 @@ pub(crate) mod native {
                     next_cursor: None,
                 })
             );
+        }
+
+        #[test]
+        fn native_estimate_reports_usage_and_available_capacity() {
+            let temp = TempDir::new();
+            run(
+                &temp.0,
+                "app",
+                1,
+                StorageRequestKind::Set {
+                    key: "owned".into(),
+                    value: vec![7; 4096],
+                },
+            );
+            let estimate = run(
+                &temp.0,
+                "app",
+                2,
+                StorageRequestKind::Estimate,
+            );
+            let StorageResult::Estimate(estimate) = estimate else {
+                panic!("estimate returned the wrong result kind")
+            };
+            assert!(estimate.usage >= 4096);
+            assert!(estimate.quota >= estimate.usage);
         }
     }
 }

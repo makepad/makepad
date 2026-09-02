@@ -1097,6 +1097,10 @@ pub struct Search<'a> {
 }
 
 impl<'a> Search<'a> {
+    pub fn generation(&self) -> ServerResult<u64> {
+        read_generation(self.db)
+    }
+
     // ---- annotations -------------------------------------------------------
 
     /// Create or replace the annotation for a registered asset and rebuild its

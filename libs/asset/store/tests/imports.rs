@@ -35,11 +35,11 @@ fn source_registration_is_idempotent_and_approval_is_not_rewritable() {
 
 #[test]
 fn import_publishes_assets_aliases_and_entries_atomically() {
-    let (root, core) = open_core("import_run");
+    let (_root, core) = open_core("import_run");
     let generation_before = {
         // Force schema/state creation before the raw side-channel read.
         core.catalog().register_asset(&asset_id_n(9), "warmup", NOW).unwrap();
-        read_generation(&root.join("catalog.sqlite3"))
+        core.search().generation().unwrap()
     };
     let report = run_kenney_import(&core, "1.0", NOW);
     assert!(report.created);
@@ -87,7 +87,7 @@ fn import_publishes_assets_aliases_and_entries_atomically() {
     // Entry rows are recorded and readable.
     assert_eq!(core.imports().entries(&import_rev).unwrap(), report.entries);
     // Alias writes went through the search choke point: generation advanced.
-    assert!(read_generation(&root.join("catalog.sqlite3")) > generation_before);
+    assert!(core.search().generation().unwrap() > generation_before);
 }
 
 #[test]

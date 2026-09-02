@@ -244,7 +244,7 @@ pub use {
         shared_bytes::{MappedBytes, SharedBytes, SharedBytesStats},
         storage::{
             StorageError, StorageHandle, StorageList, StorageOp, StorageRequestId,
-            StorageResponse, StorageResult, StorageStat, DEFAULT_STORAGE_VALUE_CAP,
+            StorageEstimate, StorageResponse, StorageResult, StorageStat, DEFAULT_STORAGE_VALUE_CAP,
             MAX_STORAGE_KEY_BYTES, MAX_STORAGE_LIST_LIMIT, MAX_STORAGE_NAMESPACE_BYTES,
         },
         texture::{

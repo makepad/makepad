@@ -561,6 +561,11 @@ pub struct ToWasmStorageResult {
     pub next: String,
     pub length_lo: u32,
     pub length_hi: u32,
+    pub usage_lo: u32,
+    pub usage_hi: u32,
+    pub quota_lo: u32,
+    pub quota_hi: u32,
+    pub error_kind: u32,
     pub error: String,
 }
 

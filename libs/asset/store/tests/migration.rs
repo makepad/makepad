@@ -433,7 +433,7 @@ fn v4_root_gains_operation_tables() {
         "SELECT name FROM sqlite_master WHERE type='table' AND name IN \
          ('operations','operation_events','operation_worker_seen') ORDER BY name",
     );
-    assert_eq!(tables.len(), 3, "v5 tables present: {tables:?}");
+    assert!(tables.is_empty(), "retired operation tables present: {tables:?}");
     // A second open of the migrated root is a clean no-op.
     AssetServerCore::open(&root, Budgets::default_v1()).unwrap();
     assert_eq!(user_version(&db), SERVER_SCHEMA_VERSION.to_string());
