@@ -12,6 +12,9 @@ use crate::{
     script::vm::*,
 };
 
+#[cfg(any(target_arch = "wasm32", test))]
+use crate::event::{Event, WindowGeomChangeEvent};
+
 pub struct WindowHandle(PoolId);
 
 #[derive(Clone, Debug, PartialEq, Copy)]
@@ -265,6 +268,63 @@ impl CxWindowPool {
             .map(|(index, item)| WindowId(index, item.generation))
     }
 
+    /// Returns physical slot zero with its current generation, if it exists.
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub(crate) fn current_id_zero(&self) -> Option<WindowId> {
+        self.id_iter().next()
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub(crate) fn web_resize_window_geom(
+        &mut self,
+        cached_native_geom: &mut WindowGeom,
+        cached_window_zero_geom: &mut WindowGeom,
+        new_native_geom: WindowGeom,
+    ) -> Option<WindowGeomChangeEvent> {
+        *cached_native_geom = new_native_geom.clone();
+        let Some(window_id) = self.current_id_zero() else {
+            *cached_window_zero_geom = new_native_geom;
+            return None;
+        };
+
+        let window = &mut self[window_id];
+        let old_geom = window.window_geom.clone();
+        window.os_dpi_factor = Some(new_native_geom.dpi_factor);
+        let new_geom = window.native_window_geom_to_layout(new_native_geom);
+        if old_geom == new_geom {
+            return None;
+        }
+
+        *cached_window_zero_geom = new_geom.clone();
+        window.window_geom = new_geom.clone();
+        Some(WindowGeomChangeEvent {
+            window_id,
+            old_geom,
+            new_geom,
+        })
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub(crate) fn web_create_window_geom(
+        &mut self,
+        window_id: WindowId,
+        cached_native_geom: &WindowGeom,
+        cached_window_zero_geom: &mut WindowGeom,
+    ) -> WindowGeomChangeEvent {
+        let window = &mut self[window_id];
+        window.os_dpi_factor = Some(cached_native_geom.dpi_factor);
+        let new_geom = window.native_window_geom_to_layout(cached_native_geom.clone());
+        window.window_geom = new_geom.clone();
+        if window_id.0 == 0 {
+            *cached_window_zero_geom = new_geom.clone();
+        }
+        WindowGeomChangeEvent {
+            window_id,
+            old_geom: new_geom.clone(),
+            new_geom,
+        }
+    }
+
     pub fn is_valid(&self, v: WindowId) -> bool {
         if v.0 < self.0.pool.len() {
             if self.0.pool[v.0].generation == v.1 {
@@ -280,6 +340,22 @@ impl CxWindowPool {
 
     pub fn from_usize(v: usize) -> WindowId {
         WindowId(v, 0)
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl Cx {
+    pub(crate) fn call_window_zero_focus_event(&mut self, focused: bool) {
+        let window_id = self
+            .windows
+            .current_id_zero()
+            .unwrap_or_else(CxWindowPool::id_zero);
+        let event = if focused {
+            Event::WindowGotFocus(window_id)
+        } else {
+            Event::WindowLostFocus(window_id)
+        };
+        self.call_event_handler(&event);
     }
 }
 
@@ -911,9 +987,170 @@ mod tests {
     use super::*;
     use crate::event::Event;
     use crate::script::vm::ScriptVmCx;
+    use std::{cell::RefCell, rc::Rc};
 
     fn test_cx() -> Cx {
         Cx::new(Box::new(|_cx: &mut Cx, _event: &Event| {}))
+    }
+
+    fn web_geom(dpi_factor: f64, width: f64, height: f64) -> WindowGeom {
+        WindowGeom {
+            dpi_factor,
+            inner_size: dvec2(width, height),
+            outer_size: dvec2(width, height),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn web_cached_native_geometry_is_applied_when_window_zero_is_created() {
+        let mut windows = CxWindowPool::default();
+        let mut native_cache = WindowGeom::default();
+        let mut window_zero_cache = WindowGeom::default();
+        let native_geom = web_geom(3.0, 400.0, 300.0);
+
+        assert!(windows
+            .web_resize_window_geom(
+                &mut native_cache,
+                &mut window_zero_cache,
+                native_geom.clone(),
+            )
+            .is_none());
+        let window_zero = windows.alloc();
+        let window_zero_id = window_zero.window_id();
+        windows[window_zero_id].dpi_override = Some(2.0);
+
+        let event = windows.web_create_window_geom(
+            window_zero_id,
+            &native_cache,
+            &mut window_zero_cache,
+        );
+
+        assert_eq!(native_cache, native_geom);
+        assert_eq!(event.window_id, window_zero_id);
+        assert_eq!(event.old_geom, event.new_geom);
+        assert_eq!(event.new_geom.inner_size, dvec2(600.0, 450.0));
+        assert_eq!(windows[window_zero_id].window_geom, event.new_geom);
+        assert_eq!(window_zero_cache, event.new_geom);
+    }
+
+    #[test]
+    fn web_resize_caches_before_creation_then_converts_and_emits_after() {
+        let mut windows = CxWindowPool::default();
+        let mut native_cache = WindowGeom::default();
+        let mut window_zero_cache = WindowGeom::default();
+        let first_native = web_geom(2.0, 100.0, 80.0);
+        let replacement_native = web_geom(3.0, 120.0, 90.0);
+
+        assert!(windows
+            .web_resize_window_geom(
+                &mut native_cache,
+                &mut window_zero_cache,
+                first_native,
+            )
+            .is_none());
+        assert!(windows
+            .web_resize_window_geom(
+                &mut native_cache,
+                &mut window_zero_cache,
+                replacement_native.clone(),
+            )
+            .is_none());
+        assert_eq!(native_cache, replacement_native);
+        assert_eq!(window_zero_cache, replacement_native);
+
+        let window_zero = windows.alloc();
+        let window_zero_id = window_zero.window_id();
+        windows[window_zero_id].dpi_override = Some(2.0);
+        windows.web_create_window_geom(
+            window_zero_id,
+            &native_cache,
+            &mut window_zero_cache,
+        );
+        let old_window_geom = windows[window_zero_id].window_geom.clone();
+        window_zero_cache = web_geom(9.0, 1.0, 1.0);
+        let resized_native = web_geom(4.0, 200.0, 150.0);
+
+        let event = windows
+            .web_resize_window_geom(
+                &mut native_cache,
+                &mut window_zero_cache,
+                resized_native.clone(),
+            )
+            .unwrap();
+
+        assert_eq!(event.window_id, window_zero_id);
+        assert_eq!(event.old_geom, old_window_geom);
+        assert_eq!(event.new_geom.inner_size, dvec2(400.0, 300.0));
+        assert_eq!(native_cache, resized_native);
+        assert_eq!(window_zero_cache, event.new_geom);
+        assert_eq!(windows[window_zero_id].window_geom, event.new_geom);
+    }
+
+    #[test]
+    fn web_focus_is_delivered_without_a_window_and_uses_current_generation() {
+        let received = Rc::new(RefCell::new(Vec::new()));
+        let received_by_handler = received.clone();
+        let mut cx = Cx::new(Box::new(move |_cx, event| match event {
+            Event::WindowGotFocus(window_id) => {
+                received_by_handler.borrow_mut().push((true, *window_id));
+            }
+            Event::WindowLostFocus(window_id) => {
+                received_by_handler
+                    .borrow_mut()
+                    .push((false, *window_id));
+            }
+            _ => {}
+        }));
+
+        assert!(cx.windows.current_id_zero().is_none());
+        cx.call_window_zero_focus_event(true);
+        cx.call_window_zero_focus_event(false);
+
+        let first_window_zero = WindowHandle::new(&mut cx);
+        drop(first_window_zero);
+        let recycled_window_zero = WindowHandle::new(&mut cx);
+        assert_eq!(recycled_window_zero.window_id(), WindowId(0, 1));
+        cx.call_window_zero_focus_event(true);
+
+        assert_eq!(
+            *received.borrow(),
+            vec![
+                (true, WindowId(0, 0)),
+                (false, WindowId(0, 0)),
+                (true, recycled_window_zero.window_id()),
+            ]
+        );
+    }
+
+    #[test]
+    fn web_nonzero_window_creation_preserves_window_zero_geometry() {
+        let mut windows = CxWindowPool::default();
+        let mut window_zero_cache = WindowGeom::default();
+        let native_cache = web_geom(2.0, 100.0, 80.0);
+        let window_zero = windows.alloc();
+        let window_zero_id = window_zero.window_id();
+        windows[window_zero_id].dpi_override = Some(2.0);
+        windows.web_create_window_geom(
+            window_zero_id,
+            &native_cache,
+            &mut window_zero_cache,
+        );
+        let cached_before = window_zero_cache.clone();
+        let window_zero_before = windows[window_zero_id].window_geom.clone();
+
+        let second_window = windows.alloc();
+        let second_window_id = second_window.window_id();
+        windows[second_window_id].dpi_override = Some(1.0);
+        let event = windows.web_create_window_geom(
+            second_window_id,
+            &native_cache,
+            &mut window_zero_cache,
+        );
+
+        assert_eq!(event.new_geom.inner_size, dvec2(200.0, 160.0));
+        assert_eq!(window_zero_cache, cached_before);
+        assert_eq!(windows[window_zero_id].window_geom, window_zero_before);
     }
 
     #[test]
