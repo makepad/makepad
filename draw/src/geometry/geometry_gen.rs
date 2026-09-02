@@ -159,6 +159,27 @@ pub struct RoadVertexPacked {
     pub uv: f32,
 }
 
+/// Lifted map roofs keep exact tile-local position and metre height, while
+/// colour and the material/painter-order pair use the same compact encodings
+/// as the ground-fill layout.
+#[derive(Clone, Script, ScriptHook)]
+#[repr(C)]
+pub struct RoofVertexPacked {
+    #[live]
+    pub x: f32,
+    #[live]
+    pub y: f32,
+    /// unorm8 r|g|b|a
+    #[live]
+    pub color: f32,
+    /// Exact roof height in metres.
+    #[live]
+    pub height: f32,
+    /// f16(material) | f16(zbias ticks)
+    #[live]
+    pub params: f32,
+}
+
 /// Instanced symbol mesh vertex (map POI icons): screen-px offset from the
 /// instance anchor, f16 uv pair, stroke distance. 16 bytes; the anchor,
 /// colour, zoom floor and depth ride the instance instead of every vertex.
@@ -354,6 +375,9 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     set_script_value_to_pod!(vm, geom.RoadVertexPacked);
     let rpgen = shared(vm, id!(RoadGeomPacked), GeometryGen::from_triangle_2d_road_packed);
     set_script_value!(vm, geom.RoadGeomPacked = rpgen);
+    set_script_value_to_pod!(vm, geom.RoofVertexPacked);
+    let rpgen = shared(vm, id!(RoofGeomPacked), GeometryGen::from_triangle_2d_roof_packed);
+    set_script_value!(vm, geom.RoofGeomPacked = rpgen);
     // Instanced icon meshes: vertex type + placeholder geom (the mesh is bound at draw time)
     set_script_value_to_pod!(vm, geom.IconVertexPacked);
     let ipgen = shared(vm, id!(IconGeomPacked), GeometryGen::from_triangle_2d_icon_packed);
@@ -472,6 +496,25 @@ impl GeometryGen {
         let packed = crate::vector::pack_road_vertices(&logical);
         for _ in 0..3 {
             g.vertices.extend_from_slice(&packed);
+        }
+        g.indices.extend_from_slice(&[0, 1, 2]);
+        g
+    }
+
+    pub fn from_triangle_2d_roof_packed() -> GeometryGen {
+        let mut g = Self::default();
+        let mut logical = [0.0; crate::vector::VECTOR_FLOATS_PER_VERTEX];
+        logical[2] = 0.5;
+        logical[3] = 1.0;
+        logical[4..8].fill(1.0);
+        logical[8] = 1e6;
+        logical[14] = crate::scene_sun::MAT_ROOF;
+        logical[16] = 0.5;
+        logical[17] = 90.0;
+        for _ in 0..3 {
+            g.vertices.extend_from_slice(
+                &crate::vector::pack_roof_record(&logical).expect("placeholder is a map roof"),
+            );
         }
         g.indices.extend_from_slice(&[0, 1, 2]);
         g

@@ -5,7 +5,8 @@ use super::style::*;
 use crate::makepad_draw::vector::{
     append_expanded_stroke_geometry, append_tessellated_geometry,
     append_tessellated_geometry_decked, compute_clip_radii, map_fill_variant_code,
-    pack_fill_vertices, pack_road_vertices, pack_vector_vertices,
+    is_compact_roof_record, pack_fill_vertices, pack_road_vertices, pack_roof_vertices,
+    pack_vector_vertices,
     VECTOR_PACKED_FLOATS_PER_VERTEX,
     tessellate_path_fill, LineCap, LineJoin, Tessellator, VVertex,
     VectorPath, VectorRenderParams, VECTOR_ANALYTIC_FRINGE_STROKE_MULT,
@@ -58,11 +59,6 @@ const ROAD_STROKE_PASS_DEPTH_OFFSET: f32 = 0.02;
 // The icon draw call is +0.04 above the casing call in MapView. Subtract it
 // from arrow param5, then restore only this tiny own-surface decal epsilon.
 const ARROW_ICON_PASS_DEPTH_OFFSET: f32 = 0.04;
-/// Baked shadow decals (T3): above the entire grounded road micro-depth
-/// ladder (strokes reach 0.22 + 0.146 rank micro) so shadows darken the
-/// streets they fall across, but below lifted bridge decks (param5 + 0.30
-/// bumps) so a deck still draws over the shadow pooling under it.
-const SHADOW_DECAL_DEPTH: f32 = 0.40;
 /// Extruded building surfaces (walls, roofs, canopy balls): above every
 /// ground DECAL including shadows. A wall pixel N px up its quad carries
 /// the depth of ground N px behind it, so any decal with a bigger param5
@@ -94,13 +90,15 @@ pub enum TileLoadState {
         /// slot on the view), same band split as the vertex streams.
         icon_instances: Vec<IconInstances>,
         icon_high_instances: Vec<IconInstances>,
-        /// Tree/signal contact-shadow discs, drawn into the shadow mask.
-        shadow_disc_geometry: Option<Geometry>,
+        /// Tree/signal contact-shadow disc instance records.
+        shadow_disc_instances: Vec<f32>,
         /// Analytic AA fringes — skipped at strong tilt where blur and
         /// density hide 1px edge AA.
         fringe_geometry: Option<Geometry>,
         /// 3D volume geometry, distance-faded from the view focus.
         fill_3d_geometry: Option<Geometry>,
+        /// Lifted records that need the generic vector layout.
+        fill_3d_misc_geometry: Option<Geometry>,
         wall_geometry: Option<Geometry>,
         /// Building walls as instance records (see `WALL_INSTANCE_FLOATS`).
         wall_instances: Vec<f32>,
@@ -324,6 +322,10 @@ pub const ICON_INSTANCE_FLOATS: usize = 8;
 /// bake no longer writes four 48-byte vertices per footprint edge.
 pub const WALL_INSTANCE_FLOATS: usize = 11;
 
+/// Floats per contact-shadow disc instance: centre xy, tile-local radius,
+/// and centre strength. A shared unit quad supplies the four mesh vertices.
+pub const SHADOW_DISC_INSTANCE_FLOATS: usize = 4;
+
 /// Floats per street-tree instance: anchor xy and the zbias shift. Every
 /// tree in a tile is the same mesh (`tree_template` near, `tree_cross_template`
 /// at the mid LOD ring), drawn once per record with the anchor added in the
@@ -377,10 +379,8 @@ pub struct TileBuffers {
     /// the vertex streams (floor <= ICON_HIGH_BAND_FLOOR here).
     pub icon_instances: Vec<IconInstances>,
     pub icon_high_instances: Vec<IconInstances>,
-    /// Tree/signal contact-shadow discs (material 6), drawn into the
-    /// shadow mask pass as coverage rather than as ground decals.
-    pub shadow_disc_indices: Vec<u32>,
-    pub shadow_disc_vertices: Vec<f32>,
+    /// Tree/signal contact-shadow discs, drawn only into the shadow mask.
+    pub shadow_disc_instances: Vec<f32>,
     /// Analytic AA fringes split from `casing_*` (see split_fringe_band),
     /// stored as compact eight-float `RoadVertexPacked` records and drawn
     /// with `DrawMapRoad` (same shader as casing/stroke; 25° tilt gate).
@@ -390,6 +390,9 @@ pub struct TileBuffers {
     /// tilt so the far field skips its vertex mass.
     pub fill_3d_indices: Vec<u32>,
     pub fill_3d_vertices: Vec<f32>,
+    /// Lifted records that cannot use `RoofVertexPacked`.
+    pub fill_3d_misc_indices: Vec<u32>,
+    pub fill_3d_misc_vertices: Vec<f32>,
     /// Building walls (MAT_WALL) — skipped at the mid LOD ring.
     pub wall_indices: Vec<u32>,
     pub wall_vertices: Vec<f32>,
@@ -445,14 +448,15 @@ impl TileBuffers {
             + self.fringe_vertices.len()
             + self.fill_3d_indices.len()
             + self.fill_3d_vertices.len()
+            + self.fill_3d_misc_indices.len()
+            + self.fill_3d_misc_vertices.len()
             + self.wall_indices.len()
             + self.wall_vertices.len()
             + self.tree_indices.len()
             + self.tree_vertices.len()
             + self.tree_cross_indices.len()
             + self.tree_cross_vertices.len()
-            + self.shadow_disc_indices.len()
-            + self.shadow_disc_vertices.len()
+            + self.shadow_disc_instances.len()
             + self.icon_vertices.len()
             + self.road_icon_indices.len()
             + self.road_icon_vertices.len()
@@ -3068,219 +3072,6 @@ fn push_wall_instance(
     *zbias += VECTOR_ZBIAS_STEP;
 }
 
-/// T3 contact-shadow decal: a radial-gradient disc on the ground
-/// (alpha `strength` at center, 0 at the rim). Split into the shadow-disc
-/// stream and drawn only into MapView's screen-space shadow mask.
-fn append_ground_shadow_disc(
-    center: (f32, f32),
-    radius_units: f32,
-    strength: f32,
-    depth_micro: f32,
-    out_vertices: &mut Vec<f32>,
-    out_indices: &mut Vec<u32>,
-    zbias: &mut f32,
-) {
-    const SEGS: u32 = 10;
-    let base = (out_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
-    let mut push_vertex = |x: f32, y: f32, alpha: f32| {
-        out_vertices.extend_from_slice(&[
-            x,
-            y,
-            0.5,
-            1.0,
-            0.0,
-            0.0,
-            0.0,
-            alpha,
-            1e6,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            MAT_SHADOW,
-            0.0,
-            depth_micro,
-            radius_units * 2.0,
-            *zbias,
-        ]);
-    };
-    push_vertex(center.0, center.1, strength);
-    for seg in 0..SEGS {
-        let a = seg as f32 / SEGS as f32 * std::f32::consts::TAU;
-        push_vertex(center.0 + a.cos() * radius_units, center.1 + a.sin() * radius_units, 0.0);
-    }
-    for seg in 0..SEGS {
-        let next = (seg + 1) % SEGS;
-        out_indices.extend_from_slice(&[base, base + 1 + seg, base + 1 + next]);
-    }
-    *zbias += VECTOR_ZBIAS_STEP;
-}
-
-/// Clip, winding-normalize and tessellate boolean shadow shapes into the
-/// icon buffer as material-6 decals. The boolean Difference can hand back
-/// hole rings wound like outers; un-normalized they invert the fill and
-/// paint self-overlapping wedges that z-fight (sharp corner lines +
-/// striping seen in review). Outer ring positive, holes negative.
-#[allow(clippy::too_many_arguments)]
-fn emit_shadow_shapes(
-    shapes: Vec<Vec<Vec<[f64; 2]>>>,
-    clip_bounds: GeoBounds,
-    aa: f32,
-    tolerance: f32,
-    path: &mut VectorPath,
-    tess: &mut Tessellator,
-    tess_verts: &mut Vec<VVertex>,
-    tess_indices: &mut Vec<u32>,
-    out_vertices: &mut Vec<f32>,
-    out_indices: &mut Vec<u32>,
-    zbias: &mut f32,
-) {
-    for shape in shapes {
-        let mut any_ring = false;
-        for (ring_index, ring) in shape.iter().enumerate() {
-            let pts: Vec<(f32, f32)> = ring
-                .iter()
-                .map(|p| (p[0] as f32, p[1] as f32))
-                .collect();
-            let mut clipped = clip_ring_to_rect(&pts, clip_bounds);
-            if clipped.len() < 3 {
-                continue;
-            }
-            let area = polygon_signed_area(&clipped);
-            // Needle filter: the boolean leaves hair-thin slivers where a
-            // projected edge grazes a footprint. Average width below ~a
-            // decimeter of tile space reads as a dark pin — drop it.
-            let mut perimeter = 0.0f64;
-            for i in 0..clipped.len() {
-                let a = clipped[i];
-                let b = clipped[(i + 1) % clipped.len()];
-                perimeter +=
-                    (((b.0 - a.0) * (b.0 - a.0) + (b.1 - a.1) * (b.1 - a.1)) as f64).sqrt();
-            }
-            let min_width = (aa as f64 * 0.8).max(0.05);
-            if area.abs() < 0.02 || area.abs() / perimeter.max(1e-6) < min_width {
-                if ring_index == 0 {
-                    break;
-                }
-                continue;
-            }
-            if (ring_index == 0 && area < 0.0) || (ring_index > 0 && area > 0.0) {
-                clipped.reverse();
-            }
-            emit_path(path, &clipped, true);
-            any_ring = true;
-        }
-        if !any_ring {
-            continue;
-        }
-        // Bevel joins: after the footprint subtraction the shadow boundary
-        // meets building corners at acute angles, and a miter fringe
-        // extrudes long dark spikes past the silhouette.
-        tessellate_path_fill(
-            path,
-            tess,
-            tess_verts,
-            tess_indices,
-            LineJoin::Bevel,
-            1.0,
-            aa,
-            false,
-            tolerance,
-        );
-        // ICON buffer (pass 3, after the road strokes), like the district
-        // tints: in a city almost all ground between buildings is road
-        // surface, and a shadow in the fill pass would be painted over by
-        // every street. Full-dark premultiplied black; the material-6
-        // shader branch scales it by the live shadow_alpha uniform.
-        append_tessellated_geometry(
-            tess_verts,
-            tess_indices,
-            out_vertices,
-            out_indices,
-            VectorRenderParams {
-                color: [0.0, 0.0, 0.0, 1.0],
-                stroke_mult: 1e6,
-                shape_id: 0.0,
-                params: [0.0, 0.0, 0.0, MAT_SHADOW, 0.0, SHADOW_DECAL_DEPTH],
-                zbias: *zbias,
-            },
-        );
-        *zbias += VECTOR_ZBIAS_STEP;
-    }
-}
-
-/// Miter-offset a positively wound ring outward by `amount` (tile units).
-/// Used to dilate the footprints subtracted from the shadow union: real
-/// sub-meter slits between abutting building sections otherwise collect
-/// shadow and read as dark hairline spikes between the walls.
-fn dilate_ring(ring: &[(f32, f32)], amount: f32) -> Vec<(f32, f32)> {
-    let n = ring.len();
-    if n < 3 || amount <= 0.0 {
-        return ring.to_vec();
-    }
-    let edge_normal = |i: usize| -> Option<(f32, f32)> {
-        let a = ring[i % n];
-        let b = ring[(i + 1) % n];
-        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-        let len = (dx * dx + dy * dy).sqrt();
-        if len < 1e-4 {
-            return None;
-        }
-        // Outward normal of a positively wound (y-down clockwise) ring.
-        Some((dy / len, -dx / len))
-    };
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let prev = (0..n)
-            .map(|k| (i + n - 1 - k) % n)
-            .find_map(edge_normal)
-            .unwrap_or((0.0, 0.0));
-        let next = (0..n).map(|k| (i + k) % n).find_map(edge_normal).unwrap_or(prev);
-        let (mx, my) = (prev.0 + next.0, prev.1 + next.1);
-        let len = (mx * mx + my * my).sqrt();
-        if len < 1e-4 {
-            out.push(ring[i]);
-            continue;
-        }
-        let scale = (2.0 / len).min(2.0);
-        out.push((
-            ring[i].0 + mx / len * amount * scale,
-            ring[i].1 + my / len * amount * scale,
-        ));
-    }
-    out
-}
-
-/// Even-odd point-in-shapes over i_overlay output (outer rings + holes):
-/// used to drop contact-shadow discs for trees already standing inside a
-/// building's cast shadow (stacked decals double-darken and z-fight).
-fn point_in_shadow_shapes(p: (f32, f32), shapes: &[Vec<Vec<[f64; 2]>>]) -> bool {
-    let (px, py) = (p.0 as f64, p.1 as f64);
-    for shape in shapes {
-        let mut inside = false;
-        for ring in shape {
-            let n = ring.len();
-            if n < 3 {
-                continue;
-            }
-            let mut j = n - 1;
-            for i in 0..n {
-                let (xi, yi) = (ring[i][0], ring[i][1]);
-                let (xj, yj) = (ring[j][0], ring[j][1]);
-                if (yi > py) != (yj > py) && px < xi + (py - yi) / (yj - yi) * (xj - xi) {
-                    inside = !inside;
-                }
-                j = i;
-            }
-        }
-        if inside {
-            return true;
-        }
-    }
-    false
-}
-
 /// T2 roof-edge/parapet AO: a gradient quad strip hugging the roof outline,
 /// dark at the edge fading to the plain roof color ~1.5 m inward. Drawn on
 /// top of the roof fill (micro-depth one rank above), so the roof reads as
@@ -3586,6 +3377,41 @@ fn split_fringe_band_then_road_pack_round_trips() {
     assert_eq!(meta1, ROAD_PARAM_KIND_SCALE * 2.0);
     assert!((cov0 - 1.0).abs() < 0.001);
     assert_eq!(cov1, 0.0);
+}
+
+#[cfg(test)]
+#[test]
+fn compact_roof_record_keeps_exact_height_and_rejects_extra_depth() {
+    use crate::makepad_draw::vector::{
+        pack_roof_record, unpack_pair_f16, ROOF_PACKED_FLOATS_PER_VERTEX,
+    };
+
+    let mut record = [0.0f32; VECTOR_FLOATS_PER_VERTEX];
+    record[0] = 123.25;
+    record[1] = -45.5;
+    record[2] = 0.5;
+    record[3] = 1.0;
+    record[4..8].copy_from_slice(&[0.13, 0.47, 0.81, 1.0]);
+    record[8] = 1e6;
+    record[14] = MAT_ROOF;
+    record[15] = 83.125;
+    record[16] = BUILDING_SURFACE_DEPTH + 0.30;
+    record[17] = 90.0;
+    record[18] = 0.0015;
+
+    let packed = pack_roof_record(&record).unwrap();
+    assert_eq!(packed.len(), ROOF_PACKED_FLOATS_PER_VERTEX);
+    assert_eq!(
+        std::mem::size_of::<crate::makepad_draw::geometry::geometry_gen::RoofVertexPacked>(),
+        20
+    );
+    assert_eq!(packed[3], record[15]);
+    let (material, zbias_ticks) = unpack_pair_f16(packed[4]);
+    assert_eq!(material, MAT_ROOF);
+    assert_eq!(zbias_ticks, 1500.0);
+
+    record[16] += DEPTH_MICRO_PER_RANK;
+    assert!(pack_roof_record(&record).is_none());
 }
 
 struct TileProfiler {
@@ -4041,6 +3867,7 @@ fn build_tile_buffers_from_features_profiled(
     let mut stroke_vertices = Vec::<f32>::new();
     let mut icon_indices = Vec::<u32>::new();
     let mut icon_vertices = Vec::<f32>::new();
+    let mut shadow_disc_instances = Vec::<f32>::new();
     // Building walls as instance records; see WALL_INSTANCE_FLOATS.
     let mut wall_instances = Vec::<f32>::new();
     // Street trees: one template mesh per LOD ring + TREE_INSTANCE_FLOATS per tree.
@@ -5019,30 +4846,21 @@ fn build_tile_buffers_from_features_profiled(
         };
 
         let trunk_ao = if theme.shiny.bake_ao { 0.78 } else { 1.0 };
-        // T3 tree contact shadows: a soft dark disc under each canopy,
-        // nudged along the shadow direction — "the tree stands on the
-        // ground" for a dozen vertices per tree.
+        // T3 tree contact shadows: a soft instanced disc under each canopy,
+        // nudged along the shadow direction so the tree sits on the ground.
         if theme.shiny.bake_shadows {
             let sun_2d = theme.shiny.sun.dir_2d();
-            for (index, (x, y)) in tree_points_3d.iter().enumerate() {
+            for (x, y) in &tree_points_3d {
                 let center = (
                     *x - sun_2d.x * 2.2 * units_per_m,
                     *y - sun_2d.y * 2.2 * units_per_m,
                 );
-                // Full-strength center (the live shadow uniform is the
-                // brightness knob), canopy-sized, offset like a canopy
-                // hanging 7.5-11 m up would cast. The per-disc depth step
-                // keeps overlapping discs (tree rows) from z-fighting each
-                // other or the building shadow union underneath.
-                append_ground_shadow_disc(
-                    center,
+                shadow_disc_instances.extend_from_slice(&[
+                    center.0,
+                    center.1,
                     3.4 * units_per_m,
                     1.0,
-                    SHADOW_DECAL_DEPTH + 0.005 + (index % 8) as f32 * 5e-4,
-                    &mut icon_vertices,
-                    &mut icon_indices,
-                    &mut icon_zbias,
-                );
+                ]);
             }
         }
         // Every street tree is the same mesh (shading depends on normals
@@ -5338,20 +5156,17 @@ fn build_tile_buffers_from_features_profiled(
         // T3: soft contact shadow under each stoplight pole.
         if theme.shiny.bake_shadows {
             let sun_2d = theme.shiny.sun.dir_2d();
-            for (index, (x, y)) in signal_points_3d.iter().enumerate() {
+            for (x, y) in &signal_points_3d {
                 let center = (
                     *x - sun_2d.x * 0.9 * units_per_m,
                     *y - sun_2d.y * 0.9 * units_per_m,
                 );
-                append_ground_shadow_disc(
-                    center,
+                shadow_disc_instances.extend_from_slice(&[
+                    center.0,
+                    center.1,
                     1.3 * units_per_m,
                     0.9,
-                    SHADOW_DECAL_DEPTH + 0.005 + (index % 8) as f32 * 5e-4,
-                    &mut icon_vertices,
-                    &mut icon_indices,
-                    &mut icon_zbias,
-                );
+                ]);
             }
         }
         for (x, y) in &signal_points_3d {
@@ -6123,14 +5938,15 @@ fn build_tile_buffers_from_features_profiled(
             icon_vertices: Vec::new(),
             icon_high_indices: Vec::new(),
             icon_high_vertices: Vec::new(),
-            shadow_disc_indices: Vec::new(),
-            shadow_disc_vertices: Vec::new(),
+            shadow_disc_instances: Vec::new(),
             icon_instances: Vec::new(),
             icon_high_instances: Vec::new(),
             fringe_indices: Vec::new(),
             fringe_vertices: Vec::new(),
             fill_3d_indices: Vec::new(),
             fill_3d_vertices: Vec::new(),
+            fill_3d_misc_indices: Vec::new(),
+            fill_3d_misc_vertices: Vec::new(),
             wall_indices: Vec::new(),
             wall_vertices: Vec::new(),
             wall_instances: Vec::new(),
@@ -7068,11 +6884,6 @@ fn build_tile_buffers_from_features_profiled(
     let mut icon_indices = icon_indices;
     let (icon_high_vertices, icon_high_indices) =
         split_icon_band(&mut icon_vertices, &mut icon_indices);
-    let (shadow_disc_vertices, shadow_disc_indices) = split_band_by(
-        &mut icon_vertices,
-        &mut icon_indices,
-        |record| record[14] > 5.5 && record[14] < 6.5,
-    );
     let (icon_instances, icon_high_instances) = split_icon_instance_band(icon_groups);
     let mut casing_vertices = casing_vertices;
     let mut casing_indices = casing_indices;
@@ -7093,6 +6904,14 @@ fn build_tile_buffers_from_features_profiled(
         &mut fill_3d_indices,
         |record| record[14] > 3.5 && record[14] < 4.5,
     );
+    // Ordinary lifted shape-0 roofs use the 20-byte roof layout. Parapet
+    // depth variants, marker stalks, signals and any future gradient or
+    // patterned roof remain byte-for-byte on the generic vector path.
+    let (fill_3d_misc_vertices, fill_3d_misc_indices) = split_band_by(
+        &mut fill_3d_vertices,
+        &mut fill_3d_indices,
+        |record| !is_compact_roof_record(record),
+    );
     // The ground stream is compact only for polygon-fill variants. Building
     // outline strokes are the sole generic records emitted into this pass;
     // keep them in a sibling stream so their stroke expansion stays intact.
@@ -7108,7 +6927,8 @@ fn build_tile_buffers_from_features_profiled(
     // upload drain to one tile per frame).
     let fill_vertices = pack_fill_vertices(&fill_vertices);
     let fill_misc_vertices = pack_vector_vertices(&fill_misc_vertices);
-    let fill_3d_vertices = pack_vector_vertices(&fill_3d_vertices);
+    let fill_3d_vertices = pack_roof_vertices(&fill_3d_vertices);
+    let fill_3d_misc_vertices = pack_vector_vertices(&fill_3d_misc_vertices);
     debug_assert!(casing_vertices
         .chunks_exact(VECTOR_FLOATS_PER_VERTEX)
         .all(|record| record[10].abs() < 0.5 || record[10] >= 99.5));
@@ -7122,7 +6942,6 @@ fn build_tile_buffers_from_features_profiled(
     let stroke_vertices = pack_road_vertices(&stroke_vertices);
     let icon_vertices = pack_vector_vertices(&icon_vertices);
     let icon_high_vertices = pack_vector_vertices(&icon_high_vertices);
-    let shadow_disc_vertices = pack_vector_vertices(&shadow_disc_vertices);
     let fringe_vertices = pack_road_vertices(&fringe_vertices);
     let wall_vertices = pack_vector_vertices(&wall_vertices);
     let tree_vertices = pack_vector_vertices(&tree_vertices);
@@ -7141,14 +6960,15 @@ fn build_tile_buffers_from_features_profiled(
         icon_vertices,
         icon_high_indices,
         icon_high_vertices,
-        shadow_disc_indices,
-        shadow_disc_vertices,
+        shadow_disc_instances,
         icon_instances,
         icon_high_instances,
         fringe_indices,
         fringe_vertices,
         fill_3d_indices,
         fill_3d_vertices,
+        fill_3d_misc_indices,
+        fill_3d_misc_vertices,
         wall_indices,
         wall_vertices,
         wall_instances,
@@ -10348,14 +10168,15 @@ mod bridge_probe_tests {
             icon_vertices: vec![1.0; VECTOR_PACKED_FLOATS_PER_VERTEX],
             icon_high_indices: Vec::new(),
             icon_high_vertices: Vec::new(),
-            shadow_disc_indices: Vec::new(),
-            shadow_disc_vertices: Vec::new(),
+            shadow_disc_instances: Vec::new(),
             icon_instances: Vec::new(),
             icon_high_instances: Vec::new(),
             fringe_indices: Vec::new(),
             fringe_vertices: Vec::new(),
             fill_3d_indices: Vec::new(),
             fill_3d_vertices: Vec::new(),
+            fill_3d_misc_indices: Vec::new(),
+            fill_3d_misc_vertices: Vec::new(),
             wall_indices: Vec::new(),
             wall_vertices: Vec::new(),
             wall_instances: Vec::new(),
@@ -12629,12 +12450,11 @@ mod bridge_probe_tests {
             true,
         )
         .unwrap();
-        let shadow_verts = buffers.shadow_disc_vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX;
         println!(
-            "fill verts {} icon verts {} shadow_disc verts {}",
+            "fill verts {} icon verts {} shadow_disc instances {}",
             buffers.fill_vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX,
             buffers.icon_vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX,
-            shadow_verts
+            buffers.shadow_disc_instances.len() / SHADOW_DISC_INSTANCE_FLOATS,
         );
     }
 
