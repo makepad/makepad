@@ -1,0 +1,8 @@
+[package]
+name = "makepad-drumkit"
+version = "0.1.0"
+edition = "2021"
+description = "Real-time-safe sample player for the Salamander Drumkit"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
