@@ -8267,6 +8267,35 @@ enum LayerParseFilter {
     DetailLayers { points: bool, lines: bool, polygons: bool },
 }
 
+const DETAIL_WAY_KEYS: &[&str] = &[
+    "layer", "bridge", "tunnel", "highway", "railway", "width", "barrier", "area",
+    "name", "attraction", "zoo", "tourism", "public_transport", "landuse", "leisure",
+    "natural", "building", "building:part", "height", "building:levels", "min_height",
+    "building:min_level", "location", "place", "parking", "surface", "access", "service",
+    "link", "rail", "waterway", "ref",
+];
+
+const DETAIL_POINT_EXTRA_KEYS: &[&str] = &[
+    "amenity", "brand", "craft", "entrance", "historic", "max_kw", "office", "operator",
+    "shop", "osm_layer", "kerb", "bus", "shelter",
+];
+
+static POINT_KEYS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+
+fn point_keys() -> &'static [&'static str] {
+    POINT_KEYS
+        .get_or_init(|| {
+            let mut keys = DETAIL_WAY_KEYS.to_vec();
+            keys.extend_from_slice(DETAIL_POINT_EXTRA_KEYS);
+            keys
+        })
+        .as_slice()
+}
+
+pub(super) fn warm_tile_registries() {
+    let _ = point_keys();
+}
+
 struct MvtLocalCollector {
     layer_filter: LayerParseFilter,
     min_dist_sq: f32,
@@ -8324,23 +8353,11 @@ impl MvtSink for MvtLocalCollector {
         // (micro_icon_for_tags), so the whitelist only arms when the point
         // layers are off — below the icon zooms, exactly where the tag mass
         // hurts.
-        const DETAIL_WAY_KEYS: &[&str] = &[
-            "layer", "bridge", "tunnel", "highway", "railway", "width", "barrier", "area",
-            "name", "attraction", "zoo", "tourism", "public_transport", "landuse",
-            "leisure", "natural", "building", "building:part", "height",
-            "building:levels", "min_height", "building:min_level", "location", "place",
-            "parking", "surface", "access", "service", "link", "rail", "waterway", "ref",
-        ];
         // Point layers add the (bounded) icon-matcher key set: every key
         // icons.rs or the point/attraction routing in merge_detail_features
         // reads. micro POIs carry dozens of address/name-translation tags
         // that nothing consumes — at the kf16 icon horizon this parse was
         // ~140ms/tile with the whitelist forced off.
-        const DETAIL_POINT_EXTRA_KEYS: &[&str] = &[
-            "amenity", "brand", "craft", "entrance", "historic", "max_kw", "office",
-            "operator", "shop", "osm_layer", "kerb", "bus", "shelter",
-        ];
-        static POINT_KEYS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
         #[cfg(not(target_arch = "wasm32"))]
         static NO_WHITELIST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         #[cfg(not(target_arch = "wasm32"))]
@@ -8353,15 +8370,7 @@ impl MvtSink for MvtLocalCollector {
         }
         match self.layer_filter {
             LayerParseFilter::DetailLayers { points: false, .. } => Some(DETAIL_WAY_KEYS),
-            LayerParseFilter::DetailLayers { points: true, .. } => Some(
-                POINT_KEYS
-                    .get_or_init(|| {
-                        let mut keys: Vec<&'static str> = DETAIL_WAY_KEYS.to_vec();
-                        keys.extend_from_slice(DETAIL_POINT_EXTRA_KEYS);
-                        keys
-                    })
-                    .as_slice(),
-            ),
+            LayerParseFilter::DetailLayers { points: true, .. } => Some(point_keys()),
             _ => None,
         }
     }

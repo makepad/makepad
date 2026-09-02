@@ -73,9 +73,10 @@ const ICON_SVGS: &[(&str, &str)] = &[
     ("charger", include_str!("icons/charger.svg")),
 ];
 
+static ICON_MESH_CACHE: OnceLock<HashMap<&'static str, IconMesh>> = OnceLock::new();
+
 fn icons() -> &'static HashMap<&'static str, IconMesh> {
-    static CACHE: OnceLock<HashMap<&'static str, IconMesh>> = OnceLock::new();
-    CACHE.get_or_init(|| {
+    ICON_MESH_CACHE.get_or_init(|| {
         let mut out = HashMap::new();
         for (name, svg) in ICON_SVGS {
             if let Some(mesh) = build_icon_mesh(svg) {
@@ -142,9 +143,10 @@ struct IconSlots {
     by_address: HashMap<usize, u16>,
 }
 
+static ICON_MESH_SLOTS: OnceLock<IconSlots> = OnceLock::new();
+
 fn icon_slots() -> &'static IconSlots {
-    static SLOTS: OnceLock<IconSlots> = OnceLock::new();
-    SLOTS.get_or_init(|| {
+    ICON_MESH_SLOTS.get_or_init(|| {
         let registry = icons();
         let mut names: Vec<&&str> = registry.keys().collect();
         names.sort_unstable();
@@ -156,6 +158,11 @@ fn icon_slots() -> &'static IconSlots {
             .collect();
         IconSlots { meshes, by_address }
     })
+}
+
+pub(super) fn warm_icon_registries() {
+    let _ = icons();
+    let _ = icon_slots();
 }
 
 /// The slot of a registry mesh (every mesh `icon_mesh` hands out has one).
@@ -449,4 +456,16 @@ pub fn icon_for_tags(tags: &HashMap<String, String>) -> Option<(&'static str, u8
         return Some(("dot", LABEL_CLASS_DEFAULT));
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_icon_registries_are_warmed() {
+        super::super::warm_shared_registries();
+        assert!(ICON_MESH_CACHE.get().is_some());
+        assert!(ICON_MESH_SLOTS.get().is_some());
+    }
 }
