@@ -101,7 +101,30 @@ impl ServiceRegistry {
         );
         inner.order.push(endpoint.clone());
         inner.generation += 1;
+        // The port announced itself when it opened, before anyone held its
+        // link: answer that `Register` NOW, so a call dispatched before the
+        // next pump (a console line adopted in the same event) reaches a
+        // port that already knows its address — otherwise the frames arrive
+        // as Call, then Registered, and the port drops the call.
+        Self::answer_pending_register(&mut inner, &endpoint);
         Ok(endpoint)
+    }
+
+    /// A `Register` already waiting on a fresh link is answered at once;
+    /// anything else waiting stays for `pump`. (The channel is drained in
+    /// order, so only a leading `Register` is taken.)
+    fn answer_pending_register(inner: &mut Inner, endpoint: &EndpointId) {
+        let entry = inner.entries.get_mut(endpoint).unwrap();
+        if let Ok(HostedUp { msg: ServiceUp::Register { manifest, port_tag }, .. }) = entry.link.up.try_recv() {
+            if manifest.validate().is_ok() {
+                entry.manifest = manifest;
+            }
+            entry.port_tag = Some(port_tag);
+            let _ = entry.link.down.send(HostedDown {
+                to: None,
+                msg: ServiceDown::Registered { port_tag, endpoint: endpoint.clone() },
+            });
+        }
     }
 
     /// Plug in a service whose endpoint ANOTHER host already issued — the

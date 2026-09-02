@@ -135,6 +135,59 @@ const UNIFORM_ONLY_MIN_TILES: usize = 2_000;
 /// A resize is one relayout, not a hundred: wait for the drag to rest.
 const RESIZE_SETTLE_SECS: f64 = 0.35;
 
+/// Seconds a picture takes to fly to its new place, shrink away, or grow
+/// back when the query changes.
+const TWEEN_SECS: f64 = 0.45;
+
+/// easeOutQuint: fast out of the gate, settling softly — the motion the
+/// desk's panes use, so the wall moves the way the rest of the desk does.
+pub fn ease_out_quint(t: f32) -> f32 {
+    let u = 1.0 - t.clamp(0.0, 1.0);
+    1.0 - u * u * u * u * u
+}
+
+fn lerp2(a: Vec2f, b: Vec2f, t: f32) -> Vec2f {
+    vec2f(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)
+}
+
+/// The display order for a query over `(title, link)` pairs in rank order:
+/// with no words, every rank as it is; otherwise only the ranks whose
+/// title or link holds EVERY word (case-insensitive), best first — a word
+/// found in the title beats one found only in the link, a whole-word hit
+/// beats a substring, and ties keep library order. Pure, so the wall's
+/// order is testable without a grid.
+pub fn order_for(items: &[(String, String)], query: &str) -> Vec<usize> {
+    let words: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
+    if words.is_empty() {
+        return (0..items.len()).collect();
+    }
+    let mut scored: Vec<(i32, usize)> = Vec::new();
+    for (rank, (title, link)) in items.iter().enumerate() {
+        let title = title.to_lowercase();
+        let link = link.to_lowercase();
+        let mut score = 0i32;
+        let mut all = true;
+        for w in &words {
+            let in_title = title.contains(w.as_str());
+            let in_link = link.contains(w.as_str());
+            if !in_title && !in_link {
+                all = false;
+                break;
+            }
+            score += if in_title { 2 } else { 1 };
+            if title.split(|c: char| !c.is_alphanumeric()).any(|t| t == w.as_str()) {
+                score += 2;
+            }
+        }
+        if all {
+            scored.push((score, rank));
+        }
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    scored.into_iter().map(|(_, rank)| rank).collect()
+}
+
+
 fn vec2f(x: f32, y: f32) -> Vec2f {
     Vec2f { x, y }
 }
@@ -214,6 +267,16 @@ struct GridItem {
     pos: Vec2f,
     size: Vec2f,
     aspect: f32,
+    /// The place the picture is flying to (its slot in the current layout,
+    /// or a point of no size when the query dropped it) and where it flew
+    /// from; `pos`/`size`/`alpha` are what is drawn right now.
+    to_pos: Vec2f,
+    to_size: Vec2f,
+    from_pos: Vec2f,
+    from_size: Vec2f,
+    alpha: f32,
+    from_alpha: f32,
+    to_alpha: f32,
 }
 
 struct PageTex {
@@ -310,6 +373,17 @@ pub struct TileGrid {
     /// The wall's world extent, whichever layout: (min, max).
     #[rust]
     bounds: Option<(Vec2f, Vec2f)>,
+    /// The words the wall is filtered by (empty: every picture).
+    #[rust]
+    query: String,
+    /// The pictures on the wall right now, in display order (indices into
+    /// `items`); the packing is cut over exactly these.
+    #[rust]
+    visible: Vec<usize>,
+    /// A layout change in flight: when it started (Cx seconds); the items
+    /// carry their from/to rects.
+    #[rust]
+    tween_start: Option<f64>,
     #[rust]
     start: Option<Instant>,
     #[rust]
@@ -396,6 +470,9 @@ impl TileGrid {
         self.plan = None;
         self.packing = None;
         self.bounds = None;
+        self.query.clear();
+        self.visible.clear();
+        self.tween_start = None;
         self.opened = true;
         let uid = self.widget_uid();
         let (rows, shards) = match db::read_items(&library.db_path()) {
@@ -407,6 +484,7 @@ impl TileGrid {
             }
         };
         self.items = rows.iter().filter_map(item_of).collect();
+        self.visible = (0..self.items.len()).collect();
         let store = store::spawn(library);
         for shard in shards.iter().filter(|s| s.sealed) {
             store.need_page(shard.id, LEVELS - 1, 1);
@@ -432,13 +510,89 @@ impl TileGrid {
         self.items.len()
     }
 
+    /// The words the wall is filtered by (empty: everything shows).
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    /// How many pictures the wall shows under the current query.
+    pub fn visible_count(&self) -> usize {
+        self.visible.len()
+    }
+
+    /// Filter and reorder the wall as the person types: the matches
+    /// (best first) are packed afresh and every picture flies from where
+    /// it is to where it goes; the others shrink away, and an empty query
+    /// brings them all flying back. The camera re-frames the new wall.
+    pub fn set_query(&mut self, cx: &mut Cx, query: &str) {
+        let query = query.trim();
+        if query == self.query {
+            return;
+        }
+        self.query = query.to_string();
+        let words: Vec<(String, String)> = self.items.iter().map(|i| (i.title.to_string(), i.link.to_string())).collect();
+        self.visible = order_for(&words, &self.query);
+        let now = cx.seconds_since_app_start();
+        self.layout_targets();
+        if self.view_rect.size.x >= 1.0 && self.cam_usable() {
+            self.begin_tween(now);
+            // The new wall has a new shape: glide the camera to frame it.
+            self.user_moved = false;
+            self.fit_camera();
+        } else {
+            self.snap();
+        }
+        self.next_frame = cx.new_next_frame();
+        self.area.redraw(cx);
+    }
+
+    /// Every picture jumps to its target: the first layout, a resize.
+    fn snap(&mut self) {
+        for item in &mut self.items {
+            item.pos = item.to_pos;
+            item.size = item.to_size;
+            item.alpha = item.to_alpha;
+            item.from_pos = item.to_pos;
+            item.from_size = item.to_size;
+            item.from_alpha = item.to_alpha;
+        }
+        self.tween_start = None;
+    }
+
+    /// Start flying every picture from where it is drawn now to its target.
+    fn begin_tween(&mut self, now: f64) {
+        for item in &mut self.items {
+            item.from_pos = item.pos;
+            item.from_size = item.size;
+            item.from_alpha = item.alpha;
+        }
+        self.tween_start = Some(now);
+    }
+
+    /// Advance the flight to `now`; true while pictures still move.
+    fn step_tween(&mut self, now: f64) -> bool {
+        let Some(start) = self.tween_start else { return false };
+        let t = ((now - start) / TWEEN_SECS).clamp(0.0, 1.0) as f32;
+        let e = ease_out_quint(t);
+        for item in &mut self.items {
+            item.pos = lerp2(item.from_pos, item.to_pos, e);
+            item.size = lerp2(item.from_size, item.to_size, e);
+            item.alpha = item.from_alpha + (item.to_alpha - item.from_alpha) * e;
+        }
+        if t >= 1.0 {
+            self.snap();
+            return false;
+        }
+        true
+    }
+
     /// Glide the camera onto one picture so it fills most of the view.
     /// False when the id is not on the grid.
     pub fn show_item(&mut self, cx: &mut Cx, item: ItemId) -> bool {
         let Some(found) = self.items.iter().find(|i| i.id == item) else {
             return false;
         };
-        let (pos, size) = (found.pos, found.size);
+        let (pos, size) = (found.to_pos, found.to_size);
         if self.view_rect.size.x < 1.0 || self.view_rect.size.y < 1.0 {
             return false;
         }
@@ -484,13 +638,26 @@ impl TileGrid {
         }
     }
 
+    /// Lay the wall out and put every picture on its slot at once: the
+    /// first layout, a resize.
     fn relayout(&mut self) {
+        self.layout_targets();
+        self.snap();
+    }
+
+    /// Cut the layout and write every picture's TARGET: the pictures on
+    /// the wall get their slot; the ones the query dropped shrink to a
+    /// point at their own centre and fade out, so leaving reads as
+    /// vanishing where they stood and coming back as growing from there.
+    fn layout_targets(&mut self) {
         match self.wall_layout() {
             WallLayout::Uniform => {
+                // The uniform grid hangs every picture, query or not.
                 let plan = grid_plan(self.items.len(), self.view_aspect());
                 for (rank, item) in self.items.iter_mut().enumerate() {
-                    item.size = cell_size(item.aspect);
-                    item.pos = grid_slot(&plan, rank, item.size);
+                    item.to_size = cell_size(item.aspect);
+                    item.to_pos = grid_slot(&plan, rank, item.to_size);
+                    item.to_alpha = 1.0;
                 }
                 let cols = plan.cols.max(1) as f32;
                 let rows = plan.rows.max(1) as f32;
@@ -502,8 +669,9 @@ impl TileGrid {
                 // Rows one world unit tall — the unit the slot pyramid and
                 // the LOD maths already think in — cut against a width that
                 // gives the whole wall roughly the view's shape, then centred
-                // on the world origin like the uniform grid.
-                let aspects: Vec<f32> = self.items.iter().map(|i| i.aspect).collect();
+                // on the world origin like the uniform grid. Only the
+                // pictures the query keeps are packed, in display order.
+                let aspects: Vec<f32> = self.visible.iter().map(|&i| self.items[i].aspect).collect();
                 let mean = if aspects.is_empty() {
                     1.0
                 } else {
@@ -512,9 +680,18 @@ impl TileGrid {
                 let width = packed_width(aspects.len(), mean, self.view_aspect());
                 let packing = pack(&aspects, width, 1.0);
                 let origin = vec2f(-packing.width * 0.5, -packing.height * 0.5);
-                for (item, rect) in self.items.iter_mut().zip(&packing.rects) {
-                    item.pos = vec2f(origin.x + rect.x, origin.y + rect.y);
-                    item.size = vec2f(rect.w, rect.h);
+                for item in &mut self.items {
+                    // Dropped by the query: a point at its own centre.
+                    let centre = vec2f(item.pos.x + item.size.x * 0.5, item.pos.y + item.size.y * 0.5);
+                    item.to_pos = centre;
+                    item.to_size = vec2f(0.0, 0.0);
+                    item.to_alpha = 0.0;
+                }
+                for (&i, rect) in self.visible.iter().zip(&packing.rects) {
+                    let item = &mut self.items[i];
+                    item.to_pos = vec2f(origin.x + rect.x, origin.y + rect.y);
+                    item.to_size = vec2f(rect.w, rect.h);
+                    item.to_alpha = 1.0;
                 }
                 self.bounds = Some((origin, vec2f(origin.x + packing.width, origin.y + packing.height)));
                 self.packing = Some(packing);
@@ -635,8 +812,10 @@ impl TileGrid {
 
     fn item_at(&self, world: Vec2d) -> Option<usize> {
         if let (Some(packing), Some((lo, _))) = (&self.packing, self.bounds) {
-            // Packed: the rows know who is where.
-            return packing.hit(world.x as f32 - lo.x, world.y as f32 - lo.y, 0.02);
+            // Packed: the rows know who is where — a rank in the packing is
+            // a place in the display order, not an item index.
+            let rank = packing.hit(world.x as f32 - lo.x, world.y as f32 - lo.y, 0.02)?;
+            return self.visible.get(rank).copied();
         }
         let plan = self.plan?;
         let col = (world.x as f32 - plan.origin.x).floor();
@@ -796,7 +975,7 @@ impl TileGrid {
         dt.rgba = if rgba { 1.0 } else { 0.0 };
         dt.uv0 = uv0;
         dt.uv1 = uv1;
-        dt.fade = fade;
+        dt.fade = fade * item.alpha;
         dt.draw_abs(cx, Rect { pos: p, size: s });
     }
 }
@@ -816,6 +995,13 @@ fn item_of(row: &ItemRow) -> Option<GridItem> {
         pos: Vec2f::default(),
         size: vec2f(CELL_FILL, CELL_FILL),
         aspect: row.aspect as f32,
+        to_pos: Vec2f::default(),
+        to_size: vec2f(CELL_FILL, CELL_FILL),
+        from_pos: Vec2f::default(),
+        from_size: vec2f(CELL_FILL, CELL_FILL),
+        alpha: 1.0,
+        from_alpha: 1.0,
+        to_alpha: 1.0,
     })
 }
 
@@ -837,6 +1023,9 @@ impl Widget for TileGrid {
             let dt = (now_time - self.last_time).clamp(0.0, 0.1);
             self.last_time = now_time;
             let moving = self.step_camera(dt) || self.drag.is_some();
+            // Pictures in flight: their drawn rects move every frame, so the
+            // instance buffer is rebuilt until they land.
+            let tweening = self.step_tween(cx.seconds_since_app_start());
             let now = self.time();
             if let Some(at) = self.resize_settle_at {
                 if now >= at {
@@ -851,7 +1040,7 @@ impl Widget for TileGrid {
             }
             let animating = self.pages.values().any(|p| now - p.arrived < FADE_SECS)
                 || self.full.values().any(|f| now - f.arrived < FADE_SECS);
-            if moving || animating || self.resize_settle_at.is_some() {
+            if moving || animating || tweening || self.resize_settle_at.is_some() {
                 self.next_frame = cx.new_next_frame();
             }
             // A settle beat exists to ask for the settled camera's tiles;
@@ -872,7 +1061,7 @@ impl Widget for TileGrid {
                 let ratio_ok = if self.pushed_all { ratio > 0.25 && ratio < 4.0 } else { ratio > 0.9 && ratio < 4.0 };
                 ratio_ok && (self.pushed_all || (d.x.abs() < view_world * 0.09 && d.y.abs() < view_world * 0.09))
             });
-            if !beat_due && (moving || animating) && self.items.len() > UNIFORM_ONLY_MIN_TILES && within_pad {
+            if !beat_due && !tweening && (moving || animating) && self.items.len() > UNIFORM_ONLY_MIN_TILES && within_pad {
                 // Re-present the retained draw calls under fresh camera
                 // uniforms: no draw_walk, no instance re-upload.
                 let center = self.view_center();
@@ -881,7 +1070,7 @@ impl Widget for TileGrid {
                 dv.set_uniform_on_draw_list(cx, area, id!(cam_pos), &[self.cam_pos.x as f32, self.cam_pos.y as f32]);
                 dv.set_uniform_on_draw_list(cx, area, id!(cam_scale), &[self.cam_scale as f32]);
                 dv.set_uniform_on_draw_list(cx, area, id!(view_center), &[center.x as f32, center.y as f32]);
-            } else if moving || animating || beat_due {
+            } else if moving || animating || tweening || beat_due {
                 self.area.redraw(cx);
             }
         }
@@ -989,6 +1178,10 @@ impl Widget for TileGrid {
         let mut culled = 0usize;
         let cull_off = self.cull_frac < 0.10;
         for (i, item) in self.items.iter().enumerate() {
+            if item.alpha <= 0.0 {
+                // Dropped by the query and done shrinking: not on the wall.
+                continue;
+            }
             let (p, s) = (item.pos, item.size);
             if p.x + s.x < vx0 || p.x > vx1 || p.y + s.y < vy0 || p.y > vy1 {
                 // The count is the truth either way — it decides whether the
@@ -1212,5 +1405,56 @@ impl TileGridRef {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wall() -> Vec<(String, String)> {
+        vec![
+            ("2026-01-02: A robot learns to love".into(), "https://smbc/1".into()),
+            ("2026-01-03: Physics of a cat".into(), "https://smbc/2".into()),
+            ("2026-01-04: The Robot uprising, again".into(), "https://smbc/3".into()),
+            ("2026-01-05: robotics for cats".into(), "https://smbc/robot".into()),
+        ]
+    }
+
+    #[test]
+    fn an_empty_query_is_library_order_and_a_query_ranks_the_matches() {
+        let w = wall();
+        assert_eq!(order_for(&w, ""), vec![0, 1, 2, 3]);
+        assert_eq!(order_for(&w, "   "), vec![0, 1, 2, 3]);
+        // Whole-word title hits first (ties in rank order), then the
+        // substring hit; a link-only hit would come last.
+        assert_eq!(order_for(&w, "robot"), vec![0, 2, 3]);
+        // Every word must appear somewhere.
+        assert_eq!(order_for(&w, "robot cat"), vec![3]);
+        assert!(order_for(&w, "dog").is_empty());
+        // Case does not matter; the link counts.
+        assert_eq!(order_for(&w, "SMBC/2"), vec![1]);
+    }
+
+    #[test]
+    fn the_flight_starts_where_it_is_and_lands_where_it_goes() {
+        assert_eq!(ease_out_quint(0.0), 0.0);
+        assert_eq!(ease_out_quint(1.0), 1.0);
+        assert_eq!(ease_out_quint(2.0), 1.0);
+        let mid = ease_out_quint(0.5);
+        assert!(mid > 0.9 && mid < 1.0, "fast out of the gate: {mid}");
+        let a = vec2f(0.0, 0.0);
+        let b = vec2f(4.0, -2.0);
+        assert_eq!(lerp2(a, b, 0.0), a);
+        assert_eq!(lerp2(a, b, 1.0), b);
+        let half = lerp2(a, b, 0.5);
+        assert!((half.x - 2.0).abs() < 1e-6 && (half.y + 1.0).abs() < 1e-6);
+        // Monotone: later is never further from the target.
+        let mut last = 0.0f32;
+        for i in 1..=20 {
+            let e = ease_out_quint(i as f32 / 20.0);
+            assert!(e >= last);
+            last = e;
+        }
     }
 }

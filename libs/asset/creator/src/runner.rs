@@ -123,21 +123,36 @@ pub fn translate(
     Ok((kind, request, wire))
 }
 
-/// Generate one thing and, when its kind publishes, put it in the catalog.
-/// Blocking; run from a worker thread. `progress` sees (note, permille).
-pub fn generate_and_publish(
+/// What one generation produced, before anything is published: the
+/// artifact bytes (when the kind makes one), the text answer (for text
+/// kinds), and the node that did the work.
+#[derive(Clone, Debug)]
+pub struct GeneratedBytes {
+    pub kind: &'static GenKind,
+    pub request: GenRequest,
+    pub artifact: Option<makepad_ai_hub::client::ArtifactBytes>,
+    pub text: Option<String>,
+    /// The node's base url, for a card that says where it ran.
+    pub node: String,
+}
+
+/// Generate one thing and hand back what came out — no catalog, no store.
+/// The desktop assistant's `gen` service uses this: the picture goes to
+/// disk and into the photo wall, never through the asset store. Blocking;
+/// run from a worker thread. `progress` sees (note, permille).
+pub fn generate_bytes(
     kind_name: &str,
     body: &Value,
     seed_fallback: u64,
-    target: &PublishTarget,
     cancel: &Arc<AtomicBool>,
     progress: &mut dyn FnMut(&str, u16),
-) -> Result<Generated, String> {
+) -> Result<GeneratedBytes, String> {
     let (kind, request, wire) = translate(kind_name, body, seed_fallback)?;
     let domain = kind.domain;
     let parsed_domain =
         domain_of(domain).ok_or_else(|| format!("unroutable domain {domain}"))?;
     let service = pick_node(domain).map_err(|e| e.to_string())?;
+    let node = service.base_url().to_string();
     let remote = service
         .request(parsed_domain, &wire)
         .map_err(|e| e.to_string())?;
@@ -167,12 +182,30 @@ pub fn generate_and_publish(
     };
 
     if kind.catalog().is_none() {
-        return Ok(Generated { asset_id: None, revision: None, text });
+        return Ok(GeneratedBytes { kind, request, artifact: None, text, node });
     }
     let artifact_ref = artifact_ref.ok_or("the job finished without an artifact")?;
     let bytes = service
         .fetch_artifact(&artifact_ref.id)
         .map_err(|e| format!("artifact fetch: {e}"))?;
+    Ok(GeneratedBytes { kind, request, artifact: Some(bytes), text, node })
+}
+
+/// Generate one thing and, when its kind publishes, put it in the catalog.
+/// Blocking; run from a worker thread. `progress` sees (note, permille).
+pub fn generate_and_publish(
+    kind_name: &str,
+    body: &Value,
+    seed_fallback: u64,
+    target: &PublishTarget,
+    cancel: &Arc<AtomicBool>,
+    progress: &mut dyn FnMut(&str, u16),
+) -> Result<Generated, String> {
+    let generated = generate_bytes(kind_name, body, seed_fallback, cancel, progress)?;
+    let GeneratedBytes { kind, request, artifact, text, .. } = generated;
+    let Some(bytes) = artifact else {
+        return Ok(Generated { asset_id: None, revision: None, text });
+    };
     progress("publishing", 950);
 
     let cache = std::env::temp_dir().join("makepad-creator-publish");

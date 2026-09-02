@@ -9,9 +9,12 @@
 //! the picture; `show` glides the camera onto one.
 
 use crate::library;
+use makepad_ai_services::wire::ToolResult;
 use makepad_image_tiles::library::ItemId;
 use makepad_image_tiles::{Library, TileGrid, TileGridAction};
 use makepad_widgets::*;
+use std::path::Path;
+use std::sync::mpsc::Receiver;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -23,6 +26,21 @@ script_mod! {
         width: Fill
         height: Fill
         flow: Down
+        // The as-you-type search: every keystroke re-hangs the wall to the
+        // matches, the pictures flying to their new places.
+        search_row := View{
+            width: Fill
+            height: Fit
+            flow: Right
+            align: Align{y: 0.5}
+            padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
+            spacing: 8
+            search := TextInput{
+                width: Fill
+                height: Fit
+                empty_text: "Search the wall  (⌘F, Esc clears)"
+            }
+        }
         grid_wrap := View{
             width: Fill
             height: Fill
@@ -63,9 +81,56 @@ pub struct PhotosView {
     library_root: String,
     #[rust]
     status_text: String,
+    /// Pictures being baked into the wall right now (`photos.add`), each
+    /// answered through `reply` when its bake finishes.
+    #[rust]
+    adds: Vec<PendingAdd>,
+    /// Where a finished `add` sends its result: the standalone window's
+    /// port, or the module host's reply sink. Set by whoever seats the view.
+    #[rust]
+    reply: Option<Box<dyn Fn(ToolResult)>>,
+    /// The picture to glide onto once the wall has re-opened after an add
+    /// — the item id only exists after the reload.
+    #[rust]
+    show_when_opened: Option<String>,
+}
+
+/// One `photos.add` in flight: the bake runs on its own thread (the tape
+/// encoder is blocking) and reports here.
+pub struct PendingAdd {
+    call_id: String,
+    path: String,
+    done: Receiver<Result<makepad_image_tiles::bake::BakeSummary, String>>,
 }
 
 impl PhotosView {
+    /// Filter the wall to `query` as the person (or the assistant) types:
+    /// the matches fly into a fresh packing, the rest shrink away, an
+    /// empty query brings everything back. The box shows the query too.
+    pub fn set_query(&mut self, cx: &mut Cx, query: &str) {
+        let input = self.view.text_input(cx, ids!(search));
+        if input.text().trim() != query.trim() {
+            input.set_text(cx, query.trim());
+        }
+        self.apply_query(cx, query);
+    }
+
+    /// The query the wall is filtered by right now.
+    pub fn query(&self, cx: &mut Cx) -> String {
+        self.view.widget(cx, ids!(grid)).borrow::<TileGrid>().map(|g| g.query().to_string()).unwrap_or_default()
+    }
+
+    fn apply_query(&mut self, cx: &mut Cx, query: &str) {
+        let counts = self.view.widget(cx, ids!(grid)).borrow_mut::<TileGrid>().map(|mut grid| {
+            grid.set_query(cx, query);
+            (grid.visible_count(), grid.count(), grid.query().to_string())
+        });
+        if let Some((shown, total, q)) = counts {
+            let text = filter_status(shown, total, &q, &self.library_root);
+            self.set_status(cx, text);
+        }
+    }
+
     /// Which collection to open. Before the first event only.
     pub fn set_collection(&mut self, collection: Option<String>) {
         self.collection = collection;
@@ -113,6 +178,14 @@ impl PhotosView {
         search_items(&items, query)
     }
 
+    /// The picture whose link is exactly `link` (an added file's path).
+    fn search_link(&self, cx: &mut Cx, link: &str) -> Option<ItemId> {
+        self.view
+            .widget(cx, ids!(grid))
+            .borrow::<TileGrid>()
+            .and_then(|grid| grid.items().into_iter().find(|(_, _, l)| l == link).map(|(id, _, _)| id))
+    }
+
     /// Glide onto one picture; false when the id is not on the wall.
     pub fn show(&mut self, cx: &mut Cx, item: ItemId) -> bool {
         self.view
@@ -132,6 +205,109 @@ impl PhotosView {
 
     pub fn pictures(&self) -> usize {
         self.pictures
+    }
+
+    /// How many pictures the wall shows under the current filter.
+    pub fn visible(&self, cx: &mut Cx) -> usize {
+        self.view.widget(cx, ids!(grid)).borrow::<TileGrid>().map(|g| g.visible_count()).unwrap_or(0)
+    }
+
+    /// Where finished adds report. The standalone window routes it to its
+    /// port; the module host to its reply sink.
+    pub fn set_reply(&mut self, reply: Box<dyn Fn(ToolResult)>) {
+        self.reply = Some(reply);
+    }
+
+    /// The library this wall is showing, if any.
+    pub fn library_root(&self) -> &str {
+        &self.library_root
+    }
+
+    /// Bake one picture on disk into the open library, off the UI thread;
+    /// the wall re-opens and glides onto it when the bake reports. The
+    /// answer goes out through `reply` — `Err` here means nothing was
+    /// started and the caller answers now.
+    pub fn start_add(&mut self, call_id: &str, path: &Path, title: &str) -> Result<(), String> {
+        if self.library_root.is_empty() {
+            return Err("no library is open on this wall".to_string());
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (call_id, path, title);
+            Err("adding pictures needs the native app".to_string())
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use makepad_image_tiles::bake::{bake, BakeOptions, Source};
+            use makepad_widgets::makepad_platform::thread::SignalToUI;
+            let root = std::path::PathBuf::from(&self.library_root);
+            let path_text = path.to_string_lossy().to_string();
+            let source = Source { url: path_text.clone(), title: title.to_string(), link: path_text.clone() };
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::Builder::new()
+                .name("photos-add".into())
+                .spawn(move || {
+                    // One picture: one fetch, one encode. The library's own
+                    // failed items stay failed — an add is about this file.
+                    let options = BakeOptions { fetch_threads: 1, encode_threads: 1, retry_failed: false };
+                    let result = bake(&root, &[source], &options, &mut |line| log!("photos add: {line}"));
+                    let _ = tx.send(result);
+                    SignalToUI::set_ui_signal();
+                })
+                .map_err(|e| format!("could not start the bake: {e}"))?;
+            self.adds.push(PendingAdd { call_id: call_id.to_string(), path: path_text, done: rx });
+            Ok(())
+        }
+    }
+
+    /// Finished adds: re-open the wall, remember which picture to show,
+    /// and answer the call.
+    fn poll_adds(&mut self, cx: &mut Cx) {
+        if self.adds.is_empty() {
+            return;
+        }
+        let mut finished = Vec::new();
+        self.adds.retain(|add| match add.done.try_recv() {
+            Ok(result) => {
+                finished.push((add.call_id.clone(), add.path.clone(), result));
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                finished.push((add.call_id.clone(), add.path.clone(), Err("the bake thread died".to_string())));
+                false
+            }
+        });
+        for (call_id, path, result) in finished {
+            let answer = match result {
+                Ok(summary) if summary.baked > 0 || summary.skipped > 0 => {
+                    self.show_when_opened = Some(path.clone());
+                    let root = Library::new(&self.library_root);
+                    self.open_library(cx, root);
+                    ToolResult::ok(&call_id, format!("{path} is on the wall now; showing it"), "added")
+                        .with_data(format!("{{\"path\":{}}}", makepad_strict_json::s(path.clone()).to_json()))
+                }
+                Ok(_) => ToolResult::failed(&call_id, format!("{path} could not be baked (not a picture the wall can decode?)")),
+                Err(e) => ToolResult::failed(&call_id, format!("adding {path} failed: {e}")),
+            };
+            match &self.reply {
+                Some(reply) => reply(answer),
+                None => log!("photos: an add finished with nobody to answer ({call_id})"),
+            }
+        }
+    }
+}
+
+/// The status line for a filtered wall: how many of the pictures show,
+/// and for which words; the plain count with the library when there is
+/// no query.
+pub fn filter_status(shown: usize, total: usize, query: &str, root: &str) -> String {
+    if query.trim().is_empty() {
+        format!("{total} pictures — {root}")
+    } else if shown == 0 {
+        format!("nothing of {total} matches · {}", query.trim())
+    } else {
+        format!("{shown} of {total} · {}", query.trim())
     }
 }
 
@@ -156,8 +332,27 @@ pub fn search_items(items: &[(ItemId, String, String)], query: &str) -> Vec<(Ite
 impl Widget for PhotosView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.ensure_open(cx);
+        self.poll_adds(cx);
+        // ⌘F (or Ctrl+F, or a bare `/` while the wall has the keys) puts the
+        // caret in the search box; Esc in the box clears the filter.
+        if let Event::KeyDown(ke) = event {
+            let input = self.view.text_input(cx, ids!(search));
+            let boxed = cx.has_key_focus(input.area());
+            let find = ke.key_code == KeyCode::KeyF && (ke.modifiers.logo || ke.modifiers.control);
+            let slash = ke.key_code == KeyCode::Slash && !boxed && !ke.modifiers.logo && !ke.modifiers.control;
+            if find || slash {
+                input.set_key_focus(cx);
+            }
+        }
         self.view.handle_event(cx, event, scope);
         if let Event::Actions(actions) = event {
+            let input = self.view.text_input(cx, ids!(search));
+            if let Some(text) = input.changed(actions) {
+                self.apply_query(cx, &text);
+            }
+            if input.escaped(actions) {
+                self.set_query(cx, "");
+            }
             for action in actions {
                 let Some(widget_action) = action.as_widget_action() else { continue };
                 match widget_action.cast::<TileGridAction>() {
@@ -165,6 +360,18 @@ impl Widget for PhotosView {
                         self.pictures = count;
                         let text = format!("{count} pictures — {}", self.library_root);
                         self.set_status(cx, text);
+                        // A re-opened wall (an add) keeps the words in the box.
+                        let kept = self.view.text_input(cx, ids!(search)).text();
+                        if !kept.trim().is_empty() {
+                            self.apply_query(cx, &kept);
+                        }
+                        // A freshly added picture: the wall knows it now.
+                        if let Some(path) = self.show_when_opened.take() {
+                            let wanted = self.search_link(cx, &path);
+                            if let Some(item) = wanted {
+                                self.show(cx, item);
+                            }
+                        }
                     }
                     TileGridAction::Opened { error: Some(e), .. } => {
                         self.pictures = 0;
@@ -207,6 +414,13 @@ mod tests {
         assert!(search_items(&items(), "   ").is_empty());
         // The link counts too.
         assert_eq!(search_items(&items(), "smbc/2")[0].0, 2);
+    }
+
+    #[test]
+    fn the_status_line_counts_the_filter() {
+        assert_eq!(filter_status(293, 293, "", "/lib"), "293 pictures — /lib");
+        assert_eq!(filter_status(12, 293, " robots ", "/lib"), "12 of 293 · robots");
+        assert_eq!(filter_status(0, 293, "dog", "/lib"), "nothing of 293 matches · dog");
     }
 
     #[test]
