@@ -215,33 +215,47 @@ pub enum DeckLoad {
 /// Number of stem lanes a separated track carries.
 pub const STEM_COUNT: usize = crate::music_dsp::STEM_COUNT;
 
-/// Pitch slider travel. The narrow range is the everyday one; the wide range
-/// is for pulling a stubborn track into line.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum PitchRange {
-    #[default]
-    Narrow,
-    Wide,
+/// How far the tempo fader reaches: one rung of `PITCH_RANGES`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PitchRange {
+    rung: u8,
 }
+
+impl Default for PitchRange {
+    fn default() -> PitchRange {
+        PitchRange { rung: PITCH_RANGE_DEFAULT }
+    }
+}
+
+/// How far the tempo fader reaches, rung by rung. Two was never enough:
+/// a beatmatch wants a few percent under the hand, a mash-up wants half
+/// the record.
+pub const PITCH_RANGES: [f64; 8] = [0.04, 0.06, 0.08, 0.10, 0.16, 0.24, 0.50, 0.90];
+const PITCH_RANGE_LABELS: [&str; 8] =
+    ["±4%", "±6%", "±8%", "±10%", "±16%", "±24%", "±50%", "±90%"];
+/// The everyday rung, and what the tab has always opened on.
+const PITCH_RANGE_DEFAULT: u8 = 2;
 
 impl PitchRange {
     pub fn fraction(self) -> f64 {
-        match self {
-            PitchRange::Narrow => 0.08,
-            PitchRange::Wide => 0.16,
-        }
+        PITCH_RANGES[self.rung as usize]
     }
+
     pub fn label(self) -> &'static str {
-        match self {
-            PitchRange::Narrow => "±8%",
-            PitchRange::Wide => "±16%",
-        }
+        PITCH_RANGE_LABELS[self.rung as usize]
     }
-    pub fn toggled(self) -> PitchRange {
-        match self {
-            PitchRange::Narrow => PitchRange::Wide,
-            PitchRange::Wide => PitchRange::Narrow,
-        }
+
+    /// One rung wider or narrower. It SATURATES rather than wrapping: a
+    /// ladder that rolls from ±90% round to ±4% under a running mix is a
+    /// trap, not a convenience.
+    pub fn stepped(self, wider: bool) -> PitchRange {
+        let last = (PITCH_RANGES.len() - 1) as u8;
+        let rung = if wider {
+            (self.rung + 1).min(last)
+        } else {
+            self.rung.saturating_sub(1)
+        };
+        PitchRange { rung }
     }
 }
 
@@ -752,7 +766,7 @@ impl Default for DeckState {
             rate_from_lock: false,
             bend: 0.0,
             pitch: 0.0,
-            pitch_range: PitchRange::Narrow,
+            pitch_range: PitchRange::default(),
             synced: false,
             ext_sync: false,
             auto_opt_out: false,
@@ -2404,13 +2418,23 @@ impl DeckEngine {
         self.set_pitch(deck, want / range)
     }
 
-    pub fn toggle_pitch_range(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+    /// Step the fader's reach one rung wider or narrower.
+    ///
+    /// It emits nothing, and that is the whole point: the tempo a deck is
+    /// running at is not the fader's to change, so choosing how far the
+    /// fader reaches must never move the music. The old toggle re-expressed
+    /// the standing pitch in the new range through `set_pitch`, which
+    /// clamped the tempo whenever the range narrowed -- with a ladder, most
+    /// presses -- and, because `set_pitch` opts a non-master out of the
+    /// lock, silently unlocked a synced deck every time the button was
+    /// pressed.
+    ///
+    /// A tempo already outside the new range simply pins the fader at its
+    /// end until the hand moves it.
+    pub fn step_pitch_range(&mut self, deck: DeckId, wider: bool) -> Vec<DeckCmd> {
         let state = self.deck_mut(deck);
-        let range = state.pitch_range.toggled();
-        state.pitch_range = range;
-        // Keep the audible tempo: re-express the same pitch in the new range.
-        let fraction = (state.pitch / range.fraction()).clamp(-1.0, 1.0);
-        self.set_pitch(deck, fraction)
+        state.pitch_range = state.pitch_range.stepped(wider);
+        Vec::new()
     }
 
     /// Drop the pitch back to the track's own tempo.
@@ -3860,7 +3884,7 @@ mod tests {
         let a = narrow.deck(DeckId::A).rate;
 
         let mut wide = DeckEngine::new();
-        wide.toggle_pitch_range(DeckId::A);
+        wide.step_pitch_range(DeckId::A, true);
         assert_ne!(
             wide.deck(DeckId::A).pitch_range.fraction(),
             narrow.deck(DeckId::A).pitch_range.fraction(),
@@ -4369,6 +4393,72 @@ mod tests {
         assert_eq!(e.cue_led(DeckId::A), CueLed::Dark, "nothing to say while it plays");
         e.deck_mut(DeckId::A).cue_held = true;
         assert_eq!(e.cue_led(DeckId::A), CueLed::Solid, "except while it is being auditioned");
+    }
+
+    // ---- how far the fader reaches ---------------------------------------
+
+    #[test]
+    fn the_range_ladder_saturates_rather_than_wrapping_under_a_running_mix() {
+        let mut e = DeckEngine::new();
+        assert_eq!(e.deck(DeckId::A).pitch_range.label(), "±8%", "the everyday rung");
+        for _ in 0..20 {
+            e.step_pitch_range(DeckId::A, true);
+        }
+        assert_eq!(e.deck(DeckId::A).pitch_range.label(), "±90%", "and it stops at the widest");
+        for _ in 0..20 {
+            e.step_pitch_range(DeckId::A, false);
+        }
+        assert_eq!(e.deck(DeckId::A).pitch_range.label(), "±4%", "and at the narrowest");
+    }
+
+    #[test]
+    fn choosing_the_range_never_moves_the_music() {
+        // Either direction. The old toggle held the tempo when widening and
+        // clamped it when narrowing, which with a ladder is most presses.
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        e.set_pitch(DeckId::A, 1.0);
+        let running_at = e.deck(DeckId::A).rate;
+        for wider in [true, false, false, false, false, true, true] {
+            let cmds = e.step_pitch_range(DeckId::A, wider);
+            assert!(cmds.is_empty(), "a range press sends nothing");
+            assert_eq!(
+                e.deck(DeckId::A).rate, running_at,
+                "the tempo is not the fader's to change: {} at {}",
+                e.deck(DeckId::A).rate,
+                e.deck(DeckId::A).pitch_range.label()
+            );
+        }
+    }
+
+    #[test]
+    fn choosing_the_range_does_not_unlock_a_synced_deck() {
+        // It used to go through `set_pitch`, which opts a non-master out of
+        // the lock -- so pressing the range button silently unlocked it.
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        load_analysed(&mut e, DeckId::B, 2, 124.0, 0.0);
+        e.deck_mut(DeckId::A).playing = true;
+        e.sync(DeckId::B, true);
+        assert!(e.deck(DeckId::B).synced);
+        e.step_pitch_range(DeckId::B, true);
+        assert!(e.deck(DeckId::B).synced, "still locked");
+        assert!(!e.deck(DeckId::B).auto_opt_out, "and not opted out");
+    }
+
+    #[test]
+    fn a_tempo_outside_the_new_range_pins_the_fader_without_being_dragged_back() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        e.step_pitch_range(DeckId::A, true);
+        e.step_pitch_range(DeckId::A, true);
+        e.set_pitch(DeckId::A, 1.0);
+        let fast = e.deck(DeckId::A).rate;
+        assert!(fast > 1.1, "well outside the narrow rungs: {fast}");
+        for _ in 0..6 {
+            e.step_pitch_range(DeckId::A, false);
+        }
+        assert_eq!(e.deck(DeckId::A).rate, fast, "the record keeps running at the tempo it had");
     }
 
     fn rate_of(cmds: &[DeckCmd], want: DeckId) -> Option<f64> {
@@ -5010,10 +5100,13 @@ mod tests {
         let mut engine = DeckEngine::new();
         engine.set_pitch(DeckId::A, 1.0);
         assert!((engine.deck(DeckId::A).rate - 1.08).abs() < 1e-9, "±8% at full travel");
-        // Widening the range keeps the audible tempo.
-        engine.toggle_pitch_range(DeckId::A);
-        assert_eq!(engine.deck(DeckId::A).pitch_range, PitchRange::Wide);
+        // Choosing the range keeps the audible tempo, in BOTH directions
+        // now: it moves no music at all.
+        engine.step_pitch_range(DeckId::A, true);
+        assert_eq!(engine.deck(DeckId::A).pitch_range.label(), "±10%");
         assert!((engine.deck(DeckId::A).rate - 1.08).abs() < 1e-9, "tempo held");
+        engine.step_pitch_range(DeckId::A, true);
+        assert_eq!(engine.deck(DeckId::A).pitch_range.label(), "±16%");
         // …and the slider now has headroom to 16%.
         engine.set_pitch(DeckId::A, 1.0);
         assert!((engine.deck(DeckId::A).rate - 1.16).abs() < 1e-9);

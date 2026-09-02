@@ -24568,8 +24568,11 @@ p2 {}
                 let cmds = self.decks.reset_key_shift(deck);
                 self.run_deck_cmds(cx, cmds);
             }
-            if refs.range.clicked(actions) {
-                let cmds = self.decks.toggle_pitch_range(deck);
+            // The ladder: press steps the fader's reach wider, shift steps
+            // it narrower. It moves no music, so there is nothing to send --
+            // only the fader's own scale and its label change.
+            if let Some(modifiers) = refs.range.clicked_modifiers(actions) {
+                let cmds = self.decks.step_pitch_range(deck, !modifiers.shift);
                 self.run_deck_cmds(cx, cmds);
                 self.sync_deck_controls(cx);
             }
