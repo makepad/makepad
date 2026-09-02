@@ -11,3 +11,13 @@ makepad-error-log = { path = "../error_log", version = "1.0.0" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 makepad-objc-sys = { path = "../objc-sys", version = "1.0.0" }
+
+# The build script fetches the CEF distribution itself when none is
+# present (build_support/cef_dist.rs): HTTPS with rustls (no system TLS),
+# the bz2 decoder with its bundled C source, tar, and a small sha1 —
+# so a clean clone builds the browser on every host with no shell around.
+[build-dependencies]
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+bzip2 = { version = "0.6", default-features = false, features = ["bzip2-sys"] }
+tar = "0.4"
+sha1_smol = "1"
