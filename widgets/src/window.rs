@@ -299,7 +299,7 @@ script_mod! {
 
 }
 
-#[derive(Script, ScriptHook, Widget)]
+#[derive(Script, Widget)]
 pub struct Window {
     #[source]
     source: ScriptObjectRef,
@@ -312,6 +312,13 @@ pub struct Window {
     demo: bool,
     #[live]
     show_caption_bar: bool,
+    /// Whether this widget should create its native surface during initial
+    /// construction. The stable window id and widget tree still exist when
+    /// false, so the owner can explicitly create the surface later.
+    #[live(true)]
+    create_on_start: bool,
+    #[rust]
+    initial_create_policy_applied: bool,
     #[rust]
     demo_next_frame: NextFrame,
     #[live]
@@ -405,6 +412,29 @@ pub struct Window {
     draw_state: DrawStateWrap<DrawState>,
     #[rust]
     initialized: bool,
+}
+
+fn apply_initial_create_policy(
+    cx: &mut Cx,
+    window: &WindowHandle,
+    create_on_start: bool,
+) -> bool {
+    !create_on_start && window.cancel_initial_create(cx)
+}
+
+impl ScriptHook for Window {
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        if !self.create_on_start && !self.initial_create_policy_applied {
+            apply_initial_create_policy(vm.cx_mut(), &self.window.handle, false);
+            self.initial_create_policy_applied = true;
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1368,6 +1398,16 @@ mod tests {
             1.0
         );
     }
+
+    #[test]
+    fn window_can_defer_its_initial_native_surface() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let window = WindowHandle::new(&mut cx);
+
+        assert!(!apply_initial_create_policy(&mut cx, &window, true));
+        assert!(apply_initial_create_policy(&mut cx, &window, false));
+        assert!(!apply_initial_create_policy(&mut cx, &window, false));
+    }
 }
 
 impl WindowRef {
@@ -1737,6 +1777,16 @@ impl Widget for Window {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        // A deferred window has no drawable yet. In particular, web has one
+        // canvas for all window passes, so submitting this pass before an
+        // explicit create would paint an uncreated secondary window over the
+        // primary canvas.
+        let window_id = self.window.handle.window_id();
+        if !self.create_on_start
+            && (!cx.windows.is_valid(window_id) || !cx.windows[window_id].is_created)
+        {
+            return DrawStep::done();
+        }
         if self.draw_state.begin(cx, DrawState::Drawing) {
             if self.begin(cx).is_not_redrawing() {
                 self.draw_state.end();
