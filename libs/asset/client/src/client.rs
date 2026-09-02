@@ -26,6 +26,7 @@ use crate::dto::{
 };
 use crate::error::{ClientError, ClientResult};
 use crate::http::HttpLimits;
+use crate::location::{BaseUrl, ClientLocation, ClientMode};
 use crate::util::now_ms;
 use crate::wire;
 use makepad_asset_data::{
@@ -40,6 +41,9 @@ use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct ClientConfig {
+    /// `None` selects the native endpoints passed to [`AssetClient::connect`].
+    /// The static constructor records its validated URL here.
+    pub location: Option<ClientLocation>,
     pub cache_root: PathBuf,
     pub cache: CacheBudgets,
     pub http: HttpLimits,
@@ -59,6 +63,7 @@ pub struct ClientConfig {
 impl ClientConfig {
     pub fn new(cache_root: impl Into<PathBuf>) -> Self {
         Self {
+            location: None,
             cache_root: cache_root.into(),
             cache: CacheBudgets::default_v1(),
             http: HttpLimits::default_v1(),
@@ -69,7 +74,20 @@ impl ClientConfig {
         }
     }
 
+    /// Select the credential-free portable HTTP + memory-cache pieces.
+    /// Static index/session execution is implemented by the next feature
+    /// lane, so connecting this configuration currently returns a typed
+    /// [`ClientError::Unavailable`].
+    pub fn static_site(base_url: BaseUrl) -> Self {
+        let mut config = Self::new(PathBuf::new());
+        config.location = Some(ClientLocation::StaticSite(base_url));
+        config
+    }
+
     fn validate(&self) -> ClientResult<()> {
+        if matches!(self.location, Some(ClientLocation::StaticSite(_))) && self.token.is_some() {
+            return Err(ClientError::InvalidInput { what: "static site bearer token" });
+        }
         self.cache.validate()?;
         self.http.validate()?;
         if self.max_transfer_attempts == 0 || self.blob_body_deadline_ms == 0 {
@@ -259,6 +277,12 @@ impl AssetClient {
         expected_server: Option<[u8; 16]>,
     ) -> ClientResult<AssetClient> {
         config.validate()?;
+        if matches!(config.location, Some(ClientLocation::StaticSite(_))) {
+            return Err(ClientError::Unavailable {
+                capability: "static_site_session",
+                mode: ClientMode::StaticWeb,
+            });
+        }
         let cache = ContentCache::open(&config.cache_root, config.cache, now_ms())?;
         let api = Api::with_keep_alive(
             endpoints,

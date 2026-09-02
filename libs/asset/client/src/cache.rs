@@ -519,6 +519,14 @@ impl ContentCache {
         Ok(())
     }
 
+    /// Remove one committed object while retaining any pin marker as intent
+    /// for a future verified re-admission.
+    pub fn remove(&mut self, digest: &[u8; 32]) -> ClientResult<bool> {
+        let existed = self.index.contains_key(digest);
+        self.remove_object(digest)?;
+        Ok(existed)
+    }
+
     // ---- commit paths ------------------------------------------------------
 
     /// Commit in-memory bytes (manifests, thumbnails). Verifies against

@@ -18,6 +18,7 @@ use crate::error::{ClientError, ClientResult};
 use crate::http::{self, HttpLimits, Request, Response};
 use crate::json::{self, Value};
 use crate::wire;
+pub use crate::location::ApiEndpoints;
 use makepad_asset_data::{
     AssetAlias, AssetId, AssetKind, AssetRevisionId, AssetRevisionRef, BlobId, ClientProfile,
     DerivedVariantId, DeviceTier, FileRole, GameAlias, GameId, GameRevisionId, ImportManifest,
@@ -35,12 +36,6 @@ const MAX_REFUSAL_BODY_BYTES: u64 = 16 * 1024;
 pub const MAX_SEARCH_LIMIT: u32 = 100;
 /// Listing page cap.
 pub const MAX_LIST_LIMIT: u64 = 500;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ApiEndpoints {
-    pub control: SocketAddr,
-    pub data: SocketAddr,
-}
 
 /// One item of an ordered batch pull. `max_bytes` is the caller's own cap —
 /// a thumbnail batch says "nothing over 512 KB here", and the server refuses

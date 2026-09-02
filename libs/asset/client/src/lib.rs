@@ -34,40 +34,71 @@
 //! lives in [`wire`] — the single coordination surface with the server
 //! process (`libs/asset/store`).
 
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub mod api;
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub mod cache;
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub mod client;
+#[cfg(any(target_arch = "wasm32", feature = "web"))]
+#[path = "portable/client.rs"]
+pub mod client;
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
+pub mod discovery;
+#[cfg(any(target_arch = "wasm32", feature = "web"))]
+#[path = "portable/discovery.rs"]
 pub mod discovery;
 pub mod dto;
 pub mod error;
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub mod http;
 // The module moved; this re-export keeps every dependent's `makepad_asset_client::json::Value` path compiling.
 pub mod json { pub use makepad_strict_json::*; }
+pub mod location;
+pub mod transport;
+pub mod cache_store;
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub mod side_channels;
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub mod publish;
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub mod resolver;
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub mod runtime;
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub mod session;
+#[cfg(any(target_arch = "wasm32", feature = "web"))]
+#[path = "portable/session.rs"]
+pub mod session;
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub mod subscriber;
 pub mod util;
 pub mod wire;
 
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub use api::{
-    AnnotationUpload, Api, ApiEndpoints, BatchFlow, BatchFrame, BatchItem, BlobHead, BlobRefAdmission, BlobRefRow, BlobRefsPage, CatalogQuery,
+    AnnotationUpload, Api, BatchFlow, BatchFrame, BatchItem, BlobHead, BlobRefAdmission, BlobRefRow, BlobRefsPage, CatalogQuery,
     ChatAttachment, ChatCreateRequest,
     ChatSendRequest, GcRequest, OperationAliasExpect, OperationCreateRequest,
     OperationFinalizeRequest, OperationInputRef, OperationOutputFile, OperationPublicationRef,
     PipelineStageSpec, SourceCollectionRegistered, default_stage_weight, stage_ref,
     DEFAULT_STAGE_WEIGHTS, MAX_LIST_LIMIT, MAX_SEARCH_LIMIT, NEUTRAL_STAGE_WEIGHT,
 };
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub use cache::{CacheBudgets, CacheStats, ContentCache, PartialWriter};
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub use client::{
     AssetClient, AssetsPage, CatalogEventCursor, CatalogEventsPage, CatalogPage, ClientConfig,
     PageCursor, SourceCollectionsCursor, SourceCollectionsPage,
 };
+#[cfg(any(target_arch = "wasm32", feature = "web"))]
+pub use client::{AssetClient, CacheBudgets, CacheStats, ClientConfig, HttpLimits};
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub use discovery::{
     bind_reuse_udp, content_client_caps, Beacon, DiscoveredServer, DiscoveryListener, MAX_ENTRIES,
 };
+#[cfg(any(target_arch = "wasm32", feature = "web"))]
+pub use discovery::{content_client_caps, Beacon};
 pub use dto::{
     ChatProviderLocality,
     AliasDto, AliasStatusDto, AnnotateBacklogDto, AnnotateSummaryDto, AnnotationDto,
@@ -91,22 +122,45 @@ pub use dto::{
     SourceCollectionRowDto, SourceCollectionsPageDto, StageOnFailDto, aggregate_permille,
 };
 pub use error::{ClientError, ClientResult};
+pub use location::{ApiEndpoints, BaseUrl, ClientLocation, ClientMode};
+pub use transport::{
+    OwnedRequest, OwnedResponse, Transport, TransportCompletion, TransportError, TransportId,
+    TransportMethod,
+};
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
+pub use transport::TcpHttpTransport;
+#[cfg(any(target_arch = "wasm32", feature = "web"))]
+pub use transport::PlatformHttpTransport;
+pub use cache_store::{BlobContent, CacheStore, CacheStoreStats, MemoryCacheStore};
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
+pub use cache_store::FsCacheStore;
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub use http::HttpLimits;
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub use publish::{
     PublishBundle, PublishBundleFile, PublishFile, PublishProvenance, PublishRequest,
     PublishRights, PublishStage, PublishStats, PublishThumbnail, Published, PublishedBundle,
     PublishedFile,
 };
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub use session::{
     SessionConfig, SessionConnector, SessionHandles, SessionMsg, SessionStatus,
 };
+#[cfg(any(target_arch = "wasm32", feature = "web"))]
+pub use session::{
+    CatalogSubscriberConfig, RuntimeConfig, SessionConfig, SessionConnector, SessionMsg,
+    SessionStatus,
+};
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub use resolver::{
     select_file, ClosureBudget, ResolvedFile, ResolvedThumbnail, TierPreference,
 };
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub use runtime::{
     ClientEvent, ClientOutput, ClientRequest, ClientRuntime, Lane, RequestId, ResourceSlot,
     ResourceState, RuntimeConfig, StageEvent, SubmitOptions,
 };
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 pub use subscriber::{
     CatalogSubscriber, CatalogSubscriberConfig, CatalogSubscriptionEvent,
 };

@@ -163,6 +163,9 @@ pub struct Request<'a> {
     pub range_start: Option<u64>,
     /// Exact strong ETag to gate the range on, sent as `If-Range: "<v>"`.
     pub if_range: Option<&'a str>,
+    /// Additional validated request headers. The native API leaves this
+    /// empty; it exists for the owned completion transport adapter.
+    pub extra_headers: &'a [(String, String)],
     /// Request body (POST/PUT only).
     pub body: Option<&'a [u8]>,
     /// Content-Type sent with a body.
@@ -187,6 +190,7 @@ impl<'a> Request<'a> {
             bearer: None,
             range_start: None,
             if_range: None,
+            extra_headers: &[],
             body: None,
             body_content_type: "application/json",
             body_deadline_ms: None,
@@ -223,6 +227,9 @@ pub struct ContentRange {
 #[derive(Clone, Debug)]
 pub struct ResponseHead {
     pub status: u16,
+    /// All response headers with ASCII-lowercase names. Values are trimmed
+    /// but otherwise retain their wire spelling.
+    pub headers: Vec<(String, String)>,
     /// Declared body length. Always present on accepted responses; for HEAD
     /// it describes the body a GET would carry.
     pub content_length: u64,
@@ -500,8 +507,21 @@ fn call_once<'a>(
     if let Some(tag) = req.if_range {
         out.extend_from_slice(format!("If-Range: \"{tag}\"\r\n").as_bytes());
     }
+    let mut has_extra_content_type = false;
+    for (name, value) in req.extra_headers {
+        check_extra_header(name, value)?;
+        if name.eq_ignore_ascii_case("content-type") {
+            has_extra_content_type = true;
+        }
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(b": ");
+        out.extend_from_slice(value.as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
     if let Some(body) = req.body {
-        out.extend_from_slice(format!("Content-Type: {}\r\n", req.body_content_type).as_bytes());
+        if !has_extra_content_type {
+            out.extend_from_slice(format!("Content-Type: {}\r\n", req.body_content_type).as_bytes());
+        }
         out.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
     }
     out.extend_from_slice(if pool.is_some() {
@@ -657,6 +677,22 @@ fn check_target(target: &str) -> ClientResult<()> {
     Ok(())
 }
 
+fn check_extra_header(name: &str, value: &str) -> ClientResult<()> {
+    if name.is_empty()
+        || name.len() > 128
+        || !name.bytes().all(token_byte_ok)
+        || matches!(name.to_ascii_lowercase().as_str(), "host" | "connection" | "content-length")
+    {
+        return Err(ClientError::InvalidInput { what: "request header name" });
+    }
+    if value.len() > MAX_HEADER_LINE
+        || !value.bytes().all(|b| b == b'\t' || (b >= b' ' && b != 0x7f))
+    {
+        return Err(ClientError::InvalidInput { what: "request header value" });
+    }
+    Ok(())
+}
+
 fn find_terminator(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
@@ -733,6 +769,7 @@ pub fn parse_response_head_conn(
     let mut content_range: Option<String> = None;
     let mut etag: Option<String> = None;
     let mut connection: Option<String> = None;
+    let mut headers = Vec::new();
     let mut count = 0usize;
     for line in lines {
         count += 1;
@@ -766,6 +803,10 @@ pub fn parse_response_head_conn(
         let name = std::str::from_utf8(name_b)
             .map_err(|_| ClientError::Protocol { what: "malformed header name" })?
             .to_ascii_lowercase();
+        let value = std::str::from_utf8(value_b)
+            .map_err(|_| ClientError::Protocol { what: "header value charset" })?
+            .to_string();
+        headers.push((name.clone(), value));
         let slot = match name.as_str() {
             "content-length" => &mut content_length,
             "transfer-encoding" => &mut transfer_encoding,
@@ -846,7 +887,7 @@ pub fn parse_response_head_conn(
         connection.as_deref().map(str::trim),
         Some(v) if v.eq_ignore_ascii_case("keep-alive")
     );
-    Ok((ResponseHead { status, content_length, content_type, content_range, etag }, keep_alive))
+    Ok((ResponseHead { status, headers, content_length, content_type, content_range, etag }, keep_alive))
 }
 
 fn parse_content_length(cl: &str) -> ClientResult<u64> {

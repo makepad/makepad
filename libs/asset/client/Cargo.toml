@@ -13,6 +13,17 @@ name = "makepad-asset-client"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["native"]
+native = []
+web = ["dep:makepad-network", "dep:makepad-live-id"]
+
 [dependencies]
 makepad-asset-data = { path = "../data" }
 makepad-strict-json = { path = "../../strict_json" }
+makepad-network = { path = "../../../platform/network", optional = true }
+makepad-live-id = { path = "../../live_id", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+makepad-network = { path = "../../../platform/network" }
+makepad-live-id = { path = "../../live_id" }
