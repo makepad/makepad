@@ -198,3 +198,7 @@ required-features = ["native"]
 name = "variants"
 path = "tests/variants.rs"
 required-features = ["native"]
+
+# On the web the embedded store is the only store, so the platform (its storage API) is not optional there.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+makepad-platform = { path = "../../../platform" }
