@@ -907,6 +907,9 @@ pub enum DeckCmd {
     SetCurve { curve: FadeCurve },
     /// Swap the two mixer deck voices (contents, transport, everything).
     SwapVoices,
+    /// Put the record on `from` onto `to` as well, on the same sample.
+    /// Distinct from a swap: nothing is exchanged and no fader moves.
+    CloneDeck { from: DeckId, to: DeckId },
     /// Playback rate multiplier (tempo). Pitch-preserving when key lock is on.
     SetRate { deck: DeckId, rate: f64 },
     /// Absolute playhead in source seconds.
@@ -1908,6 +1911,51 @@ impl DeckEngine {
             DeckCmd::SwapVoices,
             DeckCmd::SetCrossfader { position: self.crossfader },
         ]
+    }
+
+    /// The same record on both decks, from the same sample.
+    ///
+    /// The copy goes onto the deck a new track would land on, which is
+    /// never the live one -- doubling onto the deck you are playing would
+    /// be a way to lose the mix, not to work it.
+    pub fn instant_double(&mut self) -> Vec<DeckCmd> {
+        let to = self.auto_target();
+        let from = to.other();
+        if !self.deck(from).is_loaded() {
+            return Vec::new();
+        }
+        let item = match &self.deck(from).load {
+            DeckLoad::Loaded { item } => item.clone(),
+            _ => return Vec::new(),
+        };
+        // Only the fields the RECORD owns, read out before the borrow
+        // turns mutable. DeckState is not Copy and most of it belongs to
+        // the slot rather than the track.
+        let src = self.deck(from);
+        let (duration, position, playing, grid) =
+            (src.duration_secs, src.position_secs, src.playing, src.grid);
+        let (rate, from_lock, pitch) = (src.rate, src.rate_from_lock, src.pitch);
+        let (key_shift, keylock, span, cue) =
+            (src.key_shift, src.keylock, src.loop_span, src.cue_secs);
+        let dst = self.deck_mut(to);
+        dst.load = DeckLoad::Loaded { item };
+        dst.duration_secs = duration;
+        dst.position_secs = position;
+        dst.playing = playing;
+        dst.grid = grid;
+        dst.rate = rate;
+        dst.rate_from_lock = from_lock;
+        dst.pitch = pitch;
+        dst.key_shift = key_shift;
+        dst.keylock = keylock;
+        dst.loop_span = span;
+        dst.cue_secs = cue;
+        // The record travels; the marks the operator placed on the OTHER
+        // slot do not, and neither does anything half-placed.
+        dst.loop_armed = None;
+        dst.bookmark = None;
+        dst.splat = None;
+        vec![DeckCmd::CloneDeck { from, to }]
     }
 
     /// Mixer reports a deck ran off the end with looping off. With queue

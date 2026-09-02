@@ -13592,6 +13592,24 @@ p2 {}
                     self.deck_splat_snapshot_seen.swap(0, 1);
                     self.sync_deck_controls(cx);
                 }
+                DeckCmd::CloneDeck { from, to } => {
+                    // The audio first, whose whole point is that the
+                    // playhead is read under the lock the callback advances
+                    // it with. Then the host's own mirrors of the same
+                    // record -- every one a cheap handle, the waveform
+                    // pyramids sharing one texture rather than copying it.
+                    self.mixer.clone_deck(from, to);
+                    let (a, b) = (from.index(), to.index());
+                    self.deck_tracks[b] = self.deck_tracks[a].clone();
+                    self.deck_analysis[b] = self.deck_analysis[a].clone();
+                    self.deck_zoom_tex[b] = self.deck_zoom_tex[a].clone();
+                    self.deck_stem_tex[b] = self.deck_stem_tex[a].clone();
+                    self.deck_stems[b] = self.deck_stems[a].clone();
+                    self.deck_stem_coverage[b] = self.deck_stem_coverage[a].clone();
+                    self.deck_found_scores[b] = self.deck_found_scores[a].clone();
+                    self.deck_splat_refining[b] = None;
+                    self.sync_deck_controls(cx);
+                }
                 DeckCmd::UnloadTrack { deck } => {
                     // The mirror of InstallTrack's clear block: the engine
                     // says the deck is empty, so every host-side trace of
@@ -26998,11 +27016,19 @@ impl MatchEvent for App {
                 }
             }
         }
-        if self.ui.button(cx, ids!(decks_swap)).clicked(actions) {
+        if let Some(modifiers) = self.ui.button(cx, ids!(decks_swap)).clicked_modifiers(actions)
+        {
             // A swap exchanges the deck identities an armed plan is
-            // holding: the plan must not survive it.
+            // holding: the plan must not survive it. SHIFT doubles instead
+            // -- the same record on both decks from the same sample, onto
+            // the deck a new track would land on, which is never the live
+            // one.
             self.deck_hands_on();
-            let cmds = self.decks.swap();
+            let cmds = if modifiers.shift {
+                self.decks.instant_double()
+            } else {
+                self.decks.swap()
+            };
             self.run_deck_cmds(cx, cmds);
             self.sync_deck_controls(cx);
         }

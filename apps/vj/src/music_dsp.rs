@@ -437,6 +437,26 @@ impl Stretcher {
 
     /// Jump the playhead. The overlap-add state is discarded, so the next
     /// grain starts clean.
+    /// Take on another stretcher's whole overlap-add state.
+    ///
+    /// An instant double taken while the stretcher is live has to copy this
+    /// as well as the position: the two decks are reading the same record
+    /// at the same tempo, and grain streams that start at different points
+    /// in their overlap beat against each other. `window` is the same
+    /// constant table in both, so it is the one field not copied.
+    ///
+    /// The accumulator is copied INTO the box this stretcher already owns.
+    /// The caller holds the audio state lock and must not allocate.
+    pub fn copy_state_from(&mut self, other: &Stretcher) {
+        *self.ola = *other.ola;
+        self.emitted = other.emitted;
+        self.primed = other.primed;
+        self.anchor = other.anchor;
+        self.last_start = other.last_start;
+        self.ratio = other.ratio;
+        self.ended = other.ended;
+    }
+
     pub fn reset_to(&mut self, position: f64) {
         self.anchor = position.max(0.0);
         self.last_start = self.anchor as usize;

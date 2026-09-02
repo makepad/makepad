@@ -2197,6 +2197,55 @@ impl Mixer {
         self.publish_deck(&s, 1);
     }
 
+    /// Put the record on `from` onto `to` as well, on the same sample.
+    ///
+    /// The playhead is read INSIDE the lock, which is the whole point: the
+    /// callback advances it while holding that lock, and any gap between
+    /// reading it and writing it is exactly what a flanged double sounds
+    /// like. The stretcher's overlap-add state travels for the same reason
+    /// -- a double is normally taken on a synced deck, so the stretcher is
+    /// live, and grain streams that start at different points in their
+    /// overlap beat against each other.
+    ///
+    /// The RECORD travels; the channel strip does not. The fader, the tone,
+    /// the filter and the stem knobs belong to the slot, not the track.
+    pub fn clone_deck(&self, from: DeckId, to: DeckId) {
+        if from == to {
+            return;
+        }
+        let mut s = self.state.lock().unwrap();
+        let (first, rest) = s.decks.split_at_mut(1);
+        let (src, dst) = if from.index() == 0 {
+            (&first[0], &mut rest[0])
+        } else {
+            (&rest[0], &mut first[0])
+        };
+        if src.pcm.is_none() {
+            return;
+        }
+        let at = src.playhead_frames();
+        dst.pcm = src.pcm.clone();
+        dst.stems = src.stems.clone();
+        dst.stem_seam = src.stem_seam;
+        // A splat grid is the other deck's launch state, not the record.
+        dst.splat = None;
+        dst.loop_span = src.loop_span;
+        dst.slip = None;
+        dst.pause_at = None;
+        dst.ended = false;
+        dst.playing = src.playing;
+        dst.transport = src.transport;
+        dst.rate = src.rate;
+        dst.key_ratio = src.key_ratio;
+        dst.keylock = src.keylock;
+        dst.seek_fade = None;
+        dst.seek_frames(at);
+        dst.stretch.copy_state_from(&src.stretch);
+        dst.stretching = src.stretching;
+        let to_index = to.index();
+        self.publish_deck(&s, to_index);
+    }
+
     pub fn set_crossfader(&self, position: f32) {
         let Some(position) = knob(position, 0.0, 1.0) else { return };
         self.state.lock().unwrap().fader.slew(position, SLEW_SECS);
@@ -3984,6 +4033,59 @@ mod tests {
             out.data.iter().any(|s| s.abs() > 0.01),
             "the mixed file is playing again at once"
         );
+    }
+
+    #[test]
+    fn an_instant_double_lands_on_the_same_sample() {
+        // The whole point: the playhead is read under the same lock the
+        // callback advances it with, so the two decks are not a buffer
+        // apart -- which is what a flanged double sounds like.
+        let mixer = Mixer::new();
+        mixer.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 8.0));
+        mixer.set_deck_playing(DeckId::A, true);
+        for _ in 0..10 {
+            render(&mixer, 48_000.0, 512);
+        }
+        mixer.clone_deck(DeckId::A, DeckId::B);
+        let a = mixer.deck_snapshot(DeckId::A).position_secs;
+        let b = mixer.deck_snapshot(DeckId::B).position_secs;
+        assert!((a - b).abs() < 1e-9, "{a} against {b}");
+        assert!(mixer.deck_snapshot(DeckId::B).playing, "and it is running");
+        assert!(b > 0.0, "on the record, not at its head");
+    }
+
+    #[test]
+    fn a_double_takes_the_record_and_leaves_the_channel_strip() {
+        let mixer = Mixer::new();
+        mixer.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 8.0));
+        mixer.set_deck_gain(DeckId::A, 0.3);
+        mixer.set_deck_gain(DeckId::B, 0.9);
+        mixer.set_deck_rate(DeckId::A, 1.05);
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 512);
+        mixer.clone_deck(DeckId::A, DeckId::B);
+        let s = mixer.state.lock().unwrap();
+        assert!(s.decks[1].pcm.is_some(), "the record travelled");
+        assert!(
+            (s.decks[1].rate.current() - s.decks[0].rate.current()).abs() < 1e-6,
+            "and so did the tempo it is running at"
+        );
+        assert!(
+            (s.decks[1].gain.current - 0.9).abs() < 1e-6,
+            "the fader belongs to the slot: {}",
+            s.decks[1].gain.current
+        );
+    }
+
+    #[test]
+    fn a_double_onto_itself_does_nothing() {
+        let mixer = Mixer::new();
+        mixer.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 8.0));
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 512);
+        let before = mixer.deck_snapshot(DeckId::A).position_secs;
+        mixer.clone_deck(DeckId::A, DeckId::A);
+        assert_eq!(mixer.deck_snapshot(DeckId::A).position_secs, before);
     }
 
     #[test]
