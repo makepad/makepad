@@ -43,6 +43,7 @@ pub fn start_http_gateway(
         listen_address,
         request: request_tx,
         post_max_size,
+        post_max_size_overrides: Vec::new(),
     })
     .ok_or_else(|| format!("failed to bind http server at {}", listen_address))?;
 

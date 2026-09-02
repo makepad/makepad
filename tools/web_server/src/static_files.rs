@@ -1,5 +1,5 @@
 use crate::http::{
-    json_string, percent_decode, reason, response, send_response, APP_ISOLATION_HEADERS,
+    json_string, percent_decode, percent_decode_path, reason, response, send_response, APP_ISOLATION_HEADERS,
     PUBLIC_ASSET_HEADERS,
 };
 use makepad_network::http_server::{
@@ -8,20 +8,82 @@ use makepad_network::http_server::{
 use makepad_network::HttpServerHeaders;
 use std::{
     collections::HashMap,
-    ffi::OsString,
+    ffi::{CString, OsString},
     fs::{File, Metadata},
-    net::IpAddr,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{mpsc::{self, SyncSender}, Mutex},
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd};
+
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::MetadataExt;
+
 const REPORT_LIMIT: usize = 8_192;
+pub const REPORT_BODY_LIMIT: usize = REPORT_LIMIT;
 const REPORTS_PER_MINUTE: u32 = 10;
+const REPORT_WINDOW: Duration = Duration::from_secs(60);
+const MAX_REPORT_CLIENTS: usize = 4_096;
+const LOG_QUEUE_CAPACITY: usize = 256;
+
+#[derive(Clone, Copy)]
+struct ReportWindow {
+    started: Instant,
+    count: u32,
+}
+
+/// Fixed-capacity, expiring per-client limiter. Public only so the integration
+/// suite can assert its memory bound and deterministic eviction behavior.
+pub struct ReportRateLimiter {
+    entries: HashMap<IpAddr, ReportWindow>,
+    capacity: usize,
+}
+
+impl ReportRateLimiter {
+    pub fn new(capacity: usize) -> Self {
+        Self { entries: HashMap::new(), capacity: capacity.max(1) }
+    }
+
+    pub fn allow_at(&mut self, ip: IpAddr, now: Instant) -> bool {
+        self.entries.retain(|_, entry| {
+            now.checked_duration_since(entry.started)
+                .is_some_and(|age| age < REPORT_WINDOW)
+        });
+        if !self.entries.contains_key(&ip) && self.entries.len() >= self.capacity {
+            if let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.started)
+                .map(|(ip, _)| *ip)
+            {
+                self.entries.remove(&oldest);
+            }
+        }
+        let entry = self.entries.entry(ip).or_insert(ReportWindow { started: now, count: 0 });
+        if now.checked_duration_since(entry.started).unwrap_or_default() >= REPORT_WINDOW {
+            *entry = ReportWindow { started: now, count: 0 };
+        }
+        if entry.count >= REPORTS_PER_MINUTE {
+            false
+        } else {
+            entry.count += 1;
+            true
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
 
 pub struct StaticHandler {
     root: PathBuf,
-    reports: Mutex<HashMap<IpAddr, (Instant, u32)>>,
+    root_fd: File,
+    reports: Mutex<ReportRateLimiter>,
+    log_tx: SyncSender<String>,
 }
 
 impl StaticHandler {
@@ -29,12 +91,27 @@ impl StaticHandler {
         let root = root
             .canonicalize()
             .map_err(|error| format!("canonicalize static root {}: {error}", root.display()))?;
-        if !root.is_dir() {
+        let root_fd = File::open(&root)
+            .map_err(|error| format!("open static root {}: {error}", root.display()))?;
+        if !root_fd.metadata().is_ok_and(|metadata| metadata.is_dir()) {
             return Err(format!("static root {} is not a directory", root.display()));
         }
+        validate_docroot_permissions(&root)?;
+        validate_root_identity(&root, &root_fd)?;
+        let (log_tx, log_rx) = mpsc::sync_channel::<String>(LOG_QUEUE_CAPACITY);
+        std::thread::Builder::new()
+            .name("web-report-log".into())
+            .spawn(move || {
+                while let Ok(line) = log_rx.recv() {
+                    eprintln!("{line}");
+                }
+            })
+            .map_err(|error| format!("start report logger: {error}"))?;
         Ok(Self {
             root,
-            reports: Mutex::new(HashMap::new()),
+            root_fd,
+            reports: Mutex::new(ReportRateLimiter::new(MAX_REPORT_CLIENTS)),
+            log_tx,
         })
     }
 
@@ -90,7 +167,7 @@ impl StaticHandler {
     }
 
     fn serve_file(&self, headers: &HttpServerHeaders, sender: &HttpServerResponseSender) {
-        let request_path = match percent_decode(&headers.path, 8_192) {
+        let request_path = match percent_decode_path(&headers.path, 8_192) {
             Ok(path) if path.starts_with('/') && !path.contains('\0') && !path.contains('\\') => path,
             _ => {
                 send_response(sender, static_error(400, "bad request"));
@@ -102,15 +179,14 @@ impl StaticHandler {
             return;
         }
         let relative = request_path.trim_start_matches('/');
-        let unresolved = self.root.join(relative);
-        let original = match unresolved.canonicalize() {
-            Ok(path) if path.starts_with(&self.root) => path,
-            Ok(_) => {
-                send_response(sender, static_error(400, "bad request"));
-                return;
-            }
+        let original = match self.open_beneath(relative) {
+            Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 send_response(sender, static_error(404, "not found"));
+                return;
+            }
+            Err(error) if is_path_refusal(&error) => {
+                send_response(sender, static_error(400, "bad request"));
                 return;
             }
             Err(_) => {
@@ -118,7 +194,7 @@ impl StaticHandler {
                 return;
             }
         };
-        if !original.is_file() {
+        if !original.metadata().is_ok_and(|metadata| metadata.is_file()) {
             send_response(sender, static_error(404, "not found"));
             return;
         }
@@ -131,19 +207,17 @@ impl StaticHandler {
         let range = range_header.map(parse_range);
         let range_requested = range_header.is_some();
         let never_brotli = matches!(extension(relative), Some("mkidx" | "mkshard"));
-        let brotli_path = (!range_requested && !never_brotli)
-            .then(|| sibling_brotli(&original))
-            .filter(|path| path.is_file());
-        let vary = brotli_path.is_some();
+        let brotli_file = if !range_requested && !never_brotli {
+            self.open_beneath(&sibling_brotli(relative))
+                .ok()
+                .filter(|file| file.metadata().is_ok_and(|metadata| metadata.is_file()))
+        } else {
+            None
+        };
+        let vary = brotli_file.is_some();
         let use_brotli = vary && accepts_brotli(headers.header("Accept-Encoding"));
         let selected = if use_brotli {
-            match brotli_path.as_ref().unwrap().canonicalize() {
-                Ok(path) if path.starts_with(&self.root) => path,
-                _ => {
-                    send_response(sender, static_error(500, "internal error"));
-                    return;
-                }
-            }
+            brotli_file.unwrap()
         } else {
             original
         };
@@ -199,12 +273,7 @@ impl StaticHandler {
             send_response(sender, HttpServerResponse { header, body: Vec::new() });
             return;
         }
-        match File::open(&selected) {
-            Ok(file) => {
-                let _ = sender.send(HttpServerResponse::from_file(header, file, offset, body_len));
-            }
-            Err(_) => send_response(sender, static_error(500, "internal error")),
-        }
+        let _ = sender.send(HttpServerResponse::from_file(header, selected, offset, body_len));
     }
 
     fn report(&self, headers: &HttpServerHeaders, bytes: &[u8], encoded: bool) {
@@ -219,35 +288,236 @@ impl StaticHandler {
             .take(REPORT_LIMIT)
             .map(|ch| if ch.is_control() { ' ' } else { ch })
             .collect();
-        let ip = headers.addr.ip();
+        let ip = client_ip(headers);
         let now = Instant::now();
         let allowed = {
             let mut reports = self.reports.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            let entry = reports.entry(ip).or_insert((now, 0));
-            if now.duration_since(entry.0) >= Duration::from_secs(60) {
-                *entry = (now, 0);
-            }
-            if entry.1 >= REPORTS_PER_MINUTE {
-                false
-            } else {
-                entry.1 += 1;
-                true
-            }
+            reports.allow_at(ip, now)
         };
         if allowed {
-            eprintln!(
+            let _ = self.log_tx.try_send(format!(
                 "{{\"event\":\"browser_error\",\"peer\":{},\"message\":{}}}",
                 json_string(&ip.to_string()),
                 json_string(clean.trim())
-            );
+            ));
+        }
+    }
+
+    fn open_beneath(&self, relative: &str) -> std::io::Result<File> {
+        open_beneath(&self.root_fd, &self.root, relative)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn open_beneath(root_fd: &File, _root: &Path, relative: &str) -> std::io::Result<File> {
+    #[repr(C)]
+    struct OpenHow {
+        flags: u64,
+        mode: u64,
+        resolve: u64,
+    }
+    const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
+    const RESOLVE_BENEATH: u64 = 0x08;
+    let path = CString::new(relative)
+        .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+    let how = OpenHow {
+        flags: (libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NONBLOCK) as u64,
+        mode: 0,
+        resolve: RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS,
+    };
+    // SAFETY: all pointers remain valid for the syscall and a successful
+    // return is a newly owned descriptor.
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            root_fd.as_raw_fd(),
+            path.as_ptr(),
+            &how as *const OpenHow,
+            std::mem::size_of::<OpenHow>(),
+        )
+    } as libc::c_int;
+    if fd < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        // SAFETY: `openat2` returned a fresh descriptor owned by this call.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn open_beneath(root_fd: &File, _root: &Path, relative: &str) -> std::io::Result<File> {
+    let components: Vec<&str> = relative.split('/').collect();
+    if components.is_empty()
+        || components
+            .iter()
+            .any(|part| part.is_empty() || *part == "." || *part == "..")
+    {
+        return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+    }
+    let mut current = root_fd.try_clone()?;
+    for (index, component) in components.iter().enumerate() {
+        let component = CString::new(*component)
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        let mut flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
+        if index + 1 < components.len() {
+            flags |= libc::O_DIRECTORY;
+        }
+        // SAFETY: `current` is open, the C string is valid, and a successful
+        // descriptor is immediately wrapped in an owning `File`.
+        let fd = unsafe { libc::openat(current.as_raw_fd(), component.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        current = unsafe { File::from_raw_fd(fd) };
+    }
+    Ok(current)
+}
+
+#[cfg(not(unix))]
+fn open_beneath(_root_fd: &File, root: &Path, relative: &str) -> std::io::Result<File> {
+    let path = root.join(relative).canonicalize()?;
+    if !path.starts_with(root) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "path escapes static root",
+        ));
+    }
+    File::open(path)
+}
+
+#[cfg(unix)]
+fn is_path_refusal(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(code) if matches!(code, libc::ELOOP | libc::EXDEV | libc::EINVAL | libc::ENOTDIR)
+    )
+}
+
+#[cfg(not(unix))]
+fn is_path_refusal(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::PermissionDenied
+}
+
+#[cfg(target_os = "linux")]
+fn validate_docroot_permissions(root: &Path) -> Result<(), String> {
+    let euid = unsafe { libc::geteuid() };
+    if euid == 0 {
+        return Err("refusing to serve a public docroot as root".into());
+    }
+    let egid = unsafe { libc::getegid() };
+    let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+    let mut groups = if count > 0 { vec![0; count as usize] } else { Vec::new() };
+    if count > 0 && unsafe { libc::getgroups(count, groups.as_mut_ptr()) } < 0 {
+        return Err("cannot inspect service-account groups".into());
+    }
+    groups.push(egid);
+
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let metadata = path
+            .symlink_metadata()
+            .map_err(|error| format!("inspect docroot {}: {error}", path.display()))?;
+        let mode = metadata.mode();
+        let writable = if metadata.uid() == euid {
+            mode & 0o200 != 0
+        } else if groups.contains(&metadata.gid()) {
+            mode & 0o020 != 0
+        } else {
+            mode & 0o002 != 0
+        };
+        if writable {
+            return Err(format!(
+                "service account can mutate static docroot entry {}",
+                path.display()
+            ));
+        }
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(&path)
+                .map_err(|error| format!("inspect docroot {}: {error}", path.display()))?
+            {
+                pending.push(entry.map_err(|error| error.to_string())?.path());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn validate_docroot_permissions(_root: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_root_identity(root: &Path, root_fd: &File) -> Result<(), String> {
+    let path_metadata = root
+        .metadata()
+        .map_err(|error| format!("recheck static root {}: {error}", root.display()))?;
+    let fd_metadata = root_fd
+        .metadata()
+        .map_err(|error| format!("inspect static root descriptor: {error}"))?;
+    if path_metadata.dev() != fd_metadata.dev() || path_metadata.ino() != fd_metadata.ino() {
+        return Err("static root changed during startup validation".into());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn validate_root_identity(_root: &Path, _root_fd: &File) -> Result<(), String> {
+    Ok(())
+}
+
+// Published by Cloudflare at https://www.cloudflare.com/ips-v4/ and
+// https://www.cloudflare.com/ips-v6/ (verified 2026-09-02).
+const CLOUDFLARE_V4: &[(&str, u8)] = &[
+    ("173.245.48.0", 20), ("103.21.244.0", 22), ("103.22.200.0", 22),
+    ("103.31.4.0", 22), ("141.101.64.0", 18), ("108.162.192.0", 18),
+    ("190.93.240.0", 20), ("188.114.96.0", 20), ("197.234.240.0", 22),
+    ("198.41.128.0", 17), ("162.158.0.0", 15), ("104.16.0.0", 13),
+    ("104.24.0.0", 14), ("172.64.0.0", 13), ("131.0.72.0", 22),
+];
+const CLOUDFLARE_V6: &[(&str, u8)] = &[
+    ("2400:cb00::", 32), ("2606:4700::", 32), ("2803:f800::", 32),
+    ("2405:b500::", 32), ("2405:8100::", 32), ("2a06:98c0::", 29),
+    ("2c0f:f248::", 32),
+];
+
+fn cloudflare_peer(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let value = u32::from(ip);
+            CLOUDFLARE_V4.iter().any(|(base, prefix)| {
+                let base = u32::from(base.parse::<Ipv4Addr>().expect("valid Cloudflare IPv4"));
+                let mask = u32::MAX.checked_shl(32 - u32::from(*prefix)).unwrap_or(0);
+                value & mask == base & mask
+            })
+        }
+        IpAddr::V6(ip) => {
+            let value = u128::from(ip);
+            CLOUDFLARE_V6.iter().any(|(base, prefix)| {
+                let base = u128::from(base.parse::<Ipv6Addr>().expect("valid Cloudflare IPv6"));
+                let mask = u128::MAX.checked_shl(128 - u32::from(*prefix)).unwrap_or(0);
+                value & mask == base & mask
+            })
         }
     }
 }
 
-fn sibling_brotli(path: &Path) -> PathBuf {
-    let mut name: OsString = path.as_os_str().to_owned();
+fn client_ip(headers: &HttpServerHeaders) -> IpAddr {
+    let peer = headers.addr.ip();
+    if !cloudflare_peer(peer) {
+        return peer;
+    }
+    headers
+        .header("CF-Connecting-IP")
+        .filter(|value| !value.contains(','))
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(peer)
+}
+
+fn sibling_brotli(path: &str) -> String {
+    let mut name: OsString = Path::new(path).as_os_str().to_owned();
     name.push(".br");
-    PathBuf::from(name)
+    name.to_string_lossy().into_owned()
 }
 
 fn extension(path: &str) -> Option<&str> {
@@ -345,15 +615,35 @@ fn accepts_brotli(header: Option<&str>) -> bool {
             if !parts.next().is_some_and(|encoding| encoding.trim().eq_ignore_ascii_case("br")) {
                 return false;
             }
-            !parts.any(|parameter| {
-                parameter
-                    .trim()
-                    .strip_prefix("q=")
-                    .and_then(|quality| quality.parse::<f32>().ok())
-                    == Some(0.0)
-            })
+            let mut quality = 1.0f32;
+            let mut saw_quality = false;
+            for parameter in parts {
+                let parameter = parameter.trim();
+                let Some((name, value)) = parameter.split_once('=') else { continue };
+                if name.trim().eq_ignore_ascii_case("q") {
+                    if saw_quality {
+                        return false;
+                    }
+                    let Some(parsed) = parse_quality(value.trim()) else { return false };
+                    saw_quality = true;
+                    quality = parsed;
+                }
+            }
+            quality > 0.0
         })
     })
+}
+
+fn parse_quality(value: &str) -> Option<f32> {
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    if fraction.len() > 3 || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    match whole {
+        "0" => value.parse().ok(),
+        "1" if fraction.bytes().all(|byte| byte == b'0') => Some(1.0),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -463,6 +753,15 @@ mod tests {
         assert_eq!(ByteRange::Suffix(40).resolve(10), Some((0, 10)));
         assert!(parse_range("bytes=1-2,4-5").is_err());
         assert_eq!(ByteRange::From(10).resolve(10), None);
+    }
+
+    #[test]
+    fn brotli_requires_a_valid_positive_quality() {
+        assert!(accepts_brotli(Some("gzip, br")));
+        assert!(accepts_brotli(Some("br;q=0.5")));
+        for invalid in ["br;q=0", "br;q=garbage", "br;q=0.0001", "br;q=2", "br;q=1;q=0.5"] {
+            assert!(!accepts_brotli(Some(invalid)), "accepted {invalid}");
+        }
     }
 
     #[test]

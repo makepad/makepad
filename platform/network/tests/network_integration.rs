@@ -255,6 +255,7 @@ fn http_server_routes_head_through_get_and_suppresses_body() {
             listen_address,
             request: request_sender,
             post_max_size: 1024,
+            post_max_size_overrides: Vec::new(),
         })
         .expect("start HTTP server");
     let handler = std::thread::spawn(move || {
@@ -283,6 +284,65 @@ fn http_server_routes_head_through_get_and_suppresses_body() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn raw_server_request(address: SocketAddr, request: &[u8]) -> String {
+    let mut stream = TcpStream::connect(address).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    stream.write_all(request).unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    String::from_utf8(response).unwrap()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn http_server_rejects_ambiguous_framing_targets_and_get_shaped_mutations() {
+    let _guard = test_guard();
+    let port = find_free_port().expect("allocate local test port");
+    let listen_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let runtime = NetworkRuntime::new(NetworkConfig::default());
+    let (request_sender, request_receiver) = mpsc::channel::<HttpServerRequest>();
+    runtime
+        .start_http_server(HttpServer {
+            listen_address,
+            request: request_sender,
+            post_max_size: 16,
+            post_max_size_overrides: vec![("/small".into(), 2)],
+        })
+        .unwrap();
+
+    for malformed in [
+        &b"GET /x HTTP/1.1?q\r\nHost: x\r\n\r\n"[..],
+        &b"GET  HTTP/1.1\r\nHost: x\r\n\r\n"[..],
+        &b"GET https://example.test/x HTTP/1.1\r\nHost: x\r\n\r\n"[..],
+        &b"POST /x HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\nx"[..],
+        &b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"[..],
+    ] {
+        let response = raw_server_request(listen_address, malformed);
+        assert!(response.starts_with("HTTP/1.1 400"), "{response:?}");
+        assert!(response.contains("Cross-Origin-Opener-Policy: same-origin"));
+        assert!(response.contains("Cross-Origin-Embedder-Policy: require-corp"));
+    }
+    for verb in ["PUT", "DELETE"] {
+        let response = raw_server_request(
+            listen_address,
+            format!("{verb} /x HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes(),
+        );
+        assert!(response.starts_with("HTTP/1.1 405"), "{response:?}");
+    }
+    assert!(raw_server_request(
+        listen_address,
+        b"POST /x HTTP/1.1\r\nHost: x\r\n\r\n"
+    )
+    .starts_with("HTTP/1.1 411"));
+    assert!(raw_server_request(
+        listen_address,
+        b"POST /small HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\nabc"
+    )
+    .starts_with("HTTP/1.1 413"));
+    assert!(request_receiver.try_recv().is_err(), "rejected verbs reached application dispatch");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn websocket_roundtrip_via_http_server(transport: WebSocketTransport) {
     let runtime = NetworkRuntime::new(NetworkConfig::default());
     let Some(port) = find_free_port() else {
@@ -295,6 +355,7 @@ fn websocket_roundtrip_via_http_server(transport: WebSocketTransport) {
         listen_address,
         request: request_sender,
         post_max_size: 1024 * 1024,
+        post_max_size_overrides: Vec::new(),
     }) else {
         eprintln!("websocket integration test skipped: failed to start http server");
         return;

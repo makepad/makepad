@@ -61,6 +61,7 @@ impl WmHub {
             listen_address: addr,
             request: request_tx,
             post_max_size: 1024 * 1024,
+            post_max_size_overrides: Vec::new(),
         })?;
 
         let (event_tx, event_rx) = mpsc::channel::<HubEvent>();

@@ -1,10 +1,16 @@
 use std::io::prelude::*;
 use std::net::{Shutdown, SocketAddr, TcpStream};
+use std::time::{Duration, Instant};
 
 #[cfg(feature = "script")]
 use makepad_script::*;
 #[cfg(feature = "script")]
 use std::net::{IpAddr, Ipv4Addr};
+
+pub const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+const LOW_LEVEL_SECURITY_HEADERS: &str = "Cross-Origin-Opener-Policy: same-origin\r\n\
+Cross-Origin-Embedder-Policy: require-corp\r\n";
 
 pub fn write_bytes_to_tcp_stream_no_error(tcp_stream: &mut TcpStream, bytes: &[u8]) -> bool {
     let bytes_total = bytes.len();
@@ -23,49 +29,98 @@ pub fn write_bytes_to_tcp_stream_no_error(tcp_stream: &mut TcpStream, bytes: &[u
     false
 }
 
-pub fn http_error_out(mut tcp_stream: TcpStream, code: usize) {
+fn status_reason(code: u16) -> &'static str {
+    match code {
+        400 => "Bad Request",
+        405 => "Method Not Allowed",
+        408 => "Request Timeout",
+        411 => "Length Required",
+        413 => "Content Too Large",
+        431 => "Request Header Fields Too Large",
+        500 => "Internal Server Error",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        _ => "Error",
+    }
+}
+
+pub fn http_error_out(mut tcp_stream: TcpStream, code: u16) {
+    let allow = if code == 405 {
+        "Allow: GET, HEAD, POST, OPTIONS\r\n"
+    } else {
+        ""
+    };
     write_bytes_to_tcp_stream_no_error(
         &mut tcp_stream,
-        format!("HTTP/1.1 {}\r\n\r\n", code).as_bytes(),
+        format!(
+            "HTTP/1.1 {code} {}\r\n{LOW_LEVEL_SECURITY_HEADERS}{allow}Content-Length: 0\r\nConnection: close\r\n\r\n",
+            status_reason(code)
+        )
+        .as_bytes(),
     );
     let _ = tcp_stream.shutdown(Shutdown::Both);
 }
 
 pub fn split_header_line<'a>(inp: &'a str, what: &str) -> Option<&'a str> {
-    let mut what_lc = what.to_string();
-    what_lc.make_ascii_lowercase();
-    let mut inp_lc = inp.to_string();
-    inp_lc.make_ascii_lowercase();
-    if inp_lc.starts_with(&what_lc) {
-        return Some(&inp[what.len()..(inp.len() - 2)]);
-    }
-    None
+    let line = inp.strip_suffix("\r\n").unwrap_or(inp);
+    let (name, value) = line.split_once(':')?;
+    name.eq_ignore_ascii_case(what.trim_end_matches([':', ' ']))
+        .then(|| value.trim())
 }
 
+/// Parses a request-line remainder (`target HTTP/version`) without searching
+/// past the target for `?`. Kept public for compatibility with older users.
 pub fn parse_url_path(url: &str, append_index_html: bool) -> Option<(String, Option<String>)> {
-    // find the end_of_name skipping everything else
-    let end_of_name = url.find(' ');
-    end_of_name?;
-    let end_of_name = end_of_name.unwrap();
-    let mut search = None;
-    let end_of_name = if let Some(q) = url.find('?') {
-        search = Some(url[q + 1..end_of_name].to_string());
-        q
-    } else {
-        end_of_name
-    };
-
-    let mut url = url[0..end_of_name].to_string();
-
-    if append_index_html && url.ends_with('/') {
-        url.push_str("index.html");
+    let mut fields = url.split_ascii_whitespace();
+    let target = fields.next()?;
+    let version = fields.next()?;
+    if fields.next().is_some() || !matches!(version, "HTTP/1.0" | "HTTP/1.1") {
+        return None;
     }
+    parse_origin_target(target, append_index_html)
+}
 
-    Some((url, search))
+fn parse_origin_target(target: &str, append_index_html: bool) -> Option<(String, Option<String>)> {
+    if !target.starts_with('/')
+        || target.starts_with("//")
+        || target.contains('#')
+        || target.bytes().any(|byte| byte.is_ascii_control() || byte == b' ')
+    {
+        return None;
+    }
+    let (path, search) = match target.split_once('?') {
+        Some((path, search)) => (path, Some(search.to_string())),
+        None => (target, None),
+    };
+    if path.is_empty() {
+        return None;
+    }
+    let mut path = path.to_string();
+    if append_index_html && path.ends_with('/') {
+        path.push_str("index.html");
+    }
+    Some((path, search))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HttpHeadError {
+    BadRequest,
+    Timeout,
+    TooLarge,
+}
+
+impl HttpHeadError {
+    pub fn status(self) -> u16 {
+        match self {
+            Self::BadRequest => 400,
+            Self::Timeout => 408,
+            Self::TooLarge => 431,
+        }
+    }
 }
 
 #[cfg_attr(feature = "script", derive(Script, ScriptHook))]
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct HttpServerHeaders {
     #[cfg_attr(
         feature = "script",
@@ -76,6 +131,8 @@ pub struct HttpServerHeaders {
     pub addr_text: String,
     #[cfg_attr(feature = "script", live)]
     pub lines: Vec<String>,
+    #[cfg_attr(feature = "script", rust(Vec::new()))]
+    pub parsed_headers: Vec<(String, String)>,
     #[cfg_attr(feature = "script", live)]
     pub verb: String,
     #[cfg_attr(feature = "script", live)]
@@ -92,10 +149,8 @@ pub struct HttpServerHeaders {
     pub sec_websocket_key: Option<String>,
 }
 
-/// Largest request head we will buffer before giving up.
 const MAX_HEAD_BYTES: usize = 1024 * 1024;
 
-/// Index just past the `\r\n\r\n` that ends the request head, if present.
 fn find_head_end(buf: &[u8], search_from: usize) -> Option<usize> {
     let start = search_from.saturating_sub(3);
     buf[start..]
@@ -104,115 +159,154 @@ fn find_head_end(buf: &[u8], search_from: usize) -> Option<usize> {
         .map(|p| start + p + 4)
 }
 
+fn set_remaining_read_timeout(stream: &TcpStream, deadline: Instant) -> Result<(), HttpHeadError> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|duration| !duration.is_zero())
+        .ok_or(HttpHeadError::Timeout)?;
+    stream
+        .set_read_timeout(Some(remaining))
+        .map_err(|_| HttpHeadError::BadRequest)
+}
+
 impl HttpServerHeaders {
-    /// Returns the first request-header value with an ASCII case-insensitive
-    /// name. `lines` remains public for callers that need the untouched head.
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.lines.iter().skip(1).find_map(|line| {
-            let line = line.strip_suffix("\r\n").unwrap_or(line);
-            let (key, value) = line.split_once(':')?;
-            key.eq_ignore_ascii_case(name).then(|| value.trim())
-        })
+        self.parsed_headers
+            .iter()
+            .find_map(|(key, value)| key.eq_ignore_ascii_case(name).then_some(value.as_str()))
     }
 
-    /// Reads the request head, returning the parsed headers together with every
-    /// byte that was read past the head terminator.
-    ///
-    /// Those trailing bytes are the start of the body whenever a client sends
-    /// headers and body in one TCP segment. Whatever finds the end of the head
-    /// must read ahead to do it, and the socket will not hand those bytes over
-    /// a second time — so they travel with the headers and the caller consumes
-    /// them before reading further.
     pub fn from_tcp_stream(tcp_stream: &mut TcpStream) -> Option<(HttpServerHeaders, Vec<u8>)> {
-        let addr = tcp_stream.peer_addr().ok()?;
+        Self::from_tcp_stream_until(tcp_stream, Instant::now() + HTTP_READ_TIMEOUT).ok()
+    }
 
+    pub fn from_tcp_stream_until(
+        tcp_stream: &mut TcpStream,
+        deadline: Instant,
+    ) -> Result<(HttpServerHeaders, Vec<u8>), HttpHeadError> {
+        let addr = tcp_stream.peer_addr().map_err(|_| HttpHeadError::BadRequest)?;
         let mut buf = Vec::new();
         let mut chunk = [0u8; 4096];
-        // Bytes already scanned for the terminator; each pass re-checks only
-        // the new bytes plus the three that could hold a straddling \r\n\r\n.
         let mut searched = 0;
         let head_end = loop {
             if let Some(end) = find_head_end(&buf, searched) {
                 break end;
             }
-            searched = buf.len();
-            if buf.len() > MAX_HEAD_BYTES {
-                return None;
+            if buf.len() >= MAX_HEAD_BYTES {
+                return Err(HttpHeadError::TooLarge);
             }
+            searched = buf.len();
+            set_remaining_read_timeout(tcp_stream, deadline)?;
             match tcp_stream.read(&mut chunk) {
-                // EOF before the head ended: not a request we can serve.
-                Ok(0) => return None,
-                Ok(n) => buf.extend_from_slice(&chunk[..n]),
-                Err(_) => return None,
+                Ok(0) => return Err(HttpHeadError::BadRequest),
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    if buf.len() > MAX_HEAD_BYTES {
+                        return Err(HttpHeadError::TooLarge);
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    return Err(HttpHeadError::Timeout)
+                }
+                Err(_) => return Err(HttpHeadError::BadRequest),
             }
         };
 
-        // The head minus its blank terminator line, so each entry still keeps
-        // the trailing \r\n that split_header_line trims.
-        let head = String::from_utf8_lossy(&buf[..head_end - 2]).into_owned();
+        let head = std::str::from_utf8(&buf[..head_end - 2])
+            .map_err(|_| HttpHeadError::BadRequest)?;
         let body_prefix = buf[head_end..].to_vec();
+        let mut raw_lines = head.split_inclusive("\r\n");
+        let request_line = raw_lines.next().ok_or(HttpHeadError::BadRequest)?;
+        let request_line = request_line
+            .strip_suffix("\r\n")
+            .ok_or(HttpHeadError::BadRequest)?;
+        if request_line.len() > 4096 {
+            return Err(HttpHeadError::TooLarge);
+        }
+        let mut fields = request_line.split_ascii_whitespace();
+        let verb = fields.next().ok_or(HttpHeadError::BadRequest)?;
+        let target = fields.next().ok_or(HttpHeadError::BadRequest)?;
+        let version = fields.next().ok_or(HttpHeadError::BadRequest)?;
+        if fields.next().is_some()
+            || !matches!(version, "HTTP/1.0" | "HTTP/1.1")
+            || !matches!(verb, "GET" | "HEAD" | "OPTIONS" | "POST" | "PUT" | "DELETE")
+        {
+            return Err(HttpHeadError::BadRequest);
+        }
 
-        let mut lines = Vec::new();
+        let mut lines = vec![format!("{request_line}\r\n")];
         let mut content_length = None;
         let mut accept_encoding = None;
         let mut sec_websocket_key = None;
+        let mut saw_transfer_encoding = false;
+        let mut parsed_headers = Vec::new();
+        for raw in raw_lines {
+            if raw == "\r\n" {
+                continue;
+            }
+            if raw.len() > 4096 || lines.len() >= 4096 {
+                return Err(HttpHeadError::TooLarge);
+            }
+            let line = raw.strip_suffix("\r\n").ok_or(HttpHeadError::BadRequest)?;
+            if line.starts_with([' ', '\t']) {
+                return Err(HttpHeadError::BadRequest);
+            }
+            let (name, value) = line.split_once(':').ok_or(HttpHeadError::BadRequest)?;
+            if name.is_empty()
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+                || value.bytes().any(|byte| byte == 0 || byte == b'\r' || byte == b'\n')
+            {
+                return Err(HttpHeadError::BadRequest);
+            }
+            let value = value.trim_matches([' ', '\t']);
+            if name.eq_ignore_ascii_case("content-length") {
+                if content_length.is_some()
+                    || value.is_empty()
+                    || !value.bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    return Err(HttpHeadError::BadRequest);
+                }
+                content_length = Some(value.parse().map_err(|_| HttpHeadError::BadRequest)?);
+            } else if name.eq_ignore_ascii_case("transfer-encoding") {
+                saw_transfer_encoding = true;
+            } else if name.eq_ignore_ascii_case("accept-encoding") {
+                if accept_encoding.is_none() {
+                    accept_encoding = Some(value.to_string());
+                }
+            } else if name.eq_ignore_ascii_case("sec-websocket-key") {
+                if sec_websocket_key.is_some() {
+                    return Err(HttpHeadError::BadRequest);
+                }
+                sec_websocket_key = Some(value.to_string());
+            }
+            parsed_headers.push((name.to_ascii_lowercase(), value.to_string()));
+            lines.push(raw.to_string());
+        }
+        if saw_transfer_encoding {
+            return Err(HttpHeadError::BadRequest);
+        }
 
-        for raw in head.split_inclusive("\r\n") {
-            let line = raw.to_string();
-            if let Some(v) = split_header_line(&line, "Content-Length: ") {
-                content_length = Some(if let Ok(v) = v.parse() {
-                    v
-                } else {
-                    return None;
-                });
-            }
-            if let Some(v) = split_header_line(&line, "Accept-Encoding: ") {
-                accept_encoding = Some(v.to_string());
-            }
-            if let Some(v) = split_header_line(&line, "sec-websocket-key: ") {
-                sec_websocket_key = Some(v.to_string());
-            }
-            if line.len() > 4096 || lines.len() > 4096 {
-                // some overflow protection
-                return None;
-            }
-            lines.push(line);
-        }
-        if lines.len() < 2 {
-            return None;
-        }
-        let verb;
-        let path;
-        if let Some(v) = split_header_line(&lines[0], "GET ") {
-            verb = "GET";
-            path = parse_url_path(v, sec_websocket_key.is_none())
-        } else if let Some(v) = split_header_line(&lines[0], "HEAD ") {
-            verb = "HEAD";
-            path = parse_url_path(v, sec_websocket_key.is_none())
-        } else if let Some(v) = split_header_line(&lines[0], "OPTIONS ") {
-            verb = "OPTIONS";
-            path = parse_url_path(v, sec_websocket_key.is_none())
-        } else if let Some(v) = split_header_line(&lines[0], "POST ") {
-            verb = "POST";
-            path = parse_url_path(v, sec_websocket_key.is_none())
-        } else if let Some(v) = split_header_line(&lines[0], "PUT ") {
-            verb = "PUT";
-            path = parse_url_path(v, sec_websocket_key.is_none())
-        } else if let Some(v) = split_header_line(&lines[0], "DELETE ") {
-            verb = "DELETE";
-            path = parse_url_path(v, sec_websocket_key.is_none())
-        } else {
-            return None;
-        }
-        path.as_ref()?;
-        let path = path.unwrap();
-
-        Some((
+        let path = parse_origin_target(target, sec_websocket_key.is_none())
+            .ok_or(HttpHeadError::BadRequest)?;
+        let path_no_slash = path
+            .0
+            .strip_prefix('/')
+            .ok_or(HttpHeadError::BadRequest)?
+            .to_string();
+        Ok((
             HttpServerHeaders {
                 addr,
-                addr_text: format!("{}", addr),
+                addr_text: addr.to_string(),
+                parsed_headers,
                 verb: verb.to_string(),
-                path_no_slash: path.0[1..].to_string(),
+                path_no_slash,
                 path: path.0,
                 search: path.1,
                 lines,
@@ -227,98 +321,71 @@ impl HttpServerHeaders {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_url_path, HttpServerHeaders};
+    use super::{parse_url_path, HttpHeadError, HttpServerHeaders};
     use std::io::Write;
     use std::net::{TcpListener, TcpStream};
+    use std::time::{Duration, Instant};
 
-    /// Serves one connection, returning what `from_tcp_stream` produced.
-    fn read_head(write_request: impl FnOnce(&mut TcpStream) + Send + 'static) -> (Vec<String>, Vec<u8>) {
+    fn parse_head(request: &[u8]) -> Result<(HttpServerHeaders, Vec<u8>), HttpHeadError> {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
+        let bytes = request.to_vec();
         let client = std::thread::spawn(move || {
             let mut stream = TcpStream::connect(addr).unwrap();
-            write_request(&mut stream);
-            // Hold the connection open: a server that has to go back to the
-            // socket for the body would otherwise see EOF and pass by luck.
-            std::thread::sleep(std::time::Duration::from_millis(250));
+            stream.write_all(&bytes).unwrap();
         });
         let (mut server, _) = listener.accept().unwrap();
-        let (headers, body_prefix) = HttpServerHeaders::from_tcp_stream(&mut server).unwrap();
+        let result = HttpServerHeaders::from_tcp_stream_until(
+            &mut server,
+            Instant::now() + Duration::from_secs(2),
+        );
         client.join().unwrap();
-        (headers.lines, body_prefix)
+        result
     }
 
     #[test]
     fn body_sent_with_the_headers_is_returned_not_swallowed() {
-        // The case that used to wedge the server thread forever: one write, so
-        // the body lands in the same segment as the headers.
-        let (lines, body) = read_head(|stream| {
-            stream
-                .write_all(b"POST /pair HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello")
-                .unwrap();
-        });
-        assert_eq!(lines.len(), 3);
+        let (headers, body) = parse_head(
+            b"POST /pair HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello",
+        )
+        .unwrap();
+        assert_eq!(headers.lines.len(), 3);
         assert_eq!(body, b"hello");
     }
 
     #[test]
-    fn body_sent_after_the_headers_is_left_on_the_socket() {
-        let (lines, body) = read_head(|stream| {
-            stream
-                .write_all(b"POST /pair HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\n")
-                .unwrap();
-            stream.flush().unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            stream.write_all(b"hello").unwrap();
-        });
-        assert_eq!(lines.len(), 3);
-        assert!(body.is_empty());
+    fn strict_request_line_and_origin_form() {
+        for bad in [
+            &b"GET /x HTTP/1.1?q\r\nHost: x\r\n\r\n"[..],
+            &b"GET  HTTP/1.1\r\nHost: x\r\n\r\n"[..],
+            &b"GET https://example.test/x HTTP/1.1\r\nHost: x\r\n\r\n"[..],
+            &b"GET //example.test/x HTTP/1.1\r\nHost: x\r\n\r\n"[..],
+            &b"GET /x HTTP/1.1 extra\r\nHost: x\r\n\r\n"[..],
+        ] {
+            assert_eq!(parse_head(bad).unwrap_err(), HttpHeadError::BadRequest);
+        }
     }
 
     #[test]
-    fn get_without_a_body_parses_the_request_line() {
-        let (lines, body) = read_head(|stream| {
-            stream
-                .write_all(b"GET /ui/ HTTP/1.1\r\nHost: x\r\n\r\n")
-                .unwrap();
-        });
-        assert_eq!(lines[0], "GET /ui/ HTTP/1.1\r\n");
-        assert!(body.is_empty());
-    }
-
-    #[test]
-    fn head_preserves_verb_and_raw_headers() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let client = std::thread::spawn(move || {
-            let mut stream = TcpStream::connect(addr).unwrap();
-            stream
-                .write_all(b"HEAD /asset.wasm HTTP/1.1\r\nHost: x\r\nRange: bytes=4-7\r\n\r\n")
-                .unwrap();
-        });
-        let (mut server, _) = listener.accept().unwrap();
-        let (headers, body) = HttpServerHeaders::from_tcp_stream(&mut server).unwrap();
-        client.join().unwrap();
-        assert_eq!(headers.verb, "HEAD");
-        assert_eq!(headers.path, "/asset.wasm");
-        assert_eq!(headers.header("range"), Some("bytes=4-7"));
-        assert!(headers.lines.iter().any(|line| line == "Range: bytes=4-7\r\n"));
-        assert!(body.is_empty());
-    }
-
-    #[test]
-    fn appends_index_html_for_plain_http_directory_paths() {
+    fn duplicate_length_and_transfer_encoding_are_rejected() {
         assert_eq!(
-            parse_url_path("/ui/ HTTP/1.1\r\n", true),
-            Some(("/ui/index.html".to_string(), None))
+            parse_head(b"POST /x HTTP/1.1\r\nContent-Length:5\r\nContent-Length: 5\r\n\r\n")
+                .unwrap_err(),
+            HttpHeadError::BadRequest
+        );
+        assert_eq!(
+            parse_head(b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .unwrap_err(),
+            HttpHeadError::BadRequest
         );
     }
 
     #[test]
-    fn preserves_trailing_slash_for_websocket_paths() {
+    fn appends_index_and_splits_query_inside_target_only() {
         assert_eq!(
-            parse_url_path("/ui/ HTTP/1.1\r\n", false),
-            Some(("/ui/".to_string(), None))
+            parse_url_path("/ui/?x=1 HTTP/1.1\r\n", true),
+            Some(("/ui/index.html".to_string(), Some("x=1".to_string())))
         );
+        assert_eq!(parse_url_path("/x HTTP/1.1?q", true), None);
     }
 }

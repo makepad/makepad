@@ -74,7 +74,7 @@ impl Config {
                 }
                 "--chargers" => chargers = optional_path(value("--chargers", &mut args)?),
                 "--route-workers" => {
-                    route_workers = parse_count("--route-workers", value("--route-workers", &mut args)?, 1, 16)?
+                    route_workers = parse_count("--route-workers", value("--route-workers", &mut args)?, 1, 1)?
                 }
                 "--route-queue" => {
                     route_queue = parse_count("--route-queue", value("--route-queue", &mut args)?, 1, 8)?
@@ -141,14 +141,15 @@ mod tests {
         let config = Config::parse([
             "--listen", "127.0.0.1:8080", "--root", "site", "--data-dir", "data",
             "--nav-basename", "maps/test", "--searchdb", "off", "--places", "places.search",
-            "--major-graph", "major.graph", "--chargers", "off", "--route-workers", "2",
+            "--major-graph", "major.graph", "--chargers", "off", "--route-workers", "1",
             "--route-queue", "4", "--query-workers", "3",
         ]).unwrap();
         assert_eq!(config.listen.port(), 8080);
         assert!(config.searchdb.is_none());
-        assert_eq!(config.route_workers, 2);
+        assert_eq!(config.route_workers, 1);
         assert_eq!(config.route_queue, 4);
         assert_eq!(config.query_workers, 3);
         assert!(Config::parse(["site", "--route-queue", "9"]).is_err());
+        assert!(Config::parse(["site", "--route-workers", "2"]).is_err());
     }
 }

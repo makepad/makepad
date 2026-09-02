@@ -15,8 +15,11 @@ metadata.makepad-auto-version = "3q9p7hJP7S16AZ2sa6ONkcZPa0w="
 makepad-network = { path = "../../platform/network", version = "1.0.0" }
 makepad-map-nav = { path = "../../libs/map_nav" }
 makepad-geodata = { path = "../../libs/geodata" }
-makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }
+libc = "0.2"
 #makepad-file-server = {path = "../../studio/file_server", version = "0.3.0"}
  
 [features]
 nightly=[]
+
+[dev-dependencies]
+makepad-mbtile-reader = { path = "../../libs/mbtile_reader" }
