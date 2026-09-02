@@ -1244,27 +1244,23 @@ mod tests {
     #[test]
     fn macos_window_config_script_hook_applies_floating_panel_defaults_only_when_missing() {
         let mut host = test_cx();
-        let mut std = ();
-        let mut vm = ScriptVm {
-            host: &mut host,
-            std: &mut std,
-            bx: Box::new(ScriptVmBase::new()),
-        };
+        let config = host.with_vm(|vm| {
+            let obj = vm.heap_mut().new_object();
+            vm.map_mut_with(obj, |_vm, map| {
+                map.insert(
+                    ScriptValue::from_id(id!(kind)),
+                    ScriptMapValue {
+                        tag: Default::default(),
+                        value: NIL,
+                    },
+                );
+            });
 
-        let obj = vm.heap_mut().new_object();
-        vm.map_mut_with(obj, |_vm, map| {
-            map.insert(
-                ScriptValue::from_id(id!(kind)),
-                ScriptMapValue {
-                    tag: Default::default(),
-                    value: NIL,
-                },
-            );
+            let mut config = MacosWindowConfig::default();
+            config.kind = MacosWindowKind::FloatingPanel;
+            config.on_after_apply(vm, &Apply::New, &mut Scope::empty(), obj.into());
+            config
         });
-
-        let mut config = MacosWindowConfig::default();
-        config.kind = MacosWindowKind::FloatingPanel;
-        config.on_after_apply(&mut vm, &Apply::New, &mut Scope::empty(), obj.into());
 
         assert_eq!(config.level, MacosWindowLevel::Floating);
         assert!(config.non_activating);
@@ -1299,50 +1295,45 @@ mod tests {
     #[test]
     fn script_window_handle_on_after_apply_writes_macos_config_into_cx_window() {
         let mut host = test_cx();
-        let mut std = ();
-        let mut vm = ScriptVm {
-            host: &mut host,
-            std: &mut std,
-            bx: Box::new(ScriptVmBase::new()),
-        };
-
-        let handle = WindowHandle::new(vm.cx_mut());
-        let window_id = handle.window_id();
-        let mut script_window = ScriptWindowHandle {
-            handle,
-            title: "Floating Panel".to_string(),
-            app_id: "floating-panel".to_string(),
-            inner_size: Some(dvec2(320.0, 80.0)),
-            position: Some(dvec2(40.0, 50.0)),
-            kind_id: 7,
-            dpi_override: Some(2.0),
-            topmost: false,
-            transparent: true,
-            backdrop: WindowBackdrop::Blur,
-            backdrop_intensity: 0.5,
-            macos: MacosWindowConfig::floating_panel(),
-            caption_bar_height_override: None,
-        };
-
-        script_window.on_after_apply(&mut vm, &Apply::New, &mut Scope::empty(), NIL);
-
-        let cx = vm.cx_mut();
-        let cx_window = &cx.windows[window_id];
-        assert_eq!(cx_window.create_title, "Floating Panel");
-        assert_eq!(cx_window.create_app_id, "floating-panel");
-        assert_eq!(cx_window.create_inner_size, Some(dvec2(320.0, 80.0)));
-        assert_eq!(cx_window.create_position, Some(dvec2(40.0, 50.0)));
-        assert_eq!(cx_window.kind_id, 7);
-        assert_eq!(cx_window.dpi_override, Some(2.0));
-        assert_eq!(
-            cx_window.window_visuals(),
-            WindowVisuals {
+        host.with_vm(|vm| {
+            let handle = WindowHandle::new(vm.cx_mut());
+            let window_id = handle.window_id();
+            let mut script_window = ScriptWindowHandle {
+                handle,
+                title: "Floating Panel".to_string(),
+                app_id: "floating-panel".to_string(),
+                inner_size: Some(dvec2(320.0, 80.0)),
+                position: Some(dvec2(40.0, 50.0)),
+                kind_id: 7,
+                dpi_override: Some(2.0),
+                topmost: false,
                 transparent: true,
                 backdrop: WindowBackdrop::Blur,
                 backdrop_intensity: 0.5,
-            }
-        );
-        assert_eq!(cx_window.macos, MacosWindowConfig::floating_panel());
+                macos: MacosWindowConfig::floating_panel(),
+                caption_bar_height_override: None,
+            };
+
+            script_window.on_after_apply(vm, &Apply::New, &mut Scope::empty(), NIL);
+
+            let cx = vm.cx_mut();
+            let cx_window = &cx.windows[window_id];
+            assert_eq!(cx_window.create_title, "Floating Panel");
+            assert_eq!(cx_window.create_app_id, "floating-panel");
+            assert_eq!(cx_window.create_inner_size, Some(dvec2(320.0, 80.0)));
+            assert_eq!(cx_window.create_position, Some(dvec2(40.0, 50.0)));
+            assert_eq!(cx_window.kind_id, 7);
+            assert_eq!(cx_window.dpi_override, Some(2.0));
+            assert_eq!(
+                cx_window.window_visuals(),
+                WindowVisuals {
+                    transparent: true,
+                    backdrop: WindowBackdrop::Blur,
+                    backdrop_intensity: 0.5,
+                }
+            );
+            assert_eq!(cx_window.macos, MacosWindowConfig::floating_panel());
+        });
     }
 
     #[test]

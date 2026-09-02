@@ -813,14 +813,7 @@ mod tests {
     #[test]
     fn set_playhead_none_clears_the_stored_cursor() {
         let mut cx = Cx::new(Box::new(|_cx: &mut Cx, _event: &Event| {}));
-        let mut std = ();
-        let mut vm = ScriptVm {
-            host: &mut cx,
-            std: &mut std,
-            bx: Box::new(ScriptVmBase::new()),
-        };
-        let mut view = ScoreView::script_new(&mut vm);
-        drop(vm);
+        let mut view = cx.with_vm(ScoreView::script_new);
         view.playhead = Some(1.0);
 
         view.set_playhead(&mut cx, None);

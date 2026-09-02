@@ -7,7 +7,6 @@ use crate::makepad_network::{
 use crate::{task, vm, ScriptStd, ScriptVmStdExt};
 use makepad_script::id;
 use makepad_script::*;
-use std::any::Any;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::{Read, Write};
@@ -314,14 +313,14 @@ pub fn socket_stream_pause_current(vm: &mut ScriptVm, handle: ScriptHandle) -> R
     Ok(())
 }
 
-pub fn handle_script_socket_streams<H: Any>(
-    _host: &mut H,
-    std: &mut ScriptStd,
-    _script_vm: &mut Option<Box<ScriptVmBase>>,
-) {
+fn script_std(host: &mut dyn ScriptHost) -> &mut ScriptStd {
+    host.script_std().downcast_mut().unwrap()
+}
+
+pub fn handle_script_socket_streams(host: &mut dyn ScriptHost) {
     let mut resume_threads = Vec::new();
     {
-        let mut streams = std.data.socket_streams.borrow_mut();
+        let mut streams = script_std(host).data.socket_streams.borrow_mut();
         for stream in streams.iter_mut() {
             while let Ok(msg) = stream.out_recv.try_recv() {
                 match msg {
@@ -351,28 +350,32 @@ pub fn handle_script_socket_streams<H: Any>(
         }
     }
     for thread_id in resume_threads {
-        task::queue_script_thread_resume(std, thread_id);
+        task::queue_script_thread_resume(script_std(host), thread_id);
     }
 }
 
-pub fn handle_script_http_servers<H: Any>(
-    host: &mut H,
-    std: &mut ScriptStd,
-    script_vm: &mut Option<Box<ScriptVmBase>>,
-) {
+pub fn handle_script_http_servers(host: &mut dyn ScriptHost) {
     let mut i = 0;
-    while i < std.data.http_servers.len() {
-        while let Ok(msg) = std.data.http_servers[i].receiver.try_recv() {
-            let server = &mut std.data.http_servers[i];
+    while i < script_std(host).data.http_servers.len() {
+        loop {
+            let msg = script_std(host).data.http_servers[i]
+                .receiver
+                .try_recv();
+            let Ok(msg) = msg else {
+                break;
+            };
             match msg {
                 HttpServerRequest::ConnectWebSocket {
                     web_socket_id,
                     headers,
                     response_sender,
                 } => {
-                    let handler = server.events.on_connect_websocket.clone();
+                    let handler = script_std(host).data.http_servers[i]
+                        .events
+                        .on_connect_websocket
+                        .clone();
                     if let Some(handler) = handler.as_object() {
-                        let maybe_ws = vm::with_vm_and_async(host, std, script_vm, |vm| {
+                        let maybe_ws = vm::with_vm_and_async(host, |vm| {
                             let net = vm.module(id_lut!(net));
                             let headers_val = headers.script_to_value(vm);
                             let ret = vm.call(handler.into(), &[headers_val]);
@@ -390,29 +393,31 @@ pub fn handle_script_http_servers<H: Any>(
                             None
                         });
                         if let Some(ws) = maybe_ws {
-                            std.data.http_servers[i].web_sockets.push(ws);
+                            script_std(host).data.http_servers[i].web_sockets.push(ws);
                         }
                     }
                 }
                 HttpServerRequest::DisconnectWebSocket { web_socket_id } => {
-                    let mut handler = None;
-                    let mut remove_index = None;
-                    if let Some(index) = server
-                        .web_sockets
-                        .iter()
-                        .position(|v| v.web_socket_id == web_socket_id)
-                    {
-                        handler = server.web_sockets[index].events.on_closed.clone();
-                        remove_index = Some(index);
-                    }
+                    let (handler, remove_index) = {
+                        let server = &script_std(host).data.http_servers[i];
+                        if let Some(index) = server
+                            .web_sockets
+                            .iter()
+                            .position(|v| v.web_socket_id == web_socket_id)
+                        {
+                            (server.web_sockets[index].events.on_closed.clone(), Some(index))
+                        } else {
+                            (None, None)
+                        }
+                    };
 
                     if let Some(handler) = handler.as_object() {
-                        vm::with_vm_and_async(host, std, script_vm, |vm| {
+                        vm::with_vm_and_async(host, |vm| {
                             vm.call(handler.into(), &[]);
                         });
                     }
                     if let Some(index) = remove_index {
-                        std.data.http_servers[i].web_sockets.remove(index);
+                        script_std(host).data.http_servers[i].web_sockets.remove(index);
                     }
                 }
                 HttpServerRequest::BinaryMessage {
@@ -420,16 +425,18 @@ pub fn handle_script_http_servers<H: Any>(
                     response_sender: _,
                     data,
                 } => {
-                    let mut handler = None;
-                    if let Some(index) = server
-                        .web_sockets
-                        .iter()
-                        .position(|v| v.web_socket_id == web_socket_id)
-                    {
-                        handler = server.web_sockets[index].events.on_binary.clone();
-                    }
+                    let handler = {
+                        let server = &script_std(host).data.http_servers[i];
+                        server
+                            .web_sockets
+                            .iter()
+                            .position(|v| v.web_socket_id == web_socket_id)
+                            .and_then(|index| {
+                                server.web_sockets[index].events.on_binary.clone()
+                            })
+                    };
                     if let Some(handler) = handler.as_object() {
-                        vm::with_vm_and_async(host, std, script_vm, |vm| {
+                        vm::with_vm_and_async(host, |vm| {
                             let array = vm.bx.heap.new_array_from_vec_u8(data);
                             vm.call(handler.into(), &[array.into()]);
                         });
@@ -440,16 +447,18 @@ pub fn handle_script_http_servers<H: Any>(
                     response_sender: _,
                     string,
                 } => {
-                    let mut handler = None;
-                    if let Some(index) = server
-                        .web_sockets
-                        .iter()
-                        .position(|v| v.web_socket_id == web_socket_id)
-                    {
-                        handler = server.web_sockets[index].events.on_string.clone();
-                    }
+                    let handler = {
+                        let server = &script_std(host).data.http_servers[i];
+                        server
+                            .web_sockets
+                            .iter()
+                            .position(|v| v.web_socket_id == web_socket_id)
+                            .and_then(|index| {
+                                server.web_sockets[index].events.on_string.clone()
+                            })
+                    };
                     if let Some(handler) = handler.as_object() {
-                        vm::with_vm_and_async(host, std, script_vm, |vm| {
+                        vm::with_vm_and_async(host, |vm| {
                             let string = vm.bx.heap.new_string_from_str(&string);
                             vm.call(handler.into(), &[string.into()]);
                         });
@@ -459,9 +468,9 @@ pub fn handle_script_http_servers<H: Any>(
                     headers,
                     response_sender,
                 } => {
-                    let handler = server.events.on_get.clone();
+                    let handler = script_std(host).data.http_servers[i].events.on_get.clone();
                     if let Some(handler) = handler.as_object() {
-                        vm::with_vm_and_async(host, std, script_vm, |vm| {
+                        vm::with_vm_and_async(host, |vm| {
                             let net = vm.module(id_lut!(net));
                             let headers_val = headers.script_to_value(vm);
                             let ret = vm.call(handler.into(), &[headers_val]);
@@ -483,9 +492,9 @@ pub fn handle_script_http_servers<H: Any>(
                     body,
                     response,
                 } => {
-                    let handler = server.events.on_post.clone();
+                    let handler = script_std(host).data.http_servers[i].events.on_post.clone();
                     if let Some(handler) = handler.as_object() {
-                        vm::with_vm_and_async(host, std, script_vm, |vm| {
+                        vm::with_vm_and_async(host, |vm| {
                             let net = vm.module(id_lut!(net));
                             let headers_val = headers.script_to_value(vm);
                             let body_array = vm.bx.heap.new_array_from_vec_u8(body);
@@ -510,48 +519,46 @@ pub fn handle_script_http_servers<H: Any>(
     }
 }
 
-pub fn handle_script_web_socket_event<H: Any>(
-    host: &mut H,
-    std: &mut ScriptStd,
-    script_vm: &mut Option<Box<ScriptVmBase>>,
-    event: NetworkResponse,
-) {
+pub fn handle_script_web_socket_event(host: &mut dyn ScriptHost, event: NetworkResponse) {
     match event {
         NetworkResponse::WsOpened { socket_id } => {
-            if let Some(item) = std
+            let handler = script_std(host)
                 .data
                 .web_sockets
                 .iter()
                 .find(|item| item.socket_id == socket_id)
-            {
-                if let Some(handler) = item.events.on_opened.as_object() {
-                    vm::with_vm_and_async(host, std, script_vm, |vm| {
-                        vm.call(handler.into(), &[]);
-                    });
-                }
+                .and_then(|item| item.events.on_opened.as_object());
+            if let Some(handler) = handler {
+                vm::with_vm_and_async(host, |vm| {
+                    vm.call(handler.into(), &[]);
+                });
             }
         }
         NetworkResponse::WsMessage { socket_id, message } => {
-            let Some(item) = std
-                .data
-                .web_sockets
-                .iter()
-                .find(|item| item.socket_id == socket_id)
-            else {
-                return;
-            };
             match message {
                 WsMessage::Text(string) => {
-                    if let Some(handler) = item.events.on_string.as_object() {
-                        vm::with_vm_and_async(host, std, script_vm, |vm| {
+                    let handler = script_std(host)
+                        .data
+                        .web_sockets
+                        .iter()
+                        .find(|item| item.socket_id == socket_id)
+                        .and_then(|item| item.events.on_string.as_object());
+                    if let Some(handler) = handler {
+                        vm::with_vm_and_async(host, |vm| {
                             let string = vm.bx.heap.new_string_from_str(&string);
                             vm.call(handler.into(), &[string.into()]);
                         });
                     }
                 }
                 WsMessage::Binary(data) => {
-                    if let Some(handler) = item.events.on_binary.as_object() {
-                        vm::with_vm_and_async(host, std, script_vm, |vm| {
+                    let handler = script_std(host)
+                        .data
+                        .web_sockets
+                        .iter()
+                        .find(|item| item.socket_id == socket_id)
+                        .and_then(|item| item.events.on_binary.as_object());
+                    if let Some(handler) = handler {
+                        vm::with_vm_and_async(host, |vm| {
                             let data = vm.bx.heap.new_array_from_vec_u8(data);
                             vm.call(handler.into(), &[data.into()]);
                         });
@@ -560,34 +567,50 @@ pub fn handle_script_web_socket_event<H: Any>(
             }
         }
         NetworkResponse::WsClosed { socket_id } => {
-            if let Some(index) = std
-                .data
-                .web_sockets
-                .iter()
-                .position(|item| item.socket_id == socket_id)
-            {
-                if let Some(handler) = std.data.web_sockets[index].events.on_closed.as_object() {
-                    vm::with_vm_and_async(host, std, script_vm, |vm| {
+            let found = {
+                let std = script_std(host);
+                std.data
+                    .web_sockets
+                    .iter()
+                    .position(|item| item.socket_id == socket_id)
+                    .map(|index| {
+                        (
+                            index,
+                            std.data.web_sockets[index].events.on_closed.as_object(),
+                        )
+                    })
+            };
+            if let Some((index, handler)) = found {
+                if let Some(handler) = handler {
+                    vm::with_vm_and_async(host, |vm| {
                         vm.call(handler.into(), &[]);
                     });
                 }
-                std.data.web_sockets.remove(index);
+                script_std(host).data.web_sockets.remove(index);
             }
         }
         NetworkResponse::WsError { socket_id, message } => {
-            if let Some(index) = std
-                .data
-                .web_sockets
-                .iter()
-                .position(|item| item.socket_id == socket_id)
-            {
-                if let Some(handler) = std.data.web_sockets[index].events.on_error.as_object() {
-                    vm::with_vm_and_async(host, std, script_vm, |vm| {
+            let found = {
+                let std = script_std(host);
+                std.data
+                    .web_sockets
+                    .iter()
+                    .position(|item| item.socket_id == socket_id)
+                    .map(|index| {
+                        (
+                            index,
+                            std.data.web_sockets[index].events.on_error.as_object(),
+                        )
+                    })
+            };
+            if let Some((index, handler)) = found {
+                if let Some(handler) = handler {
+                    vm::with_vm_and_async(host, |vm| {
                         let message = vm.bx.heap.new_string_from_str(&message);
                         vm.call(handler.into(), &[message.into()]);
                     });
                 }
-                std.data.web_sockets.remove(index);
+                script_std(host).data.web_sockets.remove(index);
             }
         }
         NetworkResponse::HttpResponse { .. }
@@ -598,10 +621,8 @@ pub fn handle_script_web_socket_event<H: Any>(
     }
 }
 
-pub fn handle_script_network_events<H: Any>(
-    host: &mut H,
-    std: &mut ScriptStd,
-    script_vm: &mut Option<Box<ScriptVmBase>>,
+pub fn handle_script_network_events(
+    host: &mut dyn ScriptHost,
     responses: &[NetworkResponse],
 ) {
     for response in responses {
@@ -610,7 +631,7 @@ pub fn handle_script_network_events<H: Any>(
             | NetworkResponse::WsMessage { .. }
             | NetworkResponse::WsClosed { .. }
             | NetworkResponse::WsError { .. } => {
-                handle_script_web_socket_event(host, std, script_vm, response.clone());
+                handle_script_web_socket_event(host, response.clone());
                 continue;
             }
             _ => {}
@@ -630,63 +651,89 @@ pub fn handle_script_network_events<H: Any>(
 
         match response {
             NetworkResponse::HttpStreamChunk { response: res, .. } => {
-                if let Some(s) = std.data.http_requests.iter().find(|v| v.id == request_id) {
-                    if let Some(handler) = s.events.on_stream.as_object() {
-                        vm::with_vm_and_async(host, std, script_vm, |vm| {
-                            let res = res.script_to_value(vm);
-                            vm.call(handler.into(), &[res]);
-                        })
-                    }
+                let handler = script_std(host)
+                    .data
+                    .http_requests
+                    .iter()
+                    .find(|v| v.id == request_id)
+                    .and_then(|request| request.events.on_stream.as_object());
+                if let Some(handler) = handler {
+                    vm::with_vm_and_async(host, |vm| {
+                        let res = res.script_to_value(vm);
+                        vm.call(handler.into(), &[res]);
+                    });
                 }
             }
             NetworkResponse::HttpStreamComplete { response: res, .. } => {
-                if let Some(i) = std
-                    .data
-                    .http_requests
-                    .iter()
-                    .position(|v| v.id == request_id)
-                {
-                    if let Some(handler) = std.data.http_requests[i].events.on_complete.as_object()
-                    {
-                        vm::with_vm_and_async(host, std, script_vm, |vm| {
+                let found = {
+                    let std = script_std(host);
+                    std.data
+                        .http_requests
+                        .iter()
+                        .position(|v| v.id == request_id)
+                        .map(|index| {
+                            (
+                                index,
+                                std.data.http_requests[index].events.on_complete.as_object(),
+                            )
+                        })
+                };
+                if let Some((index, handler)) = found {
+                    if let Some(handler) = handler {
+                        vm::with_vm_and_async(host, |vm| {
                             let res = res.script_to_value(vm);
                             vm.call(handler.into(), &[res]);
                         })
                     }
-                    std.data.http_requests.remove(i);
+                    script_std(host).data.http_requests.remove(index);
                 }
             }
             NetworkResponse::HttpResponse { response: res, .. } => {
-                if let Some(i) = std
-                    .data
-                    .http_requests
-                    .iter()
-                    .position(|v| v.id == request_id)
-                {
-                    if let Some(handler) = std.data.http_requests[i].events.on_response.as_object()
-                    {
-                        vm::with_vm_and_async(host, std, script_vm, |vm| {
+                let found = {
+                    let std = script_std(host);
+                    std.data
+                        .http_requests
+                        .iter()
+                        .position(|v| v.id == request_id)
+                        .map(|index| {
+                            (
+                                index,
+                                std.data.http_requests[index].events.on_response.as_object(),
+                            )
+                        })
+                };
+                if let Some((index, handler)) = found {
+                    if let Some(handler) = handler {
+                        vm::with_vm_and_async(host, |vm| {
                             let res = res.script_to_value(vm);
                             vm.call(handler.into(), &[res]);
                         })
                     }
-                    std.data.http_requests.remove(i);
+                    script_std(host).data.http_requests.remove(index);
                 }
             }
             NetworkResponse::HttpError { error: err, .. } => {
-                if let Some(i) = std
-                    .data
-                    .http_requests
-                    .iter()
-                    .position(|v| v.id == request_id)
-                {
-                    if let Some(handler) = std.data.http_requests[i].events.on_error.as_object() {
-                        vm::with_vm_and_async(host, std, script_vm, |vm| {
+                let found = {
+                    let std = script_std(host);
+                    std.data
+                        .http_requests
+                        .iter()
+                        .position(|v| v.id == request_id)
+                        .map(|index| {
+                            (
+                                index,
+                                std.data.http_requests[index].events.on_error.as_object(),
+                            )
+                        })
+                };
+                if let Some((index, handler)) = found {
+                    if let Some(handler) = handler {
+                        vm::with_vm_and_async(host, |vm| {
                             let res = err.script_to_value(vm);
                             vm.call(handler.into(), &[res]);
                         })
                     }
-                    std.data.http_requests.remove(i);
+                    script_std(host).data.http_requests.remove(index);
                 }
             }
             NetworkResponse::HttpProgress { .. }
