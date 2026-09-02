@@ -154,6 +154,12 @@ pub enum TileLoadState {
         tree_template_geometry: Option<Geometry>,
         tree_cross_template_geometry: Option<Geometry>,
         tree_instances: Vec<f32>,
+        /// Shared crossed-quad marker stalk and complete stoplight meshes,
+        /// placed by compact per-prop instance records.
+        stalk_template_geometry: Option<Geometry>,
+        stalk_instances: Vec<MapPropInstance>,
+        stoplight_template_geometry: Option<Geometry>,
+        stoplight_instances: Vec<MapPropInstance>,
         feature_count: usize,
         labels: Vec<TileLabel>,
         pin_hits: Vec<PinHit>,
@@ -300,6 +306,8 @@ struct OutputCapacityHints {
     tree_cross_template_vertices: usize,
     tree_cross_template_indices: usize,
     tree_instances: usize,
+    stalk_instances: usize,
+    stoplight_instances: usize,
     road_icon_indices: usize,
     road_icon_vertices: usize,
 }
@@ -836,6 +844,33 @@ pub const SHADOW_DISC_INSTANCE_FLOATS: usize = 4;
 /// vertex shader.
 pub const TREE_INSTANCE_FLOATS: usize = 3;
 
+/// One marker stalk or stoplight placement. `size.x` scales the template's
+/// tile-local xy offsets (the stalk arm; 1 for a stoplight), while `size.y`
+/// scales its normalized metre height (the stalk lift or stoplight height).
+/// Colour is retained as UNorm8x4 and bitcast into the renderer's f32-backed
+/// instance buffer at draw time.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[repr(C)]
+pub struct MapPropInstance {
+    pub anchor: Vec2f,
+    pub size: Vec2f,
+    pub color: UNorm8x4,
+    pub zbias: f32,
+}
+
+pub const MAP_PROP_INSTANCE_BYTES: usize = std::mem::size_of::<MapPropInstance>();
+
+impl MapPropInstance {
+    fn new(anchor: (f32, f32), size: (f32, f32), color: [f32; 4], zbias: f32) -> Self {
+        Self {
+            anchor: vec2(anchor.0, anchor.1),
+            size: vec2(size.0, size.1),
+            color: UNorm8x4::from_f32(color[0], color[1], color[2], color[3]),
+            zbias,
+        }
+    }
+}
+
 /// One symbol mesh drawn N times: the mesh lives once on the GPU (per
 /// registry slot), every placement is an 8-float instance record instead of
 /// a copy of the tessellated SVG at 48 bytes a vertex.
@@ -923,6 +958,16 @@ pub struct TileBuffers {
     pub tree_cross_template_indices: Vec<u32>,
     pub tree_cross_template_vertices: Vec<f32>,
     pub tree_instances: Vec<f32>,
+    /// One unit crossed-quad stalk; instances carry anchor, arm, lift,
+    /// colour and the original painter-order depth.
+    pub stalk_template_indices: Vec<u32>,
+    pub stalk_template_vertices: Vec<f32>,
+    pub stalk_instances: Vec<MapPropInstance>,
+    /// One complete pole + green/amber/red light template; instances carry
+    /// anchor, total height and painter-order depth.
+    pub stoplight_template_indices: Vec<u32>,
+    pub stoplight_template_vertices: Vec<f32>,
+    pub stoplight_instances: Vec<MapPropInstance>,
     /// Stable oneway-arrow subset of `icon_*`. The UI keeps this small CPU
     /// copy beside the resident GPU road meshes, then appends it to a
     /// mode-only 2D/3D icon rebake without regenerating the road Boolean.
@@ -981,6 +1026,13 @@ impl TileBuffers {
                 + self.wall_instances.len()
                 + self.icon_instance_floats())
                 * 4
+            + (self.stalk_template_indices.len()
+                + self.stalk_template_vertices.len()
+                + self.stoplight_template_indices.len()
+                + self.stoplight_template_vertices.len())
+                * 4
+            + (self.stalk_instances.len() + self.stoplight_instances.len())
+                * MAP_PROP_INSTANCE_BYTES
     }
 
     /// Instance floats across both icon bands.
@@ -3869,6 +3921,69 @@ fn typed_stream_bytes_switch_indices_at_u16_vertex_limit() {
 
 #[cfg(test)]
 #[test]
+fn map_prop_instance_packing_roundtrips() {
+    use std::mem::{align_of, offset_of, size_of};
+
+    let logical_color = [0.17, 0.41, 0.73, 1.0];
+    let packed = MapPropInstance::new(
+        (123.25, -4.5),
+        (0.125, 42.75),
+        logical_color,
+        37.0 * VECTOR_ZBIAS_STEP,
+    );
+    assert_eq!(size_of::<MapPropInstance>(), 24);
+    assert_eq!(MAP_PROP_INSTANCE_BYTES, 24);
+    assert_eq!(align_of::<MapPropInstance>(), 4);
+    assert_eq!(offset_of!(MapPropInstance, anchor), 0);
+    assert_eq!(offset_of!(MapPropInstance, size), 8);
+    assert_eq!(offset_of!(MapPropInstance, color), 16);
+    assert_eq!(offset_of!(MapPropInstance, zbias), 20);
+    assert_eq!(packed.anchor, vec2(123.25, -4.5));
+    assert_eq!(packed.size, vec2(0.125, 42.75));
+    let color = packed.color.to_f32();
+    for (actual, expected) in [color.0, color.1, color.2, color.3]
+        .into_iter()
+        .zip(logical_color)
+    {
+        assert!((actual - expected).abs() <= 0.5 / 255.0 + f32::EPSILON);
+    }
+    let color_lane = u32::from_le_bytes(packed.color.0);
+    assert_eq!(UNorm8x4(f32::from_bits(color_lane).to_bits().to_le_bytes()), packed.color);
+    assert_eq!(packed.zbias, 37.0 * VECTOR_ZBIAS_STEP);
+}
+
+#[cfg(test)]
+#[test]
+fn lifted_marker_emits_one_stalk_instance_and_no_generic_3d_misc() {
+    let tags = TagSet::from(HashMap::from([
+        ("layer".to_string(), "pois".to_string()),
+        ("amenity".to_string(), "cafe".to_string()),
+        ("name".to_string(), "Stalk fixture".to_string()),
+    ]));
+    let buffers = build_tile_buffers_from_features(
+        TileKey { z: 14, x: 8414, y: 5384 },
+        &[],
+        &[((128.0, 96.0), tags)],
+        &probe_compiled_theme(),
+        16,
+        true,
+        true,
+        Vec::new(),
+        false,
+        false,
+        Vec::new(),
+        None,
+    );
+    assert_eq!(buffers.stalk_instances.len(), 1);
+    assert_eq!(buffers.stalk_instances[0].anchor, vec2(128.0, 96.0));
+    assert_eq!(buffers.stalk_instances[0].size.y, 18.0);
+    assert!(!buffers.stalk_template_indices.is_empty());
+    assert!(buffers.fill_3d_misc_indices.is_empty());
+    assert!(buffers.fill_3d_misc_vertices.is_empty());
+}
+
+#[cfg(test)]
+#[test]
 fn compact_fill_record_roundtrips_within_packed_precision() {
     use crate::makepad_draw::vector::{
         pack_fill_record, unpack_fill_depths, unpack_typed_position,
@@ -4680,6 +4795,14 @@ fn build_tile_buffers_from_features_profiled(
     let mut tree_cross_template_indices =
         Vec::<u32>::with_capacity(capacity_hints.tree_cross_template_indices);
     let mut tree_instances = Vec::<f32>::with_capacity(capacity_hints.tree_instances);
+    let mut stalk_template_vertices = Vec::<f32>::new();
+    let mut stalk_template_indices = Vec::<u32>::new();
+    let mut stalk_instances =
+        Vec::<MapPropInstance>::with_capacity(capacity_hints.stalk_instances);
+    let mut stoplight_template_vertices = Vec::<f32>::new();
+    let mut stoplight_template_indices = Vec::<u32>::new();
+    let mut stoplight_instances =
+        Vec::<MapPropInstance>::with_capacity(capacity_hints.stoplight_instances);
     let mut road_icon_indices = Vec::<u32>::with_capacity(capacity_hints.road_icon_indices);
     let mut road_icon_vertices = Vec::<f32>::with_capacity(capacity_hints.road_icon_vertices);
     let mut fill_zbias = 0.0_f32;
@@ -5879,8 +6002,9 @@ fn build_tile_buffers_from_features_profiled(
             }
         }
     }
-    // Marker stalks (3D mode): thin dark lines from the ground point up to
-    // every floating marker.
+    // Marker stalks (3D mode): one typed placement per floating marker. A
+    // single unit crossed-quad template replaces the two baked wall quads
+    // formerly repeated at every marker.
     if buildings_3d {
         let has_pins = icon_jobs.iter().any(|job| job.9 > 0.0);
         if has_pins {
@@ -5891,6 +6015,22 @@ fn build_tile_buffers_from_features_profiled(
             let units_per_m =
                 (crate::map::geometry::TILE_SIZE * n / (40_075_016.686 * lat.cos())) as f32;
             let stalk_color = hex_to_premul_rgba(0x4a5058, 1.0);
+            let mut template_zbias = 0.0;
+            for (a, b) in [((-1.0, 0.0), (1.0, 0.0)), ((0.0, -1.0), (0.0, 1.0))] {
+                append_wall_quad(
+                    a,
+                    b,
+                    0.0,
+                    1.0,
+                    [1.0; 4],
+                    1.0,
+                    (0.0, 0.0),
+                    MAT_NONE,
+                    &mut stalk_template_vertices,
+                    &mut stalk_template_indices,
+                    &mut template_zbias,
+                );
+            }
             for (job_index, job) in icon_jobs.iter().enumerate() {
                 let lift = job_lifts[job_index];
                 if lift <= 0.0 {
@@ -5898,40 +6038,24 @@ fn build_tile_buffers_from_features_profiled(
                 }
                 // Chargers get a slightly heavier stalk than POI markers.
                 let arm = if job.5 == 2 || job.5 == 3 { 0.22 } else { 0.14 } * units_per_m;
-                let (x, y) = job.0;
-                append_wall_quad(
-                    (x - arm, y),
-                    (x + arm, y),
-                    0.0,
-                    lift,
+                stalk_instances.push(MapPropInstance::new(
+                    job.0,
+                    (arm, lift),
                     stalk_color,
-                    1.0,
-                    (0.0, 0.0),
-                    MAT_NONE,
-                    &mut fill_vertices,
-                    &mut fill_indices,
-                    &mut fill_zbias,
-                );
-                append_wall_quad(
-                    (x, y - arm),
-                    (x, y + arm),
-                    0.0,
-                    lift,
-                    stalk_color,
-                    1.0,
-                    (0.0, 0.0),
-                    MAT_NONE,
-                    &mut fill_vertices,
-                    &mut fill_indices,
-                    &mut fill_zbias,
-                );
+                    fill_zbias,
+                ));
+                // Preserve the exact painter-ladder progression paid by the
+                // two removed append_wall_quad calls.
+                fill_zbias += VECTOR_ZBIAS_STEP;
+                fill_zbias += VECTOR_ZBIAS_STEP;
             }
         }
     }
 
-    // Little 3D stoplights (tilt mode): a slim dark pole with the classic
-    // three lights stacked on top — red above amber above green.
+    // Little 3D stoplights (tilt mode): one complete shared pole + three
+    // light template, with one typed placement per signal point.
     if !signal_points_3d.is_empty() {
+        const STOPLIGHT_HEIGHT_M: f32 = 5.7;
         let n = (1u32 << tile_key.z) as f64;
         let lat = (std::f64::consts::PI * (1.0 - 2.0 * (tile_key.y as f64 + 0.5) / n))
             .sinh()
@@ -5961,48 +6085,48 @@ fn build_tile_buffers_from_features_profiled(
                 ]);
             }
         }
+        let mut template_zbias = 0.0;
+        for (a, b) in [((-arm, 0.0), (arm, 0.0)), ((0.0, -arm), (0.0, arm))] {
+            append_wall_quad(
+                a,
+                b,
+                0.0,
+                3.2 / STOPLIGHT_HEIGHT_M,
+                pole_color,
+                1.0,
+                (0.0, 0.0),
+                MAT_NONE,
+                &mut stoplight_template_vertices,
+                &mut stoplight_template_indices,
+                &mut template_zbias,
+            );
+        }
+        for (color, height_m) in lights {
+            append_ball(
+                (0.0, 0.0),
+                0.5 * units_per_m,
+                0.5 / STOPLIGHT_HEIGHT_M,
+                height_m / STOPLIGHT_HEIGHT_M,
+                color,
+                8,
+                4,
+                &theme.shiny.sun,
+                MAT_NONE,
+                &mut stoplight_template_vertices,
+                &mut stoplight_template_indices,
+                &mut template_zbias,
+            );
+        }
         for (x, y) in &signal_points_3d {
-            append_wall_quad(
-                (*x - arm, *y),
-                (*x + arm, *y),
-                0.0,
-                3.2,
-                pole_color,
-                1.0,
-                (0.0, 0.0),
-                MAT_NONE,
-                &mut fill_vertices,
-                &mut fill_indices,
-                &mut fill_zbias,
-            );
-            append_wall_quad(
-                (*x, *y - arm),
-                (*x, *y + arm),
-                0.0,
-                3.2,
-                pole_color,
-                1.0,
-                (0.0, 0.0),
-                MAT_NONE,
-                &mut fill_vertices,
-                &mut fill_indices,
-                &mut fill_zbias,
-            );
-            for (color, height_m) in lights {
-                append_ball(
-                    (*x, *y),
-                    0.5 * units_per_m,
-                    0.5,
-                    height_m,
-                    color,
-                    8,
-                    4,
-                    &theme.shiny.sun,
-                    MAT_NONE,
-                    &mut fill_vertices,
-                    &mut fill_indices,
-                    &mut fill_zbias,
-                );
+            stoplight_instances.push(MapPropInstance::new(
+                (*x, *y),
+                (1.0, STOPLIGHT_HEIGHT_M),
+                [1.0; 4],
+                fill_zbias,
+            ));
+            // Two pole quads plus three light balls each took one step.
+            for _ in 0..5 {
+                fill_zbias += VECTOR_ZBIAS_STEP;
             }
             feature_count += 1;
         }
@@ -6748,6 +6872,12 @@ fn build_tile_buffers_from_features_profiled(
             tree_cross_template_indices: Vec::new(),
             tree_cross_template_vertices: Vec::new(),
             tree_instances: Vec::new(),
+            stalk_template_indices: Vec::new(),
+            stalk_template_vertices: Vec::new(),
+            stalk_instances: Vec::new(),
+            stoplight_template_indices: Vec::new(),
+            stoplight_template_vertices: Vec::new(),
+            stoplight_instances: Vec::new(),
             road_icon_indices: Vec::new(),
             road_icon_vertices: Vec::new(),
             mode_overlay_only: false,
@@ -7696,6 +7826,8 @@ fn build_tile_buffers_from_features_profiled(
             tree_cross_template_vertices: tree_cross_template_vertices.len(),
             tree_cross_template_indices: tree_cross_template_indices.len(),
             tree_instances: tree_instances.len(),
+            stalk_instances: stalk_instances.len(),
+            stoplight_instances: stoplight_instances.len(),
             road_icon_indices: road_icon_indices.len(),
             road_icon_vertices: road_icon_vertices.len(),
         },
@@ -7732,9 +7864,9 @@ fn build_tile_buffers_from_features_profiled(
         &mut fill_3d_indices,
         |record| record[14] > 3.5 && record[14] < 4.5,
     );
-    // Ordinary lifted shape-0 roofs use the 16-byte typed roof layout. Parapet
-    // depth variants, marker stalks, signals and any future gradient or
-    // patterned roof remain byte-for-byte on the generic vector path.
+    // Ordinary lifted shape-0 roofs use the 16-byte typed roof layout.
+    // Parapet depth variants and any future gradient or patterned roof stay
+    // on the generic vector path; stalks and signals now have instance bands.
     let (fill_3d_misc_vertices, fill_3d_misc_indices) = split_band_by(
         &mut fill_3d_vertices,
         &mut fill_3d_indices,
@@ -7813,6 +7945,12 @@ fn build_tile_buffers_from_features_profiled(
         tree_cross_template_indices,
         tree_cross_template_vertices: pack_vector_vertices(&tree_cross_template_vertices),
         tree_instances,
+        stalk_template_indices,
+        stalk_template_vertices: pack_vector_vertices(&stalk_template_vertices),
+        stalk_instances,
+        stoplight_template_indices,
+        stoplight_template_vertices: pack_vector_vertices(&stoplight_template_vertices),
+        stoplight_instances,
         road_icon_indices,
         road_icon_vertices,
         mode_overlay_only: !build_road_core,
@@ -11406,6 +11544,12 @@ mod tag_arena_tests {
         same_vec!(tree_cross_template_indices);
         same_float_vec!(tree_cross_template_vertices);
         same_float_vec!(tree_instances);
+        same_vec!(stalk_template_indices);
+        same_float_vec!(stalk_template_vertices);
+        same_vec!(stalk_instances);
+        same_vec!(stoplight_template_indices);
+        same_float_vec!(stoplight_template_vertices);
+        same_vec!(stoplight_instances);
         same_vec!(road_icon_indices);
         same_float_vec!(road_icon_vertices);
         same_vec!(labels);
@@ -12063,6 +12207,12 @@ mod bridge_probe_tests {
             tree_cross_template_indices: Vec::new(),
             tree_cross_template_vertices: Vec::new(),
             tree_instances: Vec::new(),
+            stalk_template_indices: Vec::new(),
+            stalk_template_vertices: Vec::new(),
+            stalk_instances: Vec::new(),
+            stoplight_template_indices: Vec::new(),
+            stoplight_template_vertices: Vec::new(),
+            stoplight_instances: Vec::new(),
             stage_summary: String::new(),
             road_icon_indices: Vec::new(),
             road_icon_vertices: Vec::new(),

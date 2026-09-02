@@ -1685,6 +1685,146 @@ script_mod! {
         }
     }
 
+    // Marker stalks and stoplights: a tile keeps one generic-vector template
+    // for each shape and repeats only this compact typed placement. Template
+    // xy and height are normalized independently by inst_size; all material,
+    // terrain, shadow and depth varyings remain the generic fill path's.
+    mod.draw.DrawMapProp = mod.std.set_type_default() do #(DrawMapProp::script_shader(vm)){
+        ..mod.draw.DrawMapVector
+        geom: vertex_buffer(geom.VectorVertexPacked, geom.VectorGeomPacked)
+
+        vertex: fn() {
+            let g_uv = unpack2f16(self.geom.uv)
+            let g_color = unpack4u8(self.geom.color)
+            let g_p0s = unpack2f16(self.geom.p0s)
+            let g_p12 = unpack2f16(self.geom.p12)
+            let g_p3c = unpack2f16(self.geom.p3c)
+            let pos = self.inst_anchor
+                + vec2(self.geom.x, self.geom.y) * self.inst_size.x
+            let h = self.geom.param4 * self.inst_size.y
+            var transformed = pos * self.map_scale + self.map_offset
+            var terrain_pos = transformed
+            let feature_lift = h * self.height_grow
+            if self.shadow_cast > 0.5 && self.shadow_cast < 1.5 {
+                let delta = self.shadow_dir * feature_lift * self.map_scale
+                transformed = transformed + delta
+                terrain_pos = terrain_pos + delta
+            }
+            var ground_m = 0.0
+            if self.terrain_span.x > 0.5 {
+                let tuv = (terrain_pos - self.terrain_org) / self.terrain_span
+                if tuv.x > 0.0 && tuv.x < 1.0 && tuv.y > 0.0 && tuv.y < 1.0 {
+                    let fit = tuv * self.terrain_uvfit.xy + self.terrain_uvfit.zw
+                    let enc = self.terrain_tex.sample_lod(fit, 0.0)
+                    ground_m = max(
+                        enc.x * 65280.0 + enc.y * 255.0 + enc.z * 0.99609375 - 32768.0,
+                        0.0
+                    )
+                }
+            }
+            let rel = transformed - self.rot_pivot
+            transformed = self.rot_pivot + vec2(
+                rel.x * self.view_rot.x - rel.y * self.view_rot.y,
+                rel.x * self.view_rot.y + rel.y * self.view_rot.x
+            )
+            let ground_rel_y = transformed.y - self.rot_pivot.y
+            let ground_fill = ground_m * self.terrain_fill_lift
+            var lift_m = feature_lift + ground_fill
+            if self.shadow_cast > 0.5 {
+                lift_m = ground_fill
+            }
+            if self.space_warp.x > 0.0001 {
+                let cos_t = self.tilt_params.x
+                let sin_t = self.space_warp.w
+                let hpx = lift_m * self.space_warp2.y
+                let wg = 0.0 - ground_rel_y
+                var wf = wg
+                var wu = 0.0
+                var wnx = 0.0
+                var wny = 1.0
+                let wa = wg - self.space_warp.y
+                if wa > 0.0 {
+                    let wr = max(self.space_warp.z, 1.0)
+                    let cap = self.space_warp2.z
+                    let th = min(wa / wr, cap)
+                    let sth = sin(th)
+                    let cth = cos(th)
+                    wf = self.space_warp.y + wr * sth
+                    wu = wr * (1.0 - cth)
+                    let we = wa - wr * cap
+                    if we > 0.0 {
+                        wf = wf + we * cos_t
+                        wu = wu + we * sin_t
+                    }
+                    wnx = 0.0 - sth
+                    wny = cth
+                }
+                let pf = wf + hpx * wnx
+                let pu = wu + hpx * wny
+                let bf = wg + (pf - wg) * self.space_warp.x
+                let bu = hpx + (pu - hpx) * self.space_warp.x
+                let zrel = bf * sin_t - bu * cos_t
+                let pw = 1.0 / max(1.0 + self.space_warp2.x * zrel, 0.12)
+                transformed = vec2(
+                    self.rot_pivot.x + (transformed.x - self.rot_pivot.x) * pw,
+                    self.rot_pivot.y - (bf * cos_t + bu * sin_t) * pw
+                )
+            } else {
+                transformed.y = self.rot_pivot.y
+                    + ground_rel_y * self.tilt_params.x
+                    - lift_m * self.tilt_params.y
+            }
+
+            self.v_tcoord = vec2(g_uv.x, g_uv.y)
+            self.v_color = vec4(g_color.x, g_color.y, g_color.z, g_color.w)
+                * unpack4u8(self.inst_color)
+            self.v_stroke_mult = self.geom.stroke_mult
+            self.v_stroke_dist = self.geom.stroke_dist * self.map_scale.x
+            self.v_shape_id = g_p0s.y
+            self.v_param0 = g_p0s.x
+            self.v_param1 = g_p12.x
+            self.v_param2 = g_p12.y
+            self.v_param3 = g_p3c.x
+            self.v_param4 = h
+            self.v_param5 = self.geom.param5
+
+            let shifted = transformed + self.draw_list.view_shift
+            self.v_world = shifted
+            self.v_screen = transformed - self.rot_pivot + self.shadow_mask_size * 0.5
+            self.v_lift = feature_lift
+
+            let cr = g_p3c.y * self.inst_size.x
+                * max(self.map_scale.x, self.map_scale.y)
+            let clip = vec4(
+                max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
+                max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
+                min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
+                min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
+            )
+            if transformed.x + cr < clip.x || transformed.y + cr < clip.y
+                || transformed.x - cr > clip.z || transformed.y - cr > clip.w {
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 0.0)
+                return
+            }
+
+            let world = self.draw_list.view_transform * vec4(
+                shifted.x
+                shifted.y
+                self.draw_depth + self.tilt_params.w
+                    + mix(
+                        self.draw_call.zbias + self.geom.zbias + self.inst_zbias,
+                        self.geom.param5
+                            + (ground_rel_y + lift_m * self.tilt_params.y)
+                                * self.tilt_params.z,
+                        sign(self.tilt_params.z)
+                    )
+                1.0
+            )
+            self.v_world_clip = world
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
+        }
+    }
+
     // Instanced building walls: the unit quad is extruded per footprint edge
     // in the vertex shader from an 11-float record (edge a/b, base/top metres,
     // outward normal, bottom AO, colour, zbias). Varyings match the vertices
@@ -3207,6 +3347,77 @@ impl DrawMapIcon {
     }
 }
 
+/// Instanced marker stalks and stoplights. Their meshes remain on the
+/// generic vector layout so the existing material and shadow fragment path
+/// stays authoritative; only placement/scale/colour repeat per feature.
+#[derive(Script, ScriptHook, Debug)]
+#[repr(C)]
+pub struct DrawMapProp {
+    #[rust(ShinyConfig::default())]
+    pub shiny: ShinyConfig,
+    #[rust]
+    shadow_mask: Option<Texture>,
+    #[deref]
+    pub draw_vars: DrawVars,
+    #[live]
+    pub draw_clip: Vec4f,
+    #[live(1.0)]
+    pub depth_clip: f32,
+    #[live(0.0)]
+    pub draw_depth: f32,
+    #[live]
+    pub inst_anchor: Vec2f,
+    #[live(vec2(1.0, 1.0))]
+    pub inst_size: Vec2f,
+    #[live]
+    pub inst_color: f32,
+    #[live]
+    pub inst_zbias: f32,
+}
+
+impl DrawMapProp {
+    fn draw_instances(
+        &mut self,
+        cx: &mut Cx2d,
+        geometry_id: GeometryId,
+        records: &[MapPropInstance],
+        uniforms: &MapDrawUniforms,
+        terrain_tex: &Texture,
+        pass_depth: f32,
+    ) {
+        if records.is_empty() || self.draw_vars.draw_shader_id.is_none() {
+            return;
+        }
+        self.draw_depth = pass_depth;
+        stamp_map_uniforms(
+            &mut self.draw_vars,
+            cx.cx,
+            uniforms,
+            &self.shiny,
+            terrain_tex,
+            self.shadow_mask.as_ref(),
+        );
+        self.draw_vars.geometry_id = Some(geometry_id);
+        cx.new_draw_call(&self.draw_vars);
+        let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
+            return;
+        };
+        for record in records {
+            self.inst_anchor = record.anchor;
+            self.inst_size = record.size;
+            self.inst_color = f32::from_bits(u32::from_le_bytes(record.color.0));
+            self.inst_zbias = record.zbias;
+            instances.instances.extend_from_slice(self.draw_vars.as_slice());
+        }
+        self.inst_anchor = vec2(0.0, 0.0);
+        self.inst_size = vec2(1.0, 1.0);
+        self.inst_color = 0.0;
+        self.inst_zbias = 0.0;
+        let new_area = cx.end_many_instances(instances);
+        self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
+    }
+}
+
 
 /// Instanced building walls: the shared unit quad is the geometry, every
 /// footprint edge is one instance (see `WALL_INSTANCE_FLOATS`); the shader is
@@ -3449,6 +3660,9 @@ pub struct MapView {
     #[redraw]
     #[live]
     draw_icon: DrawMapIcon,
+    #[redraw]
+    #[live]
+    draw_prop: DrawMapProp,
     #[redraw]
     #[live]
     draw_wall: DrawMapWall,
@@ -4286,6 +4500,7 @@ impl Widget for MapView {
         self.draw_face.shiny = self.draw_map.shiny;
         self.draw_roof.shiny = self.draw_map.shiny;
         self.draw_icon.shiny = self.draw_map.shiny;
+        self.draw_prop.shiny = self.draw_map.shiny;
         self.draw_wall.shiny = self.draw_map.shiny;
         self.draw_shadow.shiny = self.draw_map.shiny;
         self.draw_shadow_disc.shiny = self.draw_map.shiny;
@@ -4373,6 +4588,7 @@ impl Widget for MapView {
             );
             self.draw_map.shadow_mask = self.shadow_mask_texture.clone();
             self.draw_icon.shadow_mask = self.shadow_mask_texture.clone();
+            self.draw_prop.shadow_mask = self.shadow_mask_texture.clone();
             self.draw_wall.shadow_mask = self.shadow_mask_texture.clone();
             self.draw_fill.shadow_mask = self.shadow_mask_texture.clone();
             self.draw_roof.shadow_mask = self.shadow_mask_texture.clone();
@@ -4381,6 +4597,7 @@ impl Widget for MapView {
         } else {
             self.draw_map.shadow_mask = None;
             self.draw_icon.shadow_mask = None;
+            self.draw_prop.shadow_mask = None;
             self.draw_wall.shadow_mask = None;
             self.draw_fill.shadow_mask = None;
             self.draw_roof.shadow_mask = None;
@@ -4445,6 +4662,10 @@ impl Widget for MapView {
                     tree_template_geometry,
                     tree_cross_template_geometry,
                     tree_instances,
+                    stalk_template_geometry,
+                    stalk_instances,
+                    stoplight_template_geometry,
+                    stoplight_instances,
                     ..
                 } = &entry.state
                 else {
@@ -4475,6 +4696,8 @@ impl Widget for MapView {
                         tree_cross_geometry,
                         tree_template_geometry,
                         tree_cross_template_geometry,
+                        stalk_template_geometry,
+                        stoplight_template_geometry,
                     ]
                     .into_iter()
                     .flatten()
@@ -4870,6 +5093,48 @@ impl Widget for MapView {
                                 &terrain_tex,
                                 0.0,
                             );
+                        }
+                    }
+                    // Marker stalks and complete stoplights occupy the same
+                    // 3D-volume phase and LOD/grow gate as the generic misc
+                    // mesh records they replace.
+                    if lod > 0.003 {
+                        let prop_uniforms = MapDrawUniforms {
+                            map_scale,
+                            map_offset: screen_offset,
+                            fade: fade_alpha,
+                            width_correction: stroke_width_correction(entry.bucket, view_zoom),
+                            view_rot: view_rot_uniform,
+                            rot_pivot: rot_pivot_uniform,
+                            tilt_params: tilt_uniform,
+                            icon_zoom: view_zoom as f32,
+                            height_grow: lod_height,
+                            terrain_org,
+                            terrain_span,
+                            terrain_uvfit,
+                            terrain_fill_lift,
+                            shadow_dir: self.draw_map.shadow_dir,
+                            shadow_cast: self.draw_map.shadow_cast,
+                            shadow_mask_on: self.draw_map.shadow_mask_on,
+                            shadow_mask_size: self.draw_map.shadow_mask_size,
+                            shadow_mask_flip: self.draw_map.shadow_mask_flip,
+                            space_warp: self.draw_map.space_warp_u,
+                            space_warp2: self.draw_map.space_warp2_u,
+                        };
+                        for (template, instances) in [
+                            (stalk_template_geometry, stalk_instances.as_slice()),
+                            (stoplight_template_geometry, stoplight_instances.as_slice()),
+                        ] {
+                            if let Some(template) = template {
+                                self.draw_prop.draw_instances(
+                                    cx,
+                                    template.geometry_id(),
+                                    instances,
+                                    &prop_uniforms,
+                                    &terrain_tex,
+                                    0.0,
+                                );
+                            }
                         }
                     }
                     // LOD rings: near = full detail; mid = roofs + crossed-
@@ -5801,6 +6066,7 @@ impl MapView {
         // texture as a sampler is a feedback loop (a WebGL error flood and
         // a blank map; undefined on Metal).
         self.draw_map.shadow_mask = None;
+        self.draw_prop.shadow_mask = None;
         self.draw_shadow.shadow_mask = None;
         self.draw_roof.shadow_mask = None;
         self.draw_shadow_disc.shadow_mask = None;
@@ -5824,6 +6090,10 @@ impl MapView {
                 stroke_geometry,
                 shadow_disc_instances,
                 wall_instances,
+                stalk_template_geometry,
+                stalk_instances,
+                stoplight_template_geometry,
+                stoplight_instances,
                 ..
             } = &entry.state
             else {
@@ -5928,6 +6198,21 @@ impl MapView {
                     terrain_fill_lift,
                 );
             }
+            for (template, instances) in [
+                (stalk_template_geometry, stalk_instances.as_slice()),
+                (stoplight_template_geometry, stoplight_instances.as_slice()),
+            ] {
+                if let Some(template) = template {
+                    self.draw_prop.draw_instances(
+                        cx,
+                        template.geometry_id(),
+                        instances,
+                        &uniforms(1.0, 1.0),
+                        terrain_tex,
+                        0.0,
+                    );
+                }
+            }
 
             // c. Footprint cut-out at ground.
             self.draw_map.shadow_cast = 2.0;
@@ -5960,6 +6245,21 @@ impl MapView {
                     0.0,
                     terrain_fill_lift,
                 );
+            }
+            for (template, instances) in [
+                (stalk_template_geometry, stalk_instances.as_slice()),
+                (stoplight_template_geometry, stoplight_instances.as_slice()),
+            ] {
+                if let Some(template) = template {
+                    self.draw_prop.draw_instances(
+                        cx,
+                        template.geometry_id(),
+                        instances,
+                        &uniforms(0.0, 2.0),
+                        terrain_tex,
+                        0.0,
+                    );
+                }
             }
 
             // d. Tree / signal contact discs.
@@ -6291,6 +6591,12 @@ impl MapView {
             buffers.tree_cross_template_indices,
             buffers.tree_cross_template_vertices,
         );
+        let stalk_template_geometry =
+            band(buffers.stalk_template_indices, buffers.stalk_template_vertices);
+        let stoplight_template_geometry = band(
+            buffers.stoplight_template_indices,
+            buffers.stoplight_template_vertices,
+        );
 
         // Cross-fade: keep the replaced generation's geometry under the new
         // one for TILE_FADE_SECONDS instead of popping.
@@ -6373,6 +6679,10 @@ impl MapView {
                     tree_template_geometry,
                     tree_cross_template_geometry,
                     tree_instances: buffers.tree_instances,
+                    stalk_template_geometry,
+                    stalk_instances: buffers.stalk_instances,
+                    stoplight_template_geometry,
+                    stoplight_instances: buffers.stoplight_instances,
                     feature_count: if reuse_road_core {
                         buffers.feature_count.max(old_feature_count)
                     } else {
@@ -10293,6 +10603,8 @@ mod tests {
         let face = geometry_layout(&cx, &map.draw_face.draw_vars).expect("face shader initialised");
         let road = geometry_layout(&cx, &map.draw_road.draw_vars).expect("road shader initialised");
         let roof = geometry_layout(&cx, &map.draw_roof.draw_vars).expect("roof shader initialised");
+        let prop_shader = map.draw_prop.draw_vars.draw_shader_id.expect("prop shader initialised");
+        let prop_instances = &cx.draw_shaders[prop_shader.index].mapping.instances;
         assert_eq!(fill.stride_bytes, 16);
         assert_eq!(face.stride_bytes, 16);
         assert_eq!(road.stride_bytes, 28);
@@ -10340,6 +10652,14 @@ mod tests {
                 DrawShaderAttrFormat::F32x1,
                 DrawShaderAttrFormat::F16x2,
             ]
+        );
+        assert_eq!(
+            prop_instances
+                .inputs
+                .iter()
+                .find(|input| input.id == live_id!(inst_color))
+                .map(|input| input.attr_format),
+            Some(DrawShaderAttrFormat::F32x1),
         );
     }
 
