@@ -10,3 +10,5 @@ pub mod view;
 
 pub use overlay::{MapMarker, MapPuck, MapRouteOverlay};
 pub use view::*;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod bake_report;
