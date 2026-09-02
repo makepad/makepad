@@ -17,6 +17,7 @@ use std::path::Path;
 
 mod codec;
 mod mkmap;
+#[cfg(not(target_arch = "wasm32"))]
 mod writer;
 pub use codec::{
     compress_tile, compression_metadata_rows, TileCodec, TileCompression,
@@ -26,14 +27,17 @@ pub use mkmap::{
     mkmap_tile_id, mkmap_zxy_from_tile_id, BlobRef, MkmapLeaf, MkmapReader, MkmapRoot,
     MkmapTileRef, RootRecordRef, TileArchiveReader,
 };
-pub use writer::{tile_rowid_xyz, MbtilesWriter, MbtilesWriterStats, WriterValue};
+#[cfg(not(target_arch = "wasm32"))]
+pub use writer::{MbtilesWriter, MbtilesWriterStats, WriterValue};
 
 use makepad_sqlite::btree::{IndexCursor, TableCursor};
 use makepad_sqlite::schema::{read_objects, SchemaObject};
 use makepad_sqlite::value::TextMode;
 use makepad_sqlite::{Collation, Pager, Value as DbValue};
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) use makepad_sqlite::btree::{local_payload_size, PageType};
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) use makepad_sqlite::pager::MAGIC as SQLITE_MAGIC;
 pub use makepad_sqlite::pager::DbHeader;
 pub use makepad_sqlite::value::TextEncoding;
@@ -41,6 +45,34 @@ pub use makepad_sqlite::value::TextEncoding;
 /// Text is decoded leniently here: historical mbtiles/GeoPackage archives in
 /// the wild are not always clean UTF-8 and readers must keep working.
 const TEXT_MODE: TextMode = TextMode::Lossy;
+
+/// Compute the deterministic rowid used for Makepad-authored MBTiles files.
+///
+/// Coordinates are ordered by zoom, then 256×256 block row and column, then
+/// local row and column. This matches the order in a VersaTiles v02 archive.
+pub fn tile_rowid_xyz(zoom: u8, x: u32, y: u32) -> Option<i64> {
+    if zoom > 31 {
+        return None;
+    }
+    let axis = 1_u64 << zoom;
+    if u64::from(x) >= axis || u64::from(y) >= axis {
+        return None;
+    }
+
+    let zoom_capacity = 1_u128 << (u32::from(zoom) * 2);
+    let prefix = (zoom_capacity - 1) / 3;
+    let within_zoom = if zoom <= 8 {
+        u128::from(y) * u128::from(axis) + u128::from(x)
+    } else {
+        let blocks_per_axis = 1_u128 << (zoom - 8);
+        let block_x = u128::from(x >> 8);
+        let block_y = u128::from(y >> 8);
+        let local_x = u128::from(x & 255);
+        let local_y = u128::from(y & 255);
+        ((block_y * blocks_per_axis + block_x) << 16) + (local_y << 8) + local_x
+    };
+    i64::try_from(prefix + within_zoom + 1).ok()
+}
 
 // ---------------------------------------------------------------------------
 // Error
@@ -337,7 +369,7 @@ impl MbtilesReader {
                 return Ok(None);
             }
             let xyz_row = axis - 1 - tms_row_u32;
-            let Some(rowid) = writer::tile_rowid_xyz(zoom_u8, column_u32, xyz_row) else {
+            let Some(rowid) = tile_rowid_xyz(zoom_u8, column_u32, xyz_row) else {
                 return Ok(None);
             };
             let Some(record) = self.tile_row(rowid)? else {
@@ -592,7 +624,7 @@ impl MbtilesReader {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use std::io::Write;

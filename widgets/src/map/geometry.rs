@@ -1412,7 +1412,7 @@ pub fn append_stroke_pass(
     // and no corridor matching.
     let deck_possible = pass.deck_m > 0.0
         || (pass.deck_m == 0.0 && corridors.is_some_and(|q| !q.corridors.is_empty()));
-    let clock = std::time::Instant::now();
+    let clock = Cx::monotonic_now();
     let mut dense: Vec<(f32, f32)> = Vec::new();
     let points = if deck_possible && points.len() >= 2 {
         const MAX_SEG: f32 = 3.0;
@@ -1431,8 +1431,8 @@ pub fn append_stroke_pass(
     } else {
         points
     };
-    let t_densify = clock.elapsed().as_secs_f64() * 1000.0;
-    let clock = std::time::Instant::now();
+    let t_densify = (Cx::monotonic_now() - clock) * 1000.0;
+    let clock = Cx::monotonic_now();
     emit_path(path, points, closed);
     STROKE_ANCHORS.with(|anchors| {
         let mut anchors = anchors.borrow_mut();
@@ -1450,15 +1450,15 @@ pub fn append_stroke_pass(
             aa,
             tolerance,
         );
-        let t_tess = clock.elapsed().as_secs_f64() * 1000.0;
-        let clock = std::time::Instant::now();
+        let t_tess = (Cx::monotonic_now() - clock) * 1000.0;
+        let clock = Cx::monotonic_now();
         let deck_override = if pass.deck_m == 0.0 {
             corridors.and_then(|q| corridor_deck_overrides(tess_verts, &anchors, q))
         } else {
             None
         };
-        let t_deck = clock.elapsed().as_secs_f64() * 1000.0;
-        let clock = std::time::Instant::now();
+        let t_deck = (Cx::monotonic_now() - clock) * 1000.0;
+        let clock = Cx::monotonic_now();
         append_expanded_stroke_geometry(
             tess_verts,
             &anchors,
@@ -1481,7 +1481,7 @@ pub fn append_stroke_pass(
             p.densify_ms += t_densify;
             p.tess_ms += t_tess;
             p.deck_ms += t_deck;
-            p.expand_ms += clock.elapsed().as_secs_f64() * 1000.0;
+            p.expand_ms += (Cx::monotonic_now() - clock) * 1000.0;
             p.calls += 1;
             p.verts += vert_count;
         });
@@ -2238,7 +2238,7 @@ pub fn compute_visible_regions(groups: &[PaintGroup]) -> Vec<VisibleRegions> {
             .collect();
         (shapes, flat)
     };
-    let prof_t_dissolve = std::time::Instant::now();
+    let prof_t_dissolve = Cx::monotonic_now();
     let outlines: Vec<GroupOutline> = groups
         .iter()
         .map(|group| {
@@ -2307,8 +2307,8 @@ pub fn compute_visible_regions(groups: &[PaintGroup]) -> Vec<VisibleRegions> {
         })
         .collect();
 
-    prof_dissolve = prof_t_dissolve.elapsed().as_secs_f64() * 1e3;
-    let prof_t_cascade = std::time::Instant::now();
+    prof_dissolve = (Cx::monotonic_now() - prof_t_dissolve) * 1e3;
+    let prof_t_cascade = Cx::monotonic_now();
     // Incremental cascade per level, all operands dissolved outlines.
     // LIFTED content never enters an accumulated cover: two decks at
     // different heights (a viaduct over a bridge) must not cut each other
@@ -2443,7 +2443,7 @@ pub fn compute_visible_regions(groups: &[PaintGroup]) -> Vec<VisibleRegions> {
         }
     }
 
-    prof_cascade = prof_t_cascade.elapsed().as_secs_f64() * 1e3;
+    prof_cascade = (Cx::monotonic_now() - prof_t_cascade) * 1e3;
     if prof_on {
         trace!(
             "map.tile_profile",
@@ -2526,7 +2526,7 @@ pub fn build_paint_faces(
     aa: f32,
 ) -> Vec<PaintFace> {
     let prof_on = crate::makepad_platform::makepad_error_log::trace_enabled("map.tile_profile");
-    let prof_t_facetess = std::time::Instant::now();
+    let prof_t_facetess = Cx::monotonic_now();
     let mut faces = Vec::new();
     let mut path = VectorPath::new();
     let mut tess_verts: Vec<VVertex> = Vec::new();
@@ -2722,7 +2722,7 @@ pub fn build_paint_faces(
         trace!(
             "map.tile_profile",
             "facetess {:.1}ms faces={}",
-            prof_t_facetess.elapsed().as_secs_f64() * 1e3,
+            (Cx::monotonic_now() - prof_t_facetess) * 1e3,
             faces.len()
         );
     }
@@ -3564,6 +3564,8 @@ mod overlay_tests {
 
 #[cfg(test)]
 mod boolean_repro_tests {
+    use crate::makepad_platform::Cx;
+
     /// Replay a hang capture from /tmp/mp_boolean_last_*.txt (written when
     /// /tmp/mp_boolean_debug exists). Run manually:
     ///   MAKEPAD_REPRO=/tmp/mp_boolean_last_ThreadId(7).txt cargo test -p \
@@ -3597,7 +3599,7 @@ mod boolean_repro_tests {
             }
         }
         println!("repro: tag={} rings={}", tag, rings.len());
-        let clock = std::time::Instant::now();
+        let clock = Cx::monotonic_now();
         let result = match tag.as_str() {
             "simplify" => {
                 // Mirror production chunking (DISSOLVE_CHUNK).
@@ -3633,7 +3635,7 @@ mod boolean_repro_tests {
         };
         println!(
             "repro: done in {:.1}ms, {} shapes",
-            clock.elapsed().as_secs_f64() * 1000.0,
+            (Cx::monotonic_now() - clock) * 1000.0,
             result.len()
         );
     }
