@@ -889,6 +889,10 @@ pub fn mime_for_path(path: &Path) -> Option<&'static str> {
         "svg" => "image/svg+xml",
         "ico" => "image/x-icon",
         "glb" => "model/gltf-binary",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
+        "mp3" => "audio/mpeg",
+        "txt" | "md" => "text/plain; charset=utf-8",
         "bin" | "data" | "blob" | "mkidx" | "mkshard" | "search" | "searchdb"
         | "graph" | "mbtiles" => "application/octet-stream",
         _ => return None,
@@ -897,7 +901,8 @@ pub fn mime_for_path(path: &Path) -> Option<&'static str> {
 
 pub fn cache_policy(path: &str) -> &'static str {
     let lower = path.to_ascii_lowercase();
-    if lower.starts_with("maps/") || is_hashed_asset(&lower) {
+    // maps/ and models/ hold content-addressed or versioned-by-path files that never change in place
+    if lower.starts_with("maps/") || lower.starts_with("models/") || is_hashed_asset(&lower) {
         "public, max-age=31536000, immutable"
     } else {
         "private, no-cache"
