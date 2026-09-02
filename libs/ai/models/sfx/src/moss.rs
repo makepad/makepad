@@ -188,11 +188,7 @@ pub fn moss_open_shards(dir: impl AsRef<Path>) -> Result<H3ShardedWeights> {
     })
 }
 
-/// True when the CUDA device path should be used (device present and not
-/// disabled with MOSS_DEVICE=0).
+/// True when the CUDA device path should be used.
 pub fn moss_device_enabled() -> bool {
-    if std::env::var("MOSS_DEVICE").map(|v| v == "0").unwrap_or(false) {
-        return false;
-    }
     makepad_ai_common::backend::cuda::gpu_device_available()
 }

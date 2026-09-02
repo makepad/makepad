@@ -392,31 +392,6 @@ impl PaintModelExec for NativeHunyuanExec {
                 cache.len()
             )));
         }
-        // Debug: dump the reference latent + every write-cache layer as raw
-        // little-endian f32 (row-major [tokens, hidden]) for a byte-level
-        // diff against the official unet_dual write pass.
-        if let Ok(dir) = std::env::var("MAKEPAD_PBR_DUMP_VIEWS") {
-            let write_f32 = |path: &str, data: &[f32]| {
-                let mut bytes = Vec::with_capacity(data.len() * 4);
-                for v in data {
-                    bytes.extend_from_slice(&v.to_le_bytes());
-                }
-                if let Err(error) = std::fs::write(path, bytes) {
-                    eprintln!("dual dump write {path}: {error}");
-                }
-            };
-            write_f32(&format!("{dir}/ref_latent.f32"), &encoded.reference_latent);
-            for (name, data) in &cache {
-                write_f32(&format!("{dir}/cache_{name}.f32"), data);
-            }
-            eprintln!(
-                "[pbr-dual] dumped ref_latent ({} f32, {}x{}) + {} cache layers to {dir}",
-                encoded.reference_latent.len(),
-                encoded.lat_w,
-                encoded.lat_h,
-                cache.len()
-            );
-        }
         let size = cond.resolution as usize;
         let mut pos_maps = Vec::with_capacity(cond.views.len());
         for view in cond.views {
@@ -459,25 +434,6 @@ impl PaintModelExec for NativeHunyuanExec {
         let dino_tok = dino_proj
             .forward(&hidden, rows)
             .map_err(PbrError::Internal)?;
-        if let Ok(dir) = std::env::var("MAKEPAD_PBR_DUMP_VIEWS") {
-            let write_f32 = |path: &str, data: &[f32]| {
-                let mut bytes = Vec::with_capacity(data.len() * 4);
-                for v in data {
-                    bytes.extend_from_slice(&v.to_le_bytes());
-                }
-                let _ = std::fs::write(path, bytes);
-            };
-            write_f32(&format!("{dir}/dino_hidden.f32"), &hidden);
-            write_f32(&format!("{dir}/dino_tok.f32"), &dino_tok);
-            write_f32(&format!("{dir}/dino_pixels.f32"), &encoded.dino_pixels);
-            eprintln!(
-                "[pbr-dino] hidden {} f32 ({rows} rows x {}), tok {} f32, pixels {} f32",
-                hidden.len(),
-                crate::dino_proj::DINO_DIM,
-                dino_tok.len(),
-                encoded.dino_pixels.len()
-            );
-        }
         let enc_alb = unet.learned_text_clip_albedo().map_err(PbrError::Internal)?;
         let enc_mr = unet.learned_text_clip_mr().map_err(PbrError::Internal)?;
         let n_views = encoded.n_views;
@@ -524,18 +480,7 @@ impl PaintModelExec for NativeHunyuanExec {
             }
         }
         let scale_t = gpu_upload(&scale_host, 4, n_rows * hw).map_err(PbrError::Internal)?;
-        // Debug ablation: MAKEPAD_PBR_REF_SCALE=<f> overrides the conditioned
-        // branches' reference-attention scale (official [0,1,1]). 0 kills RA
-        // outright — if the output does not move, RA was already inert and
-        // its INPUTS (write-cache/K/V) are the bug; if it moves a lot, RA is
-        // contributing wrong content.
-        let ref_override = std::env::var("MAKEPAD_PBR_REF_SCALE")
-            .ok()
-            .and_then(|v| v.parse::<f32>().ok());
-        let ref_scales = match ref_override {
-            Some(rs) => [0.0f32, rs, rs],
-            None => [0.0f32, 1.0, 1.0],
-        };
+        let ref_scales = [0.0f32, 1.0, 1.0];
         // Official times denoise after one discarded UNet; keep the same split.
         if let Some(&t0) = ts.first() {
             let x12 = pack_cfg_x12_gpu(&sample, &normals_pbr, &positions_pbr)
@@ -566,29 +511,6 @@ impl PaintModelExec for NativeHunyuanExec {
             let temb_act = unet.silu_temb(&temb).map_err(PbrError::Internal)?;
             let head = walk_extras_on_resident(unet, xs, &temb_act, &ctx, n_views, &ref_scales)
                 .map_err(PbrError::Internal)?;
-            if i == 0 {
-                if let Ok(dir) = std::env::var("MAKEPAD_PBR_DUMP_VIEWS") {
-                    // Step-0 black-box tap: the sample the UNet saw and the
-                    // 3-branch v-prediction it produced, for one-step parity
-                    // against the official UNet on identical inputs.
-                    let write = |name: &str, data: &[f32]| {
-                        let mut bytes = Vec::with_capacity(data.len() * 4);
-                        for v in data {
-                            bytes.extend_from_slice(&v.to_le_bytes());
-                        }
-                        let _ = std::fs::write(format!("{dir}/{name}"), bytes);
-                    };
-                    if let (Ok(s), Ok(h), Ok(sc)) = (gpu_download(&sample), gpu_download(&head.t), gpu_download(&scale_t)) {
-                        write("step0_sample.f32", &s);
-                        write("step0_head.f32", &h);
-                        write("step0_scale.f32", &sc);
-                        // Conditioning latents the x12 pack uses (planar per row).
-                        if let Ok(np) = gpu_download(&normals_pbr) { write("step0_normals_pbr.f32", &np); }
-                        if let Ok(pp) = gpu_download(&positions_pbr) { write("step0_positions_pbr.f32", &pp); }
-                        eprintln!("[pbr-step0] t={t} sample {} head {} rows={n_rows} hw={hw}", s.len(), h.len());
-                    }
-                }
-            }
             let (c1, c2) = sched.ddim_linear_coeffs(t, batch.steps);
             sample = cfg_ddim_gpu(&sample, &head.t, &scale_t, c1, c2).map_err(PbrError::Internal)?;
         }
@@ -602,22 +524,6 @@ impl PaintModelExec for NativeHunyuanExec {
         let parts = unpack_planar_host(&sample_host, 4, n_rows, hw)
             .map_err(PbrError::Internal)?;
         batch.sample = parts.into_iter().flatten().collect();
-        if let Ok(dir) = std::env::var("MAKEPAD_PBR_DUMP_VIEWS") {
-            // Final scaled latents, planar [n_pbr*n_views][4][hw]: decode with
-            // the official VAE to split "denoise wrong" from "decoder wrong".
-            let mut bytes = Vec::with_capacity(batch.sample.len() * 4);
-            for v in &batch.sample {
-                bytes.extend_from_slice(&v.to_le_bytes());
-            }
-            let _ = std::fs::write(format!("{dir}/final_latents.f32"), bytes);
-            eprintln!(
-                "[pbr-final] latents {} f32 = {} rows x 4 x {}x{}",
-                batch.sample.len(),
-                n_rows,
-                encoded.lat_w,
-                encoded.lat_h
-            );
-        }
         let (alb_lat, mr_lat) = batch.split_materials();
         let mut albedo = Vec::with_capacity(n_views);
         let mut mr = Vec::with_capacity(n_views);
