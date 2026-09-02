@@ -416,13 +416,6 @@ impl CxOsApi for Cx {
         self.native_load_dependencies();
     }
 
-    fn spawn_thread<F>(&mut self, f: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        std::thread::spawn(f);
-    }
-
     fn open_url(&mut self, _url: &str, _in_place: OpenUrlInPlace) {
         crate::error!("open_url not implemented on this platform");
     }

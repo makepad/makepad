@@ -712,7 +712,8 @@ pub struct AsyncImageLoad {
 
 pub struct ImageCache {
     pub map: HashMap<PathBuf, ImageCacheEntry>,
-    pub thread_pool: Option<TagThreadPool<PathBuf>>,
+    pub thread_pool: Option<TaskPool>,
+    thread_pool_unavailable: bool,
     pub pending_http_requests: HashMap<LiveId, PathBuf>,
 }
 
@@ -731,6 +732,7 @@ impl ImageCache {
         Self {
             map: HashMap::new(),
             thread_pool: None,
+            thread_pool_unavailable: false,
             pending_http_requests: HashMap::new(),
         }
     }
@@ -792,6 +794,7 @@ pub enum ImageError {
     DataTooLarge { bytes: usize, limit: usize },
     UnsupportedFormat,
     Http(String),
+    Worker(String),
 }
 
 pub enum AsyncLoadResult {
@@ -1700,9 +1703,25 @@ mod tests {
 
 fn ensure_thread_pool(cx: &mut Cx) {
     ensure_image_cache_inner(cx);
-    if cx.get_global::<ImageCache>().thread_pool.is_none() {
-        let threads = cx.cpu_cores().max(3) - 2;
-        cx.get_global::<ImageCache>().thread_pool = Some(TagThreadPool::new(cx, threads));
+    if cx.get_global::<ImageCache>().thread_pool.is_none()
+        && !cx.get_global::<ImageCache>().thread_pool_unavailable
+    {
+        let spawner = cx.thread_spawner();
+        let pool = TaskPool::new(
+            spawner.clone(),
+            PoolOptions {
+                workers: spawner.worker_count(2, 8),
+                capacity: std::num::NonZeroUsize::new(1024).unwrap(),
+                name: "image-decode".into(),
+            },
+        );
+        match pool {
+            Ok(pool) => cx.get_global::<ImageCache>().thread_pool = Some(pool),
+            Err(error) => {
+                error!("ImageCache: decode pool unavailable, using serial decode: {error}");
+                cx.get_global::<ImageCache>().thread_pool_unavailable = true;
+            }
+        }
     }
 }
 
@@ -1712,11 +1731,8 @@ where
 {
     ensure_thread_pool(cx);
     let image_size_bytes = (*data).as_ref().len();
-    cx.get_global::<ImageCache>()
-        .thread_pool
-        .as_mut()
-        .unwrap()
-        .execute_rev(image_path, move |image_path| {
+    let task_key = image_path.clone();
+    let job = move || {
             let start = decode_timing_start();
             if image_decode_debug_enabled() {
                 log!(
@@ -1755,7 +1771,20 @@ where
                 image_path,
                 result: RefCell::new(Some(result)),
             });
-        });
+        };
+    if let Some(pool) = cx.get_global::<ImageCache>().thread_pool.as_mut() {
+        match pool.submit_tagged(task_key.clone(), true, QueueOrder::Lifo, job) {
+            Ok(task) => task.detach(),
+            Err(error) => Cx::post_action(AsyncImageLoad {
+                image_path: task_key,
+                result: RefCell::new(Some(Err(ImageError::Worker(error.to_string())))),
+            }),
+        }
+    } else {
+        // A non-threaded wasm build has an explicit serial path for this pure
+        // CPU decode; dedicated blocking services still report Unsupported.
+        job();
+    }
 }
 
 pub fn ensure_image_cache(cx: &mut Cx) {

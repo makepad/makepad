@@ -1125,7 +1125,9 @@ pub fn script_mod(vm: &mut ScriptVm) {
             let out_recv: ToUIReceiver<SocketStreamOut> = Default::default();
             let out_send = out_recv.sender();
             let mut in_send: FromUISender<SocketStreamIn> = Default::default();
-            let in_recv = in_send.receiver();
+            let in_recv = in_send
+                .receiver()
+                .expect("socket receiver is taken exactly once");
             let host = options.host.clone();
 
             std::thread::spawn(move || {

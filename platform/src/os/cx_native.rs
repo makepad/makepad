@@ -66,13 +66,13 @@ impl Cx {
         &mut self,
         request: crate::storage::StorageRequest,
     ) {
-        use crate::cx_api::CxOsApi;
-
         let sender = self.storage_state.sender();
-        self.spawn_thread(move || {
+        if let Ok(task) = self.spawn_thread(move || {
             let response = crate::storage::native::execute(&crate::home::storage_dir(), request);
             let _ = sender.send(response);
-        });
+        }) {
+            task.detach();
+        }
     }
 
     pub fn native_load_dependencies(&mut self) {

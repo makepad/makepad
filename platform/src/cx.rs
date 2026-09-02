@@ -81,6 +81,7 @@ pub struct Cx {
     pub(crate) gpu_info: GpuInfo,
     pub(crate) xr_capabilities: XrCapabilities,
     pub(crate) cpu_cores: usize,
+    pub(crate) thread_spawner: crate::thread::ThreadSpawner,
     pub null_texture: Texture,
     pub null_cube_texture: Texture,
     pub windows: CxWindowPool,
@@ -431,6 +432,10 @@ impl Cx {
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         crate::os::termination_signal::install();
 
+        makepad_network::install_ui_waker(Some(makepad_network::UiWaker::new(|| {
+            crate::thread::wake_ui_event_loop();
+        })));
+
         //#[cfg(any(target_arch = "wasm32", target_os = "android"))]
         //crate::makepad_error_log::set_panic_hook();
         // the null texture
@@ -486,7 +491,10 @@ impl Cx {
             demo_time_repaint: false,
             null_texture,
             null_cube_texture,
-            cpu_cores: 8,
+            cpu_cores: crate::thread::available_parallelism().get(),
+            thread_spawner: crate::thread::ThreadSpawner::for_current_thread(
+                crate::thread::available_parallelism().get(),
+            ),
             in_makepad_studio: false,
             game_input_remote: Vec::new(),
             in_draw_event: false,

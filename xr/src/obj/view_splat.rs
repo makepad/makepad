@@ -682,9 +682,14 @@ impl ViewSplat {
             return;
         }
         self.depth_sort_request_tx.new_channel();
-        let request_rx = self.depth_sort_request_tx.receiver();
+        let request_rx = self
+            .depth_sort_request_tx
+            .receiver()
+            .expect("depth sort receiver is taken exactly once per channel");
         let result_tx = self.depth_sort_result_rx.sender();
-        cx.spawn_thread(move || run_sort_worker(request_rx, result_tx));
+        if let Ok(task) = cx.spawn_thread(move || run_sort_worker(request_rx, result_tx)) {
+            task.detach();
+        }
         self.depth_sort_thread_started = true;
     }
 

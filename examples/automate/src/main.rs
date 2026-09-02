@@ -558,7 +558,10 @@ impl App {
 
         let mut midi_input = cx.midi_input();
         let state_sender = self.state_updates.sender();
-        let ui_receiver = self.ui_controls.receiver();
+        let ui_receiver = self
+            .ui_controls
+            .receiver()
+            .expect("DMX UI receiver is taken exactly once");
 
         std::thread::spawn(move || {
             let _instance_lock = match UdpSocket::bind(show::CONTROLLER_INSTANCE_LOCK_ADDR) {

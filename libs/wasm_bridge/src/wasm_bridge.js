@@ -5,6 +5,23 @@ export function init_env(env) {
     env.js_console_error = (u8_ptr, len) => _wasm._bridge.js_console_error(u8_ptr, len);
     env.js_time_now = () => _wasm._bridge.js_time_now();
     env.js_monotonic_now = () => _wasm._bridge.js_monotonic_now();
+    env.js_wake_ui = () => {
+        if (_wasm && _wasm._bridge && _wasm._bridge.js_wake_ui) {
+            _wasm._bridge.js_wake_ui();
+        }
+    };
+    env.js_spawn_thread = (request_id, context_ptr, stack_size, name_ptr, name_len) => {
+        if (_wasm && _wasm._bridge && _wasm._bridge.js_spawn_thread) {
+            return _wasm._bridge.js_spawn_thread(
+                request_id,
+                context_ptr,
+                stack_size,
+                name_ptr,
+                name_len
+            );
+        }
+        return 0;
+    };
     env.js_open_web_socket = (id, url_ptr, url_len) => console.error("js_open_web_socket out of context");
     env.js_web_socket_send_string = (id, str_ptr, url_len) => console.error("js_web_socket_send_string out of context");
     env.js_web_socket_send_binary = (id, bin_ptr, bin_len) => console.error("js_web_socket_send_binary out of context");

@@ -141,6 +141,29 @@ pub fn try_with_macos_app<R>(f: impl FnOnce(&mut MacosApp) -> R) -> Option<R> {
     })
 }
 
+/// Posts an application-defined event from any thread, waking AppKit's event
+/// wait without activating the application or any window.
+pub fn wake_event_loop() {
+    unsafe {
+        let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
+        let event: ObjcId = msg_send![
+            class!(NSEvent),
+            otherEventWithType: NSEventType::NSApplicationDefined
+            location: NSPoint { x: 0., y: 0. }
+            modifierFlags: 0u64
+            timestamp: 0f64
+            windowNumber: 0isize
+            context: nil
+            subtype: 0i16
+            data1: 0isize
+            data2: 0isize
+        ];
+        let app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+        let () = msg_send![app, postEvent: event atStart: false];
+        let () = msg_send![pool, release];
+    }
+}
+
 /// Whether this process may activate itself or make a window key.
 ///
 /// USER LAW (2026-08-26): an agent-driven or test instance must never steal

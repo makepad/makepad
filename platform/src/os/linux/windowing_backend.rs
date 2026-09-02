@@ -145,13 +145,6 @@ impl CxOsApi for Cx {
         self.native_load_dependencies();
     }
 
-    fn spawn_thread<F>(&mut self, f: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        std::thread::spawn(f);
-    }
-
     fn seconds_since_app_start(&self) -> f64 {
         Instant::now()
             .duration_since(self.os.start_time.unwrap())

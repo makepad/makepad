@@ -1737,11 +1737,19 @@ pub struct MapView {
     #[rust]
     tile_worker_rx: ToUIReceiver<TileWorkerMessage>,
     #[rust]
-    tile_thread_pool: Option<TagThreadPool<TileKey>>,
+    tile_thread_pool: Option<TaskPool>,
+    #[rust]
+    tile_thread_pool_unavailable: bool,
     #[rust]
     local_requested_tiles: HashMap<TileKey, f64>,
     #[rust]
-    archive_request_watchdog_timer: Timer,
+    archive_request_watchdog_rx: ToUIReceiver<()>,
+    #[rust]
+    archive_request_watchdog_scheduler: Option<Scheduler>,
+    #[rust]
+    archive_request_watchdog_handle: Option<TimerHandle>,
+    #[rust]
+    archive_request_watchdog_unavailable: bool,
     #[rust]
     /// Tiles the archive reported absent, stamped with the frame we learned
     /// it — re-checked after MISSING_RECHECK_FRAMES so a rebuilt/replaced
@@ -2032,12 +2040,8 @@ impl Widget for MapView {
             self.handle_archive_events(cx, event);
         }
         self.handle_tile_worker_messages(cx);
-        if self
-            .archive_request_watchdog_timer
-            .is_event(event)
-            .is_some()
-        {
-            self.archive_request_watchdog_timer = Timer::empty();
+        if self.archive_request_watchdog_rx.try_recv_flush().is_ok() {
+            self.archive_request_watchdog_handle = None;
             self.expire_archive_requests(cx);
         }
         self.sync_archive_request_watchdog(cx);
@@ -3076,14 +3080,12 @@ impl WidgetMatchEvent for MapView {
         };
 
         // Offload heavy JSON parsing + tessellation to the thread pool
-        self.ensure_tile_thread_pool(cx);
-        let pool = self.tile_thread_pool.as_ref().unwrap();
         let sender = self.tile_worker_rx.sender();
         let style_epoch = self.style_epoch;
         let theme_style = self.active_style().clone();
         let bucket = self.render_bucket();
 
-        pool.execute_rev(tile_key, move |_tag| {
+        if let Err(error) = self.submit_tile_job(cx, tile_key, move || {
             match build_tile_buffers_from_body(tile_key, &body, &theme_style, bucket) {
                 Ok(buffers) => {
                     store_tile_data_cache_on_disk(tile_key, &body);
@@ -3101,7 +3103,11 @@ impl WidgetMatchEvent for MapView {
                     });
                 }
             }
-        });
+        }) {
+            self.mark_tile_failed(tile_key, &format!("tile worker submission failed: {error}"));
+            self.update_status_text();
+            self.redraw(cx);
+        }
     }
 
     fn handle_http_request_error(
@@ -3171,7 +3177,7 @@ impl MapView {
                 let path = self.active_mbtiles_path().to_string();
                 let sender = self.archive_watch_rx.sender();
                 let workers = self.ensure_archive_worker_pool(cx);
-                workers.execute_rev(next_archive_task_token(), move |_| {
+                match workers.submit(next_archive_task_token(), move || {
                     let archive_path = std::path::PathBuf::from(&path);
                     let probe = if is_mkmap_path_shape(&path) {
                         if archive_path.file_name().is_some_and(|name| name == "root.mkidx") {
@@ -3193,7 +3199,13 @@ impl MapView {
                         mtime,
                         zoom_range,
                     });
-                });
+                }) {
+                    Ok(()) => {}
+                    Err(error) => {
+                        self.archive_watch_in_flight = false;
+                        log!("MapView: archive watch submission failed: {error}");
+                    }
+                }
             }
             self.archive_watch_timer = cx.start_timeout(5.0);
         }
@@ -3984,8 +3996,6 @@ impl MapView {
         base: Option<Arc<[u8]>>,
         detail: Option<Arc<[u8]>>,
     ) {
-        self.ensure_tile_thread_pool(cx);
-        let pool = self.tile_thread_pool.as_ref().unwrap();
         let sender = self.tile_worker_rx.sender();
         let style_epoch = self.style_epoch;
         let requested = vec![key];
@@ -4020,7 +4030,7 @@ impl MapView {
             .filter(|path| !path.trim().is_empty())
             .map(|path| path.trim().to_string())
             .collect::<Vec<_>>();
-        pool.execute_rev(key, move |_| {
+        if let Err(error) = self.submit_tile_job(cx, key, move || {
             let result = build_local_tile_from_archive_bytes(
                 key,
                 base,
@@ -4052,7 +4062,12 @@ impl MapView {
                     log!("MapView: archive tile build failed: {}", error);
                 }
             }
-        });
+        }) {
+            self.local_requested_tiles.remove(&key);
+            self.mark_tile_failed(key, &format!("tile worker submission failed: {error}"));
+            self.update_status_text();
+            self.redraw(cx);
+        }
     }
 
     fn cancel_archive_tile(&mut self, cx: &mut Cx, key: TileKey) {
@@ -4066,8 +4081,6 @@ impl MapView {
     }
 
     fn dispatch_legacy_tile_builds(&mut self, cx: &mut Cx, keys: Vec<TileKey>, bucket: u32) {
-        self.ensure_tile_thread_pool(cx);
-        let pool = self.tile_thread_pool.as_ref().unwrap();
         let style_epoch = self.style_epoch;
         let active_path = self.active_mbtiles_path().to_string();
         for key in keys {
@@ -4089,7 +4102,7 @@ impl MapView {
                     && entry.bucket == bucket
                     && entry.road_core_cached
             });
-            pool.execute_rev(key, move |_| {
+            if let Err(error) = self.submit_tile_job(cx, key, move || {
                 let detail_path = (!detail_path.is_empty()).then_some(detail_path);
                 let bridge_dz_path = (!bridge_dz_path.is_empty()).then_some(bridge_dz_path);
                 match load_local_tile_batch(
@@ -4119,7 +4132,10 @@ impl MapView {
                         });
                     }
                 }
-            });
+            }) {
+                self.local_requested_tiles.remove(&key);
+                self.mark_tile_failed(key, &format!("tile worker submission failed: {error}"));
+            }
         }
     }
 
@@ -4154,7 +4170,8 @@ impl MapView {
             }
         }
         if let Some(pool) = self.tile_thread_pool.as_ref() {
-            let dropped = pool.retain_queued(|key| key.z == request_zoom && visible.contains(key));
+            let dropped = pool
+                .retain_queued::<TileKey>(|key| key.z == request_zoom && visible.contains(key));
             for key in dropped {
                 self.local_requested_tiles.remove(&key);
                 // A queued-then-dropped placeholder must not linger as
@@ -4373,11 +4390,22 @@ impl MapView {
 
     fn sync_archive_request_watchdog(&mut self, cx: &mut Cx) {
         if self.local_requested_tiles.is_empty() {
-            if !self.archive_request_watchdog_timer.is_empty() {
-                cx.stop_timer(self.archive_request_watchdog_timer);
-                self.archive_request_watchdog_timer = Timer::empty();
+            self.archive_request_watchdog_handle = None;
+        } else if self.archive_request_watchdog_handle.is_none()
+            && !self.archive_request_watchdog_unavailable
+        {
+            if self.archive_request_watchdog_scheduler.is_none() {
+                match cx.thread_spawner().scheduler() {
+                    Ok(scheduler) => {
+                        self.archive_request_watchdog_scheduler = Some(scheduler);
+                    }
+                    Err(error) => {
+                        self.archive_request_watchdog_unavailable = true;
+                        log!("MapView: archive watchdog unavailable: {error}");
+                        return;
+                    }
+                }
             }
-        } else if self.archive_request_watchdog_timer.is_empty() {
             let now = cx.seconds_since_app_start();
             let deadline = self
                 .local_requested_tiles
@@ -4385,7 +4413,21 @@ impl MapView {
                 .copied()
                 .fold(f64::INFINITY, f64::min)
                 + ARCHIVE_REQUEST_TIMEOUT_SECONDS;
-            self.archive_request_watchdog_timer = cx.start_timeout((deadline - now).max(0.001));
+            let scheduler_deadline = Cx::monotonic_now() + (deadline - now).max(0.001);
+            let sender = self.archive_request_watchdog_rx.sender();
+            match self.archive_request_watchdog_scheduler.as_ref().unwrap().at(
+                scheduler_deadline,
+                CancellationToken::new(),
+                move || {
+                    let _ = sender.send(());
+                },
+            ) {
+                Ok(handle) => self.archive_request_watchdog_handle = Some(handle),
+                Err(error) => {
+                    self.archive_request_watchdog_unavailable = true;
+                    log!("MapView: archive watchdog scheduling failed: {error}");
+                }
+            }
         }
     }
 
@@ -4509,9 +4551,43 @@ impl MapView {
     }
 
     fn ensure_tile_thread_pool(&mut self, cx: &mut Cx) {
-        if self.tile_thread_pool.is_none() {
-            let num_threads = cx.cpu_cores().max(3) - 2;
-            self.tile_thread_pool = Some(TagThreadPool::new(cx, num_threads));
+        if self.tile_thread_pool.is_none() && !self.tile_thread_pool_unavailable {
+            let spawner = cx.thread_spawner();
+            match TaskPool::new(
+                spawner.clone(),
+                PoolOptions {
+                    workers: spawner.worker_count(2, 8),
+                    capacity: std::num::NonZeroUsize::new(1024).unwrap(),
+                    name: "map-tile".into(),
+                },
+            ) {
+                Ok(pool) => self.tile_thread_pool = Some(pool),
+                Err(error) => {
+                    log!("MapView: tile pool unavailable, using serial work: {error}");
+                    self.tile_thread_pool_unavailable = true;
+                }
+            }
+        }
+    }
+
+    fn submit_tile_job<F>(&mut self, cx: &mut Cx, key: TileKey, job: F) -> Result<(), SubmitError>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.ensure_tile_thread_pool(cx);
+        if let Some(pool) = self.tile_thread_pool.as_ref() {
+            match pool.submit_tagged(key, true, QueueOrder::Lifo, job) {
+                Ok(task) => {
+                    task.detach();
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            // Pure parsing/tessellation has an explicit serial fallback when
+            // wasm was built without atomics.
+            job();
+            Ok(())
         }
     }
 
@@ -4875,8 +4951,6 @@ impl MapView {
             let cache_path = tile_data_cache_path_for(tile_key);
             if let Ok(cached_body) = fs::read_to_string(&cache_path) {
                 // Offload heavy JSON parsing + tessellation to the thread pool
-                self.ensure_tile_thread_pool(cx);
-                let pool = self.tile_thread_pool.as_ref().unwrap();
                 let sender = self.tile_worker_rx.sender();
                 let style_epoch = self.style_epoch;
                 let theme_style = self.active_style().clone();
@@ -4897,7 +4971,7 @@ impl MapView {
                         fade: None,
                     },
                 );
-                pool.execute_rev(tile_key, move |_tag| {
+                if let Err(error) = self.submit_tile_job(cx, tile_key, move || {
                     match build_tile_buffers_from_body(tile_key, &cached_body, &theme_style, bucket)
                     {
                         Ok(buffers) => {
@@ -4916,7 +4990,11 @@ impl MapView {
                             });
                         }
                     }
-                });
+                }) {
+                    self.mark_tile_failed(tile_key, &format!("tile worker submission failed: {error}"));
+                    self.update_status_text();
+                    self.redraw(cx);
+                }
                 return false;
             }
         }
@@ -7494,17 +7572,14 @@ mod tests {
     }
 
     #[test]
-    fn map_view_source_switch_reuses_archive_pool_and_thread_count() {
+    fn map_view_source_switch_reuses_archive_pool() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let mut map = test_map(&mut cx);
         map.set_source_config(&mut cx, TileSourceConfig::http_archive("https://one.invalid/map"));
         let first = map.archive_worker_pool.as_ref().unwrap().clone();
-        let thread_count = first.thread_count();
         map.set_source_config(&mut cx, TileSourceConfig::http_archive("https://two.invalid/map"));
         let second = map.archive_worker_pool.as_ref().unwrap();
-        assert!(Arc::ptr_eq(&first, second));
-        assert_eq!(second.thread_count(), thread_count);
-        assert_eq!(thread_count, 2);
+        assert!(first.ptr_eq(second));
     }
 
     #[test]
@@ -7541,19 +7616,26 @@ mod tests {
         );
         map.local_source_zoom_range = Some((3, 3));
         map.ensure_tile_thread_pool(&mut cx);
-        let thread_count = map.tile_thread_pool.as_ref().unwrap().thread_count();
+        let thread_count = cx.thread_spawner().worker_count(2, 8).get();
         let reached = Arc::new(std::sync::Barrier::new(thread_count + 1));
         let release = Arc::new(std::sync::Barrier::new(thread_count + 1));
         for index in 0..thread_count {
             let reached = reached.clone();
             let release = release.clone();
-            map.tile_thread_pool.as_ref().unwrap().execute_rev(
-                TileKey { z: 30, x: index as i32, y: 0 },
-                move |_| {
+            map.tile_thread_pool
+                .as_ref()
+                .unwrap()
+                .submit_tagged(
+                    TileKey { z: 30, x: index as i32, y: 0 },
+                    true,
+                    QueueOrder::Lifo,
+                    move || {
                     reached.wait();
                     release.wait();
                 },
-            );
+                )
+                .unwrap()
+                .detach();
         }
         reached.wait();
         let rect = Rect {
@@ -7593,7 +7675,7 @@ mod tests {
     }
 
     #[test]
-    fn real_timer_cancels_never_completing_archive_without_draws() {
+    fn scheduler_watchdog_cancels_never_completing_archive_without_draws() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let mut map = test_map(&mut cx);
         map.zoom = 1.0;
@@ -7605,16 +7687,14 @@ mod tests {
         map.visible_tiles = vec![key];
         map.request_visible_tiles_from_local_source(&mut cx);
         assert_eq!(map.base_archive.as_ref().unwrap().waiter_count(), 1);
+        assert!(map.archive_request_watchdog_handle.is_some());
         *map.local_requested_tiles.get_mut(&key).unwrap() =
             cx.seconds_since_app_start() - ARCHIVE_REQUEST_TIMEOUT_SECONDS;
-        let timer_id = map.archive_request_watchdog_timer.0;
+        map.archive_request_watchdog_rx.sender().send(()).unwrap();
         <MapView as Widget>::handle_event(
             &mut map,
             &mut cx,
-            &Event::Timer(TimerEvent {
-                time: None,
-                timer_id,
-            }),
+            &Event::Signal,
             &mut Scope::empty(),
         );
         assert!(map.local_requested_tiles.is_empty());
