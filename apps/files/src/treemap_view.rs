@@ -693,10 +693,11 @@ impl Quad {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum MapProjection {
     /// The flat map — exactly the 2D treemap.
-    #[default]
     Flat,
     /// 2.5D: every cell extrudes straight up by its nesting depth, showing a
-    /// darker riser below its plate. Deep tangles read as towers.
+    /// darker riser below its plate. Deep tangles read as towers. The default:
+    /// the depth of a tree is the first thing the map should show.
+    #[default]
     Ortho,
     /// The same prisms through a gentle straight-down perspective: higher
     /// plates swell and lean away from the middle of the panel.
