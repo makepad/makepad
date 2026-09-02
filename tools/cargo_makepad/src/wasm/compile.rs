@@ -513,6 +513,12 @@ pub fn cp_brotli(
     exec: bool,
     compress: bool,
 ) -> Result<(), String> {
+    fs::create_dir_all(
+        dest_path
+            .parent()
+            .ok_or_else(|| format!("Destination has no parent directory: {:?}", dest_path))?,
+    )
+    .map_err(|err| format!("Cannot create parent directory for {:?}: {err}", dest_path))?;
     if source_path.extension().and_then(|s| s.to_str()) == Some("js") {
         if let Ok(content) = std::fs::read_to_string(source_path) {
             let minified = minify_js(&content);
@@ -599,6 +605,7 @@ fn build_wasm_target_spec(cwd: &PathBuf, threaded: bool) -> Result<PathBuf, Stri
 pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, String> {
     let build_crate = get_build_crate_from_args(args)?;
     let cwd = std::env::current_dir().unwrap();
+    let build_bin = get_wasm_binary_name(build_crate, args)?;
     let wasm_target_spec = build_wasm_target_spec(&cwd, config.threads)?;
     let target_arg = format!("--target={}", wasm_target_spec.display());
 
@@ -787,7 +794,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             build_dir.as_path(),
             "wasm-bindgen",
             &[
-                &format!("{build_crate}.wasm"),
+                &format!("{build_bin}.wasm"),
                 "--out-dir=.",
                 "--out-name=bindgen",
                 "--target=web",
@@ -848,10 +855,10 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
 
         build_dir.join("bindgen_bg.wasm")
     } else {
-        build_dir.join(format!("{}.wasm", build_crate))
+        build_dir.join(format!("{}.wasm", build_bin))
     };
 
-    let wasm_dest = app_dir.join(format!("{}.wasm", build_crate));
+    let wasm_dest = app_dir.join(format!("{}.wasm", build_bin));
     let mut output = if config.optimize_size || config.strip {
         let data = fs::read(&wasm_source)
             .map_err(|_| format!("Cannot read wasm file {:?}", wasm_source))?;
@@ -877,7 +884,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     let split_functions_enabled = config.split || config.split_functions;
 
     // Function splitting: split large functions into primary (stubs) + secondary (real bodies)
-    let secondary_wasm_dest = app_dir.join(format!("{}.secondary.wasm", build_crate));
+    let secondary_wasm_dest = app_dir.join(format!("{}.secondary.wasm", build_bin));
     let mut defer_secondary_wasm = false;
     let mut auto_split_outcome = AutoSplitOutcome::NotAttempted;
     let secondary_wasm_path = if split_functions_enabled {
@@ -958,7 +965,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             } else {
                 remove_brotli_artifact(&secondary_wasm_dest);
             }
-            Some(format!("./{}.secondary.wasm", build_crate))
+            Some(format!("./{}.secondary.wasm", build_bin))
         }
     } else {
         let _ = fs::remove_file(&secondary_wasm_dest);
@@ -966,7 +973,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         None
     };
 
-    let split_data_dest = app_dir.join(format!("{}.data.bin", build_crate));
+    let split_data_dest = app_dir.join(format!("{}.data.bin", build_bin));
     let mut split_data_bytes = None;
     let mut split_brotli_bytes = None;
     let split_data_path = if config.split {
@@ -994,7 +1001,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             } else {
                 remove_brotli_artifact(&split_data_dest);
             }
-            Some(format!("./{}.data.bin", build_crate))
+            Some(format!("./{}.data.bin", build_bin))
         }
     } else {
         let _ = fs::remove_file(&split_data_dest);
@@ -1016,7 +1023,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     // generate html file
     let index_path = app_dir.join("index.html");
     let html = generate_html(
-        build_crate,
+        &build_bin,
         split_data_path.as_deref(),
         secondary_wasm_path.as_deref(),
         defer_secondary_wasm,
