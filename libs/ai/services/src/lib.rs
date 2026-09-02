@@ -22,6 +22,7 @@ pub use state::{
     EngineState, Entry, ProviderChoice, ProviderRow, ServiceInfo, Status, ToolEntry, ToolStatus,
 };
 pub use wire::{
-    api_name, canonical_name, split_name, Risk, ServiceCall, ServiceContext, ServiceDown,
-    ServiceManifest, ServiceUp, ToolDef, ToolOutcome, ToolResult,
+    api_name, canonical_name, split_name, Disposition, EndpointId, HostedDown, HostedUp,
+    InstanceMeta, Risk, ServiceCall, ServiceContext, ServiceDown, ServiceManifest, ServiceUp,
+    ToolDef, ToolOutcome, ToolResult,
 };

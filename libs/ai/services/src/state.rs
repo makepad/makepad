@@ -73,8 +73,16 @@ pub struct ProviderRow {
 /// One connected (or known) app, for the apps row.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ServiceInfo {
+    /// The app id (`route`).
     pub id: String,
+    /// The host-issued endpoint of this instance; empty for an app that
+    /// is known but not running.
+    pub endpoint: String,
     pub label: String,
+    /// The endpoint this instance is nested in, if any.
+    pub parent: Option<String>,
+    /// One line: where it lives.
+    pub location: String,
     /// Its port is up and its tools are in the table.
     pub connected: bool,
     /// The host can bring it up (`os.launch`) when it is not connected.
