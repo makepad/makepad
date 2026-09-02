@@ -22,11 +22,12 @@ description = "What an app exposes to a central AI chat (manifest, tools, calls,
 
 [features]
 default = []
-engine = ["makepad-converse", "makepad-ai-hub"]
+# The real models: the hub's local engine and its cloud providers. Off by
+# default so an app that only exposes a service never links a model runtime.
+engine = ["makepad-ai-hub"]
 
 [dependencies]
 makepad-platform = { path = "../../../platform" }
 makepad-micro-serde = { path = "../../micro_serde" }
 makepad-strict-json = { path = "../../strict_json" }
-makepad-converse = { path = "../../converse", features = ["local-llm"], optional = true }
 makepad-ai-hub = { path = "../hub", default-features = false, features = ["llm"], optional = true }
