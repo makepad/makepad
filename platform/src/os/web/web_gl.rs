@@ -9,6 +9,7 @@ use crate::{
     os::web::from_wasm::*,
     texture::TextureFormat,
 };
+use std::collections::BTreeSet;
 
 impl Cx {
     pub fn render_view(
@@ -367,6 +368,8 @@ impl Cx {
     pub fn draw_pass_to_canvas(&mut self, draw_pass_id: DrawPassId) {
         let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
 
+        self.webgl_compile_draw_list_shaders(draw_list_id);
+
         // get the color and depth
         let clear_color = if self.passes[draw_pass_id].color_textures.len() == 0 {
             self.passes[draw_pass_id].clear_color
@@ -398,6 +401,8 @@ impl Cx {
 
     pub fn draw_pass_to_texture(&mut self, draw_pass_id: DrawPassId) {
         let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
+
+        self.webgl_compile_draw_list_shaders(draw_list_id);
 
         let pass_size = self.setup_render_pass(draw_pass_id, true);
         let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
@@ -479,9 +484,42 @@ impl Cx {
         self.render_view(draw_pass_id, draw_list_id, &mut zbias, zbias_step);
     }
 
-    pub fn webgl_compile_shaders(&mut self) {
-        let compile_set: Vec<usize> = self.draw_shaders.compile_set.iter().copied().collect();
-        for draw_shader_id in compile_set {
+    fn webgl_collect_draw_list_shaders(
+        &self,
+        draw_list_id: DrawListId,
+        draw_shader_ids: &mut BTreeSet<usize>,
+    ) {
+        let draw_list = &self.draw_lists[draw_list_id];
+        for order_index in 0..draw_list.draw_item_order_len() {
+            let Some(draw_item_id) = draw_list.draw_item_id_at_order_index(order_index) else {
+                continue;
+            };
+            let draw_item = &draw_list.draw_items[draw_item_id];
+            if let Some(sub_list_id) = draw_item.sub_list() {
+                self.webgl_collect_draw_list_shaders(sub_list_id, draw_shader_ids);
+            } else if let Some(draw_call) = draw_item.kind.draw_call() {
+                draw_shader_ids.insert(draw_call.draw_shader_id.index);
+            }
+        }
+    }
+
+    /// Queue only programs referenced by the draw-list tree for this pass.
+    /// Shader objects can be registered long before their widgets are visible;
+    /// compiling the global registry here made the first WebGL frame pay for
+    /// every hidden screen and template.
+    fn webgl_compile_draw_list_shaders(&mut self, draw_list_id: DrawListId) {
+        let mut draw_shader_ids = BTreeSet::new();
+        self.webgl_collect_draw_list_shaders(draw_list_id, &mut draw_shader_ids);
+
+        for draw_shader_id in draw_shader_ids {
+            if self.draw_shaders.shaders[draw_shader_id]
+                .os_shader_id
+                .is_some()
+            {
+                self.draw_shaders.compile_set.remove(&draw_shader_id);
+                continue;
+            }
+
             let (vertex, pixel, geometry_slots, instance_slots, textures, debug_code, geom_attribs, inst_attribs) = {
                 let cx_shader = &self.draw_shaders.shaders[draw_shader_id];
                 let (vertex, pixel) = match &cx_shader.mapping.code {
@@ -490,6 +528,7 @@ impl Cx {
                     }
                     CxDrawShaderCode::Combined { .. } => {
                         crate::error!("Combined shader code is not supported on wasm webgl");
+                        self.draw_shaders.compile_set.remove(&draw_shader_id);
                         continue;
                     }
                 };
@@ -549,12 +588,13 @@ impl Cx {
                     inst_attribs,
                 });
                 self.draw_shaders.os_shaders.push(shp);
+                self.os.webgl_shaders_queued_this_frame += 1;
                 os_shader_id = Some(shader_id);
             }
 
             self.draw_shaders.shaders[draw_shader_id].os_shader_id = os_shader_id;
+            self.draw_shaders.compile_set.remove(&draw_shader_id);
         }
-        self.draw_shaders.compile_set.clear();
     }
 
     fn webgl_typed_attribs(prefix: &str, inputs: &DrawShaderInputs) -> Vec<WVertexAttrib> {
