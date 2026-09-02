@@ -108,7 +108,13 @@ fn encode_decode_round_trip_psnr_and_keyframes() {
     assert!(!packets.is_empty(), "encoder produced no packets at all");
     let first = &packets[0];
     assert!(first.is_key, "the very first packet must be a keyframe");
-    let first_nals = annex_b::split_annex_b(&first.data);
+    // The Media Foundation encoder opens every access unit with an access
+    // unit delimiter (NAL 9); VideoToolbox does not. Neither carries
+    // meaning for the decoder, so the parameter sets are checked after it.
+    let first_nals: Vec<&[u8]> = annex_b::split_annex_b(&first.data)
+        .into_iter()
+        .filter(|nal| annex_b::nal_unit_type(nal) != 9)
+        .collect();
     assert!(!first_nals.is_empty(), "keyframe packet has no NAL units");
     assert_eq!(
         annex_b::nal_unit_type(first_nals[0]),
