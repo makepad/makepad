@@ -1941,6 +1941,11 @@ impl Mixer {
         let frames = secs * pcm.sample_rate.max(1) as f64;
         let from = d.playhead_frames();
         d.seek_frames(frames);
+        // A deliberate move cancels the promise a pause made to put the
+        // playhead back where the button was pressed. Without this a seek
+        // arriving while a pause is still fading -- CUE returning to its
+        // mark is exactly that -- is undone the moment the fade lands.
+        d.pause_at = None;
         d.arm_seek_fade(from);
         self.publish_deck(&s, deck.index());
     }
@@ -3763,6 +3768,36 @@ mod tests {
         assert!(health.render_max_nanos >= health.render_nanos, "the worst is still kept");
         render(&mixer, 48_000.0, 256);
         assert_eq!(mixer.audio_health().buffer_frames, 256, "the LAST buffer, not the worst");
+    }
+
+    #[test]
+    fn a_seek_during_a_pauses_fade_is_not_undone_by_it() {
+        // The pause promises to hand back the frames its fade sounded. A
+        // deliberate move afterwards -- CUE returning to its mark is one --
+        // means that promise no longer applies.
+        let mixer = Mixer::new();
+        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        for _ in 0..8 {
+            render(&mixer, 48_000.0, 512);
+        }
+        let pressed_at = mixer.deck_snapshot(DeckId::A).position_secs;
+        mixer.set_deck_playing(DeckId::A, false);
+        mixer.seek_deck_seconds(DeckId::A, 0.0);
+        for _ in 0..8 {
+            render(&mixer, 48_000.0, 512);
+        }
+        let landed = mixer.deck_snapshot(DeckId::A).position_secs;
+        // Not exactly zero: the fade goes on sounding for its own few
+        // milliseconds from the new place, which is the point of it.
+        assert!(
+            landed < 0.02,
+            "the seek stands, give or take the fade's own length: {landed}"
+        );
+        assert!(
+            pressed_at - landed > 0.05,
+            "and it is nowhere near where pause was pressed ({pressed_at})"
+        );
     }
 
     #[test]
