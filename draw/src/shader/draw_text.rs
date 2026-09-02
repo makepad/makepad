@@ -3454,6 +3454,11 @@ impl FontFamily {
         (self.id.0).into()
     }
 
+    /// Stable logical member names in fallback order.
+    pub fn member_ids(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.members.iter().map(|member| member.id.as_str())
+    }
+
     fn update_font_definitions(&self, cx: &mut Cx, fonts: &mut Fonts) {
         let mut font_ids = Vec::new();
 

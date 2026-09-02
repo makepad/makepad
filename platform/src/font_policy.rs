@@ -46,6 +46,10 @@ impl FontSet {
     }
 }
 
+/// Font resources registered by the standard widgets module outside the
+/// semantic theme roles. `app_main!` includes these in every emitted manifest.
+pub const MATH_VIEW_FONT_ASSET: &str = "makepad_widgets/resources/NewCMMath-Regular.otf";
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum FontRole {
     Regular,
@@ -96,7 +100,7 @@ pub struct FontPolicy {
     pub bold_italic: FontChain,
     pub monospace: FontChain,
     pub icons: FontChain,
-    /// De-duplicated package order, frozen by the v1 manifest fixture.
+    /// Exact de-duplicated union of every role chain, in package order.
     pub assets: &'static [FontAsset],
 }
 
@@ -163,6 +167,13 @@ const FONT_AWESOME: FontAsset = FontAsset {
     descender: 0.0,
     weight: 0.0,
 };
+const JETBRAINS_UI_SYMBOLS: FontAsset = FontAsset {
+    id: "jetbrains_ui_symbols",
+    resource_path: "makepad_widgets/resources/jetbrains_mono_variable.ttf",
+    ascender: 0.0,
+    descender: 0.0,
+    weight: 0.0,
+};
 const LXGW_REGULAR: FontAsset = FontAsset {
     id: "lxgw_wenkai_regular",
     resource_path: "makepad_widgets/resources/LXGWWenKaiRegular.ttf",
@@ -185,16 +196,15 @@ const NOTO_COLOR_EMOJI: FontAsset = FontAsset {
     weight: 0.0,
 };
 
-/// No checked-in small UI-symbol font has a matching license file. Bravura is
-/// explicitly licensed but is a large music-symbol face, so it is not used as
-/// a general UI fallback. Until a licensed subset is added, IBM Plex remains
-/// the sole proportional member of the Latin policy.
-pub const UI_SYMBOL_FALLBACK: Option<FontAsset> = None;
+/// The checked-in JetBrains Mono variable face supplies the compact UI-symbol
+/// cmap missing from IBM Plex. Its name table carries the SIL OFL 1.1 license;
+/// the draw crate freezes both the license and required cmap in a test.
+pub const UI_SYMBOL_FALLBACK: Option<FontAsset> = Some(JETBRAINS_UI_SYMBOLS);
 
-const LATIN_REGULAR: &[FontAsset] = &[IBM_PLEX_TEXT];
-const LATIN_BOLD: &[FontAsset] = &[IBM_PLEX_SEMIBOLD];
-const LATIN_ITALIC: &[FontAsset] = &[IBM_PLEX_ITALIC];
-const LATIN_BOLD_ITALIC: &[FontAsset] = &[IBM_PLEX_BOLD_ITALIC];
+const LATIN_REGULAR: &[FontAsset] = &[IBM_PLEX_TEXT, JETBRAINS_UI_SYMBOLS];
+const LATIN_BOLD: &[FontAsset] = &[IBM_PLEX_SEMIBOLD, JETBRAINS_UI_SYMBOLS];
+const LATIN_ITALIC: &[FontAsset] = &[IBM_PLEX_ITALIC, JETBRAINS_UI_SYMBOLS];
+const LATIN_BOLD_ITALIC: &[FontAsset] = &[IBM_PLEX_BOLD_ITALIC, JETBRAINS_UI_SYMBOLS];
 const MONOSPACE: &[FontAsset] = &[LIBERATION_MONO];
 const ICONS: &[FontAsset] = &[FONT_AWESOME];
 
@@ -211,6 +221,7 @@ const LATIN_ASSETS: &[FontAsset] = &[
     IBM_PLEX_BOLD_ITALIC,
     LIBERATION_MONO,
     FONT_AWESOME,
+    JETBRAINS_UI_SYMBOLS,
 ];
 const INTERNATIONAL_ASSETS: &[FontAsset] = &[
     IBM_PLEX_TEXT,
@@ -246,13 +257,130 @@ const INTERNATIONAL_POLICY: FontPolicy = FontPolicy {
     assets: INTERNATIONAL_ASSETS,
 };
 
-pub const LATIN_FONT_ASSET_MANIFEST: &[u8; 372] = b"format=makepad.font-assets.v1\nset=Latin\nasset=makepad_widgets/resources/IBMPlexSans-Text.ttf\nasset=makepad_widgets/resources/IBMPlexSans-SemiBold.ttf\nasset=makepad_widgets/resources/IBMPlexSans-Italic.ttf\nasset=makepad_widgets/resources/IBMPlexSans-BoldItalic.ttf\nasset=makepad_widgets/resources/LiberationMono-Regular.ttf\nasset=makepad_widgets/resources/fa-solid-900.ttf\n";
+pub const LATIN_FONT_ASSET_MANIFEST: &[u8; 432] = b"format=makepad.font-assets.v1\nset=Latin\nasset=makepad_widgets/resources/IBMPlexSans-Text.ttf\nasset=makepad_widgets/resources/IBMPlexSans-SemiBold.ttf\nasset=makepad_widgets/resources/IBMPlexSans-Italic.ttf\nasset=makepad_widgets/resources/IBMPlexSans-BoldItalic.ttf\nasset=makepad_widgets/resources/LiberationMono-Regular.ttf\nasset=makepad_widgets/resources/fa-solid-900.ttf\nasset=makepad_widgets/resources/jetbrains_mono_variable.ttf\n";
 
 pub const INTERNATIONAL_FONT_ASSET_MANIFEST: &[u8; 536] = b"format=makepad.font-assets.v1\nset=International\nasset=makepad_widgets/resources/IBMPlexSans-Text.ttf\nasset=makepad_widgets/resources/IBMPlexSans-SemiBold.ttf\nasset=makepad_widgets/resources/IBMPlexSans-Italic.ttf\nasset=makepad_widgets/resources/IBMPlexSans-BoldItalic.ttf\nasset=makepad_widgets/resources/LiberationMono-Regular.ttf\nasset=makepad_widgets/resources/fa-solid-900.ttf\nasset=makepad_widgets/resources/LXGWWenKaiRegular.ttf\nasset=makepad_widgets/resources/LXGWWenKaiBold.ttf\nasset=makepad_widgets/resources/NotoColorEmoji.ttf\n";
+
+const fn bytes_equal(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < left.len() {
+        if left[index] != right[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+const fn bytes_at_equal(haystack: &[u8], start: usize, needle: &[u8]) -> bool {
+    if start + needle.len() > haystack.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < needle.len() {
+        if haystack[start + index] != needle[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+const fn manifest_contains_asset(manifest: &[u8], asset: &str) -> bool {
+    let prefix = b"asset=";
+    let asset = asset.as_bytes();
+    let mut start = 0;
+    while start + prefix.len() + asset.len() < manifest.len() {
+        if bytes_at_equal(manifest, start, prefix)
+            && bytes_at_equal(manifest, start + prefix.len(), asset)
+            && manifest[start + prefix.len() + asset.len()] == b'\n'
+        {
+            return true;
+        }
+        while start < manifest.len() && manifest[start] != b'\n' {
+            start += 1;
+        }
+        start += 1;
+    }
+    false
+}
+
+const fn extra_asset_is_duplicate(manifest: &[u8], assets: &[&str], index: usize) -> bool {
+    if manifest_contains_asset(manifest, assets[index]) {
+        return true;
+    }
+    let mut previous = 0;
+    while previous < index {
+        if bytes_equal(assets[previous].as_bytes(), assets[index].as_bytes()) {
+            return true;
+        }
+        previous += 1;
+    }
+    false
+}
+
+#[doc(hidden)]
+pub const fn font_asset_manifest_len(manifest: &[u8], extra_assets: &[&str]) -> usize {
+    let mut len = manifest.len();
+    let mut index = 0;
+    while index < extra_assets.len() {
+        if !extra_asset_is_duplicate(manifest, extra_assets, index) {
+            len += b"asset=".len() + extra_assets[index].len() + 1;
+        }
+        index += 1;
+    }
+    len
+}
+
+#[doc(hidden)]
+pub const fn extend_font_asset_manifest<const N: usize>(
+    manifest: &[u8],
+    extra_assets: &[&str],
+) -> [u8; N] {
+    assert!(N == font_asset_manifest_len(manifest, extra_assets));
+    let mut out = [0; N];
+    let mut write = 0;
+    while write < manifest.len() {
+        out[write] = manifest[write];
+        write += 1;
+    }
+    let mut index = 0;
+    while index < extra_assets.len() {
+        let asset = extra_assets[index].as_bytes();
+        let mut byte = 0;
+        while byte < asset.len() {
+            assert!(asset[byte] != b'\n' && asset[byte] != b'\r');
+            byte += 1;
+        }
+        if !extra_asset_is_duplicate(manifest, extra_assets, index) {
+            let prefix = b"asset=";
+            byte = 0;
+            while byte < prefix.len() {
+                out[write] = prefix[byte];
+                write += 1;
+                byte += 1;
+            }
+            byte = 0;
+            while byte < asset.len() {
+                out[write] = asset[byte];
+                write += 1;
+                byte += 1;
+            }
+            out[write] = b'\n';
+            write += 1;
+        }
+        index += 1;
+    }
+    out
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{HashMap, HashSet};
 
     fn fixture(set: FontSet) -> String {
         let policy = set.policy();
@@ -268,11 +396,11 @@ mod tests {
     #[test]
     fn policy_construction_has_ordered_latin_and_international_chains() {
         let latin = FontSet::Latin.policy();
-        assert_eq!(latin.regular.members, &[IBM_PLEX_TEXT]);
-        assert_eq!(latin.bold.members, &[IBM_PLEX_SEMIBOLD]);
+        assert_eq!(latin.regular.members, &[IBM_PLEX_TEXT, JETBRAINS_UI_SYMBOLS]);
+        assert_eq!(latin.bold.members, &[IBM_PLEX_SEMIBOLD, JETBRAINS_UI_SYMBOLS]);
         assert_eq!(latin.monospace.members, &[LIBERATION_MONO]);
         assert_eq!(latin.icons.members, &[FONT_AWESOME]);
-        assert_eq!(UI_SYMBOL_FALLBACK, None);
+        assert_eq!(UI_SYMBOL_FALLBACK, Some(JETBRAINS_UI_SYMBOLS));
 
         let international = FontSet::International.policy();
         assert_eq!(international.regular.members, INTERNATIONAL_REGULAR);
@@ -281,6 +409,52 @@ mod tests {
         assert_eq!(international.bold_italic.members, INTERNATIONAL_BOLD_ITALIC);
         assert_eq!(international.monospace, latin.monospace);
         assert_eq!(international.icons, latin.icons);
+    }
+
+    #[test]
+    fn assets_are_the_exact_unique_union_of_role_chains() {
+        for set in [FontSet::Latin, FontSet::International] {
+            let policy = set.policy();
+            let mut union = HashMap::new();
+            for role in [
+                FontRole::Regular,
+                FontRole::Bold,
+                FontRole::Italic,
+                FontRole::BoldItalic,
+                FontRole::Monospace,
+                FontRole::Icons,
+            ] {
+                let mut chain_paths = HashSet::new();
+                for asset in policy.chain(role).members {
+                    assert!(chain_paths.insert(asset.resource_path), "duplicate in {role:?}");
+                    if let Some(previous) = union.insert(asset.resource_path, *asset) {
+                        assert_eq!(previous, *asset, "conflicting declarations for {}", asset.resource_path);
+                    }
+                }
+            }
+            let asset_paths = policy
+                .assets
+                .iter()
+                .map(|asset| asset.resource_path)
+                .collect::<HashSet<_>>();
+            assert_eq!(asset_paths.len(), policy.assets.len(), "duplicate policy asset");
+            assert_eq!(asset_paths, union.into_keys().collect());
+        }
+    }
+
+    #[test]
+    fn manifest_extension_is_exact_and_suppresses_duplicates() {
+        const EXTRAS: &[&str] = &[
+            "makepad_widgets/resources/NewCMMath-Regular.otf",
+            "makepad_widgets/resources/IBMPlexSans-Text.ttf",
+            "makepad_widgets/resources/NewCMMath-Regular.otf",
+        ];
+        const N: usize = font_asset_manifest_len(LATIN_FONT_ASSET_MANIFEST, EXTRAS);
+        const MANIFEST: [u8; N] = extend_font_asset_manifest(LATIN_FONT_ASSET_MANIFEST, EXTRAS);
+        let text = std::str::from_utf8(&MANIFEST).unwrap();
+        assert_eq!(text.matches("NewCMMath-Regular.otf").count(), 1);
+        assert_eq!(text.matches("IBMPlexSans-Text.ttf").count(), 1);
+        assert!(text.ends_with("asset=makepad_widgets/resources/NewCMMath-Regular.otf\n"));
     }
 
     #[test]

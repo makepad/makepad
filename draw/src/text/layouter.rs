@@ -1687,11 +1687,90 @@ mod tests {
     use super::BorrowedLayoutParams;
     use crate::makepad_platform::SharedBytes;
     use crate::text::font::FontId;
-    use crate::text::loader::{FontDefinition, FontFamilyDefinition};
+    use crate::text::{font_family::FontDiagnostics, loader::{FontDefinition, FontFamilyDefinition}};
     use std::path::PathBuf;
 
     const LATIN_FAMILY: u64 = 0xE111_00FA;
     const CJK_FAMILY: u64 = 0xE111_00FB;
+
+    #[test]
+    fn async_font_arrival_invalidates_cached_layout() {
+        const FAMILY: u64 = 0xE111_00FC;
+        let primary_id: FontId = 0xE111_0003_u64.into();
+        let fallback_id: FontId = 0xE111_0004_u64.into();
+        let resources =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../widgets/resources");
+        let mut layouter = Layouter::new(Settings::default());
+        let primary = SharedBytes::from_file_mmap_or_read(resources.join("IBMPlexSans-Text.ttf"))
+            .expect("primary font bytes should load");
+        layouter.define_font(
+            primary_id,
+            FontDefinition {
+                data: primary,
+                index: 0,
+                ascender_fudge_in_ems: 0.0,
+                descender_fudge_in_ems: 0.0,
+                weight: None,
+                variations: Vec::new(),
+            },
+        );
+        let diagnostics = FontDiagnostics {
+            role: "regular".to_string(),
+            set: "Latin".to_string(),
+            tried: vec!["ibm_plex_text".to_string(), "jetbrains_ui_symbols".to_string()],
+        };
+        layouter.define_font_family(
+            FAMILY.into(),
+            FontFamilyDefinition {
+                font_ids: vec![primary_id],
+                expected_member_count: 2,
+                diagnostics: diagnostics.clone(),
+            },
+        );
+        let params = OwnedLayoutParams {
+            text: "⌘".into(),
+            style: Style {
+                font_family_id: FAMILY.into(),
+                font_size_in_pts: 12.0,
+                color: None,
+            },
+            options: LayoutOptions::default(),
+        };
+        let before = layouter.get_or_layout(params.clone());
+        assert!(before.rows.iter().flat_map(|row| &row.glyphs).any(|glyph| glyph.id == 0));
+
+        let fallback = SharedBytes::from_file_mmap_or_read(
+            resources.join("jetbrains_mono_variable.ttf"),
+        )
+        .expect("fallback font bytes should arrive");
+        layouter.define_font(
+            fallback_id,
+            FontDefinition {
+                data: fallback,
+                index: 0,
+                ascender_fudge_in_ems: 0.0,
+                descender_fudge_in_ems: 0.0,
+                weight: None,
+                variations: Vec::new(),
+            },
+        );
+        layouter.set_font_family_definition(
+            FAMILY.into(),
+            FontFamilyDefinition {
+                font_ids: vec![primary_id, fallback_id],
+                expected_member_count: 2,
+                diagnostics,
+            },
+        );
+
+        let after = layouter.get_or_layout(params);
+        assert!(!Rc::ptr_eq(&before, &after), "arrival must evict the old layout");
+        assert!(after
+            .rows
+            .iter()
+            .flat_map(|row| &row.glyphs)
+            .all(|glyph| glyph.id != 0 && glyph.font.id() == fallback_id));
+    }
 
     fn real_font_layouter() -> Layouter {
         let mut layouter = Layouter::new(Settings::default());

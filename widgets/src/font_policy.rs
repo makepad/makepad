@@ -89,6 +89,11 @@ pub(crate) fn install_theme_fonts(vm: &mut ScriptVm) {
             font_bold: TextStyle{font_family: #(bold) line_spacing: 1.2}
             font_italic: TextStyle{font_family: #(italic) line_spacing: 1.2}
             font_bold_italic: TextStyle{font_family: #(bold_italic) line_spacing: 1.2}
+            // Deprecated compatibility aliases; use the names above.
+            font_regular_i18n: TextStyle{font_family: #(regular) line_spacing: 1.2}
+            font_bold_i18n: TextStyle{font_family: #(bold) line_spacing: 1.2}
+            font_italic_i18n: TextStyle{font_family: #(italic) line_spacing: 1.2}
+            font_bold_italic_i18n: TextStyle{font_family: #(bold_italic) line_spacing: 1.2}
             font_code: TextStyle{font_size: 9.0 font_family: #(monospace) line_spacing: 1.35}
             font_icons: TextStyle{font_family: #(icons) line_spacing: 1.2}
         }
@@ -98,6 +103,11 @@ pub(crate) fn install_theme_fonts(vm: &mut ScriptVm) {
             font_bold: TextStyle{font_family: #(bold) line_spacing: 1.2}
             font_italic: TextStyle{font_family: #(italic) line_spacing: 1.2}
             font_bold_italic: TextStyle{font_family: #(bold_italic) line_spacing: 1.2}
+            // Deprecated compatibility aliases; use the names above.
+            font_regular_i18n: TextStyle{font_family: #(regular) line_spacing: 1.2}
+            font_bold_i18n: TextStyle{font_family: #(bold) line_spacing: 1.2}
+            font_italic_i18n: TextStyle{font_family: #(italic) line_spacing: 1.2}
+            font_bold_italic_i18n: TextStyle{font_family: #(bold_italic) line_spacing: 1.2}
             font_code: TextStyle{font_size: 9.0 font_family: #(monospace) line_spacing: 1.35}
             font_icons: TextStyle{font_family: #(icons) line_spacing: 1.2}
         }
@@ -107,6 +117,11 @@ pub(crate) fn install_theme_fonts(vm: &mut ScriptVm) {
             font_bold: TextStyle{font_family: #(bold) line_spacing: 1.2}
             font_italic: TextStyle{font_family: #(italic) line_spacing: 1.2}
             font_bold_italic: TextStyle{font_family: #(bold_italic) line_spacing: 1.2}
+            // Deprecated compatibility aliases; use the names above.
+            font_regular_i18n: TextStyle{font_family: #(regular) line_spacing: 1.2}
+            font_bold_i18n: TextStyle{font_family: #(bold) line_spacing: 1.2}
+            font_italic_i18n: TextStyle{font_family: #(italic) line_spacing: 1.2}
+            font_bold_italic_i18n: TextStyle{font_family: #(bold_italic) line_spacing: 1.2}
             font_code: TextStyle{font_size: 9.0 font_family: #(monospace) line_spacing: 1.35}
             font_icons: TextStyle{font_family: #(icons) line_spacing: 1.2}
         }
@@ -116,7 +131,7 @@ pub(crate) fn install_theme_fonts(vm: &mut ScriptVm) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::makepad_platform::Cx;
+    use crate::makepad_platform::{Cx, ScriptNew};
 
     fn registered_font_paths(set: FontSet) -> Vec<String> {
         let mut cx = Cx::new(Box::new(|_, _| {}));
@@ -140,7 +155,7 @@ mod tests {
     fn platform_policy_is_the_widgets_theme_contract() {
         assert_eq!(FontSet::Latin.policy().regular.role, FontRole::Regular);
         assert_eq!(FontSet::International.policy().icons.role, FontRole::Icons);
-        assert_eq!(FontSet::Latin.policy().regular.members.len(), 1);
+        assert_eq!(FontSet::Latin.policy().regular.members.len(), 2);
         assert_eq!(FontSet::International.policy().regular.members.len(), 3);
         assert_eq!(
             FontSet::International.policy().regular.members[2].id,
@@ -188,5 +203,63 @@ mod tests {
             expected.sort();
             assert_eq!(registered_font_paths(set), expected);
         }
+    }
+
+    #[test]
+    fn international_theme_keeps_desktop_chain_order_and_i18n_aliases() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        assert!(cx.set_font_set(FontSet::International));
+        cx.with_vm(|vm| {
+            crate::theme_mod(vm);
+            let regular_value = crate::script_eval!(vm, {mod.theme.font_regular});
+            let bold_value = crate::script_eval!(vm, {mod.theme.font_bold});
+            let italic_value = crate::script_eval!(vm, {mod.theme.font_italic});
+            let bold_italic_value = crate::script_eval!(vm, {mod.theme.font_bold_italic});
+            let regular_i18n_value = crate::script_eval!(vm, {mod.theme.font_regular_i18n});
+            let bold_i18n_value = crate::script_eval!(vm, {mod.theme.font_bold_i18n});
+            let italic_i18n_value = crate::script_eval!(vm, {mod.theme.font_italic_i18n});
+            let bold_italic_i18n_value =
+                crate::script_eval!(vm, {mod.theme.font_bold_italic_i18n});
+            let regular = crate::TextStyle::script_from_value(vm, regular_value);
+            let bold = crate::TextStyle::script_from_value(vm, bold_value);
+            let italic = crate::TextStyle::script_from_value(vm, italic_value);
+            let bold_italic = crate::TextStyle::script_from_value(vm, bold_italic_value);
+            let regular_i18n = crate::TextStyle::script_from_value(vm, regular_i18n_value);
+            let bold_i18n = crate::TextStyle::script_from_value(vm, bold_i18n_value);
+            let italic_i18n = crate::TextStyle::script_from_value(vm, italic_i18n_value);
+            let bold_italic_i18n =
+                crate::TextStyle::script_from_value(vm, bold_italic_i18n_value);
+
+            let regular_ids = regular.font_family.member_ids().collect::<Vec<_>>();
+            let bold_ids = bold.font_family.member_ids().collect::<Vec<_>>();
+            let italic_ids = italic.font_family.member_ids().collect::<Vec<_>>();
+            let bold_italic_ids = bold_italic.font_family.member_ids().collect::<Vec<_>>();
+            assert_eq!(
+                regular_ids,
+                ["ibm_plex_text", "lxgw_wenkai_regular", "noto_color_emoji"]
+            );
+            assert_eq!(
+                bold_ids,
+                ["ibm_plex_semibold", "lxgw_wenkai_bold", "noto_color_emoji"]
+            );
+            assert_eq!(
+                italic_ids,
+                ["ibm_plex_italic", "lxgw_wenkai_regular", "noto_color_emoji"]
+            );
+            assert_eq!(
+                bold_italic_ids,
+                ["ibm_plex_bold_italic", "lxgw_wenkai_bold", "noto_color_emoji"]
+            );
+            assert_eq!(regular_i18n.font_family.member_ids().collect::<Vec<_>>(), regular_ids);
+            assert_eq!(bold_i18n.font_family.member_ids().collect::<Vec<_>>(), bold_ids);
+            assert_eq!(
+                italic_i18n.font_family.member_ids().collect::<Vec<_>>(),
+                italic_ids
+            );
+            assert_eq!(
+                bold_italic_i18n.font_family.member_ids().collect::<Vec<_>>(),
+                bold_italic_ids
+            );
+        });
     }
 }

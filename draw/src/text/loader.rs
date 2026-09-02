@@ -192,7 +192,7 @@ pub struct FontDefinition {
 mod tests {
     use super::{FontDefinition, FontFamilyDefinition, Loader};
     use crate::{
-        makepad_platform::SharedBytes,
+        makepad_platform::{Cx, SharedBytes},
         text::{font::FontId, font_family::FontDiagnostics, layouter},
     };
     use std::path::PathBuf;
@@ -227,6 +227,7 @@ mod tests {
 
     #[test]
     fn glyph_miss_does_not_start_or_discover_a_font_load() {
+        let cx = Cx::new(Box::new(|_, _| {}));
         let mut loader = Loader::new(layouter::Settings::default().loader);
         let font_id: FontId = 0xCAFE_C001_u64.into();
         let family_id = 0xCAFE_C002_u64.into();
@@ -263,9 +264,15 @@ mod tests {
             loader.font_family_definitions.len(),
             loader.font_family_cache.len(),
         );
+        let queued_http_before = cx.script_data.resources.http_resources.len();
         let shaped = family.get_or_shape("\u{10FFFF}".into());
 
         assert!(shaped.glyphs.iter().any(|glyph| glyph.id == 0));
+        assert_eq!(
+            cx.script_data.resources.http_resources.len(),
+            queued_http_before,
+            "a glyph miss must not enqueue an HTTP resource request"
+        );
         assert_eq!(
             before,
             (
@@ -276,6 +283,53 @@ mod tests {
             ),
             "shaping a miss must only exhaust the declared in-memory chain"
         );
+    }
+
+    #[test]
+    fn fallback_font_handles_a_primary_glyph_miss() {
+        let mut loader = Loader::new(layouter::Settings::default().loader);
+        let primary_id: FontId = 0xCAFE_D001_u64.into();
+        let fallback_id: FontId = 0xCAFE_D002_u64.into();
+        let family_id = 0xCAFE_D003_u64.into();
+        for (id, name) in [
+            (primary_id, "IBMPlexSans-Text.ttf"),
+            (fallback_id, "jetbrains_mono_variable.ttf"),
+        ] {
+            let data = SharedBytes::from_file_mmap_or_read(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../widgets/resources")
+                    .join(name),
+            )
+            .expect("font bytes should load");
+            loader.define_font(
+                id,
+                FontDefinition {
+                    data,
+                    index: 0,
+                    ascender_fudge_in_ems: 0.0,
+                    descender_fudge_in_ems: 0.0,
+                    weight: None,
+                    variations: Vec::new(),
+                },
+            );
+        }
+        loader.define_font_family(
+            family_id,
+            FontFamilyDefinition {
+                font_ids: vec![primary_id, fallback_id],
+                expected_member_count: 2,
+                diagnostics: Default::default(),
+            },
+        );
+
+        let shaped = loader
+            .get_or_load_font_family_rc(family_id)
+            .get_or_shape("⌘".into());
+        assert!(shaped.glyphs.iter().all(|glyph| glyph.id != 0));
+        assert!(shaped
+            .glyphs
+            .iter()
+            .all(|glyph| glyph.font.id() == fallback_id));
     }
 
     fn bundled_variable_font_path() -> PathBuf {
