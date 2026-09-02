@@ -44,6 +44,11 @@ const FP_ONE: u64 = 1 << 32;
 /// Default parameter slew, seconds — fast enough to feel instant, slow
 /// enough to never click.
 const SLEW_SECS: f32 = 0.008;
+
+/// How long the separated lanes take to replace the mixed file. Long
+/// enough that the change of TIMBRE is a fade and not an event, short
+/// enough that a deck loaded mid-set is on its lanes within a bar.
+const STEM_SEAM_SECS: f32 = 0.12;
 /// Autopilot blend moves: fast enough to read as a cut on the bar, slow
 /// enough never to click.
 const BLEND_SECS: f32 = 0.08;
@@ -617,6 +622,18 @@ struct DeckSource<'a> {
     pcm: &'a TrackPcm,
     stems: Option<&'a TrackStems>,
     stem_gain: [f32; STEM_COUNT],
+    /// How far the lanes have taken over from the mixed file, 0..1.
+    ///
+    /// A separation arrives chunk by chunk while the record plays, so the
+    /// moment the frontier reaches the playhead the source flips -- at
+    /// whatever sample the message happened to be pumped in at. This is
+    /// what softens that edge.
+    ///
+    /// It follows TIME, not position, and deliberately so: with key lock
+    /// engaged the stretcher reads nowhere near the playhead, and the loop
+    /// wrap's crossfade reads at a third place again, so a weight worked
+    /// out from the read index would jump about under all three.
+    seam: f32,
 }
 
 impl FrameSource for DeckSource<'_> {
@@ -630,6 +647,9 @@ impl FrameSource for DeckSource<'_> {
         let Some(stems) = self.stems else {
             return self.pcm.frame_f32(index);
         };
+        if self.seam <= 0.0 {
+            return self.pcm.frame_f32(index);
+        }
         let chunk = index / stems.chunk_frames;
         let offset = index - chunk * stems.chunk_frames;
         let mut out = [0.0f32; 2];
@@ -652,7 +672,17 @@ impl FrameSource for DeckSource<'_> {
         if !separated {
             return self.pcm.frame_f32(index);
         }
-        out
+        if self.seam >= 1.0 {
+            return out;
+        }
+        // LINEAR, not equal power: at unity gains the lane sum IS the mixed
+        // file, and an equal-power blend of a signal with itself bulges
+        // 3 dB. The loop wrap's crossfade carries the same reasoning.
+        let mixed = self.pcm.frame_f32(index);
+        [
+            lerp(mixed[0], out[0], self.seam),
+            lerp(mixed[1], out[1], self.seam),
+        ]
     }
 }
 
@@ -760,6 +790,12 @@ struct DeckVoice {
     /// above stays the operator's intent; this is what the room hears, and
     /// the deck keeps reading and fading for as long as it is above zero.
     transport: Ramp,
+    /// How far the separated lanes have taken over from the mixed file.
+    ///
+    /// Slewed rather than switched: the separation lands chunk by chunk
+    /// while the record plays, and the flip used to happen at whatever
+    /// sample the pump delivered it on.
+    stem_seam: Ramp,
     /// The ghost SLIP is keeping, if it is armed.
     slip: Option<Ghost>,
     /// Where the playhead was when the operator pressed pause. The fade-out
@@ -800,6 +836,7 @@ impl DeckVoice {
             gain: Ramp::at(1.0),
             mute: Ramp::at(1.0),
             transport: Ramp::at(0.0),
+            stem_seam: Ramp::at(0.0),
             slip: None,
             pause_at: None,
             ended: false,
@@ -1853,10 +1890,21 @@ impl Mixer {
             return;
         }
         d.stems = Some(stems);
+        // Fade the lanes in rather than cutting to them. The separated sum
+        // is close to the mixed file but not identical, so a hard swap is
+        // heard on the phase difference between them -- and the swap used
+        // to land on whatever sample the pump happened to deliver it at.
+        d.stem_seam.slew(1.0, STEM_SEAM_SECS);
     }
 
     pub fn clear_deck_stems(&self, deck: DeckId) {
-        self.state.lock().unwrap().decks[deck.index()].stems = None;
+        let mut s = self.state.lock().unwrap();
+        let d = &mut s.decks[deck.index()];
+        d.stems = None;
+        // Nothing to fade out of: the lanes are gone this instant, so the
+        // weight goes with them rather than ramping down over a source that
+        // no longer exists.
+        d.stem_seam = Ramp::at(0.0);
     }
 
     pub fn set_deck_playing(&self, deck: DeckId, playing: bool) {
@@ -2691,6 +2739,7 @@ impl Mixer {
                     pcm,
                     stems: deck_stems[i].as_deref(),
                     stem_gain,
+                    seam: d.stem_seam.tick(rate),
                 };
                 let length = pcm.frames.len();
 
@@ -3860,6 +3909,81 @@ mod tests {
         assert!(health.render_max_nanos >= health.render_nanos, "the worst is still kept");
         render(&mixer, 48_000.0, 256);
         assert_eq!(mixer.audio_health().buffer_frames, 256, "the LAST buffer, not the worst");
+    }
+
+    /// Lanes that are present but silent: the harshest possible swap away
+    /// from the mixed file, which is what makes it a good seam test.
+    fn silent_stems(rate: u32, seconds: f64) -> Arc<TrackStems> {
+        let chunk = rate as usize;
+        let count = (rate as f64 * seconds / chunk as f64).ceil() as usize;
+        let mut stems = TrackStems::new(chunk, count.max(1));
+        for lane in stems.lanes.iter_mut() {
+            for slot in lane.iter_mut() {
+                *slot = Some(Arc::new(vec![[0i16; 2]; chunk]));
+            }
+        }
+        Arc::new(stems)
+    }
+
+    /// The loudest sample on the left channel.
+    fn peak_of(buffer: &AudioBuffer) -> f32 {
+        (0..buffer.frame_count()).map(|f| buffer.channel(0)[f].abs()).fold(0.0, f32::max)
+    }
+
+    /// The biggest step between neighbouring samples on the left channel.
+    fn worst_step(buffer: &AudioBuffer) -> f32 {
+        let left: Vec<f32> = (0..buffer.frame_count()).map(|f| buffer.channel(0)[f]).collect();
+        left.windows(2).map(|p| (p[1] - p[0]).abs()).fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn the_lanes_fade_in_over_the_mixed_file_rather_than_cutting_to_it() {
+        // A separation lands chunk by chunk while the record plays, so the
+        // instant the frontier reaches the playhead the source used to flip
+        // on whatever sample the pump delivered it on. The lane sum is
+        // close to the mixed file but not identical, and a hard swap
+        // between them is heard on the phase difference.
+        // The mixed file is silence and the lanes are loud, so the output
+        // IS the weight: if it jumped, the swap was a cut.
+        let mixer = Mixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        mixer.install_deck(DeckId::A, const_pcm(0, 48_000 * 4, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 4096);
+        mixer.install_deck_stems(
+            DeckId::A,
+            chunked_stems([8_000.0, 0.0, 0.0, 0.0], 48_000, 4.0),
+        );
+        let first = peak_of(&render(&mixer, 48_000.0, 512));
+        for _ in 0..24 {
+            render(&mixer, 48_000.0, 512);
+        }
+        let settled = peak_of(&render(&mixer, 48_000.0, 512));
+        assert!(settled > 0.05, "the lanes did arrive: {settled}");
+        assert!(
+            first < settled * 0.5,
+            "the lanes cut in instead of fading: {first} against a settled {settled}"
+        );
+    }
+
+    #[test]
+    fn dropping_the_lanes_takes_the_weight_with_them() {
+        let mixer = Mixer::new();
+        mixer.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 4.0));
+        mixer.install_deck_stems(DeckId::A, silent_stems(48_000, 4.0));
+        mixer.set_deck_playing(DeckId::A, true);
+        for _ in 0..16 {
+            render(&mixer, 48_000.0, 512);
+        }
+        mixer.clear_deck_stems(DeckId::A);
+        // Straight back to the mixed file: there is no lane left to fade
+        // out of.
+        let out = render(&mixer, 48_000.0, 512);
+        assert!(
+            out.data.iter().any(|s| s.abs() > 0.01),
+            "the mixed file is playing again at once"
+        );
     }
 
     #[test]
