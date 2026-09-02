@@ -412,6 +412,8 @@ impl Widget for AiChatPanel {
                     }
                     Entry::Assistant { text, streaming: false } => {
                         let row = list.item(cx, index, id!(AssistantRow));
+                        // No text, no row: a blank block above a card is a gap.
+                        row.set_visible(cx, !text.trim().is_empty());
                         if let Some(mut md) = row.widget(cx, ids!(assistant_md)).borrow_mut::<Markdown>() {
                             md.set_text(cx, text);
                         }
@@ -419,6 +421,7 @@ impl Widget for AiChatPanel {
                     }
                     Entry::Assistant { text, streaming: true } => {
                         let row = list.item(cx, index, id!(StreamRow));
+                        row.set_visible(cx, !text.trim().is_empty());
                         row.label(cx, ids!(stream_text)).set_text(cx, text);
                         row
                     }
