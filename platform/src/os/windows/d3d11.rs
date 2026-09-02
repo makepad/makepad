@@ -747,7 +747,13 @@ impl Cx {
         // compositor kept it. Assuming it spent when it was not only costs one
         // paced wait; assuming it held when it was spent would remove the pacing
         // for this window entirely, so err on the side of waiting again.
-        try_with_win32_app(|app| app.spend_beat_credit(window_id));
+        try_with_win32_app(|app| {
+            app.spend_beat_credit(window_id);
+            if presented {
+                let now = app.time_now();
+                app.frame_trace.present(now);
+            }
+        });
         // Reveal the window only once a frame reached the compositor; showing it
         // earlier would flash an uncomposited black window.
         if presented && d3d11_window.first_draw {
@@ -1957,6 +1963,7 @@ impl D3d11Window {
                 // as not-presented and let the occlusion probe back us off, the same
                 // way the macOS backend handles `occlusionState`.
                 self.occluded_since.get_or_insert_with(std::time::Instant::now);
+                try_with_win32_app(|app| app.frame_trace.present_occluded());
                 return false;
             }
             if hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET {
