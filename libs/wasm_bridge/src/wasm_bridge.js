@@ -276,7 +276,12 @@ export class WasmBridge {
         let timeout = setTimeout(_ => {
             document.body.innerHTML = "<div style='margin-top:30px;margin-left:30px; color:white;'>Please close and re-open the browsertab - Shared memory allocation failed, this is a bug of iOS safari and apple needs to fix it.</div>"
         }, 1000)
-        let mem = new WebAssembly.Memory({ initial: 64, maximum: 16384, shared: true });
+        // wasm32 allows up to 65536 pages (4 GiB); older engines cap shared memory lower, so step down.
+        let mem = null;
+        for (const maximum of [65536, 32768, 16384]) {
+            try { mem = new WebAssembly.Memory({ initial: 64, maximum, shared: true }); break; } catch (_e) {}
+        }
+        if (mem === null) throw new Error("cannot allocate shared wasm memory");
         clearTimeout(timeout);
         return mem;
     }
