@@ -15,6 +15,9 @@ export class WasmWebGL extends WasmWebBrowser {
     this.xr = undefined;
     this._missing_shader_ids = new Set();
     this._gl_error_reports = new Set();
+    this.pending_webgl_shader_count = 0;
+    this.webgl_shader_poll_frame_id = 0;
+    this.webgl_shader_timeline_start = undefined;
     this.video_players = {};
     this.init_webgl_context();
 
@@ -267,195 +270,284 @@ export class WasmWebGL extends WasmWebBrowser {
     console.error("Missing shader in " + where, shader_id, vao_id);
   }
 
-  FromWasmCompileWebGLShader(args) {
-    function gl_type_from_code(gl, code) {
-      switch (code) {
-        case 1:
-          return gl.HALF_FLOAT;
-        case 2:
-          return gl.UNSIGNED_SHORT;
-        case 3:
-          return gl.SHORT;
-        case 4:
-          return gl.UNSIGNED_BYTE;
-        case 5:
-          return gl.BYTE;
-        case 6:
-          return gl.UNSIGNED_INT;
-        case 7:
-          return gl.INT;
-        default:
-          return gl.FLOAT;
-      }
+  webgl_type_from_code(code) {
+    switch (code) {
+      case 1:
+        return this.gl.HALF_FLOAT;
+      case 2:
+        return this.gl.UNSIGNED_SHORT;
+      case 3:
+        return this.gl.SHORT;
+      case 4:
+        return this.gl.UNSIGNED_BYTE;
+      case 5:
+        return this.gl.BYTE;
+      case 6:
+        return this.gl.UNSIGNED_INT;
+      case 7:
+        return this.gl.INT;
+      default:
+        return this.gl.FLOAT;
     }
-    function get_attrib_locations(gl, program, base, slots) {
-      let attrib_locs = [];
-      let attribs = slots >> 2;
-      let stride = slots * 4;
-      if ((slots & 3) != 0) attribs++;
-      for (let i = 0; i < attribs; i++) {
-        let size = slots - i * 4;
-        if (size > 4) size = 4;
-        let name = base + i;
-        attrib_locs.push({
-          loc: gl.getAttribLocation(program, name),
-          offset: i * 16,
-          size: size,
-          stride: slots * 4,
-          integer: false,
-          normalized: false,
-          gl_type: gl.FLOAT,
-        });
-      }
+  }
+
+  webgl_attrib_locations(program, base, slots) {
+    let attrib_locs = [];
+    let attribs = slots >> 2;
+    if ((slots & 3) != 0) attribs++;
+    for (let i = 0; i < attribs; i++) {
+      let size = slots - i * 4;
+      if (size > 4) size = 4;
+      attrib_locs.push({
+        loc: this.gl.getAttribLocation(program, base + i),
+        offset: i * 16,
+        size: size,
+        stride: slots * 4,
+        integer: false,
+        normalized: false,
+        gl_type: this.gl.FLOAT,
+      });
+    }
+    return attrib_locs;
+  }
+
+  webgl_typed_attrib_locations(program, table) {
+    let attrib_locs = [];
+    if (!table) {
       return attrib_locs;
     }
-    function get_typed_attrib_locations(gl, program, table) {
-      let attrib_locs = [];
-      if (!table) {
-        return attrib_locs;
-      }
-      for (let i = 0; i < table.length; i++) {
-        let a = table[i];
-        attrib_locs.push({
-          loc: gl.getAttribLocation(program, a.name),
-          offset: a.offset,
-          size: a.size,
-          stride: a.stride,
-          integer: !!a.integer,
-          normalized: !!a.normalized,
-          gl_type: gl_type_from_code(gl, a.gl_type),
-        });
-      }
-      return attrib_locs;
+    for (let i = 0; i < table.length; i++) {
+      let attrib = table[i];
+      attrib_locs.push({
+        loc: this.gl.getAttribLocation(program, attrib.name),
+        offset: attrib.offset,
+        size: attrib.size,
+        stride: attrib.stride,
+        integer: !!attrib.integer,
+        normalized: !!attrib.normalized,
+        gl_type: this.webgl_type_from_code(attrib.gl_type),
+      });
     }
+    return attrib_locs;
+  }
 
-    var gl = this.gl;
-    var vsh = gl.createShader(gl.VERTEX_SHADER);
+  log_webgl_shader_timeline(shader, phase) {
+    let now = performance.now();
+    let cumulative_ms = now - this.webgl_shader_timeline_start;
+    let elapsed_ms = now - shader.started_at;
+    console.log(
+      "makepad.webgl.shader" +
+        " id=" + shader.shader_id +
+        " phase=" + phase +
+        " vertex_ms=" + shader.vertex_ms.toFixed(2) +
+        " fragment_ms=" + shader.fragment_ms.toFixed(2) +
+        " link_ms=" + shader.link_ms.toFixed(2) +
+        " status_ms=" + shader.status_ms.toFixed(2) +
+        " ms=" + elapsed_ms.toFixed(2) +
+        " cumulative_ms=" + cumulative_ms.toFixed(2),
+    );
+  }
 
-    gl.shaderSource(vsh, args.vertex);
-    gl.compileShader(vsh);
-    if (!gl.getShaderParameter(vsh, gl.COMPILE_STATUS)) {
-      let message =
-        "webgl.compile_fail.vertex " +
-        args.shader_id +
-        " " +
-        gl.getShaderInfoLog(vsh);
-      console.error(message);
-      gl.deleteShader(vsh);
-      this.draw_shaders[args.shader_id] = { compile_failed: true };
-      return;
+  fail_webgl_shader(shader, stage, info_log) {
+    let gl = this.gl;
+    console.error(
+      "webgl.compile_fail." + stage + " " + shader.shader_id + " " + info_log,
+    );
+    gl.deleteShader(shader.vsh);
+    gl.deleteShader(shader.fsh);
+    gl.deleteProgram(shader.program);
+    this.draw_shaders[shader.shader_id] = { compile_failed: true };
+    this.pending_webgl_shader_count -= shader.pending ? 1 : 0;
+    shader.pending = false;
+    this.log_webgl_shader_timeline(shader, "failed_" + stage);
+  }
+
+  finish_webgl_shader(shader) {
+    let gl = this.gl;
+    let status_started = performance.now();
+    let vertex_ok = gl.getShaderParameter(shader.vsh, gl.COMPILE_STATUS);
+    let fragment_ok = gl.getShaderParameter(shader.fsh, gl.COMPILE_STATUS);
+    let link_ok = gl.getProgramParameter(shader.program, gl.LINK_STATUS);
+    shader.status_ms += performance.now() - status_started;
+
+    if (!vertex_ok) {
+      this.fail_webgl_shader(shader, "vertex", gl.getShaderInfoLog(shader.vsh));
+      return false;
     }
-
-    // compile pixelshader
-    var fsh = gl.createShader(gl.FRAGMENT_SHADER);
-    gl.shaderSource(fsh, args.pixel);
-    gl.compileShader(fsh);
-    if (!gl.getShaderParameter(fsh, gl.COMPILE_STATUS)) {
-      let message =
-        "webgl.compile_fail.fragment " +
-        args.shader_id +
-        " " +
-        gl.getShaderInfoLog(fsh);
-      console.error(message);
-      gl.deleteShader(vsh);
-      gl.deleteShader(fsh);
-      this.draw_shaders[args.shader_id] = { compile_failed: true };
-      return;
+    if (!fragment_ok) {
+      this.fail_webgl_shader(shader, "fragment", gl.getShaderInfoLog(shader.fsh));
+      return false;
     }
-    var program = gl.createProgram();
-    gl.attachShader(program, vsh);
-    gl.attachShader(program, fsh);
-    gl.linkProgram(program);
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-      let message =
-        "webgl.compile_fail.link " +
-        args.shader_id +
-        " " +
-        gl.getProgramInfoLog(program);
-      console.error(message);
-      gl.deleteShader(vsh);
-      gl.deleteShader(fsh);
-      gl.deleteProgram(program);
-      this.draw_shaders[args.shader_id] = { compile_failed: true };
-      return;
+    if (!link_ok) {
+      this.fail_webgl_shader(shader, "link", gl.getProgramInfoLog(shader.program));
+      return false;
     }
-
-    gl.deleteShader(vsh);
-    gl.deleteShader(fsh);
-    this.assert_no_gl_error(gl, "compile_shader");
 
     let texture_locs = [];
-    for (let i = 0; i < args.textures.length; i++) {
-      let tex_name = args.textures[i].name;
-      let loc = gl.getUniformLocation(program, "tex_" + tex_name);
+    for (let i = 0; i < shader.textures.length; i++) {
+      let tex_name = shader.textures[i].name;
+      let loc = gl.getUniformLocation(shader.program, "tex_" + tex_name);
       if (loc === null) {
-        // Keep old fallback names for non-script shaders.
-        loc = gl.getUniformLocation(program, "ds_" + tex_name);
+        loc = gl.getUniformLocation(shader.program, "ds_" + tex_name);
       }
       texture_locs.push({
         name: tex_name,
-        ty: args.textures[i].ty,
+        ty: shader.textures[i].ty,
         loc: loc,
       });
     }
 
-    let pass_uniforms_binding = this.get_uniform_block_binding(
-      program,
-      "passUniforms",
-    );
-    let draw_list_uniforms_binding = this.get_uniform_block_binding(
-      program,
-      "draw_listUniforms",
-    );
-    let draw_call_uniforms_binding = this.get_uniform_block_binding(
-      program,
-      "draw_callUniforms",
-    );
-    let user_uniforms_binding = this.get_uniform_block_binding(
-      program,
-      "userUniforms",
-    );
-    let live_uniforms_binding = this.get_uniform_block_binding(
-      program,
-      "liveUniforms",
-    );
-    this.draw_shaders[args.shader_id] = {
-      vertex: args.vertex,
-      pixel: args.pixel,
+    this.draw_shaders[shader.shader_id] = {
+      vertex: shader.vertex,
+      pixel: shader.pixel,
       geom_attribs:
-        args.geom_attribs && args.geom_attribs.length
-          ? get_typed_attrib_locations(gl, program, args.geom_attribs)
-          : get_attrib_locations(
-              gl,
-              program,
+        shader.geom_attribs && shader.geom_attribs.length
+          ? this.webgl_typed_attrib_locations(shader.program, shader.geom_attribs)
+          : this.webgl_attrib_locations(
+              shader.program,
               "packed_geometry_",
-              args.geometry_slots,
+              shader.geometry_slots,
             ),
       inst_attribs:
-        args.inst_attribs && args.inst_attribs.length
-          ? get_typed_attrib_locations(gl, program, args.inst_attribs)
-          : get_attrib_locations(
-              gl,
-              program,
+        shader.inst_attribs && shader.inst_attribs.length
+          ? this.webgl_typed_attrib_locations(shader.program, shader.inst_attribs)
+          : this.webgl_attrib_locations(
+              shader.program,
               "packed_instance_",
-              args.instance_slots,
+              shader.instance_slots,
             ),
-      pass_uniforms_binding: pass_uniforms_binding,
-      draw_list_uniforms_binding: draw_list_uniforms_binding,
-      draw_call_uniforms_binding: draw_call_uniforms_binding,
-      user_uniforms_binding: user_uniforms_binding,
-      live_uniforms_binding: live_uniforms_binding,
+      pass_uniforms_binding: this.get_uniform_block_binding(
+        shader.program,
+        "passUniforms",
+      ),
+      draw_list_uniforms_binding: this.get_uniform_block_binding(
+        shader.program,
+        "draw_listUniforms",
+      ),
+      draw_call_uniforms_binding: this.get_uniform_block_binding(
+        shader.program,
+        "draw_callUniforms",
+      ),
+      user_uniforms_binding: this.get_uniform_block_binding(
+        shader.program,
+        "userUniforms",
+      ),
+      live_uniforms_binding: this.get_uniform_block_binding(
+        shader.program,
+        "liveUniforms",
+      ),
       pass_uniform_buf: gl.createBuffer(),
       draw_list_uniform_buf: gl.createBuffer(),
       draw_call_uniform_buf: gl.createBuffer(),
       user_uniform_buf: gl.createBuffer(),
       live_uniform_buf: gl.createBuffer(),
       texture_locs: texture_locs,
+      geometry_slots: shader.geometry_slots,
+      instance_slots: shader.instance_slots,
+      program: shader.program,
+    };
+    gl.deleteShader(shader.vsh);
+    gl.deleteShader(shader.fsh);
+    this.pending_webgl_shader_count -= shader.pending ? 1 : 0;
+    shader.pending = false;
+    this.assert_no_gl_error(gl, "compile_shader_end");
+    this.log_webgl_shader_timeline(shader, "ready");
+    return true;
+  }
+
+  poll_pending_webgl_shaders() {
+    if (!this.parallel_shader_compile || this.pending_webgl_shader_count == 0) {
+      return 0;
+    }
+    let ready_count = 0;
+    for (let shader of this.draw_shaders) {
+      if (!shader || !shader.pending) {
+        continue;
+      }
+      let status_started = performance.now();
+      let complete = this.gl.getProgramParameter(
+        shader.program,
+        this.parallel_shader_compile.COMPLETION_STATUS_KHR,
+      );
+      shader.status_ms += performance.now() - status_started;
+      if (complete && this.finish_webgl_shader(shader)) {
+        ready_count++;
+      }
+    }
+    return ready_count;
+  }
+
+  schedule_webgl_shader_poll() {
+    if (this.webgl_shader_poll_frame_id || this.pending_webgl_shader_count == 0) {
+      return;
+    }
+    this.webgl_shader_poll_frame_id = window.requestAnimationFrame(() => {
+      this.webgl_shader_poll_frame_id = 0;
+      if (this.wasm == null) {
+        return;
+      }
+      if (this.poll_pending_webgl_shaders() != 0) {
+        this.to_wasm.ToWasmRedrawAll();
+        this.FromWasmRequestAnimationFrame();
+      }
+      this.schedule_webgl_shader_poll();
+    });
+  }
+
+  FromWasmCompileWebGLShader(args) {
+    let gl = this.gl;
+    let started_at = performance.now();
+    if (this.webgl_shader_timeline_start === undefined) {
+      this.webgl_shader_timeline_start = started_at;
+    }
+
+    let vsh = gl.createShader(gl.VERTEX_SHADER);
+    gl.shaderSource(vsh, args.vertex);
+    let stage_started = performance.now();
+    gl.compileShader(vsh);
+    let vertex_ms = performance.now() - stage_started;
+
+    let fsh = gl.createShader(gl.FRAGMENT_SHADER);
+    gl.shaderSource(fsh, args.pixel);
+    stage_started = performance.now();
+    gl.compileShader(fsh);
+    let fragment_ms = performance.now() - stage_started;
+
+    let program = gl.createProgram();
+    gl.attachShader(program, vsh);
+    gl.attachShader(program, fsh);
+    stage_started = performance.now();
+    gl.linkProgram(program);
+    let link_ms = performance.now() - stage_started;
+
+    let shader = {
+      shader_id: args.shader_id,
+      vertex: args.vertex,
+      pixel: args.pixel,
       geometry_slots: args.geometry_slots,
       instance_slots: args.instance_slots,
+      textures: args.textures,
+      geom_attribs: args.geom_attribs,
+      inst_attribs: args.inst_attribs,
+      vsh: vsh,
+      fsh: fsh,
       program: program,
+      pending: !!this.parallel_shader_compile,
+      started_at: started_at,
+      vertex_ms: vertex_ms,
+      fragment_ms: fragment_ms,
+      link_ms: link_ms,
+      status_ms: 0,
     };
-    this.assert_no_gl_error(gl, "compile_shader_end");
+    this.draw_shaders[args.shader_id] = shader;
+    this.log_webgl_shader_timeline(shader, "queued");
+
+    if (shader.pending) {
+      this.pending_webgl_shader_count++;
+      this.schedule_webgl_shader_poll();
+    } else {
+      this.finish_webgl_shader(shader);
+    }
   }
 
   FromWasmAllocIndexBuffer(args) {
@@ -522,32 +614,16 @@ export class WasmWebGL extends WasmWebBrowser {
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
   }
 
-  FromWasmAllocVao(args) {
+  configure_webgl_vao(vao, shader) {
     let gl = this.gl;
-    let old_vao = this.vaos[args.vao_id];
-    if (old_vao) {
-      gl.deleteVertexArray(old_vao.gl_vao);
+    let geometry_buffer = this.array_buffers[vao.geom_vb_id];
+    let instance_buffer = this.array_buffers[vao.inst_vb_id];
+    let index_buffer = this.index_buffers[vao.geom_ib_id];
+    if (!geometry_buffer || !instance_buffer || !index_buffer) {
+      return false;
     }
-    let gl_vao = gl.createVertexArray();
-    let vao = (this.vaos[args.vao_id] = {
-      gl_vao: gl_vao,
-      geom_ib_id: args.geom_ib_id,
-      geom_vb_id: args.geom_vb_id,
-      inst_vb_id: args.inst_vb_id,
-    });
-
     gl.bindVertexArray(vao.gl_vao);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.array_buffers[args.geom_vb_id].gl_buf);
-
-    let shader = this.draw_shaders[args.shader_id];
-    if (!shader || shader.compile_failed) {
-      this.report_missing_shader_once(
-        "FromWasmAllocVao",
-        args.shader_id,
-        args.vao_id,
-      );
-      return;
-    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, geometry_buffer.gl_buf);
 
     for (let i = 0; i < shader.geom_attribs.length; i++) {
       let attr = shader.geom_attribs[i];
@@ -576,7 +652,7 @@ export class WasmWebGL extends WasmWebBrowser {
       gl.vertexAttribDivisor(attr.loc, 0);
     }
 
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.array_buffers[args.inst_vb_id].gl_buf);
+    gl.bindBuffer(gl.ARRAY_BUFFER, instance_buffer.gl_buf);
 
     for (let i = 0; i < shader.inst_attribs.length; i++) {
       let attr = shader.inst_attribs[i];
@@ -607,22 +683,72 @@ export class WasmWebGL extends WasmWebBrowser {
 
     gl.bindBuffer(
       gl.ELEMENT_ARRAY_BUFFER,
-      this.index_buffers[args.geom_ib_id].gl_buf,
+      index_buffer.gl_buf,
     );
     gl.bindVertexArray(null);
+    vao.ready = true;
+    return true;
+  }
 
+  FromWasmAllocVao(args) {
+    let gl = this.gl;
+    let old_vao = this.vaos[args.vao_id];
+    if (old_vao) {
+      gl.deleteVertexArray(old_vao.gl_vao);
+    }
+    let vao = (this.vaos[args.vao_id] = {
+      gl_vao: gl.createVertexArray(),
+      shader_id: args.shader_id,
+      geom_ib_id: args.geom_ib_id,
+      geom_vb_id: args.geom_vb_id,
+      inst_vb_id: args.inst_vb_id,
+      ready: false,
+    });
+
+    let shader = this.draw_shaders[args.shader_id];
+    if (!shader || shader.compile_failed) {
+      this.report_missing_shader_once(
+        "FromWasmAllocVao",
+        args.shader_id,
+        args.vao_id,
+      );
+      return;
+    }
+    if (!shader.pending) {
+      this.configure_webgl_vao(vao, shader);
+    }
   }
 
   FromWasmDrawCall(args) {
     var gl = this.gl;
 
     let shader = this.draw_shaders[args.shader_id];
+    if (shader && shader.pending) {
+      return;
+    }
     if (!shader || shader.compile_failed) {
       this.report_missing_shader_once(
         "FromWasmDrawCall",
         args.shader_id,
         args.vao_id,
       );
+      return;
+    }
+
+    let vao = this.vaos[args.vao_id];
+    if (!vao) {
+      this.report_missing_shader_once(
+        "FromWasmDrawCall.vao",
+        args.shader_id,
+        args.vao_id,
+      );
+      return;
+    }
+    if (vao.shader_id !== args.shader_id) {
+      vao.shader_id = args.shader_id;
+      vao.ready = false;
+    }
+    if (!vao.ready && !this.configure_webgl_vao(vao, shader)) {
       return;
     }
 
@@ -634,8 +760,6 @@ export class WasmWebGL extends WasmWebBrowser {
     } else {
       gl.disable(gl.CULL_FACE);
     }
-
-    let vao = this.vaos[args.vao_id];
 
     gl.bindVertexArray(vao.gl_vao);
 
@@ -1424,6 +1548,14 @@ export class WasmWebGL extends WasmWebBrowser {
         "Sorry, makepad needs browser support for WebGL2 to run.<br/>Please update your browser or GPU drivers and try again.";
       return;
     }
+
+    // With this extension compileShader/linkProgram only enqueue driver work.
+    // Querying COMPILE_STATUS or LINK_STATUS before completion would turn the
+    // operation synchronous again, so completion is polled from animation
+    // frames and unfinished draws are skipped.
+    this.parallel_shader_compile = gl.getExtension(
+      "KHR_parallel_shader_compile",
+    );
 
     // Float color targets (RenderRf32): WebGL2 needs this extension for
     // R32F to be color-renderable. Requested up front so a missing GPU

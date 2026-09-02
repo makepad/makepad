@@ -801,10 +801,36 @@ impl Cx {
 
         if let Some(time) = is_animation_frame {
             if self.need_redrawing() {
+                let first_draw = !self.os.webgl_first_draw_logged;
+                if first_draw {
+                    crate::log!(
+                        "makepad.webgl.first_draw phase=begin ms={:.2} registry={} compile_set={}",
+                        self.seconds_since_app_start() * 1000.0,
+                        self.draw_shaders.shaders.len(),
+                        self.draw_shaders.compile_set.len()
+                    );
+                }
                 self.call_draw_event(time);
-                self.webgl_compile_shaders();
+                if first_draw {
+                    crate::log!(
+                        "makepad.webgl.first_draw phase=draw_event_done ms={:.2} registry={} compile_set={}",
+                        self.seconds_since_app_start() * 1000.0,
+                        self.draw_shaders.shaders.len(),
+                        self.draw_shaders.compile_set.len()
+                    );
+                }
             }
+            self.os.webgl_shaders_queued_this_frame = 0;
             self.handle_repaint(time);
+            if !self.os.webgl_first_draw_logged {
+                crate::log!(
+                    "makepad.webgl.first_draw phase=commands_queued ms={:.2} queued={} deferred={}",
+                    self.seconds_since_app_start() * 1000.0,
+                    self.os.webgl_shaders_queued_this_frame,
+                    self.draw_shaders.compile_set.len()
+                );
+                self.os.webgl_first_draw_logged = true;
+            }
         }
 
         if network_responses.len() != 0 {
@@ -1494,6 +1520,8 @@ pub struct CxOs {
     pub(crate) vertex_buffers: usize,
     pub(crate) index_buffers: usize,
     pub(crate) vaos: usize,
+    pub(crate) webgl_first_draw_logged: bool,
+    pub(crate) webgl_shaders_queued_this_frame: usize,
 
     pub(crate) to_wasm_js: Vec<String>,
     pub(crate) from_wasm_js: Vec<String>,
@@ -1515,6 +1543,8 @@ impl Default for CxOs {
             vertex_buffers: 0,
             index_buffers: 0,
             vaos: 0,
+            webgl_first_draw_logged: false,
+            webgl_shaders_queued_this_frame: 0,
 
             to_wasm_js: Vec::new(),
             from_wasm_js: Vec::new(),
