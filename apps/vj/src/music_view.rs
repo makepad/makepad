@@ -3376,6 +3376,23 @@ script_mod! {
                         spacing: 8
                         auto_route := MusicButton{width: 110 height: 22 text: "PICK SHAPE"}
                     }
+                    // The arc: how long the night is and what shape it
+                    // takes. Read only while CHOOSE NEXT is doing the
+                    // choosing — a dial nothing consults is worse than no
+                    // dial at all.
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{y: 0.5}
+                        MusicLabel{width: 62 text: "SET"}
+                        auto_length := MusicButton{width: 62 height: 22 text: "\u{2014}"}
+                        auto_curve := MusicButton{width: 78 height: 22 text: "BUILD"}
+                    }
+                    // Why the last record was chosen, in the scorer's own
+                    // words so the label and the plan cannot disagree.
+                    auto_why := MusicLabel{width: Fill text: ""}
                     View{
                         width: Fill
                         height: Fit

@@ -2205,6 +2205,38 @@ pub fn load_cached_summary(dir: &Path, key: &AnalysisKey) -> Option<TrackSummary
     decode_summary(&head)
 }
 
+/// The 2048-column overview for `key`, without paging in the waveform.
+///
+/// A picker ranking a whole pool needs each record's loudness envelope and
+/// nothing else, and the zoom channel behind it is megabytes. The layout
+/// puts a length in front of each run, so the overview sits at an offset
+/// that can be computed from two four-byte reads and a seek rather than a
+/// whole decode — which is why ranking a library needs no change to the
+/// format and no re-analysis of anything.
+pub fn load_cached_overview(dir: &Path, key: &AnalysisKey) -> Option<Vec<[u8; 2]>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(cache_path(dir, key)).ok()?;
+    let mut head = [0u8; SUMMARY_LEN];
+    file.read_exact(&mut head).ok()?;
+    decode_summary(&head)?;
+
+    let mut count = [0u8; 4];
+    file.read_exact(&mut count).ok()?;
+    let zoom_len = u32::from_le_bytes(count) as u64;
+    file.seek(SeekFrom::Current(zoom_len.checked_mul(4)? as i64)).ok()?;
+
+    file.read_exact(&mut count).ok()?;
+    let overview_len = u32::from_le_bytes(count) as usize;
+    // A corrupt length must not ask for a gigabyte: the overview is a
+    // fixed size the writer chose, and anything else is not one.
+    if overview_len > OVERVIEW_COLS {
+        return None;
+    }
+    let mut bytes = vec![0u8; overview_len * 2];
+    file.read_exact(&mut bytes).ok()?;
+    Some(bytes.chunks_exact(2).map(|pair| [pair[0], pair[1]]).collect())
+}
+
 fn load_cached(dir: &Path, key: &AnalysisKey) -> Option<TrackAnalysis> {
     let bytes = std::fs::read(cache_path(dir, key)).ok()?;
     decode_analysis(&bytes).ok()
@@ -3123,6 +3155,24 @@ mod tests {
         let mut old = bytes.clone();
         old[8..12].copy_from_slice(&5u32.to_le_bytes());
         assert!(decode_summary(&old).is_none());
+    }
+
+    #[test]
+    fn the_overview_comes_off_disk_without_the_waveform_behind_it() {
+        // The whole point: rank a pool by loudness without paging in the
+        // zoom channel, which is megabytes a picker will never draw.
+        let pcm = click_track(48_000, 120.0, 8.0, 0.2);
+        let analysis = analyze(&pcm);
+        let dir = std::env::temp_dir()
+            .join(format!("makepad-vj-overview-{}", std::process::id()));
+        let key = AnalysisKey::from_blob(BlobId::hash_of(b"an overviewed track"));
+        assert!(load_cached_overview(&dir, &key).is_none(), "nothing stored yet");
+
+        store_cached(&dir, &key, &analysis);
+        let overview = load_cached_overview(&dir, &key).expect("overview off disk");
+        assert_eq!(overview, analysis.tiles.overview, "byte for byte");
+        assert!(!overview.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

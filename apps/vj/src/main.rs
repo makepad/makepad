@@ -109,6 +109,7 @@ mod notes_map;
 mod music_dsp;
 mod music_import_ui;
 mod music_view;
+mod arc;
 mod mix_facts;
 mod pick;
 mod score_preview;
@@ -159,6 +160,7 @@ use crate::loop_splat_view::{
     SPLAT_ROWS,
 };
 use crate::autopilot::{AutoCmd, AutoDeckObs, AutoLoad, AutoObs, AutoPilot, AutoStyle};
+use crate::arc::Curve;
 use crate::set_history::SetHistory;
 use crate::blend::MixBrain;
 use crate::decks::{
@@ -6576,6 +6578,20 @@ pub struct App {
     /// Off is what the tab has always done.
     #[rust]
     auto_pick: bool,
+    /// How long the set is meant to run. Zero means the operator never
+    /// said, and the arc then sits at its opening rather than guessing.
+    #[rust]
+    set_length_mins: u32,
+    /// The shape the night is meant to take.
+    #[rust]
+    set_curve: Curve,
+    /// When the set started, for reading the curve. Stamped by the first
+    /// record the picker chooses.
+    #[rust]
+    set_started_secs: u64,
+    /// Why the picker chose what it chose, for the panel.
+    #[rust]
+    auto_pick_reason: String,
     /// The DJ autopilot: pure planner ticked from the 20 Hz pump.
     #[rust(AutoPilot::new())]
     autopilot: AutoPilot,
@@ -18987,6 +19003,8 @@ p2 {}
 {}
 {}
 {}
+{}
+{}
 ",
             brain,
             style,
@@ -18997,6 +19015,8 @@ p2 {}
             u8::from(self.auto_pick),
             u8::from(self.autopilot.pick_exit),
             u8::from(self.autopilot.pick_route),
+            self.set_length_mins,
+            Curve::ALL.iter().position(|c| *c == self.set_curve).unwrap_or(0) as u32,
         );
         let path = Self::autopilot_settings_path();
         if let Some(dir) = path.parent() {
@@ -19035,6 +19055,11 @@ p2 {}
         self.auto_pick = next(0) == 1;
         self.autopilot.pick_exit = next(0) == 1;
         self.autopilot.pick_route = next(0) == 1;
+        // The arc: a length in minutes and which shape, both appended, so
+        // an older settings file reads as no length and the first curve.
+        self.set_length_mins = lines.next().and_then(|l| l.parse().ok()).unwrap_or(0);
+        let curve = lines.next().and_then(|l| l.parse::<usize>().ok()).unwrap_or(0);
+        self.set_curve = Curve::ALL[curve.min(Curve::ALL.len() - 1)];
     }
 
     /// Push the loaded settings into the panel's controls — the persisted
@@ -21969,6 +21994,17 @@ p2 {}
         self.paint_lit(cx, ids!(auto_choose), self.auto_pick);
         self.paint_lit(cx, ids!(auto_exit), self.autopilot.pick_exit);
         self.paint_lit(cx, ids!(auto_route), self.autopilot.pick_route);
+        self.paint_lit(cx, ids!(auto_length), self.set_length_mins > 0);
+        self.ui.button(cx, ids!(auto_length)).set_text(
+            cx,
+            &if self.set_length_mins == 0 {
+                "\u{2014}".to_string()
+            } else {
+                format!("{}m", self.set_length_mins)
+            },
+        );
+        self.ui.button(cx, ids!(auto_curve)).set_text(cx, self.set_curve.label());
+        self.ui.label(cx, ids!(auto_why)).set_text(cx, &self.auto_pick_reason);
         self.paint_lit(cx, ids!(queue_repeat), self.decks.repeat);
         self.paint_lit(cx, ids!(queue_shuffle), self.decks.shuffle);
         // The AUTO DJ button IS the status line, the SYNC-button pattern:
@@ -24449,6 +24485,20 @@ p2 {}
             self.autopilot.set_pick_route(on);
             self.save_autopilot_settings();
         }
+        if self.ui.button(cx, ids!(auto_length)).clicked(actions) {
+            // Round the dial rather than offering a text field: a set is a
+            // couple of hours or it is not, and the arc only needs to know
+            // roughly. Zero is "I did not say", and it comes back round.
+            const LENGTHS: [u32; 6] = [0, 60, 90, 120, 180, 300];
+            let at = LENGTHS.iter().position(|m| *m == self.set_length_mins).unwrap_or(0);
+            self.set_length_mins = LENGTHS[(at + 1) % LENGTHS.len()];
+            self.save_autopilot_settings();
+        }
+        if self.ui.button(cx, ids!(auto_curve)).clicked(actions) {
+            let at = Curve::ALL.iter().position(|c| *c == self.set_curve).unwrap_or(0);
+            self.set_curve = Curve::ALL[(at + 1) % Curve::ALL.len()];
+            self.save_autopilot_settings();
+        }
         self.handle_wave_input(cx);
     }
 
@@ -24949,28 +24999,50 @@ p2 {}
             },
             None => crate::pick::Outgoing::default(),
         };
+        // The set's clock starts with the first record the picker chooses,
+        // not with the app: an evening is measured from when it began.
+        if self.set_started_secs == 0 {
+            self.set_started_secs = Self::now_secs();
+        }
+        let through = crate::arc::through(
+            self.set_length_mins,
+            Self::now_secs().saturating_sub(self.set_started_secs),
+        );
+        let dir = wave_analysis::cache_dir();
         let queued: Vec<crate::decks::TrackItem> = self.decks.queue().to_vec();
         let mut candidates: Vec<crate::pick::Candidate> = Vec::with_capacity(queued.len());
         for item in &queued {
             let key = crate::music_view::TrackKey::Asset(item.asset);
             let summary = self.row_summary(&key);
             let artist = self.row_tags(&key).artist;
+            // The overview alone, seeked to rather than decoded: the
+            // waveform behind it is megabytes a picker will never draw.
+            let energy = self
+                .row_analysis_key(&key)
+                .and_then(|cache_key| {
+                    wave_analysis::load_cached_overview(&dir, &cache_key)
+                })
+                .map_or(0.0, |overview| {
+                    crate::mix_facts::comparable_energy(&overview)
+                });
             candidates.push(crate::pick::Candidate {
                 key: item.asset.to_string(),
                 artist,
                 bpm: summary.map_or(0.0, |summary| summary.grid.bpm),
                 musical_key: summary.and_then(|summary| summary.key),
-                // Energy waits for the arc that reads it. Unmeasured scores
-                // in the middle, which is what the picker does with it.
-                energy: 0.0,
+                energy,
             });
         }
+        let settings = crate::pick::PickSettings {
+            target_energy: crate::arc::target(self.set_curve, through),
+            ..crate::pick::PickSettings::default()
+        };
         let (ranked, relaxed) = crate::pick::rank(
             &candidates,
             outgoing,
             &self.set_history,
             Self::now_secs(),
-            crate::pick::PickSettings::default(),
+            settings,
         );
         let Some(index) = crate::pick::choose(&ranked, Self::now_secs().max(1)) else {
             return;
@@ -24978,9 +25050,12 @@ p2 {}
         if let Some(pick) = ranked.iter().find(|scored| scored.index == index) {
             let mut reason = pick.reason.clone();
             if relaxed != crate::pick::Relaxed::Not {
-                reason.push_str(" — nothing else was free");
+                reason.push_str(", nothing else was free");
             }
             log!("auto dj: next is {} ({reason})", queued[index].title);
+            // Kept, not only logged: the panel says why in the same words
+            // the scorer used, so the two cannot drift apart.
+            self.auto_pick_reason = format!("{} — {reason}", queued[index].title);
         }
         if self.decks.move_queued(index, 0) {
             self.queue_rows_dirty = true;
