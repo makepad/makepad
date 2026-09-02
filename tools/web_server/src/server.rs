@@ -96,13 +96,13 @@ pub fn run_with_registry(
     Err("HTTP request channel closed".into())
 }
 
-fn allowed_methods(path: &str) -> &'static str {
+fn allowed_methods(path: &str) -> Option<&'static str> {
     match path {
-        "/api/along" => "POST, OPTIONS",
-        "/api/healthz" | "/api/search" | "/api/route" => "GET, HEAD, OPTIONS",
-        "/$report_error" => "GET, HEAD, POST, OPTIONS",
-        path if path.starts_with("/api/") => "GET, HEAD, POST, OPTIONS",
-        _ => "GET, HEAD, OPTIONS",
+        "/api/along" | "/api/crash" => Some("POST, OPTIONS"),
+        "/api/healthz" | "/api/search" | "/api/route" => Some("GET, HEAD, OPTIONS"),
+        "/$report_error" => Some("GET, HEAD, POST, OPTIONS"),
+        path if path.starts_with("/api/") => None,
+        _ => Some("GET, HEAD, OPTIONS"),
     }
 }
 
@@ -155,8 +155,9 @@ mod tests {
 
     #[test]
     fn method_policy_matches_resources() {
-        assert_eq!(allowed_methods("/api/along"), "POST, OPTIONS");
-        assert_eq!(allowed_methods("/api/search"), "GET, HEAD, OPTIONS");
-        assert_eq!(allowed_methods("/asset.wasm"), "GET, HEAD, OPTIONS");
+        assert_eq!(allowed_methods("/api/along"), Some("POST, OPTIONS"));
+        assert_eq!(allowed_methods("/api/search"), Some("GET, HEAD, OPTIONS"));
+        assert_eq!(allowed_methods("/api/not-real"), None);
+        assert_eq!(allowed_methods("/asset.wasm"), Some("GET, HEAD, OPTIONS"));
     }
 }

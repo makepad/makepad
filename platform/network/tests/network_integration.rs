@@ -311,10 +311,11 @@ fn test_forwarded_client(headers: &makepad_network::HttpServerHeaders) -> IpAddr
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn fixture_allowed_methods(path: &str) -> &'static str {
+fn fixture_allowed_methods(path: &str) -> Option<&'static str> {
     match path {
-        "/write-only" => "POST, OPTIONS",
-        _ => "GET, HEAD, OPTIONS",
+        "/write-only" => Some("POST, OPTIONS"),
+        "/read-only" => Some("GET, HEAD, OPTIONS"),
+        _ => None,
     }
 }
 
