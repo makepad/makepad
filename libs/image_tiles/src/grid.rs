@@ -22,6 +22,7 @@
 
 use crate::db::{self, ItemRow};
 use crate::library::{ItemId, Library};
+use crate::pack::{pack, Packing};
 use crate::store::{self, StoreEvent, StoreHandle};
 use crate::tape::{fit_dims, page_size, Planes, FullFrame, GRID, LEVELS, PYRAMID_LEVELS, SLOT};
 use makepad_widgets::*;
@@ -167,6 +168,30 @@ pub fn grid_slot(plan: &GridPlan, rank: usize, size: Vec2f) -> Vec2f {
     vec2f(plan.origin.x + col + (1.0 - size.x) * 0.5, plan.origin.y + row + (1.0 - size.y) * 0.5)
 }
 
+/// How the pictures hang: on unit cells, or packed edge to edge.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WallLayout {
+    /// One picture per unit cell, aspect-fit inside it: even, gappy.
+    Uniform,
+    /// Justified rows (`pack.rs`): every picture at its own proportions,
+    /// rows scaled to span the wall, no gaps — the default.
+    Packed,
+}
+
+/// The packed wall's shape for `count` pictures whose aspects average
+/// `mean_aspect`: wide enough that the whole wall has roughly the view's
+/// aspect when its rows are one world unit tall. Rows are cut by the
+/// packer; this only picks the width they are cut against.
+pub fn packed_width(count: usize, mean_aspect: f32, view_aspect: f32) -> f32 {
+    let n = count.max(1) as f32;
+    let a = if mean_aspect.is_finite() && mean_aspect > 0.0 { mean_aspect.clamp(0.05, 20.0) } else { 1.0 };
+    let v = if view_aspect.is_finite() && view_aspect > 0.05 { view_aspect.clamp(0.35, 3.0) } else { 1.6 };
+    // Area ≈ n·a (each picture is a × 1 at the target height); a wall of
+    // aspect v with that area is √(n·a·v) wide. Never narrower than the
+    // widest sensible picture.
+    (n * a * v).sqrt().max(a.min(4.0)).max(1.0)
+}
+
 /// A picture's world size inside its unit cell, keeping its own proportions.
 pub fn cell_size(aspect: f32) -> Vec2f {
     let a = if aspect.is_finite() && aspect > 0.0 { aspect.clamp(0.05, 20.0) } else { 1.0 };
@@ -276,6 +301,15 @@ pub struct TileGrid {
     items: Vec<GridItem>,
     #[rust]
     plan: Option<GridPlan>,
+    /// Packed edge to edge (the default) or one picture per unit cell.
+    #[live(true)]
+    packed: bool,
+    /// The packing behind the packed layout: the rows, for hit-testing.
+    #[rust]
+    packing: Option<Packing>,
+    /// The wall's world extent, whichever layout: (min, max).
+    #[rust]
+    bounds: Option<(Vec2f, Vec2f)>,
     #[rust]
     start: Option<Instant>,
     #[rust]
@@ -360,6 +394,8 @@ impl TileGrid {
         self.page_failed.clear();
         self.full_failed.clear();
         self.plan = None;
+        self.packing = None;
+        self.bounds = None;
         self.opened = true;
         let uid = self.widget_uid();
         let (rows, shards) = match db::read_items(&library.db_path()) {
@@ -439,13 +475,52 @@ impl TileGrid {
         }
     }
 
-    fn relayout(&mut self) {
-        let plan = grid_plan(self.items.len(), self.view_aspect());
-        for (rank, item) in self.items.iter_mut().enumerate() {
-            item.size = cell_size(item.aspect);
-            item.pos = grid_slot(&plan, rank, item.size);
+    /// Which layout this grid hangs its pictures on.
+    pub fn wall_layout(&self) -> WallLayout {
+        if self.packed {
+            WallLayout::Packed
+        } else {
+            WallLayout::Uniform
         }
-        self.plan = Some(plan);
+    }
+
+    fn relayout(&mut self) {
+        match self.wall_layout() {
+            WallLayout::Uniform => {
+                let plan = grid_plan(self.items.len(), self.view_aspect());
+                for (rank, item) in self.items.iter_mut().enumerate() {
+                    item.size = cell_size(item.aspect);
+                    item.pos = grid_slot(&plan, rank, item.size);
+                }
+                let cols = plan.cols.max(1) as f32;
+                let rows = plan.rows.max(1) as f32;
+                self.bounds = Some((plan.origin, vec2f(plan.origin.x + cols, plan.origin.y + rows)));
+                self.plan = Some(plan);
+                self.packing = None;
+            }
+            WallLayout::Packed => {
+                // Rows one world unit tall — the unit the slot pyramid and
+                // the LOD maths already think in — cut against a width that
+                // gives the whole wall roughly the view's shape, then centred
+                // on the world origin like the uniform grid.
+                let aspects: Vec<f32> = self.items.iter().map(|i| i.aspect).collect();
+                let mean = if aspects.is_empty() {
+                    1.0
+                } else {
+                    aspects.iter().map(|a| a.clamp(0.05, 20.0)).sum::<f32>() / aspects.len() as f32
+                };
+                let width = packed_width(aspects.len(), mean, self.view_aspect());
+                let packing = pack(&aspects, width, 1.0);
+                let origin = vec2f(-packing.width * 0.5, -packing.height * 0.5);
+                for (item, rect) in self.items.iter_mut().zip(&packing.rects) {
+                    item.pos = vec2f(origin.x + rect.x, origin.y + rect.y);
+                    item.size = vec2f(rect.w, rect.h);
+                }
+                self.bounds = Some((origin, vec2f(origin.x + packing.width, origin.y + packing.height)));
+                self.packing = Some(packing);
+                self.plan = None;
+            }
+        }
     }
 
     // ── camera ─────────────────────────────────────────────────────────
@@ -474,7 +549,7 @@ impl TileGrid {
 
     /// Frame the whole grid in the viewport.
     fn fit_camera(&mut self) {
-        let Some(plan) = self.plan else {
+        let Some((lo, hi)) = self.bounds else {
             self.cam_scale = 1.0;
             self.cam_scale_t = 1.0;
             self.cam_pos = Vec2d::default();
@@ -485,8 +560,9 @@ impl TileGrid {
         if self.view_rect.size.x < 1.0 {
             return;
         }
-        let cols = plan.cols.max(1) as f64;
-        let rows = plan.rows.max(1) as f64;
+        // The wall's world extent, whichever layout cut it.
+        let cols = (hi.x - lo.x).max(0.01) as f64;
+        let rows = (hi.y - lo.y).max(0.01) as f64;
         let scale = (self.view_rect.size.x * 0.94 / (cols + 0.6)).min(self.view_rect.size.y * 0.94 / (rows + 0.8));
         let scale = scale.clamp(0.01, 6000.0);
         // The fit is as far back as an auto-move goes; the wheel may pull a
@@ -558,6 +634,10 @@ impl TileGrid {
     }
 
     fn item_at(&self, world: Vec2d) -> Option<usize> {
+        if let (Some(packing), Some((lo, _))) = (&self.packing, self.bounds) {
+            // Packed: the rows know who is where.
+            return packing.hit(world.x as f32 - lo.x, world.y as f32 - lo.y, 0.02);
+        }
         let plan = self.plan?;
         let col = (world.x as f32 - plan.origin.x).floor();
         let row = (world.y as f32 - plan.origin.y).floor();
@@ -932,8 +1012,15 @@ impl Widget for TileGrid {
         // finer neighbour, so a source pixel is never stretched over more
         // than one screen pixel.
         let px = self.cam_scale * cx.current_dpi_factor().max(1.0);
-        let lod = (SLOT as f64 / px.max(1.0)).log2();
-        let desired = lod.floor().clamp(0.0, (LEVELS - 1) as f64) as usize;
+        // The level for a tile `side` world units across: a packed wall
+        // hangs pictures of many sizes, so each shard asks for the page its
+        // BIGGEST visible tile needs; on the uniform grid every side is a
+        // cell and this is the old single answer.
+        let desired_for = |side: f32| -> usize {
+            let tile_px = px * side.max(0.05) as f64;
+            let lod = (SLOT as f64 / tile_px.max(1.0)).log2();
+            lod.floor().clamp(0.0, (LEVELS - 1) as f64) as usize
+        };
 
         let mut passes: Vec<Pass> = Vec::new();
         let mut shards: Vec<i64> = by_shard.keys().copied().collect();
@@ -941,6 +1028,11 @@ impl Widget for TileGrid {
         let inv = 1.0 / GRID as f32;
         for key in shards {
             let indices = by_shard.remove(&key).unwrap();
+            let side = indices
+                .iter()
+                .map(|&i| self.items[i].size.x.max(self.items[i].size.y))
+                .fold(CELL_FILL, f32::max);
+            let desired = desired_for(side);
             let resident: Vec<usize> = (0..LEVELS).filter(|l| self.pages.contains_key(&(key, *l))).collect();
             if !self.pages.contains_key(&(key, desired)) {
                 // What this page would paint: every visible tile of the

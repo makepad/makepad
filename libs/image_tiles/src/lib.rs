@@ -32,6 +32,7 @@ pub use makepad_widgets;
 pub mod bake;
 pub mod db;
 pub mod grid;
+pub mod pack;
 pub mod library;
 pub mod store;
 pub mod tape;
