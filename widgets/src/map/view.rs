@@ -12,7 +12,138 @@ use crate::{
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MapMemoryBudgets {
+    total: usize,
+    tile_cache: usize,
+    pending: usize,
+    in_flight: usize,
+}
+
+impl MapMemoryBudgets {
+    fn from_cx(cx: &Cx) -> Self {
+        Self::from_total(cx.memory_budget_bytes())
+    }
+
+    fn from_total(total: usize) -> Self {
+        let percent = |value: usize| {
+            ((total as u64 * value as u64) / 100).min(usize::MAX as u64) as usize
+        };
+        Self {
+            total,
+            tile_cache: percent(40),
+            pending: percent(10),
+            in_flight: percent(15),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct BakeMemoryTracker {
+    limit: AtomicUsize,
+    reserved: AtomicUsize,
+    active_bytes: AtomicUsize,
+    active_count: AtomicUsize,
+}
+
+impl BakeMemoryTracker {
+    fn set_limit(&self, limit: usize) {
+        self.limit.store(limit.max(1), Ordering::Relaxed);
+    }
+
+    fn try_reserve(self: &Arc<Self>, estimate: usize) -> Option<BakeMemoryReservation> {
+        let limit = self.limit.load(Ordering::Relaxed).max(1);
+        let bytes = estimate.min(limit).max(1);
+        let mut current = self.reserved.load(Ordering::Relaxed);
+        loop {
+            if current.saturating_add(bytes) > limit {
+                return None;
+            }
+            match self.reserved.compare_exchange_weak(
+                current,
+                current + bytes,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    return Some(BakeMemoryReservation {
+                        tracker: self.clone(),
+                        bytes,
+                        active: false,
+                    })
+                }
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    fn reserved_bytes(&self) -> usize {
+        self.reserved.load(Ordering::Relaxed)
+    }
+
+    fn active_bytes(&self) -> usize {
+        self.active_bytes.load(Ordering::Relaxed)
+    }
+
+    fn active_count(&self) -> usize {
+        self.active_count.load(Ordering::Relaxed)
+    }
+}
+
+#[derive(Debug)]
+struct BakeMemoryReservation {
+    tracker: Arc<BakeMemoryTracker>,
+    bytes: usize,
+    active: bool,
+}
+
+impl BakeMemoryReservation {
+    fn start(&mut self) {
+        if self.active {
+            return;
+        }
+        self.active = true;
+        self.tracker
+            .active_bytes
+            .fetch_add(self.bytes, Ordering::Relaxed);
+        self.tracker
+            .active_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn finish(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.active = false;
+        self.tracker
+            .active_bytes
+            .fetch_sub(self.bytes, Ordering::Relaxed);
+        self.tracker
+            .active_count
+            .fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+impl Drop for BakeMemoryReservation {
+    fn drop(&mut self) {
+        self.finish();
+        self.tracker
+            .reserved
+            .fetch_sub(self.bytes, Ordering::Relaxed);
+    }
+}
+
+#[derive(Debug)]
+struct BudgetedTileWorkerMessage {
+    message: TileWorkerMessage,
+    _memory: BakeMemoryReservation,
+}
 
 /// Tile payload sources only. Navigation data is deliberately outside this
 /// contract; applications layer routing datasets over MapView separately.
@@ -2206,7 +2337,7 @@ pub struct MapView {
     #[rust]
     local_source_missing_logged: bool,
     #[rust]
-    tile_worker_rx: ToUIReceiver<TileWorkerMessage>,
+    tile_worker_rx: ToUIReceiver<BudgetedTileWorkerMessage>,
     #[rust]
     tile_thread_pool: Option<TaskPool>,
     #[rust]
@@ -2389,6 +2520,16 @@ pub struct MapView {
     pending_ready_tiles: Vec<(TileKey, TileBuffers)>,
     #[rust]
     last_tile_upload_frame: u64,
+    #[rust]
+    bake_memory: Arc<BakeMemoryTracker>,
+    #[rust]
+    bake_reservations: HashMap<TileKey, BakeMemoryReservation>,
+    #[rust]
+    bake_estimates: [usize; 3],
+    #[rust]
+    memory_report_last: Option<f64>,
+    #[rust]
+    memory_sampled_zooms: HashSet<u32>,
     // Frame-time instrumentation, aggregated to local/map_perf.log.
     #[rust]
     perf_frames: u32,
@@ -2460,7 +2601,7 @@ pub struct MapView {
 impl ScriptHook for MapView {
     fn on_after_apply(
         &mut self,
-        _vm: &mut ScriptVm,
+        vm: &mut ScriptVm,
         apply: &Apply,
         _scope: &mut Scope,
         _value: ScriptValue,
@@ -2489,7 +2630,7 @@ impl ScriptHook for MapView {
 
         let theme_changed = self.applied_dark_theme != Some(self.dark_theme);
         if theme_changed || styles_changed {
-            self.apply_theme_change();
+            self.apply_theme_change(vm.cx_mut());
             self.applied_dark_theme = Some(self.dark_theme);
         } else {
             self.apply_theme_palette();
@@ -2506,6 +2647,9 @@ impl ScriptHook for MapView {
 
 impl Widget for MapView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        // Uploads happen after widget drawing. The next event is the first
+        // point where web's JS bridge has consumed the wasm pointers too.
+        self.release_uploaded_tile_cpu(cx);
         if self.use_local_mbtiles {
             self.ensure_archive_source(cx);
             self.handle_archive_events(cx, event);
@@ -3571,6 +3715,7 @@ impl Widget for MapView {
         }
 
         self.update_status_text();
+        self.memory_report(cx.cx);
         // Viewport debug readout: the exact @cam command for this view, so
         // a screenshot alone is enough to recreate the camera. On by
         // default — it is how map work has always been driven — and
@@ -3615,6 +3760,7 @@ impl WidgetMatchEvent for MapView {
         };
         let tile_key = pending.tile_key;
         let endpoint = pending.endpoint;
+        let reservation = self.bake_reservations.remove(&tile_key);
 
         if response.status_code != 200 {
             let preview = response
@@ -3651,21 +3797,33 @@ impl WidgetMatchEvent for MapView {
         let theme_style = self.active_style().clone();
         let bucket = self.render_bucket();
 
-        if let Err(error) = self.submit_tile_job(cx, tile_key, move || {
-            match build_tile_buffers_from_body(tile_key, &body, &theme_style, bucket) {
+        let Some(reservation) = reservation else {
+            self.mark_tile_failed(tile_key, "missing bake-memory reservation");
+            return;
+        };
+        if let Err(error) = self.submit_tile_job(cx, tile_key, reservation, move |mut memory| {
+            let result = build_tile_buffers_from_body(tile_key, &body, &theme_style, bucket);
+            memory.finish();
+            match result {
                 Ok(buffers) => {
                     store_tile_data_cache_on_disk(tile_key, &body);
-                    let _ = sender.send(TileWorkerMessage::NetworkTileParsed {
-                        style_epoch,
-                        tile_key,
-                        buffers,
+                    let _ = sender.send(BudgetedTileWorkerMessage {
+                        message: TileWorkerMessage::NetworkTileParsed {
+                            style_epoch,
+                            tile_key,
+                            buffers,
+                        },
+                        _memory: memory,
                     });
                 }
                 Err(err) => {
-                    let _ = sender.send(TileWorkerMessage::NetworkTileParseFailed {
-                        style_epoch,
-                        tile_key,
-                        error: err,
+                    let _ = sender.send(BudgetedTileWorkerMessage {
+                        message: TileWorkerMessage::NetworkTileParseFailed {
+                            style_epoch,
+                            tile_key,
+                            error: err,
+                        },
+                        _memory: memory,
                     });
                 }
             }
@@ -3686,6 +3844,7 @@ impl WidgetMatchEvent for MapView {
         let Some(pending) = self.request_to_tile.remove(&request_id) else {
             return;
         };
+        self.bake_reservations.remove(&pending.tile_key);
         self.mark_tile_failed(
             pending.tile_key,
             &format!(
@@ -3718,6 +3877,7 @@ impl MapView {
                         self.install_archive_source(cx, config);
                     }
                     self.local_requested_tiles.clear();
+                    self.bake_reservations.clear();
                     let before = self.tiles.len();
                     self.tiles
                         .retain(|_, entry| matches!(entry.state, TileLoadState::Ready { .. }));
@@ -3810,6 +3970,180 @@ impl MapView {
         }
     }
 
+    fn bake_profile(&self, bucket: u32) -> TileBakeProfile {
+        TileBakeProfile::for_render_zoom(bucket, self.buildings_3d && self.tilt > 0.0)
+    }
+
+    fn bake_estimate(&self, profile: TileBakeProfile) -> usize {
+        let measured = self.bake_estimates[profile.index()];
+        if measured != 0 {
+            return measured;
+        }
+        match profile {
+            TileBakeProfile::Overview => 24 * 1024 * 1024,
+            // One worst-case bucket-16 bake fits inside 15% of a 1 GiB
+            // wasm heap; a second waits until its result reaches the UI.
+            TileBakeProfile::Street => 96 * 1024 * 1024,
+            TileBakeProfile::Detail => 96 * 1024 * 1024,
+        }
+    }
+
+    fn reserve_bake(&mut self, cx: &Cx, key: TileKey, bucket: u32) -> bool {
+        let budgets = MapMemoryBudgets::from_cx(cx);
+        self.bake_memory.set_limit(budgets.in_flight);
+        let profile = self.bake_profile(bucket);
+        let Some(reservation) = self.bake_memory.try_reserve(self.bake_estimate(profile)) else {
+            return false;
+        };
+        self.bake_reservations.insert(key, reservation);
+        true
+    }
+
+    fn observe_bake_size(&mut self, buffers: &TileBuffers) {
+        let profile = TileBakeProfile::for_render_zoom(
+            buffers.render_zoom,
+            self.buildings_3d && self.tilt > 0.0,
+        );
+        // The next tile reserves the last finished allocation plus 25% for
+        // per-tile density variation and transient builder scratch.
+        self.bake_estimates[profile.index()] = buffers
+            .allocated_byte_size()
+            .saturating_mul(5)
+            .saturating_div(4)
+            .max(4 * 1024 * 1024);
+    }
+
+    fn visit_tile_geometries(entry: &TileEntry, mut visit: impl FnMut(&Geometry)) {
+        if let TileLoadState::Ready {
+            fill_geometry,
+            casing_geometry,
+            stroke_geometry,
+            icon_geometry,
+            icon_high_geometry,
+            fringe_geometry,
+            fill_3d_geometry,
+            wall_geometry,
+            tree_geometry,
+            tree_cross_geometry,
+            ..
+        } = &entry.state
+        {
+            for geometry in [
+                fill_geometry,
+                casing_geometry,
+                stroke_geometry,
+                icon_geometry,
+                icon_high_geometry,
+                fringe_geometry,
+                fill_3d_geometry,
+                wall_geometry,
+                tree_geometry,
+                tree_cross_geometry,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                visit(geometry);
+            }
+        }
+        if let Some(fade) = &entry.fade {
+            for geometry in [
+                &fade.fill_geometry,
+                &fade.casing_geometry,
+                &fade.stroke_geometry,
+                &fade.icon_geometry,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                visit(geometry);
+            }
+        }
+    }
+
+    fn release_uploaded_tile_cpu(&self, cx: &mut Cx) {
+        let mut seen = HashSet::new();
+        for entry in self.tiles.values() {
+            Self::visit_tile_geometries(entry, |geometry| {
+                if seen.insert(geometry.geometry_id()) {
+                    geometry.discard_cpu_buffers_if_uploaded(cx);
+                }
+            });
+        }
+    }
+
+    fn remove_tile(&mut self, cx: &mut Cx, key: &TileKey) {
+        let Some(entry) = self.tiles.remove(key) else {
+            return;
+        };
+        Self::visit_tile_geometries(&entry, |geometry| {
+            geometry.discard_cpu_buffers(cx);
+        });
+    }
+
+    fn clear_tiles(&mut self, cx: &mut Cx) {
+        for (_, entry) in self.tiles.drain() {
+            Self::visit_tile_geometries(&entry, |geometry| {
+                geometry.discard_cpu_buffers(cx);
+            });
+        }
+    }
+
+    /// Once-per-second accounting beside the existing frame stats. GPU
+    /// geometry is reported separately from wasm/native CPU allocations so
+    /// browser heap probes can compare like-for-like.
+    pub fn memory_report(&mut self, cx: &Cx) {
+        let now = cx.seconds_since_app_start();
+        if self
+            .memory_report_last
+            .is_some_and(|last| now - last < 1.0)
+        {
+            return;
+        }
+        self.memory_report_last = Some(now);
+        let budgets = MapMemoryBudgets::from_cx(cx);
+        let resident_gpu: usize = self.tiles.values().map(|entry| entry.gpu_bytes).sum();
+        let retained_cpu: usize = self.tiles.values().map(|entry| entry.cpu_bytes).sum();
+        let mut staging_cpu = 0usize;
+        let mut seen = HashSet::new();
+        for entry in self.tiles.values() {
+            Self::visit_tile_geometries(entry, |geometry| {
+                if seen.insert(geometry.geometry_id()) {
+                    staging_cpu = staging_cpu.saturating_add(geometry.cpu_buffer_bytes(cx));
+                }
+            });
+        }
+        let pending: usize = self
+            .pending_ready_tiles
+            .iter()
+            .map(|(_, buffers)| buffers.allocated_byte_size())
+            .sum();
+        let leaf_cache = self
+            .base_archive
+            .as_ref()
+            .map_or(0, MapTileArchive::leaf_cache_bytes)
+            .saturating_add(
+                self.detail_archive
+                    .as_ref()
+                    .map_or(0, MapTileArchive::leaf_cache_bytes),
+            );
+        log!(
+            "MapView memory total_budget:{} tile_budget:{} pending_budget:{} inflight_budget:{} resident_gpu:{} resident_cpu:{} staging_cpu:{} pending:{} inflight_bakes:{} inflight_bytes:{} reserved_bytes:{} leaf_cache:{}",
+            budgets.total,
+            budgets.tile_cache,
+            budgets.pending,
+            budgets.in_flight,
+            resident_gpu,
+            retained_cpu,
+            staging_cpu,
+            pending,
+            self.bake_memory.active_count(),
+            self.bake_memory.active_bytes(),
+            self.bake_memory.reserved_bytes(),
+            leaf_cache,
+        );
+    }
+
     /// The Inception fold ON/OFF (the SETTING — remembers intent; the fold
     /// itself tweens in only while the camera is in a close 3D view and
     /// tweens back out when it leaves one).
@@ -3873,15 +4207,16 @@ impl MapView {
 
 
 
-    fn apply_theme_change(&mut self) {
+    fn apply_theme_change(&mut self, cx: &mut Cx) {
         self.style_epoch = self.style_epoch.wrapping_add(1);
         if self.style_epoch == 0 {
             self.style_epoch = 1;
         }
         self.apply_theme_palette();
-        self.tiles.clear();
+        self.clear_tiles(cx);
         self.request_to_tile.clear();
         self.local_requested_tiles.clear();
+        self.bake_reservations.clear();
         self.pending_ready_tiles.clear();
         self.tiles_generation = self.tiles_generation.wrapping_add(1);
         self.label_cache_valid = false;
@@ -3928,7 +4263,7 @@ impl MapView {
             old_stroke,
             old_icon,
             old_feature_count,
-            old_bytes,
+            old_road_core_bytes,
             old_road_core_cached,
             old_road_icon_indices,
             old_road_icon_vertices,
@@ -3945,7 +4280,7 @@ impl MapView {
                 feature_count,
                 ..
             },
-                bytes,
+                road_core_bytes,
                 bucket,
                 baked_3d,
                 road_core_cached,
@@ -3960,7 +4295,7 @@ impl MapView {
                 stroke_geometry,
                 icon_geometry,
                 feature_count,
-                bytes,
+                road_core_bytes,
                 road_core_cached,
                 road_icon_indices,
                 road_icon_vertices,
@@ -3994,11 +4329,6 @@ impl MapView {
                 &old_road_icon_vertices,
             );
         }
-        let tile_bytes = if reuse_road_core {
-            buffers.byte_size().max(old_bytes)
-        } else {
-            buffers.byte_size()
-        };
         // Space-warp mode: refine long chords in the ground meshes before
         // upload. A flat triangle with far-apart vertices (full-tile land
         // sheets, long straight road quads) warps only at its corners, so
@@ -4030,6 +4360,34 @@ impl MapView {
                 &mut buffers.fringe_indices,
                 &mut buffers.fringe_vertices,
                 max_edge,
+            );
+        }
+        let bake_cpu_bytes = buffers.allocated_byte_size();
+        let own_gpu_bytes = buffers.gpu_byte_size();
+        let cpu_bytes = buffers.retained_cpu_byte_size();
+        let road_core_bytes = if reuse_road_core {
+            old_road_core_bytes
+        } else {
+            buffers.road_core_gpu_byte_size()
+        };
+        let gpu_bytes = own_gpu_bytes.saturating_add(if reuse_road_core {
+            old_road_core_bytes
+        } else {
+            0
+        });
+        let tile_bytes = gpu_bytes.saturating_add(cpu_bytes);
+        if self.memory_sampled_zooms.insert(tile_key.z) {
+            let profile = self.bake_profile(buffers.render_zoom);
+            log!(
+                "MapView tile-memory z{} x{} y{} rz{} profile:{} before_upload_cpu:{} after_upload_cpu:{} gpu:{}",
+                tile_key.z,
+                tile_key.x,
+                tile_key.y,
+                buffers.render_zoom,
+                profile.name(),
+                bake_cpu_bytes,
+                cpu_bytes,
+                gpu_bytes,
             );
         }
         let fill_geometry = if !buffers.fill_indices.is_empty() && !buffers.fill_vertices.is_empty()
@@ -4198,6 +4556,9 @@ impl MapView {
                 attempts: 0,
                 retry_after: 0,
                 bytes: tile_bytes,
+                gpu_bytes,
+                cpu_bytes,
+                road_core_bytes,
                 bucket: buffers.render_zoom,
                 baked_3d: self.baked_3d_mode,
                 road_core_cached: !buffers.mode_overlay_only || reuse_road_core,
@@ -4213,22 +4574,38 @@ impl MapView {
     /// building tiles can park gigabytes of baked buffers here. Drop the
     /// oldest queued bakes beyond a byte budget — they were about to be
     /// stale anyway.
-    fn cap_pending_ready_tiles(&mut self) {
-        const PENDING_BYTE_BUDGET: usize = 384_000_000;
+    fn cap_pending_ready_tiles(&mut self, cx: &Cx) {
+        let pending_byte_budget = MapMemoryBudgets::from_cx(cx).pending;
         let mut total: usize = self
             .pending_ready_tiles
             .iter()
-            .map(|(_, buffers)| buffers.byte_size())
+            .map(|(_, buffers)| buffers.allocated_byte_size())
             .sum();
-        while total > PENDING_BYTE_BUDGET && self.pending_ready_tiles.len() > 1 {
-            let (_, dropped) = self.pending_ready_tiles.remove(0);
-            total -= dropped.byte_size();
+        while total > pending_byte_budget && self.pending_ready_tiles.len() > 1 {
+            let (key, dropped) = self.pending_ready_tiles.remove(0);
+            total = total.saturating_sub(dropped.allocated_byte_size());
+            if self
+                .tiles
+                .get(&key)
+                .is_some_and(|entry| {
+                    matches!(
+                        entry.state,
+                        TileLoadState::LoadingLocal | TileLoadState::LoadingNetwork
+                    )
+                })
+            {
+                self.tiles.remove(&key);
+            }
         }
     }
 
     fn handle_tile_worker_messages(&mut self, cx: &mut Cx) {
         let mut redraw = false;
-        while let Ok(msg) = self.tile_worker_rx.try_recv() {
+        while let Ok(BudgetedTileWorkerMessage {
+            message: msg,
+            _memory,
+        }) = self.tile_worker_rx.try_recv()
+        {
             match msg {
                 TileWorkerMessage::LocalBatchLoaded {
                     style_epoch,
@@ -4250,6 +4627,7 @@ impl MapView {
                     let mut empty_feature_tiles = Vec::<TileKey>::new();
                     let current_bucket = self.render_bucket();
                     for tile in loaded {
+                        self.observe_bake_size(&tile.buffers);
                         loaded_keys.insert(tile.tile_key);
                         self.local_missing_tiles.remove(&tile.tile_key);
                         if tile.buffers.feature_count == 0 {
@@ -4267,7 +4645,7 @@ impl MapView {
                             .retain(|(key, _)| *key != tile.tile_key);
                         self.pending_ready_tiles.push((tile.tile_key, tile.buffers));
                     }
-                    self.cap_pending_ready_tiles();
+                    self.cap_pending_ready_tiles(cx);
                     if !empty_feature_tiles.is_empty() {
                         empty_feature_tiles.sort_unstable();
                         log!("MapView: local mbtiles loaded {} tile(s) with 0 rendered features sample:{}", empty_feature_tiles.len(), format_tile_key_sample(&empty_feature_tiles, 8));
@@ -4325,9 +4703,10 @@ impl MapView {
                     if style_epoch != self.style_epoch {
                         continue;
                     }
+                    self.observe_bake_size(&buffers);
                     self.pending_ready_tiles.retain(|(key, _)| *key != tile_key);
                     self.pending_ready_tiles.push((tile_key, buffers));
-                    self.cap_pending_ready_tiles();
+                    self.cap_pending_ready_tiles(cx);
                     redraw = true;
                 }
                 TileWorkerMessage::NetworkTileParseFailed {
@@ -4361,7 +4740,7 @@ impl MapView {
                 if count >= 2 {
                     break;
                 }
-                let size = buffers.byte_size();
+                let size = buffers.gpu_byte_size();
                 if count > 0 && budget + size > UPLOAD_BYTE_BUDGET {
                     break;
                 }
@@ -4478,6 +4857,7 @@ impl MapView {
         }
         self.tile_source_config = Some(config);
         self.archive_pending_tiles.clear();
+        self.bake_reservations.clear();
         self.pending_ready_tiles.clear();
         self.local_source_zoom_range = None;
         self.local_source_logged_zoom_range = None;
@@ -4544,12 +4924,14 @@ impl MapView {
         for key in ready {
             let parts = self.archive_pending_tiles.remove(&key).unwrap();
             if parts.generation != self.archive_generation {
+                self.bake_reservations.remove(&key);
                 continue;
             }
             let base = match parts.base.unwrap() {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     self.local_requested_tiles.remove(&key);
+                    self.bake_reservations.remove(&key);
                     self.mark_tile_failed(key, &error);
                     self.update_status_text();
                     self.redraw(cx);
@@ -4606,7 +4988,12 @@ impl MapView {
             .filter(|path| !path.trim().is_empty())
             .map(|path| path.trim().to_string())
             .collect::<Vec<_>>();
-        if let Err(error) = self.submit_tile_job(cx, key, move || {
+        let Some(reservation) = self.bake_reservations.remove(&key) else {
+            self.local_requested_tiles.remove(&key);
+            self.mark_tile_failed(key, "missing bake-memory reservation");
+            return;
+        };
+        if let Err(error) = self.submit_tile_job(cx, key, reservation, move |mut memory| {
             let result = build_local_tile_from_archive_bytes(
                 key,
                 base,
@@ -4619,21 +5006,28 @@ impl MapView {
                 buildings_3d,
                 build_road_core,
             );
+            memory.finish();
             match result {
                 Ok(tile) => {
-                    let _ = sender.send(TileWorkerMessage::LocalBatchLoaded {
-                        style_epoch,
-                        requested,
-                        loaded: tile.into_iter().collect(),
-                        failed: Vec::new(),
+                    let _ = sender.send(BudgetedTileWorkerMessage {
+                        message: TileWorkerMessage::LocalBatchLoaded {
+                            style_epoch,
+                            requested,
+                            loaded: tile.into_iter().collect(),
+                            failed: Vec::new(),
+                        },
+                        _memory: memory,
                     });
                 }
                 Err(error) => {
-                    let _ = sender.send(TileWorkerMessage::LocalBatchLoaded {
-                        style_epoch,
-                        requested: requested.clone(),
-                        loaded: Vec::new(),
-                        failed: requested,
+                    let _ = sender.send(BudgetedTileWorkerMessage {
+                        message: TileWorkerMessage::LocalBatchLoaded {
+                            style_epoch,
+                            requested: requested.clone(),
+                            loaded: Vec::new(),
+                            failed: requested,
+                        },
+                        _memory: memory,
                     });
                     log!("MapView: archive tile build failed: {}", error);
                 }
@@ -4648,6 +5042,7 @@ impl MapView {
 
     fn cancel_archive_tile(&mut self, cx: &mut Cx, key: TileKey) {
         self.archive_pending_tiles.remove(&key);
+        self.bake_reservations.remove(&key);
         if let Some(archive) = self.base_archive.as_mut() {
             archive.cancel_tile(cx, key);
         }
@@ -4678,10 +5073,15 @@ impl MapView {
                     && entry.bucket == bucket
                     && entry.road_core_cached
             });
-            if let Err(error) = self.submit_tile_job(cx, key, move || {
+            let Some(reservation) = self.bake_reservations.remove(&key) else {
+                self.local_requested_tiles.remove(&key);
+                self.mark_tile_failed(key, "missing bake-memory reservation");
+                continue;
+            };
+            if let Err(error) = self.submit_tile_job(cx, key, reservation, move |mut memory| {
                 let detail_path = (!detail_path.is_empty()).then_some(detail_path);
                 let bridge_dz_path = (!bridge_dz_path.is_empty()).then_some(bridge_dz_path);
-                match load_local_tile_batch(
+                let result = load_local_tile_batch(
                     Path::new(&mbtiles_path),
                     detail_path.as_deref().map(Path::new),
                     bridge_dz_path.as_deref().map(Path::new),
@@ -4691,20 +5091,28 @@ impl MapView {
                     bucket,
                     buildings_3d,
                     build_road_core,
-                ) {
+                );
+                memory.finish();
+                match result {
                     Ok((loaded, failed)) => {
-                        let _ = sender.send(TileWorkerMessage::LocalBatchLoaded {
-                            style_epoch,
-                            requested,
-                            loaded,
-                            failed,
+                        let _ = sender.send(BudgetedTileWorkerMessage {
+                            message: TileWorkerMessage::LocalBatchLoaded {
+                                style_epoch,
+                                requested,
+                                loaded,
+                                failed,
+                            },
+                            _memory: memory,
                         });
                     }
                     Err(error) => {
-                        let _ = sender.send(TileWorkerMessage::LocalBatchFailed {
-                            style_epoch,
-                            requested,
-                            error,
+                        let _ = sender.send(BudgetedTileWorkerMessage {
+                            message: TileWorkerMessage::LocalBatchFailed {
+                                style_epoch,
+                                requested,
+                                error,
+                            },
+                            _memory: memory,
                         });
                     }
                 }
@@ -4888,9 +5296,15 @@ impl MapView {
             12usize
         };
         let max_in_flight = slot_cap.saturating_sub(self.local_requested_tiles.len());
-        if missing.len() > max_in_flight {
-            missing.truncate(max_in_flight);
+        missing.truncate(max_in_flight);
+        let mut reserved = Vec::with_capacity(missing.len());
+        for key in missing {
+            if !self.reserve_bake(cx, key, bucket) {
+                break;
+            }
+            reserved.push(key);
         }
+        let missing = reserved;
         if missing.is_empty() {
             return;
         }
@@ -4912,6 +5326,9 @@ impl MapView {
                         attempts: prev_attempts,
                         retry_after: 0,
                         bytes: 0,
+                        gpu_bytes: 0,
+                        cpu_bytes: 0,
+                        road_core_bytes: 0,
                         bucket,
                         baked_3d: self.baked_3d_mode,
                         road_core_cached: false,
@@ -5081,6 +5498,9 @@ impl MapView {
                 attempts,
                 retry_after,
                 bytes: 0,
+                gpu_bytes: 0,
+                cpu_bytes: 0,
+                road_core_bytes: 0,
                 bucket,
                 baked_3d: self.baked_3d_mode,
                 road_core_cached: false,
@@ -5184,10 +5604,20 @@ impl MapView {
         }
     }
 
-    fn submit_tile_job<F>(&mut self, cx: &mut Cx, key: TileKey, job: F) -> Result<(), SubmitError>
+    fn submit_tile_job<F>(
+        &mut self,
+        cx: &mut Cx,
+        key: TileKey,
+        mut reservation: BakeMemoryReservation,
+        job: F,
+    ) -> Result<(), SubmitError>
     where
-        F: FnOnce() + Send + 'static,
+        F: FnOnce(BakeMemoryReservation) + Send + 'static,
     {
+        let job = move || {
+            reservation.start();
+            job(reservation);
+        };
         self.ensure_tile_thread_pool(cx);
         if let Some(pool) = self.tile_thread_pool.as_ref() {
             match pool.submit_tagged(key, true, QueueOrder::Lifo, job) {
@@ -5297,49 +5727,44 @@ impl MapView {
             let frame_counter = self.frame_counter;
             let min_keep_zoom = target_zoom.saturating_sub(2);
             let max_keep_zoom = target_zoom.saturating_add(1);
-            self.tiles.retain(|key, entry| {
-                if visible_set.contains(key)
-                    || matches!(
-                        entry.state,
-                        TileLoadState::LoadingNetwork | TileLoadState::LoadingLocal
-                    )
-                {
-                    return true;
-                }
-                if key.z < min_keep_zoom || key.z > max_keep_zoom {
-                    return false;
-                }
-                frame_counter.saturating_sub(entry.last_used) <= 120
-            });
+            let expired = self
+                .tiles
+                .iter()
+                .filter(|(key, entry)| {
+                    if visible_set.contains(key)
+                        || matches!(
+                            entry.state,
+                            TileLoadState::LoadingNetwork | TileLoadState::LoadingLocal
+                        )
+                    {
+                        return false;
+                    }
+                    key.z < min_keep_zoom
+                        || key.z > max_keep_zoom
+                        || frame_counter.saturating_sub(entry.last_used) > 120
+                })
+                .map(|(key, _)| *key)
+                .collect::<Vec<_>>();
+            for key in expired {
+                self.remove_tile(cx, &key);
+            }
         }
-        // Byte budget on top of the count heuristic: 3D building bakes run
-        // 60-90 MB per tile (CPU floats AND a GPU copy), so even a modest
-        // resident set can eat the machine. Evict least-recently-used
-        // non-visible tiles until the geometry footprint fits.
-        const TILE_CACHE_BYTE_BUDGET: usize = 1_200_000_000;
-        const HTTP_TILE_CACHE_BYTE_BUDGET: usize = 240_000_000;
+        // Post-upload GPU geometry plus the compact retained CPU metadata is
+        // capped at 40% of the platform memory envelope.
         let total_bytes: usize = self.tiles.values().map(|entry| entry.bytes).sum();
-        // Anti-thrash: street-zoom tiles now carry the full icon horizon
-        // (50-85 MB each), so a fixed budget can sit BELOW visible+ring —
-        // pure LRU then evicts the exact neighbor a pan re-enters seconds
-        // later and every circle around a city center rebuilds its ring.
-        // Scale the effective budget to hold twice the visible set, and
-        // evict by DISTANCE from the view center (farthest first, LRU as
-        // the tiebreak): the pan ring survives, the trail behind does not.
+        // Anti-thrash: never evict visible geometry, and evict offscreen
+        // tiles by DISTANCE from the view center (farthest first, LRU as the
+        // tiebreak). This preserves the nearest pan ring whenever the budget
+        // has room instead of repeatedly rebuilding the next tile entered.
         let visible_bytes: usize = self
             .tiles
             .iter()
             .filter(|(key, _)| visible_set.contains(*key))
             .map(|(_, entry)| entry.bytes)
             .sum();
-        let byte_budget = if matches!(
-            self.tile_source_config,
-            Some(TileSourceConfig::HttpArchive { .. })
-        ) {
-            HTTP_TILE_CACHE_BYTE_BUDGET.max(visible_bytes)
-        } else {
-            TILE_CACHE_BYTE_BUDGET.max(visible_bytes.saturating_mul(2))
-        };
+        let byte_budget = MapMemoryBudgets::from_cx(cx)
+            .tile_cache
+            .max(visible_bytes);
         if total_bytes > byte_budget {
             let center = self.center_norm;
             let mut evictable: Vec<(TileKey, u64, usize)> = self
@@ -5372,8 +5797,8 @@ impl MapView {
                 if remaining <= byte_budget {
                     break;
                 }
-                self.tiles.remove(&key);
-                remaining -= bytes;
+                self.remove_tile(cx, &key);
+                remaining = remaining.saturating_sub(bytes);
             }
         }
         self.update_status_text();
@@ -5570,6 +5995,9 @@ impl MapView {
                 let style_epoch = self.style_epoch;
                 let theme_style = self.active_style().clone();
                 let bucket = self.render_bucket();
+                if !self.reserve_bake(cx, tile_key, bucket) {
+                    return false;
+                }
                 self.tiles.insert(
                     tile_key,
                     TileEntry {
@@ -5578,6 +6006,9 @@ impl MapView {
                         attempts: 0,
                         retry_after: 0,
                         bytes: 0,
+                        gpu_bytes: 0,
+                        cpu_bytes: 0,
+                        road_core_bytes: 0,
                         bucket,
                         baked_3d: self.baked_3d_mode,
                         road_core_cached: false,
@@ -5586,26 +6017,37 @@ impl MapView {
                         fade: None,
                     },
                 );
-                if let Err(error) = self.submit_tile_job(cx, tile_key, move || {
-                    match build_tile_buffers_from_body(tile_key, &cached_body, &theme_style, bucket)
-                    {
+                let reservation = self.bake_reservations.remove(&tile_key).unwrap();
+                if let Err(error) =
+                    self.submit_tile_job(cx, tile_key, reservation, move |mut memory| {
+                    let result =
+                        build_tile_buffers_from_body(tile_key, &cached_body, &theme_style, bucket);
+                    memory.finish();
+                    match result {
                         Ok(buffers) => {
-                            let _ = sender.send(TileWorkerMessage::NetworkTileParsed {
-                                style_epoch,
-                                tile_key,
-                                buffers,
+                            let _ = sender.send(BudgetedTileWorkerMessage {
+                                message: TileWorkerMessage::NetworkTileParsed {
+                                    style_epoch,
+                                    tile_key,
+                                    buffers,
+                                },
+                                _memory: memory,
                             });
                         }
                         Err(_err) => {
                             let _ = fs::remove_file(&cache_path);
-                            let _ = sender.send(TileWorkerMessage::NetworkTileParseFailed {
-                                style_epoch,
-                                tile_key,
-                                error: String::new(),
+                            let _ = sender.send(BudgetedTileWorkerMessage {
+                                message: TileWorkerMessage::NetworkTileParseFailed {
+                                    style_epoch,
+                                    tile_key,
+                                    error: String::new(),
+                                },
+                                _memory: memory,
                             });
                         }
                     }
-                }) {
+                })
+                {
                     self.mark_tile_failed(tile_key, &format!("tile worker submission failed: {error}"));
                     self.update_status_text();
                     self.redraw(cx);
@@ -5615,6 +6057,11 @@ impl MapView {
         }
 
         if !allow_network || !self.use_network {
+            return false;
+        }
+
+        let bucket = self.render_bucket();
+        if !self.reserve_bake(cx, tile_key, bucket) {
             return false;
         }
 
@@ -5634,7 +6081,6 @@ impl MapView {
 
         self.request_to_tile
             .insert(request_id, PendingTileRequest { tile_key, endpoint });
-        let bucket = self.render_bucket();
         self.tiles.insert(
             tile_key,
             TileEntry {
@@ -5643,6 +6089,9 @@ impl MapView {
                 attempts,
                 retry_after: 0,
                 bytes: 0,
+                gpu_bytes: 0,
+                cpu_bytes: 0,
+                road_core_bytes: 0,
                 bucket,
                 baked_3d: self.baked_3d_mode,
                 road_core_cached: false,
@@ -7132,10 +7581,11 @@ impl MapView {
             return;
         }
         self.install_archive_source(cx, config);
-        self.tiles.clear();
+        self.clear_tiles(cx);
         self.local_requested_tiles.clear();
         self.local_missing_tiles.clear();
         self.archive_pending_tiles.clear();
+        self.bake_reservations.clear();
         self.local_source_missing_logged = false;
         // Force the zoom-range probe to re-read: the new archive declares
         // its own minzoom/maxzoom (a city extract is not the planet).
@@ -7214,6 +7664,7 @@ impl MapView {
             entry.bucket = u32::MAX;
         }
         self.local_requested_tiles.clear();
+        self.bake_reservations.clear();
         self.pending_ready_tiles.clear();
         self.label_cache_valid = false;
         self.redraw(cx);
@@ -7230,6 +7681,7 @@ impl MapView {
         self.tiles
             .retain(|_, entry| matches!(entry.state, TileLoadState::Ready { .. }));
         self.local_requested_tiles.clear();
+        self.bake_reservations.clear();
         self.pending_ready_tiles.clear();
         self.label_cache_valid = false;
         self.redraw(cx);
@@ -8050,6 +8502,38 @@ mod tests {
         })
     }
 
+    #[test]
+    fn map_memory_budgets_scale_from_one_platform_envelope() {
+        let web = MapMemoryBudgets::from_total(1024 * 1024 * 1024);
+        assert_eq!(web.tile_cache, web.total * 40 / 100);
+        assert_eq!(web.pending, web.total * 10 / 100);
+        assert_eq!(web.in_flight, web.total * 15 / 100);
+
+        let native = MapMemoryBudgets::from_total(1536 * 1024 * 1024);
+        assert_eq!(native.tile_cache, 644_245_094);
+        assert_eq!(native.pending, 161_061_273);
+        assert_eq!(native.in_flight, 241_591_910);
+    }
+
+    #[test]
+    fn bake_memory_reservations_cap_bytes_and_release_on_drop() {
+        let tracker = Arc::new(BakeMemoryTracker::default());
+        tracker.set_limit(160);
+        let mut first = tracker.try_reserve(80).unwrap();
+        let second = tracker.try_reserve(80).unwrap();
+        assert!(tracker.try_reserve(1).is_none());
+        first.start();
+        assert_eq!(tracker.active_count(), 1);
+        assert_eq!(tracker.active_bytes(), 80);
+        first.finish();
+        assert_eq!(tracker.active_count(), 0);
+        assert_eq!(tracker.reserved_bytes(), 160);
+        assert!(tracker.try_reserve(1).is_none());
+        drop(first);
+        assert!(tracker.try_reserve(80).is_some());
+        drop(second);
+    }
+
     fn temp_mbtiles_with_zoom(
         name: &str,
         min_zoom: &str,
@@ -8198,7 +8682,10 @@ mod tests {
         }
         assert!(matches!(
             message,
-            Some(TileWorkerMessage::LocalBatchLoaded { loaded, .. }) if loaded.len() == 1
+            Some(BudgetedTileWorkerMessage {
+                message: TileWorkerMessage::LocalBatchLoaded { loaded, .. },
+                ..
+            }) if loaded.len() == 1
         ));
         std::fs::remove_file(path).unwrap();
     }

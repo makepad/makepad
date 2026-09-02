@@ -513,7 +513,7 @@ impl Cx {
                 }
                 geometry.dirty = geometry.dirty_vertices || geometry.dirty_indices;
 
-                let indices = geometry.indices.len();
+                let indices = geometry.index_count;
 
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;

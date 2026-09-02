@@ -639,6 +639,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.to_wasm.ToWasmInit({
             gpu_info: this.gpu_info,
             cpu_cores: hardware_concurrency,
+            wasm_memory_max_pages: this.wasm._memory_max_pages || 16384,
             xr_capabilities: this.xr_capabilities,
             browser_info: {
                 protocol: location.protocol + "",

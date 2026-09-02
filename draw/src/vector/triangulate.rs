@@ -115,7 +115,7 @@ fn f16_bits_to_f32(h: u32) -> f32 {
 }
 
 #[inline]
-fn unpack_pair_f16(v: f32) -> (f32, f32) {
+pub fn unpack_pair_f16(v: f32) -> (f32, f32) {
     let bits = v.to_bits();
     (f16_bits_to_f32(bits & 0xffff), f16_bits_to_f32(bits >> 16))
 }

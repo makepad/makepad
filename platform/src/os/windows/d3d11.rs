@@ -467,7 +467,7 @@ impl Cx {
                 //}
                 unsafe {
                     d3d11_cx.context.DrawIndexedInstanced(
-                        geometry.indices.len() as u32,
+                        geometry.index_count as u32,
                         instances as u32,
                         0,
                         0,

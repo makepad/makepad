@@ -555,13 +555,13 @@ impl Cx {
                 self.os.vertices_done = self
                     .os
                     .vertices_done
-                    .saturating_add((geometry.indices.len() as u64).saturating_mul(instances));
+                    .saturating_add((geometry.index_count as u64).saturating_mul(instances));
                 if let Some(inner) = geometry.os.index_buffer.inner.as_ref() {
                     let () = unsafe {
                         msg_send![
                             encoder,
                             drawIndexedPrimitives: MTLPrimitiveType::Triangle
-                            indexCount: geometry.indices.len() as u64
+                            indexCount: geometry.index_count as u64
                             indexType: MTLIndexType::UInt32
                             indexBuffer: inner.buffer.as_id()
                             indexBufferOffset: 0

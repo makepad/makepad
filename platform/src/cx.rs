@@ -81,6 +81,10 @@ pub struct Cx {
     pub(crate) gpu_info: GpuInfo,
     pub(crate) xr_capabilities: XrCapabilities,
     pub(crate) cpu_cores: usize,
+    /// Process memory envelope available to subsystems with large, elastic
+    /// caches. Web startup replaces the native default with the shared wasm
+    /// memory limit reported by the JS bridge.
+    pub(crate) memory_budget_bytes: usize,
     pub(crate) thread_spawner: crate::thread::ThreadSpawner,
     pub null_texture: Texture,
     pub null_cube_texture: Texture,
@@ -403,6 +407,13 @@ impl OsType {
 }
 
 impl Cx {
+    /// A conservative process-wide memory envelope for cache/batch budgets.
+    /// Native keeps a generous fixed ceiling; web reports the shared wasm
+    /// browser memory envelope through `ToWasmInit` before `Event::Startup`.
+    pub fn memory_budget_bytes(&self) -> usize {
+        self.memory_budget_bytes
+    }
+
     /// Select the application's font policy before script/theme registration.
     /// Once startup begins the choice is immutable because compiled package
     /// metadata and registered resource handles must continue to agree.
@@ -488,6 +499,7 @@ impl Cx {
             null_texture,
             null_cube_texture,
             cpu_cores: crate::thread::available_parallelism().get(),
+            memory_budget_bytes: 1536 * 1024 * 1024,
             thread_spawner: crate::thread::ThreadSpawner::for_current_thread(
                 crate::thread::available_parallelism().get(),
             ),
