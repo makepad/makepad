@@ -265,7 +265,25 @@ export class WasmBridge {
     }
 
     js_console_error(u8_ptr, len) {
-        console.error(this.u8_to_string(u8_ptr, len), '');
+        const panic_prefix = "__MAKEPAD_WASM_PANIC__:";
+        const raw = this.u8_to_string(u8_ptr, len);
+        const is_panic = raw.startsWith(panic_prefix);
+        const text = is_panic ? raw.slice(panic_prefix.length) : raw;
+        console.error(text, '');
+        if (is_panic) {
+            try {
+                const match = text.match(/(?:at |, )([^\n]+):(\d+):(\d+)(?::|\n|$)/);
+                const reporter = globalThis.makepad_crash_reporter;
+                if (reporter && typeof reporter.report === "function") {
+                    reporter.report("wasm.panic", {
+                        message: text,
+                        location: match ? `${match[1]}:${match[2]}:${match[3]}` : "",
+                        hook_stack: new Error("wasm panic hook").stack || ""
+                    });
+                }
+            } catch (_error) {
+            }
+        }
     }
 
     js_time_now() {

@@ -1515,6 +1515,16 @@ pub unsafe extern "C" fn wasm_check_signal() -> u32 {
 #[export_name = "wasm_init_panic_hook"]
 pub unsafe extern "C" fn init_panic_hook() {
     pub fn panic_hook(info: &panic::PanicHookInfo) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            #[link(wasm_import_module = "env")]
+            extern "C" {
+                fn js_console_error(u8_ptr: u32, len: u32);
+            }
+            let message = format!("__MAKEPAD_WASM_PANIC__:{}", info);
+            unsafe { js_console_error(message.as_ptr() as u32, message.len() as u32) };
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         crate::error!("{}", info)
     }
     panic::set_hook(Box::new(panic_hook));
