@@ -93,6 +93,12 @@ mod mesh_view;
 mod midi_learn;
 mod mix;
 mod mixer;
+// The audio path pinned against what it rendered the day the reference was
+// recorded, and the click rule every transition has to keep.
+#[cfg(test)]
+mod mixer_golden;
+#[cfg(test)]
+mod mixer_golden_refs;
 mod models;
 mod notes_map;
 // Two-deck music mode: deck DSP, off-thread track analysis, deck surface.

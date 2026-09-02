@@ -2752,9 +2752,53 @@ impl Mixer {
     }
 }
 
+/// Fixtures the audio tests share: tracks with a known shape and one
+/// device callback at a time.
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use super::*;
+
+    pub(crate) fn const_pcm(value: i16, frames: usize, rate: u32) -> Arc<TrackPcm> {
+        Arc::new(TrackPcm { frames: vec![[value, value]; frames], sample_rate: rate })
+    }
+
+    /// First half `a`, second half `b`: a signal a raw splice cannot hide
+    /// in, for testing that jumps land as blends.
+    pub(crate) fn split_pcm(a: i16, b: i16, frames: usize, rate: u32) -> Arc<TrackPcm> {
+        let half = frames / 2;
+        let mut all = vec![[a, a]; frames];
+        for frame in all.iter_mut().skip(half) {
+            *frame = [b, b];
+        }
+        Arc::new(TrackPcm { frames: all, sample_rate: rate })
+    }
+
+    pub(crate) fn render(mixer: &Mixer, rate: f64, frames: usize) -> AudioBuffer {
+        let mut buffer = AudioBuffer::new_with_size(frames, 2);
+        mixer.render(rate, &mut buffer);
+        buffer
+    }
+
+    /// A tone at `frequency`, as a deck would hold it.
+    pub(crate) fn tone_pcm(frequency: f64, rate: u32, seconds: f64) -> Arc<TrackPcm> {
+        let len = (rate as f64 * seconds) as usize;
+        let frames = (0..len)
+            .map(|index| {
+                let value = (2.0 * std::f64::consts::PI * frequency * index as f64
+                    / rate as f64)
+                    .sin();
+                let sample = (value * 12_000.0) as i16;
+                [sample, sample]
+            })
+            .collect();
+        Arc::new(TrackPcm { frames, sample_rate: rate })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::fixtures::*;
 
     fn local_drum_bank() -> Option<Arc<SampleBank>> {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2766,26 +2810,8 @@ mod tests {
         Some(Arc::new(SampleBank::load(&dir).expect("load local Salamander corpus")))
     }
 
-    fn const_pcm(value: i16, frames: usize, rate: u32) -> Arc<TrackPcm> {
-        Arc::new(TrackPcm { frames: vec![[value, value]; frames], sample_rate: rate })
-    }
 
-    /// First half `a`, second half `b`: a signal a raw splice cannot hide
-    /// in, for testing that jumps land as blends.
-    fn split_pcm(a: i16, b: i16, frames: usize, rate: u32) -> Arc<TrackPcm> {
-        let half = frames / 2;
-        let mut all = vec![[a, a]; frames];
-        for frame in all.iter_mut().skip(half) {
-            *frame = [b, b];
-        }
-        Arc::new(TrackPcm { frames: all, sample_rate: rate })
-    }
 
-    fn render(mixer: &Mixer, rate: f64, frames: usize) -> AudioBuffer {
-        let mut buffer = AudioBuffer::new_with_size(frames, 2);
-        mixer.render(rate, &mut buffer);
-        buffer
-    }
 
     #[test]
     fn score_preview_enters_program_before_master_and_stops_at_end() {
@@ -2907,20 +2933,6 @@ mod tests {
         assert!(out.channel(0)[32].abs() < 0.01);
     }
 
-    /// A tone at `frequency`, as a deck would hold it.
-    fn tone_pcm(frequency: f64, rate: u32, seconds: f64) -> Arc<TrackPcm> {
-        let len = (rate as f64 * seconds) as usize;
-        let frames = (0..len)
-            .map(|index| {
-                let value = (2.0 * std::f64::consts::PI * frequency * index as f64
-                    / rate as f64)
-                    .sin();
-                let sample = (value * 12_000.0) as i16;
-                [sample, sample]
-            })
-            .collect();
-        Arc::new(TrackPcm { frames, sample_rate: rate })
-    }
 
     /// RMS of the mixer's left output over `frames`, after `settle` frames.
     fn deck_rms(mixer: &Mixer, rate: f64, settle: usize, frames: usize) -> f64 {
