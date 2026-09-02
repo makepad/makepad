@@ -15,6 +15,11 @@ use makepad_geodata::{
 };
 use makepad_mbtile_reader::MbtilesWriter;
 use makepad_network::HttpServerHeaders;
+use makepad_asset_data::*;
+use makepad_asset_store::{
+    export_static, AssetAnnotation, AssetServerCore, Budgets, PublishBatchItem,
+    StaticExportOptions, Visibility,
+};
 use std::{
     collections::HashMap,
     fs,
@@ -259,6 +264,160 @@ fn start_fixture_server(base: &Path) -> (ServerChild, SocketAddr) {
         .unwrap();
     wait_until_listening(address);
     (ServerChild(child), address)
+}
+
+fn start_snapshot_server(base: &Path) -> (ServerChild, SocketAddr, BlobId) {
+    let store_root = base.join("asset-store");
+    let core = AssetServerCore::open(&store_root, Budgets::default_v1()).unwrap();
+    let glb = b"SNAPSHOT-GLB";
+    let thumbnail = b"SNAPSHOT-PNG";
+    core.put_blob(glb, 1_700_000_000_000).unwrap();
+    core.put_blob(thumbnail, 1_700_000_000_000).unwrap();
+    let blob = BlobId::hash_of(glb);
+    let manifest = AssetManifest {
+        asset_id: AssetId::from_bytes([7; 16]),
+        kind: AssetKind::Prop,
+        files: vec![AssetFile {
+            role: FileRole::RenderGlb,
+            tier: DeviceTier::Any,
+            lod: 0,
+            media: MediaType::Glb,
+            blob,
+            byte_len: glb.len() as u64,
+            dims: None,
+        }],
+        dependencies: Vec::new(),
+        thumbnail: Some(ThumbnailMeta {
+            blob: BlobId::hash_of(thumbnail),
+            media: ThumbnailMedia::Png,
+            width: 512,
+            height: 512,
+            byte_len: thumbnail.len() as u64,
+            views: Vec::new(),
+        }),
+        metrics: Metrics {
+            total_bytes: (glb.len() + thumbnail.len()) as u64,
+            triangles: 1,
+            vertices: 3,
+            ..Metrics::default()
+        },
+        coordinate_system: CoordinateSystem {
+            units_per_meter: 1.0,
+            up: Axis::YPos,
+            forward: Axis::ZNeg,
+            pivot: Pivot::Origin,
+        },
+        bounds: Bounds {
+            min: Vec3::new(-1.0, -1.0, -1.0),
+            max: Vec3::new(1.0, 1.0, 1.0),
+        },
+        anchors: Vec::new(),
+        capabilities: Capabilities::default(),
+        spawn_recipe: None,
+        provenance: None,
+        rights: Rights {
+            license: "CC0-1.0".into(),
+            license_revision: String::new(),
+            terms_digest: Some(sha256(b"CC0-1.0 legal text")),
+            terms_url: "https://creativecommons.org/publicdomain/zero/1.0/".into(),
+            credits: "fixture".into(),
+            source: String::new(),
+            source_archive: None,
+            redistribution: Redistribution::Allowed,
+            derivatives: DerivativePolicy::Allowed,
+        },
+    };
+    core.publish_batch(
+        &[PublishBatchItem {
+            namespace: "dj".into(),
+            manifest_bytes: manifest.to_canonical_bytes().unwrap(),
+            annotation: AssetAnnotation {
+                title: "DJ fixture".into(),
+                description: String::new(),
+                kind: Some(AssetKind::Prop),
+                categories: Vec::new(),
+                tags: Vec::new(),
+                creator: String::new(),
+                owner: None,
+                generator: String::new(),
+                backend: String::new(),
+                model: String::new(),
+                prompt: String::new(),
+                provenance: String::new(),
+                visibility: Visibility::Public,
+            },
+            alias: Some("dj/demo".parse().unwrap()),
+        }],
+        1_700_000_000_000,
+    )
+    .unwrap();
+
+    let root = base.join("site");
+    export_static(&core, &root, &StaticExportOptions::default()).unwrap();
+    fs::write(root.join("v1/unlisted"), b"private").unwrap();
+    drop(core);
+    freeze_docroot(&root);
+    let address = free_address();
+    let child = Command::new(env!("CARGO_BIN_EXE_makepad-web-server"))
+        .args([
+            "--listen",
+            &address.to_string(),
+            "--root",
+            root.to_str().unwrap(),
+            "--searchdb",
+            "off",
+            "--places",
+            "off",
+            "--major-graph",
+            "off",
+            "--chargers",
+            "off",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_until_listening(address);
+    (ServerChild(child), address, blob)
+}
+
+fn check_exported_static_store_routes() {
+    let tree = TempTree::new("static-store");
+    let (_server, address, blob) = start_snapshot_server(&tree.0);
+
+    let health = get(address, "/v1/health", "");
+    assert_eq!(health.status, 200);
+    assert!(health.headers.contains("Content-Type: application/json\r\n"));
+    assert!(health.headers.contains("Cache-Control: private, no-cache"));
+    assert!(health.headers.contains("Cross-Origin-Opener-Policy: same-origin"));
+    assert!(health.headers.contains("Cross-Origin-Embedder-Policy: require-corp"));
+    assert!(makepad_strict_json::parse(&health.body).is_ok());
+
+    let compressed = get(address, "/v1/health", "Accept-Encoding: br\r\n");
+    assert_eq!(compressed.status, 200);
+    assert!(compressed.headers.contains("Content-Encoding: br"));
+    let etag = health
+        .headers
+        .lines()
+        .find_map(|line| line.strip_prefix("ETag: "))
+        .unwrap();
+    assert_eq!(
+        get(address, "/v1/health", &format!("If-None-Match: {etag}\r\n")).status,
+        304
+    );
+
+    let alias = get(address, "/v1/aliases/dj/demo", "");
+    assert_eq!(alias.status, 200);
+    assert!(alias.headers.contains("Content-Type: application/json\r\n"));
+    assert!(makepad_strict_json::parse(&alias.body).is_ok());
+
+    let blob_response = get(address, &format!("/v1/blobs/{blob}"), "");
+    assert_eq!(blob_response.status, 200);
+    assert_eq!(blob_response.body, b"SNAPSHOT-GLB");
+    assert!(blob_response
+        .headers
+        .contains("Content-Type: application/octet-stream\r\n"));
+    assert_eq!(get(address, "/v1/unlisted", "").status, 404);
 }
 
 fn check_static_and_navigation_contracts_work_end_to_end() {
@@ -792,6 +951,7 @@ fn live_server_adversarial_contracts() {
     check_crash_endpoint_contracts();
     check_slow_crash_body_does_not_hold_dispatcher();
     check_static_and_navigation_contracts_work_end_to_end();
+    check_exported_static_store_routes();
     check_unavailable_is_returned_before_navigation_is_ready();
     check_along_json_rejects_deep_trailing_and_huge_typed_inputs();
     check_slow_along_upload_never_occupies_compute_worker();
