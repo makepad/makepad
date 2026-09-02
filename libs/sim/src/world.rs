@@ -264,6 +264,11 @@ pub struct GameWorld {
     /// pre-map path byte-identically. Installed and cleared with `level`;
     /// an eval's `reset_content` keeps both.
     pub map_floor: Option<std::sync::Arc<crate::meshfloor::FloorRaster>>,
+    /// The walk surfaces of the laid corridors (roads, rails, bridge
+    /// decks): a mover on one stands at the drawn deck height exactly —
+    /// see [`crate::deck`]. Empty in every world without corridors, so
+    /// pre-corridor content runs the floor rules byte-identically.
+    pub decks: Vec<crate::deck::DeckStrip>,
     /// Sky/fog, enabled by game.sky().
     pub sky: Option<SkyConfig>,
     /// What game.sun() asked for; the renderer resolves it (see SunConfig).

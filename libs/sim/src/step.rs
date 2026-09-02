@@ -113,11 +113,13 @@ pub fn step_world(world: &mut GameWorld) {
         terrain: world_terrain,
         terrain_materials: world_terrain_materials,
         voxel: world_voxel,
+        decks: world_decks,
         dynamics,
         ..
     } = &mut *world;
     let terrain = world_terrain.as_ref();
     let voxel = world_voxel.as_deref();
+    let decks: &[crate::deck::DeckStrip] = world_decks.as_slice();
 
     // F9: projectiles moving further per tick than their own smallest half
     // extent can step OVER thin geometry in the axis sweeps — the classic
@@ -465,6 +467,42 @@ pub fn step_world(world: &mut GameWorld) {
                 }
             }
         }
+        // A BOX the feet are inside of, its top within step reach, is a
+        // floor too: a stage, a crate lid, a doorstep a mover was spawned
+        // in or shoved into. The sweeps only meet a box a mover FALLS onto
+        // or WALKS into; one it starts the tick inside of met neither and
+        // stood waist-deep (the Mocap Stage). Only ever lifts.
+        {
+            let feet_now = e.pos.y - e.half.y;
+            if let Some((top, id)) = crate::deck::box_floor_under(&walls, e.pos, e.half, feet_now, CLIMB) {
+                e.pos.y = top + e.half.y;
+                if e.vel.y <= 0.0 {
+                    e.on_floor = true;
+                    e.floor_id = id;
+                    e.floor_normal = vec3f(0.0, 1.0, 0.0);
+                    e.vel.y = 0.0;
+                }
+            }
+        }
+        // A DECK is the floor exactly, at every point along it: a graded
+        // road, a railway, a bridge span. Feet within a slab-step above it
+        // (a collider slab top, a heightfield vertex the press could not
+        // follow) are set DOWN onto the deck; feet within step reach
+        // below it (a raised ballast walked into, a dip, the seam of a
+        // bridge deck) are lifted onto it. A deck another storey away —
+        // the overpass above, the road under a bridge — is not this
+        // floor, and neither is a deck under something the mover stands
+        // on. Last, so it wins over the terrain the deck was built on.
+        if !decks.is_empty() && e.vel.y <= 0.0 && !e.hits {
+            let feet_now = e.pos.y - e.half.y;
+            if let Some(deck) = crate::deck::deck_floor_under(decks, e.pos, e.half, feet_now, CLIMB) {
+                e.pos.y = deck + e.half.y;
+                e.on_floor = true;
+                e.floor_id = 0;
+                e.floor_normal = vec3f(0.0, 1.0, 0.0);
+                e.vel.y = 0.0;
+            }
+        }
         // A prop's top surface is a floor the way the terrain is — for feet
         // already within step reach of it. Columns further above never grab
         // a mover walking beneath them, which is what keeps a roofed doorway
@@ -542,7 +580,18 @@ pub fn step_world(world: &mut GameWorld) {
         if let Some((_, base, owner_yaw)) =
             owner_pose.iter().find(|(id, _, _)| *id == e.attached_to)
         {
-            e.pos = *base + e.attach_offset;
+            // The offset is in the OWNER'S frame (x right, y up, z forward),
+            // so a driver's seat stays the driver's seat as the car turns.
+            // Offsets on the up axis alone — every rider before drivers —
+            // are unchanged by the rotation.
+            let right = crate::heading_to_right(*owner_yaw);
+            let forward = crate::heading_to_forward(*owner_yaw);
+            let o = e.attach_offset;
+            e.pos = vec3f(
+                base.x + right.x * o.x + forward.x * o.z,
+                base.y + o.y,
+                base.z + right.z * o.x + forward.z * o.z,
+            );
             e.vel = vec3f(0.0, 0.0, 0.0);
             if e.attach_ride {
                 // A latched rider scrabbles: its model spins in place.
