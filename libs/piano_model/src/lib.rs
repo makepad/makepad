@@ -952,7 +952,7 @@ impl EngineCore {
                             (i as u32).wrapping_mul(0xc2b2_ae35) ^ v.strike_count.wrapping_mul(0x27d4_eb2f) ^ 0x9e37;
                         let amp = ((v.power / 64.0).sqrt() * DAMPER_NOISE_AMP).min(2.0);
                         let lp_c = 1.0 - (-core::f32::consts::TAU * 2500.0 / self.sample_rate).exp();
-                        v.damper_noise.start((0.012 * self.sample_rate) as u32, amp, lp_c, seed);
+                        v.damper_noise.start((0.012 * self.sample_rate) as u32, amp, lp_c, seed, 0);
                     }
                 } else {
                     v.eng = eng;

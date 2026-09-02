@@ -22,6 +22,19 @@
 // twice rejected as "frequencies that don't belong". A5's bracket also
 // tracked a reference sample that is the same transposed source as C6
 // (identical fitted B = 1.73e-3). Upper (excess-noise) edges untouched.
+// 2026-09-01, bass hammer/decay pass (measured against the Salamander
+// corpus with that pass's harness): A2 noise_hi LOWER edge -23.6 ->
+// -25.5 and A3 hi_ratio LOWER edge -58.5 -> -63.0. Both moved because
+// the phantom-bank gain came down 0.25 -> 0.08 (its free longitudinal
+// modes were the largest single 2-8 kHz source of a forte C1 and a
+// 6 dB share of A3's 5-9 kHz sustain — the class of tone the listener
+// rejected twice) plus, at A2, the bass strike-point correction. Real
+// values at layer 14: A2 noise_hi -32.0 (the model at -24.3 is still
+// 8 dB BRIGHTER than the instrument, so the edge moved toward it); A3
+// hi_ratio -40.9 — the model's 5-9 kHz sustain is 20 dB under the real
+// A3 with or without the phantom tones; that gap is the known contact
+// micro-structure item, and fake inharmonic energy is not the way to
+// close it. Upper (excess) edges untouched.
 // 2026-08-31, after the bridge-coupling split (partial-dependent
 // prompt/aftersound): three edges re-anchored against the REAL
 // multi-velocity corpus (Salamander C5 grand, local/score-corpus/
@@ -139,7 +152,7 @@ const NOTES: &[RefNote] = &[
         lad_300: &[0.0, -11.7, -9.9, -19.5, -23.8, -23.3, -34.9, -40.5, -27.9, -26.1, -18.5, -22.5, -26.9, -24.4, -21.2, -37.5, -31.7, -22.6, -33.3, -26.2],
         tol: [10.90, 9.62, 13.17],
         attack_ms: (4.2, 50.5), prompt: (-0.4, 20.2), after: (0.2, 11.8),
-        noise_hi: (-23.6, -6.9), hi_ratio: (-65.2, -29.6) },
+        noise_hi: (-25.5, -6.9), hi_ratio: (-65.2, -29.6) },
     RefNote { key: 48, name: "C3", win_s: 0.0460,
         lad_on: &[-1.9, 0.0, -11.5, -14.6, -16.2, -16.4, -17.3, -21.4, -18.3, -10.1, -34.6, -20.8, -20.1, -18.9, -16.3, -20.5, -41.5, -18.1, -19.8, -25.5],
         lad_100: &[-1.3, 0.0, -10.3, -9.8, -16.9, -16.9, -16.2, -21.4, -19.5, -7.8, -27.0, -16.7, -17.8, -20.3, -17.1, -28.9, -33.8, -20.7, -20.9, -22.1],
@@ -153,7 +166,7 @@ const NOTES: &[RefNote] = &[
         lad_300: &[0.0, -6.4, -20.3, -21.9, -19.9, -29.6, -13.9, -22.8, -19.3, -17.3, -18.0, -25.4, -17.8, -31.0, -28.6, -47.9, -46.7, -40.3, -32.1, -38.7],
         tol: [15.76, 15.48, 13.30],
         attack_ms: (3.1, 31.0), prompt: (7.5, 27.5), after: (3.1, 14.0),
-        noise_hi: (-29.0, -1.2), hi_ratio: (-58.5, -20.5) },
+        noise_hi: (-29.0, -1.2), hi_ratio: (-63.0, -20.5) },
     RefNote { key: 60, name: "C4", win_s: 0.0460,
         lad_on: &[0.0, -8.0, -16.9, -14.9, -15.7, -16.4, -11.2, -14.5, -10.6, -19.4, -11.1, -16.4, -21.9, -16.7, -13.1, -13.1, -23.7, -27.8, -26.1, -32.9],
         lad_100: &[0.0, -6.7, -18.9, -17.0, -21.4, -20.9, -17.7, -15.7, -20.2, -26.0, -14.6, -22.4, -31.4, -28.4, -17.5, -17.5, -21.0, -35.5, -28.8, -39.1],

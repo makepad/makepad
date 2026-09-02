@@ -12,7 +12,7 @@
 // which ships beside the model file):
 //  - the trained network `engineMain` itself, embedded verbatim as
 //    resources/pianoforte-engineMain.bin (an ONNX protobuf, parsed at
-//    construction by the pure-Rust reader below — no runtime dependency);
+//    construction by the shared pure-Rust AI loader — no runtime dependency);
 //  - the synthesis algorithm: a 30-partial harmonic additive voice whose
 //    per-partial amplitudes are the network's output, crossfaded against a
 //    13-partial measured inharmonic profile (three register buckets) with
@@ -71,6 +71,7 @@ use crate::modal::{detect_path, run_modes, KernelPath, MAX_CHUNK};
 use crate::params::{PianoPreset, Voicing};
 use crate::simd::*;
 use crate::{Instrument, Piano, PianoEvent, TimedEvent};
+use makepad_ai_loader::formats::onnx::{OnnxAttribute, OnnxModel};
 
 // ---------------------------------------------------------------------------
 // The PianoForte register profiles (measured partial ratios and amplitudes
@@ -259,193 +260,65 @@ impl ForteNet {
             out_scale: 0.0,
             out_off: 0.0,
         };
+        let model = OnnxModel::parse(data)
+            .unwrap_or_else(|error| panic!("pianoforte-engineMain: malformed ONNX: {error}"));
         let mut found = 0u32;
-        let mut consts_seen = 0usize;
-        let mut r = Pb::new(data);
-        while let Some((f, wt)) = r.key() {
-            if f == 7 && wt == 2 {
-                // GraphProto
-                let mut g = Pb::new(r.bytes());
-                while let Some((gf, gwt)) = g.key() {
-                    match (gf, gwt) {
-                        (5, 2) => {
-                            // initializer: TensorProto
-                            let (name, dims, data) = parse_tensor(g.bytes());
-                            let dst: Option<&mut [f32]> = match name.as_slice() {
-                                b"onnx::MatMul_46" => Some(&mut net.w0),
-                                b"L.0.bias" => Some(&mut net.b0),
-                                b"onnx::MatMul_48" => Some(&mut net.w1),
-                                b"L.1.bias" => Some(&mut net.b1),
-                                b"onnx::MatMul_49" => Some(&mut net.w2),
-                                b"L.2.bias" => Some(&mut net.b2),
-                                b"onnx::MatMul_50" => Some(&mut net.w3),
-                                b"L.3.bias" => Some(&mut net.b3),
-                                b"onnx::MatMul_51" => Some(&mut net.w4),
-                                b"L.4.bias" => Some(&mut net.b4),
-                                b"a" => Some(core::slice::from_mut(&mut net.act_a)),
-                                b"b" => Some(core::slice::from_mut(&mut net.act_b)),
-                                b"c" => Some(core::slice::from_mut(&mut net.act_c)),
-                                b"onnx::Sub_47" => Some(core::slice::from_mut(&mut net.act_s)),
-                                _ => None,
-                            };
-                            if let Some(dst) = dst {
-                                let n: i64 = dims.iter().product::<i64>().max(1);
-                                assert_eq!(
-                                    n as usize,
-                                    dst.len(),
-                                    "pianoforte-engineMain: tensor {} has {} values, expected {}",
-                                    String::from_utf8_lossy(&name),
-                                    n,
-                                    dst.len()
-                                );
-                                assert_eq!(data.len(), dst.len(), "pianoforte-engineMain: tensor data length");
-                                dst.copy_from_slice(&data);
-                                found += 1;
-                            }
-                        }
-                        (1, 2) => {
-                            // node: only the two output-stage Constant scalars matter
-                            if let Some(v) = parse_constant_node(g.bytes()) {
-                                match consts_seen {
-                                    0 => net.out_scale = v,
-                                    1 => net.out_off = v,
-                                    _ => {}
-                                }
-                                consts_seen += 1;
-                            }
-                        }
-                        _ => g.skip(gwt),
-                    }
-                }
-            } else {
-                r.skip(wt);
+        for (name, tensor) in &model.graph.initializers {
+            let dst: Option<&mut [f32]> = match name.as_str() {
+                "onnx::MatMul_46" => Some(&mut net.w0),
+                "L.0.bias" => Some(&mut net.b0),
+                "onnx::MatMul_48" => Some(&mut net.w1),
+                "L.1.bias" => Some(&mut net.b1),
+                "onnx::MatMul_49" => Some(&mut net.w2),
+                "L.2.bias" => Some(&mut net.b2),
+                "onnx::MatMul_50" => Some(&mut net.w3),
+                "L.3.bias" => Some(&mut net.b3),
+                "onnx::MatMul_51" => Some(&mut net.w4),
+                "L.4.bias" => Some(&mut net.b4),
+                "a" => Some(core::slice::from_mut(&mut net.act_a)),
+                "b" => Some(core::slice::from_mut(&mut net.act_b)),
+                "c" => Some(core::slice::from_mut(&mut net.act_c)),
+                "onnx::Sub_47" => Some(core::slice::from_mut(&mut net.act_s)),
+                _ => None,
+            };
+            if let Some(dst) = dst {
+                let values = tensor.f32_values().unwrap_or_else(|error| {
+                    panic!("pianoforte-engineMain: tensor {name}: {error}")
+                });
+                assert_eq!(
+                    values.len(),
+                    dst.len(),
+                    "pianoforte-engineMain: tensor {name} data length"
+                );
+                dst.copy_from_slice(&values);
+                found += 1;
             }
         }
+        let constants: Vec<f32> = model
+            .graph
+            .nodes
+            .iter()
+            .filter(|node| node.op_type == "Constant")
+            .filter_map(|node| {
+                node.attributes.values().find_map(|attribute| {
+                    let OnnxAttribute::Tensor(tensor) = attribute else {
+                        return None;
+                    };
+                    let values = tensor.f32_values().ok()?;
+                    (values.len() == 1).then_some(values[0])
+                })
+            })
+            .collect();
+        if let [out_scale, out_off] = constants.as_slice() {
+            net.out_scale = *out_scale;
+            net.out_off = *out_off;
+        }
         assert_eq!(found, 14, "pianoforte-engineMain: found {found} of 14 expected tensors");
-        assert_eq!(consts_seen, 2, "pianoforte-engineMain: expected the 2 output-stage constants");
+        assert_eq!(constants.len(), 2, "pianoforte-engineMain: expected the 2 output-stage constants");
         for v in [net.act_a, net.act_b, net.act_c, net.act_s, net.out_scale, net.out_off] {
             assert!(v.is_finite(), "pianoforte-engineMain: non-finite scalar");
         }
         net
-    }
-}
-
-/// Minimal protobuf wire-format reader (varint + length-delimited only, the
-/// two forms ONNX uses for everything we read). Bounds-checked; a truncated
-/// buffer ends the walk instead of panicking mid-read.
-struct Pb<'a> {
-    b: &'a [u8],
-    p: usize,
-}
-
-impl<'a> Pb<'a> {
-    fn new(b: &'a [u8]) -> Self {
-        Self { b, p: 0 }
-    }
-    fn varint(&mut self) -> u64 {
-        let mut v = 0u64;
-        let mut s = 0u32;
-        while self.p < self.b.len() {
-            let byte = self.b[self.p];
-            self.p += 1;
-            if s < 64 {
-                v |= ((byte & 0x7f) as u64) << s;
-            }
-            if byte & 0x80 == 0 {
-                break;
-            }
-            s += 7;
-        }
-        v
-    }
-    fn key(&mut self) -> Option<(u64, u64)> {
-        if self.p >= self.b.len() {
-            return None;
-        }
-        let k = self.varint();
-        Some((k >> 3, k & 7))
-    }
-    fn bytes(&mut self) -> &'a [u8] {
-        let n = self.varint() as usize;
-        let end = (self.p + n).min(self.b.len());
-        let r = &self.b[self.p..end];
-        self.p = end;
-        r
-    }
-    fn skip(&mut self, wt: u64) {
-        match wt {
-            0 => {
-                self.varint();
-            }
-            1 => self.p = (self.p + 8).min(self.b.len()),
-            2 => {
-                let n = self.varint() as usize;
-                self.p = (self.p + n).min(self.b.len());
-            }
-            5 => self.p = (self.p + 4).min(self.b.len()),
-            _ => self.p = self.b.len(), // unknown wire type: stop the walk
-        }
-    }
-}
-
-/// TensorProto: name (8), dims (1), float payload in raw_data (9) or
-/// packed float_data (4).
-fn parse_tensor(b: &[u8]) -> (Vec<u8>, Vec<i64>, Vec<f32>) {
-    let mut t = Pb::new(b);
-    let mut name = Vec::new();
-    let mut dims = Vec::new();
-    let mut data = Vec::new();
-    while let Some((f, wt)) = t.key() {
-        match (f, wt) {
-            (1, 0) => dims.push(t.varint() as i64),
-            (8, 2) => name = t.bytes().to_vec(),
-            (4, 2) | (9, 2) => {
-                for c in t.bytes().chunks_exact(4) {
-                    data.push(f32::from_le_bytes([c[0], c[1], c[2], c[3]]));
-                }
-            }
-            (4, 5) => {
-                let end = (t.p + 4).min(t.b.len());
-                if end - t.p == 4 {
-                    data.push(f32::from_le_bytes([t.b[t.p], t.b[t.p + 1], t.b[t.p + 2], t.b[t.p + 3]]));
-                }
-                t.p = end;
-            }
-            _ => t.skip(wt),
-        }
-    }
-    (name, dims, data)
-}
-
-/// NodeProto: returns the scalar payload if this is a Constant node with a
-/// single-element float tensor attribute (AttributeProto.t = field 5).
-fn parse_constant_node(b: &[u8]) -> Option<f32> {
-    let mut n = Pb::new(b);
-    let mut op_is_const = false;
-    let mut value = None;
-    while let Some((f, wt)) = n.key() {
-        match (f, wt) {
-            (4, 2) => op_is_const = n.bytes() == b"Constant",
-            (5, 2) => {
-                let mut a = Pb::new(n.bytes());
-                while let Some((af, awt)) = a.key() {
-                    if af == 5 && awt == 2 {
-                        let (_, _, data) = parse_tensor(a.bytes());
-                        if data.len() == 1 {
-                            value = Some(data[0]);
-                        }
-                    } else {
-                        a.skip(awt);
-                    }
-                }
-            }
-            _ => n.skip(wt),
-        }
-    }
-    if op_is_const {
-        value
-    } else {
-        None
     }
 }
 
