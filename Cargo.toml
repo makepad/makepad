@@ -28,6 +28,7 @@ workspace.members = [
     "libs/asset/store",
     "libs/asset/chat",
     "libs/chat_ui",
+    "libs/ai/hub_ui",
     "libs/asset/annotate",
     "libs/render",
     "libs/raytrace",
@@ -82,6 +83,9 @@ workspace.members = [
     "examples/render_to_texture",
     # === digital-fabrication product ===
     "apps/fab",
+    "apps/fabric",
+    "libs/fabric/measure",
+    "libs/fabric/draft",
     # === xr app ===
     "xr",
     # === studio ===
@@ -94,6 +98,8 @@ workspace.members = [
     "libs/score_layout",
     "libs/score_play",
     "libs/score_render",
+    "libs/score_view",
+    "libs/score_view/tests/embed_app",
     "libs/score_ai",
     "libs/score_import",
     "libs/score_pdf",
@@ -102,6 +108,8 @@ workspace.members = [
     "libs/midi_file",
     "libs/soundfont",
     "libs/piano_model",
+    "libs/drumkit",
+    "libs/drumkit_phys",
     "libs/musicxml",
     # === own MP3 / Ogg Vorbis decoders ===
     "libs/audio_decode",

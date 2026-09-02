@@ -1,0 +1,10 @@
+[package]
+name = "makepad-ai-beats"
+version = "0.1.0"
+edition = "2021"
+description = "Native Beat This! beat/downbeat tracking on the makepad ggml graph runtime"
+license = "MIT"
+
+[dependencies]
+makepad-ai-common = { path = "../common" }
+makepad-ai-loader = { path = "../../loader" }

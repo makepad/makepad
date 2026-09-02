@@ -24,6 +24,8 @@ members = [
     "models/speech",
     "models/splat",
     "models/stems",
+    "models/beats",
+    "models/notes",
     "models/trellis",
 ]
 resolver = "2"

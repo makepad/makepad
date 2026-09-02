@@ -1219,6 +1219,7 @@ pub fn validate_loras_for_backend(
 
 /// One generated output. `content_type` drives the `/artifact` response;
 /// `ext` names the file on disk.
+#[derive(Clone, Debug)]
 pub struct ArtifactData {
     pub content_type: &'static str,
     pub ext: &'static str,
@@ -1568,6 +1569,7 @@ pub fn backend_compiled(name: &str) -> bool {
         // so it is compiled in exactly when the LLM is.
         "vision" => cfg!(feature = "llm"),
         "ocr" => cfg!(feature = "llm"),
+        "notes" => cfg!(feature = "notes-native"),
         "kokoro" => cfg!(feature = "tts"),
         "whisper" => cfg!(feature = "stt"),
         "indextts" => cfg!(feature = "indextts"),
@@ -1577,6 +1579,7 @@ pub fn backend_compiled(name: &str) -> bool {
         "moss" => cfg!(feature = "audio"),
         "woosh" => cfg!(feature = "audio"),
         "ace" => cfg!(feature = "audio"),
+        "beats" => cfg!(feature = "beats-native"),
         "trellis" => cfg!(feature = "mesh"),
         "paint" | "paint-test" => cfg!(feature = "paint"),
         "matte-native" => cfg!(feature = "matte-native"),
@@ -1766,6 +1769,16 @@ pub fn model_availability(
 
 pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, AssetAiError> {
     match spec.backend.as_str() {
+        "sample-kit" => Err(AssetAiError::Unavailable(
+            "sample-kit is a sample bank, not a model".to_string(),
+        )),
+        #[cfg(feature = "notes-native")]
+        "notes" => Ok(Box::new(crate::notes_backend::NotesBackend::new(&spec.id))),
+        #[cfg(not(feature = "notes-native"))]
+        "notes" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a build with the 'notes-native' cargo feature",
+            spec.id
+        ))),
         #[cfg(feature = "paint")]
         "paint" | "paint-test" => Ok(Box::new(crate::paint_backend::PaintBackend::new(spec))),
         "testpattern" => Ok(Box::new(crate::testpattern::TestPatternBackend::new(
@@ -1880,6 +1893,13 @@ pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, Asset
         ))),
         #[cfg(feature = "audio")]
         "ace" => Ok(Box::new(crate::ace_backend::AceBackend::new_ace(&spec.id))),
+        #[cfg(feature = "beats-native")]
+        "beats" => Ok(Box::new(crate::beats_backend::BeatsBackend::new(&spec.id))),
+        #[cfg(not(feature = "beats-native"))]
+        "beats" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a build with the 'beats-native' cargo feature",
+            spec.id
+        ))),
         #[cfg(not(feature = "audio"))]
         "moss" => Err(AssetAiError::Unavailable(format!(
             "model {} needs a build with the 'audio' cargo feature",
@@ -2024,7 +2044,6 @@ mod tests {
     use super::{backend_compiled, create_backend, model_availability};
     #[cfg(not(feature = "python-backends"))]
     use super::backend_provisioned;
-    #[cfg(not(feature = "python-backends"))]
     use crate::error::AssetAiError;
     use crate::gpu::GpuInfo;
     use crate::registry::{Domain, ModelSpec};
@@ -2051,6 +2070,17 @@ mod tests {
             note: None,
             license: None,
             files: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn sample_kit_is_downloadable_but_not_runnable() {
+        match create_backend(&spec("sample-kit", true, Some(0.0))) {
+            Err(AssetAiError::Unavailable(message)) => {
+                assert_eq!(message, "sample-kit is a sample bank, not a model")
+            }
+            Err(error) => panic!("wrong sample-kit error: {error}"),
+            Ok(_) => panic!("sample-kit unexpectedly created a runnable backend"),
         }
     }
 
