@@ -96,6 +96,7 @@ mod media;
 mod mesh_view;
 // MIDI LEARN: alt-click (or LEARN+click) any wrapped dial/slider, wiggle a
 // CC, and that CC drives it from then on — persistent (midi-map.txt).
+mod midi_clock;
 mod midi_learn;
 mod mix;
 mod mixer;
@@ -855,6 +856,17 @@ script_mod! {
                             // 5-pin DIN, lit while learn mode is on.
                             Tip{ text: "MIDI learn: click a control, wiggle a CC"
                                 midi_learn_btn := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/midi.svg") } }
+                            }
+                            // The house clock, sent out as MIDI beat clock
+                            // for anything else in the rig to follow. Off
+                            // until asked: turning it on opens every MIDI
+                            // output the machine has, and on some drivers
+                            // an open port is one no other app can have.
+                            Tip{ text: "Send the beat clock to every MIDI output"
+                                clock_out_btn := ChromeButton{
+                                    width: 46
+                                    text: "CLK"
+                                }
                             }
                             // The RIG GROUP: karaoke overlay pair, master
                             // fadeout, and the output window — the things
@@ -6503,9 +6515,22 @@ pub struct App {
     /// Operator tap tempo, and the clock override its taps produce.
     #[rust]
     tap_tempo: TapTempo,
+    /// The MIDI beat clock sender, alive only while it is switched on.
+    #[rust]
+    clock_sender: Option<crate::midi_clock::ClockSender>,
+    #[rust]
+    clock_out: bool,
+    /// Every output the clock is being sent to while it is on.
+    #[rust]
+    clock_out_ports: Vec<MidiPortId>,
+    /// Every MIDI output the machine has, as the last port scan saw it.
+    /// Only opened when the clock is switched on.
+    #[rust]
+    all_output_ports: Vec<MidiPortId>,
     /// One tap collector per deck, for retuning that record's grid. Its
     /// own rather than the room's: tapping a record is a measurement of
     /// that record, and mixing the two runs would make each one wrong.
+    #[rust]
     deck_tap: [TapTempo; 2],
     #[rust]
     beat_override: Option<BeatOverride>,
@@ -11425,6 +11450,7 @@ p2 {}
     /// visuals through a breakdown and puts them back on the grid the drop
     /// lands on.
     fn pump_beat_clock(&mut self, snap: &SyncSnapshot) {
+        self.pump_clock_out();
         let now = Instant::now();
         let epoch = *self.clock_epoch.get_or_insert(now);
         let secs = now.saturating_duration_since(epoch).as_secs_f64();
@@ -11456,6 +11482,75 @@ p2 {}
             // says so — the source it was following is still the source it
             // is coasting on.
             None => self.beat_clock.coast(secs),
+        }
+    }
+
+    /// Send the house clock out as MIDI beat clock, or stop.
+    ///
+    /// Switching it on opens every MIDI output the machine has, which is
+    /// why it is a switch and not a default: on some drivers a port that
+    /// is open is a port no other application can have, and a VJ rig with
+    /// one synth in it should not be quietly holding all of them.
+    fn set_clock_out(&mut self, cx: &mut Cx, on: bool) {
+        self.clock_out = on;
+        if !on {
+            if let Some(sender) = self.clock_sender.take() {
+                sender.close();
+            }
+            // Back to the APC's own ports, which is what the LED writer
+            // needs and all it needs.
+            let ports = self.apc_output_ports.clone();
+            cx.use_midi_outputs(&ports);
+            return;
+        }
+        let mut ports = self.apc_output_ports.clone();
+        for port in &self.all_output_ports {
+            if !ports.contains(port) {
+                ports.push(*port);
+            }
+        }
+        cx.use_midi_outputs(&ports);
+        let share = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::midi_clock::ClockShare::new(),
+        ));
+        let sender = crate::midi_clock::ClockSender::spawn(cx.midi_output(), share);
+        sender.publish(false, 0.0, 0.0, &ports);
+        self.clock_out_ports = ports;
+        self.clock_sender = Some(sender);
+    }
+
+    /// Hand the sender this pump's view of the beat. Cheap: a lock and
+    /// five writes, on a thread that never waits for it.
+    fn pump_clock_out(&mut self) {
+        let Some(sender) = self.clock_sender.as_ref() else { return };
+        let bpm = self.beat_clock.bpm();
+        let running = bpm > 1.0
+            && bpm.is_finite()
+            && self.clock_source != crate::beat_sync::ClockSource::None;
+        let position = match self.clock_secs(Instant::now()) {
+            Some(secs) => self.beat_clock.position_at(secs),
+            None => 0.0,
+        };
+        sender.publish(running, bpm, position, &self.clock_out_ports);
+    }
+
+    fn clock_settings_path() -> std::path::PathBuf {
+        service::session_config_from_env().cache_parent.join("clock.txt")
+    }
+
+    fn save_clock_settings(&self) {
+        let mut store = crate::settings::Settings::new();
+        store.set_bool("clock.midi_out", self.clock_out);
+        let _ = crate::durable::write_file(&Self::clock_settings_path(), store.to_text());
+    }
+
+    fn load_clock_settings(&mut self, cx: &mut Cx) {
+        let Ok(body) = std::fs::read_to_string(Self::clock_settings_path()) else {
+            return;
+        };
+        let store = crate::settings::Settings::from_text(&body);
+        if store.bool("clock.midi_out", false) {
+            self.set_clock_out(cx, true);
         }
     }
 
@@ -22819,6 +22914,7 @@ p2 {}
             self.music_refs.decks[index] = refs;
         }
         self.refresh_splat_surface(cx);
+        self.paint_lit(cx, ids!(clock_out_btn), self.clock_out);
         self.paint_lit(cx, ids!(auto_sync), self.decks.auto_sync);
         self.paint_lit(cx, ids!(auto_dj), self.autopilot.on());
         self.paint_lit(cx, ids!(auto_vocal), self.autopilot.vocal_guard);
@@ -27013,6 +27109,10 @@ impl MatchEvent for App {
         // The phones rig loads before the first devices event, which then
         // resolves the saved name against what the OS actually has.
         self.load_phones_settings();
+        // The clock's own switch, after the ports event has been seen at
+        // least once -- and harmless before it, since the sender simply
+        // has nowhere to send until one arrives.
+        self.load_clock_settings(cx);
         self.sync_midi_learn_ui(cx);
         self.sync_slot_controls_ui(cx);
         // First paint of the fx slot strips: an app that starts with empty
@@ -27111,8 +27211,21 @@ impl MatchEvent for App {
                 outputs.push(desc.port_id);
             }
         }
+        self.all_output_ports = ports
+            .descs
+            .iter()
+            .filter(|desc| desc.port_type.is_output())
+            .map(|desc| desc.port_id)
+            .collect();
+        // The clock, when it is on, goes to every output; the LEDs only
+        // ever go to the pad surface's own.
+        let opened = match self.clock_out {
+            true => self.all_output_ports.clone(),
+            false => outputs.clone(),
+        };
         cx.use_midi_inputs(&inputs);
-        cx.use_midi_outputs(&outputs);
+        cx.use_midi_outputs(&opened);
+        self.clock_out_ports = opened;
         self.apc_input_ports = inputs;
         self.apc_output_ports = outputs;
         self.apc_leds.set_model(model.unwrap_or_default());
@@ -27386,7 +27499,11 @@ impl MatchEvent for App {
                     self.apply_grid_edit(cx, deck, edit);
                 }
             }
-            if self.ui.button(cx, ids!(grid_tap)).clicked(actions) {
+            if self.ui.button(cx, ids!(clock_out_btn)).clicked(actions) {
+            self.set_clock_out(cx, !self.clock_out);
+            self.save_clock_settings();
+        }
+        if self.ui.button(cx, ids!(grid_tap)).clicked(actions) {
                 // Timestamped now and anchored on where the record IS: the
                 // tempo comes from room time and the ruling from track
                 // time, and the engine divides out the deck's rate.
