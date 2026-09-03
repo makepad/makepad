@@ -257,6 +257,7 @@ impl DrawVars {
             };
 
             let cx = vm.host.cx_mut();
+            mapping.scope_uniforms_gen = cx.next_uniform_gen();
             let index = cx.draw_shaders.shaders.len();
             cx.draw_shaders.shaders.push(CxDrawShader {
                 debug_id: LiveId(0),
@@ -377,6 +378,7 @@ impl Cx {
             .update_uniform_buffer(self.os.gl(), draw_list.draw_list_uniforms.as_slice());
 
         for order_index in 0..draw_order_len {
+            let uniforms_gen = self.next_uniform_gen();
             let Some(draw_item_id) =
                 self.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
             else {
@@ -485,7 +487,7 @@ impl Cx {
                 }
 
                 // update the zbias uniform if we have it.
-                draw_call.resolve_zbias(*zbias, sploded);
+                draw_call.resolve_zbias(*zbias, sploded, uniforms_gen);
                 *zbias += zbias_step;
 
                 draw_item
@@ -899,8 +901,11 @@ impl Cx {
             return None;
         }
 
+        let ortho_uniforms_gen = self.next_uniform_gen();
+        let dpi_uniforms_gen = self.next_uniform_gen();
+        let pass = &mut self.passes[draw_pass_id];
         if !pass.keep_camera_matrix {
-            pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
+            pass.set_ortho_matrix(pass_rect.pos, pass_rect.size, ortho_uniforms_gen);
             if to_texture {
                 // OFFSCREEN passes render UPSIDE DOWN on GL: an FBO's rows
                 // are stored bottom-up, so inverting the projection's Y
@@ -916,7 +921,7 @@ impl Cx {
                 m[13] = -m[13];
             }
         }
-        pass.set_dpi_factor(dpi_factor);
+        pass.set_dpi_factor(dpi_factor, dpi_uniforms_gen);
 
         pass.os
             .pass_uniforms
@@ -2460,6 +2465,12 @@ pub struct CxOsDrawCall {
     pub user_uniforms: OpenglBuffer,
     pub inst_vb: OpenglBuffer,
     pub vao: Option<CxOsDrawCallVao>,
+    #[cfg(test)]
+    pub uniforms_recording_gen: Option<u64>,
+    #[cfg(test)]
+    pub draw_call_uniforms_gen: Option<u64>,
+    #[cfg(test)]
+    pub user_uniforms_gen: Option<u64>,
 }
 
 impl CxOsDrawCall {

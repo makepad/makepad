@@ -849,10 +849,18 @@ impl Cx {
 
                     // Set up pass uniforms
                     if !self.passes[*draw_pass_id].keep_camera_matrix {
-                        self.passes[*draw_pass_id].set_ortho_matrix(dvec2(0.0, 0.0), size);
+                        let uniforms_gen = self.next_uniform_gen();
+                        self.passes[*draw_pass_id].set_ortho_matrix(
+                            dvec2(0.0, 0.0),
+                            size,
+                            uniforms_gen,
+                        );
                     }
-                    self.passes[*draw_pass_id].set_dpi_factor(dpi_factor);
-                    self.passes[*draw_pass_id].set_time(time as f32);
+                    let dpi_uniforms_gen = self.next_uniform_gen();
+                    self.passes[*draw_pass_id]
+                        .set_dpi_factor(dpi_factor, dpi_uniforms_gen);
+                    let time_uniforms_gen = self.next_uniform_gen();
+                    self.passes[*draw_pass_id].set_time(time as f32, time_uniforms_gen);
 
                     let mut fb = window_framebuffers
                         .remove(&window_id.id())
@@ -1102,10 +1110,17 @@ impl Cx {
         };
 
         if !self.passes[draw_pass_id].keep_camera_matrix {
-            self.passes[draw_pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size);
+            let uniforms_gen = self.next_uniform_gen();
+            self.passes[draw_pass_id].set_ortho_matrix(
+                pass_rect.pos,
+                pass_rect.size,
+                uniforms_gen,
+            );
         }
-        self.passes[draw_pass_id].set_dpi_factor(dpi_factor);
-        self.passes[draw_pass_id].set_time(time as f32);
+        let dpi_uniforms_gen = self.next_uniform_gen();
+        self.passes[draw_pass_id].set_dpi_factor(dpi_factor, dpi_uniforms_gen);
+        let time_uniforms_gen = self.next_uniform_gen();
+        self.passes[draw_pass_id].set_time(time as f32, time_uniforms_gen);
 
         // Taking the framebuffer out of the store lets the raster below sample
         // every *other* offscreen target while writing into this one.
@@ -1219,6 +1234,7 @@ impl Cx {
         let sploded = self.passes[draw_pass_id].sploded.is_some();
 
         for order_index in 0..draw_order_len {
+            let uniforms_gen = self.next_uniform_gen();
             let Some(draw_item_id) =
                 self.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
             else {
@@ -1287,7 +1303,7 @@ impl Cx {
                 if let CxDrawKind::DrawCall(dc) =
                     &mut self.draw_lists[draw_list_id].draw_items[draw_item_id].kind
                 {
-                    dc.resolve_zbias(current_zbias, sploded);
+                    dc.resolve_zbias(current_zbias, sploded, uniforms_gen);
                 }
             }
             *zbias += zbias_step;

@@ -2290,6 +2290,7 @@ fn pulse_slot_set(cx: &mut Cx, s: PulseSlot, v: [f32; 4]) {
             }
         }
         PulseSlot::Uni { list, item, at } => {
+            let uniforms_gen = cx.next_uniform_gen();
             let items = &mut cx.draw_lists[list].draw_items;
             if item >= items.len() {
                 return;
@@ -2297,15 +2298,16 @@ fn pulse_slot_set(cx: &mut Cx, s: PulseSlot, v: [f32; 4]) {
             if let Some(call) = items[item].kind.draw_call_mut() {
                 if let Some(dst) = call.dyn_uniforms.get_mut(at..at + 4) {
                     dst.copy_from_slice(&v);
-                    call.uniforms_dirty = true;
+                    call.mark_uniforms_dirty(uniforms_gen);
                 }
             }
         }
         PulseSlot::Scope { shader, at } => {
+            let uniforms_gen = cx.next_uniform_gen();
             if let Some(sh) = cx.draw_shaders.shaders.get_mut(shader) {
                 if let Some(dst) = sh.mapping.scope_uniforms_buf.get_mut(at..at + 4) {
                     dst.copy_from_slice(&v);
-                    sh.mapping.scope_uniforms_gen = sh.mapping.scope_uniforms_gen.wrapping_add(1);
+                    sh.mapping.scope_uniforms_gen = uniforms_gen;
                 }
             }
         }
@@ -4237,7 +4239,8 @@ impl Widget for TweakMaterialSwatch {
                         ],
                     };
                     let id = list.id();
-                    cx.draw_lists[id].draw_list_uniforms.view_transform = m;
+                    let uniforms_gen = cx.next_uniform_gen();
+                    cx.draw_lists[id].set_uniform_view_transform(&m, uniforms_gen);
                     // The scroll viewport's clip, seen through the
                     // magnifier: (screen - t) / k.
                     let clip = self.clip.map(|c| {

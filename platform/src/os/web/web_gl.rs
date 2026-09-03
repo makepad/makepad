@@ -19,6 +19,7 @@ impl Cx {
         zbias: &mut f32,
         zbias_step: f32,
     ) {
+        let shaders_pending = self.os.webgl_shaders_pending != 0;
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
         // Exploded z-layer view: z is the call's nesting depth, not paint order.
@@ -30,6 +31,7 @@ impl Cx {
         // its well on the web.
 
         for order_index in 0..draw_order_len {
+            let uniforms_gen = self.next_uniform_gen();
             let Some(draw_item_id) =
                 self.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
             else {
@@ -66,6 +68,7 @@ impl Cx {
                 }
             } else {
                 let draw_list = &mut self.draw_lists[draw_list_id];
+                let draw_list_recording_gen = draw_list.recording_gen;
                 //view.platform.uni_vw.update_with_f32_data(device, &view.uniforms);
                 let draw_item = &mut draw_list.draw_items[draw_item_id];
                 let draw_call = if let Some(draw_call) = draw_item.kind.draw_call_mut() {
@@ -98,7 +101,7 @@ impl Cx {
                     });
                     draw_call.instance_dirty = false;
                 }
-                draw_call.resolve_zbias(*zbias, sploded);
+                draw_call.resolve_zbias(*zbias, sploded, uniforms_gen);
                 *zbias += zbias_step;
 
                 // update/alloc textures?
@@ -303,6 +306,9 @@ impl Cx {
                         geom_vb_id: vao.geom_vb_id.unwrap(),
                         inst_vb_id: draw_item.os.inst_vb_id.unwrap(),
                     });
+                    draw_item.os.uniforms_recording_gen = None;
+                    draw_item.os.draw_call_uniforms_gen = None;
+                    draw_item.os.user_uniforms_gen = None;
                 }
 
                 // A custom-camera texture pass uploads its Y-flipped copy
@@ -336,6 +342,41 @@ impl Cx {
                     }
                 }
 
+                let reset_draw_uniforms =
+                    draw_item.os.uniforms_recording_gen != Some(draw_list_recording_gen);
+                let upload_draw_call_uniforms = reset_draw_uniforms
+                    || draw_item.os.draw_call_uniforms_gen != Some(draw_call.uniforms_gen);
+                let upload_user_uniforms = reset_draw_uniforms
+                    || draw_item.os.user_uniforms_gen != Some(draw_call.uniforms_gen);
+                let draw_call_uniforms: &[f32] = if upload_draw_call_uniforms {
+                    draw_call.draw_call_uniforms.as_slice()
+                } else {
+                    &[]
+                };
+                let user_uniforms = if upload_user_uniforms {
+                    draw_call.dyn_uniforms.as_slice()
+                } else {
+                    &[]
+                };
+                if !shaders_pending {
+                    draw_item.os.uniforms_recording_gen = Some(draw_list_recording_gen);
+                    if upload_draw_call_uniforms {
+                        draw_item.os.draw_call_uniforms_gen = Some(draw_call.uniforms_gen);
+                    }
+                    if upload_user_uniforms {
+                        draw_item.os.user_uniforms_gen = Some(draw_call.uniforms_gen);
+                    }
+                }
+
+                let pass_uniforms_gen = self.passes[draw_pass_id].pass_uniforms_gen;
+                let draw_list_uniforms_gen = draw_list.uniforms_gen;
+                let uniforms_gen = draw_call.uniforms_gen;
+                let live_uniforms_gen = sh.mapping.scope_uniforms_gen;
+                debug_assert_ne!(pass_uniforms_gen, 0);
+                debug_assert_ne!(draw_list_uniforms_gen, 0);
+                debug_assert_ne!(uniforms_gen, 0);
+                debug_assert_ne!(live_uniforms_gen, 0);
+
                 self.os.from_wasm(FromWasmDrawCall {
                     shader_id: sh.os_shader_id.unwrap(),
                     vao_id: draw_item.os.vao.as_ref().unwrap().vao_id,
@@ -343,10 +384,21 @@ impl Cx {
                     depth_write: draw_call.options.depth_write,
                     backface_culling: draw_call.options.backface_culling,
                     pass_uniforms: WasmPtrF32::new(pass_uniforms),
+                    pass_uniforms_gen_lo: pass_uniforms_gen as u32,
+                    pass_uniforms_gen_hi: (pass_uniforms_gen >> 32) as u32,
                     draw_list_uniforms: WasmPtrF32::new(draw_list.draw_list_uniforms.as_slice()),
-                    draw_call_uniforms: WasmPtrF32::new(draw_call.draw_call_uniforms.as_slice()),
-                    user_uniforms: WasmPtrF32::new(draw_call.dyn_uniforms.as_slice()),
+                    draw_list_uniforms_gen_lo: draw_list_uniforms_gen as u32,
+                    draw_list_uniforms_gen_hi: (draw_list_uniforms_gen >> 32) as u32,
+                    draw_call_uniforms: WasmPtrF32::new(draw_call_uniforms),
+                    draw_call_uniforms_gen_lo: uniforms_gen as u32,
+                    draw_call_uniforms_gen_hi: (uniforms_gen >> 32) as u32,
+                    user_uniforms: WasmPtrF32::new(user_uniforms),
+                    user_uniforms_gen_lo: uniforms_gen as u32,
+                    user_uniforms_gen_hi: (uniforms_gen >> 32) as u32,
                     live_uniforms: WasmPtrF32::new(&sh.mapping.scope_uniforms_buf),
+                    live_uniforms_gen_lo: live_uniforms_gen as u32,
+                    live_uniforms_gen_hi: (live_uniforms_gen >> 32) as u32,
+                    reset_draw_uniforms,
                     const_table: WasmPtrF32::new(&[]),
                     textures,
                 });
@@ -364,8 +416,11 @@ impl Cx {
         self.passes[draw_pass_id].paint_dirty = false;
         let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
         let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
+        let dpi_uniforms_gen = self.next_uniform_gen();
+        let changed_uniforms_gen = self.next_uniform_gen();
+        let ortho_uniforms_gen = self.next_uniform_gen();
         let pass = &mut self.passes[draw_pass_id];
-        pass.set_dpi_factor(dpi_factor);
+        pass.set_dpi_factor(dpi_factor, dpi_uniforms_gen);
         // WebGL render-to-texture coordinates are vertically inverted relative
         // to onscreen canvas rendering: an FBO's rows are stored bottom-up.
         // Every offscreen pass therefore renders with its projection's Y
@@ -394,6 +449,7 @@ impl Cx {
                     m.v[13] = -m.v[13];
                 }
                 pass.os.flipped_uniforms = Some(flipped.as_slice().to_vec());
+                pass.mark_pass_uniforms_dirty(changed_uniforms_gen);
             } else {
                 let offset = pass_rect.pos + pass.view_shift;
                 let size = pass_rect.size * pass.view_scale;
@@ -408,10 +464,11 @@ impl Cx {
                     1.0,
                 );
                 pass.pass_uniforms.camera_view = Mat4f::identity();
+                pass.mark_pass_uniforms_dirty(changed_uniforms_gen);
             }
         } else {
             if !pass.keep_camera_matrix {
-                pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
+                pass.set_ortho_matrix(pass_rect.pos, pass_rect.size, ortho_uniforms_gen);
             }
         }
         pass_rect.size
@@ -770,6 +827,9 @@ pub struct CxOsDrawCallVao {
 pub struct CxOsDrawCall {
     pub vao: Option<CxOsDrawCallVao>,
     pub inst_vb_id: Option<usize>,
+    pub uniforms_recording_gen: Option<u64>,
+    pub draw_call_uniforms_gen: Option<u64>,
+    pub user_uniforms_gen: Option<u64>,
 }
 
 #[derive(Clone)]

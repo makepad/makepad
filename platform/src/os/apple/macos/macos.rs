@@ -785,7 +785,8 @@ impl Cx {
                                 })
                             ]
                         };
-                        self.passes[*draw_pass_id].set_time(time_now);
+                        let uniforms_gen = self.next_uniform_gen();
+                        self.passes[*draw_pass_id].set_time(time_now, uniforms_gen);
                         let presented = if link_drawable.is_some() {
                             // This drawable came from a CAMetalDisplayLink update,
                             // which already schedules it for the update's target
@@ -834,11 +835,13 @@ impl Cx {
                 // between them, and neither matched NextFrame).
                 CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.passes[*draw_pass_id].set_time(time_now);
+                    let uniforms_gen = self.next_uniform_gen();
+                    self.passes[*draw_pass_id].set_time(time_now, uniforms_gen);
                     self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::Texture);
                 }
                 CxDrawPassParent::None => {
-                    self.passes[*draw_pass_id].set_time(time_now);
+                    let uniforms_gen = self.next_uniform_gen();
+                    self.passes[*draw_pass_id].set_time(time_now, uniforms_gen);
                     self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::Texture);
                 }
             }

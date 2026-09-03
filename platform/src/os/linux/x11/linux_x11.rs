@@ -421,7 +421,9 @@ impl X11Cx {
         for draw_pass_id in &passes_todo {
             let parent = {
                 let mut cx = self.cx.borrow_mut();
-                cx.passes[*draw_pass_id].set_time(get_xlib_app_global().time_now() as f32);
+                let uniforms_gen = cx.next_uniform_gen();
+                cx.passes[*draw_pass_id]
+                    .set_time(get_xlib_app_global().time_now() as f32, uniforms_gen);
                 cx.passes[*draw_pass_id].parent.clone()
             };
             match parent {

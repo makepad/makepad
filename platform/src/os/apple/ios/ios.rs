@@ -538,7 +538,9 @@ impl Cx {
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for draw_pass_id in &passes_todo {
-            self.passes[*draw_pass_id].set_time(with_ios_app(|app| app.time_now() as f32));
+            let uniforms_gen = self.next_uniform_gen();
+            self.passes[*draw_pass_id]
+                .set_time(with_ios_app(|app| app.time_now() as f32), uniforms_gen);
             match self.passes[*draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(window_id) => {

@@ -167,6 +167,7 @@ impl DrawVars {
             self.dyn_instance_slots = mapping.instances.total_slots;
 
             let cx = vm.host.cx_mut();
+            mapping.scope_uniforms_gen = cx.next_uniform_gen();
             let index = cx.draw_shaders.shaders.len();
             cx.draw_shaders.shaders.push(CxDrawShader {
                 debug_id: LiveId(0),

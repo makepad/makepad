@@ -201,24 +201,28 @@ export class WasmWebGL extends WasmWebBrowser {
     return index;
   }
 
-  upload_uniform_buffer_from_ptr(gl, gl_buf, ptr_f32) {
+  upload_uniform_buffer_from_ptr(gl, gl_buf, ptr_f32, gen_lo, gen_hi) {
     if (!gl_buf || ptr_f32.ptr == 0 || ptr_f32.len == 0) {
       return;
     }
     if (
-      gl_buf._last_upload_serial === this.buffer_upload_serial &&
-      gl_buf._last_upload_ptr === ptr_f32.ptr &&
-      gl_buf._last_upload_len === ptr_f32.len &&
-      gl_buf._last_upload_memory === this.memory.buffer
+      gl_buf._last_upload_gen_lo === gen_lo &&
+      gl_buf._last_upload_gen_hi === gen_hi
     ) {
       return;
     }
     let data = new Float32Array(this.memory.buffer, ptr_f32.ptr, ptr_f32.len);
     this.upload_uniform_buffer_data(gl, gl_buf, data, gl.DYNAMIC_DRAW);
-    gl_buf._last_upload_serial = this.buffer_upload_serial;
-    gl_buf._last_upload_ptr = ptr_f32.ptr;
-    gl_buf._last_upload_len = ptr_f32.len;
-    gl_buf._last_upload_memory = this.memory.buffer;
+    gl_buf._last_upload_gen_lo = gen_lo;
+    gl_buf._last_upload_gen_hi = gen_hi;
+  }
+
+  reset_uniform_buffer_upload_cache(gl_buf) {
+    if (!gl_buf) {
+      return;
+    }
+    gl_buf._last_upload_gen_lo = undefined;
+    gl_buf._last_upload_gen_hi = undefined;
   }
 
   upload_uniform_buffer_data(gl, gl_buf, data, usage = gl.DYNAMIC_DRAW) {
@@ -451,8 +455,6 @@ export class WasmWebGL extends WasmWebBrowser {
       ),
       pass_uniform_buf: gl.createBuffer(),
       draw_list_uniform_buf: gl.createBuffer(),
-      draw_call_uniform_buf: gl.createBuffer(),
-      user_uniform_buf: gl.createBuffer(),
       live_uniform_buf: gl.createBuffer(),
       texture_locs: texture_locs,
       geometry_slots: shader.geometry_slots,
@@ -638,6 +640,8 @@ export class WasmWebGL extends WasmWebBrowser {
     if (!geometry_buffer || !instance_buffer || !index_buffer) {
       return false;
     }
+    this.reset_uniform_buffer_upload_cache(vao.draw_call_uniform_buf);
+    this.reset_uniform_buffer_upload_cache(vao.user_uniform_buf);
     gl.bindVertexArray(vao.gl_vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, geometry_buffer.gl_buf);
 
@@ -718,6 +722,14 @@ export class WasmWebGL extends WasmWebBrowser {
       geom_ib_id: args.geom_ib_id,
       geom_vb_id: args.geom_vb_id,
       inst_vb_id: args.inst_vb_id,
+      draw_call_uniform_buf:
+        old_vao && old_vao.draw_call_uniform_buf
+          ? old_vao.draw_call_uniform_buf
+          : gl.createBuffer(),
+      user_uniform_buf:
+        old_vao && old_vao.user_uniform_buf
+          ? old_vao.user_uniform_buf
+          : gl.createBuffer(),
       ready: false,
     });
 
@@ -786,25 +798,38 @@ export class WasmWebGL extends WasmWebBrowser {
     let index_buffer = this.index_buffers[vao.geom_ib_id];
     let instance_buffer = this.array_buffers[vao.inst_vb_id];
 
+    if (args.reset_draw_uniforms) {
+      this.reset_uniform_buffer_upload_cache(vao.draw_call_uniform_buf);
+      this.reset_uniform_buffer_upload_cache(vao.user_uniform_buf);
+    }
+
     this.upload_uniform_buffer_from_ptr(
       gl,
       shader.draw_list_uniform_buf,
       args.draw_list_uniforms,
+      args.draw_list_uniforms_gen_lo,
+      args.draw_list_uniforms_gen_hi,
     );
     this.upload_uniform_buffer_from_ptr(
       gl,
-      shader.draw_call_uniform_buf,
+      vao.draw_call_uniform_buf,
       args.draw_call_uniforms,
+      args.draw_call_uniforms_gen_lo,
+      args.draw_call_uniforms_gen_hi,
     );
     this.upload_uniform_buffer_from_ptr(
       gl,
-      shader.user_uniform_buf,
+      vao.user_uniform_buf,
       args.user_uniforms,
+      args.user_uniforms_gen_lo,
+      args.user_uniforms_gen_hi,
     );
     this.upload_uniform_buffer_from_ptr(
       gl,
       shader.live_uniform_buf,
       args.live_uniforms,
+      args.live_uniforms_gen_lo,
+      args.live_uniforms_gen_hi,
     );
 
     this.bind_uniform_block(
@@ -820,12 +845,12 @@ export class WasmWebGL extends WasmWebBrowser {
     this.bind_uniform_block(
       gl,
       shader.draw_call_uniforms_binding,
-      shader.draw_call_uniform_buf,
+      vao.draw_call_uniform_buf,
     );
     this.bind_uniform_block(
       gl,
       shader.user_uniforms_binding,
-      shader.user_uniform_buf,
+      vao.user_uniform_buf,
     );
     this.bind_uniform_block(
       gl,
@@ -855,12 +880,12 @@ export class WasmWebGL extends WasmWebBrowser {
     }
 
     let xr = this.xr;
-    let pass_uniforms = new Float32Array(
-      this.memory.buffer,
-      args.pass_uniforms.ptr,
-      args.pass_uniforms.len,
-    );
     if (xr !== undefined && xr.in_xr_pass) {
+      let pass_uniforms = new Float32Array(
+        this.memory.buffer,
+        args.pass_uniforms.ptr,
+        args.pass_uniforms.len,
+      );
       let left = xr.left_eye;
       let lvp = left.viewport;
       gl.viewport(lvp.x, lvp.y, lvp.width, lvp.height);
@@ -905,10 +930,12 @@ export class WasmWebGL extends WasmWebBrowser {
         instances,
       );
     } else {
-      this.upload_uniform_buffer_data(
+      this.upload_uniform_buffer_from_ptr(
         gl,
         shader.pass_uniform_buf,
-        pass_uniforms,
+        args.pass_uniforms,
+        args.pass_uniforms_gen_lo,
+        args.pass_uniforms_gen_hi,
       );
       gl.drawElementsInstanced(
         gl.TRIANGLES,
