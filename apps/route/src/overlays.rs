@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub const OVERLAY_COUNT: usize = 6;
+pub const OCEAN_OVERLAY_COUNT: usize = 2;
 pub const TERRAIN_LOCAL_MBTILES: &str = "local/overlays/nl-terrain.mbtiles";
 pub const TERRAIN_HOSTED_URL: &str =
     "https://makepad.nl/maps/overlays/terrain-20260903.mkmap/";
@@ -60,6 +61,21 @@ pub const OVERLAY_LAYERS: [OverlayLayer; OVERLAY_COUNT] = [
     OverlayLayer {
         name: "demographics",
         local_mbtiles: "local/overlays/nl-demographics.mbtiles",
+        option: None,
+    },
+];
+
+/// Always-on base overlays, in draw order. Native resolves these paths
+/// relative to the configured maps folder; demo always uses the hosted pair.
+pub const OCEAN_OVERLAY_LAYERS: [OverlayLayer; OCEAN_OVERLAY_COUNT] = [
+    OverlayLayer {
+        name: "ocean",
+        local_mbtiles: "ocean-low.mbtiles",
+        option: None,
+    },
+    OverlayLayer {
+        name: "ocean",
+        local_mbtiles: "ocean-high.mbtiles",
         option: None,
     },
 ];
