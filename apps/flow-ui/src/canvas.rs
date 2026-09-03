@@ -53,6 +53,9 @@ const GRID_CELL: f64 = 24.0;
 /// spacing doubles ("hops up a level").
 const GRID_MIN_PX: f64 = 14.0;
 const FIT_MARGIN: f64 = 32.0;
+const MIN_NODE_WIDTH: f64 = 160.0;
+const MIN_NODE_HEIGHT: f64 = 80.0;
+const RESIZE_GRIP: f64 = 18.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PortIcon {
@@ -124,6 +127,64 @@ script_mod! {
         }
     }
 
+    set_type_default() do #(DrawFlowCard::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        color: #x1c1c1f
+        border_color: #x2b2b30
+        border_size: 1.0
+        border_radius: 16.0
+        shadow_color: #0008
+        shadow_radius: 18.0
+        shadow_offset: vec2(0.0, 10.0)
+
+        rect_size2: varying(vec2(0.0))
+        rect_size3: varying(vec2(0.0))
+        rect_pos2: varying(vec2(0.0))
+        rect_shift: varying(vec2(0.0))
+        sdf_rect_pos: varying(vec2(0.0))
+        sdf_rect_size: varying(vec2(0.0))
+
+        vertex: fn() {
+            let min_offset = min(self.shadow_offset, vec2(0.0, 0.0))
+            self.rect_size2 = self.rect_size + 2.0 * vec2(self.shadow_radius)
+            self.rect_size3 = self.rect_size2 + abs(self.shadow_offset)
+            self.rect_pos2 = self.rect_pos - vec2(self.shadow_radius) + min_offset
+            self.sdf_rect_size = self.rect_size2
+                - vec2(self.shadow_radius * 2.0 + self.border_size * 2.0)
+            self.sdf_rect_pos = -min_offset + vec2(self.border_size + self.shadow_radius)
+            self.rect_shift = -min_offset
+            return self.clip_and_transform_vertex(self.rect_pos2, self.rect_size3)
+        }
+
+        pixel: fn() {
+            let sdf = Sdf2d.viewport(self.pos * self.rect_size3)
+            sdf.box(
+                self.sdf_rect_pos.x,
+                self.sdf_rect_pos.y,
+                self.sdf_rect_size.x,
+                self.sdf_rect_size.y,
+                self.border_radius
+            )
+            if sdf.shape > -1.0 {
+                let m = self.shadow_radius
+                let o = self.shadow_offset + self.rect_shift
+                let v = GaussShadow.rounded_box_shadow(
+                    vec2(m) + o,
+                    self.rect_size2 + o,
+                    self.pos * (self.rect_size3 + vec2(m)),
+                    m * 0.5,
+                    self.border_radius * 2.0
+                )
+                sdf.clear(self.shadow_color * v)
+            }
+            sdf.fill_keep(self.color)
+            if self.border_size > 0.0 {
+                sdf.stroke(self.border_color, self.border_size)
+            }
+            return sdf.result
+        }
+    }
+
     let KindIcon = mod.draw.DrawSvg{}
 
     mod.widgets.FlowCanvasBase = #(FlowCanvas::register_widget(vm))
@@ -136,6 +197,7 @@ script_mod! {
             color_a: #x111111
             color_b: #x161616
         }
+        draw_card +: {}
         draw_title +: {
             text_style: theme.font_bold{font_size: 10.5}
             color: #xe8e8ec
@@ -210,11 +272,38 @@ pub struct DrawFlowGrid {
     color_b: Vec4f,
 }
 
+/// One card, including its shadow, so the shadow follows the card's exact
+/// transformed rectangle rather than a separately batched vector estimate.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawFlowCard {
+    #[deref]
+    draw_super: DrawQuad,
+    #[live]
+    color: Vec4f,
+    #[live]
+    border_color: Vec4f,
+    #[live]
+    border_size: f32,
+    #[live]
+    border_radius: f32,
+    #[live]
+    shadow_color: Vec4f,
+    #[live]
+    shadow_radius: f32,
+    #[live]
+    shadow_offset: Vec2f,
+}
+
 #[derive(Clone, Debug)]
 pub enum CanvasEdit {
     Move {
         node: String,
         at: (f64, f64),
+    },
+    Resize {
+        node: String,
+        size: (f64, f64),
     },
     Connect {
         from_node: String,
@@ -266,6 +355,12 @@ enum Drag {
         start: DVec2,
         origin: (f64, f64),
         moved: bool,
+    },
+    Resize {
+        index: usize,
+        start: DVec2,
+        origin: (f64, f64),
+        size: (f64, f64),
     },
     Wire {
         from: usize,
@@ -363,6 +458,14 @@ impl Camera {
         m.v[13] = t.y as f32;
         m
     }
+
+    pub fn popup_anchor_transform(&self) -> PopupAnchorTransform {
+        PopupAnchorTransform {
+            scale: self.scale,
+            translation: self.view.pos + self.pan
+                - dvec2(LOCAL_ORIGIN, LOCAL_ORIGIN) * self.scale,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -393,6 +496,8 @@ pub struct FlowCanvas {
     layout: Layout,
     #[live]
     draw_bg: DrawFlowGrid,
+    #[live]
+    draw_card: DrawFlowCard,
     #[live]
     draw_vec: DrawVector,
     #[live]
@@ -476,6 +581,13 @@ pub struct FlowCanvas {
     draw_list: Option<DrawList2d>,
     #[rust]
     camera: Camera,
+    /// Screen-space chrome that `Fit` leaves clear around the graph.
+    #[rust]
+    fit_insets: Inset,
+    /// Floating toolbar/panel rectangles. In particular, scroll events do not
+    /// carry pointer capture, so the canvas must explicitly ignore them here.
+    #[rust]
+    chrome_rects: Vec<Rect>,
     #[rust]
     target_pan: DVec2,
     #[rust(1.0f64)]
@@ -641,6 +753,27 @@ impl FlowCanvas {
         self.redraw(cx);
     }
 
+    /// Select a card without claiming the pointer event. The app calls this
+    /// before dispatching into a face so an interactive child both acts and
+    /// selects its owning node.
+    pub fn select_at(&mut self, cx: &mut Cx, abs: DVec2) {
+        let node = self.node_index_at(abs).and_then(|index| {
+            self.graph
+                .as_ref()
+                .and_then(|graph| graph.nodes.get(index))
+                .map(|node| node.id.clone())
+        });
+        if node.is_some() && self.selected != node {
+            self.selected = node.clone();
+            cx.widget_action(self.uid, FlowCanvasAction::Select(node));
+            self.redraw(cx);
+        }
+    }
+
+    pub fn is_resize_handle_at(&self, abs: DVec2) -> bool {
+        self.resize_at(abs).is_some()
+    }
+
     pub fn set_highlight(&mut self, cx: &mut Cx, node: Option<String>) {
         if self.highlight != node {
             self.highlight = node;
@@ -683,6 +816,14 @@ impl FlowCanvas {
         self.camera
     }
 
+    pub fn set_fit_insets(&mut self, insets: Inset) {
+        self.fit_insets = insets;
+    }
+
+    pub fn set_chrome_rects(&mut self, rects: Vec<Rect>) {
+        self.chrome_rects = rects;
+    }
+
     /// Zoom by a factor around the view centre (menu / toolbar).
     pub fn zoom_by(&mut self, cx: &mut Cx, factor: f64) {
         let centre = self.camera.view.pos + self.camera.view.size * 0.5;
@@ -699,7 +840,14 @@ impl FlowCanvas {
         let Some(graph) = self.graph.as_ref() else {
             return;
         };
-        let view = self.camera.view;
+        let full_view = self.camera.view;
+        let view = Rect {
+            pos: full_view.pos + dvec2(self.fit_insets.left, self.fit_insets.top),
+            size: dvec2(
+                (full_view.size.x - self.fit_insets.left - self.fit_insets.right).max(1.0),
+                (full_view.size.y - self.fit_insets.top - self.fit_insets.bottom).max(1.0),
+            ),
+        };
         if graph.nodes.is_empty() || view.size.x <= 0.0 {
             self.target_pan = dvec2(0.0, 0.0);
             self.target_scale = 1.0;
@@ -710,21 +858,22 @@ impl FlowCanvas {
         let mut max = dvec2(f64::MIN, f64::MIN);
         for (index, node) in graph.nodes.iter().enumerate() {
             let (x, y) = node.at.unwrap_or(graph_edit::FIRST_AT);
-            let h = self.heights.get(index).copied().unwrap_or(0.0).max(160.0);
+            let size = self.node_size(graph, index);
             min.x = min.x.min(x);
             min.y = min.y.min(y - LABEL_H);
-            max.x = max.x.max(x + NODE_WIDTH);
-            max.y = max.y.max(y + h);
+            max.x = max.x.max(x + size.x);
+            max.y = max.y.max(y + size.y);
         }
         let span = max - min;
         let scale = ((view.size.x - 2.0 * FIT_MARGIN) / span.x)
             .min((view.size.y - 2.0 * FIT_MARGIN) / span.y)
             .clamp(ZOOM_MIN, 1.0);
         self.target_scale = scale;
-        self.target_pan = dvec2(
-            (view.size.x - span.x * scale) * 0.5 - min.x * scale,
-            (view.size.y - span.y * scale) * 0.5 - min.y * scale,
-        );
+        self.target_pan = view.pos - full_view.pos
+            + dvec2(
+                (view.size.x - span.x * scale) * 0.5 - min.x * scale,
+                (view.size.y - span.y * scale) * 0.5 - min.y * scale,
+            );
         self.next_frame = cx.new_next_frame();
         self.redraw(cx);
     }
@@ -776,11 +925,54 @@ impl FlowCanvas {
 
     fn card_rect(&self, graph: &Graph, index: usize) -> Rect {
         let pos = Camera::world_to_local(self.node_at(graph, index));
-        let height = self.heights.get(index).copied().unwrap_or(0.0).max(60.0);
         Rect {
             pos,
-            size: dvec2(NODE_WIDTH, height),
+            size: self.node_size(graph, index),
         }
+    }
+
+    fn node_size(&self, graph: &Graph, index: usize) -> DVec2 {
+        if let Some(Drag::Resize {
+            index: resized,
+            size,
+            ..
+        }) = &self.drag
+        {
+            if *resized == index {
+                return dvec2(size.0, size.1);
+            }
+        }
+        graph.nodes[index]
+            .size
+            .map(|(w, h)| dvec2(w.max(MIN_NODE_WIDTH), h.max(MIN_NODE_HEIGHT)))
+            .unwrap_or_else(|| {
+                dvec2(
+                    NODE_WIDTH,
+                    self.heights
+                        .get(index)
+                        .copied()
+                        .unwrap_or(0.0)
+                        .max(MIN_NODE_HEIGHT),
+                )
+            })
+    }
+
+    fn point_over_chrome(&self, abs: DVec2) -> bool {
+        self.chrome_rects.iter().any(|rect| rect.contains(abs))
+    }
+
+    fn resize_at(&self, abs: DVec2) -> Option<usize> {
+        let graph = self.graph.as_ref()?;
+        let local = self.camera.screen_to_local(abs);
+        let grip = RESIZE_GRIP / self.camera.scale.min(1.0);
+        (0..graph.nodes.len()).rev().find(|index| {
+            let rect = self.card_rect(graph, *index);
+            Rect {
+                pos: rect.pos + rect.size - dvec2(grip, grip),
+                size: dvec2(grip, grip),
+            }
+            .contains(local)
+        })
     }
 
     fn full_bleed(node: &Node) -> bool {
@@ -949,21 +1141,12 @@ impl FlowCanvas {
         self.draw_bg.draw_abs(cx, local_view);
     }
 
-    /// Shadows, wires and cards: one `DrawVector` batch, drawn under the faces.
+    /// Wires are one vector batch; each card is its own shadowed quad.
     fn draw_cards(&mut self, cx: &mut Cx2d, graph: &Graph) {
         let hover = self.hover;
         let dragging_wire = matches!(self.drag, Some(Drag::Wire { .. }));
         let time = self.time;
         self.draw_vec.begin();
-        // Shadows: a wide soft layer and a tight dark one.
-        for index in 0..graph.nodes.len() {
-            let r = self.card_rect(graph, index);
-            let (x, y, w, h) = (r.pos.x as f32, r.pos.y as f32, r.size.x as f32, r.size.y as f32);
-            self.draw_vec.set_color(0.0, 0.0, 0.0, 0.45);
-            self.draw_vec.shadow(x, y, w, h, CARD_RADIUS, 18.0, 0.0, 12.0);
-            self.draw_vec.set_color(0.0, 0.0, 0.0, 0.5);
-            self.draw_vec.shadow(x, y, w, h, CARD_RADIUS, 5.0, 0.0, 3.0);
-        }
         // Wires, under the cards.
         for edge in self.edges.iter().copied() {
             let a = self.port_local(graph, edge.from, edge.from_port, true);
@@ -1004,45 +1187,6 @@ impl FlowCanvas {
             Self::bezier(&mut self.draw_vec, a, b);
             self.draw_vec.stroke(3.0);
         }
-        // Cards.
-        for index in 0..graph.nodes.len() {
-            let node = &graph.nodes[index];
-            let r = self.card_rect(graph, index);
-            let (x, y, w, h) = (r.pos.x as f32, r.pos.y as f32, r.size.x as f32, r.size.y as f32);
-            let fill = if hover == Some(index) {
-                self.card_color_hover
-            } else {
-                self.card_color
-            };
-            Self::set_color(&mut self.draw_vec, fill, 1.0);
-            self.draw_vec.rounded_rect(x, y, w, h, CARD_RADIUS);
-            self.draw_vec.fill();
-            // A 1 px inner highlight gives the card its edge.
-            self.draw_vec.set_color(1.0, 1.0, 1.0, 0.07);
-            self.draw_vec
-                .rounded_rect(x + 0.5, y + 0.5, w - 1.0, h - 1.0, CARD_RADIUS - 0.5);
-            self.draw_vec.stroke(1.0);
-            let selected = self.selected.as_deref() == Some(node.id.as_str());
-            let highlighted = self.highlight.as_deref() == Some(node.id.as_str());
-            if selected || highlighted {
-                let color = if selected {
-                    self.accent_color
-                } else {
-                    self.highlight_color
-                };
-                Self::set_color(&mut self.draw_vec, color, 1.0);
-                self.draw_vec
-                    .rounded_rect(x - 1.0, y - 1.0, w + 2.0, h + 2.0, CARD_RADIUS + 1.0);
-                self.draw_vec.stroke(2.0);
-            }
-            let status_state = self.statuses.get(&node.id).map(|s| s.state.as_str());
-            if status_state == Some("waiting") {
-                Self::set_color(&mut self.draw_vec, Self::state_color("waiting"), 0.9);
-                self.draw_vec
-                    .rounded_rect(x - 1.0, y - 1.0, w + 2.0, h + 2.0, CARD_RADIUS + 1.0);
-                self.draw_vec.stroke(2.0);
-            }
-        }
         // The ghost of a palette type being placed.
         if self.armed_type.is_some() && self.camera.view.contains(self.cursor) {
             let local = self.camera.screen_to_local(self.cursor);
@@ -1058,6 +1202,30 @@ impl FlowCanvas {
             self.draw_vec.stroke(1.5);
         }
         self.draw_vec.end(cx);
+
+        for index in 0..graph.nodes.len() {
+            let node = &graph.nodes[index];
+            let rect = self.card_rect(graph, index);
+            let selected = self.selected.as_deref() == Some(node.id.as_str());
+            let highlighted = self.highlight.as_deref() == Some(node.id.as_str());
+            let waiting = self.statuses.get(&node.id).map(|s| s.state.as_str()) == Some("waiting");
+            self.draw_card.color = if hover == Some(index) {
+                self.card_color_hover
+            } else {
+                self.card_color
+            };
+            self.draw_card.border_color = if selected {
+                self.accent_color
+            } else if highlighted {
+                self.highlight_color
+            } else if waiting {
+                Self::state_color("waiting")
+            } else {
+                self.card_edge_color
+            };
+            self.draw_card.border_size = if selected || highlighted || waiting { 2.0 } else { 1.0 };
+            self.draw_card.draw_abs(cx, rect);
+        }
     }
 
     fn kind_icon(&mut self, kind: &str) -> &mut DrawSvg {
@@ -1173,10 +1341,9 @@ impl FlowCanvas {
                 });
             if let Some(error) = error {
                 let line = error.lines().next().unwrap_or(error);
-                let height = self.heights.get(index).copied().unwrap_or(0.0);
                 self.draw_error.draw_abs(
                     cx,
-                    dvec2(r.pos.x + CARD_PAD, r.pos.y + height - 18.0),
+                    dvec2(r.pos.x + CARD_PAD, r.pos.y + r.size.y - 18.0),
                     line,
                 );
             }
@@ -1187,17 +1354,20 @@ impl FlowCanvas {
     /// card heights for the next frame.
     fn draw_faces(&mut self, cx: &mut Cx2d, scope: &mut Scope, graph: &Graph) -> bool {
         let mut changed = false;
+        if let Some(faces) = scope.data.get_mut::<FaceHost>() {
+            faces.set_popup_anchor_transform(cx, Some(self.camera.popup_anchor_transform()));
+        }
         for index in 0..graph.nodes.len() {
             let node = &graph.nodes[index];
             let r = self.card_rect(graph, index);
             let full_bleed = Self::full_bleed(node);
             let strip = Self::port_rows(node) as f64 * PORT_ROW_H;
             let (content_pos, content_w, pad_top, pad_bottom) = if full_bleed {
-                (r.pos, NODE_WIDTH, 0.0, 0.0)
+                (r.pos, r.size.x, 0.0, 0.0)
             } else {
                 (
                     dvec2(r.pos.x + CARD_PAD, r.pos.y + 14.0 + strip),
-                    NODE_WIDTH - 2.0 * CARD_PAD,
+                    r.size.x - 2.0 * CARD_PAD,
                     14.0 + strip,
                     CARD_PAD,
                 )
@@ -1207,23 +1377,35 @@ impl FlowCanvas {
                     .statuses
                     .get(&node.id)
                     .is_some_and(|status| status.error.is_some());
+            let fixed_height = node
+                .size
+                .map(|_| (r.size.y - pad_top - pad_bottom).max(1.0));
             cx.begin_turtle(
                 Walk {
                     abs_pos: Some(content_pos),
                     margin: Inset::default(),
                     width: Size::Fixed(content_w),
-                    height: Size::fit(),
+                    height: fixed_height.map(Size::Fixed).unwrap_or_else(Size::fit),
                     metrics: Metrics::default(),
                 },
                 Layout {
                     flow: Flow::Down,
                     clip_x: false,
-                    clip_y: false,
+                    clip_y: fixed_height.is_some(),
                     ..Layout::default()
                 },
             );
             if let Some(faces) = scope.data.get_mut::<FaceHost>() {
-                faces.draw_face(cx, &node.id, Walk::fill_fit());
+                faces.draw_face(
+                    cx,
+                    &node.id,
+                    if fixed_height.is_some() {
+                        Walk::fill()
+                    } else {
+                        Walk::fill_fit()
+                    },
+                    fixed_height.is_some(),
+                );
             }
             let rect = cx.end_turtle();
             let mut height = rect.size.y + pad_top + pad_bottom;
@@ -1231,7 +1413,7 @@ impl FlowCanvas {
                 height += 20.0;
             }
             let height = height.max(if full_bleed { 120.0 } else { 60.0 });
-            if (self.heights[index] - height).abs() > 0.5 {
+            if node.size.is_none() && (self.heights[index] - height).abs() > 0.5 {
                 self.heights[index] = height;
                 changed = true;
             }
@@ -1323,6 +1505,19 @@ impl FlowCanvas {
                 self.draw_over
                     .circle(p.x as f32, p.y as f32, (PORT_R - 1.0) as f32);
                 self.draw_over.stroke(2.0);
+            }
+            // Three unobtrusive diagonals, in the card's own local space.
+            Self::set_color(&mut self.draw_over, self.draw_meta.color, 0.55);
+            for inset in [5.0, 9.0, 13.0] {
+                self.draw_over.move_to(
+                    (r.pos.x + r.size.x - inset) as f32,
+                    (r.pos.y + r.size.y - 3.0) as f32,
+                );
+                self.draw_over.line_to(
+                    (r.pos.x + r.size.x - 3.0) as f32,
+                    (r.pos.y + r.size.y - inset) as f32,
+                );
+                self.draw_over.stroke(1.0);
             }
         }
         self.draw_over.end(cx);
@@ -1547,7 +1742,7 @@ impl Widget for FlowCanvas {
         // A palette type armed by a press elsewhere lands on release here.
         if let Event::MouseUp(e) = event {
             if let Some(type_name) = self.armed_type.take() {
-                if self.camera.view.contains(e.abs) {
+                if self.camera.view.contains(e.abs) && !self.point_over_chrome(e.abs) {
                     let world = self.camera.screen_to_world(e.abs);
                     cx.widget_action(
                         self.uid,
@@ -1562,11 +1757,12 @@ impl Widget for FlowCanvas {
         }
         if let Event::MouseMove(e) = event {
             self.cursor = e.abs;
-            if self.armed_type.is_some() && self.camera.view.contains(e.abs) {
+            let over_chrome = self.point_over_chrome(e.abs);
+            if self.armed_type.is_some() && self.camera.view.contains(e.abs) && !over_chrome {
                 self.area.redraw(cx);
             }
             if self.drag.is_none() {
-                let hover = if self.camera.view.contains(e.abs) {
+                let hover = if self.camera.view.contains(e.abs) && !over_chrome {
                     self.node_index_at(e.abs)
                 } else {
                     None
@@ -1578,7 +1774,7 @@ impl Widget for FlowCanvas {
             }
         }
         match event.hits(cx, self.area) {
-            Hit::FingerScroll(fs) => {
+            Hit::FingerScroll(fs) if !self.point_over_chrome(fs.abs) => {
                 // Wheel = zoom anchored at the cursor; a horizontal wheel pans.
                 if fs.scroll.x.abs() > fs.scroll.y.abs() * 1.5 {
                     self.target_pan.x -= fs.scroll.x;
@@ -1589,7 +1785,7 @@ impl Widget for FlowCanvas {
                     self.zoom_to(cx, fs.abs, self.target_scale * factor);
                 }
             }
-            Hit::FingerDown(fd) => {
+            Hit::FingerDown(fd) if !self.point_over_chrome(fd.abs) => {
                 cx.set_key_focus(self.area);
                 if let Some(hit) = self.port_at(fd.abs) {
                     let graph = self.graph.as_ref().unwrap();
@@ -1634,6 +1830,20 @@ impl Widget for FlowCanvas {
                             }
                         }
                     }
+                } else if let Some(index) = self.resize_at(fd.abs) {
+                    let graph = self.graph.as_ref().unwrap();
+                    let id = graph.nodes[index].id.clone();
+                    let size = self.node_size(graph, index);
+                    if self.selected.as_deref() != Some(id.as_str()) {
+                        self.selected = Some(id.clone());
+                        cx.widget_action(self.uid, FlowCanvasAction::Select(Some(id)));
+                    }
+                    self.drag = Some(Drag::Resize {
+                        index,
+                        start: fd.abs,
+                        origin: (size.x, size.y),
+                        size: (size.x, size.y),
+                    });
                 } else if let Some(index) = self.node_index_at(fd.abs) {
                     let graph = self.graph.as_ref().unwrap();
                     let node = &graph.nodes[index];
@@ -1691,6 +1901,23 @@ impl Widget for FlowCanvas {
                             moved,
                         });
                     }
+                    Some(Drag::Resize {
+                        index,
+                        start,
+                        origin,
+                        ..
+                    }) => {
+                        let delta = (fm.abs - start) / s;
+                        self.drag = Some(Drag::Resize {
+                            index,
+                            start,
+                            origin,
+                            size: (
+                                (origin.0 + delta.x).max(MIN_NODE_WIDTH),
+                                (origin.1 + delta.y).max(MIN_NODE_HEIGHT),
+                            ),
+                        });
+                    }
                     Some(Drag::Wire {
                         from,
                         from_port,
@@ -1743,6 +1970,21 @@ impl Widget for FlowCanvas {
                                     }),
                                 );
                             }
+                        }
+                    }
+                    Some(Drag::Resize { index, size, .. }) => {
+                        if let Some(node) = self
+                            .graph
+                            .as_ref()
+                            .and_then(|graph| graph.nodes.get(index))
+                        {
+                            cx.widget_action(
+                                self.uid,
+                                FlowCanvasAction::Edit(CanvasEdit::Resize {
+                                    node: node.id.clone(),
+                                    size,
+                                }),
+                            );
                         }
                     }
                     Some(drag @ Drag::Wire { .. }) => self.finish_wire_drag(cx, drag),
