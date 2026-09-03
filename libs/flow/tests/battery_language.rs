@@ -134,6 +134,35 @@ fn numeric_literals_are_typed_but_documented_ranges_are_hints() {
 }
 
 #[test]
+fn stepped_numeric_params_are_snapped_with_a_warning() {
+    let graph = evaluate(
+        "use mod.flow.*\nlet image = Image{width: 1064 height: 1017}\nlet video = Video{width: 650 height: 359}\nFlow{image video}\n",
+        "width-step.splash",
+    )
+    .unwrap();
+    assert_eq!(param(&graph, "image", "width"), &Literal::Num(1072.0));
+    assert_eq!(param(&graph, "image", "height"), &Literal::Num(1024.0));
+    assert_eq!(param(&graph, "video", "width"), &Literal::Num(640.0));
+    assert_eq!(param(&graph, "video", "height"), &Literal::Num(352.0));
+    assert!(
+        graph
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("width 1064 snapped to 1072")),
+        "{:?}",
+        graph.warnings
+    );
+    assert!(
+        graph
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("height 1017 snapped to 1024")),
+        "{:?}",
+        graph.warnings
+    );
+}
+
+#[test]
 fn fn_requires_a_closure_and_declared_input_and_output_ports() {
     for (name, source) in [
         (

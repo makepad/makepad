@@ -102,8 +102,8 @@ mod.flow.Video = mod.flow.Gen{
     kind: @gen
     domain: "video"
     type_name: "Video"
-    /** one of: 640x352, 864x480, 960x544 */ width: 640
-    /** one of: 640x352, 864x480, 960x544 */ height: 352
+    /** 640..960 step 32 paired sizes: 640x352, 864x480, 960x544 */ width: 640
+    /** 352..544 step 32 paired sizes: 640x352, 864x480, 960x544 */ height: 352
     /** one of: 39, 65, 97, 129 */ frames: 39
     /** paired with frames: one of 30, 30, 40, 50 */ steps: 30
     /** one of: h264, h265, hevc */ codec: "h264"

@@ -123,26 +123,28 @@ mod.flow.ui.LlmFace = Face{
             }
         }
     }
-    out := Markdown{
-        width: Fill
-        height: Fit
-        body: ""
-        show := @self
+    out_scroll := mod.flow.ui.TextScroll{
+        out := Markdown{
+            width: Fill
+            height: Fit
+            body: ""
+            show := @self
+        }
     }
 }
 
 mod.flow.ui.FnFace = Face{
     params := Strip{}
-    code := Label{
-        width: Fill
-        height: Fit
-        max_lines: 2
-        text_overflow: TextOverflow.Ellipsis
-        draw_text +: {
-            color: theme.flow_text_code
-            text_style: theme.font_code{font_size: 9}
+    code_scroll := mod.flow.ui.TextScroll{
+        code := Label{
+            width: Fill
+            height: Fit
+            draw_text +: {
+                color: theme.flow_text_code
+                text_style: theme.font_code{font_size: 9}
+            }
+            param := @run
         }
-        param := @run
     }
     out := mod.flow.ui.ValueText{
         show := @self
@@ -158,7 +160,9 @@ mod.flow.ui.HttpFace = Face{
 }
 
 mod.flow.ui.AskFace = Face{
-    question := Body{param := @question}
+    question_scroll := mod.flow.ui.TextScroll{
+        question := Body{param := @question}
+    }
     choice := DropDown{
         width: Fill
         height: 26

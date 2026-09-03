@@ -1093,10 +1093,11 @@ fn extract_node(
             .get(param.name)
             .copied()
             .or_else(|| source_field_in_chain(vm, obj, source, file_name, param.name));
-        let literal = literal_from_value(vm, value)
+        let mut literal = literal_from_value(vm, value)
             .map_err(|message| source_range_error(source, field_source, file_name, message, &loc))?;
         validate_param(param, &literal)
             .map_err(|message| source_range_error(source, field_source, file_name, message, &loc))?;
+        snap_documented_param(vm, obj, &context, param.name, &mut literal, warnings);
         params.push((param.name.to_string(), literal));
     }
     let gen_inputs = if spec.kind == "gen" {
@@ -1114,6 +1115,9 @@ fn extract_node(
             .map(|(name, _)| name.clone())
             .collect();
         params = generic_gen_params(vm, obj, source, span, file_name, &loc, &input_names)?;
+        for (name, literal) in &mut params {
+            snap_documented_param(vm, obj, &context, name, literal, warnings);
+        }
     }
 
     let mut inputs = Vec::new();
@@ -1447,6 +1451,56 @@ fn generic_gen_params(
         }
     }
     Ok(params)
+}
+
+fn field_doc(vm: &ScriptVm<'_>, obj: ScriptObject, name: &str) -> Option<String> {
+    let wanted = LiveId::from_str(name);
+    vm.construction_chain(obj.into()).iter().find_map(|level| {
+        level
+            .field_docs
+            .iter()
+            .find_map(|(id, text)| (*id == wanted).then(|| text.clone()))
+    })
+}
+
+fn display_number(value: f64) -> String {
+    if value.fract().abs() < 1e-9 {
+        format!("{value:.0}")
+    } else {
+        value.to_string()
+    }
+}
+
+/// Apply a documented numeric step before the evaluated graph reaches an
+/// executor. Ranges remain editor bounds; the step is a backend contract.
+fn snap_documented_param(
+    vm: &ScriptVm<'_>,
+    obj: ScriptObject,
+    context: &str,
+    name: &str,
+    literal: &mut Literal,
+    warnings: &mut Vec<String>,
+) {
+    let Literal::Num(value) = literal else {
+        return;
+    };
+    let Some(step) = field_doc(vm, obj, name)
+        .map(|doc| parse_doc_hint(&doc))
+        .and_then(|hint| hint.step)
+        .filter(|step| step.is_finite() && *step > 0.0)
+    else {
+        return;
+    };
+    let snapped = (*value / step).round() * step;
+    if (snapped - *value).abs() <= 1e-9 {
+        return;
+    }
+    warnings.push(format!(
+        "{context}: {name} {} snapped to {}",
+        display_number(*value),
+        display_number(snapped)
+    ));
+    *value = snapped;
 }
 
 fn port_ref(

@@ -329,7 +329,7 @@ fn nodes_catalog_uses_documented_image_range() {
     let range = width.range.as_ref().unwrap();
     assert_eq!(range.min, 256.0);
     assert_eq!(range.max, 2048.0);
-    assert_eq!(range.step, Some(64.0));
+    assert_eq!(range.step, Some(16.0));
     server.shutdown();
 }
 

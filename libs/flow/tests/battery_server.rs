@@ -259,7 +259,7 @@ fn nodes_lists_image_range_and_a_documented_recipe_type() {
         .find(|param| param.name == "width")
         .expect("Image.width missing from node catalog");
     let range = width.range.as_ref().expect("Image.width range missing");
-    assert_eq!((range.min, range.max, range.step), (256.0, 2048.0, Some(64.0)));
+    assert_eq!((range.min, range.max, range.step), (256.0, 2048.0, Some(16.0)));
 
     let recipe = catalog
         .types
