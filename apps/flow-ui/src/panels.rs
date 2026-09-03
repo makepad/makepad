@@ -3,17 +3,15 @@
 //! the template picker behind New, the run's total progress bar, and the
 //! App view that shows a flow as a product.
 
-use crate::faces::{
-    format_options_for_node, format_preset_name, node_dimensions, param_text, FaceHost,
-    snap_stepped_value, FormatOptions, ModelChoice, CUSTOM_FORMAT, HUB_PICKS,
-};
+use crate::faces::{format_preset_name, param_text, snap_stepped_value, FaceHost, ModelChoice};
 use makepad_flow::{
     FlowSummary, Graph, InstanceRow, Literal, Node, NodeInputValue, NodeTypeCatalog,
     TemplateSummary, ValueBytes, ValueRef,
 };
 use makepad_widgets::fab_controls::*;
-use makepad_widgets::makepad_micro_serde::SerJson;
+use makepad_widgets::makepad_micro_serde::{JsonValue, SerJson};
 use makepad_widgets::*;
+use std::collections::HashMap;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -146,6 +144,11 @@ script_mod! {
                         attach := TitleButton{}
                     }
                     detail := MetaText{}
+                    thumbnail := View{
+                        width: Fill height: 72 flow: Overlay cursor: MouseCursor.Hand visible: false
+                        image := Image{width: Fill height: Fill fit: ImageFit.Smallest}
+                        marker := Label{visible: false}
+                    }
                     actions := View{
                         width: Fill
                         height: Fit
@@ -321,18 +324,45 @@ script_mod! {
                 width: Fill
                 height: Fit
                 flow: Down
-                padding: Inset{left: 2 right: 2 top: 4 bottom: 6}
-                spacing: 2
-                title := Label{
+                padding: Inset{left: 2 right: 2 top: 4 bottom: 8}
+                spacing: theme.space_1
+                top := View{
                     width: Fill
                     height: Fit
-                    text: ""
-                    draw_text +: {
-                        text_style: theme.font_bold{font_size: 11}
-                        color: theme.flow_text
+                    flow: Right
+                    align: Align{y: 0.5}
+                    spacing: theme.space_1
+                    kind_icon := Image{width: 16 height: 16 fit: ImageFit.Smallest}
+                    node_id := TextInput{
+                        width: Fill
+                        height: 27
+                        empty_text: "node id"
+                        draw_text +: {text_style: theme.font_bold{font_size: 10.5}}
+                    }
+                    type_name := Label{
+                        width: Fit
+                        height: Fit
+                        draw_text +: {
+                            text_style: theme.font_bold{font_size: 9}
+                            color: theme.flow_text_muted
+                        }
                     }
                 }
-                doc := MetaText{}
+                type_doc := MetaText{}
+                doc_label := RowLabel{width: Fill text: "NODE NOTE"}
+                node_doc := TextInput{
+                    width: Fill
+                    height: 64
+                    is_multiline: true
+                    empty_text: "Add a short note about this node"
+                }
+                doc_actions := View{
+                    width: Fill
+                    height: Fit
+                    flow: Right
+                    align: Align{x: 1.0}
+                    save_doc := ButtonFlat{text: "Save note"}
+                }
             }
             Section := View{
                 width: Fill
@@ -349,13 +379,14 @@ script_mod! {
                 }
                 Hr{}
             }
-            Text := Row{
-                name := RowLabel{}
-                value := TextInput{
-                    width: Fill
-                    height: 26
-                    empty_text: ""
+            Text := View{
+                width: Fill height: Fit flow: Down spacing: 2
+                top := Row{
+                    name := RowLabel{}
+                    value := TextInput{width: Fill height: 26 empty_text: ""}
+                    reset := ButtonFlatter{text: "Reset"}
                 }
+                help := MetaText{margin: Inset{left: 88}}
             }
             Multiline := View{
                 width: Fill
@@ -369,6 +400,7 @@ script_mod! {
                     flow: Right
                     align: Align{y: 0.5}
                     name := RowLabel{width: Fill}
+                    reset := ButtonFlatter{text: "Reset"}
                     apply := ButtonFlat{text: "Apply"}
                 }
                 value := TextInput{
@@ -378,122 +410,125 @@ script_mod! {
                     empty_text: ""
                     draw_text +: {text_style: theme.font_code{font_size: 9}}
                 }
+                help := MetaText{margin: Inset{left: 88}}
             }
-            Number := Row{
-                name := RowLabel{}
-                value := mod.widgets.FabValueInput{
-                    width: Fill
-                    height: 24
-                    quantize: true
-                }
-            }
-            Dimensions := Row{
-                spacing: theme.space_1
-                w_field := mod.widgets.FabValueInput{
-                    width: 54
-                    height: 24
-                    label: "w"
-                    precision: 0
-                    quantize: true
-                }
-                h_field := mod.widgets.FabValueInput{
-                    width: 54
-                    height: 24
-                    label: "h"
-                    precision: 0
-                    quantize: true
-                }
-                format := DropDown{
-                    width: Fill
-                    height: 26
-                    labels: ["Custom"]
-                }
-                swap := ButtonFlatter{
-                    width: 26
-                    height: 26
-                    text: "⇄"
-                }
-            }
-            Choice := Row{
-                name := RowLabel{}
-                value := DropDown{
-                    width: Fill
-                    height: 26
-                }
-            }
-            Model := Row{
-                name := RowLabel{}
-                value := DropDown{
-                    width: Fill
-                    height: 26
-                    labels: ["hub picks"]
-                }
-            }
-            Bool := Row{
-                name := RowLabel{}
-                value := Toggle{
-                    text: ""
-                }
-            }
-            Color := Row{
-                name := RowLabel{}
-                value := mod.widgets.FabColorPick{
-                    width: 60
-                    height: 20
-                }
-            }
-            Wired := Row{
-                name := RowLabel{}
-                value := MetaText{}
-            }
-            Output := Row{
-                name := RowLabel{}
-                output_scroll := OutputScroll{
-                    value := Label{
+            Number := View{
+                width: Fill height: Fit flow: Down spacing: 2
+                top := Row{
+                    name := RowLabel{}
+                    value := mod.widgets.FabValueInput{
                         width: Fill
-                        height: Fit
-                        text: ""
+                        height: 24
+                        quantize: true
+                    }
+                    reset := ButtonFlatter{text: "Reset"}
+                }
+                help := MetaText{margin: Inset{left: 88}}
+            }
+            Choice := View{
+                width: Fill height: Fit flow: Down spacing: 2
+                top := Row{
+                    name := RowLabel{}
+                    value := DropDown{width: Fill height: 26}
+                    reset := ButtonFlatter{text: "Reset"}
+                }
+                help := MetaText{margin: Inset{left: 88}}
+            }
+            Bool := View{
+                width: Fill height: Fit flow: Down spacing: 2
+                top := Row{
+                    name := RowLabel{}
+                    value := Toggle{text: ""}
+                    View{width: Fill height: 1}
+                    reset := ButtonFlatter{text: "Reset"}
+                }
+                help := MetaText{margin: Inset{left: 88}}
+            }
+            Color := View{
+                width: Fill height: Fit flow: Down spacing: 2
+                top := Row{
+                    name := RowLabel{}
+                    value := mod.widgets.FabColorPick{width: 60 height: 20}
+                    View{width: Fill height: 1}
+                    reset := ButtonFlatter{text: "Reset"}
+                }
+                help := MetaText{margin: Inset{left: 88}}
+            }
+            Edge := View{
+                width: Fill height: Fit flow: Down spacing: 2
+                top := Row{
+                    type_icon := Image{width: 14 height: 14 fit: ImageFit.Smallest}
+                    name := RowLabel{width: 68}
+                    source := ButtonFlatter{width: Fill text: ""}
+                    disconnect := ButtonFlatter{text: "×"}
+                }
+                help := MetaText{margin: Inset{left: 88}}
+            }
+            Port := View{
+                width: Fill height: Fit flow: Down spacing: 2
+                top := Row{
+                    type_icon := Image{width: 14 height: 14 fit: ImageFit.Smallest}
+                    name := RowLabel{width: 68}
+                    consumers := ButtonFlatter{width: Fill text: ""}
+                }
+                help := MetaText{margin: Inset{left: 88}}
+            }
+            Result := View{
+                width: Fill
+                height: Fit
+                flow: Down
+                spacing: theme.space_1
+                padding: Inset{left: 2 right: 2 top: 4 bottom: 6}
+                head := View{
+                    width: Fill height: Fit flow: Right align: Align{y: 0.5} spacing: theme.space_1
+                    name := RowLabel{width: Fill}
+                    save := ButtonFlatter{text: "Save…"}
+                    copy := ButtonFlatter{text: "Copy digest"}
+                }
+                thumb := View{
+                    width: Fill height: 136 flow: Overlay cursor: MouseCursor.Hand
+                    image := Image{width: Fill height: Fill fit: ImageFit.Smallest}
+                }
+                text_scroll := OutputScroll{
+                    text := Label{
+                        width: Fill height: Fit text: ""
                         draw_text +: {
                             text_style: theme.font_code{font_size: 8.5}
                             color: theme.flow_text_code
                         }
                     }
                 }
-                open := ButtonFlat{text: "Open"}
+                media := MetaText{}
+                meta := MetaText{}
+                marker := Label{visible: false}
             }
-            Preview := View{
-                width: Fill
-                height: Fit
-                flow: Down
-                padding: Inset{left: 2 right: 2 top: 4 bottom: 4}
-                text := Label{
-                    width: Fill
-                    height: Fit
-                    text: ""
-                    draw_text +: {text_style: theme.font_code{font_size: 8.5}}
+            Advanced := View{
+                width: Fill height: Fit padding: Inset{top: 8 bottom: 2}
+                toggle := ButtonFlat{width: Fill text: "▸  ADVANCED"}
+            }
+            FaceSource := View{
+                width: Fill height: Fit flow: Down spacing: theme.space_1
+                head := View{
+                    width: Fill height: Fit flow: Right align: Align{y: 0.5}
+                    name := RowLabel{width: Fill text: "FACE SOURCE"}
+                    apply := ButtonFlat{text: "Apply"}
                 }
-                image := Image{
-                    width: Fill
-                    height: Fit
-                    fit: ImageFit.Horizontal
+                editor := mod.widgets.CodeView{
+                    editor +: {width: Fill height: 150 read_only: false show_gutter: false word_wrap: true}
+                }
+            }
+            RawSource := View{
+                width: Fill height: Fit flow: Down spacing: theme.space_1
+                name := RowLabel{width: Fill text: "NODE SOURCE (READ ONLY)"}
+                source := ButtonFlatter{
+                    width: Fill height: Fit text: ""
+                    draw_text +: {text_style: theme.font_code{font_size: 8.5}}
                 }
             }
             Empty := View{
                 width: Fill
                 height: Fit
-                flow: Down
-                padding: Inset{left: 2 right: 2 top: 4 bottom: 4}
-                spacing: 4
-                title := Label{
-                    width: Fill
-                    height: Fit
-                    text: ""
-                    draw_text +: {
-                        text_style: theme.font_bold{font_size: 10}
-                        color: theme.flow_text_body
-                    }
-                }
-                doc := EmptyHint{margin: Inset{top: 0}}
+                hint := EmptyHint{margin: Inset{top: 2}}
             }
         }
     }
@@ -688,10 +723,6 @@ pub enum InspectorAction {
         key: String,
         value: Literal,
     },
-    SetParams {
-        node: String,
-        values: Vec<(String, Literal)>,
-    },
     SetFnSrc {
         node: String,
         src: String,
@@ -700,6 +731,30 @@ pub enum InspectorAction {
         node: String,
         src: String,
     },
+    RenameNode {
+        node: String,
+        new_id: String,
+    },
+    SetNodeDoc {
+        node: String,
+        doc: String,
+    },
+    SetNodeMeta {
+        node: String,
+        key: String,
+        value: Literal,
+    },
+    SelectNode(String),
+    Disconnect {
+        node: String,
+        port: String,
+    },
+    JumpSource(String),
+    SaveValue {
+        node: String,
+        port: String,
+    },
+    CopyDigest(String),
     OpenValue {
         node: String,
         port: String,
@@ -709,23 +764,27 @@ pub enum InspectorAction {
 #[derive(Clone, Debug)]
 enum Row {
     Head {
-        title: String,
-        doc: String,
+        kind: String,
+        id: String,
+        type_name: String,
+        type_doc: String,
+        node_doc: String,
     },
-    Empty {
-        title: String,
-        doc: String,
-    },
+    Empty(String),
     Section(String),
     Text {
         key: String,
         value: String,
         id: bool,
         number: bool,
+        help: String,
+        default: Option<Literal>,
     },
     Multiline {
         key: String,
         value: String,
+        help: String,
+        default: Option<Literal>,
     },
     Number {
         key: String,
@@ -733,59 +792,67 @@ enum Row {
         min: f64,
         max: f64,
         step: f64,
-    },
-    Dimensions {
-        width: u32,
-        height: u32,
-        options: FormatOptions,
+        help: String,
+        default: Option<Literal>,
     },
     Choice {
         key: String,
         value: String,
         options: Vec<String>,
-    },
-    Model {
-        value: String,
+        help: String,
+        default: Option<Literal>,
     },
     Bool {
         key: String,
         value: bool,
+        help: String,
+        default: Option<Literal>,
     },
     Color {
         key: String,
         rgba: [f32; 4],
+        help: String,
+        default: Option<Literal>,
     },
-    Wired {
-        key: String,
-        value: String,
-    },
-    Output {
+    Edge {
         port: String,
-        chip: String,
+        ty: makepad_flow::PortType,
+        from_node: String,
+        from_port: String,
     },
-    Preview {
-        text: String,
-        image: Option<ValueBytes>,
+    Port {
+        port: String,
+        ty: makepad_flow::PortType,
+        consumers: Vec<(String, String)>,
     },
+    Result {
+        port: String,
+        value: ValueRef,
+        bytes: Option<ValueBytes>,
+    },
+    Advanced,
+    FaceSource(String),
+    RawSource(String),
 }
 
 impl Row {
     fn template(&self) -> LiveId {
         match self {
             Row::Head { .. } => live_id!(Head),
-            Row::Empty { .. } => live_id!(Empty),
+            Row::Empty(_) => live_id!(Empty),
             Row::Section(_) => live_id!(Section),
             Row::Text { .. } => live_id!(Text),
             Row::Multiline { .. } => live_id!(Multiline),
             Row::Number { .. } => live_id!(Number),
-            Row::Dimensions { .. } => live_id!(Dimensions),
             Row::Choice { .. } => live_id!(Choice),
-            Row::Model { .. } => live_id!(Model),
             Row::Bool { .. } => live_id!(Bool),
             Row::Color { .. } => live_id!(Color),
-            Row::Wired { .. } => live_id!(Wired),
-            Row::Output { .. } => live_id!(Output),
-            Row::Preview { .. } => live_id!(Preview),
+            Row::Edge { .. } => live_id!(Edge),
+            Row::Port { .. } => live_id!(Port),
+            Row::Result { .. } => live_id!(Result),
+            Row::Advanced => live_id!(Advanced),
+            Row::FaceSource(_) => live_id!(FaceSource),
+            Row::RawSource(_) => live_id!(RawSource),
         }
     }
 }
@@ -886,6 +953,192 @@ fn hex_color(rgba: Vec4f) -> String {
     }
 }
 
+/// Parameters already represented by an editable control on the built-in
+/// node card. The inspector is the complement of this list.
+fn card_control_param(type_name: &str, key: &str) -> bool {
+    // Keep the inspector and the card format picker on the same "Custom"
+    // convention even though the picker itself owns width/height editing.
+    let _custom = format_preset_name(&[], 0, 0);
+    match type_name {
+        "Image" => matches!(key, "width" | "height" | "steps" | "seed" | "model"),
+        "Gen" => matches!(key, "width" | "height" | "model"),
+        "Llm" | "Upscale" => key == "model",
+        _ => false,
+    }
+}
+
+fn inspector_setting_names<'a>(
+    type_name: &str,
+    params: &'a [(String, Literal)],
+) -> Vec<&'a str> {
+    params
+        .iter()
+        .filter(|(key, _)| {
+            !matches!(key.as_str(), "ui" | "at" | "ports" | "domain" | "on_fail" | "label")
+                && !(type_name == "Fn" && key == "out")
+                && !card_control_param(type_name, key)
+        })
+        .map(|(key, _)| key.as_str())
+        .collect()
+}
+
+fn literal_from_json(value: &JsonValue) -> Literal {
+    match value {
+        JsonValue::Null | JsonValue::Undefined => Literal::Null,
+        JsonValue::Bool(value) => Literal::Bool(*value),
+        JsonValue::U64(value) => Literal::Num(*value as f64),
+        JsonValue::U128(value) => Literal::Num(*value as f64),
+        JsonValue::I64(value) => Literal::Num(*value as f64),
+        JsonValue::I128(value) => Literal::Num(*value as f64),
+        JsonValue::F64(value) => Literal::Num(*value),
+        JsonValue::String(value) => Literal::Str(value.clone()),
+        JsonValue::BareIdent(value) => Literal::Id(value.clone()),
+        JsonValue::Char(value) => Literal::Str(value.to_string()),
+        JsonValue::Array(values) => {
+            Literal::Arr(values.iter().map(literal_from_json).collect())
+        }
+        JsonValue::Object(values) => Literal::Obj(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), literal_from_json(value)))
+                .collect(),
+        ),
+    }
+}
+
+fn setting_row(
+    key: &str,
+    value: &Literal,
+    help: String,
+    default: Option<Literal>,
+    range: Option<(f64, f64, f64)>,
+) -> Row {
+    if let Literal::Num(number) = value {
+        let (min, max, step) = range.unwrap_or_else(|| {
+            let magnitude = number.abs().max(1.0);
+            (
+                0.0,
+                (magnitude * 4.0).max(10.0),
+                if number.fract() == 0.0 { 1.0 } else { 0.01 },
+            )
+        });
+        return Row::Number {
+            key: key.to_string(),
+            value: *number,
+            min,
+            max,
+            step,
+            help,
+            default,
+        };
+    }
+    if let Literal::Bool(value) = value {
+        return Row::Bool {
+            key: key.to_string(),
+            value: *value,
+            help,
+            default,
+        };
+    }
+    if let Some(options) = parse_choices(&help).or_else(|| match key {
+        "type" | "out" => Some(
+            ["text", "image", "audio", "video", "mesh", "json", "list", "bytes"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        ),
+        "method" => Some(
+            ["get", "post", "put", "delete"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        ),
+        "on_fail" => Some(["fail", "skip"].into_iter().map(str::to_string).collect()),
+        _ => None,
+    }) {
+        return Row::Choice {
+            key: key.to_string(),
+            value: literal_text(value),
+            options,
+            help,
+            default,
+        };
+    }
+    if let Literal::Str(text) = value {
+        if let Some(rgba) = parse_hex_color(text) {
+            if key.contains("color") || key.contains("colour") || key.contains("tint") {
+                return Row::Color {
+                    key: key.to_string(),
+                    rgba,
+                    help,
+                    default,
+                };
+            }
+        }
+        if matches!(key, "system" | "prompt" | "question" | "negative" | "default" | "brief")
+            || text.contains('\n')
+        {
+            return Row::Multiline {
+                key: key.to_string(),
+                value: text.clone(),
+                help,
+                default,
+            };
+        }
+    }
+    Row::Text {
+        key: key.to_string(),
+        value: literal_text(value),
+        id: matches!(value, Literal::Id(_)),
+        number: false,
+        help,
+        default,
+    }
+}
+
+fn port_icon_svg(ty: makepad_flow::PortType) -> &'static str {
+    match ty {
+        makepad_flow::PortType::Text => include_str!("../resources/icons/text.svg"),
+        makepad_flow::PortType::Image => include_str!("../resources/icons/image.svg"),
+        makepad_flow::PortType::Audio => include_str!("../resources/icons/audio.svg"),
+        makepad_flow::PortType::Video => include_str!("../resources/icons/video.svg"),
+        makepad_flow::PortType::Mesh => include_str!("../resources/icons/mesh.svg"),
+        makepad_flow::PortType::Json | makepad_flow::PortType::List => {
+            include_str!("../resources/icons/json.svg")
+        }
+        makepad_flow::PortType::Bytes => include_str!("../resources/icons/bytes.svg"),
+    }
+}
+
+fn kind_icon_svg(kind: &str) -> &'static str {
+    match kind {
+        "input" => include_str!("../resources/icons/input.svg"),
+        "output" => include_str!("../resources/icons/output.svg"),
+        "chat" => include_str!("../resources/icons/chat.svg"),
+        "gen" => include_str!("../resources/icons/gen.svg"),
+        "fn" => include_str!("../resources/icons/fn.svg"),
+        "http" => include_str!("../resources/icons/http.svg"),
+        "ask" => include_str!("../resources/icons/ask.svg"),
+        _ => include_str!("../resources/icons/flow.svg"),
+    }
+}
+
+fn setting_action(node: &str, key: &str, value: Literal) -> InspectorAction {
+    if matches!(key, "on_fail" | "label") {
+        InspectorAction::SetNodeMeta {
+            node: node.to_string(),
+            key: key.to_string(),
+            value,
+        }
+    } else {
+        InspectorAction::SetParam {
+            node: node.to_string(),
+            key: key.to_string(),
+            value,
+        }
+    }
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct Inspector {
     #[deref]
@@ -895,14 +1148,9 @@ pub struct Inspector {
     #[rust]
     node: Option<String>,
     #[rust]
-    preview: Option<(String, ValueBytes)>,
-    /// The hub's models for the shown node's domain (`Model` rows).
+    advanced_rows: Vec<Row>,
     #[rust]
-    models: Vec<ModelChoice>,
-    #[rust]
-    dimensions_dirty: bool,
-    #[rust]
-    dimensions_signature: Option<(String, u32, u32, FormatOptions)>,
+    advanced_open: bool,
 }
 
 impl Inspector {
@@ -915,249 +1163,163 @@ impl Inspector {
         catalog: &[NodeTypeCatalog],
         node_id: Option<&str>,
         outputs: &[(String, ValueRef)],
+        loaded: &[(String, ValueBytes)],
+        source: Option<&str>,
     ) {
+        let changed_node = self.node.as_deref() != node_id;
         self.rows.clear();
+        self.advanced_rows.clear();
+        if changed_node {
+            self.advanced_open = false;
+        }
         self.node = node_id.map(str::to_string);
-        let node = graph.and_then(|graph| graph.nodes.iter().find(|node| Some(node.id.as_str()) == node_id));
+        let node = graph.and_then(|graph| {
+            graph
+                .nodes
+                .iter()
+                .find(|node| Some(node.id.as_str()) == node_id)
+        });
         let Some(node) = node else {
-            self.dimensions_dirty = false;
-            self.dimensions_signature = None;
-            self.rows.push(Row::Empty {
-                title: "Nothing selected".into(),
-                doc: "Click a node on the canvas to edit its params; drag a palette card onto the canvas to add one.".into(),
-            });
+            self.rows.push(Row::Empty(
+                "Select a node to inspect what its card does not already show.".into(),
+            ));
             self.redraw(cx);
             return;
         };
         let entry = catalog.iter().find(|entry| entry.type_name == node.type_name);
         self.rows.push(Row::Head {
-            title: format!("{} · {}", node.id, node.type_name),
-            doc: node
-                .doc
-                .clone()
-                .or_else(|| entry.map(|entry| entry.doc.clone()))
-                .unwrap_or_default(),
+            kind: node.kind.clone(),
+            id: node.id.clone(),
+            type_name: node.type_name.clone(),
+            type_doc: entry.map(|entry| entry.doc.clone()).unwrap_or_default(),
+            node_doc: node.doc.clone().unwrap_or_default(),
         });
-        self.rows.push(Row::Section("Params".into()));
-        let dimensions = format_options_for_node(node, catalog)
-            .and_then(|options| node_dimensions(node).map(|size| (size, options)));
-        let dimensions_signature = dimensions.as_ref().map(|((width, height), options)| {
-            (node.id.clone(), *width, *height, options.clone())
-        });
-        self.dimensions_dirty = self.dimensions_signature.as_ref() != dimensions_signature.as_ref();
-        self.dimensions_signature = dimensions_signature;
-        let mut dimensions_added = false;
-        for (key, value) in &node.params {
-            if matches!(key.as_str(), "ui" | "at" | "ports" | "domain" | "out" if node.type_name == "Fn" || key != "out")
-            {
-                if key == "out" && node.type_name == "Fn" {
-                    // Output names are edited through the code, not here.
-                    self.rows.push(Row::Wired {
-                        key: key.clone(),
-                        value: literal_text(value),
-                    });
-                }
+        self.rows.push(Row::Section("SETTINGS".into()));
+        for key in inspector_setting_names(&node.type_name, &node.params) {
+            let Some((_, value)) = node.params.iter().find(|(name, _)| name == key) else {
                 continue;
-            }
-            if matches!(key.as_str(), "width" | "height") {
-                if let Some(((width, height), options)) = dimensions.as_ref() {
-                    if !dimensions_added {
-                        self.rows.push(Row::Dimensions {
-                            width: *width,
-                            height: *height,
-                            options: options.clone(),
-                        });
-                        dimensions_added = true;
-                    }
-                    continue;
-                }
-            }
-            let doc = entry
-                .and_then(|entry| entry.params.iter().find(|param| &param.name == key))
-                .map(|param| param.doc.clone())
-                .unwrap_or_default();
-            if key == "model" && node.domain.is_some() {
-                self.rows.push(Row::Model {
-                    value: literal_text(value),
-                });
-                continue;
-            }
-            let range = entry
-                .and_then(|entry| entry.params.iter().find(|param| &param.name == key))
+            };
+            let spec = entry.and_then(|entry| entry.params.iter().find(|param| param.name == key));
+            let help = spec.map(|param| param.doc.clone()).unwrap_or_default();
+            let default = spec.map(|param| literal_from_json(&param.default));
+            let range = spec
                 .and_then(|param| param.range.as_ref())
                 .map(|range| (range.min, range.max, range.step.unwrap_or(1.0)))
-                .or_else(|| parse_range(&doc));
-            if let Literal::Num(number) = value {
-                let (min, max, step) = range.unwrap_or_else(|| {
-                    let magnitude = number.abs().max(1.0);
-                    (0.0, (magnitude * 4.0).max(10.0), if number.fract() == 0.0 { 1.0 } else { 0.01 })
-                });
-                self.rows.push(Row::Number {
-                    key: key.clone(),
-                    value: *number,
-                    min,
-                    max,
-                    step,
-                });
-                continue;
-            }
-            if let Literal::Bool(flag) = value {
-                self.rows.push(Row::Bool {
-                    key: key.clone(),
-                    value: *flag,
-                });
-                continue;
-            }
-            if let Some(options) = parse_choices(&doc) {
-                self.rows.push(Row::Choice {
-                    key: key.clone(),
-                    value: literal_text(value),
-                    options,
-                });
-                continue;
-            }
-            if key == "type" || key == "method" || key == "out" || key == "on_fail" {
-                let options: Vec<String> = match key.as_str() {
-                    "type" | "out" => ["text", "image", "audio", "video", "mesh", "json", "list", "bytes"]
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect(),
-                    "method" => ["get", "post", "put", "delete"]
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect(),
-                    _ => ["fail", "skip"].iter().map(|s| s.to_string()).collect(),
-                };
-                self.rows.push(Row::Choice {
-                    key: key.clone(),
-                    value: literal_text(value),
-                    options,
-                });
-                continue;
-            }
-            if let Literal::Str(text) = value {
-                if let Some(rgba) = parse_hex_color(text) {
-                    if key.contains("color") || key.contains("colour") || key.contains("tint") {
-                        self.rows.push(Row::Color {
-                            key: key.clone(),
-                            rgba,
-                        });
-                        continue;
-                    }
-                }
-            }
-            match value {
-                Literal::Str(text)
-                    if matches!(
-                        key.as_str(),
-                        "system" | "prompt" | "question" | "negative" | "default" | "brief"
-                    ) || text.contains('\n') =>
-                {
-                    self.rows.push(Row::Multiline {
-                        key: key.clone(),
-                        value: text.clone(),
-                    });
-                }
-                Literal::Id(text) => self.rows.push(Row::Text {
-                    key: key.clone(),
-                    value: text.clone(),
-                    id: true,
-                    number: false,
-                }),
-                other => self.rows.push(Row::Text {
-                    key: key.clone(),
-                    value: literal_text(other),
-                    id: false,
-                    number: false,
-                }),
-            }
+                .or_else(|| parse_range(&help));
+            self.rows
+                .push(setting_row(key, value, help, default, range));
         }
-        if !node.inputs.is_empty() {
-            self.rows.push(Row::Section("Inputs".into()));
-        }
+        self.rows.push(setting_row(
+            "on_fail",
+            &Literal::Id(node.on_fail.clone()),
+            "What to do when this node fails.".into(),
+            Some(Literal::Id("fail".into())),
+            None,
+        ));
+        self.rows.push(setting_row(
+            "label",
+            &Literal::Str(node.label.clone().unwrap_or_default()),
+            "Optional display label for this node.".into(),
+            Some(Literal::Str(String::new())),
+            None,
+        ));
+
+        self.rows.push(Row::Section("CONNECTIONS".into()));
         for input in &node.inputs {
-            if node.params.iter().any(|(key, _)| key == &input.port) {
-                continue;
-            }
             match &input.value {
-                NodeInputValue::Edge(edge) => self.rows.push(Row::Wired {
-                    key: input.port.clone(),
-                    value: format!("← {}.{} ({})", edge.from_node, edge.from_port, input.ty.as_str()),
+                NodeInputValue::Edge(edge) => self.rows.push(Row::Edge {
+                    port: input.port.clone(),
+                    ty: input.ty,
+                    from_node: edge.from_node.clone(),
+                    from_port: edge.from_port.clone(),
                 }),
-                NodeInputValue::Literal(Literal::Null) => self.rows.push(Row::Wired {
-                    key: input.port.clone(),
-                    value: format!("(unwired {})", input.ty.as_str()),
-                }),
-                NodeInputValue::Literal(Literal::Str(text)) if input.port == "prompt" => {
-                    self.rows.push(Row::Multiline {
-                        key: input.port.clone(),
-                        value: text.clone(),
-                    })
-                }
-                NodeInputValue::Literal(Literal::Num(number)) => self.rows.push(Row::Number {
-                    key: input.port.clone(),
-                    value: *number,
-                    min: 0.0,
-                    max: (number.abs() * 4.0).max(10.0),
-                    step: if number.fract() == 0.0 { 1.0 } else { 0.01 },
-                }),
-                NodeInputValue::Literal(value) => self.rows.push(Row::Text {
-                    key: input.port.clone(),
-                    value: literal_text(value),
-                    id: matches!(value, Literal::Id(_)),
-                    number: false,
-                }),
+                NodeInputValue::Literal(value) => self.rows.push(setting_row(
+                    &input.port,
+                    value,
+                    format!("{} input · literal value", input.ty.as_str()),
+                    None,
+                    None,
+                )),
             }
         }
-        if node.type_name == "Fn" {
-            self.rows.push(Row::Section("Code".into()));
-            self.rows.push(Row::Multiline {
-                key: "run".into(),
-                value: node.fn_src.clone().unwrap_or_default(),
-            });
-        }
-        self.rows.push(Row::Section("Face".into()));
-        self.rows.push(Row::Multiline {
-            key: "ui".into(),
-            value: node.face_src.clone().unwrap_or_default(),
-        });
-        if !outputs.is_empty() {
-            self.rows.push(Row::Section("Last outputs".into()));
-            for (port, value) in outputs {
-                let chip = crate::faces::preview_text(value)
-                    .unwrap_or_else(|| format!("{} · {}", value.content_type, crate::faces::size_text(value.bytes)));
-                self.rows.push(Row::Output {
-                    port: port.clone(),
-                    chip,
+        if let Some(graph) = graph {
+            for output in &node.outputs {
+                let consumers = graph
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.from_node == node.id && edge.from_port == output.name)
+                    .map(|edge| (edge.to_node.clone(), edge.to_port.clone()))
+                    .collect();
+                self.rows.push(Row::Port {
+                    port: output.name.clone(),
+                    ty: output.ty,
+                    consumers,
                 });
             }
         }
-        if let Some((text, image)) = self.preview.clone() {
-            self.rows.push(Row::Section("Value".into()));
-            let is_image = image.content_type.starts_with("image/");
-            self.rows.push(Row::Preview {
-                text: if is_image { String::new() } else { text },
-                image: is_image.then_some(image),
-            });
+
+        if !outputs.is_empty() {
+            self.rows.push(Row::Section("RESULT".into()));
+            for (port, value) in outputs {
+                self.rows.push(Row::Result {
+                    port: port.clone(),
+                    value: value.clone(),
+                    bytes: loaded
+                        .iter()
+                        .find(|(name, _)| name == port)
+                        .map(|(_, bytes)| bytes.clone()),
+                });
+            }
+        }
+
+        self.rows.push(Row::Advanced);
+        self.advanced_rows.push(Row::FaceSource(
+            node.face_src.clone().unwrap_or_default(),
+        ));
+        let raw = source
+            .map(|source| {
+                let start = source
+                    .split_inclusive('\n')
+                    .take(node.loc.line.saturating_sub(1) as usize)
+                    .map(str::len)
+                    .sum::<usize>();
+                let end_line = graph
+                    .into_iter()
+                    .flat_map(|graph| graph.nodes.iter())
+                    .filter(|other| other.loc.line > node.loc.line)
+                    .map(|other| other.loc.line)
+                    .min();
+                let end = end_line
+                    .map(|line| {
+                        source
+                            .split_inclusive('\n')
+                            .take(line.saturating_sub(1) as usize)
+                            .map(str::len)
+                            .sum()
+                    })
+                    .unwrap_or(source.len());
+                source.get(start..end).unwrap_or_default().trim().to_string()
+            })
+            .unwrap_or_default();
+        self.advanced_rows.push(Row::RawSource(raw));
+        if self.advanced_open {
+            self.rows.extend(self.advanced_rows.clone());
         }
         self.redraw(cx);
     }
 
-    pub fn set_preview(&mut self, preview: Option<(String, ValueBytes)>) {
-        self.preview = preview;
-    }
+    /// Kept as the app's compatibility seam; results now read directly from
+    /// the digest cache passed to `show_node`.
+    pub fn set_preview(&mut self, _preview: Option<(String, ValueBytes)>) {}
 
-    /// The hub's models for the shown node's domain.
-    pub fn set_models(&mut self, cx: &mut Cx, models: Vec<ModelChoice>) {
-        if self.models != models {
-            self.models = models;
-            self.redraw(cx);
-        }
-    }
+    /// Card model pickers own their models. The focused inspector deliberately
+    /// does not duplicate those controls.
+    pub fn set_models(&mut self, _cx: &mut Cx, _models: Vec<ModelChoice>) {}
 
     /// Edits made in the rows, as actions for the app.
-    pub fn changes(&self, cx: &mut Cx, actions: &Actions) -> Vec<InspectorAction> {
+    pub fn changes(&mut self, cx: &mut Cx, actions: &Actions) -> Vec<InspectorAction> {
         let mut out = Vec::new();
+        let mut toggle_advanced = false;
         let Some(node) = self.node.clone() else {
             return out;
         };
@@ -1167,8 +1329,28 @@ impl Inspector {
                 continue;
             };
             match row {
+                Row::Head { id, node_doc, .. } => {
+                    if let Some((new_id, _)) = item.text_input(cx, ids!(node_id)).returned(actions) {
+                        let new_id = new_id.trim().to_string();
+                        if !new_id.is_empty() && new_id != *id {
+                            out.push(InspectorAction::RenameNode {
+                                node: node.clone(),
+                                new_id,
+                            });
+                        }
+                    }
+                    if item.button(cx, ids!(save_doc)).clicked(actions) {
+                        let doc = item.text_input(cx, ids!(node_doc)).text();
+                        if doc != *node_doc {
+                            out.push(InspectorAction::SetNodeDoc {
+                                node: node.clone(),
+                                doc,
+                            });
+                        }
+                    }
+                }
                 Row::Text {
-                    key, id, number, ..
+                    key, id, number, default, ..
                 } => {
                     if let Some((text, _)) = item.text_input(cx, ids!(value)).returned(actions) {
                         let value = if *number {
@@ -1181,14 +1363,15 @@ impl Inspector {
                         } else {
                             Literal::Str(text)
                         };
-                        out.push(InspectorAction::SetParam {
-                            node: node.clone(),
-                            key: key.clone(),
-                            value,
-                        });
+                        out.push(setting_action(&node, key, value));
+                    }
+                    if item.button(cx, ids!(reset)).clicked(actions) {
+                        if let Some(default) = default.clone() {
+                            out.push(setting_action(&node, key, default));
+                        }
                     }
                 }
-                Row::Multiline { key, .. } => {
+                Row::Multiline { key, default, .. } => {
                     if item.button(cx, ids!(apply)).clicked(actions) {
                         let text = item.text_input(cx, ids!(value)).text();
                         out.push(match key.as_str() {
@@ -1207,115 +1390,32 @@ impl Inspector {
                             },
                         });
                     }
+                    if item.button(cx, ids!(reset)).clicked(actions) {
+                        if let Some(default) = default.clone() {
+                            out.push(setting_action(&node, key, default));
+                        }
+                    }
                 }
                 Row::Number {
                     key,
                     min,
                     max,
                     step,
+                    default,
                     ..
                 } => {
                     if let Some(value) = item.fab_value_input(cx, ids!(value)).ended(actions) {
                         let value = inspector_commit_number(value, (*min, *max, *step));
                         item.fab_value_input(cx, ids!(value)).set_value(cx, value);
-                        out.push(InspectorAction::SetParam {
-                            node: node.clone(),
-                            key: key.clone(),
-                            value: Literal::Num(value),
-                        });
+                        out.push(setting_action(&node, key, Literal::Num(value)));
                     }
-                }
-                Row::Dimensions { options, .. } => {
-                    let width_field = item.fab_value_input(cx, ids!(w_field));
-                    let height_field = item.fab_value_input(cx, ids!(h_field));
-                    let picker = item.drop_down(cx, ids!(format));
-                    if let Some(index) = picker.changed(actions) {
-                        if let Some(preset) = index
-                            .checked_sub(1)
-                            .and_then(|index| options.presets.get(index))
-                        {
-                            width_field.set_value(cx, preset.width as f64);
-                            height_field.set_value(cx, preset.height as f64);
-                            out.push(InspectorAction::SetParams {
-                                node: node.clone(),
-                                values: vec![
-                                    ("width".into(), Literal::Num(preset.width as f64)),
-                                    ("height".into(), Literal::Num(preset.height as f64)),
-                                ],
-                            });
-                        }
-                        continue;
-                    }
-                    if item.button(cx, ids!(swap)).clicked(actions) {
-                        let width = inspector_commit_number(
-                            height_field.value(),
-                            options.width_range,
-                        )
-                        .round()
-                        .max(0.0) as u32;
-                        let height = inspector_commit_number(
-                            width_field.value(),
-                            options.height_range,
-                        )
-                        .round()
-                        .max(0.0) as u32;
-                        width_field.set_value(cx, width as f64);
-                        height_field.set_value(cx, height as f64);
-                        picker.set_selected_by_label(
-                            format_preset_name(&options.presets, width, height),
-                            cx,
-                        );
-                        out.push(InspectorAction::SetParams {
-                            node: node.clone(),
-                            values: vec![
-                                ("width".into(), Literal::Num(width as f64)),
-                                ("height".into(), Literal::Num(height as f64)),
-                            ],
-                        });
-                        continue;
-                    }
-                    let width_ended = width_field.ended(actions).map(|value| {
-                        let value = inspector_commit_number(value, options.width_range);
-                        width_field.set_value(cx, value);
-                        value
-                    });
-                    let height_ended = height_field.ended(actions).map(|value| {
-                        let value = inspector_commit_number(value, options.height_range);
-                        height_field.set_value(cx, value);
-                        value
-                    });
-                    if width_ended.is_some() || height_ended.is_some() {
-                        let width = width_field.value().round().max(0.0) as u32;
-                        let height = height_field.value().round().max(0.0) as u32;
-                        picker.set_selected_by_label(
-                            format_preset_name(&options.presets, width, height),
-                            cx,
-                        );
-                        match (width_ended, height_ended) {
-                            (Some(width), Some(height)) => {
-                                out.push(InspectorAction::SetParams {
-                                    node: node.clone(),
-                                    values: vec![
-                                        ("width".into(), Literal::Num(width)),
-                                        ("height".into(), Literal::Num(height)),
-                                    ],
-                                });
-                            }
-                            (Some(value), None) => out.push(InspectorAction::SetParam {
-                                node: node.clone(),
-                                key: "width".into(),
-                                value: Literal::Num(value),
-                            }),
-                            (None, Some(value)) => out.push(InspectorAction::SetParam {
-                                node: node.clone(),
-                                key: "height".into(),
-                                value: Literal::Num(value),
-                            }),
-                            (None, None) => {}
+                    if item.button(cx, ids!(reset)).clicked(actions) {
+                        if let Some(default) = default.clone() {
+                            out.push(setting_action(&node, key, default));
                         }
                     }
                 }
-                Row::Choice { key, .. } => {
+                Row::Choice { key, default, .. } => {
                     if let Some(label) = item.drop_down(cx, ids!(value)).changed_label(actions) {
                         let value = if matches!(key.as_str(), "type" | "method" | "out" | "on_fail") {
                             Literal::Id(label)
@@ -1324,61 +1424,102 @@ impl Inspector {
                         } else {
                             Literal::Str(label)
                         };
-                        out.push(InspectorAction::SetParam {
-                            node: node.clone(),
-                            key: key.clone(),
-                            value,
-                        });
+                        out.push(setting_action(&node, key, value));
+                    }
+                    if item.button(cx, ids!(reset)).clicked(actions) {
+                        if let Some(default) = default.clone() {
+                            out.push(setting_action(&node, key, default));
+                        }
                     }
                 }
-                Row::Model { value: current } => {
-                    if let Some(index) = item.drop_down(cx, ids!(value)).changed(actions) {
-                        let value = index
-                            .checked_sub(1)
-                            .and_then(|index| self.models.get(index))
-                            .map(|model| model.id.clone())
-                            .unwrap_or_else(|| {
-                                if index == 0 {
-                                    String::new()
-                                } else {
-                                    current.clone()
-                                }
-                            });
-                        out.push(InspectorAction::SetParam {
-                            node: node.clone(),
-                            key: "model".into(),
-                            value: Literal::Str(value),
-                        });
-                    }
-                }
-                Row::Bool { key, .. } => {
+                Row::Bool { key, default, .. } => {
                     if let Some(flag) = item.check_box(cx, ids!(value)).changed(actions) {
-                        out.push(InspectorAction::SetParam {
-                            node: node.clone(),
-                            key: key.clone(),
-                            value: Literal::Bool(flag),
-                        });
+                        out.push(setting_action(&node, key, Literal::Bool(flag)));
+                    }
+                    if item.button(cx, ids!(reset)).clicked(actions) {
+                        if let Some(default) = default.clone() {
+                            out.push(setting_action(&node, key, default));
+                        }
                     }
                 }
-                Row::Color { key, .. } => {
+                Row::Color { key, default, .. } => {
                     if let Some(rgba) = item.fab_color_pick(cx, ids!(value)).changed(actions) {
-                        out.push(InspectorAction::SetParam {
-                            node: node.clone(),
-                            key: key.clone(),
-                            value: Literal::Str(hex_color(rgba)),
-                        });
+                        out.push(setting_action(&node, key, Literal::Str(hex_color(rgba))));
+                    }
+                    if item.button(cx, ids!(reset)).clicked(actions) {
+                        if let Some(default) = default.clone() {
+                            out.push(setting_action(&node, key, default));
+                        }
                     }
                 }
-                Row::Output { port, .. } => {
-                    if item.button(cx, ids!(open)).clicked(actions) {
-                        out.push(InspectorAction::OpenValue {
+                Row::Edge { port, from_node, .. } => {
+                    if item.button(cx, ids!(source)).clicked(actions) {
+                        out.push(InspectorAction::SelectNode(from_node.clone()));
+                    }
+                    if item.button(cx, ids!(disconnect)).clicked(actions) {
+                        out.push(InspectorAction::Disconnect {
                             node: node.clone(),
                             port: port.clone(),
                         });
                     }
                 }
+                Row::Port { consumers, .. } => {
+                    if item.button(cx, ids!(consumers)).clicked(actions) {
+                        if let Some((consumer, _)) = consumers.first() {
+                            out.push(InspectorAction::SelectNode(consumer.clone()));
+                        }
+                    }
+                }
+                Row::Result { port, value, .. } => {
+                    if item
+                        .view(cx, ids!(thumb))
+                        .finger_up(actions)
+                        .is_some_and(|up| up.is_over)
+                    {
+                        out.push(InspectorAction::OpenValue {
+                            node: node.clone(),
+                            port: port.clone(),
+                        });
+                    }
+                    if item.button(cx, ids!(save)).clicked(actions) {
+                        out.push(InspectorAction::SaveValue {
+                            node: node.clone(),
+                            port: port.clone(),
+                        });
+                    }
+                    if item.button(cx, ids!(copy)).clicked(actions) {
+                        out.push(InspectorAction::CopyDigest(value.digest.clone()));
+                    }
+                }
+                Row::Advanced => {
+                    if item.button(cx, ids!(toggle)).clicked(actions) {
+                        toggle_advanced = true;
+                    }
+                }
+                Row::FaceSource(_) => {
+                    if item.button(cx, ids!(apply)).clicked(actions) {
+                        out.push(InspectorAction::SetFaceSrc {
+                            node: node.clone(),
+                            src: item.widget(cx, ids!(editor)).text(),
+                        });
+                    }
+                }
+                Row::RawSource(_) => {
+                    if item.button(cx, ids!(source)).clicked(actions) {
+                        out.push(InspectorAction::JumpSource(node.clone()));
+                    }
+                }
                 _ => {}
             }
+        }
+        if toggle_advanced {
+            self.advanced_open = !self.advanced_open;
+            if self.advanced_open {
+                self.rows.extend(self.advanced_rows.clone());
+            } else if let Some(index) = self.rows.iter().position(|row| matches!(row, Row::Advanced)) {
+                self.rows.truncate(index + 1);
+            }
+            self.redraw(cx);
         }
         out
     }
@@ -1398,22 +1539,71 @@ impl Widget for Inspector {
                 };
                 let (item, existed) = list.item_with_existed(cx, index, row.template());
                 match row {
-                    Row::Head { title, doc } | Row::Empty { title, doc } => {
-                        item.label(cx, ids!(title)).set_text(cx, title);
-                        item.label(cx, ids!(doc)).set_text(cx, doc);
+                    Row::Head {
+                        kind,
+                        id,
+                        type_name,
+                        type_doc,
+                        node_doc,
+                    } => {
+                        let id_input = item.text_input(cx, ids!(node_id));
+                        let changed = !existed || id_input.text() != *id;
+                        if changed {
+                            id_input.set_text(cx, id);
+                            let _ = item
+                                .image(cx, ids!(kind_icon))
+                                .load_svg_from_data(cx, kind_icon_svg(kind).as_bytes());
+                            item.text_input(cx, ids!(node_doc)).set_text(cx, node_doc);
+                        }
+                        item.label(cx, ids!(type_name)).set_text(cx, type_name);
+                        item.label(cx, ids!(type_doc)).set_text(cx, type_doc);
                     }
+                    Row::Empty(hint) => item.label(cx, ids!(hint)).set_text(cx, hint),
                     Row::Section(title) => item.label(cx, ids!(title)).set_text(cx, title),
-                    Row::Text { key, value, .. } => {
+                    Row::Text {
+                        key,
+                        value,
+                        id,
+                        help,
+                        default,
+                        ..
+                    } => {
                         item.label(cx, ids!(name)).set_text(cx, key);
+                        item.label(cx, ids!(help)).set_text(cx, help);
                         if !existed {
                             item.text_input(cx, ids!(value)).set_text(cx, value);
                         }
+                        let current = if *id {
+                            Literal::Id(value.clone())
+                        } else {
+                            Literal::Str(value.clone())
+                        };
+                        let reset = item.button(cx, ids!(reset));
+                        reset.set_visible(cx, default.is_some());
+                        reset.set_enabled(
+                            cx,
+                            default.as_ref().is_some_and(|value| value != &current),
+                        );
                     }
-                    Row::Multiline { key, value } => {
+                    Row::Multiline {
+                        key,
+                        value,
+                        help,
+                        default,
+                    } => {
                         item.label(cx, ids!(name)).set_text(cx, key);
+                        item.label(cx, ids!(help)).set_text(cx, help);
                         if !existed {
                             item.text_input(cx, ids!(value)).set_text(cx, value);
                         }
+                        let reset = item.button(cx, ids!(reset));
+                        reset.set_visible(cx, default.is_some());
+                        reset.set_enabled(
+                            cx,
+                            default
+                                .as_ref()
+                                .is_some_and(|default| default != &Literal::Str(value.clone())),
+                        );
                     }
                     Row::Number {
                         key,
@@ -1421,8 +1611,11 @@ impl Widget for Inspector {
                         min,
                         max,
                         step,
+                        help,
+                        default,
                     } => {
                         item.label(cx, ids!(name)).set_text(cx, key);
+                        item.label(cx, ids!(help)).set_text(cx, help);
                         let mut field = item.fab_value_input(cx, ids!(value));
                         if !existed {
                             let integral = step.fract() == 0.0;
@@ -1436,116 +1629,177 @@ impl Widget for Inspector {
                             });
                             field.set_value(cx, *value);
                         }
-                    }
-                    Row::Dimensions {
-                        width,
-                        height,
-                        options,
-                    } => {
-                        let width_field = item.fab_value_input(cx, ids!(w_field));
-                        let height_field = item.fab_value_input(cx, ids!(h_field));
-                        let picker = item.drop_down(cx, ids!(format));
-                        if !existed || self.dimensions_dirty {
-                            let (width_min, width_max, width_step) = options.width_range;
-                            let (height_min, height_max, height_step) = options.height_range;
-                            let mut width_field_inner = width_field.clone();
-                            script_apply_eval!(cx, width_field_inner, {
-                                min: #(width_min)
-                                max: #(width_max)
-                                step: #((width_step * 0.125).max(1.0))
-                                snap: #(width_step)
-                            });
-                            let mut height_field_inner = height_field.clone();
-                            script_apply_eval!(cx, height_field_inner, {
-                                min: #(height_min)
-                                max: #(height_max)
-                                step: #((height_step * 0.125).max(1.0))
-                                snap: #(height_step)
-                            });
-                            width_field.set_value(cx, *width as f64);
-                            height_field.set_value(cx, *height as f64);
-                            let mut labels = vec![CUSTOM_FORMAT.to_string()];
-                            labels.extend(
-                                options.presets.iter().map(|preset| preset.name.clone()),
-                            );
-                            picker.set_labels(cx, labels);
-                            picker.set_selected_by_label(
-                                format_preset_name(&options.presets, *width, *height),
-                                cx,
-                            );
-                            self.dimensions_dirty = false;
-                        }
+                        let reset = item.button(cx, ids!(reset));
+                        reset.set_visible(cx, default.is_some());
+                        reset.set_enabled(
+                            cx,
+                            default
+                                .as_ref()
+                                .is_some_and(|default| default != &Literal::Num(*value)),
+                        );
                     }
                     Row::Choice {
                         key,
                         value,
                         options,
+                        help,
+                        default,
                     } => {
                         item.label(cx, ids!(name)).set_text(cx, key);
+                        item.label(cx, ids!(help)).set_text(cx, help);
                         let drop_down = item.drop_down(cx, ids!(value));
                         if !existed {
                             drop_down.set_labels(cx, options.clone());
                             drop_down.set_selected_by_label(value, cx);
                         }
-                    }
-                    Row::Model { value } => {
-                        item.label(cx, ids!(name)).set_text(cx, "model");
-                        let drop_down = item.drop_down(cx, ids!(value));
-                        let mut labels = vec![HUB_PICKS.to_string()];
-                        labels.extend(self.models.iter().map(|model| model.label.clone()));
-                        let selected = self
-                            .models
-                            .iter()
-                            .find(|model| model.id == *value)
-                            .map(|model| model.label.clone())
-                            .unwrap_or_else(|| value.clone());
-                        if !selected.is_empty() && !labels.iter().any(|label| label == &selected) {
-                            labels.push(value.clone());
-                        }
-                        drop_down.set_labels(cx, labels);
-                        let mut dimmed = vec![false];
-                        dimmed.extend(self.models.iter().map(|model| model.dimmed));
-                        drop_down.set_dimmed_items(cx, dimmed);
-                        drop_down.set_selected_by_label(
-                            if value.is_empty() { HUB_PICKS } else { &selected },
+                        let reset = item.button(cx, ids!(reset));
+                        reset.set_visible(cx, default.is_some());
+                        reset.set_enabled(
                             cx,
+                            default.as_ref().is_some_and(|default| literal_text(default) != *value),
                         );
                     }
-                    Row::Bool { key, value } => {
+                    Row::Bool {
+                        key,
+                        value,
+                        help,
+                        default,
+                    } => {
                         item.label(cx, ids!(name)).set_text(cx, key);
+                        item.label(cx, ids!(help)).set_text(cx, help);
                         if !existed {
                             item.check_box(cx, ids!(value)).set_active(cx, *value, Animate::No);
                         }
+                        let reset = item.button(cx, ids!(reset));
+                        reset.set_visible(cx, default.is_some());
+                        reset.set_enabled(
+                            cx,
+                            default
+                                .as_ref()
+                                .is_some_and(|default| default != &Literal::Bool(*value)),
+                        );
                     }
-                    Row::Color { key, rgba } => {
+                    Row::Color {
+                        key,
+                        rgba,
+                        help,
+                        default,
+                    } => {
                         item.label(cx, ids!(name)).set_text(cx, key);
+                        item.label(cx, ids!(help)).set_text(cx, help);
                         if !existed {
                             item.fab_color_pick(cx, ids!(value)).set_rgba(cx, *rgba);
                         }
+                        let reset = item.button(cx, ids!(reset));
+                        reset.set_visible(cx, default.is_some());
+                        reset.set_enabled(
+                            cx,
+                            default.as_ref().is_some_and(|default| {
+                                literal_text(default)
+                                    != hex_color(Vec4f { x: rgba[0], y: rgba[1], z: rgba[2], w: rgba[3] })
+                            }),
+                        );
                     }
-                    Row::Wired { key, value } => {
-                        item.label(cx, ids!(name)).set_text(cx, key);
-                        item.label(cx, ids!(value)).set_text(cx, value);
-                    }
-                    Row::Output { port, chip, .. } => {
+                    Row::Edge {
+                        port,
+                        ty,
+                        from_node,
+                        from_port,
+                    } => {
                         item.label(cx, ids!(name)).set_text(cx, port);
-                        item.label(cx, ids!(value)).set_text(cx, chip);
-                    }
-                    Row::Preview { text, image } => {
-                        item.label(cx, ids!(text)).set_text(cx, text);
-                        let image_ref = item.image(cx, ids!(image));
-                        match image {
-                            Some(bytes) if !existed => {
-                                let loaded = if bytes.content_type.contains("jpeg") {
-                                    image_ref.load_jpg_from_data(cx, &bytes.bytes)
-                                } else {
-                                    image_ref.load_png_from_data(cx, &bytes.bytes)
-                                };
-                                image_ref.set_visible(cx, loaded.is_ok());
-                            }
-                            Some(_) => {}
-                            None => image_ref.set_visible(cx, false),
+                        item.button(cx, ids!(source))
+                            .set_text(cx, &format!("← {from_node}.{from_port}"));
+                        item.label(cx, ids!(help))
+                            .set_text(cx, &format!("{} input", ty.as_str()));
+                        if !existed {
+                            let _ = item
+                                .image(cx, ids!(type_icon))
+                                .load_svg_from_data(cx, port_icon_svg(*ty).as_bytes());
                         }
+                    }
+                    Row::Port {
+                        port,
+                        ty,
+                        consumers,
+                    } => {
+                        item.label(cx, ids!(name)).set_text(cx, port);
+                        let label = if consumers.is_empty() {
+                            "No consumers".to_string()
+                        } else {
+                            format!(
+                                "{} → {}",
+                                consumers.len(),
+                                consumers
+                                    .iter()
+                                    .map(|(node, port)| format!("{node}.{port}"))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        };
+                        item.button(cx, ids!(consumers)).set_text(cx, &label);
+                        item.button(cx, ids!(consumers))
+                            .set_enabled(cx, !consumers.is_empty());
+                        item.label(cx, ids!(help))
+                            .set_text(cx, &format!("{} output", ty.as_str()));
+                        if !existed {
+                            let _ = item
+                                .image(cx, ids!(type_icon))
+                                .load_svg_from_data(cx, port_icon_svg(*ty).as_bytes());
+                        }
+                    }
+                    Row::Result { port, value, bytes } => {
+                        item.label(cx, ids!(name)).set_text(cx, port);
+                        item.label(cx, ids!(meta)).set_text(
+                            cx,
+                            &format!(
+                                "{} · {} · {}",
+                                value.digest,
+                                crate::faces::size_text(value.bytes),
+                                value.content_type
+                            ),
+                        );
+                        let is_image = value.content_type.starts_with("image/");
+                        let is_text = value.content_type.starts_with("text/")
+                            || value.content_type == "application/json";
+                        item.view(cx, ids!(thumb)).set_visible(cx, is_image);
+                        item.view(cx, ids!(text_scroll)).set_visible(cx, is_text);
+                        item.label(cx, ids!(media))
+                            .set_visible(cx, !is_image && !is_text);
+                        item.label(cx, ids!(media)).set_text(
+                            cx,
+                            &format!("{} value", value.ty.as_str()),
+                        );
+                        let text = bytes
+                            .as_ref()
+                            .filter(|_| is_text)
+                            .map(|bytes| String::from_utf8_lossy(&bytes.bytes).into_owned())
+                            .or_else(|| crate::faces::preview_text(value))
+                            .unwrap_or_default();
+                        item.label(cx, ids!(text)).set_text(cx, &text);
+                        if is_image {
+                            let marker = item.label(cx, ids!(marker));
+                            let image = item.image(cx, ids!(image));
+                            let needs_load = marker.text() != value.digest || !image.has_content();
+                            marker.set_text(cx, &value.digest);
+                            if needs_load {
+                                let loaded = bytes
+                                    .as_ref()
+                                    .is_some_and(|bytes| image.load_image_from_data(cx, &bytes.bytes).is_ok());
+                                image.set_visible(cx, loaded);
+                            }
+                        }
+                    }
+                    Row::Advanced => item.button(cx, ids!(toggle)).set_text(
+                        cx,
+                        if self.advanced_open { "▾  ADVANCED" } else { "▸  ADVANCED" },
+                    ),
+                    Row::FaceSource(source) => {
+                        if !existed {
+                            item.widget(cx, ids!(editor)).set_text(cx, source);
+                        }
+                    }
+                    Row::RawSource(source) => {
+                        item.button(cx, ids!(source)).set_text(cx, source);
                     }
                 }
                 item.draw_all_unscoped(cx);
@@ -1571,6 +1825,11 @@ pub enum RunningAction {
     Stop(String),
     Duplicate(String),
     CopyId(String),
+    OpenImage {
+        instance: String,
+        label: String,
+        digest: String,
+    },
 }
 
 #[derive(Script, ScriptHook, Widget)]
@@ -1583,6 +1842,8 @@ pub struct RunningList {
     attached: Option<String>,
     #[rust]
     now_ms: u64,
+    #[rust]
+    thumbnails: HashMap<String, ValueBytes>,
 }
 
 impl RunningList {
@@ -1596,6 +1857,11 @@ impl RunningList {
         self.view
             .label(cx, ids!(hint))
             .set_visible(cx, self.rows.is_empty());
+        self.redraw(cx);
+    }
+
+    pub fn set_thumbnail(&mut self, cx: &mut Cx, bytes: ValueBytes) {
+        self.thumbnails.insert(bytes.digest.clone(), bytes);
         self.redraw(cx);
     }
 
@@ -1617,6 +1883,23 @@ impl RunningList {
             }
             if item.button(cx, ids!(copy)).clicked(actions) {
                 out.push(RunningAction::CopyId(row.instance.clone()));
+            }
+            if item
+                .view(cx, ids!(thumbnail))
+                .finger_up(actions)
+                .is_some_and(|up| up.is_over)
+            {
+                if let Some((label, value)) = row
+                    .outputs
+                    .iter()
+                    .find(|(_, value)| value.content_type.starts_with("image/"))
+                {
+                    out.push(RunningAction::OpenImage {
+                        instance: row.instance.clone(),
+                        label: label.clone(),
+                        digest: value.digest.clone(),
+                    });
+                }
             }
         }
         out
@@ -1664,6 +1947,27 @@ impl Widget for RunningList {
                     }
                 }
                 item.label(cx, ids!(detail)).set_text(cx, &detail);
+                let picture = row
+                    .outputs
+                    .iter()
+                    .find(|(_, value)| value.content_type.starts_with("image/"));
+                let thumb = item.view(cx, ids!(thumbnail));
+                thumb.set_visible(cx, picture.is_some());
+                if let Some((_, value)) = picture {
+                    let marker = item.label(cx, ids!(marker));
+                    let image = item.image(cx, ids!(image));
+                    let changed = marker.text() != value.digest || !image.has_content();
+                    marker.set_text(cx, &value.digest);
+                    if changed {
+                        let loaded = self
+                            .thumbnails
+                            .get(&value.digest)
+                            .is_some_and(|bytes| {
+                                image.load_image_from_data(cx, &bytes.bytes).is_ok()
+                            });
+                        image.set_visible(cx, loaded);
+                    }
+                }
                 item.draw_all_unscoped(cx);
             }
         }
@@ -2147,12 +2451,47 @@ impl Widget for AppView {
 
 #[cfg(test)]
 mod tests {
-    use super::inspector_commit_number;
+    use super::{inspector_commit_number, inspector_setting_names};
+    use makepad_flow::Literal;
 
     #[test]
     fn inspector_number_commit_snaps_and_clamps() {
         let range = (256.0, 2048.0, 16.0);
         assert_eq!(inspector_commit_number(1064.0, range), 1072.0);
         assert_eq!(inspector_commit_number(2057.0, range), 2048.0);
+    }
+
+    #[test]
+    fn image_settings_are_the_complement_of_card_controls() {
+        let params = [
+            "width", "height", "steps", "seed", "model", "negative", "guidance", "loras",
+        ]
+        .into_iter()
+        .map(|name| (name.to_string(), Literal::Null))
+        .collect::<Vec<_>>();
+        assert_eq!(
+            inspector_setting_names("Image", &params),
+            vec!["negative", "guidance", "loras"]
+        );
+    }
+
+    #[test]
+    fn card_setting_split_is_specific_to_each_builtin_type() {
+        let params = ["width", "height", "model", "system", "temperature"]
+            .into_iter()
+            .map(|name| (name.to_string(), Literal::Null))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            inspector_setting_names("Llm", &params),
+            vec!["width", "height", "system", "temperature"]
+        );
+        assert_eq!(
+            inspector_setting_names("Gen", &params),
+            vec!["system", "temperature"]
+        );
+        assert_eq!(
+            inspector_setting_names("Http", &params),
+            vec!["width", "height", "model", "system", "temperature"]
+        );
     }
 }

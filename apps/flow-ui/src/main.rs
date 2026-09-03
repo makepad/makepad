@@ -19,6 +19,7 @@ mod panels;
 mod testpattern;
 mod theme;
 mod values;
+mod viewer;
 mod wire_route;
 
 use canvas::{CanvasEdit, FlowCanvas, FlowCanvasAction, NodeStatus};
@@ -47,6 +48,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use values::ValueCache;
+use viewer::{ImageViewer, ImageViewerAction, ImageViewerItem};
 
 app_main!(App);
 
@@ -555,6 +557,7 @@ script_mod! {
                                 }
                             }
                         }
+                        image_viewer := ImageViewer{}
                     }
                 }
             }
@@ -766,6 +769,8 @@ pub struct App {
     preview_bytes: Option<makepad_flow::ValueBytes>,
     #[rust]
     save_dialog_bytes: Option<makepad_flow::ValueBytes>,
+    #[rust]
+    save_when_ready: Option<String>,
     #[rust]
     save_task: Option<makepad_widgets::makepad_platform::thread::TaskHandle<Result<std::path::PathBuf, String>>>,
     #[rust]
@@ -1541,6 +1546,7 @@ impl App {
                         {
                             list.set_rows(cx, rows, self.instance.clone());
                         }
+                        self.refresh_running_thumbnails(cx);
                         self.maybe_auto_open(cx);
                     }
                 }
@@ -1839,6 +1845,18 @@ impl App {
             .as_ref()
             .and_then(|domain| self.models.get(domain).cloned())
             .unwrap_or_default();
+        let loaded: Vec<(String, makepad_flow::ValueBytes)> = outputs
+            .iter()
+            .filter_map(|(port, value)| {
+                self.values
+                    .get(&value.digest)
+                    .map(|bytes| (port.clone(), bytes))
+            })
+            .collect();
+        let source = self
+            .definition
+            .as_ref()
+            .map(|definition| definition.source.clone());
         if let Some(mut inspector) = self.ui.widget(cx, ids!(inspector)).borrow_mut::<Inspector>() {
             inspector.set_models(cx, models);
             inspector.show_node(
@@ -1847,7 +1865,16 @@ impl App {
                 &self.catalog,
                 selected.as_deref(),
                 &outputs,
+                &loaded,
+                source.as_deref(),
             );
+        }
+        if let Some(client) = self.client() {
+            for (_, value) in &outputs {
+                if !self.values.contains(&value.digest) {
+                    self.values.request(&value.digest, client.clone());
+                }
+            }
         }
         if domain.is_some() {
             self.refresh_models(false);
@@ -3011,6 +3038,7 @@ impl App {
         let Some(value) = value else {
             return;
         };
+        self.preview_bytes = None;
         self.preview_digest = Some((value.digest.clone(), format!("{node}.{port}")));
         if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
             canvas.select(cx, Some(node.to_string()));
@@ -3019,6 +3047,9 @@ impl App {
         self.source_mode = false;
         self.set_modes(cx);
         match self.values.get(&value.digest) {
+            Some(bytes) if value.content_type.starts_with("image/") => {
+                self.show_image_viewer(cx, node, port, &bytes)
+            }
             Some(bytes) => self.show_preview(cx, &bytes),
             None => {
                 if let Some(client) = self.client() {
@@ -3107,6 +3138,21 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(preview_save)).clicked(actions) {
             self.save_preview(cx);
+        }
+        let viewer_actions = self
+            .ui
+            .widget(cx, ids!(image_viewer))
+            .borrow_mut::<ImageViewer>()
+            .map(|mut viewer| viewer.actions(cx, actions))
+            .unwrap_or_default();
+        for action in viewer_actions {
+            match action {
+                ImageViewerAction::None => {}
+                ImageViewerAction::Close => self.close_preview(cx),
+                ImageViewerAction::Save => self.save_preview(cx),
+                ImageViewerAction::CopyDigest(digest) => cx.copy_to_clipboard(&digest),
+                ImageViewerAction::Step(direction) => self.step_image_viewer(cx, direction),
+            }
         }
         if self.ui.button(cx, ids!(save_btn)).clicked(actions) {
             if let Some(name) = self.selected.clone() {
@@ -3284,8 +3330,8 @@ impl MatchEvent for App {
         let inspector_actions = self
             .ui
             .widget(cx, ids!(inspector))
-            .borrow::<Inspector>()
-            .map(|inspector| inspector.changes(cx, actions))
+            .borrow_mut::<Inspector>()
+            .map(|mut inspector| inspector.changes(cx, actions))
             .unwrap_or_default();
         for action in inspector_actions {
             match action {
@@ -3294,14 +3340,6 @@ impl MatchEvent for App {
                     if let Some(graph) = self.current_graph() {
                         let next = graph_edit::set_param(&graph, &node, &key, value);
                         self.put_graph(cx, next);
-                    }
-                }
-                InspectorAction::SetParams { node, values } => {
-                    if let Some(mut graph) = self.current_graph() {
-                        for (key, value) in values {
-                            graph = graph_edit::set_param(&graph, &node, &key, value);
-                        }
-                        self.put_graph(cx, graph);
                     }
                 }
                 InspectorAction::SetFnSrc { node, src } => {
@@ -3316,6 +3354,85 @@ impl MatchEvent for App {
                         self.put_graph(cx, next);
                     }
                 }
+                InspectorAction::RenameNode { node, new_id } => {
+                    if !valid_node_id(&new_id) {
+                        self.set_error(cx, "node ids use letters, digits and underscores and cannot start with a digit");
+                        continue;
+                    }
+                    let Some(mut graph) = self.current_graph() else {
+                        continue;
+                    };
+                    if graph.nodes.iter().any(|item| item.id == new_id) {
+                        self.set_error(cx, &format!("a node named {new_id} already exists"));
+                        continue;
+                    }
+                    rename_graph_node(&mut graph, &node, &new_id);
+                    if let Some(values) = self.outputs.remove(&node) {
+                        self.outputs.insert(new_id.clone(), values);
+                    }
+                    self.selected_node = Some(new_id.clone());
+                    if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
+                        canvas.select(cx, Some(new_id));
+                    }
+                    self.put_graph(cx, graph);
+                }
+                InspectorAction::SetNodeDoc { node, doc } => {
+                    if let Some(mut graph) = self.current_graph() {
+                        if let Some(item) = graph.nodes.iter_mut().find(|item| item.id == node) {
+                            let doc = doc.trim();
+                            item.doc = (!doc.is_empty()).then(|| doc.to_string());
+                        }
+                        self.put_graph(cx, graph);
+                    }
+                }
+                InspectorAction::SetNodeMeta { node, key, value } => {
+                    if let Some(mut graph) = self.current_graph() {
+                        if let Some(item) = graph.nodes.iter_mut().find(|item| item.id == node) {
+                            match (key.as_str(), value) {
+                                ("on_fail", Literal::Id(value) | Literal::Str(value)) => {
+                                    item.on_fail = value;
+                                }
+                                ("label", Literal::Str(value) | Literal::Id(value)) => {
+                                    item.label = (!value.is_empty()).then_some(value);
+                                }
+                                _ => {}
+                            }
+                        }
+                        self.put_graph(cx, graph);
+                    }
+                }
+                InspectorAction::SelectNode(node) => {
+                    self.selected_node = Some(node.clone());
+                    if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
+                        canvas.select(cx, Some(node));
+                    }
+                    self.refresh_inspector(cx);
+                    self.refresh_models(true);
+                }
+                InspectorAction::Disconnect { node, port } => {
+                    if let Some(graph) = self.current_graph() {
+                        self.put_graph(cx, graph_edit::disconnect(&graph, &node, &port));
+                    }
+                }
+                InspectorAction::JumpSource(node) => {
+                    self.source_mode = true;
+                    self.set_modes(cx);
+                    self.jump_to_node(cx, &node);
+                }
+                InspectorAction::SaveValue { node, port } => {
+                    let digest = self
+                        .outputs
+                        .get(&node)
+                        .and_then(|ports| ports.iter().find(|(name, _)| name == &port))
+                        .map(|(_, value)| value.digest.clone());
+                    self.save_when_ready = digest;
+                    self.open_value(cx, &node, &port);
+                    if self.preview_bytes.is_some() {
+                        self.save_when_ready = None;
+                        self.save_preview(cx);
+                    }
+                }
+                InspectorAction::CopyDigest(digest) => cx.copy_to_clipboard(&digest),
                 InspectorAction::OpenValue { node, port } => self.open_value(cx, &node, &port),
             }
         }
@@ -3368,6 +3485,19 @@ impl MatchEvent for App {
                     }
                 }
                 RunningAction::CopyId(id) => cx.copy_to_clipboard(&id),
+                RunningAction::OpenImage {
+                    instance,
+                    label,
+                    digest,
+                } => {
+                    self.preview_digest = Some((digest.clone(), format!("{instance}.{label}")));
+                    self.preview_bytes = None;
+                    if let Some(bytes) = self.values.get(&digest) {
+                        self.show_image_viewer(cx, &instance, &label, &bytes);
+                    } else if let Some(client) = self.client() {
+                        self.values.request(&digest, client);
+                    }
+                }
             }
         }
 
@@ -3395,6 +3525,14 @@ impl App {
     fn close_preview(&mut self, cx: &mut Cx) {
         self.preview_digest = None;
         self.preview_bytes = None;
+        self.save_when_ready = None;
+        if let Some(mut viewer) = self
+            .ui
+            .widget(cx, ids!(image_viewer))
+            .borrow_mut::<ImageViewer>()
+        {
+            viewer.close(cx);
+        }
         self.ui
             .view(cx, ids!(value_preview_view))
             .set_visible(cx, false);
@@ -3510,6 +3648,113 @@ impl App {
         self.refresh_inspector(cx);
     }
 
+    fn show_image_viewer(
+        &mut self,
+        cx: &mut Cx,
+        node: &str,
+        port: &str,
+        bytes: &makepad_flow::ValueBytes,
+    ) {
+        self.preview_bytes = Some(bytes.clone());
+        self.ui
+            .view(cx, ids!(value_preview_view))
+            .set_visible(cx, false);
+        let result = self
+            .ui
+            .widget(cx, ids!(image_viewer))
+            .borrow_mut::<ImageViewer>()
+            .map(|mut viewer| {
+                viewer.show(
+                    cx,
+                    ImageViewerItem {
+                        node: node.to_string(),
+                        port: port.to_string(),
+                        bytes: bytes.clone(),
+                    },
+                )
+            });
+        if let Some(Err(error)) = result {
+            self.set_error(cx, &error);
+        }
+        self.refresh_inspector(cx);
+    }
+
+    fn refresh_running_thumbnails(&mut self, cx: &mut Cx) {
+        let pictures: Vec<String> = self
+            .instances
+            .iter()
+            .flat_map(|row| row.outputs.values())
+            .filter(|value| value.content_type.starts_with("image/"))
+            .map(|value| value.digest.clone())
+            .collect();
+        let client = self.client();
+        for digest in pictures {
+            if let Some(bytes) = self.values.get(&digest) {
+                if let Some(mut list) = self
+                    .ui
+                    .widget(cx, ids!(running))
+                    .borrow_mut::<RunningList>()
+                {
+                    list.set_thumbnail(cx, bytes);
+                }
+            } else if let Some(client) = client.as_ref() {
+                self.values.request(&digest, client.clone());
+            }
+        }
+    }
+
+    fn step_image_viewer(&mut self, cx: &mut Cx, direction: i32) {
+        let current_digest = self.preview_digest.as_ref().map(|(digest, _)| digest.as_str());
+        let running_pictures = current_digest.and_then(|digest| {
+            self.instances
+                .iter()
+                .find(|row| row.outputs.values().any(|value| value.digest == digest))
+                .map(|row| {
+                    row.outputs
+                        .iter()
+                        .filter(|(_, value)| value.content_type.starts_with("image/"))
+                        .map(|(label, value)| {
+                            (row.instance.clone(), label.clone(), value.digest.clone())
+                        })
+                        .collect::<Vec<_>>()
+                })
+        });
+        let running_gallery = running_pictures.is_some();
+        let mut pictures: Vec<(String, String, String)> = running_pictures.unwrap_or_else(|| {
+            self.outputs
+                .iter()
+                .flat_map(|(node, ports)| {
+                    ports.iter().filter_map(move |(port, value)| {
+                        value.content_type.starts_with("image/").then(|| {
+                            (node.clone(), port.clone(), value.digest.clone())
+                        })
+                    })
+                })
+                .collect()
+        });
+        pictures.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        if pictures.is_empty() {
+            return;
+        }
+        let current = current_digest
+            .and_then(|digest| pictures.iter().position(|(_, _, item)| item == digest))
+            .unwrap_or(0);
+        let next = (current as i32 + direction).rem_euclid(pictures.len() as i32) as usize;
+        let (node, port, _) = pictures[next].clone();
+        if running_gallery {
+            let digest = pictures[next].2.clone();
+            self.preview_digest = Some((digest.clone(), format!("{node}.{port}")));
+            self.preview_bytes = None;
+            if let Some(bytes) = self.values.get(&digest) {
+                self.show_image_viewer(cx, &node, &port, &bytes);
+            } else if let Some(client) = self.client() {
+                self.values.request(&digest, client);
+            }
+        } else {
+            self.open_value(cx, &node, &port);
+        }
+    }
+
     fn drain_values(&mut self, cx: &mut Cx) {
         for arrival in self.values.drain() {
             match arrival {
@@ -3517,13 +3762,40 @@ impl App {
                     if let Some(faces) = self.faces.as_mut() {
                         faces.deliver_bytes(cx, &mut self.values, &digest);
                     }
+                    if let Some(bytes) = self.values.get(&digest) {
+                        if bytes.content_type.starts_with("image/") {
+                            if let Some(mut list) = self
+                                .ui
+                                .widget(cx, ids!(running))
+                                .borrow_mut::<RunningList>()
+                            {
+                                list.set_thumbnail(cx, bytes);
+                            }
+                        }
+                    }
                     if self
                         .preview_digest
                         .as_ref()
                         .is_some_and(|(wanted, _)| *wanted == digest)
                     {
                         if let Some(bytes) = self.values.get(&digest) {
-                            self.show_preview(cx, &bytes);
+                            let label = self
+                                .preview_digest
+                                .as_ref()
+                                .map(|(_, label)| label.clone())
+                                .unwrap_or_default();
+                            if bytes.content_type.starts_with("image/") {
+                                let (node, port) = label
+                                    .split_once('.')
+                                    .unwrap_or((label.as_str(), "image"));
+                                self.show_image_viewer(cx, node, port, &bytes);
+                            } else {
+                                self.show_preview(cx, &bytes);
+                            }
+                            if self.save_when_ready.as_deref() == Some(digest.as_str()) {
+                                self.save_when_ready = None;
+                                self.save_preview(cx);
+                            }
                         }
                     }
                 }
@@ -3550,6 +3822,51 @@ fn value_file_extension(content_type: &str) -> &'static str {
     }
 }
 
+fn valid_node_id(id: &str) -> bool {
+    let mut chars = id.chars();
+    chars
+        .next()
+        .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+/// Rename every graph reference in one atomic graph PUT. This includes the
+/// input edge mirrors and the names projected into `Flow{ tools: ... }`.
+fn rename_graph_node(graph: &mut Graph, old: &str, new: &str) {
+    if let Some(node) = graph.nodes.iter_mut().find(|node| node.id == old) {
+        node.id = new.to_string();
+    }
+    for node in &mut graph.nodes {
+        for input in &mut node.inputs {
+            if let makepad_flow::NodeInputValue::Edge(edge) = &mut input.value {
+                if edge.from_node == old {
+                    edge.from_node = new.to_string();
+                }
+            }
+        }
+    }
+    for edge in &mut graph.edges {
+        if edge.from_node == old {
+            edge.from_node = new.to_string();
+        }
+        if edge.to_node == old {
+            edge.to_node = new.to_string();
+        }
+    }
+    for tool in &mut graph.tools {
+        for name in tool
+            .inputs
+            .iter_mut()
+            .chain(tool.outputs.iter_mut())
+            .chain(tool.nodes.iter_mut())
+        {
+            if name == old {
+                *name = new.to_string();
+            }
+        }
+    }
+}
+
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         makepad_widgets::script_mod(vm);
@@ -3559,6 +3876,7 @@ impl AppMain for App {
         faces::register_host_widgets(vm);
         canvas::script_mod(vm);
         panels::script_mod(vm);
+        viewer::script_mod(vm);
         self::script_mod(vm)
     }
 
@@ -3884,6 +4202,28 @@ mod layout_tests {
         assert_eq!(value_file_extension("image/jpeg; charset=binary"), "jpg");
         assert_eq!(value_file_extension("application/json"), "json");
         assert_eq!(value_file_extension("application/octet-stream"), "bin");
+    }
+
+    #[test]
+    fn node_rename_rewrites_every_graph_reference() {
+        let source = "use mod.flow.*\nlet source = Text{default: \"hi\"}\nlet result = Output{value: source.text()}\nFlow{source result}\n";
+        let mut graph = makepad_flow::graph::evaluate(source, "<rename>").unwrap();
+        rename_graph_node(&mut graph, "source", "prompt");
+
+        assert!(graph.nodes.iter().any(|node| node.id == "prompt"));
+        assert!(!graph.nodes.iter().any(|node| node.id == "source"));
+        assert!(graph.edges.iter().all(|edge| {
+            edge.from_node != "source" && edge.to_node != "source"
+        }));
+        assert!(graph.nodes.iter().flat_map(|node| &node.inputs).all(|input| {
+            !matches!(&input.value, makepad_flow::NodeInputValue::Edge(edge) if edge.from_node == "source")
+        }));
+        assert!(graph.tools.iter().flat_map(|tool| {
+            tool.inputs.iter().chain(&tool.outputs).chain(&tool.nodes)
+        }).all(|node| node != "source"));
+        assert!(graph.tools.iter().any(|tool| {
+            tool.inputs.iter().chain(&tool.outputs).chain(&tool.nodes).any(|node| node == "prompt")
+        }));
     }
 
     #[test]
