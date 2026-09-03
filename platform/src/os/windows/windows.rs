@@ -806,7 +806,8 @@ impl Cx {
                     }
                 }
             }
-            self.passes[*draw_pass_id].set_time(time_now);
+            let uniforms_gen = self.next_uniform_gen();
+            self.passes[*draw_pass_id].set_time(time_now, uniforms_gen);
             match self.passes[*draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(window_id) => {

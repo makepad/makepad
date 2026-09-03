@@ -1340,8 +1340,9 @@ impl VjFxView {
         // into the pass texture (it did, and the frame came out black with
         // the effect smeared across the title bar).
         self.draw_list.begin_always(cx3d);
-        cx3d.cx.draw_lists[self.draw_list.id()].draw_list_uniforms.view_transform =
-            Mat4f::identity();
+        let uniforms_gen = cx3d.cx.next_uniform_gen();
+        cx3d.cx.draw_lists[self.draw_list.id()]
+            .set_uniform_view_transform(&Mat4f::identity(), uniforms_gen);
         let has_content = self.input0.is_some();
         let audio_bind = self.audio_bind.clone();
         let d = &mut self.draw_screen;
@@ -1547,8 +1548,9 @@ impl VjFxView {
         let doc = self.doc.as_ref().unwrap();
         let cx3d = &mut Cx3d::new(cx.cx);
         self.draw_list.begin_always(cx3d);
-        cx3d.cx.draw_lists[self.draw_list.id()].draw_list_uniforms.view_transform =
-            Mat4f::identity();
+        let uniforms_gen = cx3d.cx.next_uniform_gen();
+        cx3d.cx.draw_lists[self.draw_list.id()]
+            .set_uniform_view_transform(&Mat4f::identity(), uniforms_gen);
 
         macro_rules! draw_engine {
             // Default: input0 (real content, else the animated fallback)
@@ -1751,7 +1753,9 @@ impl VjFxView {
 /// duplicated here so the effects module depends only on makepad_widgets).
 fn fx_set_pass_camera(cx: &mut Cx, pass: &DrawPass, scene: &SceneState3D) {
     let camera_inv = scene.view.invert();
-    let pass_uniforms = &mut cx.passes[pass.draw_pass_id()].pass_uniforms;
+    let uniforms_gen = cx.next_uniform_gen();
+    let cxpass = &mut cx.passes[pass.draw_pass_id()];
+    let pass_uniforms = &mut cxpass.pass_uniforms;
     pass_uniforms.camera_projection = scene.projection;
     pass_uniforms.camera_projection_r = scene.projection;
     pass_uniforms.camera_view = scene.view;
@@ -1762,6 +1766,7 @@ fn fx_set_pass_camera(cx: &mut Cx, pass: &DrawPass, scene: &SceneState3D) {
     pass_uniforms.depth_view_r = scene.view;
     pass_uniforms.camera_inv = camera_inv;
     pass_uniforms.camera_inv_r = camera_inv;
+    cxpass.mark_pass_uniforms_dirty(uniforms_gen);
 }
 
 impl WidgetNode for VjFxView {

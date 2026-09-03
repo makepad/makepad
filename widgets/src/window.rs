@@ -875,7 +875,8 @@ impl SplodedStack {
         let pass_id = self.scene_pass.draw_pass_id();
         let params = cx.sploded_params(size);
         cx.passes[pass_id].sploded = params;
-        cx.passes[pass_id].set_ortho_matrix(dvec2(0.0, 0.0), size);
+        let uniforms_gen = cx.next_uniform_gen();
+        cx.passes[pass_id].set_ortho_matrix(dvec2(0.0, 0.0), size, uniforms_gen);
         self.scene_draw_list.begin_always(cx);
         let pass_size = cx.current_pass_size();
         cx.begin_root_turtle(pass_size, Layout::flow_overlay());

@@ -105,6 +105,11 @@ pub struct Cx {
 
     pub redraw_id: u64,
 
+    /// Process-wide source of uniform block generations. A generation is
+    /// issued once and never reused, so pooled draw/pass/list slots cannot
+    /// compare equal to a previous occupant's cached upload generation.
+    pub(crate) uniform_gen: u64,
+
     pub(crate) repaint_id: u64,
     pub(crate) event_id: u64,
     pub(crate) timer_id: u64,
@@ -593,6 +598,21 @@ fn platform_memory_budget(default: usize) -> (usize, &'static str) {
 }
 
 impl Cx {
+    /// Issue the next nonzero, process-wide uniform generation.
+    #[inline]
+    pub fn next_uniform_gen(&mut self) -> u64 {
+        Self::next_uniform_gen_from(&mut self.uniform_gen)
+    }
+
+    #[inline]
+    pub(crate) fn next_uniform_gen_from(uniform_gen: &mut u64) -> u64 {
+        let next = *uniform_gen;
+        *uniform_gen = uniform_gen
+            .checked_add(1)
+            .expect("uniform generation counter exhausted");
+        next
+    }
+
     /// A conservative process-wide memory envelope for cache/batch budgets.
     /// Native keeps a generous fixed ceiling; web reports the shared wasm
     /// browser memory envelope through `ToWasmInit` before `Event::Startup`.
@@ -726,6 +746,7 @@ impl Cx {
             new_actions: Default::default(),
 
             redraw_id: 1,
+            uniform_gen: 1,
             event_id: 1,
             repaint_id: 1,
             timer_id: 1,
@@ -901,6 +922,14 @@ mod memory_budget_tests {
 
     const MIB: u64 = 1024 * 1024;
     const GIB: u64 = 1024 * MIB;
+
+    #[test]
+    fn uniform_generation_counter_starts_at_one_and_is_monotonic() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        assert_eq!(cx.next_uniform_gen(), 1);
+        assert_eq!(cx.next_uniform_gen(), 2);
+        assert_eq!(cx.next_uniform_gen(), 3);
+    }
 
     #[test]
     fn low_memory_desktop_uses_one_quarter_of_physical_ram() {

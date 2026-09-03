@@ -1317,7 +1317,9 @@ mod tests {
 
         // Recorded at redraw 1, attaching the child: painted, and its
         // liveness rides on the parent.
-        cx.draw_lists[list.id()].clear_draw_items(1);
+        let recording_gen = cx.next_uniform_gen();
+        let uniforms_gen = cx.next_uniform_gen();
+        cx.draw_lists[list.id()].clear_draw_items(1, recording_gen, uniforms_gen);
         cx.attach_child_pass(child_id, parent_id, Some(list.id()));
         cx.passes[child_id].live_with_parent = true;
         cx.passes[parent_id].paint_dirty = true;
@@ -1328,7 +1330,9 @@ mod tests {
         // Recorded again at redraw 2 without the child: orphaned. Neither the
         // parent's repaint nor a direct dirty flag paints it, and the flag is
         // cleared so nothing keeps the frame loop awake for it.
-        cx.draw_lists[list.id()].clear_draw_items(2);
+        let recording_gen = cx.next_uniform_gen();
+        let uniforms_gen = cx.next_uniform_gen();
+        cx.draw_lists[list.id()].clear_draw_items(2, recording_gen, uniforms_gen);
         cx.passes[parent_id].paint_dirty = true;
         cx.passes[child_id].paint_dirty = true;
         cx.compute_pass_repaint_order(&mut todo);

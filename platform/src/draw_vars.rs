@@ -262,6 +262,7 @@ impl DrawVars {
     ) {
         if let Some(draw_shader_id) = self.draw_shader_id {
             if let Some(inst) = self.area.valid_instance(cx) {
+                let uniforms_gen = cx.next_uniform_gen();
                 let sh = &cx.draw_shaders[draw_shader_id.index];
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
                 let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
@@ -281,7 +282,7 @@ impl DrawVars {
                 }
 
                 if any_updated {
-                    draw_call.uniforms_dirty = true;
+                    draw_call.mark_uniforms_dirty(uniforms_gen);
                     cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
                     self.area.redraw(cx);
                 }
@@ -466,22 +467,24 @@ impl DrawVars {
             // Find the uniform input
             if let Some(input) = sh.mapping.dyn_uniforms.inputs.iter().find(|i| i.id == id) {
                 let slots = input.slots.min(value.len());
+                let offset = input.offset;
 
                 // Update local dyn_uniforms
                 for i in 0..slots {
-                    self.dyn_uniforms[input.offset + i] = value[i];
+                    self.dyn_uniforms[offset + i] = value[i];
                 }
 
                 // Update the draw call if we have a valid area
                 if let Some(inst) = self.area.valid_instance(cx) {
+                    let uniforms_gen = cx.next_uniform_gen();
                     let draw_list = &mut cx.draw_lists[inst.draw_list_id];
                     let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
                     let draw_call = draw_item.kind.draw_call_mut().unwrap();
 
                     for i in 0..slots {
-                        draw_call.dyn_uniforms[input.offset + i] = value[i];
+                        draw_call.dyn_uniforms[offset + i] = value[i];
                     }
-                    draw_call.uniforms_dirty = true;
+                    draw_call.mark_uniforms_dirty(uniforms_gen);
                     cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
                 }
             }
@@ -512,6 +515,7 @@ impl DrawVars {
             return false;
         };
         let (offset, slots) = (input.offset, input.slots.min(value.len()));
+        let uniforms_gen = cx.next_uniform_gen();
         let draw_list = &mut cx.draw_lists[inst.draw_list_id];
         let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
         let Some(draw_call) = draw_item.kind.draw_call_mut() else {
@@ -521,7 +525,7 @@ impl DrawVars {
             return false;
         }
         draw_call.dyn_uniforms[offset..offset + slots].copy_from_slice(&value[..slots]);
-        draw_call.uniforms_dirty = true;
+        draw_call.mark_uniforms_dirty(uniforms_gen);
         if let Some(pass_id) = draw_list.draw_pass_id {
             cx.passes[pass_id].paint_dirty = true;
         }
@@ -543,6 +547,7 @@ impl DrawVars {
         let Some(inst) = area.valid_instance(cx).copied() else {
             return false;
         };
+        let uniforms_gen = cx.next_uniform_gen();
         let draw_list = &mut cx.draw_lists[inst.draw_list_id];
         let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
         let Some(draw_call) = draw_item.kind.draw_call_mut() else {
@@ -554,7 +559,7 @@ impl DrawVars {
         draw_call.dyn_uniforms = self.dyn_uniforms;
         draw_call.texture_slots = self.texture_slots.clone();
         draw_call.uniform_buffer_slots = self.uniform_buffer_slots.clone();
-        draw_call.uniforms_dirty = true;
+        draw_call.mark_uniforms_dirty(uniforms_gen);
         if let Some(pass_id) = draw_list.draw_pass_id {
             cx.passes[pass_id].paint_dirty = true;
         }
@@ -578,6 +583,7 @@ impl DrawVars {
             return false;
         };
         let pass_id = draw_list.draw_pass_id;
+        let uniform_gen = &mut cx.uniform_gen;
         let draw_list = &mut cx.draw_lists[list];
         let mut touched = false;
         for item in 0..draw_list.draw_items.len() {
@@ -590,7 +596,7 @@ impl DrawVars {
             draw_call.dyn_uniforms = self.dyn_uniforms;
             draw_call.texture_slots = self.texture_slots.clone();
             draw_call.uniform_buffer_slots = self.uniform_buffer_slots.clone();
-            draw_call.uniforms_dirty = true;
+            draw_call.mark_uniforms_dirty(Cx::next_uniform_gen_from(uniform_gen));
             touched = true;
         }
         if touched {
@@ -616,6 +622,7 @@ impl DrawVars {
         for i in 0..slots {
             self.dyn_uniforms[offset + i] = value[i];
         }
+        let uniform_gen = &mut cx.uniform_gen;
         let draw_list = &mut cx.draw_lists[draw_list_id];
         let mut touched = false;
         for item in 0..draw_list.draw_items.len() {
@@ -627,7 +634,7 @@ impl DrawVars {
             for i in 0..slots {
                 draw_call.dyn_uniforms[offset + i] = value[i];
             }
-            draw_call.uniforms_dirty = true;
+            draw_call.mark_uniforms_dirty(Cx::next_uniform_gen_from(uniform_gen));
             touched = true;
         }
         if touched {
@@ -1213,6 +1220,7 @@ impl DrawVars {
             self.dyn_instance_slots = mapping.instances.total_slots;
 
             let cx = vm.host.cx_mut();
+            mapping.scope_uniforms_gen = cx.next_uniform_gen();
             let index = cx.draw_shaders.shaders.len();
             cx.draw_shaders.shaders.push(CxDrawShader {
                 debug_id: LiveId(0),

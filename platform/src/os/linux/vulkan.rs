@@ -2559,13 +2559,15 @@ impl CxVulkan {
             return Ok(false);
         }
 
+        let ortho_uniforms_gen = cx.next_uniform_gen();
+        let dpi_uniforms_gen = cx.next_uniform_gen();
         {
             let pass = &mut cx.passes[draw_pass_id];
             pass.paint_dirty = false;
             if !pass.keep_camera_matrix {
-                pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
+                pass.set_ortho_matrix(pass_rect.pos, pass_rect.size, ortho_uniforms_gen);
             }
-            pass.set_dpi_factor(dpi_factor);
+            pass.set_dpi_factor(dpi_factor, dpi_uniforms_gen);
         }
 
         let clear_color = if cx.passes[draw_pass_id].color_textures.is_empty() {
@@ -3120,13 +3122,15 @@ impl CxVulkan {
             return Ok(());
         }
 
+        let ortho_uniforms_gen = cx.next_uniform_gen();
+        let dpi_uniforms_gen = cx.next_uniform_gen();
         {
             let pass = &mut cx.passes[draw_pass_id];
             pass.paint_dirty = false;
             if !pass.keep_camera_matrix {
-                pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
+                pass.set_ortho_matrix(pass_rect.pos, pass_rect.size, ortho_uniforms_gen);
             }
-            pass.set_dpi_factor(dpi_factor);
+            pass.set_dpi_factor(dpi_factor, dpi_uniforms_gen);
         }
 
         let target_width = (dpi_factor * pass_rect.size.x).max(1.0) as usize;
@@ -5440,6 +5444,7 @@ impl CxVulkan {
         // Exploded z-layer view: z is the call's nesting depth, not paint order.
         let sploded = cx.passes[draw_pass_id].sploded.is_some();
         for order_index in 0..draw_order_len {
+            let uniforms_gen = cx.next_uniform_gen();
             let Some(draw_item_id) =
                 cx.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
             else {
@@ -5560,7 +5565,7 @@ impl CxVulkan {
                     cx.demo_time_repaint = true;
                 }
 
-                draw_call.resolve_zbias(*zbias, sploded);
+                draw_call.resolve_zbias(*zbias, sploded, uniforms_gen);
                 *zbias += zbias_step;
                 draw_call.instance_dirty = false;
                 draw_call.uniforms_dirty = false;

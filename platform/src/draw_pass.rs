@@ -140,7 +140,10 @@ impl ScriptApply for DrawPass {
 
 impl DrawPass {
     pub fn new(cx: &mut Cx) -> Self {
-        cx.passes.alloc()
+        let uniforms_gen = cx.next_uniform_gen();
+        let pass = cx.passes.alloc();
+        cx.passes[pass.draw_pass_id()].pass_uniforms_gen = uniforms_gen;
+        pass
     }
 }
 
@@ -233,7 +236,7 @@ impl DrawPass {
     }
 
     pub fn new_with_name(cx: &mut Cx, name: &str) -> Self {
-        let pass = cx.passes.alloc();
+        let pass = Self::new(cx);
         pass.set_pass_name(cx, name);
         pass
     }
@@ -543,6 +546,8 @@ pub struct CxDrawPass {
     pub view_shift: Vec2d,
     pub view_scale: Vec2d,
     pub pass_uniforms: DrawPassUniforms,
+    /// Replaced with a process-wide generation whenever the pass block changes.
+    pub pass_uniforms_gen: u64,
     pub zbias_step: f32,
     /// Set while the exploded z-layer view is up on this pass; `None` is
     /// ordinary flat 2D and leaves `camera_view` the identity it always was.
@@ -561,6 +566,7 @@ impl Default for CxDrawPass {
             zbias_step: 0.001,
             sploded: None,
             pass_uniforms: DrawPassUniforms::default(),
+            pass_uniforms_gen: 0,
             color_textures: Vec::new(),
             depth_texture: None,
             dpi_factor: None,
@@ -591,17 +597,25 @@ pub enum CxDrawPassParent {
 }
 
 impl CxDrawPass {
-    pub fn set_time(&mut self, time: f32) {
-        self.pass_uniforms.time = time;
+    #[inline]
+    pub fn mark_pass_uniforms_dirty(&mut self, uniforms_gen: u64) {
+        debug_assert_ne!(uniforms_gen, 0);
+        self.pass_uniforms_gen = uniforms_gen;
     }
 
-    pub fn set_dpi_factor(&mut self, dpi_factor: f64) {
+    pub fn set_time(&mut self, time: f32, uniforms_gen: u64) {
+        self.pass_uniforms.time = time;
+        self.mark_pass_uniforms_dirty(uniforms_gen);
+    }
+
+    pub fn set_dpi_factor(&mut self, dpi_factor: f64, uniforms_gen: u64) {
         let dpi_dilate = (2. - dpi_factor).max(0.).min(1.);
         self.pass_uniforms.dpi_factor = dpi_factor as f32;
         self.pass_uniforms.dpi_dilate = dpi_dilate as f32;
+        self.mark_pass_uniforms_dirty(uniforms_gen);
     }
 
-    pub fn set_ortho_matrix(&mut self, offset: Vec2d, size: Vec2d) {
+    pub fn set_ortho_matrix(&mut self, offset: Vec2d, size: Vec2d, uniforms_gen: u64) {
         let offset = offset + self.view_shift;
         let size = size * self.view_scale;
         let zero = Mat4f { v: [0.0; 16] };
@@ -632,6 +646,7 @@ impl CxDrawPass {
         self.pass_uniforms.depth_view_r = zero;
         self.pass_uniforms.camera_inv = Mat4f::identity();
         self.pass_uniforms.camera_inv_r = Mat4f::identity();
+        self.mark_pass_uniforms_dirty(uniforms_gen);
     }
 }
 

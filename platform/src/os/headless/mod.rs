@@ -26,7 +26,14 @@ pub(crate) fn wake_ui_event_loop() {
 pub struct CxOsDrawList {}
 
 #[derive(Default, Clone)]
-pub struct CxOsDrawCall {}
+pub struct CxOsDrawCall {
+    #[cfg(test)]
+    pub uniforms_recording_gen: Option<u64>,
+    #[cfg(test)]
+    pub draw_call_uniforms_gen: Option<u64>,
+    #[cfg(test)]
+    pub user_uniforms_gen: Option<u64>,
+}
 
 #[derive(Default, Clone)]
 pub struct CxOsPass {}

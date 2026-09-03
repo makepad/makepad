@@ -132,6 +132,7 @@ impl Cx {
         }
 
         for order_index in 0..draw_order_len {
+            let uniforms_gen = self.next_uniform_gen();
             let Some(draw_item_id) =
                 self.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
             else {
@@ -179,7 +180,7 @@ impl Cx {
                 // order. It must advance for every draw call in the tree, ahead of the early-outs
                 // below, or the sequence would depend on which draw calls happen to be dirty this
                 // frame rather than on the draw tree alone.
-                let zbias_changed = draw_call.resolve_zbias(*zbias, sploded);
+                let zbias_changed = draw_call.resolve_zbias(*zbias, sploded, uniforms_gen);
                 *zbias += zbias_step;
 
                 // A cached draw call (one whose draw list was not redrawn this frame) has
@@ -539,11 +540,17 @@ impl Cx {
 
         let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
         if !self.passes[pass_id].keep_camera_matrix {
-            self.passes[pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size);
+            let uniforms_gen = self.next_uniform_gen();
+            self.passes[pass_id].set_ortho_matrix(
+                pass_rect.pos,
+                pass_rect.size,
+                uniforms_gen,
+            );
         }
         self.passes[pass_id].paint_dirty = false;
 
-        self.passes[pass_id].set_dpi_factor(dpi_factor);
+        let uniforms_gen = self.next_uniform_gen();
+        self.passes[pass_id].set_dpi_factor(dpi_factor, uniforms_gen);
 
         let viewport = D3D11_VIEWPORT {
             Width: (pass_rect.size.x * dpi_factor) as f32,
@@ -2308,6 +2315,12 @@ pub struct CxOsDrawCall {
     pub draw_call_uniforms: D3d11Buffer,
     pub user_uniforms: D3d11Buffer,
     pub inst_vbuf: D3d11Buffer,
+    #[cfg(test)]
+    pub uniforms_recording_gen: Option<u64>,
+    #[cfg(test)]
+    pub draw_call_uniforms_gen: Option<u64>,
+    #[cfg(test)]
+    pub user_uniforms_gen: Option<u64>,
 }
 
 #[derive(Default, Clone)]
@@ -3358,6 +3371,7 @@ impl DrawVars {
 
             // Access Cx from the vm host
             let cx = vm.host.cx_mut();
+            mapping.scope_uniforms_gen = cx.next_uniform_gen();
 
             // Allocate CxDrawShader with os_shader_id set to None
             let index = cx.draw_shaders.shaders.len();
