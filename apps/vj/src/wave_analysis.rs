@@ -96,7 +96,14 @@ const CACHE_MAGIC: &[u8; 8] = b"VJWAVE\0\0";
 /// sidecar has no record of them, and "no span" is the honest answer for a
 /// file that never makes a sound — indistinguishable from "nobody looked" —
 /// so it is re-analysed rather than reused.
-const CACHE_VERSION: u32 = 9;
+/// Version 10 pulls the estimated tempo onto a musical value inside a
+/// phase budget, so a grid written by 9 was measured under a different
+/// rule and is re-analysed rather than reused. The pull is deliberately
+/// not reproducible from the stored grid -- it is not idempotent, and a
+/// second application can reach a coarser rung the first was too far
+/// from -- so a change to the ladder is a version bump, which is exactly
+/// what this number is for.
+const CACHE_VERSION: u32 = 10;
 /// Longest local file the music explorer will lift into memory.
 pub const MAX_LOCAL_TRACK_FRAMES: usize = 48_000 * 60 * 15;
 
@@ -1936,13 +1943,113 @@ fn build_tiles(envelopes: &Envelopes, pcm: &TrackPcm) -> WaveTiles {
     WaveTiles { zoom, overview }
 }
 
+/// How far the whole record's grid may be walked to reach a musical
+/// tempo, end to end.
+///
+/// Stated as phase rather than as a percentage, because phase is what a
+/// pull costs: moving the tempo from b to c walks the grid by
+/// `span * |b - c| / c`, and the far end of the record pays for all of
+/// it. Twenty-five milliseconds is about a third of what beat-tracking
+/// metrics count as a hit, and a pull costing more than that is not a
+/// correction -- it is a different tempo.
+///
+/// The window this leaves is tight on real material by design: the
+/// allowed pull is `0.025 * bpm / span`, which is a tenth of a BPM on a
+/// thirty-second fixture at 128 and a hundredth on a five-minute record.
+const SNAP_PHASE_BUDGET_SECS: f64 = 0.025;
+
+/// The tempos a record is more likely to have been made at, coarsest
+/// first: `(rungs per BPM, low, high)`.
+///
+/// Rungs per BPM rather than a step size, so the candidate is
+/// `round(bpm * per) / per` with no float slop -- 1, 2, 1.5, 3 and 12 are
+/// all exact in binary.
+///
+/// Every rung is a subset of the twelfths, so the ORDER is what makes a
+/// whole number win rather than what makes a value reachable: the first
+/// rung whose candidate is inside the budget takes it. The two banded
+/// rungs cannot both apply, so their order relative to each other decides
+/// nothing; the bands are read against the tempo the record was HEARD at,
+/// not against the candidate.
+const TEMPO_LADDER: [(f64, f64, f64); 5] = [
+    (1.0, MIN_BPM, MAX_BPM),  // whole numbers
+    (2.0, MIN_BPM, 85.0),     // halves, where a half is a slow record's half
+    (1.5, 127.0, MAX_BPM),    // two thirds, where fast records live
+    (3.0, MIN_BPM, MAX_BPM),  // thirds
+    (12.0, MIN_BPM, MAX_BPM), // twelfths
+];
+
+/// Pull a measured tempo onto a musical one, if it is close enough that
+/// the whole record's grid barely moves.
+///
+/// The pivot is the beat nearest the record's centre, so the pull is
+/// anchored where the least-squares fit is most trustworthy and no end
+/// pays more than the other. Applied ONCE, at analysis time: it is not
+/// idempotent, because moving to a nearer rung can bring a coarser one
+/// inside the budget, so there is exactly one call site and a cached grid
+/// is never pulled again.
+fn snap_tempo(grid: TrackGrid, span_secs: f64) -> TrackGrid {
+    if !grid.has_grid() || !span_secs.is_finite() || span_secs <= 0.0 {
+        return grid;
+    }
+    let beats = span_secs / grid.beat_secs;
+    let mut winner = None;
+    for (per, low, high) in TEMPO_LADDER {
+        if grid.bpm < low || grid.bpm > high {
+            continue;
+        }
+        let candidate = (grid.bpm * per).round() / per;
+        if !(MIN_BPM..=MAX_BPM).contains(&candidate) {
+            continue;
+        }
+        let walk = beats * (60.0 / candidate - grid.beat_secs).abs();
+        if walk <= SNAP_PHASE_BUDGET_SECS {
+            winner = Some(candidate);
+            break;
+        }
+    }
+    let Some(candidate) = winner else { return grid };
+    let index = ((span_secs * 0.5 - grid.first_beat_secs) / grid.beat_secs).round();
+    let anchor = grid.first_beat_secs + index * grid.beat_secs;
+    let beat_secs = 60.0 / candidate;
+    let mut first = anchor - index * beat_secs;
+    // `first_beat_secs` is the first beat at or after zero and
+    // `downbeat_phase` names the bar phase OF THAT BEAT, so a beat has to
+    // be added or dropped with the phase moved to match. A bare
+    // `rem_euclid` would land in range and quietly rotate the bar. Each
+    // loop runs at most once: the pivot moves `first` by less than the
+    // budget.
+    let mut phase = grid.downbeat_phase as i64;
+    while first < 0.0 {
+        first += beat_secs;
+        phase += 1;
+    }
+    while first >= beat_secs {
+        first -= beat_secs;
+        phase -= 1;
+    }
+    TrackGrid {
+        bpm: candidate,
+        beat_secs,
+        first_beat_secs: first,
+        downbeat_phase: phase.rem_euclid(4) as u32,
+        confidence: grid.confidence,
+    }
+}
+
 /// Full analysis of one decoded track.
 pub fn analyze(pcm: &TrackPcm) -> TrackAnalysis {
     let envelopes = build_envelopes(pcm);
     // Reuse the streaming detector over the whole file for an independent
     // BPM opinion; it only ever breaks an octave tie in the offline pass.
     let prior = streaming_prior(pcm);
-    let grid = estimate_grid(&envelopes, prior);
+    // Pulled onto a musical tempo before anything downstream reads it:
+    // the tempo map is fitted against this period, and a map built on the
+    // unpulled one would describe a different record. Here rather than
+    // inside `estimate_grid` because the pull has to come after the octave
+    // choice, the tempo fence and the phase, and because this is where the
+    // record's LENGTH is known -- the budget is a length.
+    let grid = snap_tempo(estimate_grid(&envelopes, prior), pcm.seconds());
     let tempo_map = if grid.has_grid() {
         let hop_rate = envelopes.sample_rate / envelopes.hop as f64;
         build_tempo_map(
@@ -2940,6 +3047,125 @@ mod tests {
         errors.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let worst = errors.last().copied().unwrap_or(0.0);
         (worst, errors[errors.len() / 2])
+    }
+
+    /// A grid at `bpm` whose first beat is a tenth of a second in, on the
+    /// second beat of the bar.
+    fn grid_at(bpm: f64) -> TrackGrid {
+        TrackGrid {
+            bpm,
+            beat_secs: 60.0 / bpm,
+            first_beat_secs: 0.1,
+            downbeat_phase: 1,
+            confidence: 0.8,
+        }
+    }
+
+    /// How far the grid's beats move, worst case, over a record of this
+    /// length.
+    fn beat_walk(before: TrackGrid, after: TrackGrid, span: f64) -> f64 {
+        let mut worst: f64 = 0.0;
+        let mut at = 0.0;
+        while at <= span {
+            let n = before.beat_at(at).round();
+            let was = before.first_beat_secs + n * before.beat_secs;
+            let now = after.first_beat_secs + n * after.beat_secs;
+            if (0.0..=span).contains(&was) {
+                worst = worst.max((now - was).abs());
+            }
+            at += before.beat_secs;
+        }
+        worst
+    }
+
+    #[test]
+    fn a_tempo_a_hair_off_a_whole_number_is_pulled_onto_it() {
+        let seed = grid_at(127.994);
+        let out = snap_tempo(seed, 300.0);
+        assert_eq!(out.bpm, 128.0);
+        assert_eq!(out.beat_secs, 60.0 / 128.0);
+        assert_eq!(seed.bpm, 127.994, "taken by value");
+    }
+
+    #[test]
+    fn a_tempo_too_far_from_any_rung_is_left_where_the_estimator_put_it() {
+        // The nearest twelfth is 127.9167, 0.017 away; the budget over
+        // five minutes is 0.0107.
+        let seed = grid_at(127.90);
+        assert_eq!(snap_tempo(seed, 300.0), seed);
+    }
+
+    #[test]
+    fn the_pull_never_walks_the_grid_past_its_phase_budget() {
+        for bpm in [72.4, 77.3975, 84.42, 96.2, 99.8925, 120.65, 130.45, 174.07] {
+            for span in [30.0, 120.0, 420.0] {
+                let seed = grid_at(bpm);
+                let out = snap_tempo(seed, span);
+                let walk = beat_walk(seed, out, span);
+                assert!(
+                    walk <= SNAP_PHASE_BUDGET_SECS + 1e-9,
+                    "{bpm} over {span}s walked {walk}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_whole_number_wins_over_a_nearer_twelfth() {
+        // 128.0833 is three times closer than 128.0, and the budget over
+        // thirty seconds (0.107) admits both. The ladder is ordered by
+        // musical plausibility, not by distance.
+        assert_eq!(snap_tempo(grid_at(128.07), 30.0).bpm, 128.0);
+    }
+
+    #[test]
+    fn the_banded_rungs_only_answer_inside_their_own_band() {
+        // Halves, below eighty-five: the same fractional offset reaches
+        // .5 inside the band and only the nearer twelfth outside it.
+        assert_eq!(snap_tempo(grid_at(84.45), 25.0).bpm, 84.5);
+        let out = snap_tempo(grid_at(90.45), 25.0).bpm;
+        assert!((out - 90.0 - 5.0 / 12.0).abs() < 1e-9, "{out}");
+
+        // Two thirds, above a hundred and twenty-seven: 130.6667 rather
+        // than the nearer 130.3333.
+        let out = snap_tempo(grid_at(130.45), 12.0).bpm;
+        assert!((out - 130.0 - 2.0 / 3.0).abs() < 1e-9, "{out}");
+        // Below the band the plain third answers instead.
+        let out = snap_tempo(grid_at(120.45), 12.0).bpm;
+        assert!((out - 120.0 - 1.0 / 3.0).abs() < 1e-9, "{out}");
+    }
+
+    #[test]
+    fn the_pull_keeps_the_bar_where_the_downbeat_was() {
+        let seed = TrackGrid {
+            bpm: 128.07,
+            beat_secs: 60.0 / 128.07,
+            first_beat_secs: 0.0004,
+            downbeat_phase: 2,
+            confidence: 0.8,
+        };
+        let out = snap_tempo(seed, 30.0);
+        assert_eq!(out.bpm, 128.0);
+        assert!(
+            (0.0..out.beat_secs).contains(&out.first_beat_secs),
+            "first beat {} outside [0, {})",
+            out.first_beat_secs,
+            out.beat_secs
+        );
+        // The same source second is still a downbeat: a bare rem_euclid on
+        // the phase would rotate the bar by a beat.
+        let was = (0..64)
+            .map(|n| seed.first_beat_secs + n as f64 * seed.beat_secs)
+            .find(|at| seed.is_downbeat(seed.beat_at(*at).round() as i64))
+            .expect("a downbeat in the first sixteen bars");
+        assert!(out.is_downbeat(out.beat_at(was).round() as i64), "the bar moved");
+    }
+
+    #[test]
+    fn a_click_track_at_a_fractional_tempo_is_not_dragged_to_a_whole_one() {
+        let pcm = click_track(44_100, 128.5, 30.0, 0.41);
+        let bpm = analyze(&pcm).grid.bpm;
+        assert!((bpm - 128.5).abs() < 1e-6, "{bpm}");
     }
 
     #[test]
