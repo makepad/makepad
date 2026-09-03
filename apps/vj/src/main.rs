@@ -21883,6 +21883,21 @@ p2 {}
         }
     }
 
+    /// Whether either deck has a record in flight: decoding, or waiting
+    /// for the grid that decides whether it can sync.
+    ///
+    /// Read by the background pass, which stands down while it is true.
+    /// It is deliberately not a lock or a count -- both decks are
+    /// answering for themselves, and a stale answer costs one scan
+    /// interval either way.
+    fn deck_loading(&self) -> bool {
+        [DeckId::A, DeckId::B].into_iter().any(|deck| {
+            let state = self.decks.deck(deck);
+            matches!(state.load, DeckLoad::Loading { .. })
+                || (state.is_loaded() && state.grid.is_none())
+        })
+    }
+
     /// Where the preprocessing lane would get one track's samples from.
     ///
     /// A local file is opened directly; a store track has its blob fetched on
@@ -21926,6 +21941,14 @@ p2 {}
     /// and with everything done it is a set lookup per candidate.
     fn pump_preprocess(&mut self) {
         if self.prep.group_off(PrepGroup::Analysis) {
+            return;
+        }
+        // The machine belongs to the decks first. A record on its way in
+        // is a decode and an analysis the operator is WAITING for, and
+        // starting a background one beside it takes cores off it -- so the
+        // lane stands down while a deck is loading and picks up again
+        // when nothing is.
+        if self.deck_loading() {
             return;
         }
         if self.prep_in_flight >= self.prep.concurrency {

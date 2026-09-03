@@ -6536,6 +6536,28 @@ mod tests {
         assert!(e.tap_grid(DeckId::A, 128.0, 30.0).is_none());
     }
 
+    /// What the background pass asks before it starts work: is either
+    /// deck waiting on a record?
+    #[test]
+    fn a_deck_is_loading_until_its_grid_lands() {
+        let mut e = DeckEngine::new();
+        let loading = |e: &DeckEngine| {
+            [DeckId::A, DeckId::B].into_iter().any(|deck| {
+                let state = e.deck(deck);
+                matches!(state.load, DeckLoad::Loading { .. })
+                    || (state.is_loaded() && state.grid.is_none())
+            })
+        };
+        assert!(!loading(&e), "two empty decks are waiting for nothing");
+
+        let (deck, gen) = load_gen(&e.click(item(1), DeckTarget::A));
+        assert!(loading(&e), "the decode is in flight");
+        e.track_ready(deck, gen, 200.0);
+        assert!(loading(&e), "and the grid is not here yet");
+        e.grid_ready(deck, gen, grid(120.0, 0.0), None, None);
+        assert!(!loading(&e), "now it is");
+    }
+
     #[test]
     fn each_deck_owns_its_own_snap_unit() {
         let mut e = DeckEngine::new();
