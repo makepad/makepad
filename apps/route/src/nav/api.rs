@@ -145,6 +145,10 @@ pub struct App {
     warp_check_disabled: Option<bool>,
     #[rust]
     position: Option<LocationUpdateEvent>,
+    /// The first fix flies the map to the user (Amsterdam stays the default
+    /// until then), as the native build does.
+    #[rust]
+    had_first_fix: bool,
     #[rust]
     route: Option<Route>,
     #[rust]
@@ -536,6 +540,11 @@ impl AppMain for App {
                 cx,
                 Some(MapPuck::new(fix.lon, fix.lat, fix.heading_deg, fix.accuracy_m)),
             );
+            if !self.had_first_fix {
+                self.had_first_fix = true;
+                map.fly_to(cx, fix.lon, fix.lat, 14.0);
+                self.set_status(cx, &format!("gps: fix acquired (±{:.0}m)", fix.accuracy_m));
+            }
             if let (Some(session), Some(started)) = (&mut self.nav_session, self.nav_started) {
                 let status = session.update(
                     LonLat::new(fix.lon, fix.lat),
