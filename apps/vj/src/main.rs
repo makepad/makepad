@@ -11111,6 +11111,7 @@ p2 {}
             &state.loop_slots,
             state.shape_placed.then_some(state.shape).flatten(),
             state.grid_placed.then_some(state.grid).flatten(),
+            state.grid_locked,
         );
     }
 
@@ -11125,6 +11126,7 @@ p2 {}
         slots: &[crate::decks::LoopSlot],
         shape: Option<crate::track_shape::TrackShape>,
         grid: Option<crate::wave_analysis::TrackGrid>,
+        grid_locked: bool,
     ) {
         let path = Self::loop_marks_path(item);
         let mut record = crate::marks::MarkRecord::default();
@@ -11134,9 +11136,9 @@ p2 {}
         // in the analysis cache; writing it here would freeze a
         // measurement against every later re-analysis while looking
         // exactly like a decision.
-        record.set_grid(
-            grid.map(|grid| (grid.bpm, grid.first_beat_secs, grid.downbeat_phase)),
-        );
+        record.set_grid(grid.map(|grid| {
+            (grid.bpm, grid.first_beat_secs, grid.downbeat_phase, grid_locked)
+        }));
         // The record's shape, when a HAND placed it. The detector's own
         // answer is derived and would come back looking like a decision.
         if let Some(shape) = shape {
@@ -13834,8 +13836,24 @@ p2 {}
                     self.deck_splat_refining[b] = None;
                     self.sync_deck_controls(cx);
                 }
-                DeckCmd::RetireMarks { item, cue_secs, bookmark, slots, shape, grid } => {
-                    Self::write_marks(&item, cue_secs, bookmark, &slots, shape, grid);
+                DeckCmd::RetireMarks {
+                    item,
+                    cue_secs,
+                    bookmark,
+                    slots,
+                    shape,
+                    grid,
+                    grid_locked,
+                } => {
+                    Self::write_marks(
+                        &item,
+                        cue_secs,
+                        bookmark,
+                        &slots,
+                        shape,
+                        grid,
+                        grid_locked,
+                    );
                 }
                 DeckCmd::UnloadTrack { deck } => {
                     // The mirror of InstallTrack's clear block: the engine
@@ -13969,6 +13987,17 @@ p2 {}
         let Some((grid, cmds)) = self.decks.edit_grid(deck, edit) else { return };
         self.run_deck_cmds(cx, cmds);
         self.save_loop_marks(deck);
+        self.republish_grid(cx, deck, grid);
+    }
+
+    /// Carry a changed grid to everything downstream of it: the analysis
+    /// the surfaces read, the loop cells, the record's shape and the lane.
+    fn republish_grid(
+        &mut self,
+        cx: &mut Cx,
+        deck: DeckId,
+        grid: crate::wave_analysis::TrackGrid,
+    ) {
         let index = deck.index();
         let Some(analysis) = self.deck_analysis[index].as_ref() else {
             self.push_deck_wave(cx, deck);
@@ -16320,7 +16349,7 @@ p2 {}
                                 // A grid a hand corrected on this record
                                 // before, likewise: it outranks the
                                 // analysis when that lands.
-                                if let Some((bpm, first, phase)) = record.grid() {
+                                if let Some((bpm, first, phase, locked)) = record.grid() {
                                     self.decks.restore_grid(
                                         deck,
                                         crate::wave_analysis::TrackGrid {
@@ -16330,6 +16359,7 @@ p2 {}
                                             downbeat_phase: phase,
                                             confidence: 1.0,
                                         },
+                                        locked,
                                     );
                                 }
                                 if let Some(cue) =
@@ -22385,6 +22415,11 @@ p2 {}
         self.paint_lit(cx, ids!(splat_deck_a), deck == DeckId::A);
         self.paint_lit(cx, ids!(splat_deck_b), deck == DeckId::B);
         self.paint_lit(cx, ids!(splat_on), active && model.enabled);
+        // The grid row's own lamp: lit means this record's grid is settled
+        // and nothing -- not a correction, not the analysis -- will change
+        // it. Without it a locked deck looks exactly like a deck whose
+        // buttons have stopped working.
+        self.paint_lit(cx, ids!(grid_lock), self.decks.deck(deck).grid_locked);
         self.paint_lit(cx, ids!(splat_score), self.loop_score_open);
         self.splat_model = model.clone();
         let mix = self.deck_zoom_tex[index].clone();
@@ -27346,6 +27381,18 @@ impl MatchEvent for App {
                 if self.ui.button(cx, id).clicked(actions) {
                     self.apply_grid_edit(cx, deck, edit);
                 }
+            }
+            if self.ui.button(cx, ids!(grid_undo)).clicked(actions) {
+                if let Some((grid, cmds)) = self.decks.undo_grid(deck) {
+                    self.run_deck_cmds(cx, cmds);
+                    self.republish_grid(cx, deck, grid);
+                    self.save_loop_marks(deck);
+                }
+            }
+            if self.ui.button(cx, ids!(grid_lock)).clicked(actions) {
+                let locked = !self.decks.deck(deck).grid_locked;
+                self.decks.set_grid_locked(deck, locked);
+                self.save_loop_marks(deck);
             }
         }
         self.handle_splitter(cx, actions);

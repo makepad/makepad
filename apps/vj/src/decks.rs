@@ -459,6 +459,11 @@ pub enum ScratchMotion {
 pub const EDIT_BPM_MIN: f64 = 40.0;
 pub const EDIT_BPM_MAX: f64 = 300.0;
 
+/// How many grid corrections a deck can take back. A run of one kind is
+/// one entry, so this is deep enough for a whole track's worth of
+/// deciding without being an unbounded history.
+pub const GRID_UNDO_CAP: usize = 16;
+
 /// A correction a hand makes to a measured grid.
 ///
 /// Three, because the analyser has three ways of being wrong and they are
@@ -1104,6 +1109,16 @@ pub struct DeckState {
     /// Where this record's intro and outro are: four edges, the outer two
     /// from the sound scan and the inner two from the loudness envelope.
     pub shape: Option<crate::track_shape::TrackShape>,
+    /// Where the grid was before each correction, newest last, with a run
+    /// of one kind of correction collapsed into a single step.
+    ///
+    /// Not a general undo: a run of presses on the same button is one
+    /// decision -- four taps of DOUBLE is "this is at the wrong octave",
+    /// not four things to take back one at a time.
+    pub grid_undo: Vec<(GridEdit, TrackGrid)>,
+    /// This grid is right and nothing may change it: no correction, no
+    /// flip, and not the analysis when it lands.
+    pub grid_locked: bool,
     /// Whether a hand has corrected this record's grid. Same law as the
     /// mark and the shape beside it: the analysis lands after the marks
     /// file does, and it may only fill a grid nobody has placed.
@@ -1251,6 +1266,8 @@ impl Default for DeckState {
             cue_placed: false,
             shape: None,
             shape_placed: false,
+            grid_undo: Vec::new(),
+            grid_locked: false,
             grid_placed: false,
             bookmark: None,
             muted: false,
@@ -1597,6 +1614,7 @@ pub enum DeckCmd {
         slots: Vec<LoopSlot>,
         shape: Option<crate::track_shape::TrackShape>,
         grid: Option<TrackGrid>,
+        grid_locked: bool,
     },
 }
 
@@ -1951,6 +1969,8 @@ impl DeckEngine {
         state.shape = None;
         state.shape_placed = false;
         state.grid_placed = false;
+        state.grid_locked = false;
+        state.grid_undo.clear();
         state.bookmark = None;
         // A rate the LOCK worked out matched this deck to the one on the
         // other side. That match described a pair of tracks and one of them
@@ -2434,6 +2454,7 @@ impl DeckEngine {
             slots: state.loop_slots.clone(),
             shape: state.shape_placed.then_some(state.shape).flatten(),
             grid: state.grid_placed.then_some(state.grid).flatten(),
+            grid_locked: state.grid_locked,
         })
     }
 
@@ -3048,6 +3069,7 @@ impl DeckEngine {
         state.duration_secs = 0.0;
         state.grid = None;
         state.grid_placed = false;
+        state.grid_locked = false;
         state.tempo_map = None;
         state.splat = None;
         state.position_secs = 0.0;
@@ -3307,7 +3329,7 @@ impl DeckEngine {
             if state.load_gen != gen || !matches!(state.load, DeckLoad::Loaded { .. }) {
                 return cmds;
             }
-            if !state.grid_placed {
+            if !state.grid_placed && !state.grid_locked {
                 state.grid = Some(grid);
                 state.tempo_map = tempo_map.filter(|map| !map.is_empty());
             }
@@ -4385,6 +4407,9 @@ impl DeckEngine {
         edit: GridEdit,
     ) -> Option<(TrackGrid, Vec<DeckCmd>)> {
         let state = self.deck(deck);
+        if state.grid_locked {
+            return None;
+        }
         let old = state.true_grid()?;
         let at = state.position_secs;
         let grid = match edit {
@@ -4420,6 +4445,15 @@ impl DeckEngine {
             return None;
         }
         let state = self.deck_mut(deck);
+        // A run of the same button is one decision: the step already on
+        // the stack keeps the grid from BEFORE the run, so taking it back
+        // undoes the whole run at once.
+        if state.grid_undo.last().map(|(kind, _)| *kind) != Some(edit) {
+            if state.grid_undo.len() >= GRID_UNDO_CAP {
+                state.grid_undo.remove(0);
+            }
+            state.grid_undo.push((edit, old));
+        }
         state.grid = Some(grid);
         state.grid_placed = true;
         // A corrected grid is a different record as far as the fitted
@@ -4434,14 +4468,49 @@ impl DeckEngine {
         Some((grid, cmds))
     }
 
-    /// A grid a hand corrected on this record before.
-    pub fn restore_grid(&mut self, deck: DeckId, grid: TrackGrid) {
+    /// Whether there is a correction to take back.
+    pub fn can_undo_grid(&self, deck: DeckId) -> bool {
+        !self.deck(deck).grid_undo.is_empty()
+    }
+
+    /// Take back the last correction, or the last run of one.
+    ///
+    /// Returns what to re-publish, the same shape a correction does. The
+    /// deck stays MARKED as hand-placed even when the stack empties: the
+    /// operator has looked at this grid, and the analysis landing late
+    /// must not quietly replace what they decided to keep.
+    pub fn undo_grid(&mut self, deck: DeckId) -> Option<(TrackGrid, Vec<DeckCmd>)> {
+        if self.deck(deck).grid_locked {
+            return None;
+        }
+        let (_, grid) = self.deck_mut(deck).grid_undo.pop()?;
+        if !grid.has_grid() {
+            return None;
+        }
+        self.deck_mut(deck).grid = Some(grid);
+        let cmds = if self.deck(deck).synced || self.auto_sync {
+            self.apply_auto_sync_with(Some(SyncQuantize::Beat))
+        } else {
+            Vec::new()
+        };
+        Some((grid, cmds))
+    }
+
+    /// Protect this grid from every later change, or stop protecting it.
+    pub fn set_grid_locked(&mut self, deck: DeckId, locked: bool) {
+        self.deck_mut(deck).grid_locked = locked;
+    }
+
+    /// A grid a hand corrected on this record before, and whether they
+    /// settled it.
+    pub fn restore_grid(&mut self, deck: DeckId, grid: TrackGrid, locked: bool) {
         if !grid.has_grid() {
             return;
         }
         let state = self.deck_mut(deck);
         state.grid = Some(grid);
         state.grid_placed = true;
+        state.grid_locked = locked;
         state.tempo_map = None;
     }
 
@@ -4452,6 +4521,9 @@ impl DeckEngine {
     /// other pulse; the caller re-publishes the flipped grid wherever else
     /// it lives (analysis, loop grid, cache). Returns the flipped grid.
     pub fn flip_beat_phase(&mut self, deck: DeckId) -> Option<(TrackGrid, Vec<DeckCmd>)> {
+        if self.deck(deck).grid_locked {
+            return None;
+        }
         let state = self.deck_mut(deck);
         let grid = state.grid.as_mut()?;
         if !grid.has_grid() {
@@ -6306,6 +6378,58 @@ mod tests {
         // And a record leaving the deck takes the placement with it.
         e.eject(DeckId::A);
         assert!(!e.deck(DeckId::A).grid_placed);
+    }
+
+    /// A correction can be taken back, and a RUN of the same correction is
+    /// one step: four presses of the double button is one decision.
+    #[test]
+    fn grid_corrections_undo_and_a_run_of_one_kind_is_a_single_step() {
+        let mut e = DeckEngine::new();
+        // Seventy, so two doublings still land inside the band a hand may
+        // publish.
+        load_analysed(&mut e, DeckId::A, 1, 70.0, 0.0);
+        e.observe(DeckId::A, 30.0, true);
+        assert!(!e.can_undo_grid(DeckId::A), "nothing to take back yet");
+
+        e.edit_grid(DeckId::A, GridEdit::Scale(2.0));
+        e.edit_grid(DeckId::A, GridEdit::Scale(2.0));
+        assert!((e.deck(DeckId::A).grid.unwrap().bpm - 280.0).abs() < 1e-9);
+        assert!(e.can_undo_grid(DeckId::A));
+
+        // One step back for both presses, straight to where the analyser
+        // had it.
+        e.undo_grid(DeckId::A);
+        assert!((e.deck(DeckId::A).grid.unwrap().bpm - 70.0).abs() < 1e-9);
+        assert!(!e.can_undo_grid(DeckId::A), "and the stack is empty again");
+
+        // A DIFFERENT correction is its own step.
+        e.edit_grid(DeckId::A, GridEdit::Scale(2.0));
+        e.edit_grid(DeckId::A, GridEdit::Downbeat);
+        e.undo_grid(DeckId::A);
+        assert!((e.deck(DeckId::A).grid.unwrap().bpm - 140.0).abs() < 1e-9, "only the downbeat");
+        e.undo_grid(DeckId::A);
+        assert!((e.deck(DeckId::A).grid.unwrap().bpm - 70.0).abs() < 1e-9);
+    }
+
+    /// A grid that is right is worth protecting from the next mis-click.
+    #[test]
+    fn a_locked_grid_refuses_every_correction_and_the_analysis_too() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        e.observe(DeckId::A, 30.0, true);
+        e.set_grid_locked(DeckId::A, true);
+
+        assert!(e.edit_grid(DeckId::A, GridEdit::Scale(2.0)).is_none());
+        assert!(e.flip_beat_phase(DeckId::A).is_none());
+        assert!((e.deck(DeckId::A).grid.unwrap().bpm - 120.0).abs() < 1e-9);
+
+        let gen = e.deck(DeckId::A).load_gen;
+        e.grid_ready(DeckId::A, gen, grid(96.0, 0.0), None, None);
+        assert!((e.deck(DeckId::A).grid.unwrap().bpm - 120.0).abs() < 1e-9, "not the analysis either");
+
+        // Unlocked, the corrections land again.
+        e.set_grid_locked(DeckId::A, false);
+        assert!(e.edit_grid(DeckId::A, GridEdit::Scale(2.0)).is_some());
     }
 
     #[test]

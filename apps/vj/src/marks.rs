@@ -95,6 +95,9 @@ pub struct MarkRecord {
     marks: Vec<Mark>,
 }
 
+/// What a grid mark's label says when the grid is not to be changed.
+const LOCKED: &str = "locked";
+
 /// The format this build writes. A reader meeting a higher number still
 /// takes what it recognises, because every line stands on its own.
 const VERSION: u32 = 1;
@@ -140,22 +143,32 @@ impl MarkRecord {
         self.set_point(MarkKind::Cue, secs);
     }
 
-    /// The corrected grid, if a hand left one: tempo, first beat, bar seat.
-    pub fn grid(&self) -> Option<(f64, f64, u32)> {
+    /// The corrected grid, if a hand left one: tempo, first beat, bar
+    /// seat, and whether it was locked against further change.
+    pub fn grid(&self) -> Option<(f64, f64, u32, bool)> {
         self.of_kind(MarkKind::Grid)
             .next()
             .filter(|mark| mark.len_secs > 1e-4 && mark.start_secs >= 0.0)
-            .map(|mark| (60.0 / mark.len_secs, mark.start_secs, mark.slot as u32 % 4))
+            .map(|mark| {
+                (
+                    60.0 / mark.len_secs,
+                    mark.start_secs,
+                    mark.slot as u32 % 4,
+                    mark.label == LOCKED,
+                )
+            })
     }
 
-    pub fn set_grid(&mut self, grid: Option<(f64, f64, u32)>) {
+    pub fn set_grid(&mut self, grid: Option<(f64, f64, u32, bool)>) {
         match grid {
-            Some((bpm, first_beat_secs, phase)) if bpm > 1.0 => self.put(Mark {
+            Some((bpm, first_beat_secs, phase, locked)) if bpm > 1.0 => self.put(Mark {
                 kind: MarkKind::Grid,
                 start_secs: first_beat_secs,
                 len_secs: 60.0 / bpm,
                 slot: (phase % 4) as u16,
-                label: String::new(),
+                // The label is the file's own free-text field, and "this
+                // grid is settled" is exactly the kind of thing it is for.
+                label: if locked { LOCKED.to_string() } else { String::new() },
                 colour: 0,
             }),
             _ => self.clear_kind(MarkKind::Grid),
@@ -319,9 +332,10 @@ mod tests {
     fn a_corrected_grid_survives_the_round_trip() {
         let mut record = MarkRecord::default();
         record.set_cue(Some(12.5));
-        record.set_grid(Some((128.0, 0.1875, 2)));
+        record.set_grid(Some((128.0, 0.1875, 2, true)));
         let back = MarkRecord::from_text(&record.to_text());
-        let (bpm, first, phase) = back.grid().expect("a grid");
+        let (bpm, first, phase, locked) = back.grid().expect("a grid");
+        assert!(locked, "and that it was settled");
         assert!((bpm - 128.0).abs() < 1e-9, "{bpm}");
         assert!((first - 0.1875).abs() < 1e-9);
         assert_eq!(phase, 2);
@@ -339,7 +353,7 @@ mod tests {
     fn a_grid_line_is_stepped_over_by_a_reader_that_does_not_know_it() {
         let mut written = MarkRecord::default();
         written.set_cue(Some(12.5));
-        written.set_grid(Some((128.0, 0.1875, 2)));
+        written.set_grid(Some((128.0, 0.1875, 2, false)));
         // A kind from a build newer than this reader, in the middle.
         let text = written.to_text().replace("grid ", "wibble ");
         let record = MarkRecord::from_text(&text);
