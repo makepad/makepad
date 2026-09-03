@@ -15,14 +15,14 @@ let rig = Rig{
 
 let motion = Motion{
     prompt: prompt.text()
-    mesh: rig.mesh()
+    mesh: rig.out(@mesh)
     motion_mode: "playable"
     model: "hy-motion"
     at: vec2(680, 160)
 }
 
 /** The rigged GLB with playable motion clips. */
-let character = Output{ type: @mesh  value: motion.mesh()  at: vec2(1000, 160) }
+let character = Output{ type: @mesh  value: motion.out(@mesh)  at: vec2(1000, 160) }
 
 Flow{
     label: "Rig and motion"

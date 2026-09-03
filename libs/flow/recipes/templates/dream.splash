@@ -20,7 +20,6 @@ let image = Image{
 let video = Video{
     prompt: expand.text()
     image: image.image()
-    last_frame: image.image()
     width: 640
     height: 352
     frames: 39
@@ -34,6 +33,6 @@ let movie = Output{ type: @video  value: video.video()  at: vec2(1320, 120) }
 
 Flow{
     label: "DREAM"
-    brief: "Expands one idea, paints its keyframe, and closes a generated clip back onto that frame."
+    brief: "Expands one idea, paints its keyframe, and generates a clip from that frame."
     prompt, expand, image, video, movie
 }
