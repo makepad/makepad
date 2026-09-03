@@ -844,9 +844,16 @@ impl Cx {
             self.passes[*draw_pass_id].set_time(time as f32);
             match self.passes[*draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
-                CxDrawPassParent::Window(_) => {
-                    //et dpi_factor = self.os.window_geom.dpi_factor;
-                    self.draw_pass_to_canvas(*draw_pass_id);
+                CxDrawPassParent::Window(window_id) => {
+                    // ONE canvas: only window zero paints. A second window's
+                    // pass is recorded but never presented (see CreateWindow
+                    // below) — settled here, so it neither errors nor keeps
+                    // requesting frames.
+                    if self.windows.current_id_zero() == Some(window_id) {
+                        self.draw_pass_to_canvas(*draw_pass_id);
+                    } else {
+                        self.passes[*draw_pass_id].paint_dirty = false;
+                    }
                 }
                 CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
@@ -874,6 +881,22 @@ impl Cx {
                         let window = &mut self.windows[window_id];
                         window.create_title.clone()
                     };
+                    // The browser gives an app one canvas, so the platform
+                    // has one window: a second `Window` is NOT created — it
+                    // never becomes `is_created`, its pass never paints —
+                    // and that is said once. `OsType::is_single_window` says
+                    // it up front, so an app hosts that surface in-page
+                    // instead of asking.
+                    if self.windows.current_id_zero().is_some_and(|zero| zero != window_id) {
+                        if !self.os.second_window_reported {
+                            self.os.second_window_reported = true;
+                            crate::log!(
+                                "web: one canvas, one window — {:?} {title:?} is not created (OsType::is_single_window)",
+                                window_id
+                            );
+                        }
+                        continue;
+                    }
 
                     self.os.from_wasm(FromWasmSetDocumentTitle { title });
 
@@ -1511,6 +1534,9 @@ pub struct CxOs {
     pub(crate) media: CxWebMedia,
     pub(crate) render_texture_captures:
         Vec<(crate::texture::TextureId, usize, usize, Vec<u8>)>,
+    /// The one-line notice that a second window maps to nothing has been
+    /// given (`CxOsOp::CreateWindow`).
+    pub(crate) second_window_reported: bool,
 }
 
 impl Default for CxOs {
@@ -1532,6 +1558,7 @@ impl Default for CxOs {
 
             media: CxWebMedia::default(),
             render_texture_captures: Vec::new(),
+            second_window_reported: false,
         }
     }
 }

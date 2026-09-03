@@ -402,8 +402,11 @@ impl Cx {
 
     pub fn draw_pass_to_canvas(&mut self, draw_pass_id: DrawPassId) {
         // A pass without a draw list (a debug overlay pass that drew nothing this frame) is
-        // skipped, as on Metal — unwrapping it took the whole web app down.
+        // skipped, as on Metal — unwrapping it took the whole web app down. Its dirt is
+        // cleared with it: `setup_render_pass` is what clears it on the normal path, and a
+        // pass left dirty here was re-tried — and re-reported — every frame.
         let Some(draw_list_id) = self.passes[draw_pass_id].main_draw_list_id else {
+            self.passes[draw_pass_id].paint_dirty = false;
             crate::error!("Draw pass has no draw list!");
             return;
         };
@@ -441,8 +444,10 @@ impl Cx {
 
     pub fn draw_pass_to_texture(&mut self, draw_pass_id: DrawPassId) {
         // A pass without a draw list (a debug overlay pass that drew nothing this frame) is
-        // skipped, as on Metal — unwrapping it took the whole web app down.
+        // skipped, as on Metal — unwrapping it took the whole web app down. Settled, as in
+        // `draw_pass_to_canvas`.
         let Some(draw_list_id) = self.passes[draw_pass_id].main_draw_list_id else {
+            self.passes[draw_pass_id].paint_dirty = false;
             crate::error!("Draw pass has no draw list!");
             return;
         };
