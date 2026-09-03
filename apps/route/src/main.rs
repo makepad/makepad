@@ -62,7 +62,9 @@ use ddg::{DdgEvent, DdgState};
 #[cfg(feature = "native")]
 use history::DriveLog;
 #[cfg(feature = "native")]
-use layers::{LayerState, TerrainUpdate, WindUpdate};
+use layers::{LayerState, WindUpdate};
+#[cfg(feature = "native")]
+use overlays::TerrainLayer;
 #[cfg(feature = "native")]
 use nav::{ActiveNav, NavAction, NavTick};
 #[cfg(feature = "native")]
@@ -813,7 +815,7 @@ pub struct App {
     #[rust]
     wind_rx: ToUIReceiver<WindUpdate>,
     #[rust]
-    terrain_rx: ToUIReceiver<TerrainUpdate>,
+    terrain_layer: TerrainLayer,
     /// Kokoro voice output (🔊 button). None until first startup.
     #[rust]
     speech: Option<SpeechOutput>,
@@ -2067,19 +2069,12 @@ impl App {
             map.set_wind_field(cx, 0, 0, Vec::new(), Vec::new(), (0.0, 0.0, 0.0, 0.0));
         }
 
-        if self.layers.terrain {
-            if self.layers.terrain_tx.is_none() {
-                self.layers.terrain_tx = Some(layers::start_terrain_worker(
-                    cx.thread_spawner(),
-                    self.terrain_rx.sender(),
-                    self.layers.maps_root.clone(),
-                ));
-            }
-            self.layers.last_terrain_key = None;
-            layers::request_terrain(cx, &map, &mut self.layers);
-        } else if self.layers.terrain_tx.is_some() {
-            map.set_terrain_overlay(cx, TerrainOverlayData::default());
-        }
+        self.terrain_layer.set_enabled(
+            cx,
+            &map,
+            self.layers.terrain,
+            Some(&self.layers.maps_root),
+        );
     }
 }
 
@@ -2258,7 +2253,7 @@ impl MatchEvent for App {
             self.push_line(cx, &format!("map: long-press at {lon:.5}, {lat:.5}"));
         }
         if map.viewport_changed(actions).is_some() && self.layers.terrain {
-            layers::request_terrain(cx, &map, &mut self.layers);
+            self.terrain_layer.request(cx, &map);
         }
         // '>' on a trip row: re-apply that snapshot.
         let list = self.ui.portal_list(cx, ids!(list));
@@ -2308,6 +2303,8 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.ensure_started(cx);
+        let map = self.ui.map_view(cx, ids!(map));
+        self.terrain_layer.handle_event(cx, event, &map);
         self.drain_ai_port(cx, event);
         // The Space-warp row tracks the camera live: grayed (but visible,
         // so it stays discoverable) outside the near-first-person regime,
@@ -2445,23 +2442,6 @@ impl AppMain for App {
             self.layers.wind_cache = Some(update);
             if self.layers.wind {
                 self.apply_layers(cx);
-            }
-        }
-        while let Ok(update) = self.terrain_rx.try_recv() {
-            if self.layers.terrain {
-                self.ui.map_view(cx, ids!(map)).set_terrain_overlay(
-                    cx,
-                    TerrainOverlayData {
-                        texels: update.texels,
-                        width: update.width,
-                        height: update.height,
-                        elev_texels: update.elev_texels,
-                        elev: update.elev,
-                        elev_width: update.elev_width,
-                        elev_height: update.elev_height,
-                        bbox: update.bbox,
-                    },
-                );
             }
         }
         if let Some(mut agent) = self.agent.take() {
