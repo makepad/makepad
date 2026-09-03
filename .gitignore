@@ -123,3 +123,4 @@ fleet-hosts*.txt
 window_*_frame_*.png
 remote-jobs/
 apps/asset-ui/resources/
+.makepad-notes.txt

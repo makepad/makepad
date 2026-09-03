@@ -19,6 +19,32 @@
 //! * `/tweak/final` answers the coalesced end state so the AI integrates
 //!   once instead of tracking every intermediate edit.
 //!
+//! # The note card — the human's side of the channel
+//!
+//! Everything above is the AI reading the app. A NOTE is the person writing
+//! back: a small card pinned to one widget, carrying whatever they want done
+//! to it in their own words. `Insert` or `Ctrl+Shift+N` opens it on the
+//! selection (the panel's `note` button does the same for keyboards without
+//! an Insert), the header strip drags it, the bottom-right grip resizes it,
+//! and a leader line in the selection colour keeps it joined to its widget
+//! wherever it is parked. The card is opaque and picking never reaches
+//! through it.
+//!
+//! Its four buttons are ✕ clear, ✦ send, 📌 pin and — close. Sending
+//! (`Ctrl+Enter` or ✦) does not push anything — the bridge is a server — it
+//! raises the note's `sent` count, which `/tweak/state` reports as
+//! `"ask": N` and the log ring carries as `TWEAK ask #N`. A polling agent
+//! reads either and knows the difference between a note left lying around
+//! and one it is being asked to act on NOW.
+//!
+//! Pinning writes the note to `.makepad-notes.txt` beside the running app —
+//! plain tab-separated text — so it survives the process and is readable
+//! without it.
+//!
+//! And with a selection standing, the arrow keys walk the live tree the way
+//! a scene editor does: parent, first child, previous/next sibling. With
+//! nothing selected they still belong to the exploded view's orbit.
+//!
 //! Containment (the plan of record, tweaker.md): everything UI-side lives
 //! HERE; `Window` hosts the widget and calls [`window_intercept`] — a few
 //! lines; the `/tweak` routes in `platform/src/remote.rs` stay thin and
@@ -112,8 +138,8 @@ pub struct TweakDiffEntry {
     pub scope: String,
 }
 
-/// A Ctrl+Space note card, attached to a widget by path: it rides with
-/// the widget's live rect at (dx, dy) offset and is the human's text
+/// A note card, attached to a widget by path: it rides with the widget's
+/// live rect at (dx, dy) offset, sized (w, h), and is the human's text
 /// channel to the AI (/tweak/state carries it).
 #[derive(Clone, Debug)]
 pub struct TweakNote {
@@ -121,6 +147,146 @@ pub struct TweakNote {
     pub text: String,
     pub dx: f64,
     pub dy: f64,
+    pub w: f64,
+    pub h: f64,
+    /// Pinned: the text survives the process — written to the note store
+    /// (`.makepad-notes.txt` beside the running app) and read back at the
+    /// first note of the next session.
+    pub pinned: bool,
+    /// Bumped every time the human sends the note to the AI (the sparkle
+    /// button / Ctrl+Enter). `/tweak/state` reports the note as `ask` while
+    /// this is above the count the AI last acknowledged, so a polling agent
+    /// can tell "there is a note here" from "act on this note NOW".
+    pub sent: u64,
+}
+
+/// The card's size when it is first opened.
+const NOTE_W: f64 = 230.0;
+const NOTE_H: f64 = 96.0;
+/// The card never shrinks below this — the button row needs the width.
+const NOTE_MIN_W: f64 = 140.0;
+const NOTE_MIN_H: f64 = 56.0;
+/// The header strip: drag handle plus the four icon buttons.
+const NOTE_HEADER_H: f64 = 16.0;
+/// The bottom-right resize grip, in points.
+const NOTE_GRIP: f64 = 14.0;
+
+impl TweakNote {
+    fn new(path: String) -> Self {
+        Self {
+            path,
+            text: String::new(),
+            dx: 8.0,
+            dy: -(NOTE_H + 12.0),
+            w: NOTE_W,
+            h: NOTE_H,
+            pinned: false,
+            sent: 0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// the note store — pinned notes outlive the process
+//
+// One line per note, tab-separated, in the process's working directory. A
+// flat text file on purpose: `cat .makepad-notes.txt` is a readable list of
+// what the human asked for, and the AI that drives the session can read it
+// without the app running.
+
+const NOTE_STORE: &str = ".makepad-notes.txt";
+
+fn note_store_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => {}
+            '\t' => out.push_str("\\t"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn note_store_unescape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('\\') => out.push('\\'),
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// Read the pinned notes back. Anything malformed is skipped rather than
+/// fatal: the file is meant to be hand-editable.
+fn note_store_load() -> Vec<TweakNote> {
+    let Ok(body) = std::fs::read_to_string(NOTE_STORE) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in body.lines() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        let cols: Vec<&str> = line.split('\t').collect();
+        if cols.len() < 6 {
+            continue;
+        }
+        let num = |i: usize, fallback: f64| cols[i].parse::<f64>().unwrap_or(fallback);
+        out.push(TweakNote {
+            path: cols[0].to_string(),
+            dx: num(1, 8.0),
+            dy: num(2, -(NOTE_H + 12.0)),
+            w: num(3, NOTE_W).max(NOTE_MIN_W),
+            h: num(4, NOTE_H).max(NOTE_MIN_H),
+            text: note_store_unescape(cols[5]),
+            pinned: true,
+            sent: 0,
+        });
+    }
+    out
+}
+
+/// Write every pinned note out. Called on each pin toggle and on each text
+/// commit of a pinned note — the file is tiny and the write is rare.
+fn note_store_save(notes: &[TweakNote]) {
+    let pinned: Vec<&TweakNote> = notes.iter().filter(|n| n.pinned).collect();
+    if pinned.is_empty() {
+        // Nothing pinned any more: take the file away rather than leave an
+        // empty one lying beside the app.
+        let _ = std::fs::remove_file(NOTE_STORE);
+        return;
+    }
+    let mut out = String::from(
+        "# makepad tweak notes — pinned from the F12 note card, one per line\n\
+         # path\\tdx\\tdy\\tw\\th\\ttext (\\\\n for newlines)\n",
+    );
+    for note in pinned {
+        out.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\n",
+            note.path,
+            fmt_f64(note.dx),
+            fmt_f64(note.dy),
+            fmt_f64(note.w),
+            fmt_f64(note.h),
+            note_store_escape(&note.text)
+        ));
+    }
+    if let Err(error) = std::fs::write(NOTE_STORE, out) {
+        log!("TWEAK note store write failed: {error}");
+    }
 }
 
 /// One undoable edit gesture. Value: a contiguous run of applies to one
@@ -241,8 +407,11 @@ struct TweakSession {
     /// Vibecode prompts sent this session: (sel path, layer, prompt).
     /// Surfaced in /tweak/state as the agent's work queue.
     vibes: Vec<(String, String, String, String)>,
-    /// Ctrl+Space note cards, keyed by widget path (one per widget).
+    /// Note cards, keyed by widget path (one per widget).
     notes: Vec<TweakNote>,
+    /// The pinned notes have been read back from the store: once per process,
+    /// at the first note the session touches.
+    notes_loaded: bool,
     /// The undo stack over edit gestures (Cmd+Z / Cmd+Shift+Z).
     undo: Vec<UndoStep>,
     redo: Vec<UndoStep>,
@@ -257,6 +426,26 @@ struct TweakSession {
 fn session() -> &'static Mutex<TweakSession> {
     static S: OnceLock<Mutex<TweakSession>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(TweakSession::default()))
+}
+
+impl TweakSession {
+    /// Pull the pinned notes in, once per process. Anything already open in
+    /// this session wins over the stored copy — the human is looking at it.
+    fn load_notes(&mut self) {
+        if self.notes_loaded {
+            return;
+        }
+        self.notes_loaded = true;
+        let stored = note_store_load();
+        if !stored.is_empty() {
+            log!("TWEAK note store: {} pinned note(s) from {NOTE_STORE}", stored.len());
+        }
+        for note in stored {
+            if !self.notes.iter().any(|n| n.path == note.path) {
+                self.notes.push(note);
+            }
+        }
+    }
 }
 
 const DEFAULT_SIDEBAR_WIDTH: f64 = 280.0;
@@ -790,26 +979,34 @@ pub fn window_intercept(
     }
 
     // The note card lives on the CANVAS but belongs to the tweaker: input
-    // inside it goes to ordinary dispatch (never picked through).
+    // inside it goes to ordinary dispatch (never picked through). The card
+    // is OPAQUE to picking — nothing behind it can be hovered or selected,
+    // however much of the app it covers — and while it is being dragged or
+    // resized the gesture owns the pointer wherever it wanders.
     {
-        let note_hit = tweaker
+        let (note_rect, note_gesture) = tweaker
             .borrow::<Tweaker>()
-            .and_then(|tw| tw.note_rect)
-            .map(|rect| {
-                if let Event::MouseDown(e) = event {
-                    rect.contains(e.abs)
-                } else if let Event::MouseMove(e) = event {
-                    rect.contains(e.abs)
-                } else if let Event::MouseUp(e) = event {
-                    rect.contains(e.abs)
-                } else {
-                    false
-                }
+            .map(|tw| (tw.note_rect, tw.note_drag.is_some() || tw.note_resize.is_some()))
+            .unwrap_or((None, false));
+        let note_hit = note_rect
+            .map(|rect| match event {
+                Event::MouseDown(e) => rect.contains(e.abs),
+                Event::MouseMove(e) => rect.contains(e.abs),
+                Event::MouseUp(e) => rect.contains(e.abs),
+                _ => false,
             })
             .unwrap_or(false);
-        if note_hit {
+        if note_hit || note_gesture {
             if kind == PointerKind::Down {
                 log!("TWEAK press {:.0},{:.0} on the note card: not a pick", abs.x, abs.y);
+            }
+            if kind == PointerKind::Move {
+                // Whatever was outlined under the card stops being: the
+                // pointer is on the note, not on the app.
+                let had_hover = session().lock().unwrap().hover.take().is_some();
+                if had_hover {
+                    redraw_tweaker(cx, &tweaker);
+                }
             }
             return false;
         }
@@ -1138,6 +1335,12 @@ pub fn window_intercept(
                     }
                 }
                 drop(s);
+                // A pick in the body takes the caret off whatever panel
+                // field held it. The keys that act on a SELECTION — the
+                // hierarchy arrows, Cmd+Z — are only ever ours when nothing
+                // is being typed into, and a click on the app is the moment
+                // the typing ended.
+                cx.set_key_focus(Area::Empty);
                 sidebar_refresh(cx, &tweaker);
                 redraw_tweaker(cx, &tweaker);
                 // Navigation stays reachable: the press flows on to the
@@ -3746,7 +3949,13 @@ pub fn tweak_callback(
                 out.push_str(&pick_json(pick));
             }
             {
-                let notes = session().lock().unwrap().notes.clone();
+                let notes = {
+                    // Pinned notes are part of the state whether or not a
+                    // card has been opened this run.
+                    let mut s = session().lock().unwrap();
+                    s.load_notes();
+                    s.notes.clone()
+                };
                 if !notes.is_empty() {
                     out.push_str(",\"notes\":[");
                     for (i, note) in notes.iter().enumerate() {
@@ -3754,9 +3963,14 @@ pub fn tweak_callback(
                             out.push(',');
                         }
                         out.push_str(&format!(
-                            "{{\"path\":{},\"text\":{}}}",
+                            "{{\"path\":{},\"text\":{}{}{}}}",
                             json_str(&note.path),
-                            json_str(&note.text)
+                            json_str(&note.text),
+                            // "ask": the human pressed Ctrl+Enter / the
+                            // sparkle on this note — act on it, do not just
+                            // read it. The count rises with every send.
+                            if note.sent > 0 { format!(",\"ask\":{}", note.sent) } else { String::new() },
+                            if note.pinned { ",\"pinned\":1" } else { "" }
                         ));
                     }
                     out.push(']');
@@ -4870,7 +5084,7 @@ pub struct Tweaker {
     /// The prompt TextInput's uid, captured at draw.
     #[rust]
     vibe_prompt_uid: u64,
-    /// The Ctrl+Space note card: visible for the current selection.
+    /// The note card: visible for the current selection.
     #[rust]
     note_open: bool,
     #[rust]
@@ -4881,8 +5095,27 @@ pub struct Tweaker {
     /// A grip drag in flight: pointer offset from the card origin.
     #[rust]
     note_drag: Option<Vec2d>,
+    /// A corner-grip resize in flight: (pointer at press, size at press).
+    #[rust]
+    note_resize: Option<(Vec2d, Vec2d)>,
     #[rust]
     note_text_uid: u64,
+    /// The card's four icon buttons.
+    #[rust]
+    note_clear_uid: u64,
+    #[rust]
+    note_send_uid: u64,
+    #[rust]
+    note_pin_uid: u64,
+    #[rust]
+    note_shut_uid: u64,
+    /// The chrome colours currently applied: (focused, pinned). Reapplying
+    /// them every frame would fight the shader cache for nothing.
+    #[rust]
+    note_focus_style: Option<(bool, bool)>,
+    /// Put the caret in the card the frame after it opens.
+    #[rust]
+    note_focus_pending: bool,
     /// Seed the card's TextInput once per open (never clobber typing).
     #[rust]
     note_seed_pending: bool,
@@ -5725,28 +5958,82 @@ impl Tweaker {
             let value = script_eval!(vm, {
                 use mod.prelude.widgets.*
                 use mod.widgets.*
+                // Every button is icon-only, so ButtonIcon with a centred
+                // align: a bare Button parks the glyph off to one side.
+                let NoteBtn = ButtonIcon {
+                    width: 15
+                    height: 15
+                    padding: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                    margin: Inset{left: 0 right: 2 top: 0 bottom: 0}
+                    align: Align{x: 0.5 y: 0.5}
+                    icon_walk: Walk{width: 9 height: Fit}
+                    draw_bg +: {
+                        color: #x00000000
+                    }
+                }
+                // The card's own body has NO background: a plain `View`'s
+                // draw_bg is a bare DrawQuad whose default pixel fn returns
+                // #0000, so `show_bg` plus a `color` paints nothing at all —
+                // which is why the card used to be a ghost you could read
+                // the app through. The opaque backdrop is drawn in Rust
+                // (`draw_note_backdrop`) right under this walk instead, so
+                // the field and the header composite onto something solid.
                 View {
                     width: Fill
-                    height: 72
+                    height: Fill
                     flow: Down
-                    show_bg: true
-                    draw_bg +: {
-                        color: #x2d2d36
-                    }
-                    grip := View {
+                    // The bottom inset is the resize grip's strip: the ticks
+                    // are drawn there, clear of the field's rounded corner.
+                    padding: Inset{left: 2 right: 2 top: 2 bottom: 9}
+                    head := View {
                         width: Fill
-                        height: 11
+                        height: 16
+                        flow: Right
+                        align: Align{x: 0.0 y: 0.5}
                         show_bg: true
                         draw_bg +: {
-                            color: #x444452
+                            color: instance(#x444452ff)
+                            pixel: fn() {
+                                return vec4(self.color.rgb * self.color.a, self.color.a)
+                            }
+                        }
+                        // The drag handle IS the empty stretch of the strip:
+                        // grab anywhere the buttons are not.
+                        grip := View {
+                            width: Fill
+                            height: Fill
+                        }
+                        clear := NoteBtn {
+                            draw_icon +: {
+                                color: #xc8c8d4
+                                svg: crate_resource("self:resources/icons/note_clear.svg")
+                            }
+                        }
+                        send := NoteBtn {
+                            draw_icon +: {
+                                color: #x8fd8ff
+                                svg: crate_resource("self:resources/icons/note_send.svg")
+                            }
+                        }
+                        pin := NoteBtn {
+                            draw_icon +: {
+                                color: #xc8c8d4
+                                svg: crate_resource("self:resources/icons/note_pin.svg")
+                            }
+                        }
+                        shut := NoteBtn {
+                            draw_icon +: {
+                                color: #xc8c8d4
+                                svg: crate_resource("self:resources/icons/note_close.svg")
+                            }
                         }
                     }
                     note_text := TextInput {
                         width: Fill
-                        height: 54
-                        empty_text: "note on this item \u{2014} Insert or the note button: pinned, else hovered \u{00b7} Esc closes"
+                        height: Fill
+                        empty_text: "note on this item \u{2014} Ctrl+Enter sends it to the AI"
                         draw_bg +: {
-                            color: #x22222a
+                            color: #x22222aff
                         }
                         draw_text +: {
                             color: #xe8e8d0
@@ -5757,8 +6044,252 @@ impl Tweaker {
             });
             WidgetRef::script_from_value(vm, value)
         });
+        self.note_clear_uid = ui.child(live_id!(head)).child(live_id!(clear)).widget_uid().0;
+        self.note_send_uid = ui.child(live_id!(head)).child(live_id!(send)).widget_uid().0;
+        self.note_pin_uid = ui.child(live_id!(head)).child(live_id!(pin)).widget_uid().0;
+        self.note_shut_uid = ui.child(live_id!(head)).child(live_id!(shut)).widget_uid().0;
         cx.widget_tree_insert_child(self.uid, live_id!(note), ui.clone());
         self.note_ui = Some(ui);
+    }
+
+    /// The pin button lights up while the note is pinned to disk — the one
+    /// piece of card chrome that is script-side. Opacity lives on the
+    /// backdrop instead (see `draw_note_backdrop`).
+    fn note_style(&mut self, cx: &mut Cx2d, focused: bool, pinned: bool) {
+        if self.note_focus_style == Some((focused, pinned)) {
+            return;
+        }
+        self.note_focus_style = Some((focused, pinned));
+        let Some(ui) = self.note_ui.clone() else { return };
+        let pin_color: Vec4f = if pinned {
+            vec4(1.0, 0.78, 0.29, 1.0)
+        } else {
+            vec4(0.784, 0.784, 0.831, 1.0)
+        };
+        let mut pin_ref = ui.child(live_id!(head)).child(live_id!(pin));
+        script_apply_eval!(cx, pin_ref, { draw_icon +: { color: #(pin_color) } });
+    }
+
+    /// Open or close the note card on the item we are IN — the pinned
+    /// selection, else the widget under the hover (which becomes the
+    /// selection, so the card has something to ride with).
+    fn toggle_note(&mut self, cx: &mut Cx) {
+        let sel_path = {
+            let mut s = session().lock().unwrap();
+            if s.pinned.is_none() {
+                if let Some(hover) = s.hover.clone() {
+                    s.pinned = Some(hover);
+                }
+            }
+            s.pinned.as_ref().map(|p| p.path.clone())
+        };
+        let Some(path) = sel_path else { return };
+        self.note_open = !self.note_open;
+        if self.note_open {
+            let mut s = session().lock().unwrap();
+            s.load_notes();
+            if !s.notes.iter().any(|n| n.path == path) {
+                s.notes.push(TweakNote::new(path));
+            }
+            drop(s);
+            self.note_seed_pending = true;
+            self.note_focus_pending = true;
+        } else {
+            self.note_rect = None;
+            self.note_focus_style = None;
+        }
+        self.redraw_overlay(cx);
+    }
+
+    /// The open card's note, by the current selection's path.
+    fn note_path(&self) -> Option<String> {
+        if !self.note_open {
+            return None;
+        }
+        session().lock().unwrap().pinned.as_ref().map(|p| p.path.clone())
+    }
+
+    /// Take the card's live text into the session (the TextInput only
+    /// reports on commit, and a send must carry what is on screen).
+    fn note_sync_text(&mut self, cx: &mut Cx) {
+        let (Some(path), Some(ui)) = (self.note_path(), self.note_ui.clone()) else {
+            return;
+        };
+        let text = ui.child(live_id!(note_text)).text();
+        let mut s = session().lock().unwrap();
+        if let Some(note) = s.notes.iter_mut().find(|n| n.path == path) {
+            if note.text != text {
+                note.text = text;
+                if note.pinned {
+                    let notes = s.notes.clone();
+                    drop(s);
+                    note_store_save(&notes);
+                }
+            }
+        }
+        let _ = cx;
+    }
+
+    /// The sparkle: hand this note to the AI driving the session. There is
+    /// no push channel — the bridge is a server — so "sending" means the
+    /// note goes into `/tweak/state` as an *ask* (`"ask":1` on the note,
+    /// with a bumped `sent` count) and a `TWEAK ask` line lands in the log
+    /// ring. A polling agent reads either one and acts.
+    fn note_send(&mut self, cx: &mut Cx) {
+        self.note_sync_text(cx);
+        let Some(path) = self.note_path() else { return };
+        let sent = {
+            let mut s = session().lock().unwrap();
+            let Some(note) = s.notes.iter_mut().find(|n| n.path == path) else {
+                return;
+            };
+            if note.text.trim().is_empty() {
+                None
+            } else {
+                note.sent += 1;
+                Some((note.sent, note.text.clone()))
+            }
+        };
+        match sent {
+            Some((seq, text)) => {
+                log!("TWEAK ask #{seq} {path}: {text}");
+                session().lock().unwrap().vibe_status =
+                    format!("note sent to the AI \u{00b7} ask #{seq}");
+            }
+            None => {
+                session().lock().unwrap().vibe_status =
+                    "nothing to send: the note is empty".to_string();
+            }
+        }
+        self.note_focus_pending = true;
+        self.redraw_sidebar(cx);
+        self.redraw_overlay(cx);
+    }
+
+    /// The x: empty the note's text (the card stays open, ready to retype).
+    fn note_clear(&mut self, cx: &mut Cx) {
+        let (Some(path), Some(ui)) = (self.note_path(), self.note_ui.clone()) else {
+            return;
+        };
+        ui.child(live_id!(note_text)).set_text(cx, "");
+        let notes = {
+            let mut s = session().lock().unwrap();
+            if let Some(note) = s.notes.iter_mut().find(|n| n.path == path) {
+                note.text.clear();
+            }
+            s.notes.clone()
+        };
+        note_store_save(&notes);
+        // The caret goes straight back into the field: the x is for
+        // retyping, not for leaving.
+        self.note_focus_pending = true;
+        self.redraw_overlay(cx);
+    }
+
+    /// The pin: keep this note across runs. Pinning writes the store at
+    /// once, so the text survives even a crash.
+    fn note_pin_toggle(&mut self, cx: &mut Cx) {
+        self.note_sync_text(cx);
+        let Some(path) = self.note_path() else { return };
+        let (pinned, notes) = {
+            let mut s = session().lock().unwrap();
+            let Some(note) = s.notes.iter_mut().find(|n| n.path == path) else {
+                return;
+            };
+            note.pinned = !note.pinned;
+            (note.pinned, s.notes.clone())
+        };
+        note_store_save(&notes);
+        log!(
+            "TWEAK note {} {path} ({NOTE_STORE})",
+            if pinned { "pinned" } else { "unpinned" }
+        );
+        self.note_focus_style = None;
+        self.note_focus_pending = true;
+        self.redraw_overlay(cx);
+    }
+
+    /// The close: put the card away, keeping the text.
+    fn note_close(&mut self, cx: &mut Cx) {
+        self.note_sync_text(cx);
+        self.note_open = false;
+        self.note_rect = None;
+        self.note_focus_style = None;
+        // Nothing is being typed into any more, so the arrows go back to
+        // walking the hierarchy.
+        cx.set_key_focus(Area::Empty);
+        self.redraw_overlay(cx);
+    }
+
+    /// Walk the live widget tree with the arrow keys, the way a scene
+    /// editor does: up to the parent, down to the first child, left/right to
+    /// the previous/next sibling. Only ever reached with something selected
+    /// — with nothing selected the arrows still orbit the exploded view.
+    fn walk_selection(&mut self, cx: &mut Cx, dir: KeyCode) {
+        let Some(sel) = session().lock().unwrap().pinned.clone() else {
+            return;
+        };
+        let rows = cx.widget_tree().flat_tree(cx);
+        let Some(at) = rows.iter().position(|row| row.uid == sel.uid) else {
+            return;
+        };
+        let depth = rows[at].depth;
+        // flat_tree is depth-first: the parent is the nearest earlier row one
+        // level up, the siblings are the same-depth rows that share it, and
+        // the first child is the very next row when it is one level deeper.
+        let parent = rows[..at].iter().rposition(|row| row.depth + 1 == depth);
+        let sibling = |step: isize| -> Option<usize> {
+            let mut index = at as isize;
+            loop {
+                index += step;
+                if index < 0 || index as usize >= rows.len() {
+                    return None;
+                }
+                let row = &rows[index as usize];
+                if row.depth < depth {
+                    return None; // left the parent: no sibling that way
+                }
+                if row.depth == depth {
+                    return Some(index as usize);
+                }
+            }
+        };
+        let target = match dir {
+            KeyCode::ArrowUp => parent,
+            KeyCode::ArrowDown => rows
+                .get(at + 1)
+                .filter(|row| row.depth == depth + 1)
+                .map(|_| at + 1),
+            KeyCode::ArrowLeft => sibling(-1),
+            KeyCode::ArrowRight => sibling(1),
+            _ => None,
+        };
+        let Some(target) = target else {
+            log!("TWEAK walk {dir:?}: nothing that way from {}", sel.path);
+            return;
+        };
+        let uid = rows[target].uid;
+        let widget = cx.widget_tree().widget(WidgetUid(uid));
+        if widget.is_empty() {
+            return;
+        }
+        let center = {
+            let rect = widget.area().clipped_rect_union(cx);
+            dvec2(rect.pos.x + rect.size.x * 0.5, rect.pos.y + rect.size.y * 0.5)
+        };
+        let Some(pick) = pick_of_widget(cx, &widget, center, sel.window_id) else {
+            log!("TWEAK walk {dir:?}: {} is not on screen", rows[target].name);
+            return;
+        };
+        log!("TWEAK walk {dir:?} \u{2192} {} ({})", pick.path, pick.ty);
+        session().lock().unwrap().pinned = Some(pick);
+        // The card follows the selection: a new path means a new note.
+        if self.note_open {
+            self.note_seed_pending = true;
+        }
+        self.rows_uid = 0;
+        self.redraw_sidebar(cx);
+        self.redraw_overlay(cx);
     }
 
     /// Rebuild the row bindings from the selection's reflected properties:
@@ -7933,8 +8464,15 @@ impl Tweaker {
                     let sel = session().lock().unwrap().pinned.clone();
                     if let Some(sel) = sel {
                         let mut s = session().lock().unwrap();
+                        let mut pinned = false;
                         if let Some(note) = s.notes.iter_mut().find(|n| n.path == sel.path) {
                             note.text = text.clone();
+                            pinned = note.pinned;
+                        }
+                        if pinned {
+                            let notes = s.notes.clone();
+                            drop(s);
+                            note_store_save(&notes);
                         }
                     }
                 }
@@ -8180,6 +8718,33 @@ impl Tweaker {
                     cx.redraw_all();
                 }
                 continue;
+            }
+            // The note card's own four buttons.
+            if self.note_open && action_uid != 0 {
+                if action_uid == self.note_clear_uid {
+                    if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                        self.note_clear(cx);
+                    }
+                    continue;
+                }
+                if action_uid == self.note_send_uid {
+                    if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                        self.note_send(cx);
+                    }
+                    continue;
+                }
+                if action_uid == self.note_pin_uid {
+                    if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                        self.note_pin_toggle(cx);
+                    }
+                    continue;
+                }
+                if action_uid == self.note_shut_uid {
+                    if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                        self.note_close(cx);
+                    }
+                    continue;
+                }
             }
             if self.shader_fold_uid != 0 && action_uid == self.shader_fold_uid {
                 if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
@@ -8659,14 +9224,30 @@ impl Tweaker {
         self.draw_outline.dpi = dpi;
         match style {
             PickStyle::Pinned => {
-                // The SELECTION never wears a box: the whole point of
-                // pinning a widget is seeing how it actually renders, and
-                // an outline sits exactly on the edge pixels being judged.
-                // Four viewfinder corners at a healthy distance mark the
-                // selection and leave the widget — and the margin space
-                // around it — untouched for direct manipulation.
+                // The SELECTION never wears a box ON its edge: the whole
+                // point of pinning a widget is seeing how it actually
+                // renders, and an outline sits exactly on the edge pixels
+                // being judged. Four viewfinder corners mark it instead.
+                //
+                // The corners alone were too quiet though — hovering drew a
+                // full blue box and clicking replaced it with four small
+                // ticks, which reads as "the click did nothing". So the
+                // brackets now come with a dashed hairline held 4pt OFF the
+                // widget: unmistakably still selected, and not one pixel of
+                // the thing being judged is touched.
+                let ring = Rect {
+                    pos: dvec2(pick.rect.pos.x - 4.0, pick.rect.pos.y - 4.0),
+                    size: dvec2(pick.rect.size.x + 8.0, pick.rect.size.y + 8.0),
+                };
+                self.draw_outline.border_color = vec4(0.19, 0.78, 1.0, 0.55);
+                self.draw_outline.fill_color = vec4(0.0, 0.0, 0.0, 0.0);
+                self.draw_outline.border_size = 1.0;
+                self.draw_outline.dash = 1.0;
+                if let Some(ring) = self.clip_to_viewport(cx, ring) {
+                    self.draw_outline.draw_abs(cx, ring);
+                }
                 self.draw_corner_brackets(cx, pick.rect);
-                return; // no outline, no fill, no label chip
+                return; // no fill, no label chip
             }
             PickStyle::Hover => {
                 self.draw_outline.border_color = vec4(0.19, 0.78, 1.0, 1.0);
@@ -8774,6 +9355,108 @@ impl Tweaker {
                     size: dvec2(6.0, 6.0),
                 },
             );
+        }
+    }
+
+    /// The leader: a thin line from the note card to the widget it is about,
+    /// in the selection colour so it reads as one mark with the brackets.
+    /// Both ends are pulled to the facing edges, so a card parked beside its
+    /// widget shows a short stub and one dragged across the window shows a
+    /// full run.
+    fn draw_note_leader(&mut self, cx: &mut Cx2d, card: Rect, target: Rect) {
+        // Nothing to join while the card sits on top of its own widget.
+        let overlap = card.pos.x < target.pos.x + target.size.x
+            && target.pos.x < card.pos.x + card.size.x
+            && card.pos.y < target.pos.y + target.size.y
+            && target.pos.y < card.pos.y + card.size.y;
+        if overlap {
+            return;
+        }
+        let clamp = |v: f64, lo: f64, hi: f64| v.max(lo).min(hi);
+        let target_center = dvec2(
+            target.pos.x + target.size.x * 0.5,
+            target.pos.y + target.size.y * 0.5,
+        );
+        let card_center = dvec2(card.pos.x + card.size.x * 0.5, card.pos.y + card.size.y * 0.5);
+        // The point on each rect's edge closest to the other's centre.
+        let from = dvec2(
+            clamp(target_center.x, card.pos.x, card.pos.x + card.size.x),
+            clamp(target_center.y, card.pos.y, card.pos.y + card.size.y),
+        );
+        let to = dvec2(
+            clamp(card_center.x, target.pos.x, target.pos.x + target.size.x),
+            clamp(card_center.y, target.pos.y, target.pos.y + target.size.y),
+        );
+        let max_x = self.overlay_max_x(cx.current_pass_size());
+        // The same dot chain the annotation strokes use, one segment long.
+        const RADIUS: f64 = 1.0;
+        self.draw_stroke.stroke_color = vec4(0.19, 0.78, 1.0, 0.85);
+        let d = to - from;
+        let dist = (d.x * d.x + d.y * d.y).sqrt();
+        let steps = (dist / (RADIUS * 0.9)).ceil().max(1.0) as usize;
+        for step in 0..=steps {
+            let t = step as f64 / steps as f64;
+            let px = from.x + d.x * t;
+            let py = from.y + d.y * t;
+            if px + RADIUS > max_x {
+                continue; // never into the panel band
+            }
+            self.draw_stroke.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(px - RADIUS, py - RADIUS),
+                    size: dvec2(RADIUS * 2.0, RADIUS * 2.0),
+                },
+            );
+        }
+        // A dot where it meets the widget, so the line has an aim.
+        self.draw_stroke.draw_abs(
+            cx,
+            Rect {
+                pos: dvec2(to.x - 2.5, to.y - 2.5),
+                size: dvec2(5.0, 5.0),
+            },
+        );
+    }
+
+    /// The card's opaque backdrop, drawn under its widgets: solid while the
+    /// caret is in the note (a note being typed has to be readable over
+    /// whatever it covers) and near-solid when it is not, so the card never
+    /// dissolves into the app the way a bare `show_bg` View did. The border
+    /// is the selection colour, matching the brackets and the leader.
+    fn draw_note_backdrop(&mut self, cx: &mut Cx2d, card: Rect, focused: bool) {
+        let Some(card) = self.clip_to_viewport(cx, card) else { return };
+        self.draw_outline.dpi = cx.current_dpi_factor().max(1.0) as f32;
+        self.draw_outline.dash = 0.0;
+        self.draw_outline.border_size = 1.0;
+        self.draw_outline.border_color = if focused {
+            vec4(0.19, 0.78, 1.0, 1.0)
+        } else {
+            vec4(0.19, 0.78, 1.0, 0.55)
+        };
+        self.draw_outline.fill_color = if focused {
+            vec4(0.145, 0.145, 0.180, 1.0)
+        } else {
+            vec4(0.145, 0.145, 0.180, 0.93)
+        };
+        self.draw_outline.draw_abs(cx, card);
+    }
+
+    /// The card's bottom-right resize grip: three stacked ticks, the usual
+    /// shorthand, in the selection colour.
+    fn draw_note_grip(&mut self, cx: &mut Cx2d, card: Rect) {
+        let max_x = self.overlay_max_x(cx.current_pass_size());
+        self.draw_stroke.stroke_color = vec4(0.19, 0.78, 1.0, 0.7);
+        let right = card.pos.x + card.size.x - 3.0;
+        let bottom = card.pos.y + card.size.y - 3.0;
+        for i in 0..3 {
+            let inset = 3.0 * i as f64;
+            let len = 3.0 + inset;
+            let pos = dvec2(right - len, bottom - 1.0 - inset);
+            if pos.x + len > max_x {
+                continue;
+            }
+            self.draw_stroke.draw_abs(cx, Rect { pos, size: dvec2(len, 1.0) });
         }
     }
 
@@ -9133,76 +9816,60 @@ impl Widget for Tweaker {
                     }
                 }
             }
-            Event::KeyDown(ke) if ke.key_code == KeyCode::Insert && tweak_is_on() => {
-                // Insert: a note on the item we are IN — the pinned
-                // selection, else the widget under the hover (which becomes
-                // the selection so the card has something to ride with).
-                // (Ctrl+Space is macOS's input-source switch; the user
-                // picked Insert, with the panel's note button as the
-                // fallback for keyboards without one.)
-                let sel_path = {
-                    let mut s = session().lock().unwrap();
-                    if s.pinned.is_none() {
-                        if let Some(h) = s.hover.clone() {
-                            s.pinned = Some(h);
-                        }
-                    }
-                    s.pinned.as_ref().map(|p| p.path.clone())
-                };
-                if let Some(path) = sel_path {
-                    self.note_open = !self.note_open;
-                    if self.note_open {
-                        let mut s = session().lock().unwrap();
-                        if !s.notes.iter().any(|n| n.path == path) {
-                            s.notes.push(TweakNote {
-                                path,
-                                text: String::new(),
-                                dx: 8.0,
-                                dy: -78.0,
-                            });
-                        }
-                        self.note_seed_pending = true;
-                    } else {
-                        self.note_rect = None;
-                    }
-                    self.redraw_overlay(cx);
-                }
+            // The note hotkey. Insert is the natural key and stays bound,
+            // but half the keyboards in use (laptops, 60% boards) reach it
+            // only through Fn — so Ctrl+Shift+N (Cmd+Shift+N on mac) opens
+            // the same card, and unlike a bare key it also works while the
+            // caret sits in one of the panel's fields.
+            Event::KeyDown(ke)
+                if tweak_is_on()
+                    && (ke.key_code == KeyCode::Insert
+                        || (ke.key_code == KeyCode::KeyN
+                            && ke.modifiers.shift
+                            && (ke.modifiers.control || ke.modifiers.logo))) =>
+            {
+                self.toggle_note(cx);
             }
             _ if self.note_request && tweak_is_on() => {
                 self.note_request = false;
-                // Insert: a note on the item we are IN — the pinned
-                // selection, else the widget under the hover (which becomes
-                // the selection so the card has something to ride with).
-                // (Ctrl+Space is macOS's input-source switch; the user
-                // picked Insert, with the panel's note button as the
-                // fallback for keyboards without one.)
-                let sel_path = {
-                    let mut s = session().lock().unwrap();
-                    if s.pinned.is_none() {
-                        if let Some(h) = s.hover.clone() {
-                            s.pinned = Some(h);
-                        }
-                    }
-                    s.pinned.as_ref().map(|p| p.path.clone())
-                };
-                if let Some(path) = sel_path {
-                    self.note_open = !self.note_open;
-                    if self.note_open {
-                        let mut s = session().lock().unwrap();
-                        if !s.notes.iter().any(|n| n.path == path) {
-                            s.notes.push(TweakNote {
-                                path,
-                                text: String::new(),
-                                dx: 8.0,
-                                dy: -78.0,
-                            });
-                        }
-                        self.note_seed_pending = true;
-                    } else {
-                        self.note_rect = None;
-                    }
-                    self.redraw_overlay(cx);
-                }
+                self.toggle_note(cx);
+            }
+            // Ctrl+Enter in the note card: send it to the AI. The card's
+            // TextInput would otherwise take Return, so this arm runs first
+            // (the match precedes `note_ui.handle_event` below).
+            Event::KeyDown(ke)
+                if self.note_open
+                    && tweak_is_on()
+                    && matches!(ke.key_code, KeyCode::ReturnKey | KeyCode::NumpadEnter)
+                    && (ke.modifiers.control || ke.modifiers.logo) =>
+            {
+                self.note_send(cx);
+            }
+            // Escape puts the card away (the text stays on the note).
+            Event::KeyDown(ke)
+                if self.note_open && tweak_is_on() && ke.key_code == KeyCode::Escape =>
+            {
+                self.note_close(cx);
+            }
+            // The arrows walk the hierarchy while something is selected —
+            // parent / first child / previous / next sibling, the scene
+            // editor's vocabulary. With NOTHING selected they belong to the
+            // exploded view's orbit (platform/src/sploded.rs stands down
+            // for exactly this case), and with a caret anywhere they belong
+            // to the caret.
+            Event::KeyDown(ke)
+                if tweak_is_on()
+                    && matches!(
+                        ke.key_code,
+                        KeyCode::ArrowUp
+                            | KeyCode::ArrowDown
+                            | KeyCode::ArrowLeft
+                            | KeyCode::ArrowRight
+                    )
+                    && cx.key_focus() == Area::Empty
+                    && session().lock().unwrap().pinned.is_some() =>
+            {
+                self.walk_selection(cx, ke.key_code);
             }
             Event::KeyDown(ke)
                 if ke.key_code == KeyCode::KeyZ
@@ -9373,11 +10040,26 @@ impl Widget for Tweaker {
             match event {
                 Event::MouseDown(e) if e.button.is_primary() => {
                     if let Some(rect) = self.note_rect {
+                        // Bottom-right corner: resize. It is checked first —
+                        // it overlaps nothing but the field's last corner.
+                        let corner = Rect {
+                            pos: dvec2(
+                                rect.pos.x + rect.size.x - NOTE_GRIP,
+                                rect.pos.y + rect.size.y - NOTE_GRIP,
+                            ),
+                            size: dvec2(NOTE_GRIP, NOTE_GRIP),
+                        };
+                        // The header strip minus the buttons: move. The
+                        // buttons live at its right end, so the grab band
+                        // stops where they start.
+                        let buttons = 4.0 * 17.0 + 4.0;
                         let grip = Rect {
                             pos: rect.pos,
-                            size: dvec2(rect.size.x, 12.0),
+                            size: dvec2((rect.size.x - buttons).max(0.0), NOTE_HEADER_H + 2.0),
                         };
-                        if grip.contains(e.abs) {
+                        if corner.contains(e.abs) {
+                            self.note_resize = Some((e.abs, rect.size));
+                        } else if grip.contains(e.abs) {
                             self.note_drag = Some(dvec2(
                                 e.abs.x - rect.pos.x,
                                 e.abs.y - rect.pos.y,
@@ -9386,23 +10068,47 @@ impl Widget for Tweaker {
                     }
                 }
                 Event::MouseMove(e) => {
-                    if let Some(grab) = self.note_drag {
-                        let sel = session().lock().unwrap().pinned.clone();
-                        if let Some(sel) = sel {
-                            let mut s = session().lock().unwrap();
-                            if let Some(note) =
-                                s.notes.iter_mut().find(|n| n.path == sel.path)
-                            {
-                                note.dx = e.abs.x - grab.x - sel.rect.pos.x;
-                                note.dy = e.abs.y - grab.y - sel.rect.pos.y;
-                            }
-                            drop(s);
-                            self.redraw_overlay(cx);
+                    let sel = session().lock().unwrap().pinned.clone();
+                    if let (Some((start, size)), Some(sel)) = (self.note_resize, sel.clone()) {
+                        let mut s = session().lock().unwrap();
+                        if let Some(note) = s.notes.iter_mut().find(|n| n.path == sel.path) {
+                            note.w = (size.x + e.abs.x - start.x).max(NOTE_MIN_W);
+                            note.h = (size.y + e.abs.y - start.y).max(NOTE_MIN_H);
+                        }
+                        drop(s);
+                        cx.set_cursor(MouseCursor::NwseResize);
+                        self.redraw_overlay(cx);
+                    } else if let (Some(grab), Some(sel)) = (self.note_drag, sel) {
+                        let mut s = session().lock().unwrap();
+                        if let Some(note) = s.notes.iter_mut().find(|n| n.path == sel.path) {
+                            note.dx = e.abs.x - grab.x - sel.rect.pos.x;
+                            note.dy = e.abs.y - grab.y - sel.rect.pos.y;
+                        }
+                        drop(s);
+                        cx.set_cursor(MouseCursor::Move);
+                        self.redraw_overlay(cx);
+                    } else if let Some(rect) = self.note_rect {
+                        // The corner announces itself before it is grabbed.
+                        let corner = Rect {
+                            pos: dvec2(
+                                rect.pos.x + rect.size.x - NOTE_GRIP,
+                                rect.pos.y + rect.size.y - NOTE_GRIP,
+                            ),
+                            size: dvec2(NOTE_GRIP, NOTE_GRIP),
+                        };
+                        if corner.contains(e.abs) {
+                            cx.set_cursor(MouseCursor::NwseResize);
                         }
                     }
                 }
                 Event::MouseUp(_) => {
+                    if self.note_drag.is_some() || self.note_resize.is_some() {
+                        // Geometry is part of a pinned note: keep it.
+                        let notes = session().lock().unwrap().notes.clone();
+                        note_store_save(&notes);
+                    }
                     self.note_drag = None;
+                    self.note_resize = None;
                 }
                 _ => {}
             }
@@ -9593,7 +10299,9 @@ impl Widget for Tweaker {
                 self.draw_stroke_points(cx, &stroke.points);
             }
         }
-        // The Ctrl+Space note card rides the SELECTION's live rect.
+        // The note card rides the SELECTION's live rect, joined to it by a
+        // leader line in the selection's own colour so a card dragged clear
+        // of its widget still says what it is about.
         self.note_rect = None;
         if self.note_open {
             if let Some(pick) = &pinned {
@@ -9610,17 +10318,36 @@ impl Widget for Tweaker {
                         field.set_text(cx, &note.text);
                         self.note_seed_pending = false;
                     }
+                    // Opaque while it is being typed in, translucent when
+                    // it is not: a note must be readable over whatever it
+                    // covers, and must stop covering it once it is written.
+                    let focused = cx.has_key_focus(field.area());
+                    self.note_style(cx, focused, note.pinned);
                     let pos = dvec2(
                         (pick.rect.pos.x + note.dx).max(0.0),
                         (pick.rect.pos.y + note.dy).max(0.0),
                     );
+                    let card = Rect { pos, size: dvec2(note.w, note.h) };
+                    // The leader FIRST: under the card, so it tucks beneath
+                    // the edge instead of crossing it.
+                    if pick.rect.size.x > 0.0 {
+                        self.draw_note_leader(cx, card, pick.rect);
+                    }
+                    self.draw_note_backdrop(cx, card, focused);
                     let mut walk = Walk::fit();
                     walk.abs_pos = Some(pos);
-                    walk.width = Size::Fixed(210.0);
+                    walk.width = Size::Fixed(note.w);
+                    walk.height = Size::Fixed(note.h);
                     let _ = ui.draw_walk(cx, scope, walk);
                     let rect = ui.area().rect(cx);
                     if rect.size.x > 0.0 {
                         self.note_rect = Some(rect);
+                        self.draw_note_grip(cx, rect);
+                    }
+                    if self.note_focus_pending {
+                        self.note_focus_pending = false;
+                        cx.set_key_focus(field.area());
+                        self.next_frame = cx.new_next_frame();
                     }
                 }
             }
@@ -9648,6 +10375,37 @@ impl Widget for Tweaker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn note_store_escapes_survive_a_round_trip() {
+        // The store is one tab-separated line per note, so a note carrying
+        // newlines, tabs or backslashes has to come back exactly as typed.
+        for text in [
+            "tighten the line spacing",
+            "line one\nline two\n\nline four",
+            "a\tb\\c\\nnot-a-newline",
+            "",
+        ] {
+            let round = note_store_unescape(&note_store_escape(text));
+            assert_eq!(round, text, "{text:?} did not survive");
+        }
+        // Nothing escaped may carry the separators themselves.
+        let escaped = note_store_escape("a\tb\nc");
+        assert!(!escaped.contains('\t') && !escaped.contains('\n'), "{escaped:?}");
+    }
+
+    #[test]
+    fn a_malformed_note_line_is_skipped_not_fatal() {
+        // The file is meant to be hand-editable, so short or commented lines
+        // are dropped rather than taken as a note.
+        let body = "# header\n\nnot-enough-columns\tx\n";
+        let notes: Vec<&str> = body
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+            .filter(|line| line.split('\t').count() >= 6)
+            .collect();
+        assert!(notes.is_empty());
+    }
 
     fn entry(seq: u64, path: &str, prop: &str, old: &str, new: &str) -> TweakDiffEntry {
         TweakDiffEntry {

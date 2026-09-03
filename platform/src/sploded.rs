@@ -748,19 +748,26 @@ impl Cx {
                     KeyCode::Minus | KeyCode::NumpadSubtract => {
                         self.sploded_set_spread(self.sploded.spread - SPREAD_KEY_STEP);
                     }
-                    KeyCode::ArrowLeft => {
+                    // The arrows orbit only while NOTHING is selected. With a
+                    // selection standing they belong to the design overlay,
+                    // which walks the widget hierarchy with them (parent /
+                    // child / sibling) — one pair of keys, two jobs, split by
+                    // whether there is something to walk from. The pinned
+                    // mark is exactly that signal: the tweaker hands it over
+                    // through `sploded_set_marks`.
+                    KeyCode::ArrowLeft if self.sploded.pinned_mark.is_none() => {
                         self.sploded.yaw = (self.sploded.yaw - 0.06).max(-YAW_LIMIT);
                         self.sploded_sync();
                     }
-                    KeyCode::ArrowRight => {
+                    KeyCode::ArrowRight if self.sploded.pinned_mark.is_none() => {
                         self.sploded.yaw = (self.sploded.yaw + 0.06).min(YAW_LIMIT);
                         self.sploded_sync();
                     }
-                    KeyCode::ArrowUp => {
+                    KeyCode::ArrowUp if self.sploded.pinned_mark.is_none() => {
                         self.sploded.pitch = (self.sploded.pitch + 0.06).min(PITCH_LIMIT);
                         self.sploded_sync();
                     }
-                    KeyCode::ArrowDown => {
+                    KeyCode::ArrowDown if self.sploded.pinned_mark.is_none() => {
                         self.sploded.pitch = (self.sploded.pitch - 0.06).max(-PITCH_LIMIT);
                         self.sploded_sync();
                     }
