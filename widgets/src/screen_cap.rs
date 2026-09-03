@@ -376,6 +376,7 @@ struct FrameSlot {
     spare: Vec<u8>,
     stop: bool,
     dropped: u64,
+    wake_generation: u64,
 }
 
 #[derive(Default)]
@@ -431,6 +432,7 @@ impl Session {
                     height: frame.height,
                     rgba: buf,
                 });
+                slot.wake_generation = slot.wake_generation.wrapping_add(1);
                 drop(slot);
                 cvar.notify_one();
             },
@@ -493,6 +495,7 @@ impl Session {
         let (lock, cvar) = &*self.slot;
         if let Ok(mut slot) = lock.lock() {
             slot.stop = true;
+            slot.wake_generation = slot.wake_generation.wrapping_add(1);
         }
         cvar.notify_all();
     }
@@ -636,7 +639,9 @@ fn encode_loop(
         if Cx::monotonic_now() >= grace_until || stopped(&slot) {
             break FALLBACK_AUDIO_RATE;
         }
-        std::thread::sleep(Duration::from_millis(10));
+        if !wait_for_capture_wake(&slot) {
+            break FALLBACK_AUDIO_RATE;
+        }
     };
 
     let options = VideoFileEncoderOptions {
@@ -758,6 +763,23 @@ fn recycle(slot: &Arc<(Mutex<FrameSlot>, Condvar)>, buffer: Vec<u8>) {
     }
 }
 
+/// Block the encoder worker until the UI's next presented frame or stop.
+fn wait_for_capture_wake(slot: &Arc<(Mutex<FrameSlot>, Condvar)>) -> bool {
+    let (lock, cvar) = &**slot;
+    let Ok(guard) = lock.lock() else {
+        return false;
+    };
+    if guard.stop {
+        return false;
+    }
+    let generation = guard.wake_generation;
+    cvar.wait_while(guard, |slot| {
+        !slot.stop && slot.wake_generation == generation
+    })
+    .map(|slot| !slot.stop)
+    .unwrap_or(false)
+}
+
 /// The next presented frame, or `None` at `deadline` / on stop. `deadline`
 /// of `None` waits indefinitely (until stop).
 fn take_frame(
@@ -779,13 +801,12 @@ fn take_frame(
                 if now >= deadline {
                     return None;
                 }
-                let (next, timeout) = cvar
-                    .wait_timeout(guard, Duration::from_secs_f64(deadline - now))
+                let generation = guard.wake_generation;
+                guard = cvar
+                    .wait_while(guard, |slot| {
+                        !slot.stop && slot.wake_generation == generation
+                    })
                     .ok()?;
-                guard = next;
-                if timeout.timed_out() && guard.pending.is_none() {
-                    return None;
-                }
             }
             None => {
                 guard = cvar.wait(guard).ok()?;

@@ -286,6 +286,8 @@ impl XrNetUdpWorker {
             if should_break {
                 break;
             }
+            // Browser workers cannot create the UDP socket that reaches this loop.
+            #[cfg(not(target_arch = "wasm32"))]
             thread::sleep(self.poll_interval);
         }
 
@@ -691,6 +693,8 @@ impl XrNetSyncWorker {
             if should_break {
                 break;
             }
+            // Browser workers cannot create the TCP listener that reaches this loop.
+            #[cfg(not(target_arch = "wasm32"))]
             thread::sleep(self.poll_interval);
         }
 
