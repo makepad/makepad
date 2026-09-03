@@ -44,6 +44,12 @@ impl<'a> ScriptVm<'a> {
             return;
         };
         self.bx.threads.cur().slot_base = call.prev_slot_base;
+        // A root frame's last scope holds everything the body defined after
+        // a shadowing let; keep it for host->script lookups.
+        if call.return_ip.is_none() {
+            let end = self.bx.threads.cur_ref().scopes.last().copied();
+            self.bx.threads.cur().root_end_scope = end.map(|s| self.bx.heap.new_object_ref(s));
+        }
         self.bx
             .threads
             .cur()
