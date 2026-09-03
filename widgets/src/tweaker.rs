@@ -26,11 +26,12 @@
 //! to it in their own words. `Insert` or `Ctrl+Shift+N` opens it on the
 //! selection (the panel's `note` button does the same for keyboards without
 //! an Insert), the header strip drags it, the bottom-right grip resizes it,
-//! and a leader line in the selection colour keeps it joined to its widget
-//! wherever it is parked. The card is opaque and picking never reaches
-//! through it.
+//! and a leader line in the selection colour runs between the two closest
+//! points of card and widget whenever they are far enough apart to need one.
+//! The card is opaque and picking never reaches through it.
 //!
-//! Its four buttons are ✕ clear, ✦ send, 📌 pin and — close. Sending
+//! Its three buttons are — close (far left, where a window's close control
+//! lives), ✦ send and 📌 pin. Sending
 //! (`Ctrl+Enter` or ✦) does not push anything — the bridge is a server — it
 //! raises the note's `sent` count, which `/tweak/state` reports as
 //! `"ask": N` and the log ring carries as `TWEAK ask #N`. A polling agent
@@ -44,6 +45,12 @@
 //! And with a selection standing, the arrow keys walk the live tree the way
 //! a scene editor does: parent, first child, previous/next sibling. With
 //! nothing selected they still belong to the exploded view's orbit.
+//!
+//! Two smaller readouts round the selection out: the `size` row prints what
+//! the layout actually produced under the Fill/Fit/number controls that
+//! asked for it, and clicking the footer's path line copies the whole path
+//! to the clipboard — the panel can only show it head-clipped, and a path
+//! you cannot select is a path you cannot quote.
 //!
 //! Containment (the plan of record, tweaker.md): everything UI-side lives
 //! HERE; `Window` hosts the widget and calls [`window_intercept`] — a few
@@ -170,6 +177,13 @@ const NOTE_MIN_H: f64 = 56.0;
 const NOTE_HEADER_H: f64 = 16.0;
 /// The bottom-right resize grip, in points.
 const NOTE_GRIP: f64 = 14.0;
+/// How far the card has to be from its widget's outline before the leader
+/// line is drawn at all. Under this the two read as one object already.
+const NOTE_LEADER_MIN_GAP: f64 = 30.0;
+/// How far the pinned widget's dashed ring stands off the widget itself.
+/// The leader measures to THAT — the outline is what the eye sees as the
+/// edge of the selection.
+const SELECTION_RING_OUTSET: f64 = 4.0;
 
 impl TweakNote {
     fn new(path: String) -> Self {
@@ -448,8 +462,23 @@ impl TweakSession {
     }
 }
 
+/// The pinned selection's outline rect: the widget, held off by
+/// [`SELECTION_RING_OUTSET`] so the edge pixels being judged stay clean.
+fn selection_ring(rect: Rect) -> Rect {
+    Rect {
+        pos: dvec2(rect.pos.x - SELECTION_RING_OUTSET, rect.pos.y - SELECTION_RING_OUTSET),
+        size: dvec2(
+            rect.size.x + SELECTION_RING_OUTSET * 2.0,
+            rect.size.y + SELECTION_RING_OUTSET * 2.0,
+        ),
+    }
+}
+
 const DEFAULT_SIDEBAR_WIDTH: f64 = 280.0;
 const SPLITTER_WIDTH: f64 = 5.0;
+
+/// How long the footer says "path copied" before showing the path again.
+const FOOTER_COPIED_LINGER: f64 = 1.2;
 
 /// How long the selection outline stays quiet after the last applied edit.
 const SUPPRESS_LINGER: f64 = 0.5;
@@ -2764,6 +2793,18 @@ fn packed_of(rgba: [f32; 4]) -> u32 {
         | ((rgba[1] * 255.0).round() as u32) << 16
         | ((rgba[2] * 255.0).round() as u32) << 8
         | ((rgba[3] * 255.0).round() as u32)
+}
+
+/// A measured length for the eye: one decimal at most, and no trailing `.0`.
+/// `fmt_f64` keeps four, which turns a Fill width into `420.7333` and pushes
+/// the readout past the panel's edge.
+fn fmt_measure(v: f64) -> String {
+    let rounded = (v * 10.0).round() / 10.0;
+    if (rounded - rounded.round()).abs() < f64::EPSILON {
+        format!("{}", rounded.round() as i64)
+    } else {
+        format!("{rounded:.1}")
+    }
 }
 
 fn hex_of(c: u32) -> String {
@@ -5098,11 +5139,18 @@ pub struct Tweaker {
     /// A corner-grip resize in flight: (pointer at press, size at press).
     #[rust]
     note_resize: Option<(Vec2d, Vec2d)>,
+    /// The header's drag band as DRAWN — the stretch between the close
+    /// button and the send/pin pair. Read at draw so the band never has to
+    /// be guessed from button counts.
+    #[rust]
+    note_grip_rect: Option<Rect>,
     #[rust]
     note_text_uid: u64,
-    /// The card's four icon buttons.
+    /// The footer's copy receipt is shown until this time: a click on the
+    /// path line put it on the clipboard, and that has to be visible.
     #[rust]
-    note_clear_uid: u64,
+    footer_copied_until: f64,
+    /// The card's three icon buttons.
     #[rust]
     note_send_uid: u64,
     #[rust]
@@ -5463,6 +5511,15 @@ impl Tweaker {
                                     text_style +: { font_size: 8.5 }
                                 }
                             }
+                        }
+                        // What the two fields above ASKED for is Fill / Fit /
+                        // a number; this is what the layout actually gave --
+                        // the only place the measured size is readable.
+                        measured := FabLabelSmall {
+                            width: Fill
+                            margin: Inset{left: 0 right: 0 top: 2 bottom: 0}
+                            text: ""
+                            max_lines: 2
                         }
                     }
                 }
@@ -5922,7 +5979,16 @@ impl Tweaker {
                             scope_origin := FabLabelSmall { width: Fill text: "" }
                         }
                         title_label := FabLabelDim { width: Fill text: "tweak" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
-                        path_label := FabLabelSmall { width: Fill text: "click a widget to inspect it" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                        // The path line is wrapped so the CLICK has a rect
+                        // to hit: a Label's own area reports a few points
+                        // wide whatever it renders, a View's is the real
+                        // one. Clicking it copies the full path.
+                        path_row := View {
+                            width: Fill
+                            height: Fit
+                            flow: Down
+                            path_label := FabLabelSmall { width: Fill text: "click a widget to inspect it" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                        }
                     }
                 }
             });
@@ -5982,9 +6048,10 @@ impl Tweaker {
                     width: Fill
                     height: Fill
                     flow: Down
-                    // The bottom inset is the resize grip's strip: the ticks
-                    // are drawn there, clear of the field's rounded corner.
-                    padding: Inset{left: 2 right: 2 top: 2 bottom: 9}
+                    // No inset under the field: the resize grip is allowed
+                    // to sit on its bottom-right corner rather than claim a
+                    // strip of card the note could have been written in.
+                    padding: Inset{left: 2 right: 2 top: 2 bottom: 2}
                     head := View {
                         width: Fill
                         height: 16
@@ -5997,17 +6064,22 @@ impl Tweaker {
                                 return vec4(self.color.rgb * self.color.a, self.color.a)
                             }
                         }
-                        // The drag handle IS the empty stretch of the strip:
-                        // grab anywhere the buttons are not.
+                        // Close sits far left, on its own, where a window's
+                        // close control lives.
+                        shut := NoteBtn {
+                            margin: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                            draw_icon +: {
+                                color: #xc8c8d4
+                                svg: crate_resource("self:resources/icons/note_close.svg")
+                            }
+                        }
+                        // The drag handle IS the empty stretch of the strip
+                        // between the two ends: grab anywhere the buttons
+                        // are not. Its drawn rect is what the drag hit-tests
+                        // against, so the band never has to be guessed at.
                         grip := View {
                             width: Fill
                             height: Fill
-                        }
-                        clear := NoteBtn {
-                            draw_icon +: {
-                                color: #xc8c8d4
-                                svg: crate_resource("self:resources/icons/note_clear.svg")
-                            }
                         }
                         send := NoteBtn {
                             draw_icon +: {
@@ -6019,12 +6091,6 @@ impl Tweaker {
                             draw_icon +: {
                                 color: #xc8c8d4
                                 svg: crate_resource("self:resources/icons/note_pin.svg")
-                            }
-                        }
-                        shut := NoteBtn {
-                            draw_icon +: {
-                                color: #xc8c8d4
-                                svg: crate_resource("self:resources/icons/note_close.svg")
                             }
                         }
                     }
@@ -6044,7 +6110,6 @@ impl Tweaker {
             });
             WidgetRef::script_from_value(vm, value)
         });
-        self.note_clear_uid = ui.child(live_id!(head)).child(live_id!(clear)).widget_uid().0;
         self.note_send_uid = ui.child(live_id!(head)).child(live_id!(send)).widget_uid().0;
         self.note_pin_uid = ui.child(live_id!(head)).child(live_id!(pin)).widget_uid().0;
         self.note_shut_uid = ui.child(live_id!(head)).child(live_id!(shut)).widget_uid().0;
@@ -6096,6 +6161,7 @@ impl Tweaker {
             self.note_focus_pending = true;
         } else {
             self.note_rect = None;
+            self.note_grip_rect = None;
             self.note_focus_style = None;
         }
         self.redraw_overlay(cx);
@@ -6166,26 +6232,6 @@ impl Tweaker {
         self.redraw_overlay(cx);
     }
 
-    /// The x: empty the note's text (the card stays open, ready to retype).
-    fn note_clear(&mut self, cx: &mut Cx) {
-        let (Some(path), Some(ui)) = (self.note_path(), self.note_ui.clone()) else {
-            return;
-        };
-        ui.child(live_id!(note_text)).set_text(cx, "");
-        let notes = {
-            let mut s = session().lock().unwrap();
-            if let Some(note) = s.notes.iter_mut().find(|n| n.path == path) {
-                note.text.clear();
-            }
-            s.notes.clone()
-        };
-        note_store_save(&notes);
-        // The caret goes straight back into the field: the x is for
-        // retyping, not for leaving.
-        self.note_focus_pending = true;
-        self.redraw_overlay(cx);
-    }
-
     /// The pin: keep this note across runs. Pinning writes the store at
     /// once, so the text survives even a crash.
     fn note_pin_toggle(&mut self, cx: &mut Cx) {
@@ -6214,6 +6260,7 @@ impl Tweaker {
         self.note_sync_text(cx);
         self.note_open = false;
         self.note_rect = None;
+        self.note_grip_rect = None;
         self.note_focus_style = None;
         // Nothing is being typed into any more, so the arrows go back to
         // walking the hierarchy.
@@ -6878,7 +6925,7 @@ impl Tweaker {
                 .child(live_id!(title_label))
                 .set_text(cx, &format!("Theme  \u{2022}  {colours} colours  \u{2022}  {} values", self.rows.len() - colours));
             let site = self.theme_site.split(':').next().unwrap_or("").to_string();
-            footer.child(live_id!(path_label)).set_text(cx, &format!("edits land in {site}"));
+            footer.child(live_id!(path_row)).child(live_id!(path_label)).set_text(cx, &format!("edits land in {site}"));
             footer.child(live_id!(scope_row)).set_visible(cx, false);
         } else {
             sidebar.child(live_id!(ident_footer)).child(live_id!(scope_row)).set_visible(cx, sel.is_some());
@@ -6901,9 +6948,17 @@ impl Tweaker {
                 sidebar
                     .child(live_id!(ident_footer)).child(live_id!(title_label))
                     .set_text(cx, &head);
-                let shown_path = tail_ellipsis(&display_path(cx, sel.uid), 48);
+                let now = cx.seconds_since_app_start();
+                let shown_path = if now < self.footer_copied_until {
+                    // The click's receipt, in place of the path it copied.
+                    self.next_frame = cx.new_next_frame();
+                    "path copied to the clipboard".to_string()
+                } else {
+                    tail_ellipsis(&display_path(cx, sel.uid), 48)
+                };
                 sidebar
                     .child(live_id!(ident_footer))
+                    .child(live_id!(path_row))
                     .child(live_id!(path_label))
                     .set_text(cx, &shown_path);
                 {
@@ -6932,7 +6987,7 @@ impl Tweaker {
             None => {
                 sidebar.child(live_id!(ident_footer)).child(live_id!(title_label)).set_text(cx, "tweak");
                 sidebar
-                    .child(live_id!(ident_footer)).child(live_id!(path_label))
+                    .child(live_id!(ident_footer)).child(live_id!(path_row)).child(live_id!(path_label))
                     .set_text(cx, "click a widget to inspect it");
             }
         }
@@ -7470,6 +7525,42 @@ impl Tweaker {
                     VisKind::Size => {
                         item.child(live_id!(name)).set_text(cx, "size");
                         let size_col = item.child(live_id!(size_col));
+                        // The measured rect, straight off the selection: the
+                        // fields say Fill / Fit, this says what that came out
+                        // as. Layout points first, because that is the unit
+                        // the fields take; the device pixels only when the
+                        // screen is not 1:1, where the two actually differ.
+                        {
+                            let rect = session()
+                                .lock()
+                                .unwrap()
+                                .pinned
+                                .as_ref()
+                                .map(|p| p.rect)
+                                .unwrap_or_default();
+                            let dpi = cx.current_dpi_factor();
+                            // Two lines, because one does not fit the
+                            // column: what the fields are in, then what the
+                            // screen actually shows.
+                            let text = if rect.size.x <= 0.0 && rect.size.y <= 0.0 {
+                                String::new()
+                            } else if (dpi - 1.0).abs() < 0.001 {
+                                format!(
+                                    "measured {} \u{00d7} {} px",
+                                    fmt_measure(rect.size.x),
+                                    fmt_measure(rect.size.y)
+                                )
+                            } else {
+                                format!(
+                                    "measured {} \u{00d7} {}\n{} \u{00d7} {} device px",
+                                    fmt_measure(rect.size.x),
+                                    fmt_measure(rect.size.y),
+                                    fmt_measure((rect.size.x * dpi).round()),
+                                    fmt_measure((rect.size.y * dpi).round())
+                                )
+                            };
+                            size_col.child(live_id!(measured)).set_text(cx, &text);
+                        }
                         for (axis, row_id, seg_id, input_id, segs) in [
                             (
                                 "width",
@@ -8719,14 +8810,8 @@ impl Tweaker {
                 }
                 continue;
             }
-            // The note card's own four buttons.
+            // The note card's own three buttons.
             if self.note_open && action_uid != 0 {
-                if action_uid == self.note_clear_uid {
-                    if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
-                        self.note_clear(cx);
-                    }
-                    continue;
-                }
                 if action_uid == self.note_send_uid {
                     if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
                         self.note_send(cx);
@@ -9235,10 +9320,7 @@ impl Tweaker {
                 // brackets now come with a dashed hairline held 4pt OFF the
                 // widget: unmistakably still selected, and not one pixel of
                 // the thing being judged is touched.
-                let ring = Rect {
-                    pos: dvec2(pick.rect.pos.x - 4.0, pick.rect.pos.y - 4.0),
-                    size: dvec2(pick.rect.size.x + 8.0, pick.rect.size.y + 8.0),
-                };
+                let ring = selection_ring(pick.rect);
                 self.draw_outline.border_color = vec4(0.19, 0.78, 1.0, 0.55);
                 self.draw_outline.fill_color = vec4(0.0, 0.0, 0.0, 0.0);
                 self.draw_outline.border_size = 1.0;
@@ -9358,35 +9440,89 @@ impl Tweaker {
         }
     }
 
+    /// Is `abs` on the footer's path line? Read at event time, so it answers
+    /// for the frame actually on screen.
+    fn footer_path_hit(&self, cx: &Cx, abs: Vec2d) -> bool {
+        let Some(sidebar) = self.sidebar.as_ref() else { return false };
+        let rect = sidebar
+            .child(live_id!(ident_footer))
+            .child(live_id!(path_row))
+            .area()
+            .clipped_rect(cx);
+        rect.size.y > 0.0 && rect.contains(abs)
+    }
+
+    /// Put the selection's full path on the clipboard. The label shows a
+    /// head-clipped version because the panel is narrow; what gets copied is
+    /// the whole id path — the same string `/tweak/apply` and `/snap` take,
+    /// so it is a reference anything can act on, not just read.
+    fn copy_footer_path(&mut self, cx: &mut Cx) {
+        let Some(sel) = session().lock().unwrap().pinned.clone() else { return };
+        cx.copy_to_clipboard(&sel.path);
+        log!("TWEAK copied the selection path: {}", sel.path);
+        // Say so where the path was: a clipboard write is invisible
+        // otherwise, and a click that shows nothing reads as a dead click.
+        // `draw_sidebar` puts the path back when the beat is up.
+        self.footer_copied_until = cx.seconds_since_app_start() + FOOTER_COPIED_LINGER;
+        self.next_frame = cx.new_next_frame();
+        self.redraw_sidebar(cx);
+    }
+
+    /// The card's resize grab square, at its bottom-right corner. It sits on
+    /// top of the text field on purpose: the field runs to the card's edge,
+    /// so the grip borrows a corner of it rather than costing a strip.
+    fn note_corner(card: Rect) -> Rect {
+        Rect {
+            pos: dvec2(
+                card.pos.x + card.size.x - NOTE_GRIP,
+                card.pos.y + card.size.y - NOTE_GRIP,
+            ),
+            size: dvec2(NOTE_GRIP, NOTE_GRIP),
+        }
+    }
+
+    /// The closest pair of points on two axis-aligned rects, and the gap
+    /// between them. `None` when the rects overlap — there is no gap to
+    /// span then, and no pair that means anything.
+    ///
+    /// Per axis: if the rects are apart, the nearest pair is the facing
+    /// edges; if they share a span, both points sit at the middle of the
+    /// shared span so the line stays square to the axis it does cross.
+    fn closest_points(a: Rect, b: Rect) -> Option<(Vec2d, Vec2d, f64)> {
+        fn axis(a0: f64, a1: f64, b0: f64, b1: f64) -> (f64, f64) {
+            if a1 < b0 {
+                (a1, b0)
+            } else if b1 < a0 {
+                (a0, b1)
+            } else {
+                let mid = (a0.max(b0) + a1.min(b1)) * 0.5;
+                (mid, mid)
+            }
+        }
+        let (ax, bx) = axis(a.pos.x, a.pos.x + a.size.x, b.pos.x, b.pos.x + b.size.x);
+        let (ay, by) = axis(a.pos.y, a.pos.y + a.size.y, b.pos.y, b.pos.y + b.size.y);
+        let gap = ((ax - bx).powi(2) + (ay - by).powi(2)).sqrt();
+        if gap <= 0.0 {
+            return None;
+        }
+        Some((dvec2(ax, ay), dvec2(bx, by), gap))
+    }
+
     /// The leader: a thin line from the note card to the widget it is about,
     /// in the selection colour so it reads as one mark with the brackets.
-    /// Both ends are pulled to the facing edges, so a card parked beside its
-    /// widget shows a short stub and one dragged across the window shows a
-    /// full run.
+    /// It runs between the two CLOSEST points of the card and the widget's
+    /// outline, and only appears once they are more than
+    /// [`NOTE_LEADER_MIN_GAP`] apart — a card sitting against its own widget
+    /// needs no line to say so.
     fn draw_note_leader(&mut self, cx: &mut Cx2d, card: Rect, target: Rect) {
-        // Nothing to join while the card sits on top of its own widget.
-        let overlap = card.pos.x < target.pos.x + target.size.x
-            && target.pos.x < card.pos.x + card.size.x
-            && card.pos.y < target.pos.y + target.size.y
-            && target.pos.y < card.pos.y + card.size.y;
-        if overlap {
+        let Some((from, to, gap)) = Self::closest_points(card, target) else {
+            return; // the card is over its own widget: nothing to join
+        };
+        // Close enough to read as one thing already: a stub of line between
+        // a card and the widget it is touching is clutter, not information.
+        if gap <= NOTE_LEADER_MIN_GAP {
             return;
         }
-        let clamp = |v: f64, lo: f64, hi: f64| v.max(lo).min(hi);
-        let target_center = dvec2(
-            target.pos.x + target.size.x * 0.5,
-            target.pos.y + target.size.y * 0.5,
-        );
-        let card_center = dvec2(card.pos.x + card.size.x * 0.5, card.pos.y + card.size.y * 0.5);
-        // The point on each rect's edge closest to the other's centre.
-        let from = dvec2(
-            clamp(target_center.x, card.pos.x, card.pos.x + card.size.x),
-            clamp(target_center.y, card.pos.y, card.pos.y + card.size.y),
-        );
-        let to = dvec2(
-            clamp(card_center.x, target.pos.x, target.pos.x + target.size.x),
-            clamp(card_center.y, target.pos.y, target.pos.y + target.size.y),
-        );
         let max_x = self.overlay_max_x(cx.current_pass_size());
         // The same dot chain the annotation strokes use, one segment long.
         const RADIUS: f64 = 1.0;
@@ -9661,6 +9797,13 @@ impl Widget for Tweaker {
                 (s.suppress_until, s.edit_hold)
             };
             let now = cx.seconds_since_app_start();
+            // The footer's "path copied" receipt has had its beat: put the
+            // path back. (Frames keep arriving until then because the draw
+            // asks for one while the receipt is up.)
+            if self.footer_copied_until > 0.0 && now >= self.footer_copied_until {
+                self.footer_copied_until = 0.0;
+                self.redraw_sidebar(cx);
+            }
             if now < until || hold {
                 self.next_frame = cx.new_next_frame();
             } else {
@@ -9678,6 +9821,13 @@ impl Widget for Tweaker {
                     && e.abs.y >= self.band.pos.y
                 {
                     self.splitter_drag = true;
+                } else if e.abs.x > x && self.footer_path_hit(cx, e.abs) {
+                    // The footer's path line is the selection's ADDRESS, and
+                    // it is shown head-clipped because it does not fit. One
+                    // click puts the whole thing on the clipboard, so it can
+                    // be pasted into a note, an issue or a prompt as the
+                    // unambiguous name of what is selected.
+                    self.copy_footer_path(cx);
                 } else if e.abs.x > x
                     && !self
                         .open_popup
@@ -9902,6 +10052,13 @@ impl Widget for Tweaker {
                     && !self.splitter_drag
                     && tweak_is_on() =>
             {
+                // The footer's path line copies on click, so it says so
+                // with the hand before it is clicked.
+                if self.footer_path_hit(cx, e.abs)
+                    && session().lock().unwrap().pinned.is_some()
+                {
+                    cx.set_cursor(MouseCursor::Hand);
+                }
                 // The doc tooltip: a row whose prop carries doc-channel
                 // text shows it, anchored to the row (no per-pixel churn).
                 // Tree tab: hovering a row outlines its widget in the body.
@@ -10034,32 +10191,29 @@ impl Widget for Tweaker {
             }
         }
         if self.note_open {
-            if let Some(ui) = self.note_ui.clone() {
+            // The resize corner sits ON the text field's bottom-right corner
+            // — the field runs to the card's edge rather than giving up a
+            // strip of writing space — so the press has to be claimed BEFORE
+            // the field sees it, or every resize would first drop a caret.
+            let corner_press = match event {
+                Event::MouseDown(e) if e.button.is_primary() => self
+                    .note_rect
+                    .map(|rect| Self::note_corner(rect).contains(e.abs))
+                    .unwrap_or(false),
+                _ => false,
+            };
+            if let (Some(ui), false) = (self.note_ui.clone(), corner_press) {
                 ui.handle_event(cx, event, scope);
             }
             match event {
                 Event::MouseDown(e) if e.button.is_primary() => {
                     if let Some(rect) = self.note_rect {
-                        // Bottom-right corner: resize. It is checked first —
-                        // it overlaps nothing but the field's last corner.
-                        let corner = Rect {
-                            pos: dvec2(
-                                rect.pos.x + rect.size.x - NOTE_GRIP,
-                                rect.pos.y + rect.size.y - NOTE_GRIP,
-                            ),
-                            size: dvec2(NOTE_GRIP, NOTE_GRIP),
-                        };
-                        // The header strip minus the buttons: move. The
-                        // buttons live at its right end, so the grab band
-                        // stops where they start.
-                        let buttons = 4.0 * 17.0 + 4.0;
-                        let grip = Rect {
-                            pos: rect.pos,
-                            size: dvec2((rect.size.x - buttons).max(0.0), NOTE_HEADER_H + 2.0),
-                        };
-                        if corner.contains(e.abs) {
+                        if corner_press {
                             self.note_resize = Some((e.abs, rect.size));
-                        } else if grip.contains(e.abs) {
+                        } else if self
+                            .note_grip_rect
+                            .is_some_and(|grip| grip.contains(e.abs))
+                        {
                             self.note_drag = Some(dvec2(
                                 e.abs.x - rect.pos.x,
                                 e.abs.y - rect.pos.y,
@@ -10089,14 +10243,7 @@ impl Widget for Tweaker {
                         self.redraw_overlay(cx);
                     } else if let Some(rect) = self.note_rect {
                         // The corner announces itself before it is grabbed.
-                        let corner = Rect {
-                            pos: dvec2(
-                                rect.pos.x + rect.size.x - NOTE_GRIP,
-                                rect.pos.y + rect.size.y - NOTE_GRIP,
-                            ),
-                            size: dvec2(NOTE_GRIP, NOTE_GRIP),
-                        };
-                        if corner.contains(e.abs) {
+                        if Self::note_corner(rect).contains(e.abs) {
                             cx.set_cursor(MouseCursor::NwseResize);
                         }
                     }
@@ -10303,6 +10450,7 @@ impl Widget for Tweaker {
         // leader line in the selection's own colour so a card dragged clear
         // of its widget still says what it is about.
         self.note_rect = None;
+        self.note_grip_rect = None;
         if self.note_open {
             if let Some(pick) = &pinned {
                 let note = {
@@ -10331,7 +10479,7 @@ impl Widget for Tweaker {
                     // The leader FIRST: under the card, so it tucks beneath
                     // the edge instead of crossing it.
                     if pick.rect.size.x > 0.0 {
-                        self.draw_note_leader(cx, card, pick.rect);
+                        self.draw_note_leader(cx, card, selection_ring(pick.rect));
                     }
                     self.draw_note_backdrop(cx, card, focused);
                     let mut walk = Walk::fit();
@@ -10342,6 +10490,8 @@ impl Widget for Tweaker {
                     let rect = ui.area().rect(cx);
                     if rect.size.x > 0.0 {
                         self.note_rect = Some(rect);
+                        let grip = ui.child(live_id!(head)).child(live_id!(grip)).area().rect(cx);
+                        self.note_grip_rect = (grip.size.x > 0.0).then_some(grip);
                         self.draw_note_grip(cx, rect);
                     }
                     if self.note_focus_pending {
@@ -10375,6 +10525,53 @@ impl Widget for Tweaker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
+        Rect { pos: dvec2(x, y), size: dvec2(w, h) }
+    }
+
+    #[test]
+    fn a_measured_length_reads_at_a_glance() {
+        // `fmt_f64` keeps four decimals, which is how a Fill width arrives:
+        // the readout has to fit the panel, so one decimal, none if round.
+        assert_eq!(fmt_measure(82.0), "82");
+        assert_eq!(fmt_measure(420.7333), "420.7");
+        assert_eq!(fmt_measure(420.96), "421");
+        assert_eq!(fmt_measure(0.0), "0");
+    }
+
+    #[test]
+    fn the_leader_runs_between_the_two_closest_points() {
+        let card = rect(0.0, 0.0, 100.0, 50.0);
+        // Straight below: both ends square on the facing edges, and the pair
+        // shares the x span's middle so the line is vertical.
+        let (from, to, gap) = Tweaker::closest_points(card, rect(20.0, 90.0, 60.0, 30.0)).unwrap();
+        assert_eq!((from.y, to.y), (50.0, 90.0));
+        assert_eq!(from.x, to.x);
+        assert!((gap - 40.0).abs() < 1e-9, "{gap}");
+        // Diagonally away: the two facing CORNERS, and the gap is the real
+        // distance between the rects, not centre to centre.
+        let (from, to, gap) = Tweaker::closest_points(card, rect(130.0, 90.0, 40.0, 40.0)).unwrap();
+        assert_eq!((from.x, from.y), (100.0, 50.0));
+        assert_eq!((to.x, to.y), (130.0, 90.0));
+        assert!((gap - 50.0).abs() < 1e-9, "{gap}");
+        // Card to the right of its widget: the pair flips to the near edges.
+        let (from, to, _) = Tweaker::closest_points(card, rect(-80.0, 10.0, 40.0, 20.0)).unwrap();
+        assert_eq!((from.x, to.x), (0.0, -40.0));
+        // Overlapping: no gap, no line.
+        assert!(Tweaker::closest_points(card, rect(50.0, 25.0, 80.0, 80.0)).is_none());
+    }
+
+    #[test]
+    fn a_card_against_its_widget_draws_no_leader() {
+        // The rule the drawing enforces: under NOTE_LEADER_MIN_GAP the card
+        // and the widget already read as one thing.
+        let card = rect(0.0, 0.0, 100.0, 50.0);
+        let near = Tweaker::closest_points(card, rect(0.0, 60.0, 100.0, 20.0)).unwrap().2;
+        let far = Tweaker::closest_points(card, rect(0.0, 140.0, 100.0, 20.0)).unwrap().2;
+        assert!(near <= NOTE_LEADER_MIN_GAP, "{near} should be too close to draw");
+        assert!(far > NOTE_LEADER_MIN_GAP, "{far} should draw");
+    }
 
     #[test]
     fn note_store_escapes_survive_a_round_trip() {
