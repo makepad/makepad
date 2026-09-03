@@ -442,6 +442,9 @@ export class WasmWebBrowser extends WasmBridge {
 
         this.dispatch = dispatch;
         this.canvas = canvas;
+        // The app owns all gestures over its drawable, including pinch and
+        // two-finger pan; never hand them to page zoom/scroll.
+        this.canvas.style.touchAction = 'none';
         this.handlers = new Proxy({}, {
             set(target, property, value) {
                 target[property] = typeof value === "function" ? (...args) => {
@@ -2938,11 +2941,11 @@ export class WasmWebBrowser extends WasmBridge {
             return false
         }
 
-        canvas.addEventListener('touchstart', e => this.handlers.on_touchstart(e))
+        canvas.addEventListener('touchstart', e => this.handlers.on_touchstart(e), { passive: false })
         canvas.addEventListener('touchmove', e => this.handlers.on_touchmove(e), { passive: false })
-        canvas.addEventListener('touchend', e => this.handlers.on_touch_end_cancel_leave(e));
-        canvas.addEventListener('touchcancel', e => this.handlers.on_touch_end_cancel_leave(e));
-        canvas.addEventListener('touchleave', e => this.handlers.on_touch_end_cancel_leave(e));
+        canvas.addEventListener('touchend', e => this.handlers.on_touch_end_cancel_leave(e), { passive: false });
+        canvas.addEventListener('touchcancel', e => this.handlers.on_touch_end_cancel_leave(e), { passive: false });
+        canvas.addEventListener('touchleave', e => this.handlers.on_touch_end_cancel_leave(e), { passive: false });
 
         var last_wheel_time;
         var last_was_wheel;

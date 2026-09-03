@@ -14,6 +14,7 @@ use crate::makepad_draw::vector::{
     FACE_IMPLICIT_UV, FACE_TYPED_VERTEX_BYTES, FILL_TYPED_VERTEX_BYTES,
     MAP_VERTEX_POSITION_SCALE, ROAD_TYPED_VERTEX_BYTES, VECTOR_ZBIAS_STEP,
 };
+use crate::makepad_draw::event::{TouchState, TouchUpdateEvent};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
@@ -2735,6 +2736,13 @@ const LABEL_SETTLE_SECONDS: f64 = 0.15;
 /// Keep water/foliage motion alive briefly after the last interaction or
 /// camera-animation step, then leave the last rendered phase frozen.
 const SHIMMER_SETTLE_SECS: f64 = 1.0;
+/// Two-finger travel collected before committing to pinch/rotate/tilt.
+const TOUCH_GESTURE_CLASSIFY_PX: f64 = 20.0;
+/// A smaller angular change is treated as pinch noise.
+const TOUCH_ROTATE_DEAD_ZONE_DEG: f64 = 5.0;
+/// Parallel vertical travel may change the pair shape by this much and
+/// still count as a tilt gesture.
+const TOUCH_TILT_SHAPE_TOLERANCE_PX: f64 = 12.0;
 /// One shared time-lapse for ALL weather layers: the rain nowcast frame
 /// rate AND the wind-particle advection derive from it, so cloud drift and
 /// wind streaks move as one physical system (900x real time).
@@ -2812,6 +2820,187 @@ struct FlyTo {
     from_zoom: f64,
     to_zoom: f64,
     arc: f64,
+    /// `(map point, screen-relative ground offset)`. Present for a
+    /// double-tap zoom, whose anchor must stay under the finger throughout
+    /// the animation; ordinary flights interpolate their centres as before.
+    anchor: Option<(Vec2d, Vec2d)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TouchGestureMode {
+    Pending,
+    Pinch,
+    Rotate,
+    Tilt,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TouchSample {
+    uid: u64,
+    abs: Vec2d,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TouchPair {
+    a: TouchSample,
+    b: TouchSample,
+}
+
+impl TouchPair {
+    fn midpoint(self) -> Vec2d {
+        (self.a.abs + self.b.abs) * 0.5
+    }
+
+    fn delta(self) -> Vec2d {
+        self.b.abs - self.a.abs
+    }
+
+    fn distance(self) -> f64 {
+        self.delta().length()
+    }
+
+    fn angle(self) -> f64 {
+        let delta = self.delta();
+        delta.y.atan2(delta.x)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TouchGesture {
+    None,
+    Pan {
+        uid: u64,
+        start_abs: Vec2d,
+        start_center_norm: Vec2d,
+        tap_count: u32,
+        can_tap: bool,
+        settle_camera: bool,
+        snap_tilt: bool,
+    },
+    TwoFinger {
+        start: TouchPair,
+        start_zoom: f64,
+        start_center_norm: Vec2d,
+        start_midpoint_rel: Vec2d,
+        start_rotation: f64,
+        start_tilt: f64,
+        mode: TouchGestureMode,
+    },
+}
+
+impl Default for TouchGesture {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+fn touch_angle_delta(start: TouchPair, current: TouchPair) -> f64 {
+    (current.angle() - start.angle() + std::f64::consts::PI)
+        .rem_euclid(std::f64::consts::TAU)
+        - std::f64::consts::PI
+}
+
+fn classify_touch_gesture(start: TouchPair, current: TouchPair) -> TouchGestureMode {
+    let a_motion = current.a.abs - start.a.abs;
+    let b_motion = current.b.abs - start.b.abs;
+    let midpoint_motion = current.midpoint() - start.midpoint();
+    let distance_motion = (current.distance() - start.distance()).abs();
+    let angle_motion_deg = touch_angle_delta(start, current).abs().to_degrees();
+
+    let parallel_vertical = a_motion.y * b_motion.y > 0.0
+        && a_motion.y.abs().min(b_motion.y.abs()) >= TOUCH_GESTURE_CLASSIFY_PX
+        && a_motion.x.abs() <= a_motion.y.abs() * 0.5
+        && b_motion.x.abs() <= b_motion.y.abs() * 0.5
+        && distance_motion <= TOUCH_TILT_SHAPE_TOLERANCE_PX
+        && angle_motion_deg < TOUCH_ROTATE_DEAD_ZONE_DEG;
+    if parallel_vertical {
+        return TouchGestureMode::Tilt;
+    }
+
+    let travel = a_motion
+        .length()
+        .max(b_motion.length())
+        .max(midpoint_motion.length())
+        .max(distance_motion);
+    if travel < TOUCH_GESTURE_CLASSIFY_PX {
+        return TouchGestureMode::Pending;
+    }
+    if angle_motion_deg >= TOUCH_ROTATE_DEAD_ZONE_DEG {
+        TouchGestureMode::Rotate
+    } else {
+        TouchGestureMode::Pinch
+    }
+}
+
+/// Centre for a two-finger zoom/pan. The map point below the initial
+/// midpoint is placed below the current midpoint at the new zoom.
+fn pinch_anchor_center_norm(
+    start_center_norm: Vec2d,
+    start_midpoint_rel: Vec2d,
+    current_midpoint_rel: Vec2d,
+    old_world_size: f64,
+    new_world_size: f64,
+) -> Vec2d {
+    let anchor_norm = start_center_norm + start_midpoint_rel / old_world_size;
+    (anchor_norm * new_world_size - current_midpoint_rel) / new_world_size
+}
+
+fn touch_abs(event: &TouchUpdateEvent, uid: u64) -> Option<Vec2d> {
+    event
+        .touches
+        .iter()
+        .find(|touch| touch.uid == uid && touch.state != TouchState::Stop)
+        .map(|touch| touch.abs)
+}
+
+fn first_active_touch(event: &TouchUpdateEvent) -> Option<TouchSample> {
+    event
+        .touches
+        .iter()
+        .filter(|touch| touch.state != TouchState::Stop)
+        .min_by_key(|touch| touch.uid)
+        .map(|touch| TouchSample {
+            uid: touch.uid,
+            abs: touch.abs,
+        })
+}
+
+fn first_two_active_touches(event: &TouchUpdateEvent) -> Option<TouchPair> {
+    let mut first: Option<TouchSample> = None;
+    let mut second: Option<TouchSample> = None;
+    for touch in event
+        .touches
+        .iter()
+        .filter(|touch| touch.state != TouchState::Stop)
+    {
+        let sample = TouchSample {
+            uid: touch.uid,
+            abs: touch.abs,
+        };
+        if first.is_none_or(|candidate| sample.uid < candidate.uid) {
+            second = first;
+            first = Some(sample);
+        } else if second.is_none_or(|candidate| sample.uid < candidate.uid) {
+            second = Some(sample);
+        }
+    }
+    Some(TouchPair {
+        a: first?,
+        b: second?,
+    })
+}
+
+fn active_touch_pair(event: &TouchUpdateEvent, start: TouchPair) -> Option<TouchPair> {
+    Some(TouchPair {
+        a: TouchSample {
+            uid: start.a.uid,
+            abs: touch_abs(event, start.a.uid)?,
+        },
+        b: TouchSample {
+            uid: start.b.uid,
+            abs: touch_abs(event, start.b.uid)?,
+        },
+    })
 }
 
 // --- Draw shaders ---
@@ -4216,6 +4405,8 @@ pub struct MapView {
     #[rust]
     last_tap_count: u32,
     #[rust]
+    touch_gesture: TouchGesture,
+    #[rust]
     pending_viewport_changed: bool,
     /// Interaction-gated heartbeat for water flow and foliage sway.
     #[rust]
@@ -4347,7 +4538,13 @@ impl Widget for MapView {
         // Respect the handled flag (no capture overload): floating UI panels
         // drawn on top of the map must win the hit test (EventOrder::Up
         // dispatches them first).
-        match event.hits(cx, self.draw_bg.area()) {
+        let hit = event.hits(cx, self.draw_bg.area());
+        if let Event::TouchUpdate(touch_event) = event {
+            if self.handle_touch_update(cx, touch_event, &hit) {
+                return;
+            }
+        }
+        match hit {
             Hit::FingerDown(fe) => {
                 self.note_shimmer_activity(cx);
                 let rotate_gesture = fe
@@ -4411,6 +4608,7 @@ impl Widget for MapView {
                 self.note_shimmer_activity(cx);
                 // Long press cancels the pan gesture and reports map coords.
                 self.drag_start_abs = None;
+                self.touch_gesture = TouchGesture::None;
                 let (lon, lat) = self.screen_to_lon_lat(lp.abs);
                 cx.widget_action(self.uid, MapViewAction::LongPressed { lon, lat, abs: lp.abs });
             }
@@ -7033,6 +7231,304 @@ impl MapView {
         let half_y = (self.view_rect.size.y * 0.5 / world).min(0.5);
         self.center_norm.x = if half_x >= 0.5 { 0.5 } else { self.center_norm.x.clamp(half_x, 1.0 - half_x) };
         self.center_norm.y = if half_y >= 0.5 { 0.5 } else { self.center_norm.y.clamp(half_y, 1.0 - half_y) };
+    }
+
+    fn touch_world_rel(&self, abs: Vec2d) -> Vec2d {
+        if self.space_warp_eff.is_on() {
+            self.overlay_camera().screen_to_world_rel(abs)
+        } else {
+            let rect_center = self.view_rect.pos + self.view_rect.size * 0.5;
+            self.screen_delta_to_world(abs - rect_center)
+        }
+    }
+
+    fn begin_two_finger_gesture(&mut self, pair: TouchPair) {
+        self.fly = None;
+        self.drag_start_abs = None;
+        self.gesture_panned = true;
+        self.touch_gesture = TouchGesture::TwoFinger {
+            start: pair,
+            start_zoom: self.view_zoom(),
+            start_center_norm: self.center_norm,
+            start_midpoint_rel: self.touch_world_rel(pair.midpoint()),
+            start_rotation: self.rotation,
+            start_tilt: self.tilt,
+            mode: TouchGestureMode::Pending,
+        };
+    }
+
+    fn finish_touch_interaction(
+        &mut self,
+        cx: &mut Cx,
+        settle_camera: bool,
+        snap_tilt: bool,
+    ) {
+        if settle_camera {
+            // Match the mouse rotate/tilt release: a small residual tilt is
+            // visually indistinguishable from a 3D mode that failed to end.
+            if snap_tilt && self.tilt > 0.0 && self.tilt < 10.0 {
+                self.tilt = 0.0;
+                cx.widget_action(self.uid, MapViewAction::TiltChanged { tilt: 0.0 });
+            }
+            cx.stop_timer(self.zoom_settle_timer);
+            self.zoom_settle_timer =
+                cx.start_timeout(LABEL_REPLACE_MIN_SECONDS + 0.05);
+            self.redraw(cx);
+        }
+        if self.gesture_panned {
+            self.pending_viewport_changed = false;
+            self.sync_camera_fields();
+            self.emit_viewport_changed(cx);
+        }
+        self.gesture_panned = false;
+    }
+
+    fn start_double_tap_zoom(&mut self, cx: &mut Cx, abs: Vec2d) {
+        let min_zoom = self.min_zoom.max(0.0);
+        let max_zoom = self.max_zoom.max(min_zoom);
+        let from_zoom = self.view_zoom();
+        let to_zoom = (from_zoom + 1.0).clamp(min_zoom, max_zoom);
+        if (to_zoom - from_zoom).abs() < 1e-9 {
+            return;
+        }
+        let anchor_rel = self.touch_world_rel(abs);
+        let from_world_size = tile_world_size_zoom(from_zoom);
+        let to_world_size = tile_world_size_zoom(to_zoom);
+        let anchor_norm = self.center_norm + anchor_rel / from_world_size;
+        let to_center = (anchor_norm * to_world_size - anchor_rel) / to_world_size;
+        self.fly = Some(FlyTo {
+            started: cx.seconds_since_app_start(),
+            duration: 0.25,
+            from_center: self.center_norm,
+            to_center,
+            from_zoom,
+            to_zoom,
+            arc: 0.0,
+            anchor: Some((anchor_norm, anchor_rel)),
+        });
+        self.note_shimmer_activity(cx);
+        cx.stop_timer(self.fly_timer);
+        self.fly_timer = cx.start_timeout(0.016);
+        self.redraw(cx);
+    }
+
+    fn handle_touch_tap(&mut self, cx: &mut Cx, abs: Vec2d, tap_count: u32) {
+        if tap_count == 2 {
+            self.start_double_tap_zoom(cx, abs);
+        } else if let Some((lon, lat, info)) = self.pin_at(abs) {
+            cx.widget_action(self.uid, MapViewAction::PinTapped { lon, lat, info });
+        } else if let Some(id) = self.overlay.marker_at(&self.overlay_camera(), abs) {
+            cx.widget_action(self.uid, MapViewAction::MarkerClicked { id });
+        } else {
+            let (lon, lat) = self.screen_to_lon_lat(abs);
+            cx.widget_action(self.uid, MapViewAction::Tapped { lon, lat, abs });
+        }
+    }
+
+    /// Raw multi-touch is handled after `Event::hits` has established that
+    /// the map owns the first touch. From then until release this state
+    /// machine consumes touch updates so the synthesized one-finger pan
+    /// cannot fight a two-finger camera gesture.
+    fn handle_touch_update(
+        &mut self,
+        cx: &mut Cx,
+        event: &TouchUpdateEvent,
+        hit: &Hit,
+    ) -> bool {
+        let gesture = std::mem::take(&mut self.touch_gesture);
+        let gesture = match gesture {
+            TouchGesture::None => {
+                let Hit::FingerDown(fe) = hit else {
+                    return false;
+                };
+                let DigitDevice::Touch { uid } = &fe.device else {
+                    return false;
+                };
+                let Some(abs) = touch_abs(event, *uid) else {
+                    return false;
+                };
+                self.fly = None;
+                self.gesture_panned = false;
+                TouchGesture::Pan {
+                    uid: *uid,
+                    start_abs: abs,
+                    start_center_norm: self.center_norm,
+                    tap_count: fe.tap_count,
+                    can_tap: true,
+                    settle_camera: false,
+                    snap_tilt: false,
+                }
+            }
+            gesture => gesture,
+        };
+
+        self.note_shimmer_activity(cx);
+        match gesture {
+            TouchGesture::None => unreachable!(),
+            TouchGesture::Pan {
+                uid,
+                start_abs,
+                start_center_norm,
+                tap_count,
+                can_tap,
+                settle_camera,
+                snap_tilt,
+            } => {
+                if let Some(pair) = first_two_active_touches(event) {
+                    self.begin_two_finger_gesture(pair);
+                    return true;
+                }
+                if let Some(abs) = touch_abs(event, uid) {
+                    let delta = abs - start_abs;
+                    if delta.length() > 6.0 {
+                        self.gesture_panned = true;
+                    }
+                    let world_delta = if self.space_warp_eff.is_on() {
+                        let camera = self.overlay_camera();
+                        camera.screen_to_world_rel(abs) - camera.screen_to_world_rel(start_abs)
+                    } else {
+                        self.screen_delta_to_world(delta)
+                    };
+                    let world_size = tile_world_size_zoom(self.view_zoom());
+                    self.center_norm = start_center_norm
+                        - dvec2(world_delta.x / world_size, world_delta.y / world_size);
+                    self.wrap_and_clamp_center();
+                    self.redraw(cx);
+                    self.touch_gesture = TouchGesture::Pan {
+                        uid,
+                        start_abs,
+                        start_center_norm,
+                        tap_count,
+                        can_tap,
+                        settle_camera,
+                        snap_tilt,
+                    };
+                    return true;
+                }
+
+                if let Some(remaining) = first_active_touch(event) {
+                    self.touch_gesture = TouchGesture::Pan {
+                        uid: remaining.uid,
+                        start_abs: remaining.abs,
+                        start_center_norm: self.center_norm,
+                        tap_count: 0,
+                        can_tap: false,
+                        settle_camera,
+                        snap_tilt,
+                    };
+                    return true;
+                }
+
+                let was_tap = can_tap
+                    && matches!(hit, Hit::FingerUp(fe)
+                        if matches!(&fe.device, DigitDevice::Touch { uid: up_uid } if *up_uid == uid)
+                            && fe.was_tap());
+                self.finish_touch_interaction(cx, settle_camera, snap_tilt);
+                if was_tap {
+                    let abs = event
+                        .touches
+                        .iter()
+                        .find(|touch| touch.uid == uid)
+                        .map_or(start_abs, |touch| touch.abs);
+                    self.handle_touch_tap(cx, abs, tap_count);
+                }
+                self.touch_gesture = TouchGesture::None;
+            }
+            TouchGesture::TwoFinger {
+                start,
+                start_zoom,
+                start_center_norm,
+                start_midpoint_rel,
+                start_rotation,
+                start_tilt,
+                mode,
+            } => {
+                let Some(current) = active_touch_pair(event, start) else {
+                    if let Some(pair) = first_two_active_touches(event) {
+                        self.begin_two_finger_gesture(pair);
+                    } else if let Some(remaining) = first_active_touch(event) {
+                        self.touch_gesture = TouchGesture::Pan {
+                            uid: remaining.uid,
+                            start_abs: remaining.abs,
+                            start_center_norm: self.center_norm,
+                            tap_count: 0,
+                            can_tap: false,
+                            settle_camera: true,
+                            snap_tilt: mode == TouchGestureMode::Tilt,
+                        };
+                    } else {
+                        self.finish_touch_interaction(
+                            cx,
+                            true,
+                            mode == TouchGestureMode::Tilt,
+                        );
+                        self.touch_gesture = TouchGesture::None;
+                    }
+                    return true;
+                };
+
+                let mode = if mode == TouchGestureMode::Pending {
+                    classify_touch_gesture(start, current)
+                } else {
+                    mode
+                };
+                match mode {
+                    TouchGestureMode::Pending => {}
+                    TouchGestureMode::Pinch => {
+                        let distance_ratio =
+                            current.distance().max(1.0) / start.distance().max(1.0);
+                        let min_zoom = self.min_zoom.max(0.0);
+                        let max_zoom = self.max_zoom.max(min_zoom);
+                        let new_zoom =
+                            (start_zoom + distance_ratio.log2()).clamp(min_zoom, max_zoom);
+                        let old_world_size = tile_world_size_zoom(start_zoom);
+                        let new_world_size = tile_world_size_zoom(new_zoom);
+                        let current_midpoint_rel = self.touch_world_rel(current.midpoint());
+                        self.zoom = new_zoom;
+                        self.center_norm = pinch_anchor_center_norm(
+                            start_center_norm,
+                            start_midpoint_rel,
+                            current_midpoint_rel,
+                            old_world_size,
+                            new_world_size,
+                        );
+                        self.wrap_and_clamp_center();
+                        self.last_zoom_change_frame = self.frame_counter;
+                        self.last_zoom_change_time = Some(cx.seconds_since_app_start());
+                        self.pending_viewport_changed = true;
+                        cx.stop_timer(self.zoom_settle_timer);
+                        self.zoom_settle_timer = cx.start_timeout(0.15);
+                        self.redraw(cx);
+                    }
+                    TouchGestureMode::Rotate => {
+                        let delta_deg = touch_angle_delta(start, current).to_degrees();
+                        self.rotation = (start_rotation - delta_deg).rem_euclid(360.0);
+                        self.redraw(cx);
+                    }
+                    TouchGestureMode::Tilt => {
+                        let delta_y = current.midpoint().y - start.midpoint().y;
+                        let raw_tilt =
+                            (start_tilt + delta_y * 0.25).clamp(0.0, self.tilt_max_deg_now());
+                        self.tilt = if raw_tilt < 6.0 { 0.0 } else { raw_tilt };
+                        cx.widget_action(
+                            self.uid,
+                            MapViewAction::TiltChanged { tilt: self.tilt },
+                        );
+                        self.redraw(cx);
+                    }
+                }
+                self.touch_gesture = TouchGesture::TwoFinger {
+                    start,
+                    start_zoom,
+                    start_center_norm,
+                    start_midpoint_rel,
+                    start_rotation,
+                    start_tilt,
+                    mode,
+                };
+            }
+        }
+        true
     }
 
     fn zoom_with_anchor(&mut self, cx: &mut Cx, scroll: f64, anchor_abs: Vec2d) {
@@ -9693,6 +10189,7 @@ impl MapView {
             from_zoom,
             to_zoom,
             arc,
+            anchor: None,
         });
         self.note_shimmer_activity(cx);
         cx.stop_timer(self.fly_timer);
@@ -9709,10 +10206,15 @@ impl MapView {
         let now = cx.seconds_since_app_start();
         let t = ((now - fly.started).max(0.0) / fly.duration).clamp(0.0, 1.0);
         let e = t * t * (3.0 - 2.0 * t);
-        self.center_norm = fly.from_center + (fly.to_center - fly.from_center) * e;
         let zoom = fly.from_zoom + (fly.to_zoom - fly.from_zoom) * e
             - fly.arc * (std::f64::consts::PI * e).sin();
         self.zoom = zoom.clamp(min_zoom, max_zoom);
+        self.center_norm = if let Some((anchor_norm, anchor_rel)) = fly.anchor {
+            let world_size = tile_world_size_zoom(self.zoom);
+            (anchor_norm * world_size - anchor_rel) / world_size
+        } else {
+            fly.from_center + (fly.to_center - fly.from_center) * e
+        };
         self.wrap_and_clamp_center();
         self.last_zoom_change_frame = self.frame_counter;
         self.last_zoom_change_time = Some(now);
@@ -10042,6 +10544,71 @@ mod tests {
     use super::*;
 
     use makepad_mbtile_reader::MbtilesWriter;
+
+    fn touch_pair(a: Vec2d, b: Vec2d) -> TouchPair {
+        TouchPair {
+            a: TouchSample { uid: 1, abs: a },
+            b: TouchSample { uid: 2, abs: b },
+        }
+    }
+
+    #[test]
+    fn map_touch_classifier_distinguishes_pinch_rotate_and_tilt() {
+        let start = touch_pair(dvec2(-50.0, 0.0), dvec2(50.0, 0.0));
+        assert_eq!(
+            classify_touch_gesture(
+                start,
+                touch_pair(dvec2(-70.0, 0.0), dvec2(70.0, 0.0)),
+            ),
+            TouchGestureMode::Pinch,
+        );
+
+        let angle = 30.0_f64.to_radians();
+        let rotated = dvec2(angle.cos() * 50.0, angle.sin() * 50.0);
+        assert_eq!(
+            classify_touch_gesture(start, touch_pair(-rotated, rotated)),
+            TouchGestureMode::Rotate,
+        );
+
+        assert_eq!(
+            classify_touch_gesture(
+                start,
+                touch_pair(dvec2(-50.0, 25.0), dvec2(50.0, 25.0)),
+            ),
+            TouchGestureMode::Tilt,
+        );
+    }
+
+    #[test]
+    fn map_touch_rotation_dead_zone_does_not_steal_a_pinch() {
+        let start = touch_pair(dvec2(-50.0, 0.0), dvec2(50.0, 0.0));
+        let angle = 4.0_f64.to_radians();
+        let radius = 70.0;
+        let rotated = dvec2(angle.cos() * radius, angle.sin() * radius);
+        assert_eq!(
+            classify_touch_gesture(start, touch_pair(-rotated, rotated)),
+            TouchGestureMode::Pinch,
+        );
+    }
+
+    #[test]
+    fn map_pinch_zoom_keeps_the_midpoint_point_fixed() {
+        let start_center = dvec2(0.52, 0.37);
+        let start_midpoint_rel = dvec2(80.0, -45.0);
+        let current_midpoint_rel = dvec2(115.0, -20.0);
+        let old_world_size = 256.0 * 2.0_f64.powf(12.0);
+        let new_world_size = 256.0 * 2.0_f64.powf(13.25);
+        let anchor_norm = start_center + start_midpoint_rel / old_world_size;
+        let new_center = pinch_anchor_center_norm(
+            start_center,
+            start_midpoint_rel,
+            current_midpoint_rel,
+            old_world_size,
+            new_world_size,
+        );
+        let landed_rel = (anchor_norm - new_center) * new_world_size;
+        assert!((landed_rel - current_midpoint_rel).length() < 1e-9);
+    }
 
     fn test_map(cx: &mut Cx) -> MapView {
         cx.init_cx_os();
