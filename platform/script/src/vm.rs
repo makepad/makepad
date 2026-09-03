@@ -64,6 +64,9 @@ pub struct ScriptBody {
     pub parser: ScriptParser,
     pub scope: ScriptObjectRef,
     pub me: ScriptObjectRef,
+    /// The scope the body ended in, once it has run: `let`/`fn` that
+    /// shadow a name open child scopes below `scope`.
+    pub end_scope: Option<ScriptObjectRef>,
     pub checkpoint: Option<ParserCheckpoint>,
     pub source_len: usize,
 }
@@ -972,7 +975,11 @@ impl<'a> ScriptVm<'a> {
         self.bx.threads.cur().trap.ip.index = 0;
 
         // the main interpreter loop
-        self.run_core()
+        let value = self.run_core();
+        if let Some(end) = self.bx.threads.cur().root_end_scope.take() {
+            self.bx.code.bodies.borrow_mut()[body_id as usize].end_scope = Some(end);
+        }
+        value
     }
 
     /// Checks if the value has an apply transform and calls it, returning the transformed value.
@@ -1305,6 +1312,7 @@ impl<'a> ScriptVm<'a> {
             parser: ScriptParser::default(),
             scope,
             me,
+            end_scope: None,
             checkpoint: None,
             source_len: 0,
         };
