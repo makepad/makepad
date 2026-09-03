@@ -958,7 +958,7 @@ impl RateReader {
 // biquads
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Biquad {
     b0: f32,
     b1: f32,
@@ -1064,6 +1064,27 @@ const FILTER_HP_MIN_HZ: f32 = 20.0;
 const FILTER_HP_MAX_HZ: f32 = 9_000.0;
 /// Wet/dry crossfade when the chain engages or returns to unity.
 const EQ_ENGAGE_SECS: f32 = 0.012;
+
+/// Where the sweep's corner sits for a knob at `position`: `None` inside
+/// the dead zone about centre, else the corner in Hz and whether it is
+/// the high-pass (`true`) or the low-pass. The one place a knob's travel
+/// becomes a frequency -- `prepare_block` builds its coefficients from
+/// it, so a readout that asks it cannot disagree with what is playing.
+/// Pure and cheap: a compare and a power, per block, never per frame.
+pub fn filter_corner_hz(position: f32) -> Option<(bool, f32)> {
+    let centre = 0.5;
+    if (position - centre).abs() <= FILTER_DEADZONE {
+        return None;
+    }
+    if position < centre {
+        // Low-pass sweeping down as the knob turns left.
+        let t = ((centre - position) / (centre - FILTER_DEADZONE)).clamp(0.0, 1.0);
+        Some((false, log_sweep(FILTER_LP_MAX_HZ, FILTER_LP_MIN_HZ, t)))
+    } else {
+        let t = ((position - centre) / (centre - FILTER_DEADZONE)).clamp(0.0, 1.0);
+        Some((true, log_sweep(FILTER_HP_MIN_HZ, FILTER_HP_MAX_HZ, t)))
+    }
+}
 /// Autopilot blend moves on an ENGAGED strip: fast enough to read as a cut
 /// on the bar, slow enough never to click. Matches the mixer's stem-lane
 /// blend so the EQ and stems media perform the same choreography at the
@@ -1343,13 +1364,11 @@ impl DeckEq {
         for channel in &mut self.channels {
             channel.sweep_out = channel.sweep;
         }
-        let centre = 0.5;
-        let side: i8 = if (position - centre).abs() <= FILTER_DEADZONE {
-            0
-        } else if position < centre {
-            -1
-        } else {
-            1
+        let corner = filter_corner_hz(position);
+        let side: i8 = match corner {
+            None => 0,
+            Some((false, _)) => -1,
+            Some((true, _)) => 1,
         };
         // A change of KIND -- off to on, or across the dead zone -- starts
         // the new filter from silence. Its memory is the other filter's,
@@ -1368,14 +1387,10 @@ impl DeckEq {
             return;
         }
         self.coeffs.sweep_on = true;
-        let (cutoff, lowpass) = if side < 0 {
-            // Low-pass sweeping down as the knob turns left.
-            let t = ((centre - position) / (centre - FILTER_DEADZONE)).clamp(0.0, 1.0);
-            (log_sweep(FILTER_LP_MAX_HZ, FILTER_LP_MIN_HZ, t), true)
-        } else {
-            let t = ((position - centre) / (centre - FILTER_DEADZONE)).clamp(0.0, 1.0);
-            (log_sweep(FILTER_HP_MIN_HZ, FILTER_HP_MAX_HZ, t), false)
-        };
+        // `side` is nonzero here, so the corner is there; the fallback is
+        // for the type, not for a path.
+        let (highpass, cutoff) = corner.unwrap_or((false, FILTER_LP_MAX_HZ));
+        let lowpass = !highpass;
         // The lift rides the low-Q section only. The corner's height is
         // the product of the two sections' Qs whichever takes it, and the
         // slope past the corner is the order's; what the choice sets is
@@ -1577,6 +1592,46 @@ mod tests {
     /// The resonance a sweep is allowed, and where it is taken away:
     /// at both ends of hearing, whichever side of the sweep put the
     /// corner there.
+    /// The readout and the coefficients come from one function: the
+    /// corner it names is the corner the first sweep section is built at.
+    #[test]
+    fn the_readout_corner_is_the_filter_corner() {
+        assert_eq!(filter_corner_hz(0.5), None);
+        assert_eq!(filter_corner_hz(0.52), None, "inside the dead zone");
+        assert_eq!(filter_corner_hz(0.0), Some((false, 40.0)));
+        assert_eq!(filter_corner_hz(1.0), Some((true, 9000.0)));
+        let mut last = f32::INFINITY;
+        for i in 0..=47 {
+            let (highpass, hz) = filter_corner_hz(0.47 - i as f32 * 0.01).unwrap();
+            assert!(!highpass && hz <= last, "the low-pass falls as the knob turns left");
+            last = hz;
+        }
+        let mut last = 0.0;
+        for i in 0..=47 {
+            let (highpass, hz) = filter_corner_hz(0.53 + i as f32 * 0.01).unwrap();
+            assert!(highpass && hz >= last, "the high-pass rises as the knob turns right");
+            last = hz;
+        }
+        // A filter change hands over rather than replacing the running
+        // coefficients on the spot (the click-free crossfade above), so
+        // each corner is checked on its own fresh EQ instead of by
+        // reusing one across a jump the handover would otherwise stall.
+        let mut eq = DeckEq::new(48_000.0);
+        eq.set_filter(0.3);
+        eq.prepare_block();
+        let (highpass, hz) = filter_corner_hz(0.3).unwrap();
+        assert!(!highpass);
+        let q = BUTTERWORTH_Q4[0] * eq.resonance.min(resonance_ceiling(hz));
+        assert_eq!(eq.coeffs.sweep[0], Biquad::lowpass(hz, 48_000.0, q));
+        let mut eq = DeckEq::new(48_000.0);
+        eq.set_filter(0.8);
+        eq.prepare_block();
+        let (highpass, hz) = filter_corner_hz(0.8).unwrap();
+        assert!(highpass);
+        let q = BUTTERWORTH_Q4[0] * eq.resonance.min(resonance_ceiling(hz));
+        assert_eq!(eq.coeffs.sweep[0], Biquad::highpass(hz, 48_000.0, q));
+    }
+
     #[test]
     fn resonance_is_reined_in_at_the_ends_of_hearing() {
         // Through the middle of the music the operator gets what they

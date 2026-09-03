@@ -1509,6 +1509,10 @@ script_mod! {
         spacing: 2
     }
 
+    // A gain knob: unity at the top, +6 dB at the right stop, and the cut
+    // half a square law so the last few degrees before KILL are where
+    // the fine control is. The arc runs from the resting point, so a cut
+    // and a boost point different ways.
     let MusicKnob = Rotary{
         width: 42
         height: 42
@@ -1516,6 +1520,8 @@ script_mod! {
         max: 2.0
         default: 1.0
         scroll_step: 0.025
+        taper: Audio
+        arc_from_origin: true
         text: ""
         flow: Down
         text_input: TextInput{width: 0 height: 0}
@@ -1534,9 +1540,24 @@ script_mod! {
                 let sweep = PI * 1.5
                 sdf.arc_round_caps(c.x, c.y, r - 2.5, start, start + sweep, 2.5)
                 sdf.fill(self.ring_color)
-                let lit = max(self.slide_pos, 0.01)
-                sdf.arc_round_caps(c.x, c.y, r - 2.5, start, start + sweep * lit, 2.5)
+                // The lit arc runs from the resting point to the pointer
+                // when the knob asks for it, else from the stop as a
+                // fader would.
+                let lo = min(self.origin_pos, self.slide_pos)
+                let hi = max(self.origin_pos, self.slide_pos)
+                let from = mix(0.0, lo, self.arc_origin)
+                let to = mix(max(self.slide_pos, 0.01), max(hi, lo + 0.01), self.arc_origin)
+                sdf.arc_round_caps(c.x, c.y, r - 2.5, start + sweep * from, start + sweep * to, 2.5)
                 sdf.fill(self.val_color)
+                // A tick at the resting point, so a knob at rest -- an arc
+                // of no length -- still shows where home is.
+                let o = start + sweep * self.origin_pos
+                let od = vec2(-sin(o), cos(o))
+                let t0 = c + od * (r - 6.0)
+                let t1 = c + od * r
+                sdf.move_to(t0.x, t0.y)
+                sdf.line_to(t1.x, t1.y)
+                sdf.stroke(self.rim_color * self.arc_origin, 1.0)
                 sdf.circle(c.x, c.y, r - 7.5)
                 sdf.fill_keep(self.body_color.mix(self.body_color_hover, max(self.hover, self.drag)))
                 sdf.stroke(self.rim_color, 1.0)
@@ -2177,7 +2198,7 @@ script_mod! {
                                 }
                                 KnobStack{
                                     deck_a_label_filter := KnobLabel{text: "FILTER"}
-                                    deck_a_filter := MusicKnob{min: 0.0 max: 1.0 default: 0.5}
+                                    deck_a_filter := MusicKnob{min: 0.0 max: 1.0 default: 0.5 taper: Linear}
                                     // The slot the three bands spend on
                                     // kill and solo: the sweep has no
                                     // bands to kill, so its row is free
@@ -2687,7 +2708,7 @@ script_mod! {
                                 spacing: 3
                                 KnobStack{
                                     deck_b_label_filter := KnobLabel{text: "FILTER"}
-                                    deck_b_filter := MusicKnob{min: 0.0 max: 1.0 default: 0.5}
+                                    deck_b_filter := MusicKnob{min: 0.0 max: 1.0 default: 0.5 taper: Linear}
                                     // The slot the three bands spend on
                                     // kill and solo: the sweep has no
                                     // bands to kill, so its row is free
@@ -7314,6 +7335,38 @@ pub fn format_pitch(pitch: f64) -> String {
     format!("{:+.1}%", pitch * 100.0)
 }
 
+/// A band or stem knob's readout while a hand is on it: the gain in
+/// decibels, or KILL. It is the HAND's position, not what the strip is
+/// doing about it -- a killed band's knob still reads what it will come
+/// back to. Unity reads "0.0 dB" without a sign, and so does a gain
+/// that only rounds to it; an untouched knob should look untouched.
+pub fn format_band_gain(gain: f32) -> String {
+    if gain < crate::music_dsp::EQ_KILL_EPSILON {
+        return "KILL".to_string();
+    }
+    let db = format!("{:+.1}", crate::dsp_math::ratio_to_db(gain));
+    let db = if db == "+0.0" || db == "-0.0" { "0.0".to_string() } else { db };
+    format!("{db} dB")
+}
+
+/// The sweep knob's readout: OFF about centre, else which filter it is
+/// and where its corner sits, from the same function the coefficients
+/// come from. Whole hertz below a thousand, tenths of a kilohertz
+/// above. ASCII only: the font drops glyphs it lacks.
+pub fn format_filter(position: f32) -> String {
+    match crate::music_dsp::filter_corner_hz(position) {
+        None => "OFF".to_string(),
+        Some((highpass, hz)) => {
+            let side = if highpass { "HP" } else { "LP" };
+            if hz < 1000.0 {
+                format!("{side} {}", hz.round() as i64)
+            } else {
+                format!("{side} {:.1}k", hz / 1000.0)
+            }
+        }
+    }
+}
+
 /// Key-shift readout, in signed whole semitones. An em-dash at zero: an
 /// untransposed deck should read as plainly untouched, not as "+0".
 pub fn format_key_shift(semitones: f64) -> String {
@@ -7909,6 +7962,35 @@ mod tests {
         assert_eq!(lane.cols, 0);
         assert!(lane.grid_columns().is_none());
         assert!((lane.head_column_at(123.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn band_gain_reads_in_decibels_and_a_kill_says_so() {
+        assert_eq!(format_band_gain(1.0), "0.0 dB");
+        assert_eq!(format_band_gain(2.0), "+6.0 dB");
+        assert_eq!(format_band_gain(0.5), "-6.0 dB");
+        assert_eq!(format_band_gain(0.0), "KILL");
+        assert_eq!(format_band_gain(5e-5), "KILL");
+        assert_eq!(format_band_gain(0.999), "0.0 dB", "no signed zero");
+        assert_eq!(format_band_gain(0.25), "-12.0 dB");
+    }
+
+    #[test]
+    fn the_sweep_reads_off_or_its_corner() {
+        assert_eq!(format_filter(0.5), "OFF");
+        assert_eq!(format_filter(0.51), "OFF");
+        assert_eq!(format_filter(0.0), "LP 40");
+        assert_eq!(format_filter(1.0), "HP 9.0k");
+        let (_, hz) = crate::music_dsp::filter_corner_hz(0.25).unwrap();
+        assert!(hz < 1000.0, "{hz}");
+        assert_eq!(format_filter(0.25), format!("LP {}", hz.round() as i64));
+        let (_, hz) = crate::music_dsp::filter_corner_hz(0.4).unwrap();
+        assert!(hz > 1000.0, "{hz}");
+        assert_eq!(format_filter(0.4), format!("LP {:.1}k", hz / 1000.0));
+        assert!(format_filter(0.9).starts_with("HP "));
+        for i in 0..=100 {
+            assert!(format_filter(i as f32 / 100.0).len() <= 8, "fits the legend");
+        }
     }
 
     #[test]

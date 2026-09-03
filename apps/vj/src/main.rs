@@ -7357,6 +7357,10 @@ pub struct App {
     /// beat after a run ends, then the panel folds away.
     #[rust]
     import_flash_timer: Timer,
+    /// Knob legends currently showing the knob's value in place of its
+    /// name, each with the clock that puts the name back.
+    #[rust]
+    knob_readouts: Vec<KnobReadout>,
     /// Whether the last sync saw a running import — the edge that arms the
     /// completion flash exactly once.
     #[rust]
@@ -12854,7 +12858,7 @@ p2 {}
                 let deck = if index < 4 { DeckId::A } else { DeckId::B };
                 let cmds = match index % 4 {
                     3 => self.decks.set_filter(deck, value),
-                    band => self.decks.set_eq(deck, band, value * 2.0),
+                    band => self.decks.set_eq(deck, band, hardware_band_gain(value)),
                 };
                 self.run_deck_cmds(cx, cmds);
                 self.sync_deck_knobs(cx, deck);
@@ -12870,7 +12874,7 @@ p2 {}
                     2 => 0,
                     _ => 3,
                 };
-                let cmds = self.decks.set_stem(deck, stem, value * 2.0);
+                let cmds = self.decks.set_stem(deck, stem, hardware_band_gain(value));
                 self.run_deck_cmds(cx, cmds);
                 self.sync_deck_knobs(cx, deck);
             }
@@ -14087,6 +14091,60 @@ p2 {}
 
     /// Push a deck's tone/stem knob positions back onto the surface, so the
     /// hardware and the screen never disagree.
+    /// The legend over `slot`'s knob.
+    fn knob_label(&self, cx: &mut Cx, deck: DeckId, slot: KnobSlot) -> ButtonRef {
+        let ids = MusicDeckIds::for_deck(deck);
+        let id = match slot {
+            KnobSlot::Band(band) => ids.eq_labels[band],
+            KnobSlot::Filter => ids.filter_label,
+            KnobSlot::Stem(stem) => ids.stem_labels[stem],
+        };
+        self.ui.button(cx, id)
+    }
+
+    /// Put a knob's value on its legend while the hand is on it, and
+    /// wind the clock that puts the name back. The name is read off the
+    /// legend the first time, so the DSL's word is the word that
+    /// returns. The wheel's move and its release land in ONE event, so a
+    /// legend swapped on the move and restored on the release would never
+    /// be seen: only the clock restores it, and every move rewinds it.
+    fn show_knob_readout(&mut self, cx: &mut Cx, deck: DeckId, slot: KnobSlot, text: String) {
+        let label = self.knob_label(cx, deck, slot);
+        match self.knob_readouts.iter_mut().find(|r| r.deck == deck && r.slot == slot) {
+            Some(readout) => {
+                cx.stop_timer(readout.timer);
+                readout.timer = cx.start_timeout(KNOB_READOUT_SECS);
+            }
+            None => {
+                let resting = label.text();
+                self.knob_readouts.push(KnobReadout {
+                    deck,
+                    slot,
+                    timer: cx.start_timeout(KNOB_READOUT_SECS),
+                    resting,
+                });
+            }
+        }
+        if label.text() != text {
+            label.set_text(cx, &text);
+        }
+    }
+
+    /// The name goes back on the legend now, clock or no clock.
+    fn hide_knob_readout(&mut self, cx: &mut Cx, deck: DeckId, slot: KnobSlot) {
+        if let Some(index) =
+            self.knob_readouts.iter().position(|r| r.deck == deck && r.slot == slot)
+        {
+            self.restore_knob_legend(cx, index);
+        }
+    }
+
+    fn restore_knob_legend(&mut self, cx: &mut Cx, index: usize) {
+        let readout = self.knob_readouts.remove(index);
+        cx.stop_timer(readout.timer);
+        self.knob_label(cx, readout.deck, readout.slot).set_text(cx, &readout.resting);
+    }
+
     fn sync_deck_knobs(&mut self, cx: &mut Cx, deck: DeckId) {
         let ids = MusicDeckIds::for_deck(deck);
         let state = self.decks.deck(deck);
@@ -25834,12 +25892,26 @@ p2 {}
                 let cmds = self.decks.set_gain(deck, value as f32);
                 self.run_deck_cmds(cx, cmds);
             }
+            if refs.filter.start_slide(actions) {
+                if let Some(value) = refs.filter.value() {
+                    self.show_knob_readout(cx, deck, KnobSlot::Filter, crate::music_view::format_filter(value as f32));
+                }
+            }
             if let Some(value) = refs.filter.slided(actions) {
+                self.show_knob_readout(cx, deck, KnobSlot::Filter, crate::music_view::format_filter(value as f32));
                 let cmds = self.decks.set_filter(deck, value as f32);
                 self.run_deck_cmds(cx, cmds);
             }
             for (band, knob) in refs.eq_knobs.iter().enumerate() {
+                if knob.start_slide(actions) {
+                    if let Some(value) = knob.value() {
+                        let text = crate::music_view::format_band_gain(value as f32);
+                        self.show_knob_readout(cx, deck, KnobSlot::Band(band), text);
+                    }
+                }
                 if let Some(value) = knob.slided(actions) {
+                    let text = crate::music_view::format_band_gain(value as f32);
+                    self.show_knob_readout(cx, deck, KnobSlot::Band(band), text);
                     let cmds = self.decks.set_eq(deck, band, value as f32);
                     self.run_deck_cmds(cx, cmds);
                 }
@@ -25861,7 +25933,15 @@ p2 {}
                 }
             }
             for (stem, knob) in refs.stem_knobs.iter().enumerate() {
+                if knob.start_slide(actions) {
+                    if let Some(value) = knob.value() {
+                        let text = crate::music_view::format_band_gain(value as f32);
+                        self.show_knob_readout(cx, deck, KnobSlot::Stem(stem), text);
+                    }
+                }
                 if let Some(value) = knob.slided(actions) {
+                    let text = crate::music_view::format_band_gain(value as f32);
+                    self.show_knob_readout(cx, deck, KnobSlot::Stem(stem), text);
                     let cmds = self.decks.set_stem(deck, stem, value as f32);
                     self.run_deck_cmds(cx, cmds);
                 }
@@ -25879,6 +25959,7 @@ p2 {}
                 }
             }
             if refs.filter_label.clicked(actions) {
+                self.hide_knob_readout(cx, deck, KnobSlot::Filter);
                 if let Some(value) = refs.filter.reset_to_default(cx) {
                     let cmds = self.decks.set_filter(deck, value as f32);
                     self.run_deck_cmds(cx, cmds);
@@ -25886,6 +25967,7 @@ p2 {}
             }
             for (band, label) in refs.eq_labels.iter().enumerate() {
                 if label.clicked(actions) {
+                    self.hide_knob_readout(cx, deck, KnobSlot::Band(band));
                     if let Some(value) = refs.eq_knobs[band].reset_to_default(cx) {
                         let cmds = self.decks.set_eq(deck, band, value as f32);
                         self.run_deck_cmds(cx, cmds);
@@ -25894,6 +25976,7 @@ p2 {}
             }
             for (stem, label) in refs.stem_labels.iter().enumerate() {
                 if label.clicked(actions) {
+                    self.hide_knob_readout(cx, deck, KnobSlot::Stem(stem));
                     if let Some(value) = refs.stem_knobs[stem].reset_to_default(cx) {
                         let cmds = self.decks.set_stem(deck, stem, value as f32);
                         self.run_deck_cmds(cx, cmds);
@@ -29241,6 +29324,11 @@ impl AppMain for App {
             self.ui.view(cx, ids!(import_panel)).set_visible(cx, false);
             self.ui.redraw(cx);
         }
+        for index in (0..self.knob_readouts.len()).rev() {
+            if self.knob_readouts[index].timer.is_event(event).is_some() {
+                self.restore_knob_legend(cx, index);
+            }
+        }
         if self.search_timer.is_event(event).is_some() {
             if let Some((surface, field, text)) = self.pending_search.take() {
                 let text = text.trim().to_string();
@@ -29335,6 +29423,58 @@ impl Drop for App {
             lighting.set_power(false);
             drop(lighting);
         }
+    }
+}
+
+/// How long a knob's legend keeps showing its value after the last move.
+const KNOB_READOUT_SECS: f64 = 0.8;
+
+/// A knob whose legend can read its value: the three tone bands, the
+/// sweep, the four stem lanes -- in engine order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KnobSlot {
+    Band(usize),
+    Filter,
+    Stem(usize),
+}
+
+/// A legend showing its knob's value in place of its name.
+struct KnobReadout {
+    deck: DeckId,
+    slot: KnobSlot,
+    timer: Timer,
+    /// The name, read off the legend before the value went on.
+    resting: String,
+}
+
+/// A hardware knob's 0..1 through the same law as the screen knob, so
+/// the pointer lands where the hardware knob is and the two agree at
+/// every position rather than at the centre and the stops alone.
+fn hardware_band_gain(value: f32) -> f32 {
+    makepad_widgets::slider::taper_to_value(
+        makepad_widgets::slider::SliderTaper::Audio,
+        value as f64,
+        0.0,
+        2.0,
+        1.0,
+        0.0,
+    ) as f32
+}
+
+#[cfg(test)]
+mod knob_readout_tests {
+    use super::*;
+
+    /// Screen and hardware are one law: the old straight `value * 2.0`
+    /// put a quarter-turn hardware knob at half gain where the screen
+    /// knob reads a quarter.
+    #[test]
+    fn hardware_band_knobs_follow_the_screen_taper() {
+        assert_eq!(hardware_band_gain(0.5), 1.0);
+        assert_eq!(hardware_band_gain(1.0), 2.0);
+        assert_eq!(hardware_band_gain(0.0), 0.0);
+        assert_eq!(hardware_band_gain(0.25), 0.25);
+        assert_eq!(hardware_band_gain(0.75), 1.5);
     }
 }
 

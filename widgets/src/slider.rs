@@ -13,6 +13,8 @@ script_mod! {
     mod.widgets.SliderBase = #(Slider::register_widget(vm))
     mod.widgets.DragAxis =  set_type_default() do #(DragAxis::script_api(vm))
     mod.widgets.splat(mod.widgets.DragAxis)
+    mod.widgets.SliderTaper =  set_type_default() do #(SliderTaper::script_api(vm))
+    mod.widgets.splat(mod.widgets.SliderTaper)
 
     use mod.widgets.*
 
@@ -1405,6 +1407,157 @@ pub enum DragAxis {
     Vertical,
 }
 
+/// How a slider's travel -- the 0..1 fraction of its track -- becomes the
+/// value it reports, and back.
+#[derive(Copy, Clone, Debug, PartialEq, Script, ScriptHook)]
+pub enum SliderTaper {
+    /// The value is proportional to the travel; `step` floors it.
+    #[pick]
+    Linear,
+    /// A gain knob's law: the default sits at half travel, the boost half
+    /// runs straight to `max`, and the cut half is a square law that
+    /// reaches `min` only at the stop -- fine near unity, fast near the
+    /// kill. Falls back to Linear when the default is not strictly inside
+    /// the range, because then there is no half to be either side of.
+    Audio,
+    /// Equal travel is equal ratio: a frequency knob. Falls back to Linear
+    /// when the range admits no ratio (`min <= 0` or `max <= min`).
+    Log,
+    /// Detents: the NEAREST multiple of `step`, where Linear floors.
+    /// Falls back to Linear without a step.
+    Stepped,
+    /// Two positions: `min` below half travel, `max` from half.
+    Toggle,
+}
+
+/// Travel to value. `Linear` is the map every slider had before there
+/// were tapers, expression for expression, so a slider that names none
+/// reports exactly what it did.
+pub fn taper_to_value(
+    taper: SliderTaper,
+    travel: f64,
+    min: f64,
+    max: f64,
+    default: f64,
+    step: f64,
+) -> f64 {
+    let linear = |travel: f64| {
+        let val = travel * (max - min);
+        if step != 0.0 {
+            (val / step).floor() * step + min
+        } else {
+            val + min
+        }
+    };
+    let travel_in = if travel.is_finite() { travel.clamp(0.0, 1.0) } else { 0.0 };
+    match taper {
+        SliderTaper::Linear => linear(travel),
+        SliderTaper::Audio => {
+            if !(default > min && default < max) {
+                return linear(travel);
+            }
+            if travel_in >= 0.5 {
+                default + (max - default) * ((travel_in - 0.5) / 0.5)
+            } else {
+                let t = travel_in / 0.5;
+                min + (default - min) * t * t
+            }
+        }
+        SliderTaper::Log => {
+            if min <= 0.0 || max <= min {
+                return linear(travel);
+            }
+            min * (max / min).powf(travel_in)
+        }
+        SliderTaper::Stepped => {
+            if step <= 0.0 || max <= min {
+                return linear(travel);
+            }
+            (min + (travel_in * (max - min) / step).round() * step).min(max)
+        }
+        SliderTaper::Toggle => {
+            if travel_in >= 0.5 {
+                max
+            } else {
+                min
+            }
+        }
+    }
+}
+
+/// Value to travel: the inverse of [`taper_to_value`] on every taper,
+/// so a value pushed in from outside lands the pointer where a hand
+/// would have had to put it.
+pub fn taper_to_travel(
+    taper: SliderTaper,
+    value: f64,
+    min: f64,
+    max: f64,
+    default: f64,
+    step: f64,
+) -> f64 {
+    let linear = |value: f64| (value - min) / (max - min);
+    let _ = step;
+    match taper {
+        SliderTaper::Linear => linear(value),
+        SliderTaper::Audio => {
+            if !(default > min && default < max) {
+                return linear(value);
+            }
+            let travel = if value >= default {
+                0.5 + 0.5 * (value - default) / (max - default)
+            } else {
+                0.5 * ((value - min) / (default - min)).max(0.0).sqrt()
+            };
+            if travel.is_finite() { travel.clamp(0.0, 1.0) } else { 0.0 }
+        }
+        SliderTaper::Log => {
+            if min <= 0.0 || max <= min {
+                return linear(value);
+            }
+            if value <= 0.0 {
+                return 0.0;
+            }
+            ((value / min).ln() / (max / min).ln()).clamp(0.0, 1.0)
+        }
+        SliderTaper::Stepped => {
+            if max <= min {
+                return linear(value);
+            }
+            linear(value).clamp(0.0, 1.0)
+        }
+        SliderTaper::Toggle => {
+            if value >= (min + max) * 0.5 {
+                1.0
+            } else {
+                0.0
+            }
+        }
+    }
+}
+
+/// The number a slider shows for its value, with its unit after a space
+/// when it has one. A slider with no unit shows the bare number it
+/// always did.
+pub fn format_readout(value: f64, precision: usize, unit: &str) -> String {
+    let number = match precision {
+        0 => format!("{:.0}", value),
+        1 => format!("{:.1}", value),
+        2 => format!("{:.2}", value),
+        3 => format!("{:.3}", value),
+        4 => format!("{:.4}", value),
+        5 => format!("{:.5}", value),
+        6 => format!("{:.6}", value),
+        7 => format!("{:.7}", value),
+        _ => format!("{}", value),
+    };
+    if unit.is_empty() {
+        number
+    } else {
+        format!("{number} {unit}")
+    }
+}
+
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawSlider {
@@ -1414,6 +1567,13 @@ pub struct DrawSlider {
     label_size: f32,
     #[live]
     slide_pos: f32,
+    /// Where the default sits on the track, for a material that draws
+    /// its value arc from there rather than from the stop.
+    #[live]
+    origin_pos: f32,
+    /// 1.0 when the slider asks for that arc, else 0.0.
+    #[live]
+    arc_origin: f32,
 }
 
 #[derive(Script, Widget, Animator)]
@@ -1468,6 +1628,21 @@ pub struct Slider {
     #[live]
     scroll_step: f64,
 
+    /// How the travel becomes the value. Linear, the plain map, unless
+    /// the slider says otherwise.
+    #[live(SliderTaper::Linear)]
+    pub taper: SliderTaper,
+    /// A unit the readout carries after the number -- "dB", "Hz" -- or
+    /// nothing. Typed back with or without it, the number still lands.
+    #[live]
+    pub unit: String,
+    /// Draw the value arc from the default's position rather than from
+    /// the stop, so a cut and a boost point different ways. A material
+    /// reads it as `arc_origin` beside `origin_pos`; one that does not
+    /// draws as before.
+    #[live(false)]
+    pub arc_from_origin: bool,
+
     #[live]
     bind: String,
 
@@ -1506,41 +1681,29 @@ pub enum SliderAction {
 
 impl Slider {
     fn to_external(&self) -> f64 {
-        let val = self.relative_value * (self.max - self.min);
-        if self.step != 0.0 {
-            return (val / self.step).floor() * self.step + self.min;
-        } else {
-            val + self.min
-        }
+        taper_to_value(self.taper, self.relative_value, self.min, self.max, self.default, self.step)
     }
 
     fn set_internal(&mut self, external: f64) -> bool {
         let old = self.relative_value;
-        self.relative_value = (external - self.min) / (self.max - self.min);
+        self.relative_value =
+            taper_to_travel(self.taper, external, self.min, self.max, self.default, self.step);
         old != self.relative_value
     }
 
     pub fn update_text_input(&mut self, cx: &mut Cx) {
         let e = self.to_external();
-        self.text_input.set_text(
-            cx,
-            &match self.precision {
-                0 => format!("{:.0}", e),
-                1 => format!("{:.1}", e),
-                2 => format!("{:.2}", e),
-                3 => format!("{:.3}", e),
-                4 => format!("{:.4}", e),
-                5 => format!("{:.5}", e),
-                6 => format!("{:.6}", e),
-                7 => format!("{:.7}", e),
-                _ => format!("{}", e),
-            },
-        );
+        let text = format_readout(e, self.precision, &self.unit);
+        self.text_input.set_text(cx, &text);
         self.text_input.select_all(cx);
     }
 
     pub fn draw_walk_slider(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_bg.slide_pos = self.relative_value as f32;
+        self.draw_bg.origin_pos =
+            taper_to_travel(self.taper, self.default, self.min, self.max, self.default, self.step)
+                as f32;
+        self.draw_bg.arc_origin = if self.arc_from_origin { 1.0 } else { 0.0 };
         self.draw_bg.begin(cx, walk, self.layout);
 
         if let Flow::Right { wrap: false, .. } = self.layout.flow {
@@ -1637,7 +1800,14 @@ impl Widget for Slider {
                     self.animator_play(cx, ids!(focus.off));
                 }
                 TextInputAction::Returned(value, _modifiers) => {
-                    if let Ok(v) = value.parse::<f64>() {
+                    // The readout is typed back the way it was shown, unit
+                    // and all; the unit is not part of the number.
+                    let typed = value.trim();
+                    let typed = typed
+                        .strip_suffix(self.unit.as_str())
+                        .map(str::trim_end)
+                        .unwrap_or(typed);
+                    if let Ok(v) = typed.parse::<f64>() {
                         self.set_internal(v.max(self.min).min(self.max));
                     }
                     self.update_text_input(cx);
@@ -1806,6 +1976,17 @@ impl SliderRef {
         None
     }
 
+    /// The hand has landed: a drag is starting, before it has moved. The
+    /// wheel and a typed value never say this; they show up as `slided`.
+    pub fn start_slide(&self, actions: &Actions) -> bool {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let SliderAction::StartSlide = item.cast() {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn end_slide(&self, actions: &Actions) -> Option<f64> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             match item.cast() {
@@ -1836,6 +2017,84 @@ impl SliderRef {
         } else {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod taper_tests {
+    use super::*;
+
+    /// Linear is the old map, expression for expression: the floor on a
+    /// stepped slider included.
+    #[test]
+    fn linear_taper_is_the_old_map() {
+        let v = taper_to_value(SliderTaper::Linear, 0.35, 0.0, 2.0, 1.0, 0.0);
+        assert_eq!(v, 0.35 * 2.0);
+        let stepped = taper_to_value(SliderTaper::Linear, 0.35, 0.0, 2.0, 1.0, 0.25);
+        assert_eq!(stepped, 0.5, "floors, as it always did");
+        assert_eq!(taper_to_travel(SliderTaper::Linear, 0.7, 0.0, 2.0, 1.0, 0.0), 0.35);
+        // Out of range stays out of range: nothing clamps what a caller
+        // pushed past the stops, exactly as before.
+        assert_eq!(taper_to_value(SliderTaper::Linear, 1.5, 0.0, 2.0, 1.0, 0.0), 3.0);
+    }
+
+    #[test]
+    fn audio_taper_rests_at_default_mid_travel_and_squares_the_cut() {
+        let at = |t| taper_to_value(SliderTaper::Audio, t, 0.0, 2.0, 1.0, 0.0);
+        assert_eq!(at(0.5), 1.0);
+        assert_eq!(at(1.0), 2.0);
+        assert_eq!(at(0.0), 0.0);
+        assert_eq!(at(0.75), 1.5);
+        assert_eq!(at(0.25), 0.25, "a square law on the cut side");
+        for i in 0..=100 {
+            let t = i as f64 / 100.0;
+            let back = taper_to_travel(SliderTaper::Audio, at(t), 0.0, 2.0, 1.0, 0.0);
+            assert!((back - t).abs() < 1e-12, "{t} came back as {back}");
+        }
+        // The default lands at half travel wherever it sits in the range.
+        assert_eq!(taper_to_value(SliderTaper::Audio, 0.5, 0.0, 1.5, 1.0, 0.0), 1.0);
+        assert_eq!(taper_to_travel(SliderTaper::Audio, 1.0, 0.0, 1.5, 1.0, 0.0), 0.5);
+        // A default on a stop has no two halves: Linear, and no NaN from
+        // the widget's own zeroed defaults on construction.
+        assert_eq!(taper_to_value(SliderTaper::Audio, 0.25, 0.0, 2.0, 0.0, 0.0), 0.5);
+        assert_eq!(taper_to_travel(SliderTaper::Audio, 0.5, 0.0, 2.0, 2.0, 0.0), 0.25);
+        assert_eq!(taper_to_travel(SliderTaper::Audio, 1.0, 0.0, 2.0, 0.0, 0.0), 0.5);
+    }
+
+    #[test]
+    fn log_taper_is_straight_in_octaves_and_refuses_a_zero_floor() {
+        let at = |t| taper_to_value(SliderTaper::Log, t, 20.0, 20_000.0, 1_000.0, 0.0);
+        assert!((at(0.5) - (20.0f64 * 20_000.0).sqrt()).abs() < 1e-6);
+        let ratio = at(0.4) / at(0.3);
+        assert!((at(0.8) / at(0.7) - ratio).abs() < 1e-9, "equal travel, equal ratio");
+        let back = taper_to_travel(SliderTaper::Log, at(0.3), 20.0, 20_000.0, 1_000.0, 0.0);
+        assert!((back - 0.3).abs() < 1e-12);
+        assert_eq!(
+            taper_to_value(SliderTaper::Log, 0.5, 0.0, 100.0, 50.0, 0.0),
+            taper_to_value(SliderTaper::Linear, 0.5, 0.0, 100.0, 50.0, 0.0),
+            "a floor of zero has no ratio to anything"
+        );
+    }
+
+    #[test]
+    fn stepped_rounds_to_the_nearest_detent_and_toggle_snaps() {
+        let at = |t| taper_to_value(SliderTaper::Stepped, t, 0.0, 3.0, 0.0, 1.0);
+        assert_eq!(at(0.6), 2.0);
+        assert_eq!(at(0.49), 1.0);
+        assert_eq!(at(1.0), 3.0, "the top detent is reachable");
+        assert_eq!(taper_to_travel(SliderTaper::Stepped, 2.0, 0.0, 3.0, 0.0, 1.0), 2.0 / 3.0);
+        let toggle = |t| taper_to_value(SliderTaper::Toggle, t, 0.0, 1.0, 0.0, 0.0);
+        assert_eq!(toggle(0.49), 0.0);
+        assert_eq!(toggle(0.5), 1.0);
+        assert_eq!(taper_to_travel(SliderTaper::Toggle, 1.0, 0.0, 1.0, 0.0, 0.0), 1.0);
+        assert_eq!(taper_to_travel(SliderTaper::Toggle, 0.0, 0.0, 1.0, 0.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn the_readout_carries_its_unit() {
+        assert_eq!(format_readout(1.5, 2, "dB"), "1.50 dB");
+        assert_eq!(format_readout(1.5, 2, ""), "1.50");
+        assert_eq!(format_readout(1.5, 0, "%"), "2 %");
     }
 }
 
