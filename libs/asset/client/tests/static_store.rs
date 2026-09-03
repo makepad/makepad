@@ -110,6 +110,12 @@ fn music_fixture_row(
         ("categories", Value::Arr(vec![s("music")])),
         ("tags", Value::Arr(vec![s("music"), s("stems")])),
         ("creator", s(creator)),
+        ("artist", s(creator)),
+        ("artist_url", s("https://freemusicarchive.org/artist/fixture")),
+        ("album", s("FMA Fixture")),
+        ("source_url", s(format!("https://freemusicarchive.org/music/{seed}"))),
+        ("license", s("CC BY 4.0")),
+        ("license_url", s("https://creativecommons.org/licenses/by/4.0/")),
         ("generator", s("makepad-dj-pack")),
         ("backend", s("fixture")),
         ("model", s("fixture")),
@@ -530,6 +536,12 @@ fn static_snapshot_accepts_the_vj_music_query() {
             ("Wilfredor Sample Dance 1", "Wilfredor"),
         ],
     );
+    let hit = &page.hits[0];
+    assert_eq!(hit.artist, "Marsel Minga");
+    assert_eq!(hit.album, "FMA Fixture");
+    assert_eq!(hit.source_url, "https://freemusicarchive.org/music/8");
+    assert_eq!(hit.license, "CC BY 4.0");
+    assert_eq!(hit.license_url, "https://creativecommons.org/licenses/by/4.0/");
 }
 
 #[test]

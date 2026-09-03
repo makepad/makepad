@@ -262,6 +262,12 @@ pub struct AnnotationUpload {
     pub categories: Vec<String>,
     pub tags: Vec<String>,
     pub creator: String,
+    pub artist: String,
+    pub artist_url: String,
+    pub album: String,
+    pub source_url: String,
+    pub license: String,
+    pub license_url: String,
     pub generator: String,
     pub backend: String,
     pub model: String,
@@ -287,7 +293,18 @@ impl AnnotationUpload {
         if self.title.is_empty() || self.title.len() > wire::MAX_TITLE_BYTES {
             return Err(ClientError::InvalidInput { what: "annotation title" });
         }
-        for text in [&self.title, &self.description, &self.prompt, &self.provenance] {
+        for text in [
+            &self.title,
+            &self.description,
+            &self.artist,
+            &self.artist_url,
+            &self.album,
+            &self.source_url,
+            &self.license,
+            &self.license_url,
+            &self.prompt,
+            &self.provenance,
+        ] {
             if text.chars().any(char::is_control) {
                 return Err(ClientError::InvalidInput { what: "annotation control chars" });
             }
@@ -1624,6 +1641,12 @@ impl Api {
                 ("categories", labels(&ann.categories)),
                 ("tags", labels(&ann.tags)),
                 ("creator", json::s(ann.creator.clone())),
+                ("artist", json::s(ann.artist.clone())),
+                ("artist_url", json::s(ann.artist_url.clone())),
+                ("album", json::s(ann.album.clone())),
+                ("source_url", json::s(ann.source_url.clone())),
+                ("license", json::s(ann.license.clone())),
+                ("license_url", json::s(ann.license_url.clone())),
                 ("generator", json::s(ann.generator.clone())),
                 ("backend", json::s(ann.backend.clone())),
                 ("model", json::s(ann.model.clone())),
@@ -2133,6 +2156,12 @@ impl Api {
             ("categories", labels(&ann.categories)),
             ("tags", labels(&ann.tags)),
             ("creator", json::s(ann.creator.clone())),
+            ("artist", json::s(ann.artist.clone())),
+            ("artist_url", json::s(ann.artist_url.clone())),
+            ("album", json::s(ann.album.clone())),
+            ("source_url", json::s(ann.source_url.clone())),
+            ("license", json::s(ann.license.clone())),
+            ("license_url", json::s(ann.license_url.clone())),
             ("generator", json::s(ann.generator.clone())),
             ("backend", json::s(ann.backend.clone())),
             ("model", json::s(ann.model.clone())),

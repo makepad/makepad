@@ -1376,6 +1376,12 @@ fn publish_batch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult
         categories: Vec<String>,
         tags: Vec<String>,
         creator: String,
+        artist: String,
+        artist_url: String,
+        album: String,
+        source_url: String,
+        license: String,
+        license_url: String,
         generator: String,
         backend: String,
         model: String,
@@ -1426,6 +1432,12 @@ fn publish_batch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult
             categories: body_labels(ann, "categories")?,
             tags: body_labels(ann, "tags")?,
             creator: opt_str(ann, "creator")?,
+            artist: opt_str(ann, "artist")?,
+            artist_url: opt_str(ann, "artist_url")?,
+            album: opt_str(ann, "album")?,
+            source_url: opt_str(ann, "source_url")?,
+            license: opt_str(ann, "license")?,
+            license_url: opt_str(ann, "license_url")?,
             generator: opt_str(ann, "generator")?,
             backend: opt_str(ann, "backend")?,
             model: opt_str(ann, "model")?,
@@ -1477,6 +1489,12 @@ fn publish_batch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult
                     categories: item.categories.clone(),
                     tags: item.tags.clone(),
                     creator: item.creator.clone(),
+                    artist: item.artist.clone(),
+                    artist_url: item.artist_url.clone(),
+                    album: item.album.clone(),
+                    source_url: item.source_url.clone(),
+                    license: item.license.clone(),
+                    license_url: item.license_url.clone(),
                     owner: Some(p),
                     generator: item.generator.clone(),
                     backend: item.backend.clone(),
@@ -2542,6 +2560,13 @@ fn run_search(head: &Head, rc: &RouteCtx, params: SearchParams) -> RouteResult<O
                     None => Value::Null,
                 }),
                 ("title", s(h.title.clone())),
+                ("creator", s(h.creator.clone())),
+                ("artist", s(h.artist.clone())),
+                ("artist_url", s(h.artist_url.clone())),
+                ("album", s(h.album.clone())),
+                ("source_url", s(h.source_url.clone())),
+                ("license", s(h.license.clone())),
+                ("license_url", s(h.license_url.clone())),
                 ("snippet", s(h.snippet.clone())),
                 ("score", Value::Int(h.score as i64)),
                 ("live", Value::Bool(h.live)),
@@ -2626,6 +2651,12 @@ fn annotation_put(conn: &mut Conn, head: &mut Head, rc: &RouteCtx, ast: AssetId)
     let categories = body_labels(&body, "categories")?;
     let tags = body_labels(&body, "tags")?;
     let creator = opt_str(&body, "creator")?;
+    let artist = opt_str(&body, "artist")?;
+    let artist_url = opt_str(&body, "artist_url")?;
+    let album = opt_str(&body, "album")?;
+    let source_url = opt_str(&body, "source_url")?;
+    let license = opt_str(&body, "license")?;
+    let license_url = opt_str(&body, "license_url")?;
     let generator = opt_str(&body, "generator")?;
     let backend = opt_str(&body, "backend")?;
     let model = opt_str(&body, "model")?;
@@ -2666,6 +2697,12 @@ fn annotation_put(conn: &mut Conn, head: &mut Head, rc: &RouteCtx, ast: AssetId)
             categories,
             tags,
             creator,
+            artist,
+            artist_url,
+            album,
+            source_url,
+            license,
+            license_url,
             owner: Some(p),
             generator,
             backend,
@@ -2723,6 +2760,12 @@ fn annotation_get(head: &Head, rc: &RouteCtx, ast: AssetId) -> RouteResult<Outco
         ("categories", labels(&ann.categories)),
         ("tags", labels(&ann.tags)),
         ("creator", s(ann.creator)),
+        ("artist", s(ann.artist)),
+        ("artist_url", s(ann.artist_url)),
+        ("album", s(ann.album)),
+        ("source_url", s(ann.source_url)),
+        ("license", s(ann.license)),
+        ("license_url", s(ann.license_url)),
         ("generator", s(ann.generator)),
         ("backend", s(ann.backend)),
         ("model", s(ann.model)),

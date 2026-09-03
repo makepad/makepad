@@ -16,7 +16,7 @@ use makepad_asset_data::{
     AssetAlias, AssetId, AssetKind, AssetManifest, AssetRevisionId, AssetRevisionRef,
 };
 
-pub const SERVER_SCHEMA_VERSION: i64 = 13;
+pub const SERVER_SCHEMA_VERSION: i64 = 14;
 
 // GC keeps reference-blob handling fail-closed even though embedded mode can
 // never create one. Keeping the empty table in the portable schema avoids a
@@ -31,6 +31,16 @@ CREATE TABLE IF NOT EXISTS blob_refs(
 );
 CREATE INDEX IF NOT EXISTS blob_refs_by_path ON blob_refs(path);
 ";
+
+fn table_has_column(db: &Db, table: &str, column: &str) -> ServerResult<bool> {
+    let mut stmt = db.prepare("table info", &format!("PRAGMA table_info({table})"))?;
+    while stmt.step()? {
+        if stmt.column_text(1) == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 
 pub struct CatalogCore {
     pub(crate) db: Db,
@@ -72,7 +82,7 @@ impl CatalogCore {
             let mut stmt = db.prepare("get user_version", "PRAGMA user_version")?;
             if stmt.step()? { stmt.column_i64(0) } else { 0 }
         };
-        if version != 0 && version != SERVER_SCHEMA_VERSION {
+        if version != 0 && version != 13 && version != SERVER_SCHEMA_VERSION {
             return Err(ServerError::UnsupportedSchema { found: version });
         }
         db.tx(|db| {
@@ -83,7 +93,19 @@ impl CatalogCore {
             db.exec("create variant schema", VARIANT_SCHEMA)?;
             db.exec("create gc schema", GC_SCHEMA)?;
             db.exec("create empty blob-ref schema", EMPTY_BLOBREF_SCHEMA)?;
-            if version == 0 {
+            if version == 13 {
+                let columns = [
+                    "artist", "artist_url", "album", "source_url", "license", "license_url",
+                ];
+                for (column, sql) in
+                    columns.into_iter().zip(crate::search::ATTRIBUTION_MIGRATION_SQL)
+                {
+                    if !table_has_column(db, "search_annotations", column)? {
+                        db.exec("add attribution column", sql)?;
+                    }
+                }
+            }
+            if version == 0 || version == 13 {
                 db.exec(
                     "set user_version",
                     &format!("PRAGMA user_version={SERVER_SCHEMA_VERSION}"),
@@ -176,6 +198,8 @@ impl CatalogCore {
                 "public export page",
                 "SELECT a.asset_id, a.namespace, a.created_ms, sa.asset_id,
                         sa.title, sa.description, sa.kind, sa.creator,
+                        sa.artist, sa.artist_url, sa.album, sa.source_url,
+                        sa.license, sa.license_url,
                         sa.generator, sa.backend, sa.model, sa.updated_ms
                  FROM assets a
                  LEFT JOIN search_annotations sa ON sa.asset_id=a.asset_id
@@ -221,7 +245,13 @@ impl CatalogCore {
                     stmt.column_text(8),
                     stmt.column_text(9),
                     stmt.column_text(10),
-                    stmt.column_u64(11),
+                    stmt.column_text(11),
+                    stmt.column_text(12),
+                    stmt.column_text(13),
+                    stmt.column_text(14),
+                    stmt.column_text(15),
+                    stmt.column_text(16),
+                    stmt.column_u64(17),
                 ));
             }
             drop(stmt);
@@ -240,6 +270,12 @@ impl CatalogCore {
                 description,
                 kind,
                 creator,
+                artist,
+                artist_url,
+                album,
+                source_url,
+                license,
+                license_url,
                 generator,
                 backend,
                 model,
@@ -387,6 +423,12 @@ impl CatalogCore {
                         categories,
                         tags,
                         creator,
+                        artist,
+                        artist_url,
+                        album,
+                        source_url,
+                        license,
+                        license_url,
                         generator,
                         backend,
                         model,
@@ -576,6 +618,12 @@ pub struct PublicSearchProjection {
     pub categories: Vec<String>,
     pub tags: Vec<String>,
     pub creator: String,
+    pub artist: String,
+    pub artist_url: String,
+    pub album: String,
+    pub source_url: String,
+    pub license: String,
+    pub license_url: String,
     pub generator: String,
     pub backend: String,
     pub model: String,
