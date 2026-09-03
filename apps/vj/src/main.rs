@@ -219,6 +219,11 @@ use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use crate::clock::Instant;
+
+#[cfg(test)]
+pub(crate) fn test_thread_spawner() -> ThreadSpawner {
+    Cx::new(Box::new(|_, _| {})).thread_spawner()
+}
 use std::time::Duration;
 
 app_main!(App);
@@ -2869,12 +2874,17 @@ script_mod! {
 struct SungWorker {
     tx: std::sync::mpsc::Sender<(usize, u64, crate::blend::SungMap)>,
     rx: std::sync::mpsc::Receiver<(usize, u64, crate::blend::SungMap)>,
+    spawner: Option<ThreadSpawner>,
 }
 
 impl SungWorker {
     fn new() -> SungWorker {
         let (tx, rx) = std::sync::mpsc::channel();
-        SungWorker { tx, rx }
+        SungWorker { tx, rx, spawner: None }
+    }
+
+    fn set_spawner(&mut self, spawner: ThreadSpawner) {
+        self.spawner = Some(spawner);
     }
 }
 
@@ -3152,6 +3162,7 @@ struct LoopScoreWorker {
     notes_model: Arc<
         std::sync::Mutex<Option<(std::path::PathBuf, makepad_ai_notes::NotesModel)>>,
     >,
+    spawner: Option<ThreadSpawner>,
 }
 
 impl LoopScoreWorker {
@@ -3166,7 +3177,12 @@ impl LoopScoreWorker {
             active: Vec::new(),
             next_thread: 0,
             notes_model: Arc::new(std::sync::Mutex::new(None)),
+            spawner: None,
         }
+    }
+
+    fn set_spawner(&mut self, spawner: ThreadSpawner) {
+        self.spawner = Some(spawner);
     }
 
     fn submit(&mut self, job: LoopScoreJob) -> bool {
@@ -3184,11 +3200,12 @@ impl LoopScoreWorker {
             let key = job.key;
             let tx = self.tx.clone();
             let notes_model = self.notes_model.clone();
-            let thread = self.next_thread;
             self.next_thread = self.next_thread.wrapping_add(1);
-            let spawned = std::thread::Builder::new()
-                .name(format!("loop-score-{thread}"))
-                .spawn(move || {
+            let Some(spawner) = self.spawner.as_ref() else {
+                self.pending.push_front(job);
+                break;
+            };
+            let spawned = spawner.spawn(move || {
                 let mono = copy_loop_mono(
                     &job.pcm,
                     job.stems.as_ref().map(|(stems, stem)| (stems.as_ref(), *stem)),
@@ -3261,8 +3278,12 @@ impl LoopScoreWorker {
                 let blocks = Arc::new(transcription.blocks(key.bars));
                 let _ = tx.send(LoopScoreDone { key, transcription, blocks });
             });
-            if spawned.is_ok() {
-                self.active.push(key);
+            match spawned {
+                Ok(handle) => {
+                    handle.detach();
+                    self.active.push(key);
+                }
+                Err(error) => log!("loop score worker unavailable: {error}"),
             }
         }
     }
@@ -5222,7 +5243,10 @@ pub struct SyncWorker {
 }
 
 impl SyncWorker {
-    pub fn start(feed: Arc<CaptureFeed>) -> SyncWorker {
+    pub fn start(
+        feed: Arc<CaptureFeed>,
+        spawner: ThreadSpawner,
+    ) -> SyncWorker {
         let (snap_tx, snapshots) = std::sync::mpsc::channel::<SyncSnapshot>();
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let resync = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -5230,7 +5254,7 @@ impl SyncWorker {
         let thread_stop = stop.clone();
         let thread_resync = resync.clone();
         let thread_suppress = suppress.clone();
-        let _ = std::thread::Builder::new().name("vj-beat-sync".into()).spawn(move || {
+        match spawner.spawn(move || {
             let mut scratch: Vec<f32> = Vec::with_capacity(CAPTURE_RING);
             let mut analyzer: Option<BeatSyncAnalyzer> = None;
             let mut lock_started_beat: Option<i64> = None;
@@ -5341,7 +5365,10 @@ impl SyncWorker {
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
-        });
+        }) {
+            Ok(handle) => handle.detach(),
+            Err(error) => log!("vj beat-sync worker unavailable: {error}"),
+        }
         SyncWorker {
             snapshots,
             latest: std::cell::RefCell::new(SyncSnapshot::default()),
@@ -5967,13 +5994,13 @@ impl LoopAccum {
 /// Spawn the loop-analysis worker: it accumulates bounded signatures per
 /// slot (decimating to stay under `loop_detect`'s frame cap) and publishes
 /// a `LoopReport` per revision every couple dozen accepted frames.
-fn start_loop_worker() -> (
+fn start_loop_worker(spawner: ThreadSpawner) -> (
     std::sync::mpsc::Sender<LoopScanCtl>,
     std::sync::mpsc::Receiver<(AssetRevisionId, LoopReport)>,
 ) {
     let (tx, rx) = std::sync::mpsc::channel::<LoopScanCtl>();
     let (worker_results, results) = std::sync::mpsc::channel::<(AssetRevisionId, LoopReport)>();
-    let _ = std::thread::Builder::new().name("vj-loop-detect".into()).spawn(move || {
+    match spawner.spawn(move || {
         let mut slots: [LoopAccum; 2] = Default::default();
         for accum in &mut slots {
             accum.accept_mod = 1;
@@ -6036,7 +6063,10 @@ fn start_loop_worker() -> (
                 }
             }
         }
-    });
+    }) {
+        Ok(handle) => handle.detach(),
+        Err(error) => log!("vj loop-detect worker unavailable: {error}"),
+    }
     (tx, results)
 }
 
@@ -6346,6 +6376,8 @@ pub struct App {
     ai_context: String,
     #[rust]
     started: bool,
+    #[rust]
+    thread_spawner: Option<ThreadSpawner>,
     /// The IMPORT CONTENT panel: its path, its worker and its progress.
     #[rust]
     import: ImportPanel,
@@ -8070,6 +8102,7 @@ impl App {
             stream: crate::archive_stream::StreamSwatch::open_as(
                 url,
                 crate::archive_stream::FrameFormat::Nv12,
+                self.thread_spawner.clone().expect("thread workers are not started"),
             ),
             title,
             failed: false,
@@ -10298,7 +10331,10 @@ p2 {}
                 cx.audio_input(0, move |info, buffer| {
                     callback_feed.push(info.sample_rate, buffer);
                 });
-                self.sync_worker = Some(SyncWorker::start(feed.clone()));
+                self.sync_worker = Some(SyncWorker::start(
+                    feed.clone(),
+                    self.thread_spawner.clone().expect("thread workers are not started"),
+                ));
                 self.capture = Some(feed);
             }
             cx.use_audio_inputs(&self.loopback_ids.clone());
@@ -12738,8 +12774,10 @@ p2 {}
         let (sender, receiver) = std::sync::mpsc::channel();
         self.drum_bank_requested = Some(dir.clone());
         self.drum_bank_rx = Some(receiver);
-        if let Err(error) = std::thread::Builder::new()
-            .name("salamander-drumkit-load".to_string())
+        if let Err(error) = self
+            .thread_spawner
+            .as_ref()
+            .expect("thread workers are not started")
             .spawn(move || {
                 let result = makepad_drumkit::SampleBank::load(&dir).map(|bank| {
                     let summary = bank.summary();
@@ -12747,6 +12785,7 @@ p2 {}
                 });
                 let _ = sender.send(result);
             })
+            .map(|handle| handle.detach())
         {
             self.drum_bank_rx = None;
             log!("drum kit loader could not start: {error}");
@@ -13829,6 +13868,7 @@ p2 {}
                                 self.mixer.clone(),
                                 self.video_loop,
                                 true,
+                                self.thread_spawner.clone().expect("thread workers are not started"),
                             ) {
                                 Ok(mut player) => {
                                     // STICKY per-clip profile: the same
@@ -14351,7 +14391,15 @@ p2 {}
                 None => AnalysisKey::from_blob(item.media_blob),
             };
             let analysis = flipped.clone();
-            std::thread::spawn(move || crate::wave_analysis::store_analysis(&key, &analysis));
+            match self
+                .thread_spawner
+                .as_ref()
+                .expect("thread workers are not started")
+                .spawn(move || crate::wave_analysis::store_analysis(&key, &analysis))
+            {
+                Ok(handle) => handle.detach(),
+                Err(error) => log!("analysis-cache worker unavailable: {error}"),
+            }
         }
         self.push_deck_wave(cx, deck);
         self.refresh_splat_surface(cx);
@@ -14785,7 +14833,11 @@ p2 {}
                         // fresh publish as it commits.
                         let (bundle_tx, bundle_rx) = std::sync::mpsc::channel();
                         self.fx_bundle_rx = Some(bundle_rx);
-                        std::thread::spawn(move || {
+                        let seed_worker = self
+                            .thread_spawner
+                            .as_ref()
+                            .expect("thread workers are not started")
+                            .spawn(move || {
                             let _ = std::fs::create_dir_all(&cache);
                             let connect = || {
                                 let mut cfg =
@@ -14854,6 +14906,10 @@ p2 {}
                                 }
                             }
                         });
+                        match seed_worker {
+                            Ok(handle) => handle.detach(),
+                            Err(error) => log!("vjfx seed worker unavailable: {error}"),
+                        }
                     }
                     // Restored slots learn which ASSET they are running, so
                     // a livecoded document saved on disk reaches them.
@@ -15915,9 +15971,15 @@ p2 {}
         self.session_loss_since = None;
         if let Some(up) = self.up.take() {
             // Runtime joins wait out in-flight transfers: never on the UI thread.
-            let _ = std::thread::Builder::new()
-                .name("vj-session-teardown".into())
-                .spawn(move || up.shutdown());
+            match self
+                .thread_spawner
+                .as_ref()
+                .expect("thread workers are not started")
+                .spawn(move || up.shutdown())
+            {
+                Ok(handle) => handle.detach(),
+                Err(error) => log!("session teardown worker unavailable: {error}"),
+            }
         }
         let lost_music_import = self.cat_reqs.values().find_map(|purpose| match purpose {
             CatPurpose::MusicImportAlias { prepared }
@@ -16127,7 +16189,7 @@ p2 {}
         }
         if let Err(error) = self
             .music_import_run
-            .start_files(files, cx.thread_spawner())
+            .start_files(files)
         {
             crate::log!("music import refused: {error}");
         }
@@ -16744,9 +16806,16 @@ p2 {}
         {
             let (tx, rx) = std::sync::mpsc::channel();
             self.import_scan_rx = Some(rx);
-            std::thread::spawn(move || {
+            match self
+                .thread_spawner
+                .as_ref()
+                .expect("thread workers are not started")
+                .spawn(move || {
                 let _ = tx.send(media_scan::scan(&root).files.len());
-            });
+            }) {
+                Ok(handle) => handle.detach(),
+                Err(error) => log!("import scan worker unavailable: {error}"),
+            }
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -21498,7 +21567,10 @@ p2 {}
             return;
         }
         self.model_install_note = "models: starting download…".to_string();
-        self.model_install = Some(models::start_install(missing));
+        self.model_install = Some(models::start_install(
+            missing,
+            self.thread_spawner.clone().expect("thread workers are not started"),
+        ));
         self.refresh_models_row(cx);
     }
 
@@ -25351,7 +25423,12 @@ p2 {}
             let duration = state.duration_secs;
             let out = self.autopilot_sung_results.tx.clone();
             self.autopilot_sung_fed[index] = Some((gen, false));
-            std::thread::spawn(move || {
+            match self
+                .autopilot_sung_results
+                .spawner
+                .as_ref()
+                .expect("thread workers are not started")
+                .spawn(move || {
                 // Decimated mono of the vocals lane: ×4 costs nothing a
                 // phrase map can feel, and quarters the arithmetic.
                 let lane = &stems.lanes[crate::blend::VOCALS];
@@ -25372,7 +25449,10 @@ p2 {}
                         .collect(),
                 );
                 let _ = out.send((index, gen, map));
-            });
+            }) {
+                Ok(handle) => handle.detach(),
+                Err(error) => log!("sung-map worker unavailable: {error}"),
+            }
         }
         // Finished envelope maps, minus any whose load has moved on.
         while let Ok((index, gen, map)) = self.autopilot_sung_results.rx.try_recv() {
@@ -25942,6 +26022,20 @@ impl MatchEvent for App {
         let startup_started = Cx::monotonic_now();
         #[cfg(target_arch = "wasm32")]
         log!("startup: app setup begin");
+        let spawner = cx.thread_spawner();
+        self.thread_spawner = Some(spawner.clone());
+        self.import.set_spawner(spawner.clone());
+        self.music_import_run.set_spawner(spawner.clone());
+        self.archive.set_spawner(spawner.clone());
+        self.pipelines.set_spawner(spawner.clone());
+        self.autopilot_sung_results.set_spawner(spawner.clone());
+        self.loop_score_worker.set_spawner(spawner.clone());
+        livecode::start_worker(spawner.clone());
+        self.analysis.start(spawner.clone());
+        self.loop_scan.start(spawner.clone());
+        self.stems.start(spawner.clone());
+        self.lyrics.start(spawner.clone());
+        self.writeback.start(spawner.clone());
         self.ai_port = AiServicePort::open(cx, ai::manifest());
         self.status_text = "starting…".to_string();
         let output_available = output_window_available().is_ok();
@@ -25959,8 +26053,8 @@ impl MatchEvent for App {
                 (Cx::monotonic_now() - startup_started) * 1e3
             );
         }
-        self.decode.start(cx.thread_spawner());
-        self.sidechan.start(cx.thread_spawner());
+        self.decode.start(spawner.clone());
+        self.sidechan.start(spawner);
         self.paint_lit(cx, ids!(loop_score_loop), self.loop_score_loop);
         // THE GRID IS FULL BEFORE THE FIRST FRAME. The effect library is
         // compiled in, so its art is generated here — ahead of any store,
@@ -26180,7 +26274,9 @@ impl MatchEvent for App {
         // The system-audio capture is NOT installed here: MONITOR AUDIO
         // (top bar) starts it on demand — see `set_monitor_audio`.
         if self.loop_tx.is_none() {
-            let (tx, results) = start_loop_worker();
+            let (tx, results) = start_loop_worker(
+                self.thread_spawner.clone().expect("thread workers are not started"),
+            );
             self.loop_tx = Some(tx);
             self.loop_results = Some(results);
         }
@@ -28707,7 +28803,7 @@ mod sync_tests {
 
     #[test]
     fn loop_worker_accumulates_and_reports_the_visual_period() {
-        let (tx, results) = start_loop_worker();
+        let (tx, results) = start_loop_worker(test_thread_spawner());
         let revision = AssetRevisionId::from_bytes([7; 32]);
         tx.send(LoopScanCtl::Reset { slot: 0, revision: Some(revision) }).unwrap();
         // Five clean 24-frame cycles at 30 fps → a 0.8 s Wrap loop.
@@ -28755,7 +28851,7 @@ mod sync_tests {
     #[test]
     fn sync_worker_publishes_capture_health_and_no_fake_beat() {
         let feed = Arc::new(CaptureFeed::new());
-        let worker = SyncWorker::start(feed.clone());
+        let worker = SyncWorker::start(feed.clone(), test_thread_spawner());
         let mut buffer = AudioBuffer::new_with_size(512, 2);
         for sample in buffer.channel_mut(0).iter_mut() {
             *sample = 0.5;
@@ -28779,7 +28875,7 @@ mod sync_tests {
     #[test]
     fn sync_worker_publishes_a_stamped_capture_envelope() {
         let feed = Arc::new(CaptureFeed::new());
-        let worker = SyncWorker::start(feed.clone());
+        let worker = SyncWorker::start(feed.clone(), test_thread_spawner());
         let mut buffer = AudioBuffer::new_with_size(512, 2);
         for channel in 0..2 {
             for (index, sample) in buffer.channel_mut(channel).iter_mut().enumerate() {

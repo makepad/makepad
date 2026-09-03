@@ -400,6 +400,7 @@ impl SlotPlayer {
         mixer: Mixer,
         loop_on: bool,
         start_paused: bool,
+        spawner: ThreadSpawner,
     ) -> Result<SlotPlayer, String> {
         let input = DecoderInput::prepare(Path::new(path), media)?;
         let info = VideoFileDecoder::open(&input.path)
@@ -441,9 +442,10 @@ impl SlotPlayer {
         mixer.set_slot_paused(slot, start_paused);
         let thread_shared = shared.clone();
         let thread_mixer = mixer.clone();
-        std::thread::Builder::new()
-            .name(format!("vj-slot-{:?}", slot))
-            .spawn(move || decode_loop(slot, input, thread_mixer, thread_shared))
+        let fill_spawner = spawner.clone();
+        spawner
+            .spawn(move || decode_loop(slot, input, thread_mixer, thread_shared, fill_spawner))
+            .map(|handle| handle.detach())
             .map_err(|e| e.to_string())?;
         Ok(SlotPlayer {
             width: info.width,
@@ -788,7 +790,13 @@ impl Drop for SlotPlayer {
     }
 }
 
-fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<SlotShared>) {
+fn decode_loop(
+    slot: SlotId,
+    input: DecoderInput,
+    mixer: Mixer,
+    shared: Arc<SlotShared>,
+    spawner: ThreadSpawner,
+) {
     let path = &input.path;
     let mut decoder = match VideoFileDecoder::open(path) {
         Ok(d) => d,
@@ -818,7 +826,7 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
         }
         // The eager fill worker: spawned/refreshed here (a no-op lock
         // when settled). Trim-epoch invalidation lives inside it.
-        ensure_repeat_fill(&shared, path, &info);
+        ensure_repeat_fill(&shared, path, &info, &spawner);
         // Seek: reopen and discard up to the target.
         let seek = shared.seek_100ns.swap(-1, Ordering::AcqRel);
         if seek >= 0 {
@@ -1300,7 +1308,12 @@ struct RepeatCacheSlot {
 /// iteration. Cheap when settled (one lock). The budget verdict is
 /// ARITHMETIC — window length × NV12 frame bytes — so an over-budget clip
 /// is known the instant it is cued, not minutes into a decode.
-fn ensure_repeat_fill(shared: &Arc<SlotShared>, path: &str, info: &VideoFileInfo) {
+fn ensure_repeat_fill(
+    shared: &Arc<SlotShared>,
+    path: &str,
+    info: &VideoFileInfo,
+    spawner: &ThreadSpawner,
+) {
     if PlayMode::from_u8(shared.mode.load(Ordering::Acquire)) == PlayMode::Once {
         return;
     }
@@ -1348,14 +1361,19 @@ fn ensure_repeat_fill(shared: &Arc<SlotShared>, path: &str, info: &VideoFileInfo
     }
     let shared = shared.clone();
     let path = path.to_string();
-    let _ = std::thread::Builder::new().name("vj-cache-fill".into()).spawn(move || {
+    match spawner.spawn(move || {
         let t0 = Instant::now();
         let ok = repeat_fill_worker(&shared, &path, epoch, t_in, t_out, open_ended);
         shared.repeat_cache.lock().unwrap().filling = false;
         if tl_on() {
             eprintln!("tl fill done ok={ok} in {}ms", t0.elapsed().as_millis());
         }
-    });
+    }) {
+        Ok(handle) => handle.detach(),
+        Err(error) => {
+            makepad_widgets::log!("vj repeat-cache worker unavailable: {error}");
+        }
+    }
 }
 
 /// The fill itself: a PRIVATE decoder, video track only, running at
@@ -4082,7 +4100,7 @@ impl DecodePool {
 
     /// Start the CPU lanes through Makepad's native/web-worker executor.
     /// Construction starts no OS primitive, so the web build never falls
-    /// through `std::thread::spawn` and silently loses its decoder.
+    /// through the standard-library launcher and silently loses its decoder.
     pub fn start(&mut self, spawner: ThreadSpawner) {
         let Some(job_rx) = self.heavy_rx.take() else { return };
         let (heavy_workers, thumb_workers) = lane_sizes(spawner.available_parallelism().get());
@@ -5763,6 +5781,7 @@ mod mode_flip_tests {
             mixer,
             true,  // loop on
             false, // playing
+            crate::test_thread_spawner(),
         )
         .expect("open");
         player.set_muted(true);
