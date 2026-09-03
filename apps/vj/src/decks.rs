@@ -378,6 +378,16 @@ fn semitones_of_rate(rate: f64) -> f64 {
     12.0 * rate.max(f64::MIN_POSITIVE).log2()
 }
 
+/// Which mark a nudge is aimed at.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NudgeTarget {
+    Cue,
+    /// The span that is sounding, moved whole.
+    RunningLoop,
+    /// One saved loop, by its own number.
+    Slot(u16),
+}
+
 /// A motor gesture on the platter: the deck stops or starts like a record
 /// rather than like a switch. Distinct from `ScratchMotion`, which always
 /// means a POINTER — the phase-lock rules key on the hand.
@@ -1130,6 +1140,18 @@ pub enum DeckCmd {
     /// Drop the deck's track entirely: mixer voice cleared, host mirrors
     /// wiped. The channel strip stands, exactly as it does across a load.
     UnloadTrack { deck: DeckId },
+    /// Write this record's marks down: it is leaving a deck.
+    ///
+    /// Carries the whole payload rather than a deck: by the time a
+    /// command list runs, the deck it came from may already hold the
+    /// record that displaced this one, and re-reading it would file one
+    /// track's marks under another's name.
+    RetireMarks {
+        item: TrackItem,
+        cue_secs: Option<f64>,
+        bookmark: Option<f64>,
+        slots: Vec<LoopSlot>,
+    },
 }
 
 pub struct DeckEngine {
@@ -1402,6 +1424,9 @@ impl DeckEngine {
         if self.load_refused(target).is_some() {
             return vec![DeckCmd::LoadRefused { deck }];
         }
+        // The record about to be displaced is owed its marks, and this is
+        // the last moment they are still its own.
+        let retire = self.retire_marks(deck);
         self.next_gen += 1;
         let gen = self.next_gen;
         self.last_loaded = Some(deck);
@@ -1425,7 +1450,9 @@ impl DeckEngine {
         // to. Eject has always handed the pin over; loading over a track is
         // the same loss of the deck and never did.
         self.hand_pin_over(deck);
-        vec![DeckCmd::LoadTrack { deck, gen, item }]
+        let mut cmds: Vec<DeckCmd> = retire.into_iter().collect();
+        cmds.push(DeckCmd::LoadTrack { deck, gen, item });
+        cmds
     }
 
     /// Decode finished for `(deck, gen)`. Stale generations are dropped.
@@ -1795,6 +1822,14 @@ impl DeckEngine {
             Some(grid) => grid.snap_translate(start_secs, span.start_secs, unit),
             None => start_secs,
         };
+        self.place_loop(deck, start)
+    }
+
+    /// Put the running span's IN at exactly this second, keeping its
+    /// length. Where `move_loop` lands after its snap, and where a nudge
+    /// lands without one.
+    fn place_loop(&mut self, deck: DeckId, start: f64) -> Vec<DeckCmd> {
+        let Some(span) = self.deck(deck).loop_span else { return Vec::new() };
         let Some(moved) = self.usable_span(deck, start, start + span.len_secs()) else {
             // Off the end. Ignored rather than clamped: clamping would
             // slide the loop off the phase the snap just preserved, so the
@@ -1883,6 +1918,22 @@ impl DeckEngine {
     /// Put the operator's marks back: CANCEL's undo path, and the marks
     /// file on a track's install. Cap-respecting, because a snapshot taken
     /// before a restore-from-disk could carry more than the row holds.
+    /// What a record leaving a deck is owed: its marks, written down.
+    ///
+    /// Only a LOADED deck has any. While a load is in flight the slots
+    /// still belong to the record before it, and that one was already
+    /// retired when this load was asked for.
+    fn retire_marks(&self, deck: DeckId) -> Option<DeckCmd> {
+        let state = self.deck(deck);
+        let DeckLoad::Loaded { item } = &state.load else { return None };
+        Some(DeckCmd::RetireMarks {
+            item: item.clone(),
+            cue_secs: state.cue_placed.then_some(state.cue_secs),
+            bookmark: state.bookmark,
+            slots: state.loop_slots.clone(),
+        })
+    }
+
     pub fn restore_marks(
         &mut self,
         deck: DeckId,
@@ -1913,7 +1964,15 @@ impl DeckEngine {
             Some(grid) => grid.snap_translate(secs, state.cue_secs, unit),
             None => secs,
         };
-        let duration = state.duration_secs;
+        self.place_cue(deck, target);
+    }
+
+    /// Put the mark at exactly this second. Where a placement lands once
+    /// the snap has had its say -- and where a NUDGE lands, which skips
+    /// the snap entirely: the hair a grid cannot express is the whole
+    /// reason that gesture exists.
+    fn place_cue(&mut self, deck: DeckId, target: f64) {
+        let duration = self.deck(deck).duration_secs;
         let state = self.deck_mut(deck);
         state.cue_secs = if duration > 0.0 {
             target.clamp(0.0, duration)
@@ -1954,6 +2013,70 @@ impl DeckEngine {
 
     /// Dragging a blue marker off its spot: forget that saved loop. The
     /// running span is untouched — this deletes the memory, not the sound.
+    /// Move a mark by a hair, without the grid's say.
+    ///
+    /// The gesture exists for exactly the placements a beat cannot
+    /// express: a cue a few milliseconds behind the transient, a loop
+    /// whose IN sits a hair inside the kick. Snapping it would round the
+    /// step away, so the nudge goes straight to the placers.
+    pub fn nudge_mark(
+        &mut self,
+        deck: DeckId,
+        target: NudgeTarget,
+        delta_secs: f64,
+    ) -> Vec<DeckCmd> {
+        if !delta_secs.is_finite() || !self.deck(deck).is_loaded() {
+            return Vec::new();
+        }
+        match target {
+            NudgeTarget::Cue => {
+                let at = self.deck(deck).cue_secs;
+                self.place_cue(deck, at + delta_secs);
+                Vec::new()
+            }
+            NudgeTarget::RunningLoop => {
+                let Some(span) = self.deck(deck).loop_span else { return Vec::new() };
+                self.place_loop(deck, span.start_secs + delta_secs)
+            }
+            NudgeTarget::Slot(slot) => {
+                let Some(span) = self
+                    .deck(deck)
+                    .loop_slots
+                    .iter()
+                    .find(|entry| entry.slot == slot)
+                    .map(|entry| entry.span)
+                else {
+                    return Vec::new();
+                };
+                let start = span.start_secs + delta_secs;
+                // Refused rather than clamped, exactly as a hand-dragged
+                // loop is: a clamp would change the LENGTH as well as the
+                // place, which is not what was asked for.
+                let Some(moved) = self.usable_span(deck, start, start + span.len_secs()) else {
+                    return Vec::new();
+                };
+                // If this chip is the loop that is sounding, the sound
+                // goes with it -- the chip and the loop must never part.
+                let running = self.deck(deck).loop_span.filter(|live| {
+                    (live.start_secs - span.start_secs).abs() < 1e-6
+                        && (live.end_secs - span.end_secs).abs() < 1e-6
+                });
+                let state = self.deck_mut(deck);
+                if let Some(entry) =
+                    state.loop_slots.iter_mut().find(|entry| entry.slot == slot)
+                {
+                    entry.span = moved;
+                }
+                if running.is_some() {
+                    state.loop_span = Some(moved);
+                    state.loop_memory = Some(moved);
+                    return vec![DeckCmd::SetLoopSpan { deck, span: Some(moved) }];
+                }
+                Vec::new()
+            }
+        }
+    }
+
     pub fn delete_loop_slot(&mut self, deck: DeckId, slot: u16) {
         self.deck_mut(deck).loop_slots.retain(|entry| entry.slot != slot);
     }
@@ -2220,6 +2343,7 @@ impl DeckEngine {
         if matches!(self.deck(deck).load, DeckLoad::Loading { .. }) {
             return Vec::new();
         }
+        let retire = self.retire_marks(deck);
         if self.auto_fade_hold == Some(deck) {
             self.auto_fade_hold = None;
         }
@@ -2245,7 +2369,9 @@ impl DeckEngine {
         // An ejected master hands the pin to the remaining group member
         // (or the group ends with it).
         self.hand_pin_over(deck);
-        vec![DeckCmd::UnloadTrack { deck }]
+        let mut cmds: Vec<DeckCmd> = retire.into_iter().collect();
+        cmds.push(DeckCmd::UnloadTrack { deck });
+        cmds
     }
 
     /// The tracks the undo can reach, newest first. For the tests and for
@@ -2372,6 +2498,8 @@ impl DeckEngine {
         let (rate, from_lock, pitch) = (src.rate, src.rate_from_lock, src.pitch);
         let (key_shift, keylock, span, cue, cue_placed) =
             (src.key_shift, src.keylock, src.loop_span, src.cue_secs, src.cue_placed);
+        // The record the destination is losing is owed its marks.
+        let retire = self.retire_marks(to);
         let dst = self.deck_mut(to);
         dst.load = DeckLoad::Loaded { item };
         dst.duration_secs = duration;
@@ -2389,11 +2517,16 @@ impl DeckEngine {
         // it there rather than the analysis.
         dst.cue_placed = cue_placed;
         // The record travels; the marks the operator placed on the OTHER
-        // slot do not, and neither does anything half-placed.
+        // slot do not, and neither does anything half-placed. The blue
+        // chips went with the record that just left this deck -- kept,
+        // they would be filed under the incoming track's name.
+        dst.loop_slots.clear();
         dst.loop_armed = None;
         dst.bookmark = None;
         dst.splat = None;
-        vec![DeckCmd::CloneDeck { from, to }]
+        let mut cmds: Vec<DeckCmd> = retire.into_iter().collect();
+        cmds.push(DeckCmd::CloneDeck { from, to });
+        cmds
     }
 
     /// Mixer reports a deck ran off the end with looping off. With queue
@@ -6259,7 +6392,10 @@ mod tests {
         engine.observe(DeckId::A, 120.0, true);
         let gen_before = engine.deck(DeckId::A).load_gen;
         let cmds = engine.eject(DeckId::A);
-        assert_eq!(cmds, vec![DeckCmd::UnloadTrack { deck: DeckId::A }]);
+        // The record's marks are written down BEFORE the deck lets go of
+        // it, and the unload follows.
+        assert!(matches!(cmds.first(), Some(DeckCmd::RetireMarks { .. })), "{cmds:?}");
+        assert_eq!(cmds.last(), Some(&DeckCmd::UnloadTrack { deck: DeckId::A }));
         let state = engine.deck(DeckId::A);
         assert!(matches!(state.load, DeckLoad::Empty));
         // The generation retires with the track: analysis or stems still in
@@ -6375,6 +6511,115 @@ mod tests {
             .collect()
     }
 
+
+    // ---- marks that outlive the deck, and a hair of a move --------------
+
+    #[test]
+    fn a_record_leaving_a_deck_takes_its_marks_with_it() {
+        let mut e = DeckEngine::new();
+        // The saving helper leaves the deck running; loading over one is
+        // what this test is about.
+        e.over_playing = OverPlaying::Stop;
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        e.set_cue(DeckId::A, 12.5);
+        save_at(&mut e, 30.0, 4.0);
+
+        // Loading over it retires the OUTGOING record's marks first, and
+        // carries them rather than naming the deck: by the time the host
+        // runs this, the deck may hold the record that displaced it.
+        let cmds = e.click(item(2), DeckTarget::A);
+        match cmds.first() {
+            Some(DeckCmd::RetireMarks { item, cue_secs, slots, .. }) => {
+                assert_eq!(item.asset, crate::decks::tests::item(1).asset);
+                assert_eq!(*cue_secs, Some(12.5));
+                assert_eq!(slots.len(), 1);
+                assert!((slots[0].span.start_secs - 30.0).abs() < 1e-9);
+            }
+            other => panic!("the outgoing record is owed its marks: {other:?}"),
+        }
+        assert!(matches!(cmds.last(), Some(DeckCmd::LoadTrack { .. })), "and then the load");
+    }
+
+    #[test]
+    fn a_load_in_flight_is_owed_nothing() {
+        // While a load is in flight the slots belong to the record before
+        // it, and that one was retired when this load was asked for.
+        let mut e = DeckEngine::new();
+        e.click(item(1), DeckTarget::A);
+        let cmds = e.click(item(2), DeckTarget::A);
+        assert!(!cmds.iter().any(|c| matches!(c, DeckCmd::RetireMarks { .. })));
+    }
+
+    #[test]
+    fn a_clone_gives_the_destination_the_source_record_and_none_of_its_chips() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        load_analysed(&mut e, DeckId::B, 2, 120.0, 0.0);
+        e.observe(DeckId::B, 5.0, false);
+        e.engage_loop(DeckId::B, LoopSpan { start_secs: 5.0, end_secs: 7.0 }, false);
+        assert!(e.save_loop(DeckId::B));
+        e.play_pause(DeckId::A);
+        e.observe(DeckId::A, 20.0, true);
+
+        let cmds = e.instant_double();
+        assert!(
+            cmds.iter().any(|c| matches!(c, DeckCmd::RetireMarks { .. })),
+            "the record B is losing is owed its marks",
+        );
+        // And B does not keep the chips of the record it just lost.
+        assert!(e.deck(DeckId::B).loop_slots.is_empty());
+    }
+
+    #[test]
+    fn a_nudge_moves_a_mark_by_a_hair_the_grid_cannot_express() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        // QUANT on a whole beat: a placement would round a 10 ms step off.
+        e.set_snap_beats(4);
+        e.set_cue(DeckId::A, 12.0);
+        let before = e.deck(DeckId::A).cue_secs;
+        e.nudge_mark(DeckId::A, NudgeTarget::Cue, -0.010);
+        assert!(
+            (e.deck(DeckId::A).cue_secs - (before - 0.010)).abs() < 1e-9,
+            "the snap does not get a say: {} -> {}",
+            before,
+            e.deck(DeckId::A).cue_secs,
+        );
+    }
+
+    #[test]
+    fn nudging_a_saved_loop_takes_the_sound_with_it_when_it_is_the_one_running() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        save_at(&mut e, 30.0, 4.0);
+        let cmds = e.nudge_mark(DeckId::A, NudgeTarget::Slot(0), 0.010);
+        let entry = e.deck(DeckId::A).loop_slots[0];
+        assert!((entry.span.start_secs - 30.010).abs() < 1e-9, "the chip moved");
+        assert!((entry.span.len_secs() - 4.0).abs() < 1e-9, "and kept its length");
+        // It is the loop that is sounding, so the sound goes with it.
+        let live = e.deck(DeckId::A).loop_span.expect("running");
+        assert!((live.start_secs - 30.010).abs() < 1e-9);
+        assert!(cmds.iter().any(|c| matches!(c, DeckCmd::SetLoopSpan { .. })));
+
+        // Dropped, the chip still nudges and nothing sounds differently.
+        e.toggle_loop(DeckId::A);
+        let cmds = e.nudge_mark(DeckId::A, NudgeTarget::Slot(0), -0.010);
+        assert!((e.deck(DeckId::A).loop_slots[0].span.start_secs - 30.0).abs() < 1e-9);
+        assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn a_nudge_off_the_end_is_refused_rather_than_clamped() {
+        // A clamp would change the LENGTH as well as the place, which is
+        // not what a nudge asked for.
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        save_at(&mut e, 0.0, 4.0);
+        e.toggle_loop(DeckId::A);
+        let before = e.deck(DeckId::A).loop_slots[0].span;
+        e.nudge_mark(DeckId::A, NudgeTarget::Slot(0), -1.0);
+        assert_eq!(e.deck(DeckId::A).loop_slots[0].span, before, "nothing moved");
+    }
     #[test]
     fn deleting_a_loop_frees_its_number_and_moves_nothing_else() {
         let mut e = DeckEngine::new();
@@ -6551,7 +6796,10 @@ mod tests {
         load_analysed(&mut engine, DeckId::A, 1, 128.0, 0.0);
         engine.play_pause(DeckId::A);
         engine.observe(DeckId::A, 30.0, true);
-        assert_eq!(engine.eject(DeckId::A), vec![DeckCmd::UnloadTrack { deck: DeckId::A }]);
+        assert_eq!(
+            engine.eject(DeckId::A).last(),
+            Some(&DeckCmd::UnloadTrack { deck: DeckId::A }),
+        );
         assert!(matches!(engine.deck(DeckId::A).load, DeckLoad::Empty));
     }
 
@@ -6562,7 +6810,7 @@ mod tests {
         let retired_gen = engine.deck(DeckId::A).load_gen;
         let (press, cmds) = engine.eject_press(DeckId::A, 1_000);
         assert_eq!(press, EjectPress::Ejected);
-        assert_eq!(cmds, vec![DeckCmd::UnloadTrack { deck: DeckId::A }]);
+        assert_eq!(cmds.last(), Some(&DeckCmd::UnloadTrack { deck: DeckId::A }));
 
         let (press, cmds) = engine.eject_press(DeckId::A, 1_400);
         assert_eq!(press, EjectPress::Restored { title: item(1).title });
@@ -6664,6 +6912,7 @@ mod tests {
         assert!(matches!(engine.deck(DeckId::A).load, DeckLoad::Failed { .. }));
         let (press, cmds) = engine.eject_press(DeckId::A, 1_000);
         assert_eq!(press, EjectPress::Ejected);
+        // A failed load never became Loaded, so it is owed no marks.
         assert_eq!(cmds, vec![DeckCmd::UnloadTrack { deck: DeckId::A }]);
         // A track that never sounded is not offered back.
         assert!(engine.ejected_titles().is_empty());

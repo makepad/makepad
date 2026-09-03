@@ -11041,17 +11041,35 @@ p2 {}
     fn save_loop_marks(&self, deck: DeckId) {
         let state = self.decks.deck(deck);
         let Some(item) = state.item() else { return };
-        let path = Self::loop_marks_path(item);
-        let mut record = crate::marks::MarkRecord::default();
         // Only a mark a HAND put there. The first-sound default is
         // derived, and writing it here would freeze it against any later
         // re-analysis while looking exactly like a placement.
-        record.set_cue(state.cue_placed.then_some(state.cue_secs));
-        record.set_bookmark(state.bookmark);
+        Self::write_marks(
+            item,
+            state.cue_placed.then_some(state.cue_secs),
+            state.bookmark,
+            &state.loop_slots,
+        );
+    }
+
+    /// The marks of one record, written beside the library. Takes the
+    /// PAYLOAD rather than a deck, so the eager saves and the retire a
+    /// record gets on its way off a deck cannot drift apart -- and so a
+    /// retire can still be filed after the deck has moved on.
+    fn write_marks(
+        item: &crate::decks::TrackItem,
+        cue_secs: Option<f64>,
+        bookmark: Option<f64>,
+        slots: &[crate::decks::LoopSlot],
+    ) {
+        let path = Self::loop_marks_path(item);
+        let mut record = crate::marks::MarkRecord::default();
+        record.set_cue(cue_secs);
+        record.set_bookmark(bookmark);
         // Per slot, with its NUMBER, rather than renumbering the row from
         // zero: the gaps an operator left are theirs, and the file has
         // always been able to carry them.
-        for entry in &state.loop_slots {
+        for entry in slots {
             record.put(crate::marks::Mark {
                 kind: crate::marks::MarkKind::Loop,
                 start_secs: entry.span.start_secs,
@@ -13704,6 +13722,9 @@ p2 {}
                     self.deck_found_scores[b] = self.deck_found_scores[a].clone();
                     self.deck_splat_refining[b] = None;
                     self.sync_deck_controls(cx);
+                }
+                DeckCmd::RetireMarks { item, cue_secs, bookmark, slots } => {
+                    Self::write_marks(&item, cue_secs, bookmark, &slots);
                 }
                 DeckCmd::UnloadTrack { deck } => {
                     // The mirror of InstallTrack's clear block: the engine
@@ -24702,6 +24723,9 @@ p2 {}
                 self.deck_hands_on();
                 let cmds = self.decks.cue_press(deck);
                 self.run_deck_cmds(cx, cmds);
+                // A press on a stopped deck away from the mark MOVES the
+                // mark, and that is a placement like any other.
+                self.save_loop_marks(deck);
             }
             if refs.cue.released(actions) || refs.cue.clicked(actions) {
                 let cmds = self.decks.cue_release(deck);
@@ -26076,6 +26100,7 @@ p2 {}
                     }
                     OverviewEvent::SaveLoop => {
                         self.decks.save_loop(deck);
+                        self.save_loop_marks(deck);
                     }
                     OverviewEvent::RecallLoop { slot } => {
                         let cmds = self.decks.recall_loop(deck, slot);
@@ -26084,6 +26109,28 @@ p2 {}
                     OverviewEvent::DeleteLoop { slot } => {
                         self.decks.delete_loop_slot(deck, slot);
                         self.save_loop_marks(deck);
+                    }
+                    OverviewEvent::NudgeMark { hit, delta_secs } => {
+                        // The yellow row is the scanner's, kept in its own
+                        // file with a score beside each entry; nothing
+                        // here edits it.
+                        let target = match hit {
+                            crate::music_view::MarkerHit::Cue => {
+                                Some(crate::decks::NudgeTarget::Cue)
+                            }
+                            crate::music_view::MarkerHit::Save => {
+                                Some(crate::decks::NudgeTarget::RunningLoop)
+                            }
+                            crate::music_view::MarkerHit::Recall(slot) => {
+                                Some(crate::decks::NudgeTarget::Slot(slot))
+                            }
+                            crate::music_view::MarkerHit::Found(_) => None,
+                        };
+                        if let Some(target) = target {
+                            let cmds = self.decks.nudge_mark(deck, target, delta_secs);
+                            self.run_deck_cmds(cx, cmds);
+                            self.save_loop_marks(deck);
+                        }
                     }
                     OverviewEvent::SwapLoop { from, onto } => {
                         if self.decks.swap_loop_slots(deck, from, onto) {
@@ -28162,6 +28209,13 @@ impl AppMain for App {
                 }
             }
             Event::Pause | Event::Background | Event::QuitRequested(_) | Event::Shutdown => {
+                // Unloading is not the only way a record leaves a deck.
+                // Closing the app with two loaded is the common one, and
+                // without this the promise has a hole exactly where a set
+                // ends.
+                for deck in [DeckId::A, DeckId::B] {
+                    self.save_loop_marks(deck);
+                }
                 self.latch_lighting_blackout();
                 self.sync_lighting_controls_ui(cx);
                 self.publish_program_lighting(self.program_mix);

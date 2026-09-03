@@ -158,6 +158,31 @@ const MARKER_GRAB_PX: f64 = 6.0;
 /// How far a blue marker must be dragged from home before letting go
 /// DELETES it instead of recalling it.
 const MARKER_DELETE_PX: f64 = 50.0;
+/// How far one notch of the wheel moves a mark it is hovering.
+///
+/// Ten milliseconds is about a third of the shortest gap a hand can hear
+/// as separate, so a notch is a correction rather than a move; shift
+/// takes it down to a millisecond, which is under a sample at any rate
+/// this tab renders and is there for the last hair.
+const MARK_NUDGE_SECS: f64 = 0.010;
+const MARK_NUDGE_FINE_SECS: f64 = 0.001;
+/// What one detent of a wheel reports. The fader ladder divides by the
+/// same number.
+const WHEEL_NOTCH: f64 = 120.0;
+
+/// Whole notches only, with the remainder kept for the next event: a
+/// trackpad sends a continuous stream and a mark must move in steps a
+/// hand can count, not slide under it.
+fn nudge_delta(scroll: DVec2, fine: bool, residue: &mut f64) -> f64 {
+    let axis = if scroll.y != 0.0 { -scroll.y } else { -scroll.x };
+    if !axis.is_finite() {
+        return 0.0;
+    }
+    *residue += axis / WHEEL_NOTCH;
+    let notches = residue.trunc();
+    *residue -= notches;
+    notches * if fine { MARK_NUDGE_FINE_SECS } else { MARK_NUDGE_SECS }
+}
 
 /// Where inside the loop band `secs` landed, or `None` if it did not. The
 /// offset is what makes a drag feel pinned: the band travels with the
@@ -5226,6 +5251,8 @@ pub enum OverviewEvent {
     SaveLoop,
     /// A blue marker was clicked: go into that saved loop again.
     RecallLoop { slot: u16 },
+    /// The wheel over a mark: move it by a hair, without the grid's say.
+    NudgeMark { hit: MarkerHit, delta_secs: f64 },
     /// A blue marker was dragged off its spot: forget that saved loop.
     DeleteLoop { slot: u16 },
     /// One saved loop dragged onto another: exchange what the two numbers
@@ -5312,6 +5339,9 @@ pub struct VjWaveOverview {
     /// it back to normal size — the pressed-down feel.
     #[rust]
     hover_marker: Option<MarkerHit>,
+    /// Fractions of a wheel notch not yet spent. See `nudge_delta`.
+    #[rust]
+    scroll_residue: f64,
     /// The chips themselves: green for the running loop's handle, blue
     /// for a saved one — FCP's marker idiom at strip scale.
     #[live]
@@ -5688,6 +5718,23 @@ impl Widget for VjWaveOverview {
             }
             Hit::FingerHoverOut(_) => {
                 if self.hover_marker.take().is_some() {
+                    self.area.redraw(cx);
+                }
+            }
+            // The wheel over a mark moves it by a hair the grid cannot
+            // express -- a cue a few milliseconds behind the transient, a
+            // loop whose IN sits just inside the kick. Nothing else in
+            // this tab reads a scroll here, and no scrolling container
+            // surrounds the strip, so the gesture costs nothing.
+            Hit::FingerScroll(fe) => {
+                let Some(hit) = self.marker_under(self.area.rect(cx), fe.abs) else {
+                    self.scroll_residue = 0.0;
+                    return;
+                };
+                let fine = fe.modifiers.shift;
+                let delta_secs = nudge_delta(fe.scroll, fine, &mut self.scroll_residue);
+                if delta_secs != 0.0 {
+                    self.events.push(OverviewEvent::NudgeMark { hit, delta_secs });
                     self.area.redraw(cx);
                 }
             }
@@ -7441,6 +7488,33 @@ mod tests {
         assert!(band_grab(None, 12.0, 0.35).is_none());
     }
 
+
+    #[test]
+    fn a_wheel_notch_moves_a_mark_and_a_fraction_of_one_waits() {
+        let mut residue = 0.0;
+        // A trackpad's continuous stream: nothing moves until a whole
+        // notch has arrived, and then exactly one notch does.
+        for _ in 0..3 {
+            assert_eq!(nudge_delta(dvec2(0.0, -30.0), false, &mut residue), 0.0);
+        }
+        let step = nudge_delta(dvec2(0.0, -30.0), false, &mut residue);
+        assert!((step - MARK_NUDGE_SECS).abs() < 1e-12, "one notch, got {step}");
+        // A mouse sends a whole detent at once, and the wheel's sign is
+        // the same as the fader ladder's.
+        let mut residue = 0.0;
+        let step = nudge_delta(dvec2(0.0, 120.0), false, &mut residue);
+        assert!((step + MARK_NUDGE_SECS).abs() < 1e-12, "the other way, got {step}");
+        // Shift is the fine step.
+        let mut residue = 0.0;
+        let step = nudge_delta(dvec2(0.0, -120.0), true, &mut residue);
+        assert!((step - MARK_NUDGE_FINE_SECS).abs() < 1e-12);
+        // A horizontal wheel counts too, and a number that is not one
+        // moves nothing.
+        let mut residue = 0.0;
+        assert!(nudge_delta(dvec2(-120.0, 0.0), false, &mut residue) > 0.0);
+        let mut residue = 0.0;
+        assert_eq!(nudge_delta(dvec2(0.0, f64::NAN), false, &mut residue), 0.0);
+    }
     #[test]
     fn marker_clicks_resolve_nearest_and_blue_beats_green_beats_red() {
         let saved = [(0u16, 10.0, 12.0), (1u16, 30.0, 31.0)];
