@@ -153,15 +153,16 @@ impl ChatSeam for HubChat {
         prompt: &str,
         model: &str,
     ) -> Result<Box<dyn ChatTurn>, String> {
-        use makepad_ai_hub::hub::{AiHub, ChatConfig};
+        use makepad_ai_hub::hub_chat::{HubChatConfig, HubChatSession};
         use makepad_ai_hub::local_llm::LocalLlmConfig;
-        let path = if model.is_empty() {
-            self.model_path.clone()
-        } else {
-            PathBuf::from(model)
-        };
-        let session = AiHub::in_process().start_local_chat(ChatConfig {
+        let (path, preferred_model) = resolve_model(
+            model,
+            &self.model_path,
+            &makepad_ai_hub::home::weights_dir(),
+        );
+        let session = HubChatSession::start(HubChatConfig {
             llm: LocalLlmConfig::new(path),
+            preferred_model,
             system_prompt: system.to_string(),
             tools: Vec::new(),
             wake: None,
@@ -171,6 +172,55 @@ impl ChatSeam for HubChat {
             session,
             text: String::new(),
         }))
+    }
+}
+
+#[cfg(feature = "hub-chat")]
+fn resolve_model(model: &str, fallback: &std::path::Path, weights: &std::path::Path) -> (PathBuf, Option<String>) {
+    let model = model.trim();
+    if model.is_empty() {
+        return (fallback.to_path_buf(), None);
+    }
+    let named = PathBuf::from(model);
+    let candidate = if named.is_absolute() { named } else { weights.join(named) };
+    if candidate.is_file() {
+        (candidate, None)
+    } else {
+        (PathBuf::new(), Some(model.to_string()))
+    }
+}
+
+#[cfg(all(test, feature = "hub-chat"))]
+mod model_tests {
+    use super::resolve_model;
+    use std::path::PathBuf;
+
+    #[test]
+    fn empty_file_and_fleet_model_values_take_distinct_routes() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("chat-model-test-{}", std::process::id()));
+        let weights = root.join("weights");
+        std::fs::create_dir_all(&weights).unwrap();
+        let local = weights.join("local.gguf");
+        std::fs::write(&local, b"fixture").unwrap();
+        let fallback = root.join("fallback.gguf");
+
+        assert_eq!(resolve_model("", &fallback, &weights), (fallback, None));
+        assert_eq!(
+            resolve_model("local.gguf", std::path::Path::new(""), &weights),
+            (local.clone(), None)
+        );
+        assert_eq!(
+            resolve_model(local.to_str().unwrap(), std::path::Path::new(""), &weights),
+            (local, None)
+        );
+        assert_eq!(
+            resolve_model("qwen3.8-27b", std::path::Path::new(""), &weights),
+            (PathBuf::new(), Some("qwen3.8-27b".to_string()))
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 
