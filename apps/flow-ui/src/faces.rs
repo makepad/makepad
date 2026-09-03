@@ -245,6 +245,7 @@ pub struct ModelChoice {
     pub id: String,
     pub label: String,
     pub dimmed: bool,
+    pub note: String,
 }
 
 /// Collapse repeated model ids, count distinct advertising nodes, and put
@@ -253,37 +254,95 @@ pub fn model_choices(response: &ModelsResponse) -> Vec<ModelChoice> {
     #[derive(Default)]
     struct Acc {
         nodes: BTreeSet<String>,
-        ready_or_available: bool,
-        all_absent: bool,
+        ready: BTreeSet<String>,
+        absent: BTreeSet<String>,
+        too_small: BTreeSet<String>,
+        admissible: BTreeSet<String>,
+        reasons: BTreeSet<String>,
     }
 
     let mut by_id: BTreeMap<String, Acc> = BTreeMap::new();
     for model in &response.models {
-        let entry = by_id.entry(model.id.clone()).or_insert_with(|| Acc {
-            all_absent: true,
-            ..Acc::default()
-        });
+        let entry = by_id.entry(model.id.clone()).or_default();
         entry.nodes.insert(model.node.clone());
-        entry.ready_or_available |=
-            model.available || matches!(model.state.as_str(), "ready" | "loaded");
-        entry.all_absent &= model.state == "absent";
+        match model.state.as_str() {
+            "ready" | "loaded" => {
+                entry.ready.insert(model.node.clone());
+            }
+            "absent" => {
+                entry.absent.insert(model.node.clone());
+            }
+            "too_small" => {
+                entry.too_small.insert(model.node.clone());
+            }
+            _ => {}
+        }
+        if model.available && model.state != "too_small" {
+            entry.admissible.insert(model.node.clone());
+        }
+        if let Some(note) = model.note.as_ref().filter(|note| !note.is_empty()) {
+            entry.reasons.insert(note.clone());
+        }
     }
     let mut choices: Vec<_> = by_id
         .into_iter()
         .map(|(id, acc)| {
-            let label = format!("{} · {} nodes", id, acc.nodes.len());
+            let mut label = id.clone();
+            if !acc.ready.is_empty() {
+                label.push_str(&format!(" · {} ready", acc.ready.len()));
+            }
+            if !acc.absent.is_empty() {
+                label.push_str(&format!(" · {} absent", acc.absent.len()));
+            }
+            if !acc.too_small.is_empty() {
+                label.push_str(&format!(" · {} too small", acc.too_small.len()));
+            }
+            let accounted = acc
+                .ready
+                .union(&acc.absent)
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                .union(&acc.too_small)
+                .count();
+            if accounted < acc.nodes.len() {
+                label.push_str(&format!(" · {} other", acc.nodes.len() - accounted));
+            }
+            let ready_nodes: Vec<_> = acc
+                .ready
+                .iter()
+                .map(|url| {
+                    let gpu = response
+                        .nodes
+                        .iter()
+                        .find(|node| node.base_url == *url)
+                        .and_then(|node| node.gpu.as_deref());
+                    match gpu {
+                        Some(gpu) => format!("{} {gpu}", display_node(url)),
+                        None => display_node(url).to_string(),
+                    }
+                })
+                .collect();
+            let note = if !ready_nodes.is_empty() {
+                ready_nodes.join(" · ")
+            } else if acc.admissible.is_empty() {
+                acc.reasons.into_iter().collect::<Vec<_>>().join(" · ")
+            } else {
+                "downloads on first use".to_string()
+            };
+            let dimmed = acc.admissible.is_empty();
             (
-                if acc.all_absent {
-                    2
-                } else if acc.ready_or_available {
+                if !acc.ready.is_empty() {
                     0
+                } else if dimmed {
+                    2
                 } else {
                     1
                 },
                 ModelChoice {
                     id,
                     label,
-                    dimmed: acc.all_absent,
+                    dimmed,
+                    note,
                 },
             )
         })
@@ -294,6 +353,16 @@ pub fn model_choices(response: &ModelsResponse) -> Vec<ModelChoice> {
             .then_with(|| left.id.cmp(&right.id))
     });
     choices.into_iter().map(|(_, choice)| choice).collect()
+}
+
+fn display_node(base_url: &str) -> &str {
+    base_url
+        .strip_prefix("http://")
+        .or_else(|| base_url.strip_prefix("https://"))
+        .unwrap_or(base_url)
+        .split(':')
+        .next()
+        .unwrap_or(base_url)
 }
 
 script_mod! {
@@ -461,21 +530,37 @@ script_mod! {
     mod.flow.ui.ModelPicker = set_type_default() do mod.flow.ui.ModelPickerBase{
         width: Fill
         height: Fit
-        flow: Right
-        spacing: theme.space_2
-        align: Align{y: 0.5}
-        Label{
-            width: 44
-            text: "model"
-            draw_text +: {
-                color: theme.flow_text_muted
-                text_style: theme.font_regular{font_size: 9}
+        flow: Down
+        spacing: theme.space_1
+        select := View{
+            width: Fill
+            height: Fit
+            flow: Right
+            spacing: theme.space_2
+            align: Align{y: 0.5}
+            Label{
+                width: 44
+                text: "model"
+                draw_text +: {
+                    color: theme.flow_text_muted
+                    text_style: theme.font_regular{font_size: 9}
+                }
+            }
+            picker := DropDown{
+                width: Fill
+                height: 26
+                labels: ["hub picks"]
             }
         }
-        picker := DropDown{
+        note := Label{
             width: Fill
-            height: 26
-            labels: ["hub picks"]
+            height: Fit
+            visible: false
+            text: ""
+            draw_text +: {
+                color: theme.flow_text_hint
+                text_style: theme.font_regular{font_size: 8}
+            }
         }
     }
 
@@ -1033,19 +1118,31 @@ impl ModelPicker {
         if !selected.is_empty() && !labels.iter().any(|label| *label == selected) {
             labels.push(self.value.clone());
         }
-        let picker = self.view.drop_down(cx, ids!(picker));
+        let picker = self.view.drop_down(cx, ids!(select.picker));
         picker.set_labels(cx, labels);
         let mut dimmed = vec![false];
         dimmed.extend(self.models.iter().map(|model| model.dimmed));
         picker.set_dimmed_items(cx, dimmed);
         let selected = if self.value.is_empty() { HUB_PICKS } else { &selected };
         picker.set_selected_by_label(selected, cx);
+        let note = self
+            .models
+            .iter()
+            .find(|model| model.id == self.value)
+            .map(|model| model.note.as_str())
+            .unwrap_or_default();
+        let note_label = self.view.label(cx, ids!(note));
+        note_label.set_text(cx, note);
+        note_label.set_visible(cx, !note.is_empty());
         self.view.redraw(cx);
     }
 
     /// The label the user picked, as the `model` param value.
     pub fn picked(&self, cx: &mut Cx, actions: &Actions) -> Option<String> {
-        let index = self.view.drop_down(cx, ids!(picker)).changed(actions)?;
+        let index = self
+            .view
+            .drop_down(cx, ids!(select.picker))
+            .changed(actions)?;
         Some(
             index
                 .checked_sub(1)
@@ -3148,27 +3245,62 @@ mod tests {
     #[test]
     fn models_are_deduped_counted_and_ready_first() {
         let response = ModelsResponse {
-            nodes: vec![FleetNodeDto {
-                base_url: "a".into(),
-                fleet: "test".into(),
-                healthy: true,
-            }],
+            nodes: (1..=6)
+                .map(|index| FleetNodeDto {
+                    base_url: format!("10.0.0.{index}"),
+                    fleet: "test".into(),
+                    healthy: true,
+                    gpu: (index == 1).then(|| "RTX PRO 6000".into()),
+                    vram_total_mb: None,
+                    vram_usable_mb: None,
+                    vram_free_mb: None,
+                })
+                .collect(),
             models: vec![
-                model("z-absent", "a", true, "absent"),
-                model("a-ready", "b", true, "ready"),
-                model("a-ready", "a", true, "loaded"),
-                model("z-absent", "a", true, "absent"),
+                model("flux2-dev", "10.0.0.1", true, "ready"),
+                model("flux2-dev", "10.0.0.2", true, "loaded"),
+                model("flux2-dev", "10.0.0.3", true, "absent"),
+                model("flux2-dev", "10.0.0.4", true, "absent"),
+                model("flux2-dev", "10.0.0.5", true, "absent"),
+                model("flux2-dev", "10.0.0.6", true, "absent"),
             ],
             snapshot_ms: 1,
         };
         let choices = model_choices(&response);
-        assert_eq!(choices.len(), 2);
-        assert_eq!(choices[0].id, "a-ready");
-        assert_eq!(choices[0].label, "a-ready · 2 nodes");
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].id, "flux2-dev");
+        assert_eq!(choices[0].label, "flux2-dev · 2 ready · 4 absent");
+        assert_eq!(
+            choices[0].note,
+            "10.0.0.1 RTX PRO 6000 · 10.0.0.2"
+        );
         assert!(!choices[0].dimmed);
-        assert_eq!(choices[1].id, "z-absent");
-        assert_eq!(choices[1].label, "z-absent · 1 nodes");
-        assert!(choices[1].dimmed);
+    }
+
+    #[test]
+    fn model_with_no_admissible_node_is_dimmed_with_the_capacity_reason() {
+        let mut too_small = model("flux2-dev", "10.0.0.217", false, "too_small");
+        too_small.note = Some("needs 31744 MB, this card can free 30603".into());
+        let response = ModelsResponse {
+            nodes: vec![FleetNodeDto {
+                base_url: "10.0.0.217".into(),
+                fleet: "test".into(),
+                healthy: true,
+                gpu: Some("RTX 5090".into()),
+                vram_total_mb: Some(32_607),
+                vram_usable_mb: Some(30_603),
+                vram_free_mb: Some(29_785),
+            }],
+            models: vec![too_small],
+            snapshot_ms: 1,
+        };
+        let choices = model_choices(&response);
+        assert_eq!(choices[0].label, "flux2-dev · 1 too small");
+        assert!(choices[0].dimmed);
+        assert_eq!(
+            choices[0].note,
+            "needs 31744 MB, this card can free 30603"
+        );
     }
 
     #[test]
