@@ -189,17 +189,29 @@ pub fn route_wire(
     style: RouteStyle,
     corridor_offset: f64,
 ) -> WireRoute {
-    let straight = cubic_route(from, to);
-    if !cubic_intersects(&straight, obstacles) {
-        return straight;
-    }
-
     let radius = style.corner_radius.max(16.0);
     let stub = style.port_stub.max(radius * 2.0).max(24.0);
     let source_stub = Point::new(from.x + stub, from.y);
     let target_stub = Point::new(to.x - stub, to.y);
-    if !segment_clear(from, source_stub, obstacles)
-        || !segment_clear(target_stub, to, obstacles)
+    let source_owner = endpoint_obstacle(from, obstacles, true);
+    let target_owner = endpoint_obstacle(to, obstacles, false);
+
+    let straight = cubic_route(from, to);
+    if route_samples_clear(
+        &straight.samples,
+        obstacles,
+        source_owner,
+        target_owner,
+        from,
+        source_stub,
+        target_stub,
+        to,
+    ) {
+        return straight;
+    }
+
+    if !segment_clear_except(from, source_stub, obstacles, source_owner)
+        || !segment_clear_except(target_stub, to, obstacles, target_owner)
     {
         return straight;
     }
@@ -209,7 +221,7 @@ pub fn route_wire(
     // card margin.
     let reserve = radius + corridor_offset.abs();
     let guides: Vec<Obstacle> = obstacles.iter().map(|rect| rect.inflate(reserve)).collect();
-    let mut candidates = Vec::with_capacity(3);
+    let mut candidates = Vec::with_capacity(3 + obstacles.len() * 2);
 
     if source_stub.x <= target_stub.x {
         if let Some(channel) = choose_forward_channel(source_stub, target_stub, &guides, corridor_offset)
@@ -225,55 +237,44 @@ pub fn route_wire(
         }
     }
 
-    if let Some((above, below)) = outside_rows(from, to, &guides, radius, corridor_offset) {
-        if source_stub.x <= target_stub.x {
-            candidates.push(vec![
-                from,
-                source_stub,
-                Point::new(source_stub.x, above),
-                Point::new(target_stub.x, above),
-                target_stub,
-                to,
-            ]);
-            candidates.push(vec![
-                from,
-                source_stub,
-                Point::new(source_stub.x, below),
-                Point::new(target_stub.x, below),
-                target_stub,
-                to,
-            ]);
-        } else {
-            let right = guides
-                .iter()
-                .fold(source_stub.x.max(to.x), |x, rect| x.max(rect.max.x))
-                + radius
-                + corridor_offset.max(0.0);
-            candidates.push(vec![
-                from,
-                source_stub,
-                Point::new(right, source_stub.y),
-                Point::new(right, above),
-                Point::new(target_stub.x, above),
-                target_stub,
-                to,
-            ]);
-            candidates.push(vec![
-                from,
-                source_stub,
-                Point::new(right, source_stub.y),
-                Point::new(right, below),
-                Point::new(target_stub.x, below),
-                target_stub,
-                to,
-            ]);
-        }
+    // Backward and vertically stacked connections leave the source on its
+    // right, drop on that clear track, cross on the shortest clear row, and
+    // approach the target from its left. Trying every obstacle boundary also
+    // finds the useful row between two stacked cards instead of needlessly
+    // going around the entire graph.
+    for row in routing_rows(from, to, obstacles, radius, corridor_offset) {
+        candidates.push(vec![
+            from,
+            source_stub,
+            Point::new(source_stub.x, row),
+            Point::new(target_stub.x, row),
+            target_stub,
+            to,
+        ]);
     }
 
     let best = candidates
         .into_iter()
         .map(simplify)
-        .filter(|points| valid_orthogonal(points, &guides, radius))
+        .filter(|points| {
+            valid_orthogonal(
+                points,
+                obstacles,
+                radius,
+                source_owner,
+                target_owner,
+            ) && fillet_boxes_clear(points, obstacles, radius)
+                && route_samples_clear(
+                    &rounded_samples(points, radius),
+                    obstacles,
+                    source_owner,
+                    target_owner,
+                    from,
+                    source_stub,
+                    target_stub,
+                    to,
+                )
+        })
         .min_by(|left, right| compare_routes(left, right));
     let Some(points) = best else {
         return straight;
@@ -289,27 +290,43 @@ pub fn pulse_progress(elapsed_seconds: f64) -> f64 {
     t * t * (3.0 - 2.0 * t)
 }
 
-fn cubic_intersects(route: &WireRoute, obstacles: &[Obstacle]) -> bool {
-    route
-        .samples
-        .windows(2)
-        .any(|pair| !segment_clear(pair[0], pair[1], obstacles))
+fn endpoint_obstacle(point: Point, obstacles: &[Obstacle], exits_right: bool) -> Option<usize> {
+    obstacles
+        .iter()
+        .enumerate()
+        .filter_map(|(index, rect)| {
+            let contains = point.x >= rect.min.x
+                && point.x <= rect.max.x
+                && point.y >= rect.min.y
+                && point.y <= rect.max.y;
+            contains.then_some((
+                index,
+                if exits_right {
+                    rect.max.x - point.x
+                } else {
+                    point.x - rect.min.x
+                },
+            ))
+        })
+        .min_by(|left, right| left.1.partial_cmp(&right.1).unwrap_or(Ordering::Equal))
+        .map(|(index, _)| index)
 }
 
-fn outside_rows(
+fn routing_rows(
     from: Point,
     to: Point,
     obstacles: &[Obstacle],
     radius: f64,
     offset: f64,
-) -> Option<(f64, f64)> {
-    let mut top = from.y.min(to.y);
-    let mut bottom = from.y.max(to.y);
+) -> Vec<f64> {
+    let mut rows = vec![from.y, to.y];
     for rect in obstacles {
-        top = top.min(rect.min.y);
-        bottom = bottom.max(rect.max.y);
+        rows.push(rect.min.y - radius + offset);
+        rows.push(rect.max.y + radius + offset);
     }
-    Some((top - radius + offset, bottom + radius + offset))
+    rows.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
+    rows.dedup_by(|left, right| (*left - *right).abs() < 1e-6);
+    rows
 }
 
 /// Find a clear vertical track between the stubs. Forbidden x intervals are
@@ -394,14 +411,30 @@ fn simplify(points: Vec<Point>) -> Vec<Point> {
     out
 }
 
-fn valid_orthogonal(points: &[Point], obstacles: &[Obstacle], radius: f64) -> bool {
+fn valid_orthogonal(
+    points: &[Point],
+    obstacles: &[Obstacle],
+    radius: f64,
+    source_owner: Option<usize>,
+    target_owner: Option<usize>,
+) -> bool {
     if points.len() < 4
         || points.windows(2).any(|pair| {
             (pair[0].x - pair[1].x).abs() > 1e-6 && (pair[0].y - pair[1].y).abs() > 1e-6
         })
         || points
             .windows(2)
-            .any(|pair| !segment_clear(pair[0], pair[1], obstacles))
+            .enumerate()
+            .any(|(index, pair)| {
+                let ignored = if index == 0 {
+                    source_owner
+                } else if index + 2 == points.len() {
+                    target_owner
+                } else {
+                    None
+                };
+                !segment_clear_except(pair[0], pair[1], obstacles, ignored)
+            })
     {
         return false;
     }
@@ -419,6 +452,69 @@ fn valid_orthogonal(points: &[Point], obstacles: &[Obstacle], radius: f64) -> bo
     true
 }
 
+/// Validate the entire rounded path against the caller's margin-inflated
+/// obstacles. Only the straight piece through each port's own edge is
+/// exempt; the first/last fillets and every middle segment remain checked.
+fn route_samples_clear(
+    samples: &[Point],
+    obstacles: &[Obstacle],
+    source_owner: Option<usize>,
+    target_owner: Option<usize>,
+    from: Point,
+    source_stub: Point,
+    target_stub: Point,
+    to: Point,
+) -> bool {
+    samples.windows(2).all(|pair| {
+        let source_exempt = horizontal_subsegment(pair[0], pair[1], from, source_stub);
+        let target_exempt = horizontal_subsegment(pair[0], pair[1], target_stub, to);
+        let ignored = if source_exempt {
+            source_owner
+        } else if target_exempt {
+            target_owner
+        } else {
+            None
+        };
+        segment_clear_except(pair[0], pair[1], obstacles, ignored)
+    })
+}
+
+fn horizontal_subsegment(a: Point, b: Point, start: Point, end: Point) -> bool {
+    const EPSILON: f64 = 1e-6;
+    if (a.y - start.y).abs() > EPSILON
+        || (b.y - start.y).abs() > EPSILON
+        || (start.y - end.y).abs() > EPSILON
+    {
+        return false;
+    }
+    let min_x = start.x.min(end.x) - EPSILON;
+    let max_x = start.x.max(end.x) + EPSILON;
+    a.x >= min_x && a.x <= max_x && b.x >= min_x && b.x <= max_x
+}
+
+/// The conservative fillet test requested by the router contract: even the
+/// complete bounding box of every rounded corner must miss every card.
+fn fillet_boxes_clear(points: &[Point], obstacles: &[Obstacle], radius: f64) -> bool {
+    (1..points.len() - 1).all(|index| {
+        let before = points[index - 1];
+        let corner = points[index];
+        let after = points[index + 1];
+        let r = radius
+            .min(before.distance(corner) * 0.5)
+            .min(corner.distance(after) * 0.5);
+        let entry = move_toward(corner, before, r);
+        let exit = move_toward(corner, after, r);
+        let min_x = entry.x.min(corner.x).min(exit.x);
+        let max_x = entry.x.max(corner.x).max(exit.x);
+        let min_y = entry.y.min(corner.y).min(exit.y);
+        let max_y = entry.y.max(corner.y).max(exit.y);
+        obstacles.iter().all(|rect| {
+            !ranges_overlap_open(min_x, max_x, rect.min.x, rect.max.x)
+                || !ranges_overlap_open(min_y, max_y, rect.min.y, rect.max.y)
+        })
+    })
+}
+
 fn compare_routes(left: &[Point], right: &[Point]) -> Ordering {
     let left_bends = left.len().saturating_sub(2);
     let right_bends = right.len().saturating_sub(2);
@@ -433,8 +529,16 @@ fn path_length(points: &[Point]) -> f64 {
     points.windows(2).map(|pair| pair[0].distance(pair[1])).sum()
 }
 
+#[cfg(test)]
 fn segment_clear(a: Point, b: Point, obstacles: &[Obstacle]) -> bool {
-    obstacles.iter().all(|rect| {
+    segment_clear_except(a, b, obstacles, None)
+}
+
+fn segment_clear_except(a: Point, b: Point, obstacles: &[Obstacle], ignored: Option<usize>) -> bool {
+    obstacles.iter().enumerate().all(|(index, rect)| {
+        if ignored == Some(index) {
+            return true;
+        }
         if rect.contains_strict(a) || rect.contains_strict(b) {
             return false;
         }
@@ -536,6 +640,30 @@ mod tests {
         route_wire(from, to, obstacles, RouteStyle::default(), 0.0)
     }
 
+    fn card(x: f64, y: f64, width: f64, height: f64) -> Obstacle {
+        Obstacle::from_xywh(x, y, width, height).inflate(12.0)
+    }
+
+    fn assert_route_misses_cards(route: &WireRoute, obstacles: &[Obstacle]) {
+        let style = RouteStyle::default();
+        let stub = style.port_stub.max(style.corner_radius * 2.0).max(24.0);
+        let source_stub = Point::new(route.from.x + stub, route.from.y);
+        let target_stub = Point::new(route.to.x - stub, route.to.y);
+        assert!(route_samples_clear(
+            &route.samples,
+            obstacles,
+            endpoint_obstacle(route.from, obstacles, true),
+            endpoint_obstacle(route.to, obstacles, false),
+            route.from,
+            source_stub,
+            target_stub,
+            route.to,
+        ));
+        if let RouteKind::Orthogonal { points, radius } = &route.kind {
+            assert!(fillet_boxes_clear(points, obstacles, *radius));
+        }
+    }
+
     #[test]
     fn straight_when_clear() {
         let route = route(Point::new(0.0, 20.0), Point::new(240.0, 80.0), &[]);
@@ -564,6 +692,42 @@ mod tests {
         let max_y = points.iter().map(|point| point.y).fold(f64::NEG_INFINITY, f64::max);
         assert!(min_y < obstacle.min.y, "shorter route should pass above: {points:?}");
         assert!(max_y < obstacle.max.y + 32.0);
+    }
+
+    #[test]
+    fn stacked_image_to_picture_keeps_every_middle_segment_outside_endpoint_cards() {
+        let obstacles = [
+            card(40.0, 60.0, 330.0, 165.0),
+            card(40.0, 360.0, 330.0, 165.0),
+            card(420.0, 60.0, 330.0, 430.0),
+            card(420.0, 520.0, 330.0, 165.0),
+        ];
+        let route = route(Point::new(750.0, 86.0), Point::new(420.0, 546.0), &obstacles);
+        let RouteKind::Orthogonal { points, .. } = &route.kind else {
+            panic!("stacked endpoint cards require a corridor");
+        };
+        assert!(points[1].x >= route.from.x + 24.0, "{points:?}");
+        assert_route_misses_cards(&route, &obstacles);
+    }
+
+    #[test]
+    fn below_left_prompt_to_expand_uses_clear_right_drop_and_cross_row() {
+        let obstacles = [
+            card(40.0, 60.0, 330.0, 165.0),
+            card(40.0, 360.0, 330.0, 165.0),
+            card(420.0, 60.0, 330.0, 430.0),
+            card(420.0, 520.0, 330.0, 165.0),
+        ];
+        let route = route(Point::new(370.0, 86.0), Point::new(40.0, 386.0), &obstacles);
+        let RouteKind::Orthogonal { points, .. } = &route.kind else {
+            panic!("below-left endpoint cards require a corridor");
+        };
+        assert!(points[1].x >= route.from.x + 24.0, "{points:?}");
+        assert!(
+            points.iter().any(|point| point.y > 237.0 && point.y < 348.0),
+            "route should cross between the stacked cards: {points:?}"
+        );
+        assert_route_misses_cards(&route, &obstacles);
     }
 
     #[test]

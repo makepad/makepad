@@ -28,9 +28,12 @@ use crate::faces::FaceHost;
 use crate::graph_edit::{self, GraphIndex, NODE_WIDTH};
 use crate::wire_route::{self, Obstacle, Point, RouteKind, RouteStyle, WireRoute};
 use makepad_flow::{Graph, Literal, Node, NodeInputValue, PortType};
+use makepad_widgets::fab_controls::FabValueInput;
 use makepad_widgets::makepad_draw::DrawSvg;
+use makepad_widgets::makepad_platform::event::TouchState;
 use makepad_widgets::widget_tree::CxWidgetExt;
 use makepad_widgets::*;
+use std::any::TypeId;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -41,6 +44,8 @@ pub const LOCAL_ORIGIN: f64 = 32768.0;
 const ROOT_SIZE: f64 = 65536.0;
 
 const CARD_RADIUS: f32 = 16.0;
+const CARD_OUTLINE_PX: f64 = 2.0;
+const CARD_HOVER_OUTLINE_ALPHA: f32 = 0.42;
 /// The icon-and-title row above every card.
 const LABEL_H: f64 = 26.0;
 /// Top inset occupied by the card's in-body header/chrome before its ports.
@@ -61,6 +66,40 @@ const FIT_MARGIN: f64 = 32.0;
 const MIN_NODE_WIDTH: f64 = 160.0;
 const MIN_TEXT_LINE_H: f64 = 18.0;
 const RESIZE_GRIP: f64 = 18.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CardOutlineGeometry {
+    outer_rect: Rect,
+    radius: f32,
+    stroke_width: f32,
+}
+
+/// The shader strokes the body's own SDF shape. Its outer edge is therefore
+/// exactly this much larger than the body while retaining `CARD_RADIUS`.
+fn card_outline_geometry(body_rect: Rect, zoom: f64) -> CardOutlineGeometry {
+    let stroke_width = CARD_OUTLINE_PX / zoom.max(0.01);
+    CardOutlineGeometry {
+        outer_rect: Rect {
+            pos: body_rect.pos - dvec2(stroke_width, stroke_width),
+            size: body_rect.size + dvec2(stroke_width * 2.0, stroke_width * 2.0),
+        },
+        radius: CARD_RADIUS,
+        stroke_width: stroke_width as f32,
+    }
+}
+
+fn is_interactive_face_type(type_id: TypeId) -> bool {
+    type_id == TypeId::of::<TextInput>()
+        || type_id == TypeId::of::<FabValueInput>()
+        || type_id == TypeId::of::<DropDown>()
+        || type_id == TypeId::of::<DropDown2>()
+        || type_id == TypeId::of::<Button>()
+        || type_id == TypeId::of::<FoldHeader>()
+        || type_id == TypeId::of::<FoldButton>()
+        || type_id == TypeId::of::<Slider>()
+        || type_id == TypeId::of::<CheckBox>()
+        || type_id == TypeId::of::<RadioButton>()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct CardContentRect {
@@ -183,6 +222,8 @@ script_mod! {
         border_color: theme.flow_edge
         border_size: 1.0
         border_radius: 16.0
+        outline_color: #0000
+        outline_size: 0.0
         shadow_color: theme.flow_shadow
         shadow_radius: 12.0
         shadow_offset: vec2(0.0, 0.0)
@@ -229,7 +270,10 @@ script_mod! {
             }
             sdf.fill_keep(self.color)
             if self.border_size > 0.0 {
-                sdf.stroke(self.border_color, self.border_size)
+                sdf.stroke_keep(self.border_color, self.border_size)
+            }
+            if self.outline_size > 0.0 {
+                sdf.stroke(self.outline_color, self.outline_size)
             }
             return sdf.result
         }
@@ -354,6 +398,10 @@ pub struct DrawFlowCard {
     border_size: f32,
     #[live]
     border_radius: f32,
+    #[live]
+    outline_color: Vec4f,
+    #[live]
+    outline_size: f32,
     #[live]
     shadow_color: Vec4f,
     #[live]
@@ -980,6 +1028,33 @@ impl FlowCanvas {
         self.resize_at(abs).is_some()
     }
 
+    /// Display-only face widgets deliberately do not block a card drag. The
+    /// allowlist mirrors the controls that own presses inside a card face.
+    fn interactive_face_widget_at(&self, cx: &Cx, abs: DVec2, handled: Area) -> bool {
+        let local = self.camera.screen_to_local(abs);
+        let mut interactive = false;
+        let mut handled_widget_found = handled.is_empty();
+        for (_, root) in &self.face_roots {
+            root.find_widgets_from_point(cx, local, &mut |widget| {
+                handled_widget_found |= widget.area() == handled;
+                if !interactive
+                    && widget
+                        .widget_type_id()
+                        .is_some_and(is_interactive_face_type)
+                {
+                    interactive = true;
+                }
+            });
+            if interactive {
+                break;
+            }
+        }
+        // Scroll bars are stored inside a View rather than as WidgetRefs. A
+        // face-owned capture with no matching widget is therefore an opaque
+        // interactive control and must keep the press.
+        interactive || !handled_widget_found
+    }
+
     pub fn set_highlight(&mut self, cx: &mut Cx, node: Option<String>) {
         if self.highlight != node {
             self.highlight = node;
@@ -1447,9 +1522,7 @@ impl FlowCanvas {
             }
             let obstacles: Vec<Obstacle> = card_rects
                 .iter()
-                .enumerate()
-                .filter(|(card, _)| *card != edge.from && *card != edge.to)
-                .map(|(_, rect)| {
+                .map(|rect| {
                     Obstacle::from_xywh(rect.pos.x, rect.pos.y, rect.size.x, rect.size.y)
                         .inflate(CARD_CLEARANCE)
                 })
@@ -1464,12 +1537,7 @@ impl FlowCanvas {
         const CARD_CLEARANCE: f64 = 12.0;
         let from = Self::route_point(self.port_local(graph, from_index, from_port, true));
         let to = Self::route_point(to);
-        let target = match &self.drag {
-            Some(Drag::Wire { target, .. }) => target.map(|(node, _)| node),
-            _ => None,
-        };
         let obstacles: Vec<Obstacle> = (0..graph.nodes.len())
-            .filter(|index| *index != from_index && Some(*index) != target)
             .map(|index| {
                 let rect = self.card_rect(graph, index);
                 Obstacle::from_xywh(rect.pos.x, rect.pos.y, rect.size.x, rect.size.y)
@@ -1587,15 +1655,16 @@ impl FlowCanvas {
         self.draw_vec.end(cx);
     }
 
-    /// Card shadow and body. Selection is deliberately drawn later in the
-    /// canvas list so it remains above every card child.
+    /// Card shadow, body and its shared-geometry selection/hover outline.
     fn draw_card(&mut self, cx: &mut Cx2d, graph: &Graph, indices: &[usize]) {
         self.draw_card.shadow_radius = (12.0 / self.camera.scale.max(0.01)) as f32;
         self.draw_card.shadow_offset = vec2(0.0, 0.0);
         let hover = self.hover;
+        let selected = self.selected.as_deref();
         for index in indices.iter().copied() {
             let node = &graph.nodes[index];
             let rect = self.card_rect(graph, index);
+            let outline = card_outline_geometry(rect, self.camera.scale);
             let highlighted = self.highlight.as_deref() == Some(node.id.as_str());
             let waiting = self.statuses.get(&node.id).map(|s| s.state.as_str()) == Some("waiting");
             self.draw_card.color = if hover == Some(index) {
@@ -1611,6 +1680,25 @@ impl FlowCanvas {
                 self.card_edge_color
             };
             self.draw_card.border_size = if highlighted || waiting { 2.0 } else { 1.0 };
+            self.draw_card.border_radius = outline.radius;
+            let outline_alpha = if selected == Some(node.id.as_str()) {
+                1.0
+            } else if hover == Some(index) {
+                CARD_HOVER_OUTLINE_ALPHA
+            } else {
+                0.0
+            };
+            self.draw_card.outline_color = vec4(
+                self.accent_color.x,
+                self.accent_color.y,
+                self.accent_color.z,
+                self.accent_color.w * outline_alpha,
+            );
+            self.draw_card.outline_size = if outline_alpha > 0.0 {
+                outline.stroke_width
+            } else {
+                0.0
+            };
             self.draw_card.draw_abs(cx, rect);
         }
     }
@@ -1900,19 +1988,6 @@ impl FlowCanvas {
                     .circle(p.x as f32, p.y as f32, (PORT_R - 1.0) as f32);
                 self.draw_over.stroke(2.0);
             }
-            // Three unobtrusive diagonals, in the card's own local space.
-            Self::set_color(&mut self.draw_over, self.draw_meta.color, 0.55);
-            for inset in [5.0, 9.0, 13.0] {
-                self.draw_over.move_to(
-                    (r.pos.x + r.size.x - inset) as f32,
-                    (r.pos.y + r.size.y - 3.0) as f32,
-                );
-                self.draw_over.line_to(
-                    (r.pos.x + r.size.x - 3.0) as f32,
-                    (r.pos.y + r.size.y - inset) as f32,
-                );
-                self.draw_over.stroke(1.0);
-            }
         }
         self.draw_over.end(cx);
         // The port-type icons inside the discs.
@@ -1935,10 +2010,28 @@ impl FlowCanvas {
                 self.port_icon(output.ty).draw_abs(cx, rect);
             }
         }
+        // The grip is last inside the body: shadow/body/face/ports/icons/grip.
+        self.draw_over.begin();
+        Self::set_color(&mut self.draw_over, self.draw_meta.color, 0.55);
+        for index in indices.iter().copied() {
+            let r = self.card_rect(graph, index);
+            for inset in [5.0, 9.0, 13.0] {
+                self.draw_over.move_to(
+                    (r.pos.x + r.size.x - inset) as f32,
+                    (r.pos.y + r.size.y - 3.0) as f32,
+                );
+                self.draw_over.line_to(
+                    (r.pos.x + r.size.x - 3.0) as f32,
+                    (r.pos.y + r.size.y - inset) as f32,
+                );
+                self.draw_over.stroke(1.0);
+            }
+        }
+        self.draw_over.end(cx);
     }
 
-    /// Placement ghost and selection ring draw after every card list.
-    fn draw_top_overlay(&mut self, cx: &mut Cx2d, graph: &Graph) {
+    /// Placement ghost above the retained card lists.
+    fn draw_top_overlay(&mut self, cx: &mut Cx2d) {
         self.draw_over.begin();
         if self.armed_type.is_some() && self.camera.view.contains(self.cursor) {
             let local = self.camera.screen_to_local(self.cursor);
@@ -1952,23 +2045,6 @@ impl FlowCanvas {
             self.draw_over
                 .rounded_rect(x, y, NODE_WIDTH as f32, 120.0, CARD_RADIUS);
             self.draw_over.stroke(1.5);
-        }
-        if let Some(index) = self
-            .selected
-            .as_ref()
-            .and_then(|id| self.node_index.get(id))
-            .copied()
-        {
-            let rect = self.card_rect(graph, index);
-            Self::set_color(&mut self.draw_over, self.accent_color, 1.0);
-            self.draw_over.rounded_rect(
-                rect.pos.x as f32,
-                rect.pos.y as f32,
-                rect.size.x as f32,
-                rect.size.y as f32,
-                CARD_RADIUS,
-            );
-            self.draw_over.stroke(2.0);
         }
         self.draw_over.end(cx);
     }
@@ -2066,6 +2142,41 @@ mod tests {
     }
 
     #[test]
+    fn card_outline_is_body_geometry_grown_by_screen_space_stroke() {
+        let body = Rect {
+            pos: dvec2(100.0, 200.0),
+            size: dvec2(300.0, 220.0),
+        };
+        let outline = card_outline_geometry(body, 0.5);
+        assert_eq!(outline.radius, CARD_RADIUS);
+        assert_eq!(outline.stroke_width, 4.0);
+        assert_eq!(outline.outer_rect.pos, dvec2(96.0, 196.0));
+        assert_eq!(outline.outer_rect.size, dvec2(308.0, 228.0));
+    }
+
+    #[test]
+    fn face_press_classification_keeps_controls_interactive_and_displays_draggable() {
+        for interactive in [
+            TypeId::of::<TextInput>(),
+            TypeId::of::<FabValueInput>(),
+            TypeId::of::<DropDown>(),
+            TypeId::of::<Button>(),
+            TypeId::of::<FoldHeader>(),
+            TypeId::of::<Slider>(),
+        ] {
+            assert!(is_interactive_face_type(interactive));
+        }
+        for display in [
+            TypeId::of::<View>(),
+            TypeId::of::<Image>(),
+            TypeId::of::<Label>(),
+            TypeId::of::<Markdown>(),
+        ] {
+            assert!(!is_interactive_face_type(display));
+        }
+    }
+
+    #[test]
     fn card_content_rect_subtracts_header_ports_and_padding() {
         let card = Rect {
             pos: dvec2(100.0, 200.0),
@@ -2149,15 +2260,19 @@ impl Widget for FlowCanvas {
                     .unwrap_or_else(|| DrawList2d::new(cx));
                 card_list.begin_always(cx);
                 let one = std::slice::from_ref(&index);
+                // One retained list fixes the visual order per card. The
+                // outline is part of the body shader, so face content and
+                // then ports/icons/grip necessarily cover it; the label is
+                // emitted last and remains above the complete card.
                 self.draw_card(cx, &graph, one);
-                self.draw_labels(cx, &graph, one);
                 heights_changed |= self.draw_faces(cx, scope, &graph, one);
                 self.draw_overlays(cx, &graph, one);
+                self.draw_labels(cx, &graph, one);
                 card_list.end(cx);
                 self.card_draw_lists[index] = Some(card_list);
             }
             self.z_order = z_order;
-            self.draw_top_overlay(cx, &graph);
+            self.draw_top_overlay(cx);
             self.graph = Some(graph);
         }
         cx.pop_clip_rect();
@@ -2259,7 +2374,23 @@ impl Widget for FlowCanvas {
                 }
             }
         }
-        match event.hits(cx, self.area) {
+        // Faces receive events first. Co-capture display-only face presses so
+        // a click can still open a picture, then promote the canvas capture
+        // once movement crosses the card-drag threshold. Interactive face
+        // controls retain exclusive capture.
+        let capture_display_press = match event {
+            Event::MouseDown(event) => {
+                self.node_index_at(event.abs).is_some()
+                    && !self.interactive_face_widget_at(cx, event.abs, event.handled.get())
+            }
+            Event::TouchUpdate(event) => event.touches.iter().any(|touch| {
+                touch.state == TouchState::Start
+                    && self.node_index_at(touch.abs).is_some()
+                    && !self.interactive_face_widget_at(cx, touch.abs, touch.handled.get())
+            }),
+            _ => false,
+        };
+        match event.hits_with_capture_overload(cx, self.area, capture_display_press) {
             Hit::FingerScroll(fs) if !self.point_over_chrome(fs.abs) => {
                 // Wheel = zoom anchored at the cursor; a horizontal wheel pans.
                 if fs.scroll.x.abs() > fs.scroll.y.abs() * 1.5 {
@@ -2375,6 +2506,9 @@ impl Widget for FlowCanvas {
                     }) => {
                         let delta = fm.abs - start;
                         let moved = moved || delta.length() > DRAG_THRESHOLD;
+                        if moved {
+                            cx.promote_finger_capture_over(self.area);
+                        }
                         let graph_at = self
                             .graph
                             .as_ref()
