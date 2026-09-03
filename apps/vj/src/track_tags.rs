@@ -99,7 +99,9 @@ const MAX_FLAC_BLOCKS: usize = 1024;
 /// What a library row can say about a track without analysing it.
 /// Every field is already display-ready: empty string means "the file
 /// does not say", which a cell shows as blank rather than as a guess.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+// Not `Eq`: the three tag hints below are floats and a key, and a tag
+// that says 128.0 twice is the same tag either way.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TrackTags {
     pub title: String,
     pub artist: String,
@@ -112,6 +114,20 @@ pub struct TrackTags {
     /// one. `None` for formats that do not (and for variable-rate files
     /// whose header does not carry a nominal figure).
     pub bitrate_kbps: Option<u32>,
+    /// What the file SAYS its tempo is. A claim, not a measurement: the
+    /// tab never shows it in the tempo column, because that column is a
+    /// report of what this machine measured and a tag is somebody else's
+    /// word. It is worth having as a hint for the detector, which has to
+    /// choose an octave and can be told which one somebody expected.
+    pub tag_bpm: Option<f64>,
+    /// What the file says its key is, read from the notations tags are
+    /// written in. Same standing as the tempo: a hint, never a report.
+    pub tag_key: Option<crate::track_key::KeyEstimate>,
+    /// A replay-gain figure in decibels, when the file carries one. This
+    /// one IS usable directly: it is a level match somebody already
+    /// measured, and it is a better first answer than a broadband average
+    /// of the samples.
+    pub tag_gain_db: Option<f64>,
 }
 
 impl TrackTags {
@@ -151,6 +167,18 @@ impl TrackTags {
         if let Some(kbps) = self.bitrate_kbps {
             out.push_str(&format!("bitrate {kbps}\n"));
         }
+        // The three hints ride along for the same reason everything else
+        // does: a store track's bytes are here once, and a claim nobody
+        // wrote down is a claim nobody can use next session.
+        if let Some(bpm) = self.tag_bpm {
+            out.push_str(&format!("tag_bpm {bpm}\n"));
+        }
+        if let Some(key) = self.tag_key {
+            out.push_str(&format!("tag_key {}\n", key.camelot()));
+        }
+        if let Some(db) = self.tag_gain_db {
+            out.push_str(&format!("tag_gain {db}\n"));
+        }
         out
     }
 
@@ -168,6 +196,18 @@ impl TrackTags {
                 "genre" => out.genre = value,
                 "year" => out.year = value,
                 "bitrate" => out.bitrate_kbps = value.parse().ok(),
+                "tag_bpm" => {
+                    out.tag_bpm = value.parse().ok().filter(|bpm: &f64| {
+                        bpm.is_finite() && (40.0..=300.0).contains(bpm)
+                    })
+                }
+                "tag_key" => out.tag_key = crate::track_key::parse_key(&value),
+                "tag_gain" => {
+                    out.tag_gain_db = value
+                        .parse()
+                        .ok()
+                        .filter(|db: &f64| db.is_finite() && db.abs() <= 40.0)
+                }
                 _ => {}
             }
         }
@@ -222,7 +262,60 @@ pub fn read_from_bytes(bytes: &[u8]) -> TrackTags {
         genre: genre_of(&tags),
         year: year_of(&tags),
         bitrate_kbps: nominal_bitrate(bytes),
+        tag_bpm: tag_bpm(&tags),
+        tag_key: tag_key(&tags),
+        tag_gain_db: tag_gain_db(&tags),
     }
+}
+
+/// A tempo a file claims, if it claims a plausible one.
+///
+/// Files say "128", "128.00", and occasionally "128,5" with a decimal
+/// comma. Anything outside the band a record can be at is a tag somebody
+/// typed wrong, and a wrong hint is worse than none.
+fn tag_bpm(tags: &makepad_audio_decode::Tags) -> Option<f64> {
+    let raw = find_tag(tags, &["TBPM", "BPM", "TEMPO"])?;
+    let bpm: f64 = raw.trim().replace(',', ".").parse().ok()?;
+    (bpm.is_finite() && (40.0..=300.0).contains(&bpm)).then_some(bpm)
+}
+
+/// A key a file claims, in whichever of the three notations it used.
+fn tag_key(tags: &makepad_audio_decode::Tags) -> Option<crate::track_key::KeyEstimate> {
+    let raw = find_tag(tags, &["TKEY", "INITIALKEY", "INITIAL KEY", "KEY"])?;
+    crate::track_key::parse_key(&raw)
+}
+
+/// A replay-gain figure, in decibels. Files write it as "-7.23 dB".
+fn tag_gain_db(tags: &makepad_audio_decode::Tags) -> Option<f64> {
+    let raw = find_tag(
+        tags,
+        &["REPLAYGAIN_TRACK_GAIN", "REPLAYGAIN_ALBUM_GAIN", "R128_TRACK_GAIN"],
+    )?;
+    let cleaned = raw.trim().trim_end_matches(|c: char| c.is_ascii_alphabetic() || c == ' ');
+    let db: f64 = cleaned.trim().parse().ok()?;
+    // R128 tags are in Q7.8 fixed point relative to -23 LUFS, not in
+    // decibels; a value that large is one of those, and reading it as
+    // decibels would ask for a gain of several thousand.
+    let db = match raw.to_ascii_uppercase().starts_with("R128") || db.abs() > 60.0 {
+        true => db / 256.0,
+        false => db,
+    };
+    (db.is_finite() && db.abs() <= 40.0).then_some(db)
+}
+
+/// The first of these keys the file carried, by upper-cased name.
+fn find_tag<'a>(
+    tags: &'a makepad_audio_decode::Tags,
+    names: &[&str],
+) -> Option<&'a str> {
+    for name in names {
+        if let Some((_, value)) = tags.all.iter().find(|(key, _)| key == name) {
+            if !value.trim().is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
 }
 
 /// Bitrate from a file's size and a known duration, for containers whose
@@ -632,6 +725,73 @@ fn flac_metadata_end(bytes: &[u8], mut at: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a file CLAIMS about itself: read, bounded, and never confused
+    /// with a measurement.
+    #[test]
+    fn a_files_own_claims_are_read_and_bounded() {
+        let tags = |pairs: &[(&str, &str)]| {
+            let mut tags = makepad_audio_decode::Tags::default();
+            for (key, value) in pairs {
+                tags.push(key, value);
+            }
+            tags
+        };
+        assert_eq!(tag_bpm(&tags(&[("TBPM", "128")])), Some(128.0));
+        assert_eq!(tag_bpm(&tags(&[("BPM", "128.50")])), Some(128.5));
+        // A decimal comma is how half the world writes it.
+        assert_eq!(tag_bpm(&tags(&[("TBPM", "128,5")])), Some(128.5));
+        // And a tempo no record has is a typo, not a hint.
+        assert_eq!(tag_bpm(&tags(&[("TBPM", "0")])), None);
+        assert_eq!(tag_bpm(&tags(&[("TBPM", "9999")])), None);
+        assert_eq!(tag_bpm(&tags(&[("TBPM", "fast")])), None);
+        assert_eq!(tag_bpm(&tags(&[])), None);
+
+        assert_eq!(
+            tag_key(&tags(&[("TKEY", "Am")])).map(|k| k.camelot()),
+            Some("8A".to_string())
+        );
+        assert_eq!(
+            tag_key(&tags(&[("INITIALKEY", "8A")])).map(|k| k.camelot()),
+            Some("8A".to_string())
+        );
+        assert!(tag_key(&tags(&[("TKEY", "H7")])).is_none());
+
+        // Replay gain, with and without its unit.
+        assert_eq!(tag_gain_db(&tags(&[("REPLAYGAIN_TRACK_GAIN", "-7.23 dB")])), Some(-7.23));
+        assert_eq!(tag_gain_db(&tags(&[("REPLAYGAIN_TRACK_GAIN", "+2.5")])), Some(2.5));
+        // The R128 tag is fixed point against -23 LUFS, not decibels: read
+        // as decibels it would ask for a gain of several thousand.
+        let r128 = tag_gain_db(&tags(&[("R128_TRACK_GAIN", "-1280")])).expect("a figure");
+        assert!((r128 + 5.0).abs() < 1e-9, "{r128}");
+        assert!(tag_gain_db(&tags(&[("REPLAYGAIN_TRACK_GAIN", "loud")])).is_none());
+    }
+
+    /// A claim written down comes back the same, and one that cannot mean
+    /// anything does not come back at all.
+    #[test]
+    fn the_claims_survive_the_sidecar() {
+        let mine = TrackTags {
+            title: "Bike".into(),
+            tag_bpm: Some(128.5),
+            tag_key: crate::track_key::parse_key("Am"),
+            tag_gain_db: Some(-7.25),
+            ..Default::default()
+        };
+        let back = TrackTags::from_text(&mine.to_text());
+        assert_eq!(back.tag_bpm, Some(128.5));
+        assert_eq!(back.tag_key.map(|k| k.camelot()), Some("8A".to_string()));
+        assert_eq!(back.tag_gain_db, Some(-7.25));
+        // And a hand-edited file that says something impossible says nothing.
+        let broken = TrackTags::from_text("tag_bpm 9999
+tag_gain 500
+tag_key H
+");
+        assert_eq!(broken.tag_bpm, None);
+        assert_eq!(broken.tag_gain_db, None);
+        assert!(broken.tag_key.is_none());
+    }
+
     use std::path::PathBuf;
 
     /// MPEG-1 Layer III, 44.1 kHz, 128 kbit/s, joint stereo, no CRC — the
@@ -1000,6 +1160,11 @@ mod tests {
             genre: "Southern Rock".into(),
             year: "1998".into(),
             bitrate_kbps: Some(320),
+            // The hints do not ride the sidecar: they come off the file
+            // itself, and a claim is only worth reading where it is made.
+            tag_bpm: None,
+            tag_key: None,
+            tag_gain_db: None,
         };
         assert!(load_sidecar(&dir, "abc").is_none(), "nothing written yet");
         save_sidecar(&dir, "abc", &tags);

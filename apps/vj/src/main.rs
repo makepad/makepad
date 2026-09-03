@@ -14189,15 +14189,18 @@ p2 {}
     /// content digest, so a track that has been on a deck before comes back
     /// from its sidecar instead of being analysed again.
     fn submit_analysis(&mut self, deck: DeckId, pcm: Arc<TrackPcm>) {
-        let (gen, key) = {
+        let (gen, key, row) = {
             let state = self.decks.deck(deck);
             let Some(item) = state.item() else { return };
             let key = match self.local_by_asset.get(&item.asset) {
                 Some(path) => AnalysisKey::from_path(path),
                 None => AnalysisKey::from_blob(item.media_blob),
             };
-            (state.load_gen, key)
+            (state.load_gen, key, TrackKey::Asset(item.asset))
         };
+        // What the file claims, for the octave tie only. Memoized, so this
+        // is a map lookup on every load after the first.
+        let tag_bpm = self.row_tags(&row).tag_bpm;
         // Hub state belongs to the UI thread. Resolve the acknowledged model
         // path here and hand only the path to the analysis worker.
         let beats_model = self.hub_model_path("beat-this", "weights");
@@ -14207,6 +14210,7 @@ p2 {}
             key,
             pcm,
             beats_model,
+            tag_bpm,
         });
     }
 
@@ -16474,7 +16478,23 @@ p2 {}
                         // master comes up, a hot one comes down, and the
                         // fader still reads what the operator set — the trim
                         // only rides along while NORMALISE is latched.
-                        let trim = Self::level_trim(&pcm);
+                        // A replay-gain figure the file carries is a
+                        // level match somebody already measured, and a
+                        // better first answer than a broadband average of
+                        // the samples. Either way the analysis's own
+                        // measurement replaces it when it lands.
+                        let row = self
+                            .decks
+                            .deck(deck)
+                            .item()
+                            .map(|item| TrackKey::Asset(item.asset));
+                        let tagged = row
+                            .map(|row| self.row_tags(&row))
+                            .and_then(|tags| tags.tag_gain_db)
+                            .map(|db| {
+                                (10f64.powf(db / 20.0) as f32).clamp(0.25, 3.0)
+                            });
+                        let trim = tagged.unwrap_or_else(|| Self::level_trim(&pcm));
                         self.deck_incoming.insert((deck.index(), gen), (pcm, peaks));
                         let cmds = self.decks.track_ready(deck, gen, seconds);
                         let trim_cmds = self.decks.set_norm_gain(deck, trim);
@@ -21993,9 +22013,17 @@ p2 {}
             Ok(pcm) => self.analysis.submit(AnalysisJob {
                 deck: None,
                 gen,
-                key: AnalysisKey::from_raw(key),
+                key: AnalysisKey::from_raw(key.clone()),
                 pcm,
                 beats_model,
+                // The background pass reads the tags at fetch time and
+                // files them; by the time the analysis is asked for they
+                // are on disk under this same key.
+                tag_bpm: crate::track_tags::load_sidecar(
+                    &wave_analysis::cache_dir(),
+                    &key,
+                )
+                .and_then(|tags| tags.tag_bpm),
             }),
             Err(error) => {
                 // Stays in `prep_analysed`, so an unreadable file is not

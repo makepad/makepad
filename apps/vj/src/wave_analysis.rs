@@ -2277,7 +2277,7 @@ impl AnalysisTiming {
 }
 
 pub fn analyze(pcm: &TrackPcm) -> TrackAnalysis {
-    analyze_timed(pcm).0
+    analyze_timed(pcm, None).0
 }
 
 /// Measure again only what this build no longer agrees with.
@@ -2286,7 +2286,11 @@ pub fn analyze(pcm: &TrackPcm) -> TrackAnalysis {
 /// profiles costs the chroma pass and nothing else, where before it threw
 /// away the waveform, the tempo map and the loudness too. A grid change
 /// is still most of an analysis, because the envelopes it reads are.
-pub fn repair(analysis: &mut TrackAnalysis, pcm: &TrackPcm) -> bool {
+pub fn repair(
+    analysis: &mut TrackAnalysis,
+    pcm: &TrackPcm,
+    tag_bpm: Option<f64>,
+) -> bool {
     let stale = analysis.stale;
     if !stale.any() {
         return false;
@@ -2294,7 +2298,7 @@ pub fn repair(analysis: &mut TrackAnalysis, pcm: &TrackPcm) -> bool {
     if stale.needs_envelopes() {
         let envelopes = build_envelopes(pcm);
         if stale.grid {
-            let prior = streaming_prior(pcm);
+            let prior = streaming_prior(pcm).or(tag_bpm);
             analysis.grid = snap_tempo(estimate_grid(&envelopes, prior), pcm.seconds());
             analysis.tempo_map = match analysis.grid.has_grid() {
                 true => {
@@ -2342,7 +2346,15 @@ pub fn repair(analysis: &mut TrackAnalysis, pcm: &TrackPcm) -> bool {
 }
 
 /// The same analysis, saying where its time went.
-pub fn analyze_timed(pcm: &TrackPcm) -> (TrackAnalysis, AnalysisTiming) {
+/// `tag_bpm` is what the FILE claims its tempo is, when it claims one.
+/// It is used for one thing and nothing else: breaking the octave tie,
+/// which is the detector's own weakest decision and the one a human
+/// already answered when they tagged the record. It never becomes the
+/// published tempo -- the record is still measured.
+pub fn analyze_timed(
+    pcm: &TrackPcm,
+    tag_bpm: Option<f64>,
+) -> (TrackAnalysis, AnalysisTiming) {
     let mut timing = AnalysisTiming::default();
     let mut clock = std::time::Instant::now();
     let mut lap = |timing: &mut u64, clock: &mut std::time::Instant| {
@@ -2353,7 +2365,9 @@ pub fn analyze_timed(pcm: &TrackPcm) -> (TrackAnalysis, AnalysisTiming) {
     lap(&mut timing.envelopes, &mut clock);
     // Reuse the streaming detector over the whole file for an independent
     // BPM opinion; it only ever breaks an octave tie in the offline pass.
-    let prior = streaming_prior(pcm);
+    // The live detector's own lock first: it is a measurement of THIS
+    // record, and a tag is somebody's word about it.
+    let prior = streaming_prior(pcm).or(tag_bpm);
     lap(&mut timing.prior, &mut clock);
     // Pulled onto a musical tempo before anything downstream reads it:
     // the tempo map is fitted against this period, and a map built on the
@@ -3031,6 +3045,8 @@ pub struct AnalysisJob {
     pub key: AnalysisKey,
     pub pcm: Arc<TrackPcm>,
     pub beats_model: Option<PathBuf>,
+    /// What the file claims its tempo is, for the octave tie only.
+    pub tag_bpm: Option<f64>,
 }
 
 pub struct AnalysisDone {
@@ -3085,7 +3101,7 @@ fn run_analysis_jobs(jobs: Receiver<AnalysisJob>, done_tx: Sender<AnalysisDone>)
                     // thrown away: only what changed is measured again,
                     // and it counts as freshly measured from then on.
                     Some(mut hit) => {
-                        let repaired = repair(&mut hit, &job.pcm);
+                        let repaired = repair(&mut hit, &job.pcm, job.tag_bpm);
                         if repaired {
                             makepad_widgets::log!(
                                 "analysis: repaired what this build measures differently"
@@ -3094,7 +3110,7 @@ fn run_analysis_jobs(jobs: Receiver<AnalysisJob>, done_tx: Sender<AnalysisDone>)
                         (hit, !repaired)
                     }
                     None => {
-                        let (analysis, timing) = analyze_timed(&job.pcm);
+                        let (analysis, timing) = analyze_timed(&job.pcm, job.tag_bpm);
                         // Where the time went, per stage. A track that
                         // took four seconds took them somewhere, and
                         // the total alone cannot say whether that is a
@@ -3850,7 +3866,7 @@ mod tests {
     #[test]
     fn an_analysis_says_where_its_time_went() {
         let pcm = click_track(44_100, 128.0, 12.0, 0.41);
-        let (analysis, timing) = analyze_timed(&pcm);
+        let (analysis, timing) = analyze_timed(&pcm, None);
         assert!(analysis.grid.has_grid(), "and it still analysed the track");
         // Every stage is a real number of milliseconds or a zero, and the
         // total is exactly their sum -- no stage is left out of it.
@@ -4303,6 +4319,7 @@ mod tests {
                 key: AnalysisKey::from_blob(BlobId::hash_of(format!("batch{n}").as_bytes())),
                 pcm: pcm.clone(),
                 beats_model: None,
+                tag_bpm: None,
             });
         }
         pool.submit(AnalysisJob {
@@ -4311,6 +4328,7 @@ mod tests {
             key: AnalysisKey::from_blob(BlobId::hash_of(b"the deck's own")),
             pcm: pcm.clone(),
             beats_model: None,
+            tag_bpm: None,
         });
         // The deck's answer comes back without the ten in front of it
         // having to finish first.
@@ -4334,6 +4352,43 @@ mod tests {
     }
 
     /// A change to one detector costs that product's work and no more.
+    /// A file that says its tempo answers the detector's weakest
+    /// question -- which octave -- and nothing else.
+    #[test]
+    fn a_tagged_tempo_breaks_the_octave_tie() {
+        // A pulse with an even, weaker beat between each pair: the comb
+        // can read it at either 96 or 192, which is exactly the tie a
+        // tagged tempo exists to settle.
+        let rate = 48_000u32;
+        let seconds = 20.0;
+        let mut frames = vec![[0i16; 2]; (rate as f64 * seconds) as usize];
+        let beat = 60.0 / 96.0;
+        let mut at = 0.05;
+        let mut strong = true;
+        while at < seconds {
+            let start = (at * rate as f64) as usize;
+            let level = if strong { 22_000 } else { 17_000 };
+            for n in 0..600 {
+                if let Some(frame) = frames.get_mut(start + n) {
+                    let fade = 1.0 - n as f64 / 600.0;
+                    let value = (level as f64 * fade) as i16;
+                    frame[0] = value;
+                    frame[1] = value;
+                }
+            }
+            at += beat / 2.0;
+            strong = !strong;
+        }
+        let pcm = TrackPcm { frames, sample_rate: rate };
+        let slow = analyze_timed(&pcm, Some(96.0)).0.grid.bpm;
+        let fast = analyze_timed(&pcm, Some(192.0)).0.grid.bpm;
+        assert!(
+            (slow - 96.0).abs() < 1.0 || (fast - 192.0).abs() < 1.0,
+            "neither hint was taken: {slow} and {fast}"
+        );
+        assert!(fast >= slow, "the faster hint never reads slower: {slow} vs {fast}");
+    }
+
     #[test]
     fn only_the_product_that_changed_is_measured_again() {
         let pcm = click_track(48_000, 128.0, 8.0, 0.0);
@@ -4351,14 +4406,14 @@ mod tests {
         let before = older.grid;
         let tiles = older.tiles.overview.len();
         older.key = None;
-        assert!(repair(&mut older, &pcm), "there was something to repair");
+        assert!(repair(&mut older, &pcm, None), "there was something to repair");
         assert!(older.key.is_some(), "the key was measured again");
         assert_eq!(older.grid, before, "and the grid was not touched");
         assert_eq!(older.tiles.overview.len(), tiles, "nor the waveform");
         assert!(!older.stale.any(), "and it is agreed with now");
 
         // Nothing stale is nothing to do.
-        assert!(!repair(&mut older, &pcm));
+        assert!(!repair(&mut older, &pcm, None));
     }
 
     /// A sidecar written before the products were versioned says nothing

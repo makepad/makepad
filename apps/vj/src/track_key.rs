@@ -203,6 +203,85 @@ impl KeyNotation {
     }
 }
 
+/// A key a FILE claims, in whichever notation whoever wrote the tag used:
+/// "8A", "1m", "Am", "A minor", "F#".
+///
+/// Its confidence is zero, and that is the whole point: this is somebody
+/// else's word, not a measurement, and every reader that weighs a key by
+/// how sure the detector was will weigh this at nothing until something
+/// measures the record.
+pub fn parse_key(raw: &str) -> Option<KeyEstimate> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let upper = text.to_ascii_uppercase();
+    // The two numbered wheels: a number and a letter, nothing else.
+    if let Some(rest) = upper.strip_suffix(['A', 'B', 'M', 'D']) {
+        if let Ok(number) = rest.trim().parse::<i32>() {
+            if (1..=12).contains(&number) {
+                let minor = upper.ends_with('A') || upper.ends_with('M');
+                // Turn the open wheel's numbering into the other's.
+                let camelot = match upper.ends_with('M') || upper.ends_with('D') {
+                    true => (number + 6) % 12 + 1,
+                    false => number,
+                };
+                return Some(from_wheel(camelot, minor));
+            }
+        }
+    }
+    // Or a name: a letter, an optional accidental, and an optional mode.
+    let mut chars = text.chars();
+    let letter = chars.next()?.to_ascii_uppercase();
+    let mut tonic = match letter {
+        'C' => 0,
+        'D' => 2,
+        'E' => 4,
+        'F' => 5,
+        'G' => 7,
+        'A' => 9,
+        'B' => 11,
+        _ => return None,
+    };
+    let rest: String = chars.collect();
+    let rest = rest.trim();
+    let rest = match rest.strip_prefix('#').or_else(|| rest.strip_prefix('s')) {
+        Some(rest) => {
+            tonic = (tonic + 1) % 12;
+            rest
+        }
+        None => match rest.strip_prefix('b') {
+            Some(rest) => {
+                tonic = (tonic + 11) % 12;
+                rest
+            }
+            None => rest,
+        },
+    };
+    let word = rest.trim().to_ascii_lowercase();
+    let minor = match word.as_str() {
+        "" | "maj" | "major" => false,
+        "m" | "min" | "minor" => true,
+        _ => return None,
+    };
+    Some(KeyEstimate { tonic, minor, confidence: 0.0 })
+}
+
+/// The key at a numbered wheel position: the inverse of [`camelot`].
+///
+/// [`camelot`]: KeyEstimate::camelot
+fn from_wheel(number: i32, minor: bool) -> KeyEstimate {
+    // Seven steps round the circle of fifths is a semitone, and seven is
+    // its own inverse modulo twelve, so the same multiply undoes it.
+    let step = (number - 8).rem_euclid(12);
+    let root = (step * 7).rem_euclid(12);
+    let tonic = match minor {
+        true => (root + 9).rem_euclid(12),
+        false => root,
+    };
+    KeyEstimate { tonic: tonic as u8, minor, confidence: 0.0 }
+}
+
 // ---------------------------------------------------------------------------
 // how two keys sit together
 // ---------------------------------------------------------------------------
@@ -1067,6 +1146,41 @@ fn pearson(left: &[f64; 12], right: &[f64; 12]) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    /// A key a FILE claims, in whichever notation somebody wrote it in.
+    #[test]
+    fn a_tagged_key_is_read_in_every_notation_it_is_written_in() {
+        for text in ["8A", "1m", "Am", "A minor", "a min", " Am "] {
+            let key = parse_key(text).unwrap_or_else(|| panic!("{text}"));
+            assert_eq!(key.camelot(), "8A", "{text}");
+            assert_eq!(key.confidence, 0.0, "a claim is not a measurement");
+        }
+        for text in ["8B", "1d", "C", "C major", "c maj"] {
+            let key = parse_key(text).unwrap_or_else(|| panic!("{text}"));
+            assert_eq!(key.camelot(), "8B", "{text}");
+        }
+        // Accidentals, both spellings.
+        assert_eq!(parse_key("F#m").map(|k| k.camelot()), Some("11A".to_string()));
+        assert_eq!(parse_key("Gbm").map(|k| k.camelot()), Some("11A".to_string()));
+        assert_eq!(parse_key("Bb").map(|k| k.camelot()), Some("6B".to_string()));
+        // And the wheels round-trip against the formatter.
+        for tonic in 0..12u8 {
+            for minor in [false, true] {
+                let key = KeyEstimate { tonic, minor, confidence: 0.5 };
+                let back = parse_key(&key.camelot()).expect("its own wheel");
+                assert_eq!(back.tonic, tonic, "{}", key.camelot());
+                assert_eq!(back.minor, minor);
+                let back = parse_key(&key.open_key()).expect("the other wheel");
+                assert_eq!(back.tonic, tonic, "{}", key.open_key());
+                let back = parse_key(&key.name()).expect("its own name");
+                assert_eq!(back.tonic, tonic, "{}", key.name());
+            }
+        }
+        // And nonsense is nonsense.
+        for text in ["", "  ", "13A", "0A", "H", "Am7", "banana"] {
+            assert!(parse_key(text).is_none(), "{text}");
+        }
+    }
+
     /// Three notations, one wheel underneath.
     #[test]
     fn a_key_is_written_three_ways_and_means_the_same_thing() {
