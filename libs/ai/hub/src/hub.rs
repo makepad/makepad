@@ -62,6 +62,7 @@ impl AiHub {
     pub fn start_local_chat(&self, config: ChatConfig) -> HubChatSession {
         HubChatSession::start(HubChatConfig {
             llm: config.llm,
+            preferred_model: None,
             system_prompt: config.system_prompt,
             tools: config.tools,
             wake: config.wake,

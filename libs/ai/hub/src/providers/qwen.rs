@@ -219,7 +219,12 @@ pub struct FleetQwenChatProvider<T: FleetTransport> {
     transport: T,
     /// Node base URLs from LAN discovery, e.g. `http://10.0.0.169:8123`.
     bases: Vec<String>,
+    /// Exact fleet model requested by the caller. `None` keeps the normal
+    /// provider preference order.
+    preferred_model: Option<String>,
     max_tokens: u32,
+    /// Every turn gets a fresh sample, including an empty-completion retry.
+    sample_seed: u64,
     active: Option<ActiveJob>,
     /// Private by default; the broker hands EVERY session's provider the
     /// same one so the fleet is probed once, not once per session.
@@ -274,6 +279,7 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         FleetQwenChatProvider {
             transport,
             bases,
+            preferred_model: None,
             // NOT a policy number: the client requests the maximum and the
             // serving lane clamps to its physics (context minus prompt).
             // Every policy cap tried here got observed cutting a real
@@ -281,11 +287,22 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
             // dog-shop interior). Boxes serving an older build clamp this to
             // their fixed ceiling, which is merely what they did before.
             max_tokens: u32::MAX,
+            sample_seed: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0)
+                ^ std::process::id() as u64,
             active: None,
             picks,
             conversation: Self::conversation_id(),
             wire: Vec::new(),
         }
+    }
+
+    /// Restrict election to one advertised fleet model id.
+    pub fn with_preferred_model(mut self, model: Option<String>) -> Self {
+        self.preferred_model = model.map(|model| model.trim().to_string()).filter(|model| !model.is_empty());
+        self
     }
 
     fn mark_dead(&mut self, base: &str) {
@@ -302,7 +319,9 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
     /// scan stops at the first usable node (last-good first).
     fn probe(&mut self) -> Result<(String, String, bool), String> {
         if let Some(pick) = self.picks.fresh() {
-            return Ok(pick);
+            if self.preferred_model.as_deref().is_none_or(|wanted| wanted == pick.1) {
+                return Ok(pick);
+            }
         }
         if self.bases.is_empty() {
             return Err(format!(
@@ -364,11 +383,16 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         // FINAL round of a long successful turn died at the re-probe and
         // the user saw an error after their level had already built.
         if let Some((base, model, text_fallback)) = self.picks.take_stale() {
-            self.picks.remember(base.clone(), model.clone(), text_fallback);
-            return Ok((base, model, text_fallback));
+            if self.preferred_model.as_deref().is_none_or(|wanted| wanted == model) {
+                self.picks.remember(base.clone(), model.clone(), text_fallback);
+                return Ok((base, model, text_fallback));
+            }
         }
         Err(if reasons.is_empty() {
-            "no fleet node advertises a chat or Qwen text model".to_string()
+            match &self.preferred_model {
+                Some(model) => format!("no fleet node advertises requested model {model}"),
+                None => "no fleet node advertises a chat or Qwen text model".to_string(),
+            }
         } else {
             reasons.join("; ")
         })
@@ -438,6 +462,16 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
                     .and_then(Value::as_str)
                     .unwrap_or("unavailable");
                 reasons.push(format!("{base}: {id} {why}"));
+                continue;
+            }
+            if let Some(wanted) = &self.preferred_model {
+                if id == wanted {
+                    if domain == "chat" {
+                        chat_id = Some(id.to_string());
+                    } else if domain == "text" {
+                        text_id = Some(id.to_string());
+                    }
+                }
                 continue;
             }
             if domain == "chat" {
@@ -594,9 +628,12 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
             last_user
         };
         let domain = if text_fallback { "text" } else { "chat" };
+        let seed = self.sample_seed & i64::MAX as u64;
+        self.sample_seed = self.sample_seed.wrapping_add(1);
         let body = json::obj(vec![
             ("model", json::s(model)),
             ("domain", json::s(domain)),
+            ("seed", Value::Int(seed as i64)),
             ("prompt", json::s(prompt)),
             ("chat_system", json::s(input.system.clone())),
             ("chat_session", json::s(self.conversation.clone())),
@@ -1056,12 +1093,20 @@ mod wire_transcript_tests {
             if url.ends_with("/models") {
                 return Ok(json::obj(vec![(
                     "models",
-                    Value::Arr(vec![json::obj(vec![
-                        ("id", json::s("qwen3.8-27b")),
-                        ("domain", json::s("chat")),
-                        ("available", Value::Bool(true)),
-                        ("state", json::s("loaded")),
-                    ])]),
+                    Value::Arr(vec![
+                        json::obj(vec![
+                            ("id", json::s("qwen3.8-27b")),
+                            ("domain", json::s("chat")),
+                            ("available", Value::Bool(true)),
+                            ("state", json::s("loaded")),
+                        ]),
+                        json::obj(vec![
+                            ("id", json::s("qwen3.6-27b")),
+                            ("domain", json::s("chat")),
+                            ("available", Value::Bool(true)),
+                            ("state", json::s("loaded")),
+                        ]),
+                    ]),
                 )]));
             }
             // A job poll: pop the scripted raw reply.
@@ -1111,6 +1156,24 @@ mod wire_transcript_tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn an_exact_preferred_model_overrides_the_default_rank() {
+        let transport = Scripted::default();
+        let mut provider = FleetQwenChatProvider::new(transport.clone(), vec!["http://n1:1".into()])
+            .with_preferred_model(Some("qwen3.6-27b".into()));
+        assert!(matches!(
+            provider.availability(),
+            ProviderAvailability::Available { model, .. } if model == "qwen3.6-27b"
+        ));
+        provider
+            .begin_turn(&TurnInput::new("SYS", vec![user("hello")]))
+            .unwrap();
+        assert_eq!(
+            transport.generates.borrow()[0].get("model").and_then(Value::as_str),
+            Some("qwen3.6-27b")
+        );
     }
 
     /// The wire mirror echoes the RAW reply and carries a stable

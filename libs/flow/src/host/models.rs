@@ -192,6 +192,9 @@ impl FleetSnapshot {
         models.sort_by(|left, right| {
             (&left.domain, &left.id, &left.node).cmp(&(&right.domain, &right.id, &right.node))
         });
+        models.dedup_by(|left, right| {
+            left.domain == right.domain && left.id == right.id && left.node == right.node
+        });
         self.nodes = nodes;
         self.models = models;
         self.snapshot_ms = unix_ms();
@@ -234,7 +237,9 @@ fn insert_candidate(candidates: &mut BTreeMap<String, Candidate>, base_url: &str
 fn model_dto(node: &str, model: ModelInfoJson) -> ModelInfoDto {
     ModelInfoDto {
         id: model.id,
-        domain: model.domain,
+        // The hub advertises the conversational face of an LLM as `chat`.
+        // Flow's public generation domain and Llm picker call that `text`.
+        domain: if model.domain == "chat" { "text".to_string() } else { model.domain },
         backend: model.backend,
         node: node.to_string(),
         available: model.available,
