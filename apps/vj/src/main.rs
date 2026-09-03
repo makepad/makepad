@@ -148,6 +148,7 @@ mod track_key;
 mod track_tags;
 mod wave_analysis;
 mod pads;
+mod loudness;
 mod local_store;
 mod loop_close;
 mod media_scan;
