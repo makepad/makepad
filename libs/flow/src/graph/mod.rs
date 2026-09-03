@@ -10,6 +10,7 @@ const PRELUDE_FILE: &str = "<makepad-flow-prelude>";
 const RECIPE_PRELUDE_FILE: &str = "<makepad-flow-recipe-prelude>";
 const RECIPE_PRELUDE: &str = include_str!("../../recipes/prelude_recipes.splash");
 const FN_INSTRUCTION_LIMIT: usize = 200_000;
+pub const MAX_SOURCE_BYTES: usize = 192 * 1024;
 
 /// A loaded flow and the splash heap that owns its run-time closures.
 pub struct FlowVm {
@@ -21,6 +22,7 @@ pub struct FlowVm {
 
 impl FlowVm {
     pub fn load(source: &str, file_name: &str) -> Result<(Self, Graph), EvalError> {
+        validate_source(source, file_name)?;
         let mut host = Box::new(ScriptVmHost::new(0i32, ()));
         let mut vm = ScriptVm {
             host: host.as_mut(),
@@ -978,8 +980,8 @@ fn extract(
             }
         }
     }
-    validate_edges(&nodes, &edges, file_name)?;
     validate_acyclic(&nodes, &edges, file_name)?;
+    validate_edges(&nodes, &edges, file_name)?;
     let tools = extract_tools(vm, flow_obj, &nodes, &edges, source, flow_span, file_name)?;
     let flow_ui_src = flow_span
         .and_then(|span| field_sources(source, span).get("ui").copied())
@@ -1086,12 +1088,14 @@ fn extract_node(
     let mut params = Vec::new();
     for param in spec.params {
         let value = deep_value(vm, obj, param.name).unwrap_or(NIL);
-        let literal = literal_from_value(vm, value).map_err(|message| {
-            field_error(source, span, param.name, file_name, message, &loc)
-        })?;
-        validate_param(param, &literal).map_err(|message| {
-            field_error(source, span, param.name, file_name, message, &loc)
-        })?;
+        let field_source = fields
+            .get(param.name)
+            .copied()
+            .or_else(|| source_field_in_chain(vm, obj, source, file_name, param.name));
+        let literal = literal_from_value(vm, value)
+            .map_err(|message| source_range_error(source, field_source, file_name, message, &loc))?;
+        validate_param(param, &literal)
+            .map_err(|message| source_range_error(source, field_source, file_name, message, &loc))?;
         params.push((param.name.to_string(), literal));
     }
     let gen_inputs = if spec.kind == "gen" {
@@ -1142,12 +1146,31 @@ fn extract_node(
                 file_name,
                 span,
                 &loc,
+                id,
                 &name,
                 inferred,
                 true,
                 value,
                 object_ids,
             )?);
+        }
+        let declared: HashSet<&str> = inputs.iter().map(|input| input.port.as_str()).collect();
+        for name in fields.keys() {
+            if matches!(name.as_str(), "in" | "out" | "run") || declared.contains(name.as_str()) {
+                continue;
+            }
+            if own_value(vm, obj, name).is_some_and(|value| looks_like_port_ref(vm, value)) {
+                return Err(field_error(
+                    source,
+                    span,
+                    name,
+                    file_name,
+                    format!(
+                        "Fn field `{name}` receives an edge but is undeclared; declare it in `Fn.in`"
+                    ),
+                    &loc,
+                ));
+            }
         }
     } else if spec.kind == "gen" {
         for (name, ty) in gen_inputs.unwrap() {
@@ -1163,6 +1186,7 @@ fn extract_node(
                 file_name,
                 span,
                 &loc,
+                id,
                 &name,
                 ty,
                 false,
@@ -1183,6 +1207,7 @@ fn extract_node(
                 file_name,
                 span,
                 &loc,
+                id,
                 input.name,
                 declared_ty,
                 input.flexible,
@@ -1296,13 +1321,16 @@ fn extract_input(
     file_name: &str,
     span: Option<(usize, usize)>,
     loc: &Loc,
+    node_id: &str,
     name: &str,
     declared_ty: PortType,
     flexible: bool,
     value: ScriptValue,
     object_ids: &HashMap<ScriptObject, String>,
 ) -> Result<NodeInput, EvalError> {
-    if let Some(edge) = port_ref(vm, value, object_ids, source, span, name, file_name, loc)? {
+    if let Some(edge) = port_ref(
+        vm, value, object_ids, source, span, node_id, name, file_name, loc,
+    )? {
         return Ok(NodeInput {
             port: name.to_string(),
             ty: if flexible { declared_ty } else { declared_ty },
@@ -1320,6 +1348,16 @@ fn extract_input(
             name,
             file_name,
             "closure where a literal or port reference was expected",
+            loc,
+        ));
+    }
+    if let Some(referenced) = value.as_object().and_then(|object| object_ids.get(&object)) {
+        return Err(field_error(
+            source,
+            span,
+            name,
+            file_name,
+            format!("expected a port reference such as `{referenced}.text()`"),
             loc,
         ));
     }
@@ -1395,6 +1433,7 @@ fn port_ref(
     object_ids: &HashMap<ScriptObject, String>,
     source: &str,
     span: Option<(usize, usize)>,
+    to_node: &str,
     field: &str,
     file_name: &str,
     loc: &Loc,
@@ -1422,12 +1461,15 @@ fn port_ref(
         )
     })?;
     let from_node = object_ids.get(&node_obj).cloned().ok_or_else(|| {
+        let referenced = source_port_ref_node(source, span, field).unwrap_or("unknown");
         field_error(
             source,
             span,
             field,
             file_name,
-            "node not in flow",
+            format!(
+                "node `{referenced}` is referenced by `{to_node}.{field}` but not listed in `Flow{{}}`"
+            ),
             loc,
         )
     })?;
@@ -1453,6 +1495,20 @@ fn looks_like_port_ref(vm: &ScriptVm<'_>, value: ScriptValue) -> bool {
             && own_value(vm, obj, "node").is_some()
             && own_value(vm, obj, "port").is_some()
     })
+}
+
+fn source_port_ref_node<'a>(
+    source: &'a str,
+    span: Option<(usize, usize)>,
+    field: &str,
+) -> Option<&'a str> {
+    let range = field_sources(source, span?).get(field).copied()?;
+    let expression = source[range.0..range.1].trim();
+    let name = expression.split_once('.')?.0.trim();
+    (!name.is_empty()
+        && name.as_bytes().first().is_some_and(|byte| is_ident_start(*byte))
+        && name.as_bytes().iter().all(|byte| is_ident_continue(*byte)))
+    .then_some(name)
 }
 
 fn outputs_for(
@@ -1646,6 +1702,11 @@ fn validate_param(param: &ParamSpec, value: &Literal) -> Result<(), String> {
     };
     if ok {
         Ok(())
+    } else if matches!(param.expected, ParamType::HttpMethod) {
+        Err(
+            "wrong type for parameter `method`; allowed methods are @get, @post, @put, @delete"
+                .to_string(),
+        )
     } else {
         Err(format!("wrong type for parameter `{}`", param.name))
     }
@@ -2165,6 +2226,15 @@ fn at(file: &str, line: u32, col: u32, message: impl Into<String>) -> EvalError 
     }
 }
 
+pub(crate) fn source_size_error(file_name: &str) -> EvalError {
+    at(
+        file_name,
+        1,
+        1,
+        "flow source exceeds the 192 KiB size budget",
+    )
+}
+
 fn field_error(
     source: &str,
     span: Option<(usize, usize)>,
@@ -2176,6 +2246,19 @@ fn field_error(
     let (line, col) = span
         .and_then(|span| field_sources(source, span).get(field).map(|range| range.0))
         .map(|offset| offset_line_col(source, offset))
+        .unwrap_or((fallback.line, fallback.col));
+    at(file_name, line, col, message)
+}
+
+fn source_range_error(
+    source: &str,
+    range: Option<(usize, usize)>,
+    file_name: &str,
+    message: impl Into<String>,
+    fallback: &Loc,
+) -> EvalError {
+    let (line, col) = range
+        .map(|range| offset_line_col(source, range.0))
         .unwrap_or((fallback.line, fallback.col));
     at(file_name, line, col, message)
 }
@@ -2216,10 +2299,9 @@ fn source_field_in_chain(
 
 fn line_col_offset(source: &str, line: u32, col: u32) -> Option<usize> {
     let mut offset = 0usize;
-    // Object construction ips currently resolve one-based while diagnostic
-    // ips resolve zero-based; this is the coordinate convention exposed by
-    // `made_at` + `ip_to_loc` in makepad-script.
-    let target_line = line.max(1) as usize;
+    // Object construction lines are zero-based while columns are one-based;
+    // source locations exposed by flow diagnostics are one-based.
+    let target_line = line as usize + 1;
     for (index, text) in source.split_inclusive('\n').enumerate() {
         if index + 1 == target_line {
             let byte_col = text
@@ -2240,12 +2322,58 @@ fn line_col_offset(source: &str, line: u32, col: u32) -> Option<usize> {
 
 fn offset_line_col(source: &str, offset: usize) -> (u32, u32) {
     let prefix = &source[..offset.min(source.len())];
-    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() as u32;
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() as u32 + 1;
     let col = prefix
         .rfind('\n')
         .map(|index| prefix[index + 1..].chars().count())
-        .unwrap_or_else(|| prefix.chars().count()) as u32;
+        .unwrap_or_else(|| prefix.chars().count()) as u32
+        + 1;
     (line, col)
+}
+
+fn validate_source(source: &str, file_name: &str) -> Result<(), EvalError> {
+    if source.len() > MAX_SOURCE_BYTES {
+        return Err(source_size_error(file_name));
+    }
+    let bytes = source.as_bytes();
+    let mut braces = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                index = skip_string(bytes, index).ok_or_else(|| {
+                    let (line, col) = offset_line_col(source, index);
+                    at(file_name, line, col, "unterminated string literal")
+                })?;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                index = skip_line_comment(bytes, index);
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index = skip_block_comment(bytes, index).ok_or_else(|| {
+                    let (line, col) = offset_line_col(source, index);
+                    at(file_name, line, col, "unterminated block comment")
+                })?;
+            }
+            b'{' => {
+                braces.push(index);
+                index += 1;
+            }
+            b'}' => {
+                if braces.pop().is_none() {
+                    let (line, col) = offset_line_col(source, index);
+                    return Err(at(file_name, line, col, "unmatched closing brace"));
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    if let Some(open) = braces.pop() {
+        let (line, col) = offset_line_col(source, open);
+        return Err(at(file_name, line, col, "unterminated object literal"));
+    }
+    Ok(())
 }
 
 fn find_next_code_char(source: &str, start: usize, needle: u8) -> Option<usize> {

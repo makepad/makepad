@@ -340,7 +340,6 @@ Flow{original, trim, mutate, observe, wrong, forever, trimmed, mutated, observed
 }
 
 #[test]
-#[ignore = "BUG: fake HTTP 3xx responses are accepted instead of refused as redirects"]
 fn http_accept_policy_private_redirect_and_json_contracts() {
     let source = |accept: &str, out: &str, url: &str| {
         format!(
