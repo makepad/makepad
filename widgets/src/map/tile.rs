@@ -1,4 +1,5 @@
 use super::geometry::*;
+use super::tile_draw::TileDrawLists;
 use super::icons::*;
 use super::label::*;
 use super::style::*;
@@ -200,6 +201,19 @@ pub struct TileEntry {
     /// Cross-fade state: the replaced generation's geometry stays drawable
     /// underneath while the new one fades in.
     pub fade: Option<TileFade>,
+    /// The tile's retained draw lists, one per carto pass: recorded when
+    /// this entry's content is first drawn, re-attached with fresh uniforms
+    /// on every later frame, freed with the entry.
+    pub draw: TileDrawLists,
+}
+
+impl TileEntry {
+    /// The cross-fade is over: the outgoing generation leaves the draw, so
+    /// every retained list is recorded again on its next frame.
+    pub fn end_fade(&mut self) {
+        self.fade = None;
+        self.draw.invalidate();
+    }
 }
 
 #[derive(Debug)]
