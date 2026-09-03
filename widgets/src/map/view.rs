@@ -2620,7 +2620,7 @@ const ZOOM_SETTLE_SECONDS: f64 = 0.08;
 /// Frames before an archive-absent tile is probed again (~30 s at 60 fps).
 const MISSING_RECHECK_FRAMES: u64 = 1800;
 const ARCHIVE_REQUEST_TIMEOUT_SECONDS: f64 = 10.0;
-const UPLOAD_TIME_BUDGET_SECONDS: f64 = 0.006;
+const READY_TILE_INSERTS_PER_FRAME: usize = 2;
 
 #[derive(Default)]
 struct ReadyTileDrainStats {
@@ -2636,12 +2636,9 @@ fn drain_pending_ready_tiles<T>(
     mut insert: impl FnMut(T) -> f64,
 ) -> ReadyTileDrainStats {
     let mut stats = ReadyTileDrainStats::default();
-    while !pending.is_empty() {
+    while stats.count < READY_TILE_INSERTS_PER_FRAME && !pending.is_empty() {
         let size = byte_size(&pending[0]);
-        if stats.count > 0
-            && (stats.bytes.saturating_add(size) > byte_budget
-                || stats.seconds >= UPLOAD_TIME_BUDGET_SECONDS)
-        {
+        if stats.count > 0 && stats.bytes.saturating_add(size) > byte_budget {
             break;
         }
         let ready = pending.remove(0);
@@ -2650,6 +2647,24 @@ fn drain_pending_ready_tiles<T>(
         stats.seconds += insert(ready).max(0.0);
     }
     stats
+}
+
+fn sort_ready_tiles_for_insert<T>(
+    pending: &mut [(TileKey, T)],
+    visible_tiles: &[TileKey],
+    center_norm: Vec2d,
+    rotation: (f64, f64),
+    tilt_cos: f64,
+) {
+    pending.sort_unstable_by_key(|(key, _)| {
+        (
+            !visible_tiles.contains(key),
+            tile_screen_priority(*key, key.z, center_norm, rotation, tilt_cos),
+            key.z,
+            key.y,
+            key.x,
+        )
+    });
 }
 
 fn tile_screen_priority(
@@ -4138,7 +4153,7 @@ pub struct MapView {
     #[rust]
     shaped_runs: HashMap<(u64, u32, u32), Option<PreparedTextRun>>,
     // Finished tile buffers waiting for GPU upload; drained within per-frame
-    // time and byte budgets so a rebuild burst cannot monopolize a frame.
+    // count and byte budgets so a rebuild burst cannot monopolize a frame.
     #[rust]
     pending_ready_tiles: Vec<(TileKey, TileBuffers)>,
     #[rust]
@@ -5867,19 +5882,16 @@ impl MapView {
     }
 
     fn sort_pending_ready_tiles(&mut self) {
-        let visible_tiles = &self.visible_tiles;
         let center_norm = self.center_norm;
         let rotation = self.screen_rotation();
         let tilt_cos = self.tilt_cos();
-        self.pending_ready_tiles.sort_unstable_by_key(|(key, _)| {
-            (
-                !visible_tiles.contains(key),
-                tile_screen_priority(*key, key.z, center_norm, rotation, tilt_cos),
-                key.z,
-                key.y,
-                key.x,
-            )
-        });
+        sort_ready_tiles_for_insert(
+            &mut self.pending_ready_tiles,
+            &self.visible_tiles,
+            center_norm,
+            rotation,
+            tilt_cos,
+        );
     }
 
     /// A fast pan across 3D building tiles can park gigabytes of baked
@@ -6029,9 +6041,9 @@ impl MapView {
             self.sort_pending_ready_tiles();
             self.cap_pending_ready_tiles(cx);
         }
-        // Drain until the measured upload time or byte budget is spent. A
+        // Drain at most two inserts, and stop sooner at the byte budget. A
         // bucket-17+ tile can carry tens of MB of vertex data, so always
-        // allow the first tile even when it exceeds a budget.
+        // allow the first tile even when it exceeds the byte budget.
         if !self.pending_ready_tiles.is_empty()
             && self.last_tile_upload_frame != self.frame_counter
         {
@@ -10217,20 +10229,45 @@ mod tests {
     }
 
     #[test]
-    fn ready_tile_drain_inserts_25_results_within_nine_frames() {
+    fn map_ready_tile_queue_meters_nine_arrivals_in_ring_order() {
         struct FakeResult {
-            id: usize,
             bytes: usize,
             upload_seconds: f64,
         }
 
-        let mut pending = (0..25)
-            .map(|id| FakeResult {
-                id,
-                bytes: if id == 0 { 30_000_000 } else { 4_000_000 },
-                upload_seconds: 0.0021,
+        let key = |x, y| TileKey { z: 3, x, y };
+        let visible = vec![key(4, 4), key(4, 3), key(3, 4), key(5, 4), key(4, 5)];
+        let arrivals = [
+            key(4, 6),
+            key(5, 4),
+            key(2, 4),
+            key(4, 4),
+            key(6, 4),
+            key(4, 3),
+            key(4, 2),
+            key(4, 5),
+            key(3, 4),
+        ];
+        let mut pending = arrivals
+            .into_iter()
+            .map(|key| {
+                (
+                    key,
+                    FakeResult {
+                        bytes: 4_000_000,
+                        upload_seconds: 0.0001,
+                    },
+                )
             })
             .collect::<Vec<_>>();
+        sort_ready_tiles_for_insert(
+            &mut pending,
+            &visible,
+            dvec2(4.5 / 8.0, 4.5 / 8.0),
+            (1.0, 0.0),
+            1.0,
+        );
+
         let mut inserted = Vec::new();
         let mut frames = 0;
         while !pending.is_empty() {
@@ -10238,18 +10275,31 @@ mod tests {
             let stats = drain_pending_ready_tiles(
                 &mut pending,
                 MapMemoryBudgets::from_total(1536 * 1024 * 1024, false).upload,
-                |ready| ready.bytes,
-                |ready| {
-                    inserted.push(ready.id);
+                |(_, ready)| ready.bytes,
+                |(key, ready)| {
+                    inserted.push(key);
                     ready.upload_seconds
                 },
             );
-            assert!(stats.count > 0);
-            assert!(frames <= 9);
+            assert!((1..=READY_TILE_INSERTS_PER_FRAME).contains(&stats.count));
         }
 
-        assert_eq!(frames, 9);
-        assert_eq!(inserted, (0..25).collect::<Vec<_>>());
+        assert!(frames >= 3);
+        assert_eq!(frames, 5);
+        assert_eq!(
+            inserted,
+            [
+                key(4, 4),
+                key(4, 3),
+                key(3, 4),
+                key(5, 4),
+                key(4, 5),
+                key(4, 2),
+                key(2, 4),
+                key(6, 4),
+                key(4, 6),
+            ]
+        );
     }
 
     #[test]
