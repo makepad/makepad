@@ -26,7 +26,8 @@
 use crate::button::ButtonAction;
 use crate::widget_tree::CxWidgetExt;
 use crate::{
-    animator::*, makepad_derive_widget::*, makepad_draw::*, text_input::*, view::View, widget::*,
+    animator::*, makepad_derive_widget::*, makepad_draw::ime::TextInputConfig, makepad_draw::*,
+    text_input::*, view::View, widget::*,
 };
 use crate::makepad_script::script;
 
@@ -1065,6 +1066,21 @@ impl FabValueInput {
 
     pub fn value(&self) -> f64 {
         self.value
+    }
+
+    /// Focus/IME state of the private text editor used while a scrub field is
+    /// being typed. Canvas hosts cannot discover this child through the
+    /// public widget tree because it is embedded directly, not a WidgetRef.
+    pub fn text_ime_anchor(&self, cx: &Cx) -> Option<(Area, Rect, TextInputConfig)> {
+        let area = self.text_input.area();
+        if !self.editing || area.is_empty() || !cx.has_key_focus(area) {
+            return None;
+        }
+        Some((
+            area,
+            self.text_input.cursor_rect_in_absolute(cx)?,
+            self.text_input.ime_config(),
+        ))
     }
 
     fn publish(&mut self, cx: &mut Cx, uid: WidgetUid, v: f64, ended: bool) {
