@@ -2178,6 +2178,16 @@ script_mod! {
                                 KnobStack{
                                     deck_a_label_filter := KnobLabel{text: "FILTER"}
                                     deck_a_filter := MusicKnob{min: 0.0 max: 1.0 default: 0.5}
+                                    // The slot the three bands spend on
+                                    // kill and solo: the sweep has no
+                                    // bands to kill, so its row is free
+                                    // for how hard it rings. Three rungs,
+                                    // because a resonance that has to be
+                                    // dialled in is one nobody uses
+                                    // mid-mix.
+                                    MSRow{
+                                        deck_a_resonance := MSButton{text: "RES"}
+                                    }
                                 }
                             }
                             deck_a_stems_head := View{
@@ -2678,6 +2688,16 @@ script_mod! {
                                 KnobStack{
                                     deck_b_label_filter := KnobLabel{text: "FILTER"}
                                     deck_b_filter := MusicKnob{min: 0.0 max: 1.0 default: 0.5}
+                                    // The slot the three bands spend on
+                                    // kill and solo: the sweep has no
+                                    // bands to kill, so its row is free
+                                    // for how hard it rings. Three rungs,
+                                    // because a resonance that has to be
+                                    // dialled in is one nobody uses
+                                    // mid-mix.
+                                    MSRow{
+                                        deck_b_resonance := MSButton{text: "RES"}
+                                    }
                                 }
                                 KnobStack{
                                     deck_b_label_eq_low := KnobLabel{text: "LOW"}

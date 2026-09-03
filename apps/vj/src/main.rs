@@ -3414,6 +3414,7 @@ struct DeckRefs {
     loop_scan: ButtonRef,
     phase_flip: ButtonRef,
     mute: ButtonRef,
+    resonance: ButtonRef,
     sync: ButtonRef,
     slip: ButtonRef,
     keylock: ButtonRef,
@@ -3470,6 +3471,7 @@ impl DeckRefs {
             loop_scan: ui.button(cx, ids.loop_scan),
             phase_flip: ui.button(cx, ids.phase_flip),
             mute: ui.button(cx, ids.mute),
+            resonance: ui.button(cx, ids.resonance),
             sync: ui.button(cx, ids.sync),
             slip: ui.button(cx, ids.slip),
             keylock: ui.button(cx, ids.keylock),
@@ -3582,6 +3584,8 @@ struct MusicDeckIds {
     loop_scan: &'static [LiveId],
     phase_flip: &'static [LiveId],
     mute: &'static [LiveId],
+    /// The RES chip under the sweep knob: how hard the filter rings.
+    resonance: &'static [LiveId],
     sync: &'static [LiveId],
     slip: &'static [LiveId],
     keylock: &'static [LiveId],
@@ -3640,6 +3644,7 @@ impl MusicDeckIds {
                 loop_scan: ids!(deck_a_loop_scan),
                 phase_flip: ids!(deck_a_phase_flip),
                 mute: ids!(deck_a_mute),
+                resonance: ids!(deck_a_resonance),
                 sync: ids!(deck_a_sync),
                 slip: ids!(deck_a_slip),
                 keylock: ids!(deck_a_keylock),
@@ -3726,6 +3731,7 @@ impl MusicDeckIds {
                 loop_scan: ids!(deck_b_loop_scan),
                 phase_flip: ids!(deck_b_phase_flip),
                 mute: ids!(deck_b_mute),
+                resonance: ids!(deck_b_resonance),
                 sync: ids!(deck_b_sync),
                 slip: ids!(deck_b_slip),
                 keylock: ids!(deck_b_keylock),
@@ -13947,6 +13953,9 @@ p2 {}
                 DeckCmd::SetFilter { deck, position } => {
                     self.mixer.set_deck_filter(deck, position)
                 }
+                DeckCmd::SetResonance { deck, lift } => {
+                    self.mixer.set_deck_resonance(deck, lift)
+                }
                 DeckCmd::SetStemGain { deck, stem, gain } => {
                     self.mixer.set_deck_stem_gain(deck, stem, gain)
                 }
@@ -22901,6 +22910,7 @@ p2 {}
             let pitch = state.pitch;
             let bend = state.bend;
             let synced = state.synced;
+            let resonance = state.resonance;
             let loaded = state.is_loaded();
             // What a fresh press of the retire button would do. Read off
             // the ENGINE's own mirror, which is the one `eject_press`
@@ -23150,6 +23160,13 @@ p2 {}
             self.paint_phones_lit(cx, ids.hp, self.phones_deck[index]);
             for (band, kill) in ids.eq_kills.iter().enumerate() {
                 self.paint_lit(cx, kill, eq_kill[band]);
+            }
+            // Off the model, like the filter beside it: a swap carries
+            // the strip, and the chip has to follow it.
+            self.paint_lit(cx, ids.resonance, resonance > 0);
+            let word = if resonance >= 2 { "RES+" } else { "RES" };
+            if refs.resonance.text() != word {
+                refs.resonance.set_text(cx, word);
             }
             for (band, solo) in ids.eq_solos.iter().enumerate() {
                 self.paint_lit(cx, solo, eq_solo[band]);
@@ -25830,6 +25847,10 @@ p2 {}
                     let cmds = self.decks.toggle_eq_kill(deck, band);
                     self.run_deck_cmds(cx, cmds);
                 }
+            }
+            if refs.resonance.clicked(actions) {
+                let cmds = self.decks.cycle_resonance(deck);
+                self.run_deck_cmds(cx, cmds);
             }
             for (band, solo) in refs.eq_solos.iter().enumerate() {
                 if solo.clicked(actions) {

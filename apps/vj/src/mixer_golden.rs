@@ -476,6 +476,22 @@ fn a_filter_jump_is_click_free() {
     assert!(worst < CLICK, "a filter jump must not step, biggest step {worst}");
 }
 
+/// The ordinary gesture: a sweep dragged from one side of the knob to the
+/// other, through the dead zone. The jump test above drives DC, which a
+/// low-pass passes untouched, so it cannot see a filter ringing on the
+/// other filter's memory; this one drives a tone, which can.
+#[test]
+fn a_filter_sweep_through_centre_is_click_free() {
+    let mixer = deck_a(tone_pcm(220.0, 48_000, 3.0));
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| {
+        let position = (0.2 + index as f32 * 0.02).min(0.85);
+        mixer.set_deck_filter(DeckId::A, position);
+    });
+    assert!(worst < CLICK, "a sweep through the centre stepped by {worst}");
+}
+
 #[test]
 fn a_gain_change_is_click_free() {
     let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));

@@ -1083,9 +1083,12 @@ struct EqChannelState {
     /// Sweepable filter, 4th order.
     sweep: [BiquadState; 2],
     /// The same filter at its PREVIOUS setting, kept running while a
-    /// change crossfades. Its own state, because a biquad's state means
-    /// nothing to a different set of coefficients -- handing the old
-    /// state to new numbers is exactly the click this exists to remove.
+    /// change crossfades. Its own copy of the state, so it can ring down
+    /// on its own while the new filter is faded in over it. The new
+    /// filter inherits the state when the change is a small one -- a
+    /// knob dragged a little -- and starts from silence when the KIND of
+    /// filter changes, because a low-pass's memory handed to a high-pass
+    /// is not a small mismatch, it is a ring that dwarfs the signal.
     sweep_out: [BiquadState; 2],
 }
 
@@ -1101,6 +1104,10 @@ struct EqCoeffs {
     /// What the sweep was, for the frames it takes to hand over.
     sweep_prev: [Biquad; 2],
     sweep_prev_on: bool,
+    /// Which side of the dead zone the sweep is on: -1 low-pass, 0 off,
+    /// 1 high-pass. A change of side is a change of KIND, and that is
+    /// what decides whether the new filter may keep the old one's memory.
+    sweep_side: i8,
 }
 
 impl EqCoeffs {
@@ -1115,6 +1122,7 @@ impl EqCoeffs {
             sweep_on: false,
             sweep_prev: [Biquad::default(); 2],
             sweep_prev_on: false,
+            sweep_side: 0,
         }
     }
 }
@@ -1138,6 +1146,8 @@ pub struct DeckEq {
     filter_built: f32,
     /// Frames left in a filter handover; zero when nothing is changing.
     handover: u32,
+    /// How hard the sweep rings; 1.0 is Butterworth, which is flat.
+    resonance: f32,
     /// Crossfade between the dry input and the processed chain.
     wet: ParamRamp,
 }
@@ -1154,6 +1164,7 @@ impl DeckEq {
             blend_filter: ParamRamp::at(0.0),
             filter_built: f32::NAN,
             handover: 0,
+            resonance: 1.0,
             wet: ParamRamp::at(0.0),
         }
     }
@@ -1276,14 +1287,31 @@ impl DeckEq {
             && (self.effective_filter() - 0.5).abs() <= FILTER_DEADZONE
     }
 
+    /// How much the sweep may ring at its corner.
+    ///
+    /// Off is Butterworth -- the flattest four-pole there is, and what
+    /// the sweep has always been. The two rungs above it are the sound a
+    /// DJ filter is expected to make: a lift at the corner that turns a
+    /// sweep from a curtain into a note. The top rung lifts the corner by
+    /// about seven decibels where the ceiling is not in force, and hot
+    /// material at the corner will meet the master clamp; that is the
+    /// sound, and it is the operator's to reach for.
+    ///
+    /// Three rungs and not a knob, because the only free room is the
+    /// kill-and-solo slot under the FILTER knob, and because a resonance
+    /// that has to be dialled in is one nobody uses mid-mix.
+    pub const RESONANCE_RUNGS: [f32; 3] = [1.0, 1.9, 3.2];
+
     /// How long a filter change takes to hand over, in frames.
     ///
-    /// About a millisecond and a half at 48 kHz: long enough that the two
-    /// filters' outputs are blended rather than switched, short enough
-    /// that a hand sweeping the knob hears a sweep and not a smear. A
-    /// fixed length rather than a share of the buffer, so the answer does
-    /// not change with the device's block size.
-    const FILTER_HANDOVER_FRAMES: u32 = 64;
+    /// Five milliseconds at 48 kHz: long enough that the two filters'
+    /// outputs are blended rather than switched even with the corner
+    /// ringing at the top rung, short enough that a hand sweeping the
+    /// knob hears a sweep and not a smear. A fixed length rather than a
+    /// share of the buffer, so the answer does not change with the
+    /// device's block size -- and a running handover is allowed to finish
+    /// before the next one starts, for the same reason.
+    const FILTER_HANDOVER_FRAMES: u32 = 256;
 
     /// Rebuild rate-dependent coefficients. Called once per device buffer,
     /// never per frame — the trig is the expensive part and the ear cannot
@@ -1293,6 +1321,15 @@ impl DeckEq {
         let engaged = !self.at_unity();
         self.wet.slew(if engaged { 1.0 } else { 0.0 }, EQ_ENGAGE_SECS);
         if (position - self.filter_built).abs() < 1e-4 {
+            return;
+        }
+        // A running handover finishes first. Restarting it would drop the
+        // outgoing filter at whatever weight it had reached, in one
+        // sample -- a step whose size depends on how far the crossfade
+        // had got, which is to say on the device's block size. The new
+        // position is picked up on the first block after the crossfade
+        // lands, at most five milliseconds late.
+        if self.handover > 0 {
             return;
         }
         self.filter_built = position;
@@ -1307,25 +1344,69 @@ impl DeckEq {
             channel.sweep_out = channel.sweep;
         }
         let centre = 0.5;
-        if (position - centre).abs() <= FILTER_DEADZONE {
+        let side: i8 = if (position - centre).abs() <= FILTER_DEADZONE {
+            0
+        } else if position < centre {
+            -1
+        } else {
+            1
+        };
+        // A change of KIND -- off to on, or across the dead zone -- starts
+        // the new filter from silence. Its memory is the other filter's,
+        // and a low-pass's memory handed to a high-pass rings at many
+        // times the signal; the crossfade then hides a bounded start-up
+        // instead of an unbounded ring. A small drag on the same side
+        // keeps the memory, which is nearly right and settles at once.
+        if side != self.coeffs.sweep_side {
+            for channel in &mut self.channels {
+                channel.sweep = [BiquadState::default(); 2];
+            }
+        }
+        self.coeffs.sweep_side = side;
+        if side == 0 {
             self.coeffs.sweep_on = false;
             return;
         }
         self.coeffs.sweep_on = true;
-        if position < centre {
+        let (cutoff, lowpass) = if side < 0 {
             // Low-pass sweeping down as the knob turns left.
             let t = ((centre - position) / (centre - FILTER_DEADZONE)).clamp(0.0, 1.0);
-            let cutoff = log_sweep(FILTER_LP_MAX_HZ, FILTER_LP_MIN_HZ, t);
-            for (index, q) in BUTTERWORTH_Q4.iter().enumerate() {
-                self.coeffs.sweep[index] = Biquad::lowpass(cutoff, self.sample_rate, *q);
-            }
+            (log_sweep(FILTER_LP_MAX_HZ, FILTER_LP_MIN_HZ, t), true)
         } else {
             let t = ((position - centre) / (centre - FILTER_DEADZONE)).clamp(0.0, 1.0);
-            let cutoff = log_sweep(FILTER_HP_MIN_HZ, FILTER_HP_MAX_HZ, t);
-            for (index, q) in BUTTERWORTH_Q4.iter().enumerate() {
-                self.coeffs.sweep[index] = Biquad::highpass(cutoff, self.sample_rate, *q);
-            }
+            (log_sweep(FILTER_HP_MIN_HZ, FILTER_HP_MAX_HZ, t), false)
+        };
+        // The lift rides the low-Q section only. The corner's height is
+        // the product of the two sections' Qs whichever takes it, and the
+        // slope past the corner is the order's; what the choice sets is
+        // the WIDTH of the peak, and a broad hump reads as a sweep where a
+        // narrow one reads as a whistle.
+        let lift = self.resonance.min(resonance_ceiling(cutoff));
+        for (index, q) in BUTTERWORTH_Q4.iter().enumerate() {
+            let q = if index == 0 { *q * lift } else { *q };
+            self.coeffs.sweep[index] = match lowpass {
+                true => Biquad::lowpass(cutoff, self.sample_rate, q),
+                false => Biquad::highpass(cutoff, self.sample_rate, q),
+            };
         }
+    }
+
+    /// How hard the sweep rings at its corner. Rebuilds on the next block
+    /// and hands over like any other change, so it can be turned mid-mix.
+    pub fn set_resonance(&mut self, lift: f32) {
+        // Never above the top rung: the ceiling plateaus there, and a lift
+        // past it would step at the plateau's edge.
+        let lift = match lift.is_finite() {
+            true => lift.clamp(1.0, Self::RESONANCE_RUNGS[2]),
+            false => 1.0,
+        };
+        if (lift - self.resonance).abs() < 1e-6 {
+            return;
+        }
+        self.resonance = lift;
+        // Force the rebuild: the POSITION has not moved, and that is what
+        // the built-coefficient guard watches.
+        self.filter_built = f32::NAN;
     }
 
     /// Process one stereo frame.
@@ -1342,6 +1423,7 @@ impl DeckEq {
         // Counted once per FRAME, not per channel: the two channels are
         // the same moment in time and must land on the same blend.
         let handover_after = self.handover.saturating_sub(1);
+        let blend = 1.0 - self.handover as f32 / Self::FILTER_HANDOVER_FRAMES as f32;
         if wet <= 0.0 {
             // Untouched deck: the sample the decoder produced, unchanged.
             return frame;
@@ -1394,15 +1476,43 @@ impl DeckEq {
                             .process(&mut state.sweep_out[index], going);
                     }
                 }
-                let t = 1.0
-                    - self.handover as f32 / Self::FILTER_HANDOVER_FRAMES as f32;
-                wet_sample = going + (wet_sample - going) * t;
+                wet_sample = going + (wet_sample - going) * blend;
             }
             out[channel] = x + (wet_sample - x) * wet;
         }
         self.handover = handover_after;
         out
     }
+}
+
+/// What resonance a sweep may actually have with its corner HERE.
+///
+/// A four-pole filter asked to ring hard with its corner at the edge of
+/// hearing is a filter asked to make a whistle or a rumble: a resonant
+/// corner on the bass is a sub-bass boost, and one on the air is a sine
+/// wave. That is true at the bottom of the low-pass sweep and at the
+/// START of the high-pass one -- both put the corner on the bass -- so
+/// the ceiling is a function of the corner's frequency and not of how
+/// far the knob has travelled, and it guards both ends of both sides.
+///
+/// Full lift from about 90 Hz to 6 kHz, coming down to flat by 40 Hz
+/// and by 14 kHz, with a soft knee. Never below flat.
+fn resonance_ceiling(corner_hz: f32) -> f32 {
+    const FLAT_LOW_HZ: f32 = 40.0;
+    const FULL_LOW_HZ: f32 = 90.0;
+    const FULL_HIGH_HZ: f32 = 6_000.0;
+    const FLAT_HIGH_HZ: f32 = 14_000.0;
+    let corner = if corner_hz.is_finite() { corner_hz.max(1.0) } else { 1.0 };
+    let reach = if corner < FULL_LOW_HZ {
+        (corner / FLAT_LOW_HZ).ln() / (FULL_LOW_HZ / FLAT_LOW_HZ).ln()
+    } else if corner > FULL_HIGH_HZ {
+        (FLAT_HIGH_HZ / corner).ln() / (FLAT_HIGH_HZ / FULL_HIGH_HZ).ln()
+    } else {
+        return f32::INFINITY;
+    };
+    let reach = reach.clamp(0.0, 1.0);
+    let ceiling = 1.0 + (DeckEq::RESONANCE_RUNGS[2] - 1.0) * reach * reach;
+    ceiling.max(1.0)
 }
 
 fn log_sweep(from: f32, to: f32, t: f32) -> f32 {
@@ -1464,6 +1574,162 @@ static COUNTING_ALLOCATOR: alloc_probe::CountingAllocator = alloc_probe::Countin
 
 #[cfg(test)]
 mod tests {
+    /// The resonance a sweep is allowed, and where it is taken away:
+    /// at both ends of hearing, whichever side of the sweep put the
+    /// corner there.
+    #[test]
+    fn resonance_is_reined_in_at_the_ends_of_hearing() {
+        // Through the middle of the music the operator gets what they
+        // asked for.
+        for hz in [90.0, 200.0, 800.0, 2_000.0, 6_000.0] {
+            assert!(resonance_ceiling(hz).is_infinite(), "{hz}");
+        }
+        // Down towards the bass it comes down, and it is flat by 40 Hz:
+        // that is the bottom of the low-pass sweep AND the first engaged
+        // position of the high-pass one, and a resonant corner on the
+        // bass is a sub-bass boost either way.
+        let near = resonance_ceiling(70.0);
+        let further = resonance_ceiling(50.0);
+        assert!(near > further, "{near} then {further}");
+        assert!((resonance_ceiling(40.0) - 1.0).abs() < 1e-6);
+        assert!((resonance_ceiling(FILTER_HP_MIN_HZ) - 1.0).abs() < 1e-6, "the high-pass's near end");
+        assert!((resonance_ceiling(FILTER_LP_MIN_HZ) - 1.0).abs() < 1e-6, "the low-pass's far end");
+        // Up towards the air likewise: flat by 14 kHz, which covers the
+        // top of the high-pass sweep and the start of the low-pass one.
+        assert!(resonance_ceiling(8_000.0) > resonance_ceiling(11_000.0));
+        assert!((resonance_ceiling(14_000.0) - 1.0).abs() < 1e-6);
+        assert!((resonance_ceiling(FILTER_LP_MAX_HZ) - 1.0).abs() < 1e-6, "the low-pass's near end");
+        // Never below flat, and never above the top rung, whatever it is
+        // asked -- including nonsense.
+        for hz in [0.0, 1.0, 39.0, 41.0, 9_000.0, 20_000.0, 1e9, f32::NAN] {
+            let ceiling = resonance_ceiling(hz);
+            assert!(ceiling >= 1.0, "{hz}");
+            assert!(ceiling.is_infinite() || ceiling <= DeckEq::RESONANCE_RUNGS[2], "{hz}");
+        }
+    }
+
+    /// Turning RES mid-play hands over like a knob move does. The tab's
+    /// absolute click rule cannot gate this one -- a corner ringing at
+    /// the top rung steps by more than that every sample on its own --
+    /// so the toggle is held to the steady state it toggles between.
+    #[test]
+    fn turning_resonance_mid_play_adds_no_step_of_its_own() {
+        let rate = 48_000.0f32;
+        let worst = |toggle_at: Option<usize>| {
+            let mut eq = DeckEq::new(rate);
+            eq.set_resonance(DeckEq::RESONANCE_RUNGS[2]);
+            // The corner on the tone, which is the loudest the ring gets.
+            eq.set_filter(0.1517);
+            let mut phase = 0.0f32;
+            let mut out = Vec::with_capacity(12_000);
+            for block in 0..48 {
+                if Some(block) == toggle_at {
+                    eq.set_resonance(1.0);
+                }
+                eq.prepare_block();
+                for _ in 0..256 {
+                    phase += 2.0 * std::f32::consts::PI * 220.0 / rate;
+                    let x = phase.sin() * 0.5;
+                    out.push(eq.process([x, x], rate)[0]);
+                }
+            }
+            out[6_000..]
+                .windows(2)
+                .map(|pair| (pair[1] - pair[0]).abs())
+                .fold(0.0f32, f32::max)
+        };
+        let steady = worst(None);
+        let toggled = worst(Some(30));
+        assert!(
+            toggled <= steady * 1.05 + 1e-4,
+            "the toggle stepped by {toggled} against a steady {steady}"
+        );
+    }
+
+    /// The device's block size must not change what a sweep sounds like.
+    /// A second move landing while a handover is still running waits for
+    /// it, rather than dropping the outgoing filter at whatever weight it
+    /// had reached.
+    #[test]
+    fn a_second_filter_move_waits_for_the_running_handover() {
+        let rate = 48_000.0f32;
+        for block_frames in [16usize, 32, 64, 256, 2048] {
+            let mut eq = DeckEq::new(rate);
+            let mut phase = 0.0f32;
+            let mut out = Vec::with_capacity(8192);
+            let mut render = |eq: &mut DeckEq, frames: usize, out: &mut Vec<f32>, phase: &mut f32| {
+                eq.prepare_block();
+                for _ in 0..frames {
+                    *phase += 2.0 * std::f32::consts::PI * 220.0 / rate;
+                    let x = phase.sin() * 0.5;
+                    out.push(eq.process([x, x], rate)[0]);
+                }
+            };
+            eq.set_filter(0.2);
+            let mut rendered = 0;
+            while rendered < 2048 {
+                render(&mut eq, block_frames, &mut out, &mut phase);
+                rendered += block_frames;
+            }
+            let settled = out.len();
+            eq.set_filter(0.85);
+            render(&mut eq, block_frames, &mut out, &mut phase);
+            eq.set_filter(0.86);
+            let mut rendered = 0;
+            while rendered < 2048 {
+                render(&mut eq, block_frames, &mut out, &mut phase);
+                rendered += block_frames;
+            }
+            let worst = out[settled - 1..]
+                .windows(2)
+                .map(|pair| (pair[1] - pair[0]).abs())
+                .fold(0.0f32, f32::max);
+            assert!(worst < 0.02, "{block_frames}-frame blocks stepped by {worst}");
+        }
+    }
+
+    /// Resonance is a lift at the corner: with the sweep parked as a
+    /// low-pass, a tone sitting AT the corner comes out louder with it
+    /// than without, and one well below is untouched.
+    #[test]
+    fn resonance_lifts_the_corner_and_leaves_the_passband_alone() {
+        let rate = 48_000.0f32;
+        let level = |lift: f32, hz: f32| {
+            let mut eq = DeckEq::new(rate);
+            eq.set_resonance(lift);
+            // Mid-travel on the low-pass side, well clear of the clamp.
+            eq.set_filter(0.25);
+            eq.prepare_block();
+            let mut phase = 0.0f32;
+            let mut peak = 0.0f32;
+            for n in 0..12_000 {
+                phase += 2.0 * std::f32::consts::PI * hz / rate;
+                let x = phase.sin() * 0.5;
+                let y = eq.process([x, x], rate)[0];
+                // Ignore the settling, measure the steady state.
+                if n > 6_000 {
+                    peak = peak.max(y.abs());
+                }
+            }
+            peak
+        };
+        // The corner at a quarter travel, from the sweep's own law.
+        let corner = {
+            let t = 0.25f32 / (0.5 - FILTER_DEADZONE);
+            log_sweep(FILTER_LP_MAX_HZ, FILTER_LP_MIN_HZ, t)
+        };
+        let flat = level(1.0, corner);
+        let rung = level(DeckEq::RESONANCE_RUNGS[2], corner);
+        assert!(rung > flat * 1.3, "flat {flat}, resonant {rung}");
+        // Deep in the passband nothing moves. Not two octaves down but
+        // four: a resonant section's shape reaches further than its peak,
+        // and a couple of percent at two octaves is the filter's own
+        // arithmetic rather than a fault.
+        let flat_low = level(1.0, corner / 16.0);
+        let rung_low = level(DeckEq::RESONANCE_RUNGS[2], corner / 16.0);
+        assert!((rung_low - flat_low).abs() < 0.01, "{flat_low} vs {rung_low}");
+    }
+
     /// A filter sweep is a gesture, and a gesture must not click.
     ///
     /// Moving the knob replaces four biquads' coefficients while their

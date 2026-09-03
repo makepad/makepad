@@ -1243,6 +1243,10 @@ pub struct DeckState {
     pub eq_solo: [bool; 3],
     /// Bipolar sweep filter; 0.5 = off.
     pub filter: f32,
+    /// Which resonance rung the sweep is on; 0 is flat. Part of the
+    /// channel strip like the filter beside it, so a swap carries it and
+    /// a load leaves it, for the same reasons.
+    pub resonance: usize,
     /// Per-stem gains, in [`crate::music_dsp::StemKind`] order.
     pub stem_gain: [f32; STEM_COUNT],
     pub stem_kill: [bool; STEM_COUNT],
@@ -1307,6 +1311,7 @@ impl Default for DeckState {
             eq_kill: [false; 3],
             eq_solo: [false; 3],
             filter: 0.5,
+            resonance: 0,
             stem_gain: [1.0; STEM_COUNT],
             stem_kill: [false; STEM_COUNT],
             stem_solo: [false; STEM_COUNT],
@@ -1320,6 +1325,12 @@ impl Default for DeckState {
 impl DeckState {
     /// What this deck should actually be sent: the fader the operator set,
     /// times the level-match trim when NORMALISE is asking for one.
+    /// The lift the mixer is sent for this deck's resonance rung.
+    pub fn resonance_lift(&self) -> f32 {
+        let rungs = crate::music_dsp::DeckEq::RESONANCE_RUNGS;
+        rungs[self.resonance.min(rungs.len() - 1)]
+    }
+
     pub fn effective_gain(&self, normalise: bool) -> f32 {
         if normalise {
             (self.gain * self.norm_gain).clamp(0.0, 1.5)
@@ -1597,6 +1608,8 @@ pub enum DeckCmd {
     SetEqBand { deck: DeckId, band: usize, gain: f32 },
     /// Bipolar sweep filter; 0.5 = off.
     SetFilter { deck: DeckId, position: f32 },
+    /// How hard the sweep rings, as the lift the mixer applies.
+    SetResonance { deck: DeckId, lift: f32 },
     /// One stem lane's gain, 0 = muted.
     SetStemGain { deck: DeckId, stem: usize, gain: f32 },
     SplatSet { deck: DeckId, grid: Arc<SplatGrid> },
@@ -2030,6 +2043,7 @@ impl DeckEngine {
             DeckCmd::SetRate { deck, rate: state.rate },
             DeckCmd::SetKeyShift { deck, semitones: state.key_shift },
             DeckCmd::SetFilter { deck, position: state.filter },
+            DeckCmd::SetResonance { deck, lift: state.resonance_lift() },
         ];
         for band in 0..3 {
             cmds.push(DeckCmd::SetEqBand { deck, band, gain: state.eq_effective(band) });
@@ -4763,6 +4777,16 @@ impl DeckEngine {
         let state = self.deck_mut(deck);
         state.filter = position.clamp(0.0, 1.0);
         vec![DeckCmd::SetFilter { deck, position: state.filter }]
+    }
+
+    /// Step the sweep's resonance to the next rung, round and round:
+    /// flat, a lift, a bigger lift, flat. Round rather than up-and-back
+    /// so the chip is one press per step in the dark.
+    pub fn cycle_resonance(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        let rungs = crate::music_dsp::DeckEq::RESONANCE_RUNGS.len();
+        let state = self.deck_mut(deck);
+        state.resonance = (state.resonance + 1) % rungs;
+        vec![DeckCmd::SetResonance { deck, lift: state.resonance_lift() }]
     }
 
     /// Stem knob. Inert until the separated stems are loaded — the deck is

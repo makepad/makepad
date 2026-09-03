@@ -2314,6 +2314,12 @@ impl Mixer {
         true
     }
 
+    /// How hard this deck's sweep rings at its corner.
+    pub fn set_deck_resonance(&self, deck: DeckId, lift: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].eq.set_resonance(lift);
+    }
+
     /// The reverse hold: the record runs backwards while it is held, and a
     /// ghost keeps the place it should have reached.
     ///
