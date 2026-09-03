@@ -1,6 +1,7 @@
 use makepad_flow::graph::{evaluate, is_canonical, prelude_catalog, tool_schema, write};
 use makepad_flow::{Literal, NodeInputValue, PortType};
 use makepad_micro_serde::{DeJson, SerJson};
+use std::collections::HashSet;
 
 #[test]
 fn design_fixture_evaluates() {
@@ -155,6 +156,71 @@ fn generic_gen_carries_custom_params_and_ports() {
 }
 
 #[test]
+fn declared_gen_port_signatures_survive_writer_round_trip() {
+    let source = r#"use mod.flow.*
+let Misleading = Image{
+    ports: {
+        in: {picture: @text, caption: @image}
+        out: {picture: @audio, caption: @video}
+    }
+}
+let generated = Misleading{}
+let result = Output{type: @audio value: generated.out(@picture)}
+Flow{generated, result}
+"#;
+    let graph = evaluate(source, "misleading-ports.splash").unwrap();
+    let before = graph.nodes.iter().find(|node| node.id == "generated").unwrap();
+    assert_eq!(before.type_name, "Image");
+    assert_eq!(
+        before
+            .inputs
+            .iter()
+            .map(|port| (port.port.as_str(), port.ty))
+            .collect::<Vec<_>>(),
+        [("picture", PortType::Text), ("caption", PortType::Image)]
+    );
+    assert_eq!(
+        before
+            .outputs
+            .iter()
+            .map(|port| (port.name.as_str(), port.ty))
+            .collect::<Vec<_>>(),
+        [("picture", PortType::Audio), ("caption", PortType::Video)]
+    );
+    let written = write(&graph);
+    let rewritten = evaluate(&written, "misleading-ports-written.splash").unwrap();
+    let after = rewritten
+        .nodes
+        .iter()
+        .find(|node| node.id == "generated")
+        .unwrap();
+    assert_eq!(
+        before
+            .inputs
+            .iter()
+            .map(|port| (port.port.as_str(), port.ty))
+            .collect::<Vec<_>>(),
+        after
+            .inputs
+            .iter()
+            .map(|port| (port.port.as_str(), port.ty))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        before
+            .outputs
+            .iter()
+            .map(|port| (port.name.as_str(), port.ty))
+            .collect::<Vec<_>>(),
+        after
+            .outputs
+            .iter()
+            .map(|port| (port.name.as_str(), port.ty))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn named_tool_prunes_the_unrelated_branch() {
     let graph = evaluate(include_str!("fixtures/tools.splash"), "tools.splash").unwrap();
     assert_eq!(graph.tools[0].name, "run");
@@ -300,6 +366,18 @@ Flow{clip, result}
 }
 
 #[test]
+fn empty_legacy_port_arrays_still_warn() {
+    let source = r#"use mod.flow.*
+let Legacy = Gen{domain: "image" ports: {in: [] out: []}}
+let empty = Legacy{}
+Flow{empty}
+"#;
+    let graph = evaluate(source, "empty-legacy-ports.splash").unwrap();
+    assert_eq!(graph.warnings.len(), 2, "{:?}", graph.warnings);
+    assert!(graph.warnings.iter().all(|warning| warning.contains("deprecated")));
+}
+
+#[test]
 fn prelude_catalog_walks_every_recipe_type_including_mesh() {
     let catalog = prelude_catalog().unwrap();
     let mesh = catalog
@@ -344,6 +422,63 @@ fn prelude_catalog_walks_every_recipe_type_including_mesh() {
         ._in
         .iter()
         .any(|port| port.name == "reference_image" && port.ty == PortType::Image));
+}
+
+#[test]
+fn prelude_catalog_has_the_exact_public_node_type_set() {
+    let catalog = prelude_catalog().unwrap();
+    let names: Vec<_> = catalog.iter().map(|node| node.type_name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "Annotate",
+            "Ask",
+            "Control",
+            "Depth",
+            "Fn",
+            "Gen",
+            "Http",
+            "Image",
+            "ImageEdit",
+            "Inpaint",
+            "Input",
+            "Llm",
+            "Matte",
+            "Mesh",
+            "Motion",
+            "Music",
+            "Output",
+            "Paint",
+            "Rig",
+            "Sfx",
+            "Speech",
+            "Splat",
+            "Text",
+            "Upscale",
+            "Video",
+            "VideoEnhance",
+            "Vision",
+            "World",
+        ]
+    );
+    assert_eq!(names.iter().copied().collect::<HashSet<_>>().len(), names.len());
+    for excluded in [
+        "Node",
+        "Flow",
+        "NodeFace",
+        "InputFace",
+        "TextFace",
+        "OutputFace",
+        "LlmFace",
+        "FnFace",
+        "HttpFace",
+        "AskFace",
+        "GenFace",
+        "ImageFace",
+        "UpscaleFace",
+    ] {
+        assert!(!names.contains(&excluded), "catalog contains `{excluded}`");
+    }
 }
 
 #[test]

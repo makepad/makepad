@@ -75,3 +75,51 @@ fn every_recipe_template_evaluates_and_round_trips() {
         assert!(is_canonical(&written), "{name}: written form is not canonical");
     }
 }
+
+#[test]
+fn shipped_templates_are_warning_free_and_keep_typed_multi_input_edges() {
+    let template_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("recipes/templates");
+    for entry in fs::read_dir(&template_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|extension| extension != "splash") {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_str().unwrap();
+        let source = fs::read_to_string(&path).unwrap();
+        let graph = evaluate(&source, name).unwrap();
+        assert!(graph.warnings.is_empty(), "{name}: {:?}", graph.warnings);
+    }
+
+    let dream = evaluate(include_str!("../recipes/templates/dream.splash"), "dream.splash").unwrap();
+    let keyframes: HashSet<_> = dream
+        .edges
+        .iter()
+        .filter(|edge| edge.from_node == "image" && edge.to_node == "video")
+        .map(|edge| (edge.from_port.as_str(), edge.to_port.as_str()))
+        .collect();
+    assert_eq!(keyframes, HashSet::from([("image", "image"), ("image", "last_frame")]));
+
+    let music = evaluate(include_str!("../recipes/templates/music.splash"), "music.splash").unwrap();
+    assert!(music.edges.iter().any(|edge| {
+        edge.from_node == "lyrics"
+            && edge.from_port == "text"
+            && edge.to_node == "music"
+            && edge.to_port == "lyrics"
+    }));
+
+    let inpaint = evaluate(include_str!("../recipes/templates/inpaint.splash"), "inpaint.splash")
+        .unwrap();
+    let image_edges: HashSet<_> = inpaint
+        .edges
+        .iter()
+        .filter(|edge| edge.to_node == "inpaint" && matches!(edge.to_port.as_str(), "image" | "mask"))
+        .map(|edge| (edge.from_node.as_str(), edge.to_port.as_str()))
+        .collect();
+    assert_eq!(image_edges, HashSet::from([("image", "image"), ("mask", "mask")]));
+    let node = inpaint.nodes.iter().find(|node| node.id == "inpaint").unwrap();
+    assert!(node
+        .inputs
+        .iter()
+        .filter(|input| matches!(input.port.as_str(), "image" | "mask"))
+        .all(|input| input.ty == makepad_flow::PortType::Image));
+}

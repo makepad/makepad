@@ -14,7 +14,7 @@ let ocr = Gen{
     image: image.image()
     max_tokens: 12384
     model: "chandra-ocr-2"
-    ports: { in: [@prompt, @image], out: [@text] }
+    ports: { in: {prompt: @text, image: @image}, out: {text: @text} }
     text: fn() { self.out(@text) }
     ui: mod.flow.ui.GenFace
     at: vec2(360, 160)

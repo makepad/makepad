@@ -129,8 +129,10 @@ fn write_node(
             }
         }
         "Image" => {
-            write_input(out, node, "prompt", false, by_id);
-            write_input(out, node, "image", false, by_id);
+            write_ports(out, node);
+            for input in &node.inputs {
+                write_input(out, node, &input.port, false, by_id);
+            }
             write_param(out, node, "width", true);
             write_param(out, node, "height", true);
             for name in ["steps", "seed", "negative", "model"] {
@@ -138,32 +140,17 @@ fn write_node(
             }
         }
         "Upscale" => {
-            write_input(out, node, "image", false, by_id);
+            write_ports(out, node);
+            for input in &node.inputs {
+                write_input(out, node, &input.port, false, by_id);
+            }
             write_param(out, node, "factor", false);
         }
         "Gen" => {
             out.push_str("    domain: ");
             write_string(out, node.domain.as_deref().unwrap_or(""));
             out.push('\n');
-            out.push_str("    ports: { in: {");
-            for (index, input) in node.inputs.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                out.push_str(&input.port);
-                out.push_str(": @");
-                out.push_str(port_type_name(input.ty));
-            }
-            out.push_str("}  out: {");
-            for (index, port) in node.outputs.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                out.push_str(&port.name);
-                out.push_str(": @");
-                out.push_str(port_type_name(port.ty));
-            }
-            out.push_str("} }\n");
+            write_ports(out, node);
             for (name, value) in &node.params {
                 out.push_str("    ");
                 out.push_str(name);
@@ -202,6 +189,28 @@ fn write_node(
         out.push('\n');
     }
     out.push_str("}\n\n");
+}
+
+fn write_ports(out: &mut String, node: &Node) {
+    out.push_str("    ports: { in: {");
+    for (index, input) in node.inputs.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&input.port);
+        out.push_str(": @");
+        out.push_str(port_type_name(input.ty));
+    }
+    out.push_str("}  out: {");
+    for (index, port) in node.outputs.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&port.name);
+        out.push_str(": @");
+        out.push_str(port_type_name(port.ty));
+    }
+    out.push_str("} }\n");
 }
 
 fn write_param(out: &mut String, node: &Node, name: &str, force: bool) {
@@ -257,18 +266,10 @@ fn write_input_value(out: &mut String, value: &NodeInputValue, by_id: &HashMap<&
         NodeInputValue::Literal(value) => write_literal(out, value),
         NodeInputValue::Edge(edge) => {
             out.push_str(&edge.from_node);
-            let shadows_method = by_id.get(edge.from_node.as_str()).is_some_and(|source| {
-                source.type_name == "Gen"
-                    || (source.kind == "gen"
-                        && source.inputs.iter().any(|input| {
-                            input.port == edge.from_port
-                                && !matches!(
-                                    input.value,
-                                    NodeInputValue::Literal(Literal::Null)
-                                )
-                        }))
-            });
-            if shadows_method {
+            let use_generic_out = by_id
+                .get(edge.from_node.as_str())
+                .is_some_and(|source| source.kind == "gen");
+            if use_generic_out {
                 out.push_str(".out(@");
                 out.push_str(&edge.from_port);
                 out.push(')');

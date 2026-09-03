@@ -98,6 +98,7 @@ pub struct FakeGen {
     pub cancelled: Arc<AtomicBool>,
     pub bytes: Vec<u8>,
     pub origins: Arc<Mutex<Vec<(Option<String>, Option<u64>)>>>,
+    pub requests: Arc<Mutex<Vec<(Domain, GenerateRequestJson)>>>,
 }
 
 impl FakeGen {
@@ -108,6 +109,7 @@ impl FakeGen {
             cancelled: Arc::new(AtomicBool::new(false)),
             bytes: b"fake-png".to_vec(),
             origins: Arc::new(Mutex::new(Vec::new())),
+            requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -121,6 +123,7 @@ impl GenSeam for FakeGen {
             polls: AtomicUsize::new(0),
             bytes: self.bytes.clone(),
             origins: self.origins.clone(),
+            requests: self.requests.clone(),
         }))
     }
 }
@@ -132,6 +135,7 @@ struct FakeProvider {
     polls: AtomicUsize,
     bytes: Vec<u8>,
     origins: Arc<Mutex<Vec<(Option<String>, Option<u64>)>>>,
+    requests: Arc<Mutex<Vec<(Domain, GenerateRequestJson)>>>,
 }
 
 impl ContentProvider for FakeProvider {
@@ -145,7 +149,7 @@ impl ContentProvider for FakeProvider {
 
     fn request(
         &self,
-        _domain: Domain,
+        domain: Domain,
         request: &GenerateRequestJson,
     ) -> Result<String, AssetAiError> {
         self.starts.lock().unwrap().push((
@@ -156,6 +160,7 @@ impl ContentProvider for FakeProvider {
             .lock()
             .unwrap()
             .push((request.origin_key.clone(), request.origin_epoch));
+        self.requests.lock().unwrap().push((domain, request.clone()));
         Ok("fake-job".to_string())
     }
 
