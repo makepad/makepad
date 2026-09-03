@@ -1442,14 +1442,19 @@ impl PoolSlot {
         let run_state = state.clone();
         let run_token = token.clone();
         let cancel_state = state.clone();
+        let pool_name = inner.name.clone();
+        let lane = self.lane;
         let run = move || {
             if run_token.is_cancelled() {
                 run_state.complete(Err(TaskError::Cancelled));
                 signal_ui_completion();
                 return;
             }
-            let result = catch_unwind(AssertUnwindSafe(f))
-                .map_err(|payload| TaskError::Panicked(panic_report(payload)));
+            let result = catch_unwind(AssertUnwindSafe(f)).map_err(|payload| {
+                let report = panic_report(payload);
+                crate::error!("{} {} job panicked: {}", pool_name, lane.label(), report.message);
+                TaskError::Panicked(report)
+            });
             run_state.complete(result);
             signal_ui_completion();
         };
@@ -2377,10 +2382,13 @@ mod tests {
     }
 
     #[test]
-    fn pool_keeps_capacity_after_task_panic() {
+    fn pool_reports_panic_and_keeps_worker_alive() {
         let pool = test_pool(1, 0, 2, 2);
         let failed = pool.submit(Lane::Light, || panic!("pool task panic")).unwrap();
-        assert!(matches!(worker_join(failed), Err(TaskError::Panicked(_))));
+        let Err(TaskError::Panicked(report)) = worker_join(failed) else {
+            panic!("panicking job did not report TaskError::Panicked");
+        };
+        assert_eq!(&*report.message, "pool task panic");
         let next = pool.submit(Lane::Light, || 31).unwrap();
         assert_eq!(worker_join(next).unwrap(), 31);
         assert_eq!(pool.queued(Lane::Light), 0);

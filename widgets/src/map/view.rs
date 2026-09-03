@@ -5935,6 +5935,18 @@ impl MapView {
                     self.mark_tile_failed(tile_key, &format!("parse: {}", error));
                     redraw = true;
                 }
+                TileWorkerMessage::TileJobPanicked {
+                    style_epoch,
+                    tile_key,
+                    error,
+                } => {
+                    self.local_requested_tiles.remove(&tile_key);
+                    if style_epoch != self.style_epoch {
+                        continue;
+                    }
+                    self.mark_tile_failed(tile_key, &error);
+                    redraw = true;
+                }
             }
         }
         if !self.pending_ready_tiles.is_empty() {
@@ -6772,15 +6784,39 @@ impl MapView {
     where
         F: FnOnce() + Send + 'static,
     {
+        let sender = self.tile_worker_rx.sender();
+        let style_epoch = self.style_epoch;
+        let guarded_job = move || {
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)) {
+                let message = if let Some(message) = payload.downcast_ref::<&str>() {
+                    (*message).to_string()
+                } else if let Some(message) = payload.downcast_ref::<String>() {
+                    message.clone()
+                } else {
+                    "non-string panic payload".to_string()
+                };
+                let error = format!(
+                    "tile bake z{} x{} y{} panicked: {}",
+                    key.z, key.x, key.y, message
+                );
+                crate::error!("MapView: {error}");
+                let _ = sender.send(TileWorkerMessage::TileJobPanicked {
+                    style_epoch,
+                    tile_key: key,
+                    error,
+                });
+            }
+        };
         let pool = cx.task_pool();
         if pool.is_open() {
             let window = pool_window(&pool, self.tile_queue.in_flight());
             self.tile_queue.set_in_flight_limit(window);
-            self.tile_queue.push(&pool, key, true, QueueOrder::Lifo, job)
+            self.tile_queue
+                .push(&pool, key, true, QueueOrder::Lifo, guarded_job)
         } else {
             // Pure parsing/tessellation has an explicit serial fallback when
             // wasm was built without atomics.
-            job();
+            guarded_job();
             Ok(())
         }
     }
@@ -9926,6 +9962,33 @@ mod tests {
         assert!(!is_mkmap_path_shape("local/maps/example-base.mbtiles"));
         assert!(is_mkmap_path_shape("local/maps/world.mkmap"));
         assert!(is_mkmap_path_shape("local/maps/world/root.mkidx"));
+    }
+
+    #[test]
+    fn map_tile_job_panic_marks_the_tile_failed() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        let key = TileKey { z: 14, x: 8414, y: 5384 };
+        map.submit_tile_job(&mut cx, key, || panic!("synthetic tile bake failure"))
+            .unwrap();
+
+        for _ in 0..2_000 {
+            map.handle_tile_worker_messages(&mut cx);
+            if map
+                .tiles
+                .get(&key)
+                .is_some_and(|entry| matches!(entry.state, TileLoadState::Failed { .. }))
+                && map.tile_queue.in_flight() == 0
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(map
+            .tiles
+            .get(&key)
+            .is_some_and(|entry| matches!(entry.state, TileLoadState::Failed { .. })));
+        assert_eq!(map.tile_queue.in_flight(), 0);
     }
 
     #[test]
