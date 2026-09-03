@@ -52,6 +52,20 @@ const FIRST_TEMPLATE: &str = "prompt-to-image";
 /// How often the hub's model lists are refreshed while a flow with generators is open.
 const MODELS_REFRESH_SECS: f64 = 10.0;
 
+fn is_focus_routed_input(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::KeyDown(_)
+            | Event::KeyUp(_)
+            | Event::TextInput(_)
+            | Event::TextRangeReplace(_)
+            | Event::TextCopy(_)
+            | Event::TextCut(_)
+            | Event::ImeAction(_)
+            | Event::SelectionHandleDrag(_)
+    )
+}
+
 const HELP_SHORTCUTS: &str = "⌘N  new flow from a template
 ⌘O  open the next flow
 ⌘S  save the source pane
@@ -84,6 +98,7 @@ script_mod! {
     }
 
     let Panel = RoundedShadowView{
+        width: Fill
         height: Fill
         flow: Down
         cursor: MouseCursor.Default
@@ -96,9 +111,24 @@ script_mod! {
             border_radius: 12.0
             border_size: 1.0
             border_color: #x232327
-            shadow_color: #0008
-            shadow_radius: 18.0
-            shadow_offset: vec2(0.0, 7.0)
+            shadow_color: #0005
+            shadow_radius: 12.0
+            shadow_offset: vec2(0.0, 0.0)
+        }
+    }
+
+    let PanelSplitter = Splitter{
+        width: Fill
+        height: Fill
+        size: 8.0
+        draw_bg +: {
+            color_bg: #0000
+            color: #x26262c
+            color_hover: #x6b5148
+            color_drag: #xff5c39
+            splitter_pad: 2.0
+            bar_size: 72.0
+            border_radius: 2.0
         }
     }
 
@@ -224,9 +254,9 @@ script_mod! {
                                     border_radius: 12.0
                                     border_size: 1.0
                                     border_color: #x232327
-                                    shadow_color: #0008
-                                    shadow_radius: 16.0
-                                    shadow_offset: vec2(0.0, 5.0)
+                                    shadow_color: #0005
+                                    shadow_radius: 12.0
+                                    shadow_offset: vec2(0.0, 0.0)
                                 }
                                 status_dot := RoundedView{
                                     width: 8
@@ -260,64 +290,115 @@ script_mod! {
                                 new_btn := Button{text: "New"}
                             }
 
-                            View{
+                            column_split := PanelSplitter{
                                 width: Fill
                                 height: Fill
-                                flow: Right
-                                spacing: theme.space_2
-                                padding: Inset{left: 8 right: 8 bottom: 8}
-
-                                left_panel := Panel{
-                                    width: 236
-                                    SectionTitle{text: "FLOWS"}
-                                    flow_list := FlowList{height: 136}
-                                    SectionTitle{text: "RUNNING"}
-                                    running := RunningList{height: 150}
-                                    SectionTitle{text: "PALETTE"}
-                                    palette_note := Label{
+                                axis: SplitterAxis.Horizontal
+                                align: SplitterAlign.FromA(244.0)
+                                min_vertical: 180.0
+                                max_vertical: 620.0
+                                a: View{
+                                    width: Fill
+                                    height: Fill
+                                    left_panel := View{
                                         width: Fill
-                                        height: Fit
-                                        text: "Drag a card onto the canvas to add a node."
-                                        draw_text +: {
-                                            color: #x5e5e66
-                                            text_style: theme.font_regular{font_size: 8.5}
+                                        height: Fill
+                                        clip_x: false
+                                        clip_y: false
+                                        padding: Inset{left: 8 right: 4 bottom: 8}
+                                        left_flow_split := PanelSplitter{
+                                            axis: SplitterAxis.Vertical
+                                            align: SplitterAlign.FromA(176.0)
+                                            min_horizontal: 72.0
+                                            max_horizontal: 220.0
+                                            a: Panel{
+                                                SectionTitle{text: "FLOWS"}
+                                                flow_list := FlowList{}
+                                            }
+                                            b: View{
+                                                width: Fill
+                                                height: Fill
+                                                left_running_split := PanelSplitter{
+                                                    axis: SplitterAxis.Vertical
+                                                    align: SplitterAlign.FromA(194.0)
+                                                    min_horizontal: 100.0
+                                                    max_horizontal: 104.0
+                                                    a: Panel{
+                                                        SectionTitle{text: "RUNNING"}
+                                                        running := RunningList{}
+                                                    }
+                                                    b: Panel{
+                                                        SectionTitle{text: "PALETTE"}
+                                                        palette_note := Label{
+                                                            width: Fill
+                                                            height: Fit
+                                                            text: "Drag a card onto the canvas to add a node."
+                                                            draw_text +: {
+                                                                color: #x5e5e66
+                                                                text_style: theme.font_regular{font_size: 8.5}
+                                                            }
+                                                        }
+                                                        palette := Palette{}
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
-                                    palette := Palette{height: Fill}
                                 }
 
-                                View{width: Fill height: Fill}
-
-                                right_panel := Panel{
-                                    width: 330
-                                    inspector_view := View{
-                                        width: Fill
-                                        height: Fill
-                                        flow: Down
-                                        spacing: theme.space_1
-                                        SectionTitle{text: "INSPECTOR"}
-                                        inspector := Inspector{}
-                                    }
-                                    source_view := View{
-                                        width: Fill
-                                        height: Fill
-                                        flow: Down
-                                        visible: false
-                                        spacing: theme.space_2
-                                        View{
-                                            width: Fill
-                                            height: Fit
-                                            flow: Right
-                                            align: Align{y: 0.5}
-                                            SectionTitle{width: Fill text: "SOURCE"}
-                                            save_btn := Button{text: "Save"}
-                                        }
-                                        source := TextInput{
+                                b: View{
+                                    width: Fill
+                                    height: Fill
+                                    canvas_right_split := PanelSplitter{
+                                        axis: SplitterAxis.Horizontal
+                                        align: SplitterAlign.FromB(338.0)
+                                        min_vertical: 320.0
+                                        max_vertical: 260.0
+                                        a: View{width: Fill height: Fill}
+                                        b: View{
                                             width: Fill
                                             height: Fill
-                                            is_multiline: true
-                                            empty_text: "Open a flow to edit its source"
-                                            draw_text +: {text_style: theme.font_code{font_size: 9}}
+                                            right_panel := View{
+                                                width: Fill
+                                                height: Fill
+                                                clip_x: false
+                                                clip_y: false
+                                                padding: Inset{left: 4 right: 8 bottom: 8}
+                                                right_source_split := PanelSplitter{
+                                                    axis: SplitterAxis.Vertical
+                                                    align: SplitterAlign.FromB(330.0)
+                                                    min_horizontal: 84.0
+                                                    max_horizontal: 84.0
+                                                    a: Panel{
+                                                        spacing: theme.space_1
+                                                        SectionTitle{text: "INSPECTOR"}
+                                                        inspector := Inspector{}
+                                                    }
+                                                    b: View{
+                                                        width: Fill
+                                                        height: Fill
+                                                        source_view := Panel{
+                                                            visible: false
+                                                            spacing: theme.space_2
+                                                            View{
+                                                                width: Fill
+                                                                height: Fit
+                                                                flow: Right
+                                                                align: Align{y: 0.5}
+                                                                SectionTitle{width: Fill text: "SOURCE"}
+                                                                save_btn := Button{text: "Save"}
+                                                            }
+                                                            source := TextInput{
+                                                                width: Fill
+                                                                height: Fill
+                                                                is_multiline: true
+                                                                empty_text: "Open a flow to edit its source"
+                                                                draw_text +: {text_style: theme.font_code{font_size: 9}}
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -543,6 +624,12 @@ pub struct App {
     last_error: Option<String>,
     #[rust]
     menu_state: (bool, bool, bool, bool),
+    /// Splitter positions are widget state; these two slots only remember a
+    /// pane's live size while that pane is collapsed by a View-menu toggle.
+    #[rust]
+    left_panel_align: Option<SplitterAlign>,
+    #[rust]
+    source_panel_align: Option<SplitterAlign>,
 }
 
 impl App {
@@ -1952,14 +2039,34 @@ impl App {
             .view(cx, ids!(app_view_view))
             .set_visible(cx, self.app_mode);
         self.ui
-            .view(cx, ids!(inspector_view))
-            .set_visible(cx, !self.source_mode);
-        self.ui
             .view(cx, ids!(source_view))
             .set_visible(cx, self.source_mode);
-        self.ui
-            .view(cx, ids!(left_panel))
-            .set_visible(cx, !self.left_hidden);
+        let left_split = self.ui.widget(cx, ids!(column_split));
+        if self.left_hidden {
+            if self.left_panel_align.is_none() {
+                self.left_panel_align = left_split.borrow::<Splitter>().map(|splitter| splitter.align());
+            }
+            left_split.as_splitter().set_align(cx, SplitterAlign::FromA(0.0));
+        } else if let Some(align) = self.left_panel_align.take() {
+            left_split.as_splitter().set_align(cx, align);
+        }
+        self.ui.view(cx, ids!(left_panel)).set_visible(cx, !self.left_hidden);
+
+        let source_split = self.ui.widget(cx, ids!(right_source_split));
+        if self.source_mode {
+            if let Some(align) = self.source_panel_align.take() {
+                source_split.as_splitter().set_align(cx, align);
+            }
+        } else {
+            if self.source_panel_align.is_none() {
+                self.source_panel_align = source_split
+                    .borrow::<Splitter>()
+                    .map(|splitter| splitter.align());
+            }
+            source_split
+                .as_splitter()
+                .set_align(cx, SplitterAlign::FromB(0.0));
+        }
         self.ui.button(cx, ids!(view_btn)).set_text(
             cx,
             if self.app_mode { "Canvas" } else { "App view" },
@@ -1968,15 +2075,8 @@ impl App {
             cx,
             if self.source_mode { "Inspector" } else { "Source" },
         );
-        if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
-            canvas.set_fit_insets(Inset {
-                left: if self.left_hidden { 8.0 } else { 252.0 },
-                top: 58.0,
-                right: 346.0,
-                bottom: 8.0,
-            });
-        }
-        if !self.source_mode && self.selected_node.is_some() {
+        self.update_canvas_fit_insets(cx);
+        if self.selected_node.is_some() {
             self.refresh_models(true);
         }
         self.ui.redraw(cx);
@@ -1992,11 +2092,39 @@ impl App {
         let mut rects = vec![
             self.ui.widget(cx, ids!(toolbar)).area().rect(cx),
             self.ui.widget(cx, ids!(right_panel)).area().rect(cx),
+            self.ui.widget(cx, ids!(column_split)).area().rect(cx),
+            self.ui.widget(cx, ids!(canvas_right_split)).area().rect(cx),
         ];
         if !self.left_hidden {
             rects.push(self.ui.widget(cx, ids!(left_panel)).area().rect(cx));
         }
         rects
+    }
+
+    fn update_canvas_fit_insets(&mut self, cx: &mut Cx) {
+        let canvas_rect = self.ui.widget(cx, ids!(canvas)).area().rect(cx);
+        let left_rect = self.ui.widget(cx, ids!(left_panel)).area().rect(cx);
+        let right_rect = self.ui.widget(cx, ids!(right_panel)).area().rect(cx);
+        let left = if self.left_hidden {
+            8.0
+        } else if canvas_rect.size.x <= 0.0 || left_rect.size.x <= 0.0 {
+            252.0
+        } else {
+            (left_rect.pos.x + left_rect.size.x - canvas_rect.pos.x + 8.0).max(8.0)
+        };
+        let right = if canvas_rect.size.x <= 0.0 || right_rect.size.x <= 0.0 {
+            346.0
+        } else {
+            (canvas_rect.pos.x + canvas_rect.size.x - right_rect.pos.x + 8.0).max(8.0)
+        };
+        if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
+            canvas.set_fit_insets(Inset {
+                left,
+                top: 58.0,
+                right,
+                bottom: 8.0,
+            });
+        }
     }
 
     fn show_templates(&mut self, cx: &mut Cx, visible: bool) {
@@ -2315,6 +2443,36 @@ impl MatchEvent for App {
             self.source_mode = !self.source_mode;
             self.set_modes(cx);
         }
+        let column_changed = self
+            .ui
+            .widget(cx, ids!(column_split))
+            .borrow::<Splitter>()
+            .is_some_and(|splitter| splitter.changed(actions).is_some());
+        let right_changed = self
+            .ui
+            .widget(cx, ids!(canvas_right_split))
+            .borrow::<Splitter>()
+            .is_some_and(|splitter| splitter.changed(actions).is_some());
+        if column_changed && self.left_hidden {
+            self.ui
+                .widget(cx, ids!(column_split))
+                .as_splitter()
+                .set_align(cx, SplitterAlign::FromA(0.0));
+        }
+        let source_changed = self
+            .ui
+            .widget(cx, ids!(right_source_split))
+            .borrow::<Splitter>()
+            .is_some_and(|splitter| splitter.changed(actions).is_some());
+        if source_changed && !self.source_mode {
+            self.ui
+                .widget(cx, ids!(right_source_split))
+                .as_splitter()
+                .set_align(cx, SplitterAlign::FromB(0.0));
+        }
+        if column_changed || right_changed {
+            self.update_canvas_fit_insets(cx);
+        }
 
         // Canvas.
         let canvas_uid = self.ui.widget(cx, ids!(canvas)).widget_uid();
@@ -2590,6 +2748,7 @@ impl AppMain for App {
         }
         self.services.handle_event(cx, event);
         self.match_event(cx, event);
+        self.update_canvas_fit_insets(cx);
         let chrome_rects = self.canvas_chrome_rects(cx);
         if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
             canvas.set_chrome_rects(chrome_rects);
@@ -2645,12 +2804,18 @@ impl AppMain for App {
                 }
             }
         }
-        match self.faces.as_mut() {
-            Some(faces) => {
-                let mut scope = Scope::with_data(faces);
-                self.ui.handle_event(cx, event, &mut scope);
+        let face_owns_key_focus = self
+            .faces
+            .as_ref()
+            .is_some_and(|faces| faces.owns_key_focus(cx));
+        if !(face_owns_key_focus && is_focus_routed_input(event)) {
+            match self.faces.as_mut() {
+                Some(faces) => {
+                    let mut scope = Scope::with_data(faces);
+                    self.ui.handle_event(cx, event, &mut scope);
+                }
+                None => self.ui.handle_event(cx, event, &mut Scope::empty()),
             }
-            None => self.ui.handle_event(cx, event, &mut Scope::empty()),
         }
         if self.poll_timer.is_event(event).is_some() || matches!(event, Event::Signal) {
             self.drain_io(cx);
@@ -2670,6 +2835,44 @@ impl AppMain for App {
         if let Event::Shutdown = event {
             self.shutdown(cx);
         }
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    #[test]
+    fn splitter_panel_layout_mounts_headlessly() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let app = cx.with_vm(|vm| App::from_script_mod(vm, <App as AppMain>::script_mod));
+        for path in [
+            ids!(column_split),
+            ids!(left_flow_split),
+            ids!(left_running_split),
+            ids!(canvas_right_split),
+            ids!(right_source_split),
+        ] {
+            assert!(app.ui.widget(&cx, path).borrow::<Splitter>().is_some());
+        }
+        assert!(app.ui.widget(&cx, ids!(flow_list)).borrow::<FlowList>().is_some());
+        assert!(app
+            .ui
+            .widget(&cx, ids!(running))
+            .borrow::<RunningList>()
+            .is_some());
+        assert!(app.ui.widget(&cx, ids!(palette)).borrow::<Palette>().is_some());
+        assert!(app
+            .ui
+            .widget(&cx, ids!(inspector))
+            .borrow::<Inspector>()
+            .is_some());
+        assert!(app
+            .ui
+            .widget(&cx, ids!(source))
+            .borrow::<TextInput>()
+            .is_some());
     }
 }
 
