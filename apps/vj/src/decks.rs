@@ -721,8 +721,64 @@ impl ProcessMode {
     }
 }
 
-/// The armed count past 64: the BOOKMARK rung. `[` drops an in point
-/// with no out — no loop, just a position saved as a marker to jump to.
+/// One beat, in the count's own unit.
+///
+/// The count is carried in THIRTY-SECONDS of a beat so the ladder can
+/// reach below one: a stutter is a fraction of a beat, and a `u32` of
+/// whole beats has no way to say so. Thirty-seconds because it is the
+/// finest rung anyone asks for and it leaves the sentinel below alone —
+/// `u32::MAX` still sorts above the ladder's top of 16384.
+pub const LOOP_TICKS_PER_BEAT: u32 = 32;
+
+/// Every loop size the tab offers, shortest first: a thirty-second of a
+/// beat up to five hundred and twelve beats, doubling at each rung.
+///
+/// THE one table. The count dropdown draws its rows from it and the `-`
+/// and `+` stepper walks it, where the two used to be a list and a piece
+/// of arithmetic that had to agree with each other by hand.
+///
+/// The bottom rungs are honest but not always reachable: `LOOP_MIN_SECS`
+/// refuses a span shorter than a grain of the time stretcher, so at 120
+/// BPM the ladder engages down to an eighth of a beat and no further.
+/// That floor is the stretcher's and belongs to it, not to this table.
+pub const LOOP_LADDER: [(u32, &str); 15] = [
+    (1, "1/32"),
+    (2, "1/16"),
+    (4, "1/8"),
+    (8, "1/4"),
+    (16, "1/2"),
+    (32, "1"),
+    (64, "2"),
+    (128, "4"),
+    (256, "8"),
+    (512, "16"),
+    (1024, "32"),
+    (2048, "64"),
+    (4096, "128"),
+    (8192, "256"),
+    (16384, "512"),
+];
+
+/// Which rung a count is on, or None for MAN and the bookmark.
+pub fn loop_rung_index(ticks: u32) -> Option<usize> {
+    LOOP_LADDER.iter().position(|(rung, _)| *rung == ticks)
+}
+
+/// The rung nearest a length in beats, on a LOG scale.
+///
+/// Log, not arithmetic: three beats is equidistant from two and four by
+/// subtraction, and four is the musical answer.
+pub fn nearest_loop_rung(beats: f64) -> u32 {
+    if !(beats > 0.0) || !beats.is_finite() {
+        return LOOP_TICKS_PER_BEAT;
+    }
+    let ticks = (beats * LOOP_TICKS_PER_BEAT as f64).log2().round();
+    let ticks = 2f64.powi(ticks.clamp(0.0, 31.0) as i32) as u32;
+    ticks.clamp(LOOP_LADDER[0].0, LOOP_LADDER[LOOP_LADDER.len() - 1].0)
+}
+
+/// The armed count past the top rung: the BOOKMARK rung. `[` drops an in
+/// point with no out — no loop, just a position saved as a marker.
 pub const LOOP_BEATS_INF: u32 = u32::MAX;
 
 /// The tempo a beat COUNT falls back to when nothing has measured the
@@ -814,10 +870,10 @@ pub struct DeckState {
     /// The operator flipped the grid onto the other pulse (see
     /// [`DeckEngine::flip_beat_phase`]); a second flip undoes the first.
     pub phase_flipped: bool,
-    /// Armed loop length in beats; 0 = MAN, free placement. This says what
-    /// `[` and `]` will do NEXT and nothing else — a running manual span
-    /// has no beat count to describe it.
-    pub loop_beats: u32,
+    /// Armed loop length in THIRTY-SECONDS of a beat; 0 = MAN, free
+    /// placement, and `LOOP_BEATS_INF` the bookmark rung. Anything else is
+    /// a rung of `LOOP_LADDER`. This says what `[` and `]` will do NEXT.
+    pub loop_ticks: u32,
     /// The loop that is actually running. A deck loops when it has a span;
     /// a bool beside one is a second truth that can disagree with the first.
     pub loop_span: Option<LoopSpan>,
@@ -940,7 +996,7 @@ impl Default for DeckState {
         Self {
             load: DeckLoad::Empty,
             playing: false,
-            loop_beats: 4,
+            loop_ticks: 4 * LOOP_TICKS_PER_BEAT,
             phase_flipped: false,
             loop_span: None,
             loop_armed: None,
@@ -1674,7 +1730,7 @@ impl DeckEngine {
     /// count is MAN or the track has no grid to measure a beat against.
     fn armed_secs(&self, deck: DeckId) -> Option<f64> {
         let state = self.deck(deck);
-        if state.loop_beats == 0 || state.loop_beats == LOOP_BEATS_INF {
+        if state.loop_ticks == 0 || state.loop_ticks == LOOP_BEATS_INF {
             return None;
         }
         // A deck with no track has no length to measure against, and
@@ -1683,7 +1739,10 @@ impl DeckEngine {
         if !state.is_loaded() {
             return None;
         }
-        Some(state.counted_beat_secs() * state.loop_beats as f64)
+        // The one line where the ladder reaching below a beat happens.
+        // Everything downstream of here is already seconds.
+        Some(state.counted_beat_secs() * state.loop_ticks as f64
+            / LOOP_TICKS_PER_BEAT as f64)
     }
 
     /// A span is only worth engaging if it fits inside the track and is
@@ -1736,7 +1795,7 @@ impl DeckEngine {
     /// beats later; in MAN it waits for `]`.
     pub fn loop_in(&mut self, deck: DeckId) -> Vec<DeckCmd> {
         let position = self.deck(deck).position_secs;
-        if self.deck(deck).loop_beats == LOOP_BEATS_INF {
+        if self.deck(deck).loop_ticks == LOOP_BEATS_INF {
             // The bookmark rung: `[` places the current bookmark — GREEN,
             // like a fresh loop, and clicking its chip is what saves it.
             // It replaces a running loop the way `[` always replaces.
@@ -1749,14 +1808,26 @@ impl DeckEngine {
             return Vec::new();
         }
         if let Some(len) = self.armed_secs(deck) {
-            return match self.usable_span(deck, position, position + len) {
+            // A SUB-BEAT rung starts on the beat's own subdivision. A
+            // stutter is a subdivision of the beat, and one that starts
+            // between two of them arrives late every lap -- which is
+            // audible in a way a whole-beat loop's offset is not, because
+            // the ear has the beat itself to compare it against.
+            let ticks = self.deck(deck).loop_ticks;
+            let start = match self.deck(deck).true_grid() {
+                Some(grid) if ticks < LOOP_TICKS_PER_BEAT && ticks > 0 => {
+                    grid.snap_to_subdivision(position, LOOP_TICKS_PER_BEAT / ticks)
+                }
+                _ => position,
+            };
+            return match self.usable_span(deck, start, start + len) {
                 Some(span) => self.engage_loop(deck, span, true),
                 None => Vec::new(),
             };
         }
         // A beat count with no grid behind it has nothing honest to do —
         // and must not fall through into arming MAN.
-        if self.deck(deck).loop_beats != 0 {
+        if self.deck(deck).loop_ticks != 0 {
             return Vec::new();
         }
         self.deck_mut(deck).loop_armed = Some(position);
@@ -1774,7 +1845,7 @@ impl DeckEngine {
                 None => Vec::new(),
             };
         }
-        if self.deck(deck).loop_beats != 0 {
+        if self.deck(deck).loop_ticks != 0 {
             return Vec::new();
         }
         let Some(armed) = self.deck(deck).loop_armed else { return Vec::new() };
@@ -1795,25 +1866,28 @@ impl DeckEngine {
     /// well as a measured one — and for a beat loop the two are the same
     /// arithmetic anyway.
     fn loop_scale(&mut self, deck: DeckId, factor: f64) -> Vec<DeckCmd> {
-        let beats = self.deck(deck).loop_beats;
+        let beats = self.deck(deck).loop_ticks;
         // The bookmark rung's transitions come first: they change what the
         // current object IS, never its size, and the direct pick owns
         // that logic.
-        if factor >= 1.0 && (beats == 64 || beats == LOOP_BEATS_INF) {
+        let top = LOOP_LADDER[LOOP_LADDER.len() - 1].0;
+        let bottom = LOOP_LADDER[0].0;
+        if factor >= 1.0 && (beats == top || beats == LOOP_BEATS_INF) {
             return self.set_loop_beats(deck, LOOP_BEATS_INF);
         }
         if factor < 1.0 && beats == LOOP_BEATS_INF {
-            return self.set_loop_beats(deck, 64);
+            return self.set_loop_beats(deck, top);
         }
-        // Halving 1 lands on MAN rather than sticking at 1, and doubling
-        // out of MAN has to special-case zero or it would stay there.
+        // Halving the shortest rung lands on MAN rather than sticking, and
+        // doubling out of MAN has to special-case zero or it would stay.
         let next = match (factor < 1.0, beats) {
+            (true, _) if beats <= bottom => 0,
             (true, _) => beats / 2,
-            (false, 0) => 1,
-            (false, _) => (beats * 2).min(64),
+            (false, 0) => bottom,
+            (false, _) => (beats * 2).min(top),
         };
         let Some(span) = self.deck(deck).loop_span else {
-            self.deck_mut(deck).loop_beats = next;
+            self.deck_mut(deck).loop_ticks = next;
             return Vec::new();
         };
         let end = span.start_secs + span.len_secs() * factor;
@@ -1823,7 +1897,7 @@ impl DeckEngine {
             return Vec::new();
         };
         let state = self.deck_mut(deck);
-        state.loop_beats = next;
+        state.loop_ticks = next;
         // A resized loop that IS a saved marker carries the marker along:
         // the blue chip keeps aiming at the same IN, and its stored
         // duration follows what the ear now hears.
@@ -1901,19 +1975,19 @@ impl DeckEngine {
     /// back and loop mode with it; picking a length over a running loop
     /// resizes it in place, marker following.
     pub fn set_loop_beats(&mut self, deck: DeckId, beats: u32) -> Vec<DeckCmd> {
-        let current = self.deck(deck).loop_beats;
+        let current = self.deck(deck).loop_ticks;
         if beats == current {
             return Vec::new();
         }
         if beats == LOOP_BEATS_INF {
-            self.deck_mut(deck).loop_beats = LOOP_BEATS_INF;
+            self.deck_mut(deck).loop_ticks = LOOP_BEATS_INF;
             let state = self.deck_mut(deck);
             let Some(span) = state.loop_span.take() else { return Vec::new() };
             state.bookmark = Some(span.start_secs);
             state.loop_memory = Some(span);
             return vec![DeckCmd::SetLoopSpan { deck, span: None, seek: LoopSeek::None }];
         }
-        self.deck_mut(deck).loop_beats = beats;
+        self.deck_mut(deck).loop_ticks = beats;
         if current == LOOP_BEATS_INF {
             let Some(inpoint) = self.deck(deck).bookmark else { return Vec::new() };
             let Some(len) = self.armed_secs(deck) else { return Vec::new() };
@@ -3990,13 +4064,13 @@ mod tests {
         state.loop_span = Some(LoopSpan { start_secs: 8.0, end_secs: 10.0 });
         state.loop_memory = Some(LoopSpan { start_secs: 8.0, end_secs: 10.0 });
         state.loop_armed = Some(4.0);
-        state.loop_beats = 16;
+        state.loop_ticks = 512;
         let (d, g) = load_gen(&e.click(item(3), DeckTarget::B));
         let cmds = e.track_ready(d, g, 20.0);
         let state = e.deck(DeckId::B);
         assert!(state.loop_span.is_none(), "a span belongs to the track it was measured on");
         assert!(state.loop_memory.is_none() && state.loop_armed.is_none());
-        assert_eq!(state.loop_beats, 16, "the armed length is an operator preference");
+        assert_eq!(state.loop_ticks, 512, "the armed length is an operator preference");
         assert!(cmds.contains(&DeckCmd::SetLoopSpan { deck: DeckId::B, span: None , seek: LoopSeek::None }));
     }
 
@@ -4014,7 +4088,7 @@ mod tests {
     fn bracket_in_builds_n_beats_forward_from_the_playhead() {
         let mut e = DeckEngine::new();
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0); // 0.5 s a beat, 300 s long
-        e.deck_mut(DeckId::A).loop_beats = 4;
+        e.deck_mut(DeckId::A).loop_ticks = 128;
         e.observe(DeckId::A, 10.25, true);
         let cmds = e.loop_in(DeckId::A);
         let span = e.deck(DeckId::A).loop_span.expect("a span");
@@ -4028,7 +4102,7 @@ mod tests {
     fn bracket_out_builds_n_beats_back_from_the_playhead() {
         let mut e = DeckEngine::new();
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
-        e.deck_mut(DeckId::A).loop_beats = 8;
+        e.deck_mut(DeckId::A).loop_ticks = 256;
         e.observe(DeckId::A, 10.0, true);
         let cmds = e.loop_out(DeckId::A);
         let span = e.deck(DeckId::A).loop_span.expect("a span");
@@ -4047,7 +4121,7 @@ mod tests {
         let mut e = DeckEngine::new();
         load_unanalysed(&mut e, DeckId::A, 1);
         assert!(!e.deck(DeckId::A).has_true_beats());
-        e.deck_mut(DeckId::A).loop_beats = 4;
+        e.deck_mut(DeckId::A).loop_ticks = 128;
         e.observe(DeckId::A, 10.0, true);
         assert!(!e.loop_in(DeckId::A).is_empty(), "the bracket engages");
         let span = e.deck(DeckId::A).loop_span.expect("a span");
@@ -4065,7 +4139,7 @@ mod tests {
     #[test]
     fn a_deck_with_no_track_still_has_no_count_to_measure() {
         let mut e = DeckEngine::new();
-        e.deck_mut(DeckId::A).loop_beats = 4;
+        e.deck_mut(DeckId::A).loop_ticks = 128;
         assert!(e.loop_in(DeckId::A).is_empty(), "no record, no length");
         assert!(e.deck(DeckId::A).loop_span.is_none());
     }
@@ -4075,7 +4149,7 @@ mod tests {
         let mut e = DeckEngine::new();
         let (deck, gen) = load_gen(&e.click(item(1), DeckTarget::A));
         e.track_ready(deck, gen, 300.0);
-        e.deck_mut(DeckId::A).loop_beats = 4;
+        e.deck_mut(DeckId::A).loop_ticks = 128;
         e.observe(DeckId::A, 10.0, true);
         e.loop_in(DeckId::A);
         assert!((e.deck(DeckId::A).loop_span.unwrap().end_secs - 14.0).abs() < 1e-9);
@@ -4119,7 +4193,7 @@ mod tests {
     fn man_arms_on_in_and_closes_on_out_with_no_grid_at_all() {
         let mut e = DeckEngine::new();
         load_unanalysed(&mut e, DeckId::A, 1);
-        e.deck_mut(DeckId::A).loop_beats = 0; // MAN
+        e.deck_mut(DeckId::A).loop_ticks = 0; // MAN
         e.observe(DeckId::A, 10.0, true);
         assert!(e.loop_in(DeckId::A).is_empty(), "arming makes no sound and no command");
         assert_eq!(e.deck(DeckId::A).loop_armed, Some(10.0));
@@ -4135,7 +4209,7 @@ mod tests {
     fn man_out_before_in_re_arms_instead_of_closing_backwards() {
         let mut e = DeckEngine::new();
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
-        e.deck_mut(DeckId::A).loop_beats = 0;
+        e.deck_mut(DeckId::A).loop_ticks = 0;
         e.observe(DeckId::A, 20.0, true);
         e.loop_in(DeckId::A);
         e.observe(DeckId::A, 5.0, true); // scrubbed back behind the arm
@@ -4148,7 +4222,7 @@ mod tests {
     fn man_out_with_nothing_armed_is_ignored() {
         let mut e = DeckEngine::new();
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
-        e.deck_mut(DeckId::A).loop_beats = 0;
+        e.deck_mut(DeckId::A).loop_ticks = 0;
         e.observe(DeckId::A, 10.0, true);
         assert!(e.loop_out(DeckId::A).is_empty());
         assert!(e.deck(DeckId::A).loop_span.is_none());
@@ -4158,7 +4232,7 @@ mod tests {
     fn a_span_that_runs_off_the_end_is_refused() {
         let mut e = DeckEngine::new();
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0); // 300 s
-        e.deck_mut(DeckId::A).loop_beats = 64; // 32 s
+        e.deck_mut(DeckId::A).loop_ticks = 2048; // 32 s
         e.observe(DeckId::A, 299.0, true);
         assert!(e.loop_in(DeckId::A).is_empty(), "OUT would land past the track end");
         assert!(e.deck(DeckId::A).loop_span.is_none());
@@ -4172,7 +4246,7 @@ mod tests {
     fn a_span_shorter_than_the_floor_is_refused() {
         let mut e = DeckEngine::new();
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
-        e.deck_mut(DeckId::A).loop_beats = 0;
+        e.deck_mut(DeckId::A).loop_ticks = 0;
         e.observe(DeckId::A, 10.0, true);
         e.loop_in(DeckId::A);
         // A hair after IN: all seam, no music.
@@ -4182,31 +4256,113 @@ mod tests {
     }
 
     #[test]
-    fn the_count_halves_to_man_and_doubles_back_out_of_it() {
+    fn the_count_walks_the_ladder_and_falls_off_it_into_man() {
+        let bottom = LOOP_LADDER[0].0;
+        let top = LOOP_LADDER[LOOP_LADDER.len() - 1].0;
         let mut e = DeckEngine::new();
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
-        e.deck_mut(DeckId::A).loop_beats = 2;
+        // Down the ladder from two beats to its shortest rung, and then
+        // off the bottom into MAN.
+        e.deck_mut(DeckId::A).loop_ticks = 2 * LOOP_TICKS_PER_BEAT;
         e.loop_halve(DeckId::A);
-        assert_eq!(e.deck(DeckId::A).loop_beats, 1);
+        assert_eq!(e.deck(DeckId::A).loop_ticks, LOOP_TICKS_PER_BEAT, "one beat");
+        for _ in 0..5 {
+            e.loop_halve(DeckId::A);
+        }
+        assert_eq!(e.deck(DeckId::A).loop_ticks, bottom, "a thirty-second of a beat");
         e.loop_halve(DeckId::A);
-        assert_eq!(e.deck(DeckId::A).loop_beats, 0, "1 halves into MAN");
+        assert_eq!(e.deck(DeckId::A).loop_ticks, 0, "and then MAN");
         e.loop_halve(DeckId::A);
-        assert_eq!(e.deck(DeckId::A).loop_beats, 0, "MAN is the floor");
+        assert_eq!(e.deck(DeckId::A).loop_ticks, 0, "MAN is the floor");
         e.loop_double(DeckId::A);
-        assert_eq!(e.deck(DeckId::A).loop_beats, 1, "0 doubles to 1, not to 0");
-        for _ in 0..6 {
+        assert_eq!(e.deck(DeckId::A).loop_ticks, bottom, "0 doubles onto the ladder");
+        // And all the way up it to the top rung, then the bookmark.
+        for _ in 0..(LOOP_LADDER.len() - 1) {
             e.loop_double(DeckId::A);
         }
-        assert_eq!(e.deck(DeckId::A).loop_beats, 64, "the last measured rung");
+        assert_eq!(e.deck(DeckId::A).loop_ticks, top, "the last measured rung");
         e.loop_double(DeckId::A);
-        assert_eq!(e.deck(DeckId::A).loop_beats, LOOP_BEATS_INF, "then the bookmark rung");
+        assert_eq!(e.deck(DeckId::A).loop_ticks, LOOP_BEATS_INF, "then the bookmark rung");
+    }
+
+    #[test]
+    fn every_rung_of_the_ladder_is_a_doubling_and_the_dial_shows_them_all() {
+        // One table, and the count dial's rows are built from it.
+        for pair in LOOP_LADDER.windows(2) {
+            assert_eq!(pair[1].0, pair[0].0 * 2, "{} then {}", pair[0].1, pair[1].1);
+        }
+        assert_eq!(LOOP_LADDER[0].1, "1/32");
+        assert_eq!(LOOP_LADDER[LOOP_LADDER.len() - 1].1, "512");
+        assert_eq!(loop_rung_index(LOOP_TICKS_PER_BEAT).map(|i| LOOP_LADDER[i].1), Some("1"));
+        assert_eq!(loop_rung_index(0), None, "MAN is not a rung");
+        assert_eq!(loop_rung_index(LOOP_BEATS_INF), None, "nor is the bookmark");
+    }
+
+    #[test]
+    fn a_hand_set_length_is_read_back_as_the_nearest_rung() {
+        // Log, not arithmetic: three beats is equidistant from two and
+        // four by subtraction, and four is the musical answer.
+        assert_eq!(nearest_loop_rung(4.0), 4 * LOOP_TICKS_PER_BEAT);
+        assert_eq!(nearest_loop_rung(3.0), 4 * LOOP_TICKS_PER_BEAT);
+        assert_eq!(nearest_loop_rung(0.26), 8, "a hair over a quarter beat");
+        // And it stays on the ladder whatever it is handed.
+        assert_eq!(nearest_loop_rung(1e9), LOOP_LADDER[LOOP_LADDER.len() - 1].0);
+        assert_eq!(nearest_loop_rung(1e-9), LOOP_LADDER[0].0);
+        assert_eq!(nearest_loop_rung(f64::NAN), LOOP_TICKS_PER_BEAT);
+        assert_eq!(nearest_loop_rung(-1.0), LOOP_TICKS_PER_BEAT);
+    }
+
+
+    #[test]
+    fn a_sub_beat_loop_starts_on_the_beats_own_subdivision() {
+        // A stutter that starts between two subdivisions arrives late
+        // every lap, and the ear has the beat itself to compare it with.
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0); // beats at 0.0, 0.5, 1.0 ...
+        // A quarter of a beat is 0.125 s: the slots are every 0.125 s.
+        e.deck_mut(DeckId::A).loop_ticks = 8;
+        e.observe(DeckId::A, 10.19, true);
+        e.loop_in(DeckId::A);
+        let span = e.deck(DeckId::A).loop_span.expect("engaged");
+        assert!(
+            (span.start_secs - 10.25).abs() < 1e-9,
+            "landed on the nearer slot, at {}",
+            span.start_secs,
+        );
+        assert!((span.len_secs() - 0.125).abs() < 1e-9);
+
+        // A WHOLE-beat rung is untouched: it starts exactly where the
+        // record is, which is what the brackets have always done.
+        e.toggle_loop(DeckId::A);
+        e.deck_mut(DeckId::A).loop_ticks = 4 * LOOP_TICKS_PER_BEAT;
+        e.observe(DeckId::A, 10.19, true);
+        e.loop_in(DeckId::A);
+        let span = e.deck(DeckId::A).loop_span.expect("engaged");
+        assert!((span.start_secs - 10.19).abs() < 1e-9, "at {}", span.start_secs);
+    }
+    #[test]
+    fn a_sub_beat_rung_arms_a_sub_beat_loop() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0); // half a second a beat
+        e.observe(DeckId::A, 10.0, true);
+        // An eighth of a beat is 62.5 ms at this tempo -- above the floor
+        // the stretcher's own grain sets, so it engages.
+        e.deck_mut(DeckId::A).loop_ticks = 4;
+        e.loop_in(DeckId::A);
+        let span = e.deck(DeckId::A).loop_span.expect("engaged");
+        assert!((span.len_secs() - 0.0625).abs() < 1e-9, "at {}", span.len_secs());
+        // A thirty-second is 15.6 ms, under that floor, and is refused
+        // rather than clamped -- the floor belongs to the stretcher.
+        e.toggle_loop(DeckId::A);
+        e.deck_mut(DeckId::A).loop_ticks = 1;
+        assert!(e.loop_in(DeckId::A).is_empty());
     }
 
     #[test]
     fn halving_a_running_loop_anchors_on_in_and_emits_no_seek() {
         let mut e = DeckEngine::new();
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
-        e.deck_mut(DeckId::A).loop_beats = 4;
+        e.deck_mut(DeckId::A).loop_ticks = 128;
         e.observe(DeckId::A, 10.0, true);
         e.loop_in(DeckId::A); // 10.0 .. 12.0
         e.observe(DeckId::A, 11.5, true); // three quarters through
@@ -4214,7 +4370,7 @@ mod tests {
         let span = e.deck(DeckId::A).loop_span.expect("a span");
         assert!((span.start_secs - 10.0).abs() < 1e-9, "IN is the anchor");
         assert!((span.len_secs() - 1.0).abs() < 1e-9, "the span halves with the count");
-        assert_eq!(e.deck(DeckId::A).loop_beats, 2);
+        assert_eq!(e.deck(DeckId::A).loop_ticks, 64);
         // No seek: the engine's mirror of the playhead is a stale 20 Hz
         // number, so the MIXER catches a stranded playhead — modulo the new
         // length, keeping the subdivision's phase instead of re-triggering
@@ -4234,7 +4390,7 @@ mod tests {
     fn the_cutter_works_on_a_manual_span_with_no_grid() {
         let mut e = DeckEngine::new();
         load_unanalysed(&mut e, DeckId::A, 1);
-        e.deck_mut(DeckId::A).loop_beats = 0;
+        e.deck_mut(DeckId::A).loop_ticks = 0;
         e.observe(DeckId::A, 10.0, true);
         e.loop_in(DeckId::A);
         e.observe(DeckId::A, 14.0, true);
@@ -4249,12 +4405,12 @@ mod tests {
     fn a_resize_that_will_not_fit_is_refused_and_the_count_holds() {
         let mut e = DeckEngine::new();
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0); // 300 s
-        e.deck_mut(DeckId::A).loop_beats = 4;
+        e.deck_mut(DeckId::A).loop_ticks = 128;
         e.observe(DeckId::A, 297.0, true);
         e.loop_in(DeckId::A); // 297.0 .. 299.0
         let cmds = e.loop_double(DeckId::A); // would end at 301, past the track
         assert!(cmds.is_empty());
-        assert_eq!(e.deck(DeckId::A).loop_beats, 4, "a refused resize does not move N");
+        assert_eq!(e.deck(DeckId::A).loop_ticks, 128, "a refused resize does not move N");
         let span = e.deck(DeckId::A).loop_span.expect("a span");
         assert!((span.end_secs - 299.0).abs() < 1e-9, "the running span is untouched");
     }
@@ -4415,7 +4571,7 @@ mod tests {
     fn a_running_loop_saves_once_and_a_saved_one_recalls_later() {
         let mut e = DeckEngine::new();
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
-        e.deck_mut(DeckId::A).loop_beats = 4;
+        e.deck_mut(DeckId::A).loop_ticks = 128;
         e.observe(DeckId::A, 10.0, true);
         e.loop_in(DeckId::A); // 10.0 .. 12.0
         assert!(e.save_loop(DeckId::A), "the green marker click");
@@ -4474,11 +4630,11 @@ mod tests {
     fn infinity_arms_bookmarks_that_jump_and_never_loop() {
         let mut e = DeckEngine::new();
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
-        e.deck_mut(DeckId::A).loop_beats = 64;
+        e.deck_mut(DeckId::A).loop_ticks = LOOP_LADDER[LOOP_LADDER.len() - 1].0;
         e.loop_double(DeckId::A);
-        assert_eq!(e.deck(DeckId::A).loop_beats, LOOP_BEATS_INF, "64 doubles into ∞");
+        assert_eq!(e.deck(DeckId::A).loop_ticks, LOOP_BEATS_INF, "the top rung doubles into ∞");
         e.loop_double(DeckId::A);
-        assert_eq!(e.deck(DeckId::A).loop_beats, LOOP_BEATS_INF, "∞ is the top");
+        assert_eq!(e.deck(DeckId::A).loop_ticks, LOOP_BEATS_INF, "∞ is the top");
         // With ∞ armed, `[` places a GREEN bookmark: an IN with no OUT —
         // no loop, no sound change, and nothing saved yet.
         e.observe(DeckId::A, 10.2, true);
@@ -4504,33 +4660,39 @@ mod tests {
     fn the_count_dial_converts_between_bookmark_and_loop() {
         let mut e = DeckEngine::new();
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0); // 0.5 s a beat
-        e.deck_mut(DeckId::A).loop_beats = LOOP_BEATS_INF;
+        e.deck_mut(DeckId::A).loop_ticks = LOOP_BEATS_INF;
         e.observe(DeckId::A, 10.2, true);
         e.loop_in(DeckId::A); // the current bookmark
-        // Dial down: the out point returns 64 beats later and loop mode
-        // becomes active — the playhead is outside, so it jumps in.
-        e.observe(DeckId::A, 50.0, true);
+        // Dial down: the out point returns the top rung's length later and
+        // loop mode becomes active — the playhead is outside, so it jumps
+        // in. Past the whole span, because the top rung is long.
+        e.observe(DeckId::A, 280.0, true);
         let cmds = e.loop_halve(DeckId::A);
-        assert_eq!(e.deck(DeckId::A).loop_beats, 64);
+        let top = LOOP_LADDER[LOOP_LADDER.len() - 1].0;
+        assert_eq!(e.deck(DeckId::A).loop_ticks, top);
         let span = e.deck(DeckId::A).loop_span.expect("loop mode is back");
         assert!((span.start_secs - 10.2).abs() < 1e-9);
-        assert!((span.len_secs() - 32.0).abs() < 1e-9, "64 beats at 120 BPM");
+        let want = 0.5 * top as f64 / LOOP_TICKS_PER_BEAT as f64;
+        assert!((span.len_secs() - want).abs() < 1e-9, "the top rung at 120 BPM");
         assert!(e.deck(DeckId::A).bookmark.is_none(), "the bookmark became the loop");
         assert_eq!(seek_of(&cmds, DeckId::A), Some(10.2));
         // Dial back up to ∞: loop mode exits, the out point is gone, and
         // the current object is a bookmark at the same IN again.
         let cmds = e.loop_double(DeckId::A);
-        assert_eq!(e.deck(DeckId::A).loop_beats, LOOP_BEATS_INF);
+        assert_eq!(e.deck(DeckId::A).loop_ticks, LOOP_BEATS_INF);
         assert!(e.deck(DeckId::A).loop_span.is_none(), "no out point, no loop");
         assert_eq!(e.deck(DeckId::A).bookmark, Some(10.2));
         assert!(cmds.contains(&DeckCmd::SetLoopSpan { deck: DeckId::A, span: None , seek: LoopSeek::None }));
-        // And a plain 4-beat loop dialed all the way up collapses too.
-        e.deck_mut(DeckId::A).loop_beats = 4;
+        // And a plain 4-beat loop dialed all the way up the ladder
+        // collapses too, whatever the ladder's length.
+        e.deck_mut(DeckId::A).loop_ticks = 4 * LOOP_TICKS_PER_BEAT;
         e.observe(DeckId::A, 20.0, true);
         e.loop_in(DeckId::A);
         assert!(e.deck(DeckId::A).bookmark.is_none(), "engaging clears the bookmark");
-        for _ in 0..5 {
-            e.loop_double(DeckId::A); // 8, 16, 32, 64, ∞
+        let rungs_above_four =
+            LOOP_LADDER.len() - loop_rung_index(4 * LOOP_TICKS_PER_BEAT).expect("a rung");
+        for _ in 0..rungs_above_four {
+            e.loop_double(DeckId::A);
         }
         assert!(e.deck(DeckId::A).loop_span.is_none());
         assert_eq!(e.deck(DeckId::A).bookmark, Some(20.0));
@@ -4540,13 +4702,13 @@ mod tests {
     fn picking_a_count_resizes_in_place_and_converts_at_the_ends() {
         let mut e = DeckEngine::new();
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
-        e.deck_mut(DeckId::A).loop_beats = 4;
+        e.deck_mut(DeckId::A).loop_ticks = 128;
         e.observe(DeckId::A, 10.0, true);
         e.loop_in(DeckId::A); // 10.0 .. 12.0
         assert!(e.save_loop(DeckId::A));
         // Pick 16: the running loop resizes to exactly 16 beats from IN,
         // marker following like the cutter.
-        e.set_loop_beats(DeckId::A, 16);
+        e.set_loop_beats(DeckId::A, 512);
         let span = e.deck(DeckId::A).loop_span.expect("still looping");
         assert!((span.len_secs() - 8.0).abs() < 1e-9);
         assert!((e.deck(DeckId::A).loop_slots[0].span.len_secs() - 8.0).abs() < 1e-9);
@@ -4555,7 +4717,7 @@ mod tests {
         e.set_loop_beats(DeckId::A, LOOP_BEATS_INF);
         assert!(e.deck(DeckId::A).loop_span.is_none());
         assert_eq!(e.deck(DeckId::A).bookmark, Some(10.0));
-        e.set_loop_beats(DeckId::A, 8);
+        e.set_loop_beats(DeckId::A, 256);
         let span = e.deck(DeckId::A).loop_span.expect("loop mode is back");
         assert!((span.len_secs() - 4.0).abs() < 1e-9);
     }
@@ -4564,7 +4726,7 @@ mod tests {
     fn clearing_marks_takes_the_bookmark_too_and_a_snapshot_puts_them_back() {
         let mut e = DeckEngine::new();
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
-        e.deck_mut(DeckId::A).loop_beats = 4;
+        e.deck_mut(DeckId::A).loop_ticks = 128;
         e.observe(DeckId::A, 10.0, true);
         e.loop_in(DeckId::A);
         e.save_loop(DeckId::A);
@@ -4594,7 +4756,7 @@ mod tests {
     fn resizing_a_saved_loop_updates_its_marker() {
         let mut e = DeckEngine::new();
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
-        e.deck_mut(DeckId::A).loop_beats = 4;
+        e.deck_mut(DeckId::A).loop_ticks = 128;
         e.observe(DeckId::A, 10.0, true);
         e.loop_in(DeckId::A); // 10.0 .. 12.0
         assert!(e.save_loop(DeckId::A));
@@ -4616,7 +4778,7 @@ mod tests {
         // and what this test is about is what a load DOES.
         e.over_playing = OverPlaying::Stop;
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
-        e.deck_mut(DeckId::A).loop_beats = 1;
+        e.deck_mut(DeckId::A).loop_ticks = 32;
         for i in 0..(LOOP_SLOT_CAP + 2) {
             e.observe(DeckId::A, 10.0 + i as f64, true);
             e.loop_in(DeckId::A);
@@ -4644,16 +4806,16 @@ mod tests {
         let mut e = DeckEngine::new();
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
         load_analysed(&mut e, DeckId::B, 2, 128.0, 0.0);
-        e.deck_mut(DeckId::A).loop_beats = 16;
+        e.deck_mut(DeckId::A).loop_ticks = 512;
         e.deck_mut(DeckId::A).loop_span = Some(LoopSpan { start_secs: 8.0, end_secs: 10.0 });
-        e.deck_mut(DeckId::B).loop_beats = 2;
+        e.deck_mut(DeckId::B).loop_ticks = 64;
         e.swap();
-        assert_eq!(e.deck(DeckId::B).loop_beats, 16);
+        assert_eq!(e.deck(DeckId::B).loop_ticks, 512);
         assert_eq!(
             e.deck(DeckId::B).loop_span,
             Some(LoopSpan { start_secs: 8.0, end_secs: 10.0 })
         );
-        assert_eq!(e.deck(DeckId::A).loop_beats, 2);
+        assert_eq!(e.deck(DeckId::A).loop_ticks, 64);
     }
 
     // -----------------------------------------------------------------

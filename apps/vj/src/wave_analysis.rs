@@ -163,6 +163,29 @@ impl TrackGrid {
     ///
     /// `unit_beats == 0` is the control's off row, and a track with no
     /// grid has nothing to measure against; both hand the target back.
+    /// Pull `secs` onto the grid's own subdivision: the nearer of the
+    /// `parts` slots inside each beat.
+    ///
+    /// A SEPARATE law from `snap_translate`, and deliberately its opposite.
+    /// That one preserves the phase a reference already had inside the
+    /// unit -- it is a translation, not a quantise, and the whole tab's
+    /// QUANT behaviour rests on it. This one lands on the grid itself,
+    /// which is right for a sub-beat loop, because a sub-beat loop IS a
+    /// subdivision of the beat and starting it off the subdivision is what
+    /// makes a stutter arrive late.
+    pub fn snap_to_subdivision(&self, secs: f64, parts: u32) -> f64 {
+        if parts == 0 || !self.has_grid() || !secs.is_finite() {
+            return secs;
+        }
+        let slots = parts as f64;
+        let landed = self.secs_at_beat((self.beat_at(secs) * slots).round() / slots);
+        if landed >= 0.0 {
+            landed
+        } else {
+            secs
+        }
+    }
+
     pub fn snap_translate(&self, target_secs: f64, phase_ref_secs: f64, unit_beats: u32) -> f64 {
         if unit_beats == 0 || !self.has_grid() {
             return target_secs;

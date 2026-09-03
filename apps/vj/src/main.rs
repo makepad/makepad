@@ -22278,7 +22278,7 @@ p2 {}
                 .map(|span| (span.start_secs, span.end_secs))
                 .collect();
             let cue_secs = state.cue_secs;
-            let loop_beats = state.loop_beats;
+            let loop_beats = state.loop_ticks;
             let loop_armed = state.loop_armed.is_some();
             let refined_by_beats = self.deck_analysis[index]
                 .as_ref()

@@ -2392,17 +2392,20 @@ const BEATS_ROWS: [(u32, &str); 6] =
 /// count, and a letter among the numbers looked like a different KIND of
 /// answer when it is only the count nobody has set yet. It also sits
 /// between − and + now, which are arithmetic.
-const LOOP_ROWS: [(u32, &str); 9] = [
-    (0, "0"),
-    (1, "1"),
-    (2, "2"),
-    (4, "4"),
-    (8, "8"),
-    (16, "16"),
-    (32, "32"),
-    (64, "64"),
-    (u32::MAX, "\u{221e}"),
-];
+/// The loop-count rows: MAN, then every rung of the engine's own ladder,
+/// then the bookmark. Built FROM that ladder rather than written out
+/// again -- the two used to be a list here and a piece of arithmetic in
+/// the engine, which had to agree with each other by hand.
+fn loop_rows() -> &'static [(u32, &'static str)] {
+    use std::sync::OnceLock;
+    static ROWS: OnceLock<Vec<(u32, &'static str)>> = OnceLock::new();
+    ROWS.get_or_init(|| {
+        let mut rows = vec![(0u32, "0")];
+        rows.extend(crate::decks::LOOP_LADDER.iter().copied());
+        rows.push((crate::decks::LOOP_BEATS_INF, "\u{221e}"));
+        rows
+    })
+}
 const BEATS_ROW_H: f64 = 18.0;
 const BEATS_PANEL_W: f64 = 42.0;
 const BEATS_PANEL_PAD: f64 = 4.0;
@@ -2453,7 +2456,7 @@ pub struct VjBeatsDrop {
 impl VjBeatsDrop {
     fn rows(&self) -> &'static [(u32, &'static str)] {
         if self.loop_rows {
-            &LOOP_ROWS
+            loop_rows()
         } else {
             &BEATS_ROWS
         }
