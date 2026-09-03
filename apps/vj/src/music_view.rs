@@ -1408,7 +1408,7 @@ script_mod! {
 
     // Four stems have to fit the same width three tone bands do.
     let StemStack = KnobStack{width: 44}
-    let StemKnob = MusicKnob{width: 40 height: 40}
+    let StemKnob = MusicKnob{width: 40 height: 40 default: 1.0}
 
     let MusicFader = Slider{
         axis: DragAxis.Vertical
@@ -1453,6 +1453,7 @@ script_mod! {
         height: 40
         min: 0.0
         max: 1.0
+        default: 0.5
         scroll_step: 0.025
         text: ""
         text_input: TextInput{width: 0 height: 0}
