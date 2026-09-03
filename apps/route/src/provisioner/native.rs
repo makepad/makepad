@@ -1,5 +1,7 @@
 use crate::testmap::TestMapBuild;
-use crate::overlays::{overlay_source, OverlaySelection, OVERLAY_LAYERS};
+use crate::overlays::{
+    overlay_source, OverlaySelection, OCEAN_OVERLAY_LAYERS, OVERLAY_LAYERS,
+};
 use makepad_widgets::{Cx, MapViewRef, OverlaySource, TileSourceConfig};
 use std::fs;
 use std::ops::{Deref, DerefMut};
@@ -7,7 +9,6 @@ use std::path::{Path, PathBuf};
 
 pub const PROFILE: super::ProvisioningProfile = super::ProvisioningProfile::Native;
 const WORLD_ARCHIVE: &str = "world.mkmap";
-const OCEAN_MBTILES: [&str; 2] = ["ocean-low.mbtiles", "ocean-high.mbtiles"];
 
 /// Native source selection plus the existing test-map state used by the rest
 /// of the app's provisioning UI.
@@ -96,24 +97,25 @@ impl MapProvisioner {
         selection: &OverlaySelection,
         maps_root: &Path,
     ) -> Vec<OverlaySource> {
-        let mut sources = OCEAN_MBTILES
-            .into_iter()
-            .map(|name| maps_root.join(name))
-            .filter(|path| path.is_file())
-            .map(|path| {
-                let name = path
-                    .file_stem()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("ocean");
-                OverlaySource::new(
-                    name,
-                    TileSourceConfig::local_archive(path.to_string_lossy().into_owned()),
-                )
+        let (ocean_urls, selectable_urls) = super::demo::HOSTED_CONFIG
+            .overlays
+            .split_at(OCEAN_OVERLAY_LAYERS.len());
+        let mut sources = OCEAN_OVERLAY_LAYERS
+            .iter()
+            .zip(ocean_urls.iter().copied())
+            .map(|(layer, url)| {
+                let path = maps_root.join(layer.local_mbtiles);
+                let source = if path.is_file() {
+                    TileSourceConfig::local_archive(path.to_string_lossy().into_owned())
+                } else {
+                    TileSourceConfig::http_archive(url)
+                };
+                overlay_source(*layer, source)
             })
             .collect::<Vec<_>>();
         let available = OVERLAY_LAYERS
             .iter()
-            .zip(super::demo::HOSTED_CONFIG.overlays)
+            .zip(selectable_urls.iter().copied())
             .map(|(layer, url)| {
                 let source = Path::new(layer.local_mbtiles);
                 let source = if source.is_file() {
