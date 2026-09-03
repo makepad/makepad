@@ -641,6 +641,29 @@ const EXT_PHASE_GAIN: f64 = 0.25;
 /// seek, a scratch, a fresh EXT engage). Land it rather than trim for bars.
 pub const EXT_RESEEK_BEATS: f64 = 0.25;
 
+/// How long a follower is walked back after the record it follows is let
+/// go, in the FOLLOWER'S OWN beats -- half a bar of a leader running at
+/// half tempo, and the deck being moved is the one whose beats matter.
+///
+/// A ceiling, not a schedule: the walk is over the moment the phase is
+/// back inside what the standing servo holds. The arithmetic behind the
+/// number: the trim is bounded at two percent, the worst error the servo
+/// can report is half a beat, so the slowest possible close takes about
+/// twelve and a half beats. Thirty-two is that with room, and it is what
+/// stops a follower whose grid is wrong from refusing to land forever.
+pub const RELAND_BEATS: f64 = 32.0;
+
+/// A follower being walked back to the phase a released record left.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Reland {
+    /// What is left of the ceiling, in this deck's own beats.
+    pub beats_left: f64,
+    /// Where the deck was at the last pump, so travel can be measured
+    /// without a clock. Re-anchored rather than spent when the playhead
+    /// moves somewhere it cannot describe.
+    pub last_secs: f64,
+}
+
 /// What a deck should do to keep following an external clock.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExternalFollow {
@@ -1027,6 +1050,14 @@ pub struct DeckState {
     pub splat: Option<SplatUiState>,
     /// Source-time playhead, mirrored from the mixer.
     pub position_secs: f64,
+    /// Being walked back to the phase a released record left, if so.
+    ///
+    /// While this stands the standing servo trims the rate as usual and
+    /// its LANDING is suppressed: the phase closes at two percent instead
+    /// of in one cut. Describes a pair of playheads, like the lock rate
+    /// beside it, and is nonsense the moment either of them is moved on
+    /// purpose.
+    pub reland: Option<Reland>,
     /// Playback rate multiplier; 1.0 = the track's own tempo.
     pub rate: f64,
     /// What the PLATTER is doing, as a multiple of the track's own tempo:
@@ -1137,6 +1168,7 @@ impl Default for DeckState {
             grid: None,
             splat: None,
             position_secs: 0.0,
+            reland: None,
             rate: 1.0,
             platter_rate: 1.0,
             rate_from_lock: false,
@@ -1677,6 +1709,7 @@ impl DeckEngine {
         state.auto_opt_out = false;
         state.stems_ready = false;
         state.scratching = false;
+        state.reland = None;
         // A held bend belongs to the track that was under the hand.
         state.bend = 0.0;
         // A deck with a load in flight cannot lead, and when its new grid
@@ -1801,6 +1834,9 @@ impl DeckEngine {
             return Vec::new();
         }
         state.playing = !state.playing;
+        // A walk describes a pair of PLAYHEADS: stopping or starting one
+        // of them ends it, and the re-lock below is the landing.
+        state.reland = None;
         let mut cmds = vec![DeckCmd::SetPlaying { deck, playing: state.playing }];
         // Starting a deck changes who is leading, so the grid lock is
         // re-decided here rather than waiting for the next observation.
@@ -2813,6 +2849,7 @@ impl DeckEngine {
         state.auto_opt_out = false;
         state.stems_ready = false;
         state.scratching = false;
+        state.reland = None;
         // An ejected master hands the pin to the remaining group member
         // (or the group ends with it).
         self.hand_pin_over(deck);
@@ -3525,16 +3562,39 @@ impl DeckEngine {
         let Some(follow) = external_follow(reference, &view, envelope) else {
             return Vec::new();
         };
+        // Spend the walk, if one is running: this deck's own travel since
+        // the last pump, measured on its own beats, so the whole mechanism
+        // reads no clock. A step that is backwards or absurdly long is a
+        // wrap, a seek or a second gesture -- the anchor is moved to the
+        // new place and nothing is spent, because RETIRING there would
+        // hand straight back to a servo that seeks.
+        let walked = state.reland.map(|mut reland| {
+            let beat = state.counted_beat_secs().max(1e-9);
+            let step = state.position_secs - reland.last_secs;
+            if step.is_finite() && (0.0..=beat * 4.0).contains(&step) {
+                reland.beats_left -= step / beat;
+            }
+            reland.last_secs = state.position_secs;
+            // Inside the dead band the servo would not land anyway: that
+            // is the clean hand-back, and the ceiling is only for a deck
+            // whose grid is wrong enough never to get there.
+            let done =
+                reland.beats_left <= 0.0 || follow.error_beats.abs() <= EXT_RESEEK_BEATS;
+            (!done).then_some(reland)
+        });
         let lookahead = self.land_lookahead_secs;
         let mut cmds = Vec::new();
         let state = self.deck_mut(deck);
+        if let Some(reland) = walked {
+            state.reland = reland;
+        }
         state.rate_from_lock = true;
         if (state.rate - follow.rate).abs() > 1e-4 {
             state.rate = follow.rate;
             state.pitch = (follow.rate - 1.0).clamp(-0.5, 0.5);
             cmds.push(DeckCmd::SetRate { deck, rate: follow.rate });
         }
-        if let Some(secs) = follow.reseek_secs {
+        if let (Some(secs), None) = (follow.reseek_secs, state.reland) {
             let secs = secs + follow.rate * lookahead;
             state.position_secs = secs;
             cmds.push(DeckCmd::SeekSeconds { deck, secs });
@@ -3820,10 +3880,13 @@ impl DeckEngine {
             ScratchMotion::Grab => self.deck_mut(deck).scratching = true,
             ScratchMotion::Move { .. } => {}
             ScratchMotion::Release => {
-                self.deck_mut(deck).scratching = false;
-                // Letting go re-locks against the leader, from wherever the
-                // hand left the record.
-                if self.deck(deck).synced || self.auto_sync {
+                // Letting go of a FOLLOWER re-locks it against the leader,
+                // from wherever the hand left the record. Letting go of the
+                // deck the group follows is the other case entirely: the
+                // re-lock would move the followers, so they are walked back
+                // with the rate instead and nothing is seeked.
+                let led = self.platter_released(deck);
+                if !led && (self.deck(deck).synced || self.auto_sync) {
                     cmds.extend(self.apply_auto_sync_with(Some(SyncQuantize::Beat)));
                 }
             }
@@ -3847,7 +3910,14 @@ impl DeckEngine {
         if !state.is_loaded() || (on && !state.playing) {
             return Vec::new();
         }
-        self.deck_mut(deck).scratching = on;
+        match on {
+            true => self.deck_mut(deck).scratching = true,
+            // Through the same funnel a hand uses: letting go of a reverse
+            // hold on the leading record walks the followers back too.
+            false => {
+                self.platter_released(deck);
+            }
+        }
         vec![DeckCmd::Censor { deck, on }]
     }
 
@@ -3865,6 +3935,45 @@ impl DeckEngine {
         vec![DeckCmd::Spin { deck, motion }]
     }
 
+    /// The platter is nobody's but the deck's again.
+    ///
+    /// One funnel for all three ways a gesture can end -- a hand let go, a
+    /// reverse hold released, a motor landed -- because what happens next
+    /// depends only on WHOSE record it was. Returns whether the deck that
+    /// let go is the one the group follows: if it is, its followers are
+    /// walked back with the rate and the caller must not re-lock them with
+    /// a seek, which is the jump-cut this exists to remove.
+    ///
+    /// Arms nothing when the flag was not set on the way in, so a release
+    /// nothing was holding earns no walk.
+    fn platter_released(&mut self, deck: DeckId) -> bool {
+        if !self.deck(deck).scratching {
+            return false;
+        }
+        self.deck_mut(deck).scratching = false;
+        // Read AFTER the clear, deliberately: clearing the flag does not
+        // change who leads, and asking now is asking about the state the
+        // followers are about to be corrected in.
+        if self.sync_leader() != Some(deck) {
+            return false;
+        }
+        let mut armed = false;
+        for other in [DeckId::A, DeckId::B] {
+            if other == deck {
+                continue;
+            }
+            let state = self.deck(other);
+            if !state.is_loaded() || !state.playing || !state.synced {
+                continue;
+            }
+            let at = state.position_secs;
+            self.deck_mut(other).reland =
+                Some(Reland { beats_left: RELAND_BEATS, last_secs: at });
+            armed = true;
+        }
+        armed
+    }
+
     /// The mixer's word on whether the platter is still under a gesture.
     ///
     /// Only ever CLEARS, and only a motor gesture: a hand owns the flag
@@ -3872,7 +3981,7 @@ impl DeckEngine {
     pub fn observe_spin(&mut self, deck: DeckId, gesture: bool) {
         if self.spin_running[deck.index()] && !gesture {
             self.spin_running[deck.index()] = false;
-            self.deck_mut(deck).scratching = false;
+            self.platter_released(deck);
         }
     }
 
@@ -3889,7 +3998,11 @@ impl DeckEngine {
         }
         let duration = self.deck(deck).duration_secs;
         let secs = if duration > 0.0 { secs.clamp(0.0, duration) } else { secs.max(0.0) };
-        self.deck_mut(deck).position_secs = secs;
+        let state = self.deck_mut(deck);
+        state.position_secs = secs;
+        // A deliberate move ends any walk on this deck: the re-lock below
+        // IS the landing, and there is nothing left to close gently.
+        state.reland = None;
         let mut cmds = vec![DeckCmd::SeekSeconds { deck, secs }];
         cmds.extend(self.apply_auto_sync_with(Some(SyncQuantize::Beat)));
         cmds
@@ -6429,6 +6542,149 @@ mod tests {
             "landed {} not {want}",
             engine.deck(DeckId::B).position_secs
         );
+    }
+
+    /// Two 120 BPM decks locked and playing, A leading. Returns the pair
+    /// with a hand on A's record that has dragged it a third of a beat out
+    /// of phase, the hand still down.
+    fn dragged_leader() -> DeckEngine {
+        let mut engine = DeckEngine::new();
+        load_analysed(&mut engine, DeckId::A, 1, 120.0, 0.0);
+        load_analysed(&mut engine, DeckId::B, 2, 120.0, 0.0);
+        engine.play_pause(DeckId::A);
+        engine.play_pause(DeckId::B);
+        engine.observe(DeckId::A, 30.0, true);
+        engine.observe(DeckId::B, 30.0, true);
+        engine.apply_auto_sync();
+        assert_eq!(engine.sync_master(), Some(DeckId::A));
+        engine.scratch(DeckId::A, ScratchMotion::Grab);
+        engine.observe(DeckId::A, 30.0 + 1.0 / 6.0, true);
+        engine
+    }
+
+    /// Letting go of the record the group follows used to jump-cut the
+    /// follower: the release re-locked, and the re-lock lands with a seek.
+    /// It is walked back with the rate now.
+    #[test]
+    fn letting_the_leaders_record_go_walks_the_follower_back_instead_of_cutting_it() {
+        let mut engine = dragged_leader();
+        let cmds = engine.scratch(DeckId::A, ScratchMotion::Release);
+        assert!(seek_of(&cmds, DeckId::B).is_none(), "no cut: {cmds:?}");
+        assert!(engine.deck(DeckId::B).reland.is_some(), "and a walk instead");
+
+        let gap_before = phase_gap(&engine);
+        assert!(gap_before > EXT_RESEEK_BEATS, "a real error to close: {gap_before}");
+        // Pump: both decks travel a beat at a time at their own rates.
+        let (mut a, mut b) = (engine.deck(DeckId::A).position_secs, 30.0);
+        for _ in 0..40 {
+            a += 0.5;
+            b += 0.5 * engine.deck(DeckId::B).rate;
+            engine.observe(DeckId::A, a, true);
+            engine.observe(DeckId::B, b, true);
+            let cmds = engine.hold_deck_sync();
+            assert!(seek_of(&cmds, DeckId::B).is_none(), "still no cut: {cmds:?}");
+            if let Some(rate) = rate_of(&cmds, DeckId::B) {
+                assert!(rate > 1.0, "B is behind, so it leans forward: {rate}");
+                assert!((rate - 1.0).abs() <= 0.02 + 1e-9, "and only just: {rate}");
+            }
+            b = engine.deck(DeckId::B).position_secs;
+        }
+        assert!(phase_gap(&engine) < gap_before, "and it closed");
+    }
+
+    /// The walk hands back the moment the phase is inside what the standing
+    /// servo holds -- not when the ceiling runs out.
+    #[test]
+    fn a_re_land_retires_when_the_phase_is_back_inside_what_the_servo_holds() {
+        let mut engine = dragged_leader();
+        engine.scratch(DeckId::A, ScratchMotion::Release);
+        let (mut a, mut b) = (engine.deck(DeckId::A).position_secs, 30.0);
+        let mut beats = 0;
+        while engine.deck(DeckId::B).reland.is_some() && beats < 60 {
+            a += 0.5;
+            b += 0.5 * engine.deck(DeckId::B).rate;
+            engine.observe(DeckId::A, a, true);
+            engine.observe(DeckId::B, b, true);
+            engine.hold_deck_sync();
+            b = engine.deck(DeckId::B).position_secs;
+            beats += 1;
+        }
+        assert!(engine.deck(DeckId::B).reland.is_none(), "it retired");
+        assert!(beats < RELAND_BEATS as i32, "on the phase, not the ceiling: {beats}");
+        assert!(phase_gap(&engine) <= EXT_RESEEK_BEATS + 1e-9);
+    }
+
+    /// A loop wrap moves the playhead somewhere the anchor cannot measure.
+    /// Retiring on it would hand straight back to a servo that seeks --
+    /// the jump-cut this exists to remove, one wrap late.
+    #[test]
+    fn a_loop_wrap_does_not_hand_a_re_land_back_to_a_servo_that_seeks() {
+        let mut engine = dragged_leader();
+        engine.scratch(DeckId::A, ScratchMotion::Release);
+        let a = engine.deck(DeckId::A).position_secs;
+        // The follower wraps its loop: back four beats.
+        engine.observe(DeckId::A, a + 0.5, true);
+        engine.observe(DeckId::B, 28.0, true);
+        let cmds = engine.hold_deck_sync();
+        assert!(seek_of(&cmds, DeckId::B).is_none(), "no cut on a wrap: {cmds:?}");
+        assert!(engine.deck(DeckId::B).reland.is_some(), "the walk survives the wrap");
+    }
+
+    /// The other half of the same gesture, unchanged: a hand on a FOLLOWER
+    /// still lands that deck on release, and never touches the leader.
+    #[test]
+    fn a_hand_on_a_followers_record_still_lands_it_and_never_touches_the_leader() {
+        let mut engine = DeckEngine::new();
+        load_analysed(&mut engine, DeckId::A, 1, 120.0, 0.0);
+        load_analysed(&mut engine, DeckId::B, 2, 120.0, 0.0);
+        engine.play_pause(DeckId::A);
+        engine.play_pause(DeckId::B);
+        engine.observe(DeckId::A, 30.0, true);
+        engine.observe(DeckId::B, 30.0, true);
+        engine.apply_auto_sync();
+        engine.scratch(DeckId::B, ScratchMotion::Grab);
+        engine.observe(DeckId::B, 30.0 + 1.0 / 6.0, true);
+
+        let cmds = engine.scratch(DeckId::B, ScratchMotion::Release);
+        assert!(seek_of(&cmds, DeckId::B).is_some(), "it still lands: {cmds:?}");
+        assert!(seek_of(&cmds, DeckId::A).is_none(), "and never the leader");
+        assert!(rate_of(&cmds, DeckId::A).is_none());
+        assert!(engine.deck(DeckId::A).reland.is_none(), "no walk on either deck");
+        assert!(engine.deck(DeckId::B).reland.is_none());
+    }
+
+    /// A motor gesture has no release event of its own: the mixer's word
+    /// ends it, and it must reach the same funnel a hand does.
+    #[test]
+    fn a_motor_gesture_on_the_leader_arms_the_walk_when_the_mixer_says_it_landed() {
+        let mut engine = dragged_leader();
+        engine.scratch(DeckId::A, ScratchMotion::Release);
+        engine.deck_mut(DeckId::B).reland = None;
+
+        engine.spin(DeckId::A, SpinMotion::SoftStart);
+        assert!(engine.deck(DeckId::A).scratching);
+        engine.observe(DeckId::A, 31.0, true);
+        assert!(engine.hold_deck_sync().is_empty(), "frozen while it winds up");
+
+        engine.observe_spin(DeckId::A, false);
+        assert!(!engine.deck(DeckId::A).scratching, "the mixer ended it");
+        assert!(engine.deck(DeckId::B).reland.is_some(), "same funnel as a hand");
+    }
+
+    /// A walk describes a PAIR of playheads and is nonsense the moment one
+    /// of them is moved on purpose.
+    #[test]
+    fn a_deliberate_move_of_the_follower_ends_the_walk() {
+        let mut engine = dragged_leader();
+        engine.scratch(DeckId::A, ScratchMotion::Release);
+        assert!(engine.deck(DeckId::B).reland.is_some());
+        engine.seek_secs(DeckId::B, 60.0);
+        assert!(engine.deck(DeckId::B).reland.is_none(), "the seek is the landing");
+
+        let mut engine = dragged_leader();
+        engine.scratch(DeckId::A, ScratchMotion::Release);
+        engine.play_pause(DeckId::B);
+        assert!(engine.deck(DeckId::B).reland.is_none(), "and so is a stop");
     }
 
     /// Phase difference between the decks, in beats of the follower's grid.
