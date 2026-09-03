@@ -49,6 +49,11 @@ const BLEND_SECS: f32 = 0.08;
 const MAX_SLOT_QUEUE_FRAMES: usize = 96_000;
 /// Master safety clamp.
 const CLAMP: f32 = 1.0;
+/// Width of the blend when separated stems first take over from the mixed
+/// file on a playing deck, seconds. At unity gains the two are the same
+/// signal and the blend is inaudible; under a knob already turned it is
+/// what keeps the swap from being a step.
+const STEM_SWAP_SECS: f32 = 0.020;
 /// Width of the crossfade at a deck loop's wrap, seconds. The tail of the
 /// loop blends into the run-up to IN over this window, so the seam is a
 /// mix of two pieces of programme rather than a gain treatment — long
@@ -252,6 +257,160 @@ impl TrackPcm {
         match self.frames.get(index) {
             Some(frame) => [frame[0] as f32 / 32768.0, frame[1] as f32 / 32768.0],
             None => [0.0, 0.0],
+        }
+    }
+}
+
+/// Frames per streamed chunk. A power of two, so the per-sample chunk
+/// lookup on the audio thread is a shift and a mask: ~2.7 s at 48 kHz,
+/// ~3 s at 44.1 kHz.
+pub const STREAM_CHUNK_SHIFT: u32 = 17;
+pub const STREAM_CHUNK_FRAMES: usize = 1 << STREAM_CHUNK_SHIFT;
+
+/// A track still coming out of the decoder: whole chunks in order, every
+/// one [`STREAM_CHUNK_FRAMES`] long except the last.
+///
+/// The table is an immutable snapshot. A new chunk makes a NEW table that
+/// shares every earlier chunk (`with_chunk` clones a vector of pointers,
+/// never audio), and the UI thread swaps it in under the state lock as one
+/// pointer move — so the callback never sees a table mid-growth, never
+/// waits, and never allocates to read it.
+pub struct StreamPcm {
+    pub sample_rate: u32,
+    pub chunks: Vec<Arc<Vec<[i16; 2]>>>,
+    /// Frames decoded so far: the sum of the chunk lengths.
+    pub len: usize,
+    /// The length the decoder expects the track to have (its container's
+    /// duration), never less than `len`. What the strip and the time
+    /// display are scaled to while the file is still arriving.
+    pub expected: usize,
+    /// The decoder reported the end: `len` is the whole track.
+    pub complete: bool,
+}
+
+impl StreamPcm {
+    pub fn new(sample_rate: u32, expected: Option<usize>) -> StreamPcm {
+        let capacity = expected.map_or(0, |frames| frames.div_ceil(STREAM_CHUNK_FRAMES) + 1);
+        StreamPcm {
+            sample_rate,
+            chunks: Vec::with_capacity(capacity),
+            len: 0,
+            expected: expected.unwrap_or(0),
+            complete: false,
+        }
+    }
+
+    /// This table plus one more chunk. The chunk before it must have been
+    /// full — the read path relies on every chunk but the last being
+    /// exactly [`STREAM_CHUNK_FRAMES`] — and an empty chunk only marks the
+    /// end.
+    pub fn with_chunk(&self, chunk: Arc<Vec<[i16; 2]>>, last: bool) -> StreamPcm {
+        debug_assert!(
+            self.chunks.last().map_or(true, |previous| previous.len() == STREAM_CHUNK_FRAMES),
+            "a streamed chunk may only follow a full one"
+        );
+        debug_assert!(!self.complete, "no chunk follows the end of a stream");
+        let mut chunks = Vec::with_capacity(self.chunks.capacity().max(self.chunks.len() + 1));
+        chunks.extend(self.chunks.iter().cloned());
+        let mut len = self.len;
+        if !chunk.is_empty() {
+            len += chunk.len();
+            chunks.push(chunk);
+        }
+        let expected = if last { len } else { self.expected.max(len) };
+        StreamPcm { sample_rate: self.sample_rate, chunks, len, expected, complete: last }
+    }
+
+    pub fn seconds(&self) -> f64 {
+        self.len as f64 / self.sample_rate.max(1) as f64
+    }
+
+    pub fn expected_seconds(&self) -> f64 {
+        self.expected.max(self.len) as f64 / self.sample_rate.max(1) as f64
+    }
+
+    #[inline]
+    fn frame_f32(&self, index: usize) -> [f32; 2] {
+        if index >= self.len {
+            return [0.0, 0.0];
+        }
+        let chunk = index >> STREAM_CHUNK_SHIFT;
+        let offset = index & (STREAM_CHUNK_FRAMES - 1);
+        match self.chunks.get(chunk).and_then(|chunk| chunk.get(offset)) {
+            Some(frame) => [frame[0] as f32 / 32768.0, frame[1] as f32 / 32768.0],
+            None => [0.0, 0.0],
+        }
+    }
+}
+
+/// What a deck voice reads from: the whole file once it is decoded, or the
+/// growing chunk table while it is being decoded. Same timeline, same
+/// samples; the swap from one to the other at the end of the decode is a
+/// pointer move at the playhead and cannot be heard.
+#[derive(Clone)]
+pub enum DeckPcm {
+    Whole(Arc<TrackPcm>),
+    Stream(Arc<StreamPcm>),
+}
+
+impl DeckPcm {
+    /// Frames that can be read right now.
+    #[inline]
+    pub fn len(&self) -> usize {
+        match self {
+            DeckPcm::Whole(pcm) => pcm.frames.len(),
+            DeckPcm::Stream(stream) => stream.len,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        match self {
+            DeckPcm::Whole(pcm) => pcm.sample_rate,
+            DeckPcm::Stream(stream) => stream.sample_rate,
+        }
+    }
+
+    /// The track's length as far as anyone knows: exact once decoded, the
+    /// decoder's expectation before that.
+    pub fn expected_seconds(&self) -> f64 {
+        match self {
+            DeckPcm::Whole(pcm) => pcm.seconds(),
+            DeckPcm::Stream(stream) => stream.expected_seconds(),
+        }
+    }
+
+    pub fn expected_len(&self) -> usize {
+        match self {
+            DeckPcm::Whole(pcm) => pcm.frames.len(),
+            DeckPcm::Stream(stream) => stream.expected.max(stream.len),
+        }
+    }
+
+    /// False while the decoder is still delivering: a playhead at `len`
+    /// is waiting at the edge, not at the end of the track.
+    pub fn complete(&self) -> bool {
+        match self {
+            DeckPcm::Whole(_) => true,
+            DeckPcm::Stream(stream) => stream.complete,
+        }
+    }
+
+    pub fn whole(&self) -> Option<&TrackPcm> {
+        match self {
+            DeckPcm::Whole(pcm) => Some(pcm),
+            DeckPcm::Stream(_) => None,
+        }
+    }
+
+    #[inline]
+    fn frame_f32(&self, index: usize) -> [f32; 2] {
+        match self {
+            DeckPcm::Whole(pcm) => pcm.frame_f32(index),
+            DeckPcm::Stream(stream) => stream.frame_f32(index),
         }
     }
 }
@@ -512,15 +671,19 @@ impl SplatState {
 /// What a deck's DSP chain reads from: the full mix, or the stem lanes
 /// summed under their current gains.
 struct DeckSource<'a> {
-    pcm: &'a TrackPcm,
+    pcm: &'a DeckPcm,
     stems: Option<&'a TrackStems>,
     stem_gain: [f32; STEM_COUNT],
+    /// How far the stem lanes have taken over from the mixed file: 1.0 once
+    /// the swap-in blend has run its few milliseconds (see
+    /// [`STEM_SWAP_SECS`]).
+    stem_blend: f32,
 }
 
 impl FrameSource for DeckSource<'_> {
     #[inline]
     fn frame_count(&self) -> usize {
-        self.pcm.frames.len()
+        self.pcm.len()
     }
 
     #[inline]
@@ -549,6 +712,15 @@ impl FrameSource for DeckSource<'_> {
         // before separation existed.
         if !separated {
             return self.pcm.frame_f32(index);
+        }
+        // The swap-in: the stem sum IS the mixed file, so at unity gains
+        // this blend is a no-op — it only softens a swap that lands under
+        // knobs already turned, where the two really differ.
+        if self.stem_blend < 1.0 {
+            let mixed = self.pcm.frame_f32(index);
+            let t = self.stem_blend.max(0.0);
+            out[0] = mixed[0] + (out[0] - mixed[0]) * t;
+            out[1] = mixed[1] + (out[1] - mixed[1]) * t;
         }
         out
     }
@@ -630,8 +802,12 @@ struct SeekFade {
 }
 
 struct DeckVoice {
-    pcm: Option<Arc<TrackPcm>>,
+    pcm: Option<DeckPcm>,
     stems: Option<Arc<TrackStems>>,
+    /// The stem swap-in blend: 0.0 when a table first lands on a track that
+    /// had none, ramping to 1.0 over [`STEM_SWAP_SECS`]. See
+    /// [`DeckSource::frame`].
+    stem_blend: ParamRamp,
     splat: Option<SplatState>,
     /// Playhead in SOURCE frames. Fractional, and free to run backwards
     /// under a hand on the waveform.
@@ -671,6 +847,7 @@ impl DeckVoice {
         DeckVoice {
             pcm: None,
             stems: None,
+            stem_blend: ParamRamp::at(1.0),
             splat: None,
             pos: 0.0,
             playing: false,
@@ -699,8 +876,10 @@ impl DeckVoice {
         self.eq.reset_blend();
     }
 
+    /// Frames the voice can read right now — the decoded edge while a
+    /// track is still streaming in, which is what seeks clamp to.
     fn frame_count(&self) -> usize {
-        self.pcm.as_ref().map(|pcm| pcm.frames.len()).unwrap_or(0)
+        self.pcm.as_ref().map(DeckPcm::len).unwrap_or(0)
     }
 
     /// Move the playhead and drop every bit of streaming state that was
@@ -736,7 +915,7 @@ impl DeckVoice {
             return;
         }
         let Some(pcm) = self.pcm.as_ref() else { return };
-        let total = (SEEK_XFADE_SECS * pcm.sample_rate.max(1) as f64).max(1.0);
+        let total = (SEEK_XFADE_SECS * pcm.sample_rate().max(1) as f64).max(1.0);
         self.seek_fade = Some(SeekFade { pos: from, left: total, total });
     }
 }
@@ -1639,15 +1818,57 @@ impl Mixer {
     /// Install a decoded track, paused at zero. Any stems from a previous
     /// track go with it; the tone chain is reset but its settings stand.
     pub fn install_deck(&self, deck: DeckId, pcm: Arc<TrackPcm>) {
+        self.install_deck_pcm(deck, DeckPcm::Whole(pcm));
+    }
+
+    /// Install a track that is still being decoded, paused at zero: the
+    /// deck plays what has arrived and waits at the decoded edge for the
+    /// rest. Everything else is `install_deck`.
+    pub fn install_deck_stream(&self, deck: DeckId, stream: Arc<StreamPcm>) {
+        self.install_deck_pcm(deck, DeckPcm::Stream(stream));
+    }
+
+    fn install_deck_pcm(&self, deck: DeckId, pcm: DeckPcm) {
         let mut s = lock_from_ui(&self.state);
         let d = &mut s.decks[deck.index()];
         d.pcm = Some(pcm);
         d.stems = None;
+        d.stem_blend = ParamRamp::at(1.0);
         d.splat = None;
         d.playing = false;
         d.seek_frames(0.0);
         d.eq.reset();
         d.reset_blend();
+    }
+
+    /// More of a streaming track arrived: swap the grown table in. One
+    /// pointer move under the lock — the chunks are shared with the table
+    /// already playing, so nothing is copied here and nothing the callback
+    /// is reading moves. A deck that is not streaming (the whole file
+    /// landed, or another track took the deck) ignores it.
+    pub fn grow_deck_stream(&self, deck: DeckId, stream: Arc<StreamPcm>) {
+        let mut s = lock_from_ui(&self.state);
+        let d = &mut s.decks[deck.index()];
+        if matches!(d.pcm, Some(DeckPcm::Stream(_))) {
+            d.pcm = Some(DeckPcm::Stream(stream));
+        }
+    }
+
+    /// The decoder finished: the whole file takes over from the chunk
+    /// table at the playhead. Same samples on the same timeline, so the
+    /// transport, the stretcher and any loop keep exactly their place; a
+    /// deck parked at the decoded edge simply continues.
+    pub fn complete_deck(&self, deck: DeckId, pcm: Arc<TrackPcm>) {
+        let mut s = lock_from_ui(&self.state);
+        let d = &mut s.decks[deck.index()];
+        if matches!(d.pcm, Some(DeckPcm::Stream(_))) {
+            d.pcm = Some(DeckPcm::Whole(pcm));
+        }
+    }
+
+    /// Whether the deck is playing a track that is still being decoded.
+    pub fn deck_is_streaming(&self, deck: DeckId) -> bool {
+        matches!(lock_from_ui(&self.state).decks[deck.index()].pcm, Some(DeckPcm::Stream(_)))
     }
 
     /// Drop the deck's track entirely: the voice renders silence until the
@@ -1673,6 +1894,13 @@ impl Mixer {
         if d.pcm.is_none() || stems.is_empty() {
             return;
         }
+        // The first table on this track is the swap from the mixed file
+        // to its stems: blend it in. Later tables are the same stems with
+        // more chunks and need no blend.
+        if d.stems.is_none() {
+            d.stem_blend = ParamRamp::at(0.0);
+            d.stem_blend.slew(1.0, STEM_SWAP_SECS);
+        }
         d.stems = Some(stems);
     }
 
@@ -1684,8 +1912,10 @@ impl Mixer {
         let mut s = lock_from_ui(&self.state);
         let d = &mut s.decks[deck.index()];
         if playing {
-            // Playing from the end restarts.
+            // Playing from the end restarts. A playhead at the DECODED
+            // edge of a streaming track is not at the end: it waits there.
             if d.playhead_frames() >= d.frame_count() as f64
+                && d.pcm.as_ref().is_some_and(DeckPcm::complete)
                 && !d.splat.as_ref().is_some_and(|splat| splat.active)
             {
                 d.seek_frames(0.0);
@@ -1701,7 +1931,7 @@ impl Mixer {
         let mut state = lock_from_ui(&self.state);
         let voice = &mut state.decks[deck.index()];
         let Some(pcm) = voice.pcm.as_ref() else { return };
-        let frames = SplatFrames::from_grid(&grid, pcm.sample_rate.max(1) as f64);
+        let frames = SplatFrames::from_grid(&grid, pcm.sample_rate().max(1) as f64);
         match voice.splat.as_mut() {
             Some(splat) => {
                 splat.grid = grid;
@@ -1768,11 +1998,14 @@ impl Mixer {
         }
     }
 
+    /// A fraction of the track as the strip shows it — its EXPECTED length
+    /// while it is still decoding — clamped by `seek_frames` to what has
+    /// arrived, so a jump past the decoded edge waits there.
     pub fn seek_deck_fraction(&self, deck: DeckId, fraction: f64) {
         let mut s = lock_from_ui(&self.state);
         let d = &mut s.decks[deck.index()];
-        let len = d.frame_count() as f64;
-        if len > 0.0 {
+        let len = d.pcm.as_ref().map_or(0.0, |pcm| pcm.expected_len() as f64);
+        if len > 0.0 && d.frame_count() > 0 {
             let from = d.playhead_frames();
             d.seek_frames(fraction.clamp(0.0, 1.0) * len);
             d.arm_seek_fade(from);
@@ -1784,7 +2017,7 @@ impl Mixer {
         let mut s = lock_from_ui(&self.state);
         let d = &mut s.decks[deck.index()];
         let Some(pcm) = d.pcm.as_ref() else { return };
-        let frames = secs.max(0.0) * pcm.sample_rate.max(1) as f64;
+        let frames = secs.max(0.0) * pcm.sample_rate().max(1) as f64;
         let from = d.playhead_frames();
         d.seek_frames(frames);
         d.arm_seek_fade(from);
@@ -1857,11 +2090,13 @@ impl Mixer {
             d.loop_span = None;
             return;
         };
-        let rate = pcm.sample_rate.max(1) as f64;
+        let rate = pcm.sample_rate().max(1) as f64;
         // Clamp OUT to the real frame count: the seconds->frames round trip
         // can land a hair ABOVE it, and an OUT past the last frame lets the
         // end-of-track check win over the wrap — a dead deck with LOOP lit.
-        let frames = pcm.frames.len() as f64;
+        // (On a streaming track that is the expected length: a span past
+        // the decoded edge waits there like any other read.)
+        let frames = pcm.expected_len() as f64;
         d.loop_span = span.map(|(start, end)| {
             (start.max(0.0) * rate, (end.max(0.0) * rate).min(frames))
         });
@@ -1949,8 +2184,8 @@ impl Mixer {
         match &d.pcm {
             None => (0.0, 0.0, false),
             Some(pcm) => {
-                let position = d.playhead_frames() / pcm.sample_rate.max(1) as f64;
-                (position, pcm.seconds(), d.playing)
+                let position = d.playhead_frames() / pcm.sample_rate().max(1) as f64;
+                (position, pcm.expected_seconds(), d.playing)
             }
         }
     }
@@ -1971,8 +2206,8 @@ impl Mixer {
                 splat: None,
             },
             Some(pcm) => DeckSnapshot {
-                position_secs: d.playhead_frames() / pcm.sample_rate.max(1) as f64,
-                duration_secs: pcm.seconds(),
+                position_secs: d.playhead_frames() / pcm.sample_rate().max(1) as f64,
+                duration_secs: pcm.expected_seconds(),
                 playing: d.playing,
                 scratching,
                 splat: d.splat.as_ref().map(SplatState::snapshot),
@@ -2265,7 +2500,7 @@ impl Mixer {
         // Deck sources are lifted out of the frame loop: one reference count
         // per buffer instead of one per sample, and the borrow checker can
         // then see that the voice state and its PCM are disjoint.
-        let deck_pcm: [Option<Arc<TrackPcm>>; 2] =
+        let deck_pcm: [Option<DeckPcm>; 2] =
             [s.decks[0].pcm.clone(), s.decks[1].pcm.clone()];
         let deck_stems: [Option<Arc<TrackStems>>; 2] =
             [s.decks[0].stems.clone(), s.decks[1].stems.clone()];
@@ -2364,11 +2599,16 @@ impl Mixer {
                     *slot = ramp.tick(rate) * blend.tick(rate);
                 }
                 let Some(pcm) = deck_pcm[i].as_ref() else { continue };
-                if pcm.frames.is_empty() {
+                if pcm.is_empty() {
                     continue;
                 }
-                let natural_step = pcm.sample_rate as f64 / device_rate;
-                if let Some(splat) = d.splat.as_mut().filter(|splat| splat.active) {
+                let natural_step = pcm.sample_rate() as f64 / device_rate;
+                // The loop grid is built over the whole file, so it only
+                // ever owns time on one.
+                let splat_whole = pcm.whole().and_then(|whole| {
+                    d.splat.as_mut().filter(|splat| splat.active).map(|splat| (splat, whole))
+                });
+                if let Some((splat, whole)) = splat_whole {
                     // Splat owns source time. Rate, key lock and scratch are
                     // intentionally ignored; the shared master advances at
                     // the track's natural rate and every row derives from it.
@@ -2377,7 +2617,7 @@ impl Mixer {
                     }
                     let frame = render_splat_source(
                         splat,
-                        pcm,
+                        whole,
                         deck_stems[i].as_deref(),
                         stem_gain,
                         natural_step,
@@ -2406,8 +2646,9 @@ impl Mixer {
                     pcm,
                     stems: deck_stems[i].as_deref(),
                     stem_gain,
+                    stem_blend: d.stem_blend.tick(rate),
                 };
-                let length = pcm.frames.len();
+                let length = pcm.len();
 
                 // Tempo and pitch, split into the two stages that can each
                 // deliver one of them. The stretcher changes duration at
@@ -2531,6 +2772,13 @@ impl Mixer {
                         d.seek_frames(start);
                         continue;
                     }
+                    // The decoded edge of a track still streaming in is
+                    // not the end of the track: the deck waits there —
+                    // silent, still playing, the playhead parked — and
+                    // carries on the moment the next chunk lands.
+                    if !pcm.complete() {
+                        continue;
+                    }
                     d.playing = false;
                     d.ended = true;
                     s.ended_decks.push(if i == 0 { DeckId::A } else { DeckId::B });
@@ -2547,7 +2795,7 @@ impl Mixer {
                     // The pre-roll has to exist on the track, so a span
                     // starting at the very head plays a raw splice instead.
                     Some((start, end)) if start >= 1.0 => {
-                        let xf = (LOOP_XFADE_SECS * pcm.sample_rate as f64)
+                        let xf = (LOOP_XFADE_SECS * pcm.sample_rate() as f64)
                             .min((end - start) * 0.15)
                             .min(start)
                             .max(1.0);
@@ -3278,6 +3526,189 @@ mod tests {
             }
         }
         Arc::new(stems)
+    }
+
+    /// A constant-valued streamed chunk of `frames` frames.
+    fn stream_chunk(value: i16, frames: usize) -> Arc<Vec<[i16; 2]>> {
+        Arc::new(vec![[value, value]; frames])
+    }
+
+    /// The deck's playhead in frames, straight from the state.
+    fn deck_pos(mixer: &Mixer, deck: DeckId) -> f64 {
+        mixer.state.lock().unwrap().decks[deck.index()].playhead_frames()
+    }
+
+    #[test]
+    fn a_streaming_deck_waits_at_the_decoded_edge_and_carries_on() {
+        let rate = 48_000u32;
+        let mixer = Mixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        // One chunk in, three expected.
+        let table = StreamPcm::new(rate, Some(STREAM_CHUNK_FRAMES * 3));
+        let table = Arc::new(table.with_chunk(stream_chunk(8_000, STREAM_CHUNK_FRAMES), false));
+        mixer.install_deck_stream(DeckId::A, table.clone());
+        assert!(mixer.deck_is_streaming(DeckId::A));
+        let snapshot = mixer.deck_snapshot(DeckId::A);
+        assert!((snapshot.duration_secs - 3.0 * STREAM_CHUNK_FRAMES as f64 / rate as f64).abs() < 1e-9);
+        mixer.set_deck_playing(DeckId::A, true);
+
+        // Play through the chunk: audible, then silent AT the edge, still
+        // playing, the playhead parked there rather than ended.
+        let audible = deck_rms(&mixer, rate as f64, 256, 4_096);
+        assert!(audible > 0.1, "the decoded lead plays: {audible}");
+        let _ = render(&mixer, rate as f64, STREAM_CHUNK_FRAMES);
+        let parked = render(&mixer, rate as f64, 4_096);
+        assert!(parked.channel(0).iter().all(|v| *v == 0.0), "past the edge is silence");
+        assert_eq!(deck_pos(&mixer, DeckId::A), STREAM_CHUNK_FRAMES as f64);
+        assert!(mixer.deck_snapshot(DeckId::A).playing, "waiting is not ended");
+        assert!(mixer.drain_ended_decks().is_empty());
+
+        // The next chunk lands: playback resumes from the edge, no seek.
+        let table = Arc::new(table.with_chunk(stream_chunk(8_000, STREAM_CHUNK_FRAMES), false));
+        mixer.grow_deck_stream(DeckId::A, table.clone());
+        let resumed = render(&mixer, rate as f64, 4_096);
+        assert!(resumed.channel(0).iter().skip(64).all(|v| v.abs() > 0.1), "resumes on arrival");
+        assert!(deck_pos(&mixer, DeckId::A) > STREAM_CHUNK_FRAMES as f64 + 4_000.0);
+
+        // The end: the last (short) chunk, then the deck really ends.
+        let table = Arc::new(table.with_chunk(stream_chunk(8_000, 1_000), true));
+        mixer.grow_deck_stream(DeckId::A, table);
+        let _ = render(&mixer, rate as f64, STREAM_CHUNK_FRAMES + 2_000);
+        assert!(!mixer.deck_snapshot(DeckId::A).playing);
+        assert_eq!(mixer.drain_ended_decks(), vec![DeckId::A]);
+        // Play from the end restarts, now that the end is the end.
+        mixer.set_deck_playing(DeckId::A, true);
+        assert_eq!(deck_pos(&mixer, DeckId::A), 0.0);
+    }
+
+    #[test]
+    fn a_seek_past_the_decoded_edge_parks_there_and_plays_when_it_can() {
+        let rate = 48_000u32;
+        let mixer = Mixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        let table = StreamPcm::new(rate, Some(STREAM_CHUNK_FRAMES * 4));
+        let table = Arc::new(table.with_chunk(stream_chunk(8_000, STREAM_CHUNK_FRAMES), false));
+        mixer.install_deck_stream(DeckId::A, table.clone());
+        mixer.set_deck_playing(DeckId::A, true);
+        // 90% of the EXPECTED track is far past the one chunk in hand.
+        mixer.seek_deck_fraction(DeckId::A, 0.9);
+        assert_eq!(deck_pos(&mixer, DeckId::A), STREAM_CHUNK_FRAMES as f64);
+        let parked = render(&mixer, rate as f64, 2_048);
+        assert!(parked.channel(0).iter().all(|v| *v == 0.0));
+        assert!(mixer.deck_snapshot(DeckId::A).playing);
+        // A seek in seconds past the edge parks the same way.
+        mixer.seek_deck_seconds(DeckId::A, 100.0);
+        assert_eq!(deck_pos(&mixer, DeckId::A), STREAM_CHUNK_FRAMES as f64);
+        // ...and a seek inside the decoded region plays at once.
+        mixer.seek_deck_seconds(DeckId::A, 0.5);
+        let level = deck_rms(&mixer, rate as f64, 256, 2_048);
+        assert!(level > 0.1, "{level}");
+        // The chunk arrives: from the edge the deck plays on.
+        mixer.seek_deck_fraction(DeckId::A, 0.9);
+        let table = Arc::new(table.with_chunk(stream_chunk(8_000, STREAM_CHUNK_FRAMES), false));
+        mixer.grow_deck_stream(DeckId::A, table);
+        let level = deck_rms(&mixer, rate as f64, 256, 2_048);
+        assert!(level > 0.1, "{level}");
+    }
+
+    #[test]
+    fn the_whole_file_takes_over_from_the_stream_at_the_playhead() {
+        let rate = 48_000u32;
+        let mixer = Mixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        let whole = tone_pcm(440.0, rate, 6.0);
+        // The stream is the first chunk of the very same samples.
+        let table = StreamPcm::new(rate, Some(whole.frames.len()));
+        let first = Arc::new(whole.frames[..STREAM_CHUNK_FRAMES].to_vec());
+        let table = Arc::new(table.with_chunk(first, false));
+        mixer.install_deck_stream(DeckId::A, table);
+        mixer.set_deck_playing(DeckId::A, true);
+        let _ = render(&mixer, rate as f64, 10_000);
+        let before = deck_pos(&mixer, DeckId::A);
+        mixer.complete_deck(DeckId::A, whole.clone());
+        assert!(!mixer.deck_is_streaming(DeckId::A));
+        assert_eq!(deck_pos(&mixer, DeckId::A), before, "the swap moves nothing");
+        // What comes out after the swap is what the whole file holds there.
+        let out = render(&mixer, rate as f64, 512);
+        for (n, sample) in out.channel(0).iter().enumerate() {
+            let want = whole.frames[before as usize + n][0] as f32 / 32768.0;
+            assert!((sample - want).abs() < 1e-3, "frame {n}: {sample} vs {want}");
+        }
+        // The duration reads the exact length now.
+        assert!((mixer.deck_snapshot(DeckId::A).duration_secs - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stems_swap_in_sample_aligned_at_the_playhead() {
+        let rate = 48_000u32;
+        let mixer = Mixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        // The mixed file numbers its frames; the stems put the SAME numbers
+        // in one lane, chunked the way the separator does.
+        let total = rate as usize * 4;
+        let frames: Vec<[i16; 2]> = (0..total).map(|i| [(i % 20_000) as i16; 2]).collect();
+        let pcm = Arc::new(TrackPcm { frames: frames.clone(), sample_rate: rate });
+        let chunk = rate as usize;
+        let mut stems = TrackStems::new(chunk, total.div_ceil(chunk));
+        for index in 0..total.div_ceil(chunk) {
+            let start = index * chunk;
+            let end = (start + chunk).min(total);
+            stems.lanes[0][index] = Some(stem_block(&frames[start..end]));
+            for lane in 1..STEM_COUNT {
+                stems.lanes[lane][index] = Some(stem_block(&vec![[0, 0]; end - start]));
+            }
+        }
+        mixer.install_deck(DeckId::A, pcm);
+        mixer.set_deck_playing(DeckId::A, true);
+        let _ = render(&mixer, rate as f64, 7_777);
+        let at = deck_pos(&mixer, DeckId::A) as usize;
+        mixer.install_deck_stems(DeckId::A, Arc::new(stems));
+        let out = render(&mixer, rate as f64, 4_096);
+        // Frame n after the swap is source frame at+n, read from the lane:
+        // the stem sum is the mix, so the blend hides nothing and the lane
+        // format's one bit of headroom is the only difference allowed.
+        for (n, sample) in out.channel(0).iter().enumerate() {
+            let want = frames[at + n][0] as f32 / 32768.0;
+            assert!((sample - want).abs() <= 2.5 / 32768.0, "frame {n}: {sample} vs {want}");
+        }
+    }
+
+    #[test]
+    fn a_stem_swap_under_a_turned_knob_is_a_blend_not_a_step() {
+        let rate = 48_000u32;
+        let mixer = Mixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        mixer.install_deck(DeckId::A, const_pcm(8_000, rate as usize * 4, rate));
+        // Vocals killed before the stems exist: the swap will actually
+        // change the sound (the whole signal sits in the vocals lane).
+        mixer.set_deck_stem_gain(DeckId::A, 0, 0.0);
+        mixer.set_deck_playing(DeckId::A, true);
+        let _ = render(&mixer, rate as f64, 4_096);
+        let mut stems = TrackStems::new(rate as usize, 4);
+        for index in 0..4 {
+            stems.lanes[0][index] = Some(stem_block(&vec![[8_000, 8_000]; rate as usize]));
+            for lane in 1..STEM_COUNT {
+                stems.lanes[lane][index] = Some(stem_block(&vec![[0, 0]; rate as usize]));
+            }
+        }
+        mixer.install_deck_stems(DeckId::A, Arc::new(stems));
+        let out = render(&mixer, rate as f64, 4_096);
+        let left = out.channel(0);
+        let level = 8_000.0 / 32768.0;
+        // The first frame is still (nearly) the mixed file; well past the
+        // blend the vocals-only stems are silent; in between it ramps.
+        assert!(left[0] > level * 0.9, "starts on the mix: {}", left[0]);
+        assert!(left[4_000].abs() < 1e-4, "ends on the stems: {}", left[4_000]);
+        let mid = left[(STEM_SWAP_SECS * rate as f32 * 0.5) as usize];
+        assert!(mid > level * 0.25 && mid < level * 0.75, "halfway is a blend: {mid}");
+        for pair in left.windows(2) {
+            assert!((pair[1] - pair[0]).abs() < level * 0.05, "no step: {:?}", pair);
+        }
     }
 
     #[test]
@@ -4330,7 +4761,7 @@ mod tests {
             Some((0, part))
         );
 
-        let pcm = deck.pcm.as_ref().unwrap();
+        let pcm = deck.pcm.as_ref().and_then(DeckPcm::whole).unwrap();
         let stems = deck.stems.as_deref();
         let gains = [1.0; STEM_COUNT];
         let first = splat_cell_frame(

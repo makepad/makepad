@@ -639,6 +639,89 @@ impl OnePole {
     }
 }
 
+/// One hop (10 ms) of the coloured waveform: RMS per band in
+/// `[low, mid, high]` order and the broadband peak.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WaveHop {
+    pub rms: [f32; 3],
+    pub peak: f32,
+}
+
+/// The band split and per-hop reduction behind the waveform tiles, as a
+/// stream: frames go in as the decoder produces them and whole hops come
+/// out, so a deck can draw its picture while the file is still being read.
+/// The whole-track analysis runs this same builder over the whole file, so
+/// the provisional picture and the final one are the same arithmetic.
+pub struct WaveHopBuilder {
+    low: OnePole,
+    mid: OnePole,
+    sums: [f64; 3],
+    hop_peak: f32,
+    in_hop: usize,
+    hop: usize,
+}
+
+impl WaveHopBuilder {
+    pub fn new(sample_rate: u32) -> WaveHopBuilder {
+        let sample_rate = sample_rate.max(1) as f64;
+        WaveHopBuilder {
+            low: OnePole::new(BAND_LOW_HZ, sample_rate as f32),
+            mid: OnePole::new(BAND_HIGH_HZ, sample_rate as f32),
+            sums: [0.0; 3],
+            hop_peak: 0.0,
+            in_hop: 0,
+            hop: ((sample_rate * HOP_SECS).round() as usize).max(16),
+        }
+    }
+
+    /// Frames per hop at this rate.
+    pub fn hop_frames(&self) -> usize {
+        self.hop
+    }
+
+    /// Feed frames; every hop completed by them is appended to `out`.
+    pub fn push(&mut self, frames: &[[i16; 2]], out: &mut Vec<WaveHop>) {
+        for frame in frames {
+            let mono = (frame[0] as f32 + frame[1] as f32) * 0.5 / 32768.0;
+            let low_band = self.low.process(mono);
+            let mid_band = self.mid.process(mono) - low_band;
+            let high_band = mono - self.low.state - mid_band;
+            let bands = [low_band, mid_band, high_band];
+            for (sum, value) in self.sums.iter_mut().zip(bands) {
+                *sum += (value as f64) * (value as f64);
+            }
+            self.hop_peak = self.hop_peak.max(mono.abs());
+            self.in_hop += 1;
+            if self.in_hop == self.hop {
+                out.push(self.take_hop());
+            }
+        }
+    }
+
+    /// The trailing partial hop, at the end of the stream.
+    pub fn finish(&mut self, out: &mut Vec<WaveHop>) {
+        if self.in_hop > 0 {
+            out.push(self.take_hop());
+        }
+    }
+
+    fn take_hop(&mut self) -> WaveHop {
+        let inverse = 1.0 / self.in_hop as f64;
+        let hop = WaveHop {
+            rms: [
+                (self.sums[0] * inverse).sqrt() as f32,
+                (self.sums[1] * inverse).sqrt() as f32,
+                (self.sums[2] * inverse).sqrt() as f32,
+            ],
+            peak: self.hop_peak,
+        };
+        self.sums = [0.0; 3];
+        self.hop_peak = 0.0;
+        self.in_hop = 0;
+        hop
+    }
+}
+
 /// Per-hop band envelopes over the whole track.
 struct Envelopes {
     /// RMS per band per hop, in `[low, mid, high]` order.
@@ -655,49 +738,13 @@ struct Envelopes {
 
 fn build_envelopes(pcm: &TrackPcm) -> Envelopes {
     let sample_rate = pcm.sample_rate.max(1) as f64;
-    let hop = ((sample_rate * HOP_SECS).round() as usize).max(16);
-    let hops = pcm.frames.len() / hop + 1;
-    let mut band_rms = Vec::with_capacity(hops);
-    let mut peak = Vec::with_capacity(hops);
-
-    let mut low = OnePole::new(BAND_LOW_HZ, sample_rate as f32);
-    let mut mid = OnePole::new(BAND_HIGH_HZ, sample_rate as f32);
-    let mut sums = [0.0f64; 3];
-    let mut hop_peak = 0.0f32;
-    let mut in_hop = 0usize;
-    for frame in &pcm.frames {
-        let mono = (frame[0] as f32 + frame[1] as f32) * 0.5 / 32768.0;
-        let low_band = low.process(mono);
-        let mid_band = mid.process(mono) - low_band;
-        let high_band = mono - low.state - mid_band;
-        let bands = [low_band, mid_band, high_band];
-        for (sum, value) in sums.iter_mut().zip(bands) {
-            *sum += (value as f64) * (value as f64);
-        }
-        hop_peak = hop_peak.max(mono.abs());
-        in_hop += 1;
-        if in_hop == hop {
-            let inverse = 1.0 / in_hop as f64;
-            band_rms.push([
-                (sums[0] * inverse).sqrt() as f32,
-                (sums[1] * inverse).sqrt() as f32,
-                (sums[2] * inverse).sqrt() as f32,
-            ]);
-            peak.push(hop_peak);
-            sums = [0.0; 3];
-            hop_peak = 0.0;
-            in_hop = 0;
-        }
-    }
-    if in_hop > 0 {
-        let inverse = 1.0 / in_hop as f64;
-        band_rms.push([
-            (sums[0] * inverse).sqrt() as f32,
-            (sums[1] * inverse).sqrt() as f32,
-            (sums[2] * inverse).sqrt() as f32,
-        ]);
-        peak.push(hop_peak);
-    }
+    let mut builder = WaveHopBuilder::new(pcm.sample_rate);
+    let hop = builder.hop_frames();
+    let mut hops = Vec::with_capacity(pcm.frames.len() / hop + 1);
+    builder.push(&pcm.frames, &mut hops);
+    builder.finish(&mut hops);
+    let band_rms: Vec<[f32; 3]> = hops.iter().map(|hop| hop.rms).collect();
+    let peak: Vec<f32> = hops.iter().map(|hop| hop.peak).collect();
 
     // Spectral flux per band, log-compressed so a quiet intro and a limited
     // drop contribute comparably, then half-wave rectified.
@@ -1794,10 +1841,17 @@ fn build_tempo_map(envelopes: &Envelopes, period: f64, offset: f64) -> TempoMap 
 /// sits and whatever else has been computed by the time it is drawn.
 fn track_scale(values: impl Iterator<Item = f32>) -> f32 {
     let mut values: Vec<f32> = values.collect();
-    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    if values.is_empty() {
+        return 0.0;
+    }
     let index =
         ((values.len() as f64 * REFERENCE_PERCENTILE) as usize).min(values.len().saturating_sub(1));
-    let reference = values.get(index).copied().unwrap_or(0.0);
+    // A selection, not a sort: this runs again for every chunk of a track
+    // still streaming in, over every hop so far.
+    let (_, reference, _) = values.select_nth_unstable_by(index, |a, b| {
+        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let reference = *reference;
     if reference > 1e-6 {
         1.0 / reference
     } else {
@@ -1816,24 +1870,48 @@ fn hop_level(peak: f32, rms: [f32; 3]) -> f32 {
 
 /// Build the display tiles from the per-hop envelopes.
 fn build_tiles(envelopes: &Envelopes, pcm: &TrackPcm) -> WaveTiles {
+    let _ = pcm;
+    tiles_from_hops(&envelopes.band_rms, &envelopes.peak)
+}
+
+/// The tiles of a track still being decoded: the hops in hand, normalized
+/// against themselves, laid over the length the decoder expects so the
+/// picture fills in from the left instead of reflowing with every chunk.
+/// Columns past the decoded edge are empty. The whole-track analysis
+/// replaces this the moment it lands.
+pub fn provisional_tiles(hops: &[WaveHop], columns: usize) -> WaveTiles {
+    let band_rms: Vec<[f32; 3]> = hops.iter().map(|hop| hop.rms).collect();
+    let peak: Vec<f32> = hops.iter().map(|hop| hop.peak).collect();
+    let mut tiles = tiles_from_hops(&band_rms, &peak);
+    if tiles.zoom.len() < columns {
+        tiles.zoom.resize(columns, [0; 4]);
+    }
+    tiles
+}
+
+/// The tiles from per-hop band RMS and peaks — the one place the picture's
+/// normalization lives, for the final analysis and the streaming preview
+/// alike.
+fn tiles_from_hops(band_rms: &[[f32; 3]], peak: &[f32]) -> WaveTiles {
+    if peak.is_empty() || band_rms.is_empty() {
+        return WaveTiles { zoom: Vec::new(), overview: vec![[0u8; 2]; OVERVIEW_COLS] };
+    }
     // Normalize each band by a high percentile so quiet tracks still fill
     // the display, without one clipped transient flattening everything.
     // These are the COLOUR of a column, never its height.
     let mut band_scale = [1.0f32; 3];
     for (band, scale) in band_scale.iter_mut().enumerate() {
-        *scale = track_scale(envelopes.band_rms.iter().map(|rms| rms[band]));
+        *scale = track_scale(band_rms.iter().map(|rms| rms[band]));
     }
     // The height of a column is its level against the whole track — one
     // scale for the entire file, computed here, applied nowhere else.
-    let levels: Vec<f32> = envelopes
-        .peak
+    let levels: Vec<f32> = peak
         .iter()
-        .zip(&envelopes.band_rms)
+        .zip(band_rms)
         .map(|(peak, rms)| hop_level(*peak, *rms))
         .collect();
     let level_scale = track_scale(levels.iter().copied());
-    let zoom = envelopes
-        .band_rms
+    let zoom = band_rms
         .iter()
         .zip(&levels)
         .map(|(rms, level)| {
@@ -1850,18 +1928,19 @@ fn build_tiles(envelopes: &Envelopes, pcm: &TrackPcm) -> WaveTiles {
         .collect();
 
     let mut overview = vec![[0u8; 2]; OVERVIEW_COLS];
-    let hops = envelopes.peak.len().max(1);
-    let peak_scale = track_scale(envelopes.peak.iter().copied());
+    let hops = peak.len().min(band_rms.len()).max(1);
+    let peak_scale = track_scale(peak.iter().copied());
     for column in 0..OVERVIEW_COLS {
         let start = column * hops / OVERVIEW_COLS;
         let end = (((column + 1) * hops) / OVERVIEW_COLS).max(start + 1).min(hops);
-        let mut peak = 0.0f32;
+        let mut hop_peak = 0.0f32;
         let mut energy = 0.0f64;
         for index in start..end {
-            peak = peak.max(envelopes.peak[index]);
-            let rms = envelopes.band_rms[index];
+            hop_peak = hop_peak.max(peak[index]);
+            let rms = band_rms[index];
             energy += ((rms[0] * rms[0] + rms[1] * rms[1] + rms[2] * rms[2]) as f64).sqrt();
         }
+        let peak = hop_peak;
         let mean = (energy / (end - start).max(1) as f64) as f32;
         overview[column] = [
             ((peak * peak_scale).clamp(0.0, 1.0).powf(WAVE_CURVE) * 255.0) as u8,
@@ -1869,7 +1948,6 @@ fn build_tiles(envelopes: &Envelopes, pcm: &TrackPcm) -> WaveTiles {
             (((1.0 + 40.0 * mean).ln() / (41.0f32).ln()).clamp(0.0, 1.0) * 255.0) as u8,
         ];
     }
-    let _ = pcm;
     WaveTiles { zoom, overview }
 }
 

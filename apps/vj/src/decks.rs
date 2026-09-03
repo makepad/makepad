@@ -1073,6 +1073,18 @@ impl DeckEngine {
         Vec::new()
     }
 
+    /// The decoder is still delivering the track already on the deck — it
+    /// opened on a lead — and its length is now known better: the
+    /// container's expectation while chunks arrive, exact at the end.
+    /// Stale generations and decks that never opened are ignored.
+    pub fn track_grew(&mut self, deck: DeckId, gen: DeckGen, duration_secs: f64) {
+        let state = self.deck_mut(deck);
+        if state.load_gen != gen || !matches!(state.load, DeckLoad::Loaded { .. }) {
+            return;
+        }
+        state.duration_secs = duration_secs.max(0.0);
+    }
+
     pub fn play_pause(&mut self, deck: DeckId) -> Vec<DeckCmd> {
         let state = self.deck_mut(deck);
         if !matches!(state.load, DeckLoad::Loaded { .. }) {

@@ -4404,6 +4404,16 @@ struct DeckLoadProgress {
     stem_bytes: [u64; 4],
     stem_totals: [u64; 4],
     wants_stems: bool,
+    /// The deck opened on a decoded lead and is playing while the rest of
+    /// the load — decode, stems — goes on underneath.
+    playable: bool,
+}
+
+/// What a deck's `InstallTrack` puts on the mixer: the growing chunk table
+/// of a track still decoding, or a file that landed whole.
+enum DeckIncoming {
+    Stream(Arc<crate::mixer::StreamPcm>),
+    Whole(Arc<TrackPcm>, Vec<(f32, f32)>),
 }
 
 impl DeckLoadProgress {
@@ -4414,6 +4424,25 @@ impl DeckLoadProgress {
             stem_bytes: [0; 4],
             stem_totals: [0; 4],
             wants_stems: false,
+            playable: false,
+        };
+    }
+
+    /// The deck opened on a lead: from here the indicator reports, it does
+    /// not block.
+    fn playable(&mut self, gen: u64) {
+        if self.gen == gen && !matches!(self.phase, DeckLoadPhase::Failed(_)) {
+            self.playable = true;
+        }
+    }
+
+    /// Decoded frames against the decoder's expectation (0 = unknown).
+    fn decode_progress(&mut self, gen: u64, done: u64, total: u64) {
+        if self.gen != gen || !matches!(self.phase, DeckLoadPhase::Decoding { .. }) {
+            return;
+        }
+        self.phase = DeckLoadPhase::Decoding {
+            progress: (total > 0).then_some((done.min(total), total)),
         };
     }
 
@@ -4507,15 +4536,31 @@ impl DeckLoadProgress {
                 *total as f64 / (1024.0 * 1024.0),
             )),
             DeckLoadPhase::Fetching { .. } => Some("fetching".to_string()),
-            DeckLoadPhase::Decoding { .. } => Some("decoding".to_string()),
-            DeckLoadPhase::Stems => Some("stems".to_string()),
+            DeckLoadPhase::Decoding { progress } => {
+                let percent = progress
+                    .filter(|(_, total)| *total > 0)
+                    .map(|(done, total)| format!(" {:.0} %", done as f64 * 100.0 / total as f64))
+                    .unwrap_or_default();
+                Some(if self.playable {
+                    format!("playing while decoding{percent}")
+                } else {
+                    format!("decoding{percent}")
+                })
+            }
+            DeckLoadPhase::Stems => Some(if self.playable {
+                "playing while stems load".to_string()
+            } else {
+                "stems".to_string()
+            }),
             DeckLoadPhase::Failed(error) => Some(format!("failed: {error}")),
         }
     }
 
-    /// `(phase, fraction, indeterminate)` for the waveform strip. Fetch is
-    /// phase 1, decode 2, stems 3 and failure 4.
-    fn visual(&self) -> Option<(f32, f32, f32)> {
+    /// `(phase, fraction, indeterminate, playable)` for the waveform strip.
+    /// Fetch is phase 1, decode 2, stems 3 and failure 4; `playable` says
+    /// the deck is already playing under it, so the strip reports instead
+    /// of covering the picture.
+    fn visual(&self) -> Option<(f32, f32, f32, bool)> {
         let fraction = |done: u64, total: u64| {
             if total > 0 {
                 (done as f64 / total as f64).clamp(0.0, 1.0) as f32
@@ -4523,18 +4568,20 @@ impl DeckLoadProgress {
                 0.0
             }
         };
+        let playable = self.playable;
         match &self.phase {
             DeckLoadPhase::Idle | DeckLoadPhase::Ready => None,
             DeckLoadPhase::Fetching { bytes, total } => Some((
                 1.0,
                 fraction(*bytes, *total),
                 if *total == 0 { 1.0 } else { 0.0 },
+                playable,
             )),
             DeckLoadPhase::Decoding { progress } => match progress {
                 Some((done, total)) if *total > 0 => {
-                    Some((2.0, fraction(*done, *total), 0.0))
+                    Some((2.0, fraction(*done, *total), 0.0, playable))
                 }
-                _ => Some((2.0, 0.0, 1.0)),
+                _ => Some((2.0, 0.0, 1.0, playable)),
             },
             DeckLoadPhase::Stems => {
                 let done = self.stem_bytes.iter().sum();
@@ -4543,9 +4590,10 @@ impl DeckLoadProgress {
                     3.0,
                     fraction(done, total),
                     if total == 0 || done >= total { 1.0 } else { 0.0 },
+                    playable,
                 ))
             }
-            DeckLoadPhase::Failed(_) => Some((4.0, 1.0, 0.0)),
+            DeckLoadPhase::Failed(_) => Some((4.0, 1.0, 0.0, playable)),
         }
     }
 
@@ -4566,15 +4614,15 @@ mod deck_load_progress_tests {
         load.arm_stems(7, [mib, 2 * mib, mib, 4 * mib]);
         load.fetch_progress(7, 12 * mib, 32 * mib);
         assert_eq!(load.text().as_deref(), Some("fetching 12.0 / 32.0 MB"));
-        assert_eq!(load.visual(), Some((1.0, 0.375, 0.0)));
+        assert_eq!(load.visual(), Some((1.0, 0.375, 0.0, false)));
 
         load.decoding(7);
         assert_eq!(load.phase, DeckLoadPhase::Decoding { progress: None });
-        assert_eq!(load.visual(), Some((2.0, 0.0, 1.0)));
+        assert_eq!(load.visual(), Some((2.0, 0.0, 1.0, false)));
         load.stem_progress(7, 0, mib, mib);
         load.decoded(7);
         assert_eq!(load.phase, DeckLoadPhase::Stems);
-        assert_eq!(load.visual(), Some((3.0, 0.125, 0.0)));
+        assert_eq!(load.visual(), Some((3.0, 0.125, 0.0, false)));
         load.stems_ready(7);
         assert_eq!(load.phase, DeckLoadPhase::Ready);
 
@@ -4582,9 +4630,40 @@ mod deck_load_progress_tests {
         load.decoding(8);
         load.failed(8, "bad audio".to_string());
         assert_eq!(load.text().as_deref(), Some("failed: bad audio"));
-        assert_eq!(load.visual(), Some((4.0, 1.0, 0.0)));
+        assert_eq!(load.visual(), Some((4.0, 1.0, 0.0, false)));
         load.stems_ready(7); // stale completion cannot clear the failure
         assert!(load.is_failed());
+    }
+
+    #[test]
+    fn a_playable_deck_reports_instead_of_blocking() {
+        let mut load = DeckLoadProgress::default();
+        load.begin(3, 0);
+        load.decoding(3);
+        assert_eq!(load.text().as_deref(), Some("decoding"));
+        // Chunks land, the expectation is known, the deck opens.
+        load.decode_progress(3, 1_000, 10_000);
+        assert_eq!(load.text().as_deref(), Some("decoding 10 %"));
+        load.playable(3);
+        load.decode_progress(3, 4_200, 10_000);
+        assert_eq!(load.text().as_deref(), Some("playing while decoding 42 %"));
+        assert_eq!(load.visual(), Some((2.0, 0.42, 0.0, true)));
+        // A stale generation says nothing.
+        load.decode_progress(2, 9_000, 10_000);
+        assert_eq!(load.text().as_deref(), Some("playing while decoding 42 %"));
+        // Stems keep the deck playing under them too.
+        load.arm_stems(3, [1, 1, 1, 1]);
+        load.decoded(3);
+        assert_eq!(load.text().as_deref(), Some("playing while stems load"));
+        assert!(matches!(load.visual(), Some((3.0, _, _, true))));
+        load.stems_ready(3);
+        assert_eq!(load.text(), None);
+        assert_eq!(load.visual(), None);
+        // A new load starts blocking again.
+        load.begin(4, 0);
+        load.decoding(4);
+        assert_eq!(load.text().as_deref(), Some("decoding"));
+        assert_eq!(load.visual(), Some((2.0, 0.0, 1.0, false)));
     }
 }
 
@@ -6793,7 +6872,15 @@ pub struct App {
 
     // Decks.
     #[rust]
-    deck_incoming: HashMap<(usize, u64), (Arc<TrackPcm>, Vec<(f32, f32)>)>,
+    deck_incoming: HashMap<(usize, u64), DeckIncoming>,
+    /// The chunk stream of the track a deck is decoding (and, until the
+    /// analysis lands, the hops its provisional waveform is drawn from).
+    #[rust]
+    deck_stream: [Option<media::DeckStream>; 2],
+    /// When each deck's streamed picture was last rebuilt (app seconds):
+    /// a fast native decode lands chunks faster than the eye needs frames.
+    #[rust]
+    deck_stream_wave_at: [f64; 2],
     #[rust]
     deck_load_progress: [DeckLoadProgress; 2],
     #[rust]
@@ -13904,9 +13991,20 @@ p2 {}
                         .find(|(d, _)| *d == deck.index())
                         .copied();
                     if let Some(key) = key {
-                        if let Some((pcm, peaks)) = self.deck_incoming.remove(&key) {
-                            self.mixer.install_deck(deck, pcm.clone());
-                            self.deck_tracks[deck.index()] = Some((pcm.clone(), peaks));
+                        if let Some(incoming) = self.deck_incoming.remove(&key) {
+                            match incoming {
+                                // Still decoding: the deck opens on the
+                                // chunks in hand and everything that needs
+                                // the whole file waits for `deck_decoded`.
+                                DeckIncoming::Stream(table) => {
+                                    self.mixer.install_deck_stream(deck, table);
+                                    self.deck_tracks[deck.index()] = None;
+                                }
+                                DeckIncoming::Whole(pcm, peaks) => {
+                                    self.mixer.install_deck(deck, pcm.clone());
+                                    self.deck_tracks[deck.index()] = Some((pcm, peaks));
+                                }
+                            }
                             // The waveform and the beat grid come from a
                             // worker: never the UI thread, never the audio
                             // callback. Until it answers the deck shows the
@@ -13951,43 +14049,10 @@ p2 {}
                             // digest, this deck matches no cached transcript.
                             self.deck_track_digest[deck.index()] = None;
                             self.mixer.clear_deck_stems(deck);
-                            #[cfg(not(target_arch = "wasm32"))]
-                            self.submit_analysis(deck, pcm.clone());
-                            #[cfg(target_arch = "wasm32")]
-                            {
-                                self.try_install_demo_analysis(cx, deck, key.1);
-                                self.try_install_demo_splat(cx, deck, key.1);
-                            }
-                            // Fetch or compute, decided when the track was
-                            // clicked: a deck whose side-channel fetch is
-                            // armed for this generation never loads the
-                            // separation model at all. The fetch's own
-                            // failure paths return to this same choice.
-                            let mode = self.decks.deck(deck).stems_mode;
-                            let separation = separation_action(
-                                self.stem_separation,
-                                self.side_channels_armed(deck, key.1),
-                                self.stem_hub_reachable(),
-                            );
-                            if !mode.shows() {
-                                // Off: this track never costs a separation,
-                                // and nothing of it would be heard anyway.
-                                self.deck_stem_status[deck.index()] =
-                                    String::new();
-                                self.deck_stem_busy[deck.index()] = None;
-                            } else if separation == SeparationAction::SideChannel {
-                                self.deck_stem_status[deck.index()] =
-                                    "stems: fetching…".to_string();
-                                self.deck_stem_busy[deck.index()] = Some(true);
-                                self.try_start_side_channels(deck, key.1);
-                            } else if mode.computes() {
-                                self.submit_separation_action(deck, pcm, separation);
-                            } else {
-                                // Cached: a fetch of work already done is
-                                // welcome, starting the machine is not.
-                                self.deck_stem_status[deck.index()] = String::new();
-                                self.deck_stem_busy[deck.index()] = None;
-                            }
+                            // The analysis and the stems need the whole
+                            // file: `deck_decoded` starts them when the
+                            // decoder is done, which for a track that
+                            // landed whole is this same pump.
                         }
                     }
                 }
@@ -13999,6 +14064,11 @@ p2 {}
                         let source_rate = self.deck_tracks[deck.index()]
                             .as_ref()
                             .map(|(pcm, _)| pcm.sample_rate)
+                            .or_else(|| {
+                                self.deck_stream[deck.index()]
+                                    .as_ref()
+                                    .map(media::DeckStream::sample_rate)
+                            })
                             .unwrap_or(0);
                         log!(
                             "audio: deck {deck:?} transport playing={playing} source_rate={source_rate} device_frames={frames}"
@@ -14063,6 +14133,7 @@ p2 {}
                 DeckCmd::SwapVoices => {
                     self.mixer.swap_decks();
                     self.deck_tracks.swap(0, 1);
+                    self.deck_stream.swap(0, 1);
                     self.deck_load_progress.swap(0, 1);
                     self.deck_analysis.swap(0, 1);
                     self.deck_demo_analysis.swap(0, 1);
@@ -14095,6 +14166,7 @@ p2 {}
                     self.deck_lyrics_status[index] = String::new();
                     self.deck_track_digest[index] = None;
                     self.deck_side_channels[index] = None;
+                    self.deck_stream[index] = None;
                     self.deck_stem_status[index] = String::new();
                     self.deck_stem_busy[index] = None;
                     self.deck_load_progress[index].clear();
@@ -16715,6 +16787,9 @@ p2 {}
         }
         let deadline = crate::clock::Instant::now()
             + std::time::Duration::from_micros((media::UI_STEP_BUDGET_MS * 1000.0) as u64);
+        // Decks whose streamed picture grew this pump: redrawn once below,
+        // however many chunks landed.
+        let mut wave_touched = [false; 2];
         while let Some(done) = self.next_decode_result(deadline) {
             match done {
                 // A background warm-up borrows the deck decode lane and is
@@ -16745,6 +16820,50 @@ p2 {}
                         }
                     }
                 }
+                // The prefetch's decode cuts no chunks; if one ever came,
+                // it would have no deck to go to.
+                DecodeDone::DeckChunk { gen, .. } if gen == stems::PREFETCH_GEN => {}
+                DecodeDone::DeckChunk { deck, gen, chunk } => {
+                    let index = deck.index();
+                    // A load this chunk no longer belongs to: dropped whole.
+                    if self.decks.deck(deck).load_gen != gen {
+                        continue;
+                    }
+                    if !self.deck_stream[index].as_ref().is_some_and(|stream| stream.gen == gen) {
+                        self.deck_stream[index] = Some(media::DeckStream::new(gen));
+                    }
+                    let stream = self.deck_stream[index].as_mut().expect("just made");
+                    let became_playable = match stream.accept(*chunk) {
+                        Ok(became) => became,
+                        Err(error) => {
+                            // Once per stream: the rest are dropped silently
+                            // and the whole file installs when it lands.
+                            log!("deck {deck:?}: stream broken, waiting for the whole file: {error}");
+                            continue;
+                        }
+                    };
+                    let table = stream.table();
+                    let frames = stream.frames() as u64;
+                    let expected = stream.fraction().map_or(0, |_| stream.expected_frames() as u64);
+                    let seconds = stream.seconds();
+                    let expected_secs = stream.expected_seconds();
+                    let playing = stream.is_playable();
+                    self.deck_load_progress[index].decode_progress(gen, frames, expected);
+                    if became_playable {
+                        self.deck_incoming.insert((index, gen), DeckIncoming::Stream(table));
+                        if self.deck_playable(cx, deck, gen, expected_secs) {
+                            log!(
+                                "deck {deck:?}: playable at {} of ~{} while decoding",
+                                format_duration(seconds),
+                                format_duration(expected_secs)
+                            );
+                        }
+                    } else if playing {
+                        self.mixer.grow_deck_stream(deck, table);
+                        self.decks.track_grew(deck, gen, expected_secs);
+                    }
+                    wave_touched[index] = true;
+                }
                 DecodeDone::Preview { gen, result } => {
                     // A stale preview (the operator moved on) lands here
                     // and dies whole — never near the mixer.
@@ -16771,70 +16890,34 @@ p2 {}
                         {
                             self.web_status_error.clear();
                         }
-                        let seconds = pcm.seconds();
-                        // Level-match trim, measured while the samples are
-                        // in hand: RMS over the whole track against a target
-                        // that leaves headroom for the loud ones. A quiet
-                        // master comes up, a hot one comes down, and the
-                        // fader still reads what the operator set — the trim
-                        // only rides along while NORMALISE is latched.
-                        let trim = Self::level_trim(&pcm);
-                        self.deck_incoming.insert((deck.index(), gen), (pcm, peaks));
-                        let cmds = self.decks.track_ready(deck, gen, seconds);
-                        let trim_cmds = self.decks.set_norm_gain(deck, trim);
-                        let installed = !cmds.is_empty();
-                        if !installed {
-                            self.deck_incoming.remove(&(deck.index(), gen));
-                        } else {
-                            self.deck_load_progress[deck.index()].decoded(gen);
-                        }
-                        self.run_deck_cmds(cx, cmds);
-                        self.run_deck_cmds(cx, trim_cmds);
-                        if installed {
-                            log!("deck {deck:?}: ready {}", format_duration(seconds));
-                            // Marks saved for this track come back with it,
-                            // and so does the red marker: a track starts
-                            // where the operator left it, not at the top.
-                            if let Some(item) = self.decks.deck(deck).item().cloned() {
-                                let marks = Self::load_loop_marks(&item);
-                                if !marks.is_empty() {
-                                    self.decks.restore_loop_slots(deck, marks);
-                                }
-                                if let Some(cue) = Self::load_track_cue(&item) {
-                                    self.decks.set_cue(deck, cue);
-                                    let cmds = self.decks.seek_secs(deck, cue);
-                                    self.run_deck_cmds(cx, cmds);
-                                }
-                                let (found, scores) = Self::load_found_loops(&item);
-                                self.deck_found_scores[deck.index()] = scores;
-                                self.decks.install_found_loops(deck, found);
-                                // AUTO FIND: a record nobody has scanned
-                                // scans itself. The FILE's absence is the
-                                // test, not an empty list — an empty file
-                                // means the operator cleared the marks on
-                                // purpose, and bringing them back would undo
-                                // a deliberate act. Parking is safe HERE
-                                // where it is not inside `start_loop_scan`
-                                // itself: InstallTrack's unconditional clear
-                                // of scan_pending has already run by the
-                                // time this block does.
-                                if self.scan_automatic
-                                    && !Self::found_loops_path(&item).exists()
-                                {
-                                    let config = self.scan_settings().to_config();
-                                    self.start_loop_scan(deck, config);
-                                }
+                        let index = deck.index();
+                        // The stream opened the deck already — the usual
+                        // case. Otherwise (a broken stream, a decoder that
+                        // cut nothing) the file installs whole, as it did
+                        // before streaming existed.
+                        let opened = self.decks.deck(deck).load_gen == gen
+                            && self.decks.deck(deck).is_loaded()
+                            && self.deck_stream[index]
+                                .as_ref()
+                                .is_some_and(|stream| stream.gen == gen && stream.is_playable());
+                        if !opened {
+                            let seconds = pcm.seconds();
+                            self.deck_incoming
+                                .insert((index, gen), DeckIncoming::Whole(pcm.clone(), peaks.clone()));
+                            if !self.deck_playable(cx, deck, gen, seconds) {
+                                continue;
                             }
-                            // AUTOPLAY: the pick that armed this deck is
-                            // now something it can actually play.
-                            self.spend_autoplay(cx, deck);
                         }
-                        self.sync_deck_controls(cx);
+                        self.deck_decoded(cx, deck, gen, pcm, peaks);
+                        wave_touched[index] = true;
                     }
                     Err(error) => {
                         log!("deck-load: failed deck={deck:?} gen={gen}: {error}");
                         self.set_web_status_error(format!("music decode: {error}"));
                         self.deck_load_progress[deck.index()].failed(gen, error.clone());
+                        // A deck that opened on a lead and then lost its
+                        // decoder keeps what it has; one that never opened
+                        // fails as before.
                         let cmds = self.decks.track_failed(deck, gen, error);
                         self.run_deck_cmds(cx, cmds);
                     }
@@ -17144,6 +17227,11 @@ p2 {}
                 // Sorted into neither queue above: a dropped job carries no
                 // work for this thread.
                 DecodeDone::ThumbDropped { .. } | DecodeDone::ThumbTimedOut { .. } => {}
+            }
+        }
+        for deck in [DeckId::A, DeckId::B] {
+            if wave_touched[deck.index()] {
+                self.refresh_stream_wave(cx, deck);
             }
         }
         if !self.decode_backlog.is_empty() {
@@ -20883,6 +20971,156 @@ p2 {}
         self.sidechan.submit(job);
     }
 
+    /// The deck opens on what has arrived: the engine installs whatever is
+    /// in `deck_incoming` for `(deck, gen)` — the chunk table of a track
+    /// still decoding, or a file that landed whole — and the transport,
+    /// the marks and the autoplay all go live. False when the load was
+    /// superseded and nothing installed.
+    fn deck_playable(&mut self, cx: &mut Cx, deck: DeckId, gen: u64, duration_secs: f64) -> bool {
+        let index = deck.index();
+        let cmds = self.decks.track_ready(deck, gen, duration_secs);
+        if cmds.is_empty() {
+            self.deck_incoming.remove(&(index, gen));
+            return false;
+        }
+        self.run_deck_cmds(cx, cmds);
+        self.deck_load_progress[index].playable(gen);
+        // Marks saved for this track come back with it, and so does the
+        // red marker: a track starts where the operator left it, not at
+        // the top.
+        if let Some(item) = self.decks.deck(deck).item().cloned() {
+            let marks = Self::load_loop_marks(&item);
+            if !marks.is_empty() {
+                self.decks.restore_loop_slots(deck, marks);
+            }
+            if let Some(cue) = Self::load_track_cue(&item) {
+                self.decks.set_cue(deck, cue);
+                let cmds = self.decks.seek_secs(deck, cue);
+                self.run_deck_cmds(cx, cmds);
+            }
+            let (found, scores) = Self::load_found_loops(&item);
+            self.deck_found_scores[index] = scores;
+            self.decks.install_found_loops(deck, found);
+        }
+        // AUTOPLAY: the pick that armed this deck is now something it can
+        // actually play.
+        self.spend_autoplay(cx, deck);
+        self.sync_deck_controls(cx);
+        true
+    }
+
+    /// The whole file is in. The mixer swaps it in for the chunk table at
+    /// the playhead, and everything that needs the track entire starts:
+    /// the level trim, the analysis, the stems, the automatic loop scan.
+    fn deck_decoded(
+        &mut self,
+        cx: &mut Cx,
+        deck: DeckId,
+        gen: u64,
+        pcm: Arc<TrackPcm>,
+        peaks: Vec<(f32, f32)>,
+    ) {
+        let index = deck.index();
+        let seconds = pcm.seconds();
+        self.mixer.complete_deck(deck, pcm.clone());
+        self.deck_tracks[index] = Some((pcm.clone(), peaks));
+        self.decks.track_grew(deck, gen, seconds);
+        if let Some(stream) = self.deck_stream[index].as_mut().filter(|stream| stream.gen == gen) {
+            // The audio is on the deck whole now; the hops stay for the
+            // picture until the analysis replaces it.
+            stream.release_audio();
+        }
+        // Level-match trim, measured while the samples are in hand: RMS
+        // over the whole track against a target that leaves headroom for
+        // the loud ones. A quiet master comes up, a hot one comes down,
+        // and the fader still reads what the operator set — the trim only
+        // rides along while NORMALISE is latched.
+        let trim = Self::level_trim(&pcm);
+        let cmds = self.decks.set_norm_gain(deck, trim);
+        self.run_deck_cmds(cx, cmds);
+        self.deck_load_progress[index].decoded(gen);
+        log!("deck {deck:?}: decoded {}", format_duration(seconds));
+        #[cfg(not(target_arch = "wasm32"))]
+        self.submit_analysis(deck, pcm.clone());
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.try_install_demo_analysis(cx, deck, gen);
+            self.try_install_demo_splat(cx, deck, gen);
+        }
+        // Fetch or compute, decided when the track was clicked: a deck
+        // whose side-channel fetch is armed for this generation never
+        // loads the separation model at all. The fetch's own failure paths
+        // return to this same choice.
+        let mode = self.decks.deck(deck).stems_mode;
+        let separation = separation_action(
+            self.stem_separation,
+            self.side_channels_armed(deck, gen),
+            self.stem_hub_reachable(),
+        );
+        if !mode.shows() {
+            // Off: this track never costs a separation, and nothing of it
+            // would be heard anyway.
+            self.deck_stem_status[index] = String::new();
+            self.deck_stem_busy[index] = None;
+        } else if separation == SeparationAction::SideChannel {
+            self.deck_stem_status[index] = "stems: fetching…".to_string();
+            self.deck_stem_busy[index] = Some(true);
+            self.try_start_side_channels(deck, gen);
+        } else if mode.computes() {
+            self.submit_separation_action(deck, pcm, separation);
+        } else {
+            // Cached: a fetch of work already done is welcome, starting
+            // the machine is not.
+            self.deck_stem_status[index] = String::new();
+            self.deck_stem_busy[index] = None;
+        }
+        // AUTO FIND: a record nobody has scanned scans itself. The FILE's
+        // absence is the test, not an empty list — an empty file means the
+        // operator cleared the marks on purpose, and bringing them back
+        // would undo a deliberate act. Parking is safe HERE where it is
+        // not inside `start_loop_scan` itself: InstallTrack's unconditional
+        // clear of scan_pending has already run by the time this does.
+        if let Some(item) = self.decks.deck(deck).item().cloned() {
+            if self.scan_automatic && !Self::found_loops_path(&item).exists() {
+                let config = self.scan_settings().to_config();
+                self.start_loop_scan(deck, config);
+            }
+        }
+        self.sync_deck_controls(cx);
+    }
+
+    /// Redraw a deck's waveform from the chunks decoded so far — the
+    /// provisional picture, scaled to the length the decoder expects so it
+    /// fills in from the left. The analysis's tiles replace it when they
+    /// land; until then (or for good, where no analysis runs) this is the
+    /// wave.
+    fn refresh_stream_wave(&mut self, cx: &mut Cx, deck: DeckId) {
+        let index = deck.index();
+        if self.deck_analysis[index].is_some() {
+            return;
+        }
+        let Some(stream) = self.deck_stream[index].as_ref() else { return };
+        if self.decks.deck(deck).load_gen != stream.gen {
+            return;
+        }
+        // A native decode lands a chunk every few tens of milliseconds; a
+        // rebuild over every hop so far that often would own the UI thread
+        // of a long set. A few pictures a second is all the eye takes, and
+        // the end of the stream always draws.
+        const STREAM_WAVE_INTERVAL_SECS: f64 = 0.2;
+        let now = cx.seconds_since_app_start();
+        if !stream.is_complete()
+            && self.deck_zoom_tex[index].is_some()
+            && now - self.deck_stream_wave_at[index] < STREAM_WAVE_INTERVAL_SECS
+        {
+            return;
+        }
+        self.deck_stream_wave_at[index] = now;
+        let tiles = wave_analysis::provisional_tiles(&stream.hops, stream.wave_columns());
+        self.deck_zoom_tex[index] = crate::music_view::zoom_texture(cx, &tiles);
+        self.push_deck_wave(cx, deck);
+    }
+
     /// Whether `deck_tracks` holds the audio of THIS load generation — the
     /// deck holds the previous track's PCM until the new one installs.
     fn deck_track_is(&self, deck: DeckId, gen: u64) -> bool {
@@ -21453,6 +21691,7 @@ p2 {}
                     if self.decks.deck(deck).load_gen != gen {
                         continue;
                     }
+                    log!("deck {deck:?}: stems in");
                     self.deck_stem_status[deck.index()] = "stems: live".to_string();
                     self.deck_stem_busy[deck.index()] = None;
                     self.deck_load_progress[deck.index()].stems_ready(gen);
@@ -21983,10 +22222,18 @@ p2 {}
         let index = deck.index();
         let pyramid = self.deck_zoom_tex[index].clone();
         let stem_pyramid = self.deck_stem_tex[index].clone();
+        // The analysis's columns once it has answered; the streamed
+        // picture's (scaled to the expected length) before that.
         let cols = self
             .deck_analysis[index]
             .as_ref()
             .map(|analysis| analysis.tiles.zoom.len())
+            .or_else(|| {
+                self.deck_stream[index]
+                    .as_ref()
+                    .filter(|_| self.deck_zoom_tex[index].is_some())
+                    .map(media::DeckStream::wave_columns)
+            })
             .unwrap_or(0);
         let state = self.decks.deck(deck);
         let lane = WaveLane {
