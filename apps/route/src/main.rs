@@ -79,11 +79,11 @@ use trip::TripModel;
 use voice::{GateResult, VoiceGate};
 
 #[cfg(feature = "native")]
-app_main!(App, font_set: International);
+app_main!(App);
 #[cfg(feature = "demo")]
 pub use nav::api::App;
 #[cfg(feature = "demo")]
-app_main!(App, font_set: International);
+app_main!(App);
 
 /// Dam square, the point the map opens on and where a fresh test map
 /// lands.

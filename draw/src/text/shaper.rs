@@ -21,11 +21,10 @@ use {
 static WARNED_MISSING_GLYPHS: Mutex<Option<HashSet<char>>> = Mutex::new(None);
 
 fn mark_missing_glyph_for_warning(warned: &Mutex<Option<HashSet<char>>>, ch: char) -> bool {
-    warned
-        .lock()
-        .unwrap()
-        .get_or_insert_with(HashSet::new)
-        .insert(ch)
+    let Ok(mut warned) = warned.try_lock() else {
+        return false;
+    };
+    warned.get_or_insert_with(HashSet::new).insert(ch)
 }
 
 /// Returns `true` if `text` is guaranteed to contain no right-to-left
@@ -280,6 +279,13 @@ impl Shaper {
         let Some(ch) = text.get(cluster..).and_then(|s| s.chars().next()) else {
             return;
         };
+        // These misses are expected while their deferred policy face is in
+        // flight. The family arrival has one aggregate log line instead.
+        if crate::makepad_platform::LazyFontFamily::Cjk.contains(ch)
+            || crate::makepad_platform::LazyFontFamily::Emoji.contains(ch)
+        {
+            return;
+        }
         if mark_missing_glyph_for_warning(&WARNED_MISSING_GLYPHS, ch) {
             crate::makepad_platform::log!("{}", missing_glyph_message(ch, diagnostics));
         }

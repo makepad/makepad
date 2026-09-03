@@ -19,7 +19,6 @@ use makepad_widgets::*;
 
 app_main!(
     App,
-    font_set: International,
     font_assets: ["makepad_widgets/resources/jetbrains_mono_variable.ttf"]
 );
 

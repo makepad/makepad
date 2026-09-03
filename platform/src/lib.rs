@@ -143,8 +143,9 @@ pub use {
         display_context::{DisplayContext, SystemBarAppearance},
         font_policy::{
             extend_font_asset_manifest, font_asset_manifest_len, FontAsset, FontChain, FontPolicy,
-            FontRole, FontSet, FONT_ASSET_MANIFEST_SECTION, INTERNATIONAL_FONT_ASSET_MANIFEST,
-            LATIN_FONT_ASSET_MANIFEST, MATH_VIEW_FONT_ASSET, UI_SYMBOL_FALLBACK,
+            FontRole, FontSet, LazyFontAsset, LazyFontFamily, FONT_ASSET_MANIFEST_SECTION,
+            INTERNATIONAL_FONT_ASSET_MANIFEST, LATIN_FONT_ASSET_MANIFEST,
+            LATIN_FONT_ASSET_PACKAGE_MANIFEST, MATH_VIEW_FONT_ASSET, UI_SYMBOL_FALLBACK,
         },
         draw_list::{CxDrawCall, CxDrawItem, CxDrawListPool, CxRectArea, DrawList, DrawListId},
         draw_matrix::DrawMatrix,

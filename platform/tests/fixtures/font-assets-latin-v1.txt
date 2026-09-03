@@ -7,3 +7,4 @@ asset=makepad_widgets/resources/IBMPlexSans-BoldItalic.ttf
 asset=makepad_widgets/resources/LiberationMono-Regular.ttf
 asset=makepad_widgets/resources/fa-solid-900.ttf
 asset=makepad_widgets/resources/jetbrains_mono_variable.ttf
+asset=makepad_widgets/resources/NotoSans-Regular.ttf
