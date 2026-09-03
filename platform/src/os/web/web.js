@@ -1256,6 +1256,13 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     resume_audio_from_gesture() {
+        this.had_user_gesture = true;
+        if (!this.audio_context && this.audio_start_args) {
+            const args = this.audio_start_args;
+            this.audio_start_args = null;
+            this.start_audio_output(args, 1);
+            return;
+        }
         const audio_context = this.audio_context;
         if (!audio_context) {
             return;
@@ -1295,6 +1302,20 @@ export class WasmWebBrowser extends WasmBridge {
         if (this.audio_context) {
             return
         }
+        // The web's rule: an output is created inside a user gesture. The wasm asks at
+        // start-up; the first click or key press creates the context and the worklet.
+        if (!this.had_user_gesture) {
+            this.audio_start_args = args;
+            console.log("web audio: output requested — waiting for the first click or key press");
+            return;
+        }
+        this.start_audio_output(args, 1);
+    }
+
+    start_audio_output(args, attempt) {
+        if (this.audio_context) {
+            return
+        }
         let audio_context;
         try {
             audio_context = new AudioContext({
@@ -1322,7 +1343,13 @@ export class WasmWebBrowser extends WasmBridge {
                 throw new Error("thread stack allocation prerequisites are unavailable");
             }
 
-            await audio_context.audioWorklet.addModule("./makepad_platform/audio_worklet.js", { credentials: 'omit' });
+            // A stalled module load (seen: it never settles until a second context exists)
+            // is not waited on forever — the deadline fails this attempt, and the retry below
+            // starts over on a fresh context.
+            await Promise.race([
+                audio_context.audioWorklet.addModule("./makepad_platform/audio_worklet.js", { credentials: 'omit' }),
+                new Promise((_, reject) => setTimeout(() => reject(new Error("worklet module load stalled")), 4000)),
+            ]);
 
             const audio_worklet = new AudioWorkletNode(audio_context, 'audio-worklet', {
                 numberOfInputs: 0,
@@ -1376,7 +1403,18 @@ export class WasmWebBrowser extends WasmBridge {
             if (audio_context.state === "running") {
                 this.watch_audio_callback(audio_context);
             }
-        }).catch(error => console.error(`web audio: start failed: ${error}`));
+        }).catch(error => {
+            console.error(`web audio: start failed (attempt ${attempt}): ${error}`);
+            if (this.audio_context !== audio_context) {
+                return;
+            }
+            this.audio_context = null;
+            audio_context.close().catch(() => {});
+            if (attempt < 3) {
+                console.log(`web audio: retrying the output on a fresh context (attempt ${attempt + 1})`);
+                this.start_audio_output(args, attempt + 1);
+            }
+        });
     }
 
     FromWasmQueryAudioDevices(args) {
