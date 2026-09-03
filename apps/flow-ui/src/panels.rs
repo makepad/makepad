@@ -3,7 +3,7 @@
 //! the template picker behind New, the run's total progress bar, and the
 //! App view that shows a flow as a product.
 
-use crate::faces::{param_text, FaceHost, HUB_PICKS};
+use crate::faces::{param_text, FaceHost, ModelChoice, HUB_PICKS};
 use makepad_flow::{
     FlowSummary, Graph, InstanceRow, Literal, Node, NodeInputValue, NodeTypeCatalog,
     TemplateSummary, ValueBytes, ValueRef,
@@ -847,7 +847,7 @@ pub struct Inspector {
     preview: Option<(String, ValueBytes)>,
     /// The hub's models for the shown node's domain (`Model` rows).
     #[rust]
-    models: Vec<String>,
+    models: Vec<ModelChoice>,
 }
 
 impl Inspector {
@@ -1071,7 +1071,7 @@ impl Inspector {
     }
 
     /// The hub's models for the shown node's domain.
-    pub fn set_models(&mut self, cx: &mut Cx, models: Vec<String>) {
+    pub fn set_models(&mut self, cx: &mut Cx, models: Vec<ModelChoice>) {
         if self.models != models {
             self.models = models;
             self.redraw(cx);
@@ -1156,9 +1156,19 @@ impl Inspector {
                         });
                     }
                 }
-                Row::Model { .. } => {
-                    if let Some(label) = item.drop_down(cx, ids!(value)).changed_label(actions) {
-                        let value = if label == HUB_PICKS { String::new() } else { label };
+                Row::Model { value: current } => {
+                    if let Some(index) = item.drop_down(cx, ids!(value)).changed(actions) {
+                        let value = index
+                            .checked_sub(1)
+                            .and_then(|index| self.models.get(index))
+                            .map(|model| model.id.clone())
+                            .unwrap_or_else(|| {
+                                if index == 0 {
+                                    String::new()
+                                } else {
+                                    current.clone()
+                                }
+                            });
                         out.push(InspectorAction::SetParam {
                             node: node.clone(),
                             key: "model".into(),
@@ -1268,13 +1278,24 @@ impl Widget for Inspector {
                         item.label(cx, ids!(name)).set_text(cx, "model");
                         let drop_down = item.drop_down(cx, ids!(value));
                         let mut labels = vec![HUB_PICKS.to_string()];
-                        labels.extend(self.models.iter().cloned());
-                        if !value.is_empty() && !labels.iter().any(|label| label == value) {
+                        labels.extend(self.models.iter().map(|model| model.label.clone()));
+                        let selected = self
+                            .models
+                            .iter()
+                            .find(|model| model.id == *value)
+                            .map(|model| model.label.clone())
+                            .unwrap_or_else(|| value.clone());
+                        if !selected.is_empty() && !labels.iter().any(|label| label == &selected) {
                             labels.push(value.clone());
                         }
                         drop_down.set_labels(cx, labels);
-                        let selected = if value.is_empty() { HUB_PICKS } else { value.as_str() };
-                        drop_down.set_selected_by_label(selected, cx);
+                        let mut dimmed = vec![false];
+                        dimmed.extend(self.models.iter().map(|model| model.dimmed));
+                        drop_down.set_dimmed_items(cx, dimmed);
+                        drop_down.set_selected_by_label(
+                            if value.is_empty() { HUB_PICKS } else { &selected },
+                            cx,
+                        );
                     }
                     Row::Bool { key, value } => {
                         item.label(cx, ids!(name)).set_text(cx, key);
@@ -1864,7 +1885,7 @@ impl AppView {
             .unwrap_or_else(|| format!("{} · {}", node.id, node.type_name));
         self.draw_text.draw_abs(cx, header.pos + dvec2(0.0, 4.0), &title);
         if let Some(faces) = scope.data.get_mut::<FaceHost>() {
-            faces.draw_face(cx, &node.id, Walk::fill_fit());
+            faces.draw_face(cx, &node.id, Walk::fill_fit(), false);
         } else {
             let text = param_text(node, "default");
             let rect = cx.walk_turtle(Walk::fixed(width - 24.0, 20.0));

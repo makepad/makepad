@@ -183,6 +183,13 @@ fn write_node(
     out.push_str(", ");
     write_number(out, at.1);
     out.push_str(")\n");
+    if let Some(size) = node.size {
+        out.push_str("    size: vec2(");
+        write_number(out, size.0);
+        out.push_str(", ");
+        write_number(out, size.1);
+        out.push_str(")\n");
+    }
     if let Some(face) = &node.face_src {
         out.push_str("    ui: ");
         out.push_str(face.trim());
@@ -416,4 +423,30 @@ fn compact(source: &str) -> String {
         index += 1;
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_size_round_trips_after_position() {
+        let source = r#"use mod.flow.*
+let prompt = Input{
+    type: @text
+    default: "hello"
+    at: vec2(12.5, 30)
+    size: vec2(420, 180.25)
+}
+Flow{prompt}
+"#;
+        let graph = evaluate(source, "<size-round-trip>").unwrap();
+        assert_eq!(graph.nodes[0].size, Some((420.0, 180.25)));
+        let written = write(&graph);
+        let at = written.find("    at: vec2(12.5, 30)\n").unwrap();
+        let size = written.find("    size: vec2(420, 180.25)\n").unwrap();
+        assert!(at < size);
+        let reparsed = evaluate(&written, "<size-round-trip-written>").unwrap();
+        assert_eq!(reparsed.nodes[0].size, graph.nodes[0].size);
+    }
 }

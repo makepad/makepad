@@ -20,7 +20,7 @@ mod testpattern;
 mod values;
 
 use canvas::{CanvasEdit, FlowCanvas, FlowCanvasAction, NodeStatus};
-use faces::{BridgeCall, FaceBridgeCall, FaceHost};
+use faces::{model_choices, BridgeCall, FaceBridgeCall, FaceHost, ModelChoice};
 use makepad_flow::client::{
     ClientError, FlowClient, FlowSubscriber, FlowSubscriberConfig, SessionConfig,
     SessionConnector, SessionStatus, SubscriptionEvent,
@@ -83,17 +83,22 @@ script_mod! {
         }
     }
 
-    let Panel = RoundedView{
+    let Panel = RoundedShadowView{
         height: Fill
         flow: Down
+        cursor: MouseCursor.Default
+        grab_key_focus: false
         padding: Inset{left: 10 right: 10 top: 8 bottom: 10}
         spacing: theme.space_1
         show_bg: true
         draw_bg +: {
-            color: #x161618
+            color: #x161618e8
             border_radius: 12.0
             border_size: 1.0
             border_color: #x232327
+            shadow_color: #0008
+            shadow_radius: 18.0
+            shadow_offset: vec2(0.0, 7.0)
         }
     }
 
@@ -180,187 +185,202 @@ script_mod! {
                         ]
                     }
 
-                    toolbar := RoundedView{
-                        width: Fill
-                        height: 46
-                        flow: Right
-                        spacing: theme.space_2
-                        padding: Inset{left: 12 right: 12 top: 6 bottom: 6}
-                        margin: Inset{left: 8 right: 8 top: 4 bottom: 4}
-                        align: Align{y: 0.5}
-                        show_bg: true
-                        draw_bg +: {
-                            color: #x161618
-                            border_radius: 12.0
-                            border_size: 1.0
-                            border_color: #x232327
-                        }
-                        status_dot := RoundedView{
-                            width: 8
-                            height: 8
-                            draw_bg +: {
-                                border_radius: 4.0
-                                color: #x8a8a92
-                            }
-                        }
-                        status_chip := ToolText{text: "Discovering"}
-                        flow_name := Label{
-                            width: Fit
-                            height: Fit
-                            margin: Inset{left: 10}
-                            text: "No flow open"
-                            draw_text +: {
-                                color: #xe8e8ec
-                                text_style: theme.font_bold{font_size: 11}
-                            }
-                        }
-                        instance_chip := ToolText{}
-                        View{width: 10 height: 1}
-                        run_btn := Button{text: "▶ Run"}
-                        cancel_btn := ButtonFlat{text: "Cancel"}
-                        run_bar := RunBar{width: 220 height: 6 margin: Inset{left: 6 right: 6}}
-                        run_state := ToolText{width: Fill}
-                        zoom_label := ToolText{text: "100 %"}
-                        fit_btn := ButtonFlat{text: "Fit"}
-                        view_btn := ButtonFlat{text: "App view"}
-                        side_btn := ButtonFlat{text: "Source"}
-                        new_btn := Button{text: "New"}
-                    }
-
-                    View{
+                    workspace := View{
                         width: Fill
                         height: Fill
-                        flow: Right
-                        spacing: theme.space_2
-                        padding: Inset{left: 8 right: 8 bottom: 8}
+                        flow: Overlay
 
-                        left_panel := Panel{
-                            width: 236
-                            SectionTitle{text: "FLOWS"}
-                            flow_list := FlowList{height: 136}
-                            SectionTitle{text: "RUNNING"}
-                            running := RunningList{height: 150}
-                            SectionTitle{text: "PALETTE"}
-                            palette_note := Label{
-                                width: Fill
-                                height: Fit
-                                text: "Drag a card onto the canvas to add a node."
-                                draw_text +: {
-                                    color: #x5e5e66
-                                    text_style: theme.font_regular{font_size: 8.5}
-                                }
-                            }
-                            palette := Palette{height: Fill}
-                        }
-
-                        View{
+                        canvas_view := View{
                             width: Fill
                             height: Fill
-                            flow: Overlay
-                            canvas_view := View{
+                            flow: Down
+                            canvas := FlowCanvas{}
+                        }
+                        app_view_view := View{
+                            width: Fill
+                            height: Fill
+                            visible: false
+                            app_view := AppView{}
+                        }
+
+                        chrome := View{
+                            width: Fill
+                            height: Fill
+                            flow: Down
+
+                            toolbar := RoundedShadowView{
                                 width: Fill
-                                height: Fill
-                                flow: Down
-                                canvas := FlowCanvas{}
-                            }
-                            app_view_view := View{
-                                width: Fill
-                                height: Fill
-                                visible: false
-                                app_view := AppView{}
-                            }
-                            error_line := View{
-                                width: Fill
-                                height: Fill
-                                flow: Down
-                                align: Align{y: 1.0}
-                                padding: Inset{left: 12 right: 12 bottom: 10}
-                                error_label := Label{
-                                    width: Fill
-                                    height: Fit
-                                    text: ""
-                                    draw_text +: {
-                                        color: #xf26d6d
-                                        text_style: theme.font_regular{font_size: 9}
+                                height: 46
+                                flow: Right
+                                cursor: MouseCursor.Default
+                                grab_key_focus: false
+                                spacing: theme.space_2
+                                padding: Inset{left: 12 right: 12 top: 6 bottom: 6}
+                                margin: Inset{left: 8 right: 8 top: 4 bottom: 4}
+                                align: Align{y: 0.5}
+                                show_bg: true
+                                draw_bg +: {
+                                    color: #x161618e8
+                                    border_radius: 12.0
+                                    border_size: 1.0
+                                    border_color: #x232327
+                                    shadow_color: #0008
+                                    shadow_radius: 16.0
+                                    shadow_offset: vec2(0.0, 5.0)
+                                }
+                                status_dot := RoundedView{
+                                    width: 8
+                                    height: 8
+                                    draw_bg +: {
+                                        border_radius: 4.0
+                                        color: #x8a8a92
                                     }
                                 }
+                                status_chip := ToolText{text: "Discovering"}
+                                flow_name := Label{
+                                    width: Fit
+                                    height: Fit
+                                    margin: Inset{left: 10}
+                                    text: "No flow open"
+                                    draw_text +: {
+                                        color: #xe8e8ec
+                                        text_style: theme.font_bold{font_size: 11}
+                                    }
+                                }
+                                instance_chip := ToolText{}
+                                View{width: 10 height: 1}
+                                run_btn := Button{text: "▶ Run"}
+                                cancel_btn := ButtonFlat{text: "Cancel"}
+                                run_bar := RunBar{width: 220 height: 6 margin: Inset{left: 6 right: 6}}
+                                run_state := ToolText{width: Fill}
+                                zoom_label := ToolText{text: "100 %"}
+                                fit_btn := ButtonFlat{text: "Fit"}
+                                view_btn := ButtonFlat{text: "App view"}
+                                side_btn := ButtonFlat{text: "Source"}
+                                new_btn := Button{text: "New"}
                             }
-                            template_view := View{
+
+                            View{
                                 width: Fill
                                 height: Fill
-                                align: Align{x: 0.5 y: 0.5}
-                                visible: false
-                                template_picker := TemplatePicker{}
-                            }
-                            help_view := View{
-                                width: Fill
-                                height: Fill
-                                align: Align{x: 0.5 y: 0.5}
-                                visible: false
-                                help := HelpPanel{
-                                    head := View{
+                                flow: Right
+                                spacing: theme.space_2
+                                padding: Inset{left: 8 right: 8 bottom: 8}
+
+                                left_panel := Panel{
+                                    width: 236
+                                    SectionTitle{text: "FLOWS"}
+                                    flow_list := FlowList{height: 136}
+                                    SectionTitle{text: "RUNNING"}
+                                    running := RunningList{height: 150}
+                                    SectionTitle{text: "PALETTE"}
+                                    palette_note := Label{
                                         width: Fill
                                         height: Fit
-                                        flow: Right
-                                        align: Align{y: 0.5}
-                                        help_title := Label{
-                                            width: Fill
-                                            height: Fit
-                                            text: ""
-                                            draw_text +: {
-                                                text_style: theme.font_bold{font_size: 11}
-                                                color: #xe8e8ec
-                                            }
+                                        text: "Drag a card onto the canvas to add a node."
+                                        draw_text +: {
+                                            color: #x5e5e66
+                                            text_style: theme.font_regular{font_size: 8.5}
                                         }
-                                        help_close := ButtonFlat{text: "Close"}
                                     }
-                                    help_body := ScrollYView{
+                                    palette := Palette{height: Fill}
+                                }
+
+                                View{width: Fill height: Fill}
+
+                                right_panel := Panel{
+                                    width: 330
+                                    inspector_view := View{
                                         width: Fill
-                                        height: Fit{max: FitBound.Abs(520)}
-                                        help_text := Label{
+                                        height: Fill
+                                        flow: Down
+                                        spacing: theme.space_1
+                                        SectionTitle{text: "INSPECTOR"}
+                                        inspector := Inspector{}
+                                    }
+                                    source_view := View{
+                                        width: Fill
+                                        height: Fill
+                                        flow: Down
+                                        visible: false
+                                        spacing: theme.space_2
+                                        View{
                                             width: Fill
                                             height: Fit
-                                            text: ""
-                                            draw_text +: {
-                                                color: #xd0d0d4
-                                                text_style: theme.font_regular{font_size: 9.5}
-                                            }
+                                            flow: Right
+                                            align: Align{y: 0.5}
+                                            SectionTitle{width: Fill text: "SOURCE"}
+                                            save_btn := Button{text: "Save"}
+                                        }
+                                        source := TextInput{
+                                            width: Fill
+                                            height: Fill
+                                            is_multiline: true
+                                            empty_text: "Open a flow to edit its source"
+                                            draw_text +: {text_style: theme.font_code{font_size: 9}}
                                         }
                                     }
                                 }
                             }
                         }
 
-                        right_panel := Panel{
-                            width: 330
-                            inspector_view := View{
+                        error_line := View{
+                            width: Fill
+                            height: Fill
+                            flow: Down
+                            align: Align{y: 1.0}
+                            padding: Inset{left: 12 right: 12 bottom: 10}
+                            error_label := Label{
                                 width: Fill
-                                height: Fill
-                                flow: Down
-                                spacing: theme.space_1
-                                SectionTitle{text: "INSPECTOR"}
-                                inspector := Inspector{}
+                                height: Fit
+                                text: ""
+                                draw_text +: {
+                                    color: #xf26d6d
+                                    text_style: theme.font_regular{font_size: 9}
+                                }
                             }
-                            source_view := View{
-                                width: Fill
-                                height: Fill
-                                flow: Down
-                                visible: false
-                                spacing: theme.space_2
-                                View{
+                        }
+                        template_view := View{
+                            width: Fill
+                            height: Fill
+                            align: Align{x: 0.5 y: 0.5}
+                            visible: false
+                            template_picker := TemplatePicker{}
+                        }
+                        help_view := View{
+                            width: Fill
+                            height: Fill
+                            align: Align{x: 0.5 y: 0.5}
+                            visible: false
+                            help := HelpPanel{
+                                head := View{
                                     width: Fill
                                     height: Fit
                                     flow: Right
                                     align: Align{y: 0.5}
-                                    SectionTitle{width: Fill text: "SOURCE"}
-                                    save_btn := Button{text: "Save"}
+                                    help_title := Label{
+                                        width: Fill
+                                        height: Fit
+                                        text: ""
+                                        draw_text +: {
+                                            text_style: theme.font_bold{font_size: 11}
+                                            color: #xe8e8ec
+                                        }
+                                    }
+                                    help_close := ButtonFlat{text: "Close"}
                                 }
-                                source := TextInput{
+                                help_body := ScrollYView{
                                     width: Fill
-                                    height: Fill
-                                    is_multiline: true
-                                    empty_text: "Open a flow to edit its source"
-                                    draw_text +: {text_style: theme.font_code{font_size: 9}}
+                                    height: Fit{max: FitBound.Abs(520)}
+                                    help_text := Label{
+                                        width: Fill
+                                        height: Fit
+                                        text: ""
+                                        draw_text +: {
+                                            color: #xd0d0d4
+                                            text_style: theme.font_regular{font_size: 9.5}
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -457,7 +477,7 @@ pub struct App {
     catalog: Vec<NodeTypeCatalog>,
     /// The hub's model ids by domain, from `GET /v1/models?domain=`.
     #[rust]
-    models: HashMap<String, Vec<String>>,
+    models: HashMap<String, Vec<ModelChoice>>,
     #[rust]
     models_fetched_at: f64,
     #[rust]
@@ -850,12 +870,20 @@ impl App {
                 "this flow has logic outside its nodes; canvas edits rewrite the file from the graph",
             );
         }
+        let remount = self
+            .definition
+            .as_ref()
+            .and_then(|definition| definition.graph.as_ref())
+            .is_none_or(|old| graph_edit::needs_face_remount(old, &graph));
         if let Some(definition) = self.definition.as_mut() {
             // The canvas draws the edit at once; the server's re-evaluation
             // confirms or corrects it through flow.changed.
             definition.graph = Some(graph.clone());
         }
         self.show_graph(cx);
+        if remount {
+            self.remount_faces(cx);
+        }
         self.pending_graph = true;
         self.redo.clear();
         self.io(move |client| {
@@ -876,6 +904,7 @@ impl App {
         };
         let next = match edit {
             CanvasEdit::Move { node, at } => graph_edit::move_node(&graph, &node, at),
+            CanvasEdit::Resize { node, size } => graph_edit::resize_node(&graph, &node, size),
             CanvasEdit::Connect {
                 from_node,
                 from_port,
@@ -919,6 +948,7 @@ impl App {
             copy.params = node.params.clone();
             copy.fn_src = node.fn_src.clone();
             copy.face_src = node.face_src.clone();
+            copy.size = node.size;
         }
         self.put_graph(cx, next);
     }
@@ -989,6 +1019,13 @@ impl App {
                     match result {
                         Ok(response) => {
                             if self.selected.as_deref() == Some(&name) {
+                                let remount = self
+                                    .definition
+                                    .as_ref()
+                                    .and_then(|definition| definition.graph.as_ref())
+                                    .is_none_or(|old| {
+                                        graph_edit::needs_face_remount(old, &response.graph)
+                                    });
                                 if let Some(definition) = self.definition.as_mut() {
                                     definition.revision = response.revision;
                                     definition.graph = Some(response.graph);
@@ -996,6 +1033,9 @@ impl App {
                                 }
                                 self.push_revision(response.revision);
                                 self.show_graph(cx);
+                                if remount {
+                                    self.remount_faces(cx);
+                                }
                             }
                             self.refresh_flows();
                             self.services.refresh_definitions();
@@ -1039,19 +1079,12 @@ impl App {
                     self.io.fetching_models.remove(&domain);
                     match result {
                         Ok(response) => {
-                            let mut ids: Vec<String> = response
-                                .models
-                                .iter()
-                                .filter(|model| model.available)
-                                .map(|model| model.id.clone())
-                                .collect();
-                            ids.sort();
-                            ids.dedup();
-                            self.models.insert(domain, ids);
+                            self.models.insert(domain, model_choices(&response));
                             self.push_models(cx);
                         }
                         Err(error) => {
-                            // A server without the route: the pickers keep "hub picks".
+                            // Preserve the last good choices; a first failure leaves
+                            // the picker with its built-in "hub picks" entry.
                             log!("flow-ui: models for {domain}: {error}");
                         }
                     }
@@ -1217,14 +1250,15 @@ impl App {
         );
         self.last_error = definition.error.as_ref().map(format_eval_error);
         self.push_revision(definition.revision);
-        let source_changed = self
+        let remount = self
             .definition
             .as_ref()
-            .map(|old| old.source != definition.source)
-            .unwrap_or(true);
+            .and_then(|old| old.graph.as_ref())
+            .zip(definition.graph.as_ref())
+            .is_none_or(|(old, new)| graph_edit::needs_face_remount(old, new));
         self.definition = Some(definition);
         self.show_graph(cx);
-        if source_changed || self.faces.is_none() {
+        if remount || self.faces.is_none() {
             self.remount_faces(cx);
         }
         self.update_connection(cx);
@@ -1370,6 +1404,7 @@ impl App {
         }
         self.faces = Some(faces);
         self.push_models(cx);
+        self.refresh_models(true);
         self.request_wanted_values(cx);
         self.ui.redraw(cx);
     }
@@ -1933,7 +1968,35 @@ impl App {
             cx,
             if self.source_mode { "Inspector" } else { "Source" },
         );
+        if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
+            canvas.set_fit_insets(Inset {
+                left: if self.left_hidden { 8.0 } else { 252.0 },
+                top: 58.0,
+                right: 346.0,
+                bottom: 8.0,
+            });
+        }
+        if !self.source_mode && self.selected_node.is_some() {
+            self.refresh_models(true);
+        }
         self.ui.redraw(cx);
+    }
+
+    fn point_over_canvas_chrome(&self, cx: &mut Cx, point: DVec2) -> bool {
+        self.canvas_chrome_rects(cx)
+            .iter()
+            .any(|rect| rect.contains(point))
+    }
+
+    fn canvas_chrome_rects(&self, cx: &mut Cx) -> Vec<Rect> {
+        let mut rects = vec![
+            self.ui.widget(cx, ids!(toolbar)).area().rect(cx),
+            self.ui.widget(cx, ids!(right_panel)).area().rect(cx),
+        ];
+        if !self.left_hidden {
+            rects.push(self.ui.widget(cx, ids!(left_panel)).area().rect(cx));
+        }
+        rects
     }
 
     fn show_templates(&mut self, cx: &mut Cx, visible: bool) {
@@ -2183,6 +2246,7 @@ impl MatchEvent for App {
                             canvas.select(cx, Some(node.clone()));
                         }
                         self.refresh_inspector(cx);
+                        self.refresh_models(true);
                     }
                 }
             }
@@ -2271,6 +2335,9 @@ impl MatchEvent for App {
                         }
                     }
                     self.refresh_inspector(cx);
+                    if node.is_some() {
+                        self.refresh_models(true);
+                    }
                     self.update_menu_state(cx);
                 }
                 FlowCanvasAction::Edit(edit) => self.apply_edit(cx, edit),
@@ -2523,23 +2590,59 @@ impl AppMain for App {
         }
         self.services.handle_event(cx, event);
         self.match_event(cx, event);
+        let chrome_rects = self.canvas_chrome_rects(cx);
+        if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
+            canvas.set_chrome_rects(chrome_rects);
+        }
+        // Selection belongs to the card, even when the press is about to be
+        // handled by an interactive child in its mounted face.
+        if !self.app_mode {
+            if let Event::MouseDown(e) = event {
+                if !self.point_over_canvas_chrome(cx, e.abs) {
+                    if let Some(mut canvas) =
+                        self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>()
+                    {
+                        canvas.select_at(cx, e.abs);
+                    }
+                }
+            }
+        }
         // The faces first: a click inside a face is the face's, and the
         // canvas then sees it as handled. Their positions go through the
         // canvas camera.
         if !matches!(event, Event::Draw(_)) {
-            let camera = self
+            let canvas_mode = !self.app_mode;
+            let (camera, resize_press) = self
                 .ui
                 .widget(cx, ids!(canvas))
                 .borrow::<FlowCanvas>()
-                .map(|canvas| canvas.camera());
-            let mapped = !self.app_mode;
-            if let Some(faces) = self.faces.as_mut() {
-                faces.handle_event(
-                    cx,
-                    event,
-                    &mut Scope::empty(),
-                    if mapped { camera.as_ref() } else { None },
-                );
+                .map(|canvas| {
+                    (
+                        canvas.camera(),
+                        canvas_mode
+                            && matches!(event, Event::MouseDown(e) if canvas.is_resize_handle_at(e.abs)),
+                    )
+                })
+                .map(|(camera, resize)| (Some(camera), resize))
+                .unwrap_or((None, false));
+            let mapped = canvas_mode;
+            let over_chrome = match event {
+                Event::MouseDown(e) => self.point_over_canvas_chrome(cx, e.abs),
+                Event::MouseMove(e) => self.point_over_canvas_chrome(cx, e.abs),
+                Event::MouseUp(e) => self.point_over_canvas_chrome(cx, e.abs),
+                Event::Scroll(e) => self.point_over_canvas_chrome(cx, e.abs),
+                Event::LongPress(e) => self.point_over_canvas_chrome(cx, e.abs),
+                _ => false,
+            };
+            if !over_chrome && !resize_press {
+                if let Some(faces) = self.faces.as_mut() {
+                    faces.handle_event(
+                        cx,
+                        event,
+                        &mut Scope::empty(),
+                        if mapped { camera.as_ref() } else { None },
+                    );
+                }
             }
         }
         match self.faces.as_mut() {

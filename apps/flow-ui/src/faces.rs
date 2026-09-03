@@ -12,8 +12,8 @@ use crate::canvas::{declared_output_type, Camera, PortIcon};
 use crate::values::ValueCache;
 use makepad_code_editor::code_view::CodeView;
 use makepad_flow::{
-    Graph, InstanceRow, Literal, Node, NodeTypeCatalog, PortType, ValueBytes, ValueRef,
-    PRELUDE,
+    Graph, InstanceRow, Literal, ModelsResponse, Node, NodeTypeCatalog, PortType, ValueBytes,
+    ValueRef, PRELUDE,
 };
 use makepad_widgets::fab_controls::*;
 use makepad_widgets::makepad_micro_serde::SerJson;
@@ -22,7 +22,7 @@ use makepad_widgets::widget_async::{enter_isolate, leave_isolate, CxSplashVmExt,
 use makepad_widgets::widget_tree::CxWidgetExt;
 use makepad_widgets::*;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 
 const FACES: &str = include_str!("faces.splash");
@@ -36,6 +36,63 @@ const HANDLER_INSTRUCTION_LIMIT: usize = 200_000;
 pub const HUB_PICKS: &str = "hub picks";
 /// The caret shown at the end of streaming text.
 const STREAM_CARET: &str = " ▌";
+
+/// One model id after collapsing the per-fleet-node rows returned by the hub.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelChoice {
+    pub id: String,
+    pub label: String,
+    pub dimmed: bool,
+}
+
+/// Collapse repeated model ids, count distinct advertising nodes, and put
+/// ready/available choices before models that still need acquiring.
+pub fn model_choices(response: &ModelsResponse) -> Vec<ModelChoice> {
+    #[derive(Default)]
+    struct Acc {
+        nodes: BTreeSet<String>,
+        ready_or_available: bool,
+        all_absent: bool,
+    }
+
+    let mut by_id: BTreeMap<String, Acc> = BTreeMap::new();
+    for model in &response.models {
+        let entry = by_id.entry(model.id.clone()).or_insert_with(|| Acc {
+            all_absent: true,
+            ..Acc::default()
+        });
+        entry.nodes.insert(model.node.clone());
+        entry.ready_or_available |=
+            model.available || matches!(model.state.as_str(), "ready" | "loaded");
+        entry.all_absent &= model.state == "absent";
+    }
+    let mut choices: Vec<_> = by_id
+        .into_iter()
+        .map(|(id, acc)| {
+            let label = format!("{} · {} nodes", id, acc.nodes.len());
+            (
+                if acc.all_absent {
+                    2
+                } else if acc.ready_or_available {
+                    0
+                } else {
+                    1
+                },
+                ModelChoice {
+                    id,
+                    label,
+                    dimmed: acc.all_absent,
+                },
+            )
+        })
+        .collect();
+    choices.sort_by(|(left_rank, left), (right_rank, right)| {
+        left_rank
+            .cmp(right_rank)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    choices.into_iter().map(|(_, choice)| choice).collect()
+}
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -115,6 +172,7 @@ script_mod! {
         width: Fill
         height: Fit
         flow: Down
+        align: Align{x: 0.5 y: 0.5}
         cursor: MouseCursor.Hand
         empty := EmptyWell{}
         image := RoundedPicture{
@@ -143,6 +201,7 @@ script_mod! {
         width: Fill
         height: Fit
         flow: Down
+        align: Align{x: 0.5 y: 0.5}
         cursor: MouseCursor.Hand
         empty := EmptyWell{
             note +: {text: "no value yet"}
@@ -184,6 +243,29 @@ script_mod! {
             labels: ["hub picks"]
         }
     }
+
+    // The host wraps direct, named face controls that carry a bind in this
+    // row. It keeps user-declared controls aligned with the built-in strip.
+    mod.flow.ui.DeclaredInputRow = View{
+        width: Fill
+        height: Fit
+        flow: Right
+        spacing: theme.space_2
+        align: Align{y: 0.5}
+        name := Label{
+            width: 44
+            height: Fit
+            text: ""
+            draw_text +: {
+                color: #x8a8a92
+                text_style: theme.font_regular{font_size: 9}
+            }
+        }
+        value := View{
+            width: Fill
+            height: Fit
+        }
+    }
 }
 
 /// An image value: the PNG/JPEG bytes become the texture; the picture fills
@@ -194,6 +276,8 @@ pub struct ValueImage {
     view: View,
     #[rust]
     loaded: bool,
+    #[rust]
+    card_sized: bool,
 }
 
 fn empty_note(ty: PortType) -> &'static str {
@@ -235,6 +319,28 @@ impl Widget for ValueImage {
 }
 
 impl ValueImage {
+    fn set_card_sized(&mut self, cx: &mut Cx, sized: bool) {
+        if self.card_sized == sized {
+            return;
+        }
+        self.card_sized = sized;
+        let mut image = self.view.image(cx, ids!(image));
+        if sized {
+            script_apply_eval!(cx, image, {
+                width: Fill
+                height: Fill
+                fit: ImageFit.Smallest
+            });
+        } else {
+            script_apply_eval!(cx, image, {
+                width: Fill
+                height: Fit
+                fit: ImageFit.Horizontal
+            });
+        }
+        self.view.redraw(cx);
+    }
+
     fn set_empty_type(&mut self, cx: &mut Cx, ty: PortType) {
         set_empty_type(&mut self.view, cx, ty);
     }
@@ -307,6 +413,8 @@ pub struct ValueView {
     value: String,
     #[rust]
     loaded: bool,
+    #[rust]
+    card_sized: bool,
 }
 
 impl Widget for ValueView {
@@ -334,6 +442,28 @@ impl Widget for ValueView {
 }
 
 impl ValueView {
+    fn set_card_sized(&mut self, cx: &mut Cx, sized: bool) {
+        if self.card_sized == sized {
+            return;
+        }
+        self.card_sized = sized;
+        let mut image = self.view.image(cx, ids!(image));
+        if sized {
+            script_apply_eval!(cx, image, {
+                width: Fill
+                height: Fill
+                fit: ImageFit.Smallest
+            });
+        } else {
+            script_apply_eval!(cx, image, {
+                width: Fill
+                height: Fit
+                fit: ImageFit.Horizontal
+            });
+        }
+        self.view.redraw(cx);
+    }
+
     fn set_empty_type(&mut self, cx: &mut Cx, ty: PortType) {
         set_empty_type(&mut self.view, cx, ty);
     }
@@ -374,7 +504,7 @@ pub struct ModelPicker {
     #[rust]
     value: String,
     #[rust]
-    models: Vec<String>,
+    models: Vec<ModelChoice>,
 }
 
 impl Widget for ModelPicker {
@@ -396,7 +526,7 @@ impl Widget for ModelPicker {
 impl ModelPicker {
     /// The hub's models for this node's domain; the current value stays
     /// selectable even when the list does not carry it.
-    pub fn set_models(&mut self, cx: &mut Cx, models: Vec<String>) {
+    pub fn set_models(&mut self, cx: &mut Cx, models: Vec<ModelChoice>) {
         if self.models != models {
             self.models = models;
             self.sync_labels(cx);
@@ -405,29 +535,42 @@ impl ModelPicker {
 
     fn sync_labels(&mut self, cx: &mut Cx) {
         let mut labels = vec![HUB_PICKS.to_string()];
-        labels.extend(self.models.iter().cloned());
-        if !self.value.is_empty() && !labels.iter().any(|label| *label == self.value) {
+        labels.extend(self.models.iter().map(|model| model.label.clone()));
+        let selected = self
+            .models
+            .iter()
+            .find(|model| model.id == self.value)
+            .map(|model| model.label.clone())
+            .unwrap_or_else(|| self.value.clone());
+        if !selected.is_empty() && !labels.iter().any(|label| *label == selected) {
             labels.push(self.value.clone());
         }
         let picker = self.view.drop_down(cx, ids!(picker));
         picker.set_labels(cx, labels);
-        let selected = if self.value.is_empty() {
-            HUB_PICKS.to_string()
-        } else {
-            self.value.clone()
-        };
-        picker.set_selected_by_label(&selected, cx);
+        let mut dimmed = vec![false];
+        dimmed.extend(self.models.iter().map(|model| model.dimmed));
+        picker.set_dimmed_items(cx, dimmed);
+        let selected = if self.value.is_empty() { HUB_PICKS } else { &selected };
+        picker.set_selected_by_label(selected, cx);
         self.view.redraw(cx);
     }
 
     /// The label the user picked, as the `model` param value.
     pub fn picked(&self, cx: &mut Cx, actions: &Actions) -> Option<String> {
-        let label = self.view.drop_down(cx, ids!(picker)).changed_label(actions)?;
-        Some(if label == HUB_PICKS {
-            String::new()
-        } else {
-            label
-        })
+        let index = self.view.drop_down(cx, ids!(picker)).changed(actions)?;
+        Some(
+            index
+                .checked_sub(1)
+                .and_then(|index| self.models.get(index))
+                .map(|model| model.id.clone())
+                .unwrap_or_else(|| {
+                    if index == 0 {
+                        String::new()
+                    } else {
+                        self.value.clone()
+                    }
+                }),
+        )
     }
 }
 
@@ -818,6 +961,7 @@ pub struct MountedFace {
     pub shows: Vec<Bind>,
     pub params: Vec<(WidgetRef, String)>,
     pub param_binds: Vec<(WidgetRef, String)>,
+    pub dropdowns: Vec<WidgetRef>,
     pub on_value: Option<ScriptFnRef>,
     pub on_state: Option<ScriptFnRef>,
 }
@@ -847,6 +991,81 @@ fn collect_widgets(root: &WidgetRef, out: &mut Vec<WidgetRef>) {
     }
     out.push(root.clone());
     root.children(&mut |_, child| collect_widgets(&child, out));
+}
+
+/// Give each direct `name := Control{bind/param_bind...}` child a real name
+/// column. Complex built-in rows (including ModelPicker) already label
+/// themselves and are left intact.
+fn wrap_declared_inputs(vm: &mut ScriptVm<'_>, root: &WidgetRef) {
+    let candidates: Vec<(usize, LiveId, WidgetRef)> = {
+        let Some(view) = root.borrow::<View>() else {
+            return;
+        };
+        view.children
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (id, child))| {
+                if child.borrow::<ModelPicker>().is_some() {
+                    return None;
+                }
+                let source = child.script_source();
+                if source == ScriptObject::ZERO {
+                    return None;
+                }
+                let bound = ["bind", "param_bind"].iter().any(|name| {
+                    own_value(vm, source, name).is_some_and(|value| !value.is_nil())
+                });
+                bound.then(|| (index, *id, child.clone()))
+            })
+            .collect()
+    };
+    if candidates.is_empty() {
+        return;
+    }
+    let row_value = own_value(vm, vm.bx.heap.modules, "flow")
+        .and_then(|value| value.as_object())
+        .and_then(|flow| own_value(vm, flow, "ui"))
+        .and_then(|value| value.as_object())
+        .and_then(|ui| own_value(vm, ui, "DeclaredInputRow"));
+    let Some(row_value) = row_value else {
+        return;
+    };
+    let strip = root.child(live_id!(params));
+    let into_strip = strip.borrow::<View>().is_some();
+    let mut rows = Vec::new();
+    for (index, id, child) in &candidates {
+        let Some(name) = id.as_string(|name| name.map(str::to_string)) else {
+            continue;
+        };
+        let row = WidgetRef::script_from_value(vm, row_value);
+        if row.is_empty() {
+            continue;
+        }
+        if let Some(mut slot) = row.child(live_id!(value)).borrow_mut::<View>() {
+            slot.children.push((*id, child.clone()));
+        }
+        row.label(vm.cx_mut(), ids!(name)).set_text(vm.cx_mut(), &name);
+        rows.push((*index, *id, row));
+    }
+    if into_strip {
+        if let Some(mut strip) = strip.borrow_mut::<View>() {
+            for (_, id, row) in &rows {
+                strip.children.push((*id, row.clone()));
+            }
+        }
+        let ids: BTreeSet<_> = rows.iter().map(|(_, id, _)| *id).collect();
+        if let Some(mut view) = root.borrow_mut::<View>() {
+            view.children.retain(|(id, _)| !ids.contains(id));
+        }
+    } else {
+        for (index, _, row) in rows {
+            if let Some(mut view) = root.borrow_mut::<View>() {
+                if let Some(entry) = view.children.get_mut(index) {
+                    entry.1 = row;
+                }
+            }
+        }
+    }
 }
 
 /// Which port `@self` means for a node: an input-like node's value lives on
@@ -1043,6 +1262,7 @@ impl FaceHost {
             if !errors.is_empty() {
                 face.error = Some(errors.join("\n"));
             }
+            wrap_declared_inputs(vm, &root);
             if let Some(face_obj) = face_obj {
                 for (hook, slot) in [("on_value", 0usize), ("on_state", 1usize)] {
                     if let Some(fn_obj) = deep_value(vm, face_obj, hook)
@@ -1061,6 +1281,9 @@ impl FaceHost {
             let mut widgets = Vec::new();
             collect_widgets(&root, &mut widgets);
             for widget in widgets {
+                if widget.borrow::<DropDown>().is_some() {
+                    face.dropdowns.push(widget.clone());
+                }
                 let src = widget.script_source();
                 if src == ScriptObject::ZERO {
                     continue;
@@ -1164,10 +1387,18 @@ impl FaceHost {
     /// Draw one node's face where the caller's turtle is. The face subtree
     /// gets an empty scope: the host's scope data is the canvas's, not
     /// the isolate's.
-    pub fn draw_face(&mut self, cx: &mut Cx2d, node: &str, walk: Walk) {
-        let Some(root) = self.faces.get(node).map(|face| face.root.clone()) else {
+    pub fn draw_face(&mut self, cx: &mut Cx2d, node: &str, walk: Walk, card_sized: bool) {
+        let Some(face) = self.faces.get(node) else {
             return;
         };
+        for show in &face.shows {
+            if let Some(mut image) = show.widget.borrow_mut::<ValueImage>() {
+                image.set_card_sized(cx, card_sized);
+            } else if let Some(mut value) = show.widget.borrow_mut::<ValueView>() {
+                value.set_card_sized(cx, card_sized);
+            }
+        }
+        let root = face.root.clone();
         if root.is_empty() {
             return;
         }
@@ -1177,6 +1408,7 @@ impl FaceHost {
     }
 
     pub fn draw_flow_face(&mut self, cx: &mut Cx2d, walk: Walk) {
+        self.set_popup_anchor_transform(cx, None);
         let Some(root) = self.flow_face.as_ref().map(|face| face.root.clone()) else {
             return;
         };
@@ -1194,6 +1426,7 @@ impl FaceHost {
     /// through the inverse camera first, and a hit they claim is written
     /// back to the original event so the canvas does not claim it too.
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope, camera: Option<&Camera>) {
+        self.set_popup_anchor_transform(cx, camera.map(Camera::popup_anchor_transform));
         let roots: Vec<WidgetRef> = self
             .faces
             .values()
@@ -1213,6 +1446,20 @@ impl FaceHost {
         leave_isolate(cx, entry);
         if let Some(remapped) = remapped.as_ref() {
             sync_handled(event, remapped);
+        }
+    }
+
+    pub fn set_popup_anchor_transform(
+        &mut self,
+        cx: &mut Cx,
+        transform: Option<PopupAnchorTransform>,
+    ) {
+        for face in self.faces.values().chain(self.flow_face.iter()) {
+            for dropdown in &face.dropdowns {
+                dropdown
+                    .as_drop_down()
+                    .set_popup_anchor_transform(cx, transform);
+            }
         }
     }
 
@@ -1261,7 +1508,7 @@ impl FaceHost {
     }
 
     /// The hub's model list for a node's `model` picker.
-    pub fn set_models(&mut self, cx: &mut Cx, node: &str, models: &[String]) {
+    pub fn set_models(&mut self, cx: &mut Cx, node: &str, models: &[ModelChoice]) {
         let Some(face) = self.faces.get(node) else {
             return;
         };
@@ -1877,5 +2124,79 @@ pub fn size_text(bytes: usize) -> String {
         format!("{} KB", bytes / 1024)
     } else {
         format!("{bytes} B")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use makepad_flow::{FleetNodeDto, ModelInfoDto};
+
+    fn model(id: &str, node: &str, available: bool, state: &str) -> ModelInfoDto {
+        ModelInfoDto {
+            id: id.into(),
+            domain: "image".into(),
+            backend: "test".into(),
+            node: node.into(),
+            available,
+            gated: false,
+            state: state.into(),
+            vram_gb: None,
+            note: None,
+        }
+    }
+
+    #[test]
+    fn models_are_deduped_counted_and_ready_first() {
+        let response = ModelsResponse {
+            nodes: vec![FleetNodeDto {
+                base_url: "a".into(),
+                fleet: "test".into(),
+                healthy: true,
+            }],
+            models: vec![
+                model("z-absent", "a", true, "absent"),
+                model("a-ready", "b", true, "ready"),
+                model("a-ready", "a", true, "loaded"),
+                model("z-absent", "a", true, "absent"),
+            ],
+            snapshot_ms: 1,
+        };
+        let choices = model_choices(&response);
+        assert_eq!(choices.len(), 2);
+        assert_eq!(choices[0].id, "a-ready");
+        assert_eq!(choices[0].label, "a-ready · 2 nodes");
+        assert!(!choices[0].dimmed);
+        assert_eq!(choices[1].id, "z-absent");
+        assert_eq!(choices[1].label, "z-absent · 1 nodes");
+        assert!(choices[1].dimmed);
+    }
+
+    #[test]
+    fn face_declared_picker_is_mounted_as_a_labelled_strip_row() {
+        let source = include_str!("../../../libs/flow/recipes/templates/prompt-to-image.splash");
+        let graph = makepad_flow::graph::evaluate(source, "<face-row>").unwrap();
+        let catalog = makepad_flow::graph::prelude_catalog().unwrap();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        let host = FaceHost::mount(
+            &mut cx,
+            WidgetUid(0),
+            "test",
+            "<face-row>",
+            source,
+            &graph,
+            &catalog,
+        );
+        assert!(host.error.is_none(), "{:?}", host.error);
+        let root = host.faces.get("image").unwrap().root.clone();
+        let row = root.child(live_id!(params)).child(live_id!(style));
+        assert_eq!(row.label(&cx, ids!(name)).text(), "style");
+        assert!(row
+            .child(live_id!(value))
+            .child(live_id!(style))
+            .borrow::<DropDown>()
+            .is_some());
+        host.free(&mut cx);
     }
 }
