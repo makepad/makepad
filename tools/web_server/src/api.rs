@@ -1,7 +1,7 @@
 use crate::{
     config::Config,
     http::{api_error, json_response, json_string, query_pairs, response, send_response},
-    live_services::LiveServiceRegistry,
+    live_services::{LiveHealth, LiveServiceRegistry},
 };
 use makepad_geodata::query::LayerDb;
 use makepad_map_nav::{
@@ -42,9 +42,9 @@ pub struct HealthState {
     pub chargers: &'static str,
     pub regional_graph: &'static str,
     pub major_graph: &'static str,
-    // Reserved service slots for the later radar/weather/wind lane.
-    pub radar: &'static str,
-    pub wind: &'static str,
+    pub radar: LiveHealth,
+    pub wind: LiveHealth,
+    pub weather: LiveHealth,
 }
 
 impl Default for HealthState {
@@ -56,8 +56,9 @@ impl Default for HealthState {
             chargers: "unavailable",
             regional_graph: "unavailable",
             major_graph: "disabled",
-            radar: "unavailable",
-            wind: "unavailable",
+            radar: LiveHealth { status: "unavailable", updated_unix: None },
+            wind: LiveHealth { status: "unavailable", updated_unix: None },
+            weather: LiveHealth { status: "unavailable", updated_unix: None },
         }
     }
 }
@@ -65,15 +66,16 @@ impl Default for HealthState {
 impl HealthState {
     fn json(&self) -> String {
         format!(
-            "{{\"ok\":{},\"search\":{},\"along\":{},\"chargers\":{},\"regional_graph\":{},\"major_graph\":{},\"radar\":{},\"wind\":{}}}",
+            "{{\"ok\":{},\"search\":{},\"along\":{},\"chargers\":{},\"regional_graph\":{},\"major_graph\":{},\"radar\":{},\"wind\":{},\"weather\":{}}}",
             self.ok,
             json_string(self.search),
             json_string(self.along),
             json_string(self.chargers),
             json_string(self.regional_graph),
             json_string(self.major_graph),
-            json_string(self.radar),
-            json_string(self.wind),
+            self.radar.json(),
+            self.wind.json(),
+            self.weather.json(),
         )
     }
 }
@@ -346,7 +348,7 @@ impl Drop for AlongPermit {
 pub struct ServiceRegistry {
     health: RwLock<HealthState>,
     workers: RwLock<Option<WorkerSenders>>,
-    pub live: LiveServiceRegistry,
+    pub live: Arc<LiveServiceRegistry>,
 }
 
 impl ServiceRegistry {
@@ -358,7 +360,7 @@ impl ServiceRegistry {
         Arc::new(Self {
             health: RwLock::new(health),
             workers: RwLock::new(None),
-            live: LiveServiceRegistry::default(),
+            live: Arc::new(LiveServiceRegistry::default()),
         })
     }
 
@@ -396,8 +398,9 @@ impl ServiceRegistry {
             chargers,
             regional_graph: "ready",
             major_graph: if major_ready { "ready" } else { "disabled" },
-            radar: "unavailable",
-            wind: "unavailable",
+            radar: LiveHealth { status: "unavailable", updated_unix: None },
+            wind: LiveHealth { status: "unavailable", updated_unix: None },
+            weather: LiveHealth { status: "unavailable", updated_unix: None },
         };
     }
 
@@ -413,6 +416,7 @@ impl ServiceRegistry {
         let live = self.live.state();
         health.radar = live.radar;
         health.wind = live.wind;
+        health.weather = live.weather;
         health
     }
 
@@ -427,6 +431,9 @@ impl ServiceRegistry {
     }
 
     pub fn handle_get(&self, headers: &HttpServerHeaders, sender: &HttpServerResponseSender) -> bool {
+        if self.live.handle_get(headers, sender) {
+            return true;
+        }
         match headers.path.as_str() {
             "/api/healthz" => {
                 if headers.verb == "OPTIONS" {
@@ -511,7 +518,7 @@ impl ServiceRegistry {
             self.enqueue_along(body, sender.clone());
             true
         } else if headers.path.starts_with("/api/") {
-            let status = if matches!(headers.path.as_str(), "/api/search" | "/api/route" | "/api/healthz") {
+            let status = if matches!(headers.path.as_str(), "/api/search" | "/api/route" | "/api/healthz" | "/api/radar/manifest" | "/api/radar/frame" | "/api/wind/current" | "/api/weather/now") {
                 405
             } else {
                 404
@@ -567,7 +574,7 @@ impl ServiceRegistry {
                 });
             true
         } else if headers.path.starts_with("/api/") {
-            let response = if matches!(headers.path.as_str(), "/api/search" | "/api/route" | "/api/healthz") {
+            let response = if matches!(headers.path.as_str(), "/api/search" | "/api/route" | "/api/healthz" | "/api/radar/manifest" | "/api/radar/frame" | "/api/wind/current" | "/api/weather/now") {
                 api_method_not_allowed("GET, HEAD, OPTIONS")
             } else {
                 api_error(404, "not_found", "API endpoint not found")

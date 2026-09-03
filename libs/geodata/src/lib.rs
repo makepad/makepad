@@ -12,6 +12,8 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 mod clock;
+#[cfg(not(target_arch = "wasm32"))]
+mod http_fetch;
 
 pub mod fetch;
 pub mod geo;

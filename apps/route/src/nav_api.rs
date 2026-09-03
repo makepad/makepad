@@ -260,9 +260,9 @@ impl NavApi {
         }
     }
 
-    fn schedule_retry(&mut self, cx: &mut Cx, call: &PendingCall) {
+    fn schedule_retry(&mut self, cx: &mut Cx, call: &PendingCall, status: u16) {
         let attempt = call.attempt.saturating_add(1);
-        let delay = retry_delay_seconds(attempt);
+        let delay = retry_delay_seconds(attempt, call.request_kind.operation(), status);
         self.retries.push(RetryCall {
             request: call.request.clone(),
             request_kind: call.request_kind.clone(),
@@ -451,9 +451,9 @@ impl NavApi {
                     };
                     cx.stop_timer(call.timeout);
                     let retrying = retryable_status(response.status_code)
-                        && retryable_operation(call.request_kind.operation());
+                        && retryable_operation(call.request_kind.operation(), response.status_code);
                     if retrying {
-                        self.schedule_retry(cx, &call);
+                        self.schedule_retry(cx, &call, response.status_code);
                     }
                     events.push(parse_response(call.request_kind, response, retrying));
                 }
@@ -480,15 +480,34 @@ impl NavApi {
     }
 }
 
-fn retryable_operation(operation: ApiOperation) -> bool {
+fn retryable_operation(operation: ApiOperation, status: u16) -> bool {
     matches!(operation, ApiOperation::Search | ApiOperation::Route | ApiOperation::Along)
+        || (status == 503
+            && matches!(
+                operation,
+                ApiOperation::Weather
+                    | ApiOperation::RadarManifest
+                    | ApiOperation::RadarFrame
+                    | ApiOperation::Wind
+            ))
 }
 
 fn retryable_status(status: u16) -> bool {
     matches!(status, 429 | 503)
 }
 
-fn retry_delay_seconds(attempt: u8) -> f64 {
+fn retry_delay_seconds(attempt: u8, operation: ApiOperation, status: u16) -> f64 {
+    if status == 503
+        && matches!(
+            operation,
+            ApiOperation::Weather
+                | ApiOperation::RadarManifest
+                | ApiOperation::RadarFrame
+                | ApiOperation::Wind
+        )
+    {
+        return 30.0;
+    }
     2.0_f64
         .powi(attempt.saturating_sub(1).min(5) as i32)
         .min(MAX_RETRY_SECONDS)
@@ -1087,10 +1106,14 @@ mod tests {
         assert!(retryable_status(429));
         assert!(retryable_status(503));
         assert!(!retryable_status(500));
-        assert_eq!(retry_delay_seconds(1), 1.0);
-        assert_eq!(retry_delay_seconds(2), 2.0);
-        assert_eq!(retry_delay_seconds(6), 30.0);
-        assert_eq!(retry_delay_seconds(u8::MAX), 30.0);
+        assert!(retryable_operation(ApiOperation::RadarManifest, 503));
+        assert!(retryable_operation(ApiOperation::Wind, 503));
+        assert!(!retryable_operation(ApiOperation::Wind, 404));
+        assert_eq!(retry_delay_seconds(1, ApiOperation::Search, 503), 1.0);
+        assert_eq!(retry_delay_seconds(2, ApiOperation::Search, 503), 2.0);
+        assert_eq!(retry_delay_seconds(6, ApiOperation::Search, 503), 30.0);
+        assert_eq!(retry_delay_seconds(u8::MAX, ApiOperation::Search, 503), 30.0);
+        assert_eq!(retry_delay_seconds(1, ApiOperation::Wind, 503), 30.0);
     }
 
     #[test]
