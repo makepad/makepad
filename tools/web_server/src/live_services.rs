@@ -2,7 +2,7 @@ use crate::http::{api_error, json_response, json_string, query_pairs, response, 
 use makepad_geodata::{
     knmi_hdf5::{self, KnmiFrame},
     png::{self, PngFormat},
-    radar::{RadarConfig, RadarDataset, RadarSync},
+    radar::{RadarConfig, RadarDataset, RadarSync, KNMI_ANONYMOUS_KEY},
     radar_raster::{self, RadarProjection, RASTER_EAST, RASTER_NORTH, RASTER_SOUTH, RASTER_WEST},
     wind::{WindField, WindSync},
 };
@@ -75,6 +75,14 @@ pub struct LiveServiceRegistry {
     worker_stops: Mutex<Vec<SyncSender<()>>>,
 }
 
+struct EphemeralCache(PathBuf);
+
+impl Drop for EphemeralCache {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 impl Default for LiveServiceRegistry {
     fn default() -> Self {
         Self {
@@ -96,10 +104,25 @@ impl LiveServiceRegistry {
         cache_dir: Option<&Path>,
         knmi_key_file: Option<&Path>,
     ) -> Result<(), String> {
-        let Some(cache_dir) = cache_dir else {
-            return Ok(());
+        let key = select_knmi_key(knmi_key_file)?;
+        if let Some(key_file) = knmi_key_file {
+            println!("knmi: key file {}", key_file.display());
+        } else {
+            println!("knmi: anonymous public key");
+        }
+
+        let (cache_dir, ephemeral_cache) = if let Some(cache_dir) = cache_dir {
+            (cache_dir.to_path_buf(), None)
+        } else {
+            println!("live cache: in-memory; restarts will re-poll");
+            let cache_dir = std::env::temp_dir().join(format!(
+                "makepad-web-server-live-{}-{}",
+                std::process::id(),
+                SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()
+            ));
+            (cache_dir.clone(), Some(Arc::new(EphemeralCache(cache_dir))))
         };
-        fs::create_dir_all(cache_dir)
+        fs::create_dir_all(&cache_dir)
             .map_err(|error| format!("create live cache {}: {error}", cache_dir.display()))?;
 
         let wind_dir = cache_dir.join("wind");
@@ -108,25 +131,21 @@ impl LiveServiceRegistry {
         if let Some((stamp, field)) = wind_sync.cached_with_stamp() {
             self.publish_wind(stamp, field);
         }
-        self.spawn_wind_worker(wind_dir)?;
-
-        let Some(key_file) = knmi_key_file else {
-            return Ok(());
-        };
-        let key = fs::read_to_string(key_file)
-            .map_err(|error| format!("read KNMI key file {}: {error}", key_file.display()))?;
-        let key = key.trim();
-        if key.is_empty() || key.len() > 4096 || key.contains(['\r', '\n']) {
-            return Err("KNMI key file must contain one non-empty key".into());
+        if let Err(error) = self.spawn_wind_worker(wind_dir, ephemeral_cache.clone()) {
+            self.mark_unavailable(false);
+            return Err(error);
         }
 
         let radar_dir = cache_dir.join("radar");
         self.mark_warming(true);
-        let (forecast, composite) = radar_syncs(&radar_dir, key);
+        let (forecast, composite) = radar_syncs(&radar_dir, &key);
         if let Ok(package) = load_or_build_radar(&radar_dir, &forecast, &composite, false) {
             self.publish_radar(package);
         }
-        self.spawn_radar_worker(radar_dir, key.to_string())?;
+        if let Err(error) = self.spawn_radar_worker(radar_dir, key, ephemeral_cache) {
+            self.mark_unavailable(true);
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -138,6 +157,17 @@ impl LiveServiceRegistry {
             state.weather = warming;
         } else {
             state.wind = warming;
+        }
+    }
+
+    fn mark_unavailable(&self, radar: bool) {
+        let mut state = self.state.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let unavailable = LiveHealth { status: "unavailable", updated_unix: None };
+        if radar {
+            state.radar = unavailable;
+            state.weather = unavailable;
+        } else {
+            state.wind = unavailable;
         }
     }
 
@@ -157,13 +187,19 @@ impl LiveServiceRegistry {
             LiveHealth { status: "ok", updated_unix: Some(updated_unix) };
     }
 
-    fn spawn_radar_worker(self: &Arc<Self>, cache_dir: PathBuf, key: String) -> Result<(), String> {
+    fn spawn_radar_worker(
+        self: &Arc<Self>,
+        cache_dir: PathBuf,
+        key: String,
+        ephemeral_cache: Option<Arc<EphemeralCache>>,
+    ) -> Result<(), String> {
         let (stop_sender, stop_receiver) = mpsc::sync_channel(1);
         self.worker_stops.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(stop_sender);
         let registry = Arc::downgrade(self);
         std::thread::Builder::new()
             .name("web-live-radar".into())
             .spawn(move || {
+                let _ephemeral_cache = ephemeral_cache;
                 let (forecast, composite) = radar_syncs(&cache_dir, &key);
                 loop {
                     let result = forecast.sync().and_then(|_| composite.sync()).and_then(|_| {
@@ -187,13 +223,18 @@ impl LiveServiceRegistry {
         Ok(())
     }
 
-    fn spawn_wind_worker(self: &Arc<Self>, cache_dir: PathBuf) -> Result<(), String> {
+    fn spawn_wind_worker(
+        self: &Arc<Self>,
+        cache_dir: PathBuf,
+        ephemeral_cache: Option<Arc<EphemeralCache>>,
+    ) -> Result<(), String> {
         let (stop_sender, stop_receiver) = mpsc::sync_channel(1);
         self.worker_stops.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(stop_sender);
         let registry: Weak<Self> = Arc::downgrade(self);
         std::thread::Builder::new()
             .name("web-live-wind".into())
             .spawn(move || {
+                let _ephemeral_cache = ephemeral_cache;
                 let sync = wind_sync(&cache_dir);
                 loop {
                     match sync.sync() {
@@ -309,6 +350,19 @@ impl LiveServiceRegistry {
         };
         json_response(200, "public, max-age=60", weather_json(&package, lon, lat))
     }
+}
+
+fn select_knmi_key(knmi_key_file: Option<&Path>) -> Result<String, String> {
+    let Some(key_file) = knmi_key_file else {
+        return Ok(KNMI_ANONYMOUS_KEY.to_string());
+    };
+    let key = fs::read_to_string(key_file)
+        .map_err(|error| format!("read KNMI key file {}: {error}", key_file.display()))?;
+    let key = key.trim();
+    if key.is_empty() || key.len() > 4096 || key.contains(['\r', '\n']) {
+        return Err("KNMI key file must contain one non-empty key".into());
+    }
+    Ok(key.to_string())
 }
 
 fn radar_syncs(cache_dir: &Path, key: &str) -> (RadarSync, RadarSync) {
@@ -586,5 +640,16 @@ mod tests {
             b"png"
         );
         assert!(String::from_utf8(registry.radar_frame_response(Some("minute=0")).body).unwrap().contains("bad_request"));
+    }
+
+    #[test]
+    fn knmi_key_selection_prefers_file_and_falls_back_to_anonymous() {
+        assert_eq!(select_knmi_key(None).unwrap(), KNMI_ANONYMOUS_KEY);
+
+        let key_file = PathBuf::from("target").join(format!("knmi-key-test-{}", std::process::id()));
+        fs::create_dir_all(key_file.parent().unwrap()).unwrap();
+        fs::write(&key_file, "personal-key\n").unwrap();
+        assert_eq!(select_knmi_key(Some(&key_file)).unwrap(), "personal-key");
+        fs::remove_file(key_file).unwrap();
     }
 }
