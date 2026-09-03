@@ -17,10 +17,17 @@
 
 use crate::cue::SlotId;
 use crate::decks::DeckId;
-use crate::mixer::{Mixer, TrackPcm, MAX_VIDEO_PLAYBACK_RATE, MIN_VIDEO_PLAYBACK_RATE};
+use crate::mixer::{
+    Mixer, StreamPcm, TrackPcm, MAX_VIDEO_PLAYBACK_RATE, MIN_VIDEO_PLAYBACK_RATE,
+    STREAM_CHUNK_FRAMES,
+};
 use crate::pads::PadKey;
+use crate::wave_analysis::{WaveHop, WaveHopBuilder, ZOOM_COLS_PER_SEC};
 use makepad_asset_data::{AssetRevisionId, MediaType, ThumbnailCells};
-use makepad_audio_decode::{decode_audio_limited, AudioFormat, Limits as AudioLimits};
+use makepad_audio_decode::{
+    decode_audio_limited, mp3::Mp3Decoder, vorbis::VorbisDecoder, AudioFormat,
+    Limits as AudioLimits,
+};
 use makepad_widgets::makepad_platform::thread::{lock_from_ui, ThreadSpawner};
 use makepad_widgets::makepad_platform::video_file::{nv12, VideoFileDecoder, VideoFileInfo};
 use std::cell::RefCell;
@@ -2050,6 +2057,354 @@ impl DecodeSource {
     }
 }
 
+// ---------------------------------------------------------------------------
+// streaming deck decode
+// ---------------------------------------------------------------------------
+
+/// How much of a track must be in before the deck opens on it. From then on
+/// the decoder stays ahead by construction: the voice waits at the decoded
+/// edge rather than ever reading past it.
+pub const PLAYABLE_LEAD_SECS: f64 = 2.5;
+
+/// Cuts a decoder's output into ordered [`DeckChunk`]s for the deck while
+/// keeping the whole track for the analysis that needs it entire. The
+/// worker's side of the stream; [`DeckStream`] is the UI's.
+struct StreamCutter<'a> {
+    frames: Vec<[i16; 2]>,
+    sample_rate: u32,
+    total_hint: Option<usize>,
+    max_frames: usize,
+    emitted: usize,
+    seq: u32,
+    hops: WaveHopBuilder,
+    /// `None` for a decode nobody is listening to chunk by chunk (the stems
+    /// prefetch): the track is still assembled, nothing is copied out.
+    sink: Option<&'a mut dyn FnMut(DeckChunk)>,
+}
+
+impl<'a> StreamCutter<'a> {
+    fn new(
+        sample_rate: u32,
+        total_hint: Option<usize>,
+        max_frames: usize,
+        sink: Option<&'a mut dyn FnMut(DeckChunk)>,
+    ) -> StreamCutter<'a> {
+        let sample_rate = sample_rate.max(1);
+        let total_hint = total_hint.filter(|frames| *frames > 0).map(|frames| frames.min(max_frames));
+        StreamCutter {
+            frames: Vec::with_capacity(total_hint.unwrap_or(0)),
+            sample_rate,
+            total_hint,
+            max_frames,
+            emitted: 0,
+            seq: 0,
+            hops: WaveHopBuilder::new(sample_rate),
+            sink,
+        }
+    }
+
+    #[inline]
+    fn push(&mut self, frame: [i16; 2]) -> Result<(), String> {
+        if self.frames.len() >= self.max_frames {
+            return Err("audio clip exceeds the decode budget".into());
+        }
+        self.frames.push(frame);
+        Ok(())
+    }
+
+    /// Send every whole chunk that is in, keeping `holdback` frames back —
+    /// the gapless tail an MP3 only knows to trim once its end is reached.
+    fn flush(&mut self, holdback: usize) {
+        while self.frames.len().saturating_sub(holdback) >= self.emitted + STREAM_CHUNK_FRAMES {
+            self.emit(self.emitted + STREAM_CHUNK_FRAMES, false);
+        }
+    }
+
+    fn emit(&mut self, end: usize, last: bool) {
+        let Some(sink) = self.sink.as_mut() else {
+            self.emitted = end;
+            return;
+        };
+        let slice = &self.frames[self.emitted..end];
+        let mut hops = Vec::with_capacity(slice.len() / self.hops.hop_frames() + 1);
+        self.hops.push(slice, &mut hops);
+        if last {
+            self.hops.finish(&mut hops);
+        }
+        sink(DeckChunk {
+            seq: self.seq,
+            sample_rate: self.sample_rate,
+            total_frames_hint: self.total_hint,
+            frames: Arc::new(slice.to_vec()),
+            hops,
+            last,
+        });
+        self.seq += 1;
+        self.emitted = end;
+    }
+
+    /// The end of the stream: drop `trim_tail` frames, send what is left as
+    /// the last chunk (empty when a full chunk was the end) and hand back
+    /// the whole track.
+    fn finish(mut self, trim_tail: usize, what: &str) -> Result<TrackPcm, String> {
+        let keep = self.frames.len().saturating_sub(trim_tail).max(self.emitted);
+        self.frames.truncate(keep);
+        if self.frames.is_empty() {
+            return Err(format!("{what} decoded to zero frames"));
+        }
+        self.emit(self.frames.len(), true);
+        Ok(TrackPcm { frames: self.frames, sample_rate: self.sample_rate })
+    }
+}
+
+/// Decode a deck track, delivering it in order through `sink` as it comes
+/// off the decoder and returning it whole at the end. WAV parses at once
+/// and streams from memory; MP3 and Ogg Vorbis run the repo's progressive
+/// decoders frame by frame; MP4/M4A pulls the platform decoder's audio
+/// chunks. Native and web share every line of it.
+fn decode_deck_stream(
+    source: &DecodeSource,
+    media: MediaType,
+    max_frames: usize,
+    sink: Option<&mut dyn FnMut(DeckChunk)>,
+) -> Result<TrackPcm, String> {
+    let sample = |v: f32| (v.clamp(-1.0, 1.0) * 32767.0) as i16;
+    match media {
+        MediaType::Wav => {
+            let bytes = source.read_bytes()?;
+            let parsed = parse_wav(&bytes, max_frames)?;
+            let total = parsed.frames.len();
+            let mut cutter = StreamCutter::new(parsed.sample_rate, Some(total), max_frames, sink);
+            cutter.frames = parsed.frames;
+            cutter.flush(0);
+            cutter.finish(0, "wav")
+        }
+        MediaType::Mp4 => {
+            let DecodeSource::Path(path) = source else {
+                return Err("hardware MP4 audio decode is unavailable for in-memory web blobs".into());
+            };
+            // Cache objects are digest-only names; AVURLAsset keys off the
+            // extension. Lease a typed hard link the same way video slots do.
+            let input = DecoderInput::prepare(path, MediaType::Mp4)?;
+            let mut decoder = VideoFileDecoder::open(&input.path).map_err(|e| e.to_string())?;
+            let info = decoder.info().clone();
+            if !info.has_audio {
+                return Err("mp4 has no audio track".into());
+            }
+            // The rate is the first chunk's word, not the container's: some
+            // platform decoders advertise one and deliver another.
+            let mut cutter: Option<StreamCutter> = None;
+            let mut sink = sink;
+            loop {
+                match decoder.next_audio().map_err(|e| e.to_string())? {
+                    None => break,
+                    Some(chunk) => {
+                        let rate = chunk.sample_rate.max(1);
+                        let cutter = match cutter.as_mut() {
+                            Some(cutter) if cutter.sample_rate != rate => {
+                                return Err("mp4 audio changes sample rate mid-stream".into());
+                            }
+                            Some(cutter) => cutter,
+                            None => {
+                                let hint = (info.duration_100ns > 0).then(|| {
+                                    (info.duration_100ns as f64 / 10_000_000.0 * rate as f64) as usize
+                                });
+                                cutter.insert(StreamCutter::new(rate, hint, max_frames, sink.take()))
+                            }
+                        };
+                        let ch = chunk.channels.max(1) as usize;
+                        for frame in chunk.samples.chunks_exact(ch) {
+                            cutter.push([frame[0], frame[ch - 1]])?;
+                        }
+                        cutter.flush(0);
+                    }
+                }
+            }
+            match cutter {
+                Some(cutter) => cutter.finish(0, "mp4 audio"),
+                None => Err("mp4 audio decoded to zero frames".into()),
+            }
+        }
+        MediaType::Mp3 => {
+            let bytes = source.read_bytes()?;
+            let mut decoder =
+                Mp3Decoder::with_limits(&bytes, AudioLimits::with_max_frames(max_frames))
+                    .map_err(|e| e.to_string())?;
+            let rate = decoder.rate();
+            let hint = makepad_audio_decode::mp3::probe_duration(&bytes)
+                .ok()
+                .map(|secs| (secs * rate as f64) as usize);
+            // The gapless tail is trimmed once the end is known; those
+            // frames are held back from the stream until then.
+            let (_, skip_back) = decoder.trim();
+            let skip_back = skip_back as usize;
+            let mut cutter = StreamCutter::new(rate, hint, max_frames, sink);
+            let (mut channels, mut frame_rate) = (0u16, 0u32);
+            while let Some(frame) = decoder.next_frame().map_err(|e| e.to_string())? {
+                if channels != 0 && (frame.channels != channels || frame.rate != frame_rate) {
+                    return Err("mp3: format changes mid-stream".into());
+                }
+                channels = frame.channels;
+                frame_rate = frame.rate;
+                let ch = channels.max(1) as usize;
+                for pcm in frame.pcm.chunks_exact(ch) {
+                    cutter.push([sample(pcm[0]), sample(pcm[ch - 1])])?;
+                }
+                cutter.flush(skip_back);
+            }
+            cutter.finish(skip_back, "mp3")
+        }
+        MediaType::Ogg => {
+            let bytes = source.read_bytes()?;
+            let mut decoder =
+                VorbisDecoder::with_limits(&bytes, AudioLimits::with_max_frames(max_frames))
+                    .map_err(|e| e.to_string())?;
+            let channels = decoder.channels().max(1) as usize;
+            let hint = decoder.total_frames().map(|frames| frames as usize);
+            let mut cutter = StreamCutter::new(decoder.rate(), hint, max_frames, sink);
+            while let Some(block) = decoder.next_block().map_err(|e| e.to_string())? {
+                for pcm in block.chunks_exact(channels) {
+                    cutter.push([sample(pcm[0]), sample(pcm[channels - 1])])?;
+                }
+                cutter.flush(0);
+            }
+            cutter.finish(0, "ogg vorbis")
+        }
+        other => Err(format!("unsupported audio media {other:?}")),
+    }
+}
+
+/// The UI thread's side of a streaming deck decode. It takes the worker's
+/// chunks in order, keeps the table the mixer plays from — every chunk
+/// shared with it, nothing copied — and the waveform hops the picture is
+/// drawn from, and says when the deck may open.
+pub struct DeckStream {
+    pub gen: u64,
+    table: Arc<StreamPcm>,
+    next_seq: u32,
+    total_hint: Option<usize>,
+    playable: bool,
+    /// A chunk came out of order or after the end: the rest are dropped,
+    /// and the whole file installs when it lands, as it did before
+    /// streaming existed.
+    broken: bool,
+    pub hops: Vec<WaveHop>,
+}
+
+impl DeckStream {
+    pub fn new(gen: u64) -> DeckStream {
+        DeckStream {
+            gen,
+            table: Arc::new(StreamPcm::new(0, None)),
+            next_seq: 0,
+            total_hint: None,
+            playable: false,
+            broken: false,
+            hops: Vec::new(),
+        }
+    }
+
+    /// Take the next chunk. `Ok(true)` the one time the stream becomes
+    /// playable: the lead is in, or the whole (short) track is.
+    pub fn accept(&mut self, chunk: DeckChunk) -> Result<bool, String> {
+        if self.broken {
+            return Ok(false);
+        }
+        if self.table.complete {
+            self.broken = true;
+            return Err("a chunk arrived after the end of the stream".into());
+        }
+        if chunk.seq != self.next_seq {
+            self.broken = true;
+            return Err(format!(
+                "chunk {} arrived where {} was expected",
+                chunk.seq, self.next_seq
+            ));
+        }
+        if self.next_seq == 0 {
+            self.table = Arc::new(StreamPcm::new(chunk.sample_rate, chunk.total_frames_hint));
+        } else if chunk.sample_rate != self.table.sample_rate {
+            self.broken = true;
+            return Err("the sample rate changed mid-stream".into());
+        }
+        self.next_seq += 1;
+        if chunk.total_frames_hint.is_some() {
+            self.total_hint = chunk.total_frames_hint;
+        }
+        self.hops.extend(chunk.hops);
+        self.table = Arc::new(self.table.with_chunk(chunk.frames, chunk.last));
+        let became = !self.playable
+            && (self.table.seconds() >= PLAYABLE_LEAD_SECS || self.table.complete);
+        if became {
+            self.playable = true;
+        }
+        Ok(became)
+    }
+
+    /// The table the mixer plays from, as of the last chunk.
+    pub fn table(&self) -> Arc<StreamPcm> {
+        self.table.clone()
+    }
+
+    pub fn is_playable(&self) -> bool {
+        self.playable
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.table.complete
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.table.sample_rate
+    }
+
+    pub fn frames(&self) -> usize {
+        self.table.len
+    }
+
+    pub fn seconds(&self) -> f64 {
+        self.table.seconds()
+    }
+
+    /// The track's length as far as anyone knows: the container's claim
+    /// until the end, exact from then on.
+    pub fn expected_frames(&self) -> usize {
+        self.table.expected.max(self.table.len)
+    }
+
+    pub fn expected_seconds(&self) -> f64 {
+        self.table.expected_seconds()
+    }
+
+    /// Decoded over expected, when there is an expectation to measure by.
+    pub fn fraction(&self) -> Option<f32> {
+        if self.total_hint.is_none() && !self.table.complete {
+            return None;
+        }
+        let expected = self.expected_frames().max(1) as f64;
+        Some((self.table.len as f64 / expected).clamp(0.0, 1.0) as f32)
+    }
+
+    /// Waveform columns over the expected length — what the strip is
+    /// scaled to, so the picture fills in from the left.
+    pub fn wave_columns(&self) -> usize {
+        let secs = self.expected_frames() as f64 / self.table.sample_rate.max(1) as f64;
+        (secs * ZOOM_COLS_PER_SEC).ceil() as usize
+    }
+
+    /// Let the audio go once the whole file is on the deck. The hops stay:
+    /// they are the picture until the analysis replaces it.
+    pub fn release_audio(&mut self) {
+        self.table = Arc::new(StreamPcm {
+            sample_rate: self.table.sample_rate,
+            chunks: Vec::new(),
+            len: self.table.len,
+            expected: self.table.expected,
+            complete: self.table.complete,
+        });
+    }
+}
+
 /// Min/max waveform columns over the whole clip.
 /// Columns in the pre-listen player's seek strip — one bin per bar.
 pub const PREVIEW_WAVE_COLS: usize = 240;
@@ -2340,7 +2695,32 @@ pub enum PreparedMesh {
     },
 }
 
+/// One ordered piece of a deck's decode, sent while the rest of the file is
+/// still being read. Every chunk is [`STREAM_CHUNK_FRAMES`] long except the
+/// last, which says so; `hops` are the waveform hops those frames make, so
+/// the picture can be drawn as the audio arrives.
+pub struct DeckChunk {
+    pub seq: u32,
+    pub sample_rate: u32,
+    /// The container's own length claim, frames, when it makes one. The
+    /// same on every chunk of a stream.
+    pub total_frames_hint: Option<usize>,
+    pub frames: Arc<Vec<[i16; 2]>>,
+    pub hops: Vec<WaveHop>,
+    pub last: bool,
+}
+
 pub enum DecodeDone {
+    /// A piece of a deck track, ahead of its `Deck` result. In order, and
+    /// only for real loads — the stems prefetch borrows the lane and gets
+    /// its answer whole.
+    DeckChunk {
+        deck: DeckId,
+        gen: u64,
+        chunk: Box<DeckChunk>,
+    },
+    /// The whole track, after its chunks: what the analysis, the stems and
+    /// everything else that needs the file entire is given.
     Deck {
         deck: DeckId,
         gen: u64,
@@ -3577,13 +3957,25 @@ fn test_sleep_marker(path: &Path) -> Option<Duration> {
     Some(Duration::from_millis(ms))
 }
 
-fn run_heavy_job(job: DecodeJob) -> DecodeDone {
+/// Run one job. `done` is for the pieces a deck decode sends ahead of its
+/// result; the result itself is returned.
+fn run_heavy_job(job: DecodeJob, done: &Sender<DecodeDone>) -> DecodeDone {
     match job {
         DecodeJob::Deck { deck, gen, source, media } => {
-            let result = decode_audio_source(&source, media, MAX_TRACK_FRAMES).map(|pcm| {
-                let peaks = wave_peaks(&pcm, WAVE_COLS);
-                (Arc::new(pcm), peaks)
-            });
+            // The stems prefetch borrows this lane under its own
+            // generation and wants the file whole; nothing listens to its
+            // chunks, so none are cut.
+            let streaming = gen != crate::stems::PREFETCH_GEN;
+            let mut sink = |chunk: DeckChunk| {
+                let _ = done.send(DecodeDone::DeckChunk { deck, gen, chunk: Box::new(chunk) });
+            };
+            let sink: Option<&mut dyn FnMut(DeckChunk)> =
+                if streaming { Some(&mut sink) } else { None };
+            let result =
+                decode_deck_stream(&source, media, MAX_TRACK_FRAMES, sink).map(|pcm| {
+                    let peaks = wave_peaks(&pcm, WAVE_COLS);
+                    (Arc::new(pcm), peaks)
+                });
             DecodeDone::Deck { deck, gen, result }
         }
         DecodeJob::Pad { pad, gen, revision, source, media } => {
@@ -3703,7 +4095,7 @@ impl DecodePool {
                         guard.recv()
                     };
                     let Ok(job) = job else { return };
-                    let out = run_heavy_job(job);
+                    let out = run_heavy_job(job, &done);
                     if done.send(out).is_err() {
                         return;
                     }
@@ -4478,11 +4870,25 @@ mod tests {
         });
         let deadline = crate::clock::Instant::now() + Duration::from_secs(10);
         let mut results = Vec::new();
+        let mut chunks = Vec::new();
         while results.len() < 2 && crate::clock::Instant::now() < deadline {
-            results.extend(pool.poll());
+            for done in pool.poll() {
+                match done {
+                    DecodeDone::DeckChunk { deck, gen, chunk } => {
+                        assert_eq!((deck, gen), (DeckId::A, 7));
+                        chunks.push(chunk);
+                    }
+                    other => results.push(other),
+                }
+            }
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(results.len(), 2);
+        // The stream precedes the whole: one (short, last) chunk of 50.
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].last);
+        assert_eq!(chunks[0].frames.len(), 50);
+        assert_eq!(chunks[0].total_frames_hint, Some(50));
         for done in results {
             match done {
                 DecodeDone::Deck { deck, gen, result } => {
@@ -4491,6 +4897,7 @@ mod tests {
                     assert_eq!(pcm.frames.len(), 50);
                     assert_eq!(peaks.len(), WAVE_COLS);
                 }
+                DecodeDone::DeckChunk { .. } => unreachable!("chunks were set aside"),
                 DecodeDone::Pad { gen, result, .. } => {
                     assert_eq!(gen, 9);
                     assert!(result.is_err(), "bad wav must fail");
@@ -4508,6 +4915,133 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A synthetic chunk of `frames` frames at `rate`, numbered `seq`.
+    fn chunk(seq: u32, rate: u32, frames: usize, hint: Option<usize>, last: bool) -> DeckChunk {
+        DeckChunk {
+            seq,
+            sample_rate: rate,
+            total_frames_hint: hint,
+            frames: Arc::new(vec![[seq as i16 + 1, 0]; frames]),
+            hops: vec![WaveHop::default(); frames / (rate as usize / 100).max(1)],
+            last,
+        }
+    }
+
+    #[test]
+    fn a_stream_opens_on_the_lead_and_grows_to_its_end() {
+        let rate = 48_000;
+        let hint = Some(STREAM_CHUNK_FRAMES * 2 + 1_000);
+        let mut stream = DeckStream::new(3);
+        // One full chunk at 48 kHz is ~2.73 s: past the lead.
+        assert!(STREAM_CHUNK_FRAMES as f64 / rate as f64 >= PLAYABLE_LEAD_SECS);
+        assert_eq!(stream.accept(chunk(0, rate, STREAM_CHUNK_FRAMES, hint, false)), Ok(true));
+        assert!(stream.is_playable() && !stream.is_complete());
+        assert_eq!(stream.frames(), STREAM_CHUNK_FRAMES);
+        assert_eq!(stream.expected_frames(), hint.unwrap());
+        let fraction = stream.fraction().expect("a hinted stream measures its progress");
+        assert!((fraction - STREAM_CHUNK_FRAMES as f32 / hint.unwrap() as f32).abs() < 1e-4);
+        // The picture is scaled to the expectation, not to what is in.
+        let expected_cols = (hint.unwrap() as f64 / rate as f64 * ZOOM_COLS_PER_SEC).ceil() as usize;
+        assert_eq!(stream.wave_columns(), expected_cols);
+        assert!(stream.hops.len() < expected_cols);
+
+        // Playable is announced once; growth is silent.
+        assert_eq!(stream.accept(chunk(1, rate, STREAM_CHUNK_FRAMES, hint, false)), Ok(false));
+        assert_eq!(stream.table().chunks.len(), 2);
+        // The end: a short last chunk fixes the length exactly, even when
+        // the container over-claimed.
+        assert_eq!(stream.accept(chunk(2, rate, 500, hint, true)), Ok(false));
+        assert!(stream.is_complete());
+        assert_eq!(stream.frames(), STREAM_CHUNK_FRAMES * 2 + 500);
+        assert_eq!(stream.expected_frames(), stream.frames());
+        assert_eq!(stream.fraction(), Some(1.0));
+        assert!(stream.accept(chunk(3, rate, 10, hint, true)).is_err(), "nothing follows the end");
+        // Releasing the audio keeps the geometry for the picture.
+        stream.release_audio();
+        assert!(stream.table().chunks.is_empty());
+        assert_eq!(stream.expected_frames(), STREAM_CHUNK_FRAMES * 2 + 500);
+    }
+
+    #[test]
+    fn a_short_track_opens_on_its_last_chunk_and_the_mixer_table_reads_it() {
+        let rate = 48_000;
+        let mut stream = DeckStream::new(1);
+        // Under the lead, but whole: playable at once.
+        assert_eq!(stream.accept(chunk(0, rate, 4_800, None, true)), Ok(true));
+        assert!(stream.is_playable() && stream.is_complete());
+        assert_eq!(stream.fraction(), Some(1.0));
+        let table = stream.table();
+        assert_eq!(table.len, 4_800);
+        assert!(table.complete);
+        assert!((table.seconds() - 0.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_chunk_out_of_order_breaks_the_stream_quietly() {
+        let rate = 44_100;
+        let mut stream = DeckStream::new(9);
+        assert_eq!(stream.accept(chunk(0, rate, STREAM_CHUNK_FRAMES, None, false)), Ok(true));
+        // No hint and not complete: nothing to measure progress by.
+        assert_eq!(stream.fraction(), None);
+        assert_eq!(stream.expected_frames(), STREAM_CHUNK_FRAMES);
+        let error = stream.accept(chunk(2, rate, STREAM_CHUNK_FRAMES, None, false)).unwrap_err();
+        assert!(error.contains("expected"), "{error}");
+        // The table stands as it was; later chunks are dropped without a word.
+        assert_eq!(stream.frames(), STREAM_CHUNK_FRAMES);
+        assert_eq!(stream.accept(chunk(3, rate, STREAM_CHUNK_FRAMES, None, false)), Ok(false));
+        assert_eq!(stream.frames(), STREAM_CHUNK_FRAMES);
+        assert!(!stream.is_complete());
+    }
+
+    #[test]
+    fn the_cutter_streams_a_wav_in_order_and_returns_it_whole() {
+        let dir = std::env::temp_dir().join(format!("vj_stream_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Two full chunks and a tail, every frame numbered by position.
+        let total = STREAM_CHUNK_FRAMES * 2 + 12_345;
+        let frames: Vec<(i16, i16)> =
+            (0..total).map(|i| ((i % 30_000) as i16, -((i % 30_000) as i16))).collect();
+        let path = dir.join("numbered.wav");
+        std::fs::write(&path, wav_pcm16(&frames, 44_100)).unwrap();
+
+        let mut chunks: Vec<DeckChunk> = Vec::new();
+        let mut sink = |chunk: DeckChunk| chunks.push(chunk);
+        let pcm = decode_deck_stream(
+            &DecodeSource::Path(path.clone()),
+            MediaType::Wav,
+            MAX_TRACK_FRAMES,
+            Some(&mut sink),
+        )
+        .expect("the numbered wav decodes");
+        assert_eq!(pcm.frames.len(), total);
+        assert_eq!(chunks.len(), 3);
+        let mut assembled: Vec<[i16; 2]> = Vec::new();
+        let mut hops = 0usize;
+        for (index, chunk) in chunks.iter().enumerate() {
+            assert_eq!(chunk.seq as usize, index);
+            assert_eq!(chunk.sample_rate, 44_100);
+            assert_eq!(chunk.total_frames_hint, Some(total));
+            assert_eq!(chunk.last, index == 2);
+            assert_eq!(chunk.frames.len(), if chunk.last { 12_345 } else { STREAM_CHUNK_FRAMES });
+            assembled.extend_from_slice(&chunk.frames);
+            hops += chunk.hops.len();
+        }
+        // The chunks ARE the track, in order, and the hops cover it once.
+        assert_eq!(assembled, pcm.frames);
+        assert_eq!(hops, total.div_ceil(441));
+
+        // Nobody listening: the same track, no chunks cut.
+        let whole = decode_deck_stream(
+            &DecodeSource::Path(path),
+            MediaType::Wav,
+            MAX_TRACK_FRAMES,
+            None,
+        )
+        .expect("decodes without a sink");
+        assert_eq!(whole.frames, pcm.frames);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

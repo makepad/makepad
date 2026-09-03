@@ -4215,6 +4215,9 @@ impl Widget for VjWaveScroll {
 struct WaveLoadView {
     phase: f32,
     progress: Option<f32>,
+    /// The deck is already playing what has arrived: the waveform stays
+    /// in view and the progress is a thin line under it, not a curtain.
+    playable: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -4360,10 +4363,11 @@ pub struct VjWaveOverview {
 }
 
 impl VjWaveOverview {
-    pub fn set_load(&mut self, cx: &mut Cx, visual: Option<(f32, f32, f32)>) {
-        let load = visual.map(|(phase, progress, indeterminate)| WaveLoadView {
+    pub fn set_load(&mut self, cx: &mut Cx, visual: Option<(f32, f32, f32, bool)>) {
+        let load = visual.map(|(phase, progress, indeterminate, playable)| WaveLoadView {
             phase,
             progress: (indeterminate < 0.5).then_some(progress),
+            playable,
         });
         if self.load == load {
             return;
@@ -4763,11 +4767,22 @@ impl Widget for VjWaveOverview {
         self.draw_lane.draw_abs(cx, rect);
         if let Some(load) = self.load {
             let accent = self.draw_load.color;
-            self.draw_load.color = Vec4f::from_u32(0x090c10d9);
-            self.draw_load.draw_abs(cx, rect);
-            let track = Rect {
-                pos: dvec2(rect.pos.x + 12.0, rect.pos.y + rect.size.y * 0.5 - 4.0),
-                size: dvec2((rect.size.x - 24.0).max(1.0), 8.0),
+            // A deck that is already playing keeps its picture: the bar is
+            // a thin line along the bottom edge, where the decoded region
+            // grows under the waveform drawing in above it. A deck still
+            // waiting gets the curtain and the bar across the middle.
+            let track = if load.playable {
+                Rect {
+                    pos: dvec2(rect.pos.x, rect.pos.y + rect.size.y - 3.0),
+                    size: dvec2(rect.size.x.max(1.0), 3.0),
+                }
+            } else {
+                self.draw_load.color = Vec4f::from_u32(0x090c10d9);
+                self.draw_load.draw_abs(cx, rect);
+                Rect {
+                    pos: dvec2(rect.pos.x + 12.0, rect.pos.y + rect.size.y * 0.5 - 4.0),
+                    size: dvec2((rect.size.x - 24.0).max(1.0), 8.0),
+                }
             };
             self.draw_load.color = Vec4f::from_u32(0x2a323cff);
             self.draw_load.draw_abs(cx, track);
