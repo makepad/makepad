@@ -2731,6 +2731,11 @@ pub(crate) const TILE_FADE_SECONDS: f64 = 0.25;
 /// Hard time budget for one placement pass; labels that don't make it are
 /// picked up by the next re-place.
 const LABEL_PLACE_BUDGET_MS: f64 = 7.0;
+/// How many consecutive at-rest follow-up passes a budget-truncated
+/// placement may chain before the tail is given up until the camera moves:
+/// every pass restarts from the top candidates, so a tail that never fits
+/// the rest budget must not become a standing 12 Hz re-place loop.
+const LABEL_FOLLOWUP_MAX: u32 = 4;
 
 /// Inclusive tile-index span covering the half-open world-space interval
 /// `[world_min, world_max)` plus one prefetch tile on either side.
@@ -4124,6 +4129,10 @@ pub struct MapView {
     camera_motion_sig: (f64, f64, f64, f64),
     #[rust]
     needs_label_followup: bool,
+    /// Consecutive at-rest follow-up passes since the last complete one
+    /// (see `LABEL_FOLLOWUP_MAX`).
+    #[rust]
+    label_followups: u32,
     // Shaped text runs keyed by (text hash, len, quantized font_scale bits);
     // shaping dominates label placement cost.
     #[rust]
@@ -7607,7 +7616,12 @@ impl MapView {
         // uniforms the tiles get, so warp-amount changes (and rotation
         // under the fold) ride the GPU exactly like tile geometry.
         let tilt_delta = self.tilt != self.label_cache_tilt;
+        // A budget-truncated pass is never a strict cache hit: its follow-up
+        // wake must run the full at-rest pass, else the truncated placement
+        // (on a slow frame: no labels at all) would stand until the camera
+        // moved far enough to invalidate the cache by itself.
         let cache_strict = self.label_cache_valid
+            && !self.needs_label_followup
             && self.label_cache_zoom == view_zoom
             && rot_delta == 0.0
             && !tilt_delta
@@ -7723,6 +7737,8 @@ impl MapView {
         if self.scratch_candidates.is_empty() {
             self.path_glyphs.clear();
             self.scratch_accepted_plans.clear();
+            self.needs_label_followup = false;
+            self.label_followups = 0;
             self.store_label_cache(draw_tiles, view_zoom, map_offset);
             self.label_perf = label_perf;
             return true;
@@ -7757,7 +7773,11 @@ impl MapView {
                 .last_zoom_change_time
                 .is_none_or(|at| now - at > 0.25);
         let place_budget_ms = if at_rest { 40.0 } else { LABEL_PLACE_BUDGET_MS };
-        let place_start = now;
+        // The budget is for placement: candidate collection and the sort
+        // above are already paid for, and on a slow frame (the web at dense
+        // zooms spends 5-6 ms collecting) charging them here left nothing
+        // for the loop — a pass that placed zero labels and committed that.
+        let place_start = cx.seconds_since_app_start();
         for candidate_index in 0..self.scratch_candidates.len() {
             if (cx.seconds_since_app_start() - place_start).max(0.0) * 1000.0 > place_budget_ms {
                 label_perf.rejected_budget +=
@@ -7906,8 +7926,22 @@ impl MapView {
         // the one this generation keeps.
         self.store_label_cache(draw_tiles, view_zoom, map_offset);
         self.draw_label_plans(cx, Vec2f { x: 0.0, y: 0.0 });
-        // budget-truncated passes need another wake to place the tail
-        self.needs_label_followup = label_perf.rejected_budget > 0;
+        // A budget-truncated pass leaves a tail (on a slow gesture frame:
+        // most of the labels) unplaced: flag it and arm the settle wake so
+        // the next quiet frame runs the full at-rest pass — `cache_strict`
+        // yields to the flag. At rest the chain is capped (every pass
+        // restarts from the top candidates).
+        let truncated = label_perf.rejected_budget > 0;
+        self.label_followups = if at_rest && truncated {
+            self.label_followups + 1
+        } else {
+            0
+        };
+        self.needs_label_followup = truncated && self.label_followups < LABEL_FOLLOWUP_MAX;
+        if self.needs_label_followup {
+            cx.cx.stop_timer(self.zoom_settle_timer);
+            self.zoom_settle_timer = cx.cx.start_timeout(LABEL_SETTLE_SECONDS + 0.02);
+        }
         self.label_perf = label_perf;
         true
     }
