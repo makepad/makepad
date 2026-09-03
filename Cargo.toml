@@ -18,6 +18,8 @@ workspace.members = [
     "apps/route",
     "apps/asset-ui",
     "apps/asset-server",
+    "apps/flow-server",
+    "apps/flow-ui",
     "apps/ai-hub",
     "apps/vj",
     "apps/mixer",

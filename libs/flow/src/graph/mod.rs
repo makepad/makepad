@@ -1,4 +1,5 @@
 use crate::wire::*;
+use makepad_micro_serde::*;
 use makepad_script::*;
 use std::collections::{HashMap, HashSet};
 
@@ -286,6 +287,117 @@ pub fn evaluate(source: &str, file_name: &str) -> Result<Graph, EvalError> {
         })
     } else {
         result
+    }
+}
+
+/// Evaluate the shipped prelude and expose its palette metadata. Field and
+/// object descriptions come through splash's `construction_chain` docs API,
+/// so the HTTP catalog cannot drift from the `/** */` text authors edit.
+pub fn prelude_catalog() -> Result<Vec<NodeTypeCatalog>, EvalError> {
+    let mut host = ScriptVmHost::new(0i32, ());
+    let mut vm = ScriptVm {
+        host: &mut host,
+        bx: Box::new(ScriptVmBase::new()),
+    };
+    vm.bx.captured_errors = Some(Vec::new());
+    vm.new_module(id!(flow));
+    vm.eval(make_mod(PRELUDE_FILE, crate::PRELUDE));
+    let errors = vm.take_errors();
+    if !errors.is_empty() {
+        return Err(error_from_vm(&errors[0], PRELUDE_FILE));
+    }
+    let module = own_value(&vm, vm.bx.heap.modules, "flow")
+        .and_then(|value| value.as_object())
+        .ok_or_else(|| at(PRELUDE_FILE, 1, 1, "prelude module is missing"))?;
+
+    let mut out = Vec::new();
+    for type_name in [
+        "Input", "Text", "Output", "Llm", "Fn", "Http", "Ask", "Gen", "Image", "Upscale",
+    ] {
+        let obj = own_value(&vm, module, type_name)
+            .and_then(|value| value.as_object())
+            .ok_or_else(|| at(PRELUDE_FILE, 1, 1, format!("prelude did not register `{type_name}`")))?;
+        let spec = type_spec(type_name).expect("catalog type has a graph specification");
+        let chain = vm.construction_chain(obj.into());
+        let doc = chain.iter().find_map(|level| level.doc.clone()).unwrap_or_default();
+        let field_doc = |name: &str| {
+            let wanted = LiveId::from_str(name);
+            chain
+                .iter()
+                .find_map(|level| level.field_docs.iter().find_map(|(id, text)| (*id == wanted).then(|| text.clone())))
+                .unwrap_or_default()
+        };
+        let params = spec
+            .params
+            .iter()
+            .map(|param| {
+                let doc = field_doc(param.name);
+                let hint = parse_doc_hint(&doc);
+                let range = match (hint.min, hint.max) {
+                    (Some(min), Some(max)) => Some(ParamRange {
+                        min,
+                        max,
+                        step: hint.step,
+                    }),
+                    _ => None,
+                };
+                NodeParamCatalog {
+                    name: param.name.to_string(),
+                    default: default_json(param.default),
+                    doc,
+                    range,
+                }
+            })
+            .collect();
+        let inputs = spec
+            .inputs
+            .iter()
+            .map(|port| Port { name: port.name.to_string(), ty: port.ty })
+            .collect();
+        let outputs = catalog_outputs(type_name);
+        let domain = match type_name {
+            "Image" => Some("image".to_string()),
+            "Upscale" => Some("upscale".to_string()),
+            _ => None,
+        };
+        out.push(NodeTypeCatalog {
+            type_name: type_name.to_string(),
+            kind: spec.kind.to_string(),
+            domain,
+            ports: NodePortsCatalog { _in: inputs, out: outputs },
+            params,
+            face: format!("{type_name}Face"),
+            doc,
+        });
+    }
+    Ok(out)
+}
+
+fn catalog_outputs(type_name: &str) -> Vec<Port> {
+    match type_name {
+        "Input" | "Text" | "Ask" | "Llm" => vec![Port {
+            name: "text".to_string(),
+            ty: PortType::Text,
+        }],
+        "Http" => vec![
+            Port { name: "value".to_string(), ty: PortType::Text },
+            Port { name: "meta".to_string(), ty: PortType::Json },
+        ],
+        "Image" | "Upscale" => vec![Port {
+            name: "image".to_string(),
+            ty: PortType::Image,
+        }],
+        _ => Vec::new(),
+    }
+}
+
+fn default_json(value: DefaultValue) -> JsonValue {
+    match value {
+        DefaultValue::Null => JsonValue::Null,
+        DefaultValue::Num(value) => JsonValue::F64(value),
+        DefaultValue::Str(value) | DefaultValue::Id(value) => JsonValue::String(value.to_string()),
+        DefaultValue::Arr => JsonValue::Array(Vec::new()),
+        DefaultValue::Obj => JsonValue::Object(HashMap::new()),
     }
 }
 

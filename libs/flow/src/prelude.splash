@@ -175,11 +175,11 @@ mod.flow.Image = mod.flow.Gen{
     domain: "image"
     /** Text describing the desired image. */
     prompt: ""
-    /** one of: 512x512, 768x768, 1024x1024, 768x512, 512x768, 1024x576 */
+    /** 256..2048 step 64 */
     width: 1024
-    /** one of: 512x512, 768x768, 1024x1024, 768x512, 512x768, 1024x576 */
+    /** 256..2048 step 64 */
     height: 1024
-    /** one of: 4, 8, 12, 20, 28, 50 */
+    /** 1..50 */
     steps: 8
     /** Reproducible seed; zero lets the provider choose. */
     seed: 0
