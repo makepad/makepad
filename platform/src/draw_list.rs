@@ -510,9 +510,6 @@ pub struct CxDrawCall {
     pub uniform_buffer_slots: [Option<UniformBuffer>; DRAW_CALL_UNIFORM_BUFFER_SLOTS],
     pub instance_dirty: bool,
     pub uniforms_dirty: bool,
-    /// Bumped whenever either uniform block owned by this draw call changes.
-    /// WebGL uses it to keep retained draw-call UBOs resident between frames.
-    pub uniforms_gen: u64,
     /// Component nesting depth (`Cx::nesting_depth`) at the moment this call
     /// was created. The exploded z-layer view hands this to the shader in
     /// place of the paint-order zbias, so one plane = one nesting level.
@@ -535,15 +532,8 @@ impl CxDrawCall {
             uniform_buffer_slots: draw_vars.uniform_buffer_slots.clone(),
             instance_dirty: true,
             uniforms_dirty: true,
-            uniforms_gen: 1,
             turtle_depth,
         }
-    }
-
-    #[inline]
-    pub fn mark_uniforms_dirty(&mut self) {
-        self.uniforms_dirty = true;
-        self.uniforms_gen = self.uniforms_gen.wrapping_add(1);
     }
 
     /// The z the shader sees in `world.z`. Paint order normally; the emitting
@@ -559,11 +549,7 @@ impl CxDrawCall {
         } else {
             paint_order
         };
-        let changed = self.draw_call_uniforms.set_zbias(z);
-        if changed {
-            self.uniforms_gen = self.uniforms_gen.wrapping_add(1);
-        }
-        changed
+        self.draw_call_uniforms.set_zbias(z)
     }
 }
 
@@ -680,8 +666,6 @@ pub struct CxDrawList {
     pub codeflow_parent_id: Option<DrawListId>, // the id of the parent we nest in, codeflow wise
 
     pub redraw_id: u64,
-    /// Changes on every recording, including repeated recordings in one redraw.
-    pub recording_gen: u64,
     pub draw_pass_id: Option<DrawPassId>,
 
     pub draw_items: CxDrawItems,
@@ -696,8 +680,6 @@ pub struct CxDrawList {
     pub overlay_order: u64,
 
     pub draw_list_uniforms: DrawListUniforms,
-    /// Bumped when this list is recorded or its uniform block is changed.
-    pub uniforms_gen: u64,
     pub draw_list_has_clip: bool,
 
     /// Paint order for a RETAINED sub-list. `None` — every ordinary list —
@@ -729,12 +711,6 @@ pub struct CxRectArea {
 }
 
 impl CxDrawList {
-    #[inline]
-    pub fn set_uniform_view_transform(&mut self, transform: &Mat4f) {
-        self.draw_list_uniforms.view_transform = *transform;
-        self.uniforms_gen = self.uniforms_gen.wrapping_add(1);
-    }
-
     /// Raise a backend walk's running paint-order depth counter to this
     /// sub-list's floor, on the way into it. See [`CxDrawList::overlay_z_lift`].
     ///
@@ -1029,8 +1005,6 @@ impl CxDrawList {
 
     pub fn clear_draw_items(&mut self, redraw_id: u64) {
         self.redraw_id = redraw_id;
-        self.recording_gen = self.recording_gen.wrapping_add(1);
-        self.uniforms_gen = self.uniforms_gen.wrapping_add(1);
         self.draw_items.clear();
         self.draw_item_reorder = None;
         self.rect_areas.clear();
