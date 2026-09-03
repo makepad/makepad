@@ -1,0 +1,9 @@
+[package]
+name = "makepad-app-flow-ui"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-flow = { path = "../../libs/flow", features = ["host"] }

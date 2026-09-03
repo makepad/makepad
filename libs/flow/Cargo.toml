@@ -4,8 +4,16 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[features]
+default = ["client", "host"]
+client = []
+host = []
+
 [dependencies]
 makepad-script = { path = "../../platform/script" }
 makepad-micro-serde = { path = "../micro_serde" }
 makepad-strict-json = { path = "../strict_json" }
+makepad-ai-hub = { path = "../ai/hub", default-features = false }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+makepad-bounded-http = { path = "../bounded_http" }
