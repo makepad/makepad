@@ -1,9 +1,6 @@
 //! Cache semantics: atomic verified commits, resumable partials, pinning,
 //! deterministic eviction under injected time, and fail-closed refusals.
 
-// Native filesystem test uses wall time only to verify metadata aging.
-#![allow(clippy::disallowed_types, clippy::disallowed_methods)]
-
 mod common;
 
 use common::{payload, test_root};
@@ -135,7 +132,7 @@ fn partial_resume_across_writer_drop_and_reopen() {
     let digest = digest_of(&full);
     {
         let mut cache = ContentCache::open(&root, small_budgets(), NOW).unwrap();
-        let mut w = cache.open_partial(&digest).unwrap();
+        let mut w = cache.open_partial_at(&digest, NOW).unwrap();
         assert_eq!(w.resumed_bytes(), 0);
         w.write(&full[..700]).unwrap();
         // Dropping the writer KEEPS the partial (that is the resume point).
@@ -144,7 +141,7 @@ fn partial_resume_across_writer_drop_and_reopen() {
     }
     // A whole new cache instance (process restart) resumes from byte 700.
     let mut cache = ContentCache::open(&root, small_budgets(), NOW + 1).unwrap();
-    let mut w = cache.open_partial(&digest).unwrap();
+    let mut w = cache.open_partial_at(&digest, NOW + 1).unwrap();
     assert_eq!(w.resumed_bytes(), 700);
     w.write(&full[700..]).unwrap();
     let path = cache.commit_partial(w, NOW + 2).unwrap();
@@ -158,7 +155,7 @@ fn partial_digest_mismatch_deletes_partial() {
     let root = test_root("partial_bad");
     let mut cache = ContentCache::open(&root, small_budgets(), NOW).unwrap();
     let digest = digest_of(&payload(60, 100));
-    let mut w = cache.open_partial(&digest).unwrap();
+    let mut w = cache.open_partial_at(&digest, NOW).unwrap();
     w.write(b"wrong bytes entirely").unwrap();
     let err = cache.commit_partial(w, NOW).unwrap_err();
     assert!(matches!(err, ClientError::DigestMismatch { .. }));
@@ -172,7 +169,7 @@ fn partial_reset_restarts_hash_state() {
     let mut cache = ContentCache::open(&root, small_budgets(), NOW).unwrap();
     let full = payload(61, 300);
     let digest = digest_of(&full);
-    let mut w = cache.open_partial(&digest).unwrap();
+    let mut w = cache.open_partial_at(&digest, NOW).unwrap();
     w.write(b"garbage prefix").unwrap();
     w.reset().unwrap();
     assert_eq!(w.resumed_bytes(), 0);
@@ -187,7 +184,7 @@ fn stale_partials_swept_at_open_fresh_kept() {
     let digest = digest_of(&payload(70, 100));
     {
         let mut cache = ContentCache::open(&root, small_budgets(), NOW).unwrap();
-        let mut w = cache.open_partial(&digest).unwrap();
+        let mut w = cache.open_partial_at(&digest, NOW).unwrap();
         w.write(b"resume me").unwrap();
     }
     // Reopen "now": fresh partial survives.
@@ -197,16 +194,7 @@ fn stale_partials_swept_at_open_fresh_kept() {
     }
     // Reopen far in the future: swept.
     let far = NOW + small_budgets().stale_partial_ms + 60 * 60 * 1000;
-    // The file's real mtime is "now" (wall clock), so measure staleness from
-    // real wall time plus the budget.
-    let wall_now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-    let cache =
-        ContentCache::open(&root, small_budgets(), wall_now + small_budgets().stale_partial_ms + 10)
-            .unwrap();
-    let _ = far;
+    let cache = ContentCache::open(&root, small_budgets(), far).unwrap();
     assert_eq!(cache.partial_len(&digest), 0, "stale partial swept");
 }
 

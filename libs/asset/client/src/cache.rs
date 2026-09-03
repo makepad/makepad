@@ -7,6 +7,7 @@
 //! ```text
 //! objects/<first-2-hex>/<64-hex>   committed verified blobs, named by SHA-256
 //! partial/<64-hex>.part            resumable in-flight downloads, by digest
+//! partial/<64-hex>.stamp           caller-supplied wall-clock milliseconds
 //! tmp/w<pid>-<counter>.part        non-resumable staging (swept at open)
 //! pins/<64-hex>                    pin markers (empty files)
 //! lru/<64-hex>                     last-use stamps (ascii milliseconds)
@@ -58,7 +59,7 @@ pub struct CacheBudgets {
     pub max_object_bytes: u64,
     /// Total bytes `partial/` may hold before old partials are swept.
     pub max_partial_bytes: u64,
-    /// A partial older than this (since last write) is deleted at open.
+    /// A partial not opened or resumed for longer than this is deleted.
     pub stale_partial_ms: u64,
     /// Verified blob bytes the client may hold in PROCESS MEMORY across
     /// fetches. Unbounded residency was a leak with a polite name: an app
@@ -297,21 +298,30 @@ impl ContentCache {
         for entry in fs::read_dir(&partial).map_err(io_err("cache read partial"))? {
             let entry = entry.map_err(io_err("cache read partial entry"))?;
             let path = entry.path();
-            if partial_digest_of(&path).is_none() {
+            if partial_stamp_digest_of(&path).is_some() {
+                continue;
+            }
+            let Some(digest) = partial_digest_of(&path) else {
                 // Not a digest-keyed partial: foreign garbage, remove.
                 fs::remove_file(&path).map_err(io_err("cache sweep partial"))?;
                 continue;
-            }
-            let modified = entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .map_err(io_err("cache stat partial"))?;
-            let age_ms = modified
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| now_ms.saturating_sub(d.as_millis() as u64))
-                .unwrap_or(u64::MAX);
+            };
+            let stamp = read_partial_stamp(&partial_stamp_path_in(&partial, &digest));
+            let age_ms = stamp.map(|t| now_ms.saturating_sub(t)).unwrap_or(u64::MAX);
             if age_ms > budgets.stale_partial_ms {
                 fs::remove_file(&path).map_err(io_err("cache sweep stale partial"))?;
+                remove_if_present(&partial_stamp_path_in(&partial, &digest), "cache sweep partial stamp")?;
+            }
+        }
+
+        // A crash can strand a stamp without its partial. It carries no
+        // resumable state and must not accumulate forever.
+        for entry in fs::read_dir(&partial).map_err(io_err("cache read partial stamps"))? {
+            let entry = entry.map_err(io_err("cache read partial stamp entry"))?;
+            let path = entry.path();
+            let Some(digest) = partial_stamp_digest_of(&path) else { continue };
+            if !partial_path_in(&partial, &digest).exists() {
+                fs::remove_file(path).map_err(io_err("cache sweep orphan partial stamp"))?;
             }
         }
 
@@ -419,7 +429,11 @@ impl ContentCache {
     }
 
     fn partial_path(&self, digest: &[u8; 32]) -> PathBuf {
-        self.partial.join(format!("{}.part", to_hex(digest)))
+        partial_path_in(&self.partial, digest)
+    }
+
+    fn partial_stamp_path(&self, digest: &[u8; 32]) -> PathBuf {
+        partial_stamp_path_in(&self.partial, digest)
     }
 
     fn touch(&self, digest: &[u8; 32], now_ms: u64) -> ClientResult<()> {
@@ -611,9 +625,20 @@ impl ContentCache {
     /// state covers exactly what is on disk; `resumed_bytes()` tells the
     /// caller which Range offset to request.
     pub fn open_partial(&mut self, expected: &[u8; 32]) -> ClientResult<PartialWriter> {
+        self.open_partial_at(expected, crate::util::now_ms())
+    }
+
+    /// Timestamp-injected form of [`Self::open_partial`], used by callers
+    /// that already own the wall clock and by deterministic tests.
+    pub fn open_partial_at(
+        &mut self,
+        expected: &[u8; 32],
+        now_ms: u64,
+    ) -> ClientResult<PartialWriter> {
         // Keep the partial area under budget: sweep other, oldest partials.
         self.sweep_partials_for_budget(expected)?;
         let path = self.partial_path(expected);
+        let stamp_path = self.partial_stamp_path(expected);
         let mut hasher = Sha256::new();
         let mut written = 0u64;
         // Append mode: every later write lands at EOF, i.e. exactly after the
@@ -649,9 +674,11 @@ impl ContentCache {
                 .map_err(io_err("cache create partial"))?,
             Err(e) => return Err(io_err("cache open partial")(e)),
         };
+        fs::write(&stamp_path, now_ms.to_string()).map_err(io_err("cache write partial stamp"))?;
         Ok(PartialWriter {
             file,
             path,
+            stamp_path,
             expected: *expected,
             hasher,
             written,
@@ -660,26 +687,24 @@ impl ContentCache {
     }
 
     fn sweep_partials_for_budget(&self, keep: &[u8; 32]) -> ClientResult<()> {
-        let mut entries: Vec<(PathBuf, u64, u128)> = Vec::new();
+        let mut entries: Vec<(PathBuf, PathBuf, u64, u64)> = Vec::new();
         let mut total = 0u64;
         for entry in fs::read_dir(&self.partial).map_err(io_err("cache read partial"))? {
             let entry = entry.map_err(io_err("cache read partial entry"))?;
+            let path = entry.path();
+            let Some(digest) = partial_digest_of(&path) else { continue };
             let meta = entry.metadata().map_err(io_err("cache stat partial"))?;
             total = total.saturating_add(meta.len());
-            let modified = meta
-                .modified()
-                .map_err(io_err("cache stat partial"))?
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            entries.push((entry.path(), meta.len(), modified));
+            let stamp_path = self.partial_stamp_path(&digest);
+            let stamp = read_partial_stamp(&stamp_path).unwrap_or(0);
+            entries.push((path, stamp_path, meta.len(), stamp));
         }
         if total <= self.budgets.max_partial_bytes {
             return Ok(());
         }
         let keep_path = self.partial_path(keep);
-        entries.sort_by_key(|(_, _, modified)| *modified);
-        for (path, size, _) in entries {
+        entries.sort_by(|a, b| a.3.cmp(&b.3).then_with(|| a.0.cmp(&b.0)));
+        for (path, stamp_path, size, _) in entries {
             if total <= self.budgets.max_partial_bytes {
                 break;
             }
@@ -687,6 +712,7 @@ impl ContentCache {
                 continue;
             }
             fs::remove_file(&path).map_err(io_err("cache sweep partial budget"))?;
+            remove_if_present(&stamp_path, "cache sweep partial budget stamp")?;
             total = total.saturating_sub(size);
         }
         Ok(())
@@ -701,11 +727,12 @@ impl ContentCache {
         writer: PartialWriter,
         now_ms: u64,
     ) -> ClientResult<PathBuf> {
-        let PartialWriter { file, path, expected, hasher, written, .. } = writer;
+        let PartialWriter { file, path, stamp_path, expected, hasher, written, .. } = writer;
         let digest = hasher.finalize();
         if digest != expected {
             drop(file);
             let _ = fs::remove_file(&path);
+            let _ = fs::remove_file(&stamp_path);
             return Err(ClientError::DigestMismatch {
                 what: "cache commit partial",
                 expected,
@@ -717,6 +744,7 @@ impl ContentCache {
             // object wins; sizes must agree.
             drop(file);
             let _ = fs::remove_file(&path);
+            let _ = fs::remove_file(&stamp_path);
             if size != written {
                 return Err(ClientError::SizeMismatch {
                     what: "cache dedup object",
@@ -736,6 +764,9 @@ impl ContentCache {
         file.flush().map_err(io_err("cache flush partial"))?;
         drop(file);
         self.commit_file(&path, &digest, written, now_ms)?;
+        // The object is already committed; a disposable orphan stamp must
+        // not turn that success into an error.
+        let _ = fs::remove_file(&stamp_path);
         Ok(self.object_path(&digest))
     }
 
@@ -747,11 +778,8 @@ impl ContentCache {
     /// Drop any partial for `expected` (used after a digest mismatch so the
     /// next attempt starts clean).
     pub fn discard_partial(&mut self, expected: &[u8; 32]) -> ClientResult<()> {
-        match fs::remove_file(self.partial_path(expected)) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(io_err("cache discard partial")(e)),
-        }
+        remove_if_present(&self.partial_path(expected), "cache discard partial")?;
+        remove_if_present(&self.partial_stamp_path(expected), "cache discard partial stamp")
     }
 
     // ---- verified reads ----------------------------------------------------
@@ -825,6 +853,7 @@ impl ContentCache {
 pub struct PartialWriter {
     file: File,
     path: PathBuf,
+    stamp_path: PathBuf,
     expected: [u8; 32],
     hasher: Sha256,
     written: u64,
@@ -879,6 +908,36 @@ fn partial_digest_of(path: &Path) -> Option<[u8; 32]> {
     let name = path.file_name()?.to_str()?;
     let hex = name.strip_suffix(".part")?;
     from_hex_exact::<32>(hex)
+}
+
+fn partial_stamp_digest_of(path: &Path) -> Option<[u8; 32]> {
+    if path.extension().and_then(|s| s.to_str()) != Some("stamp") {
+        return None;
+    }
+    let stem = path.file_stem()?.to_str()?;
+    from_hex_exact::<32>(stem)
+}
+
+fn partial_path_in(dir: &Path, digest: &[u8; 32]) -> PathBuf {
+    dir.join(format!("{}.part", to_hex(digest)))
+}
+
+fn partial_stamp_path_in(dir: &Path, digest: &[u8; 32]) -> PathBuf {
+    dir.join(format!("{}.stamp", to_hex(digest)))
+}
+
+fn read_partial_stamp(path: &Path) -> Option<u64> {
+    let mut value = String::new();
+    File::open(path).ok()?.take(32).read_to_string(&mut value).ok()?;
+    value.trim().parse().ok()
+}
+
+fn remove_if_present(path: &Path, what: &'static str) -> ClientResult<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(io_err(what)(e)),
+    }
 }
 
 #[cfg(test)]

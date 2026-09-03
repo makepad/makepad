@@ -1035,7 +1035,7 @@ impl AssetClient {
         abort: &dyn Fn() -> bool,
     ) -> ClientResult<PathBuf> {
         let digest = *blob.as_bytes();
-        let mut writer = self.cache().open_partial(&digest)?;
+        let mut writer = self.cache().open_partial_at(&digest, now_ms())?;
 
         // A partial already at/above the expected size cannot be extended by
         // a range request; it is either complete (commit will prove it) or
