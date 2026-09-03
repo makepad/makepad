@@ -30,6 +30,7 @@ pub enum RunEvent {
         instance: String,
         flow: String,
         revision: u64,
+        planned_nodes: Vec<String>,
     },
     NodeStarted {
         node: String,
@@ -103,11 +104,13 @@ impl RunEvent {
                 instance,
                 flow,
                 revision,
+                planned_nodes,
             } => Wire::RunStarted {
                 run_id: run_id.0.clone(),
                 instance: instance.clone(),
                 flow: flow.clone(),
                 revision: *revision,
+                planned_nodes: planned_nodes.clone(),
             },
             Self::NodeStarted { node } => Wire::NodeStarted { node: node.clone() },
             Self::NodeProgress {
@@ -250,11 +253,17 @@ pub fn spawn_run_with_policy(
                 .and_then(|name| name.to_str())
                 .unwrap_or(&input.file_name)
                 .to_string();
+            let mut planned_nodes: Vec<String> =
+                scheduler::selected_nodes(&input.graph, input.outputs.as_deref())
+                    .into_iter()
+                    .collect();
+            planned_nodes.sort();
             let _ = events.send(RunEvent::RunStarted {
                 run_id: input.run_id.clone(),
                 instance: input.instance.clone(),
                 flow,
                 revision: input.graph_revision,
+                planned_nodes,
             });
             let loaded = FlowVm::load(&input.source, &input.file_name);
             let (mut vm, mut run_graph) = match loaded {

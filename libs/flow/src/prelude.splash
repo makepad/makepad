@@ -11,6 +11,12 @@ mod.flow.ui = {
     GenFace: {}
     ImageFace: {}
     UpscaleFace: {}
+    ValueImage: {}
+    ValueText: {}
+    ValueJson: {}
+    ValueAudio: {}
+    ValueVideo: {}
+    ValueMesh: {}
 }
 mod.flow.ImageFace = mod.flow.ui.ImageFace
 mod.flow.InputFace = mod.flow.ui.InputFace

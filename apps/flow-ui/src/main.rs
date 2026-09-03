@@ -17,6 +17,7 @@ mod faces;
 mod graph_edit;
 mod panels;
 mod testpattern;
+mod theme;
 mod values;
 
 use canvas::{CanvasEdit, FlowCanvas, FlowCanvasAction, NodeStatus};
@@ -31,7 +32,8 @@ use makepad_flow::host::{FlowServer, FlowServerConfig};
 use makepad_flow::{
     CreateInstanceRequest, CreateInstanceResponse, CreateRunResponse, Event as FlowEvent,
     FlowDefinition, FlowSummary, Graph, InstanceRow, Literal, ModelsResponse, NodeTypeCatalog,
-    NodesResponse, PortType, PutFlowResponse, TemplateSummary, ValueRef,
+    NodeState, NodesResponse, PortType, PutFlowResponse, RunRowDto, RunState, TemplateSummary,
+    ValueRef,
 };
 use makepad_widgets::makepad_draw::text::selection::Cursor;
 use makepad_widgets::makepad_platform::thread::SignalToUI;
@@ -92,7 +94,7 @@ script_mod! {
         margin: Inset{top: 6 bottom: 2}
         text: ""
         draw_text +: {
-            color: #x6e6e76
+            color: theme.flow_text_subtle
             text_style: theme.font_bold{font_size: 8.5}
         }
     }
@@ -107,11 +109,11 @@ script_mod! {
         spacing: theme.space_1
         show_bg: true
         draw_bg +: {
-            color: #x161618e8
+            color: theme.flow_surface_translucent
             border_radius: 12.0
             border_size: 1.0
-            border_color: #x232327
-            shadow_color: #0005
+            border_color: theme.flow_surface_hover
+            shadow_color: theme.flow_shadow
             shadow_radius: 12.0
             shadow_offset: vec2(0.0, 0.0)
         }
@@ -122,10 +124,10 @@ script_mod! {
         height: Fill
         size: 8.0
         draw_bg +: {
-            color_bg: #0000
-            color: #x26262c
-            color_hover: #x6b5148
-            color_drag: #xff5c39
+            color_bg: theme.flow_clear
+            color: theme.flow_divider
+            color_hover: theme.flow_accent_hover
+            color_drag: theme.flow_accent
             splitter_pad: 2.0
             bar_size: 72.0
             border_radius: 2.0
@@ -137,7 +139,7 @@ script_mod! {
         height: Fit
         text: ""
         draw_text +: {
-            color: #x8a8a92
+            color: theme.flow_text_muted
             text_style: theme.font_regular{font_size: 9.5}
         }
     }
@@ -150,10 +152,10 @@ script_mod! {
         padding: Inset{left: 16 right: 16 top: 12 bottom: 14}
         show_bg: true
         draw_bg +: {
-            color: #x1c1c1f
+            color: theme.flow_surface
             border_radius: 14.0
             border_size: 1.0
-            border_color: #x33333a
+            border_color: theme.flow_edge_soft
         }
     }
 
@@ -162,7 +164,7 @@ script_mod! {
             main_window := Window{
                 window.title: "Flow"
                 window.inner_size: vec2(1800, 1000)
-                pass.clear_color: #x0f0f10
+                pass.clear_color: theme.flow_window
                 body +: {
                     width: Fill
                     height: Fill
@@ -250,11 +252,11 @@ script_mod! {
                                 align: Align{y: 0.5}
                                 show_bg: true
                                 draw_bg +: {
-                                    color: #x161618e8
+                                    color: theme.flow_surface_translucent
                                     border_radius: 12.0
                                     border_size: 1.0
-                                    border_color: #x232327
-                                    shadow_color: #0005
+                                    border_color: theme.flow_surface_hover
+                                    shadow_color: theme.flow_shadow
                                     shadow_radius: 12.0
                                     shadow_offset: vec2(0.0, 0.0)
                                 }
@@ -263,7 +265,7 @@ script_mod! {
                                     height: 8
                                     draw_bg +: {
                                         border_radius: 4.0
-                                        color: #x8a8a92
+                                        color: theme.flow_text_muted
                                     }
                                 }
                                 status_chip := ToolText{text: "Discovering"}
@@ -273,7 +275,7 @@ script_mod! {
                                     margin: Inset{left: 10}
                                     text: "No flow open"
                                     draw_text +: {
-                                        color: #xe8e8ec
+                                        color: theme.flow_text
                                         text_style: theme.font_bold{font_size: 11}
                                     }
                                 }
@@ -334,7 +336,7 @@ script_mod! {
                                                             height: Fit
                                                             text: "Drag a card onto the canvas to add a node."
                                                             draw_text +: {
-                                                                color: #x5e5e66
+                                                                color: theme.flow_text_hint
                                                                 text_style: theme.font_regular{font_size: 8.5}
                                                             }
                                                         }
@@ -416,7 +418,7 @@ script_mod! {
                                 height: Fit
                                 text: ""
                                 draw_text +: {
-                                    color: #xf26d6d
+                                    color: theme.flow_error
                                     text_style: theme.font_regular{font_size: 9}
                                 }
                             }
@@ -445,7 +447,7 @@ script_mod! {
                                         text: ""
                                         draw_text +: {
                                             text_style: theme.font_bold{font_size: 11}
-                                            color: #xe8e8ec
+                                            color: theme.flow_text
                                         }
                                     }
                                     help_close := ButtonFlat{text: "Close"}
@@ -458,10 +460,60 @@ script_mod! {
                                         height: Fit
                                         text: ""
                                         draw_text +: {
-                                            color: #xd0d0d4
+                                            color: theme.flow_text_body
                                             text_style: theme.font_regular{font_size: 9.5}
                                         }
                                     }
+                                }
+                            }
+                        }
+                        value_preview_view := View{
+                            width: Fill
+                            height: Fill
+                            flow: Overlay
+                            visible: false
+                            preview_scrim := RoundedView{
+                                width: Fill
+                                height: Fill
+                                show_bg: true
+                                draw_bg +: {color: theme.flow_scrim}
+                            }
+                            preview_panel := RoundedShadowView{
+                                width: Fill
+                                height: Fill
+                                margin: Inset{left: 36 right: 36 top: 36 bottom: 36}
+                                padding: Inset{left: 14 right: 14 top: 12 bottom: 14}
+                                spacing: theme.space_2
+                                flow: Down
+                                show_bg: true
+                                draw_bg +: {
+                                    color: theme.flow_surface
+                                    border_color: theme.flow_edge_soft
+                                    border_size: 1.0
+                                    border_radius: 14.0
+                                    shadow_color: theme.flow_shadow
+                                    shadow_radius: 18.0
+                                }
+                                preview_head := View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    align: Align{y: 0.5}
+                                    preview_title := Label{
+                                        width: Fill
+                                        height: Fit
+                                        text: "Value"
+                                        draw_text +: {
+                                            color: theme.flow_text
+                                            text_style: theme.font_bold{font_size: 11}
+                                        }
+                                    }
+                                    preview_save := Button{text: "Save…"}
+                                    preview_close := ButtonFlat{text: "Close"}
+                                }
+                                preview_value := mod.flow.ui.ValueView{
+                                    width: Fill
+                                    height: Fill
                                 }
                             }
                         }
@@ -476,6 +528,7 @@ enum IoResult {
     Flows(Result<Vec<FlowSummary>, ClientError>),
     Flow {
         name: String,
+        generation: u64,
         result: Result<FlowDefinition, ClientError>,
     },
     Saved {
@@ -499,16 +552,52 @@ enum IoResult {
     },
     InstanceCreated {
         flow: String,
+        generation: u64,
         result: Result<CreateInstanceResponse, ClientError>,
     },
     InstanceRunStarted {
         flow: String,
+        generation: u64,
+        request_generation: u64,
+        planned_nodes: Vec<String>,
+        journal: InputJournal,
         result: Result<(String, CreateRunResponse), ClientError>,
     },
     Instances(Result<Vec<InstanceRow>, ClientError>),
-    Instance(Result<InstanceRow, ClientError>),
-    RunStarted(Result<CreateRunResponse, ClientError>),
+    Instance {
+        instance: String,
+        generation: u64,
+        result: Result<InstanceRow, ClientError>,
+    },
+    RunStarted {
+        instance: String,
+        generation: u64,
+        request_generation: u64,
+        planned_nodes: Vec<String>,
+        journal: InputJournal,
+        result: Result<CreateRunResponse, ClientError>,
+    },
+    InputsPut {
+        instance: String,
+        generation: u64,
+        journal: InputJournal,
+        result: Result<(), ClientError>,
+    },
+    RunSnapshot {
+        instance: String,
+        generation: u64,
+        run_id: String,
+        result: Result<RunRowDto, ClientError>,
+    },
     Done(Result<(), ClientError>),
+}
+
+type InputKey = (String, String);
+type InputJournal = HashMap<InputKey, String>;
+
+#[derive(Clone)]
+struct RunRequest {
+    outputs: Option<Vec<String>>,
 }
 
 #[derive(Default)]
@@ -534,6 +623,8 @@ struct RunInfo {
     state: String,
     started: f64,
     finished_secs: Option<f64>,
+    revision: u64,
+    planned_nodes: Vec<String>,
 }
 
 #[derive(Script, ScriptHook)]
@@ -542,6 +633,8 @@ pub struct App {
     ui: WidgetRef,
     #[rust]
     host: Option<FlowServer>,
+    #[rust]
+    testpattern_service: Option<testpattern::TestpatternService>,
     #[rust]
     session: Option<SessionConnector>,
     #[rust]
@@ -572,6 +665,12 @@ pub struct App {
     #[rust]
     instance: Option<String>,
     #[rust]
+    attachment_generation: u64,
+    #[rust]
+    run_request_generation: u64,
+    #[rust]
+    run_start_in_flight: bool,
+    #[rust]
     instance_row: Option<InstanceRow>,
     #[rust]
     instances: Vec<InstanceRow>,
@@ -601,6 +700,12 @@ pub struct App {
     #[rust]
     pending_inputs: HashMap<(String, String), String>,
     #[rust]
+    input_flush_in_flight: bool,
+    #[rust]
+    deferred_run: Option<RunRequest>,
+    #[rust]
+    deferred_flow_reload: bool,
+    #[rust]
     pending_params: HashMap<(String, String), Literal>,
     #[rust]
     pending_graph: bool,
@@ -613,6 +718,12 @@ pub struct App {
     #[rust]
     preview_digest: Option<(String, String)>,
     #[rust]
+    preview_bytes: Option<makepad_flow::ValueBytes>,
+    #[rust]
+    save_dialog_bytes: Option<makepad_flow::ValueBytes>,
+    #[rust]
+    save_task: Option<makepad_widgets::makepad_platform::thread::TaskHandle<Result<std::path::PathBuf, String>>>,
+    #[rust]
     time: f64,
     #[rust]
     services: FlowServices,
@@ -624,6 +735,8 @@ pub struct App {
     last_error: Option<String>,
     #[rust]
     menu_state: (bool, bool, bool, bool),
+    #[rust]
+    menu_state_initialized: bool,
     /// Splitter positions are widget state; these two slots only remember a
     /// pane's live size while that pane is collapsed by a View-menu toggle.
     #[rust]
@@ -652,8 +765,10 @@ impl App {
                     .filter(|value| !value.is_empty())
                 {
                     let seams = if value == "testpattern" {
-                        match testpattern::start_service_url() {
-                            Ok(url) => {
+                        match testpattern::start_service() {
+                            Ok(service) => {
+                                let url = service.url.clone();
+                                self.testpattern_service = Some(service);
                                 log!("flow-ui: testpattern hub service at {url} — gen and chat are stand-ins");
                                 Some(Seams {
                                     chat: Arc::new(testpattern::TestpatternChat),
@@ -712,6 +827,91 @@ impl App {
         self.session.as_ref().and_then(|session| session.client())
     }
 
+    fn run_is_active(&self) -> bool {
+        self.run.as_ref().is_some_and(|run| {
+            matches!(run.state.as_str(), "queued" | "running" | "waiting")
+        })
+    }
+
+    fn display_run(&mut self, cx: &mut Cx, run: RunInfo) {
+        let changed = self.run.as_ref().map(|old| old.run_id.as_str())
+            != Some(run.run_id.as_str());
+        self.run = Some(run);
+        if changed {
+            self.current_node = None;
+            self.outputs.clear();
+            if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
+                canvas.clear_run(cx);
+            }
+            if let Some(faces) = self.faces.as_mut() {
+                faces.reset_run();
+            }
+        }
+        self.update_run_bar(cx);
+    }
+
+    fn detach_faces(&mut self, cx: &mut Cx) {
+        if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
+            canvas.set_face_roots(cx, Vec::new());
+        }
+        if let Some(faces) = self.faces.take() {
+            faces.free(cx);
+        }
+    }
+
+    fn clear_attachment(&mut self, cx: &mut Cx) {
+        self.detach_faces(cx);
+        self.close_preview(cx);
+        self.attachment_generation = self.attachment_generation.wrapping_add(1);
+        self.run_request_generation = self.run_request_generation.wrapping_add(1);
+        self.run_start_in_flight = false;
+        self.instance = None;
+        self.instance_row = None;
+        self.run = None;
+        self.outputs.clear();
+        self.current_node = None;
+        self.pending_inputs.clear();
+        self.input_flush_in_flight = false;
+        self.deferred_run = None;
+    }
+
+    /// The sole instance ownership transition. Old isolate roots are removed
+    /// before its VM is freed; only a known matching definition may remount.
+    fn attach_instance(&mut self, cx: &mut Cx, instance: Option<String>, mount: bool) {
+        if self.instance == instance {
+            if mount && self.faces.is_none() {
+                self.remount_faces(cx);
+            }
+            return;
+        }
+        self.clear_attachment(cx);
+        self.instance = instance;
+        if mount && self.instance.is_some() && self.definition.is_some() {
+            self.remount_faces(cx);
+        }
+    }
+
+    fn focus_instance(&mut self, cx: &mut Cx, instance: String, flow: Option<String>) {
+        if flow.as_deref() == self.selected.as_deref() && self.definition.is_some() {
+            self.attach_instance(cx, Some(instance), true);
+        } else {
+            self.clear_attachment(cx);
+            self.instance = Some(instance);
+            self.definition = None;
+            if let Some(flow) = flow {
+                self.selected = Some(flow.clone());
+                self.unsaved = false;
+                self.revisions.clear();
+                self.redo.clear();
+                self.ui.label(cx, ids!(flow_name)).set_text(cx, &flow);
+                self.show_flow_list(cx);
+                self.load_flow(flow);
+            }
+        }
+        self.fetch_instance();
+        self.refresh_instances();
+    }
+
     /// Run one client call on a worker thread; the result lands in the
     /// mailbox and wakes the UI.
     fn io<F>(&self, f: F)
@@ -739,10 +939,10 @@ impl App {
         };
         let status = session.status();
         let (text, color) = match &status {
-            SessionStatus::Discovering => ("Discovering".to_string(), vec4(0.55, 0.55, 0.58, 1.0)),
-            SessionStatus::Connecting { .. } => ("Connecting…".to_string(), vec4(0.95, 0.76, 0.3, 1.0)),
+            SessionStatus::Discovering => ("Discovering".to_string(), theme::state_color("cancelled")),
+            SessionStatus::Connecting { .. } => ("Connecting…".to_string(), theme::state_color("waiting")),
             SessionStatus::Retrying { in_secs, .. } => {
-                (format!("Retrying in {in_secs} s"), vec4(0.95, 0.43, 0.43, 1.0))
+                (format!("Retrying in {in_secs} s"), theme::state_color("failed"))
             }
             SessionStatus::Connected { .. } => (
                 format!(
@@ -753,7 +953,7 @@ impl App {
                         .map(|definition| definition.revision)
                         .unwrap_or(0)
                 ),
-                vec4(0.30, 0.77, 0.42, 1.0),
+                theme::state_color("done"),
             ),
         };
         self.ui.label(cx, ids!(status_chip)).set_text(cx, &text);
@@ -829,13 +1029,23 @@ impl App {
         let Some(id) = self.instance.clone() else {
             return;
         };
-        self.io(move |client| IoResult::Instance(client.instance(&id)));
+        let generation = self.attachment_generation;
+        self.io(move |client| IoResult::Instance {
+            instance: id.clone(),
+            generation,
+            result: client.instance(&id),
+        });
     }
 
     fn load_flow(&mut self, name: String) {
+        let generation = self.attachment_generation;
         self.io(move |client| {
             let result = client.flow(&name);
-            IoResult::Flow { name, result }
+            IoResult::Flow {
+                name,
+                generation,
+                result,
+            }
         });
     }
 
@@ -860,12 +1070,11 @@ impl App {
     }
 
     fn open_flow(&mut self, cx: &mut Cx, name: String) {
+        self.clear_attachment(cx);
         self.selected = Some(name.clone());
+        self.definition = None;
         self.unsaved = false;
-        self.instance = None;
-        self.instance_row = None;
-        self.run = None;
-        self.outputs.clear();
+        self.deferred_flow_reload = false;
         self.revisions.clear();
         self.redo.clear();
         self.ui.label(cx, ids!(flow_name)).set_text(cx, &name);
@@ -896,15 +1105,19 @@ impl App {
             .max_by_key(|row| row.last_activity_ms)
             .map(|row| row.instance.clone());
         if let Some(id) = existing {
-            self.instance = Some(id);
-            self.remount_faces(cx);
+            self.attach_instance(cx, Some(id), true);
             self.fetch_instance();
             return;
         }
         self.binding = true;
+        let generation = self.attachment_generation;
         self.io(move |client| {
             let result = client.create_instance(&flow, &CreateInstanceRequest::default());
-            IoResult::InstanceCreated { flow, result }
+            IoResult::InstanceCreated {
+                flow,
+                generation,
+                result,
+            }
         });
     }
 
@@ -1059,8 +1272,14 @@ impl App {
                         Err(error) => self.show_error(cx, &error),
                     }
                 }
-                IoResult::Flow { name, result } => {
-                    if self.selected.as_deref() != Some(&name) {
+                IoResult::Flow {
+                    name,
+                    generation,
+                    result,
+                } => {
+                    if self.selected.as_deref() != Some(&name)
+                        || generation != self.attachment_generation
+                    {
                         continue;
                     }
                     match result {
@@ -1176,15 +1395,20 @@ impl App {
                         }
                     }
                 }
-                IoResult::InstanceCreated { flow, result } => {
+                IoResult::InstanceCreated {
+                    flow,
+                    generation,
+                    result,
+                } => {
                     self.binding = false;
-                    if self.selected.as_deref() != Some(&flow) {
+                    if self.selected.as_deref() != Some(&flow)
+                        || generation != self.attachment_generation
+                    {
                         continue;
                     }
                     match result {
                         Ok(response) => {
-                            self.instance = Some(response.instance);
-                            self.remount_faces(cx);
+                            self.attach_instance(cx, Some(response.instance), true);
                             self.fetch_instance();
                             self.refresh_instances();
                         }
@@ -1193,14 +1417,39 @@ impl App {
                         }
                     }
                 }
-                IoResult::InstanceRunStarted { flow, result } => {
-                    if self.selected.as_deref() != Some(&flow) {
+                IoResult::InstanceRunStarted {
+                    flow,
+                    generation,
+                    request_generation,
+                    planned_nodes,
+                    journal,
+                    result,
+                } => {
+                    if self.selected.as_deref() != Some(&flow)
+                        || generation != self.attachment_generation
+                    {
                         continue;
                     }
+                    if !request_generation_matches(
+                        self.run_request_generation,
+                        request_generation,
+                    ) {
+                        if result.is_err() {
+                            merge_failed_input_journal(&mut self.pending_inputs, journal);
+                        }
+                        continue;
+                    }
+                    self.run_start_in_flight = false;
+                    let deferred = self.deferred_run.take();
                     match result {
                         Ok((instance, response)) => {
-                            self.instance = Some(instance);
-                            self.run = Some(RunInfo {
+                            // Edits made while instance creation was in flight
+                            // belong to the new instance, not to the empty
+                            // attachment that is about to be cleared.
+                            let newer_inputs = std::mem::take(&mut self.pending_inputs);
+                            self.attach_instance(cx, Some(instance), true);
+                            self.pending_inputs = newer_inputs;
+                            self.display_run(cx, RunInfo {
                                 run_id: response.run_id,
                                 state: if response.queued == 0 {
                                     "running".into()
@@ -1209,13 +1458,23 @@ impl App {
                                 },
                                 started: self.time,
                                 finished_secs: None,
+                                revision: self
+                                    .definition
+                                    .as_ref()
+                                    .map_or(0, |definition| definition.revision),
+                                planned_nodes,
                             });
-                            self.remount_faces(cx);
                             self.fetch_instance();
+                            self.fetch_run_snapshot();
                             self.refresh_instances();
-                            self.update_run_bar(cx);
                         }
-                        Err(error) => self.show_error(cx, &error),
+                        Err(error) => {
+                            merge_failed_input_journal(&mut self.pending_inputs, journal);
+                            self.show_error(cx, &error);
+                        }
+                    }
+                    if let Some(request) = deferred {
+                        self.start_run(request.outputs);
                     }
                 }
                 IoResult::Instances(result) => {
@@ -1230,17 +1489,25 @@ impl App {
                         self.maybe_auto_open(cx);
                     }
                 }
-                IoResult::Instance(result) => match result {
+                IoResult::Instance {
+                    instance,
+                    generation,
+                    result,
+                } => {
+                    if !attachment_matches(
+                        self.instance.as_deref(),
+                        self.attachment_generation,
+                        &instance,
+                        generation,
+                    ) {
+                        continue;
+                    }
+                    match result {
                     Ok(row) => {
-                        if self.instance.as_deref() == Some(row.instance.as_str()) {
+                        if row.instance == instance {
                             if self.selected.as_deref() != Some(row.flow.as_str()) {
-                                self.selected = Some(row.flow.clone());
-                                self.unsaved = false;
-                                self.revisions.clear();
-                                self.ui
-                                    .label(cx, ids!(flow_name))
-                                    .set_text(cx, &row.flow);
-                                self.load_flow(row.flow.clone());
+                                let instance = row.instance.clone();
+                                self.focus_instance(cx, instance, Some(row.flow.clone()));
                             }
                             let chip = format!(
                                 "{} · {}",
@@ -1250,6 +1517,21 @@ impl App {
                                 row.state
                             );
                             self.ui.label(cx, ids!(instance_chip)).set_text(cx, &chip);
+                            let recover_run = !self.run_is_active()
+                                && row.run.as_ref().is_some_and(|run_id| {
+                                    self.run.as_ref().map(|run| run.run_id.as_str())
+                                        != Some(run_id.as_str())
+                                });
+                            if recover_run {
+                                self.run = Some(RunInfo {
+                                    run_id: row.run.clone().unwrap(),
+                                    state: row.state.clone(),
+                                    started: self.time,
+                                    finished_secs: None,
+                                    revision: row.revision,
+                                    planned_nodes: Vec::new(),
+                                });
+                            }
                             if let Some(faces) = self.faces.as_mut() {
                                 faces.fill_inputs(cx, &row);
                             }
@@ -1276,27 +1558,120 @@ impl App {
                                 }
                             }
                             self.instance_row = Some(row);
+                            if recover_run {
+                                self.fetch_run_snapshot();
+                            }
                             self.update_run_bar(cx);
                         }
                     }
                     Err(error) => self.show_error(cx, &error),
-                },
-                IoResult::RunStarted(result) => match result {
-                    Ok(response) => {
-                        self.run = Some(RunInfo {
-                            run_id: response.run_id,
-                            state: if response.queued == 0 {
-                                "running".into()
-                            } else {
-                                "queued".into()
-                            },
-                            started: self.time,
-                            finished_secs: None,
-                        });
-                        self.update_run_bar(cx);
                     }
-                    Err(error) => self.show_error(cx, &error),
-                },
+                }
+                IoResult::RunStarted {
+                    instance,
+                    generation,
+                    request_generation,
+                    planned_nodes,
+                    journal,
+                    result,
+                } => {
+                    if !attachment_matches(
+                        self.instance.as_deref(),
+                        self.attachment_generation,
+                        &instance,
+                        generation,
+                    ) {
+                        continue;
+                    }
+                    if !request_generation_matches(
+                        self.run_request_generation,
+                        request_generation,
+                    ) {
+                        if result.is_err() {
+                            merge_failed_input_journal(&mut self.pending_inputs, journal);
+                        }
+                        continue;
+                    }
+                    self.run_start_in_flight = false;
+                    let deferred = self.deferred_run.take();
+                    match result {
+                        Ok(response) => {
+                            self.display_run(cx, RunInfo {
+                                run_id: response.run_id,
+                                state: if response.queued == 0 {
+                                    "running".into()
+                                } else {
+                                    "queued".into()
+                                },
+                                started: self.time,
+                                finished_secs: None,
+                                revision: self
+                                    .definition
+                                    .as_ref()
+                                    .map_or(0, |definition| definition.revision),
+                                planned_nodes,
+                            });
+                            self.fetch_run_snapshot();
+                        }
+                        Err(error) => {
+                            merge_failed_input_journal(&mut self.pending_inputs, journal);
+                            self.show_error(cx, &error);
+                        }
+                    }
+                    if let Some(request) = deferred {
+                        self.start_run(request.outputs);
+                    }
+                }
+                IoResult::InputsPut {
+                    instance,
+                    generation,
+                    journal,
+                    result,
+                } => {
+                    if !attachment_matches(
+                        self.instance.as_deref(),
+                        self.attachment_generation,
+                        &instance,
+                        generation,
+                    )
+                    {
+                        continue;
+                    }
+                    self.input_flush_in_flight = false;
+                    match result {
+                        Ok(()) => {
+                            if let Some(request) = self.deferred_run.take() {
+                                self.start_run(request.outputs);
+                            }
+                        }
+                        Err(error) => {
+                            merge_failed_input_journal(&mut self.pending_inputs, journal);
+                            self.show_error(cx, &error);
+                        }
+                    }
+                }
+                IoResult::RunSnapshot {
+                    instance,
+                    generation,
+                    run_id,
+                    result,
+                } => {
+                    if !attachment_matches(
+                        self.instance.as_deref(),
+                        self.attachment_generation,
+                        &instance,
+                        generation,
+                    )
+                        || self.run.as_ref().map(|run| run.run_id.as_str())
+                            != Some(run_id.as_str())
+                    {
+                        continue;
+                    }
+                    match result {
+                        Ok(row) => self.apply_run_row(cx, row),
+                        Err(error) => self.show_error(cx, &error),
+                    }
+                }
                 IoResult::Done(result) => {
                     if let Err(error) = result {
                         self.show_error(cx, &error);
@@ -1528,39 +1903,18 @@ impl App {
         self.set_error(cx, &text);
     }
 
-    /// The run's total progress, computed here from the node rows (the
-    /// server's run row has no `progress` field): done nodes plus the running
-    /// ones' permille over the nodes in the run, skipped ones excluded.
+    /// Exact §3 progress: `(done + running_fraction) / planned_nodes`.
+    /// Terminal color is selected independently by `RunBar` from `state`.
     fn update_run_bar(&mut self, cx: &mut Cx) {
-        let graph = self.current_graph();
         let (fraction, done, total) = {
             let canvas = self.ui.widget(cx, ids!(canvas));
             let canvas = canvas.borrow::<FlowCanvas>();
-            let mut sum = 0.0;
-            let mut done = 0usize;
-            let mut total = 0usize;
-            if let (Some(graph), Some(canvas)) = (graph.as_ref(), canvas.as_ref()) {
-                for node in &graph.nodes {
-                    match canvas.statuses.get(&node.id) {
-                        Some(status) if status.state == "skipped" => {}
-                        Some(status) if matches!(status.state.as_str(), "done" | "failed") => {
-                            total += 1;
-                            done += 1;
-                            sum += 1.0;
-                        }
-                        Some(status) if status.state == "running" && status.has_progress => {
-                            total += 1;
-                            sum += status.permille as f64 / 1000.0;
-                        }
-                        _ => total += 1,
-                    }
-                }
-            }
-            (
-                if total > 0 { sum / total as f64 } else { 0.0 },
-                done,
-                total,
-            )
+            self.run
+                .as_ref()
+                .zip(canvas.as_ref())
+                .map_or((0.0, 0, 0), |(run, canvas)| {
+                    total_progress(&run.planned_nodes, &canvas.statuses)
+                })
         };
         let (state, text) = match (&self.run, &self.instance_row) {
             (Some(run), _) => {
@@ -1575,7 +1929,6 @@ impl App {
             (None, Some(row)) => (String::new(), row.state.clone()),
             (None, None) => (String::new(), String::new()),
         };
-        let fraction = if state == "done" { 1.0 } else { fraction };
         self.ui.label(cx, ids!(run_state)).set_text(cx, &text);
         if let Some(mut bar) = self.ui.widget(cx, ids!(run_bar)).borrow_mut::<RunBar>() {
             bar.set_progress(cx, fraction, &state);
@@ -1584,14 +1937,15 @@ impl App {
     }
 
     fn update_menu_state(&mut self, cx: &mut Cx) {
-        let running = self.run.as_ref().is_some_and(|run| matches!(run.state.as_str(), "running" | "queued"));
+        let running = self.run_is_active();
         let has_selected = self.selected_node.is_some();
         let can_undo = self.revisions.len() >= 2;
         let can_redo = !self.redo.is_empty();
         let next = (running, has_selected, can_undo, can_redo);
-        if next == self.menu_state {
+        if self.menu_state_initialized && next == self.menu_state {
             return;
         }
+        self.menu_state_initialized = true;
         self.menu_state = next;
         let menu = self.ui.menu_bar(cx, ids!(menu_bar));
         menu.set_enabled(cx, live_id!(cancel), running);
@@ -1613,10 +1967,16 @@ impl App {
         let events = subscriber.poll();
         for event in events {
             match event {
-                SubscriptionEvent::Ready | SubscriptionEvent::ResyncRequired => {
+                SubscriptionEvent::Ready => {
                     self.refresh_flows();
                     self.refresh_instances();
                     self.fetch_instance();
+                }
+                SubscriptionEvent::ResyncRequired => {
+                    self.refresh_flows();
+                    self.refresh_instances();
+                    self.fetch_instance();
+                    self.fetch_run_snapshot();
                 }
                 SubscriptionEvent::Events(events) => {
                     for event in events {
@@ -1635,7 +1995,12 @@ impl App {
                 self.refresh_flows();
                 self.services.refresh_definitions();
                 if !self.unsaved && event.name.as_deref() == self.selected.as_deref() {
-                    if let Some(name) = event.name {
+                    if self.run_is_active() {
+                        self.deferred_flow_reload |= self
+                            .run
+                            .as_ref()
+                            .is_some_and(|run| event.revision != Some(run.revision));
+                    } else if let Some(name) = event.name {
                         self.load_flow(name);
                     }
                 }
@@ -1666,25 +2031,25 @@ impl App {
             }
             return;
         }
+        let event_run_id = event.run_id.as_deref().unwrap_or_default();
+        if !run_event_belongs(self.run.as_ref(), &event.kind, event_run_id) {
+            if event.kind == "run.started" && !self.run_is_active() {
+                self.fetch_instance();
+            }
+            return;
+        }
         let node = event.node.clone().unwrap_or_default();
         match event.kind.as_str() {
             "run.started" => {
-                self.current_node = None;
-                self.outputs.clear();
-                self.run = Some(RunInfo {
+                self.display_run(cx, RunInfo {
                     run_id: event.run_id.clone().unwrap_or_default(),
                     state: "running".into(),
                     started: self.time,
                     finished_secs: None,
+                    revision: event.revision.unwrap_or(0),
+                    planned_nodes: event.planned_nodes.clone().unwrap_or_default(),
                 });
-                if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
-                    canvas.clear_run(cx);
-                }
-                if let Some(faces) = self.faces.as_mut() {
-                    faces.reset_run();
-                }
                 self.refresh_instances();
-                self.update_run_bar(cx);
             }
             "node.started" => self.set_node_status(cx, &node, "running", 0, false, "", None),
             "node.progress" => {
@@ -1728,6 +2093,11 @@ impl App {
             }
             "node.failed" => {
                 let error = event.error_text();
+                if self.last_error.is_none() {
+                    if let Some(error) = error.as_deref() {
+                        self.set_error(cx, error);
+                    }
+                }
                 self.set_node_status(cx, &node, "failed", 0, false, "", error);
             }
             "node.skipped" => {
@@ -1747,6 +2117,25 @@ impl App {
                     run.state = state.clone();
                     run.finished_secs = event.secs;
                 }
+                let unresolved = self
+                    .run
+                    .as_ref()
+                    .map(|run| run.planned_nodes.clone())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|node| {
+                        self.ui
+                            .widget(cx, ids!(canvas))
+                            .borrow::<FlowCanvas>()
+                            .and_then(|canvas| canvas.statuses.get(node).cloned())
+                            .is_none_or(|status| {
+                                matches!(status.state.as_str(), "pending" | "ready" | "running" | "waiting")
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                for node in unresolved {
+                    self.set_node_status(cx, &node, "cancelled", 0, false, "", None);
+                }
                 if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
                     let streaming: Vec<String> = canvas.streaming.iter().cloned().collect();
                     for node in streaming {
@@ -1760,6 +2149,12 @@ impl App {
                 self.refresh_instances();
                 self.fetch_instance();
                 self.update_run_bar(cx);
+                if self.deferred_flow_reload {
+                    self.deferred_flow_reload = false;
+                    if let Some(name) = self.selected.clone() {
+                        self.load_flow(name);
+                    }
+                }
             }
             _ => {}
         }
@@ -1833,15 +2228,24 @@ impl App {
     /// Text inputs are debounced by the poll tick (250 ms); everything else
     /// is written on the same tick it changed.
     fn flush_pending(&mut self, cx: &mut Cx) {
-        if !self.pending_inputs.is_empty() && self.instance.is_some() {
-            let id = self.instance.clone().unwrap();
-            let body = self.take_pending_input_body();
+        if !self.pending_inputs.is_empty()
+            && !self.input_flush_in_flight
+            && self.instance.is_some()
+            && self.client().is_some()
+        {
+            let instance = self.instance.clone().unwrap();
+            let generation = self.attachment_generation;
+            let journal = std::mem::take(&mut self.pending_inputs);
+            let body = input_journal_body(self.current_graph().as_ref(), &journal);
+            self.input_flush_in_flight = true;
             self.io(move |client| {
-                IoResult::Done(
-                    client
-                        .put_inputs(&id, "tab", &body)
-                        .map(|_| ()),
-                )
+                let result = client.put_inputs(&instance, "tab", &body).map(|_| ());
+                IoResult::InputsPut {
+                    instance,
+                    generation,
+                    journal,
+                    result,
+                }
             });
         }
         if !self.pending_params.is_empty() && !self.pending_graph {
@@ -1895,16 +2299,37 @@ impl App {
     }
 
     fn start_run(&mut self, outputs: Option<Vec<String>>) {
-        let inputs = (!self.pending_inputs.is_empty()).then(|| self.take_pending_input_body());
-        if let Some(id) = self.instance.clone() {
+        if self.input_flush_in_flight || self.run_start_in_flight {
+            self.deferred_run = Some(RunRequest { outputs });
+            return;
+        }
+        if self.client().is_none() {
+            return;
+        }
+        let journal = std::mem::take(&mut self.pending_inputs);
+        let input_body = (!journal.is_empty())
+            .then(|| input_journal_body(self.current_graph().as_ref(), &journal));
+        let planned_nodes = planned_nodes_for(self.current_graph().as_ref(), outputs.as_deref());
+        let generation = self.attachment_generation;
+        self.run_request_generation = self.run_request_generation.wrapping_add(1);
+        let request_generation = self.run_request_generation;
+        self.run_start_in_flight = true;
+        if let Some(instance) = self.instance.clone() {
             self.io(move |client| {
                 let result = (|| {
-                    if let Some(inputs) = inputs.as_ref() {
-                        client.put_inputs(&id, "tab", inputs)?;
+                    if let Some(inputs) = input_body.as_ref() {
+                        client.put_inputs(&instance, "tab", inputs)?;
                     }
-                    client.start_run(&id, outputs.as_deref())
+                    client.start_run(&instance, outputs.as_deref())
                 })();
-                IoResult::RunStarted(result)
+                IoResult::RunStarted {
+                    instance,
+                    generation,
+                    request_generation,
+                    planned_nodes,
+                    journal,
+                    result,
+                }
             });
             return;
         }
@@ -1914,37 +2339,110 @@ impl App {
         self.io(move |client| {
             let result = (|| {
                 let created = client.create_instance(&flow, &CreateInstanceRequest::default())?;
-                if let Some(inputs) = inputs.as_ref() {
+                if let Some(inputs) = input_body.as_ref() {
                     client.put_inputs(&created.instance, "tab", inputs)?;
                 }
                 let started = client.start_run(&created.instance, outputs.as_deref())?;
                 Ok((created.instance, started))
             })();
-            IoResult::InstanceRunStarted { flow, result }
+            IoResult::InstanceRunStarted {
+                flow,
+                generation,
+                request_generation,
+                planned_nodes,
+                journal,
+                result,
+            }
         });
     }
 
-    fn take_pending_input_body(&mut self) -> makepad_strict_json::Value {
-        let graph = self.current_graph();
-        let pending = std::mem::take(&mut self.pending_inputs);
-        let mut by_node: HashMap<String, Vec<(String, makepad_strict_json::Value)>> =
-            HashMap::new();
-        for ((node, port), text) in pending {
-            let ty = graph
-                .as_ref()
-                .and_then(|graph| instance_input_type(graph, &node, &port))
-                .unwrap_or(PortType::Text);
-            by_node
-                .entry(node)
-                .or_default()
-                .push((port, input_value_json(ty, text)));
+    fn fetch_run_snapshot(&self) {
+        let (Some(instance), Some(run)) = (self.instance.clone(), self.run.as_ref()) else {
+            return;
+        };
+        let generation = self.attachment_generation;
+        let run_id = run.run_id.clone();
+        self.io(move |client| IoResult::RunSnapshot {
+            instance,
+            generation,
+            result: client.run(&run_id),
+            run_id,
+        });
+    }
+
+    fn apply_run_row(&mut self, cx: &mut Cx, row: RunRowDto) {
+        let state = run_state_name(row.state).to_string();
+        let terminal = matches!(row.state, RunState::Done | RunState::Failed | RunState::Cancelled);
+        let finished_secs = row
+            .finished_ms
+            .map(|finished| finished.saturating_sub(row.started_ms) as f64 / 1000.0);
+        let started = self.run.as_ref().map_or(self.time, |run| run.started);
+        self.run = Some(RunInfo {
+            run_id: row.run_id.clone(),
+            state: state.clone(),
+            started,
+            finished_secs,
+            revision: row.revision,
+            planned_nodes: row.planned_nodes.clone(),
+        });
+        self.outputs.clear();
+        if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
+            canvas.clear_run(cx);
         }
-        makepad_strict_json::Value::Obj(
-            by_node
-                .into_iter()
-                .map(|(node, ports)| (node, makepad_strict_json::Value::Obj(ports)))
-                .collect(),
-        )
+        if let Some(faces) = self.faces.as_mut() {
+            faces.reset_run();
+        }
+
+        let mut first_error = None;
+        for node in &row.planned_nodes {
+            let source = row.nodes.get(node);
+            let mut node_state = source.map_or(NodeState::Pending, |node| node.state);
+            node_state = reconciled_node_state(row.state, node_state);
+            let state_name = node_state_name(node_state);
+            let progress = source.and_then(|node| node.progress);
+            let stage = source.and_then(|node| node.stage.as_deref()).unwrap_or_default();
+            let error = source.and_then(|node| node.error.clone());
+            if first_error.is_none() {
+                first_error = error.clone();
+            }
+            self.set_node_status(
+                cx,
+                node,
+                state_name,
+                progress.unwrap_or(0),
+                progress.is_some(),
+                stage,
+                error,
+            );
+            if let Some(text) = source.and_then(|node| node.text.as_deref()) {
+                if let Some(faces) = self.faces.as_mut() {
+                    faces.push_delta(cx, node, "text", text);
+                }
+            }
+            if let Some(source) = source {
+                for output in &source.outputs {
+                    self.record_value(cx, node, &output.port, output.value.clone());
+                }
+            }
+        }
+        for (node, value) in row.outputs {
+            let port = self.output_face_port(&node);
+            self.record_value(cx, &node, &port, value);
+        }
+        if let Some(error) = first_error {
+            self.set_error(cx, &error);
+        }
+        if let Some(faces) = self.faces.as_mut() {
+            faces.push_state(cx, "run", &state);
+        }
+        self.request_wanted_values(cx);
+        self.update_run_bar(cx);
+        if terminal && self.deferred_flow_reload {
+            self.deferred_flow_reload = false;
+            if let Some(name) = self.selected.clone() {
+                self.load_flow(name);
+            }
+        }
     }
 
     fn cancel_run(&mut self) {
@@ -2176,17 +2674,8 @@ impl App {
         let Some(name) = self.selected.take() else {
             return;
         };
-        if let Some(faces) = self.faces.take() {
-            if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
-                canvas.set_face_roots(cx, Vec::new());
-            }
-            faces.free(cx);
-        }
+        self.clear_attachment(cx);
         self.definition = None;
-        self.instance = None;
-        self.instance_row = None;
-        self.run = None;
-        self.outputs.clear();
         self.ui.label(cx, ids!(flow_name)).set_text(cx, "No flow open");
         self.ui.label(cx, ids!(instance_chip)).set_text(cx, "");
         self.show_graph(cx);
@@ -2280,12 +2769,7 @@ impl App {
 
     fn shutdown(&mut self, cx: &mut Cx) {
         self.services.shutdown();
-        if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
-            canvas.set_face_roots(cx, Vec::new());
-        }
-        if let Some(faces) = self.faces.take() {
-            faces.free(cx);
-        }
+        self.detach_faces(cx);
         if let Some(subscriber) = self.subscriber.take() {
             subscriber.request_stop();
         }
@@ -2295,6 +2779,7 @@ impl App {
         if let Some(host) = self.host.take() {
             host.shutdown();
         }
+        self.testpattern_service.take();
     }
 
     fn refresh_ai_context(&mut self) {
@@ -2353,18 +2838,23 @@ impl App {
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         for action in actions {
+            if let Some(dialog) = action.downcast_ref::<
+                makepad_widgets::makepad_platform::file_dialogs::FileDialogAction,
+            >() {
+                self.handle_preview_save_dialog(cx, dialog);
+            }
             if let Some(call) = action.downcast_ref::<FaceBridgeCall>() {
                 self.handle_bridge_call(call.clone());
             }
             if let Some(action) = action.downcast_ref::<FlowUiAction>() {
                 match action {
                     FlowUiAction::Focus { instance } => {
-                        self.instance = Some(instance.clone());
-                        self.instance_row = None;
-                        self.run = None;
-                        self.outputs.clear();
-                        self.fetch_instance();
-                        self.refresh_instances();
+                        let flow = self
+                            .instances
+                            .iter()
+                            .find(|row| row.instance == *instance)
+                            .map(|row| row.flow.clone());
+                        self.focus_instance(cx, instance.clone(), flow);
                     }
                     FlowUiAction::Select { node } => {
                         self.selected_node = Some(node.clone());
@@ -2416,6 +2906,12 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(help_close)).clicked(actions) {
             self.ui.view(cx, ids!(help_view)).set_visible(cx, false);
             self.ui.redraw(cx);
+        }
+        if self.ui.button(cx, ids!(preview_close)).clicked(actions) {
+            self.close_preview(cx);
+        }
+        if self.ui.button(cx, ids!(preview_save)).clicked(actions) {
+            self.save_preview(cx);
         }
         if self.ui.button(cx, ids!(save_btn)).clicked(actions) {
             if let Some(name) = self.selected.clone() {
@@ -2633,29 +3129,13 @@ impl MatchEvent for App {
                         .iter()
                         .find(|row| row.instance == id)
                         .map(|row| row.flow.clone());
-                    if let Some(flow) = flow {
-                        if self.selected.as_deref() != Some(flow.as_str()) {
-                            self.selected = Some(flow.clone());
-                            self.unsaved = false;
-                            self.revisions.clear();
-                            self.ui.label(cx, ids!(flow_name)).set_text(cx, &flow);
-                            self.show_flow_list(cx);
-                            self.load_flow(flow);
-                        }
-                        self.instance = Some(id);
-                        self.run = None;
-                        self.outputs.clear();
-                        self.remount_faces(cx);
-                        self.fetch_instance();
-                        self.refresh_instances();
-                    }
+                    self.focus_instance(cx, id, flow);
                 }
                 RunningAction::Stop(id) => {
                     let target = id.clone();
                     self.io(move |client| IoResult::Done(client.delete_instance(&target)));
                     if self.instance.as_deref() == Some(id.as_str()) {
-                        self.instance = None;
-                        self.instance_row = None;
+                        self.attach_instance(cx, None, false);
                     }
                 }
                 RunningAction::Duplicate(id) => {
@@ -2665,13 +3145,18 @@ impl MatchEvent for App {
                         .find(|row| row.instance == id)
                         .map(|row| row.flow.clone());
                     if let Some(flow) = flow {
+                        let generation = self.attachment_generation;
                         self.io(move |client| {
                             let request = CreateInstanceRequest {
                                 label: Some("copy".to_string()),
                                 ..CreateInstanceRequest::default()
                             };
                             let result = client.create_instance(&flow, &request);
-                            IoResult::InstanceCreated { flow, result }
+                            IoResult::InstanceCreated {
+                                flow,
+                                generation,
+                                result,
+                            }
                         });
                     }
                 }
@@ -2681,8 +3166,8 @@ impl MatchEvent for App {
 
         // Faces: bound widgets → instance inputs / graph params; pictures → open.
         let mut opens = Vec::new();
-        if let Some(faces) = self.faces.as_ref() {
-            for (node, port, text) in faces.bind_changes(actions) {
+        if let Some(faces) = self.faces.as_mut() {
+            for (node, port, text) in faces.bind_changes(cx, actions) {
                 self.pending_inputs.insert((node, port), text);
             }
             let mut params = faces.param_changes(cx, actions);
@@ -2700,6 +3185,81 @@ impl MatchEvent for App {
 }
 
 impl App {
+    fn close_preview(&mut self, cx: &mut Cx) {
+        self.preview_digest = None;
+        self.preview_bytes = None;
+        self.ui
+            .view(cx, ids!(value_preview_view))
+            .set_visible(cx, false);
+        self.ui.redraw(cx);
+    }
+
+    fn save_preview(&mut self, cx: &mut Cx) {
+        let Some(bytes) = self.preview_bytes.clone() else {
+            return;
+        };
+        let extension = value_file_extension(&bytes.content_type);
+        let stem = self
+            .preview_digest
+            .as_ref()
+            .map(|(_, label)| label.as_str())
+            .unwrap_or("value");
+        self.save_dialog_bytes = Some(bytes);
+        cx.open_save_file_dialog(
+            makepad_widgets::makepad_platform::file_dialogs::FileDialog::new()
+                .set_id(live_id!(save_flow_value))
+                .set_title("Save flow output".into())
+                .set_filename(format!("{stem}.{extension}"))
+                .add_filter(format!("{extension} file"), vec![extension.into()]),
+        );
+    }
+
+    fn handle_preview_save_dialog(
+        &mut self,
+        cx: &mut Cx,
+        action: &makepad_widgets::makepad_platform::file_dialogs::FileDialogAction,
+    ) {
+        use makepad_widgets::makepad_platform::file_dialogs::FileDialogAction;
+        match action {
+            FileDialogAction::SaveFileSelected { id, path }
+                if *id == live_id!(save_flow_value) =>
+            {
+                let Some(value) = self.save_dialog_bytes.take() else {
+                    return;
+                };
+                let path = path.clone();
+                let bytes = value.bytes;
+                match cx.task_pool().submit(
+                    makepad_widgets::makepad_platform::thread::Lane::Light,
+                    move || {
+                        std::fs::write(&path, bytes.as_ref())
+                            .map(|_| path)
+                            .map_err(|error| error.to_string())
+                    },
+                ) {
+                    Ok(task) => self.save_task = Some(task),
+                    Err(error) => self.set_error(cx, &format!("could not queue save: {error}")),
+                }
+            }
+            FileDialogAction::SaveFileCancelled { id } if *id == live_id!(save_flow_value) => {
+                self.save_dialog_bytes = None;
+            }
+            _ => {}
+        }
+    }
+
+    fn drain_save_task(&mut self, cx: &mut Cx) {
+        let Some(result) = self.save_task.as_mut().and_then(|task| task.try_take()) else {
+            return;
+        };
+        self.save_task = None;
+        match result {
+            Ok(Ok(path)) => self.set_error(cx, &format!("saved {}", path.display())),
+            Ok(Err(error)) => self.set_error(cx, &format!("save failed: {error}")),
+            Err(error) => self.set_error(cx, &format!("save worker failed: {error}")),
+        }
+    }
+
     fn show_preview(&mut self, cx: &mut Cx, bytes: &makepad_flow::ValueBytes) {
         let text = if bytes.content_type.starts_with("image/") {
             String::new()
@@ -2709,6 +3269,37 @@ impl App {
         if let Some(mut inspector) = self.ui.widget(cx, ids!(inspector)).borrow_mut::<Inspector>() {
             inspector.set_preview(Some((text, bytes.clone())));
         }
+        self.preview_bytes = Some(bytes.clone());
+        let title = self
+            .preview_digest
+            .as_ref()
+            .map(|(_, label)| label.as_str())
+            .unwrap_or("Value");
+        self.ui
+            .label(cx, ids!(preview_title))
+            .set_text(cx, title);
+        if let Some(mut value) = self
+            .ui
+            .widget(cx, ids!(preview_value))
+            .borrow_mut::<faces::ValueView>()
+        {
+            value.set_card_sized(cx, true);
+            if bytes.content_type.starts_with("image/") {
+                value.set_image(cx, bytes);
+            } else {
+                let text = String::from_utf8_lossy(&bytes.bytes);
+                let text = if text.is_empty() {
+                    format!("{} · {}", bytes.content_type, faces::size_text(bytes.bytes.len()))
+                } else {
+                    text.chars().take(16 * 1024).collect()
+                };
+                value.set_text(cx, &text);
+            }
+        }
+        self.ui
+            .view(cx, ids!(value_preview_view))
+            .set_visible(cx, true);
+        self.ui.redraw(cx);
         self.refresh_inspector(cx);
     }
 
@@ -2734,6 +3325,21 @@ impl App {
                 }
             }
         }
+        self.drain_save_task(cx);
+    }
+}
+
+fn value_file_extension(content_type: &str) -> &'static str {
+    match content_type.split(';').next().unwrap_or(content_type).trim() {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "audio/wav" | "audio/x-wav" => "wav",
+        "audio/mpeg" => "mp3",
+        "video/mp4" => "mp4",
+        "application/json" => "json",
+        "text/plain" | "text/markdown" => "txt",
+        _ => "bin",
     }
 }
 
@@ -2742,6 +3348,8 @@ impl AppMain for App {
         makepad_widgets::script_mod(vm);
         makepad_code_editor::script_mod(vm);
         makepad_aichat::script_mod(vm);
+        theme::script_mod(vm);
+        faces::register_host_widgets(vm);
         canvas::script_mod(vm);
         panels::script_mod(vm);
         self::script_mod(vm)
@@ -2753,6 +3361,11 @@ impl AppMain for App {
         }
         if let Event::NextFrame(nf) = event {
             self.time = nf.time;
+        }
+        if matches!(event, Event::KeyDown(e) if e.key_code == KeyCode::Escape)
+            && self.ui.view(cx, ids!(value_preview_view)).visible()
+        {
+            self.close_preview(cx);
         }
         self.services.handle_event(cx, event);
         self.match_event(cx, event);
@@ -2825,6 +3438,10 @@ impl AppMain for App {
                 None => self.ui.handle_event(cx, event, &mut Scope::empty()),
             }
         }
+        let text_editing = widget_tree_has_text_focus(&self.ui, cx);
+        self.ui
+            .menu_bar(cx, ids!(menu_bar))
+            .handle_shortcut(cx, event, text_editing);
         if self.poll_timer.is_event(event).is_some() || matches!(event, Event::Signal) {
             self.drain_io(cx);
             self.drain_values(cx);
@@ -2834,7 +3451,7 @@ impl AppMain for App {
             if self.source_mode {
                 self.highlight_caret_node(cx);
             }
-            if self.run.as_ref().is_some_and(|run| matches!(run.state.as_str(), "running" | "queued")) {
+            if self.run_is_active() {
                 self.update_run_bar(cx);
             }
             self.refresh_models(false);
@@ -2846,9 +3463,159 @@ impl AppMain for App {
     }
 }
 
+fn widget_tree_has_text_focus(root: &WidgetRef, cx: &Cx) -> bool {
+    if root.borrow::<TextInput>().is_some() && cx.has_key_focus(root.area()) {
+        return true;
+    }
+    let mut children = Vec::new();
+    root.children(&mut |_, child| children.push(child));
+    children
+        .iter()
+        .any(|child| widget_tree_has_text_focus(child, cx))
+}
+
+fn merge_failed_input_journal(pending: &mut InputJournal, journal: InputJournal) {
+    for (key, value) in journal {
+        pending.entry(key).or_insert(value);
+    }
+}
+
+fn attachment_matches(
+    current_instance: Option<&str>,
+    current_generation: u64,
+    response_instance: &str,
+    response_generation: u64,
+) -> bool {
+    current_generation == response_generation && current_instance == Some(response_instance)
+}
+
+fn request_generation_matches(current: u64, response: u64) -> bool {
+    current == response
+}
+
+fn run_event_belongs(current: Option<&RunInfo>, kind: &str, event_run_id: &str) -> bool {
+    if kind == "run.started" {
+        return current.map(|run| run.run_id.as_str()) == Some(event_run_id);
+    }
+    if kind.starts_with("node.") || kind == "run.finished" {
+        return current.map(|run| run.run_id.as_str()) == Some(event_run_id);
+    }
+    true
+}
+
+fn reconciled_node_state(run: RunState, node: NodeState) -> NodeState {
+    if matches!(run, RunState::Done | RunState::Failed | RunState::Cancelled)
+        && matches!(
+            node,
+            NodeState::Pending | NodeState::Ready | NodeState::Running | NodeState::Waiting
+        )
+    {
+        NodeState::Cancelled
+    } else {
+        node
+    }
+}
+
+fn input_journal_body(graph: Option<&Graph>, journal: &InputJournal) -> makepad_strict_json::Value {
+    let mut by_node: HashMap<String, Vec<(String, makepad_strict_json::Value)>> = HashMap::new();
+    for ((node, port), text) in journal {
+        let ty = graph
+            .and_then(|graph| instance_input_type(graph, node, port))
+            .unwrap_or(PortType::Text);
+        by_node
+            .entry(node.clone())
+            .or_default()
+            .push((port.clone(), input_value_json(ty, text.clone())));
+    }
+    makepad_strict_json::Value::Obj(
+        by_node
+            .into_iter()
+            .map(|(node, ports)| (node, makepad_strict_json::Value::Obj(ports)))
+            .collect(),
+    )
+}
+
+fn planned_nodes_for(graph: Option<&Graph>, outputs: Option<&[String]>) -> Vec<String> {
+    let Some(graph) = graph else {
+        return Vec::new();
+    };
+    let requested: Vec<String> = outputs.map_or_else(
+        || {
+            graph
+                .nodes
+                .iter()
+                .filter(|node| node.kind == "output")
+                .map(|node| node.id.clone())
+                .collect()
+        },
+        |outputs| outputs.to_vec(),
+    );
+    let index = graph_edit::GraphIndex::new(&graph);
+    let mut planned = HashSet::new();
+    for node in requested {
+        planned.insert(node.clone());
+        planned.extend(
+            index
+                .ancestor_indices(&node)
+                .into_iter()
+                .map(|index| graph.nodes[index].id.clone()),
+        );
+    }
+    let mut planned: Vec<String> = planned.into_iter().collect();
+    planned.sort();
+    planned
+}
+
+fn total_progress(
+    planned_nodes: &[String],
+    statuses: &HashMap<String, NodeStatus>,
+) -> (f64, usize, usize) {
+    let mut contribution = 0.0;
+    let mut done = 0;
+    for node in planned_nodes {
+        match statuses.get(node) {
+            Some(status) if status.state == "done" => {
+                done += 1;
+                contribution += 1.0;
+            }
+            Some(status) if status.state == "running" && status.has_progress => {
+                contribution += status.permille as f64 / 1000.0;
+            }
+            _ => {}
+        }
+    }
+    let total = planned_nodes.len();
+    (if total == 0 { 0.0 } else { contribution / total as f64 }, done, total)
+}
+
+fn run_state_name(state: RunState) -> &'static str {
+    match state {
+        RunState::Queued => "queued",
+        RunState::Running => "running",
+        RunState::Waiting => "waiting",
+        RunState::Done => "done",
+        RunState::Failed => "failed",
+        RunState::Cancelled => "cancelled",
+    }
+}
+
+fn node_state_name(state: NodeState) -> &'static str {
+    match state {
+        NodeState::Pending => "pending",
+        NodeState::Ready => "ready",
+        NodeState::Running => "running",
+        NodeState::Waiting => "waiting",
+        NodeState::Done => "done",
+        NodeState::Failed => "failed",
+        NodeState::Skipped => "skipped",
+        NodeState::Cancelled => "cancelled",
+    }
+}
+
 #[cfg(test)]
 mod layout_tests {
     use super::*;
+    use makepad_flow::NodeRowDto;
 
     #[test]
     fn splitter_panel_layout_mounts_headlessly() {
@@ -2881,6 +3648,180 @@ mod layout_tests {
             .widget(&cx, ids!(source))
             .borrow::<TextInput>()
             .is_some());
+        assert!(app
+            .ui
+            .widget(&cx, ids!(preview_value))
+            .borrow::<faces::ValueView>()
+            .is_some());
+    }
+
+    #[test]
+    fn failed_input_put_restores_only_edits_that_were_not_replaced() {
+        let old = ("input".to_string(), "text".to_string());
+        let untouched = ("other".to_string(), "text".to_string());
+        let mut pending = HashMap::from([(old.clone(), "newer".to_string())]);
+        merge_failed_input_journal(
+            &mut pending,
+            HashMap::from([
+                (old.clone(), "in-flight".to_string()),
+                (untouched.clone(), "restore-me".to_string()),
+            ]),
+        );
+        assert_eq!(pending.get(&old).map(String::as_str), Some("newer"));
+        assert_eq!(pending.get(&untouched).map(String::as_str), Some("restore-me"));
+    }
+
+    #[test]
+    fn output_save_extensions_follow_the_value_content_type() {
+        assert_eq!(value_file_extension("image/png"), "png");
+        assert_eq!(value_file_extension("image/jpeg; charset=binary"), "jpg");
+        assert_eq!(value_file_extension("application/json"), "json");
+        assert_eq!(value_file_extension("application/octet-stream"), "bin");
+    }
+
+    #[test]
+    fn interleaved_run_ids_and_stale_start_responses_are_rejected() {
+        let run = RunInfo {
+            run_id: "run-a".into(),
+            state: "running".into(),
+            started: 0.0,
+            finished_secs: None,
+            revision: 7,
+            planned_nodes: vec!["a".into()],
+        };
+        assert!(run_event_belongs(Some(&run), "node.progress", "run-a"));
+        assert!(!run_event_belongs(Some(&run), "node.done", "run-b"));
+        assert!(!run_event_belongs(Some(&run), "run.started", "run-b"));
+        assert!(!run_event_belongs(None, "run.started", "run-b"));
+        assert!(attachment_matches(Some("instance-a"), 4, "instance-a", 4));
+        assert!(!attachment_matches(Some("instance-b"), 5, "instance-a", 4));
+        assert!(request_generation_matches(7, 7));
+        assert!(!request_generation_matches(8, 7));
+    }
+
+    #[test]
+    fn pruned_progress_uses_only_planned_nodes_and_terminal_state_does_not_complete_it() {
+        let planned = vec!["done".into(), "running".into(), "cancelled".into()];
+        let statuses = HashMap::from([
+            ("done".into(), NodeStatus::new("done", 1000, true, "", None)),
+            (
+                "running".into(),
+                NodeStatus::new("running", 250, true, "", None),
+            ),
+            (
+                "cancelled".into(),
+                NodeStatus::new("cancelled", 0, false, "", None),
+            ),
+            (
+                "not-planned".into(),
+                NodeStatus::new("done", 1000, true, "", None),
+            ),
+        ]);
+        assert_eq!(total_progress(&planned, &statuses), (1.25 / 3.0, 1, 3));
+        assert_eq!(
+            reconciled_node_state(RunState::Cancelled, NodeState::Running),
+            NodeState::Cancelled
+        );
+        assert_eq!(
+            reconciled_node_state(RunState::Failed, NodeState::Failed),
+            NodeState::Failed
+        );
+    }
+
+    #[test]
+    fn pruned_plan_tracks_only_the_requested_output_ancestors() {
+        let source = "use mod.flow.*\nlet a = Text{default: \"a\"}\nlet b = Text{default: \"b\"}\nlet left = Output{value: a.text()}\nlet right = Output{value: b.text()}\nFlow{a b left right}\n";
+        let graph = makepad_flow::graph::evaluate(source, "<pruned-progress>").unwrap();
+        assert_eq!(
+            planned_nodes_for(Some(&graph), Some(&["left".to_string()])),
+            vec!["a".to_string(), "left".to_string()]
+        );
+    }
+
+    #[test]
+    fn flow_change_waits_for_the_captured_run_revision() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let mut app = cx.with_vm(|vm| App::from_script_mod(vm, <App as AppMain>::script_mod));
+        app.selected = Some("demo".into());
+        app.run = Some(RunInfo {
+            run_id: "run-a".into(),
+            state: "running".into(),
+            started: 0.0,
+            finished_secs: None,
+            revision: 7,
+            planned_nodes: vec!["node".into()],
+        });
+        app.handle_flow_event(
+            &mut cx,
+            FlowEvent {
+                topic: "flow".into(),
+                kind: "flow.changed".into(),
+                name: Some("demo".into()),
+                revision: Some(8),
+                ..Default::default()
+            },
+        );
+        assert!(app.deferred_flow_reload);
+    }
+
+    #[test]
+    fn gap_run_row_rebuild_reconciles_nonterminal_nodes() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let mut app = cx.with_vm(|vm| App::from_script_mod(vm, <App as AppMain>::script_mod));
+        app.run = Some(RunInfo {
+            run_id: "run-a".into(),
+            state: "running".into(),
+            started: 0.0,
+            finished_secs: None,
+            revision: 7,
+            planned_nodes: vec!["running".into(), "failed".into()],
+        });
+        app.apply_run_row(
+            &mut cx,
+            RunRowDto {
+                run_id: "run-a".into(),
+                instance: "instance-a".into(),
+                flow: "demo".into(),
+                revision: 7,
+                state: RunState::Failed,
+                planned_nodes: vec!["running".into(), "failed".into()],
+                nodes: HashMap::from([
+                    (
+                        "running".into(),
+                        NodeRowDto {
+                            state: NodeState::Running,
+                            progress: Some(500),
+                            stage: Some("work".into()),
+                            outputs: Vec::new(),
+                            error: None,
+                            text: Some("partial".into()),
+                        },
+                    ),
+                    (
+                        "failed".into(),
+                        NodeRowDto {
+                            state: NodeState::Failed,
+                            progress: None,
+                            stage: None,
+                            outputs: Vec::new(),
+                            error: Some("boom".into()),
+                            text: None,
+                        },
+                    ),
+                ]),
+                outputs: HashMap::new(),
+                http_log: Vec::new(),
+                started_ms: 1_000,
+                finished_ms: Some(2_000),
+            },
+        );
+        let canvas = app.ui.widget(&cx, ids!(canvas));
+        let canvas = canvas.borrow::<FlowCanvas>().unwrap();
+        assert_eq!(canvas.statuses["running"].state, "cancelled");
+        assert_eq!(canvas.statuses["failed"].state, "failed");
+        assert_eq!(app.last_error.as_deref(), Some("boom"));
     }
 }
 

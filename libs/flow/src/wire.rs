@@ -120,6 +120,7 @@ pub enum RunEventPayload {
         instance: String,
         flow: String,
         revision: u64,
+        planned_nodes: Vec<String>,
     },
     NodeStarted {
         node: String,
@@ -543,6 +544,8 @@ pub struct Event {
     pub reason: Option<String>,
     pub question: Option<String>,
     pub outputs: Option<JsonValue>,
+    /// Exact node-pruned execution set, present on `run.started`.
+    pub planned_nodes: Option<Vec<String>>,
 }
 
 impl PartialEq for Event {
@@ -817,6 +820,8 @@ pub struct RunRowDto {
     pub flow: String,
     pub revision: u64,
     pub state: RunState,
+    /// Exact node-pruned execution set used as the progress denominator.
+    pub planned_nodes: Vec<String>,
     pub nodes: HashMap<String, NodeRowDto>,
     pub outputs: HashMap<String, ValueRef>,
     pub http_log: Vec<HttpLogEntryDto>,
