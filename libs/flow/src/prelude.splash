@@ -1,0 +1,233 @@
+// Headless face placeholders. flow-ui replaces these with its registered widgets.
+mod.flow.ui = {
+    NodeFace: {}
+    InputFace: {}
+    TextFace: {}
+    OutputFace: {}
+    LlmFace: {}
+    FnFace: {}
+    HttpFace: {}
+    AskFace: {}
+    GenFace: {}
+    ImageFace: {}
+    UpscaleFace: {}
+}
+mod.flow.ImageFace = mod.flow.ui.ImageFace
+mod.flow.InputFace = mod.flow.ui.InputFace
+mod.flow.TextFace = mod.flow.ui.TextFace
+mod.flow.OutputFace = mod.flow.ui.OutputFace
+mod.flow.LlmFace = mod.flow.ui.LlmFace
+mod.flow.FnFace = mod.flow.ui.FnFace
+mod.flow.HttpFace = mod.flow.ui.HttpFace
+mod.flow.AskFace = mod.flow.ui.AskFace
+
+/** Base prototype shared by every flow node. */
+mod.flow.Node = {
+    kind: @node
+    type_name: "Node"
+    /** Canvas position. */
+    at: nil
+    /** Optional node face. */
+    ui: nil
+    /** Failure policy: fail or skip. */
+    on_fail: @fail
+    /** Optional display label. */
+    label: nil
+    out: fn(name) { {node: self, port: name} }
+}
+
+/** A value supplied when a flow is started. */
+mod.flow.Input = mod.flow.Node{
+    kind: @input
+    type_name: "Input"
+    /** Value type: text, image, audio, video, mesh, json, or list. */
+    type: @text
+    /** Value used when the caller omits this input. */
+    default: ""
+    ui: mod.flow.ui.InputFace
+    text: fn() { self.out(@text) }
+    image: fn() { self.out(@image) }
+    audio: fn() { self.out(@audio) }
+    video: fn() { self.out(@video) }
+    mesh: fn() { self.out(@mesh) }
+    json: fn() { self.out(@json) }
+    list: fn() { self.out(@list) }
+}
+
+/** A text input with the standard textbox face. */
+mod.flow.Text = mod.flow.Input{
+    type_name: "Text"
+    type: @text
+    ui: mod.flow.ui.TextFace
+}
+
+/** A named result returned by the flow. */
+mod.flow.Output = mod.flow.Node{
+    kind: @output
+    type_name: "Output"
+    /** Result value type. */
+    type: @text
+    /** Port whose value becomes this result. */
+    value: nil
+    ui: mod.flow.ui.OutputFace
+}
+
+/** Expand or transform text with a language model. */
+mod.flow.Llm = mod.flow.Node{
+    kind: @chat
+    type_name: "Llm"
+    /** Instruction for the language model. */
+    system: ""
+    /** Text sent to the language model. */
+    prompt: ""
+    /** Model name; empty lets the hub choose. */
+    model: ""
+    /** Sampling temperature. */
+    temperature: 0.7
+    /** Maximum generated tokens; zero uses the provider default. */
+    max_tokens: 0
+    ui: mod.flow.ui.LlmFace
+    text: fn() { self.out(@text) }
+}
+
+/** Run a pure splash closure over declared inputs. */
+mod.flow.Fn = mod.flow.Node{
+    kind: @fn
+    type_name: "Fn"
+    /** Named literal or connected inputs. */
+    in: {}
+    /** Names of values returned by run. */
+    out: []
+    /** Pure splash closure called at run time. */
+    run: nil
+    ui: mod.flow.ui.FnFace
+    text: fn() { {node: self, port: @text} }
+    image: fn() { {node: self, port: @image} }
+    audio: fn() { {node: self, port: @audio} }
+    video: fn() { {node: self, port: @video} }
+    mesh: fn() { {node: self, port: @mesh} }
+    json: fn() { {node: self, port: @json} }
+    list: fn() { {node: self, port: @list} }
+    bytes: fn() { {node: self, port: @bytes} }
+}
+
+/** Make a bounded HTTP request. */
+mod.flow.Http = mod.flow.Node{
+    kind: @http
+    type_name: "Http"
+    /** HTTP method: get, post, put, or delete. */
+    method: @get
+    /** Request URL. */
+    url: ""
+    /** Request header object. */
+    headers: {}
+    /** Optional request body. */
+    body: nil
+    /** Request Content-Type. */
+    content_type: ""
+    /** Response value type: text, json, image, audio, video, or bytes. */
+    out: @text
+    /** Accepted response content types. */
+    accept: []
+    ui: mod.flow.ui.HttpFace
+    value: fn() { {node: self, port: @value} }
+    meta: fn() { {node: self, port: @meta} }
+}
+
+/** Ask the caller a question and park the run for its answer. */
+mod.flow.Ask = mod.flow.Node{
+    kind: @ask
+    type_name: "Ask"
+    /** Question shown or sent to the caller. */
+    question: ""
+    /** Answer type. */
+    type: @text
+    /** Suggested answers. */
+    options: []
+    /** Answer used when the node is skipped. */
+    default: ""
+    /** Timeout in seconds; zero waits forever. */
+    timeout: 0
+    ui: mod.flow.ui.AskFace
+    text: fn() { self.out(@text) }
+    image: fn() { self.out(@image) }
+    audio: fn() { self.out(@audio) }
+    video: fn() { self.out(@video) }
+    mesh: fn() { self.out(@mesh) }
+    json: fn() { self.out(@json) }
+    list: fn() { self.out(@list) }
+}
+
+/** Primitive for a generation request handled by a hub domain. */
+mod.flow.Gen = mod.flow.Node{
+    kind: @gen
+    type_name: "Gen"
+    /** Hub generation domain. */
+    domain: ""
+    /** Input and output port declaration. */
+    ports: {in: [] out: []}
+    ui: mod.flow.ui.GenFace
+}
+
+/** Paint an image from a prompt on the hub's image lane. */
+mod.flow.Image = mod.flow.Gen{
+    type_name: "Image"
+    domain: "image"
+    /** Text describing the desired image. */
+    prompt: ""
+    /** 256..2048 step 64 */
+    width: 1024
+    /** 256..2048 step 64 */
+    height: 1024
+    /** 1..50 */
+    steps: 8
+    /** Reproducible seed; zero lets the provider choose. */
+    seed: 0
+    /** Things the image should avoid. */
+    negative: ""
+    /** Model name; empty lets the hub choose. */
+    model: ""
+    ports: {in: [@prompt, @image] out: [@image]}
+    image: fn() { self.out(@image) }
+    ui: mod.flow.ui.ImageFace
+}
+
+/** Enlarge an image with the hub's upscale lane. */
+mod.flow.Upscale = mod.flow.Gen{
+    type_name: "Upscale"
+    domain: "upscale"
+    /** Upscale multiplier. */
+    factor: 2
+    ports: {in: [@image] out: [@image]}
+    image: fn() { self.out(@image) }
+    ui: mod.flow.ui.UpscaleFace
+}
+
+/** A complete flow graph and its callable projections. */
+mod.flow.Flow = {
+    kind: @flow
+    type_name: "Flow"
+    /** Display label. */
+    label: ""
+    /** Short description used by tool callers. */
+    brief: ""
+    /** Start mode: manual or input. */
+    trigger: @manual
+    /** Maximum simultaneous runs per instance. */
+    concurrency: 1
+    /** Create an instance when the server starts. */
+    autostart: false
+    /** Named callable graph projections. */
+    tools: {}
+    /** Optional whole-flow face. */
+    ui: nil
+}
+
+// A few names commonly used in custom faces; explicit ui values are carried as source.
+mod.flow.DropDown = {}
+mod.flow.View = {}
+mod.flow.Label = {}
+mod.flow.Button = {}
+mod.flow.vec2 = fn(x, y) { [x, y] }
+
+mod.flow.freeze_module()

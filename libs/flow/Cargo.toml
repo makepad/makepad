@@ -1,0 +1,11 @@
+[package]
+name = "makepad-flow"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+makepad-script = { path = "../../platform/script" }
+makepad-micro-serde = { path = "../micro_serde" }
+makepad-strict-json = { path = "../strict_json" }
+
