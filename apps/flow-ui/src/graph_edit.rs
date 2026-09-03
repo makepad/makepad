@@ -462,30 +462,68 @@ pub fn depths(graph: &Graph) -> HashMap<String, usize> {
     depth
 }
 
-/// Give every node without an `at` a place: columns by dependency depth,
-/// rows in declaration order within a column, below anything already placed
-/// in that column.
+/// Give every node without an `at` a place. A node with wired inputs sits
+/// one column to the right of its right-most upstream node, on its row,
+/// using the column pitch the placed nodes already use (else the default);
+/// a source sits in the first column, below anything already there. Nodes
+/// are placed in dependency order, so every upstream node has a place first.
 pub fn auto_place(graph: &mut Graph) {
     let depth = depths(graph);
-    let mut column_bottom: HashMap<usize, f64> = HashMap::new();
-    for node in &graph.nodes {
-        if let Some((x, y)) = node.at {
-            let column = ((x - FIRST_AT.0) / (NODE_WIDTH + COLUMN_GAP)).round().max(0.0) as usize;
-            let bottom = column_bottom.entry(column).or_insert(FIRST_AT.1 - ROW_GAP);
-            *bottom = bottom.max(y);
-        }
+    let mut xs: Vec<f64> = graph.nodes.iter().filter_map(|node| node.at.map(|at| at.0)).collect();
+    xs.sort_by(|a, b| a.total_cmp(b));
+    xs.dedup_by(|a, b| (*a - *b).abs() < 1.0);
+    let mut deltas: Vec<f64> = xs
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .filter(|delta| *delta >= NODE_WIDTH)
+        .collect();
+    deltas.sort_by(|a, b| a.total_cmp(b));
+    let pitch = deltas
+        .get(deltas.len() / 2)
+        .copied()
+        .unwrap_or(NODE_WIDTH + COLUMN_GAP);
+    let mut upstream: HashMap<String, Vec<String>> = HashMap::new();
+    for edge in &graph.edges {
+        upstream
+            .entry(edge.to_node.clone())
+            .or_default()
+            .push(edge.from_node.clone());
     }
-    for node in &mut graph.nodes {
-        if node.at.is_some() {
+    let mut order: Vec<usize> = (0..graph.nodes.len()).collect();
+    order.sort_by_key(|index| depth.get(&graph.nodes[*index].id).copied().unwrap_or(0));
+    let mut first_column_bottom = graph
+        .nodes
+        .iter()
+        .filter_map(|node| node.at)
+        .filter(|(x, _)| (*x - FIRST_AT.0).abs() < NODE_WIDTH)
+        .map(|(_, y)| y)
+        .fold(FIRST_AT.1 - ROW_GAP, f64::max);
+    for index in order {
+        if graph.nodes[index].at.is_some() {
             continue;
         }
-        let column = depth.get(&node.id).copied().unwrap_or(0);
-        let bottom = column_bottom.entry(column).or_insert(FIRST_AT.1 - ROW_GAP);
-        *bottom += ROW_GAP;
-        node.at = Some((
-            FIRST_AT.0 + column as f64 * (NODE_WIDTH + COLUMN_GAP),
-            *bottom,
-        ));
+        let id = graph.nodes[index].id.clone();
+        let anchor = upstream
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .filter_map(|from| graph.nodes.iter().find(|node| node.id == *from))
+            .filter_map(|node| node.at)
+            .max_by(|a, b| a.0.total_cmp(&b.0));
+        let mut at = match anchor {
+            Some((x, y)) => (x + pitch, y),
+            None => {
+                first_column_bottom += ROW_GAP;
+                (FIRST_AT.0, first_column_bottom)
+            }
+        };
+        // Never on top of a placed node: step down a row until clear.
+        while graph.nodes.iter().any(|node| {
+            node.at.is_some_and(|(x, y)| (x - at.0).abs() < NODE_WIDTH && (y - at.1).abs() < ROW_GAP * 0.5)
+        }) {
+            at.1 += ROW_GAP;
+        }
+        graph.nodes[index].at = Some(at);
     }
 }
 

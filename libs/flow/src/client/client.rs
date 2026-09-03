@@ -156,6 +156,8 @@ impl FlowClient {
         decode(&body, "template response")
     }
 
+    /// The hub fleet's live models, optionally for one domain (`image`,
+    /// `video`, …). Additive for flow-ui's model picker (lane F8b serves it).
     pub fn nodes_catalog(&self) -> ClientResult<NodesResponse> {
         let body = self.call(Method::Get, "/v1/nodes", None, true, None)?;
         decode(&body, "node catalog")

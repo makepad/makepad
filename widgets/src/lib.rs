@@ -72,6 +72,7 @@ pub mod drop_slider;
 pub mod tip;
 pub mod value_input;
 pub mod fab_controls;
+pub mod menu_bar;
 
 pub mod splitter;
 
@@ -181,6 +182,7 @@ pub use crate::{
     // view_ui - no public exports
     label::*,
     link_label::*,
+    menu_bar::*,
     modal::*,
     nav_control::*,
     page_flip::*,
@@ -379,6 +381,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::tip::script_mod(vm);
     crate::value_input::script_mod(vm);
     crate::fab_controls::script_mod(vm);
+    crate::menu_bar::script_mod(vm);
     crate::combo_box::script_mod(vm);
 
     crate::splitter::script_mod(vm);
