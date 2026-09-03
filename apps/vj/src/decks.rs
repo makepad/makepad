@@ -1271,6 +1271,12 @@ pub enum DeckCmd {
     /// The reverse hold: the record runs backwards while it is held, and a
     /// ghost keeps the place it should have reached.
     Censor { deck: DeckId, on: bool },
+    /// Latch a ghost for a roll about to engage.
+    RollPush { deck: DeckId },
+    /// Let one level of roll go: the span to put back, and whether to keep
+    /// what is sounding instead of returning to the ghost. ONE command,
+    /// because either order of two would leave a buffer of wrong audio.
+    RollPop { deck: DeckId, parent: Option<LoopSpan>, adopt: bool },
     Spin { deck: DeckId, motion: SpinMotion },
     /// Keep the key when the tempo changes (time stretch) or let it slide.
     SetKeylock { deck: DeckId, on: bool },
@@ -1354,6 +1360,9 @@ pub struct DeckEngine {
     /// is all that tells a second press from a first. A refusal arms
     /// nothing, and an undo spends the stamp so one eject buys one undo.
     last_eject_ms: [Option<u64>; 2],
+    /// The span each level of roll displaced, newest last. The mixer keeps
+    /// the ghosts; this keeps what to put back when one is let go.
+    roll_parents: [Vec<Option<LoopSpan>>; 2],
     /// The platter is under a MOTOR gesture. A hand has a release to clear
     /// its hold on; a brake or a wind-up has no event at all — it simply
     /// lands — so the engine keeps this bit and clears it when the mixer
@@ -1397,6 +1406,7 @@ impl Default for DeckEngine {
             ejected: Vec::new(),
             last_eject_ms: [None; 2],
             spin_running: [false; 2],
+            roll_parents: [Vec::new(), Vec::new()],
             auto_fade_hold: None,
             sync_master: None,
             land_lookahead_secs: 0.0,
@@ -2654,6 +2664,52 @@ impl DeckEngine {
         let mut cmds: Vec<DeckCmd> = retire.into_iter().collect();
         cmds.push(DeckCmd::UnloadTrack { deck });
         cmds
+    }
+
+    /// Start a momentary roll: a loop of the armed length from here, held
+    /// only while the button is.
+    ///
+    /// The engine owns spans and the mixer owns positions, so a press is
+    /// two commands -- the mixer latches a ghost wrapping through whatever
+    /// is running NOW, then the ordinary span install. A roll held over
+    /// another therefore returns into the one beneath it.
+    pub fn roll_press(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        if self.roll_parents[deck.index()].len() >= crate::mixer::ROLL_STACK_CAP {
+            return Vec::new();
+        }
+        let Some(len) = self.armed_secs(deck) else { return Vec::new() };
+        let at = self.deck(deck).position_secs;
+        let Some(span) = self.usable_span(deck, at, at + len) else { return Vec::new() };
+        let parent = self.deck(deck).loop_span;
+        self.roll_parents[deck.index()].push(parent);
+        let mut cmds = vec![DeckCmd::RollPush { deck }];
+        cmds.extend(self.engage_loop(deck, span, false));
+        cmds
+    }
+
+    /// Let the roll go. Without `adopt` the deck lands where the record
+    /// would have got to and the span underneath comes back; with it, the
+    /// loop that is sounding becomes the deck's own and every level under
+    /// it stands down.
+    pub fn roll_release(&mut self, deck: DeckId, adopt: bool) -> Vec<DeckCmd> {
+        let stack = &mut self.roll_parents[deck.index()];
+        if stack.is_empty() {
+            return Vec::new();
+        }
+        if adopt {
+            stack.clear();
+            return vec![DeckCmd::RollPop { deck, parent: None, adopt: true }];
+        }
+        let parent = stack.pop().flatten();
+        let state = self.deck_mut(deck);
+        state.loop_span = parent;
+        state.loop_memory = parent.or(state.loop_memory);
+        vec![DeckCmd::RollPop { deck, parent, adopt: false }]
+    }
+
+    /// How many rolls this deck is holding.
+    pub fn rolls_held(&self, deck: DeckId) -> usize {
+        self.roll_parents[deck.index()].len()
     }
 
     /// The tracks the undo can reach, newest first. For the tests and for

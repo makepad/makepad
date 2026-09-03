@@ -391,6 +391,59 @@ struct Ghost {
     span: Option<(f64, f64)>,
 }
 
+/// How many rolls can be held over one another.
+///
+/// Four, because the gesture is one hand on one row of buttons and four
+/// is more than that hand can hold down at once. A fixed array rather
+/// than a growing one: the callback walks it every buffer.
+pub const ROLL_STACK_CAP: usize = 4;
+
+/// The ghosts a stack of rolls is keeping, newest last.
+///
+/// Each level latches the span that was running when THAT level engaged,
+/// so releasing level two lands where level one's playback would have
+/// been, and releasing level one lands where the record would have been.
+#[derive(Clone, Copy, Default)]
+struct RollGhosts {
+    ghosts: [Option<Ghost>; ROLL_STACK_CAP],
+    len: usize,
+}
+
+impl RollGhosts {
+    fn push(&mut self, ghost: Ghost) -> bool {
+        if self.len >= ROLL_STACK_CAP {
+            return false;
+        }
+        self.ghosts[self.len] = Some(ghost);
+        self.len += 1;
+        true
+    }
+
+    fn pop(&mut self) -> Option<Ghost> {
+        if self.len == 0 {
+            return None;
+        }
+        self.len -= 1;
+        self.ghosts[self.len].take()
+    }
+
+    fn clear(&mut self) {
+        *self = RollGhosts::default();
+    }
+
+    /// Advance every level. Once per deck per buffer, never per frame.
+    fn advance(&mut self, frames: f64) {
+        for ghost in self.ghosts.iter_mut().take(self.len).flatten() {
+            ghost.pos += ghost.step * frames;
+            if let Some((start, end)) = ghost.span {
+                if ghost.pos >= end {
+                    ghost.pos = wrapped_into_span(ghost.pos, start, end);
+                }
+            }
+        }
+    }
+}
+
 /// Fold a playhead back inside a span, keeping the overshoot.
 ///
 /// Modulo rather than a reset to IN: resetting discards up to a step per
@@ -826,6 +879,11 @@ struct DeckVoice {
     stem_seam: Ramp,
     /// The ghost SLIP is keeping, if it is armed.
     slip: Option<Ghost>,
+    /// The ghosts a stack of momentary rolls is keeping. A SECOND field
+    /// rather than one general stack: SLIP and the reverse hold have an
+    /// ownership dance between them, and sharing a stack would force an
+    /// ordering puzzle on every combination of the three.
+    rolls: RollGhosts,
     /// The reverse hold armed the ghost itself, so letting go puts it away
     /// again. False when SLIP was already latched by hand — then only SLIP
     /// retires it, and a censor must not take the operator's ghost with it.
@@ -882,6 +940,7 @@ impl DeckVoice {
             transport: Ramp::at(0.0),
             stem_seam: Ramp::at(0.0),
             slip: None,
+            rolls: RollGhosts::default(),
             censor_owns_slip: false,
             pause_at: None,
             pending: None,
@@ -938,6 +997,7 @@ impl DeckVoice {
         self.pause_at = None;
         self.seek_fade = None;
         self.slip = None;
+        self.rolls.clear();
         self.censor_owns_slip = false;
         self.loop_span = None;
         self.ended = false;
@@ -2013,6 +2073,7 @@ impl Mixer {
         // an empty voice, and the next hold would refuse to arm because it
         // found one already there.
         d.slip = None;
+        d.rolls.clear();
         d.censor_owns_slip = false;
         d.scratch = ScratchRamp::default();
         // With no pcm the clamp parks the playhead at zero; this also
@@ -2337,6 +2398,66 @@ impl Mixer {
             }
         }
         self.publish_deck(&s, deck.index());
+    }
+
+    /// Latch a ghost for a roll about to engage.
+    ///
+    /// The ghost wraps through whatever span was running when this level
+    /// engaged, so a roll held over another returns into the one beneath
+    /// it rather than to where the record was before either.
+    pub fn push_deck_roll(&self, deck: DeckId) -> bool {
+        let mut s = self.state.lock().unwrap();
+        let d = &mut s.decks[deck.index()];
+        let Some(pcm) = d.pcm.as_ref() else { return false };
+        let device = f64::from_bits(self.device_rate_bits.load(Ordering::Acquire));
+        // Before the first callback there is no device rate to latch a step
+        // from, and a ghost that cannot move is worse than none.
+        if !(device > 0.0) {
+            return false;
+        }
+        let natural = pcm.sample_rate as f64 / device;
+        let ghost = Ghost {
+            pos: d.playhead_frames(),
+            step: natural * d.rate.current() as f64,
+            span: d.loop_span,
+        };
+        let pushed = d.rolls.push(ghost);
+        self.publish_deck(&s, deck.index());
+        pushed
+    }
+
+    /// Let one level of roll go: put the parent span back and land on the
+    /// ghost, in ONE lock.
+    ///
+    /// The two cannot be separate calls: either order leaves a buffer of
+    /// the wrong audio between them. The landing goes through the ordinary
+    /// seek blend, so the return cannot click.
+    pub fn pop_deck_roll(&self, deck: DeckId, parent: Option<(f64, f64)>, adopt: bool) {
+        let mut s = self.state.lock().unwrap();
+        let d = &mut s.decks[deck.index()];
+        if adopt {
+            // The loop now sounding is the deck's: every level under it
+            // stands down, and nothing goes back.
+            d.rolls.clear();
+            self.publish_deck(&s, deck.index());
+            return;
+        }
+        let Some(ghost) = d.rolls.pop() else { return };
+        let Some(pcm) = d.pcm.as_ref() else { return };
+        let rate = pcm.sample_rate.max(1) as f64;
+        let frames = pcm.frames.len() as f64;
+        d.loop_span =
+            parent.map(|(start, end)| (start.max(0.0) * rate, (end.max(0.0) * rate).min(frames)));
+        let from = d.playhead_frames();
+        d.seek_frames(ghost.pos);
+        d.pause_at = None;
+        d.arm_seek_fade(from);
+        self.publish_deck(&s, deck.index());
+    }
+
+    /// How many rolls this deck is holding.
+    pub fn deck_rolls(&self, deck: DeckId) -> usize {
+        self.state.lock().unwrap().decks[deck.index()].rolls.len
     }
 
     /// Whether SLIP is holding a ghost on this deck.
@@ -2950,6 +3071,8 @@ impl Mixer {
                     }
                 }
             }
+            // And every level of the roll stack, here for the same reason.
+            voice.rolls.advance(frames as f64);
         }
         s.score_preview.render_block(frames, device_rate);
 
@@ -3837,6 +3960,150 @@ mod tests {
         let moved = mixer.deck_snapshot(DeckId::A).position_secs - settled;
         let want = (8 * 512) as f64 / 48_000.0;
         assert!((moved - want).abs() < 0.005, "and then runs at tempo: {moved} of {want}");
+    }
+
+    // ---- the momentary roll ---------------------------------------------
+
+    #[test]
+    fn a_roll_returns_the_deck_to_where_the_record_would_have_been() {
+        let mixer = spin_deck_a(16_384, 480_000);
+        mixer.set_deck_playing(DeckId::A, true);
+        spin_render(&mixer, 16);
+        let armed_at = mixer.deck_snapshot(DeckId::A).position_secs;
+
+        mixer.push_deck_roll(DeckId::A);
+        mixer.set_deck_loop_span(
+            DeckId::A,
+            Some((armed_at, armed_at + 0.25)),
+            crate::decks::LoopSeek::MovedOut,
+        );
+        assert_eq!(mixer.deck_rolls(DeckId::A), 1);
+        let held = 40;
+        spin_render(&mixer, held);
+        mixer.pop_deck_roll(DeckId::A, None, false);
+        spin_render(&mixer, 1);
+
+        let want = armed_at + (held * 512) as f64 / 48_000.0;
+        let landed = mixer.deck_snapshot(DeckId::A).position_secs;
+        assert!(
+            (landed - want).abs() < 0.02,
+            "the record carried on underneath: want {want}, got {landed}",
+        );
+        assert_eq!(mixer.deck_rolls(DeckId::A), 0);
+    }
+
+    #[test]
+    fn a_roll_held_over_another_returns_into_the_one_beneath_it() {
+        let mixer = spin_deck_a(16_384, 480_000);
+        mixer.set_deck_playing(DeckId::A, true);
+        spin_render(&mixer, 8);
+        let outer = (2.0, 3.0);
+
+        // The outer roll: a one-second loop.
+        mixer.push_deck_roll(DeckId::A);
+        mixer.set_deck_loop_span(
+            DeckId::A,
+            Some(outer),
+            crate::decks::LoopSeek::MovedOut,
+        );
+        // The engine sends the record into a loop it engages; here that is
+        // the caller's job.
+        mixer.seek_deck_seconds(DeckId::A, outer.0);
+        spin_render(&mixer, 8);
+        // The inner one, over it.
+        mixer.push_deck_roll(DeckId::A);
+        mixer.set_deck_loop_span(
+            DeckId::A,
+            Some((2.0, 2.125)),
+            crate::decks::LoopSeek::MovedOut,
+        );
+        assert_eq!(mixer.deck_rolls(DeckId::A), 2);
+        spin_render(&mixer, 40);
+
+        // Letting the inner one go lands INSIDE the outer one -- its ghost
+        // wrapped through the outer span, not through the whole track.
+        mixer.pop_deck_roll(DeckId::A, Some(outer), false);
+        spin_render(&mixer, 1);
+        let at = mixer.deck_snapshot(DeckId::A).position_secs;
+        assert!(at >= outer.0 && at < outer.1, "back inside the outer roll, at {at}");
+        assert_eq!(mixer.deck_rolls(DeckId::A), 1);
+    }
+
+    #[test]
+    fn adopting_a_roll_keeps_what_is_sounding_and_stands_every_level_down() {
+        let mixer = spin_deck_a(16_384, 480_000);
+        mixer.set_deck_playing(DeckId::A, true);
+        spin_render(&mixer, 8);
+        mixer.push_deck_roll(DeckId::A);
+        mixer.push_deck_roll(DeckId::A);
+        mixer.set_deck_loop_span(
+            DeckId::A,
+            Some((2.0, 2.5)),
+            crate::decks::LoopSeek::MovedOut,
+        );
+        mixer.seek_deck_seconds(DeckId::A, 2.0);
+        spin_render(&mixer, 20);
+        let at = mixer.deck_snapshot(DeckId::A).position_secs;
+
+        mixer.pop_deck_roll(DeckId::A, None, true);
+        spin_render(&mixer, 1);
+        assert_eq!(mixer.deck_rolls(DeckId::A), 0, "every level stood down");
+        let after = mixer.deck_snapshot(DeckId::A).position_secs;
+        assert!(after >= 2.0 && after < 2.5, "still in the loop it adopted, at {after}");
+        assert!((after - at).abs() < 0.05, "and it did not jump: {at} -> {after}");
+    }
+
+    #[test]
+    fn a_roll_stack_is_bounded_and_a_pop_with_nothing_on_it_does_nothing() {
+        let mixer = spin_deck_a(16_384, 480_000);
+        mixer.set_deck_playing(DeckId::A, true);
+        spin_render(&mixer, 8);
+        for _ in 0..ROLL_STACK_CAP + 3 {
+            mixer.push_deck_roll(DeckId::A);
+        }
+        assert_eq!(mixer.deck_rolls(DeckId::A), ROLL_STACK_CAP, "a fixed depth");
+        for _ in 0..ROLL_STACK_CAP {
+            mixer.pop_deck_roll(DeckId::A, None, false);
+        }
+        let at = mixer.deck_snapshot(DeckId::A).position_secs;
+        mixer.pop_deck_roll(DeckId::A, None, false);
+        spin_render(&mixer, 1);
+        assert_eq!(mixer.deck_rolls(DeckId::A), 0);
+        assert!(mixer.deck_snapshot(DeckId::A).position_secs >= at, "and nothing jumped back");
+    }
+
+    #[test]
+    fn a_roll_is_click_free_both_ways() {
+        let mixer = Mixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        mixer.install_deck(DeckId::A, split_pcm(16_384, -16_384, 480_000, 48_000));
+        mixer.seek_deck_seconds(DeckId::A, 7.0);
+        mixer.set_deck_playing(DeckId::A, true);
+        spin_render(&mixer, 8);
+        let mut worst = 0.0f32;
+        let mut previous: Option<f32> = None;
+        for index in 0..48 {
+            if index == 8 {
+                mixer.push_deck_roll(DeckId::A);
+                mixer.set_deck_loop_span(
+                    DeckId::A,
+                    Some((7.1, 7.35)),
+                    crate::decks::LoopSeek::MovedOut,
+                );
+            }
+            if index == 32 {
+                mixer.pop_deck_roll(DeckId::A, None, false);
+            }
+            let block = render(&mixer, 48_000.0, 512);
+            for sample in &block.channel(0)[..512] {
+                if let Some(last) = previous {
+                    worst = worst.max((sample - last).abs());
+                }
+                previous = Some(*sample);
+            }
+        }
+        assert!(worst < 0.02, "a roll must blend in and out, biggest step {worst}");
     }
     // ---- a load that lands on a deck that is already playing ------------
 

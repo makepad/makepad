@@ -13668,6 +13668,14 @@ p2 {}
                 }
                 DeckCmd::Scratch { deck, motion } => self.mixer.scratch_deck(deck, motion),
                 DeckCmd::Censor { deck, on } => self.mixer.set_deck_censor(deck, on),
+                DeckCmd::RollPush { deck } => {
+                    self.mixer.push_deck_roll(deck);
+                }
+                DeckCmd::RollPop { deck, parent, adopt } => self.mixer.pop_deck_roll(
+                    deck,
+                    parent.map(|s| (s.start_secs, s.end_secs)),
+                    adopt,
+                ),
                 DeckCmd::Spin { deck, motion } => self.mixer.spin_deck(deck, motion),
                 DeckCmd::SetKeylock { deck, on } => self.mixer.set_deck_keylock(deck, on),
                 DeckCmd::SetKeyShift { deck, semitones } => {
@@ -24837,7 +24845,45 @@ p2 {}
                     }
                 }
             }
-            if refs.loop_in.clicked(actions) {
+            // `[` engages the armed loop from here. SHIFT makes that same
+            // instruction MOMENTARY -- a roll, held only while the button
+            // is, landing on where the record would have got to. On this
+            // button rather than beside it for the reason written out
+            // above for the beat pair: the transport row has no width
+            // left, and a roll is what `[` already means, held down.
+            //
+            // ALT on the release adopts instead: the loop stops being
+            // momentary and becomes the deck's. Alt rather than shift,
+            // because shift is what STARTED the roll and holding it
+            // throughout is the natural hand.
+            if let Some(modifiers) = refs.loop_in.pressed_modifiers(actions) {
+                if modifiers.shift {
+                    self.deck_hands_on();
+                    let cmds = self.decks.roll_press(deck);
+                    self.run_deck_cmds(cx, cmds);
+                }
+            }
+            // A roll being let go swallows the click that comes with the
+            // release, so an ordinary `[` cannot fire on top of it.
+            //
+            // A finger lifted INSIDE the button reports Clicked and one
+            // lifted outside reports Released, and only one action per
+            // widget comes back -- so the release has to accept either or
+            // the roll never lets go.
+            let mut rolled = false;
+            let release = refs
+                .loop_in
+                .released_modifiers(actions)
+                .or_else(|| refs.loop_in.clicked_modifiers(actions));
+            if let Some(modifiers) = release {
+                if self.decks.rolls_held(deck) > 0 {
+                    rolled = true;
+                    let cmds = self.decks.roll_release(deck, modifiers.alt);
+                    self.run_deck_cmds(cx, cmds);
+                    self.save_loop_marks(deck);
+                }
+            }
+            if !rolled && refs.loop_in.clicked(actions) {
                 let cmds = self.decks.loop_in(deck);
                 self.run_deck_cmds(cx, cmds);
                 self.save_loop_marks(deck);
