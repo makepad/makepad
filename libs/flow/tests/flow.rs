@@ -1,4 +1,4 @@
-use makepad_flow::graph::{evaluate, is_canonical, tool_schema, write};
+use makepad_flow::graph::{evaluate, is_canonical, prelude_catalog, tool_schema, write};
 use makepad_flow::{Literal, NodeInputValue, PortType};
 use makepad_micro_serde::{DeJson, SerJson};
 
@@ -238,6 +238,112 @@ fn graph_wire_json_round_trips() {
     let graph = evaluate(include_str!("fixtures/prompt_image.splash"), "wire.splash").unwrap();
     let json = graph.serialize_json();
     assert_eq!(makepad_flow::Graph::deserialize_json(&json).unwrap(), graph);
+}
+
+#[test]
+fn inpaint_mask_port_type_checks_against_declared_image_type() {
+    let source = r#"use mod.flow.*
+let image = Input{type: @image}
+let mask = Input{type: @image}
+let inpaint = Inpaint{prompt: "fill" image: image.image() mask: mask.image()}
+let picture = Output{type: @image value: inpaint.out(@image)}
+Flow{image, mask, inpaint, picture}
+"#;
+    let graph = evaluate(source, "inpaint_ok.splash").unwrap();
+    let node = graph.nodes.iter().find(|node| node.id == "inpaint").unwrap();
+    let mask_input = node.inputs.iter().find(|input| input.port == "mask").unwrap();
+    assert_eq!(mask_input.ty, PortType::Image);
+    let image_input = node.inputs.iter().find(|input| input.port == "image").unwrap();
+    assert_eq!(image_input.ty, PortType::Image);
+    let prompt_input = node.inputs.iter().find(|input| input.port == "prompt").unwrap();
+    assert_eq!(prompt_input.ty, PortType::Text);
+    round_trip(&graph);
+}
+
+#[test]
+fn wiring_text_into_inpaint_mask_is_a_located_error() {
+    let source = r#"use mod.flow.*
+let image = Input{type: @image}
+let words = Input{type: @text}
+let inpaint = Inpaint{prompt: "fill" image: image.image() mask: words.text()}
+Flow{image, words, inpaint}
+"#;
+    let error = evaluate(source, "inpaint_mismatch.splash").unwrap_err();
+    assert_eq!(error.file, "inpaint_mismatch.splash");
+    assert!(error.line > 0 && error.col > 0, "{error:?}");
+    assert!(error.message.contains("type mismatch"), "{error:?}");
+    assert!(error.message.contains("mask"), "{error:?}");
+}
+
+#[test]
+fn old_array_ports_form_still_evaluates_with_a_deprecation_warning() {
+    let source = r#"use mod.flow.*
+let LegacyGen = Gen{domain: "video" ports: {in: [@prompt] out: [@video]}}
+let clip = LegacyGen{prompt: "waves"}
+let result = Output{type: @video value: clip.out(@video)}
+Flow{clip, result}
+"#;
+    let graph = evaluate(source, "legacy_ports.splash").unwrap();
+    let node = graph.nodes.iter().find(|node| node.id == "clip").unwrap();
+    // The array form still infers types by name, exactly as before.
+    assert_eq!(node.inputs[0].ty, PortType::Text);
+    assert_eq!(node.outputs[0].ty, PortType::Video);
+    assert!(
+        graph
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("deprecated") && warning.contains("clip")),
+        "{:?}",
+        graph.warnings
+    );
+    round_trip(&graph);
+}
+
+#[test]
+fn prelude_catalog_walks_every_recipe_type_including_mesh() {
+    let catalog = prelude_catalog().unwrap();
+    let mesh = catalog
+        .iter()
+        .find(|node| node.type_name == "Mesh")
+        .expect("Mesh reaches the catalog");
+    assert_eq!(mesh.kind, "gen");
+    assert_eq!(mesh.domain.as_deref(), Some("mesh"));
+    assert!(mesh
+        .ports
+        ._in
+        .iter()
+        .any(|port| port.name == "prompt" && port.ty == PortType::Text));
+    assert!(mesh
+        .ports
+        ._in
+        .iter()
+        .any(|port| port.name == "image" && port.ty == PortType::Image));
+    assert!(mesh
+        .ports
+        .out
+        .iter()
+        .any(|port| port.name == "mesh" && port.ty == PortType::Mesh));
+    assert!(mesh.params.iter().any(|param| param.name == "remesh_resolution"));
+    assert!(!mesh.doc.is_empty());
+    // The catalog is no longer the old hard-coded ten-name list.
+    for type_name in ["Inpaint", "Video", "Music", "Paint", "Control", "ImageEdit"] {
+        assert!(
+            catalog.iter().any(|node| node.type_name == type_name),
+            "catalog missing `{type_name}`"
+        );
+    }
+    let music = catalog.iter().find(|node| node.type_name == "Music").unwrap();
+    assert!(music
+        .ports
+        ._in
+        .iter()
+        .any(|port| port.name == "lyrics" && port.ty == PortType::Text));
+    let paint = catalog.iter().find(|node| node.type_name == "Paint").unwrap();
+    assert!(paint
+        .ports
+        ._in
+        .iter()
+        .any(|port| port.name == "reference_image" && port.ty == PortType::Image));
 }
 
 #[test]

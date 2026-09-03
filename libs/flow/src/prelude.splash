@@ -164,8 +164,8 @@ mod.flow.Gen = mod.flow.Node{
     type_name: "Gen"
     /** Hub generation domain. */
     domain: ""
-    /** Input and output port declaration. */
-    ports: {in: [] out: []}
+    /** Typed input and output port declaration: `{in: {name: @type, ...}, out: {name: @type, ...}}`. */
+    ports: {in: {} out: {}}
     ui: mod.flow.ui.GenFace
 }
 
@@ -189,7 +189,7 @@ mod.flow.Image = mod.flow.Gen{
     model: ""
     /** LoRA list; each strength is one of: 1.0, 0.8, 0.6, 0.4, 1.2. */
     loras: []
-    ports: {in: [@prompt, @image] out: [@image]}
+    ports: {in: {prompt: @text, image: @image} out: {image: @image}}
     image: fn() { self.out(@image) }
     ui: mod.flow.ui.ImageFace
 }
@@ -202,7 +202,7 @@ mod.flow.Upscale = mod.flow.Gen{
     factor: 2
     /** Model name; empty lets the hub choose. */
     model: ""
-    ports: {in: [@image] out: [@image]}
+    ports: {in: {image: @image} out: {image: @image}}
     image: fn() { self.out(@image) }
     ui: mod.flow.ui.UpscaleFace
 }
