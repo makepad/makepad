@@ -114,7 +114,7 @@ pub struct OnsetFront {
 fn mono(pcm: &TrackPcm) -> Vec<f32> {
     pcm.frames
         .iter()
-        .map(|f| (f[0] as f32 + f[1] as f32) * 0.5 / 32768.0)
+        .map(|f| crate::dsp_math::mono(*f))
         .collect()
 }
 
@@ -150,7 +150,7 @@ pub fn onset_front(pcm: &TrackPcm) -> OnsetFront {
     let bank = filterbank(rate, 30.0, 17_000.0, 24.0);
     // Hann window.
     let window: Vec<f32> = (0..FFT_SIZE)
-        .map(|i| (0.5 - 0.5 * (2.0 * PI * i as f64 / FFT_SIZE as f64).cos()) as f32)
+        .map(|i| crate::dsp_math::hann_f64(i, FFT_SIZE) as f32)
         .collect();
     let frames = if samples.len() > FFT_SIZE { (samples.len() - FFT_SIZE) / hop + 1 } else { 0 };
     let mut spec: Vec<Vec<f32>> = Vec::with_capacity(frames);
@@ -302,7 +302,7 @@ pub fn fine_onset_envelope(pcm: &TrackPcm) -> (Vec<f32>, f64) {
     let mut sums = [0.0f64; 3];
     let mut in_hop = 0usize;
     for frame in &pcm.frames {
-        let value = (frame[0] as f32 + frame[1] as f32) * 0.5 / 32768.0;
+        let value = crate::dsp_math::mono(*frame);
         let low_band = low.process(value);
         let mid_band = mid.process(value) - low_band;
         let high_band = value - low.state - mid_band;
@@ -378,7 +378,7 @@ pub fn fine_low_envelope(pcm: &TrackPcm) -> (Vec<f32>, f64) {
     let mut sum = 0.0f64;
     let mut in_hop = 0usize;
     for frame in &pcm.frames {
-        let value = (frame[0] as f32 + frame[1] as f32) * 0.5 / 32768.0;
+        let value = crate::dsp_math::mono(*frame);
         state += alpha * (value - state);
         sum += (state as f64) * (state as f64);
         in_hop += 1;
@@ -969,7 +969,7 @@ pub fn kick_envelope(pcm: &TrackPcm) -> (Vec<f32>, f64) {
     let mut sum = 0.0f64;
     let mut in_hop = 0usize;
     for frame in &pcm.frames {
-        let value = (frame[0] as f32 + frame[1] as f32) * 0.5 / 32768.0;
+        let value = crate::dsp_math::mono(*frame);
         a += alpha * (value - a);
         b += alpha * (a - b);
         sum += (b as f64) * (b as f64);
@@ -1799,7 +1799,7 @@ pub fn structural_boundaries(pcm: &TrackPcm, count: usize) -> Vec<f64> {
     let mut sum = 0.0f64;
     let mut in_hop = 0usize;
     for frame in &pcm.frames {
-        let value = (frame[0] as f32 + frame[1] as f32) * 0.5 / 32768.0;
+        let value = crate::dsp_math::mono(*frame);
         sum += (value as f64) * (value as f64);
         in_hop += 1;
         if in_hop == hop {
@@ -2931,7 +2931,7 @@ mod judge_tests {
         for chunk in pcm.frames.chunks(512) {
             scratch.clear();
             scratch.extend(
-                chunk.iter().map(|f| (f[0] as f32 + f[1] as f32) * 0.5 / 32768.0),
+                chunk.iter().map(|f| crate::dsp_math::mono(*f)),
             );
             analyzer.push_mono(&scratch);
         }
@@ -3008,7 +3008,7 @@ mod judge_tests {
         for chunk in pcm.frames.chunks(512) {
             scratch.clear();
             scratch.extend(
-                chunk.iter().map(|f| (f[0] as f32 + f[1] as f32) * 0.5 / 32768.0),
+                chunk.iter().map(|f| crate::dsp_math::mono(*f)),
             );
             analyzer.push_mono(&scratch);
         }

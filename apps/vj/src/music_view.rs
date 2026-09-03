@@ -1918,6 +1918,12 @@ script_mod! {
                         spacing: 4
                         align: Align{x: 0.0, y: 0.5}
                         deck_a_sync := MusicButton{width: Fill height: 22 text: "SYNC"}
+                        // SLIP: the track keeps running where you left it
+                        // while the record goes somewhere else. The room
+                        // comes out of SYNC's own Fill, which is the only
+                        // elastic thing in this row and where the headphone
+                        // button's width came from too.
+                        deck_a_slip := MusicButton{width: 34 height: 22 text: "SLIP"}
                         // The analyser's grid can sit on the off pulse: same tempo,
                         // sync exactly half a beat out. This flips it.
                         deck_a_phase_flip := MusicButton{width: 26 height: 22 padding: 0 align: Align{x: 0.5, y: 0.5} text: "½"}
@@ -2207,19 +2213,22 @@ script_mod! {
                             draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
                         }
                         deck_a_cue := MusicButton{width: 40 height: 24 text: "CUE"}
-                        // One beat back, one beat on — the nudge a hand makes
-                        // when the drop lands a hair early — and a phrase with a
-                        // modifier held: shift takes four bars, control sixteen.
-                        // A beat is a GRID measurement, so these do nothing until
-                        // a grid does: there is no length to step by before one
-                        // lands.
+                        // One beat either way — the nudge a hand makes when the
+                        // drop lands a hair off — and a phrase with a modifier held:
+                        // shift takes four bars, control sixteen.
+                        // A beat is a GRID measurement,
+                        // so these do nothing until a grid does: there is no
+                        // length to step by before one lands.
+                        //
+                        // The chevrons point at the TRACK, not at the playhead:
+                        // < sends the track a beat FORWARD past the head, > a
+                        // beat back. It is the same convention as a hand on the
+                        // platter — push the record the way the arrow points.
                         //
                         // NOT mirrored on deck B, for the reason the loop marks
-                        // are not: these point along the TRACK, and back is on
-                        // the left of every transport in the room whichever
-                        // deck it belongs to.
-                        deck_a_beat_back := MusicButton{width: 22 height: 24 text: "<"}
-                        deck_a_beat_fwd := MusicButton{width: 22 height: 24 text: ">"}
+                        // are not: the sense is the same whichever deck it is.
+                        deck_a_beat_fwd := MusicButton{width: 22 height: 24 text: "<"}
+                        deck_a_beat_back := MusicButton{width: 22 height: 24 text: ">"}
                         deck_a_loop := MusicIconButton{
                             draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
                         }
@@ -2501,6 +2510,9 @@ script_mod! {
                             height: 22
                             draw_icon +: { svg: crate_resource("self:resources/icons/headphones.svg") }
                         }
+                        // Mirrored, so SLIP sits inboard of SYNC on this
+                        // side the way the rest of the row is mirrored.
+                        deck_b_slip := MusicButton{width: 34 height: 22 text: "SLIP"}
                         deck_b_sync := MusicButton{width: Fill height: 22 text: "SYNC"}
                     }
                     View{
@@ -2760,9 +2772,9 @@ script_mod! {
                             draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
                         }
                         // NOT mirrored, exactly as the loop marks above are
-                        // not: back is left on every transport in the room.
-                        deck_b_beat_back := MusicButton{width: 22 height: 24 text: "<"}
-                        deck_b_beat_fwd := MusicButton{width: 22 height: 24 text: ">"}
+                        // not: the chevrons read the same on both decks.
+                        deck_b_beat_fwd := MusicButton{width: 22 height: 24 text: "<"}
+                        deck_b_beat_back := MusicButton{width: 22 height: 24 text: ">"}
                         deck_b_cue := MusicButton{width: 40 height: 24 text: "CUE"}
                         deck_b_play := MusicIconButton{
                             draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
@@ -2889,6 +2901,8 @@ script_mod! {
                         a: View{
                             width: Fill
                             height: Fill
+                            flow: Down
+                            spacing: 6
                             library_drop := RoundedView{
                             width: Fill
                             height: Fill
@@ -3127,6 +3141,67 @@ script_mod! {
                             }
                             music_tracks := mod.widgets.VjTrackList{show_queue_button: true}
                         }
+                            // The console strip: always one line of live numbers, and the
+                            // app's own log when it is opened. It sits under the
+                            // explorer, where the list it reports on is.
+                            console_strip := View{
+                                width: Fill
+                                height: Fit
+                                flow: Down
+                                console_grip := RoundedView{
+                                    visible: false
+                                    width: Fill
+                                    height: 7
+                                    cursor: MouseCursor.RowResize
+                                    show_bg: true
+                                    draw_bg +: {
+                                        color: #xffffff1f
+                                        color_hover: #xffffff5c
+                                        border_radius: 3.0
+                                        hover: instance(0.0)
+                                    }
+                                }
+                                View{
+                                    width: Fill
+                                    height: 24
+                                    flow: Right
+                                    spacing: 6
+                                    align: Align{x: 0.0, y: 0.5}
+                                    console_chevron_up := ChevronIcon{
+                                        visible: false
+                                        draw_icon +: { svg: crate_resource("self:resources/icons/chevron_up.svg") }
+                                    }
+                                    console_chevron_down := ChevronIcon{
+                                        draw_icon +: { svg: crate_resource("self:resources/icons/chevron_down.svg") }
+                                    }
+                                    console_line := MusicLabel{width: Fill text: ""}
+                                    console_view_0 := MusicChipButton{height: 20 text: "numbers"}
+                                    console_view_1 := MusicChipButton{height: 20 text: "log"}
+                                    console_view_2 := MusicChipButton{height: 20 text: "both"}
+                                }
+                                console_body := View{
+                                    visible: false
+                                    width: Fill
+                                    height: 160
+                                    flow: Down
+                                    spacing: 4
+                                    console_numbers := MusicLabel{width: Fill text: ""}
+                                    View{
+                                        width: Fill
+                                        height: Fit
+                                        flow: Right
+                                        spacing: 6
+                                        align: Align{x: 0.0, y: 0.5}
+                                        console_filter := TextInput{
+                                            width: Fill{min: 96. max: 320.}
+                                            flow: Flow.Right{wrap: false}
+                                            empty_text: "filter…"
+                                        }
+                                        console_clear := MusicChipButton{height: 20 text: "clear"}
+                                    }
+                                    console_log := MusicLabel{width: Fill text: ""}
+                                }
+                            }
                         }
                         b: View{
                             width: Fill
@@ -3985,7 +4060,7 @@ script_mod! {
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: 90 text: "OVERLAP"}
-                        scan_overlap := MusicButton{width: 110 height: 22 text: "OVERLAP"}
+                        scan_overlap := MusicButton{width: 110 height: 22 text: "ALLOWED"}
                     }
                     View{
                         width: Fill

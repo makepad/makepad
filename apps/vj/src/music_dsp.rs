@@ -32,6 +32,43 @@
 // the floating-point environment
 // ---------------------------------------------------------------------------
 
+/// A control value the engine will act on: `value` held inside its range,
+/// or `None` when it is not a number the operator could have meant.
+///
+/// A clamp alone is not containment here. `f32::clamp` hands NaN straight
+/// back, and it turns an infinity into a range END — so a division by zero
+/// upstream arrives as master gain 0 (the room goes quiet) or as the
+/// loudest the console can be. Neither is what anybody asked for, so a
+/// value that is not finite moves nothing at all.
+#[inline]
+pub fn knob(value: f32, low: f32, high: f32) -> Option<f32> {
+    value.is_finite().then(|| value.clamp(low, high))
+}
+
+/// The same rule for the controls the engine keeps in double precision:
+/// tempo, key shift, seconds along a track.
+#[inline]
+pub fn knob64(value: f64, low: f64, high: f64) -> Option<f64> {
+    value.is_finite().then(|| value.clamp(low, high))
+}
+
+/// A sample the bus can carry, or silence.
+///
+/// Nothing upstream should ever produce a number that is not one, but a
+/// resonant filter driven past stability, a rate that came from a division
+/// by zero, or one bad byte from a learned controller all can — and a
+/// non-finite sample is not a click, it is a dead output until the device is
+/// reopened, because it poisons every accumulator it touches. One test at
+/// the mix point costs nothing measurable and cannot be reasoned around.
+#[inline]
+pub fn audible(sample: f32) -> f32 {
+    if sample.is_finite() {
+        sample
+    } else {
+        0.0
+    }
+}
+
 /// Arm flush-to-zero on the calling thread: a result too small to be a
 /// normal number becomes exactly zero, and a denormal input is read as zero.
 ///
@@ -138,12 +175,6 @@ impl StemKind {
     }
 }
 
-/// Linear interpolation between two stereo frames.
-#[inline]
-pub fn lerp_frame(a: [f32; 2], b: [f32; 2], t: f32) -> [f32; 2] {
-    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
-}
-
 /// Catmull-Rom between `b` and `c`, with `a` and `d` as the shoulders.
 ///
 /// A straight line between two samples is a poor guess at what the waveform
@@ -185,13 +216,26 @@ impl ParamRamp {
         ParamRamp { current: value, target: value, step: 0.0 }
     }
 
+    /// Move to `target` over `secs`. A target that is not a number is
+    /// REFUSED rather than clamped: `f32::clamp` passes NaN straight
+    /// through, and one NaN here settles nothing ever again — `current !=
+    /// target` stays true for the rest of the session, so the ramp adds NaN
+    /// to NaN forever and whatever it drives goes quiet until the track is
+    /// reloaded. Keeping the last good value degrades a bad number into a
+    /// knob that did not move.
     pub fn slew(&mut self, target: f32, secs: f32) {
+        if !target.is_finite() {
+            return;
+        }
         self.target = target;
         let distance = (target - self.current).abs();
         self.step = if secs <= 0.0 { f32::MAX } else { (distance / secs).max(1e-6) };
     }
 
     pub fn jump(&mut self, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
         self.current = value;
         self.target = value;
         self.step = 0.0;
@@ -377,7 +421,7 @@ impl Stretcher {
         let mut window = Box::new([0.0f32; WSOLA_WINDOW]);
         for (index, value) in window.iter_mut().enumerate() {
             // Periodic Hann: two of these at 50% overlap sum to exactly 1.
-            *value = 0.5 - 0.5 * (2.0 * PI * index as f32 / WSOLA_WINDOW as f32).cos();
+            *value = crate::dsp_math::hann(index, WSOLA_WINDOW);
         }
         Stretcher {
             window,
@@ -393,6 +437,26 @@ impl Stretcher {
 
     /// Jump the playhead. The overlap-add state is discarded, so the next
     /// grain starts clean.
+    /// Take on another stretcher's whole overlap-add state.
+    ///
+    /// An instant double taken while the stretcher is live has to copy this
+    /// as well as the position: the two decks are reading the same record
+    /// at the same tempo, and grain streams that start at different points
+    /// in their overlap beat against each other. `window` is the same
+    /// constant table in both, so it is the one field not copied.
+    ///
+    /// The accumulator is copied INTO the box this stretcher already owns.
+    /// The caller holds the audio state lock and must not allocate.
+    pub fn copy_state_from(&mut self, other: &Stretcher) {
+        *self.ola = *other.ola;
+        self.emitted = other.emitted;
+        self.primed = other.primed;
+        self.anchor = other.anchor;
+        self.last_start = other.last_start;
+        self.ratio = other.ratio;
+        self.ended = other.ended;
+    }
+
     pub fn reset_to(&mut self, position: f64) {
         self.anchor = position.max(0.0);
         self.last_start = self.anchor as usize;
@@ -1345,7 +1409,7 @@ mod tests {
     }
 
     fn db(value: f64) -> f64 {
-        20.0 * value.max(1e-12).log10()
+        crate::dsp_math::ratio_to_db_f64(value)
     }
 
     #[test]
@@ -1509,6 +1573,68 @@ mod tests {
         }
         assert!((scratch.rate() - 1.08).abs() < 1e-3, "rate {}", scratch.rate());
         assert!(!scratch.active());
+    }
+
+    // ---- numbers that are not numbers -------------------------------------
+
+    #[test]
+    fn a_ramp_keeps_its_last_good_value_when_handed_one_that_is_not_a_number() {
+        // Left to itself a ramp is poisoned for the session: `current !=
+        // target` is true forever once either is NaN, so every tick adds NaN
+        // to NaN and the band never sounds again until the track is reloaded.
+        let mut ramp = ParamRamp::at(0.75);
+        ramp.slew(f32::NAN, 0.01);
+        assert_eq!(ramp.target(), 0.75, "the target must not move");
+        for _ in 0..64 {
+            assert!(ramp.tick(48_000.0).is_finite());
+        }
+        assert_eq!(ramp.current(), 0.75);
+        ramp.jump(f32::INFINITY);
+        assert_eq!(ramp.current(), 0.75, "a jump refuses it too");
+        ramp.slew(0.25, 0.01);
+        for _ in 0..4_800 {
+            ramp.tick(48_000.0);
+        }
+        assert!((ramp.current() - 0.25).abs() < 1e-6, "and the ramp still works after");
+    }
+
+    #[test]
+    fn a_tone_control_handed_one_that_is_not_a_number_stays_where_it_was() {
+        let mut eq = DeckEq::new(48_000.0);
+        eq.set_band(0, 0.4);
+        eq.set_filter(0.3);
+        eq.set_band(0, f32::NAN);
+        eq.set_filter(f32::NAN);
+        assert_eq!(eq.band(0), 0.4);
+        assert_eq!(eq.filter(), 0.3);
+        eq.prepare_block();
+        for _ in 0..512 {
+            let out = eq.process([0.5, -0.5], 48_000.0);
+            assert!(out[0].is_finite() && out[1].is_finite(), "the chain stays finite");
+        }
+    }
+
+    #[test]
+    fn a_control_handed_one_that_is_not_a_number_moves_nothing() {
+        assert_eq!(knob(0.5, 0.0, 1.2), Some(0.5));
+        assert_eq!(knob(2.0, 0.0, 1.2), Some(1.2), "an ordinary value still clamps");
+        assert_eq!(knob(-1.0, 0.0, 1.2), Some(0.0));
+        assert_eq!(knob(f32::NAN, 0.0, 1.2), None);
+        assert_eq!(knob(f32::INFINITY, 0.0, 1.2), None, "never the loudest the console can be");
+        assert_eq!(knob(f32::NEG_INFINITY, 0.0, 1.2), None, "and never silence");
+        assert_eq!(knob64(1.5, 0.5, 2.0), Some(1.5));
+        assert_eq!(knob64(f64::NAN, 0.5, 2.0), None);
+        assert_eq!(knob64(f64::INFINITY, 0.5, 2.0), None);
+    }
+
+    #[test]
+    fn a_sample_that_is_not_a_number_leaves_the_bus_as_silence() {
+        assert_eq!(audible(f32::NAN), 0.0);
+        assert_eq!(audible(f32::INFINITY), 0.0);
+        assert_eq!(audible(f32::NEG_INFINITY), 0.0);
+        assert_eq!(audible(0.25), 0.25, "an ordinary sample passes untouched");
+        assert_eq!(audible(-0.25), -0.25);
+        assert_eq!(audible(0.0), 0.0);
     }
 
     // ---- floating-point environment ---------------------------------------

@@ -327,7 +327,6 @@ fn a_seek_is_click_free() {
 }
 
 #[test]
-#[ignore = "play and pause are a gain step today (0.5 on a half-scale signal); the \n           transport work ramps them and un-marks this"]
 fn play_and_pause_are_click_free() {
     let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
     mixer.set_deck_playing(DeckId::A, true);

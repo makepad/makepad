@@ -176,6 +176,32 @@ fn xorshift64star(mut x: u64) -> u64 {
     x.wrapping_mul(0x2545_F491_4F6C_DD1D)
 }
 
+/// What a fresh load puts back to nothing.
+///
+/// Every switch is off by default, which is exactly what the tab did
+/// before this existed: the channel strip an operator has set stands
+/// across a load, because on most decks that is the point -- the EQ and
+/// the trim describe the ROOM, not the record.
+///
+/// The groups are separable because they answer to different hands. Speed
+/// and key are tempo and pitch intent; the EQ, the filter and the gain are
+/// the console; the stems are the lane knobs. Note what is NOT here: a
+/// tempo the LOCK worked out is dropped unconditionally, because a match
+/// to a departed track is never a preference somebody chose.
+///
+/// Deliberately untouched by any of these, and staying that way: the pitch
+/// RANGE, keylock, the armed loop count and the stem mode. Those describe
+/// how the operator likes to work, not what was on the last record.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LoadReset {
+    pub speed: bool,
+    pub key: bool,
+    pub eq: bool,
+    pub filter: bool,
+    pub gain: bool,
+    pub stems: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum DeckLoad {
     #[default]
@@ -189,33 +215,47 @@ pub enum DeckLoad {
 /// Number of stem lanes a separated track carries.
 pub const STEM_COUNT: usize = crate::music_dsp::STEM_COUNT;
 
-/// Pitch slider travel. The narrow range is the everyday one; the wide range
-/// is for pulling a stubborn track into line.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum PitchRange {
-    #[default]
-    Narrow,
-    Wide,
+/// How far the tempo fader reaches: one rung of `PITCH_RANGES`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PitchRange {
+    rung: u8,
 }
+
+impl Default for PitchRange {
+    fn default() -> PitchRange {
+        PitchRange { rung: PITCH_RANGE_DEFAULT }
+    }
+}
+
+/// How far the tempo fader reaches, rung by rung. Two was never enough:
+/// a beatmatch wants a few percent under the hand, a mash-up wants half
+/// the record.
+pub const PITCH_RANGES: [f64; 8] = [0.04, 0.06, 0.08, 0.10, 0.16, 0.24, 0.50, 0.90];
+const PITCH_RANGE_LABELS: [&str; 8] =
+    ["±4%", "±6%", "±8%", "±10%", "±16%", "±24%", "±50%", "±90%"];
+/// The everyday rung, and what the tab has always opened on.
+const PITCH_RANGE_DEFAULT: u8 = 2;
 
 impl PitchRange {
     pub fn fraction(self) -> f64 {
-        match self {
-            PitchRange::Narrow => 0.08,
-            PitchRange::Wide => 0.16,
-        }
+        PITCH_RANGES[self.rung as usize]
     }
+
     pub fn label(self) -> &'static str {
-        match self {
-            PitchRange::Narrow => "±8%",
-            PitchRange::Wide => "±16%",
-        }
+        PITCH_RANGE_LABELS[self.rung as usize]
     }
-    pub fn toggled(self) -> PitchRange {
-        match self {
-            PitchRange::Narrow => PitchRange::Wide,
-            PitchRange::Wide => PitchRange::Narrow,
-        }
+
+    /// One rung wider or narrower. It SATURATES rather than wrapping: a
+    /// ladder that rolls from ±90% round to ±4% under a running mix is a
+    /// trap, not a convenience.
+    pub fn stepped(self, wider: bool) -> PitchRange {
+        let last = (PITCH_RANGES.len() - 1) as u8;
+        let rung = if wider {
+            (self.rung + 1).min(last)
+        } else {
+            self.rung.saturating_sub(1)
+        };
+        PitchRange { rung }
     }
 }
 
@@ -224,11 +264,83 @@ impl PitchRange {
 const SYNC_RATE_MIN: f64 = 0.80;
 const SYNC_RATE_MAX: f64 = 1.25;
 /// Hard clamp on any rate the engine emits.
+/// How far a held bend pushes the tempo, as a fraction of the track's own.
+/// Four percent is a shove that lands a bar inside a beat; two is the
+/// correction you make while listening to whether it worked.
+pub const BEND_COARSE: f64 = 0.04;
+pub const BEND_FINE: f64 = 0.02;
+
+/// How far one trim press moves the tempo, as a fraction of the track's
+/// own. Absolute, NOT a share of the selected range: a step that means
+/// half a percent on one range and a twentieth of that on another is a
+/// button nobody can learn.
+pub const TRIM_COARSE: f64 = 0.005;
+pub const TRIM_FINE: f64 = 0.0005;
+
 pub const RATE_MIN: f64 = 0.25;
 pub const RATE_MAX: f64 = 4.0;
 /// How far the key can be shifted, in semitones either way. An octave: past
 /// that a mix has left the track behind anyway.
 pub const KEY_SHIFT_MAX: f64 = 12.0;
+
+/// How close to the mark counts as being ON it. A hair over one frame at
+/// 48k, so a return that lands sample-exact reads as parked while a
+/// deliberate scrub of a millisecond does not.
+const CUE_AT_MARK_SECS: f64 = 0.001;
+
+/// What the CUE lamp is doing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CueLed {
+    Dark,
+    Solid,
+    Blink,
+}
+
+/// Which key the lock holds, and what letting go does with it.
+///
+/// Three flat states rather than two switches: `Original` captures
+/// nothing, so it has only one way to be released, and a fourth state
+/// would show the operator two that behave identically.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum KeylockMode {
+    /// The track's own key, whatever the tempo is doing. What the tab has
+    /// always done.
+    #[default]
+    Original,
+    /// The key that was already sounding when the lock went on, given back
+    /// when it comes off.
+    Current,
+    /// The same anchor, but the borrowed semitones stay in the shift knob
+    /// afterwards, as an interval the operator now owns.
+    CurrentKept,
+}
+
+impl KeylockMode {
+    /// The word the button wears. It names the key the lock will hold, so
+    /// the mode can be picked before anything is pressed.
+    pub fn label(self) -> &'static str {
+        match self {
+            KeylockMode::Original => "KEY",
+            KeylockMode::Current => "NOW",
+            KeylockMode::CurrentKept => "NOW+",
+        }
+    }
+
+    pub fn cycled(self) -> KeylockMode {
+        match self {
+            KeylockMode::Original => KeylockMode::Current,
+            KeylockMode::Current => KeylockMode::CurrentKept,
+            KeylockMode::CurrentKept => KeylockMode::Original,
+        }
+    }
+}
+
+/// A tempo ratio said as the interval it shifts the pitch by: double speed
+/// is an octave up. The floor is belt-and-braces -- the rate is clamped to
+/// RATE_MIN everywhere it is set, but a log of zero would poison the knob.
+fn semitones_of_rate(rate: f64) -> f64 {
+    12.0 * rate.max(f64::MIN_POSITIVE).log2()
+}
 
 /// What the pointer is doing to a deck's waveform.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -622,8 +734,23 @@ pub struct DeckState {
     pub position_secs: f64,
     /// Playback rate multiplier; 1.0 = the track's own tempo.
     pub rate: f64,
+    /// Whether the rate above was worked out by SYNC rather than put there
+    /// by hand.
+    ///
+    /// The two are the same number and mean different things. A rate the
+    /// operator set is a preference and may follow them onto the next
+    /// track; a rate the lock computed describes a PAIR of tracks and is
+    /// nonsense the moment one of them is replaced. Nothing could tell
+    /// them apart before, so a load onto a synced follower kept a match to
+    /// a track that had left the deck.
+    pub rate_from_lock: bool,
     /// Operator pitch offset as a fraction (−0.08 = 8% slow).
     pub pitch: f64,
+    /// A HELD bend, on top of whatever the fader says, in the same units.
+    /// Deliberately not part of `pitch`: moving the fader opts a follower
+    /// out of the lock, and nudging a deck back into place must not cost it
+    /// its sync. Zero unless a bend button is down.
+    pub bend: f64,
     pub pitch_range: PitchRange,
     /// Tempo/phase are being held against the other deck.
     pub synced: bool,
@@ -637,7 +764,20 @@ pub struct DeckState {
     /// tape faster. It also decides where a key shift is measured from: with
     /// the lock on, from the track's own key; with it off, from whatever the
     /// tempo already did to the pitch.
+    /// CUE is down and previewing from the mark. The two sync servos leave
+    /// a previewing deck alone, exactly as they leave a scratched one
+    /// alone: what is sounding is an audition, not the mix.
+    pub cue_held: bool,
     pub keylock: bool,
+    /// Which key the lock holds. See `KeylockMode`.
+    pub keylock_mode: KeylockMode,
+    /// The semitones the lock folded into `key_shift` when it engaged.
+    ///
+    /// Recorded rather than recomputed on release: the tempo may have moved
+    /// while the lock was holding, and giving back an interval worked out
+    /// against the NEW tempo would leave the key somewhere nobody asked
+    /// for. Zero whenever no lock is holding a borrowed interval.
+    pub keylock_offset: f64,
     /// Operator key shift in SEMITONES: pitch without tempo. 0 = the track's
     /// own key.
     pub key_shift: f64,
@@ -689,12 +829,17 @@ impl Default for DeckState {
             splat: None,
             position_secs: 0.0,
             rate: 1.0,
+            rate_from_lock: false,
+            bend: 0.0,
             pitch: 0.0,
-            pitch_range: PitchRange::Narrow,
+            pitch_range: PitchRange::default(),
             synced: false,
             ext_sync: false,
             auto_opt_out: false,
+            cue_held: false,
             keylock: true,
+            keylock_mode: KeylockMode::default(),
+            keylock_offset: 0.0,
             key_shift: 0.0,
             scratching: false,
             eq: [1.0; 3],
@@ -728,6 +873,19 @@ impl DeckState {
     /// A deck loops when it has a span, and only then.
     pub fn loop_on(&self) -> bool {
         self.loop_span.is_some()
+    }
+
+    /// Whether the span standing on this deck is the whole file.
+    ///
+    /// A track repeat and a loop are ONE span and one wrap: there is no
+    /// second mechanism and no flag beside it, which is why the loop icon
+    /// lights, the overview band draws, RELOOP works and `[`, `]` and the
+    /// stepper all behave with nothing new plumbed. This only tells the two
+    /// apart for the gesture that placed it.
+    pub fn repeats_whole_track(&self) -> bool {
+        self.loop_span.is_some_and(|span| {
+            span.start_secs <= 0.0 && span.end_secs >= self.duration_secs - 1e-9
+        })
     }
 
     pub fn title(&self) -> Option<&str> {
@@ -815,6 +973,9 @@ pub enum DeckCmd {
     SetCurve { curve: FadeCurve },
     /// Swap the two mixer deck voices (contents, transport, everything).
     SwapVoices,
+    /// Put the record on `from` onto `to` as well, on the same sample.
+    /// Distinct from a swap: nothing is exchanged and no fader moves.
+    CloneDeck { from: DeckId, to: DeckId },
     /// Playback rate multiplier (tempo). Pitch-preserving when key lock is on.
     SetRate { deck: DeckId, rate: f64 },
     /// Absolute playhead in source seconds.
@@ -857,6 +1018,9 @@ pub struct DeckEngine {
     last_loaded: Option<DeckId>,
     /// Hold the non-leading deck to the leader's grid without being asked.
     pub auto_sync: bool,
+    /// What a fresh load puts back to nothing. Off by default; see
+    /// `LoadReset`.
+    pub load_reset: LoadReset,
     /// QUANT's unit in beats, 0 = off. One global value: snapping is a
     /// property of how the operator is working, not of a deck.
     pub snap_beats: u32,
@@ -902,6 +1066,7 @@ impl Default for DeckEngine {
             curve: FadeCurve::EqualPower,
             last_loaded: None,
             auto_sync: true,
+            load_reset: LoadReset::default(),
             snap_beats: 0,
             queue: Vec::new(),
             auto_load_queue: true,
@@ -1075,6 +1240,13 @@ impl DeckEngine {
         state.auto_opt_out = false;
         state.stems_ready = false;
         state.scratching = false;
+        // A held bend belongs to the track that was under the hand.
+        state.bend = 0.0;
+        // A deck with a load in flight cannot lead, and when its new grid
+        // lands it must not become the reference the LIVE deck is dragged
+        // to. Eject has always handed the pin over; loading over a track is
+        // the same loss of the deck and never did.
+        self.hand_pin_over(deck);
         vec![DeckCmd::LoadTrack { deck, gen, item }]
     }
 
@@ -1103,6 +1275,45 @@ impl DeckEngine {
         state.found_loops.clear();
         state.cue_secs = 0.0;
         state.bookmark = None;
+        // A rate the LOCK worked out matched this deck to the one on the
+        // other side. That match described a pair of tracks and one of them
+        // has just been replaced, so it goes back to the track's own tempo
+        // rather than following a stranger onto a new record. A rate the
+        // operator set by hand is a preference and stays.
+        if state.rate_from_lock {
+            state.rate = 1.0;
+            state.pitch = 0.0;
+            state.rate_from_lock = false;
+        }
+        // Then whatever the operator asked a load to clear. Done here, in
+        // front of the command list below, so every SetX carries the reset
+        // value and there is no second source of truth.
+        let policy = self.load_reset;
+        let state = self.deck_mut(deck);
+        if policy.speed {
+            state.rate = 1.0;
+            state.pitch = 0.0;
+            state.rate_from_lock = false;
+        }
+        if policy.key {
+            state.key_shift = 0.0;
+        }
+        if policy.eq {
+            state.eq = [1.0; 3];
+            state.eq_kill = [false; 3];
+            state.eq_solo = [false; 3];
+        }
+        if policy.filter {
+            state.filter = 0.0;
+        }
+        if policy.gain {
+            state.gain = 1.0;
+        }
+        if policy.stems {
+            state.stem_gain = [1.0; STEM_COUNT];
+            state.stem_kill = [false; STEM_COUNT];
+            state.stem_solo = [false; STEM_COUNT];
+        }
         // Fresh installs inherit the whole standing channel-strip intent:
         // transport, tone, stems and the rate the pitch slider is sitting at.
         let mut cmds = vec![
@@ -1172,6 +1383,56 @@ impl DeckEngine {
             DeckCmd::SeekSeconds { deck, secs: span.start_secs },
             DeckCmd::SetLoopSpan { deck, span: Some(span) },
         ]
+    }
+
+    /// Repeat the whole track, or stop repeating it.
+    ///
+    /// This is the ordinary loop span set to the whole file, so the mixer's
+    /// wrap, its raw splice at the head (nothing exists before frame zero to
+    /// crossfade with) and its rule that a span never ends a deck all apply
+    /// unchanged. Nothing new is added to the audio path.
+    ///
+    /// Unlike every other way of engaging a span it leaves RELOOP's memory
+    /// and any placed bookmark alone. An operator who has a loop saved at
+    /// the drop and then repeats the track must still get that loop back
+    /// when they press RELOOP -- a repeat is a transport choice, not a
+    /// replacement for the loop they were keeping.
+    pub fn repeat_track(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        if self.deck(deck).repeats_whole_track() {
+            let state = self.deck_mut(deck);
+            state.loop_span = None;
+            return vec![DeckCmd::SetLoopSpan { deck, span: None }];
+        }
+        if !self.deck(deck).is_loaded() {
+            return Vec::new();
+        }
+        let duration = self.deck(deck).duration_secs;
+        // The same floor every other span passes: a file too short to hold
+        // one is not something to repeat.
+        let Some(span) = self.usable_span(deck, 0.0, duration) else {
+            return Vec::new();
+        };
+        let state = self.deck_mut(deck);
+        state.loop_span = Some(span);
+        state.loop_armed = None;
+        // No seek: the playhead is inside the whole file by definition, so
+        // there is nowhere for a repeat to move the record to.
+        vec![DeckCmd::SetLoopSpan { deck, span: Some(span) }]
+    }
+
+    /// Give the sync pin to the other deck, if it can carry it.
+    ///
+    /// Called wherever a deck stops being able to lead: ejected, unsynced,
+    /// or loading. The same election was written out three times before
+    /// this and missing from the fourth place that needed it.
+    fn hand_pin_over(&mut self, deck: DeckId) {
+        if self.sync_master != Some(deck) {
+            return;
+        }
+        let other = deck.other();
+        let state = self.deck(other);
+        self.sync_master =
+            (state.synced && state.is_loaded() && state.sync_view().is_some()).then_some(other);
     }
 
     /// Seconds one armed loop is worth on this deck, or `None` when the
@@ -1416,12 +1677,6 @@ impl DeckEngine {
         self.engage_loop(deck, resized, false)
     }
 
-    /// Marks read back from disk on a track's install.
-    pub fn restore_loop_slots(&mut self, deck: DeckId, mut slots: Vec<LoopSpan>) {
-        slots.truncate(LOOP_SLOT_CAP);
-        self.deck_mut(deck).loop_slots = slots;
-    }
-
     /// REMOVE USER LOOPS: drop every blue mark and the bookmark in one act
     /// — the operator's own marks, gone. No stash to press again: the scan
     /// dialog's CANCEL is the undo now, and a second meaning for this call
@@ -1433,8 +1688,8 @@ impl DeckEngine {
         state.bookmark = None;
     }
 
-    /// Put a snapshot of the operator's marks back — CANCEL's undo path,
-    /// cap-respecting like `restore_loop_slots` because a snapshot taken
+    /// Put the operator's marks back: CANCEL's undo path, and the marks
+    /// file on a track's install. Cap-respecting, because a snapshot taken
     /// before a restore-from-disk could carry more than the row holds.
     pub fn restore_marks(
         &mut self,
@@ -1714,14 +1969,7 @@ impl DeckEngine {
         state.scratching = false;
         // An ejected master hands the pin to the remaining group member
         // (or the group ends with it).
-        if self.sync_master == Some(deck) {
-            let other = deck.other();
-            let state = self.deck(other);
-            self.sync_master = (state.synced
-                && state.is_loaded()
-                && state.sync_view().is_some())
-            .then_some(other);
-        }
+        self.hand_pin_over(deck);
         vec![DeckCmd::UnloadTrack { deck }]
     }
 
@@ -1746,6 +1994,51 @@ impl DeckEngine {
             DeckCmd::SwapVoices,
             DeckCmd::SetCrossfader { position: self.crossfader },
         ]
+    }
+
+    /// The same record on both decks, from the same sample.
+    ///
+    /// The copy goes onto the deck a new track would land on, which is
+    /// never the live one -- doubling onto the deck you are playing would
+    /// be a way to lose the mix, not to work it.
+    pub fn instant_double(&mut self) -> Vec<DeckCmd> {
+        let to = self.auto_target();
+        let from = to.other();
+        if !self.deck(from).is_loaded() {
+            return Vec::new();
+        }
+        let item = match &self.deck(from).load {
+            DeckLoad::Loaded { item } => item.clone(),
+            _ => return Vec::new(),
+        };
+        // Only the fields the RECORD owns, read out before the borrow
+        // turns mutable. DeckState is not Copy and most of it belongs to
+        // the slot rather than the track.
+        let src = self.deck(from);
+        let (duration, position, playing, grid) =
+            (src.duration_secs, src.position_secs, src.playing, src.grid);
+        let (rate, from_lock, pitch) = (src.rate, src.rate_from_lock, src.pitch);
+        let (key_shift, keylock, span, cue) =
+            (src.key_shift, src.keylock, src.loop_span, src.cue_secs);
+        let dst = self.deck_mut(to);
+        dst.load = DeckLoad::Loaded { item };
+        dst.duration_secs = duration;
+        dst.position_secs = position;
+        dst.playing = playing;
+        dst.grid = grid;
+        dst.rate = rate;
+        dst.rate_from_lock = from_lock;
+        dst.pitch = pitch;
+        dst.key_shift = key_shift;
+        dst.keylock = keylock;
+        dst.loop_span = span;
+        dst.cue_secs = cue;
+        // The record travels; the marks the operator placed on the OTHER
+        // slot do not, and neither does anything half-placed.
+        dst.loop_armed = None;
+        dst.bookmark = None;
+        dst.splat = None;
+        vec![DeckCmd::CloneDeck { from, to }]
     }
 
     /// Mixer reports a deck ran off the end with looping off. With queue
@@ -1931,6 +2224,11 @@ impl DeckEngine {
         let mut cmds = Vec::new();
         let state = self.deck_mut(follower);
         state.synced = true;
+        // Outside the guard on purpose: a lock that works out the rate the
+        // deck already has still means that rate describes a PAIR of
+        // tracks, and marking it only when it moved would miss exactly the
+        // case where the two tracks already agreed.
+        state.rate_from_lock = true;
         if (state.rate - plan.rate).abs() > 1e-9 {
             state.rate = plan.rate;
             // Show the operator the rate the sync chose on the pitch slider.
@@ -1981,7 +2279,7 @@ impl DeckEngine {
             return Vec::new();
         }
         let state = self.deck(follower);
-        if !state.is_loaded() || state.auto_opt_out || state.scratching {
+        if !state.is_loaded() || state.auto_opt_out || state.scratching || state.cue_held {
             return Vec::new();
         }
         if state.sync_view().is_none() {
@@ -2037,12 +2335,7 @@ impl DeckEngine {
             state.synced = false;
             state.auto_opt_out = true;
             if self.sync_master == Some(deck) {
-                let other = deck.other();
-                let state = self.deck(other);
-                self.sync_master = (state.synced
-                    && state.is_loaded()
-                    && state.sync_view().is_some())
-                .then_some(other);
+                self.hand_pin_over(deck);
             } else if !self.deck(deck.other()).synced {
                 // The last follower left: the group is dissolved.
                 self.sync_master = None;
@@ -2094,7 +2387,7 @@ impl DeckEngine {
         let mut cmds = Vec::new();
         for deck in [DeckId::A, DeckId::B] {
             let state = self.deck(deck);
-            if !state.ext_sync || !state.playing || state.scratching {
+            if !state.ext_sync || !state.playing || state.scratching || state.cue_held {
                 continue;
             }
             cmds.extend(self.follow_view(deck, external));
@@ -2125,7 +2418,7 @@ impl DeckEngine {
                 continue;
             }
             let state = self.deck(deck);
-            if !state.synced || state.ext_sync || !state.playing || state.scratching {
+            if !state.synced || state.ext_sync || !state.playing || state.scratching || state.cue_held {
                 continue;
             }
             cmds.extend(self.follow_view(deck, &view));
@@ -2147,6 +2440,7 @@ impl DeckEngine {
         let lookahead = self.land_lookahead_secs;
         let mut cmds = Vec::new();
         let state = self.deck_mut(deck);
+        state.rate_from_lock = true;
         if (state.rate - follow.rate).abs() > 1e-4 {
             state.rate = follow.rate;
             state.pitch = (follow.rate - 1.0).clamp(-0.5, 0.5);
@@ -2162,6 +2456,12 @@ impl DeckEngine {
 
     /// No commands: unlike auto sync, a new unit changes nothing until
     /// the next seek, so there is nothing to emit.
+    /// Choose what a fresh load puts back to nothing. Emits nothing: the
+    /// policy only bites on the next load, so there is nothing to send now.
+    pub fn set_load_reset(&mut self, policy: LoadReset) {
+        self.load_reset = policy;
+    }
+
     pub fn set_snap_beats(&mut self, beats: u32) {
         self.snap_beats = beats;
     }
@@ -2196,11 +2496,14 @@ impl DeckEngine {
         let state = self.deck_mut(deck);
         state.pitch = pitch;
         state.rate = rate;
+        // A hand on the tempo makes it the operator's, whatever the lock
+        // had made of it before.
+        state.rate_from_lock = false;
         if !is_master {
             state.synced = false;
             state.auto_opt_out = true;
         }
-        let mut cmds = vec![DeckCmd::SetRate { deck, rate }];
+        let mut cmds = vec![DeckCmd::SetRate { deck, rate: self.bent(deck, rate) }];
         // A tempo move on the LEADER propagates: the follower keeps up.
         if self.sync_leader() == Some(deck) {
             cmds.extend(self.apply_auto_sync());
@@ -2208,21 +2511,61 @@ impl DeckEngine {
         cmds
     }
 
-    /// Nudge the pitch by a small step (the ± buttons / an encoder).
-    pub fn nudge_pitch(&mut self, deck: DeckId, steps: f64) -> Vec<DeckCmd> {
-        let state = self.deck(deck);
-        let range = state.pitch_range.fraction();
-        let fraction = state.pitch / range + steps * 0.01;
-        self.set_pitch(deck, fraction)
+    /// What to command this deck, with any held bend on top.
+    ///
+    /// Clamped rather than merely added: a bend that could drive the rate
+    /// to zero or through it would stop or reverse the record, and a bend
+    /// is a nudge, never a transport control.
+    fn bent(&self, deck: DeckId, base: f64) -> f64 {
+        (base + self.deck(deck).bend).clamp(RATE_MIN, RATE_MAX)
     }
 
-    pub fn toggle_pitch_range(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+    /// Hold a bend: `direction` is +1 to push forward, -1 to hold back.
+    pub fn hold_bend(&mut self, deck: DeckId, direction: f64, fine: bool) -> Vec<DeckCmd> {
+        let step = if fine { BEND_FINE } else { BEND_COARSE };
+        self.deck_mut(deck).bend = direction.signum() * step;
+        let base = self.deck(deck).rate;
+        vec![DeckCmd::SetRate { deck, rate: self.bent(deck, base) }]
+    }
+
+    /// Let it go: straight back to whatever the fader says.
+    pub fn release_bend(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        self.deck_mut(deck).bend = 0.0;
+        let rate = self.deck(deck).rate;
+        vec![DeckCmd::SetRate { deck, rate }]
+    }
+
+    /// Trim the tempo permanently by a small step: `direction` is +1 to
+    /// speed up, -1 to slow down.
+    ///
+    /// The step is a share of the TRACK's tempo, not of the selected range,
+    /// so widening the range changes how far the fader reaches and not what
+    /// this button does. It stops at the end of the range rather than
+    /// running past it.
+    pub fn trim_pitch(&mut self, deck: DeckId, direction: f64, fine: bool) -> Vec<DeckCmd> {
+        let step = if fine { TRIM_FINE } else { TRIM_COARSE };
+        let range = self.deck(deck).pitch_range.fraction();
+        let want = self.deck(deck).pitch + direction.signum() * step;
+        self.set_pitch(deck, want / range)
+    }
+
+    /// Step the fader's reach one rung wider or narrower.
+    ///
+    /// It emits nothing, and that is the whole point: the tempo a deck is
+    /// running at is not the fader's to change, so choosing how far the
+    /// fader reaches must never move the music. The old toggle re-expressed
+    /// the standing pitch in the new range through `set_pitch`, which
+    /// clamped the tempo whenever the range narrowed -- with a ladder, most
+    /// presses -- and, because `set_pitch` opts a non-master out of the
+    /// lock, silently unlocked a synced deck every time the button was
+    /// pressed.
+    ///
+    /// A tempo already outside the new range simply pins the fader at its
+    /// end until the hand moves it.
+    pub fn step_pitch_range(&mut self, deck: DeckId, wider: bool) -> Vec<DeckCmd> {
         let state = self.deck_mut(deck);
-        let range = state.pitch_range.toggled();
-        state.pitch_range = range;
-        // Keep the audible tempo: re-express the same pitch in the new range.
-        let fraction = (state.pitch / range.fraction()).clamp(-1.0, 1.0);
-        self.set_pitch(deck, fraction)
+        state.pitch_range = state.pitch_range.stepped(wider);
+        Vec::new()
     }
 
     /// Drop the pitch back to the track's own tempo.
@@ -2248,6 +2591,11 @@ impl DeckEngine {
 
     /// Back to the track's own key.
     pub fn reset_key_shift(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        // The readout is the way back to the track's own key and it has to
+        // mean it: leaving a debt standing here would drive the shift
+        // NEGATIVE at the next release. `nudge_key_shift` deliberately does
+        // not do this, so a step taken while the lock holds survives it.
+        self.deck_mut(deck).keylock_offset = 0.0;
         self.set_key_shift(deck, 0.0)
     }
 
@@ -2257,7 +2605,118 @@ impl DeckEngine {
     pub fn toggle_keylock(&mut self, deck: DeckId) -> Vec<DeckCmd> {
         let state = self.deck_mut(deck);
         state.keylock = !state.keylock;
-        vec![DeckCmd::SetKeylock { deck, on: state.keylock }]
+        let engaged = state.keylock;
+        let mode = state.keylock_mode;
+        let mut cmds = vec![DeckCmd::SetKeylock { deck, on: engaged }];
+        if engaged {
+            if mode == KeylockMode::Original {
+                return cmds;
+            }
+            // Hand the tempo's own interval to the shift knob, and the
+            // render path then holds precisely the key that was already
+            // sounding. The STANDING tempo, not the bent one: a lean held
+            // across the press must not become a permanent anchor.
+            let rate = self.deck(deck).rate;
+            let before = self.deck(deck).key_shift;
+            cmds.extend(self.set_key_shift(deck, before + semitones_of_rate(rate)));
+            // Recorded AFTER the clamp, so the give-back is exact even at
+            // the rail.
+            let after = self.deck(deck).key_shift;
+            self.deck_mut(deck).keylock_offset = after - before;
+            return cmds;
+        }
+        // Letting go. Both conditions matter: `Current` alone would emit a
+        // pointless shift of nothing in the default mode, and a standing
+        // debt alone would take back semitones the operator was told they
+        // could keep.
+        let owed = self.deck(deck).keylock_offset;
+        if mode == KeylockMode::Current && owed != 0.0 {
+            let now = self.deck(deck).key_shift;
+            cmds.extend(self.set_key_shift(deck, now - owed));
+        }
+        self.deck_mut(deck).keylock_offset = 0.0;
+        cmds
+    }
+
+    /// Walk the three keys the lock can hold. Moves no pitch and sends no
+    /// command: it says what the NEXT press will do, and the button reads
+    /// it out so the choice can be made before anything is pressed.
+    pub fn cycle_keylock_mode(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.keylock_mode = state.keylock_mode.cycled();
+        Vec::new()
+    }
+
+    /// CUE went down.
+    ///
+    /// Paused away from the mark, this MOVES the mark here -- that is how a
+    /// cue point gets set without a second control. Anywhere else it starts
+    /// a preview from the mark, which sounds for as long as the button is
+    /// held.
+    ///
+    /// The preview deliberately does not go through `seek_secs` or `play`:
+    /// both re-run auto sync, and a playing follower would be jumped to the
+    /// nearest beat -- up to half a beat from the very mark it is
+    /// auditioning.
+    pub fn cue_press(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        if !self.deck(deck).is_loaded() {
+            return Vec::new();
+        }
+        let state = self.deck(deck);
+        let at_mark = (state.position_secs - state.cue_secs).abs() < CUE_AT_MARK_SECS;
+        if !state.playing && !at_mark {
+            let secs = state.position_secs;
+            self.deck_mut(deck).cue_secs = secs;
+            return Vec::new();
+        }
+        let cue = state.cue_secs;
+        let state = self.deck_mut(deck);
+        state.cue_held = true;
+        state.playing = true;
+        state.position_secs = cue;
+        vec![
+            DeckCmd::SeekSeconds { deck, secs: cue },
+            DeckCmd::SetPlaying { deck, playing: true },
+        ]
+    }
+
+    /// CUE came up: the preview stops and the record goes back to the mark.
+    /// A press that only moved the mark has nothing to release.
+    pub fn cue_release(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        if !self.deck(deck).cue_held {
+            return Vec::new();
+        }
+        let cue = self.deck(deck).cue_secs;
+        let state = self.deck_mut(deck);
+        state.cue_held = false;
+        state.playing = false;
+        state.position_secs = cue;
+        vec![
+            DeckCmd::SetPlaying { deck, playing: false },
+            DeckCmd::SeekSeconds { deck, secs: cue },
+        ]
+    }
+
+    /// What the CUE lamp should be doing.
+    pub fn cue_led(&self, deck: DeckId) -> CueLed {
+        let state = self.deck(deck);
+        if !state.is_loaded() {
+            return CueLed::Dark;
+        }
+        if state.cue_held {
+            return CueLed::Solid;
+        }
+        // Parked exactly on the mark, ready to go: the light every hand
+        // reads as "this deck is cued and waiting".
+        if !state.playing && (state.position_secs - state.cue_secs).abs() < CUE_AT_MARK_SECS {
+            return CueLed::Solid;
+        }
+        // Stopped somewhere else: pressing CUE will move the mark here, and
+        // the blink is the warning that it will.
+        if !state.playing {
+            return CueLed::Blink;
+        }
+        CueLed::Dark
     }
 
     /// Pointer on the waveform. A grab suspends the phase lock; the release
@@ -2382,7 +2841,7 @@ impl DeckEngine {
             return own;
         }
         let state = self.deck(deck);
-        if !state.is_loaded() || state.auto_opt_out || state.scratching {
+        if !state.is_loaded() || state.auto_opt_out || state.scratching || state.cue_held {
             return own;
         }
         let (Some(lead), Some(follow)) =
@@ -3543,6 +4002,661 @@ mod tests {
         engine.grid_ready(deck, gen, grid(bpm, first_beat_secs));
     }
 
+    // ---- momentary pitch bend -------------------------------------------
+
+    #[test]
+    fn a_bend_moves_the_rate_without_moving_the_fader() {
+        let mut decks = DeckEngine::new();
+        let before = decks.deck(DeckId::A).pitch;
+        let cmds = decks.hold_bend(DeckId::A, 1.0, false);
+        assert_eq!(rate_of(&cmds, DeckId::A), Some(1.0 + BEND_COARSE));
+        assert_eq!(decks.deck(DeckId::A).pitch, before, "the fader has not moved");
+    }
+
+    #[test]
+    fn releasing_a_bend_puts_the_rate_back_exactly() {
+        let mut decks = DeckEngine::new();
+        decks.hold_bend(DeckId::A, -1.0, false);
+        let cmds = decks.release_bend(DeckId::A);
+        assert_eq!(rate_of(&cmds, DeckId::A), Some(1.0), "back to the track's own tempo");
+        assert_eq!(decks.deck(DeckId::A).bend, 0.0);
+    }
+
+    #[test]
+    fn a_fine_bend_is_smaller_than_a_coarse_one() {
+        let mut decks = DeckEngine::new();
+        let coarse = rate_of(&decks.hold_bend(DeckId::A, 1.0, false), DeckId::A).unwrap();
+        decks.release_bend(DeckId::A);
+        let fine = rate_of(&decks.hold_bend(DeckId::A, 1.0, true), DeckId::A).unwrap();
+        assert!(fine > 1.0 && fine < coarse, "fine {fine} coarse {coarse}");
+    }
+
+    #[test]
+    fn a_bend_does_not_drop_a_follower_out_of_sync() {
+        // This is the whole reason a bend is not a pitch move: `set_pitch`
+        // opts a follower out of the lock, and nudging a deck back into
+        // place must not cost it its sync.
+        let mut decks = DeckEngine::new();
+        decks.deck_mut(DeckId::B).synced = true;
+        decks.deck_mut(DeckId::B).auto_opt_out = false;
+        decks.hold_bend(DeckId::B, 1.0, false);
+        assert!(decks.deck(DeckId::B).synced, "still locked");
+        assert!(!decks.deck(DeckId::B).auto_opt_out, "and not opted out");
+    }
+
+    #[test]
+    fn a_bend_never_drives_the_deck_backwards() {
+        let mut decks = DeckEngine::new();
+        decks.set_pitch(DeckId::A, -1.0);
+        for _ in 0..40 {
+            decks.hold_bend(DeckId::A, -1.0, false);
+        }
+        let rate = rate_of(&decks.hold_bend(DeckId::A, -1.0, false), DeckId::A).unwrap();
+        assert!(rate >= RATE_MIN, "a bend must never reverse the record: {rate}");
+    }
+
+    #[test]
+    fn a_held_bend_survives_a_pitch_move_underneath_it() {
+        let mut decks = DeckEngine::new();
+        decks.hold_bend(DeckId::A, 1.0, false);
+        let cmds = decks.set_pitch(DeckId::A, 0.5);
+        let base = 1.0 + 0.5 * decks.deck(DeckId::A).pitch_range.fraction();
+        assert_eq!(
+            rate_of(&cmds, DeckId::A),
+            Some(base + BEND_COARSE),
+            "the bend rides on top of whatever the fader now says"
+        );
+    }
+
+    // ---- permanent tempo trim -------------------------------------------
+
+    #[test]
+    fn a_trim_steps_the_same_tempo_whatever_the_range_is() {
+        // The whole point. A nudge used to step a percent of the RANGE, so
+        // the same button moved the music by 0.08% on a narrow range and
+        // 0.5% on a wide one, and an operator could not learn what it did.
+        let mut narrow = DeckEngine::new();
+        narrow.trim_pitch(DeckId::A, 1.0, false);
+        let a = narrow.deck(DeckId::A).rate;
+
+        let mut wide = DeckEngine::new();
+        wide.step_pitch_range(DeckId::A, true);
+        assert_ne!(
+            wide.deck(DeckId::A).pitch_range.fraction(),
+            narrow.deck(DeckId::A).pitch_range.fraction(),
+            "the two decks must actually differ for this to prove anything"
+        );
+        wide.trim_pitch(DeckId::A, 1.0, false);
+        let b = wide.deck(DeckId::A).rate;
+
+        assert!((a - b).abs() < 1e-12, "{a} against {b}");
+        assert!((a - (1.0 + TRIM_COARSE)).abs() < 1e-12, "half a percent of tempo: {a}");
+    }
+
+    #[test]
+    fn a_fine_trim_is_a_tenth_of_a_coarse_one() {
+        let mut decks = DeckEngine::new();
+        decks.trim_pitch(DeckId::A, 1.0, true);
+        assert!((decks.deck(DeckId::A).rate - (1.0 + TRIM_FINE)).abs() < 1e-12);
+        assert!((TRIM_COARSE - TRIM_FINE * 10.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_trim_stops_at_the_end_of_the_range_rather_than_running_past_it() {
+        let mut decks = DeckEngine::new();
+        let range = decks.deck(DeckId::A).pitch_range.fraction();
+        for _ in 0..1000 {
+            decks.trim_pitch(DeckId::A, 1.0, false);
+        }
+        assert!(
+            (decks.deck(DeckId::A).pitch - range).abs() < 1e-12,
+            "trimmed to {} with a range of {range}",
+            decks.deck(DeckId::A).pitch
+        );
+    }
+
+    #[test]
+    fn a_trim_down_and_back_up_returns_to_where_it_started() {
+        let mut decks = DeckEngine::new();
+        decks.set_pitch(DeckId::A, 0.25);
+        let was = decks.deck(DeckId::A).pitch;
+        decks.trim_pitch(DeckId::A, -1.0, false);
+        decks.trim_pitch(DeckId::A, 1.0, false);
+        assert!((decks.deck(DeckId::A).pitch - was).abs() < 1e-12);
+    }
+
+    // ---- whole-track repeat ---------------------------------------------
+
+    #[test]
+    fn repeating_a_track_engages_a_span_over_the_whole_file() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        let duration = e.deck(DeckId::A).duration_secs;
+        let cmds = e.repeat_track(DeckId::A);
+        assert_eq!(
+            cmds,
+            vec![DeckCmd::SetLoopSpan {
+                deck: DeckId::A,
+                span: Some(LoopSpan { start_secs: 0.0, end_secs: duration })
+            }],
+            "one span, no seek: the playhead is already inside the whole file"
+        );
+        assert!(e.deck(DeckId::A).repeats_whole_track());
+        assert!(e.deck(DeckId::A).loop_on(), "and it is an ordinary loop as far as everything else is concerned");
+    }
+
+    #[test]
+    fn a_second_press_stops_repeating_and_leaves_no_span() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        e.repeat_track(DeckId::A);
+        let cmds = e.repeat_track(DeckId::A);
+        assert_eq!(cmds, vec![DeckCmd::SetLoopSpan { deck: DeckId::A, span: None }]);
+        assert!(!e.deck(DeckId::A).loop_on());
+        assert!(!e.deck(DeckId::A).repeats_whole_track());
+    }
+
+    #[test]
+    fn a_repeat_does_not_cost_the_operator_the_loop_they_were_keeping() {
+        // The whole reason this does not go through `engage_loop`: that
+        // overwrites RELOOP's memory and throws away a placed bookmark, so
+        // repeating a track would quietly lose the loop saved at the drop.
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        let kept = LoopSpan { start_secs: 30.0, end_secs: 34.0 };
+        e.deck_mut(DeckId::A).loop_memory = Some(kept);
+        e.deck_mut(DeckId::A).bookmark = Some(12.5);
+
+        e.repeat_track(DeckId::A);
+        assert_eq!(e.deck(DeckId::A).loop_memory, Some(kept), "RELOOP still remembers it");
+        assert_eq!(e.deck(DeckId::A).bookmark, Some(12.5), "and the green mark is still placed");
+
+        e.repeat_track(DeckId::A);
+        assert_eq!(e.deck(DeckId::A).loop_memory, Some(kept), "leaving the repeat does not claim it either");
+        let cmds = e.toggle_loop(DeckId::A);
+        assert_eq!(
+            cmds,
+            vec![
+                DeckCmd::SeekSeconds { deck: DeckId::A, secs: 30.0 },
+                DeckCmd::SetLoopSpan { deck: DeckId::A, span: Some(kept) },
+            ],
+            "and RELOOP brings back the loop, not the whole track"
+        );
+    }
+
+    #[test]
+    fn an_unloaded_deck_cannot_repeat_a_track() {
+        let mut e = DeckEngine::new();
+        assert!(e.repeat_track(DeckId::A).is_empty(), "nothing to repeat");
+        assert!(e.deck(DeckId::A).loop_span.is_none());
+        // A deck with a load still in flight has a duration of zero, which
+        // would be a span of nothing at all.
+        e.click(item(1), DeckTarget::A);
+        assert!(e.repeat_track(DeckId::A).is_empty());
+        assert!(e.deck(DeckId::A).loop_span.is_none());
+    }
+
+    #[test]
+    fn a_fresh_load_drops_a_whole_track_repeat_like_any_other_span() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        e.repeat_track(DeckId::A);
+        assert!(e.deck(DeckId::A).repeats_whole_track());
+        load_analysed(&mut e, DeckId::A, 2, 128.0, 0.0);
+        assert!(!e.deck(DeckId::A).loop_on(), "a span measured on the last track means nothing on this one");
+        assert!(!e.deck(DeckId::A).repeats_whole_track());
+    }
+
+    #[test]
+    fn the_stepper_shortens_a_repeat_into_an_ordinary_loop() {
+        // Halving a repeat leaves the first half, which is no longer the
+        // whole file -- so the gesture that made it a repeat makes it one
+        // again rather than toggling it off. Worth pinning: it is the one
+        // place the toggle is not its own inverse.
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        let duration = e.deck(DeckId::A).duration_secs;
+        e.repeat_track(DeckId::A);
+        e.loop_halve(DeckId::A);
+        assert!(!e.deck(DeckId::A).repeats_whole_track(), "half a file is a loop now");
+        assert!(e.deck(DeckId::A).loop_on());
+        e.repeat_track(DeckId::A);
+        assert_eq!(
+            e.deck(DeckId::A).loop_span,
+            Some(LoopSpan { start_secs: 0.0, end_secs: duration }),
+            "and the gesture puts the whole file back"
+        );
+    }
+
+    // ---- what a load may and may not carry ------------------------------
+
+    #[test]
+    fn a_load_drops_a_tempo_the_lock_worked_out_but_keeps_one_set_by_hand() {
+        // The lock's rate matched THIS deck to the one on the other side.
+        // Replace the track under it and that match describes a record that
+        // has left the building.
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        load_analysed(&mut e, DeckId::B, 2, 124.0, 0.0);
+        e.deck_mut(DeckId::A).playing = true;
+        e.sync(DeckId::B, true);
+        let locked = e.deck(DeckId::B).rate;
+        assert!((locked - 1.0).abs() > 1e-6, "the lock did move the rate: {locked}");
+        assert!(e.deck(DeckId::B).rate_from_lock);
+
+        // With AUTO SYNC off nothing would ever correct it, which is the
+        // case that made this a fault rather than a wrinkle.
+        e.auto_sync = false;
+        load_analysed(&mut e, DeckId::B, 3, 100.0, 0.0);
+        assert_eq!(e.deck(DeckId::B).rate, 1.0, "back to the new track's own tempo");
+        assert_eq!(e.deck(DeckId::B).pitch, 0.0);
+        assert!(!e.deck(DeckId::B).rate_from_lock);
+    }
+
+    #[test]
+    fn dropping_the_locks_tempo_does_not_stop_auto_sync_claiming_the_new_track() {
+        // The reset runs when the track lands; the grid arrives after it,
+        // and AUTO SYNC locking the new record to the room is the whole
+        // point of leaving it on.
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        load_analysed(&mut e, DeckId::B, 2, 124.0, 0.0);
+        e.deck_mut(DeckId::A).playing = true;
+        e.sync(DeckId::B, true);
+        assert!(e.auto_sync, "on by default, and this test is about that");
+        load_analysed(&mut e, DeckId::B, 3, 100.0, 0.0);
+        assert!(
+            (e.deck(DeckId::B).rate - 1.28).abs() < 1e-9,
+            "the new track is locked to the live one, not left at its own tempo: {}",
+            e.deck(DeckId::B).rate
+        );
+    }
+
+    #[test]
+    fn a_tempo_the_hand_set_survives_a_load() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        e.set_pitch(DeckId::A, 0.5);
+        let by_hand = e.deck(DeckId::A).rate;
+        assert!(!e.deck(DeckId::A).rate_from_lock, "a hand on the slider owns the rate");
+        load_analysed(&mut e, DeckId::A, 2, 100.0, 0.0);
+        assert_eq!(e.deck(DeckId::A).rate, by_hand, "the operator's tempo follows them");
+    }
+
+    #[test]
+    fn loading_over_the_pinned_deck_hands_the_pin_on_rather_than_dragging_the_live_one() {
+        // A deck with a load in flight cannot lead. Left holding the pin,
+        // its new grid arrives and the LIVE deck gets pulled onto it.
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        load_analysed(&mut e, DeckId::B, 2, 124.0, 0.0);
+        e.deck_mut(DeckId::A).playing = true;
+        e.deck_mut(DeckId::B).playing = true;
+        e.sync(DeckId::B, true);
+        e.sync_master = Some(DeckId::A);
+
+        e.click(item(9), DeckTarget::A);
+        assert_ne!(e.sync_master, Some(DeckId::A), "a loading deck does not keep the pin");
+    }
+
+    #[test]
+    fn a_held_bend_does_not_follow_the_operator_onto_the_next_track() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        e.hold_bend(DeckId::A, 1.0, false);
+        assert_ne!(e.deck(DeckId::A).bend, 0.0);
+        e.click(item(9), DeckTarget::A);
+        assert_eq!(e.deck(DeckId::A).bend, 0.0, "the lean was on the record that just left");
+    }
+
+    #[test]
+    fn a_load_leaves_the_console_alone_unless_it_is_asked_not_to() {
+        // The default IS today's behaviour, and a later flip of one of
+        // these bools should fail here rather than move eight other tests.
+        assert_eq!(LoadReset::default(), LoadReset {
+            speed: false, key: false, eq: false, filter: false, gain: false, stems: false,
+        });
+        assert_eq!(DeckEngine::new().load_reset, LoadReset::default());
+
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        e.deck_mut(DeckId::A).eq = [0.3, 0.4, 0.5];
+        e.deck_mut(DeckId::A).filter = -0.7;
+        e.deck_mut(DeckId::A).gain = 0.6;
+        e.deck_mut(DeckId::A).key_shift = 2.0;
+        e.deck_mut(DeckId::A).stem_gain = [0.1, 0.2, 0.3, 0.4];
+        load_analysed(&mut e, DeckId::A, 2, 100.0, 0.0);
+        let s = e.deck(DeckId::A);
+        assert_eq!(s.eq, [0.3, 0.4, 0.5], "the EQ describes the room, not the record");
+        assert_eq!(s.filter, -0.7);
+        assert_eq!(s.gain, 0.6);
+        assert_eq!(s.key_shift, 2.0);
+        assert_eq!(s.stem_gain, [0.1, 0.2, 0.3, 0.4]);
+    }
+
+    #[test]
+    fn each_switch_clears_its_own_group_and_no_other() {
+        for (name, policy) in [
+            ("eq", LoadReset { eq: true, ..LoadReset::default() }),
+            ("filter", LoadReset { filter: true, ..LoadReset::default() }),
+            ("gain", LoadReset { gain: true, ..LoadReset::default() }),
+            ("key", LoadReset { key: true, ..LoadReset::default() }),
+            ("stems", LoadReset { stems: true, ..LoadReset::default() }),
+        ] {
+            let mut e = DeckEngine::new();
+            e.set_load_reset(policy);
+            load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+            let d = e.deck_mut(DeckId::A);
+            d.eq = [0.3, 0.4, 0.5];
+            d.eq_kill = [true; 3];
+            d.filter = -0.7;
+            d.gain = 0.6;
+            d.key_shift = 2.0;
+            d.stem_gain = [0.1, 0.2, 0.3, 0.4];
+            d.stem_solo = [true; STEM_COUNT];
+            load_analysed(&mut e, DeckId::A, 2, 100.0, 0.0);
+            let s = e.deck(DeckId::A);
+            assert_eq!(s.eq == [1.0; 3], policy.eq, "{name}: eq");
+            assert_eq!(s.eq_kill == [false; 3], policy.eq, "{name}: eq kills");
+            assert_eq!(s.filter == 0.0, policy.filter, "{name}: filter");
+            assert_eq!(s.gain == 1.0, policy.gain, "{name}: gain");
+            assert_eq!(s.key_shift == 0.0, policy.key, "{name}: key");
+            assert_eq!(s.stem_gain == [1.0; STEM_COUNT], policy.stems, "{name}: stem gains");
+            assert_eq!(s.stem_solo == [false; STEM_COUNT], policy.stems, "{name}: stem solos");
+        }
+    }
+
+    #[test]
+    fn the_speed_switch_clears_a_tempo_the_hand_set() {
+        let mut e = DeckEngine::new();
+        e.set_load_reset(LoadReset { speed: true, ..LoadReset::default() });
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        e.set_pitch(DeckId::A, 0.5);
+        assert_ne!(e.deck(DeckId::A).rate, 1.0);
+        e.auto_sync = false;
+        load_analysed(&mut e, DeckId::A, 2, 100.0, 0.0);
+        assert_eq!(e.deck(DeckId::A).rate, 1.0, "asked for, so even the hand's tempo goes");
+        assert_eq!(e.deck(DeckId::A).pitch, 0.0);
+    }
+
+    // ---- which key the lock holds ---------------------------------------
+
+    #[test]
+    fn the_default_mode_holds_the_tracks_own_key_and_touches_no_knob() {
+        // The mode that has always shipped. The lock starts ON, so the
+        // first press is a release.
+        let mut e = DeckEngine::new();
+        assert_eq!(e.deck(DeckId::A).keylock_mode, KeylockMode::Original);
+        assert!(e.deck(DeckId::A).keylock, "on by default");
+        e.set_pitch(DeckId::A, 1.0);
+        let released = e.toggle_keylock(DeckId::A);
+        assert_eq!(released, vec![DeckCmd::SetKeylock { deck: DeckId::A, on: false }]);
+        let engaged = e.toggle_keylock(DeckId::A);
+        assert_eq!(engaged, vec![DeckCmd::SetKeylock { deck: DeckId::A, on: true }]);
+        assert_eq!(e.deck(DeckId::A).key_shift, 0.0, "nothing borrowed, nothing owed");
+        assert_eq!(e.deck(DeckId::A).keylock_offset, 0.0);
+    }
+
+    #[test]
+    fn holding_the_key_that_was_sounding_folds_the_tempos_own_interval_into_the_knob() {
+        let mut e = DeckEngine::new();
+        e.deck_mut(DeckId::A).keylock_mode = KeylockMode::Current;
+        e.toggle_keylock(DeckId::A); // off
+        e.set_pitch(DeckId::A, 1.0); // the widest the default range reaches
+        let rate = e.deck(DeckId::A).rate;
+        let want = 12.0 * rate.log2();
+        e.toggle_keylock(DeckId::A); // on
+        assert!(
+            (e.deck(DeckId::A).key_shift - want).abs() < 1e-9,
+            "the knob holds the interval the tempo was making: {} against {want}",
+            e.deck(DeckId::A).key_shift
+        );
+        assert!((e.deck(DeckId::A).keylock_offset - want).abs() < 1e-9);
+    }
+
+    #[test]
+    fn letting_go_gives_back_exactly_what_was_borrowed() {
+        let mut e = DeckEngine::new();
+        e.deck_mut(DeckId::A).keylock_mode = KeylockMode::Current;
+        e.toggle_keylock(DeckId::A);
+        e.set_pitch(DeckId::A, 1.0);
+        e.toggle_keylock(DeckId::A);
+        // The tempo moves WHILE the lock holds, which is the whole reason
+        // the borrowed amount is recorded rather than recomputed.
+        e.set_pitch(DeckId::A, -0.4);
+        e.toggle_keylock(DeckId::A);
+        assert!(
+            e.deck(DeckId::A).key_shift.abs() < 1e-9,
+            "back to the track's own key, not to an interval worked out against a tempo that moved: {}",
+            e.deck(DeckId::A).key_shift
+        );
+        assert_eq!(e.deck(DeckId::A).keylock_offset, 0.0);
+    }
+
+    #[test]
+    fn the_keeping_mode_leaves_the_borrowed_semitones_in_the_knob() {
+        let mut e = DeckEngine::new();
+        e.deck_mut(DeckId::A).keylock_mode = KeylockMode::CurrentKept;
+        e.toggle_keylock(DeckId::A);
+        e.set_pitch(DeckId::A, 1.0);
+        e.toggle_keylock(DeckId::A);
+        let held = e.deck(DeckId::A).key_shift;
+        assert!(held > 0.0);
+        e.toggle_keylock(DeckId::A);
+        assert_eq!(e.deck(DeckId::A).key_shift, held, "the interval is the operator's now");
+        assert_eq!(e.deck(DeckId::A).keylock_offset, 0.0, "and nothing is owed");
+    }
+
+    #[test]
+    fn a_key_step_taken_while_the_lock_holds_survives_letting_go() {
+        let mut e = DeckEngine::new();
+        e.deck_mut(DeckId::A).keylock_mode = KeylockMode::Current;
+        e.toggle_keylock(DeckId::A);
+        e.set_pitch(DeckId::A, 1.0);
+        e.toggle_keylock(DeckId::A);
+        e.nudge_key_shift(DeckId::A, 1.0);
+        e.toggle_keylock(DeckId::A);
+        assert!(
+            (e.deck(DeckId::A).key_shift - 1.0).abs() < 1e-9,
+            "the borrow goes back, the operator's own step stays: {}",
+            e.deck(DeckId::A).key_shift
+        );
+    }
+
+    #[test]
+    fn zeroing_the_key_clears_the_debt_so_the_next_release_cannot_go_negative() {
+        let mut e = DeckEngine::new();
+        e.deck_mut(DeckId::A).keylock_mode = KeylockMode::Current;
+        e.toggle_keylock(DeckId::A);
+        e.set_pitch(DeckId::A, 1.0);
+        e.toggle_keylock(DeckId::A);
+        e.reset_key_shift(DeckId::A);
+        assert_eq!(e.deck(DeckId::A).keylock_offset, 0.0);
+        e.toggle_keylock(DeckId::A);
+        assert_eq!(e.deck(DeckId::A).key_shift, 0.0, "and it stays at the track's own key");
+    }
+
+    #[test]
+    fn cycling_names_the_key_the_next_press_will_hold_and_moves_nothing() {
+        let mut e = DeckEngine::new();
+        e.set_pitch(DeckId::A, 1.0);
+        let before = e.deck(DeckId::A).key_shift;
+        assert_eq!(e.deck(DeckId::A).keylock_mode.label(), "KEY");
+        assert!(e.cycle_keylock_mode(DeckId::A).is_empty(), "it sends nothing");
+        assert_eq!(e.deck(DeckId::A).keylock_mode.label(), "NOW");
+        e.cycle_keylock_mode(DeckId::A);
+        assert_eq!(e.deck(DeckId::A).keylock_mode.label(), "NOW+");
+        e.cycle_keylock_mode(DeckId::A);
+        assert_eq!(e.deck(DeckId::A).keylock_mode, KeylockMode::Original, "three, then round");
+        assert_eq!(e.deck(DeckId::A).key_shift, before, "and no pitch moved");
+    }
+
+    #[test]
+    fn a_borrow_clamped_at_the_rail_is_given_back_only_as_far_as_it_went() {
+        let mut e = DeckEngine::new();
+        e.deck_mut(DeckId::A).keylock_mode = KeylockMode::Current;
+        e.toggle_keylock(DeckId::A);
+        e.set_key_shift(DeckId::A, KEY_SHIFT_MAX);
+        e.set_pitch(DeckId::A, 1.0);
+        e.toggle_keylock(DeckId::A);
+        assert_eq!(e.deck(DeckId::A).key_shift, KEY_SHIFT_MAX, "the knob was already at the rail");
+        assert_eq!(e.deck(DeckId::A).keylock_offset, 0.0, "so nothing was actually borrowed");
+        e.toggle_keylock(DeckId::A);
+        assert_eq!(
+            e.deck(DeckId::A).key_shift, KEY_SHIFT_MAX,
+            "and letting go must not take back semitones it never got"
+        );
+    }
+
+    // ---- CUE over its own edges -----------------------------------------
+
+    #[test]
+    fn cue_pressed_on_a_stopped_deck_away_from_the_mark_moves_the_mark_here() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        e.deck_mut(DeckId::A).position_secs = 42.0;
+        let cmds = e.cue_press(DeckId::A);
+        assert!(cmds.is_empty(), "setting a mark makes no sound and moves nothing");
+        assert_eq!(e.deck(DeckId::A).cue_secs, 42.0);
+        assert!(!e.deck(DeckId::A).cue_held, "there is nothing to release");
+        assert!(e.cue_release(DeckId::A).is_empty());
+    }
+
+    #[test]
+    fn cue_held_on_a_cued_deck_previews_from_the_mark_and_stops_on_release() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        e.deck_mut(DeckId::A).cue_secs = 30.0;
+        e.deck_mut(DeckId::A).position_secs = 30.0;
+        let down = e.cue_press(DeckId::A);
+        assert_eq!(down, vec![
+            DeckCmd::SeekSeconds { deck: DeckId::A, secs: 30.0 },
+            DeckCmd::SetPlaying { deck: DeckId::A, playing: true },
+        ]);
+        assert!(e.deck(DeckId::A).cue_held);
+        // It ran on for a while, as a preview does.
+        e.deck_mut(DeckId::A).position_secs = 33.0;
+        let up = e.cue_release(DeckId::A);
+        assert_eq!(up, vec![
+            DeckCmd::SetPlaying { deck: DeckId::A, playing: false },
+            DeckCmd::SeekSeconds { deck: DeckId::A, secs: 30.0 },
+        ]);
+        assert!(!e.deck(DeckId::A).cue_held);
+        assert_eq!(e.deck(DeckId::A).cue_secs, 30.0, "an audition never moves the mark");
+    }
+
+    #[test]
+    fn cue_pressed_while_playing_returns_to_the_mark_rather_than_moving_it() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        e.deck_mut(DeckId::A).cue_secs = 12.0;
+        e.deck_mut(DeckId::A).position_secs = 90.0;
+        e.deck_mut(DeckId::A).playing = true;
+        e.cue_press(DeckId::A);
+        assert_eq!(e.deck(DeckId::A).cue_secs, 12.0, "a playing deck's mark is not up for grabs");
+        e.cue_release(DeckId::A);
+        assert_eq!(e.deck(DeckId::A).position_secs, 12.0);
+        assert!(!e.deck(DeckId::A).playing);
+    }
+
+    #[test]
+    fn a_previewing_deck_is_left_alone_by_the_lock() {
+        // The audition is not the mix. A servo that corrected it would
+        // drag the preview off the very mark it is auditioning.
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        load_analysed(&mut e, DeckId::B, 2, 124.0, 0.0);
+        e.deck_mut(DeckId::A).playing = true;
+        e.sync(DeckId::B, true);
+        e.deck_mut(DeckId::B).position_secs = e.deck(DeckId::B).cue_secs;
+        e.cue_press(DeckId::B);
+        let held = e.hold_deck_sync();
+        assert!(
+            !held.iter().any(|c| matches!(c, DeckCmd::SeekSeconds { deck, .. } if *deck == DeckId::B)),
+            "the lock must not move a deck that is being auditioned: {held:?}"
+        );
+    }
+
+    #[test]
+    fn the_cue_lamp_says_what_the_button_will_do() {
+        let mut e = DeckEngine::new();
+        assert_eq!(e.cue_led(DeckId::A), CueLed::Dark, "an empty deck has nothing to cue");
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        assert_eq!(e.cue_led(DeckId::A), CueLed::Solid, "parked on the mark, ready");
+        e.deck_mut(DeckId::A).position_secs = 42.0;
+        assert_eq!(e.cue_led(DeckId::A), CueLed::Blink, "stopped elsewhere: a press moves the mark");
+        e.deck_mut(DeckId::A).playing = true;
+        assert_eq!(e.cue_led(DeckId::A), CueLed::Dark, "nothing to say while it plays");
+        e.deck_mut(DeckId::A).cue_held = true;
+        assert_eq!(e.cue_led(DeckId::A), CueLed::Solid, "except while it is being auditioned");
+    }
+
+    // ---- how far the fader reaches ---------------------------------------
+
+    #[test]
+    fn the_range_ladder_saturates_rather_than_wrapping_under_a_running_mix() {
+        let mut e = DeckEngine::new();
+        assert_eq!(e.deck(DeckId::A).pitch_range.label(), "±8%", "the everyday rung");
+        for _ in 0..20 {
+            e.step_pitch_range(DeckId::A, true);
+        }
+        assert_eq!(e.deck(DeckId::A).pitch_range.label(), "±90%", "and it stops at the widest");
+        for _ in 0..20 {
+            e.step_pitch_range(DeckId::A, false);
+        }
+        assert_eq!(e.deck(DeckId::A).pitch_range.label(), "±4%", "and at the narrowest");
+    }
+
+    #[test]
+    fn choosing_the_range_never_moves_the_music() {
+        // Either direction. The old toggle held the tempo when widening and
+        // clamped it when narrowing, which with a ladder is most presses.
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        e.set_pitch(DeckId::A, 1.0);
+        let running_at = e.deck(DeckId::A).rate;
+        for wider in [true, false, false, false, false, true, true] {
+            let cmds = e.step_pitch_range(DeckId::A, wider);
+            assert!(cmds.is_empty(), "a range press sends nothing");
+            assert_eq!(
+                e.deck(DeckId::A).rate, running_at,
+                "the tempo is not the fader's to change: {} at {}",
+                e.deck(DeckId::A).rate,
+                e.deck(DeckId::A).pitch_range.label()
+            );
+        }
+    }
+
+    #[test]
+    fn choosing_the_range_does_not_unlock_a_synced_deck() {
+        // It used to go through `set_pitch`, which opts a non-master out of
+        // the lock -- so pressing the range button silently unlocked it.
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        load_analysed(&mut e, DeckId::B, 2, 124.0, 0.0);
+        e.deck_mut(DeckId::A).playing = true;
+        e.sync(DeckId::B, true);
+        assert!(e.deck(DeckId::B).synced);
+        e.step_pitch_range(DeckId::B, true);
+        assert!(e.deck(DeckId::B).synced, "still locked");
+        assert!(!e.deck(DeckId::B).auto_opt_out, "and not opted out");
+    }
+
+    #[test]
+    fn a_tempo_outside_the_new_range_pins_the_fader_without_being_dragged_back() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        e.step_pitch_range(DeckId::A, true);
+        e.step_pitch_range(DeckId::A, true);
+        e.set_pitch(DeckId::A, 1.0);
+        let fast = e.deck(DeckId::A).rate;
+        assert!(fast > 1.1, "well outside the narrow rungs: {fast}");
+        for _ in 0..6 {
+            e.step_pitch_range(DeckId::A, false);
+        }
+        assert_eq!(e.deck(DeckId::A).rate, fast, "the record keeps running at the tempo it had");
+    }
+
     fn rate_of(cmds: &[DeckCmd], want: DeckId) -> Option<f64> {
         cmds.iter().rev().find_map(|cmd| match cmd {
             DeckCmd::SetRate { deck, rate } if *deck == want => Some(*rate),
@@ -4182,19 +5296,27 @@ mod tests {
         let mut engine = DeckEngine::new();
         engine.set_pitch(DeckId::A, 1.0);
         assert!((engine.deck(DeckId::A).rate - 1.08).abs() < 1e-9, "±8% at full travel");
-        // Widening the range keeps the audible tempo.
-        engine.toggle_pitch_range(DeckId::A);
-        assert_eq!(engine.deck(DeckId::A).pitch_range, PitchRange::Wide);
+        // Choosing the range keeps the audible tempo, in BOTH directions
+        // now: it moves no music at all.
+        engine.step_pitch_range(DeckId::A, true);
+        assert_eq!(engine.deck(DeckId::A).pitch_range.label(), "±10%");
         assert!((engine.deck(DeckId::A).rate - 1.08).abs() < 1e-9, "tempo held");
+        engine.step_pitch_range(DeckId::A, true);
+        assert_eq!(engine.deck(DeckId::A).pitch_range.label(), "±16%");
         // …and the slider now has headroom to 16%.
         engine.set_pitch(DeckId::A, 1.0);
         assert!((engine.deck(DeckId::A).rate - 1.16).abs() < 1e-9);
         let cmds = engine.reset_pitch(DeckId::A);
         assert_eq!(cmds, vec![DeckCmd::SetRate { deck: DeckId::A, rate: 1.0 }]);
         assert!((engine.deck(DeckId::A).pitch).abs() < 1e-12);
-        // Nudges step in whole percent of the range.
-        engine.nudge_pitch(DeckId::A, 1.0);
-        assert!((engine.deck(DeckId::A).rate - 1.0016).abs() < 1e-9, "{}", engine.deck(DeckId::A).rate);
+        // A trim steps a share of the TRACK's tempo, so the wider range
+        // above does not change what one press does.
+        engine.trim_pitch(DeckId::A, 1.0, false);
+        assert!(
+            (engine.deck(DeckId::A).rate - (1.0 + TRIM_COARSE)).abs() < 1e-9,
+            "{}",
+            engine.deck(DeckId::A).rate
+        );
     }
 
     #[test]

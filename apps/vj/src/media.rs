@@ -2043,7 +2043,7 @@ pub fn preview_wave_bins(pcm: &TrackPcm, cols: usize) -> Vec<f32> {
             (((col + 1) as f64 * per_col) as usize).clamp(start + 1, pcm.frames.len());
         let mut sum = 0.0f64;
         for frame in &pcm.frames[start..end] {
-            let mono = (frame[0] as f32 + frame[1] as f32) * 0.5 / 32768.0;
+            let mono = crate::dsp_math::mono(*frame);
             sum += (mono as f64) * (mono as f64);
         }
         let rms = (sum / (end - start).max(1) as f64).sqrt() as f32;
@@ -2069,7 +2069,7 @@ pub fn wave_peaks(pcm: &TrackPcm, cols: usize) -> Vec<(f32, f32)> {
             .clamp(start + 1, pcm.frames.len());
         let (mut lo, mut hi) = (0.0f32, 0.0f32);
         for frame in &pcm.frames[start..end] {
-            let mono = (frame[0] as f32 + frame[1] as f32) * 0.5 / 32768.0;
+            let mono = crate::dsp_math::mono(*frame);
             lo = lo.min(mono);
             hi = hi.max(mono);
         }
@@ -4823,6 +4823,23 @@ mod mode_flip_tests {
         ids
     }
 
+    /// Drain until the ring goes quiet, or give up.
+    ///
+    /// Parking is a STATE, not a deadline. Waiting a fixed stretch and then
+    /// asserting silence assumes the decoder has finished by then, which on
+    /// a loaded machine it sometimes has not -- that assumption failed
+    /// about one run in eight. This waits for the property instead, and the
+    /// caller then holds it to STAYING quiet, which is the real claim.
+    fn wait_quiet(player: &mut SlotPlayer, dur: Duration) -> bool {
+        let deadline = Instant::now() + dur;
+        while Instant::now() < deadline {
+            if presented_for(player, Duration::from_millis(200)).is_empty() {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Wait until the window is resident (or give up after `dur`).
     fn wait_resident(player: &mut SlotPlayer, dur: Duration) -> Option<Arc<Vec<Frame>>> {
         let deadline = Instant::now() + dur;
@@ -4865,7 +4882,7 @@ mod mode_flip_tests {
         assert_eq!(frames.len(), ID_FRAMES, "the cache is the whole window");
         assert!(frames.windows(2).all(|w| w[1].pts_100ns > w[0].pts_100ns));
         // Parked: whatever the first pass queued drains, then nothing.
-        let _ = presented_for(&mut player, Duration::from_millis(600));
+        assert!(wait_quiet(&mut player, Duration::from_secs(5)), "the ring never parked");
         let quiet = presented_for(&mut player, Duration::from_millis(800));
         assert!(quiet.is_empty(), "the ring kept flowing while resident: {quiet:?}");
         assert!(player.needs_frame_pump(), "a parked resident clip still wants the display pump");
@@ -4875,6 +4892,14 @@ mod mode_flip_tests {
             player.set_mode(mode);
             std::thread::sleep(Duration::from_millis(250));
             assert!(player.resident_frames().is_some(), "{mode:?} dropped the cache");
+            // Drain first, then look — the same shape as the parked check
+            // above. A frame already in flight when the mode changed still
+            // arrives, and one of those is not the ring un-parking; a
+            // stream of them is.
+            assert!(
+                wait_quiet(&mut player, Duration::from_secs(3)),
+                "{mode:?} left the ring running"
+            );
             let leak = presented_for(&mut player, Duration::from_millis(400));
             assert!(leak.is_empty(), "{mode:?} un-parked the ring: {leak:?}");
         }

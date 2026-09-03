@@ -28,6 +28,10 @@ use crate::music_import_ui::MusicImporter;
 /// The third list tab: the loops page that stands in for the explorer and
 /// the queue together.
 const LISTS_LOOPS: usize = 2;
+
+/// How long a beat chevron may be held and still count as a tap. Longer
+/// than a click, shorter than a deliberate lean on the tempo.
+const BEND_TAP_SECS: f64 = 0.25;
 mod apc40;
 mod archive_stream;
 mod archive_ui;
@@ -42,6 +46,8 @@ mod cue;
 mod deck_sections;
 mod deck_tabs;
 mod decks;
+// Writing the operator's own work so that losing power cannot cost it.
+mod durable;
 // VJ effect renderstack: mesh-generating engines configured by splash
 // documents (see effects/mod.rs for the document contract). Also compiled
 // standalone by the effect_gallery example.
@@ -118,6 +124,14 @@ mod set_history;
 // Which columns a track list shows and in what order — the operator's, not
 // the template's.
 mod columns;
+// The strip under the lists: live numbers at rest, the app's log when it
+// is opened.
+mod console;
+mod dsp_math;
+mod marks;
+mod settings;
+#[macro_use]
+mod verify;
 // What may be worked out about a track before anyone asks to play it, and
 // where the results of that work are kept.
 mod preprocess;
@@ -186,6 +200,7 @@ use crate::lyrics::{
 };
 use crate::stems::{StemsJob, StemsMsg, StemsPool};
 use crate::columns::{Column, ColumnLayout};
+use crate::console::{ClipLatch, Console, ConsoleView};
 use crate::preprocess::{Group as PrepGroup, Pass as PrepPass, PreprocessSettings, PASSES};
 use crate::track_tags::TrackTags;
 use crate::wave_analysis::{
@@ -2689,12 +2704,15 @@ script_mod! {
                         }
 
                     }
-                    // F3: frame-time overlay (Cx perf monitor).
+                    // F3: frame-time overlay (Cx perf monitor). Pinned to the
+                    // bottom LEFT: the bottom right is where the pre-listen
+                    // player parks, and a developer overlay has no business
+                    // sitting on top of a control the operator is using.
                     perf_box := View{
                         visible: false
                         width: Fill
                         height: Fill
-                        perf_graph := PerfGraph{}
+                        perf_graph := PerfGraph{ panel_anchor: vec2(0.0, 1.0) }
                     }
                     // The FLOATING home of the pre-listen player: parked at
                     // the window's bottom-right, above the panels, below
@@ -3292,7 +3310,7 @@ fn copy_loop_mono(
         }
         None => {
             for sample in &pcm.frames[start..end] {
-                mono.push((sample[0] as f32 + sample[1] as f32) * (0.5 / 32768.0));
+                mono.push(crate::dsp_math::mono(*sample));
             }
         }
     }
@@ -3339,6 +3357,7 @@ struct DeckRefs {
     phase_flip: ButtonRef,
     mute: ButtonRef,
     sync: ButtonRef,
+    slip: ButtonRef,
     keylock: ButtonRef,
     /// The key-shift readout, which is also its reset.
     key: ButtonRef,
@@ -3390,6 +3409,7 @@ impl DeckRefs {
             phase_flip: ui.button(cx, ids.phase_flip),
             mute: ui.button(cx, ids.mute),
             sync: ui.button(cx, ids.sync),
+            slip: ui.button(cx, ids.slip),
             keylock: ui.button(cx, ids.keylock),
             key: ui.button(cx, ids.key),
             key_up: ui.button(cx, ids.key_up),
@@ -3493,6 +3513,7 @@ struct MusicDeckIds {
     phase_flip: &'static [LiveId],
     mute: &'static [LiveId],
     sync: &'static [LiveId],
+    slip: &'static [LiveId],
     keylock: &'static [LiveId],
     key: &'static [LiveId],
     key_up: &'static [LiveId],
@@ -3547,6 +3568,7 @@ impl MusicDeckIds {
                 phase_flip: ids!(deck_a_phase_flip),
                 mute: ids!(deck_a_mute),
                 sync: ids!(deck_a_sync),
+                slip: ids!(deck_a_slip),
                 keylock: ids!(deck_a_keylock),
                 key: ids!(deck_a_key),
                 key_up: ids!(deck_a_key_up),
@@ -3629,6 +3651,7 @@ impl MusicDeckIds {
                 phase_flip: ids!(deck_b_phase_flip),
                 mute: ids!(deck_b_mute),
                 sync: ids!(deck_b_sync),
+                slip: ids!(deck_b_slip),
                 keylock: ids!(deck_b_keylock),
                 key: ids!(deck_b_key),
                 key_up: ids!(deck_b_key_up),
@@ -6967,6 +6990,29 @@ pub struct App {
     /// is room) is the landing; the loops page is one tap away.
     #[rust(0usize)]
     lists_shown: usize,
+    /// The strip under the lists: one line of numbers, and the log when it
+    /// is opened.
+    #[rust]
+    console: Console,
+    /// What the lists were last given, so the strip only re-sizes them when
+    /// the number actually moves.
+    #[rust]
+    console_points: Option<(f64, f64)>,
+    /// The master clipped and has not been cleared.
+    #[rust]
+    console_clip: ClipLatch,
+    /// When each beat chevron went down, per deck and per direction, so a
+    /// tap can be told from a hold on release.
+    #[rust]
+    bend_press: [[Option<std::time::Instant>; 2]; 2],
+    /// The console's height when its grip was grabbed.
+    #[rust]
+    console_grab: Option<f64>,
+    /// How far the console has read the process log, and the lines it kept.
+    #[rust]
+    console_log_cursor: u64,
+    #[rust]
+    console_lines: VecDeque<String>,
     /// How far the tabs have to go at this width, so the strips are only
     /// rebuilt on an actual change.
     #[rust(TabStage::None)]
@@ -7010,8 +7056,14 @@ pub struct App {
     /// the render itself ever threatens its buffer.
     #[rust]
     audio_contended_seen: u64,
+    /// Poisoned callbacks already reported.
+    #[rust]
+    audio_poisoned_seen: u64,
     #[rust]
     audio_render_max_seen: u64,
+    /// The monitor's own dropout count, as last reported.
+    #[rust]
+    audio_phones_starved_seen: u64,
     /// Last lit/unlit state pushed into each chrome button.
     #[rust]
     lit_state: HashMap<u64, bool>,
@@ -8208,10 +8260,7 @@ impl App {
 
     fn save_midi_map(&self) {
         let path = Self::midi_map_path();
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(path, self.midi_learn.encode());
+        let _ = crate::durable::write_file(&path, self.midi_learn.encode());
     }
 
     fn load_midi_map(&mut self) {
@@ -9011,7 +9060,7 @@ tween {}
             u8::from(self.slot_beat_sync[i]),
             self.slot_tween_mode[i],
         );
-        let _ = std::fs::write(path, body);
+        let _ = crate::durable::write_file(&path, body);
     }
 
     fn load_clip_profile(rev: &AssetRevisionId) -> Option<ClipProfile> {
@@ -9069,7 +9118,7 @@ p2 {}
             p(slot.p[1]),
             p(slot.p[2]),
         );
-        let _ = std::fs::write(path, body);
+        let _ = crate::durable::write_file(&path, body);
     }
 
     /// Layer the effect's own sticky dial profile onto a freshly loaded
@@ -9118,18 +9167,12 @@ p2 {}
 
     fn save_fx_slots(&self) {
         let path = Self::fx_slots_state_path();
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(path, self.fx_slots.encode());
+        let _ = crate::durable::write_file(&path, self.fx_slots.encode());
     }
 
     fn save_fx_slot_source(&self, kind: FxSlotKind, source: &str) {
         let path = Self::fx_slot_source_path(kind);
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(path, source);
+        let _ = crate::durable::write_file(&path, source);
     }
 
     fn load_fx_slots_panel(&mut self, cx: &mut Cx) {
@@ -10905,20 +10948,17 @@ p2 {}
     /// Where the last-active surface sleeps between sessions: one word in
     /// a file, so closing on the DJ tab reopens on the DJ tab.
     fn ui_surface_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/vj/ui-surface")
+        crate::service::data_root().join("ui-surface")
     }
 
     fn save_ui_surface(surface: ApcSurface) {
         let path = Self::ui_surface_path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
         let name = match surface {
             ApcSurface::Video => "video",
             ApcSurface::Music => "music",
             ApcSurface::Sfx => "sfx",
         };
-        let _ = std::fs::write(path, name);
+        let _ = crate::durable::write_file(&path, name);
     }
 
     fn load_ui_surface() -> Option<ApcSurface> {
@@ -10939,9 +10979,7 @@ p2 {}
         for byte in item.asset.as_bytes() {
             name.push_str(&format!("{byte:02x}"));
         }
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../local/vj/loop-marks")
-            .join(name)
+        crate::service::data_root().join("loop-marks").join(name)
     }
 
     /// The SAVE button: write the deck's marks beside the library.
@@ -10978,46 +11016,28 @@ p2 {}
         (TARGET_RMS / rms).clamp(0.25, 3.0) as f32
     }
 
-    /// A track's marks file: its cue on the first line, then one line per
-    /// loop slot. The cue line is prefixed, so a reader that only wants the
-    /// slots drops it on the floor without knowing it exists — which is
-    /// exactly what `load_loop_marks` does.
+    /// A track's marks file, as one typed record: the cue, the loop slots
+    /// and — for the first time — the bookmark, which the two hand-rolled
+    /// shapes this replaces had no room for. See `crate::marks`.
     fn save_loop_marks(&self, deck: DeckId) {
         let state = self.decks.deck(deck);
         let Some(item) = state.item() else { return };
         let path = Self::loop_marks_path(item);
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let mut text = format!("cue {}\n", state.cue_secs);
-        for slot in &state.loop_slots {
-            text.push_str(&format!("{} {}\n", slot.start_secs, slot.end_secs));
-        }
-        let _ = std::fs::write(path, text);
+        let mut record = crate::marks::MarkRecord::default();
+        record.set_cue(Some(state.cue_secs));
+        record.set_bookmark(state.bookmark);
+        let spans: Vec<(f64, f64)> =
+            state.loop_slots.iter().map(|slot| (slot.start_secs, slot.end_secs)).collect();
+        record.set_loops(&spans);
+        let _ = crate::durable::write_file(&path, record.to_text());
     }
 
-    /// Where a track last had its red marker, so it starts where the
-    /// operator left it rather than at the top.
-    fn load_track_cue(item: &crate::decks::TrackItem) -> Option<f64> {
-        let text = std::fs::read_to_string(Self::loop_marks_path(item)).ok()?;
-        text.lines()
-            .find_map(|line| line.strip_prefix("cue "))
-            .and_then(|secs| secs.trim().parse::<f64>().ok())
-            .filter(|secs| secs.is_finite() && *secs > 0.0)
-    }
-
-    fn load_loop_marks(item: &crate::decks::TrackItem) -> Vec<crate::decks::LoopSpan> {
-        let Ok(text) = std::fs::read_to_string(Self::loop_marks_path(item)) else {
-            return Vec::new();
-        };
-        text.lines()
-            .filter_map(|line| {
-                let mut parts = line.split_whitespace();
-                let start = parts.next()?.parse().ok()?;
-                let end = parts.next()?.parse().ok()?;
-                Some(crate::decks::LoopSpan { start_secs: start, end_secs: end })
-            })
-            .collect()
+    /// What this track was marked with, in whatever shape the file is in.
+    /// A missing or unreadable file is simply a track nobody has marked.
+    fn load_marks(item: &crate::decks::TrackItem) -> crate::marks::MarkRecord {
+        std::fs::read_to_string(Self::loop_marks_path(item))
+            .map(|text| crate::marks::MarkRecord::from_text(&text))
+            .unwrap_or_default()
     }
 
     /// Where the scanner's findings sleep: a sibling of `loop-marks`, one
@@ -11029,25 +11049,20 @@ p2 {}
         for byte in item.asset.as_bytes() {
             name.push_str(&format!("{byte:02x}"));
         }
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../local/vj/found-loops")
-            .join(name)
+        crate::service::data_root().join("found-loops").join(name)
     }
 
     fn save_found_loops(&self, deck: DeckId) {
         let state = self.decks.deck(deck);
         let Some(item) = state.item() else { return };
         let path = Self::found_loops_path(item);
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
         let scores = &self.deck_found_scores[deck.index()];
         let mut text = String::new();
         for (index, span) in state.found_loops.iter().enumerate() {
             let score = scores.get(index).copied().unwrap_or(0.0);
             text.push_str(&format!("{} {} {}\n", span.start_secs, span.end_secs, score));
         }
-        let _ = std::fs::write(path, text);
+        let _ = crate::durable::write_file(&path, text);
     }
 
     fn load_found_loops(
@@ -11061,14 +11076,14 @@ p2 {}
         for line in text.lines() {
             let mut parts = line.split_whitespace();
             let (Some(start), Some(end)) = (parts.next(), parts.next()) else { continue };
-            let (Ok(start), Ok(end)) = (start.parse::<f64>(), end.parse::<f64>()) else { continue };
             // A corrupted sidecar (truncated write, disk fault) can hand back
             // NaN/inf text that parses fine and then poisons every span math
-            // downstream — the same guard read_loop_scan_config puts on its
-            // own text fields.
-            if !start.is_finite() || !end.is_finite() {
+            // downstream.
+            let (Some(start), Some(end)) =
+                (crate::durable::seconds(start), crate::durable::seconds(end))
+            else {
                 continue;
-            }
+            };
             spans.push(crate::decks::LoopSpan { start_secs: start, end_secs: end });
             scores.push(parts.next().and_then(|s| s.parse().ok()).unwrap_or(0.0));
         }
@@ -13624,6 +13639,24 @@ p2 {}
                     self.deck_splat_snapshot_seen.swap(0, 1);
                     self.sync_deck_controls(cx);
                 }
+                DeckCmd::CloneDeck { from, to } => {
+                    // The audio first, whose whole point is that the
+                    // playhead is read under the lock the callback advances
+                    // it with. Then the host's own mirrors of the same
+                    // record -- every one a cheap handle, the waveform
+                    // pyramids sharing one texture rather than copying it.
+                    self.mixer.clone_deck(from, to);
+                    let (a, b) = (from.index(), to.index());
+                    self.deck_tracks[b] = self.deck_tracks[a].clone();
+                    self.deck_analysis[b] = self.deck_analysis[a].clone();
+                    self.deck_zoom_tex[b] = self.deck_zoom_tex[a].clone();
+                    self.deck_stem_tex[b] = self.deck_stem_tex[a].clone();
+                    self.deck_stems[b] = self.deck_stems[a].clone();
+                    self.deck_stem_coverage[b] = self.deck_stem_coverage[a].clone();
+                    self.deck_found_scores[b] = self.deck_found_scores[a].clone();
+                    self.deck_splat_refining[b] = None;
+                    self.sync_deck_controls(cx);
+                }
                 DeckCmd::UnloadTrack { deck } => {
                     // The mirror of InstallTrack's clear block: the engine
                     // says the deck is empty, so every host-side trace of
@@ -13666,6 +13699,22 @@ p2 {}
             self.ui
                 .slider(cx, pitch_id)
                 .set_value(cx, (state.pitch / range).clamp(-1.0, 1.0));
+            // One wheel notch over the tempo fader is half a percent of the
+            // TRACK's tempo, whatever range is selected. The fader's own
+            // step is a share of its travel, so without this a notch means
+            // 0.2% on a narrow range and 0.4% on a wide one -- the same
+            // gesture doing different things, which is a control nobody can
+            // learn. Shift still gives a fifth of it; the shared fader's
+            // ladder is 0.2/1/4/10 and changing that is every other
+            // slider's business, not this one's.
+            // Divided by the fader's SPAN as well: its scroll step is
+            // normalised over the whole travel, and this one runs -1..1, so
+            // a step of one would move it by two.
+            let step = crate::decks::TRIM_COARSE / range / 2.0;
+            let mut fader = self.ui.widget(cx, pitch_id);
+            script_apply_eval!(cx, fader, {
+                scroll_step: #(step)
+            });
         }
         let pos = self.decks.crossfader as f64;
         self.ui.slider(cx, ids!(xfader)).set_value(cx, pos);
@@ -13798,21 +13847,91 @@ p2 {}
         // with a cause attached: contended = a UI-thread lock hold silenced
         // a whole callback; render high-water = the render itself is the
         // threat. Atomic reads, so this costs nothing when all is well.
-        let (contended, render_max) = self.mixer.audio_health();
-        if contended != self.audio_contended_seen {
+        let health = self.mixer.audio_health();
+        if health.contended != self.audio_contended_seen {
             log!(
                 "audio: {} SILENT callback(s) from lock contention (+{} since last)",
-                contended,
-                contended - self.audio_contended_seen
+                health.contended,
+                health.contended - self.audio_contended_seen
             );
-            self.audio_contended_seen = contended;
+            self.audio_contended_seen = health.contended;
         }
-        if render_max > self.audio_render_max_seen && render_max > 2_000_000 {
+        // A panic on a thread that held the mixer lock. The buffer played,
+        // so nobody heard a thing; the app is one panic worse off than it
+        // looks, and this is the only place that says so.
+        if health.poisoned != self.audio_poisoned_seen {
             log!(
-                "audio: render high-water {:.2}ms",
-                render_max as f64 / 1_000_000.0
+                "audio: state lock POISONED by a panic elsewhere {} time(s) (+{} since last); the callback took it over and carried on",
+                health.poisoned,
+                health.poisoned - self.audio_poisoned_seen
             );
-            self.audio_render_max_seen = render_max;
+            self.audio_poisoned_seen = health.poisoned;
+        }
+        // The monitor's own dropout: heard in the cans, invisible in the
+        // room, and until now counted nowhere at all.
+        if health.phones_starved != self.audio_phones_starved_seen {
+            log!(
+                "audio: phones ran dry {} time(s) (+{} since last)",
+                health.phones_starved,
+                health.phones_starved - self.audio_phones_starved_seen
+            );
+            self.audio_phones_starved_seen = health.phones_starved;
+        }
+        if health.render_max_nanos > self.audio_render_max_seen
+            && health.render_max_nanos > 2_000_000
+        {
+            // The share of the buffer's own playing time this cost is what
+            // says whether the machine is keeping up; the millisecond figure
+            // alone means nothing without the buffer length beside it.
+            match health.budget_used() {
+                Some(share) => log!(
+                    "audio: render high-water {:.2}ms, {:.0}% of a {} frame buffer",
+                    health.render_max_nanos as f64 / 1_000_000.0,
+                    share * 100.0,
+                    health.buffer_frames,
+                ),
+                None => log!(
+                    "audio: render high-water {:.2}ms",
+                    health.render_max_nanos as f64 / 1_000_000.0
+                ),
+            }
+            self.audio_render_max_seen = health.render_max_nanos;
+        }
+        // The strip's one line, every pump: this is the only place these
+        // numbers reach the operator. Everything above them goes to the log,
+        // which nobody in a booth is reading.
+        let meters = self.mixer.meters();
+        let master = meters[crate::mixer::METER_MASTER];
+        self.console_clip.saw(master);
+        let line = crate::console::summary_line(&health, master, self.console_clip.lit());
+        self.set_status_label(cx, ids!(console_line), &line);
+        // The opened pane is the same numbers with the room to lay them out.
+        if self.console.panes().0 {
+            let decks = self.mixer.deck_levels();
+            let detail = crate::console::detail_text(&health, &meters, decks);
+            self.set_status_label(cx, ids!(console_numbers), &detail);
+        }
+        // Only while the pane is showing: an operator who never opens it
+        // pays one comparison a tick.
+        if self.console.panes().1 {
+            let (cursor, fresh) = makepad_widgets::makepad_platform::log_ring::read_since(
+                self.console_log_cursor,
+                200,
+            );
+            self.console_log_cursor = cursor;
+            for line in fresh {
+                self.console_lines.push_back(line.text);
+            }
+            while self.console_lines.len() > 400 {
+                self.console_lines.pop_front();
+            }
+            // The strip's extent as `paint_console` last worked it out.
+            // Measuring the column here would read its over-ask again.
+            let strip = self.console_points.map_or(crate::console::CLOSED_POINTS, |(_, s)| s);
+            let rows = ((strip - 60.0) / 14.0).max(1.0) as usize;
+            let lines: Vec<String> = self.console_lines.iter().cloned().collect();
+            let text = crate::console::pane_text(&lines, &self.console.filter, rows);
+            self.set_status_label(cx, ids!(console_log), &text);
         }
         // The import worker reports here: cheap when idle, and it must be
         // drained on the UI tick rather than blocking anything.
@@ -15911,11 +16030,21 @@ p2 {}
                             // and so does the red marker: a track starts
                             // where the operator left it, not at the top.
                             if let Some(item) = self.decks.deck(deck).item().cloned() {
-                                let marks = Self::load_loop_marks(&item);
-                                if !marks.is_empty() {
-                                    self.decks.restore_loop_slots(deck, marks);
+                                let record = Self::load_marks(&item);
+                                let slots: Vec<crate::decks::LoopSpan> = record
+                                    .loops()
+                                    .into_iter()
+                                    .map(|(start, end)| crate::decks::LoopSpan {
+                                        start_secs: start,
+                                        end_secs: end,
+                                    })
+                                    .collect();
+                                if !slots.is_empty() || record.bookmark().is_some() {
+                                    self.decks.restore_marks(deck, slots, record.bookmark());
                                 }
-                                if let Some(cue) = Self::load_track_cue(&item) {
+                                if let Some(cue) =
+                                    record.cue().filter(|secs| *secs > 0.0)
+                                {
                                     self.decks.set_cue(deck, cue);
                                     let cmds = self.decks.seek_secs(deck, cue);
                                     self.run_deck_cmds(cx, cmds);
@@ -17246,6 +17375,171 @@ p2 {}
         }
     }
 
+    /// The pane the console shares with the explorer, in layout points.
+    ///
+    /// Measured from POSITIONS, not from a size: a `Fill` view reports the
+    /// room it asked for rather than the room it got, so the page body reads
+    /// 32 points taller than it draws — the models row underneath takes that
+    /// back — and the lists inherit the over-ask. The floor is therefore read
+    /// off the row that stands on it, and the pane is the distance from the
+    /// lists up to there. Until that row has drawn, the pane's own size will
+    /// do.
+    fn console_room(&mut self, cx: &mut Cx) -> f64 {
+        let pane = self.ui.widget(cx, ids!(lists_pair)).area().rect(cx);
+        let floor = self.ui.widget(cx, ids!(models_row)).area().rect(cx).pos.y;
+        if floor > pane.pos.y {
+            floor - crate::console::GAP_POINTS - pane.pos.y
+        } else {
+            pane.size.y
+        }
+    }
+
+    /// Show the console the way its state says. Every set is guarded, so a
+    /// settled console does no work at all.
+    fn paint_console(&mut self, cx: &mut Cx) {
+        let (numbers, log) = self.console.panes();
+        let open = self.console.open;
+        // The explorer and the strip divide the pane between them, and both
+        // are given a size: a `Fill` explorer takes the whole pane as the
+        // turtle reaches it and leaves the strip nothing at all, whatever
+        // size the strip itself was given. Both are set on EVERY pump, the
+        // way the folds and the tabs are — these are DSL-declared sizes, and
+        // anything that re-applies the panel puts the declared ones straight
+        // back.
+        //
+        let room = self.console_room(cx);
+        let strip = self.console.extent(room);
+        let explorer =
+            (room - crate::console::GAP_POINTS - strip).max(crate::console::OPEN_MIN_POINTS);
+        for (path, points) in [(ids!(library_drop), explorer), (ids!(console_strip), strip)] {
+            let view = self.ui.view(cx, path);
+            let mut view_ref = view.borrow_mut();
+            if let Some(view) = view_ref.as_mut() {
+                view.walk.height = Size::Fixed(points);
+            }
+        }
+        // What is left of the strip once the one line has had its own.
+        let body = (strip - crate::console::CLOSED_POINTS).max(0.0);
+        if let Some(mut view) = self.ui.widget(cx, ids!(console_body)).borrow_mut::<View>() {
+            view.walk.height = Size::Fixed(body);
+        }
+        // Redraw on EITHER size moving, not on the strip's alone. The strip
+        // stays 24 while it is shut, so a guard that watches only it lets the
+        // very first measurement — taken before the page has settled — stand
+        // for good: the sizes are set again every pump, but nothing ever
+        // draws them, so the stale room measures itself back.
+        if room > 1.0 && self.console_points != Some((explorer, strip)) {
+            self.console_points = Some((explorer, strip));
+            self.ui.redraw(cx);
+        }
+        for (path, want) in [
+            (ids!(console_body), open),
+            (ids!(console_grip), open),
+            (ids!(console_chevron_up), open),
+            (ids!(console_chevron_down), !open),
+            (ids!(console_numbers), numbers),
+            (ids!(console_log), log),
+        ] {
+            let view = self.ui.widget(cx, path);
+            if view.visible() != want {
+                view.set_visible(cx, want);
+            }
+        }
+        for (index, chip) in
+            [ids!(console_view_0), ids!(console_view_1), ids!(console_view_2)]
+                .into_iter()
+                .enumerate()
+        {
+            self.paint_lit(cx, chip, index == self.console.view.index());
+        }
+    }
+
+    /// The chevron opens and closes the strip; the chips pick what the
+    /// opened area shows. Both save, because the operator set them.
+    fn handle_console(&mut self, cx: &mut Cx, actions: &Actions) {
+        let mut changed = false;
+        for (path, open) in
+            [(ids!(console_chevron_down), true), (ids!(console_chevron_up), false)]
+        {
+            if self.ui.button(cx, path).clicked(actions) && self.console.open != open {
+                self.console.open = open;
+                changed = true;
+            }
+        }
+        for (index, chip) in
+            [ids!(console_view_0), ids!(console_view_1), ids!(console_view_2)]
+                .into_iter()
+                .enumerate()
+        {
+            if self.ui.button(cx, chip).clicked(actions) {
+                let view = ConsoleView::from_index(index);
+                if self.console.view != view {
+                    self.console.view = view;
+                    changed = true;
+                }
+                // Picking a pane while it is shut opens it: nobody chooses
+                // what to see in something they cannot see.
+                if !self.console.open {
+                    self.console.open = true;
+                    changed = true;
+                }
+            }
+        }
+        // The grip, in the same idiom as the one between the decks and the
+        // lists: painted hover, and the height stored on release so a size
+        // clamped on the way does not spring back.
+        let grip = self.ui.view(cx, ids!(console_grip));
+        for (action, lit) in [
+            (grip.finger_hover_in(actions), true),
+            (grip.finger_hover_out(actions), false),
+        ] {
+            if action.is_none() {
+                continue;
+            }
+            let mut view = self.ui.widget(cx, ids!(console_grip));
+            let color: u32 = if lit { 0xffff_ff5c } else { 0xffff_ff1f };
+            script_apply_eval!(cx, view, {
+                draw_bg +: { color: #(color) }
+            });
+            self.ui.redraw(cx);
+        }
+        if grip.finger_down(actions).is_some() {
+            let room = self.console_room(cx);
+            self.console_grab = Some(self.console.extent(room));
+        }
+        if let Some(moved) = grip.finger_move(actions) {
+            if let Some(start) = self.console_grab {
+                // The console lies BELOW the grip, so dragging up grows it.
+                let travel = moved.abs_start.y - moved.abs.y;
+                let room = self.console_room(cx);
+                self.console.set_open_height(start + travel, room);
+                self.paint_console(cx);
+                self.resync_layout(cx);
+            }
+        }
+        if grip.finger_up(actions).is_some() && self.console_grab.take().is_some() {
+            let room = self.console_room(cx);
+            let settled = self.console.extent(room);
+            self.console.set_open_height(settled, room);
+            self.save_preprocess_settings();
+        }
+        // The filter narrows the tail as it is typed; clearing drops what
+        // has been kept rather than what the process log holds.
+        if let Some(text) = self.ui.text_input(cx, ids!(console_filter)).changed(actions) {
+            self.console.filter = text;
+            changed = true;
+        }
+        if self.ui.button(cx, ids!(console_clear)).clicked(actions) {
+            self.console_lines.clear();
+            changed = true;
+        }
+        if changed {
+            self.paint_console(cx);
+            self.resync_layout(cx);
+            self.save_preprocess_settings();
+        }
+    }
+
     /// A list tab was pressed. Wide, the explorer and queue tabs both mean
     /// the pair; the loops tab is a page at every width.
     fn handle_lists_tabs(&mut self, cx: &mut Cx, actions: &Actions) {
@@ -18239,12 +18533,13 @@ p2 {}
         // lines: they are the same dialog, and two files would be two things
         // to keep in step for no gain.
         let body = format!(
-            "{}explorer_columns {}\nqueue_columns {}\n",
+            "{}explorer_columns {}\nqueue_columns {}\n{}",
             self.prep.to_text(),
             self.explorer_columns.to_text(),
             self.queue_columns.to_text(),
+            self.console.to_text(),
         );
-        let _ = std::fs::write(path, body);
+        let _ = crate::durable::write_file(&path, body);
     }
 
     /// Read the dialog back, and put its cache root in force before anything
@@ -18261,7 +18556,7 @@ p2 {}
                         self.explorer_columns = ColumnLayout::from_text(value)
                     }
                     "queue_columns" => self.queue_columns = ColumnLayout::from_text(value),
-                    _ => {}
+                    _ => self.console.apply_line(key, value),
                 }
             }
         }
@@ -18273,37 +18568,37 @@ p2 {}
     /// are live monitoring state and deliberately absent.
     fn save_phones_settings(&self) {
         let path = Self::phones_settings_path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let body = format!(
-            "{}\n{}\n{}\n{}\n",
-            self.phones_device_name.as_deref().unwrap_or(""),
-            self.phones_volume,
-            self.phones_placement.index(),
-            self.phones_cue_mode.index(),
-        );
-        let _ = std::fs::write(path, body);
+        let mut store = crate::settings::Settings::new();
+        store.set_text("phones.device", self.phones_device_name.as_deref().unwrap_or(""));
+        store.set_f64("phones.volume", self.phones_volume as f64);
+        store.set_usize("phones.placement", self.phones_placement.index());
+        store.set_usize("phones.cue_mode", self.phones_cue_mode.index());
+        let _ = crate::durable::write_file(&path, store.to_text());
     }
 
     fn load_phones_settings(&mut self) {
         let Ok(body) = std::fs::read_to_string(Self::phones_settings_path()) else {
             return;
         };
-        // Line-per-field; missing lines read as the defaults, so the file
-        // can grow.
-        let mut lines = body.lines();
-        let name = lines.next().unwrap_or("").trim();
-        self.phones_device_name = (!name.is_empty()).then(|| name.to_string());
-        if let Some(volume) = lines.next().and_then(|line| line.trim().parse::<f32>().ok()) {
-            self.phones_volume = volume.clamp(0.0, 1.0);
-        }
-        if let Some(place) = lines.next().and_then(|line| line.trim().parse::<usize>().ok()) {
-            self.phones_placement = PhonesPlacement::from_index(place);
-        }
-        if let Some(mode) = lines.next().and_then(|line| line.trim().parse::<usize>().ok()) {
-            self.phones_cue_mode = CueMode::from_index(mode);
-        }
+        // Four bare lines before the store existed, the device NAME first;
+        // keys since. A missing key is the default, so the file can grow.
+        let store = crate::settings::Settings::from_text(&body);
+        let store = if store.version() == 0 {
+            crate::settings::legacy::phones(&body)
+        } else {
+            store
+        };
+        let name = store.text("phones.device", "");
+        self.phones_device_name = (!name.is_empty()).then_some(name);
+        // The store refuses a number that is not finite, so a hand-edited or
+        // half-written file can no longer hand the monitor a level it could
+        // never leave.
+        self.phones_volume =
+            (store.f64("phones.volume", self.phones_volume as f64) as f32).clamp(0.0, 1.0);
+        self.phones_placement =
+            PhonesPlacement::from_index(store.usize("phones.placement", self.phones_placement.index()));
+        self.phones_cue_mode =
+            CueMode::from_index(store.usize("phones.cue_mode", self.phones_cue_mode.index()));
         self.mixer.set_phones_volume(self.phones_volume);
         self.mixer.set_cue_mode(self.phones_cue_mode);
     }
@@ -18988,10 +19283,7 @@ p2 {}
     /// scans with have to travel with it.
     fn save_loop_scan_settings(&self) {
         let path = Self::loop_scan_settings_path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(path, self.scan_settings().to_text());
+        let _ = crate::durable::write_file(&path, self.scan_settings().to_text());
     }
 
     fn load_loop_scan_settings(&mut self) {
@@ -19014,49 +19306,39 @@ p2 {}
             AutoStyle::Outro => 0,
             AutoStyle::Body => 1,
         };
-        let body = format!(
-            "{}
-{}
-{}
-{}
-{}
-{}
-{}
-{}
-{}
-{}
-{}
-{}
-",
-            brain,
-            style,
-            u8::from(self.autopilot.vocal_guard),
-            u8::from(self.autopilot.phrase_snap),
-            u8::from(self.decks.repeat),
-            u8::from(self.decks.shuffle),
-            u8::from(self.auto_pick),
-            u8::from(self.autopilot.pick_exit),
-            u8::from(self.autopilot.pick_route),
-            self.set_length_mins,
-            Curve::ALL.iter().position(|c| *c == self.set_curve).unwrap_or(0) as u32,
-            u8::from(self.autopilot.suggest_only) as u32,
+        let mut store = crate::settings::Settings::new();
+        store.set_usize("auto.brain", brain);
+        store.set_usize("auto.style", style);
+        store.set_bool("auto.vocal_guard", self.autopilot.vocal_guard);
+        store.set_bool("auto.phrase_snap", self.autopilot.phrase_snap);
+        store.set_bool("queue.repeat", self.decks.repeat);
+        store.set_bool("queue.shuffle", self.decks.shuffle);
+        store.set_bool("auto.pick", self.auto_pick);
+        store.set_bool("auto.pick_exit", self.autopilot.pick_exit);
+        store.set_bool("auto.pick_route", self.autopilot.pick_route);
+        store.set_bool("auto.suggest_only", self.autopilot.suggest_only);
+        store.set_usize("auto.set_length_mins", self.set_length_mins as usize);
+        store.set_usize(
+            "auto.set_curve",
+            Curve::ALL.iter().position(|c| *c == self.set_curve).unwrap_or(0),
         );
         let path = Self::autopilot_settings_path();
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(path, body);
+        let _ = crate::durable::write_file(&path, store.to_text());
     }
 
     fn load_autopilot_settings(&mut self) {
         let Ok(body) = std::fs::read_to_string(Self::autopilot_settings_path()) else {
             return;
         };
-        let mut lines = body.lines();
-        let mut next = |fallback: u8| -> u8 {
-            lines.next().and_then(|l| l.parse().ok()).unwrap_or(fallback)
+        // Six bare numbers before the store existed; keys since. A file with
+        // no version line is the old one, whatever else it looks like.
+        let store = crate::settings::Settings::from_text(&body);
+        let store = if store.version() == 0 {
+            crate::settings::legacy::autopilot(&body)
+        } else {
+            store
         };
-        match next(2) {
+        match store.usize("auto.brain", 2) {
             0 => self.autopilot.brain = MixBrain::Fade,
             1 => self.autopilot.brain = MixBrain::Eq,
             2 => self.autopilot.brain = MixBrain::Stems,
@@ -19064,28 +19346,24 @@ p2 {}
             // first plan rolls one.
             _ => self.autopilot.brain_random = true,
         };
-        self.autopilot.set_style(if next(0) == 1 {
+        self.autopilot.set_style(if store.usize("auto.style", 0) == 1 {
             AutoStyle::Body
         } else {
             AutoStyle::Outro
         });
-        self.autopilot.vocal_guard = next(1) == 1;
-        self.autopilot.phrase_snap = next(1) == 1;
-        self.decks.repeat = next(0) == 1;
-        self.decks.shuffle = next(0) == 1;
-        // Appended after the file's first six lines: an older settings file
-        // is missing it and reads as off, which is what the tab did before.
-        self.auto_pick = next(0) == 1;
-        self.autopilot.pick_exit = next(0) == 1;
-        self.autopilot.pick_route = next(0) == 1;
-        // Everything below was APPENDED, in this order. A field inserted
-        // into the middle of this file shifts every value after it, and the
-        // settings an operator spent a night getting right come back as
-        // somebody else's — so new ones go on the end, always.
-        self.set_length_mins = lines.next().and_then(|l| l.parse().ok()).unwrap_or(0);
-        let curve = lines.next().and_then(|l| l.parse::<usize>().ok()).unwrap_or(0);
-        self.autopilot.suggest_only =
-            lines.next().and_then(|l| l.parse::<u8>().ok()).unwrap_or(0) == 1;
+        self.autopilot.vocal_guard = store.bool("auto.vocal_guard", true);
+        self.autopilot.phrase_snap = store.bool("auto.phrase_snap", true);
+        self.decks.repeat = store.bool("queue.repeat", false);
+        self.decks.shuffle = store.bool("queue.shuffle", false);
+        // Each of these defaults to what the tab did before it existed, so
+        // a settings file written before any of them reads as the old
+        // behaviour rather than as a surprise.
+        self.auto_pick = store.bool("auto.pick", false);
+        self.autopilot.pick_exit = store.bool("auto.pick_exit", false);
+        self.autopilot.pick_route = store.bool("auto.pick_route", false);
+        self.autopilot.suggest_only = store.bool("auto.suggest_only", false);
+        self.set_length_mins = store.usize("auto.set_length_mins", 0) as u32;
+        let curve = store.usize("auto.set_curve", 0);
         self.set_curve = Curve::ALL[curve.min(Curve::ALL.len() - 1)];
     }
 
@@ -19110,62 +19388,60 @@ p2 {}
     /// prompt re-apply at launch, so an endless stream stays endless
     /// through every reboot instead of dying with the window.
     fn save_gen_panel(&self) {
-        let prompt = self.gen.prompt.replace('\n', " ");
-        let body = format!(
-            "{}\n{}\n{}\n{}\n{}\n",
-            self.gen.selected,
-            self.gen.video_length(),
-            u8::from(self.gen.continuous()),
-            prompt,
-            u8::from(self.gen_panel_open),
-        ) + &format!(
-            "{}\n{}\n{}\n{}\n",
-            self.lower_tab as u8,
-            u8::from(self.monitor_audio),
-            u8::from(self.import.convert_video),
-            // Appended last: a file written before the canvas picker
-            // existed simply has no line here and reads as the default.
-            self.gen.size_index(),
-        ) + &format!("{}\n", self.gen.image_model_index());
+        let mut store = crate::settings::Settings::new();
+        store.set_usize("gen.profile", self.gen.selected);
+        store.set_usize("gen.video_length", self.gen.video_length());
+        store.set_bool("gen.continuous", self.gen.continuous());
+        store.set_text("gen.prompt", &self.gen.prompt);
+        store.set_bool("gen.panel_open", self.gen_panel_open);
+        store.set_usize("ui.lower_tab", self.lower_tab as usize);
+        store.set_bool("ui.monitor_audio", self.monitor_audio);
+        store.set_bool("import.convert_video", self.import.convert_video);
+        store.set_usize("gen.video_size", self.gen.size_index());
+        store.set_usize("gen.image_model", self.gen.image_model_index());
         let path = Self::gen_panel_path();
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(path, body);
+        let _ = crate::durable::write_file(&path, store.to_text());
     }
 
     fn load_gen_panel(&mut self, cx: &mut Cx) {
         let Ok(body) = std::fs::read_to_string(Self::gen_panel_path()) else { return };
-        let mut lines = body.lines();
-        let selected: usize = lines.next().and_then(|l| l.parse().ok()).unwrap_or(0);
-        let length: usize = lines.next().and_then(|l| l.parse().ok()).unwrap_or(0);
-        let cont = lines.next().map(|l| l == "1").unwrap_or(false);
-        let prompt = lines.next().unwrap_or("").to_string();
-        let open = lines.next().map(|l| l == "1").unwrap_or(false);
+        // Ten bare lines before the store existed, the PROMPT sitting in the
+        // middle of them; keys since.
+        let store = crate::settings::Settings::from_text(&body);
+        let store = if store.version() == 0 {
+            crate::settings::legacy::gen_panel(&body)
+        } else {
+            store
+        };
+        let selected = store.usize("gen.profile", 0);
+        let length = store.usize("gen.video_length", 0);
+        let cont = store.bool("gen.continuous", false);
+        let prompt = store.text("gen.prompt", "");
+        let open = store.bool("gen.panel_open", false);
         if open != self.gen_panel_open {
             self.set_gen_panel_open(cx, open);
         }
-        let tab = LowerTab::from_u8(lines.next().and_then(|l| l.parse().ok()).unwrap_or(0));
+        let tab = LowerTab::from_u8(store.usize("ui.lower_tab", 0) as u8);
         if tab != self.lower_tab {
             self.set_lower_tab(cx, tab);
         }
         // MONITOR AUDIO comes back on for the operator who left it on
         // (the TCC prompt was answered on the deliberate first flip).
-        if lines.next().map(|l| l == "1").unwrap_or(false) {
+        if store.bool("ui.monitor_audio", false) {
             self.set_monitor_audio(cx, true);
         }
         // The import's FLOW tick — absent in files written before it
         // existed, which reads as off, which is the old behaviour exactly.
-        if lines.next().map(|l| l == "1").unwrap_or(false) {
+        if store.bool("import.convert_video", false) {
             self.import.convert_video = true;
             self.ui.check_box(cx, ids!(import_flow)).set_active(cx, true, Animate::No);
         }
-        let size: usize = lines.next().and_then(|l| l.parse().ok()).unwrap_or(0);
+        let size = store.usize("gen.video_size", 0);
         // Only a REMEMBERED pick counts as the operator having chosen: an
-        // absent line must still take the flux default when the profiles
+        // absent key must still take the flux default when the profiles
         // land, rather than pinning `auto` forever.
-        if let Some(model) = lines.next().and_then(|l| l.parse::<usize>().ok()) {
-            self.gen.set_image_model(model);
+        if store.has("gen.image_model") {
+            self.gen.set_image_model(store.usize("gen.image_model", 0));
         }
         self.gen.select_profile(selected);
         self.gen.set_video_length(length);
@@ -21564,7 +21840,7 @@ p2 {}
                 any = true;
                 let mut sum = 0.0f64;
                 for frame in &block[offset..end] {
-                    let mono = (frame[0] as f64 + frame[1] as f64) * 0.5 / 32768.0;
+                    let mono = crate::dsp_math::mono_f64(*frame);
                     sum += mono * mono;
                 }
                 // The headroom is undone once per lane rather than per
@@ -21818,6 +22094,7 @@ p2 {}
             let grid = state.grid;
             let rate = state.rate;
             let pitch = state.pitch;
+            let bend = state.bend;
             let synced = state.synced;
             let loaded = state.is_loaded();
             let loop_on = state.loop_on();
@@ -21865,12 +22142,26 @@ p2 {}
             let refs = std::mem::take(&mut self.music_refs.decks[index]);
             self.set_label(cx, base, &refs.title, &title);
             self.set_label(cx, base + 1, &refs.artist, &artist);
-            self.set_label(cx, base + 2, &refs.bpm, &format_bpm(grid, rate));
+            self.set_label(cx, base + 2, &refs.bpm, &format_bpm(grid, rate + bend));
             self.set_label(
                 cx,
                 base + 3,
                 &refs.pitch_text,
-                &format!("{}{}", format_pitch(pitch), if synced { " SYNC" } else { "" }),
+                // A held bend says so. It does not move the fader, so
+                // without this the only sign that a deck is leaning is the
+                // sound of it.
+                &format!(
+                    "{}{}{}",
+                    format_pitch(pitch),
+                    if bend > 0.0 {
+                        " BEND +"
+                    } else if bend < 0.0 {
+                        " BEND -"
+                    } else {
+                        ""
+                    },
+                    if synced { " SYNC" } else { "" }
+                ),
             );
             self.set_label(
                 cx,
@@ -21945,6 +22236,18 @@ p2 {}
             // Wall time, not a frame count: the pump runs per UI frame.
             let blink = self.blink_anchor.elapsed().as_millis() / 250 % 2 == 0;
             self.paint_lit(cx, ids.loop_out, loop_armed && blink);
+            // The CUE lamp on the same phase: lit parked on the mark or
+            // while auditioning, blinking when a press would move the mark,
+            // dark while the deck simply plays.
+            self.paint_lit(
+                cx,
+                ids.cue,
+                match self.decks.cue_led(deck) {
+                    crate::decks::CueLed::Solid => true,
+                    crate::decks::CueLed::Blink => blink,
+                    crate::decks::CueLed::Dark => false,
+                },
+            );
             self.paint_lit(cx, ids.mute, muted);
             // The SYNC control wears its mode: chrome when free, lit when
             // held against the other deck, and lit reading EXT + the room's
@@ -21965,6 +22268,14 @@ p2 {}
                 refs.sync.set_text(cx, &sync_text);
             }
             self.paint_lit(cx, ids.sync, mode != SyncMode::Off || synced);
+            self.paint_lit(cx, ids.slip, self.mixer.deck_slipping(deck));
+            // The lock's own word: which key it will hold, shown whether it
+            // is engaged or not. `paint_lit` still says whether it is.
+            let keylock_text = self.decks.deck(deck).keylock_mode.label();
+            if self.label_cache.get(&(base + 10)).map(String::as_str) != Some(keylock_text) {
+                self.label_cache.insert(base + 10, keylock_text.to_string());
+                refs.keylock.set_text(cx, keylock_text);
+            }
             self.paint_lit(cx, ids.loop_scan, self.scan_busy[index]);
             self.paint_lit(cx, ids.keylock, keylock);
             self.paint_phones_lit(cx, ids.hp, self.phones_deck[index]);
@@ -22068,6 +22379,7 @@ p2 {}
         self.paint_deck_sections(cx);
         self.paint_deck_tabs(cx);
         self.paint_lists_tabs(cx);
+        self.paint_console(cx);
         self.refresh_music_rows(cx);
     }
 
@@ -24178,20 +24490,37 @@ p2 {}
                 let cmds = self.decks.play_pause(deck);
                 self.run_deck_cmds(cx, cmds);
             }
-            if refs.cue.clicked(actions) {
+            // CUE reads its own edges rather than a click, because holding
+            // it is a different instruction from tapping it. Down: a
+            // stopped deck away from the mark MOVES the mark here, and
+            // anything else previews from it for as long as it is held. Up:
+            // the preview stops and the record goes back.
+            //
+            // A finger lifted inside the button reports Clicked and one
+            // lifted outside reports Released, and only one action per
+            // widget comes back, so the release accepts either.
+            if refs.cue.pressed(actions) {
                 self.deck_hands_on();
-                // Cue: stop and return to wherever the red marker sits —
-                // the track start until the operator drags it elsewhere.
-                let cue = self.decks.deck(deck).cue_secs;
-                let mut cmds = Vec::new();
-                if self.decks.deck(deck).playing {
-                    cmds.extend(self.decks.play_pause(deck));
-                }
-                cmds.extend(self.decks.seek_secs(deck, cue));
+                let cmds = self.decks.cue_press(deck);
                 self.run_deck_cmds(cx, cmds);
             }
-            if refs.loop_button.clicked(actions) {
-                let cmds = self.decks.toggle_loop(deck);
+            if refs.cue.released(actions) || refs.cue.clicked(actions) {
+                let cmds = self.decks.cue_release(deck);
+                self.run_deck_cmds(cx, cmds);
+            }
+            // RELOOP/EXIT plainly; SHIFT repeats the whole track, which is
+            // the same span mechanism with the file as its span. On this
+            // button rather than a new one for the reason written out
+            // twenty lines below for the beat pair: the transport row has
+            // no width left. Deliberately no `deck_hands_on` here, as the
+            // plain arm has never had one -- a repeat is not the operator
+            // taking the deck off the autopilot.
+            if let Some(modifiers) = refs.loop_button.clicked_modifiers(actions) {
+                let cmds = if modifiers.shift {
+                    self.decks.repeat_track(deck)
+                } else {
+                    self.decks.toggle_loop(deck)
+                };
                 self.run_deck_cmds(cx, cmds);
             }
             if refs.loop_halve.clicked(actions) {
@@ -24207,21 +24536,56 @@ p2 {}
             // engine refuses rather than guessing a beat length, so an early
             // press does nothing instead of throwing the playhead somewhere.
             //
-            // Named for what they do, so the sign here never has to lie about
-            // it. The bar-sized jumps take the operator's hand back from the
-            // autopilot; a one-beat nudge is the correction it expects.
-            for (button, sign) in [(&refs.beat_back, -1.0), (&refs.beat_fwd, 1.0)] {
-                let Some(modifiers) = button.clicked_modifiers(actions) else { continue };
-                let cmds = if modifiers.control {
-                    self.deck_hands_on();
-                    self.decks.beat_jump(deck, sign * 16.0 * 4.0)
-                } else if modifiers.shift {
-                    self.deck_hands_on();
-                    self.decks.beat_jump(deck, sign * 4.0 * 4.0)
-                } else {
-                    self.decks.nudge_beats(deck, sign)
-                };
-                self.run_deck_cmds(cx, cmds);
+            // Which GLYPH sits on which of these lives in the DSL: the
+            // chevrons point at the track rather than the playhead, so <
+            // is wired to the forward step. Named for what they do, so the
+            // sign here never has to lie about it. The bar-sized jumps take
+            // the operator's hand back from the autopilot; a one-beat nudge
+            // is the correction it expects.
+            //
+            // A TAP steps; a HOLD bends the tempo for as long as it is down
+            // and lets go of it on release. Both live on the same pair
+            // because the transport row has no width left for another, and
+            // because they are the same gesture at two lengths: a tap moves
+            // the record, a hold leans on it.
+            for (index, (button, sign)) in
+                [(&refs.beat_back, -1.0), (&refs.beat_fwd, 1.0)].into_iter().enumerate()
+            {
+                if let Some(modifiers) = button.pressed_modifiers(actions) {
+                    if modifiers.control {
+                        self.deck_hands_on();
+                        let cmds = self.decks.beat_jump(deck, sign * 16.0 * 4.0);
+                        self.run_deck_cmds(cx, cmds);
+                    } else if modifiers.shift {
+                        self.deck_hands_on();
+                        let cmds = self.decks.beat_jump(deck, sign * 4.0 * 4.0);
+                        self.run_deck_cmds(cx, cmds);
+                    } else {
+                        self.bend_press[deck.index()][index] =
+                            Some(std::time::Instant::now());
+                        let cmds = self.decks.hold_bend(deck, sign, false);
+                        self.run_deck_cmds(cx, cmds);
+                    }
+                }
+                // A finger lifted INSIDE the button reports Clicked, and
+                // one lifted outside reports Released; only one action per
+                // widget comes back, so a release has to accept either or
+                // the bend never lets go.
+                if button.released(actions) || button.clicked(actions) {
+                    let Some(down_at) = self.bend_press[deck.index()][index].take() else {
+                        continue;
+                    };
+                    let cmds = self.decks.release_bend(deck);
+                    self.run_deck_cmds(cx, cmds);
+                    // Short enough to have been a tap: the bend that just
+                    // happened moved the track by a couple of milliseconds
+                    // and nobody heard it, and the beat step is what was
+                    // meant.
+                    if down_at.elapsed().as_secs_f64() < BEND_TAP_SECS {
+                        let cmds = self.decks.nudge_beats(deck, sign);
+                        self.run_deck_cmds(cx, cmds);
+                    }
+                }
             }
             if refs.loop_in.clicked(actions) {
                 let cmds = self.decks.loop_in(deck);
@@ -24327,9 +24691,24 @@ p2 {}
                 self.run_deck_cmds(cx, cmds);
                 self.sync_deck_controls(cx);
             }
-            if refs.keylock.clicked(actions) {
-                let cmds = self.decks.toggle_keylock(deck);
+            // SLIP: the track carries on where it was left while the
+            // record is taken elsewhere. Shift on the release KEEPS the
+            // detour instead of landing on the ghost.
+            if let Some(modifiers) = refs.slip.clicked_modifiers(actions) {
+                let slipping = self.mixer.deck_slipping(deck);
+                self.mixer.set_deck_slip(deck, !slipping, modifiers.shift);
+            }
+            // Alt walks which key the lock holds, the same modifier trick
+            // SYNC uses for EXT twenty lines above. The word on the button
+            // says which, so the choice can be made before pressing.
+            if let Some(modifiers) = refs.keylock.clicked_modifiers(actions) {
+                let cmds = if modifiers.alt {
+                    self.decks.cycle_keylock_mode(deck)
+                } else {
+                    self.decks.toggle_keylock(deck)
+                };
                 self.run_deck_cmds(cx, cmds);
+                self.sync_deck_knobs(cx, deck);
             }
             if refs.key_up.clicked(actions) {
                 let cmds = self.decks.nudge_key_shift(deck, 1.0);
@@ -24344,8 +24723,11 @@ p2 {}
                 let cmds = self.decks.reset_key_shift(deck);
                 self.run_deck_cmds(cx, cmds);
             }
-            if refs.range.clicked(actions) {
-                let cmds = self.decks.toggle_pitch_range(deck);
+            // The ladder: press steps the fader's reach wider, shift steps
+            // it narrower. It moves no music, so there is nothing to send --
+            // only the fader's own scale and its label change.
+            if let Some(modifiers) = refs.range.clicked_modifiers(actions) {
+                let cmds = self.decks.step_pitch_range(deck, !modifiers.shift);
                 self.run_deck_cmds(cx, cmds);
                 self.sync_deck_controls(cx);
             }
@@ -24946,7 +25328,7 @@ p2 {}
                     Vec::with_capacity(lane.len() * stems.chunk_frames / 4 + 4);
                 for block in lane.iter().flatten() {
                     for frame in block.iter().step_by(4) {
-                        mono.push((frame[0] as f32 + frame[1] as f32) * 0.5 / 32768.0);
+                        mono.push(crate::dsp_math::mono(*frame));
                     }
                 }
                 let rate = sample_rate as f64 / 4.0;
@@ -26223,6 +26605,7 @@ impl MatchEvent for App {
         self.handle_deck_tabs(cx, actions);
         self.handle_deck_sections(cx, actions);
         self.handle_lists_tabs(cx, actions);
+        self.handle_console(cx, actions);
         if self.ui.button(cx, ids!(loop_score_play)).clicked(actions) {
             self.play_loop_score_preview(cx);
         }
@@ -27053,11 +27436,19 @@ impl MatchEvent for App {
                 }
             }
         }
-        if self.ui.button(cx, ids!(decks_swap)).clicked(actions) {
+        if let Some(modifiers) = self.ui.button(cx, ids!(decks_swap)).clicked_modifiers(actions)
+        {
             // A swap exchanges the deck identities an armed plan is
-            // holding: the plan must not survive it.
+            // holding: the plan must not survive it. SHIFT doubles instead
+            // -- the same record on both decks from the same sample, onto
+            // the deck a new track would land on, which is never the live
+            // one.
             self.deck_hands_on();
-            let cmds = self.decks.swap();
+            let cmds = if modifiers.shift {
+                self.decks.instant_double()
+            } else {
+                self.decks.swap()
+            };
             self.run_deck_cmds(cx, cmds);
             self.sync_deck_controls(cx);
         }

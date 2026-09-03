@@ -50,7 +50,7 @@ pub(crate) struct BeatFeatures {
 fn mono_of_pcm(pcm: &TrackPcm) -> Vec<f32> {
     pcm.frames
         .iter()
-        .map(|f| (f[0] as f32 + f[1] as f32) * 0.5 / 32768.0)
+        .map(|f| crate::dsp_math::mono(*f))
         .collect()
 }
 

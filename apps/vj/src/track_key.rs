@@ -467,7 +467,7 @@ fn track_chroma(frames: &[[i16; 2]], sample_rate: u32) -> Option<[f64; 12]> {
 
     let transform = Fft::new(FRAME);
     let window: Vec<f64> = (0..FRAME)
-        .map(|index| 0.5 - 0.5 * (2.0 * PI * index as f64 / FRAME as f64).cos())
+        .map(|index| crate::dsp_math::hann_f64(index, FRAME))
         .collect();
     let mut real = vec![0.0f64; FRAME];
     let mut imaginary = vec![0.0f64; FRAME];
@@ -847,7 +847,7 @@ fn decimate_mono(frames: &[[i16; 2]], rate: f64) -> (Vec<f32>, f64) {
     if factor == 1 {
         let mono = frames
             .iter()
-            .map(|frame| (frame[0] as f32 + frame[1] as f32) * 0.5 / 32768.0)
+            .map(|frame| crate::dsp_math::mono(*frame))
             .collect();
         return (mono, rate);
     }
@@ -860,7 +860,7 @@ fn decimate_mono(frames: &[[i16; 2]], rate: f64) -> (Vec<f32>, f64) {
     let mut phase = 0usize;
     let inverse = 1.0 / (factor as f64 * factor as f64);
     for frame in frames {
-        let mono = (frame[0] as f64 + frame[1] as f64) * 0.5 / 32768.0;
+        let mono = crate::dsp_math::mono_f64(*frame);
         first_sum += mono - first[slot];
         first[slot] = mono;
         second_sum += first_sum - second[slot];

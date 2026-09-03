@@ -62,6 +62,12 @@ pub struct PerfGraph {
     panel_height: f64,
     #[live(10.0)]
     panel_margin: f64,
+    /// Which corner of the walk rect the panel pins itself to: (0,0) is the
+    /// top left, (1,1) the bottom right. It is an overlay over somebody
+    /// else's screen, so where it sits is the host's business — the corner
+    /// that is free depends on what the app already parks there.
+    #[live(dvec2(1.0, 1.0))]
+    panel_anchor: DVec2,
     #[rust]
     next_frame: NextFrame,
     #[rust]
@@ -85,20 +91,17 @@ impl Widget for PerfGraph {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        // (placement is `panel_rect`, just below the impl)
         let pane = cx.walk_turtle(walk);
         if pane.size.x < 40.0 || pane.size.y < 40.0 {
             return DrawStep::done();
         }
-        // Corner-pin the panel bottom-right within the walk rect.
         let m = self.panel_margin;
         let size = dvec2(
             self.panel_width.min(pane.size.x - m * 2.0),
             self.panel_height.min(pane.size.y - m * 2.0),
         );
-        let rect = Rect {
-            pos: pane.pos + pane.size - size - dvec2(m, m),
-            size,
-        };
+        let rect = panel_rect(pane, size, m, self.panel_anchor);
         cx.cx.perf_monitor.set_enabled(true);
         cx.cx.perf_monitor.read(&mut self.frames);
         let channels: Vec<PerfChannelInfo> = cx.cx.perf_monitor.channels().to_vec();
@@ -259,5 +262,48 @@ impl Widget for PerfGraph {
         // live graph: keep frames coming while we're being drawn
         self.next_frame = cx.new_next_frame();
         DrawStep::done()
+    }
+}
+
+/// Where the panel sits inside `pane`: `anchor` picks the corner, (0,0) top
+/// left through (1,1) bottom right, and `margin` is kept from whichever
+/// edges it is pinned to.
+fn panel_rect(pane: Rect, size: DVec2, margin: f64, anchor: DVec2) -> Rect {
+    let free = pane.size - size - dvec2(margin, margin) * 2.0;
+    let free = dvec2(free.x.max(0.0), free.y.max(0.0));
+    Rect {
+        pos: pane.pos + dvec2(margin, margin) + dvec2(free.x * anchor.x, free.y * anchor.y),
+        size,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pane() -> Rect {
+        Rect { pos: dvec2(100.0, 200.0), size: dvec2(1000.0, 800.0) }
+    }
+
+    #[test]
+    fn the_panel_sits_in_the_corner_it_is_anchored_to() {
+        let size = dvec2(330.0, 150.0);
+        let bottom_right = panel_rect(pane(), size, 10.0, dvec2(1.0, 1.0));
+        assert_eq!(bottom_right.pos, dvec2(100.0 + 1000.0 - 330.0 - 10.0, 200.0 + 800.0 - 150.0 - 10.0));
+        let bottom_left = panel_rect(pane(), size, 10.0, dvec2(0.0, 1.0));
+        assert_eq!(bottom_left.pos, dvec2(110.0, 200.0 + 800.0 - 150.0 - 10.0));
+        let top_left = panel_rect(pane(), size, 10.0, dvec2(0.0, 0.0));
+        assert_eq!(top_left.pos, dvec2(110.0, 210.0));
+        let top_right = panel_rect(pane(), size, 10.0, dvec2(1.0, 0.0));
+        assert_eq!(top_right.pos, dvec2(100.0 + 1000.0 - 330.0 - 10.0, 210.0));
+        assert_eq!(bottom_right.size, size, "the corner never changes the size");
+    }
+
+    #[test]
+    fn the_panel_keeps_its_margin_in_a_pane_too_small_to_hold_it() {
+        let tight = Rect { pos: dvec2(0.0, 0.0), size: dvec2(200.0, 100.0) };
+        let rect = panel_rect(tight, dvec2(180.0, 80.0), 10.0, dvec2(1.0, 1.0));
+        assert_eq!(rect.pos, dvec2(10.0, 10.0));
+        assert_eq!(rect.size, dvec2(180.0, 80.0));
     }
 }
