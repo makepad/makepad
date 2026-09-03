@@ -29,7 +29,8 @@ use crate::loop_splat::{
 };
 use crate::music_dsp::{
     DeckEq, FrameSource, ParamRamp, RateReader, ScratchRamp, Stretcher, STEM_COUNT,
-    STRETCH_BYPASS_EPSILON, STRETCH_RATIO_MAX, STRETCH_RATIO_MIN, WSOLA_WINDOW,
+    STRETCH_BYPASS_EPSILON, STRETCH_ENGAGE_EPSILON, STRETCH_RATIO_MAX, STRETCH_RATIO_MIN,
+    WSOLA_WINDOW,
 };
 use crate::pads::{PadKey, VoiceAlloc, VoiceId};
 use crate::score_preview::{PreviewEvent, PreviewSequence};
@@ -631,6 +632,11 @@ struct SplatState {
     active: bool,
     master_frames: f64,
     rows: [SplatRowVoice; SPLAT_ROWS],
+    /// The cell the picture follows: the one launched last. The deck's
+    /// reported playhead cycles inside it, so the waveform stays on the
+    /// segment that is sounding instead of walking off through the track
+    /// with the master clock.
+    view: Option<RowCell>,
 }
 
 impl SplatState {
@@ -641,7 +647,43 @@ impl SplatState {
             active: false,
             master_frames,
             rows: [SplatRowVoice::default(); SPLAT_ROWS],
+            view: None,
         }
+    }
+
+    /// Where the ear is: inside the cell the picture follows, else on the
+    /// master clock.
+    fn playhead_frames(&self) -> f64 {
+        match self.view {
+            Some(cell) if self.master_frames >= cell.anchor_frames => {
+                cell.start_frames
+                    + (self.master_frames - cell.anchor_frames).rem_euclid(cell.len_frames.max(1.0))
+            }
+            Some(cell) => cell.start_frames,
+            None => self.master_frames,
+        }
+    }
+
+    /// Nothing sounding and nothing waiting to.
+    fn idle(&self) -> bool {
+        self.rows.iter().all(|row| row.cell.is_none() && row.queued.is_none())
+    }
+
+    /// The cell a row is sounding, or the one it is about to.
+    fn row_slot(voice: &SplatRowVoice) -> Option<RowCell> {
+        voice.queued.and_then(|queued| queued.cell).or(voice.cell)
+    }
+
+    /// A launch or a stop just landed: the picture keeps following its
+    /// cell while that cell sounds, moves to a row that is still sounding
+    /// when its own row stopped, and goes back to the master clock when
+    /// every row has.
+    fn revalidate_view(&mut self) {
+        let Some(view) = self.view else { return };
+        if self.rows.iter().any(|voice| Self::row_slot(voice) == Some(view)) {
+            return;
+        }
+        self.view = self.rows.iter().find_map(Self::row_slot);
     }
 
     fn bar_start_at_or_before(&self, master: f64) -> f64 {
@@ -665,24 +707,80 @@ impl SplatState {
         }
     }
 
+    /// The source span a slot names on the CURRENT frames: the cell's
+    /// bars, or the `part` of them, as `(start, len)` in source frames.
+    /// One derivation for a launch and for a re-launch on a replaced grid,
+    /// so the same slot always means the same samples.
+    fn slot_frames(&self, row: SplatRow, col: usize, part: SplatPart) -> Option<(f64, f64)> {
+        if col >= SPLAT_COLS || !part.is_valid() {
+            return None;
+        }
+        let cell = self.frames.cells[row.index()][col]?;
+        let part_len = cell.len_frames / f64::from(part.den);
+        Some((cell.start_frames + f64::from(part.num) * part_len, part_len.max(1.0)))
+    }
+
     fn queue_cell(&mut self, row: SplatRow, col: usize, part: SplatPart) {
-        if !self.active || col >= SPLAT_COLS || !part.is_valid() {
+        if !self.active {
             return;
         }
-        let at_frames = self.next_bar_after(self.master_frames);
-        let Some(cell) = self.frames.cells[row.index()][col] else { return };
-        let denominator = f64::from(part.den);
-        let part_len = cell.len_frames / denominator;
-        self.rows[row.index()].queued = Some(Queued {
-            cell: Some(RowCell {
-                col: cell.col,
-                part,
-                start_frames: cell.start_frames + f64::from(part.num) * part_len,
-                len_frames: part_len.max(1.0),
-                anchor_frames: at_frames,
-            }),
-            at_frames,
-        });
+        let Some((start_frames, len_frames)) = self.slot_frames(row, col, part) else { return };
+        // The first launch into a silent grid starts NOW, and the master
+        // clock is re-seated on the cell so the grid's bars and the loop's
+        // bars are the same bars from here: the click plays exactly the
+        // segment it named, at once. Later launches join on the next bar,
+        // in phase with what is already running.
+        let at_frames = if self.idle() {
+            self.master_frames = start_frames;
+            start_frames
+        } else {
+            self.next_bar_after(self.master_frames)
+        };
+        let launched = RowCell {
+            col: col as u8,
+            part,
+            start_frames,
+            len_frames,
+            anchor_frames: at_frames,
+        };
+        self.rows[row.index()].queued = Some(Queued { cell: Some(launched), at_frames });
+        self.view = Some(launched);
+    }
+
+    /// The frames were replaced under a running grid — the refined grid
+    /// landed once the stems were in. Every row that is sounding or waiting
+    /// re-launches the SAME slot on the new frames at the next bar, through
+    /// the ordinary crossfade, and a slot the new grid no longer has stops
+    /// there. What is heard is always what the grid on screen says, so a
+    /// click on a cell lands on the boundaries it shows however many grids
+    /// have come and gone; a slot whose span did not change is left alone.
+    fn rebase_rows(&mut self) {
+        let view = self.view;
+        let mut rebased_view = None;
+        for row in SplatRow::ALL {
+            let voice = self.rows[row.index()];
+            // A pending stop stands; a pending launch moves to the new
+            // frames like a sounding one.
+            if matches!(voice.queued, Some(Queued { cell: None, .. })) {
+                continue;
+            }
+            let Some(old) = Self::row_slot(&voice) else { continue };
+            let follows_view = view == Some(old);
+            match self.slot_frames(row, usize::from(old.col), old.part) {
+                Some((start_frames, len_frames))
+                    if start_frames == old.start_frames && len_frames == old.len_frames => {}
+                Some(_) => {
+                    self.queue_cell(row, usize::from(old.col), old.part);
+                    if follows_view {
+                        rebased_view = self.rows[row.index()].queued.and_then(|queued| queued.cell);
+                    }
+                }
+                None => self.queue_stop(row, true),
+            }
+        }
+        // Re-launching set the picture to whichever row went last; it
+        // follows the row it followed before.
+        self.view = rebased_view.or(view);
     }
 
     /// A plain stop is immediate: the loop goes quiet on the next rendered
@@ -953,7 +1051,7 @@ impl DeckVoice {
     /// Where the playhead really is, whichever path is driving it.
     fn playhead_frames(&self) -> f64 {
         if let Some(splat) = self.splat.as_ref().filter(|splat| splat.active) {
-            return splat.master_frames;
+            return splat.playhead_frames();
         }
         if self.stretching {
             self.stretch.position()
@@ -991,7 +1089,7 @@ fn splat_cell_frame(
     row: SplatRow,
     cell: RowCell,
     master_frames: f64,
-    pcm: &TrackPcm,
+    pcm: &DeckPcm,
     stems: Option<&TrackStems>,
     stem_gain: [f32; STEM_COUNT],
 ) -> [f32; 2] {
@@ -1024,14 +1122,15 @@ fn splat_cell_frame(
 /// loops to a stateful monotonic reader would weaken the phase guarantee.
 fn render_splat_source(
     splat: &mut SplatState,
-    pcm: &TrackPcm,
+    pcm: &DeckPcm,
     stems: Option<&TrackStems>,
     stem_gain: [f32; STEM_COUNT],
     source_step: f64,
 ) -> [f32; 2] {
     let master = splat.master_frames;
-    let fade_frames = (SPLAT_XFADE_SECS * pcm.sample_rate.max(1) as f64).max(1.0);
+    let fade_frames = (SPLAT_XFADE_SECS * pcm.sample_rate().max(1) as f64).max(1.0);
     let mut sum = [0.0f32; 2];
+    let mut landed = false;
     for row in SplatRow::ALL {
         let voice = &mut splat.rows[row.index()];
         if let Some(queued) = voice.queued.filter(|queued| master >= queued.at_frames) {
@@ -1043,6 +1142,7 @@ fn render_splat_source(
                 len_frames: fade_frames,
             });
             voice.cell = queued.cell;
+            landed = true;
         }
         let frame = if let Some(fade) = voice.fade {
             let phase = ((master - fade.start_frames) / fade.len_frames).clamp(0.0, 1.0) as f32;
@@ -1071,6 +1171,9 @@ fn render_splat_source(
         sum[1] += frame[1];
     }
     splat.master_frames += source_step;
+    if landed {
+        splat.revalidate_view();
+    }
     sum
 }
 
@@ -1514,6 +1617,8 @@ pub enum MixCmd {
     SplatStopAll { deck: DeckId, timed: bool },
     SeekFraction { deck: DeckId, fraction: f64 },
     SeekSeconds { deck: DeckId, secs: f64 },
+    /// Move by `delta_secs` from the playhead AS IT IS when this lands.
+    SeekRelative { deck: DeckId, delta_secs: f64 },
     SetRate { deck: DeckId, rate: f32 },
     SetKeyRatio { deck: DeckId, ratio: f32 },
     SetKeylock { deck: DeckId, on: bool },
@@ -2291,6 +2396,14 @@ impl Mixer {
         self.run_cmd(MixCmd::SeekSeconds { deck, secs });
     }
 
+    /// Relative seek: `delta_secs` from wherever the playhead is when the
+    /// command reaches the audio thread. The right shape for a phase
+    /// correction measured against a snapshot — the error survives the
+    /// trip, an absolute target does not.
+    pub fn nudge_deck_seconds(&self, deck: DeckId, delta_secs: f64) {
+        self.run_cmd(MixCmd::SeekRelative { deck, delta_secs });
+    }
+
     /// Tempo multiplier. With key lock on the pitch is preserved; with it
     /// off the deck simply plays faster or slower.
     pub fn set_deck_rate(&self, deck: DeckId, rate: f64) {
@@ -2799,6 +2912,7 @@ impl MixEngine {
                         let old_grid = std::mem::replace(&mut splat.grid, grid);
                         let old_frames = std::mem::replace(&mut splat.frames, frames);
                         retire(shared, Retired::Splat(old_grid, old_frames));
+                        splat.rebase_rows();
                     }
                     None => voice.splat = Some(SplatState::new(grid, frames, voice.pos)),
                 }
@@ -2806,20 +2920,31 @@ impl MixEngine {
             MixCmd::SetSplatEnabled { deck, on } => {
                 let voice = &mut s.decks[deck.index()];
                 let frame_count = voice.frame_count() as f64;
+                // Where the ear is on the plain transport, before the grid
+                // takes the clock: the master starts exactly there. It is
+                // NOT pulled back to a bar start — launches quantise
+                // against the grid's own bars whatever the master reads,
+                // and a paused deck must not be seen to move (a fresh load
+                // sat at the first bar, not at zero, with the grid on).
+                let heard = voice.playhead_frames().clamp(0.0, frame_count);
                 let Some(splat) = voice.splat.as_mut() else { return };
                 if on == splat.active {
                     return;
                 }
                 if on {
-                    splat.master_frames =
-                        splat.bar_start_at_or_before(voice.pos).clamp(0.0, frame_count);
+                    splat.master_frames = heard;
+                    splat.view = None;
                     splat.active = true;
+                    voice.pos = heard;
                     voice.stretching = false;
                     voice.reader.reset();
                 } else {
-                    let master = splat.master_frames.clamp(0.0, frame_count);
+                    // Leave the grid where the ear was: inside the cell the
+                    // picture followed, not wherever the master clock got to.
+                    let heard = splat.playhead_frames().clamp(0.0, frame_count);
                     splat.active = false;
-                    voice.seek_frames(master);
+                    splat.view = None;
+                    voice.seek_frames(heard);
                 }
             }
             MixCmd::SplatLaunch { deck, row, col, part } => {
@@ -2863,6 +2988,14 @@ impl MixEngine {
                 let Some(pcm) = d.pcm.as_ref() else { return };
                 let frames = secs.max(0.0) * pcm.sample_rate().max(1) as f64;
                 let from = d.playhead_frames();
+                d.seek_frames(frames);
+                d.arm_seek_fade(from);
+            }
+            MixCmd::SeekRelative { deck, delta_secs } => {
+                let d = &mut s.decks[deck.index()];
+                let Some(pcm) = d.pcm.as_ref() else { return };
+                let from = d.playhead_frames();
+                let frames = from + delta_secs * pcm.sample_rate().max(1) as f64;
                 d.seek_frames(frames);
                 d.arm_seek_fade(from);
             }
@@ -3282,12 +3415,11 @@ impl MixEngine {
                     continue;
                 }
                 let natural_step = pcm.sample_rate() as f64 / device_rate;
-                // The loop grid is built over the whole file, so it only
-                // ever owns time on one.
-                let splat_whole = pcm.whole().and_then(|whole| {
-                    d.splat.as_mut().filter(|splat| splat.active).map(|splat| (splat, whole))
-                });
-                if let Some((splat, whole)) = splat_whole {
+                // The grid owns time on a streaming track too: a cell past
+                // the decoded edge reads silence until its audio lands,
+                // and a click means the same thing however far the decode
+                // is.
+                if let Some(splat) = d.splat.as_mut().filter(|splat| splat.active) {
                     // Splat owns source time. Rate, key lock and scratch are
                     // intentionally ignored; the shared master advances at
                     // the track's natural rate and every row derives from it.
@@ -3296,7 +3428,7 @@ impl MixEngine {
                     }
                     let frame = render_splat_source(
                         splat,
-                        whole,
+                        pcm,
                         deck_stems[i].as_deref(),
                         stem_gain,
                         natural_step,
@@ -3354,15 +3486,26 @@ impl MixEngine {
                 // do; scratching and a unity ratio both read the source
                 // directly, so an untouched deck is the sample the decoder
                 // produced.
+                // With hysteresis: engaged past one threshold, released
+                // below a smaller one, so a rate that hovers at unity does
+                // not flip the path every buffer.
+                let off_unity = (stretch_ratio - 1.0).abs();
                 let want_stretch = !scratching
-                    && (stretch_ratio - 1.0).abs() > STRETCH_BYPASS_EPSILON
-                    && length > WSOLA_WINDOW + 1;
+                    && length > WSOLA_WINDOW + 1
+                    && if d.stretching {
+                        off_unity > STRETCH_BYPASS_EPSILON
+                    } else {
+                        off_unity > STRETCH_ENGAGE_EPSILON
+                    };
                 if want_stretch != d.stretching {
                     if want_stretch {
                         d.stretch.reset_to(d.pos);
                         d.reader.reset();
                     } else {
-                        d.pos = d.stretch.position();
+                        // Continue from the frame the ear is at, not from
+                        // the search's ideal anchor: the two can differ by
+                        // a search width, and that difference is a skip.
+                        d.pos = d.stretch.heard_position();
                     }
                     d.stretching = want_stretch;
                 }
@@ -5359,8 +5502,45 @@ mod tests {
         );
     }
 
-    fn splat_fixture(missing_drums: bool) -> (TestMixer, u32) {
+    /// The fixture's grid: a 2 s bar, one one-bar cell per column, the
+    /// first bar at `first_bar_secs`. `shift_secs` moves every cell's
+    /// window (a refined grid that chose other bars) and columns from
+    /// `keep_cols` on have no cell at all (a refined grid that lost one).
+    fn splat_grid(first_bar_secs: f64, shift_secs: f64, keep_cols: usize) -> Arc<SplatGrid> {
         use crate::loop_splat::{SplatCell, SplatSection};
+
+        let sections = (0..SPLAT_COLS)
+            .map(|col| SplatSection {
+                start_secs: col as f64 * 2.0,
+                end_secs: (col + 1) as f64 * 2.0,
+                bars: 1,
+            })
+            .collect();
+        let mut cells = [[None; SPLAT_COLS]; SPLAT_ROWS];
+        for row in SplatRow::ALL {
+            for col in 0..keep_cols.min(SPLAT_COLS) {
+                cells[row.index()][col] = Some(SplatCell {
+                    span: crate::decks::LoopSpan {
+                        start_secs: col as f64 * 2.0 + shift_secs,
+                        end_secs: (col + 1) as f64 * 2.0 + shift_secs,
+                    },
+                    bars: 1,
+                    energy: 1.0,
+                    silent: false,
+                });
+            }
+        }
+        Arc::new(SplatGrid {
+            bpm: 120.0,
+            bar_secs: 2.0,
+            first_bar_secs,
+            sections,
+            cells,
+            bars_per_col: [1; SPLAT_COLS],
+        })
+    }
+
+    fn splat_fixture(missing_drums: bool) -> (TestMixer, u32) {
 
         let rate = 1_000u32;
         let frame_count = rate as usize * 16;
@@ -5389,35 +5569,7 @@ mod tests {
                 .collect();
             stems.lanes[stem][0] = Some(Arc::new(samples));
         }
-        let sections = (0..SPLAT_COLS)
-            .map(|col| SplatSection {
-                start_secs: col as f64 * 2.0,
-                end_secs: (col + 1) as f64 * 2.0,
-                bars: 1,
-            })
-            .collect();
-        let mut cells = [[None; SPLAT_COLS]; SPLAT_ROWS];
-        for row in SplatRow::ALL {
-            for col in 0..SPLAT_COLS {
-                cells[row.index()][col] = Some(SplatCell {
-                    span: crate::decks::LoopSpan {
-                        start_secs: col as f64 * 2.0,
-                        end_secs: (col + 1) as f64 * 2.0,
-                    },
-                    bars: 1,
-                    energy: 1.0,
-                    silent: false,
-                });
-            }
-        }
-        let grid = Arc::new(SplatGrid {
-            bpm: 120.0,
-            bar_secs: 2.0,
-            first_bar_secs: 0.0,
-            sections,
-            cells,
-            bars_per_col: [1; SPLAT_COLS],
-        });
+        let grid = splat_grid(0.0, 0.0, SPLAT_COLS);
         let mixer = TestMixer::new();
         mixer.state().master = Ramp::at(1.0);
         mixer.install_deck(DeckId::A, pcm);
@@ -5439,21 +5591,226 @@ mod tests {
         samples
     }
 
+    /// The cell a row is sounding (or, before its bar, waiting to sound).
+    fn row_slot(mixer: &TestMixer, row: SplatRow) -> Option<(f64, f64)> {
+        let state = mixer.state();
+        let splat = state.decks[0].splat.as_ref().unwrap();
+        let voice = splat.rows[row.index()];
+        voice
+            .queued
+            .and_then(|queued| queued.cell)
+            .or(voice.cell)
+            .map(|cell| (cell.start_frames, cell.len_frames))
+    }
+
+    /// What the mix row reads at master frame `at`, as a source frame
+    /// index: the ramp fixture stores the index in every sample.
+    fn cell_read(mixer: &TestMixer, at: f64) -> f64 {
+        let state = mixer.state();
+        let deck = &state.decks[0];
+        let splat = deck.splat.as_ref().unwrap();
+        let cell = splat.rows[SplatRow::Mix.index()].cell.expect("a sounding mix cell");
+        let pcm = deck.pcm.as_ref().unwrap();
+        let frame = splat_cell_frame(SplatRow::Mix, cell, at, pcm, None, [1.0; STEM_COUNT]);
+        frame[0] as f64 * 32768.0
+    }
+
+    /// A freshly installed deck sits at zero until it plays or is seeked —
+    /// whatever else lands on it while it is paused: a grid (whose first
+    /// bar is past zero), the grid switched on and off, a loop span, a
+    /// rate, stems, the stream growing and completing.
+    #[test]
+    fn install_never_moves_a_paused_deck() {
+        let rate = 1_000u32;
+        let frame_count = rate as usize * 16;
+        let mixer = TestMixer::new();
+        mixer.state().master = Ramp::at(1.0);
+        let grid = splat_grid(0.5, 0.0, SPLAT_COLS);
+        let whole = const_pcm(12_000, frame_count, rate);
+
+        mixer.install_deck(DeckId::A, whole.clone());
+        mixer.install_deck_stems(DeckId::A, Arc::new(TrackStems::new(frame_count, 1)));
+        mixer.set_deck_splat(DeckId::A, grid.clone());
+        mixer.set_deck_splat_enabled(DeckId::A, true);
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 3.0)));
+        mixer.set_deck_rate(DeckId::A, 1.05);
+        mixer.set_deck_keylock(DeckId::A, true);
+        render_count(&mixer, rate, 500, 64);
+        let snapshot = mixer.deck_snapshot(DeckId::A);
+        assert!(!snapshot.playing);
+        assert_eq!(snapshot.position_secs, 0.0, "the grid on: {snapshot:?}");
+        assert_eq!(deck_pos(&mixer, DeckId::A), 0.0);
+        mixer.set_deck_splat_enabled(DeckId::A, false);
+        render_count(&mixer, rate, 100, 64);
+        assert_eq!(deck_pos(&mixer, DeckId::A), 0.0, "the grid off again");
+        assert_eq!(mixer.deck_snapshot(DeckId::A).position_secs, 0.0);
+
+        // The same through the chunk table of a track still decoding
+        // (every chunk but the last is a full one).
+        let long = STREAM_CHUNK_FRAMES + 4_000;
+        let table = StreamPcm::new(rate, Some(long));
+        let first = Arc::new(table.with_chunk(stream_chunk(7, STREAM_CHUNK_FRAMES), false));
+        mixer.install_deck_stream(DeckId::B, first.clone());
+        mixer.set_deck_splat(DeckId::B, grid);
+        mixer.set_deck_splat_enabled(DeckId::B, true);
+        mixer.set_deck_loop_span(DeckId::B, Some((0.0, 2.0)));
+        render_count(&mixer, rate, 100, 64);
+        let grown = Arc::new(first.with_chunk(stream_chunk(7, 4_000), false));
+        mixer.grow_deck_stream(DeckId::B, grown);
+        render_count(&mixer, rate, 100, 64);
+        mixer.complete_deck(DeckId::B, const_pcm(7, long, rate));
+        render_count(&mixer, rate, 100, 64);
+        let snapshot = mixer.deck_snapshot(DeckId::B);
+        assert!(!snapshot.playing);
+        assert_eq!(snapshot.position_secs, 0.0, "{snapshot:?}");
+        assert_eq!(deck_pos(&mixer, DeckId::B), 0.0);
+        // A relative landing never reaches a paused deck from the engine,
+        // but the mixer honours one it is sent — that is a seek.
+    }
+
+    /// A click on a cell loops exactly that cell's bars: the boundaries are
+    /// the grid's bar positions in source frames, the reads walk them
+    /// sample by sample and wrap on the frame, the reported playhead cycles
+    /// inside them, and a second click on the same cell — or the same
+    /// track through the chunk table while it is still decoding — lands on
+    /// the very same frames.
+    #[test]
+    fn cell_loop_boundaries_are_sample_exact_and_stable() {
+        let rate = 1_000u32;
+        let frame_count = rate as usize * 16;
+        let ramp = Arc::new(TrackPcm {
+            frames: (0..frame_count).map(|i| [i as i16, i as i16]).collect(),
+            sample_rate: rate,
+        });
+        let grid = splat_grid(0.0, 0.0, SPLAT_COLS);
+        for streamed in [false, true] {
+            let mixer = TestMixer::new();
+            mixer.state().master = Ramp::at(1.0);
+            if streamed {
+                // Half the track decoded: the grid owns time on a stream too.
+                let table = StreamPcm::new(rate, Some(frame_count));
+                let half = Arc::new(ramp.frames[..frame_count / 2].to_vec());
+                mixer.install_deck_stream(DeckId::A, Arc::new(table.with_chunk(half, false)));
+            } else {
+                mixer.install_deck(DeckId::A, ramp.clone());
+            }
+            mixer.set_deck_splat(DeckId::A, grid.clone());
+            mixer.set_deck_splat_enabled(DeckId::A, true);
+            mixer.set_deck_playing(DeckId::A, true);
+            render_count(&mixer, rate, 300, 64);
+
+            mixer.splat_launch(DeckId::A, SplatRow::Mix, 1, SplatPart::WHOLE);
+            render_count(&mixer, rate, 1, 1);
+            let (cell, anchor) = {
+                let state = mixer.state();
+                let splat = state.decks[0].splat.as_ref().unwrap();
+                let cell = splat.rows[SplatRow::Mix.index()].cell.expect("sounding at once");
+                (cell, cell.anchor_frames)
+            };
+            assert_eq!((cell.start_frames, cell.len_frames), (2_000.0, 2_000.0), "streamed {streamed}");
+            assert_eq!(anchor, 2_000.0, "the first launch re-seats the clock on the cell");
+            for lap in 0..20 {
+                let base = anchor + lap as f64 * cell.len_frames;
+                assert_eq!(cell_read(&mixer, base), 2_000.0, "lap {lap} start");
+                assert_eq!(cell_read(&mixer, base + 1.0), 2_001.0, "lap {lap} second frame");
+                assert_eq!(cell_read(&mixer, base + 1_999.0), 3_999.0, "lap {lap} last frame");
+            }
+            // The rendered clock: one source frame per device frame here, so
+            // after every whole lap the reported playhead is back on the
+            // same frame, inside the cell, twenty laps running.
+            for lap in 0..20 {
+                render_count(&mixer, rate, 2_000, 256);
+                assert_eq!(deck_pos(&mixer, DeckId::A), 2_001.0, "lap {lap}, streamed {streamed}");
+                let secs = mixer.deck_snapshot(DeckId::A).position_secs;
+                assert!((2.0..4.0).contains(&secs), "the header cycles inside the bar: {secs}");
+            }
+            // Stop, then the same click again: the very same frames.
+            mixer.splat_stop_row(DeckId::A, SplatRow::Mix, false);
+            render_count(&mixer, rate, 700, 64);
+            assert_eq!(row_slot(&mixer, SplatRow::Mix), None);
+            mixer.splat_launch(DeckId::A, SplatRow::Mix, 1, SplatPart::WHOLE);
+            render_count(&mixer, rate, 1, 1);
+            assert_eq!(row_slot(&mixer, SplatRow::Mix), Some((2_000.0, 2_000.0)));
+            let again = mixer.state().decks[0].splat.as_ref().unwrap().rows[SplatRow::Mix.index()]
+                .cell
+                .unwrap();
+            assert_eq!(cell_read(&mixer, again.anchor_frames), 2_000.0);
+            assert_eq!(cell_read(&mixer, again.anchor_frames + 2_000.0), 2_000.0, "wraps on the frame");
+        }
+    }
+
+    /// A refined grid landing under a running loop: a slot whose bars did
+    /// not change is left alone; one whose bars moved re-launches on the
+    /// new frames at the next bar (the picture following it); one the new
+    /// grid no longer has stops there. The sound is always the grid shown.
+    #[test]
+    fn a_replaced_grid_relaunches_running_rows_on_its_own_frames() {
+        let (mixer, rate) = splat_fixture(false);
+        render_count(&mixer, rate, 300, 64);
+        mixer.splat_launch(DeckId::A, SplatRow::Drums, 1, SplatPart::WHOLE);
+        mixer.splat_launch(DeckId::A, SplatRow::Bass, 7, SplatPart::WHOLE);
+        render_count(&mixer, rate, 500, 64);
+        assert_eq!(row_slot(&mixer, SplatRow::Drums), Some((2_000.0, 2_000.0)));
+        assert_eq!(row_slot(&mixer, SplatRow::Bass), Some((14_000.0, 2_000.0)));
+
+        // The same bars again: nothing is re-launched.
+        mixer.set_deck_splat(DeckId::A, splat_grid(0.0, 0.0, SPLAT_COLS));
+        render_count(&mixer, rate, 1, 1);
+        {
+            let state = mixer.state();
+            let splat = state.decks[0].splat.as_ref().unwrap();
+            assert!(splat.rows[SplatRow::Drums.index()].queued.is_none(), "unchanged slot left alone");
+            assert!(splat.rows[SplatRow::Bass.index()].queued.is_none());
+        }
+
+        // Every window a bar later, and column 7 gone.
+        mixer.set_deck_splat(DeckId::A, splat_grid(0.0, 2.0, 7));
+        render_count(&mixer, rate, 1, 1);
+        {
+            let state = mixer.state();
+            let splat = state.decks[0].splat.as_ref().unwrap();
+            let drums = splat.rows[SplatRow::Drums.index()];
+            let queued = drums.queued.and_then(|queued| queued.cell).expect("drums re-launch queued");
+            assert_eq!((queued.start_frames, queued.len_frames), (4_000.0, 2_000.0));
+            assert_eq!(queued.anchor_frames, 4_000.0, "on the next bar");
+            assert_eq!(drums.cell.map(|cell| cell.start_frames), Some(2_000.0), "still sounding the old bars until then");
+            let bass = splat.rows[SplatRow::Bass.index()];
+            assert!(matches!(bass.queued, Some(Queued { cell: None, .. })), "a lost slot stops: {bass:?}");
+            // The picture stays on the bass (launched last) while it sounds.
+            assert_eq!(splat.view.map(|cell| cell.start_frames), Some(14_000.0));
+        }
+        render_count(&mixer, rate, 2_100, 256);
+        assert_eq!(row_slot(&mixer, SplatRow::Drums), Some((4_000.0, 2_000.0)));
+        assert_eq!(row_slot(&mixer, SplatRow::Bass), None);
+        // ...and moves to what is still sounding once the bass has stopped.
+        {
+            let state = mixer.state();
+            let splat = state.decks[0].splat.as_ref().unwrap();
+            assert_eq!(splat.view.map(|cell| cell.start_frames), Some(4_000.0), "the picture follows");
+        }
+        let secs = mixer.deck_snapshot(DeckId::A).position_secs;
+        assert!((4.0..6.0).contains(&secs), "the playhead cycles in the new bars: {secs}");
+    }
+
     #[test]
     fn splat_launch_swap_phase_stop_and_transport_return_are_quantized() {
         let (mixer, rate) = splat_fixture(false);
         render_count(&mixer, rate, 300, 64);
         mixer.splat_launch(DeckId::A, SplatRow::Drums, 0, SplatPart::WHOLE);
-        let before = render_count(&mixer, rate, 1_700, 256);
-        assert!(before.iter().all(|sample| sample.abs() < 1e-7));
-        // The equal-power fade begins on source frame 2000. Its first sample
-        // has zero incoming gain; the immediately following sample is live.
-        let onset = render_count(&mixer, rate, 2, 64);
-        assert!(onset[0].abs() < 1e-7 && onset[1].abs() > 1e-5);
+        // The first launch into a silent grid plays AT ONCE: the master
+        // clock is re-seated on the cell (frame 0), the equal-power fade
+        // starts on the first rendered sample (zero incoming gain) and the
+        // very next one is live. From here the grid's bars are the cell's.
+        let first = render_count(&mixer, rate, 1_700, 256);
+        assert!(first[0].abs() < 1e-7 && first[1].abs() > 1e-5, "the click sounds at once");
+        assert!(first[1_000].abs() > 1e-5);
+        render_count(&mixer, rate, 2, 64);
 
         render_count(&mixer, rate, 500, 64);
+        // A second launch into a running grid waits for the next bar
+        // (4000 on this clock), in phase with what is already playing.
         mixer.splat_launch(DeckId::A, SplatRow::Drums, 3, SplatPart::WHOLE);
-        render_count(&mixer, rate, 1_504, 256);
+        render_count(&mixer, rate, 1_804, 256);
         {
             let state = mixer.state();
             let splat = state.decks[0].splat.as_ref().unwrap();
@@ -5533,7 +5890,7 @@ mod tests {
             Some((0, part))
         );
 
-        let pcm = deck.pcm.as_ref().and_then(DeckPcm::whole).unwrap();
+        let pcm = deck.pcm.as_ref().unwrap();
         let stems = deck.stems.as_deref();
         let gains = [1.0; STEM_COUNT];
         let first = splat_cell_frame(
