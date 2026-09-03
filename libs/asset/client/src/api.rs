@@ -2927,8 +2927,6 @@ fn stage_token_ok(t: &str) -> bool {
 }
 
 #[cfg(test)]
-// Native API tests use std deadlines to prove validation performs no I/O.
-#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 mod tests {
     use super::*;
 
@@ -3005,7 +3003,7 @@ mod tests {
             data: "127.0.0.1:2".parse().unwrap(),
         };
         let api = Api::new(endpoints, HttpLimits::default_v1(), None).unwrap();
-        let start = std::time::Instant::now();
+        let start = makepad_platform::Cx::monotonic_now();
         match api.source_collections_page(None, 501) {
             Err(ClientError::InvalidInput { what }) => assert_eq!(what, "source page limit"),
             other => panic!("501 must refuse locally, got {other:?}"),
@@ -3019,7 +3017,7 @@ mod tests {
             other => panic!("bad cursor must refuse locally, got {other:?}"),
         }
         assert!(
-            start.elapsed() < std::time::Duration::from_millis(50),
+            makepad_platform::Cx::monotonic_now() - start < 0.05,
             "must not touch the network"
         );
     }
@@ -3051,7 +3049,7 @@ mod tests {
             data: "127.0.0.1:2".parse().unwrap(),
         };
         let api = Api::new(endpoints, HttpLimits::default_v1(), None).unwrap();
-        let start = std::time::Instant::now();
+        let start = makepad_platform::Cx::monotonic_now();
         match api.resolve_variant_set(&VariantSetId::from_bytes([1; 32]), &too_big) {
             Err(ClientError::InvalidInput { what }) => {
                 assert_eq!(what, "profile max_variant_bytes")
@@ -3059,7 +3057,7 @@ mod tests {
             other => panic!("must refuse locally, got {other:?}"),
         }
         assert!(
-            start.elapsed() < std::time::Duration::from_millis(50),
+            makepad_platform::Cx::monotonic_now() - start < 0.05,
             "must not touch the network"
         );
     }
