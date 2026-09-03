@@ -276,6 +276,9 @@ pub const WSOLA_CORR: usize = 512;
 /// Correlation subsampling: the similarity surface is smooth at audio rates,
 /// so every other sample scores the same peak for half the work.
 const WSOLA_CORR_STRIDE: usize = 2;
+/// Mono frames the search region spans: every candidate start plus the
+/// correlation length past the last one.
+const WSOLA_REGION: usize = 2 * WSOLA_SEARCH + WSOLA_CORR;
 /// Ratios inside this band are treated as "no stretch" and bypass entirely.
 pub const STRETCH_BYPASS_EPSILON: f64 = 1e-4;
 /// Widest stretch the grain search can still track. A caller that splits a
@@ -295,6 +298,12 @@ pub struct Stretcher {
     window: Box<[f32; WSOLA_WINDOW]>,
     /// Overlap-add accumulator, per channel.
     ola: Box<[[f32; WSOLA_WINDOW]; 2]>,
+    /// The grain search's scratch: the mono template the last grain was
+    /// heading into, and the mono span every candidate is scored
+    /// against. Filled once per hop, so the search runs over contiguous
+    /// memory instead of asking the source for every product.
+    template: Box<[f32; WSOLA_CORR / WSOLA_CORR_STRIDE]>,
+    region: Box<[f32; WSOLA_REGION]>,
     /// Frames of `ola` already handed out from the front of the current hop.
     emitted: usize,
     /// Whether `ola` currently holds a grain at all.
@@ -323,6 +332,8 @@ impl Stretcher {
         Stretcher {
             window,
             ola: Box::new([[0.0; WSOLA_WINDOW]; 2]),
+            template: Box::new([0.0; WSOLA_CORR / WSOLA_CORR_STRIDE]),
+            region: Box::new([0.0; WSOLA_REGION]),
             emitted: 0,
             primed: false,
             anchor: 0.0,
@@ -448,9 +459,15 @@ impl Stretcher {
 
     /// The grain start near `ideal` whose head best continues the waveform
     /// the previous grain was heading into.
-    fn best_start<S: FrameSource>(&self, source: &S, ideal: usize, last: usize) -> usize {
+    ///
+    /// The template and the whole candidate span are pulled out of the
+    /// source ONCE, as mono, and the scoring runs over those two slices:
+    /// a few thousand source reads per hop instead of a quarter million,
+    /// which is what kept a stem-backed deck under sync inside its buffer.
+    fn best_start<S: FrameSource>(&mut self, source: &S, ideal: usize, last: usize) -> usize {
         let template_at = self.last_start + WSOLA_HOP;
-        if template_at + WSOLA_CORR >= source.frame_count() {
+        let frame_count = source.frame_count();
+        if template_at + WSOLA_CORR >= frame_count {
             return ideal;
         }
         let low = ideal.saturating_sub(WSOLA_SEARCH);
@@ -458,24 +475,34 @@ impl Stretcher {
         if high <= low {
             return ideal.min(last);
         }
-        let mut best = ideal.min(last);
+        let best_default = ideal.min(last);
+        // A candidate whose correlation window would run off the end is
+        // not scored; the scan stops there, as it always has.
+        let Some(high) = frame_count.checked_sub(WSOLA_CORR + 1).map(|cap| high.min(cap)) else {
+            return best_default;
+        };
+        if high < low {
+            return best_default;
+        }
+        for (k, slot) in self.template.iter_mut().enumerate() {
+            let a = source.frame(template_at + k * WSOLA_CORR_STRIDE);
+            *slot = a[0] + a[1];
+        }
+        let span = (high - low + WSOLA_CORR).min(WSOLA_REGION);
+        for (j, slot) in self.region[..span].iter_mut().enumerate() {
+            let b = source.frame(low + j);
+            *slot = b[0] + b[1];
+        }
+        let mut best = best_default;
         let mut best_score = f32::NEG_INFINITY;
-        let mut candidate = low;
-        while candidate <= high {
-            if candidate + WSOLA_CORR >= source.frame_count() {
-                break;
-            }
+        for candidate in low..=high {
+            let base = candidate - low;
             let mut dot = 0.0f32;
             let mut energy = 1e-9f32;
-            let mut offset = 0;
-            while offset < WSOLA_CORR {
-                let a = source.frame(template_at + offset);
-                let b = source.frame(candidate + offset);
-                let am = a[0] + a[1];
-                let bm = b[0] + b[1];
+            for (k, &am) in self.template.iter().enumerate() {
+                let bm = self.region[base + k * WSOLA_CORR_STRIDE];
                 dot += am * bm;
                 energy += bm * bm;
-                offset += WSOLA_CORR_STRIDE;
             }
             // Normalizing by the candidate's own energy keeps the search
             // from always jumping onto the loudest nearby transient.
@@ -484,7 +511,6 @@ impl Stretcher {
                 best_score = score;
                 best = candidate;
             }
-            candidate += 1;
         }
         best
     }

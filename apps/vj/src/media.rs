@@ -28,7 +28,7 @@ use makepad_audio_decode::{
     decode_audio_limited, mp3::Mp3Decoder, vorbis::VorbisDecoder, AudioFormat,
     Limits as AudioLimits,
 };
-use makepad_widgets::makepad_platform::thread::{lock_from_ui, ThreadSpawner};
+use makepad_widgets::makepad_platform::thread::ThreadSpawner;
 use makepad_widgets::makepad_platform::video_file::{nv12, VideoFileDecoder, VideoFileInfo};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -536,7 +536,9 @@ impl SlotPlayer {
     /// The eager repeat cache, once complete — the tweener reads frame
     /// pairs straight out of it.
     pub fn cache_frames(&self) -> Option<Arc<Vec<Frame>>> {
-        lock_from_ui(&self.shared.repeat_cache).frames.clone()
+        // The fill thread holds this while it works; a frame in which it
+        // does simply reads as "not yet" instead of waiting on it.
+        self.shared.repeat_cache.try_lock().ok()?.frames.clone()
     }
 
     /// A stable identity for this player (this cue of this clip): the

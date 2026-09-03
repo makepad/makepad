@@ -109,6 +109,7 @@ mod browser_store {
     pub struct BrowserStore;
 }
 mod score_preview;
+mod spsc;
 mod stems;
 mod wave_analysis;
 mod pads;
@@ -215,8 +216,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
-use makepad_widgets::makepad_platform::thread::lock_from_ui;
+use std::sync::Arc;
 use crate::clock::Instant;
 use std::time::Duration;
 
@@ -5133,9 +5133,6 @@ pub struct SyncSnapshot {
     pub suppressed: bool,
 }
 
-struct SyncShared {
-    snap: Mutex<SyncSnapshot>,
-}
 
 /// The analysis worker: drains the capture ring OFF the realtime callback
 /// and publishes a coherent snapshot for the UI thread. The pure beat
@@ -5143,7 +5140,11 @@ struct SyncShared {
 /// until it lands the snapshot carries capture health and `beat` stays
 /// honestly `None`, so every consumer falls back to immediate fades.
 pub struct SyncWorker {
-    shared: Arc<SyncShared>,
+    /// Snapshots arrive over a channel, newest last; the latest one taken
+    /// is kept here for the readers in between. The UI never locks
+    /// anything the worker holds.
+    snapshots: std::sync::mpsc::Receiver<SyncSnapshot>,
+    latest: std::cell::RefCell<SyncSnapshot>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     resync: Arc<std::sync::atomic::AtomicBool>,
     suppress: Arc<std::sync::atomic::AtomicBool>,
@@ -5151,11 +5152,10 @@ pub struct SyncWorker {
 
 impl SyncWorker {
     pub fn start(feed: Arc<CaptureFeed>) -> SyncWorker {
-        let shared = Arc::new(SyncShared { snap: Mutex::new(SyncSnapshot::default()) });
+        let (snap_tx, snapshots) = std::sync::mpsc::channel::<SyncSnapshot>();
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let resync = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let suppress = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let thread_shared = shared.clone();
         let thread_stop = stop.clone();
         let thread_resync = resync.clone();
         let thread_suppress = suppress.clone();
@@ -5251,22 +5251,33 @@ impl SyncWorker {
                 let beat = analyzer_snapshot.as_ref().and_then(|snapshot| {
                     beat_info_from_snapshot(snapshot, &mut lock_started_beat, Instant::now())
                 });
+                if snap_tx
+                    .send(SyncSnapshot {
+                        sample_rate: rate,
+                        frames: stats.frames_written,
+                        dropped: stats.dropped_samples,
+                        peak: stats.peak,
+                        lock_state,
+                        beat,
+                        wave,
+                        wave_stamp,
+                        suppressed,
+                    })
+                    .is_err()
                 {
-                    let mut snap = thread_shared.snap.lock().unwrap();
-                    snap.sample_rate = rate;
-                    snap.frames = stats.frames_written;
-                    snap.dropped = stats.dropped_samples;
-                    snap.peak = stats.peak;
-                    snap.lock_state = lock_state;
-                    snap.beat = beat;
-                    snap.wave = wave;
-                    snap.wave_stamp = wave_stamp;
-                    snap.suppressed = suppressed;
+                    // The handle is gone: nobody will read another one.
+                    return;
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
         });
-        SyncWorker { shared, stop, resync, suppress }
+        SyncWorker {
+            snapshots,
+            latest: std::cell::RefCell::new(SyncSnapshot::default()),
+            stop,
+            resync,
+            suppress,
+        }
     }
 
     /// Park the detector: a deck is playing, so the room is only ever going
@@ -5276,8 +5287,14 @@ impl SyncWorker {
         self.suppress.store(on, Ordering::Release);
     }
 
+    /// The newest snapshot the worker has published. Never waits: the
+    /// channel is drained with `try_recv`.
     pub fn snapshot(&self) -> SyncSnapshot {
-        lock_from_ui(&self.shared.snap).clone()
+        let mut latest = self.latest.borrow_mut();
+        while let Ok(snap) = self.snapshots.try_recv() {
+            *latest = snap;
+        }
+        latest.clone()
     }
 
     /// Drop the tracked grid and re-derive tempo and phase from the audio
@@ -5881,12 +5898,10 @@ impl LoopAccum {
 /// a `LoopReport` per revision every couple dozen accepted frames.
 fn start_loop_worker() -> (
     std::sync::mpsc::Sender<LoopScanCtl>,
-    Arc<Mutex<Vec<(AssetRevisionId, LoopReport)>>>,
+    std::sync::mpsc::Receiver<(AssetRevisionId, LoopReport)>,
 ) {
     let (tx, rx) = std::sync::mpsc::channel::<LoopScanCtl>();
-    let results: Arc<Mutex<Vec<(AssetRevisionId, LoopReport)>>> =
-        Arc::new(Mutex::new(Vec::new()));
-    let worker_results = results.clone();
+    let (worker_results, results) = std::sync::mpsc::channel::<(AssetRevisionId, LoopReport)>();
     let _ = std::thread::Builder::new().name("vj-loop-detect".into()).spawn(move || {
         let mut slots: [LoopAccum; 2] = Default::default();
         for accum in &mut slots {
@@ -5943,7 +5958,9 @@ fn start_loop_worker() -> (
                             detection,
                             period_secs: detection.period_frames as f64 * seconds_per_frame,
                         };
-                        worker_results.lock().unwrap().push((revision, report));
+                        if worker_results.send((revision, report)).is_err() {
+                            return;
+                        }
                     }
                 }
             }
@@ -6883,7 +6900,7 @@ pub struct App {
     #[rust]
     loop_tx: Option<Sender<LoopScanCtl>>,
     #[rust]
-    loop_results: Option<Arc<Mutex<Vec<(AssetRevisionId, LoopReport)>>>>,
+    loop_results: Option<std::sync::mpsc::Receiver<(AssetRevisionId, LoopReport)>>,
     #[rust]
     loop_reports: HashMap<AssetRevisionId, LoopReport>,
     #[rust]
@@ -7227,7 +7244,7 @@ pub struct App {
     /// contended callback IS an audible gap; render high-water says whether
     /// the render itself ever threatens its buffer.
     #[rust]
-    audio_contended_seen: u64,
+    audio_overruns_seen: u64,
     #[rust]
     audio_render_max_seen: u64,
     /// Wasm play-to-device watchdog. Both values come from atomics/the UI
@@ -12145,10 +12162,7 @@ p2 {}
     /// releases the rate back to 1.0 when the beat lock decays).
     fn pump_loop_reports(&mut self) {
         if let Some(results) = self.loop_results.as_ref() {
-            let drained: Vec<(AssetRevisionId, LoopReport)> = results
-                .try_lock()
-                .map(|mut results| results.drain(..).collect())
-                .unwrap_or_default();
+            let drained: Vec<(AssetRevisionId, LoopReport)> = results.try_iter().collect();
             for (revision, report) in drained {
                 self.loop_reports.insert(revision, report);
             }
@@ -14340,18 +14354,22 @@ p2 {}
     // ---- polling ------------------------------------------------------------
 
     fn pump(&mut self, cx: &mut Cx) {
-        // Audio health first, so a dropout heard in the room shows up here
-        // with a cause attached: contended = a UI-thread lock hold silenced
-        // a whole callback; render high-water = the render itself is the
-        // threat. Atomic reads, so this costs nothing when all is well.
-        let (contended, render_max) = self.mixer.audio_health();
-        if contended != self.audio_contended_seen {
+        // Audio first: re-send what a full command ring refused and take
+        // back the payloads the callback retired, so they are freed here
+        // and never in a callback.
+        self.mixer.pump();
+        // Then its health, so a dropout heard in the room shows up here
+        // with a cause attached: an overrun = the render itself outran its
+        // buffer and starved the device. Atomic reads, so this costs
+        // nothing when all is well.
+        let (overruns, render_max) = self.mixer.audio_health();
+        if overruns != self.audio_overruns_seen {
             log!(
-                "audio: {} SILENT callback(s) from lock contention (+{} since last)",
-                contended,
-                contended - self.audio_contended_seen
+                "audio: {} overrun callback(s) (+{} since last)",
+                overruns,
+                overruns - self.audio_overruns_seen
             );
-            self.audio_contended_seen = contended;
+            self.audio_overruns_seen = overruns;
         }
         if render_max > self.audio_render_max_seen && render_max > 2_000_000 {
             log!(
@@ -18921,7 +18939,7 @@ p2 {}
         let Some(item) = item else { return };
         let Some(key) = self.preview_key_at(list, index) else { return };
         // One preview at a time: the newcomer replaces whatever played.
-        let dropped = self.mixer.clear_preview();
+        self.mixer.clear_preview();
         self.phones_preview_gen += 1;
         let gen = self.phones_preview_gen;
         self.preview_active = Some(key);
@@ -18978,12 +18996,10 @@ p2 {}
             }
         }
         self.sync_phones_player_ui(cx);
-        // The replaced track's buffer dies here, outside the mixer lock.
-        drop(dropped);
     }
 
     fn stop_preview(&mut self, cx: &mut Cx) {
-        let dropped = self.mixer.clear_preview();
+        self.mixer.clear_preview();
         // In-flight decodes for the old preview land stale and die.
         self.phones_preview_gen += 1;
         self.preview_active = None;
@@ -18992,7 +19008,6 @@ p2 {}
         self.preview_title.clear();
         self.preview_peaks = Arc::new(Vec::new());
         self.sync_phones_player_ui(cx);
-        drop(dropped);
     }
 
     /// `m:ss.t / m:ss.t` — tenths, the mockup's clock.
@@ -26083,10 +26098,12 @@ impl MatchEvent for App {
         self.ui.drop_down(cx, ids!(gen_profile)).set_selected_item(cx, 2);
         if !self.audio_installed {
             self.audio_installed = true;
-            let mixer = self.mixer.clone();
+            // The engine leaves the UI thread here, for good: from now on
+            // only the device callback touches the mix state.
+            let mut engine = self.mixer.take_engine().expect("the mix engine is installed once");
             cx.audio_output(0, move |info, output| {
                 output.zero();
-                mixer.render(info.sample_rate, output);
+                engine.render(info.sample_rate, output);
             });
             // The headphone cue rides slot 1 unconditionally: with no
             // second device requested the closure simply never runs. It
@@ -28654,7 +28671,7 @@ mod sync_tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut best: Option<LoopReport> = None;
         while Instant::now() < deadline {
-            for (got_revision, report) in results.lock().unwrap().drain(..) {
+            for (got_revision, report) in results.try_iter() {
                 assert_eq!(got_revision, revision);
                 best = Some(report);
             }
