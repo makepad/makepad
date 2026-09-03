@@ -1,3 +1,6 @@
+mod services;
+
+use crate::services::{BridgeContext, FlowServices, FlowUiAction};
 pub use makepad_widgets;
 
 use makepad_flow::client::{
@@ -9,7 +12,7 @@ use makepad_flow::host::{FlowServer, FlowServerConfig};
 use makepad_flow::{FlowDefinition, FlowSummary, PutFlowResponse};
 use makepad_widgets::makepad_platform::thread::SignalToUI;
 use makepad_widgets::*;
-use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{channel, Receiver, Sender};
 
 app_main!(App);
 
@@ -242,6 +245,10 @@ enum IoResult {
         source: String,
         result: Result<PutFlowResponse, ClientError>,
     },
+    FocusedInstance {
+        id: String,
+        result: Result<makepad_strict_json::Value, ClientError>,
+    },
 }
 
 #[derive(Default)]
@@ -249,6 +256,7 @@ struct IoMailbox {
     sender: Option<Sender<IoResult>>,
     receiver: Option<Receiver<IoResult>>,
     fetching_flows: bool,
+    fetching_focused: bool,
 }
 
 impl IoMailbox {
@@ -283,6 +291,18 @@ pub struct App {
     connected_server: Option<[u8; 16]>,
     #[rust]
     embedded: bool,
+    #[rust]
+    services: FlowServices,
+    #[rust]
+    focused_instance: Option<String>,
+    #[rust]
+    focused_instance_state: Option<String>,
+    #[rust]
+    current_node: Option<String>,
+    #[rust]
+    selected_node: Option<String>,
+    #[rust]
+    last_error: Option<String>,
 }
 
 impl App {
@@ -349,6 +369,7 @@ impl App {
             if self.connected_server != Some(server_id) {
                 self.connected_server = Some(server_id);
                 if let Some(client) = session.client() {
+                    self.services.connect(cx, client.clone());
                     self.subscriber = FlowSubscriber::start(
                         client,
                         FlowSubscriberConfig::default(),
@@ -358,8 +379,10 @@ impl App {
                 }
             }
         } else {
-            self.connected_server = None;
-            self.subscriber = None;
+            if self.connected_server.take().is_some() {
+                self.services.disconnect();
+                self.subscriber = None;
+            }
         }
     }
 
@@ -422,12 +445,33 @@ impl App {
         });
     }
 
+    fn refresh_focused_instance(&mut self) {
+        if self.io.fetching_focused {
+            return;
+        }
+        let (Some(id), Some(session), Some(sender)) = (
+            self.focused_instance.clone(),
+            self.session.as_ref(),
+            self.io.sender.clone(),
+        ) else {
+            return;
+        };
+        let Some(client) = session.client() else {
+            return;
+        };
+        self.io.fetching_focused = true;
+        std::thread::spawn(move || {
+            let result = client
+                .lock()
+                .map_err(|_| ClientError::Protocol("flow client lock poisoned".into()))
+                .and_then(|client| client.instance(&id));
+            let _ = sender.send(IoResult::FocusedInstance { id, result });
+            SignalToUI::set_ui_signal();
+        });
+    }
+
     fn drain_io(&mut self, cx: &mut Cx) {
-        loop {
-            let next = match self.io.receiver.as_ref().map(Receiver::try_recv) {
-                Some(Ok(result)) => result,
-                Some(Err(TryRecvError::Empty | TryRecvError::Disconnected)) | None => break,
-            };
+        while let Some(Ok(next)) = self.io.receiver.as_ref().map(Receiver::try_recv) {
             match next {
                 IoResult::Flows(result) => {
                     self.io.fetching_flows = false;
@@ -440,6 +484,7 @@ impl App {
                                 list.set_rows(cx, flows);
                             }
                             self.update_connection(cx);
+                            self.refresh_ai_context();
                         }
                         Err(error) => self.show_error(cx, &error),
                     }
@@ -468,10 +513,35 @@ impl App {
                         self.ui.label(cx, ids!(flow_name)).set_text(cx, &name);
                         self.ui.label(cx, ids!(error_label)).set_text(cx, "");
                         self.refresh_flows();
+                        self.services.refresh_definitions();
                         self.load_flow(name);
                     }
                     Err(error) => self.show_error(cx, &error),
                 },
+                IoResult::FocusedInstance { id, result } => {
+                    self.io.fetching_focused = false;
+                    if self.focused_instance.as_deref() != Some(&id) {
+                        continue;
+                    }
+                    match result {
+                        Ok(instance) => {
+                            self.focused_instance_state =
+                                json_string(&instance, &["state"]);
+                            self.current_node =
+                                json_string(&instance, &["current_node", "node"]);
+                            if let Some(flow) = json_string(&instance, &["flow"]) {
+                                if self.selected.as_deref() != Some(&flow) {
+                                    self.selected = Some(flow.clone());
+                                    self.selected_node = None;
+                                    self.ui.label(cx, ids!(flow_name)).set_text(cx, &flow);
+                                    self.load_flow(flow);
+                                }
+                            }
+                            self.refresh_ai_context();
+                        }
+                        Err(error) => self.show_error(cx, &error),
+                    }
+                }
             }
         }
     }
@@ -489,6 +559,7 @@ impl App {
                 .map(format_eval_error)
                 .unwrap_or_default(),
         );
+        self.last_error = definition.error.as_ref().map(format_eval_error);
         let mut lines = Vec::new();
         if let Some(graph) = &definition.graph {
             for node in &graph.nodes {
@@ -518,6 +589,7 @@ impl App {
         self.ui
             .label(cx, ids!(graph_summary))
             .set_text(cx, &lines.join("\n"));
+        self.refresh_ai_context();
     }
 
     fn show_error(&mut self, cx: &mut Cx, error: &ClientError) {
@@ -525,7 +597,9 @@ impl App {
             ClientError::Eval(error) => format_eval_error(error),
             other => other.to_string(),
         };
+        self.last_error = Some(text.clone());
         self.ui.label(cx, ids!(error_label)).set_text(cx, &text);
+        self.refresh_ai_context();
     }
 
     fn poll_subscription(&mut self) {
@@ -537,11 +611,13 @@ impl App {
             match event {
                 SubscriptionEvent::Ready | SubscriptionEvent::ResyncRequired => {
                     self.refresh_flows();
+                    self.refresh_focused_instance();
                 }
                 SubscriptionEvent::Events(events) => {
                     for event in events {
                         if event.kind == "flow.changed" {
                             self.refresh_flows();
+                            self.services.refresh_definitions();
                             if !self.unsaved
                                 && event.name.as_deref() == self.selected.as_deref()
                             {
@@ -551,6 +627,13 @@ impl App {
                             }
                         } else if event.kind == "flow.removed" || event.kind == "flow.error" {
                             self.refresh_flows();
+                            self.services.refresh_definitions();
+                        } else if (event.kind.starts_with("instance.")
+                            || event.kind.starts_with("run.")
+                            || event.kind.starts_with("node."))
+                            && self.focused_instance.as_deref() == event.instance.as_deref()
+                        {
+                            self.refresh_focused_instance();
                         }
                     }
                 }
@@ -560,15 +643,34 @@ impl App {
     }
 
     fn shutdown(&mut self) {
+        self.services.shutdown();
         if let Some(subscriber) = self.subscriber.take() {
             subscriber.request_stop();
         }
         if let Some(mut session) = self.session.take() {
             session.stop();
         }
-        if let Some(mut host) = self.host.take() {
+        if let Some(host) = self.host.take() {
             host.shutdown();
         }
+    }
+
+    fn refresh_ai_context(&mut self) {
+        let selected = self
+            .selected
+            .as_deref()
+            .and_then(|name| self.flows.iter().find(|flow| flow.name == name));
+        self.services.set_context(BridgeContext {
+            flow: self.selected.clone(),
+            revision: selected.map(|flow| flow.revision),
+            canonical: selected.map(|flow| flow.canonical),
+            instance: self.focused_instance.clone(),
+            instance_state: self.focused_instance_state.clone(),
+            current_node: self.current_node.clone(),
+            selected_node: self.selected_node.clone(),
+            open_view: "source".to_string(),
+            last_error: self.last_error.clone(),
+        });
     }
 }
 
@@ -577,6 +679,19 @@ impl MatchEvent for App {
         for action in actions {
             if action.downcast_ref::<IoPing>().is_some() {
                 self.drain_io(cx);
+            }
+            if let Some(action) = action.downcast_ref::<FlowUiAction>() {
+                match action {
+                    FlowUiAction::Focus { instance } => {
+                        self.focused_instance = Some(instance.clone());
+                        self.focused_instance_state = None;
+                        self.current_node = None;
+                        self.refresh_focused_instance();
+                    }
+                    FlowUiAction::Select { node } => {
+                        self.selected_node = Some(node.clone());
+                    }
+                }
             }
         }
         let selected_index = self
@@ -587,6 +702,8 @@ impl MatchEvent for App {
         if let Some(index) = selected_index {
             if let Some(name) = self.flows.get(index).map(|flow| flow.name.clone()) {
                 self.selected = Some(name.clone());
+                self.selected_node = None;
+                self.last_error = None;
                 self.unsaved = false;
                 self.ui.label(cx, ids!(flow_name)).set_text(cx, &name);
                 self.load_flow(name);
@@ -612,12 +729,14 @@ impl MatchEvent for App {
         if self.ui.text_input(cx, ids!(source)).changed(actions).is_some() {
             self.unsaved = true;
         }
+        self.refresh_ai_context();
     }
 }
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         makepad_widgets::script_mod(vm);
+        makepad_aichat::script_mod(vm);
         self::script_mod(vm)
     }
 
@@ -625,6 +744,7 @@ impl AppMain for App {
         if let Event::Startup = event {
             self.startup(cx);
         }
+        self.services.handle_event(cx, event);
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
         if self.poll_timer.is_event(event).is_some() || matches!(event, Event::Signal) {
@@ -632,6 +752,7 @@ impl AppMain for App {
             self.update_connection(cx);
             self.poll_subscription();
         }
+        self.refresh_ai_context();
         if let Event::Shutdown = event {
             self.shutdown();
         }
@@ -640,4 +761,18 @@ impl AppMain for App {
 
 fn format_eval_error(error: &makepad_flow::EvalError) -> String {
     format!("{}:{} {}", error.line, error.col, error.message)
+}
+
+fn json_string(value: &makepad_strict_json::Value, names: &[&str]) -> Option<String> {
+    let direct = names
+        .iter()
+        .find_map(|name| value.get(name).and_then(|value| value.as_str()))
+        .map(str::to_string);
+    direct.or_else(|| {
+        let instance = value.get("instance")?;
+        names
+            .iter()
+            .find_map(|name| instance.get(name).and_then(|value| value.as_str()))
+            .map(str::to_string)
+    })
 }

@@ -72,6 +72,15 @@ pub struct FlowClient {
     _data: HttpClient,
 }
 
+/// Bytes fetched from the value plane. The current bounded transport does
+/// not expose response headers, so the content type is conservatively
+/// detected from well-known media signatures.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FetchedValue {
+    pub bytes: Vec<u8>,
+    pub content_type: String,
+}
+
 impl std::fmt::Debug for FlowClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FlowClient")
@@ -182,6 +191,93 @@ impl FlowClient {
         Ok(())
     }
 
+    /// `GET /v1/instances`, optionally narrowed to one flow or waiting
+    /// instances. These runtime routes are intentionally projected as strict
+    /// JSON until their DTOs settle without coupling the client to host state.
+    pub fn instances(&self, flow: Option<&str>, waiting: bool) -> ClientResult<Value> {
+        let mut target = "/v1/instances".to_string();
+        let mut separator = '?';
+        if let Some(flow) = flow {
+            target.push(separator);
+            separator = '&';
+            target.push_str("flow=");
+            target.push_str(flow_name(flow)?);
+        }
+        if waiting {
+            target.push(separator);
+            target.push_str("waiting=1");
+        }
+        self.call_json(Method::Get, &target, None)
+    }
+
+    pub fn instance(&self, id: &str) -> ClientResult<Value> {
+        let target = format!("/v1/instances/{}", route_id(id, "instance")?);
+        self.call_json(Method::Get, &target, None)
+    }
+
+    pub fn create_instance(&self, name: &str, request: &Value) -> ClientResult<Value> {
+        let target = format!("/v1/flows/{}/instances", flow_name(name)?);
+        let body = request.to_json().into_bytes();
+        self.call_json(Method::Post, &target, Some(&body))
+    }
+
+    pub fn put_inputs(&self, id: &str, inputs: &Value) -> ClientResult<Value> {
+        let target = format!("/v1/instances/{}/inputs", route_id(id, "instance")?);
+        let body = inputs.to_json().into_bytes();
+        let response = self.call(Method::Put, &target, Some(&body), true, None)?;
+        if response.is_empty() {
+            Ok(Value::Obj(Vec::new()))
+        } else {
+            parse_json(&response)
+        }
+    }
+
+    pub fn start_run(&self, id: &str, outputs: Option<&[String]>) -> ClientResult<Value> {
+        let target = format!("/v1/instances/{}/runs", route_id(id, "instance")?);
+        let body = Value::Obj(match outputs {
+            Some(outputs) => vec![(
+                "outputs".to_string(),
+                Value::Arr(outputs.iter().cloned().map(Value::Str).collect()),
+            )],
+            None => Vec::new(),
+        })
+        .to_json()
+        .into_bytes();
+        self.call_json(Method::Post, &target, Some(&body))
+    }
+
+    pub fn run(&self, id: &str) -> ClientResult<Value> {
+        let target = format!("/v1/runs/{}", route_id(id, "run")?);
+        self.call_json(Method::Get, &target, None)
+    }
+
+    pub fn cancel_run(&self, id: &str) -> ClientResult<()> {
+        let target = format!("/v1/runs/{}/cancel", route_id(id, "run")?);
+        let _ = self.call(Method::Post, &target, None, true, None)?;
+        Ok(())
+    }
+
+    pub fn stop_instance(&self, id: &str) -> ClientResult<()> {
+        let target = format!("/v1/instances/{}", route_id(id, "instance")?);
+        let _ = self.call(Method::Delete, &target, None, true, None)?;
+        Ok(())
+    }
+
+    pub fn value(&self, digest: &str) -> ClientResult<FetchedValue> {
+        let target = format!("/v1/values/{}", value_digest(digest)?);
+        let response = self
+            ._data
+            .call(Method::Get, &target, Some(self.token.as_str()), None, None)?;
+        match response.status {
+            200..=299 => Ok(FetchedValue {
+                content_type: sniff_content_type(&response.body).to_string(),
+                bytes: response.body,
+            }),
+            401 => Err(ClientError::Unauthorized),
+            status => Err(http_error(status, &response.body)),
+        }
+    }
+
     pub fn events(
         &self,
         cursor: Option<&str>,
@@ -246,6 +342,16 @@ impl FlowClient {
             },
             status => Err(http_error(status, &response.body)),
         }
+    }
+
+    fn call_json(
+        &self,
+        method: Method,
+        target: &str,
+        body: Option<&[u8]>,
+    ) -> ClientResult<Value> {
+        let response = self.call(method, target, body, true, None)?;
+        parse_json(&response)
     }
 }
 
@@ -352,6 +458,49 @@ fn flow_name(name: &str) -> ClientResult<&str> {
         return Err(ClientError::Protocol("invalid flow name".into()));
     }
     Ok(name)
+}
+
+fn route_id<'a>(id: &'a str, what: &str) -> ClientResult<&'a str> {
+    if id.is_empty()
+        || id.len() > 128
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+    {
+        return Err(ClientError::Protocol(format!("invalid {what} id")));
+    }
+    Ok(id)
+}
+
+fn value_digest(digest: &str) -> ClientResult<&str> {
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(ClientError::Protocol("invalid value digest".into()));
+    }
+    Ok(digest)
+}
+
+fn sniff_content_type(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        "image/jpeg"
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        "image/gif"
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WAVE" {
+        "audio/wav"
+    } else if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        "video/mp4"
+    } else if bytes.starts_with(b"glTF") {
+        "model/gltf-binary"
+    } else {
+        "application/octet-stream"
+    }
 }
 
 pub(crate) fn parse_hex16(text: &str) -> Option<[u8; 16]> {
