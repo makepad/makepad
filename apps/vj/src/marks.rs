@@ -22,8 +22,11 @@ pub enum MarkKind {
     Bookmark,
     /// A saved loop in one of the blue slots.
     Loop,
-    /// An addressable pad, Phase 2's hot cue bank.
+    /// A numbered point in the bank: pressing it sends the record there.
     HotCue,
+    /// A numbered point that carries a RUNNING loop to it rather than
+    /// replacing it, and seeks when none is running.
+    Jump,
     /// The ends of the track the analysis found sound between.
     Intro,
     Outro,
@@ -36,6 +39,7 @@ impl MarkKind {
             MarkKind::Bookmark => "bookmark",
             MarkKind::Loop => "loop",
             MarkKind::HotCue => "hotcue",
+            MarkKind::Jump => "jump",
             MarkKind::Intro => "intro",
             MarkKind::Outro => "outro",
         }
@@ -47,6 +51,7 @@ impl MarkKind {
             "bookmark" => MarkKind::Bookmark,
             "loop" => MarkKind::Loop,
             "hotcue" => MarkKind::HotCue,
+            "jump" => MarkKind::Jump,
             "intro" => MarkKind::Intro,
             "outro" => MarkKind::Outro,
             _ => return None,
@@ -93,6 +98,12 @@ impl MarkRecord {
     }
 
     /// Every mark of one kind, in slot order.
+    /// Every mark, in the order the record keeps them: by kind, then by
+    /// number. For a reader that wants more than one kind at a time.
+    pub fn marks(&self) -> &[Mark] {
+        &self.marks
+    }
+
     pub fn of_kind(&self, kind: MarkKind) -> impl Iterator<Item = &Mark> {
         self.marks.iter().filter(move |mark| mark.kind == kind)
     }

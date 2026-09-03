@@ -108,7 +108,7 @@ pub enum MarkerHit {
 /// overlap — recalling a saved loop is the deliberate act; saving it again
 /// would be a no-op anyway. Nearest within `tol` takes it.
 fn marker_hit(
-    saved: &[(u16, f64, f64)],
+    saved: &[(u16, f64, f64, u32)],
     running_in: Option<f64>,
     cue_secs: f64,
     secs: f64,
@@ -823,7 +823,9 @@ script_mod! {
             }
         }
         draw_marker_saved +: {
-            color: uniform(#x3d8bff)
+            // Per CHIP rather than per family: the bank hands each number
+            // its own hue, so the colour arrives with the draw.
+            color: #x3d8bff
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 let w = self.rect_size.x
@@ -5323,7 +5325,9 @@ pub struct VjWaveOverview {
     loop_span: Option<(f64, f64)>,
     /// Saved loops — the blue chips. `(start, end)` in source seconds.
     #[rust]
-    loop_slots: Vec<(u16, f64, f64)>,
+    /// Number, in, out, colour. The colour comes from the deck, which
+    /// resolves the palette -- the strip paints what it is handed.
+    loop_slots: Vec<(u16, f64, f64, u32)>,
     /// Scanner-found loops — the yellow chips on the bottom edge.
     #[rust]
     found_loops: Vec<(f64, f64)>,
@@ -5347,7 +5351,7 @@ pub struct VjWaveOverview {
     #[live]
     draw_marker_live: DrawQuad,
     #[live]
-    draw_marker_saved: DrawQuad,
+    draw_marker_saved: DrawColor,
     /// The yellow chip: a found loop, mirrored to point up from the
     /// bottom edge so the two mark rows never collide.
     #[live]
@@ -5466,7 +5470,7 @@ impl VjWaveOverview {
     }
 
     /// The saved-loop chips, diffed like the span push.
-    pub fn set_loop_slots(&mut self, cx: &mut Cx, slots: &[(u16, f64, f64)]) {
+    pub fn set_loop_slots(&mut self, cx: &mut Cx, slots: &[(u16, f64, f64, u32)]) {
         if self.loop_slots.as_slice() == slots {
             return;
         }
@@ -5908,6 +5912,7 @@ impl Widget for VjWaveOverview {
                         continue;
                     }
                 }
+                self.draw_marker_saved.color = Vec4f::from_u32(entry.3);
                 self.draw_marker_saved.draw_abs(
                     cx,
                     chip_sized(centre_of(entry.1), grown(MarkerHit::Recall(entry.0))),
@@ -7517,7 +7522,7 @@ mod tests {
     }
     #[test]
     fn marker_clicks_resolve_nearest_and_blue_beats_green_beats_red() {
-        let saved = [(0u16, 10.0, 12.0), (1u16, 30.0, 31.0)];
+        let saved = [(0u16, 10.0, 12.0, 0u32), (1u16, 30.0, 31.0, 0u32)];
         // Near a blue marker: recall it, nearest one on a tie of tolerance.
         assert_eq!(marker_hit(&saved, None, 0.0, 10.2, 0.35), Some(MarkerHit::Recall(0)));
         assert_eq!(marker_hit(&saved, None, 0.0, 29.8, 0.35), Some(MarkerHit::Recall(1)));

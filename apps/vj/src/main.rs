@@ -11071,12 +11071,12 @@ p2 {}
         // always been able to carry them.
         for entry in slots {
             record.put(crate::marks::Mark {
-                kind: crate::marks::MarkKind::Loop,
+                kind: entry.kind.mark_kind(),
                 start_secs: entry.span.start_secs,
                 len_secs: entry.span.len_secs().max(0.0),
                 slot: entry.slot,
                 label: String::new(),
-                colour: 0,
+                colour: entry.colour,
             });
         }
         let _ = crate::durable::write_file(&path, record.to_text());
@@ -16118,15 +16118,24 @@ p2 {}
                                 // With their numbers. `of_kind` hands them
                                 // back in ascending order already, and the
                                 // engine owns the cap and the dedupe.
+                                // Every kind the bank can hold, not just
+                                // the loops. The engine owns the cap, the
+                                // dedupe and the ascending order.
                                 let slots: Vec<crate::decks::LoopSlot> = record
-                                    .of_kind(crate::marks::MarkKind::Loop)
-                                    .into_iter()
-                                    .map(|mark| crate::decks::LoopSlot {
-                                        slot: mark.slot,
-                                        span: crate::decks::LoopSpan {
-                                            start_secs: mark.start_secs,
-                                            end_secs: mark.end_secs(),
-                                        },
+                                    .marks()
+                                    .iter()
+                                    .filter_map(|mark| {
+                                        Some(crate::decks::LoopSlot {
+                                            slot: mark.slot,
+                                            span: crate::decks::LoopSpan {
+                                                start_secs: mark.start_secs,
+                                                end_secs: mark.end_secs(),
+                                            },
+                                            kind: crate::decks::SlotKind::from_mark_kind(
+                                                mark.kind,
+                                            )?,
+                                            colour: mark.colour,
+                                        })
                                     })
                                     .collect();
                                 if !slots.is_empty() || record.bookmark().is_some() {
@@ -22267,10 +22276,17 @@ p2 {}
                 DeckLoad::Empty | DeckLoad::Loading { .. } => false,
             };
             let loop_on = state.loop_on();
-            let loop_slots: Vec<(u16, f64, f64)> = state
+            let loop_slots: Vec<(u16, f64, f64, u32)> = state
                 .loop_slots
                 .iter()
-                .map(|entry| (entry.slot, entry.span.start_secs, entry.span.end_secs))
+                .map(|entry| {
+                    (
+                        entry.slot,
+                        entry.span.start_secs,
+                        entry.span.end_secs,
+                        entry.shown_colour(),
+                    )
+                })
                 .collect();
             let found_loops: Vec<(f64, f64)> = state
                 .found_loops

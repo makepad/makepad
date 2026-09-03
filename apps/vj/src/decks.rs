@@ -825,6 +825,42 @@ pub struct SplatUiState {
     pub last: SplatSnapshot,
 }
 
+/// What a slot in the bank DOES when its number is pressed.
+///
+/// Stored rather than inferred. The bank has always told a point from a
+/// span by measuring the span's length, which works until an operator
+/// wants a mark that jumps a running loop somewhere rather than replacing
+/// it -- two different answers for the same zero length.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SlotKind {
+    /// Send the record to the mark. A cue point.
+    #[default]
+    Cue,
+    /// Engage the span. A saved loop.
+    Loop,
+    /// Carry the RUNNING loop to the mark, or seek there when none is
+    /// running -- the same choice a phrase jump already makes.
+    Jump,
+}
+
+/// The colours the bank hands out, one per number, in order.
+///
+/// Assigned by NUMBER rather than by kind, so an operator learns "the
+/// third pad is green" once and it stays true whatever they put on it.
+/// Red, orange, amber, green, cyan, blue, violet, magenta -- eight hues
+/// around the wheel, each far enough from its neighbours to be told apart
+/// on a chip nine points wide.
+pub const SLOT_PALETTE: [u32; LOOP_SLOT_CAP] = [
+    0xff4d4dff,
+    0xff8c3aff,
+    0xf5c542ff,
+    0x63c08aff,
+    0x3ad0d0ff,
+    0x3d8bffff,
+    0x9b6bffff,
+    0xff5cc8ff,
+];
+
 /// A saved loop and the NUMBER the operator addresses it by.
 ///
 /// The number is data, not a position in a list: deleting one frees its
@@ -836,6 +872,43 @@ pub struct SplatUiState {
 pub struct LoopSlot {
     pub slot: u16,
     pub span: LoopSpan,
+    /// What pressing this number does. See `SlotKind`.
+    pub kind: SlotKind,
+    /// Its colour, or 0 for "the palette answers for this number".
+    pub colour: u32,
+}
+
+impl SlotKind {
+    /// The kind this reads and writes as on disk.
+    pub fn mark_kind(self) -> crate::marks::MarkKind {
+        match self {
+            SlotKind::Cue => crate::marks::MarkKind::HotCue,
+            SlotKind::Loop => crate::marks::MarkKind::Loop,
+            SlotKind::Jump => crate::marks::MarkKind::Jump,
+        }
+    }
+
+    /// And back. Anything else is not a slot at all.
+    pub fn from_mark_kind(kind: crate::marks::MarkKind) -> Option<SlotKind> {
+        Some(match kind {
+            crate::marks::MarkKind::HotCue => SlotKind::Cue,
+            crate::marks::MarkKind::Loop => SlotKind::Loop,
+            crate::marks::MarkKind::Jump => SlotKind::Jump,
+            _ => return None,
+        })
+    }
+}
+
+impl LoopSlot {
+    /// The colour this slot shows: its own if it has one, and the number's
+    /// otherwise. A slot past the palette's end falls back to the first
+    /// hue rather than to nothing.
+    pub fn shown_colour(&self) -> u32 {
+        if self.colour != 0 {
+            return self.colour;
+        }
+        SLOT_PALETTE[self.slot as usize % SLOT_PALETTE.len()]
+    }
 }
 
 impl LoopSpan {
@@ -2118,13 +2191,67 @@ impl DeckEngine {
         else {
             return false;
         };
+        // The kind is stamped HERE, once, rather than re-derived from the
+        // length on every read: a bookmark is a point, anything else is a
+        // loop, and a colour of zero means the number's own hue answers.
+        let kind = if span.len_secs() < 1e-9 { SlotKind::Cue } else { SlotKind::Loop };
         let at = state.loop_slots.partition_point(|entry| entry.slot < slot);
-        state.loop_slots.insert(at, LoopSlot { slot, span });
+        state.loop_slots.insert(at, LoopSlot { slot, span, kind, colour: 0 });
         true
     }
 
     /// Dragging a blue marker off its spot: forget that saved loop. The
     /// running span is untouched — this deletes the memory, not the sound.
+    /// Put a mark on THIS number, at the playhead.
+    ///
+    /// The bank could only ever be written to by saving whatever was
+    /// running onto the lowest free number. This is the addressed press:
+    /// a number an operator chose, holding what they chose to put on it.
+    /// Idempotent on the number -- pressing it again replaces what is
+    /// there rather than refusing or landing somewhere else.
+    ///
+    /// Under QUANT the mark lands on the grid rather than beside it: the
+    /// track's own first beat is the phase reference, which turns the
+    /// tab's translation into the quantise-to-grid this one gesture wants.
+    pub fn set_slot(&mut self, deck: DeckId, slot: u16, kind: SlotKind) -> bool {
+        if slot >= LOOP_SLOT_CAP as u16 || !self.deck(deck).is_loaded() {
+            return false;
+        }
+        let unit = self.snap_beats;
+        let state = self.deck(deck);
+        let at = match state.true_grid() {
+            Some(grid) if unit != 0 => {
+                grid.snap_translate(state.position_secs, grid.first_beat_secs, unit)
+            }
+            _ => state.position_secs,
+        };
+        let span = match kind {
+            SlotKind::Loop => {
+                let Some(len) = self.armed_secs(deck) else { return false };
+                let Some(span) = self.usable_span(deck, at, at + len) else { return false };
+                span
+            }
+            _ => LoopSpan { start_secs: at, end_secs: at },
+        };
+        let state = self.deck_mut(deck);
+        state.loop_slots.retain(|entry| entry.slot != slot);
+        let index = state.loop_slots.partition_point(|entry| entry.slot < slot);
+        state.loop_slots.insert(index, LoopSlot { slot, span, kind, colour: 0 });
+        true
+    }
+
+    /// Give one number a colour of its own, or 0 to hand it back to the
+    /// palette. Returns whether the number holds anything.
+    pub fn set_slot_colour(&mut self, deck: DeckId, slot: u16, colour: u32) -> bool {
+        match self.deck_mut(deck).loop_slots.iter_mut().find(|e| e.slot == slot) {
+            Some(entry) => {
+                entry.colour = colour;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Move a mark by a hair, without the grid's say.
     ///
     /// The gesture exists for exactly the placements a beat cannot
@@ -2161,11 +2288,28 @@ impl DeckEngine {
                     return Vec::new();
                 };
                 let start = span.start_secs + delta_secs;
-                // Refused rather than clamped, exactly as a hand-dragged
-                // loop is: a clamp would change the LENGTH as well as the
-                // place, which is not what was asked for.
-                let Some(moved) = self.usable_span(deck, start, start + span.len_secs()) else {
-                    return Vec::new();
+                // A POINT has no length to validate, and `usable_span`
+                // refuses anything shorter than a loop may be -- so the
+                // wheel over a cue chip used to do nothing at all. Clamp
+                // it into the track and move on.
+                let moved = if span.len_secs() < LOOP_MIN_SECS {
+                    let duration = self.deck(deck).duration_secs;
+                    let at = if duration > 0.0 {
+                        start.clamp(0.0, duration)
+                    } else {
+                        start.max(0.0)
+                    };
+                    LoopSpan { start_secs: at, end_secs: at + span.len_secs() }
+                } else {
+                    // Refused rather than clamped, exactly as a
+                    // hand-dragged loop is: a clamp would change the
+                    // LENGTH as well as the place, which is not what was
+                    // asked for.
+                    let Some(moved) = self.usable_span(deck, start, start + span.len_secs())
+                    else {
+                        return Vec::new();
+                    };
+                    moved
                 };
                 // If this chip is the loop that is sounding, the sound
                 // goes with it -- the chip and the loop must never part.
@@ -2209,9 +2353,17 @@ impl DeckEngine {
         let at_b = slots.iter().position(|entry| entry.slot == b);
         match (at_a, at_b) {
             (Some(x), Some(y)) => {
-                let span = slots[x].span;
+                // The whole entry trades places, not just its span: a kind
+                // left behind on the other number would make a point
+                // claim to be a loop, and a colour left behind would make
+                // the row lie about which mark is which.
+                let (span, kind, colour) = (slots[x].span, slots[x].kind, slots[x].colour);
                 slots[x].span = slots[y].span;
+                slots[x].kind = slots[y].kind;
+                slots[x].colour = slots[y].colour;
                 slots[y].span = span;
+                slots[y].kind = kind;
+                slots[y].colour = colour;
                 true
             }
             (Some(x), None) => {
@@ -2237,19 +2389,20 @@ impl DeckEngine {
     pub fn sort_loop_slots(&mut self, deck: DeckId, pack: bool) -> bool {
         let slots = &mut self.deck_mut(deck).loop_slots;
         let before = slots.clone();
-        let mut spans: Vec<LoopSpan> = slots.iter().map(|entry| entry.span).collect();
+        // The WHOLE entry travels: only which number it sits on changes.
+        let mut marks = slots.clone();
         // `total_cmp`, because a value that got past the loaders must not
         // be able to panic a comparator.
-        spans.sort_by(|a, b| a.start_secs.total_cmp(&b.start_secs));
+        marks.sort_by(|a, b| a.span.start_secs.total_cmp(&b.span.start_secs));
         let numbers: Vec<u16> = if pack {
-            (0..spans.len() as u16).collect()
+            (0..marks.len() as u16).collect()
         } else {
             slots.iter().map(|entry| entry.slot).collect()
         };
         *slots = numbers
             .into_iter()
-            .zip(spans)
-            .map(|(slot, span)| LoopSlot { slot, span })
+            .zip(marks)
+            .map(|(slot, mark)| LoopSlot { slot, ..mark })
             .collect();
         *slots != before
     }
@@ -2258,27 +2411,40 @@ impl DeckEngine {
     /// not — and if that loop IS the one running, the second click exits
     /// it, the same gesture as the RELOOP/EXIT button.
     pub fn recall_loop(&mut self, deck: DeckId, slot: u16) -> Vec<DeckCmd> {
-        let Some(span) = self
+        let Some((span, kind)) = self
             .deck(deck)
             .loop_slots
             .iter()
             .find(|entry| entry.slot == slot)
-            .map(|entry| entry.span)
+            .map(|entry| (entry.span, entry.kind))
         else {
             return Vec::new();
         };
-        if span.len_secs() < 1e-9 {
-            // A bookmark: an exact jump to the point, engaging nothing.
-            return self.seek_secs(deck, span.start_secs);
-        }
-        if let Some(running) = self.deck(deck).loop_span {
-            if (running.start_secs - span.start_secs).abs() < 1e-6
-                && (running.end_secs - span.end_secs).abs() < 1e-6
-            {
-                return self.toggle_loop(deck);
+        match kind {
+            SlotKind::Cue => self.seek_secs(deck, span.start_secs),
+            SlotKind::Jump => match self.deck(deck).loop_span {
+                Some(_) => self.move_loop(deck, span.start_secs),
+                None => self.seek_secs(deck, span.start_secs),
+            },
+            // The length refusal is a PRECONDITION on ENGAGING, ahead of
+            // whatever the kind claims. A file edited by hand, or a swap
+            // that put a point on a loop's number, must not be able to
+            // engage a one-frame span -- which on the audio thread is a
+            // stuck buzz rather than a loop.
+            SlotKind::Loop if span.len_secs() < LOOP_MIN_SECS => {
+                self.seek_secs(deck, span.start_secs)
+            }
+            SlotKind::Loop => {
+                if let Some(running) = self.deck(deck).loop_span {
+                    if (running.start_secs - span.start_secs).abs() < 1e-6
+                        && (running.end_secs - span.end_secs).abs() < 1e-6
+                    {
+                        return self.toggle_loop(deck);
+                    }
+                }
+                self.engage_loop(deck, span, true)
             }
         }
-        self.engage_loop(deck, span, true)
     }
 
     /// Scanner results land here, replacing the previous scan wholesale —
@@ -4787,8 +4953,7 @@ mod tests {
         let many = (0..20)
             .map(|i| LoopSlot {
                 slot: i as u16,
-                span: LoopSpan { start_secs: i as f64, end_secs: i as f64 },
-            })
+                span: LoopSpan { start_secs: i as f64, end_secs: i as f64 }, kind: SlotKind::Loop, colour: 0 })
             .collect();
         e.restore_marks(DeckId::A, many, None);
         assert_eq!(e.deck(DeckId::A).loop_slots.len(), LOOP_SLOT_CAP);
@@ -6771,6 +6936,160 @@ mod tests {
     }
 
 
+
+    // ---- the bank: a number, a kind and a colour ------------------------
+
+    #[test]
+    fn a_press_puts_a_mark_on_the_number_it_was_aimed_at() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        e.observe(DeckId::A, 30.0, true);
+        assert!(e.set_slot(DeckId::A, 5, SlotKind::Cue));
+        let entry = e.deck(DeckId::A).loop_slots[0];
+        assert_eq!(entry.slot, 5, "the number it was aimed at, not the lowest free one");
+        assert_eq!(entry.kind, SlotKind::Cue);
+        assert!((entry.span.start_secs - 30.0).abs() < 1e-9);
+        assert!(entry.span.len_secs() < 1e-9, "a point has no length");
+
+        // Idempotent: a second press replaces what is there.
+        e.observe(DeckId::A, 40.0, true);
+        assert!(e.set_slot(DeckId::A, 5, SlotKind::Loop));
+        assert_eq!(e.deck(DeckId::A).loop_slots.len(), 1);
+        let entry = e.deck(DeckId::A).loop_slots[0];
+        assert_eq!(entry.kind, SlotKind::Loop);
+        assert!((entry.span.len_secs() - 2.0).abs() < 1e-9, "four beats at 120 BPM");
+
+        // Past the end of the bank, and on an empty deck, it refuses.
+        assert!(!e.set_slot(DeckId::A, LOOP_SLOT_CAP as u16, SlotKind::Cue));
+        assert!(!DeckEngine::new().set_slot(DeckId::A, 0, SlotKind::Cue));
+    }
+
+    #[test]
+    fn a_press_under_quant_lands_on_the_grid_rather_than_beside_it() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0); // beats every 0.5 s
+        e.set_snap_beats(1);
+        e.observe(DeckId::A, 30.19, true);
+        e.set_slot(DeckId::A, 0, SlotKind::Cue);
+        let at = e.deck(DeckId::A).loop_slots[0].span.start_secs;
+        assert!((at - 30.0).abs() < 1e-9, "on the beat, at {at}");
+        // With QUANT off it lands exactly where the record is.
+        e.set_snap_beats(0);
+        e.observe(DeckId::A, 40.19, true);
+        e.set_slot(DeckId::A, 1, SlotKind::Cue);
+        assert!((e.deck(DeckId::A).loop_slots[1].span.start_secs - 40.19).abs() < 1e-9);
+    }
+
+    #[test]
+    fn what_a_number_does_is_stored_rather_than_measured() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        e.observe(DeckId::A, 10.0, true);
+        e.loop_in(DeckId::A);
+        e.observe(DeckId::A, 40.0, true);
+        e.set_slot(DeckId::A, 0, SlotKind::Jump);
+
+        // A JUMP carries the running loop rather than replacing it.
+        let cmds = e.recall_loop(DeckId::A, 0);
+        let span = e.deck(DeckId::A).loop_span.expect("still looping");
+        assert!((span.start_secs - 40.0).abs() < 1e-9, "the loop came to the mark");
+        assert!((span.len_secs() - 2.0).abs() < 1e-9, "and kept its length");
+        assert!(cmds.iter().any(|c| matches!(c, DeckCmd::SetLoopSpan { .. })));
+
+        // With no loop running it is an ordinary seek.
+        e.toggle_loop(DeckId::A);
+        e.observe(DeckId::A, 80.0, true);
+        e.recall_loop(DeckId::A, 0);
+        assert!((e.deck(DeckId::A).position_secs - 40.0).abs() < 1e-9);
+        assert!(e.deck(DeckId::A).loop_span.is_none());
+    }
+
+    #[test]
+    fn a_number_that_claims_to_be_a_loop_but_holds_a_point_cannot_engage_one() {
+        // The length refusal is a PRECONDITION, ahead of whatever the kind
+        // claims: a one-frame span on the audio thread is a stuck buzz.
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        e.observe(DeckId::A, 30.0, true);
+        e.set_slot(DeckId::A, 0, SlotKind::Cue);
+        // Lie about it, the way a hand-edited file could.
+        e.deck_mut(DeckId::A).loop_slots[0].kind = SlotKind::Loop;
+        e.observe(DeckId::A, 80.0, true);
+        e.recall_loop(DeckId::A, 0);
+        assert!(e.deck(DeckId::A).loop_span.is_none(), "nothing engaged");
+        assert!((e.deck(DeckId::A).position_secs - 30.0).abs() < 1e-9, "it seeked instead");
+    }
+
+    #[test]
+    fn a_swap_and_a_sort_carry_the_whole_mark_and_not_just_its_span() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        e.observe(DeckId::A, 30.0, true);
+        e.set_slot(DeckId::A, 0, SlotKind::Cue);
+        e.observe(DeckId::A, 10.0, true);
+        e.set_slot(DeckId::A, 1, SlotKind::Loop);
+        e.set_slot_colour(DeckId::A, 1, 0x112233ff);
+
+        assert!(e.swap_loop_slots(DeckId::A, 0, 1));
+        let slots = &e.deck(DeckId::A).loop_slots;
+        assert_eq!(slots[0].kind, SlotKind::Loop, "the kind travelled");
+        assert_eq!(slots[0].colour, 0x112233ff, "and so did the colour");
+        assert_eq!(slots[1].kind, SlotKind::Cue);
+        assert_eq!(slots[1].colour, 0);
+
+        // And a sort by time keeps every entry whole. The swap already
+        // left the row in playing order, so the sort reports no change --
+        // and must still not have torn anything apart.
+        assert!(!e.sort_loop_slots(DeckId::A, false), "already in order");
+        let slots = &e.deck(DeckId::A).loop_slots;
+        assert!((slots[0].span.start_secs - 10.0).abs() < 1e-9);
+        assert_eq!(slots[0].kind, SlotKind::Loop);
+        assert_eq!(slots[0].colour, 0x112233ff);
+        assert_eq!(slots[1].kind, SlotKind::Cue);
+    }
+
+    #[test]
+    fn every_number_has_a_colour_of_its_own_until_one_is_given_to_it() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        e.observe(DeckId::A, 10.0, true);
+        for slot in 0..LOOP_SLOT_CAP as u16 {
+            e.set_slot(DeckId::A, slot, SlotKind::Cue);
+        }
+        let shown: Vec<u32> =
+            e.deck(DeckId::A).loop_slots.iter().map(|s| s.shown_colour()).collect();
+        assert_eq!(shown, SLOT_PALETTE.to_vec(), "the palette, in number order");
+        // Every hue is its own: eight chips nine points wide have to be
+        // told apart at a glance.
+        for (i, a) in SLOT_PALETTE.iter().enumerate() {
+            for b in SLOT_PALETTE.iter().skip(i + 1) {
+                assert_ne!(a, b);
+            }
+        }
+        // A colour given by hand outranks the number's own.
+        e.set_slot_colour(DeckId::A, 3, 0x00ff00ff);
+        assert_eq!(e.deck(DeckId::A).loop_slots[3].shown_colour(), 0x00ff00ff);
+        assert!(!e.set_slot_colour(DeckId::A, 99, 1), "and an empty number takes none");
+    }
+
+    #[test]
+    fn the_wheel_can_move_a_point_where_it_used_to_do_nothing() {
+        // A point has no length, and the span validator refuses anything
+        // shorter than a loop may be -- so the nudge was inert on exactly
+        // the marks it is most wanted for.
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        e.observe(DeckId::A, 30.0, true);
+        e.set_slot(DeckId::A, 0, SlotKind::Cue);
+        e.nudge_mark(DeckId::A, NudgeTarget::Slot(0), -0.010);
+        let entry = e.deck(DeckId::A).loop_slots[0];
+        assert!((entry.span.start_secs - 29.99).abs() < 1e-9, "at {}", entry.span.start_secs);
+        assert!(entry.span.len_secs() < 1e-9, "and it is still a point");
+        // Clamped into the track rather than refused: there is no length
+        // for a refusal to protect.
+        e.nudge_mark(DeckId::A, NudgeTarget::Slot(0), -1e6);
+        assert!(e.deck(DeckId::A).loop_slots[0].span.start_secs.abs() < 1e-9);
+    }
     // ---- marks that outlive the deck, and a hair of a move --------------
 
     #[test]
@@ -6965,11 +7284,11 @@ mod tests {
         let mut e = DeckEngine::new();
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
         let slots = vec![
-            LoopSlot { slot: 5, span: LoopSpan { start_secs: 10.0, end_secs: 12.0 } },
-            LoopSlot { slot: 0, span: LoopSpan { start_secs: 40.0, end_secs: 42.0 } },
+            LoopSlot { slot: 5, span: LoopSpan { start_secs: 10.0, end_secs: 12.0 }, kind: SlotKind::Loop, colour: 0 },
+            LoopSlot { slot: 0, span: LoopSpan { start_secs: 40.0, end_secs: 42.0 }, kind: SlotKind::Loop, colour: 0 },
             // Out of range and a duplicate: both refused at the door.
-            LoopSlot { slot: 99, span: LoopSpan { start_secs: 1.0, end_secs: 2.0 } },
-            LoopSlot { slot: 5, span: LoopSpan { start_secs: 3.0, end_secs: 4.0 } },
+            LoopSlot { slot: 99, span: LoopSpan { start_secs: 1.0, end_secs: 2.0 }, kind: SlotKind::Loop, colour: 0 },
+            LoopSlot { slot: 5, span: LoopSpan { start_secs: 3.0, end_secs: 4.0 }, kind: SlotKind::Loop, colour: 0 },
         ];
         e.restore_marks(DeckId::A, slots, None);
         assert_eq!(numbers(&e), vec![(0, 40.0), (5, 10.0)]);
