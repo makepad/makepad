@@ -20,7 +20,7 @@
 //! what an ear reads as a click. The transitions that fail that rule today
 //! are kept, marked, and un-marked by the work that ramps them.
 
-use crate::decks::DeckId;
+use crate::decks::{DeckId, SpinMotion};
 use crate::mixer::fixtures::{const_pcm, render, split_pcm, tone_pcm};
 use crate::mixer::{Mixer, TrackPcm};
 use crate::mixer_golden_refs::reference;
@@ -353,6 +353,64 @@ fn play_and_pause_are_click_free() {
         _ => {}
     });
     assert!(worst < CLICK, "play and pause must ramp, biggest step {worst}");
+}
+
+/// A reverse hold moves only the read RATE, so DC would hide any step it
+/// made. This is the split signal a raw splice cannot hide in, the same one
+/// the seek test uses.
+#[test]
+fn a_censor_and_its_return_are_click_free() {
+    let mixer = deck_a(split_pcm(16_384, -16_384, 480_000, 48_000));
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| match index {
+        8 => mixer.set_deck_censor(DeckId::A, true),
+        24 => mixer.set_deck_censor(DeckId::A, false),
+        _ => {}
+    });
+    assert!(worst < CLICK, "a reverse hold must flip and land, biggest step {worst}");
+}
+
+#[test]
+fn a_brake_is_click_free() {
+    let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| {
+        if index == 8 {
+            mixer.spin_deck(DeckId::A, SpinMotion::Brake);
+        }
+    });
+    assert!(worst < CLICK, "a brake must wind down, biggest step {worst}");
+}
+
+/// Well clear of the split, which is at the half-way mark: a record thrown
+/// backwards across a splice reproduces the splice, and that is the
+/// material speaking rather than the gesture.
+#[test]
+fn a_spin_back_is_click_free() {
+    let mixer = deck_a(split_pcm(16_384, -16_384, 480_000, 48_000));
+    mixer.seek_deck_seconds(DeckId::A, 7.5);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| {
+        if index == 8 {
+            mixer.spin_deck(DeckId::A, SpinMotion::SpinBack);
+        }
+    });
+    assert!(worst < CLICK, "a spin-back must throw and fall, biggest step {worst}");
+}
+
+#[test]
+fn a_soft_start_is_click_free() {
+    let mixer = deck_a(split_pcm(16_384, -16_384, 480_000, 48_000));
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| {
+        if index == 8 {
+            mixer.spin_deck(DeckId::A, SpinMotion::SoftStart);
+        }
+    });
+    assert!(worst < CLICK, "a soft start must wind up, biggest step {worst}");
 }
 
 /// The test this whole load-over-playing path exists for. Against a plain

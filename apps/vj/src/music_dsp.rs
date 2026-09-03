@@ -279,6 +279,44 @@ pub const SCRATCH_RELEASE_SECS: f32 = 0.22;
 /// How fast the rate follows the pointer while dragging.
 pub const SCRATCH_TRACK_SECS: f32 = 0.010;
 
+// The MOTOR times. Everything above is a hand on the record; these are the
+// platter driving itself, and they are here beside the others so every
+// platter time is in one block.
+
+/// Into reverse when the hold starts. Fast enough to read as a flip.
+pub const CENSOR_FLIP_SECS: f32 = 0.006;
+/// Out of reverse when it ends. This MUST stay under the seek blend the
+/// landing hides beneath (`SEEK_XFADE_SECS` in the mixer), or a tail of
+/// near-reversed audio pokes out past it. A test asserts the relation.
+pub const CENSOR_RETURN_SECS: f32 = 0.004;
+/// The reverse hold plays the record backwards at its own speed.
+pub const CENSOR_RATE: f32 = -1.0;
+/// A motor brake: the platter coasts to a stop the way a heavy one does.
+pub const BRAKE_SECS: f32 = 0.9;
+/// A spin-back is two legs: a hard throw backwards, then a fall to rest.
+pub const SPINBACK_THROW_SECS: f32 = 0.05;
+pub const SPINBACK_PEAK: f32 = -4.0;
+pub const SPINBACK_FALL_SECS: f32 = 0.6;
+/// And a start that winds up rather than cutting in.
+pub const SOFT_START_SECS: f32 = 1.2;
+
+/// What a motor gesture does the moment it reaches its target rate.
+///
+/// The distinction is load-bearing. A reverse HOLD must stay in charge for
+/// as long as the operator holds it, however long that is; a brake is
+/// finished when the platter stops and must hand the rate back, because a
+/// motor that never retires holds the deck's sync servos and its frame
+/// pump off for the rest of the set.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MotorEnd {
+    /// Stay in charge until something else takes over.
+    Hold,
+    /// Hand the rate back to the deck.
+    Retire,
+    /// Run a second leg first: a throw backwards, and then the fall to rest.
+    Then(f32, f32),
+}
+
 /// Vinyl-style rate override. While a pointer holds the waveform the deck's
 /// rate follows the drag; on release it ramps back to the deck's tempo.
 #[derive(Clone, Copy, Debug)]
@@ -288,6 +326,17 @@ pub struct ScratchRamp {
     held: bool,
     /// The ramp still owns the rate (releasing but not yet back at tempo).
     releasing: bool,
+    /// A MOTOR gesture owns the rate: no hand is on the record, and the
+    /// ramp does not chase the deck's tempo while it runs.
+    motor: bool,
+    /// What the motor gesture does when it lands, armed here so the
+    /// callback never needs a timer of its own.
+    end: MotorEnd,
+    /// How long the release currently in flight takes. Carried rather than
+    /// hard-coded because a censor hands back in four milliseconds and a
+    /// soft start winds up over more than a second, and the tempo-chase
+    /// below re-slews with whatever this says.
+    release_secs: f32,
 }
 
 impl Default for ScratchRamp {
@@ -296,6 +345,9 @@ impl Default for ScratchRamp {
             rate: ParamRamp::at(1.0),
             held: false,
             releasing: false,
+            motor: false,
+            end: MotorEnd::Retire,
+            release_secs: SCRATCH_RELEASE_SECS,
         }
     }
 }
@@ -303,11 +355,16 @@ impl Default for ScratchRamp {
 impl ScratchRamp {
     /// Pointer down: brake to a stop from wherever the deck was.
     pub fn grab(&mut self, deck_rate: f32) {
-        if !self.held && !self.releasing {
+        // `!active()` rather than the two flags: a hand landing on a
+        // platter that a motor is still winding down brakes it from where
+        // the motor got to, not from the deck's tempo.
+        if !self.active() {
             self.rate.jump(deck_rate);
         }
         self.held = true;
         self.releasing = false;
+        self.motor = false;
+        self.end = MotorEnd::Retire;
         self.rate.slew(0.0, SCRATCH_GRAB_SECS);
     }
 
@@ -321,21 +378,64 @@ impl ScratchRamp {
 
     /// Pointer up: spin back up to the deck's tempo.
     pub fn release(&mut self, deck_rate: f32) {
-        if !self.held {
+        self.release_over(deck_rate, SCRATCH_RELEASE_SECS);
+    }
+
+    /// The same hand-back over a chosen time. A hand off the record takes
+    /// the platter's own spin-up; a reverse hold has to be back inside the
+    /// seek blend that hides its landing.
+    pub fn release_over(&mut self, deck_rate: f32, secs: f32) {
+        if !self.held && !self.motor {
             return;
         }
         self.held = false;
+        self.motor = false;
+        self.end = MotorEnd::Retire;
         self.releasing = true;
-        self.rate.slew(deck_rate, SCRATCH_RELEASE_SECS);
+        self.release_secs = secs;
+        self.rate.slew(deck_rate, secs);
+    }
+
+    /// Drive the platter with no hand on it. `end` says what happens when
+    /// it lands: hold there, hand back, or run a second leg first.
+    pub fn motor(&mut self, from: f32, target: f32, secs: f32, end: MotorEnd) {
+        if !self.active() {
+            self.rate.jump(from);
+        }
+        self.held = false;
+        self.releasing = false;
+        self.motor = true;
+        self.end = end;
+        self.rate.slew(target, secs);
+    }
+
+    /// Wind up to the deck's tempo from a standstill. This is a RELEASE, so
+    /// it inherits the tempo chase below — over its own time, not the
+    /// hand-off's.
+    pub fn spin_up_from(&mut self, from: f32, deck_rate: f32, secs: f32) {
+        self.rate.jump(from);
+        self.held = false;
+        self.motor = false;
+        self.end = MotorEnd::Retire;
+        self.releasing = true;
+        self.release_secs = secs;
+        self.rate.slew(deck_rate, secs);
     }
 
     /// True while the scratch ramp — not the deck tempo — owns playback.
     pub fn active(&self) -> bool {
-        self.held || self.releasing
+        self.held || self.releasing || self.motor
     }
 
+    /// A HAND is on the record. Deliberately not true for a motor gesture:
+    /// the deck engine keys its phase-lock rules on the hand.
     pub fn held(&self) -> bool {
         self.held
+    }
+
+    /// The platter is driving itself.
+    pub fn motoring(&self) -> bool {
+        self.motor
     }
 
     pub fn rate(&self) -> f32 {
@@ -347,14 +447,32 @@ impl ScratchRamp {
     #[inline]
     pub fn tick(&mut self, device_rate: f32, deck_rate: f32) -> f32 {
         if self.releasing {
-            // Follow a tempo change made mid-release.
+            // Follow a tempo change made mid-release, over the time THIS
+            // release was given. A censor hands back in four milliseconds
+            // and re-slewing it over the hand-off's fifth of a second
+            // would poke a tail of reversed audio past the seek blend.
             if (self.rate.target() - deck_rate).abs() > 1e-6 {
-                self.rate.slew(deck_rate, SCRATCH_RELEASE_SECS);
+                self.rate.slew(deck_rate, self.release_secs);
             }
         }
         let value = self.rate.tick(device_rate);
         if self.releasing && self.rate.settled() {
             self.releasing = false;
+            self.release_secs = SCRATCH_RELEASE_SECS;
+        }
+        // A motor that never retires leaves `active()` true for the rest of
+        // the set, and with it the deck's sync servos, its follower and its
+        // frame pump all held off. So it retires the moment it lands —
+        // unless a second leg was armed, which starts here.
+        if self.motor && self.rate.settled() {
+            match self.end {
+                MotorEnd::Then(target, secs) => {
+                    self.end = MotorEnd::Retire;
+                    self.rate.slew(target, secs);
+                }
+                MotorEnd::Retire => self.motor = false,
+                MotorEnd::Hold => {}
+            }
         }
         value
     }
@@ -643,6 +761,14 @@ impl RateReader {
     }
 
     /// One output frame. `pull` yields consecutive source frames.
+    ///
+    /// FORWARD ONLY, by construction rather than by choice: `pull` is the
+    /// time stretcher, which produces the next grain and cannot be asked
+    /// for a previous one. A negative step therefore HOLDS the current
+    /// frame rather than rewinding — and that is right, because reverse
+    /// never comes through here. The render drops out of the stretcher the
+    /// moment a hand or a motor owns the rate, and reads the source
+    /// directly, where the playhead is free to travel either way.
     pub fn read(
         &mut self,
         step: f64,
@@ -670,6 +796,7 @@ impl RateReader {
             self.frac = 0.0;
         }
         let out = cubic_frame(self.prev, self.cur, self.next, self.next2, self.frac as f32);
+        // See the note on `read`: the window only ever advances.
         self.frac += step.max(0.0);
         while self.frac >= 1.0 {
             self.frac -= 1.0;
@@ -1575,6 +1702,183 @@ mod tests {
         assert!(!scratch.active());
     }
 
+
+    // ---- the platter driving itself --------------------------------------
+
+    #[test]
+    fn the_streaming_reader_is_forward_only_and_a_negative_step_holds() {
+        // The contract, written down so nobody "fixes" the clamp into a
+        // rewind the stretcher cannot honour: `pull` produces the NEXT
+        // grain and has no previous one to give. Reverse lives on the
+        // direct read in the mixer, not here.
+        let mut source = (0..64).map(|i| [i as f32, i as f32]);
+        let mut pull = || source.next();
+        let mut reader = RateReader::default();
+        let first = reader.read(1.0, &mut pull).expect("a frame");
+        let mut held = reader.read(0.0, &mut pull).expect("a frame");
+        assert!(held[0] >= first[0], "a zero step never goes backwards");
+        for _ in 0..8 {
+            let next = reader.read(-1.0, &mut pull).expect("a frame");
+            assert_eq!(next, held, "a negative step holds rather than rewinds");
+            held = next;
+        }
+    }
+
+    #[test]
+    fn a_motor_gesture_drives_the_platter_with_no_hand_on_it_and_retires() {
+        let rate = 48_000.0f32;
+        let mut scratch = ScratchRamp::default();
+        scratch.motor(1.0, 0.0, BRAKE_SECS, MotorEnd::Retire);
+        assert!(scratch.active(), "the ramp owns the rate");
+        assert!(!scratch.held(), "but no hand is on the record");
+        assert!(scratch.motoring());
+        for _ in 0..(rate * BRAKE_SECS * 1.2) as usize {
+            scratch.tick(rate, 1.0);
+        }
+        assert!(scratch.rate().abs() < 1e-3, "the platter stopped");
+        // The load-bearing half: a motor that never retires holds the
+        // deck's sync servos and its frame pump off for the rest of the set.
+        assert!(!scratch.active(), "and handed the rate back");
+        assert!(!scratch.motoring());
+    }
+
+    #[test]
+    fn a_throw_backwards_falls_to_a_stop_on_its_own() {
+        let rate = 48_000.0f32;
+        let mut scratch = ScratchRamp::default();
+        scratch.motor(
+            1.0,
+            SPINBACK_PEAK,
+            SPINBACK_THROW_SECS,
+            MotorEnd::Then(0.0, SPINBACK_FALL_SECS),
+        );
+        for _ in 0..(rate * SPINBACK_THROW_SECS * 1.1) as usize {
+            scratch.tick(rate, 1.0);
+        }
+        assert!(
+            (scratch.rate() - SPINBACK_PEAK).abs() < SPINBACK_PEAK.abs() * 0.05,
+            "the throw reaches its peak, got {}",
+            scratch.rate(),
+        );
+        assert!(scratch.active(), "and the second leg is still to come");
+        for _ in 0..(rate * SPINBACK_FALL_SECS * 1.2) as usize {
+            scratch.tick(rate, 1.0);
+        }
+        assert!(scratch.rate().abs() < 1e-3, "the fall reaches rest");
+        assert!(!scratch.active(), "with no timer on the caller thread");
+    }
+
+    #[test]
+    fn a_motor_holds_its_rate_where_a_release_chases_the_tempo() {
+        let rate = 48_000.0f32;
+        let mut scratch = ScratchRamp::default();
+        // The pitch slider moves throughout. A brake does not follow it.
+        scratch.motor(1.0, 0.0, BRAKE_SECS, MotorEnd::Retire);
+        for _ in 0..(rate * BRAKE_SECS * 1.2) as usize {
+            scratch.tick(rate, 1.08);
+        }
+        assert!(scratch.rate().abs() < 1e-3, "a brake stops at zero, not at tempo");
+
+        // A soft start IS a release, so it chases — but over its OWN time,
+        // not the hand-off's. Ticked with a tempo that differs from the one
+        // it was handed, so the chase actually fires.
+        scratch.spin_up_from(0.0, 1.0, SOFT_START_SECS);
+        for _ in 0..(rate * SCRATCH_RELEASE_SECS * 1.5) as usize {
+            scratch.tick(rate, 1.08);
+        }
+        assert!(
+            scratch.active(),
+            "the wind-up must still be running well past the hand-off time, at {}",
+            scratch.rate(),
+        );
+        for _ in 0..(rate * SOFT_START_SECS) as usize {
+            scratch.tick(rate, 1.08);
+        }
+        assert!((scratch.rate() - 1.08).abs() < 1e-3, "rate {}", scratch.rate());
+        assert!(!scratch.active());
+    }
+
+    #[test]
+    fn a_hand_landing_on_a_winding_down_platter_takes_it_over_from_there() {
+        let rate = 48_000.0f32;
+        let mut scratch = ScratchRamp::default();
+        scratch.motor(1.0, 0.0, BRAKE_SECS, MotorEnd::Retire);
+        for _ in 0..(rate * BRAKE_SECS / 3.0) as usize {
+            scratch.tick(rate, 1.0);
+        }
+        let coasting = scratch.rate();
+        assert!(coasting < 1.0 && coasting > 0.0, "mid-brake, got {coasting}");
+        scratch.grab(1.0);
+        let after = scratch.tick(rate, 1.0);
+        assert!(
+            after <= coasting + 1e-4,
+            "a hand must not snap the platter back up to tempo first: {coasting} -> {after}",
+        );
+        assert!(scratch.held() && !scratch.motoring());
+    }
+
+    #[test]
+    fn a_reverse_hold_stays_in_charge_for_as_long_as_it_is_held() {
+        // A brake is finished when the platter stops. A hold is not
+        // finished until somebody lets go, however long it runs.
+        let rate = 48_000.0f32;
+        let mut scratch = ScratchRamp::default();
+        scratch.motor(1.0, CENSOR_RATE, CENSOR_FLIP_SECS, MotorEnd::Hold);
+        for _ in 0..(rate * CENSOR_FLIP_SECS * 20.0) as usize {
+            scratch.tick(rate, 1.0);
+        }
+        assert!((scratch.rate() - CENSOR_RATE).abs() < 1e-3);
+        assert!(scratch.active() && scratch.motoring(), "still holding");
+        scratch.release_over(1.0, CENSOR_RETURN_SECS);
+        for _ in 0..(rate * CENSOR_RETURN_SECS * 1.2) as usize {
+            scratch.tick(rate, 1.0);
+        }
+        assert!(!scratch.active(), "and lets go when told");
+    }
+
+    #[test]
+    fn a_short_hand_back_returns_from_reverse_inside_the_seek_blend() {
+        let rate = 48_000.0f32;
+        let mut scratch = ScratchRamp::default();
+        scratch.motor(1.0, CENSOR_RATE, CENSOR_FLIP_SECS, MotorEnd::Hold);
+        for _ in 0..(rate * CENSOR_FLIP_SECS * 1.2) as usize {
+            scratch.tick(rate, 1.0);
+        }
+        assert!((scratch.rate() - CENSOR_RATE).abs() < 1e-3, "in reverse");
+        scratch.release_over(1.0, CENSOR_RETURN_SECS);
+        for _ in 0..(rate * CENSOR_RETURN_SECS * 1.2) as usize {
+            scratch.tick(rate, 1.0);
+        }
+        assert!((scratch.rate() - 1.0).abs() < 1e-3, "back at tempo");
+        assert!(!scratch.active());
+        // The landing hides under the seek blend. Longer than the blend and
+        // a tail of near-reversed audio pokes out past it.
+        assert!(
+            CENSOR_RETURN_SECS <= 0.005,
+            "the hand-back must fit inside SEEK_XFADE_SECS",
+        );
+    }
+
+    #[test]
+    fn a_short_hand_back_keeps_its_own_time_when_the_tempo_moves_under_it() {
+        // The chase used to re-slew every release over the hand-off's fifth
+        // of a second, whatever time the release was given.
+        let rate = 48_000.0f32;
+        let mut scratch = ScratchRamp::default();
+        scratch.motor(1.0, CENSOR_RATE, CENSOR_FLIP_SECS, MotorEnd::Hold);
+        for _ in 0..(rate * CENSOR_FLIP_SECS * 1.2) as usize {
+            scratch.tick(rate, 1.0);
+        }
+        scratch.release_over(1.0, CENSOR_RETURN_SECS);
+        for _ in 0..(rate * CENSOR_RETURN_SECS * 1.5) as usize {
+            scratch.tick(rate, 1.05);
+        }
+        assert!(
+            !scratch.active(),
+            "the hand-back must land in its own time, not the pointer's: {}",
+            scratch.rate(),
+        );
+    }
     // ---- numbers that are not numbers -------------------------------------
 
     #[test]

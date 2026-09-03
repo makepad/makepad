@@ -1256,6 +1256,9 @@ mod imp {
              /g?w=&scale=&raw= grab window w (default: first). writes a png, returns {{\"png\":path,\"w\":id,\"sz\":[w,h]}}; raw=1 sends image/png bytes\n\
              /m?k=&x=&y=&w=    mouse. k=move|down|up|click|scroll  b=0 left,1 right,2 middle  scroll: dx=,dy=\n\
                                add hw=1 to take the hardware pointer path (pointer-lock/pin transform included)\n\
+                               shift=1 ctrl=1 alt=1 cmd=1 hold modifiers down for the press: a\n\
+                               gesture that only exists under a modifier cannot be driven\n\
+                               without them\n\
              /click?x=&y=      alias for /m?k=click\n\
              /k?t=TEXT         type text. or /k?k=down|up&c=KeyA (Escape ReturnKey Tab Backspace ArrowLeft F1 Key1 ..)\n\
              /t?t=TEXT         same as /k?t=\n\

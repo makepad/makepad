@@ -179,7 +179,7 @@ use crate::arc::Curve;
 use crate::set_history::SetHistory;
 use crate::blend::MixBrain;
 use crate::decks::{
-    DeckCmd, DeckEngine, DeckId, DeckLoad, DeckTarget, EjectPress, LoadReset, OverPlaying, ScratchMotion, SyncMode,
+    DeckCmd, DeckEngine, DeckId, DeckLoad, DeckTarget, EjectPress, LoadReset, OverPlaying, ScratchMotion, SpinMotion, SyncMode,
     SyncView, TrackItem, TrackSideChannels,
 };
 use crate::console_scale::TabStage;
@@ -7081,6 +7081,11 @@ pub struct App {
     /// on every refresh pass.
     #[rust]
     retire_face: [Option<bool>; 2],
+    /// This deck's lane drag is a reverse hold rather than a scrub. Kept
+    /// because the release has to end whichever one the press began, and a
+    /// hold the engine refused falls back to an ordinary scrub.
+    #[rust]
+    censor_drag: [bool; 2],
     /// Last string pushed into each status label. The status panel is
     /// mirrored on a 20 Hz pump and most of it never changes between
     /// ticks; `set_text` on an unchanged string still costs a widget
@@ -13629,6 +13634,8 @@ p2 {}
                     self.mixer.seek_deck_seconds(deck, secs)
                 }
                 DeckCmd::Scratch { deck, motion } => self.mixer.scratch_deck(deck, motion),
+                DeckCmd::Censor { deck, on } => self.mixer.set_deck_censor(deck, on),
+                DeckCmd::Spin { deck, motion } => self.mixer.spin_deck(deck, motion),
                 DeckCmd::SetKeylock { deck, on } => self.mixer.set_deck_keylock(deck, on),
                 DeckCmd::SetKeyShift { deck, semitones } => {
                     self.mixer.set_deck_key_shift(deck, semitones)
@@ -21972,6 +21979,9 @@ p2 {}
             let snapshot = self.mixer.deck_snapshot(deck);
             self.decks
                 .observe(deck, snapshot.position_secs, snapshot.playing);
+            // A motor gesture has no release event to clear itself on, so
+            // the mixer's word is what ends it.
+            self.decks.observe_spin(deck, snapshot.scratching);
             self.decks.observe_splat(deck, snapshot.splat);
         }
     }
@@ -24610,9 +24620,24 @@ p2 {}
             // Take the resolved refs out for the duration: every check below
             // is a pointer deref, not a walk of the widget tree.
             let refs = std::mem::take(&mut self.music_refs.decks[deck.index()]);
-            if refs.play.clicked(actions) {
+            // PLAY, and what PLAY feels like when asked. A modifier
+            // rather than three more buttons: the transport row is at its
+            // width and every control in it already has a job, which is the
+            // same reason the whole-track repeat rides the loop button and
+            // SLIP's adopt rides SLIP.
+            if let Some(modifiers) = refs.play.clicked_modifiers(actions) {
                 self.deck_hands_on();
-                let cmds = self.decks.play_pause(deck);
+                let playing = self.decks.deck(deck).playing;
+                let cmds = if modifiers.control {
+                    self.decks.spin(deck, SpinMotion::SpinBack)
+                } else if modifiers.shift {
+                    self.decks.spin(
+                        deck,
+                        if playing { SpinMotion::Brake } else { SpinMotion::SoftStart },
+                    )
+                } else {
+                    self.decks.play_pause(deck)
+                };
                 self.run_deck_cmds(cx, cmds);
             }
             // Retire the deck, and take it back. A press on a playing deck
@@ -25951,6 +25976,30 @@ p2 {}
                 }
                 WaveEvent::ScratchEnd { deck } => {
                     let cmds = self.decks.scratch(deck, ScratchMotion::Release);
+                    self.run_deck_cmds(cx, cmds);
+                }
+                WaveEvent::CensorStart { deck } => {
+                    self.deck_hands_on();
+                    let cmds = self.decks.censor(deck, true);
+                    // A reverse hold needs a record that is running. On a
+                    // stopped deck the shift is spent for nothing, so the
+                    // drag falls back to the scrub the same press would
+                    // otherwise have been — scrubbing a paused deck is a
+                    // gesture in its own right and must not go dead.
+                    self.censor_drag[deck.index()] = !cmds.is_empty();
+                    let cmds = if cmds.is_empty() {
+                        self.decks.scratch(deck, ScratchMotion::Grab)
+                    } else {
+                        cmds
+                    };
+                    self.run_deck_cmds(cx, cmds);
+                }
+                WaveEvent::CensorEnd { deck } => {
+                    let cmds = if std::mem::take(&mut self.censor_drag[deck.index()]) {
+                        self.decks.censor(deck, false)
+                    } else {
+                        self.decks.scratch(deck, ScratchMotion::Release)
+                    };
                     self.run_deck_cmds(cx, cmds);
                 }
                 WaveEvent::Zoom { .. } => {}

@@ -4594,6 +4594,10 @@ pub enum WaveEvent {
     /// Scrub at this rate (1.0 = normal speed forward, negative = back).
     ScratchRate { deck: DeckId, rate: f32 },
     ScratchEnd { deck: DeckId },
+    /// The reverse hold, on the same surface and the same hand: the record
+    /// runs backwards while it is down and lands where it would have been.
+    CensorStart { deck: DeckId },
+    CensorEnd { deck: DeckId },
     /// Wheel over the lanes: `secs` is the new window width.
     Zoom { secs: f64 },
     /// A display-cadence tick while a hand is on a record. The host answers
@@ -4752,6 +4756,9 @@ struct DragState {
     last_time: f64,
     /// The last rate we published, so an idle pointer decays to a stop.
     idle_since: f64,
+    /// This drag is a reverse HOLD, not a scrub. Its rate is fixed, so no
+    /// pointer motion and no idle decay may retune it.
+    censor: bool,
 }
 
 impl VjWaveScroll {
@@ -4898,7 +4905,7 @@ impl Widget for VjWaveScroll {
             if let Some(probe) = self.frame_probe.as_mut() {
                 probe.ticks += 1;
             }
-            if let Some(drag) = self.drag {
+            if let Some(drag) = self.drag.filter(|drag| !drag.censor) {
                 let now = cx.seconds_since_app_start();
                 if now - drag.idle_since > SCRATCH_IDLE_SECS {
                     self.events.push(WaveEvent::ScratchRate { deck: drag.deck, rate: 0.0 });
@@ -4930,17 +4937,31 @@ impl Widget for VjWaveScroll {
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 let Some(deck) = self.lane_at(fe.abs) else { return };
                 let now = cx.seconds_since_app_start();
+                // Shift on the lane is the reverse hold rather than a
+                // scrub: the same hand, on the same surface, where the
+                // reversal is visible.
+                let censor = fe.mod_shift();
                 self.drag = Some(DragState {
                     deck,
                     last_x: fe.abs.x,
                     last_time: now,
                     idle_since: now,
+                    censor,
                 });
-                self.events.push(WaveEvent::ScratchStart { deck });
+                self.events.push(if censor {
+                    WaveEvent::CensorStart { deck }
+                } else {
+                    WaveEvent::ScratchStart { deck }
+                });
                 self.next_frame = cx.new_next_frame();
             }
             Hit::FingerMove(fe) => {
                 let Some(mut drag) = self.drag else { return };
+                // A reverse hold is a fixed rate. A twitch of the pointer
+                // must not turn it into a scrub.
+                if drag.censor {
+                    return;
+                }
                 let now = cx.seconds_since_app_start();
                 let delta_x = fe.abs.x - drag.last_x;
                 let delta_secs = now - drag.last_time;
@@ -4959,7 +4980,11 @@ impl Widget for VjWaveScroll {
             }
             Hit::FingerUp(_) => {
                 if let Some(drag) = self.drag.take() {
-                    self.events.push(WaveEvent::ScratchEnd { deck: drag.deck });
+                    self.events.push(if drag.censor {
+                        WaveEvent::CensorEnd { deck: drag.deck }
+                    } else {
+                        WaveEvent::ScratchEnd { deck: drag.deck }
+                    });
                 }
             }
             Hit::FingerHoverIn(_) | Hit::FingerHoverOver(_) => {

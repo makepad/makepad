@@ -20,14 +20,16 @@
 use crate::cue::SlotId;
 use crate::dsp_math::{lerp, lerp_frame};
 use crate::verify_or;
-use crate::decks::{crossfader_gains, DeckId, FadeCurve, ScratchMotion};
+use crate::decks::{crossfader_gains, DeckId, FadeCurve, ScratchMotion, SpinMotion};
 use crate::loop_splat::{
     SplatGrid, SplatPart, SplatRow, SplatSnapshot, SPLAT_COLS, SPLAT_ROWS,
 };
 use crate::music_dsp::{
     audible, knob, knob64,
-    DeckEq, FrameSource, ParamRamp, RateReader, ScratchRamp, Stretcher, STEM_COUNT,
+    DeckEq, FrameSource, MotorEnd, ParamRamp, RateReader, ScratchRamp, Stretcher, STEM_COUNT,
     STRETCH_BYPASS_EPSILON, STRETCH_RATIO_MAX, STRETCH_RATIO_MIN, WSOLA_WINDOW,
+    BRAKE_SECS, CENSOR_FLIP_SECS, CENSOR_RATE, CENSOR_RETURN_SECS, SOFT_START_SECS,
+    SPINBACK_FALL_SECS, SPINBACK_PEAK, SPINBACK_THROW_SECS,
 };
 use crate::pads::{PadKey, VoiceAlloc, VoiceId};
 use crate::published::Published;
@@ -824,6 +826,10 @@ struct DeckVoice {
     stem_seam: Ramp,
     /// The ghost SLIP is keeping, if it is armed.
     slip: Option<Ghost>,
+    /// The reverse hold armed the ghost itself, so letting go puts it away
+    /// again. False when SLIP was already latched by hand — then only SLIP
+    /// retires it, and a censor must not take the operator's ghost with it.
+    censor_owns_slip: bool,
     /// Where the playhead was when the operator pressed pause. The fade-out
     /// keeps reading, so without this a pause would eat the few
     /// milliseconds it sounded and every pause would walk the track on.
@@ -868,6 +874,7 @@ impl DeckVoice {
             transport: Ramp::at(0.0),
             stem_seam: Ramp::at(0.0),
             slip: None,
+            censor_owns_slip: false,
             pause_at: None,
             pending: None,
             retired: RetiredTrack::default(),
@@ -922,6 +929,7 @@ impl DeckVoice {
         self.pause_at = None;
         self.seek_fade = None;
         self.slip = None;
+        self.censor_owns_slip = false;
         self.loop_span = None;
         self.ended = false;
         self.playing = load.play;
@@ -1988,6 +1996,13 @@ impl Mixer {
         d.splat = None;
         d.playing = false;
         d.transport = Ramp::at(0.0);
+        // The gestures go with the track they were made on. A reverse hold
+        // running when a deck is unloaded would otherwise leave a ghost on
+        // an empty voice, and the next hold would refuse to arm because it
+        // found one already there.
+        d.slip = None;
+        d.censor_owns_slip = false;
+        d.scratch = ScratchRamp::default();
         // With no pcm the clamp parks the playhead at zero; this also
         // clears `ended`, so a later install re-arms end reporting.
         d.seek_frames(0.0);
@@ -2171,22 +2186,9 @@ impl Mixer {
         let mut s = self.state.lock().unwrap();
         let d = &mut s.decks[deck.index()];
         if on {
-            if d.slip.is_some() {
+            if !self.arm_ghost(d) {
                 return;
             }
-            let Some(pcm) = d.pcm.as_ref() else { return };
-            let device = f64::from_bits(self.device_rate_bits.load(Ordering::Acquire));
-            // Before the first callback there is no device rate to latch a
-            // step from, and a ghost that cannot move is worse than none.
-            if !(device > 0.0) {
-                return;
-            }
-            let natural = pcm.sample_rate as f64 / device;
-            d.slip = Some(Ghost {
-                pos: d.playhead_frames(),
-                step: natural * d.rate.current() as f64,
-                span: d.loop_span,
-            });
             self.publish_deck(&s, deck.index());
             return;
         }
@@ -2196,6 +2198,131 @@ impl Mixer {
             d.seek_frames(ghost.pos);
             d.pause_at = None;
             d.arm_seek_fade(from);
+        }
+        self.publish_deck(&s, deck.index());
+    }
+
+    /// Latch a ghost at the playhead with the rate it is running at.
+    ///
+    /// One ghost, two ways to arm it: the SLIP latch and the reverse hold.
+    /// Returns whether THIS call armed one — false when a ghost was
+    /// already there, and false when there is nothing to latch.
+    fn arm_ghost(&self, d: &mut DeckVoice) -> bool {
+        if d.slip.is_some() {
+            return false;
+        }
+        let Some(pcm) = d.pcm.as_ref() else { return false };
+        let device = f64::from_bits(self.device_rate_bits.load(Ordering::Acquire));
+        // Before the first callback there is no device rate to latch a step
+        // from, and a ghost that cannot move is worse than none.
+        if !(device > 0.0) {
+            return false;
+        }
+        let natural = pcm.sample_rate as f64 / device;
+        d.slip = Some(Ghost {
+            pos: d.playhead_frames(),
+            step: natural * d.rate.current() as f64,
+            span: d.loop_span,
+        });
+        true
+    }
+
+    /// The reverse hold: the record runs backwards while it is held, and a
+    /// ghost keeps the place it should have reached.
+    ///
+    /// Letting go lands the deck on the ghost through the ordinary seek, so
+    /// it takes the same blend every commanded jump does. The hand-back is
+    /// deliberately shorter than that blend, so no tail of reversed audio
+    /// pokes out past the landing.
+    pub fn set_deck_censor(&self, deck: DeckId, on: bool) {
+        let mut s = self.state.lock().unwrap();
+        let d = &mut s.decks[deck.index()];
+        if on {
+            // A hand on the record outranks a motor.
+            if d.scratch.held() {
+                return;
+            }
+            // Armed ONCE: asking twice would arm a ghost and then report
+            // that it had not, and every hold would leak the one it made.
+            let armed = self.arm_ghost(d);
+            // With nothing to return to, a reverse hold is just a scratch.
+            if !armed && d.slip.is_none() {
+                return;
+            }
+            d.censor_owns_slip = armed;
+            d.scratch.motor(
+                d.rate.current(),
+                CENSOR_RATE,
+                CENSOR_FLIP_SECS,
+                MotorEnd::Hold,
+            );
+            self.publish_deck(&s, deck.index());
+            return;
+        }
+        if !d.scratch.motoring() {
+            return;
+        }
+        d.scratch.release_over(d.rate.current(), CENSOR_RETURN_SECS);
+        // The same three lines the slip release uses: land on the ghost
+        // under the seek blend.
+        if let Some(ghost) = d.slip.as_ref().map(|g| g.pos) {
+            let from = d.playhead_frames();
+            d.seek_frames(ghost);
+            d.pause_at = None;
+            d.arm_seek_fade(from);
+        }
+        if d.censor_owns_slip {
+            d.slip = None;
+            d.censor_owns_slip = false;
+        }
+        self.publish_deck(&s, deck.index());
+    }
+
+    /// A motor gesture on the platter: the deck stops or starts like a
+    /// record rather than like a switch.
+    pub fn spin_deck(&self, deck: DeckId, motion: SpinMotion) {
+        let mut s = self.state.lock().unwrap();
+        let d = &mut s.decks[deck.index()];
+        // A load waiting out a fade re-aims rather than being fought, the
+        // same way a plain play does.
+        if let Some(pending) = d.pending.as_mut() {
+            pending.play = matches!(motion, SpinMotion::SoftStart);
+            d.playing = pending.play;
+            self.publish_deck(&s, deck.index());
+            return;
+        }
+        let deck_rate = d.rate.current();
+        match motion {
+            SpinMotion::Brake | SpinMotion::SpinBack => {
+                d.playing = false;
+                // CLEARING THIS IS THE POINT. A stop normally hands back
+                // the frames its fade sounded, so the playhead stays where
+                // the button was pressed. A brake is the opposite: the
+                // record travelled while it wound down, and it stays where
+                // it stopped.
+                d.pause_at = None;
+                d.ended = false;
+                let (target, secs, end, total) = match motion {
+                    SpinMotion::SpinBack => (
+                        SPINBACK_PEAK,
+                        SPINBACK_THROW_SECS,
+                        MotorEnd::Then(0.0, SPINBACK_FALL_SECS),
+                        SPINBACK_THROW_SECS + SPINBACK_FALL_SECS,
+                    ),
+                    _ => (0.0, BRAKE_SECS, MotorEnd::Retire, BRAKE_SECS),
+                };
+                d.scratch.motor(deck_rate, target, secs, end);
+                // The gain falls as the pitch does, so the record is silent
+                // exactly when it has stopped rather than before it.
+                d.transport.slew(0.0, total);
+            }
+            SpinMotion::SoftStart => {
+                d.playing = true;
+                d.ended = false;
+                d.pause_at = None;
+                d.scratch.spin_up_from(0.0, deck_rate, SOFT_START_SECS);
+                d.transport.slew(1.0, SLEW_SECS);
+            }
         }
         self.publish_deck(&s, deck.index());
     }
@@ -2888,6 +3015,10 @@ impl Mixer {
                 let key_ratio = d.key_ratio.tick(rate) as f64;
                 let scratch_rate = d.scratch.tick(rate, deck_rate);
                 let scratching = d.scratch.active();
+                // Which way the record is travelling. Everything gated on
+                // this is bit-identical when it is false, which is every
+                // frame the tab rendered before the reverse hold existed.
+                let reverse = scratching && scratch_rate < 0.0;
                 let mut stem_gain = [0.0f32; STEM_COUNT];
                 for ((slot, ramp), blend) in stem_gain
                     .iter_mut()
@@ -2986,7 +3117,15 @@ impl Mixer {
                 // A span owns the playhead, on both read paths. Wrap BEFORE
                 // the read so no frame past the out point is ever emitted.
                 if let Some((start, end)) = d.loop_span {
-                    if d.playhead_frames() >= end {
+                    // Two-sided, because a record running backwards leaves
+                    // a loop at IN. `wrapped_into_span` already folds a
+                    // position below the span (it is a remainder, not a
+                    // clamp), so the landing needs nothing new. The GHOST's
+                    // own wrap above stays one-sided on purpose: its step
+                    // is latched from the deck's tempo when it is armed and
+                    // never goes negative, so it only ever leaves at OUT.
+                    let head = d.playhead_frames();
+                    if head >= end || (reverse && head < start) {
                         // Land MODULO the length, keeping the overshoot.
                         // Resetting to IN exactly discards up to a step
                         // per lap — a held loop walks audibly early —
@@ -3091,7 +3230,12 @@ impl Mixer {
                             .min((end - start) * 0.15)
                             .min(start)
                             .max(1.0);
-                        if loop_pos >= end - xf && loop_pos < end {
+                        // Not while reversing: the blend walks TOWARDS IN
+                        // through the material running up to it, and
+                        // travelling the other way through the same window
+                        // it would mix forward pre-roll under a backwards
+                        // tail. The wrap below IN carries the seam instead.
+                        if !reverse && loop_pos >= end - xf && loop_pos < end {
                             let u = loop_pos - (end - xf);
                             let src = start - xf + u;
                             let index = src as usize;
@@ -3396,6 +3540,171 @@ mod tests {
 
 
 
+
+    // ---- the reverse hold, and the platter driving itself ---------------
+
+    /// Buffers of 512 frames at 48 kHz, the size the device asks for.
+    fn spin_render(mixer: &Mixer, buffers: usize) {
+        for _ in 0..buffers {
+            render(mixer, 48_000.0, 512);
+        }
+    }
+
+    fn spin_deck_a(value: i16, frames: usize) -> Mixer {
+        let mixer = Mixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        mixer.install_deck(DeckId::A, const_pcm(value, frames, 48_000));
+        mixer
+    }
+
+    #[test]
+    fn a_censor_runs_the_record_backwards_while_it_is_held() {
+        let mixer = spin_deck_a(16_384, 480_000);
+        mixer.set_deck_playing(DeckId::A, true);
+        spin_render(&mixer, 16);
+        let at = mixer.deck_snapshot(DeckId::A).position_secs;
+        assert!(at > 0.0, "the record was running");
+
+        mixer.set_deck_censor(DeckId::A, true);
+        spin_render(&mixer, 16);
+        let back = mixer.deck_snapshot(DeckId::A).position_secs;
+        assert!(back < at, "the record runs backwards: {at} -> {back}");
+        assert!(mixer.deck_scratching(DeckId::A), "the ramp owns the rate");
+    }
+
+    #[test]
+    fn letting_go_of_a_censor_lands_on_where_the_track_would_have_been() {
+        let mixer = spin_deck_a(16_384, 480_000);
+        mixer.set_deck_playing(DeckId::A, true);
+        spin_render(&mixer, 16);
+        let armed_at = mixer.deck_snapshot(DeckId::A).position_secs;
+
+        mixer.set_deck_censor(DeckId::A, true);
+        let held = 24;
+        spin_render(&mixer, held);
+        mixer.set_deck_censor(DeckId::A, false);
+        spin_render(&mixer, 1);
+
+        let want = armed_at + (held * 512) as f64 / 48_000.0;
+        let landed = mixer.deck_snapshot(DeckId::A).position_secs;
+        assert!(
+            (landed - want).abs() < 0.02,
+            "the deck lands where the record would have got to: want {want}, got {landed}",
+        );
+    }
+
+    #[test]
+    fn a_censor_under_a_latched_slip_leaves_the_operators_ghost_running() {
+        let mixer = spin_deck_a(16_384, 480_000);
+        mixer.set_deck_playing(DeckId::A, true);
+        spin_render(&mixer, 8);
+        mixer.set_deck_slip(DeckId::A, true, false);
+        let slipped_at = mixer.deck_snapshot(DeckId::A).position_secs;
+
+        mixer.set_deck_censor(DeckId::A, true);
+        spin_render(&mixer, 16);
+        mixer.set_deck_censor(DeckId::A, false);
+        spin_render(&mixer, 1);
+        assert!(mixer.deck_slipping(DeckId::A), "the operator's ghost is still theirs");
+
+        // And it is still RUNNING: releasing SLIP some buffers later lands
+        // further on again, by exactly the time that passed.
+        let censor_landing = mixer.deck_snapshot(DeckId::A).position_secs;
+        let after = 20;
+        spin_render(&mixer, after);
+        mixer.set_deck_slip(DeckId::A, false, false);
+        spin_render(&mixer, 1);
+        let slip_landing = mixer.deck_snapshot(DeckId::A).position_secs;
+        assert!(
+            slip_landing > censor_landing,
+            "the ghost went on: {censor_landing} -> {slip_landing}",
+        );
+        let want = slipped_at + ((16 + 1 + after + 1) * 512) as f64 / 48_000.0;
+        assert!(
+            (slip_landing - want).abs() < 0.05,
+            "and by the elapsed time: want {want}, got {slip_landing}",
+        );
+    }
+
+    #[test]
+    fn a_censor_is_refused_while_a_hand_is_on_the_record() {
+        let mixer = spin_deck_a(16_384, 480_000);
+        mixer.set_deck_playing(DeckId::A, true);
+        spin_render(&mixer, 8);
+        mixer.scratch_deck(DeckId::A, ScratchMotion::Grab);
+        mixer.set_deck_censor(DeckId::A, true);
+        assert!(!mixer.deck_slipping(DeckId::A), "no ghost was armed");
+    }
+
+    #[test]
+    fn reverse_inside_a_loop_wraps_back_to_the_out_point() {
+        let mixer = spin_deck_a(16_384, 480_000);
+        mixer.set_deck_loop_span(DeckId::A, Some((4.0, 5.0)));
+        mixer.seek_deck_seconds(DeckId::A, 4.5);
+        mixer.set_deck_playing(DeckId::A, true);
+        spin_render(&mixer, 8);
+        mixer.set_deck_censor(DeckId::A, true);
+        // Far longer than the span: without a two-sided wrap the record
+        // walks out at IN and off the front of the track.
+        spin_render(&mixer, 400);
+        let at = mixer.deck_snapshot(DeckId::A).position_secs;
+        assert!(at >= 4.0 && at <= 5.0, "the loop still owns the playhead, at {at}");
+    }
+
+    #[test]
+    fn a_brake_leaves_the_record_where_it_wound_down() {
+        let mixer = spin_deck_a(16_384, 480_000);
+        mixer.set_deck_playing(DeckId::A, true);
+        spin_render(&mixer, 8);
+        let began = mixer.deck_snapshot(DeckId::A).position_secs;
+
+        mixer.spin_deck(DeckId::A, SpinMotion::Brake);
+        spin_render(&mixer, (48_000.0 * BRAKE_SECS / 512.0) as usize + 8);
+        let stopped = mixer.deck_snapshot(DeckId::A).position_secs;
+        // The record TRAVELLED while it wound down. A pause hands those
+        // frames back; a brake must not.
+        assert!(stopped > began, "the platter carried on: {began} -> {stopped}");
+        assert!(!mixer.deck_scratching(DeckId::A), "and handed the rate back");
+
+        spin_render(&mixer, 8);
+        let after = mixer.deck_snapshot(DeckId::A).position_secs;
+        assert!((after - stopped).abs() < 1e-6, "and then stayed there: {stopped} -> {after}");
+    }
+
+    #[test]
+    fn a_spin_back_throws_the_record_backwards_before_it_stops() {
+        let mixer = spin_deck_a(16_384, 480_000);
+        mixer.seek_deck_seconds(DeckId::A, 5.0);
+        mixer.set_deck_playing(DeckId::A, true);
+        spin_render(&mixer, 8);
+        let began = mixer.deck_snapshot(DeckId::A).position_secs;
+
+        mixer.spin_deck(DeckId::A, SpinMotion::SpinBack);
+        let total = SPINBACK_THROW_SECS + SPINBACK_FALL_SECS;
+        spin_render(&mixer, (48_000.0 * total / 512.0) as usize + 8);
+        let stopped = mixer.deck_snapshot(DeckId::A).position_secs;
+        assert!(stopped < began, "it went backwards: {began} -> {stopped}");
+        assert!(!mixer.deck_scratching(DeckId::A));
+    }
+
+    #[test]
+    fn a_soft_start_comes_up_to_tempo_instead_of_cutting_in() {
+        let mixer = spin_deck_a(16_384, 480_000);
+        mixer.spin_deck(DeckId::A, SpinMotion::SoftStart);
+        let quarter = (48_000.0 * SOFT_START_SECS / 4.0 / 512.0) as usize;
+        spin_render(&mixer, quarter);
+        let early = mixer.deck_snapshot(DeckId::A).position_secs;
+        let real = (quarter * 512) as f64 / 48_000.0;
+        assert!(early < real * 0.6, "the platter is still winding up: {early} of {real}");
+
+        spin_render(&mixer, (48_000.0 * SOFT_START_SECS / 512.0) as usize + 8);
+        let settled = mixer.deck_snapshot(DeckId::A).position_secs;
+        spin_render(&mixer, 8);
+        let moved = mixer.deck_snapshot(DeckId::A).position_secs - settled;
+        let want = (8 * 512) as f64 / 48_000.0;
+        assert!((moved - want).abs() < 0.005, "and then runs at tempo: {moved} of {want}");
+    }
     // ---- a load that lands on a deck that is already playing ------------
 
     #[test]

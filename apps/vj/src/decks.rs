@@ -378,6 +378,19 @@ fn semitones_of_rate(rate: f64) -> f64 {
     12.0 * rate.max(f64::MIN_POSITIVE).log2()
 }
 
+/// A motor gesture on the platter: the deck stops or starts like a record
+/// rather than like a switch. Distinct from `ScratchMotion`, which always
+/// means a POINTER — the phase-lock rules key on the hand.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SpinMotion {
+    /// Wind down to a stop, leaving the record where it stopped.
+    Brake,
+    /// Throw it backwards and let it fall to rest.
+    SpinBack,
+    /// Wind up to tempo from a standstill.
+    SoftStart,
+}
+
 /// What the pointer is doing to a deck's waveform.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ScratchMotion {
@@ -1035,6 +1048,10 @@ pub enum DeckCmd {
     SeekSeconds { deck: DeckId, secs: f64 },
     /// Pointer on the waveform: vinyl-style rate override.
     Scratch { deck: DeckId, motion: ScratchMotion },
+    /// The reverse hold: the record runs backwards while it is held, and a
+    /// ghost keeps the place it should have reached.
+    Censor { deck: DeckId, on: bool },
+    Spin { deck: DeckId, motion: SpinMotion },
     /// Keep the key when the tempo changes (time stretch) or let it slide.
     SetKeylock { deck: DeckId, on: bool },
     /// Key shift in semitones: pitch WITHOUT tempo.
@@ -1105,6 +1122,11 @@ pub struct DeckEngine {
     /// is all that tells a second press from a first. A refusal arms
     /// nothing, and an undo spends the stamp so one eject buys one undo.
     last_eject_ms: [Option<u64>; 2],
+    /// The platter is under a MOTOR gesture. A hand has a release to clear
+    /// its hold on; a brake or a wind-up has no event at all — it simply
+    /// lands — so the engine keeps this bit and clears it when the mixer
+    /// reports the motor has handed the rate back.
+    spin_running: [bool; 2],
     /// The deck an autopilot fade is retiring: auto sync must not re-seek
     /// it when the fader crosses the middle and leadership flips.
     auto_fade_hold: Option<DeckId>,
@@ -1142,6 +1164,7 @@ impl Default for DeckEngine {
             last_requeued: None,
             ejected: Vec::new(),
             last_eject_ms: [None; 2],
+            spin_running: [false; 2],
             auto_fade_hold: None,
             sync_master: None,
             land_lookahead_secs: 0.0,
@@ -2925,6 +2948,51 @@ impl DeckEngine {
             }
         }
         cmds
+    }
+
+    /// The reverse hold. The record runs backwards while it is held and a
+    /// ghost keeps the place it should have reached; letting go lands the
+    /// deck on the ghost.
+    ///
+    /// Deliberately NOT `scratch`: that one re-locks the phase with a
+    /// beat-quantised seek on release, and fired after the ghost has just
+    /// handed the deck a position it would move the deck off the very place
+    /// the hold exists to return it to. The ghost landing IS the truth.
+    ///
+    /// `scratching` is set for the duration so the sync servos leave the
+    /// deck alone while it runs.
+    pub fn censor(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
+        let state = self.deck(deck);
+        if !state.is_loaded() || (on && !state.playing) {
+            return Vec::new();
+        }
+        self.deck_mut(deck).scratching = on;
+        vec![DeckCmd::Censor { deck, on }]
+    }
+
+    /// A motor gesture on the platter. `scratching` is set for the same
+    /// reason it is for a hand: the servos must not chase a playhead that
+    /// is deliberately not keeping time while the platter winds up or down.
+    pub fn spin(&mut self, deck: DeckId, motion: SpinMotion) -> Vec<DeckCmd> {
+        if !self.deck(deck).is_loaded() {
+            return Vec::new();
+        }
+        self.spin_running[deck.index()] = true;
+        let state = self.deck_mut(deck);
+        state.scratching = true;
+        state.playing = matches!(motion, SpinMotion::SoftStart);
+        vec![DeckCmd::Spin { deck, motion }]
+    }
+
+    /// The mixer's word on whether the platter is still under a gesture.
+    ///
+    /// Only ever CLEARS, and only a motor gesture: a hand owns the flag
+    /// from the instant it lands, before the mixer has seen anything.
+    pub fn observe_spin(&mut self, deck: DeckId, gesture: bool) {
+        if self.spin_running[deck.index()] && !gesture {
+            self.spin_running[deck.index()] = false;
+            self.deck_mut(deck).scratching = false;
+        }
     }
 
     /// Absolute seek in source seconds (an overview click, a cue recall).
@@ -5077,6 +5145,71 @@ mod tests {
         assert!(engine.deck(DeckId::B).synced);
         assert!(!engine.deck(DeckId::B).auto_opt_out);
         assert!(rate_of(&cmds, DeckId::B).is_some());
+    }
+
+    #[test]
+    fn a_censor_suspends_the_phase_lock_and_does_not_relock_when_it_ends() {
+        // The difference from a hand, and the whole reason the reverse hold
+        // is its own engine method: the GHOST landing is the truth, and a
+        // beat-quantised seek on top of it would move the deck off the very
+        // place the hold exists to return it to.
+        let mut engine = DeckEngine::new();
+        load_analysed(&mut engine, DeckId::A, 1, 120.0, 0.0);
+        load_analysed(&mut engine, DeckId::B, 2, 120.0, 0.0);
+        engine.play_pause(DeckId::A);
+        engine.observe(DeckId::A, 10.0, true);
+        engine.play_pause(DeckId::B);
+        engine.observe(DeckId::B, 3.0, true);
+        engine.apply_auto_sync();
+
+        let cmds = engine.censor(DeckId::B, true);
+        assert_eq!(cmds, vec![DeckCmd::Censor { deck: DeckId::B, on: true }]);
+        assert!(engine.deck(DeckId::B).scratching);
+        engine.observe(DeckId::A, 10.4, true);
+        let cmds = engine.apply_auto_sync();
+        assert!(seek_of(&cmds, DeckId::B).is_none(), "no seek under a reverse hold");
+
+        let cmds = engine.censor(DeckId::B, false);
+        assert_eq!(cmds, vec![DeckCmd::Censor { deck: DeckId::B, on: false }]);
+        assert!(!engine.deck(DeckId::B).scratching);
+        assert!(
+            !cmds.iter().any(|c| matches!(
+                c,
+                DeckCmd::SeekSeconds { .. } | DeckCmd::SetRate { .. }
+            )),
+            "the ghost landing stands: {cmds:?}",
+        );
+        // And it is refused outright on a deck that is not running: there
+        // would be nothing for the ghost to keep the place of.
+        engine.play_pause(DeckId::B);
+        engine.observe(DeckId::B, 3.0, false);
+        assert!(engine.censor(DeckId::B, true).is_empty());
+    }
+
+    #[test]
+    fn a_motor_gesture_holds_the_servos_off_until_the_mixer_says_it_landed() {
+        // A hand has a release to clear its hold on. A brake or a wind-up
+        // has no event at all -- it simply lands -- so the mixer's word is
+        // what ends it.
+        let mut engine = DeckEngine::new();
+        load_analysed(&mut engine, DeckId::A, 1, 120.0, 0.0);
+        engine.play_pause(DeckId::A);
+        engine.observe(DeckId::A, 10.0, true);
+
+        let cmds = engine.spin(DeckId::A, SpinMotion::Brake);
+        assert_eq!(cmds, vec![DeckCmd::Spin { deck: DeckId::A, motion: SpinMotion::Brake }]);
+        assert!(engine.deck(DeckId::A).scratching);
+        assert!(!engine.deck(DeckId::A).playing, "a brake is a stop");
+        // The platter is still winding down: the flag stands.
+        engine.observe_spin(DeckId::A, true);
+        assert!(engine.deck(DeckId::A).scratching);
+        // And clears when the motor hands the rate back.
+        engine.observe_spin(DeckId::A, false);
+        assert!(!engine.deck(DeckId::A).scratching);
+
+        let cmds = engine.spin(DeckId::A, SpinMotion::SoftStart);
+        assert_eq!(cmds, vec![DeckCmd::Spin { deck: DeckId::A, motion: SpinMotion::SoftStart }]);
+        assert!(engine.deck(DeckId::A).playing, "a soft start is a start");
     }
 
     #[test]
