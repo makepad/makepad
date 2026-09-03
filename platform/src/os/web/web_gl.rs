@@ -630,7 +630,6 @@ impl Cx {
                     inst_attribs,
                 });
                 self.draw_shaders.os_shaders.push(shp);
-                self.os.webgl_shaders_queued_this_frame += 1;
                 self.os.webgl_shaders_pending += 1;
                 os_shader_id = Some(shader_id);
             }

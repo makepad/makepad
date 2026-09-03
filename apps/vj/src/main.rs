@@ -4269,7 +4269,6 @@ enum CatPurpose {
         gen: CatGen,
         slot: usize,
         first: bool,
-        namespace: Option<String>,
     },
     Detail { surface: Surface, gen: CatGen, asset: AssetId },
     Manifest { surface: Surface, gen: CatGen, asset: AssetId, revision: AssetRevisionId },
@@ -7162,6 +7161,9 @@ pub struct App {
     /// Frame-loop hang detector: the previous pump's instant.
     #[rust]
     frame_watch: Option<crate::clock::Instant>,
+    /// Last reported frame hang; repeated stalls are rate-limited.
+    #[rust]
+    framehang_reported: Option<crate::clock::Instant>,
     /// One wasm-only duration sample around the first widget-tree draw.
     #[rust]
     first_draw_timed: bool,
@@ -13079,19 +13081,13 @@ p2 {}
                     // pages behind them, and a page outranks a thumbnail
                     // blob: an empty tile with no title is worse than a tile
                     // waiting for its picture.
-                    let namespace = query.namespace.clone();
-                    let kind = query.kind;
                     if let Ok(id) = up.catalog.submit_with(
                         ClientRequest::CatalogSearch { query, cursor },
                         makepad_asset_client::SubmitOptions::newest_first(),
                     ) {
-                        log!(
-                            "catalog request: id={id} namespace={} kind={kind:?}",
-                            namespace.as_deref().unwrap_or("*")
-                        );
                         self.cat_reqs.insert(
                             id,
-                            CatPurpose::Page { surface, gen, slot, first, namespace },
+                            CatPurpose::Page { surface, gen, slot, first },
                         );
                     }
                 }
@@ -14289,8 +14285,13 @@ p2 {}
             let t = crate::clock::Instant::now();
             if let Some(last) = self.frame_watch {
                 let gap = t.duration_since(last).as_secs_f64() * 1e3;
-                if gap > 200.0 {
+                if gap > 1_000.0
+                    && self.framehang_reported.is_none_or(|reported| {
+                        t.duration_since(reported) >= std::time::Duration::from_secs(10)
+                    })
+                {
                     log!("framehang: {gap:.0}ms between frames");
+                    self.framehang_reported = Some(t);
                 }
             }
             self.frame_watch = Some(t);
@@ -14914,7 +14915,7 @@ p2 {}
                 ClientEvent::Done { output, .. } => {
                     self.note_session_ok();
                     let Some(purpose) = self.cat_reqs.remove(&id) else { continue };
-                    self.catalog_done(cx, id, purpose, output);
+                    self.catalog_done(cx, purpose, output);
                 }
                 ClientEvent::Failed { error, .. } => {
                     if is_session_loss(&error) {
@@ -15007,20 +15008,14 @@ p2 {}
     fn catalog_done(
         &mut self,
         cx: &mut Cx,
-        request_id: RequestId,
         purpose: CatPurpose,
         output: ClientOutput,
     ) {
         match (purpose, output) {
             (
-                CatPurpose::Page { surface, gen, slot, first, namespace },
+                CatPurpose::Page { surface, gen, slot, first },
                 ClientOutput::CatalogPage(page),
             ) => {
-                log!(
-                    "catalog response: id={request_id} namespace={} hits={}",
-                    namespace.as_deref().unwrap_or("*"),
-                    page.hits.len()
-                );
                 let hits = page
                     .hits
                     .into_iter()
@@ -25830,12 +25825,13 @@ impl MatchEvent for App {
             .iter()
             .any(|desc| desc.device_type.is_loopback() && desc.has_failed);
         self.loopback_ids = loopback;
-        log!(
-            "audio devices: {} loopback device(s), failed={}, monitor={}",
-            self.loopback_ids.len(),
-            self.loopback_failed,
-            self.monitor_audio
-        );
+        if self.monitor_audio {
+            log!(
+                "audio devices: {} loopback device(s), failed={}, monitor=true",
+                self.loopback_ids.len(),
+                self.loopback_failed,
+            );
+        }
         // MONITOR AUDIO gates the actual device open (that open is what
         // fires the OS screen-recording prompt).
         if self.monitor_audio {

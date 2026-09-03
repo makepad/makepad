@@ -105,7 +105,6 @@ impl WebAudioAccess {
 
     pub fn use_audio_inputs(&mut self, _os: &mut CxOs, _devices: &[AudioDeviceId]) {
         // TODO
-        crate::log!("Web audio input todo!");
     }
 
     pub fn use_audio_outputs(&mut self, os: &mut CxOs, devices: &[AudioDeviceId]) {
@@ -113,7 +112,6 @@ impl WebAudioAccess {
         // we can however only use one so we'll use the first one
         // and then we'll send over the device we want to the other side
         if devices.len() == 0 {
-            crate::log!("web audio: no output device; output stopped");
             os.from_wasm(FromWasmStopAudioOutput {});
             return;
         }
