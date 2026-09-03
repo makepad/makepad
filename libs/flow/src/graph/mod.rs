@@ -593,10 +593,54 @@ pub fn prelude_catalog() -> Result<Vec<NodeTypeCatalog>, EvalError> {
                 .unwrap_or_default()
         };
 
-        let (ports_in, ports_out, params) = if let Some(spec) = type_spec(&type_name) {
-            // One of the language's Rust-defined kinds: params and the
-            // fixed input ports come from its specification.
-            let params = spec
+        let spec = type_spec(&type_name);
+        let mut discard = Vec::new();
+        let loc = Loc { line: 1, col: 1 };
+        let (ports_in, ports_out) = if kind == "gen" {
+            let ports_in = ports_side_typed(
+                &vm,
+                obj,
+                "in",
+                "",
+                None,
+                RECIPE_PRELUDE_FILE,
+                &loc,
+                &type_name,
+                &mut discard,
+            )?
+            .into_iter()
+            .map(|(name, ty)| Port { name, ty })
+            .collect();
+            let ports_out = ports_side_typed(
+                &vm,
+                obj,
+                "out",
+                "",
+                None,
+                RECIPE_PRELUDE_FILE,
+                &loc,
+                &type_name,
+                &mut discard,
+            )?
+            .into_iter()
+            .map(|(name, ty)| Port { name, ty })
+            .collect();
+            (ports_in, ports_out)
+        } else if let Some(spec) = &spec {
+            let ports_in = spec
+                .inputs
+                .iter()
+                .map(|port| Port {
+                    name: port.name.to_string(),
+                    ty: port.ty,
+                })
+                .collect();
+            (ports_in, catalog_outputs(&type_name))
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let params = if let Some(spec) = &spec {
+            spec
                 .params
                 .iter()
                 .map(|param| {
@@ -617,36 +661,13 @@ pub fn prelude_catalog() -> Result<Vec<NodeTypeCatalog>, EvalError> {
                         range,
                     }
                 })
-                .collect();
-            let ports_in = spec
-                .inputs
-                .iter()
-                .map(|port| Port { name: port.name.to_string(), ty: port.ty })
-                .collect();
-            (ports_in, catalog_outputs(&type_name), params)
+                .collect()
         } else {
-            // A recipe-domain type built purely in splash over `Gen`: read
-            // its declared typed ports and generic parameters the same way
-            // a flow file's node extraction does.
-            let mut discard = Vec::new();
-            let loc = Loc { line: 1, col: 1 };
-            let ports_in: Vec<Port> = ports_side_typed(
-                &vm, obj, "in", "", None, RECIPE_PRELUDE_FILE, &loc, &type_name, &mut discard,
-            )?
-            .into_iter()
-            .map(|(name, ty)| Port { name, ty })
-            .collect();
-            let ports_out: Vec<Port> = ports_side_typed(
-                &vm, obj, "out", "", None, RECIPE_PRELUDE_FILE, &loc, &type_name, &mut discard,
-            )?
-            .into_iter()
-            .map(|(name, ty)| Port { name, ty })
-            .collect();
             let input_names: HashSet<String> =
                 ports_in.iter().map(|port| port.name.clone()).collect();
             let generic_params =
                 generic_gen_params(&vm, obj, "", None, RECIPE_PRELUDE_FILE, &loc, &input_names)?;
-            let params = generic_params
+            generic_params
                 .into_iter()
                 .map(|(name, literal)| {
                     let doc = field_doc(&name);
@@ -666,8 +687,7 @@ pub fn prelude_catalog() -> Result<Vec<NodeTypeCatalog>, EvalError> {
                         range,
                     }
                 })
-                .collect();
-            (ports_in, ports_out, params)
+                .collect()
         };
 
         let face = ui_module
@@ -1074,7 +1094,7 @@ fn extract_node(
         })?;
         params.push((param.name.to_string(), literal));
     }
-    let gen_inputs = if type_name == "Gen" {
+    let gen_inputs = if spec.kind == "gen" {
         Some(ports_side_typed(
             vm, obj, "in", source, span, file_name, &loc, &context, warnings,
         )?)
@@ -1129,9 +1149,14 @@ fn extract_node(
                 object_ids,
             )?);
         }
-    } else if type_name == "Gen" {
+    } else if spec.kind == "gen" {
         for (name, ty) in gen_inputs.unwrap() {
-            let value = input_value(vm, obj, &name, DefaultValue::Null);
+            let default = spec
+                .inputs
+                .iter()
+                .find_map(|input| (input.name == name).then_some(input.default))
+                .unwrap_or(DefaultValue::Null);
+            let value = input_value(vm, obj, &name, default);
             inputs.push(extract_input(
                 vm,
                 source,
@@ -1442,6 +1467,14 @@ fn outputs_for(
     context: &str,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<Port>, EvalError> {
+    if type_spec(type_name).is_some_and(|spec| spec.kind == "gen") {
+        return Ok(ports_side_typed(
+            vm, obj, "out", source, span, file_name, loc, context, warnings,
+        )?
+        .into_iter()
+        .map(|(name, ty)| Port { name, ty })
+        .collect());
+    }
     Ok(match type_name {
         "Input" | "Text" | "Ask" => vec![Port {
             name: port_type_name(param_port_type(params, "type").unwrap()).to_string(),
@@ -1481,18 +1514,6 @@ fn outputs_for(
                 ty: PortType::Json,
             },
         ],
-        "Image" => vec![Port {
-            name: "image".to_string(),
-            ty: PortType::Image,
-        }],
-        "Upscale" => vec![Port {
-            name: "image".to_string(),
-            ty: PortType::Image,
-        }],
-        "Gen" => ports_side_typed(vm, obj, "out", source, span, file_name, loc, context, warnings)?
-            .into_iter()
-            .map(|(name, ty)| Port { name, ty })
-            .collect(),
         _ => unreachable!(),
     })
 }
@@ -1565,16 +1586,14 @@ fn ports_side_typed(
                 loc,
             )
         })?;
-        if !names.is_empty() {
-            warnings.push(format!(
-                "{context}: ports.{side} uses the deprecated array form `[{}]`; declare `{side}: {{ name: @type, ... }}` with explicit types",
-                names
-                    .iter()
-                    .map(|name| format!("@{name}"))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            ));
-        }
+        warnings.push(format!(
+            "{context}: ports.{side} uses the deprecated array form `[{}]`; declare `{side}: {{ name: @type, ... }}` with explicit types",
+            names
+                .iter()
+                .map(|name| format!("@{name}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        ));
         return Ok(names
             .into_iter()
             .map(|name| {

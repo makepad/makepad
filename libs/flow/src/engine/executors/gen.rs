@@ -8,6 +8,64 @@ use makepad_ai_hub::registry::Domain;
 use makepad_ai_hub::{discovery, fleet, makepad_base64};
 use std::sync::Arc;
 
+#[derive(Clone, Copy)]
+enum MediaDestination {
+    Primary,
+    Named(&'static str),
+}
+
+// This is the hub's binary-input wire contract. Domains not listed here use
+// the compatibility default: `image` is primary and every other port is a
+// same-named entry in `GenerateRequestJson::inputs`.
+const MEDIA_INPUT_ROUTES: &[(&str, &[(&str, MediaDestination)])] = &[
+    (
+        "edit",
+        &[
+            ("image", MediaDestination::Primary),
+            ("reference_1", MediaDestination::Named("reference_1")),
+            ("reference_2", MediaDestination::Named("reference_2")),
+            ("reference_3", MediaDestination::Named("reference_3")),
+        ],
+    ),
+    (
+        "inpaint",
+        &[
+            ("image", MediaDestination::Named("image")),
+            ("mask", MediaDestination::Named("mask")),
+        ],
+    ),
+    ("control", &[("control", MediaDestination::Primary)]),
+    ("upscale", &[("image", MediaDestination::Primary)]),
+    ("matte", &[("image", MediaDestination::Primary)]),
+    ("depth", &[("image", MediaDestination::Primary)]),
+    (
+        "video",
+        &[
+            ("image", MediaDestination::Primary),
+            ("last_frame", MediaDestination::Named("last_frame")),
+        ],
+    ),
+    ("enhance", &[("video", MediaDestination::Primary)]),
+    ("mesh", &[("image", MediaDestination::Primary)]),
+    (
+        "paint",
+        &[
+            ("mesh", MediaDestination::Named("mesh")),
+            (
+                "reference_image",
+                MediaDestination::Named("reference_image"),
+            ),
+        ],
+    ),
+    ("rig", &[("mesh", MediaDestination::Primary)]),
+    ("motion", &[("mesh", MediaDestination::Primary)]),
+    ("splat", &[("image", MediaDestination::Primary)]),
+    ("world", &[("image", MediaDestination::Primary)]),
+    ("vision", &[("image", MediaDestination::Primary)]),
+    ("music", &[("audio", MediaDestination::Primary)]),
+    ("speech", &[("audio", MediaDestination::Primary)]),
+];
+
 pub trait GenSeam: Send + Sync {
     fn pick(&self, domain: &str) -> Result<Box<dyn ContentProvider>, String>;
 }
@@ -203,6 +261,11 @@ fn build_request(
         origin_epoch: Some(origin.1),
         ..Default::default()
     };
+    let domain_routes = node.domain.as_deref().and_then(|domain| {
+        MEDIA_INPUT_ROUTES
+            .iter()
+            .find_map(|(candidate, routes)| (*candidate == domain).then_some(*routes))
+    });
     for (name, value) in inputs {
         if name == "prompt" && value.ty == PortType::Text {
             request.prompt = Some(value.as_text()?.to_string());
@@ -216,15 +279,34 @@ fn build_request(
                 &makepad_base64::BASE64_STANDARD,
             ))
             .map_err(|error| error.to_string())?;
-            if name == "image" {
-                request.input_b64 = Some(data_b64);
-                request.input_content_type = Some(value.content_type.clone());
-            } else {
-                request.inputs.get_or_insert_with(Vec::new).push(NamedInputJson {
-                    name: name.clone(),
-                    content_type: value.content_type.clone(),
-                    data_b64,
-                });
+            let configured = domain_routes.and_then(|routes| {
+                routes
+                    .iter()
+                    .find_map(|(port, destination)| (*port == name).then_some(*destination))
+            });
+            match configured {
+                Some(MediaDestination::Primary) => {
+                    request.input_b64 = Some(data_b64);
+                    request.input_content_type = Some(value.content_type.clone());
+                }
+                None if domain_routes.is_none() && name == "image" => {
+                    request.input_b64 = Some(data_b64);
+                    request.input_content_type = Some(value.content_type.clone());
+                }
+                Some(MediaDestination::Named(wire_name)) => {
+                    request.inputs.get_or_insert_with(Vec::new).push(NamedInputJson {
+                        name: wire_name.to_string(),
+                        content_type: value.content_type.clone(),
+                        data_b64,
+                    });
+                }
+                None => {
+                    request.inputs.get_or_insert_with(Vec::new).push(NamedInputJson {
+                        name: name.clone(),
+                        content_type: value.content_type.clone(),
+                        data_b64,
+                    });
+                }
             }
         }
     }
