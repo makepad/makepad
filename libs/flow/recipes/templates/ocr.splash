@@ -1,0 +1,30 @@
+use mod.flow.*
+
+/** Optional OCR instruction; empty uses Chandra's transcription prompt. */
+let prompt = Input{ type: @text  default: ""  at: vec2(40, 80) }
+
+/** The scanned page to transcribe. */
+let image = Input{ type: @image  at: vec2(40, 240) }
+
+let ocr = Gen{
+    kind: @gen
+    domain: "ocr"
+    type_name: "Ocr"
+    prompt: prompt.text()
+    image: image.image()
+    max_tokens: 12384
+    model: "chandra-ocr-2"
+    ports: { in: [@prompt, @image], out: [@text] }
+    text: fn() { self.out(@text) }
+    ui: mod.flow.ui.GenFace
+    at: vec2(360, 160)
+}
+
+/** The page transcription as HTML text. */
+let transcription = Output{ type: @text  value: ocr.text()  at: vec2(680, 160) }
+
+Flow{
+    label: "OCR"
+    brief: "Transcribes a scanned page into HTML with the hub's OCR domain."
+    prompt, image, ocr, transcription
+}

@@ -1,0 +1,37 @@
+use mod.flow.*
+
+/** What to paint. */
+let prompt = Input{ type: @text  default: "a lighthouse at dusk"  at: vec2(40, 120) }
+
+let expand = Llm{
+    system: "Rewrite the prompt as one vivid paragraph for an image model.
+             Keep the subject. Add light, lens, material, mood. No lists."
+    prompt: prompt.text()
+    at: vec2(360, 120)
+}
+
+let styled = Fn{
+    in: { text: expand.text()  style: "photo" }
+    out: [@text]
+    run: |in| { {text: in.text + ", " + in.style + " style"} }
+    at: vec2(680, 120)
+}
+
+let image = Image{
+    prompt: styled.text()
+    width: 1024  height: 1024  steps: 8
+    at: vec2(1000, 120)
+    ui: ImageFace{
+        /* the AI added a style picker; its value feeds the Fn above */
+        style := DropDown{ labels: ["photo", "anime", "oil paint"]  bind: styled.style }
+    }
+}
+
+/** The finished picture. */
+let picture = Output{ type: @image  value: image.image() }
+
+Flow{
+    label: "Prompt to image"
+    brief: "Expands a short prompt into a rich one and paints it."
+    prompt, expand, styled, image, picture
+}

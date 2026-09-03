@@ -1,0 +1,36 @@
+use mod.flow.*
+
+/** A short description retained on the generated mesh. */
+let prompt = Input{ type: @text  default: "a low-poly brass diving helmet"  at: vec2(40, 80) }
+
+/** The isolated object reference. */
+let image = Input{ type: @image  at: vec2(40, 240) }
+
+let mesh = Mesh{
+    prompt: prompt.text()
+    image: image.image()
+    remesh_resolution: 512
+    texture: false
+    decimation_target: 12000
+    texture_size: 1024
+    model: "trellis-2"
+    at: vec2(360, 160)
+}
+
+let paint = Paint{
+    prompt: prompt.text()
+    mesh: mesh.mesh()
+    reference_image: image.image()
+    texture_size: 1024
+    model: "hunyuan3d-paint-2.1"
+    at: vec2(680, 160)
+}
+
+/** The PBR-painted GLB. */
+let model = Output{ type: @mesh  value: paint.mesh()  at: vec2(1000, 160) }
+
+Flow{
+    label: "Image to PBR mesh"
+    brief: "Reconstructs a supplied object image as a TRELLIS mesh and paints a PBR atlas from the same reference."
+    prompt, image, mesh, paint, model
+}
