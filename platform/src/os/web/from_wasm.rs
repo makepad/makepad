@@ -376,6 +376,9 @@ pub struct WColorTarget {
 
 #[derive(FromWasm, Default)]
 pub struct WDepthTarget {
+    /// false = the pass has no depth texture (`Default`); a texture id of 0 is
+    /// a real texture, so absence needs its own flag.
+    pub attached: bool,
     pub texture_id: usize,
     pub init_only: bool,
     pub clear_depth: f32,

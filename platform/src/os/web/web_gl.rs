@@ -495,6 +495,7 @@ impl Cx {
             match self.passes[draw_pass_id].clear_depth {
                 DrawPassClearDepth::InitWith(clear_depth) => {
                     depth_target = WDepthTarget {
+                        attached: true,
                         texture_id: depth_texture.texture_id().0,
                         init_only: true,
                         clear_depth,
@@ -502,6 +503,7 @@ impl Cx {
                 }
                 DrawPassClearDepth::ClearWith(clear_depth) => {
                     depth_target = WDepthTarget {
+                        attached: true,
                         texture_id: depth_texture.texture_id().0,
                         init_only: false,
                         clear_depth,
