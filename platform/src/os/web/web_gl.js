@@ -22,6 +22,7 @@ export class WasmWebGL extends WasmWebBrowser {
     this.webgl_shader_batch_failed_count = 0;
     this.webgl_shader_summary_timer = undefined;
     this.video_players = {};
+    this.bgra_upload_scratch = new Uint32Array(0);
     this.init_webgl_context();
 
     this.load_deps();
@@ -932,11 +933,23 @@ export class WasmWebGL extends WasmWebBrowser {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     //gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-    let data_array = new Uint8Array(
+    let pixel_count = args.width * args.height;
+    let source = new Uint32Array(
       this.memory.buffer,
       args.data.ptr,
-      args.width * args.height * 4,
+      pixel_count,
     );
+    if (this.bgra_upload_scratch.length < pixel_count) {
+      this.bgra_upload_scratch = new Uint32Array(pixel_count);
+    }
+    let converted = this.bgra_upload_scratch;
+    for (let i = 0; i < pixel_count; i++) {
+      let v = source[i];
+      converted[i] =
+        ((v & 0xff) << 16) | (v & 0xff00ff00) | ((v >>> 16) & 0xff);
+    }
+    // UNSIGNED_BYTE uploads must come from a Uint8Array view.
+    let data_array = new Uint8Array(converted.buffer, 0, pixel_count * 4);
     //agdconsole.log(args.width, args.height);
     gl.texImage2D(
       gl.TEXTURE_2D,
@@ -1023,12 +1036,22 @@ export class WasmWebGL extends WasmWebBrowser {
     gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
 
-    let face_size = args.width * args.height * 4;
-    let all_faces = new Uint8Array(
+    let face_pixels = args.width * args.height;
+    let pixel_count = face_pixels * 6;
+    let source = new Uint32Array(
       this.memory.buffer,
       args.data.ptr,
-      face_size * 6,
+      pixel_count,
     );
+    if (this.bgra_upload_scratch.length < pixel_count) {
+      this.bgra_upload_scratch = new Uint32Array(pixel_count);
+    }
+    let all_faces = this.bgra_upload_scratch;
+    for (let i = 0; i < pixel_count; i++) {
+      let v = source[i];
+      all_faces[i] =
+        ((v & 0xff) << 16) | (v & 0xff00ff00) | ((v >>> 16) & 0xff);
+    }
     let faces = [
       gl.TEXTURE_CUBE_MAP_POSITIVE_X,
       gl.TEXTURE_CUBE_MAP_NEGATIVE_X,
@@ -1038,9 +1061,11 @@ export class WasmWebGL extends WasmWebBrowser {
       gl.TEXTURE_CUBE_MAP_NEGATIVE_Z,
     ];
     for (let i = 0; i < 6; i++) {
-      let begin = i * face_size;
-      let end = begin + face_size;
-      let data_array = all_faces.subarray(begin, end);
+      let data_array = new Uint8Array(
+        all_faces.buffer,
+        i * face_pixels * 4,
+        face_pixels * 4,
+      );
       gl.texImage2D(
         faces[i],
         0,
