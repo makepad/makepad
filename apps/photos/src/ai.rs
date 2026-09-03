@@ -109,7 +109,7 @@ pub fn answer(cx: &mut Cx, view: &mut PhotosView, call: &ServiceCall) -> Answere
             let title = str_arg(call, "title").filter(|t| !t.is_empty()).unwrap_or_else(|| {
                 path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
             });
-            return match view.start_add(id, &path, &title) {
+            return match view.start_add(cx, id, &path, &title) {
                 Ok(()) => Answered::Later,
                 Err(why) => Answered::Now(ToolResult::failed(id, why)),
             };

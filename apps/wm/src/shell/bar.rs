@@ -204,11 +204,19 @@ pub fn volume_icon(level: Option<u32>, muted: bool) -> Ico {
 // ======================================================================
 
 fn run(cmd: &str, args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new(cmd).args(args).output().ok()?;
-    if !out.status.success() {
-        return None;
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (cmd, args);
+        None
     }
-    String::from_utf8(out.stdout).ok()
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let out = std::process::Command::new(cmd).args(args).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8(out.stdout).ok()
+    }
 }
 
 /// `date +"%A %H:%M"` — omarchy's `dddd HH:mm`.
@@ -239,44 +247,50 @@ pub struct SampledStatus {
     pub bluetooth: Option<bool>,
 }
 
-/// Spawn the sampler thread: refreshes the cheap facts every second and
-/// the slow ones every fifth round, then wakes the UI to copy the cache.
+/// Spawn the lifetime sampler worker: refreshes the cheap facts every second
+/// and the slow ones every fifth round, then sends an immutable snapshot to
+/// the UI. Dropping the receiver ends the worker.
 pub fn start_status_sampler(
-) -> std::sync::Arc<std::sync::Mutex<SampledStatus>> {
-    use makepad_widgets::makepad_platform::thread::SignalToUI;
-    use std::sync::{Arc, Mutex};
-    let cache = Arc::new(Mutex::new(SampledStatus::default()));
-    let writer = Arc::clone(&cache);
-    let _ = std::thread::Builder::new()
-        .name("wm-status".into())
-        .spawn(move || {
+    spawner: &makepad_widgets::makepad_platform::thread::ThreadSpawner,
+) -> Result<
+    (
+        std::sync::mpsc::Receiver<SampledStatus>,
+        makepad_widgets::makepad_platform::thread::TaskHandle<()>,
+    ),
+    makepad_widgets::makepad_platform::thread::SpawnError,
+> {
+    use makepad_widgets::makepad_platform::thread::{CancellationToken, SignalToUI, ThreadOptions};
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = spawner.spawn_worker(
+        ThreadOptions {
+            name: Some("wm-status".into()),
+            ..Default::default()
+        },
+        move || {
             let mut round: u32 = 0;
+            let mut status = SampledStatus::default();
+            let wait = CancellationToken::new();
             loop {
                 let (volume, muted) = sample_volume();
-                let clock = sample_clock(false);
-                let clock_alt = sample_clock(true);
-                let slow = if round % 5 == 0 {
-                    Some((sample_battery(), sample_network(), sample_bluetooth()))
-                } else {
-                    None
-                };
-                if let Ok(mut s) = writer.lock() {
-                    s.volume = volume;
-                    s.muted = muted;
-                    s.clock = clock;
-                    s.clock_alt = clock_alt;
-                    if let Some((battery, network, bluetooth)) = slow {
-                        s.battery = battery;
-                        s.network = network;
-                        s.bluetooth = bluetooth;
-                    }
+                status.volume = volume;
+                status.muted = muted;
+                status.clock = sample_clock(false);
+                status.clock_alt = sample_clock(true);
+                if round % 5 == 0 {
+                    status.battery = sample_battery();
+                    status.network = sample_network();
+                    status.bluetooth = sample_bluetooth();
+                }
+                if tx.send(status.clone()).is_err() {
+                    break;
                 }
                 SignalToUI::set_ui_signal();
                 round = round.wrapping_add(1);
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                let _ = wait.wait_until(makepad_widgets::Cx::monotonic_now() + 1.0);
             }
-        });
-    cache
+        },
+    )?;
+    Ok((rx, worker))
 }
 
 /// Output volume and mute, from the shared system mixer.

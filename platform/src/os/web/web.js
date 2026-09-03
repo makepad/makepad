@@ -496,6 +496,10 @@ export class WasmWebBrowser extends WasmBridge {
         return performance.now() / 1000.0;
     }
 
+    js_worker_wait(_timeout_ms) {
+        throw new Error("js_worker_wait may only run in a Web Worker");
+    }
+
     js_wake_ui() {
         if (makepad_crash_reporter.is_wasm_dead()) {
             makepad_crash_reporter.suppress_followup();

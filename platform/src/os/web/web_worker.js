@@ -92,6 +92,7 @@ onmessage = async function (e) {
     let web_sockets = {}
     let network_web_sockets = {}
     let network_http_requests = new Map();
+    let worker_wait_word = new Int32Array(new SharedArrayBuffer(4));
 
     function id_to_key(lo, hi) {
         return `${lo}:${hi}`;
@@ -113,6 +114,10 @@ onmessage = async function (e) {
                 name: u8_to_string(name_ptr, name_len)
             });
             return 1;
+        },
+
+        js_worker_wait(timeout_ms) {
+            Atomics.wait(worker_wait_word, 0, 0, timeout_ms);
         },
 
         js_console_error: (str_ptr, str_len) => {

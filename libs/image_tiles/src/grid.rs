@@ -28,7 +28,6 @@ use crate::tape::{fit_dims, page_size, Planes, FullFrame, GRID, LEVELS, PYRAMID_
 use makepad_widgets::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -385,8 +384,6 @@ pub struct TileGrid {
     #[rust]
     tween_start: Option<f64>,
     #[rust]
-    start: Option<Instant>,
-    #[rust]
     next_frame: NextFrame,
     #[rust]
     last_time: f64,
@@ -447,16 +444,15 @@ pub struct TileGrid {
 }
 
 impl TileGrid {
-    fn time(&mut self) -> f64 {
-        let start = *self.start.get_or_insert_with(Instant::now);
-        start.elapsed().as_secs_f64()
+    fn time(&self) -> f64 {
+        Cx::monotonic_now()
     }
 
     /// Open a baked library: read the index, spawn the decode pool, lay the
     /// grid out and ask for every shard's coarsest page so the whole set
     /// shows the moment the first decodes land.
     pub fn open(&mut self, cx: &mut Cx, library: Library) {
-        if let Some(store) = self.store.take() {
+        if let Some(mut store) = self.store.take() {
             store.shutdown();
         }
         self.items.clear();
@@ -485,10 +481,11 @@ impl TileGrid {
         };
         self.items = rows.iter().filter_map(item_of).collect();
         self.visible = (0..self.items.len()).collect();
-        let store = store::spawn(library, &cx.thread_spawner());
+        let mut store = store::spawn(library, cx.task_pool());
         for shard in shards.iter().filter(|s| s.sealed) {
-            store.need_page(shard.id, LEVELS - 1, 1);
-            self.requested.insert((shard.id, LEVELS - 1));
+            if store.need_page(shard.id, LEVELS - 1, 1) {
+                self.requested.insert((shard.id, LEVELS - 1));
+            }
         }
         self.store = Some(store);
         self.relayout();
@@ -837,7 +834,8 @@ impl TileGrid {
     // ── store events ───────────────────────────────────────────────────
 
     fn drain_store(&mut self, cx: &mut Cx) {
-        let Some(store) = self.store.take() else { return };
+        let Some(mut store) = self.store.take() else { return };
+        store.reap_finished();
         let mut redraw = false;
         while let Ok(event) = store.events.try_recv() {
             redraw = true;
@@ -1014,7 +1012,7 @@ impl Widget for TileGrid {
             self.drain_store(cx);
         }
         if let Event::Shutdown = event {
-            if let Some(store) = self.store.take() {
+            if let Some(mut store) = self.store.take() {
                 store.shutdown();
             }
         }
@@ -1268,13 +1266,15 @@ impl Widget for TileGrid {
             page.last_used = frame;
             passes.push(Pass { y: page.y.clone(), uv: page.uv.clone(), fade, tiles });
         }
-        for (&key, &priority) in &want_pages {
+        let mut page_needs: Vec<_> = want_pages.iter().map(|(&key, &priority)| (key, priority)).collect();
+        page_needs.sort_unstable_by_key(|(_, priority)| std::cmp::Reverse(*priority));
+        for (key, priority) in page_needs {
             if embargoed(&mut self.page_failed, key, now) {
                 continue;
             }
-            if let Some(store) = &self.store {
-                if self.requested.insert(key) {
-                    store.need_page(key.0, key.1, priority);
+            if let Some(store) = &mut self.store {
+                if !self.requested.contains(&key) && store.need_page(key.0, key.1, priority) {
+                    self.requested.insert(key);
                 }
             }
         }
@@ -1362,9 +1362,9 @@ impl Widget for TileGrid {
             if embargoed(&mut self.full_failed, key, now) {
                 continue;
             }
-            if let Some(store) = &self.store {
-                if self.full_requested.insert(key) {
-                    store.need_full(key, want, area as u64);
+            if let Some(store) = &mut self.store {
+                if !self.full_requested.contains(&key) && store.need_full(key, want, area as u64) {
+                    self.full_requested.insert(key);
                 }
             }
         }
@@ -1375,7 +1375,7 @@ impl Widget for TileGrid {
         // the moment it comes back.
         if self.frame % 15 == 0 || self.beat_now {
             self.beat_now = false;
-            if let Some(store) = &self.store {
+            if let Some(store) = &mut self.store {
                 let fulls: HashMap<ItemId, u64> = full_visible.iter().copied().collect();
                 store.wants(&want_pages, &fulls);
                 self.requested.retain(|k| want_pages.contains_key(k));

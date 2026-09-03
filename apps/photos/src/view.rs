@@ -12,9 +12,9 @@ use crate::library;
 use makepad_ai_services::wire::ToolResult;
 use makepad_image_tiles::library::ItemId;
 use makepad_image_tiles::{Library, TileGrid, TileGridAction};
+use makepad_widgets::makepad_platform::thread::{Lane, TaskHandle};
 use makepad_widgets::*;
 use std::path::Path;
-use std::sync::mpsc::Receiver;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -95,12 +95,11 @@ pub struct PhotosView {
     show_when_opened: Option<String>,
 }
 
-/// One `photos.add` in flight: the bake runs on its own thread (the tape
-/// encoder is blocking) and reports here.
+/// One `photos.add` in flight: the blocking tape bake is a heavy pool job.
 pub struct PendingAdd {
     call_id: String,
     path: String,
-    done: Receiver<Result<makepad_image_tiles::bake::BakeSummary, String>>,
+    done: TaskHandle<Result<makepad_image_tiles::bake::BakeSummary, String>>,
 }
 
 impl PhotosView {
@@ -227,35 +226,44 @@ impl PhotosView {
     /// the wall re-opens and glides onto it when the bake reports. The
     /// answer goes out through `reply` — `Err` here means nothing was
     /// started and the caller answers now.
-    pub fn start_add(&mut self, call_id: &str, path: &Path, title: &str) -> Result<(), String> {
+    pub fn start_add(
+        &mut self,
+        cx: &mut Cx,
+        call_id: &str,
+        path: &Path,
+        title: &str,
+    ) -> Result<(), String> {
         if self.library_root.is_empty() {
             return Err("no library is open on this wall".to_string());
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = (call_id, path, title);
+            let _ = (cx, call_id, path, title);
             Err("adding pictures needs the native app".to_string())
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
             use makepad_image_tiles::bake::{bake, BakeOptions, Source};
-            use makepad_widgets::makepad_platform::thread::SignalToUI;
             let root = std::path::PathBuf::from(&self.library_root);
             let path_text = path.to_string_lossy().to_string();
             let source = Source { url: path_text.clone(), title: title.to_string(), link: path_text.clone() };
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::Builder::new()
-                .name("photos-add".into())
-                .spawn(move || {
+            let pool = cx.task_pool();
+            let bake_pool = pool.clone();
+            let done = pool
+                .submit(Lane::Heavy, move || {
                     // One picture: one fetch, one encode. The library's own
                     // failed items stay failed — an add is about this file.
                     let options = BakeOptions { fetch_threads: 1, encode_threads: 1, retry_failed: false };
-                    let result = bake(&root, &[source], &options, &mut |line| log!("photos add: {line}"));
-                    let _ = tx.send(result);
-                    SignalToUI::set_ui_signal();
+                    bake(
+                        &root,
+                        &[source],
+                        &options,
+                        &mut |line| log!("photos add: {line}"),
+                        &bake_pool,
+                    )
                 })
-                .map_err(|e| format!("could not start the bake: {e}"))?;
-            self.adds.push(PendingAdd { call_id: call_id.to_string(), path: path_text, done: rx });
+                .map_err(|e| format!("could not queue the bake: {e}"))?;
+            self.adds.push(PendingAdd { call_id: call_id.to_string(), path: path_text, done });
             Ok(())
         }
     }
@@ -267,16 +275,16 @@ impl PhotosView {
             return;
         }
         let mut finished = Vec::new();
-        self.adds.retain(|add| match add.done.try_recv() {
-            Ok(result) => {
+        self.adds.retain_mut(|add| match add.done.try_take() {
+            Some(Ok(result)) => {
                 finished.push((add.call_id.clone(), add.path.clone(), result));
                 false
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => true,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                finished.push((add.call_id.clone(), add.path.clone(), Err("the bake thread died".to_string())));
+            Some(Err(error)) => {
+                finished.push((add.call_id.clone(), add.path.clone(), Err(format!("bake task failed: {error}"))));
                 false
             }
+            None => true,
         });
         for (call_id, path, result) in finished {
             let answer = match result {
