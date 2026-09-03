@@ -272,6 +272,11 @@ pub enum TileWorkerMessage {
         tile_key: TileKey,
         error: String,
     },
+    TileJobPanicked {
+        style_epoch: u64,
+        tile_key: TileKey,
+        error: String,
+    },
 }
 
 #[derive(Debug)]
@@ -831,6 +836,57 @@ fn split_band_by(
                 new_index
             };
             band_indices.push(mapped);
+        }
+    }
+    *vertices = low_vertices;
+    *indices = low_indices;
+    (high_vertices, high_indices)
+}
+
+/// Partition triangles by a predicate over all three vertex records. A
+/// vertex shared by triangles in different bands is copied into each band;
+/// no triangle can carry a record that did not participate in its decision.
+fn split_band_by_all(
+    vertices: &mut Vec<f32>,
+    indices: &mut Vec<u32>,
+    predicate: impl Fn(&[f32]) -> bool,
+) -> (Vec<f32>, Vec<u32>) {
+    let vert_count = vertices.len() / VECTOR_FLOATS_PER_VERTEX;
+    let is_high = vertices
+        .chunks_exact(VECTOR_FLOATS_PER_VERTEX)
+        .map(predicate)
+        .collect::<Vec<_>>();
+    let record = |index: u32| {
+        let start = index as usize * VECTOR_FLOATS_PER_VERTEX;
+        &vertices[start..start + VECTOR_FLOATS_PER_VERTEX]
+    };
+    let any_high = indices
+        .chunks_exact(3)
+        .any(|tri| tri.iter().all(|&index| is_high[index as usize]));
+    if !any_high {
+        return (Vec::new(), Vec::new());
+    }
+
+    let mut low_vertices = Vec::new();
+    let mut low_indices = Vec::new();
+    let mut high_vertices = Vec::new();
+    let mut high_indices = Vec::new();
+    let mut low_remap = vec![u32::MAX; vert_count];
+    let mut high_remap = vec![u32::MAX; vert_count];
+    for tri in indices.chunks_exact(3) {
+        let high = tri.iter().all(|&index| is_high[index as usize]);
+        let (band_vertices, band_indices, remap) = if high {
+            (&mut high_vertices, &mut high_indices, &mut high_remap)
+        } else {
+            (&mut low_vertices, &mut low_indices, &mut low_remap)
+        };
+        for &old in tri {
+            let slot = &mut remap[old as usize];
+            if *slot == u32::MAX {
+                *slot = (band_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
+                band_vertices.extend_from_slice(record(old));
+            }
+            band_indices.push(*slot);
         }
     }
     *vertices = low_vertices;
@@ -4502,6 +4558,68 @@ fn split_fringe_band_then_road_pack_round_trips() {
     assert_eq!(meta1, ROAD_PARAM_KIND_SCALE * 2.0);
     assert!((cov0 - 1.0).abs() < 0.001);
     assert_eq!(cov1, 0.0);
+}
+
+#[cfg(test)]
+#[test]
+fn map_face_band_split_requires_all_three_triangle_records() {
+    use crate::makepad_draw::vector::{
+        pack_road_record, FACE_TYPED_VERTEX_BYTES, ROAD_KIND_FILL,
+        ROAD_PARAM_KIND_SCALE,
+    };
+
+    // RoadPaintEvent::Face emits this exact record shape for a deck field
+    // crossing ground: fill uv throughout, but a per-vertex ramp height.
+    let verts = [
+        VVertex { x: 0.0, y: 0.0, u: 0.5, v: 1.0, ..Default::default() },
+        VVertex { x: 1.0, y: 0.0, u: 0.5, v: 1.0, ..Default::default() },
+        VVertex { x: 0.0, y: 1.0, u: 0.5, v: 1.0, ..Default::default() },
+        VVertex { x: 2.0, y: 0.0, u: 0.5, v: 1.0, ..Default::default() },
+        VVertex { x: 3.0, y: 0.0, u: 0.5, v: 1.0, ..Default::default() },
+        VVertex { x: 2.0, y: 1.0, u: 0.5, v: 1.0, ..Default::default() },
+    ];
+    let source_indices = [0, 1, 2, 3, 4, 5];
+    let decks = [0.0, 0.25, 0.5, 0.0, 0.0, 0.0];
+    let mut casing_vertices = Vec::new();
+    let mut casing_indices = Vec::new();
+    append_tessellated_geometry_decked(
+        &verts,
+        &source_indices,
+        &mut casing_vertices,
+        &mut casing_indices,
+        VectorRenderParams {
+            color: [0.2, 0.4, 0.6, 1.0],
+            stroke_mult: 1e6,
+            shape_id: 0.0,
+            params: [0.0; 6],
+            zbias: 0.0,
+        },
+        Some(&decks),
+    );
+
+    let emitted = casing_vertices.clone();
+    let (face_vertices, face_indices) = split_band_by_all(
+        &mut casing_vertices,
+        &mut casing_indices,
+        is_compact_face_record,
+    );
+
+    assert_eq!(casing_indices, [0, 1, 2], "the mixed ramp triangle stays on the road path");
+    assert_eq!(face_indices, [0, 1, 2], "the wholly compact triangle moves to the face path");
+    assert_eq!(casing_vertices, emitted[..3 * VECTOR_FLOATS_PER_VERTEX]);
+    assert_eq!(face_vertices, emitted[3 * VECTOR_FLOATS_PER_VERTEX..]);
+    for (record, expected_deck) in emitted
+        .chunks_exact(VECTOR_FLOATS_PER_VERTEX)
+        .take(3)
+        .zip(decks)
+    {
+        let road = pack_road_record(record);
+        assert_eq!(road.off.to_f32(), (0.0, 0.0));
+        assert_eq!(road.deck, expected_deck);
+        assert_eq!(road.uv.to_f32(), (0.5, 1.0));
+        assert_eq!(road.params.to_f32().0, ROAD_PARAM_KIND_SCALE * ROAD_KIND_FILL);
+    }
+    assert_eq!(pack_face_vertices(&face_vertices).len(), 3 * FACE_TYPED_VERTEX_BYTES);
 }
 
 /// A primary road (a union tier) crossing nothing, and a tram line (a
@@ -8202,11 +8320,15 @@ fn build_tile_buffers_from_features_profiled(
     } else {
         (Vec::new(), Vec::new())
     };
-    // Grounded union faces take the 16-byte face layout; the split keeps
-    // both streams in emission order. Faces are whole triangles by
-    // construction (one record kind per feature), so nothing duplicates.
-    let (face_vertices, face_indices) =
-        split_band_by(&mut casing_vertices, &mut casing_indices, is_compact_face_record);
+    // Grounded union faces take the 16-byte face layout. Deck fields can
+    // cross zero inside one ramp triangle, so only triangles whose THREE
+    // records project losslessly may enter the compact stream. Mixed
+    // triangles stay on the road layout and shared vertices are copied.
+    let (face_vertices, face_indices) = split_band_by_all(
+        &mut casing_vertices,
+        &mut casing_indices,
+        is_compact_face_record,
+    );
     // 3D band sub-splits by material (param3, slot 14): walls skip at the
     // mid LOD ring ("roofs only"), canopy balls swap to crossed quads far
     // out. Materials were authored per-append so the predicate is exact.
