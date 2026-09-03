@@ -31,7 +31,8 @@
 //! The card is opaque and picking never reaches through it.
 //!
 //! Its three buttons are — close (far left, where a window's close control
-//! lives), ✦ send and 📌 pin. Sending
+//! lives) and, at the right, Send and Pin — labelled, because an icon alone
+//! is a guess about what a button does to what you just wrote. Sending
 //! (`Ctrl+Enter` or ✦) does not push anything — the bridge is a server — it
 //! raises the note's `sent` count, which `/tweak/state` reports as
 //! `"ask": N` and the log ring carries as `TWEAK ask #N`. A polling agent
@@ -46,9 +47,10 @@
 //! a scene editor does: parent, first child, previous/next sibling. With
 //! nothing selected they still belong to the exploded view's orbit.
 //!
-//! Two smaller readouts round the selection out: the `size` row prints what
-//! the layout actually produced under the Fill/Fit/number controls that
-//! asked for it, and clicking the footer's path line copies the whole path
+//! Two smaller readouts round the selection out: a full-width line at the
+//! top of the Layout section prints what the layout actually produced, above
+//! the Fill/Fit/number controls that asked for it, and clicking the footer's
+//! path line copies the whole path
 //! to the clipboard — the panel can only show it head-clipped, and a path
 //! you cannot select is a path you cannot quote.
 //!
@@ -4830,6 +4832,8 @@ enum VisKind {
     Prop(usize),
     /// width + height compacted onto one row.
     Size,
+    /// The measured rect, as one full-width line above the size controls.
+    Measured,
     /// Four-sided box editor (mini rectangle, drag-to-scrub legs).
     BoxInset(BoxKind),
     /// spacing + flow on one row.
@@ -5512,15 +5516,22 @@ impl Tweaker {
                                 }
                             }
                         }
-                        // What the two fields above ASKED for is Fill / Fit /
-                        // a number; this is what the layout actually gave --
-                        // the only place the measured size is readable.
-                        measured := FabLabelSmall {
-                            width: Fill
-                            margin: Inset{left: 0 right: 0 top: 2 bottom: 0}
-                            text: ""
-                            max_lines: 2
-                        }
+                    }
+                }
+                // What the size fields ASK for is Fill / Fit / a number; this
+                // says what the layout actually gave. Its own full-width line
+                // at the top of the Layout section, above the controls it
+                // reports on, so the numbers are not squeezed into a column.
+                let MeasuredRowT = View {
+                    width: Fill
+                    height: Fit
+                    flow: Right
+                    padding: Inset{left: 8 right: 8 top: 1 bottom: 3}
+                    measured := FabLabelSmall {
+                        width: Fill
+                        text: ""
+                        max_lines: 1
+                        text_overflow: TextOverflow.Ellipsis
                     }
                 }
                 let BoxRowT = FabPropRow {
@@ -5828,6 +5839,7 @@ impl Tweaker {
                             TextRow := TextRowT {}
                             InfoRow := InfoRowT {}
                             SizeRow := SizeRowT {}
+                            MeasuredRow := MeasuredRowT {}
                             BoxRow := BoxRowT {}
                             FlowRow := FlowRowT {}
                             AlignRow := AlignRowT {}
@@ -5938,6 +5950,7 @@ impl Tweaker {
                         InfoRow := InfoRowT {}
                         CascadeRow := CascadeRowT {}
                         SizeRow := SizeRowT {}
+                        MeasuredRow := MeasuredRowT {}
                         BoxRow := BoxRowT {}
                         FlowRow := FlowRowT {}
                         AlignRow := AlignRowT {}
@@ -6037,6 +6050,26 @@ impl Tweaker {
                         color: #x00000000
                     }
                 }
+                // The two buttons that DO something to the note say what:
+                // an icon alone is a guess, and there is room on the strip.
+                // (Close keeps its bare glyph — the meaning of a — in a
+                // title bar is not in doubt.)
+                let NoteBtnLabelled = Button {
+                    width: Fit
+                    height: 15
+                    padding: Inset{left: 3 right: 5 top: 0 bottom: 0}
+                    margin: Inset{left: 0 right: 2 top: 0 bottom: 0}
+                    spacing: 3
+                    align: Align{x: 0.5 y: 0.5}
+                    icon_walk: Walk{width: 9 height: Fit}
+                    draw_bg +: {
+                        color: #x00000000
+                    }
+                    draw_text +: {
+                        color: #xc8c8d4
+                        text_style +: { font_size: 7.5 }
+                    }
+                }
                 // The card's own body has NO background: a plain `View`'s
                 // draw_bg is a bare DrawQuad whose default pixel fn returns
                 // #0000, so `show_bg` plus a `color` paints nothing at all —
@@ -6081,13 +6114,15 @@ impl Tweaker {
                             width: Fill
                             height: Fill
                         }
-                        send := NoteBtn {
+                        send := NoteBtnLabelled {
+                            text: "Send"
                             draw_icon +: {
                                 color: #x8fd8ff
                                 svg: crate_resource("self:resources/icons/note_send.svg")
                             }
                         }
-                        pin := NoteBtn {
+                        pin := NoteBtnLabelled {
+                            text: "Pin"
                             draw_icon +: {
                                 color: #xc8c8d4
                                 svg: crate_resource("self:resources/icons/note_pin.svg")
@@ -6801,6 +6836,9 @@ impl Tweaker {
             let theme = self.panel_tab == PanelTab::Theme;
             let composites: Vec<VisKind> = if section == SectionKind::Layout && !filtering && !theme {
                 let mut list = Vec::new();
+                // The measurement first, then the controls that produced
+                // it: read what it IS, then change what it asks for.
+                list.push(VisKind::Measured);
                 // Always present: an axis with no reflected row IS the Fit
                 // state — the segments must still show it.
                 list.push(VisKind::Size);
@@ -7419,6 +7457,7 @@ impl Tweaker {
                     VisKind::More(..) => live_id!(MoreRow),
                     VisKind::Material(_) => live_id!(MaterialRow),
                     VisKind::Size => live_id!(SizeRow),
+                    VisKind::Measured => live_id!(MeasuredRow),
                     VisKind::BoxInset(_) => live_id!(BoxRow),
                     VisKind::FlowSpacing => live_id!(FlowRow),
                     VisKind::AlignGrid => live_id!(AlignRow),
@@ -7522,45 +7561,41 @@ impl Tweaker {
                             }
                         }
                     }
+                    VisKind::Measured => {
+                        // Straight off the selection: what the layout gave,
+                        // in the unit the size fields take, and — only when
+                        // the screen is not 1:1, where the two differ — the
+                        // device pixels it actually covers.
+                        let rect = session()
+                            .lock()
+                            .unwrap()
+                            .pinned
+                            .as_ref()
+                            .map(|p| p.rect)
+                            .unwrap_or_default();
+                        let dpi = cx.current_dpi_factor();
+                        let text = if rect.size.x <= 0.0 && rect.size.y <= 0.0 {
+                            String::new()
+                        } else if (dpi - 1.0).abs() < 0.001 {
+                            format!(
+                                "measured {} \u{00d7} {} px",
+                                fmt_measure(rect.size.x),
+                                fmt_measure(rect.size.y)
+                            )
+                        } else {
+                            format!(
+                                "measured {} \u{00d7} {} = {} \u{00d7} {} device px",
+                                fmt_measure(rect.size.x),
+                                fmt_measure(rect.size.y),
+                                fmt_measure((rect.size.x * dpi).round()),
+                                fmt_measure((rect.size.y * dpi).round())
+                            )
+                        };
+                        item.child(live_id!(measured)).set_text(cx, &text);
+                    }
                     VisKind::Size => {
                         item.child(live_id!(name)).set_text(cx, "size");
                         let size_col = item.child(live_id!(size_col));
-                        // The measured rect, straight off the selection: the
-                        // fields say Fill / Fit, this says what that came out
-                        // as. Layout points first, because that is the unit
-                        // the fields take; the device pixels only when the
-                        // screen is not 1:1, where the two actually differ.
-                        {
-                            let rect = session()
-                                .lock()
-                                .unwrap()
-                                .pinned
-                                .as_ref()
-                                .map(|p| p.rect)
-                                .unwrap_or_default();
-                            let dpi = cx.current_dpi_factor();
-                            // Two lines, because one does not fit the
-                            // column: what the fields are in, then what the
-                            // screen actually shows.
-                            let text = if rect.size.x <= 0.0 && rect.size.y <= 0.0 {
-                                String::new()
-                            } else if (dpi - 1.0).abs() < 0.001 {
-                                format!(
-                                    "measured {} \u{00d7} {} px",
-                                    fmt_measure(rect.size.x),
-                                    fmt_measure(rect.size.y)
-                                )
-                            } else {
-                                format!(
-                                    "measured {} \u{00d7} {}\n{} \u{00d7} {} device px",
-                                    fmt_measure(rect.size.x),
-                                    fmt_measure(rect.size.y),
-                                    fmt_measure((rect.size.x * dpi).round()),
-                                    fmt_measure((rect.size.y * dpi).round())
-                                )
-                            };
-                            size_col.child(live_id!(measured)).set_text(cx, &text);
-                        }
                         for (axis, row_id, seg_id, input_id, segs) in [
                             (
                                 "width",
@@ -9872,6 +9907,7 @@ impl Widget for Tweaker {
                                 }
                             }
                             VisKind::Size
+                            | VisKind::Measured
                             | VisKind::BoxInset(_)
                             | VisKind::FlowSpacing
                             | VisKind::AlignGrid => {}
