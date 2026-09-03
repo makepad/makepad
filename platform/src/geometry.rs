@@ -656,6 +656,25 @@ impl Default for CxGeometry {
 
 #[cfg(test)]
 #[test]
+fn a_reused_slot_invalidates_the_old_geometry_id() {
+    let mut cx = Cx::new(Box::new(|_, _| {}));
+    let first = Geometry::new(&mut cx);
+    let old_id = first.geometry_id();
+    assert!(!cx.geometries.skip_stale(old_id));
+    // Freed but not reused: the slot still holds what the id named.
+    drop(first);
+    assert!(!cx.geometries.skip_stale(old_id));
+    // Reused: same slot, new generation; the old id is stale and must skip.
+    let second = Geometry::new(&mut cx);
+    let new_id = second.geometry_id();
+    assert_eq!(new_id.slot_index(), old_id.slot_index());
+    assert_ne!(new_id.generation(), old_id.generation());
+    assert!(cx.geometries.skip_stale(old_id));
+    assert!(!cx.geometries.skip_stale(new_id));
+}
+
+#[cfg(test)]
+#[test]
 fn discarded_staging_preserves_resident_geometry_counts() {
     let mut geometry = CxGeometry {
         indices: IndexData::U32(vec![0, 1, 2]),

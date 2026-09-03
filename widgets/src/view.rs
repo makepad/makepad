@@ -967,6 +967,11 @@ impl Widget for View {
                             } else {*/
                             cx.set_pass_area(&texture_cache.pass, self.area);
                             //}
+                            // The cache hit still consumes the texture: keep
+                            // the pass attached, or a repaint of the cached
+                            // subtree (an animated child, `repaint`) would find
+                            // it orphaned and never re-render.
+                            cx.make_child_pass(&texture_cache.pass);
                         }
                         return DrawStep::done();
                     }

@@ -1467,6 +1467,44 @@ impl Cx {
     pub fn repaint_pass(&mut self, draw_pass_id: DrawPassId) {
         let cxpass = &mut self.passes[draw_pass_id];
         cxpass.paint_dirty = true;
+        cxpass.repaint_requested = true;
+    }
+
+    /// Parent `child` under `parent` for painting order on behalf of
+    /// `attached_by`: the draw list being recorded, whose draw calls consume
+    /// the child's output. That list is remembered with its current redraw
+    /// id; when it is recorded again without calling this, the child is
+    /// orphaned and no longer painted. `None` (no list open) parents without
+    /// a record, like `DrawPass::set_pass_parent`.
+    pub fn attach_child_pass(
+        &mut self,
+        child: DrawPassId,
+        parent: DrawPassId,
+        attached_by: Option<DrawListId>,
+    ) {
+        let attached_by =
+            attached_by.map(|list_id| (list_id, self.draw_lists[list_id].redraw_id));
+        let cxpass = &mut self.passes[child];
+        cxpass.parent = CxDrawPassParent::DrawPass(parent);
+        cxpass.attached_by = attached_by;
+    }
+
+    /// True when the draw list that attached `draw_pass_id` has been recorded
+    /// again since without re-attaching it, or was freed: nothing samples the
+    /// pass any more. Its own draw list is frozen at the frame that last began
+    /// it, and the geometries and textures those draw calls name may since
+    /// have been freed and their slots reused — painting it would draw
+    /// whatever now sits in them (the gauss scene pass after the window stopped
+    /// capturing was re-encoded every pan frame with the map's evicted tile
+    /// geometries under other tiles' meshes: tens of millions of triangles into
+    /// a texture nobody read).
+    pub fn pass_attachment_is_stale(&self, draw_pass_id: DrawPassId) -> bool {
+        let Some((list_id, redraw_id)) = self.passes[draw_pass_id].attached_by else {
+            return false;
+        };
+        // A dropped list (its widget is gone) keeps its slot and generation
+        // until reuse; that orphans the pass just the same.
+        self.draw_lists.is_id_freed(list_id) || self.draw_lists[list_id].redraw_id != redraw_id
     }
 
     pub fn repaint_pass_and_child_passes(&mut self, draw_pass_id: DrawPassId) {

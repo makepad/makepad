@@ -117,10 +117,15 @@ impl<'a> CxDraw<'a> {
         !self.pass_stack.is_empty()
     }
 
+    /// Declare `pass` a dependency of the pass being drawn, on behalf of the
+    /// draw list being recorded: call it on every draw that consumes the
+    /// pass's texture, whether or not the pass is begun again. A list that is
+    /// recorded again without it orphans the pass, which then stops painting
+    /// (`Cx::pass_attachment_is_stale`).
     pub fn make_child_pass(&mut self, pass: &DrawPass) {
-        let pass_id = self.pass_stack.last().unwrap().pass_id;
-        let cxpass = &mut self.passes[pass.draw_pass_id()];
-        cxpass.parent = CxDrawPassParent::DrawPass(pass_id);
+        let parent = self.pass_stack.last().unwrap().pass_id;
+        let attached_by = self.draw_list_stack.last().cloned();
+        self.cx.attach_child_pass(pass.draw_pass_id(), parent, attached_by);
     }
 
     pub fn begin_pass(&mut self, pass: &DrawPass, dpi_override: Option<f64>) {
