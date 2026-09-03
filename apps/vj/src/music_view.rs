@@ -3437,6 +3437,7 @@ script_mod! {
                         grid_halve := MusicButton{width: 34 height: 22 text: "÷2"}
                         grid_two_thirds := MusicButton{width: 38 height: 22 text: "×⅔"}
                         grid_three_quarters := MusicButton{width: 38 height: 22 text: "×¾"}
+                        grid_tap := MusicButton{width: 40 height: 22 text: "tap"}
                         grid_undo := MusicButton{width: 44 height: 22 text: "undo"}
                         grid_lock := MusicButton{width: 40 height: 22 text: "lock"}
                         View{width: Fill height: Fit}

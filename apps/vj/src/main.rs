@@ -6503,6 +6503,10 @@ pub struct App {
     /// Operator tap tempo, and the clock override its taps produce.
     #[rust]
     tap_tempo: TapTempo,
+    /// One tap collector per deck, for retuning that record's grid. Its
+    /// own rather than the room's: tapping a record is a measurement of
+    /// that record, and mixing the two runs would make each one wrong.
+    deck_tap: [TapTempo; 2],
     #[rust]
     beat_override: Option<BeatOverride>,
     /// App-clock time of the last TAP press, so the button can flash it.
@@ -27380,6 +27384,22 @@ impl MatchEvent for App {
             ] {
                 if self.ui.button(cx, id).clicked(actions) {
                     self.apply_grid_edit(cx, deck, edit);
+                }
+            }
+            if self.ui.button(cx, ids!(grid_tap)).clicked(actions) {
+                // Timestamped now and anchored on where the record IS: the
+                // tempo comes from room time and the ruling from track
+                // time, and the engine divides out the deck's rate.
+                let now = cx.seconds_since_app_start();
+                let at = self.mixer.deck_snapshot(deck).position_secs;
+                if self.deck_tap[deck.index()].tap(now).is_some() {
+                    if let Some(bpm) = self.deck_tap[deck.index()].trimmed_bpm() {
+                        if let Some((grid, cmds)) = self.decks.tap_grid(deck, bpm, at) {
+                            self.run_deck_cmds(cx, cmds);
+                            self.republish_grid(cx, deck, grid);
+                            self.save_loop_marks(deck);
+                        }
+                    }
                 }
             }
             if self.ui.button(cx, ids!(grid_undo)).clicked(actions) {

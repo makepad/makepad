@@ -464,6 +464,14 @@ pub const EDIT_BPM_MAX: f64 = 300.0;
 /// deciding without being an unbounded history.
 pub const GRID_UNDO_CAP: usize = 16;
 
+/// What put a step on the grid's undo stack. A run of one kind collapses,
+/// and a run of taps is one decision exactly as a run of doublings is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GridStep {
+    Edit(GridEdit),
+    Tap,
+}
+
 /// A correction a hand makes to a measured grid.
 ///
 /// Three, because the analyser has three ways of being wrong and they are
@@ -1115,7 +1123,7 @@ pub struct DeckState {
     /// Not a general undo: a run of presses on the same button is one
     /// decision -- four taps of DOUBLE is "this is at the wrong octave",
     /// not four things to take back one at a time.
-    pub grid_undo: Vec<(GridEdit, TrackGrid)>,
+    pub grid_undo: Vec<(GridStep, TrackGrid)>,
     /// This grid is right and nothing may change it: no correction, no
     /// flip, and not the analysis when it lands.
     pub grid_locked: bool,
@@ -4448,17 +4456,81 @@ impl DeckEngine {
         // A run of the same button is one decision: the step already on
         // the stack keeps the grid from BEFORE the run, so taking it back
         // undoes the whole run at once.
-        if state.grid_undo.last().map(|(kind, _)| *kind) != Some(edit) {
+        if state.grid_undo.last().map(|(step, _)| *step) != Some(GridStep::Edit(edit)) {
             if state.grid_undo.len() >= GRID_UNDO_CAP {
                 state.grid_undo.remove(0);
             }
-            state.grid_undo.push((edit, old));
+            state.grid_undo.push((GridStep::Edit(edit), old));
         }
         state.grid = Some(grid);
         state.grid_placed = true;
         // A corrected grid is a different record as far as the fitted
         // moving tempo is concerned: it was fitted against the line that
         // has just been replaced.
+        state.tempo_map = None;
+        let cmds = if self.deck(deck).synced || self.auto_sync {
+            self.apply_auto_sync_with(Some(SyncQuantize::Beat))
+        } else {
+            Vec::new()
+        };
+        Some((grid, cmds))
+    }
+
+    /// Retune this record's grid from a hand's tapping.
+    ///
+    /// `tapped_bpm` is what the taps measured in ROOM time and
+    /// `at_secs` is where the record was at the last of them. The record's
+    /// own tempo is the tapped one divided by the rate the deck is running
+    /// at -- tapping along with a deck pitched up measures the pitched
+    /// tempo, and the grid is a property of the record.
+    ///
+    /// The tapped beat becomes the first of the bar: a hand tapping a
+    /// record taps the one.
+    pub fn tap_grid(
+        &mut self,
+        deck: DeckId,
+        tapped_bpm: f64,
+        at_secs: f64,
+    ) -> Option<(TrackGrid, Vec<DeckCmd>)> {
+        let state = self.deck(deck);
+        if state.grid_locked || !state.is_loaded() {
+            return None;
+        }
+        if !tapped_bpm.is_finite() || !at_secs.is_finite() || at_secs < 0.0 {
+            return None;
+        }
+        let rate = if state.rate.is_finite() && state.rate > 1e-6 { state.rate } else { 1.0 };
+        let bpm = tapped_bpm / rate;
+        if !(EDIT_BPM_MIN..=EDIT_BPM_MAX).contains(&bpm) {
+            return None;
+        }
+        let beat_secs = 60.0 / bpm;
+        // The tap is a ruling, so the first beat at or after zero is that
+        // ruling walked back into its own period -- and it is the one, so
+        // the bar phase is however many periods that walk took.
+        let steps = (at_secs / beat_secs).floor();
+        let grid = TrackGrid {
+            bpm,
+            beat_secs,
+            first_beat_secs: at_secs - steps * beat_secs,
+            downbeat_phase: (-(steps as i64)).rem_euclid(4) as u32,
+            confidence: 1.0,
+        };
+        if !grid.has_grid() {
+            return None;
+        }
+        let old = state.grid;
+        let state = self.deck_mut(deck);
+        if let Some(old) = old.filter(|grid| grid.has_grid()) {
+            if state.grid_undo.last().map(|(step, _)| *step) != Some(GridStep::Tap) {
+                if state.grid_undo.len() >= GRID_UNDO_CAP {
+                    state.grid_undo.remove(0);
+                }
+                state.grid_undo.push((GridStep::Tap, old));
+            }
+        }
+        state.grid = Some(grid);
+        state.grid_placed = true;
         state.tempo_map = None;
         let cmds = if self.deck(deck).synced || self.auto_sync {
             self.apply_auto_sync_with(Some(SyncQuantize::Beat))
@@ -6430,6 +6502,38 @@ mod tests {
         // Unlocked, the corrections land again.
         e.set_grid_locked(DeckId::A, false);
         assert!(e.edit_grid(DeckId::A, GridEdit::Scale(2.0)).is_some());
+    }
+
+    /// Tapping along with a record retunes its grid: the tapped tempo is
+    /// the record's, and the tapped beat is the one.
+    #[test]
+    fn tapping_along_retunes_the_record_and_puts_the_one_where_the_hand_did() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        e.observe(DeckId::A, 30.0, true);
+        let (grid, _) = e.tap_grid(DeckId::A, 128.0, 30.37).expect("a grid");
+        assert!((grid.bpm - 128.0).abs() < 1e-9);
+        // The tap is a ruling, and it is the one.
+        let beat = grid.beat_at(30.37);
+        assert!(beat.fract().abs() < 1e-9, "the tap is on a beat: {beat}");
+        assert!(grid.is_downbeat(beat.round() as i64), "and it is the one");
+        assert!(e.deck(DeckId::A).grid_placed);
+
+        // A deck running fast measures a fast tempo; the RECORD's is what
+        // gets written down.
+        e.set_pitch(DeckId::A, 0.5); // +4% on the default range
+        let rate = e.deck(DeckId::A).rate;
+        let (grid, _) = e.tap_grid(DeckId::A, 128.0 * rate, 30.0).expect("a grid");
+        assert!((grid.bpm - 128.0).abs() < 1e-9, "{} at rate {rate}", grid.bpm);
+
+        // A run of taps is one step back, like a run of any other button.
+        e.undo_grid(DeckId::A);
+        assert!((e.deck(DeckId::A).grid.unwrap().bpm - 120.0).abs() < 1e-9);
+        assert!(!e.can_undo_grid(DeckId::A));
+
+        // And a locked grid refuses the tap too.
+        e.set_grid_locked(DeckId::A, true);
+        assert!(e.tap_grid(DeckId::A, 128.0, 30.0).is_none());
     }
 
     #[test]

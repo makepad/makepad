@@ -745,6 +745,33 @@ impl TapTempo {
         bpm.is_finite().then_some(bpm.clamp(60.0 / TAP_MAX_GAP_SECS, 60.0 / TAP_MIN_GAP_SECS))
     }
 
+    /// The tempo of the run with its wildest gaps thrown away.
+    ///
+    /// The plain mean spreads one late tap across the whole reading; the
+    /// middle half of the gaps does not. Kept beside [`bpm`] rather than
+    /// replacing it: the room's clock is disciplined continuously and
+    /// wants every tap it was given, while a tap that RETUNES A RECORD is
+    /// spent once and has to be right.
+    ///
+    /// [`bpm`]: Self::bpm
+    pub fn trimmed_bpm(&self) -> Option<f64> {
+        if self.taps.len() < TAP_TEMPO_TAPS {
+            return None;
+        }
+        let mut gaps: Vec<f64> =
+            self.taps.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        gaps.sort_by(f64::total_cmp);
+        // The middle half, and never fewer than two: with four gaps that
+        // is the middle two, which is the smallest run this can be asked
+        // about.
+        let drop = gaps.len() / 4;
+        let kept = &gaps[drop..gaps.len() - drop];
+        let kept = if kept.len() < 2 { &gaps[..] } else { kept };
+        let mean = kept.iter().sum::<f64>() / kept.len() as f64;
+        let bpm = 60.0 / mean;
+        bpm.is_finite().then_some(bpm.clamp(60.0 / TAP_MAX_GAP_SECS, 60.0 / TAP_MIN_GAP_SECS))
+    }
+
     pub fn taps(&self) -> usize {
         self.taps.len()
     }
@@ -2190,6 +2217,35 @@ mod tests {
         // One tap says WHERE the one is, never how fast the music runs.
         assert_eq!(clock.bpm, None);
         assert_eq!(tap.bpm(), None);
+    }
+
+    /// One late tap in the middle of an otherwise steady run moves the
+    /// plain mean and not the trimmed one.
+    #[test]
+    fn a_trimmed_reading_shrugs_off_one_late_tap() {
+        let period = 60.0 / 128.0;
+        let mut tap = TapTempo::new();
+        // Six taps, the fourth of them 25 ms late and the fifth catching
+        // up again -- a hand, not a new tempo.
+        let mut at = 5.0;
+        for index in 0..6 {
+            tap.tap(at);
+            at += period + if index == 2 { 0.025 } else if index == 3 { -0.025 } else { 0.0 };
+        }
+        assert_eq!(tap.taps(), 6);
+        let plain = tap.bpm().expect("a tempo");
+        let trimmed = tap.trimmed_bpm().expect("a tempo");
+        assert!(
+            (trimmed - 128.0).abs() < (plain - 128.0).abs() + 1e-12,
+            "trimmed {trimmed} is no worse than plain {plain}"
+        );
+        assert!((trimmed - 128.0).abs() < 0.35, "trimmed {trimmed}");
+
+        // Fewer than four taps is not a tempo either way.
+        let mut short = TapTempo::new();
+        short.tap(1.0);
+        short.tap(1.0 + period);
+        assert!(short.trimmed_bpm().is_none());
     }
 
     #[test]
