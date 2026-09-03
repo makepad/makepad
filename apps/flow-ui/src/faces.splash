@@ -32,7 +32,7 @@ let Meta = Label{
     height: Fit
     text: ""
     draw_text +: {
-        color: #x8a8a92
+        color: theme.flow_text_muted
         text_style: theme.font_regular{font_size: 9}
     }
 }
@@ -42,7 +42,7 @@ let Body = Label{
     height: Fit
     text: ""
     draw_text +: {
-        color: #xd0d0d4
+        color: theme.flow_text_body
         text_style: theme.font_regular{font_size: 9.5}
     }
 }
@@ -139,7 +139,7 @@ mod.flow.ui.FnFace = Face{
         max_lines: 2
         text_overflow: TextOverflow.Ellipsis
         draw_text +: {
-            color: #xc8c8cc
+            color: theme.flow_text_code
             text_style: theme.font_code{font_size: 9}
         }
         param := @run
@@ -170,6 +170,10 @@ mod.flow.ui.AskFace = Face{
         height: 32
         empty_text: "Answer"
         bind := @self
+    }
+    answer_button := Button{
+        width: Fill
+        text: "Answer"
     }
 }
 

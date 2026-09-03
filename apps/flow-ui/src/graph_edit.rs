@@ -15,6 +15,92 @@ pub const COLUMN_GAP: f64 = 60.0;
 pub const ROW_GAP: f64 = 260.0;
 pub const FIRST_AT: (f64, f64) = (40.0, 120.0);
 
+/// Node lookup and reverse adjacency, rebuilt once when a graph changes.
+/// A wire drag walks the source's ancestors once and then scans candidate
+/// ports, instead of rebuilding adjacency for every candidate.
+#[derive(Default)]
+pub struct GraphIndex {
+    nodes: HashMap<String, usize>,
+    upstream: Vec<Vec<usize>>,
+}
+
+impl GraphIndex {
+    pub fn new(graph: &Graph) -> Self {
+        let nodes: HashMap<String, usize> = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| (node.id.clone(), index))
+            .collect();
+        let mut upstream = vec![Vec::new(); graph.nodes.len()];
+        for edge in &graph.edges {
+            let (Some(from), Some(to)) = (nodes.get(&edge.from_node), nodes.get(&edge.to_node)) else {
+                continue;
+            };
+            upstream[*to].push(*from);
+        }
+        Self { nodes, upstream }
+    }
+
+    pub fn node(&self, id: &str) -> Option<usize> {
+        self.nodes.get(id).copied()
+    }
+
+    fn ancestors(&self, node: usize) -> HashSet<usize> {
+        let mut seen = HashSet::new();
+        let mut stack = vec![node];
+        while let Some(node) = stack.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            stack.extend(self.upstream[node].iter().copied());
+        }
+        seen
+    }
+
+    pub fn ancestor_indices(&self, node: &str) -> HashSet<usize> {
+        self.node(node)
+            .map(|node| self.ancestors(node))
+            .unwrap_or_default()
+    }
+
+    pub fn compatible_inputs(
+        &self,
+        graph: &Graph,
+        from_node: &str,
+        from_port: &str,
+    ) -> Vec<(usize, usize)> {
+        let Some(from) = self.node(from_node) else {
+            return Vec::new();
+        };
+        let Some(ty) = graph.nodes[from]
+            .outputs
+            .iter()
+            .find(|output| output.name == from_port)
+            .map(|output| output.ty)
+        else {
+            return Vec::new();
+        };
+        let ancestors = self.ancestors(from);
+        let mut out = Vec::new();
+        for (node_index, node) in graph.nodes.iter().enumerate() {
+            if node_index == from || ancestors.contains(&node_index) {
+                continue;
+            }
+            for (port_index, input) in node.inputs.iter().enumerate() {
+                let flexible = node.type_name == "Fn"
+                    || (node.type_name == "Http"
+                        && (input.port == "body" || input.port == "headers"))
+                    || (node.type_name == "Output" && input.port == "value");
+                if flexible || input.ty == ty {
+                    out.push((node_index, port_index));
+                }
+            }
+        }
+        out
+    }
+}
+
 /// A fresh id `<type>_<n>`, lower-cased, that no node in the graph uses.
 pub fn fresh_node_id(graph: &Graph, type_name: &str) -> String {
     let base: String = type_name
@@ -264,55 +350,30 @@ pub fn output_port_type(graph: &Graph, node_id: &str, port: &str) -> Option<Port
 
 /// Would an edge `from → to` close a loop? True when `from` already
 /// depends on `to` (or they are the same node).
+#[cfg(test)]
 pub fn would_cycle(graph: &Graph, from: &str, to: &str) -> bool {
-    if from == to {
-        return true;
-    }
-    let mut upstream: HashMap<&str, Vec<&str>> = HashMap::new();
-    for edge in &graph.edges {
-        upstream
-            .entry(edge.to_node.as_str())
-            .or_default()
-            .push(edge.from_node.as_str());
-    }
-    let mut stack = vec![from];
-    let mut seen = HashSet::new();
-    while let Some(node) = stack.pop() {
-        if !seen.insert(node) {
-            continue;
-        }
-        if node == to {
-            return true;
-        }
-        if let Some(sources) = upstream.get(node) {
-            stack.extend(sources.iter().copied());
-        }
-    }
-    false
+    let index = GraphIndex::new(graph);
+    let (Some(from), Some(to)) = (index.node(from), index.node(to)) else {
+        return from == to;
+    };
+    index.ancestors(from).contains(&to)
 }
 
 /// Every input port an output can legally be wired to: same type, not the
 /// same node, no cycle. `Fn` inputs are flexible (any type re-types the
 /// port) and `Http.body`/`Http.headers` accept anything as well.
 pub fn compatible_inputs(graph: &Graph, from_node: &str, from_port: &str) -> Vec<(String, String)> {
-    let Some(ty) = output_port_type(graph, from_node, from_port) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for node in &graph.nodes {
-        if node.id == from_node || would_cycle(graph, from_node, &node.id) {
-            continue;
-        }
-        for input in &node.inputs {
-            let flexible = node.type_name == "Fn"
-                || (node.type_name == "Http" && (input.port == "body" || input.port == "headers"))
-                || (node.type_name == "Output" && input.port == "value");
-            if flexible || input.ty == ty {
-                out.push((node.id.clone(), input.port.clone()));
-            }
-        }
-    }
-    out
+    let index = GraphIndex::new(graph);
+    index
+        .compatible_inputs(graph, from_node, from_port)
+        .into_iter()
+        .map(|(node, port)| {
+            (
+                graph.nodes[node].id.clone(),
+                graph.nodes[node].inputs[port].port.clone(),
+            )
+        })
+        .collect()
 }
 
 /// Connect an output to an input. Fails with a reason when the types do
@@ -517,12 +578,20 @@ pub fn auto_place(graph: &mut Graph) {
         .get(deltas.len() / 2)
         .copied()
         .unwrap_or(NODE_WIDTH + COLUMN_GAP);
-    let mut upstream: HashMap<String, Vec<String>> = HashMap::new();
+    let node_index: HashMap<String, usize> = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.clone(), index))
+        .collect();
+    let mut upstream = vec![Vec::new(); graph.nodes.len()];
     for edge in &graph.edges {
-        upstream
-            .entry(edge.to_node.clone())
-            .or_default()
-            .push(edge.from_node.clone());
+        if let (Some(from), Some(to)) = (
+            node_index.get(&edge.from_node).copied(),
+            node_index.get(&edge.to_node).copied(),
+        ) {
+            upstream[to].push(from);
+        }
     }
     let mut order: Vec<usize> = (0..graph.nodes.len()).collect();
     order.sort_by_key(|index| depth.get(&graph.nodes[*index].id).copied().unwrap_or(0));
@@ -533,17 +602,26 @@ pub fn auto_place(graph: &mut Graph) {
         .filter(|(x, _)| (*x - FIRST_AT.0).abs() < NODE_WIDTH)
         .map(|(_, y)| y)
         .fold(FIRST_AT.1 - ROW_GAP, f64::max);
+    let cell_height = ROW_GAP * 0.5;
+    let mut occupied: HashMap<(i64, i64), Vec<(f64, f64)>> = HashMap::new();
+    let cell = |at: (f64, f64)| {
+        (
+            (at.0 / NODE_WIDTH).floor() as i64,
+            (at.1 / cell_height).floor() as i64,
+        )
+    };
+    for at in graph.nodes.iter().filter_map(|node| node.at) {
+        occupied.entry(cell(at)).or_default().push(at);
+    }
     for index in order {
         if graph.nodes[index].at.is_some() {
             continue;
         }
-        let id = graph.nodes[index].id.clone();
         let anchor = upstream
-            .get(&id)
+            .get(index)
             .into_iter()
             .flatten()
-            .filter_map(|from| graph.nodes.iter().find(|node| node.id == *from))
-            .filter_map(|node| node.at)
+            .filter_map(|from| graph.nodes[*from].at)
             .max_by(|a, b| a.0.total_cmp(&b.0));
         let mut at = match anchor {
             Some((x, y)) => (x + pitch, y),
@@ -553,12 +631,25 @@ pub fn auto_place(graph: &mut Graph) {
             }
         };
         // Never on top of a placed node: step down a row until clear.
-        while graph.nodes.iter().any(|node| {
-            node.at.is_some_and(|(x, y)| (x - at.0).abs() < NODE_WIDTH && (y - at.1).abs() < ROW_GAP * 0.5)
-        }) {
+        while {
+            let (cell_x, cell_y) = cell(at);
+            (-1..=1).any(|dx| {
+                (-1..=1).any(|dy| {
+                    occupied
+                        .get(&(cell_x + dx, cell_y + dy))
+                        .is_some_and(|points| {
+                            points.iter().any(|(x, y)| {
+                                (*x - at.0).abs() < NODE_WIDTH
+                                    && (*y - at.1).abs() < cell_height
+                            })
+                        })
+                })
+            })
+        } {
             at.1 += ROW_GAP;
         }
         graph.nodes[index].at = Some(at);
+        occupied.entry(cell(at)).or_default().push(at);
     }
 }
 
@@ -772,5 +863,44 @@ mod tests {
             .map(|c| c.type_name.as_str())
             .collect();
         assert_eq!(names, vec!["Upscale"]);
+    }
+
+    #[test]
+    fn graph_index_storage_and_compatibility_scan_are_linear_in_graph_size() {
+        let input = catalog("Input", "input", &[], &[("text", PortType::Text)]);
+        let llm = catalog(
+            "Llm",
+            "chat",
+            &[("prompt", PortType::Text)],
+            &[("text", PortType::Text)],
+        );
+        let (seed, _) = add_node(&empty(), &input, (0.0, 0.0));
+        let (template, _) = add_node(&empty(), &llm, (0.0, 0.0));
+        let mut graph = empty();
+        let mut source = seed.nodes[0].clone();
+        source.id = "n0".into();
+        graph.nodes.push(source);
+        for index in 1..512 {
+            let mut node = template.nodes[0].clone();
+            node.id = format!("n{index}");
+            node.inputs[0].value = NodeInputValue::Edge(EdgeRef {
+                from_node: format!("n{}", index - 1),
+                from_port: "text".into(),
+            });
+            graph.edges.push(Edge {
+                from_node: format!("n{}", index - 1),
+                from_port: "text".into(),
+                to_node: node.id.clone(),
+                to_port: "prompt".into(),
+            });
+            graph.nodes.push(node);
+        }
+        let index = GraphIndex::new(&graph);
+        assert_eq!(index.nodes.len(), graph.nodes.len());
+        assert_eq!(index.upstream.iter().map(Vec::len).sum::<usize>(), graph.edges.len());
+        assert_eq!(
+            index.compatible_inputs(&graph, "n0", "text").len(),
+            graph.nodes.len() - 1
+        );
     }
 }

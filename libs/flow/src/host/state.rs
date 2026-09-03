@@ -69,6 +69,7 @@ pub struct RunRow {
     pub flow: String,
     pub revision: u64,
     pub state: RunState,
+    pub planned_nodes: Vec<String>,
     pub nodes: BTreeMap<String, NodeRow>,
     pub outputs: BTreeMap<String, Value>,
     pub http_log: Vec<HttpLogEntry>,
@@ -608,7 +609,11 @@ impl FlowState {
         event: RunEvent,
     ) {
         match &event {
-            RunEvent::RunStarted { .. } => {}
+            RunEvent::RunStarted { planned_nodes, .. } => {
+                if let Some(row) = self.runs.get_mut(&run_id) {
+                    row.planned_nodes = planned_nodes.clone();
+                }
+            }
             RunEvent::NodeStarted { node } => {
                 if let Some(row) = self.runs.get_mut(&run_id) {
                     row.nodes.entry(node.clone()).or_default().state = NodeState::Running;
@@ -797,6 +802,11 @@ impl FlowState {
             .get(&instance_id)
             .map(|instance| instance.inputs.clone())
             .unwrap_or_default();
+        let mut planned_nodes: Vec<String> =
+            engine::scheduler::selected_nodes(&graph, outputs.as_deref())
+                .into_iter()
+                .collect();
+        planned_nodes.sort();
         let input = RunInput {
             run_id: run_id.clone(),
             instance: instance_id.0.clone(),
@@ -824,6 +834,7 @@ impl FlowState {
                     flow: flow.clone(),
                     revision,
                     state: RunState::Running,
+                    planned_nodes,
                     nodes: BTreeMap::new(),
                     outputs: BTreeMap::new(),
                     http_log: Vec::new(),
@@ -1000,6 +1011,11 @@ impl FlowState {
             RunDecision::Busy => StartRunOutcome::Busy,
             RunDecision::Queued(queued) => {
                 let run_id = instance.runs.back().expect("just queued").clone();
+                let mut planned_nodes: Vec<String> =
+                    engine::scheduler::selected_nodes(&graph, outputs.as_deref())
+                        .into_iter()
+                        .collect();
+                planned_nodes.sort();
                 self.runs.insert(
                     run_id.clone(),
                     RunRow {
@@ -1007,6 +1023,7 @@ impl FlowState {
                         flow,
                         revision: graph.revision,
                         state: RunState::Queued,
+                        planned_nodes,
                         nodes: BTreeMap::new(),
                         outputs: BTreeMap::new(),
                         http_log: Vec::new(),
@@ -1198,6 +1215,7 @@ fn run_row_dto(run_id: &RunId, row: &RunRow) -> RunRowDto {
         flow: row.flow.clone(),
         revision: row.revision,
         state: row.state,
+        planned_nodes: row.planned_nodes.clone(),
         nodes: row
             .nodes
             .iter()

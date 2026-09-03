@@ -17,12 +17,13 @@ use makepad_flow::{
 };
 use makepad_widgets::fab_controls::*;
 use makepad_widgets::makepad_micro_serde::SerJson;
+use makepad_widgets::makepad_platform::event::TweakRayEvent;
 use makepad_widgets::makepad_script::*;
 use makepad_widgets::widget_async::{enter_isolate, leave_isolate, CxSplashVmExt, SplashVmId};
 use makepad_widgets::widget_tree::CxWidgetExt;
 use makepad_widgets::*;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 const FACES: &str = include_str!("faces.splash");
@@ -292,7 +293,7 @@ script_mod! {
         height: Fit
         animating: false
         draw_svg +: {
-            color: #x3a3a40
+            color: theme.flow_surface_input
         }
     }
 
@@ -303,7 +304,7 @@ script_mod! {
         align: Align{x: 0.5 y: 0.5}
         spacing: theme.space_2
         draw_bg +: {
-            color: #x151517
+            color: theme.flow_surface_deep
             border_radius: 16.0
             content_inset: uniform(2.0)
             pixel: fn() {
@@ -327,7 +328,7 @@ script_mod! {
             height: Fit
             text: "no picture yet"
             draw_text +: {
-                color: #x6a6a72
+                color: theme.flow_text_empty
                 text_style: theme.font_regular{font_size: 9}
             }
         }
@@ -357,7 +358,7 @@ script_mod! {
             text: ""
             draw_text +: {
                 text_style: theme.font_code{font_size: 9}
-                color: #xc8c8cc
+                color: theme.flow_text_code
             }
         }
     }
@@ -382,11 +383,19 @@ script_mod! {
             margin: Inset{left: 14 right: 14 top: 12 bottom: 12}
             text: ""
             draw_text +: {
-                color: #xd0d0d4
+                color: theme.flow_text_body
                 text_style: theme.font_regular{font_size: 9.5}
             }
         }
     }
+
+    // Stable typed names for custom faces. Media types share ValueView's
+    // type-aware empty state and byte-count presentation until a decoder is
+    // available; JSON deliberately uses the code-font text renderer.
+    mod.flow.ui.ValueJson = mod.flow.ui.ValueText{}
+    mod.flow.ui.ValueAudio = mod.flow.ui.ValueView{}
+    mod.flow.ui.ValueVideo = mod.flow.ui.ValueView{}
+    mod.flow.ui.ValueMesh = mod.flow.ui.ValueView{}
 
     mod.flow.ui.ModelPickerBase = #(ModelPicker::register_widget(vm))
     mod.flow.ui.ModelPicker = set_type_default() do mod.flow.ui.ModelPickerBase{
@@ -399,7 +408,7 @@ script_mod! {
             width: 44
             text: "model"
             draw_text +: {
-                color: #x8a8a92
+                color: theme.flow_text_muted
                 text_style: theme.font_regular{font_size: 9}
             }
         }
@@ -466,7 +475,7 @@ script_mod! {
             height: Fit
             text: ""
             draw_text +: {
-                color: #x8a8a92
+                color: theme.flow_text_muted
                 text_style: theme.font_regular{font_size: 9}
             }
         }
@@ -640,9 +649,7 @@ impl Widget for ValueView {
     }
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
         self.value = v.to_string();
-        if self.loaded {
-            return;
-        }
+        self.loaded = false;
         self.view.image(cx, ids!(image)).set_visible(cx, false);
         let text = self.view.label(cx, ids!(text));
         text.set_text(cx, v);
@@ -656,7 +663,7 @@ impl Widget for ValueView {
 }
 
 impl ValueView {
-    fn set_card_sized(&mut self, cx: &mut Cx, sized: bool) {
+    pub(crate) fn set_card_sized(&mut self, cx: &mut Cx, sized: bool) {
         if self.card_sized == sized {
             return;
         }
@@ -916,6 +923,15 @@ impl ModelPicker {
 /// Registers the Rust-backed face widgets into `mod.flow.ui` of an isolate.
 pub fn register_face_widgets(vm: &mut ScriptVm) {
     self::script_mod(vm);
+}
+
+/// The main app only needs the value viewer, but the face widget module is
+/// intentionally one registration unit. Give it the same empty namespace an
+/// isolate receives from the headless prelude before registering it.
+pub fn register_host_widgets(vm: &mut ScriptVm) {
+    vm.new_module(id!(flow));
+    vm.eval(script! { mod.flow.ui = {} });
+    register_face_widgets(vm);
 }
 
 // ---------------------------------------------------------------------------
@@ -1302,6 +1318,8 @@ pub struct MountedFace {
     pub param_binds: Vec<(WidgetRef, String)>,
     pub format_pickers: Vec<WidgetRef>,
     pub dropdowns: Vec<WidgetRef>,
+    /// Ask controls are staged until this explicit button is pressed.
+    pub answer_button: Option<WidgetRef>,
     pub on_value: Option<ScriptFnRef>,
     pub on_state: Option<ScriptFnRef>,
 }
@@ -1310,6 +1328,7 @@ pub struct MountedFace {
 pub struct FaceHost {
     pub instance: String,
     vm_id: SplashVmId,
+    heap_key: usize,
     node_objects: NodeObjects,
     bridge: Option<ScriptObjectRef>,
     pub faces: HashMap<String, MountedFace>,
@@ -1325,6 +1344,12 @@ pub struct FaceHost {
     pub wanted: Vec<String>,
     /// Window mapping for node faces living in the canvas draw list.
     camera_transform: Option<PopupAnchorTransform>,
+    /// Latest local edit for each Ask output. These deliberately do not enter
+    /// the app's pending-input journal until the Answer button is pressed.
+    staged_asks: HashMap<(String, String), String>,
+    /// Canvas back-to-front order, used to offer hits to the visually
+    /// frontmost face first.
+    event_order: Vec<String>,
 }
 
 fn collect_widgets(root: &WidgetRef, out: &mut Vec<WidgetRef>) {
@@ -1502,10 +1527,12 @@ impl FaceHost {
         catalog: &[NodeTypeCatalog],
     ) -> Self {
         let vm_id = cx.alloc_splash_vm();
+        let heap_key = cx.with_script_vm_id_trusted(vm_id, |vm| vm.bx.heap.heap_key());
         let node_objects: NodeObjects = Rc::new(RefCell::new(HashMap::new()));
         let mut host = Self {
             instance: instance.to_string(),
             vm_id,
+            heap_key,
             node_objects: node_objects.clone(),
             bridge: None,
             faces: HashMap::new(),
@@ -1515,6 +1542,8 @@ impl FaceHost {
             last_values: HashMap::new(),
             wanted: Vec::new(),
             camera_transform: None,
+            staged_asks: HashMap::new(),
+            event_order: graph.nodes.iter().map(|node| node.id.clone()).collect(),
         };
         let instance_name = instance.to_string();
         let nodes_for_bridge = node_objects.clone();
@@ -1524,6 +1553,7 @@ impl FaceHost {
         let result: Result<(ScriptObjectRef, ScriptObjectRef), String> = cx
             .with_script_vm_id_trusted(vm_id, |vm| {
                 makepad_code_editor::script_mod(vm);
+                crate::theme::script_mod(vm);
                 vm.new_module(id!(flow));
                 eval_checked(vm, PRELUDE_FILE, PRELUDE)?;
                 register_face_widgets(vm);
@@ -1719,6 +1749,12 @@ impl FaceHost {
             }
             let mut widgets = Vec::new();
             collect_widgets(&root, &mut widgets);
+            if graph_node.as_ref().is_some_and(|node| node.kind == "ask") {
+                let button = root.child(live_id!(answer_button));
+                if button.borrow::<Button>().is_some() {
+                    face.answer_button = Some(button);
+                }
+            }
             for widget in widgets {
                 if widget.borrow::<FormatPicker>().is_some() {
                     face.format_pickers.push(widget.clone());
@@ -1835,6 +1871,7 @@ impl FaceHost {
         self.flow_face = None;
         self.bridge = None;
         self.node_objects.borrow_mut().clear();
+        DropDown::retire_popup_menus_for_heap(cx, self.heap_key);
         cx.free_splash_vm(self.vm_id);
     }
 
@@ -1886,13 +1923,20 @@ impl FaceHost {
     /// back to the original event so the canvas does not claim it too.
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope, camera: Option<&Camera>) {
         self.set_popup_anchor_transform(cx, camera.map(Camera::popup_anchor_transform));
-        let roots: Vec<WidgetRef> = self
-            .faces
-            .values()
-            .chain(self.flow_face.iter())
+        let mut roots: Vec<WidgetRef> = self
+            .event_order
+            .iter()
+            .rev()
+            .filter_map(|id| self.faces.get(id))
             .map(|face| face.root.clone())
             .filter(|root| !root.is_empty())
             .collect();
+        roots.extend(
+            self.flow_face
+                .iter()
+                .map(|face| face.root.clone())
+                .filter(|root| !root.is_empty()),
+        );
         if roots.is_empty() {
             return;
         }
@@ -1904,7 +1948,14 @@ impl FaceHost {
         }
         leave_isolate(cx, entry);
         if let Some(remapped) = remapped.as_ref() {
-            sync_handled(event, remapped);
+            sync_handled(event, remapped, camera.expect("mapped event requires a camera"));
+        }
+    }
+
+    pub fn set_z_order(&mut self, order: &[String]) {
+        if self.event_order != order {
+            self.event_order.clear();
+            self.event_order.extend_from_slice(order);
         }
     }
 
@@ -2027,6 +2078,20 @@ impl FaceHost {
                 }
                 continue;
             }
+            if let Some(mut check) = widget.borrow_mut::<CheckBox>() {
+                if let Literal::Bool(value) = value {
+                    check.set_active(cx, *value, Animate::No);
+                }
+                continue;
+            }
+            if let Some(mut color) = widget.borrow_mut::<FabColorPick>() {
+                if let Some(text) = literal_text(value) {
+                    if let Some((rgba, _)) = parse_hex(&text) {
+                        color.set_rgba(cx, rgba);
+                    }
+                }
+                continue;
+            }
             if let Some(text) = literal_text(value) {
                 set_widget_text(cx, widget, &text);
             }
@@ -2083,6 +2148,20 @@ impl FaceHost {
                     if let Ok(number) = text.parse::<f64>() {
                         bind.widget.as_slider().set_value(cx, number);
                     }
+                } else if bind.widget.borrow::<FabValueInput>().is_some() {
+                    if let Ok(number) = text.parse::<f64>() {
+                        bind.widget.as_fab_value_input().set_value(cx, number);
+                    }
+                } else if bind.widget.borrow::<CheckBox>().is_some() {
+                    if let Ok(value) = text.parse::<bool>() {
+                        bind.widget
+                            .as_check_box()
+                            .set_active(cx, value, Animate::No);
+                    }
+                } else if bind.widget.borrow::<FabColorPick>().is_some() {
+                    if let Some((rgba, _)) = parse_hex(&text) {
+                        bind.widget.as_fab_color_pick().set_rgba(cx, rgba);
+                    }
                 }
             }
         }
@@ -2122,24 +2201,69 @@ impl FaceHost {
     }
 
     /// Widget changes on `bind` widgets → `(node, port, text)`.
-    pub fn bind_changes(&self, actions: &Actions) -> Vec<(String, String, String)> {
+    pub fn bind_changes(&mut self, cx: &Cx, actions: &Actions) -> Vec<(String, String, String)> {
         let mut out = Vec::new();
         for face in self.faces.values().chain(self.flow_face.iter()) {
             for bind in &face.binds {
-                if bind.widget.borrow::<TextInput>().is_some() {
+                let changed = if bind.widget.borrow::<TextInput>().is_some() {
                     let input = bind.widget.as_text_input();
                     if let Some(text) = input.changed(actions) {
-                        out.push((bind.node.clone(), bind.port.clone(), text));
+                        Some(text)
                     } else if let Some((text, _)) = input.returned(actions) {
-                        out.push((bind.node.clone(), bind.port.clone(), text));
+                        Some(text)
+                    } else {
+                        None
                     }
                 } else if bind.widget.borrow::<DropDown>().is_some() {
-                    if let Some(label) = bind.widget.as_drop_down().changed_label(actions) {
-                        out.push((bind.node.clone(), bind.port.clone(), label));
-                    }
+                    bind.widget.as_drop_down().changed_label(actions)
                 } else if bind.widget.borrow::<Slider>().is_some() {
-                    if let Some(value) = bind.widget.as_slider().end_slide(actions) {
-                        out.push((bind.node.clone(), bind.port.clone(), value.to_string()));
+                    bind.widget
+                        .as_slider()
+                        .end_slide(actions)
+                        .map(|value| value.to_string())
+                } else if bind.widget.borrow::<FabValueInput>().is_some() {
+                    bind.widget
+                        .as_fab_value_input()
+                        .changed(actions)
+                        .map(|value| value.to_string())
+                } else if bind.widget.borrow::<CheckBox>().is_some() {
+                    bind.widget
+                        .as_check_box()
+                        .changed(actions)
+                        .map(|value| value.to_string())
+                } else if bind.widget.borrow::<FabColorPick>().is_some() {
+                    bind.widget.as_fab_color_pick().changed(actions).map(|value| {
+                        format_hex([value.x, value.y, value.z, value.w], true)
+                    })
+                } else {
+                    None
+                };
+                if let Some(value) = changed {
+                    let key = (bind.node.clone(), bind.port.clone());
+                    if face.answer_button.is_some() {
+                        self.staged_asks.insert(key, value);
+                    } else {
+                        out.push((key.0, key.1, value));
+                    }
+                }
+            }
+            if face
+                .answer_button
+                .as_ref()
+                .is_some_and(|button| button.as_button().clicked(actions))
+            {
+                let mut committed = HashSet::new();
+                for bind in &face.binds {
+                    let key = (bind.node.clone(), bind.port.clone());
+                    if !committed.insert(key.clone()) {
+                        continue;
+                    }
+                    if let Some(value) = self
+                        .staged_asks
+                        .remove(&key)
+                        .or_else(|| current_bound_value(cx, &bind.widget))
+                    {
+                        out.push((key.0, key.1, value));
                     }
                 }
             }
@@ -2163,6 +2287,21 @@ impl FaceHost {
                 } else if widget.borrow::<FabValueInput>().is_some() {
                     if let Some(value) = widget.as_fab_value_input().ended(actions) {
                         out.push((node.clone(), key.clone(), Literal::Num(value)));
+                    }
+                } else if widget.borrow::<CheckBox>().is_some() {
+                    if let Some(value) = widget.as_check_box().changed(actions) {
+                        out.push((node.clone(), key.clone(), Literal::Bool(value)));
+                    }
+                } else if widget.borrow::<FabColorPick>().is_some() {
+                    if let Some(value) = widget.as_fab_color_pick().changed(actions) {
+                        out.push((
+                            node.clone(),
+                            key.clone(),
+                            Literal::Str(format_hex(
+                                [value.x, value.y, value.z, value.w],
+                                true,
+                            )),
+                        ));
                     }
                 } else if widget.borrow::<ModelPicker>().is_some() {
                     // Its dropdown is read by `model_changes`.
@@ -2341,15 +2480,23 @@ impl FaceHost {
         let key = (node.to_string(), port.to_string());
         let full = self.deltas.entry(key).or_default();
         full.push_str(text);
-        let mut shown = full.clone();
-        shown.push_str(STREAM_CARET);
+        if full.len() > 16 * 1024 {
+            let mut cut = full.len() - 16 * 1024;
+            while !full.is_char_boundary(cut) {
+                cut += 1;
+            }
+            full.drain(..cut);
+        }
+        let content_len = full.len();
+        full.push_str(STREAM_CARET);
         for face in self.faces.values().chain(self.flow_face.iter()) {
             for show in &face.shows {
                 if show.node == node && show.port == port {
-                    set_widget_text(cx, &show.widget, &shown);
+                    set_widget_text(cx, &show.widget, full);
                 }
             }
         }
+        full.truncate(content_len);
     }
 
     /// A node changed state; the face hooks hear about it.
@@ -2382,6 +2529,7 @@ impl FaceHost {
     /// A new run started: streamed text starts over.
     pub fn reset_run(&mut self) {
         self.deltas.clear();
+        self.staged_asks.clear();
     }
 
     /// Bytes arrived for a wanted digest: re-push every value that has it.
@@ -2399,6 +2547,24 @@ impl FaceHost {
         for ((node, port), value) in matching {
             self.push_value(cx, &node, &port, &value, Some(&bytes));
         }
+    }
+}
+
+fn current_bound_value(cx: &Cx, widget: &WidgetRef) -> Option<String> {
+    if widget.borrow::<TextInput>().is_some() {
+        Some(widget.as_text_input().text())
+    } else if widget.borrow::<DropDown>().is_some() {
+        Some(widget.as_drop_down().selected_label())
+    } else if widget.borrow::<Slider>().is_some() {
+        widget.as_slider().value().map(|value| value.to_string())
+    } else if widget.borrow::<FabValueInput>().is_some() {
+        Some(widget.as_fab_value_input().value().to_string())
+    } else if widget.borrow::<CheckBox>().is_some() {
+        Some(widget.as_check_box().active(cx).to_string())
+    } else if let Some(color) = widget.borrow::<FabColorPick>() {
+        Some(format_hex(color.rgba(), true))
+    } else {
+        None
     }
 }
 
@@ -2522,6 +2688,7 @@ fn remap_event(event: &Event, camera: &Camera) -> Option<Event> {
         Event::MouseMove(e) => {
             let mut e = e.clone();
             e.abs = camera.screen_to_local(e.abs);
+            e.lock_delta /= camera.scale;
             Event::MouseMove(e)
         }
         Event::MouseUp(e) => {
@@ -2537,6 +2704,7 @@ fn remap_event(event: &Event, camera: &Camera) -> Option<Event> {
         Event::Scroll(e) => {
             let mut e = e.clone();
             e.abs = camera.screen_to_local(e.abs);
+            e.scroll /= camera.scale;
             Event::Scroll(e)
         }
         Event::LongPress(e) => {
@@ -2548,15 +2716,40 @@ fn remap_event(event: &Event, camera: &Camera) -> Option<Event> {
             let mut e = e.clone();
             for touch in &mut e.touches {
                 touch.abs = camera.screen_to_local(touch.abs);
+                touch.radius /= camera.scale;
             }
             Event::TouchUpdate(e)
         }
+        Event::SelectionHandleDrag(e) => {
+            let mut e = e.clone();
+            e.abs = camera.screen_to_local(e.abs);
+            Event::SelectionHandleDrag(e)
+        }
+        Event::Drag(e) => {
+            let mut e = e.clone();
+            e.abs = camera.screen_to_local(e.abs);
+            Event::Drag(e)
+        }
+        Event::Drop(e) => {
+            let mut e = e.clone();
+            e.abs = camera.screen_to_local(e.abs);
+            Event::Drop(e)
+        }
+        Event::TweakRay(e) => Event::TweakRay(TweakRayEvent {
+            abs: camera.screen_to_local(e.abs),
+            window_id: e.window_id,
+            modifiers: e.modifiers,
+            time: e.time,
+            dpi_factor: e.dpi_factor,
+            hit_widget_uids: RefCell::new(e.hit_widget_uids.borrow().clone()),
+            hit_rect: std::cell::Cell::new(e.hit_rect.get()),
+        }),
         _ => return None,
     })
 }
 
 /// A hit the faces claimed on the mapped clone is a hit on the original.
-fn sync_handled(original: &Event, remapped: &Event) {
+fn sync_handled(original: &Event, remapped: &Event, camera: &Camera) {
     match (original, remapped) {
         (Event::MouseDown(a), Event::MouseDown(b)) => {
             if a.handled.get().is_empty() {
@@ -2591,6 +2784,13 @@ fn sync_handled(original: &Event, remapped: &Event) {
                 }
             }
         }
+        (Event::TweakRay(a), Event::TweakRay(b)) => {
+            *a.hit_widget_uids.borrow_mut() = b.hit_widget_uids.borrow().clone();
+            a.hit_rect.set(b.hit_rect.get().map(|rect| Rect {
+                pos: camera.local_to_screen(rect.pos),
+                size: rect.size * camera.scale,
+            }));
+        }
         _ => {}
     }
 }
@@ -2624,6 +2824,9 @@ pub fn size_text(bytes: usize) -> String {
 mod tests {
     use super::*;
     use makepad_flow::{FleetNodeDto, ModelInfoDto};
+    use makepad_widgets::makepad_platform::event::{ScrollEvent, ScrollPhase};
+    use std::cell::Cell;
+    use std::sync::{Arc, Mutex};
 
     fn model(id: &str, node: &str, available: bool, state: &str) -> ModelInfoDto {
         ModelInfoDto {
@@ -2767,18 +2970,115 @@ mod tests {
     }
 
     #[test]
-    fn ime_cursor_is_reanchored_in_transformed_screen_space() {
-        let transform = PopupAnchorTransform {
-            scale: 0.5,
-            translation: dvec2(-100.0, 40.0),
-        };
-        let cursor = transformed_ime_cursor(
-            rect(32790.0, 32820.0, 2.0, 18.0),
-            dvec2(32768.0, 32768.0),
-            transform,
+    fn named_typed_value_widgets_mount_in_custom_faces() {
+        let source = "use mod.flow.*\nlet value = Text{ui: mod.flow.ui.NodeFace{ audio := mod.flow.ui.ValueAudio{} video := mod.flow.ui.ValueVideo{} mesh := mod.flow.ui.ValueMesh{} json := mod.flow.ui.ValueJson{} }}\nFlow{value}\n";
+        let graph = makepad_flow::graph::evaluate(source, "<typed-values>").unwrap();
+        let catalog = makepad_flow::graph::prelude_catalog().unwrap();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        let host = FaceHost::mount(
+            &mut cx,
+            WidgetUid(0),
+            "test",
+            "<typed-values>",
+            source,
+            &graph,
+            &catalog,
         );
-        assert_eq!(cursor.pos, dvec2(-16473.0, -16318.0));
-        assert_eq!(cursor.size, dvec2(1.0, 9.0));
+        assert!(host.error.is_none(), "{:?}", host.error);
+        let root = &host.faces.get("value").unwrap().root;
+        for id in [live_id!(audio), live_id!(video), live_id!(mesh)] {
+            assert!(root.child(id).borrow::<ValueView>().is_some());
+        }
+        assert!(root.child(live_id!(json)).borrow::<ValueText>().is_some());
+        host.free(&mut cx);
+    }
+
+    #[test]
+    fn ime_cursor_is_reanchored_in_transformed_screen_space() {
+        for (scale, expected_pos, expected_size) in [
+            (0.5, dvec2(-25.0, -20.0), dvec2(1.0, 9.0)),
+            (2.0, dvec2(140.0, 85.0), dvec2(4.0, 36.0)),
+        ] {
+            let cursor = transformed_ime_cursor(
+                rect(110.0, 70.0, 2.0, 18.0),
+                dvec2(100.0, 50.0),
+                PopupAnchorTransform {
+                    scale,
+                    translation: dvec2(20.0, -5.0),
+                },
+            );
+            assert_eq!(cursor.pos, expected_pos);
+            assert_eq!(cursor.size, expected_size);
+        }
+    }
+
+    #[test]
+    fn zoomed_face_click_scroll_drop_and_tweak_geometry_map_at_half_and_double() {
+        for scale in [0.5, 2.0] {
+            let camera = Camera {
+                view: rect(10.0, 20.0, 800.0, 600.0),
+                pan: dvec2(30.0, -5.0),
+                scale,
+            };
+            let screen = dvec2(140.0, 215.0);
+            let expected = dvec2(
+                crate::canvas::LOCAL_ORIGIN + 100.0 / scale,
+                crate::canvas::LOCAL_ORIGIN + 200.0 / scale,
+            );
+            let click = Event::MouseDown(MouseDownEvent {
+                abs: screen,
+                button: MouseButton::PRIMARY,
+                window_id: WindowId(1, 1),
+                modifiers: KeyModifiers::default(),
+                handled: Cell::new(Area::Empty),
+                time: 0.0,
+            });
+            assert!(matches!(remap_event(&click, &camera), Some(Event::MouseDown(e)) if e.abs == expected));
+
+            let scroll = Event::Scroll(ScrollEvent {
+                window_id: WindowId(1, 1),
+                scroll: dvec2(8.0, -4.0),
+                abs: screen,
+                modifiers: KeyModifiers::default(),
+                handled_x: Cell::new(false),
+                handled_y: Cell::new(false),
+                is_mouse: true,
+                time: 0.0,
+                phase: ScrollPhase::None,
+            });
+            assert!(matches!(remap_event(&scroll, &camera), Some(Event::Scroll(e)) if e.abs == expected && e.scroll == dvec2(8.0 / scale, -4.0 / scale)));
+
+            let drop = Event::Drop(DropEvent {
+                modifiers: KeyModifiers::default(),
+                handled: Arc::new(Mutex::new(false)),
+                abs: screen,
+                items: Arc::new(Vec::new()),
+            });
+            assert!(matches!(remap_event(&drop, &camera), Some(Event::Drop(e)) if e.abs == expected));
+
+            let original = Event::TweakRay(TweakRayEvent {
+                abs: screen,
+                window_id: WindowId(1, 1),
+                modifiers: KeyModifiers::default(),
+                time: 0.0,
+                dpi_factor: 1.0,
+                hit_widget_uids: RefCell::new(Vec::new()),
+                hit_rect: Cell::new(None),
+            });
+            let mapped = remap_event(&original, &camera).unwrap();
+            if let Event::TweakRay(mapped) = &mapped {
+                mapped
+                    .hit_rect
+                    .set(Some(rect(crate::canvas::LOCAL_ORIGIN + 10.0, crate::canvas::LOCAL_ORIGIN + 20.0, 30.0, 40.0)));
+            }
+            sync_handled(&original, &mapped, &camera);
+            let Event::TweakRay(original) = original else { unreachable!() };
+            assert_eq!(
+                original.hit_rect.get(),
+                Some(rect(40.0 + 10.0 * scale, 15.0 + 20.0 * scale, 30.0 * scale, 40.0 * scale))
+            );
+        }
     }
 
     #[test]
@@ -2806,6 +3106,77 @@ mod tests {
             .child(live_id!(style))
             .borrow::<DropDown>()
             .is_some());
+        host.free(&mut cx);
+    }
+
+    #[test]
+    fn repeated_isolate_dropdown_mounts_release_popup_cache_and_vm() {
+        let source = include_str!("../../../libs/flow/recipes/templates/prompt-to-image.splash");
+        let graph = makepad_flow::graph::evaluate(source, "<isolate-retire>").unwrap();
+        let catalog = makepad_flow::graph::prelude_catalog().unwrap();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        let baseline = DropDown::popup_menu_cache_len(&mut cx);
+        for index in 0..4 {
+            let host = FaceHost::mount(
+                &mut cx,
+                WidgetUid(0),
+                &format!("test-{index}"),
+                "<isolate-retire>",
+                source,
+                &graph,
+                &catalog,
+            );
+            let bridge = host.bridge.clone().expect("face bridge");
+            assert_eq!(cx.script_ref_vm_id(&bridge), Some(host.vm_id));
+            host.free(&mut cx);
+            assert_eq!(cx.script_ref_vm_id(&bridge), None);
+            assert_eq!(DropDown::popup_menu_cache_len(&mut cx), baseline);
+        }
+    }
+
+    #[test]
+    fn ask_text_is_staged_until_the_answer_button_fires() {
+        let source = "use mod.flow.*\nlet ask = Ask{question: \"Which?\"}\nFlow{ask}\n";
+        let graph = makepad_flow::graph::evaluate(source, "<ask-stage>").unwrap();
+        let catalog = makepad_flow::graph::prelude_catalog().unwrap();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        let mut host = FaceHost::mount(
+            &mut cx,
+            WidgetUid(0),
+            "test",
+            "<ask-stage>",
+            source,
+            &graph,
+            &catalog,
+        );
+        let face = host.faces.get("ask").expect("ask face");
+        let answer = face
+            .binds
+            .iter()
+            .find(|bind| bind.widget.borrow::<TextInput>().is_some())
+            .unwrap()
+            .widget
+            .clone();
+        let button = face.answer_button.clone().expect("explicit Answer button");
+        let edit: ActionsBuf = vec![Box::new(WidgetAction {
+            data: None,
+            action: Box::new(TextInputAction::Changed("draft".into())),
+            widget_uid: answer.widget_uid(),
+            group: None,
+        })];
+        assert!(host.bind_changes(&cx, &edit).is_empty());
+        let press: ActionsBuf = vec![Box::new(WidgetAction {
+            data: None,
+            action: Box::new(ButtonAction::Clicked(KeyModifiers::default())),
+            widget_uid: button.widget_uid(),
+            group: None,
+        })];
+        assert_eq!(
+            host.bind_changes(&cx, &press),
+            vec![("ask".into(), "text".into(), "draft".into())]
+        );
         host.free(&mut cx);
     }
 }

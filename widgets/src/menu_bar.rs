@@ -199,6 +199,7 @@ pub struct MenuEntry {
     pub label: String,
     /// The chord as written (`"Shift+Cmd+Z"`), not yet parsed or prettied.
     pub shortcut: Option<String>,
+    parsed_shortcut: Option<MenuShortcut>,
     /// A disabled entry greys out, ignores the pointer and drops its chord.
     pub enabled: bool,
     /// A 1 px rule; `id`, `label` and `shortcut` are unused.
@@ -211,6 +212,7 @@ impl Default for MenuEntry {
             id: LiveId(0),
             label: String::new(),
             shortcut: None,
+            parsed_shortcut: None,
             enabled: true,
             separator: false,
         }
@@ -219,10 +221,12 @@ impl Default for MenuEntry {
 
 impl MenuEntry {
     pub fn item(id: LiveId, label: impl Into<String>, shortcut: Option<&str>) -> Self {
+        let shortcut = shortcut.map(str::to_string);
         Self {
             id,
             label: label.into(),
-            shortcut: shortcut.map(|s| s.to_string()),
+            parsed_shortcut: shortcut.as_deref().and_then(parse_shortcut),
+            shortcut,
             ..Self::default()
         }
     }
@@ -313,6 +317,9 @@ pub fn parse_shortcut(text: &str) -> Option<MenuShortcut> {
             "alt" | "option" | "opt" => out.alt = true,
             "shift" => out.shift = true,
             other => {
+                if key.is_some() {
+                    return None;
+                }
                 key = Some(key_code_from_name(other)?);
                 out.shift_any = other == "plus";
             }
@@ -559,6 +566,9 @@ pub struct MenuBar {
     hot_title: Option<usize>,
     #[rust]
     hot_entry: Option<usize>,
+    /// Focus restored when the menu closes.
+    #[rust]
+    focus_before_open: Area,
 
     #[rust]
     bar_rect: Rect,
@@ -671,10 +681,14 @@ fn parse_menus(vm: &mut ScriptVm, value: ScriptValue) -> Vec<MenuDef> {
                 id,
                 label: obj_string(vm, entry_obj, id!(label)).unwrap_or_default(),
                 shortcut: obj_string(vm, entry_obj, id!(shortcut)).filter(|s| !s.is_empty()),
+                parsed_shortcut: None,
                 enabled: obj_bool(vm, entry_obj, id!(enabled)).unwrap_or(true),
                 separator: false,
             });
         });
+        for entry in &mut items {
+            entry.parsed_shortcut = entry.shortcut.as_deref().and_then(parse_shortcut);
+        }
         menus.push(MenuDef { label, items });
     });
     menus
@@ -702,6 +716,11 @@ impl MenuBar {
     /// Replace the whole menu tree at runtime. Closes any open menu.
     pub fn set_menus(&mut self, cx: &mut Cx, menus: Vec<MenuDef>) {
         self.defs = menus;
+        for menu in &mut self.defs {
+            for entry in &mut menu.items {
+                entry.parsed_shortcut = entry.shortcut.as_deref().and_then(parse_shortcut);
+            }
+        }
         self.open_menu = None;
         self.hot_title = None;
         self.hot_entry = None;
@@ -741,8 +760,12 @@ impl MenuBar {
         if index >= self.defs.len() || self.open_menu == Some(index) {
             return;
         }
+        if self.open_menu.is_none() {
+            self.focus_before_open = cx.key_focus();
+        }
         self.open_menu = Some(index);
-        self.hot_entry = None;
+        self.hot_entry = self.first_enabled(index);
+        cx.set_key_focus(self.draw_bg.area());
         let uid = self.widget_uid();
         cx.widget_action(uid, MenuBarAction::Opened);
         self.redraw_overlay(cx);
@@ -759,6 +782,9 @@ impl MenuBar {
         cx.widget_action(uid, MenuBarAction::Closed);
         self.redraw_overlay(cx);
         self.draw_bg.redraw(cx);
+        if cx.key_focus() == self.draw_bg.area() {
+            cx.set_key_focus(self.focus_before_open);
+        }
         // The overlay draw list keeps painting until the whole pass is
         // rebuilt, so a close is a full redraw, exactly like FabColorPick's.
         cx.redraw_all();
@@ -794,10 +820,7 @@ impl MenuBar {
                 if entry.separator || !entry.enabled {
                     continue;
                 }
-                let Some(text) = &entry.shortcut else {
-                    continue;
-                };
-                let Some(shortcut) = parse_shortcut(text) else {
+                let Some(shortcut) = entry.parsed_shortcut else {
                     continue;
                 };
                 if shortcut.matches(ke) {
@@ -806,6 +829,80 @@ impl MenuBar {
             }
         }
         None
+    }
+
+    fn first_enabled(&self, menu: usize) -> Option<usize> {
+        self.defs.get(menu)?.items.iter().position(|entry| !entry.separator && entry.enabled)
+    }
+
+    fn step_entry(&self, menu: usize, current: Option<usize>, delta: isize) -> Option<usize> {
+        let items = &self.defs.get(menu)?.items;
+        if items.is_empty() {
+            return None;
+        }
+        let mut index = current.unwrap_or(if delta > 0 { items.len() - 1 } else { 0 });
+        for _ in 0..items.len() {
+            index = (index as isize + delta).rem_euclid(items.len() as isize) as usize;
+            if !items[index].separator && items[index].enabled {
+                return Some(index);
+            }
+        }
+        None
+    }
+
+    /// Accelerators are dispatched by the host after it has determined
+    /// whether an editor owns focus. Returning true means a menu action was
+    /// queued. Open-menu navigation remains inside the widget itself.
+    pub fn handle_shortcut(&mut self, cx: &mut Cx, event: &Event, text_editing: bool) -> bool {
+        let Event::KeyDown(ke) = event else {
+            return false;
+        };
+        if text_editing || ke.is_repeat || self.open_menu.is_some() {
+            return false;
+        }
+        let Some(id) = self.match_shortcut(ke) else {
+            return false;
+        };
+        self.fire(cx, id);
+        true
+    }
+
+    fn handle_open_key(&mut self, cx: &mut Cx, ke: &KeyEvent) -> bool {
+        let Some(menu) = self.open_menu else {
+            return false;
+        };
+        match ke.key_code {
+            KeyCode::Escape => self.close(cx),
+            KeyCode::ArrowLeft | KeyCode::ArrowRight => {
+                let delta = if ke.key_code == KeyCode::ArrowLeft { -1 } else { 1 };
+                let next = (menu as isize + delta).rem_euclid(self.defs.len() as isize) as usize;
+                self.open(cx, next);
+            }
+            KeyCode::ArrowUp => {
+                self.hot_entry = self.step_entry(menu, self.hot_entry, -1);
+                self.redraw_overlay(cx);
+            }
+            KeyCode::ArrowDown => {
+                self.hot_entry = self.step_entry(menu, self.hot_entry, 1);
+                self.redraw_overlay(cx);
+            }
+            KeyCode::ReturnKey | KeyCode::Space => {
+                let id = self.hot_entry.and_then(|entry| {
+                    self.defs
+                        .get(menu)?
+                        .items
+                        .get(entry)
+                        .filter(|entry| !entry.separator && entry.enabled)
+                        .map(|entry| entry.id)
+                });
+                if let Some(id) = id {
+                    self.close(cx);
+                    self.fire(cx, id);
+                }
+            }
+            _ => return false,
+        }
+        true
     }
 
     fn draw_titles(&mut self, cx: &mut Cx2d, rect: Rect) {
@@ -1059,17 +1156,17 @@ impl Widget for MenuBar {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if let Event::KeyDown(ke) = event {
-            if !ke.is_repeat {
-                if self.open_menu.is_some() && ke.key_code == KeyCode::Escape {
-                    self.close(cx);
-                    return;
-                }
-                // Only a chord an entry actually claims is acted on; every
-                // other key press passes through untouched.
-                if let Some(id) = self.match_shortcut(ke) {
-                    self.close(cx);
-                    self.fire(cx, id);
-                }
+            if !ke.is_repeat && self.handle_open_key(cx, ke) {
+                return;
+            }
+        }
+
+        if matches!(event, Event::WindowLostFocus(_) | Event::PopupDismissed(_)) {
+            self.close(cx);
+        }
+        if let Event::KeyFocusLost(event) = event {
+            if event.prev == self.draw_bg.area() {
+                self.close(cx);
             }
         }
 
@@ -1121,12 +1218,27 @@ impl MenuBarRef {
     pub fn is_open(&self) -> bool {
         self.borrow().map_or(false, |inner| inner.is_open())
     }
+
+    pub fn handle_shortcut(&self, cx: &mut Cx, event: &Event, text_editing: bool) -> bool {
+        self.borrow_mut()
+            .is_some_and(|mut inner| inner.handle_shortcut(cx, event, text_editing))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::makepad_script::script;
+
+    fn bare_bar(cx: &mut Cx) -> MenuBar {
+        cx.with_vm(|vm| {
+            let value = vm.eval(script! {
+                use mod.prelude.widgets.*
+                MenuBar{}
+            });
+            MenuBar::script_from_value(vm, value)
+        })
+    }
 
     /// The DSL only fails at eval time, so the gate is a real registration:
     /// build the widget from `mod.widgets.MenuBar` with the menu tree the
@@ -1198,6 +1310,7 @@ mod tests {
         assert!(parse_shortcut("Cmd+Frobnicate").is_none());
         assert!(parse_shortcut("Cmd").is_none());
         assert!(parse_shortcut("").is_none());
+        assert!(parse_shortcut("Cmd+N+O").is_none());
     }
 
     #[test]
@@ -1207,5 +1320,95 @@ mod tests {
         assert_eq!(shortcut_display("Ctrl+Alt+Delete"), "\u{2303}\u{2325}Delete");
         assert_eq!(shortcut_display("Cmd+Plus"), "\u{2318}+");
         assert_eq!(shortcut_display("F1"), "F1");
+    }
+
+    #[test]
+    fn keyboard_navigation_skips_disabled_entries_fires_and_closes_on_blur() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let mut disabled = MenuEntry::item(live_id!(disabled), "Disabled", None);
+        disabled.enabled = false;
+        let mut bar = bare_bar(&mut cx);
+        bar.defs = vec![
+            MenuDef::new(
+                "File",
+                vec![
+                    disabled,
+                    MenuEntry::separator(),
+                    MenuEntry::item(live_id!(open), "Open", Some("Cmd+O")),
+                    MenuEntry::item(live_id!(save), "Save", Some("Cmd+S")),
+                ],
+            ),
+            MenuDef::new(
+                "Edit",
+                vec![MenuEntry::item(live_id!(undo), "Undo", Some("Cmd+Z"))],
+            ),
+        ];
+        bar.open(&mut cx, 0);
+        assert_eq!(bar.hot_entry, Some(2));
+        assert!(bar.handle_open_key(
+            &mut cx,
+            &KeyEvent {
+                key_code: KeyCode::ArrowDown,
+                ..Default::default()
+            }
+        ));
+        assert_eq!(bar.hot_entry, Some(3));
+        bar.handle_open_key(
+            &mut cx,
+            &KeyEvent {
+                key_code: KeyCode::ArrowRight,
+                ..Default::default()
+            },
+        );
+        assert_eq!(bar.open_menu, Some(1));
+        assert_eq!(bar.hot_entry, Some(0));
+        bar.handle_open_key(
+            &mut cx,
+            &KeyEvent {
+                key_code: KeyCode::ReturnKey,
+                ..Default::default()
+            },
+        );
+        assert!(!bar.is_open());
+
+        bar.open(&mut cx, 0);
+        bar.handle_event(
+            &mut cx,
+            &Event::WindowLostFocus(WindowId(1, 1)),
+            &mut Scope::empty(),
+        );
+        assert!(!bar.is_open());
+    }
+
+    #[test]
+    fn text_editor_focus_has_shortcut_precedence() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let mut bar = bare_bar(&mut cx);
+        bar.defs = vec![MenuDef::new(
+            "Edit",
+            vec![MenuEntry::item(live_id!(undo), "Undo", Some("Cmd+Z"))],
+        )];
+        let event = Event::KeyDown(KeyEvent {
+            key_code: KeyCode::KeyZ,
+            modifiers: KeyModifiers {
+                logo: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert!(!bar.handle_shortcut(&mut cx, &event, true));
+        assert!(bar.handle_shortcut(&mut cx, &event, false));
+
+        bar.open(&mut cx, 0);
+        bar.handle_open_key(
+            &mut cx,
+            &KeyEvent {
+                key_code: KeyCode::Escape,
+                ..Default::default()
+            },
+        );
+        assert!(!bar.is_open());
     }
 }

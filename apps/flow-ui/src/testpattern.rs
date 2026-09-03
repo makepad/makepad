@@ -7,7 +7,7 @@
 use makepad_ai_hub::download::Downloader;
 use makepad_ai_hub::peer_serve::PeerOptions;
 use makepad_ai_hub::registry::{Domain, ModelSpec, Registry};
-use makepad_ai_hub::server::{start_service, ServiceConfig};
+use makepad_ai_hub::server::{start_service as start_hub_service, ServiceConfig, ServiceHandle};
 use makepad_flow::engine::executors::chat::ChatSeam;
 use makepad_flow::engine::{ChatEvent, ChatTurn};
 use std::time::Instant;
@@ -18,19 +18,33 @@ const FLEET: &str = "flow-testpattern";
 const WORDS_PER_SECOND: f64 = 18.0;
 const FIRST_TOKEN_SECS: f64 = 0.4;
 
+/// Owned dev service. Dropping it releases the service handles and removes
+/// the process-private cache rather than leaking both for the app lifetime.
+pub struct TestpatternService {
+    pub url: String,
+    handle: Option<ServiceHandle>,
+    cache_dir: std::path::PathBuf,
+}
+
+impl Drop for TestpatternService {
+    fn drop(&mut self) {
+        drop(self.handle.take());
+        let _ = std::fs::remove_dir_all(&self.cache_dir);
+    }
+}
+
 /// Start the hub service with the `testpattern` image model on a loopback
-/// port; returns its base URL. The service has no stop message: its
-/// threads belong to this process and end with it, as in the engine tests.
-pub fn start_service_url() -> Result<String, String> {
+/// port and return an owner the app retains until shutdown.
+pub fn start_service() -> Result<TestpatternService, String> {
     let cache_dir = std::env::temp_dir().join(format!(
         "makepad-flow-ui-testpattern-{}",
         std::process::id()
     ));
     let downloader = Downloader::new("http://127.0.0.1:1", None).map_err(|error| error.to_string())?;
-    let handle = start_service(ServiceConfig {
+    let handle = start_hub_service(ServiceConfig {
         host: "127.0.0.1".to_string(),
         port: 0,
-        cache_dir,
+        cache_dir: cache_dir.clone(),
         registry: Registry {
             models: vec![ModelSpec {
                 id: "testpattern".to_string(),
@@ -55,9 +69,32 @@ pub fn start_service_url() -> Result<String, String> {
         fleet: FLEET.to_string(),
     })
     .map_err(|error| error.to_string())?;
-    let url = format!("http://{}", handle.addr);
-    std::mem::forget(handle);
-    Ok(url)
+    Ok(TestpatternService {
+        url: format!("http://{}", handle.addr),
+        handle: Some(handle),
+        cache_dir,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owned_service_removes_its_process_cache_on_drop() {
+        let cache_dir = std::env::temp_dir().join(format!(
+            "makepad-flow-ui-testpattern-drop-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(cache_dir.join("sentinel"), b"owned").unwrap();
+        drop(TestpatternService {
+            url: String::new(),
+            handle: None,
+            cache_dir: cache_dir.clone(),
+        });
+        assert!(!cache_dir.exists());
+    }
 }
 
 /// Streams one vivid paragraph built from the prompt, word by word.

@@ -553,7 +553,7 @@ fn propagate_upstream(
     }
 }
 
-fn selected_nodes(graph: &crate::Graph, outputs: Option<&[String]>) -> HashSet<String> {
+pub(crate) fn selected_nodes(graph: &crate::Graph, outputs: Option<&[String]>) -> HashSet<String> {
     let requested: Vec<String> = outputs
         .map(|outputs| outputs.to_vec())
         .unwrap_or_else(|| {
