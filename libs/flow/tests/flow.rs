@@ -47,7 +47,7 @@ fn errors_have_locations() {
         (
             "missing.splash",
             "use mod.flow.*\nlet hidden = Text{}\nlet result = Output{value: hidden.text()}\nFlow{result}",
-            "node not in flow",
+            "node `hidden` is referenced by `result.value` but not listed in `Flow{}`",
         ),
         (
             "mismatch.splash",

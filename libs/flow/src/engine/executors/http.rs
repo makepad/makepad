@@ -134,6 +134,12 @@ impl Executor for HttpExecutor {
                 .clone(),
             status: Some(response.status),
         });
+        if (300..400).contains(&response.status) {
+            return Poll::Failed(format!(
+                "HTTP redirect refused (status {})",
+                response.status
+            ));
+        }
         if response.body.len() > 32 * 1024 * 1024 {
             return Poll::Failed("HTTP response body exceeds 32 MiB".to_string());
         }

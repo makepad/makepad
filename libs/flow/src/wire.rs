@@ -335,6 +335,30 @@ pub struct NodesResponse {
     pub types: Vec<NodeTypeCatalog>,
     pub brief: String,
 }
+
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct TemplateSummary {
+    pub name: String,
+    pub label: String,
+    pub brief: String,
+    pub node_count: u64,
+    pub inputs: Vec<(String, String)>,
+    pub outputs: Vec<(String, String)>,
+}
+
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct TemplateResponse {
+    pub name: String,
+    pub label: String,
+    pub brief: String,
+    pub source: String,
+}
+
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct CreateFromTemplateRequest {
+    pub template: String,
+}
+
 #[derive(Clone, Debug, SerJson, DeJson)]
 pub struct FlowResponse {
     pub source: String,
