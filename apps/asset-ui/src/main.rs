@@ -244,7 +244,7 @@ use crate::store_views::{
     StoreListPanel, StoreRow,
     TileDelete,
 };
-use crate::video_player::VideoPlayer;
+use crate::video_player::{VideoDecoder, VideoPlayer};
 
 use makepad_micro_serde::SerJson;
 use makepad_widgets::*;
@@ -4010,7 +4010,7 @@ pub struct App {
     fleet_timer: Timer,
     /// LAN beacon listener; polled on the fleet timer.
     #[rust]
-    discovered: Option<makepad_ai_hub::discovery::Discovered>,
+    discovered: Option<makepad_ai_hub::discovery::Discovery>,
     #[rust]
     job_timer: Timer,
     #[rust]
@@ -4036,6 +4036,8 @@ pub struct App {
     library: Option<Library>,
     #[rust]
     video: Option<VideoPlayer>,
+    #[rust]
+    video_decoder: Option<VideoDecoder>,
     /// The file the viewer's current video came from — Restart and the loop
     /// toggle re-open it.
     video_path: Option<PathBuf>,
@@ -4323,8 +4325,16 @@ impl App {
     // -- setup ---------------------------------------------------------------
 
     fn setup(&mut self, cx: &mut Cx) {
+        let pool = cx.task_pool();
+        let spawner = cx.thread_spawner();
+        let (video_decoder, mut video_audio) =
+            VideoDecoder::start(spawner.clone()).expect("asset-ui video decoder worker");
+        self.video_decoder = Some(video_decoder);
         let _ = std::fs::create_dir_all(artifacts_dir());
-        self.artifact_io = Some(ArtifactIo::start());
+        self.artifact_io = Some(ArtifactIo::start(spawner.clone()));
+        self.analysis = Some(AnalysisQueue::start(spawner.clone()));
+        self.import_page.set_task_pool(pool.clone());
+        self.music_import_page.set_task_pool(pool.clone());
         self.load_fleet_prefs();
         self.library = Some(Library::open(repo_path("local/ai_content_library")));
         self.saved_presets = fast_presets::load(&fast_presets::store_path());
@@ -4349,7 +4359,11 @@ impl App {
         // The store hosts the embedded Asset Server; hand it the library it
         // must publish. Library::open ran above, so the product backfill is
         // already on disk when the watcher's first poll reads index.json.
-        self.store.start(PathBuf::from(repo_path("local/ai_content_library")));
+        self.store.start(
+            PathBuf::from(repo_path("local/ai_content_library")),
+            pool,
+            spawner,
+        );
         self.asset_store_timer = cx.start_interval(0.2);
         // Opening stays metadata-only; every missing preview is queued here
         // and regenerated a bounded slice at a time once frames are flowing.
@@ -4548,11 +4562,12 @@ impl App {
         self.refresh_voice_ui(cx);
         self.sync_preset_name_box(cx);
 
-        // Speakers: wav artifacts + video soundtrack.
+        // Speakers: both engines move into the callback and own their state.
+        let mut audio_engine = crate::audio::take_engine();
         cx.audio_output(0, move |info, output| {
             output.zero();
-            crate::audio::mix_into(output, info.sample_rate);
-            crate::video_player::mix_into(output, info.sample_rate);
+            audio_engine.mix_into(output, info.sample_rate);
+            video_audio.mix_into(output, info.sample_rate);
         });
 
         // Headless drive.
@@ -7541,7 +7556,7 @@ impl App {
                         // WAV must not call play() or a 200ms DS_* / Quake
                         // shot becomes a loop (play-at-end restarts).
                         if audition && audio::autoplay_one_shot(domain, pcm.seconds()) {
-                            crate::video_player::stop_audio();
+                            self.stop_video_audio();
                             audio::play();
                             self.arm_audio_pump(cx);
                         }
@@ -7589,7 +7604,8 @@ impl App {
             // behind a new open or an error state.
             self.stop_video_playback();
             self.clear_video_frame(cx);
-            match VideoPlayer::new(&path.to_string_lossy()) {
+            let decoder = self.video_decoder.as_ref().expect("video decoder started");
+            match VideoPlayer::new(&path.to_string_lossy(), decoder) {
                 Ok(player) => {
                     self.ui.label(cx, ids!(video_info)).set_text(
                         cx,
@@ -9101,7 +9117,7 @@ impl App {
                                 && audio::is_ready()
                                 && !audio::is_playing()
                             {
-                                crate::video_player::stop_audio();
+                                self.stop_video_audio();
                                 audio::play();
                                 self.arm_audio_pump(cx);
                                 self.sync_audio_ui(cx);
@@ -10714,7 +10730,8 @@ impl App {
                 if let Some(path) = item.as_ref().and_then(|item| item.payload.clone()) {
                     self.stop_video_playback();
                     self.clear_video_frame(cx);
-                    match VideoPlayer::new(&path.to_string_lossy()) {
+                    let decoder = self.video_decoder.as_ref().expect("video decoder started");
+                    match VideoPlayer::new(&path.to_string_lossy(), decoder) {
                         Ok(player) => {
                             self.library_video_file = Some(file.clone());
                             self.video = Some(player);
@@ -10789,7 +10806,8 @@ impl App {
                             self.library_audio_file = Some(file.clone());
                             // The transport: decoded off the frame thread and
                             // installed when it lands.
-                            let clip_gen = crate::audio::load_clip_async(bytes.clone());
+                            let pool = cx.task_pool();
+                            let clip_gen = crate::audio::load_clip_async(&pool, bytes.clone());
                             // And, exactly once per track, what the store
                             // already holds BESIDE the mixed audio: the four
                             // separated layers and the transcript. The clip
@@ -10930,11 +10948,9 @@ impl App {
 
     // -- "Split audio layers": the bake queue and its consumers -----------
 
-    /// The bake + fetch lanes, started on first use. Two threads parked on
-    /// a channel is the whole cost of having them.
+    /// The bake + fetch lanes, started once with the app and fed by channels.
     fn analysis(&mut self) -> &mut analysis::AnalysisQueue {
-        self.analysis
-            .get_or_insert_with(analysis::AnalysisQueue::start)
+        self.analysis.as_mut().expect("analysis workers started")
     }
 
     /// The selected catalog hit when it is an AUDIO asset: id and title.
@@ -12400,7 +12416,13 @@ impl App {
     /// [`Self::clear_video_frame`] is also called.
     fn stop_video_playback(&mut self) {
         self.video = None;
-        crate::video_player::stop_audio();
+        self.stop_video_audio();
+    }
+
+    fn stop_video_audio(&self) {
+        if let Some(decoder) = &self.video_decoder {
+            decoder.stop_audio();
+        }
     }
 
     /// Blank the actual video WIDGET texture (not only the app-side handle),
@@ -12792,7 +12814,8 @@ impl App {
     fn restart_viewer_video(&mut self, cx: &mut Cx) -> bool {
         let Some(path) = self.video_path.clone() else { return false };
         self.stop_video_playback();
-        match VideoPlayer::new(&path.to_string_lossy()) {
+        let decoder = self.video_decoder.as_ref().expect("video decoder started");
+        match VideoPlayer::new(&path.to_string_lossy(), decoder) {
             Ok(player) => {
                 self.video = Some(player);
                 self.sync_video_transport(cx);
@@ -14133,7 +14156,7 @@ impl MatchEvent for App {
                 } else {
                     // A user-resumed WAV preview wins over a stale video
                     // soundtrack in the shared device callback.
-                    crate::video_player::stop_audio();
+                    self.stop_video_audio();
                     audio::play();
                     self.arm_audio_pump(cx);
                 }
@@ -14691,14 +14714,17 @@ impl AppMain for App {
             }
         }
         self.scrub_audio(cx, event);
-        if self.audio_timer.is_event(event).is_some() && audio::is_ready() {
-            self.sync_audio_ui(cx);
-            // The Library rail has its own transport over the same mixer.
-            if self.surface == Surface::Library && self.library_audio_file.is_some() {
-                self.refresh_library_audio(cx);
-                // Playback that started from the transport re-arms the
-                // transcript's own per-frame follow.
-                self.arm_lyrics_pump(cx);
+        if self.audio_timer.is_event(event).is_some() {
+            audio::pump();
+            if audio::is_ready() {
+                self.sync_audio_ui(cx);
+                // The Library rail has its own transport over the same mixer.
+                if self.surface == Surface::Library && self.library_audio_file.is_some() {
+                    self.refresh_library_audio(cx);
+                    // Playback that started from the transport re-arms the
+                    // transcript's own per-frame follow.
+                    self.arm_lyrics_pump(cx);
+                }
             }
         }
         if self.audio_timer.is_event(event).is_some() && self.webcam.capturing {
@@ -15919,6 +15945,12 @@ mod world_style_tests {
             kind: Some(makepad_asset_data::AssetKind::World),
             title: title.to_string(),
             creator: String::new(),
+            artist: String::new(),
+            artist_url: String::new(),
+            album: String::new(),
+            source_url: String::new(),
+            license: String::new(),
+            license_url: String::new(),
             snippet: String::new(),
             score: 0,
             live: true,

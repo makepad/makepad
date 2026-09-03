@@ -4959,7 +4959,10 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
         let mut want: Vec<(String, String)> = [
             ("audio", "moss-sfx"),
             ("audio", "sa3-sfx"),
+            ("audio", "salamander-drumkit"),
             ("audio", "woosh-sfx"),
+            ("beats", "beat-this"),
+            ("body", "sam3dbody"),
             ("control", "flux1-canny-dev"),
             ("control", "flux1-depth-dev"),
             ("depth", "da3-metric-large"),
@@ -4977,6 +4980,8 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             ("music", "minimax-music3"),
             ("music", "minimax-music3-q4"),
             ("music", "ace-step-1.5-xl"),
+            ("notes", "basic-pitch"),
+            ("ocr", "chandra-ocr-2"),
             ("paint", "hunyuan3d-paint-2.1"),
             ("rig", "skintokens"),
             ("rig", "skintokens-oracle"),
@@ -4984,6 +4989,8 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             ("splat", "triposplat"),
             ("speech", "indextts-2.5"),
             ("speech", "kokoro"),
+            ("stems", "bs-roformer-4stem"),
+            ("stt", "whisper-large-v3-turbo"),
             ("text", "qwen3.8-27b"),
             ("upscale", "realesrgan-x4plus"),
             ("vision", "qwen3.8-27b-vision"),
@@ -5044,7 +5051,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
     /// fails visibly as a service gap instead of rerouting.
     const DOCUMENTED_OVERRIDE_PINS: &[(&str, &str)] = &[("text", CHARACTER_LLM_MODEL)];
 
-    /// Every pin must reference a model the registry actually has in the
+    /// Every pin must reference a model the registry can serve for the
     /// pinned domain — or be a documented cache-registry override above.
     /// Catches typos and silent registry drift.
     #[test]
@@ -5059,7 +5066,13 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
                     registry
                         .models
                         .iter()
-                        .any(|entry| entry.id == *model && entry.domain.as_str() == *domain),
+                        .any(|entry| {
+                            entry.id == *model
+                                && (entry.domain.as_str() == *domain
+                                    || (*domain == "edit"
+                                        && entry.domain.as_str() == "image"
+                                        && model.starts_with("flux2-dev")))
+                        }),
                     "preset {:?} pins unknown model {domain}/{model}",
                     preset.name
                 );
