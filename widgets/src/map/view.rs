@@ -2740,9 +2740,12 @@ const SHIMMER_SETTLE_SECS: f64 = 1.0;
 const TOUCH_GESTURE_CLASSIFY_PX: f64 = 20.0;
 /// A smaller angular change is treated as pinch noise.
 const TOUCH_ROTATE_DEAD_ZONE_DEG: f64 = 5.0;
-/// Parallel vertical travel may change the pair shape by this much and
-/// still count as a tilt gesture.
-const TOUCH_TILT_SHAPE_TOLERANCE_PX: f64 = 12.0;
+/// Each finger must have moved at least this far vertically, in the same
+/// direction as the other, for the pair to count as a tilt stroke.
+const TOUCH_TILT_MIN_FINGER_PX: f64 = 6.0;
+/// How far sideways a tilt stroke may lean, as a fraction of its vertical
+/// travel ("up/down with about 20 % acceptance").
+const TOUCH_TILT_SIDEWAYS_RATIO: f64 = 0.2;
 /// One shared time-lapse for ALL weather layers: the rain nowcast frame
 /// rate AND the wind-particle advection derive from it, so cloud drift and
 /// wind streaks move as one physical system (900x real time).
@@ -2911,16 +2914,6 @@ fn classify_touch_gesture(start: TouchPair, current: TouchPair) -> TouchGestureM
     let distance_motion = (current.distance() - start.distance()).abs();
     let angle_motion_deg = touch_angle_delta(start, current).abs().to_degrees();
 
-    let parallel_vertical = a_motion.y * b_motion.y > 0.0
-        && a_motion.y.abs().min(b_motion.y.abs()) >= TOUCH_GESTURE_CLASSIFY_PX
-        && a_motion.x.abs() <= a_motion.y.abs() * 0.5
-        && b_motion.x.abs() <= b_motion.y.abs() * 0.5
-        && distance_motion <= TOUCH_TILT_SHAPE_TOLERANCE_PX
-        && angle_motion_deg < TOUCH_ROTATE_DEAD_ZONE_DEG;
-    if parallel_vertical {
-        return TouchGestureMode::Tilt;
-    }
-
     let travel = a_motion
         .length()
         .max(b_motion.length())
@@ -2928,6 +2921,21 @@ fn classify_touch_gesture(start: TouchPair, current: TouchPair) -> TouchGestureM
         .max(distance_motion);
     if travel < TOUCH_GESTURE_CLASSIFY_PX {
         return TouchGestureMode::Pending;
+    }
+    // Tilt is two fingers moving TOGETHER up or down: both travel in the
+    // same vertical direction and the pair as a whole has moved far enough
+    // vertically. Nothing else matters — not the spread, not the angle,
+    // not how the fingers sit relative to each other or how diagonal the
+    // stroke is. A pinch or rotate moves the fingers against each other,
+    // so their vertical motions disagree and never pass this test.
+    let same_vertical_direction = a_motion.y * b_motion.y > 0.0
+        && a_motion.y.abs().min(b_motion.y.abs()) >= TOUCH_TILT_MIN_FINGER_PX;
+    // "Up/down" with a little slack: the pair's stroke may lean sideways by
+    // a fifth of its vertical travel and still read as vertical.
+    let mostly_vertical = midpoint_motion.y.abs() >= TOUCH_GESTURE_CLASSIFY_PX
+        && midpoint_motion.x.abs() <= midpoint_motion.y.abs() * TOUCH_TILT_SIDEWAYS_RATIO;
+    if same_vertical_direction && mostly_vertical {
+        return TouchGestureMode::Tilt;
     }
     if angle_motion_deg >= TOUCH_ROTATE_DEAD_ZONE_DEG {
         TouchGestureMode::Rotate
