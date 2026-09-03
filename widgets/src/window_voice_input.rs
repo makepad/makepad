@@ -1,7 +1,7 @@
 use crate::makepad_draw::{
     audio::{AudioBuffer, AudioDeviceId, AudioDevicesEvent, AudioInputOptions},
     permission::{Permission, PermissionResult, PermissionStatus},
-    thread::SignalToUI,
+    thread::{SignalToUI, ThreadOptions, ThreadSpawner},
     Cx, CxMediaApi, Event, NextFrame,
 };
 use makepad_ai_hub::speech::{Segment, SttConfig, SttEvent, SttSession};
@@ -156,6 +156,7 @@ impl WindowVoiceInput {
         }
         if let Some((audio_rx, control_rx, text_tx, wave_tx)) = self.worker_inputs.take() {
             spawn_voice_worker(
+                &cx.thread_spawner(),
                 audio_rx,
                 control_rx,
                 text_tx,
@@ -648,6 +649,7 @@ impl StreamingDownsampler {
 }
 
 fn spawn_voice_worker(
+    spawner: &ThreadSpawner,
     audio_rx: Receiver<Vec<f32>>,
     control_rx: Receiver<VoiceControlMessage>,
     text_tx: mpsc::Sender<String>,
@@ -655,7 +657,7 @@ fn spawn_voice_worker(
     text_signal: SignalToUI,
     engine_mic: Arc<AtomicBool>,
 ) {
-    std::thread::spawn(move || {
+    let spawned = spawner.spawn_worker(ThreadOptions { name: Some("makepad-voice".into()), ..Default::default() }, move || {
         // The hub picks the recognizer: Whisper in this process (weights here,
         // machine election), on the machine node, on a LAN node, else the OS
         // engine. Loading happens on the session's own thread and reports
@@ -897,6 +899,9 @@ fn spawn_voice_worker(
             }
         }
     });
+    if let Ok(handle) = spawned {
+        handle.detach();
+    }
 }
 
 fn trim_pending_to_recent(samples: &mut VecDeque<f32>, keep: usize) {

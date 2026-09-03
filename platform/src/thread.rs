@@ -1,9 +1,21 @@
 //! Cross-platform thread runtime.
 //!
-//! Dedicated tasks are joinable and always publish one terminal result. Short
-//! work belongs in [`TaskPool`], whose queue is bounded and whose workers park
-//! while idle. Deadlines are Makepad monotonic seconds; no `Instant` crosses
-//! the wasm boundary.
+//! Background work runs on ONE mechanism on every target: the runtime-owned
+//! [`TaskPool`] (`Cx::task_pool()`), whose workers are created once at
+//! start-up and stay warm. A job is submitted lock-free from any thread and
+//! its result comes back through a [`TaskHandle`] polled with `try_take`
+//! (never a blocking join on the UI thread) or over whatever channel the job
+//! carries; every completion raises the UI signal. The pool has two lanes so
+//! a long job (an mp3 decode, a stem fetch, a bake) never queues in front of
+//! a short interactive one (an icon, a thumbnail, a catalog request).
+//!
+//! [`ThreadSpawner::spawn_worker`] creates a dedicated long-lived thread — an
+//! audio, decode or network loop fed over a channel — once at start-up. It is
+//! never the mechanism for a job: on the web a Web Worker takes hundreds of
+//! milliseconds to come up, on desktop it is churn.
+//!
+//! Deadlines are Makepad monotonic seconds; no `Instant` crosses the wasm
+//! boundary.
 
 use {
     crate::{
@@ -12,22 +24,20 @@ use {
         event::{Event, Timer},
     },
     std::{
-        any::{Any, TypeId},
+        any::Any,
         collections::{HashMap, VecDeque},
         fmt,
         num::NonZeroUsize,
         panic::{catch_unwind, AssertUnwindSafe},
         sync::{
-            atomic::{AtomicBool, AtomicU32, Ordering},
+            atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering},
+            mpsc::{sync_channel, Receiver, SyncSender, TrySendError},
             Arc, Condvar, Mutex, MutexGuard, OnceLock,
         },
         thread::ThreadId,
         time::Duration,
     },
 };
-
-#[cfg(any(target_arch = "wasm32", test))]
-use std::sync::atomic::AtomicUsize;
 
 pub use makepad_network::{
     to_ui_bounded, to_ui_oneshot, FromUIReceiver, FromUISender, ReceiverAlreadyTaken,
@@ -368,6 +378,15 @@ fn panic_report(payload: Box<dyn Any + Send>) -> PanicReport {
     PanicReport { message }
 }
 
+/// Creates dedicated, long-lived threads.
+///
+/// This is NOT the way to run a job. A job (a decode, a fetch, a scan, an
+/// encode — anything with an end) goes to [`Cx::task_pool`], whose workers
+/// already exist and are warm on every target. `spawn_worker` exists for the
+/// handful of threads an app creates ONCE at start-up and then feeds over a
+/// channel for its whole life: an audio engine, a decode loop, a network or
+/// websocket pump, a file watcher. On the web every call here boots a fresh
+/// Web Worker (hundreds of milliseconds); on desktop it is an OS thread.
 #[derive(Clone)]
 pub struct ThreadSpawner {
     ui_thread: ThreadId,
@@ -400,15 +419,11 @@ impl ThreadSpawner {
         }
     }
 
-    pub fn spawn<F, T>(&self, f: F) -> Result<TaskHandle<T>, SpawnError>
-    where
-        F: FnOnce() -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        self.spawn_with(ThreadOptions::default(), f)
-    }
-
-    pub fn spawn_with<F, T>(&self, options: ThreadOptions, f: F) -> Result<TaskHandle<T>, SpawnError>
+    /// Create one dedicated long-lived thread. Call it once at start-up for a
+    /// loop that is fed over a channel; never per job — jobs go to
+    /// [`TaskPool::submit`]. The handle reports the thread's terminal result;
+    /// `detach()` it when nobody waits for that.
+    pub fn spawn_worker<F, T>(&self, options: ThreadOptions, f: F) -> Result<TaskHandle<T>, SpawnError>
     where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
@@ -484,85 +499,6 @@ impl ThreadSpawner {
     pub(crate) fn close_runtime(&self) {
         self.runtime_open.store(false, Ordering::Release);
     }
-
-    /// Run borrowed fan-out from a worker. Calling this on the UI thread is
-    /// refused before the body runs.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn scope<'env, R>(
-        &self,
-        body: impl for<'scope> FnOnce(&ScopedSpawner<'scope, 'env>) -> R,
-    ) -> Result<R, TaskError> {
-        if std::thread::current().id() == self.ui_thread {
-            return Err(TaskError::WouldBlockUi);
-        }
-        catch_unwind(AssertUnwindSafe(|| {
-            std::thread::scope(|scope| body(&ScopedSpawner { scope }))
-        }))
-        .map_err(|payload| TaskError::Panicked(panic_report(payload)))
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub fn scope<'env, R>(
-        &self,
-        _body: impl for<'scope> FnOnce(&ScopedSpawner<'scope, 'env>) -> R,
-    ) -> Result<R, TaskError> {
-        if std::thread::current().id() == self.ui_thread {
-            Err(TaskError::WouldBlockUi)
-        } else {
-            Err(TaskError::Spawn(SpawnError::Unsupported))
-        }
-    }
-}
-
-pub struct ScopedSpawner<'scope, 'env: 'scope> {
-    #[cfg(not(target_arch = "wasm32"))]
-    scope: &'scope std::thread::Scope<'scope, 'env>,
-    #[cfg(target_arch = "wasm32")]
-    marker: std::marker::PhantomData<&'scope &'env ()>,
-}
-
-pub struct ScopedTaskHandle<'scope, T> {
-    #[cfg(not(target_arch = "wasm32"))]
-    handle: std::thread::ScopedJoinHandle<'scope, T>,
-    #[cfg(target_arch = "wasm32")]
-    marker: std::marker::PhantomData<&'scope T>,
-}
-
-impl<'scope, 'env> ScopedSpawner<'scope, 'env> {
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn spawn<F, T>(&self, f: F) -> Result<ScopedTaskHandle<'scope, T>, SpawnError>
-    where
-        F: FnOnce() -> T + Send + 'scope,
-        T: Send + 'scope,
-    {
-        std::thread::Builder::new()
-            .spawn_scoped(self.scope, f)
-            .map(|handle| ScopedTaskHandle { handle })
-            .map_err(map_spawn_io_error)
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub fn spawn<F, T>(&self, _f: F) -> Result<ScopedTaskHandle<'scope, T>, SpawnError>
-    where
-        F: FnOnce() -> T + Send + 'scope,
-        T: Send + 'scope,
-    {
-        Err(SpawnError::Unsupported)
-    }
-}
-
-impl<T> ScopedTaskHandle<'_, T> {
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn join(self) -> Result<T, TaskError> {
-        self.handle
-            .join()
-            .map_err(|payload| TaskError::Panicked(panic_report(payload)))
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub fn join(self) -> Result<T, TaskError> {
-        Err(TaskError::Spawn(SpawnError::Unsupported))
-}
 }
 
 fn validate_stack_size(stack_size: Option<usize>) -> Result<(), SpawnError> {
@@ -625,22 +561,61 @@ impl Cx {
         self.thread_spawner.with_parallelism(self.cpu_cores.max(1))
     }
 
-    pub fn spawn_thread<F, T>(&mut self, f: F) -> Result<TaskHandle<T>, SpawnError>
+    /// The runtime's background executor: created once (at `Event::Startup`,
+    /// or on first use), sized to the machine, workers warm on every target.
+    /// The returned handle is a cheap clone that any thread may submit on.
+    pub fn task_pool(&self) -> TaskPool {
+        self.task_pool
+            .get_or_init(|| {
+                let spawner = self.thread_spawner();
+                let options = PoolOptions::runtime(spawner.available_parallelism());
+                match TaskPool::new(spawner, options) {
+                    Ok(pool) => pool,
+                    Err(error) => {
+                        crate::log!("task pool unavailable ({error}); background jobs are refused");
+                        TaskPool::closed()
+                    }
+                }
+            })
+            .clone()
+    }
+
+    pub(crate) fn warm_task_pool(&self) {
+        let _ = self.task_pool();
+    }
+
+    /// One line: worker count, lanes, job counts and queue waits so far.
+    pub fn task_pool_summary(&self) -> String {
+        match self.task_pool.get() {
+            Some(pool) => pool.summary(),
+            None => "pool: not started".to_string(),
+        }
+    }
+
+    pub(crate) fn close_task_pool(&self) {
+        if let Some(pool) = self.task_pool.get() {
+            crate::log!("{}", pool.summary());
+            pool.close(ShutdownMode::CancelPending);
+        }
+    }
+
+    /// One dedicated long-lived thread (see [`ThreadSpawner::spawn_worker`]).
+    pub fn spawn_worker<F, T>(&self, f: F) -> Result<TaskHandle<T>, SpawnError>
     where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        let result = self.thread_spawner().spawn(f);
+        let result = self.thread_spawner().spawn_worker(ThreadOptions::default(), f);
         log_unsupported_spawn_once(&result);
         result
     }
 
-    pub fn spawn_thread_with<F, T>(&mut self, options: ThreadOptions, f: F) -> Result<TaskHandle<T>, SpawnError>
+    pub fn spawn_worker_with<F, T>(&self, options: ThreadOptions, f: F) -> Result<TaskHandle<T>, SpawnError>
     where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        let result = self.thread_spawner().spawn_with(options, f);
+        let result = self.thread_spawner().spawn_worker(options, f);
         log_unsupported_spawn_once(&result);
         result
     }
@@ -650,12 +625,44 @@ fn log_unsupported_spawn_once<T>(result: &Result<TaskHandle<T>, SpawnError>) {
     static LOGGED: AtomicBool = AtomicBool::new(false);
     match result {
         Err(SpawnError::Unsupported) if !LOGGED.swap(true, Ordering::AcqRel) => {
-            crate::error!("Cx::spawn_thread is unsupported on wasm without atomics");
+            crate::error!("Cx::spawn_worker is unsupported on wasm without atomics");
         }
         Err(error) if !matches!(error, SpawnError::Unsupported) => {
-            crate::error!("Cx::spawn_thread failed: {error}");
+            crate::error!("Cx::spawn_worker failed: {error}");
         }
         _ => {}
+    }
+}
+
+/// Which lane a job travels on.
+///
+/// `Light` is short interactive work — an icon or SVG, an image or tile
+/// decode, a thumbnail, a catalog request — and is served by every worker,
+/// including the ones reserved for it. `Heavy` is anything long — an audio
+/// decode, a stem fetch, a loop scan, a bake — and may only use the
+/// non-reserved workers, so a burst of heavy jobs never queues in front of the
+/// light ones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Lane {
+    Light,
+    Heavy,
+}
+
+impl Lane {
+    const ALL: [Lane; 2] = [Lane::Light, Lane::Heavy];
+
+    fn index(self) -> usize {
+        match self {
+            Lane::Light => 0,
+            Lane::Heavy => 1,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Lane::Light => "light",
+            Lane::Heavy => "heavy",
+        }
     }
 }
 
@@ -671,11 +678,51 @@ pub enum ShutdownMode {
     Drain,
 }
 
+/// The most workers one pool tracks; the idle set is one `u32` bit mask.
+pub const MAX_POOL_WORKERS: usize = 32;
+
 #[derive(Clone, Debug)]
 pub struct PoolOptions {
+    /// Total worker threads, clamped to `1..=MAX_POOL_WORKERS`.
     pub workers: NonZeroUsize,
-    pub capacity: NonZeroUsize,
+    /// Workers that only ever run `Lane::Light` jobs. Clamped so at least one
+    /// worker can run heavy jobs.
+    pub light_reserve: usize,
+    /// Bounded queue depth per lane; a full lane refuses the submit.
+    pub light_capacity: NonZeroUsize,
+    pub heavy_capacity: NonZeroUsize,
     pub name: Arc<str>,
+}
+
+impl PoolOptions {
+    /// The runtime sizing law. Desktop: hardware concurrency minus one for the
+    /// UI thread, clamped to `3..=8`. Web: the same minus one, capped at 6
+    /// (Web Workers are expensive to start but cheap to keep) and at least 3.
+    /// Two workers are reserved for light jobs on both.
+    pub fn runtime(parallelism: NonZeroUsize) -> Self {
+        let hardware = parallelism.get();
+        #[cfg(target_arch = "wasm32")]
+        let total = hardware.saturating_sub(1).clamp(3, 6);
+        #[cfg(not(target_arch = "wasm32"))]
+        let total = hardware.saturating_sub(1).clamp(3, 8);
+        Self {
+            workers: NonZeroUsize::new(total).unwrap(),
+            light_reserve: 2,
+            light_capacity: NonZeroUsize::new(512).unwrap(),
+            heavy_capacity: NonZeroUsize::new(128).unwrap(),
+            name: "makepad-pool".into(),
+        }
+    }
+
+    pub fn with_workers(workers: usize, light_reserve: usize) -> Self {
+        Self {
+            workers: NonZeroUsize::new(workers.max(1)).unwrap(),
+            light_reserve,
+            light_capacity: NonZeroUsize::new(512).unwrap(),
+            heavy_capacity: NonZeroUsize::new(128).unwrap(),
+            name: "pool".into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -695,35 +742,22 @@ impl fmt::Display for SubmitError {
 
 impl std::error::Error for SubmitError {}
 
-struct ErasedTag {
-    value: Box<dyn Any + Send>,
-    type_id: TypeId,
-    equals: fn(&dyn Any, &dyn Any) -> bool,
+/// A refused submission hands the job back so the caller can retry it on a
+/// later frame instead of rebuilding it.
+pub struct Refused<F> {
+    pub job: F,
+    pub error: SubmitError,
 }
 
-impl ErasedTag {
-    fn new<K: PartialEq + Send + 'static>(key: K) -> Self {
-        fn equals<K: PartialEq + 'static>(left: &dyn Any, right: &dyn Any) -> bool {
-            left.downcast_ref::<K>() == right.downcast_ref::<K>()
-        }
-        Self {
-            value: Box::new(key),
-            type_id: TypeId::of::<K>(),
-            equals: equals::<K>,
-        }
-    }
-
-    fn equals_key<K: PartialEq + 'static>(&self, key: &K) -> bool {
-        self.type_id == TypeId::of::<K>() && (self.equals)(self.value.as_ref(), key)
-    }
-
-    fn downcast_ref<K: 'static>(&self) -> Option<&K> {
-        self.value.downcast_ref()
+impl<F> fmt::Debug for Refused<F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Refused").field("error", &self.error).finish_non_exhaustive()
     }
 }
 
 struct PoolJob {
-    tag: Option<ErasedTag>,
+    lane: Lane,
+    submitted_at: f64,
     run: Option<Box<dyn FnOnce() + Send>>,
     cancel: Option<Box<dyn FnOnce() + Send>>,
 }
@@ -748,100 +782,636 @@ impl Drop for PoolJob {
     }
 }
 
-struct PoolState {
-    queue: VecDeque<PoolJob>,
-    shutdown: Option<ShutdownMode>,
+struct LaneQueue {
+    /// Lock-free bounded hand-over: `try_send` never blocks, on any thread.
+    sender: SyncSender<PoolJob>,
+    /// Workers only. The UI thread never touches this mutex.
+    receiver: Mutex<Receiver<PoolJob>>,
+    capacity: usize,
+    queued: AtomicUsize,
+    peak_queued: AtomicUsize,
+    submitted: AtomicU64,
+    completed: AtomicU64,
+    wait_total_us: AtomicU64,
+    wait_max_us: AtomicU64,
+    run_total_us: AtomicU64,
+    run_max_us: AtomicU64,
 }
 
+impl LaneQueue {
+    fn new(capacity: usize) -> Self {
+        let (sender, receiver) = sync_channel(capacity);
+        Self {
+            sender,
+            receiver: Mutex::new(receiver),
+            capacity,
+            queued: AtomicUsize::new(0),
+            peak_queued: AtomicUsize::new(0),
+            submitted: AtomicU64::new(0),
+            completed: AtomicU64::new(0),
+            wait_total_us: AtomicU64::new(0),
+            wait_max_us: AtomicU64::new(0),
+            run_total_us: AtomicU64::new(0),
+            run_max_us: AtomicU64::new(0),
+        }
+    }
+
+    fn try_take(&self) -> Option<PoolJob> {
+        let receiver = self.receiver.lock().unwrap_or_else(|error| error.into_inner());
+        let job = receiver.try_recv().ok();
+        drop(receiver);
+        if job.is_some() {
+            self.queued.fetch_sub(1, Ordering::AcqRel);
+        }
+        job
+    }
+
+    fn snapshot(&self) -> LaneStats {
+        let completed = self.completed.load(Ordering::Relaxed);
+        let average = |total: u64| {
+            if completed == 0 {
+                0.0
+            } else {
+                total as f64 / completed as f64 / 1000.0
+            }
+        };
+        LaneStats {
+            submitted: self.submitted.load(Ordering::Relaxed),
+            completed,
+            queued: self.queued.load(Ordering::Relaxed),
+            peak_queued: self.peak_queued.load(Ordering::Relaxed),
+            capacity: self.capacity,
+            wait_avg_ms: average(self.wait_total_us.load(Ordering::Relaxed)),
+            wait_max_ms: self.wait_max_us.load(Ordering::Relaxed) as f64 / 1000.0,
+            run_avg_ms: average(self.run_total_us.load(Ordering::Relaxed)),
+            run_max_ms: self.run_max_us.load(Ordering::Relaxed) as f64 / 1000.0,
+        }
+    }
+}
+
+struct WorkerSlot {
+    thread: OnceLock<std::thread::Thread>,
+    heavy_capable: bool,
+}
+
+const POOL_OPEN: u8 = 0;
+const POOL_DRAINING: u8 = 1;
+const POOL_CANCELLED: u8 = 2;
+
 struct PoolInner {
-    state: Mutex<PoolState>,
-    wake: Condvar,
-    worker_exit: Condvar,
-    workers_remaining: Mutex<usize>,
-    worker_handles: Mutex<Vec<TaskHandle<()>>>,
-    spawner: ThreadSpawner,
-    capacity: usize,
+    lanes: [LaneQueue; 2],
+    workers: Vec<WorkerSlot>,
+    light_reserve: usize,
+    /// One bit per parked worker. Set by the worker before it parks, cleared
+    /// by whoever unparks it — the unpark token makes the hand-off lossless.
+    idle: AtomicU32,
+    closed: AtomicU8,
+    started: AtomicUsize,
+    exited: AtomicUsize,
+    /// Live `TaskPool` handles; the last one to drop closes the pool so a
+    /// discarded runtime (a test's `Cx`) does not leak parked workers.
+    handles: AtomicUsize,
+    shutdown_state: Arc<TaskState<()>>,
+    ui_thread: ThreadId,
     name: Arc<str>,
 }
 
-#[cfg(test)]
-static LIVE_POOL_WORKERS: AtomicUsize = AtomicUsize::new(0);
+impl PoolInner {
+    fn take_job(&self, heavy_capable: bool) -> Option<PoolJob> {
+        if self.closed.load(Ordering::Acquire) == POOL_CANCELLED {
+            // Dropping a queued job completes its handle as cancelled.
+            while self.lanes[0].try_take().is_some() {}
+            while self.lanes[1].try_take().is_some() {}
+            return None;
+        }
+        if let Some(job) = self.lanes[Lane::Light.index()].try_take() {
+            return Some(job);
+        }
+        if heavy_capable {
+            return self.lanes[Lane::Heavy.index()].try_take();
+        }
+        None
+    }
 
+    fn run_job(&self, job: PoolJob) {
+        let queue = &self.lanes[job.lane.index()];
+        let started = Cx::monotonic_now();
+        let wait_us = ((started - job.submitted_at).max(0.0) * 1_000_000.0) as u64;
+        queue.wait_total_us.fetch_add(wait_us, Ordering::Relaxed);
+        queue.wait_max_us.fetch_max(wait_us, Ordering::Relaxed);
+        job.run();
+        let run_us = ((Cx::monotonic_now() - started).max(0.0) * 1_000_000.0) as u64;
+        queue.run_total_us.fetch_add(run_us, Ordering::Relaxed);
+        queue.run_max_us.fetch_max(run_us, Ordering::Relaxed);
+        queue.completed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Wake one parked worker able to serve `lane`. Any thread may call this;
+    /// it is atomics only. Light jobs go to the light-only workers first,
+    /// leaving the heavy-capable ones free for heavy work.
+    fn wake_one(&self, lane: Lane) {
+        std::sync::atomic::fence(Ordering::SeqCst);
+        let mask = self.idle.load(Ordering::SeqCst);
+        if mask == 0 {
+            return;
+        }
+        let passes: &[bool] = match lane {
+            Lane::Light => &[false, true],
+            Lane::Heavy => &[true],
+        };
+        for &heavy_capable in passes {
+            for (index, slot) in self.workers.iter().enumerate() {
+                if slot.heavy_capable != heavy_capable {
+                    continue;
+                }
+                let bit = 1u32 << index;
+                if mask & bit == 0 {
+                    continue;
+                }
+                if self.idle.fetch_and(!bit, Ordering::SeqCst) & bit != 0 {
+                    if let Some(thread) = slot.thread.get() {
+                        thread.unpark();
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    fn unpark_all(&self) {
+        for slot in &self.workers {
+            if let Some(thread) = slot.thread.get() {
+                thread.unpark();
+            }
+        }
+    }
+}
+
+fn pool_worker(inner: Arc<PoolInner>, index: usize) {
+    let _exit = PoolWorkerExit(inner.clone());
+    let slot = &inner.workers[index];
+    let _ = slot.thread.set(std::thread::current());
+    inner.started.fetch_add(1, Ordering::AcqRel);
+    let bit = 1u32 << index;
+    loop {
+        if let Some(job) = inner.take_job(slot.heavy_capable) {
+            inner.run_job(job);
+            continue;
+        }
+        if inner.closed.load(Ordering::Acquire) != POOL_OPEN {
+            break;
+        }
+        inner.idle.fetch_or(bit, Ordering::SeqCst);
+        std::sync::atomic::fence(Ordering::SeqCst);
+        if let Some(job) = inner.take_job(slot.heavy_capable) {
+            inner.idle.fetch_and(!bit, Ordering::SeqCst);
+            inner.run_job(job);
+            continue;
+        }
+        if inner.closed.load(Ordering::SeqCst) != POOL_OPEN {
+            inner.idle.fetch_and(!bit, Ordering::SeqCst);
+            continue;
+        }
+        std::thread::park();
+        inner.idle.fetch_and(!bit, Ordering::SeqCst);
+    }
+}
+
+struct PoolWorkerExit(Arc<PoolInner>);
+
+impl Drop for PoolWorkerExit {
+    fn drop(&mut self) {
+        let exited = self.0.exited.fetch_add(1, Ordering::AcqRel) + 1;
+        if exited == self.0.workers.len() {
+            self.0.shutdown_state.complete(Ok(()));
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LaneStats {
+    pub submitted: u64,
+    pub completed: u64,
+    pub queued: usize,
+    pub peak_queued: usize,
+    pub capacity: usize,
+    pub wait_avg_ms: f64,
+    pub wait_max_ms: f64,
+    pub run_avg_ms: f64,
+    pub run_max_ms: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PoolStats {
+    pub workers: usize,
+    pub light_reserve: usize,
+    pub started: usize,
+    pub exited: usize,
+    pub light: LaneStats,
+    pub heavy: LaneStats,
+}
+
+/// The background executor. Clone it freely: every handle submits into the
+/// same warm workers. Submission is lock-free on every thread; a full lane
+/// hands the job back to be retried next frame; results are polled with
+/// [`TaskHandle::try_take`] (never a blocking join on the UI thread) and every
+/// completion raises the UI signal.
+///
+/// A pool job must never wait for another pool job (a worker blocking on a
+/// sibling's handle can starve the pool); a dedicated worker made with
+/// [`ThreadSpawner::spawn_worker`] may join pool handles.
 pub struct TaskPool {
     inner: Arc<PoolInner>,
 }
 
+impl Clone for TaskPool {
+    fn clone(&self) -> Self {
+        self.inner.handles.fetch_add(1, Ordering::AcqRel);
+        Self { inner: self.inner.clone() }
+    }
+}
+
+impl Drop for TaskPool {
+    fn drop(&mut self) {
+        if self.inner.handles.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.close(ShutdownMode::CancelPending);
+        }
+    }
+}
+
 impl fmt::Debug for TaskPool {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let state = lock_from_ui(&self.inner.state);
         f.debug_struct("TaskPool")
             .field("name", &self.inner.name)
-            .field("queued", &state.queue.len())
-            .field("capacity", &self.inner.capacity)
-            .field("shutdown", &state.shutdown)
+            .field("workers", &self.inner.workers.len())
+            .field("light_reserve", &self.inner.light_reserve)
+            .field("queued_light", &self.inner.lanes[0].queued.load(Ordering::Relaxed))
+            .field("queued_heavy", &self.inner.lanes[1].queued.load(Ordering::Relaxed))
+            .field("closed", &self.inner.closed.load(Ordering::Relaxed))
             .finish()
     }
 }
 
 impl TaskPool {
+    /// Spawn the workers now; they park until the first job.
     pub fn new(spawner: ThreadSpawner, options: PoolOptions) -> Result<Self, SpawnError> {
-        let worker_len = options.workers.get();
+        let worker_len = options.workers.get().min(MAX_POOL_WORKERS);
+        let light_reserve = options.light_reserve.min(worker_len - 1);
+        let workers = (0..worker_len)
+            .map(|index| WorkerSlot {
+                thread: OnceLock::new(),
+                heavy_capable: index >= light_reserve,
+            })
+            .collect();
         let inner = Arc::new(PoolInner {
-            state: Mutex::new(PoolState { queue: VecDeque::new(), shutdown: None }),
-            wake: Condvar::new(),
-            worker_exit: Condvar::new(),
-            workers_remaining: Mutex::new(worker_len),
-            worker_handles: Mutex::new(Vec::with_capacity(worker_len)),
-            spawner: spawner.clone(),
-            capacity: options.capacity.get(),
+            lanes: [
+                LaneQueue::new(options.light_capacity.get()),
+                LaneQueue::new(options.heavy_capacity.get()),
+            ],
+            workers,
+            light_reserve,
+            idle: AtomicU32::new(0),
+            closed: AtomicU8::new(POOL_OPEN),
+            started: AtomicUsize::new(0),
+            exited: AtomicUsize::new(0),
+            handles: AtomicUsize::new(1),
+            shutdown_state: Arc::new(TaskState::default()),
+            ui_thread: spawner.ui_thread,
             name: options.name.clone(),
         });
-
+        let pool = Self { inner: inner.clone() };
         for index in 0..worker_len {
             let worker_inner = inner.clone();
-            let handle = match spawner.spawn_with(
+            let spawned = spawner.spawn_worker(
                 ThreadOptions {
                     name: Some(format!("{}-{index}", options.name).into()),
                     ..Default::default()
                 },
-                move || pool_worker(worker_inner),
-            ) {
-                Ok(handle) => handle,
+                move || pool_worker(worker_inner, index),
+            );
+            match spawned {
+                Ok(handle) => handle.detach(),
                 Err(error) => {
-                    let started = lock_from_ui(&inner.worker_handles).len();
-                    *lock_from_ui(&inner.workers_remaining) = started;
-                    initiate_pool_shutdown(&inner, ShutdownMode::CancelPending);
+                    // The workers that did start exit; the ones that never
+                    // will are counted out so shutdown can still complete.
+                    let missing = worker_len - index;
+                    let exited = inner.exited.fetch_add(missing, Ordering::AcqRel) + missing;
+                    pool.close(ShutdownMode::CancelPending);
+                    if exited == worker_len {
+                        inner.shutdown_state.complete(Ok(()));
+                    }
                     return Err(error);
                 }
-            };
-            lock_from_ui(&inner.worker_handles).push(handle);
+            }
         }
-        Ok(Self { inner })
+        Ok(pool)
     }
 
-    pub fn submit<F, T>(&self, order: QueueOrder, f: F) -> Result<TaskHandle<T>, SubmitError>
+    /// A pool with no workers that refuses every job; what `Cx::task_pool`
+    /// hands out when the target cannot run threads.
+    pub fn closed() -> Self {
+        let inner = Arc::new(PoolInner {
+            lanes: [LaneQueue::new(1), LaneQueue::new(1)],
+            workers: Vec::new(),
+            light_reserve: 0,
+            idle: AtomicU32::new(0),
+            closed: AtomicU8::new(POOL_CANCELLED),
+            started: AtomicUsize::new(0),
+            exited: AtomicUsize::new(0),
+            handles: AtomicUsize::new(1),
+            shutdown_state: Arc::new(TaskState::default()),
+            ui_thread: std::thread::current().id(),
+            name: "closed".into(),
+        });
+        inner.shutdown_state.complete(Ok(()));
+        Self { inner }
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.inner.closed.load(Ordering::Acquire) == POOL_OPEN
+    }
+
+    pub fn worker_count(&self) -> usize {
+        self.inner.workers.len()
+    }
+
+    pub fn light_reserve(&self) -> usize {
+        self.inner.light_reserve
+    }
+
+    /// Workers that can run `Lane::Heavy` jobs.
+    pub fn heavy_workers(&self) -> usize {
+        self.inner.workers.len() - self.inner.light_reserve
+    }
+
+    pub fn started_workers(&self) -> usize {
+        self.inner.started.load(Ordering::Acquire)
+    }
+
+    /// Workers parked with nothing to do right now — what a staging queue
+    /// may hand over without the jobs sitting in the pool's channel.
+    pub fn idle_workers(&self) -> usize {
+        self.inner.idle.load(Ordering::Acquire).count_ones() as usize
+    }
+
+    pub fn queued(&self, lane: Lane) -> usize {
+        self.inner.lanes[lane.index()].queued.load(Ordering::Acquire)
+    }
+
+    pub fn submit<F, T>(&self, lane: Lane, f: F) -> Result<TaskHandle<T>, SubmitError>
     where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        self.submit_inner::<(), F, T>(None, false, order, f)
+        self.try_submit(lane, f).map_err(|refused| refused.error)
     }
 
-    pub fn submit_tagged<K, F, T>(&self, key: K, replace_queued: bool, order: QueueOrder, f: F) -> Result<TaskHandle<T>, SubmitError>
+    /// Like [`submit`](Self::submit) but a refused job comes back intact so
+    /// the caller can hold it for the next frame.
+    pub fn try_submit<F, T>(&self, lane: Lane, f: F) -> Result<TaskHandle<T>, Refused<F>>
     where
-        K: Clone + PartialEq + Send + 'static,
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        self.submit_inner(Some(key), replace_queued, order, f)
+        match self.reserve(lane) {
+            Ok(slot) => Ok(slot.submit(f)),
+            Err(error) => Err(Refused { job: f, error }),
+        }
     }
 
-    fn submit_inner<K, F, T>(&self, key: Option<K>, replace_queued: bool, order: QueueOrder, f: F) -> Result<TaskHandle<T>, SubmitError>
+    /// Claim one queue slot on `lane` without a job yet. Lets a caller pop
+    /// its own staging structure only once the pool is known to take the
+    /// job; an unused reservation gives the slot back on drop.
+    pub fn reserve(&self, lane: Lane) -> Result<PoolSlot, SubmitError> {
+        if !self.is_open() {
+            return Err(SubmitError::Closed);
+        }
+        let queue = &self.inner.lanes[lane.index()];
+        let queued = queue.queued.fetch_add(1, Ordering::AcqRel) + 1;
+        if queued > queue.capacity {
+            queue.queued.fetch_sub(1, Ordering::AcqRel);
+            return Err(SubmitError::QueueFull);
+        }
+        queue.peak_queued.fetch_max(queued, Ordering::Relaxed);
+        Ok(PoolSlot { pool: self.clone(), lane, armed: true })
+    }
+
+    pub fn stats(&self) -> PoolStats {
+        PoolStats {
+            workers: self.inner.workers.len(),
+            light_reserve: self.inner.light_reserve,
+            started: self.inner.started.load(Ordering::Acquire),
+            exited: self.inner.exited.load(Ordering::Acquire),
+            light: self.inner.lanes[0].snapshot(),
+            heavy: self.inner.lanes[1].snapshot(),
+        }
+    }
+
+    /// `pool: 7 workers (2 light-only), 143 jobs, peak queue light 6 / heavy 3, ...`
+    pub fn summary(&self) -> String {
+        let stats = self.stats();
+        let mut out = format!(
+            "pool: {} workers ({} light-only, {} started), {} jobs, peak queue light {} / heavy {}",
+            stats.workers,
+            stats.light_reserve,
+            stats.started,
+            stats.light.submitted + stats.heavy.submitted,
+            stats.light.peak_queued,
+            stats.heavy.peak_queued,
+        );
+        for (lane, lane_stats) in Lane::ALL.iter().zip([stats.light, stats.heavy]) {
+            out.push_str(&format!(
+                "; {} {}: wait avg {:.2} ms max {:.2} ms, run avg {:.1} ms max {:.1} ms",
+                lane.label(),
+                lane_stats.completed,
+                lane_stats.wait_avg_ms,
+                lane_stats.wait_max_ms,
+                lane_stats.run_avg_ms,
+                lane_stats.run_max_ms,
+            ));
+        }
+        out
+    }
+
+    /// Stop accepting work and let the workers exit — never waits.
+    /// `CancelPending` completes every queued handle as cancelled; `Drain`
+    /// runs what is queued first. Running jobs finish either way.
+    pub fn close(&self, mode: ShutdownMode) {
+        let target = match mode {
+            ShutdownMode::CancelPending => POOL_CANCELLED,
+            ShutdownMode::Drain => POOL_DRAINING,
+        };
+        let _ = self.inner.closed.fetch_max(target, Ordering::SeqCst);
+        self.inner.unpark_all();
+    }
+
+    #[cfg(test)]
+    fn shutdown_handle_for_test(&self) -> TaskHandle<()> {
+        TaskHandle {
+            state: self.inner.shutdown_state.clone(),
+            token: CancellationToken::new(),
+            ui_thread: self.inner.ui_thread,
+            priority_status: PriorityStatus::Applied,
+            native_join: None,
+        }
+    }
+
+    /// Close and return a handle that completes once the last worker has
+    /// exited. Poll it with `try_take`; join it only from a dedicated thread.
+    pub fn shutdown(&self, mode: ShutdownMode) -> TaskHandle<()> {
+        self.close(mode);
+        TaskHandle {
+            state: self.inner.shutdown_state.clone(),
+            token: CancellationToken::new(),
+            ui_thread: self.inner.ui_thread,
+            priority_status: PriorityStatus::Applied,
+            #[cfg(not(target_arch = "wasm32"))]
+            native_join: None,
+        }
+    }
+}
+
+impl TaskPool {
+    /// Run `f(i)` for every `i in 0..len` on the pool AND the calling thread,
+    /// returning once every index has run: the caller-helping replacement
+    /// for `std::thread::scope` fan-outs inside a worker. The caller claims
+    /// indices like any helper, so the batch completes even when the pool is
+    /// saturated or refuses helpers, and a helper never waits on anything,
+    /// so it cannot deadlock. Helpers that have not started when the caller
+    /// runs out of work are cancelled; the ones mid-index are waited for
+    /// (also on unwind), which is what keeps the borrow of `f` sound.
+    ///
+    /// Never call this on the UI thread: it works and waits. Debug builds
+    /// assert; release builds run the batch serially there.
+    pub fn fan_out<F>(&self, lane: Lane, len: usize, f: F)
     where
-        K: Clone + PartialEq + Send + 'static,
+        F: Fn(usize) + Sync,
+    {
+        if len == 0 {
+            return;
+        }
+        if std::thread::current().id() == self.inner.ui_thread {
+            debug_assert!(false, "TaskPool::fan_out on the UI thread would block it");
+            for index in 0..len {
+                f(index);
+            }
+            return;
+        }
+        let shared = Arc::new(FanOutShared {
+            f: &f as *const F as *const (),
+            call: fan_out_call::<F>,
+            next: AtomicUsize::new(0),
+            len,
+            running: AtomicUsize::new(0),
+            cancelled: AtomicBool::new(false),
+            parent: std::thread::current(),
+        });
+        let helpers = (len - 1).min(self.worker_count());
+        let mut handles = Vec::with_capacity(helpers);
+        for _ in 0..helpers {
+            let helper = shared.clone();
+            match self.submit(lane, move || fan_out_helper(&helper)) {
+                Ok(handle) => handles.push(handle),
+                Err(_) => break,
+            }
+        }
+        let _wait = FanOutParent { shared: &shared, handles };
+        fan_out_work(&shared);
+    }
+}
+
+struct FanOutShared {
+    /// `&F` with its lifetime erased; only dereferenced while the parent's
+    /// frame is alive, which `FanOutParent` guarantees.
+    f: *const (),
+    call: unsafe fn(*const (), usize),
+    next: AtomicUsize,
+    len: usize,
+    running: AtomicUsize,
+    cancelled: AtomicBool,
+    parent: std::thread::Thread,
+}
+
+// The erased pointer is only ever used as `&F` where `F: Sync`, so sharing
+// it between threads is exactly as safe as sharing `&F`.
+unsafe impl Send for FanOutShared {}
+unsafe impl Sync for FanOutShared {}
+
+unsafe fn fan_out_call<F: Fn(usize) + Sync>(f: *const (), index: usize) {
+    (*(f as *const F))(index);
+}
+
+fn fan_out_work(shared: &FanOutShared) {
+    loop {
+        let index = shared.next.fetch_add(1, Ordering::AcqRel);
+        if index >= shared.len {
+            break;
+        }
+        unsafe { (shared.call)(shared.f, index) };
+    }
+}
+
+struct FanOutRunning<'a>(&'a FanOutShared);
+
+impl Drop for FanOutRunning<'_> {
+    fn drop(&mut self) {
+        if self.0.running.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.0.parent.unpark();
+        }
+    }
+}
+
+fn fan_out_helper(shared: &FanOutShared) {
+    shared.running.fetch_add(1, Ordering::SeqCst);
+    let _running = FanOutRunning(shared);
+    // SeqCst pairs with the parent's cancelled-store / running-load: either
+    // this helper sees the cancellation, or the parent sees it running.
+    if shared.cancelled.load(Ordering::SeqCst) {
+        return;
+    }
+    fan_out_work(shared);
+}
+
+struct FanOutParent<'a> {
+    shared: &'a Arc<FanOutShared>,
+    handles: Vec<TaskHandle<()>>,
+}
+
+impl Drop for FanOutParent<'_> {
+    fn drop(&mut self) {
+        self.shared.cancelled.store(true, Ordering::SeqCst);
+        for handle in &self.handles {
+            handle.cancel();
+        }
+        while self.shared.running.load(Ordering::SeqCst) != 0 {
+            std::thread::park_timeout(Duration::from_millis(1));
+        }
+    }
+}
+
+/// A claimed queue slot; see [`TaskPool::reserve`].
+#[must_use = "an unused reservation is released on drop; submit a job into it"]
+pub struct PoolSlot {
+    pool: TaskPool,
+    lane: Lane,
+    armed: bool,
+}
+
+impl PoolSlot {
+    pub fn lane(&self) -> Lane {
+        self.lane
+    }
+
+    /// Queue the job. It cannot be refused any more: if the pool closed in
+    /// the meantime the handle completes as `TaskError::Cancelled`.
+    pub fn submit<F, T>(mut self, f: F) -> TaskHandle<T>
+    where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
+        self.armed = false;
+        let inner = &self.pool.inner;
+        let queue = &inner.lanes[self.lane.index()];
         let state = Arc::new(TaskState::default());
         let token = CancellationToken::new();
         let run_state = state.clone();
@@ -850,60 +1420,180 @@ impl TaskPool {
         let run = move || {
             if run_token.is_cancelled() {
                 run_state.complete(Err(TaskError::Cancelled));
+                signal_ui_completion();
                 return;
             }
             let result = catch_unwind(AssertUnwindSafe(f))
                 .map_err(|payload| TaskError::Panicked(panic_report(payload)));
             run_state.complete(result);
+            signal_ui_completion();
         };
         let job = PoolJob {
-            tag: key.as_ref().cloned().map(ErasedTag::new),
+            lane: self.lane,
+            submitted_at: Cx::monotonic_now(),
             run: Some(Box::new(run)),
             cancel: Some(Box::new(move || {
                 cancel_state.complete(Err(TaskError::Cancelled));
             })),
         };
-
-        let mut pool_state = lock_from_ui(&self.inner.state);
-        if pool_state.shutdown.is_some() {
-            drop(pool_state);
-            drop(job);
-            return Err(SubmitError::Closed);
-        }
-        if replace_queued {
-            if let Some(key) = key.as_ref() {
-                pool_state.queue.retain(|job| !job.tag.as_ref().is_some_and(|tag| tag.equals_key(key)));
+        queue.submitted.fetch_add(1, Ordering::Relaxed);
+        match queue.sender.try_send(job) {
+            Ok(()) => inner.wake_one(self.lane),
+            Err(TrySendError::Full(job)) | Err(TrySendError::Disconnected(job)) => {
+                // The reservation bounds the channel, so this is the pool
+                // going away underneath us: give the slot back and let the
+                // job's drop complete the handle as cancelled.
+                queue.queued.fetch_sub(1, Ordering::AcqRel);
+                drop(job);
             }
         }
-        if pool_state.queue.len() >= self.inner.capacity {
-            drop(pool_state);
-            drop(job);
-            return Err(SubmitError::QueueFull);
-        }
-        match order {
-            QueueOrder::Fifo => pool_state.queue.push_back(job),
-            QueueOrder::Lifo => pool_state.queue.push_front(job),
-        }
-        drop(pool_state);
-        self.inner.wake.notify_one();
-        Ok(TaskHandle {
+        TaskHandle {
             state,
             token,
-            ui_thread: self.inner.spawner.ui_thread,
+            ui_thread: inner.ui_thread,
             priority_status: PriorityStatus::Applied,
             #[cfg(not(target_arch = "wasm32"))]
             native_join: None,
-        })
+        }
+    }
+}
+
+impl Drop for PoolSlot {
+    fn drop(&mut self) {
+        if self.armed {
+            self.pool.inner.lanes[self.lane.index()]
+                .queued
+                .fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+fn signal_ui_completion() {
+    #[cfg(not(test))]
+    SignalToUI::set_ui_signal();
+}
+
+/// A UI-owned staging queue in front of the pool for work that needs
+/// per-key replacement, newest-first order or pruning of what has not started
+/// yet (map tiles, image decodes, archive reads).
+///
+/// Nothing here locks: the queue lives on the thread that owns it, hands at
+/// most `in_flight_limit` jobs to the pool at a time and keeps the rest where
+/// `retain`/replace can still reach them. Call [`pump`](Self::pump) after
+/// pushes and on every `Event::Signal` (each pool completion raises it) so
+/// freed slots are refilled.
+pub struct TaskQueue<K> {
+    lane: Lane,
+    in_flight_limit: usize,
+    capacity: usize,
+    in_flight: Arc<AtomicUsize>,
+    staged: VecDeque<(K, Box<dyn FnOnce() + Send>)>,
+}
+
+impl<K> fmt::Debug for TaskQueue<K> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TaskQueue")
+            .field("lane", &self.lane)
+            .field("staged", &self.staged.len())
+            .field("in_flight", &self.in_flight.load(Ordering::Relaxed))
+            .field("in_flight_limit", &self.in_flight_limit)
+            .finish()
+    }
+}
+
+struct InFlightGuard(Arc<AtomicUsize>);
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl<K: PartialEq> TaskQueue<K> {
+    /// `in_flight_limit` is how many jobs may sit with the pool at once —
+    /// the pool's worker count keeps every worker busy while the staging
+    /// order still rules everything else.
+    pub fn new(lane: Lane, in_flight_limit: usize, capacity: usize) -> Self {
+        Self {
+            lane,
+            in_flight_limit: in_flight_limit.max(1),
+            capacity: capacity.max(1),
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            staged: VecDeque::new(),
+        }
     }
 
-    pub fn retain_queued<K>(&self, mut keep: impl FnMut(&K) -> bool) -> Vec<K>
+    pub fn lane(&self) -> Lane {
+        self.lane
+    }
+
+    /// Resize the in-flight window, typically to the pool's worker count
+    /// once it is known. Zero holds everything in staging until the next
+    /// `pump` with a wider window.
+    pub fn set_in_flight_limit(&mut self, limit: usize) {
+        self.in_flight_limit = limit;
+    }
+
+    pub fn staged_len(&self) -> usize {
+        self.staged.len()
+    }
+
+    pub fn in_flight(&self) -> usize {
+        self.in_flight.load(Ordering::Acquire)
+    }
+
+    pub fn is_idle(&self) -> bool {
+        self.staged.is_empty() && self.in_flight() == 0
+    }
+
+    /// Stage a job and hand over what fits. With `replace_queued` a staged
+    /// job with the same key is dropped first. `Lifo` makes this job the
+    /// next to run.
+    pub fn push<F>(&mut self, pool: &TaskPool, key: K, replace_queued: bool, order: QueueOrder, job: F) -> Result<(), SubmitError>
     where
-        K: Clone + Send + 'static,
+        F: FnOnce() + Send + 'static,
+    {
+        if !pool.is_open() {
+            return Err(SubmitError::Closed);
+        }
+        if replace_queued {
+            self.staged.retain(|(staged_key, _)| *staged_key != key);
+        }
+        if self.staged.len() >= self.capacity {
+            return Err(SubmitError::QueueFull);
+        }
+        let job: Box<dyn FnOnce() + Send> = Box::new(job);
+        match order {
+            QueueOrder::Fifo => self.staged.push_back((key, job)),
+            QueueOrder::Lifo => self.staged.push_front((key, job)),
+        }
+        self.pump(pool);
+        Ok(())
+    }
+
+    /// Hand staged jobs to the pool while the in-flight window has room.
+    pub fn pump(&mut self, pool: &TaskPool) {
+        while !self.staged.is_empty() && self.in_flight.load(Ordering::Acquire) < self.in_flight_limit {
+            let Ok(slot) = pool.reserve(self.lane) else { break };
+            let Some((_, job)) = self.staged.pop_front() else { break };
+            self.in_flight.fetch_add(1, Ordering::AcqRel);
+            let guard = InFlightGuard(self.in_flight.clone());
+            slot.submit(move || {
+                let _guard = guard;
+                job();
+            })
+            .detach();
+        }
+    }
+
+    /// Drop staged jobs whose key fails `keep`; returns the dropped keys.
+    /// Jobs already with the pool are not affected.
+    pub fn retain(&mut self, mut keep: impl FnMut(&K) -> bool) -> Vec<K>
+    where
+        K: Clone,
     {
         let mut dropped = Vec::new();
-        let mut state = lock_from_ui(&self.inner.state);
-        state.queue.retain(|job| {
-            let Some(key) = job.tag.as_ref().and_then(ErasedTag::downcast_ref::<K>) else { return true };
+        self.staged.retain(|(key, _)| {
             if keep(key) {
                 true
             } else {
@@ -914,121 +1604,12 @@ impl TaskPool {
         dropped
     }
 
-    pub fn shutdown(&self, mode: ShutdownMode) -> TaskHandle<()> {
-        initiate_pool_shutdown(&self.inner, mode);
-        let inner = self.inner.clone();
-        let handles = std::mem::take(&mut *lock_from_ui(&inner.worker_handles));
-        match self.inner.spawner.spawn_with(
-            ThreadOptions {
-                name: Some(format!("{}-shutdown", self.inner.name).into()),
-                ..Default::default()
-            },
-            move || {
-                for handle in handles {
-                    let _ = handle.join();
-                }
-                let mut remaining = inner.workers_remaining.lock().unwrap();
-                while *remaining != 0 {
-                    remaining = inner.worker_exit.wait(remaining).unwrap();
-                }
-            },
-        ) {
-            Ok(handle) => handle,
-            Err(error) => TaskHandle::completed(self.inner.spawner.ui_thread, Err(TaskError::Spawn(error))),
-        }
+    pub fn contains(&self, key: &K) -> bool {
+        self.staged.iter().any(|(staged_key, _)| staged_key == key)
     }
-}
 
-impl Drop for TaskPool {
-    fn drop(&mut self) {
-        initiate_pool_shutdown(&self.inner, ShutdownMode::CancelPending);
-        if !lock_from_ui(&self.inner.worker_handles).is_empty() {
-            self.shutdown(ShutdownMode::CancelPending).detach();
-        }
-    }
-}
-
-fn initiate_pool_shutdown(inner: &PoolInner, mode: ShutdownMode) {
-    let mut state = lock_from_ui(&inner.state);
-    match (state.shutdown, mode) {
-        (None, mode) => state.shutdown = Some(mode),
-        (Some(ShutdownMode::Drain), ShutdownMode::CancelPending) => state.shutdown = Some(ShutdownMode::CancelPending),
-        _ => {}
-    }
-    if state.shutdown == Some(ShutdownMode::CancelPending) {
-        state.queue.clear();
-    }
-    drop(state);
-    inner.wake.notify_all();
-}
-
-fn pool_worker(inner: Arc<PoolInner>) {
-    let _exit = PoolWorkerExit(inner.clone());
-    #[cfg(test)]
-    LIVE_POOL_WORKERS.fetch_add(1, Ordering::AcqRel);
-    loop {
-        let job = {
-            let mut state = inner.state.lock().unwrap();
-            loop {
-                if let Some(job) = state.queue.pop_front() {
-                    break Some(job);
-                }
-                if state.shutdown.is_some() {
-                    break None;
-                }
-                state = inner.wake.wait(state).unwrap();
-            }
-        };
-        let Some(job) = job else { break };
-        let _permit = SharedWorkerPermit::acquire();
-        job.run();
-    }
-}
-
-struct PoolWorkerExit(Arc<PoolInner>);
-
-impl Drop for PoolWorkerExit {
-    fn drop(&mut self) {
-        if let Ok(mut remaining) = self.0.workers_remaining.lock() {
-            *remaining = remaining.saturating_sub(1);
-            self.0.worker_exit.notify_all();
-        }
-        #[cfg(test)]
-        LIVE_POOL_WORKERS.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
-struct WorkerBudget {
-    active: Mutex<usize>,
-    wake: Condvar,
-}
-
-fn worker_budget() -> &'static WorkerBudget {
-    static BUDGET: OnceLock<WorkerBudget> = OnceLock::new();
-    BUDGET.get_or_init(|| WorkerBudget { active: Mutex::new(0), wake: Condvar::new() })
-}
-
-struct SharedWorkerPermit;
-
-impl SharedWorkerPermit {
-    fn acquire() -> Self {
-        let budget = worker_budget();
-        let limit = worker_count(1, usize::MAX).get();
-        let mut active = budget.active.lock().unwrap();
-        while *active >= limit {
-            active = budget.wake.wait(active).unwrap();
-        }
-        *active += 1;
-        Self
-    }
-}
-
-impl Drop for SharedWorkerPermit {
-    fn drop(&mut self) {
-        let budget = worker_budget();
-        let mut active = budget.active.lock().unwrap();
-        *active = active.saturating_sub(1);
-        budget.wake.notify_one();
+    pub fn clear(&mut self) {
+        self.staged.clear();
     }
 }
 
@@ -1452,6 +2033,37 @@ mod tests {
         std::thread::spawn(move || handle.join()).join().unwrap()
     }
 
+    fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
+        let deadline = Cx::monotonic_now() + 10.0;
+        while !ready() {
+            assert!(Cx::monotonic_now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn test_pool(workers: usize, light_reserve: usize, light_capacity: usize, heavy_capacity: usize) -> TaskPool {
+        let spawner = ThreadSpawner::for_current_thread(workers + 1);
+        TaskPool::new(
+            spawner,
+            PoolOptions {
+                workers: NonZeroUsize::new(workers).unwrap(),
+                light_reserve,
+                light_capacity: NonZeroUsize::new(light_capacity).unwrap(),
+                heavy_capacity: NonZeroUsize::new(heavy_capacity).unwrap(),
+                name: "test-pool".into(),
+            },
+        )
+        .unwrap()
+    }
+
+    /// A job that reports it started and then waits for a release.
+    fn gate_job(started: mpsc::Sender<()>, release: mpsc::Receiver<u32>) -> impl FnOnce() -> u32 + Send + 'static {
+        move || {
+            started.send(()).unwrap();
+            release.recv().unwrap_or(0)
+        }
+    }
+
     #[test]
     fn lock_from_ui_returns_uncontended_and_contended_guards() {
         let mutex = Mutex::new(1_u32);
@@ -1472,16 +2084,16 @@ mod tests {
     }
 
     #[test]
-    fn task_completion_is_taken_once_and_ui_join_is_refused() {
+    fn worker_completion_is_taken_once_and_ui_join_is_refused() {
         let spawner = ThreadSpawner::for_current_thread(2);
-        let mut handle = spawner.spawn(|| 42).unwrap();
+        let mut handle = spawner.spawn_worker(ThreadOptions::default(), || 42).unwrap();
         while !handle.is_finished() {
             std::thread::yield_now();
         }
         assert_eq!(handle.try_take().unwrap().unwrap(), 42);
         assert!(handle.try_take().is_none());
 
-        let handle = spawner.spawn(|| 7).unwrap();
+        let handle = spawner.spawn_worker(ThreadOptions::default(), || 7).unwrap();
         assert_eq!(handle.join(), Err(TaskError::WouldBlockUi));
     }
 
@@ -1505,10 +2117,10 @@ mod tests {
     }
 
     #[test]
-    fn task_name_stack_and_panic_are_reported() {
+    fn worker_name_stack_and_panic_are_reported() {
         let spawner = ThreadSpawner::for_current_thread(2);
         let named = spawner
-            .spawn_with(
+            .spawn_worker(
                 ThreadOptions {
                     name: Some("runtime-test-name".into()),
                     stack_size: Some(MIN_THREAD_STACK_SIZE),
@@ -1519,7 +2131,7 @@ mod tests {
             .unwrap();
         assert_eq!(worker_join(named).unwrap().as_deref(), Some("runtime-test-name"));
         assert!(matches!(
-            spawner.spawn_with(
+            spawner.spawn_worker(
                 ThreadOptions {
                     stack_size: Some(MIN_THREAD_STACK_SIZE - 1),
                     ..Default::default()
@@ -1530,7 +2142,7 @@ mod tests {
                 if requested == MIN_THREAD_STACK_SIZE - 1
         ));
         let prioritized = spawner
-            .spawn_with(
+            .spawn_worker(
                 ThreadOptions {
                     priority: CxThreadPriority::Utility,
                     ..Default::default()
@@ -1547,28 +2159,8 @@ mod tests {
             }
         );
         worker_join(prioritized).unwrap();
-        let panicked = spawner.spawn(|| panic!("completion panic")).unwrap();
+        let panicked = spawner.spawn_worker(ThreadOptions::default(), || panic!("completion panic")).unwrap();
         assert!(matches!(worker_join(panicked), Err(TaskError::Panicked(_))));
-    }
-
-    #[test]
-    fn scoped_fanout_is_worker_only() {
-        let spawner = ThreadSpawner::for_current_thread(2);
-        assert_eq!(spawner.scope(|_| 1), Err(TaskError::WouldBlockUi));
-        let worker_spawner = spawner.clone();
-        let outer = spawner
-            .spawn(move || {
-                let values = [2, 3];
-                worker_spawner
-                    .scope(|scope| {
-                        let left = scope.spawn(|| values[0]).unwrap();
-                        let right = scope.spawn(|| values[1]).unwrap();
-                        left.join().unwrap() + right.join().unwrap()
-                    })
-                    .unwrap()
-            })
-            .unwrap();
-        assert_eq!(worker_join(outer).unwrap(), 5);
     }
 
     #[test]
@@ -1576,7 +2168,9 @@ mod tests {
         let spawner = ThreadSpawner::for_current_thread(2);
         let token = CancellationToken::new();
         let waiter_token = token.clone();
-        let handle = spawner.spawn(move || waiter_token.wait_until(Cx::monotonic_now() + 30.0)).unwrap();
+        let handle = spawner
+            .spawn_worker(ThreadOptions::default(), move || waiter_token.wait_until(Cx::monotonic_now() + 30.0))
+            .unwrap();
         token.cancel();
         assert_eq!(worker_join(handle).unwrap(), WaitOutcome::Cancelled);
     }
@@ -1585,64 +2179,308 @@ mod tests {
     fn closed_runtime_refuses_new_work() {
         let spawner = ThreadSpawner::for_current_thread(2);
         spawner.close_runtime();
-        assert!(matches!(spawner.spawn(|| ()), Err(SpawnError::RuntimeClosed)));
+        assert!(matches!(spawner.spawn_worker(ThreadOptions::default(), || ()), Err(SpawnError::RuntimeClosed)));
         assert!(matches!(spawner.scheduler(), Err(SpawnError::RuntimeClosed)));
+        assert!(matches!(
+            TaskPool::new(spawner, PoolOptions::with_workers(1, 0)),
+            Err(SpawnError::RuntimeClosed)
+        ));
     }
 
     #[test]
-    fn pool_bounds_replaces_prunes_and_shuts_down() {
-        let baseline = LIVE_POOL_WORKERS.load(Ordering::Acquire);
-        let spawner = ThreadSpawner::for_current_thread(2);
-        let pool = TaskPool::new(spawner, PoolOptions {
-            workers: NonZeroUsize::new(1).unwrap(),
-            capacity: NonZeroUsize::new(2).unwrap(),
-            name: "test-pool".into(),
-        }).unwrap();
-        let (gate_tx, gate_rx) = mpsc::channel();
-        let (started_tx, started_rx) = mpsc::channel();
-        let running = pool.submit(QueueOrder::Fifo, move || {
-            started_tx.send(()).unwrap();
-            gate_rx.recv().unwrap()
-        }).unwrap();
-        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        let replaced = pool.submit_tagged(1_u32, true, QueueOrder::Fifo, || 1).unwrap();
-        let other = pool.submit_tagged(2_u32, false, QueueOrder::Fifo, || 3).unwrap();
-        assert!(matches!(
-            pool.submit(QueueOrder::Fifo, || 99),
-            Err(SubmitError::QueueFull)
-        ));
-        let kept = pool.submit_tagged(1_u32, true, QueueOrder::Fifo, || 2).unwrap();
-        assert_eq!(worker_join(replaced), Err(TaskError::Cancelled));
-        let mut pruned = pool.retain_queued::<u32>(|_| false);
-        pruned.sort_unstable();
-        assert_eq!(pruned, vec![1, 2]);
-        assert_eq!(worker_join(other), Err(TaskError::Cancelled));
-        assert_eq!(worker_join(kept), Err(TaskError::Cancelled));
-        gate_tx.send(9).unwrap();
-        assert_eq!(worker_join(running).unwrap(), 9);
+    fn runtime_sizing_reserves_the_ui_thread_and_two_light_workers() {
+        let tiny = PoolOptions::runtime(NonZeroUsize::new(1).unwrap());
+        assert_eq!(tiny.workers.get(), 3);
+        assert_eq!(tiny.light_reserve, 2);
+        let mid = PoolOptions::runtime(NonZeroUsize::new(6).unwrap());
+        assert_eq!(mid.workers.get(), 5);
+        let big = PoolOptions::runtime(NonZeroUsize::new(32).unwrap());
+        assert_eq!(big.workers.get(), if cfg!(target_arch = "wasm32") { 6 } else { 8 });
+    }
+
+    #[test]
+    fn pool_workers_are_warm_before_the_first_job() {
+        let pool = test_pool(3, 1, 8, 8);
+        wait_for("workers to start", || pool.started_workers() == 3);
+        let stats = pool.stats();
+        assert_eq!(stats.started, 3);
+        assert_eq!(stats.light.submitted + stats.heavy.submitted, 0);
+        assert_eq!(pool.worker_count(), 3);
+        assert_eq!(pool.light_reserve(), 1);
+        assert_eq!(pool.heavy_workers(), 2);
+
+        let first = pool.submit(Lane::Light, || 5).unwrap();
+        assert_eq!(worker_join(first).unwrap(), 5);
+        assert_eq!(pool.stats().light.completed, 1);
+
         worker_join(pool.shutdown(ShutdownMode::Drain)).unwrap();
-        assert_eq!(LIVE_POOL_WORKERS.load(Ordering::Acquire), baseline);
+        assert_eq!(pool.stats().exited, 3);
+        assert!(!pool.is_open());
+        assert!(matches!(pool.submit(Lane::Light, || ()), Err(SubmitError::Closed)));
+    }
+
+    #[test]
+    fn pool_jobs_complete_in_order_of_availability() {
+        let pool = test_pool(2, 0, 16, 16);
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let blocking_order = order.clone();
+        let blocking = pool
+            .submit(Lane::Light, {
+                let gate = gate_job(started_tx, release_rx);
+                move || {
+                    let value = gate();
+                    blocking_order.lock().unwrap().push("A");
+                    value
+                }
+            })
+            .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        let mut handles = Vec::new();
+        for tag in ["B", "C", "D"] {
+            let order = order.clone();
+            handles.push(
+                pool.submit(Lane::Light, move || {
+                    order.lock().unwrap().push(tag);
+                })
+                .unwrap(),
+            );
+        }
+        for handle in handles {
+            worker_join(handle).unwrap();
+        }
+        assert_eq!(*order.lock().unwrap(), vec!["B", "C", "D"]);
+
+        release_tx.send(9).unwrap();
+        assert_eq!(worker_join(blocking).unwrap(), 9);
+        assert_eq!(*order.lock().unwrap(), vec!["B", "C", "D", "A"]);
+        assert!(pool.stats().light.wait_max_ms < 5_000.0);
+        worker_join(pool.shutdown(ShutdownMode::Drain)).unwrap();
+    }
+
+    #[test]
+    fn pool_full_lane_is_refused_without_blocking() {
+        let pool = test_pool(1, 0, 1, 1);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let running = pool.submit(Lane::Light, gate_job(started_tx, release_rx)).unwrap();
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        let queued = pool.submit(Lane::Light, || 1).unwrap();
+        assert_eq!(pool.queued(Lane::Light), 1);
+        let before = Cx::monotonic_now();
+        let refused = pool.try_submit(Lane::Light, || 2).unwrap_err();
+        assert!(Cx::monotonic_now() - before < 0.5, "a full lane must answer at once");
+        assert_eq!(refused.error, SubmitError::QueueFull);
+        // The job comes back intact.
+        assert_eq!((refused.job)(), 2);
+
+        // The heavy lane is bounded on its own.
+        let heavy = pool.submit(Lane::Heavy, || 3).unwrap();
+        assert!(matches!(pool.submit(Lane::Heavy, || 4), Err(SubmitError::QueueFull)));
+
+        // Polling never blocks while the worker is busy.
+        let mut probe = pool.submit(Lane::Heavy, || 5);
+        assert!(matches!(probe, Err(SubmitError::QueueFull)));
+        let mut queued = queued;
+        assert!(queued.try_take().is_none());
+
+        release_tx.send(7).unwrap();
+        assert_eq!(worker_join(running).unwrap(), 7);
+        assert_eq!(worker_join(queued).unwrap(), 1);
+        assert_eq!(worker_join(heavy).unwrap(), 3);
+        probe = pool.submit(Lane::Heavy, || 5);
+        assert_eq!(worker_join(probe.unwrap()).unwrap(), 5);
+        assert_eq!(pool.stats().light.peak_queued, 1, "the running job left the queue; one waited behind it");
+        worker_join(pool.shutdown(ShutdownMode::Drain)).unwrap();
+    }
+
+    #[test]
+    fn pool_light_lane_never_waits_behind_heavy_jobs() {
+        let pool = test_pool(3, 2, 8, 8);
+        wait_for("workers to start", || pool.started_workers() == 3);
+        let mut releases = Vec::new();
+        let mut heavy = Vec::new();
+        let (started_tx, started_rx) = mpsc::channel();
+        for _ in 0..3 {
+            let (release_tx, release_rx) = mpsc::channel();
+            releases.push(release_tx);
+            heavy.push(pool.submit(Lane::Heavy, gate_job(started_tx.clone(), release_rx)).unwrap());
+        }
+        // Exactly one heavy worker: one job runs, two stay queued.
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(started_rx.recv_timeout(Duration::from_millis(200)).is_err());
+        assert_eq!(pool.queued(Lane::Heavy), 2);
+
+        let before = Cx::monotonic_now();
+        let light = pool.submit(Lane::Light, || "icon").unwrap();
+        assert_eq!(worker_join(light).unwrap(), "icon");
+        assert!(Cx::monotonic_now() - before < 2.0, "light work must not queue behind heavy work");
+        assert!(pool.stats().light.wait_max_ms < 1_000.0);
+
+        for release in releases {
+            release.send(1).unwrap();
+        }
+        for handle in heavy {
+            assert_eq!(worker_join(handle).unwrap(), 1);
+        }
+        worker_join(pool.shutdown(ShutdownMode::Drain)).unwrap();
+    }
+
+    #[test]
+    fn pool_cancel_pending_shutdown_cancels_queued_and_joins() {
+        let pool = test_pool(1, 0, 4, 4);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let running = pool.submit(Lane::Light, gate_job(started_tx, release_rx)).unwrap();
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let queued_light = pool.submit(Lane::Light, || 1).unwrap();
+        let queued_heavy = pool.submit(Lane::Heavy, || 2).unwrap();
+
+        let shutdown = pool.shutdown(ShutdownMode::CancelPending);
+        assert!(!pool.is_open());
+        release_tx.send(3).unwrap();
+        assert_eq!(worker_join(running).unwrap(), 3);
+        assert_eq!(worker_join(queued_light), Err(TaskError::Cancelled));
+        assert_eq!(worker_join(queued_heavy), Err(TaskError::Cancelled));
+        worker_join(shutdown).unwrap();
+        assert_eq!(pool.stats().exited, 1);
+        assert_eq!(pool.queued(Lane::Light), 0);
+        assert_eq!(pool.queued(Lane::Heavy), 0);
     }
 
     #[test]
     fn pool_keeps_capacity_after_task_panic() {
-        let spawner = ThreadSpawner::for_current_thread(2);
-        let pool = TaskPool::new(
-            spawner,
-            PoolOptions {
-                workers: NonZeroUsize::new(1).unwrap(),
-                capacity: NonZeroUsize::new(2).unwrap(),
-                name: "panic-pool".into(),
-            },
-        )
-        .unwrap();
-        let failed = pool
-            .submit(QueueOrder::Fifo, || panic!("pool task panic"))
-            .unwrap();
+        let pool = test_pool(1, 0, 2, 2);
+        let failed = pool.submit(Lane::Light, || panic!("pool task panic")).unwrap();
         assert!(matches!(worker_join(failed), Err(TaskError::Panicked(_))));
-        let next = pool.submit(QueueOrder::Fifo, || 31).unwrap();
+        let next = pool.submit(Lane::Light, || 31).unwrap();
         assert_eq!(worker_join(next).unwrap(), 31);
+        assert_eq!(pool.queued(Lane::Light), 0);
         worker_join(pool.shutdown(ShutdownMode::Drain)).unwrap();
+    }
+
+    #[test]
+    fn pool_reservation_returns_its_slot_when_unused() {
+        let pool = test_pool(1, 0, 1, 1);
+        let slot = pool.reserve(Lane::Light).unwrap();
+        assert!(matches!(pool.reserve(Lane::Light), Err(SubmitError::QueueFull)));
+        drop(slot);
+        let slot = pool.reserve(Lane::Light).unwrap();
+        assert_eq!(worker_join(slot.submit(|| 4)).unwrap(), 4);
+        worker_join(pool.shutdown(ShutdownMode::Drain)).unwrap();
+    }
+
+    #[test]
+    fn task_queue_orders_replaces_and_prunes_without_locking() {
+        let pool = test_pool(1, 0, 8, 8);
+        let mut queue: TaskQueue<u32> = TaskQueue::new(Lane::Light, 1, 16);
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<u32>();
+        let first_order = order.clone();
+        queue
+            .push(&pool, 1, true, QueueOrder::Lifo, move || {
+                started_tx.send(()).unwrap();
+                let _ = release_rx.recv();
+                first_order.lock().unwrap().push(1);
+            })
+            .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(queue.in_flight(), 1);
+
+        for key in [2, 3] {
+            let order = order.clone();
+            queue
+                .push(&pool, key, true, QueueOrder::Lifo, move || order.lock().unwrap().push(key))
+                .unwrap();
+        }
+        assert_eq!(queue.staged_len(), 2);
+        assert_eq!(queue.retain(|key| *key != 2), vec![2]);
+        assert!(queue.contains(&3));
+        let replaced_order = order.clone();
+        queue
+            .push(&pool, 3, true, QueueOrder::Lifo, move || replaced_order.lock().unwrap().push(30))
+            .unwrap();
+        assert_eq!(queue.staged_len(), 1, "replace keeps one job per key");
+
+        release_tx.send(0).unwrap();
+        wait_for("first job to finish", || queue.in_flight() == 0);
+        queue.pump(&pool);
+        wait_for("replacement to run", || queue.is_idle() && order.lock().unwrap().len() == 2);
+        assert_eq!(*order.lock().unwrap(), vec![1, 30]);
+        worker_join(pool.shutdown(ShutdownMode::Drain)).unwrap();
+    }
+
+    #[test]
+    fn fan_out_completes_with_a_saturated_pool_and_from_a_worker() {
+        let pool = test_pool(2, 0, 8, 8);
+        wait_for("workers to start", || pool.started_workers() == 2);
+        let sum = Arc::new(AtomicU64::new(0));
+        let worker_pool = pool.clone();
+        let worker_sum = sum.clone();
+        let spawner = ThreadSpawner::for_current_thread(3);
+        let batch = spawner
+            .spawn_worker(ThreadOptions::default(), move || {
+                let seen = Mutex::new(Vec::new());
+                worker_pool.fan_out(Lane::Heavy, 1000, |index| {
+                    worker_sum.fetch_add(index as u64, Ordering::Relaxed);
+                    seen.lock().unwrap().push(index);
+                });
+                let mut seen = seen.into_inner().unwrap();
+                seen.sort_unstable();
+                seen
+            })
+            .unwrap();
+        let seen = worker_join(batch).unwrap();
+        assert_eq!(seen, (0..1000).collect::<Vec<_>>());
+        assert_eq!(sum.load(Ordering::Relaxed), 499_500);
+
+        // Every worker blocked: the caller still finishes the whole batch.
+        let mut releases = Vec::new();
+        let mut blockers = Vec::new();
+        let (started_tx, started_rx) = mpsc::channel();
+        for _ in 0..2 {
+            let (release_tx, release_rx) = mpsc::channel();
+            releases.push(release_tx);
+            blockers.push(pool.submit(Lane::Light, gate_job(started_tx.clone(), release_rx)).unwrap());
+        }
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let saturated_pool = pool.clone();
+        let saturated = spawner
+            .spawn_worker(ThreadOptions::default(), move || {
+                let count = AtomicUsize::new(0);
+                saturated_pool.fan_out(Lane::Light, 64, |_| {
+                    count.fetch_add(1, Ordering::Relaxed);
+                });
+                count.into_inner()
+            })
+            .unwrap();
+        assert_eq!(worker_join(saturated).unwrap(), 64);
+        for release in releases {
+            release.send(1).unwrap();
+        }
+        for blocker in blockers {
+            worker_join(blocker).unwrap();
+        }
+        // The cancelled helpers drained cleanly; the pool is still usable.
+        assert_eq!(worker_join(pool.submit(Lane::Light, || 8).unwrap()).unwrap(), 8);
+        worker_join(pool.shutdown(ShutdownMode::Drain)).unwrap();
+    }
+
+    #[test]
+    fn dropping_the_last_handle_closes_the_pool() {
+        let pool = test_pool(2, 0, 4, 4);
+        wait_for("workers to start", || pool.started_workers() == 2);
+        let shutdown = pool.shutdown_handle_for_test();
+        let clone = pool.clone();
+        drop(pool);
+        assert!(clone.is_open(), "a live handle keeps the pool open");
+        drop(clone);
+        worker_join(shutdown).unwrap();
     }
 
     #[test]

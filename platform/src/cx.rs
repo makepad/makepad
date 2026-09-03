@@ -87,6 +87,8 @@ pub struct Cx {
     pub(crate) memory_budget_bytes: usize,
     pub(crate) memory_budget_initialized: bool,
     pub(crate) thread_spawner: crate::thread::ThreadSpawner,
+    /// The runtime's warm background executor; see `Cx::task_pool`.
+    pub(crate) task_pool: std::cell::OnceCell<crate::thread::TaskPool>,
     pub null_texture: Texture,
     pub null_cube_texture: Texture,
     pub windows: CxWindowPool,
@@ -698,6 +700,7 @@ impl Cx {
             thread_spawner: crate::thread::ThreadSpawner::for_current_thread(
                 crate::thread::available_parallelism().get(),
             ),
+            task_pool: std::cell::OnceCell::new(),
             in_makepad_studio: false,
             game_input_remote: Vec::new(),
             in_draw_event: false,

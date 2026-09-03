@@ -45,7 +45,7 @@ use makepad_asset_importer::gen_publish::{
 use makepad_asset_importer::gen_kinds::kind_of;
 use makepad_asset_importer::gen_profiles::build_profiles;
 use makepad_asset_client::PipelineStageSpec;
-use makepad_widgets::makepad_platform::thread::ThreadSpawner;
+use makepad_widgets::makepad_platform::thread::{Lane, TaskPool, ThreadOptions, ThreadSpawner};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -125,18 +125,25 @@ pub struct Pipelines {
     done_rx: Receiver<PipeDone>,
     queued: usize,
     spawner: Option<ThreadSpawner>,
+    pool: Option<TaskPool>,
 }
 
 impl Default for Pipelines {
     fn default() -> Self {
         let (done_tx, done_rx) = channel();
-        Pipelines { tx: None, done_tx, done_rx, queued: 0, spawner: None }
+        Pipelines { tx: None, done_tx, done_rx, queued: 0, spawner: None, pool: None }
     }
 }
 
 impl Pipelines {
+    /// The spawner makes the worker and one event pump per run; every
+    /// engine and fleet job runs on `pool`'s heavy lane.
     pub fn set_spawner(&mut self, spawner: ThreadSpawner) {
         self.spawner = Some(spawner);
+    }
+
+    pub fn set_task_pool(&mut self, pool: TaskPool) {
+        self.pool = Some(pool);
     }
 
     /// (Re)point the transport at a verified session. The endpoints/token
@@ -147,9 +154,13 @@ impl Pipelines {
     pub fn connect(&mut self, endpoints: ApiEndpoints, token: Option<String>) {
         let (tx, rx) = channel::<PipeReq>();
         let done = self.done_tx.clone();
-        let spawned = self.spawner.as_ref().and_then(|spawner| {
+        let spawned = self.spawner.as_ref().zip(self.pool.as_ref()).and_then(|(spawner, pool)| {
             let worker_spawner = spawner.clone();
-            match spawner.spawn(move || worker(endpoints, token, rx, done, worker_spawner)) {
+            let worker_pool = pool.clone();
+            let options = ThreadOptions { name: Some("vj-pipelines".into()), ..Default::default() };
+            match spawner.spawn_worker(options, move || {
+                worker(endpoints, token, rx, done, worker_spawner, worker_pool)
+            }) {
                 Ok(handle) => {
                     handle.detach();
                     Some(())
@@ -272,6 +283,7 @@ fn worker(
     rx: Receiver<PipeReq>,
     done: Sender<PipeDone>,
     spawner: ThreadSpawner,
+    pool: TaskPool,
 ) {
     // The registry outlives any one worker: a reconnect must keep answering
     // for runs the previous worker spawned.
@@ -296,6 +308,7 @@ fn worker(
                     prompt,
                     stages,
                     &spawner,
+                    &pool,
                 );
                 PipeDone::Created { tag, result }
             }
@@ -317,7 +330,7 @@ fn worker(
                     namespace,
                     kind,
                     body,
-                    &spawner,
+                    &pool,
                 );
                 PipeDone::JobQueued { tag, result }
             }
@@ -409,6 +422,7 @@ fn spawn_run(
     prompt: String,
     stages: Vec<PipelineStageSpec>,
     spawner: &ThreadSpawner,
+    pool: &TaskPool,
 ) -> Result<PipelineCreatedDto, String> {
     // Translate every declared stage before anything runs: a refusal here
     // is the whole declaration refusing, exactly like the server's 400.
@@ -497,10 +511,14 @@ fn spawn_run(
     registry.lock().unwrap().insert(pipeline.0, handle.clone());
 
     let endpoints = endpoints.clone();
-    let run_spawner = spawner.clone();
+    let run_pool = pool.clone();
+    // One dedicated event pump per run (it publishes each finished stage
+    // and waits for the engine, which a pool job must never do); the engine
+    // itself is a heavy pool job.
+    let options = ThreadOptions { name: Some("vj-pipeline-run".into()), ..Default::default() };
     spawner
-        .spawn(move || {
-            run_thread(handle, spec, orders, endpoints, token, namespace, prompt, run_spawner)
+        .spawn_worker(options, move || {
+            run_thread(handle, spec, orders, endpoints, token, namespace, prompt, run_pool)
         })
         .map(|handle| handle.detach())
         .map_err(|error| format!("could not spawn the run thread: {error}"))?;
@@ -588,12 +606,12 @@ fn run_thread(
     token: Option<String>,
     namespace: String,
     typed_prompt: String,
-    spawner: ThreadSpawner,
+    pool: TaskPool,
 ) {
     let (events_tx, events_rx) = channel();
     let cancel = handle.cancel.clone();
     let engine_spec = spec.clone();
-    let engine = spawner.spawn(move || {
+    let engine = pool.submit(Lane::Heavy, move || {
             engine::run(
                 &engine_spec,
                 &orders,
@@ -607,7 +625,7 @@ fn run_thread(
         let mut record = handle.record.lock().unwrap();
         for stage in &mut record.stages {
             stage.state = StageState::Failed;
-            stage.error = Some("could not spawn the engine".to_string());
+            stage.error = Some("could not queue the engine".to_string());
         }
         record.finished_ms = Some(now_ms());
         return;
@@ -788,9 +806,9 @@ fn spawn_job(
     namespace: String,
     kind_name: String,
     body: Value,
-    spawner: &ThreadSpawner,
+    pool: &TaskPool,
 ) -> Result<JobId, String> {
-    // Validate at enqueue so a typo refuses before any thread spawns.
+    // Validate at enqueue so a typo refuses before any job is queued.
     let _ = makepad_asset_creator::runner::translate(&kind_name, &body, tag)?;
     let job = JobId(mint_id(tag ^ 0x00B5));
     let handle = Arc::new(JobHandle {
@@ -808,10 +826,11 @@ fn spawn_job(
     });
     jobs.lock().unwrap().insert(job.0, handle.clone());
     let endpoints = endpoints.clone();
-    spawner
-        .spawn(move || job_thread(handle, endpoints, token, namespace, kind_name, body, tag))
+    pool.submit(Lane::Heavy, move || {
+            job_thread(handle, endpoints, token, namespace, kind_name, body, tag)
+        })
         .map(|handle| handle.detach())
-        .map_err(|error| format!("could not spawn the job thread: {error}"))?;
+        .map_err(|error| format!("could not queue the job: {error}"))?;
     Ok(job)
 }
 

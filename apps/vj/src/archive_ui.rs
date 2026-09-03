@@ -38,7 +38,7 @@ use makepad_asset_data::{
 };
 use makepad_asset_importer::thumbs;
 use makepad_asset_importer::videothumb::probe_video;
-use makepad_widgets::makepad_platform::thread::ThreadSpawner;
+use makepad_widgets::makepad_platform::thread::{Lane, TaskPool, ThreadOptions, ThreadSpawner};
 use makepad_widgets::makepad_platform::video_file::{nv12, VideoFileDecoder};
 use makepad_widgets::{ImageBuffer, Texture};
 use std::collections::HashMap;
@@ -296,6 +296,7 @@ pub struct ArchivePanel {
     pending_autocue: bool,
     publish_rx: Option<Receiver<PublishMsg>>,
     spawner: Option<ThreadSpawner>,
+    pool: Option<TaskPool>,
 }
 
 impl Default for ArchivePanel {
@@ -332,13 +333,20 @@ impl Default for ArchivePanel {
             pending_autocue: false,
             publish_rx: None,
             spawner: None,
+            pool: None,
         }
     }
 }
 
 impl ArchivePanel {
+    /// The spawner makes the decode loop and one loop per open swatch or
+    /// stream; one-shot work (publishing) goes to `pool`.
     pub fn set_spawner(&mut self, spawner: ThreadSpawner) {
         self.spawner = Some(spawner);
+    }
+
+    pub fn set_task_pool(&mut self, pool: TaskPool) {
+        self.pool = Some(pool);
     }
 
     /// Where downloads and tiles are cached: `<cache_parent>/archive-cache`.
@@ -370,7 +378,8 @@ impl ArchivePanel {
             let (req_tx, req_rx) = mpsc::channel::<DecodeReq>();
             let (done_tx, done_rx) = mpsc::channel::<DecodeDone>();
             let spawner = self.spawner.clone().expect("archive worker is not started");
-            match spawner.spawn(move || {
+            let options = ThreadOptions { name: Some("vj-archive-decode".into()), ..Default::default() };
+            match spawner.spawn_worker(options, move || {
                     while let Ok(req) = req_rx.recv() {
                         let done = match req {
                             DecodeReq::Thumb { identifier, bytes } => DecodeDone::Thumb {
@@ -1083,8 +1092,8 @@ impl ArchivePanel {
                             self.import = ImportState::Publishing;
                             let (tx, rx) = mpsc::channel();
                             self.publish_rx = Some(rx);
-                            if let Some(spawner) = self.spawner.as_ref() {
-                                match spawner.spawn(move || {
+                            if let Some(pool) = self.pool.as_ref() {
+                                match pool.submit(Lane::Heavy, move || {
                                     let verdict = publish(target, &item, &file, &path);
                                     let _ = tx.send(PublishMsg::Done(verdict));
                                 }) {
@@ -1208,7 +1217,9 @@ impl SwatchPlayer {
             failure: Mutex::new(None),
         });
         let thread_shared = shared.clone();
-        match spawner.spawn(move || swatch_loop(source, thread_shared)) {
+        // A loop for as long as this swatch is open, fed by the shared flags.
+        let options = ThreadOptions { name: Some("vj-archive-swatch".into()), ..Default::default() };
+        match spawner.spawn_worker(options, move || swatch_loop(source, thread_shared)) {
             Ok(handle) => handle.detach(),
             Err(error) => {
                 *shared.failure.lock().unwrap() = Some(error.to_string());

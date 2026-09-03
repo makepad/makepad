@@ -18,7 +18,7 @@
 use makepad_ai_hub::backend::CancelToken;
 use makepad_ai_hub::download::{DownloadProgress, Downloader};
 use makepad_ai_hub::registry::FileSpec;
-use makepad_widgets::makepad_platform::thread::ThreadSpawner;
+use makepad_widgets::makepad_platform::thread::{Lane, TaskPool};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
 
@@ -147,14 +147,14 @@ impl InstallHandle {
     }
 }
 
-/// One worker thread, models downloaded in order. A failure moves on to the
-/// next model; a cancel stops the run — either way the `.part` stays for a
-/// resumed retry.
-pub fn start_install(models: Vec<&'static VjModel>, spawner: ThreadSpawner) -> InstallHandle {
+/// One heavy pool job, models downloaded in order. A failure moves on to
+/// the next model; a cancel stops the run — either way the `.part` stays for
+/// a resumed retry.
+pub fn start_install(models: Vec<&'static VjModel>, pool: TaskPool) -> InstallHandle {
     let (out, rx) = channel();
     let cancel = CancelToken::new();
     let worker_cancel = cancel.clone();
-    match spawner.spawn(move || {
+    match pool.submit(Lane::Heavy, move || {
             let downloader = match Downloader::from_env() {
                 Ok(downloader) => downloader,
                 Err(error) => {

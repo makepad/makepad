@@ -67,11 +67,12 @@ impl Cx {
         request: crate::storage::StorageRequest,
     ) {
         let sender = self.storage_state.sender();
-        if let Ok(task) = self.spawn_thread(move || {
+        match self.task_pool().submit(crate::thread::Lane::Heavy, move || {
             let response = crate::storage::native::execute(&crate::home::storage_dir(), request);
             let _ = sender.send(response);
         }) {
-            task.detach();
+            Ok(task) => task.detach(),
+            Err(error) => crate::error!("storage request refused by the task pool: {error}"),
         }
     }
 

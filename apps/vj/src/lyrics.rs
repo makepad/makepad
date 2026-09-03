@@ -33,7 +33,7 @@
 use crate::decks::DeckId;
 use crate::wave_analysis::TrackGrid;
 use makepad_ai_stems::{CacheHeader, StemCache, Stem};
-use makepad_widgets::makepad_platform::thread::ThreadSpawner;
+use makepad_widgets::makepad_platform::thread::{ThreadOptions, ThreadSpawner};
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -1385,7 +1385,8 @@ impl LyricsPool {
         let Some(jobs) = self.jobs.take() else { return };
         let Some(prefetch_jobs) = self.prefetch_jobs.take() else { return };
         let out = self.out.clone();
-        match spawner.spawn(move || {
+        let options = ThreadOptions { name: Some("vj-lyrics".into()), ..Default::default() };
+        match spawner.spawn_worker(options, move || {
                 let mut backend: Option<Transcriber> = None;
                 let mut backend_failed = false;
                 loop {

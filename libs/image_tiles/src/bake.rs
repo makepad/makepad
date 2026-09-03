@@ -16,6 +16,7 @@ use crate::tape::{
     FULL_BPP, FULL_MAX_PX, LEVELS, PAGE_BPP, PYRAMID_LEVELS, SHARD_CAP,
 };
 use makepad_network::blocking_http::{self, Limits, Request};
+use makepad_widgets::makepad_platform::thread::{ThreadOptions, ThreadSpawner};
 use std::collections::VecDeque;
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -214,6 +215,7 @@ pub fn bake(
     sources: &[Source],
     options: &BakeOptions,
     log: &mut dyn FnMut(String),
+    spawner: &ThreadSpawner,
 ) -> Result<BakeSummary, String> {
     let library = Library::new(root);
     library.ensure_dirs()?;
@@ -258,12 +260,24 @@ pub fn bake(
     let (done_tx, done_rx) = mpsc::channel::<PackMsg>();
 
     let total = pending.len();
-    let result = std::thread::scope(|scope| -> Result<(), String> {
-        for _ in 0..fetch_threads {
-            let job_rx = job_rx.clone();
-            let fetched_tx: SyncSender<(i64, Vec<u8>)> = fetched_tx.clone();
-            let done_tx = done_tx.clone();
-            scope.spawn(move || loop {
+    // Fetch and encode are two pools of dedicated workers pipelined through
+    // bounded channels, not a bounded batch: they must run concurrently with
+    // each other and with the packer below for the whole bake, which is what
+    // `ThreadSpawner::spawn_worker` is for (`TaskPool::fan_out` is a
+    // blocking parallel-for and would serialize the two stages, deadlocking
+    // on the bounded `fetched_tx` the moment its buffer filled with nobody
+    // yet decoding). Nothing here borrows anything but owned clones, so
+    // there is no scoped-thread lifetime to preserve; the packer loop below
+    // only returns once `done_rx` closes, which is only once every fetch and
+    // encode worker has dropped its last `done_tx` clone at its own natural
+    // exit — the same completion guarantee `thread::scope` gave by joining.
+    for _ in 0..fetch_threads {
+        let job_rx = job_rx.clone();
+        let fetched_tx: SyncSender<(i64, Vec<u8>)> = fetched_tx.clone();
+        let done_tx = done_tx.clone();
+        if let Ok(handle) = spawner.spawn_worker(
+            ThreadOptions { name: Some("tiles-bake-fetch".into()), ..Default::default() },
+            move || loop {
                 let job = { job_rx.lock().unwrap().recv() };
                 let Ok((id, url)) = job else { break };
                 match fetch_bytes(&url, PICTURE_MAX_BYTES) {
@@ -278,14 +292,19 @@ pub fn bake(
                         }
                     }
                 }
-            });
+            },
+        ) {
+            handle.detach();
         }
-        drop(fetched_tx);
-        for _ in 0..encode_threads {
-            let fetched_rx = fetched_rx.clone();
-            let done_tx = done_tx.clone();
-            let library = library.clone();
-            scope.spawn(move || loop {
+    }
+    drop(fetched_tx);
+    for _ in 0..encode_threads {
+        let fetched_rx = fetched_rx.clone();
+        let done_tx = done_tx.clone();
+        let library = library.clone();
+        if let Ok(handle) = spawner.spawn_worker(
+            ThreadOptions { name: Some("tiles-bake-encode".into()), ..Default::default() },
+            move || loop {
                 let job = { fetched_rx.lock().unwrap().recv() };
                 let Ok((id, bytes)) = job else { break };
                 let msg = match process_picture(&library, id, &bytes) {
@@ -295,10 +314,14 @@ pub fn bake(
                 if done_tx.send(msg).is_err() {
                     break;
                 }
-            });
+            },
+        ) {
+            handle.detach();
         }
-        drop(done_tx);
+    }
+    drop(done_tx);
 
+    let result: Result<(), String> = (|| {
         // The packer: this thread. One open shard, slots filled in arrival
         // order, sealed when full.
         let mut open: Option<OpenShard> = None;
@@ -353,7 +376,7 @@ pub fn bake(
             summary.shards_sealed += 1;
         }
         Ok(())
-    });
+    })();
     result?;
     let (pending_after, ready_after, failed_after) = db.counts()?;
     log(format!(

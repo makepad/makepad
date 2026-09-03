@@ -50,12 +50,12 @@ use makepad_platform::script::timer::script_local_utc_offset_secs;
 use makepad_platform::video_file::{
     PcmAudioTrackOptions, VideoFileCodec, VideoFileEncoder, VideoFileEncoderOptions,
 };
+use makepad_platform::thread::{TaskHandle, ThreadOptions};
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::thread::JoinHandle;
 use std::time::Duration;
 
 script_mod! {
@@ -263,7 +263,7 @@ impl ScreenCap {
             }
         };
         let fps = capture_fps(self.max_fps);
-        let session = Session::start(path.clone(), self.window_id, fps);
+        let session = Session::start(cx, path.clone(), self.window_id, fps);
         log!("ScreenCap: recording to {}", path.display());
         self.session = Some(session);
         self.next_frame = cx.new_next_frame();
@@ -288,7 +288,8 @@ impl ScreenCap {
         if !session.is_finished() {
             return None;
         }
-        let result = self.session.take().unwrap().join();
+        let result = session.try_finish()?;
+        self.session = None;
         self.redraw_requested = true;
         Some(match result {
             Ok(path) => {
@@ -394,12 +395,12 @@ struct Session {
     /// Cleared by the encoder thread on exit, so the UI can poll for the
     /// finalize without blocking on a join.
     running: Arc<AtomicBool>,
-    join: Option<JoinHandle<Result<PathBuf, String>>>,
+    join: Option<TaskHandle<Result<PathBuf, String>>>,
     stopping: bool,
 }
 
 impl Session {
-    fn start(path: PathBuf, window_id: Option<usize>, fps: u32) -> Self {
+    fn start(cx: &Cx, path: PathBuf, window_id: Option<usize>, fps: u32) -> Self {
         let slot = Arc::new((Mutex::new(FrameSlot::default()), Condvar::new()));
         let audio = Arc::new(Mutex::new(AudioQueue::default()));
         let running = Arc::new(AtomicBool::new(true));
@@ -455,13 +456,16 @@ impl Session {
         let thread_slot = slot.clone();
         let thread_audio = audio.clone();
         let thread_running = running.clone();
-        let join = std::thread::Builder::new()
-            .name("makepad-screencap".to_string())
-            .spawn(move || {
-                let result = encode_loop(&path, thread_slot, thread_audio, fps);
-                thread_running.store(false, Ordering::Release);
-                result.map(|_| path)
-            })
+        let join = cx
+            .thread_spawner()
+            .spawn_worker(
+                ThreadOptions { name: Some("makepad-screencap".into()), ..Default::default() },
+                move || {
+                    let result = encode_loop(&path, thread_slot, thread_audio, fps);
+                    thread_running.store(false, Ordering::Release);
+                    result.map(|_| path)
+                },
+            )
             .ok();
         if join.is_none() {
             running.store(false, Ordering::Release);
@@ -497,12 +501,24 @@ impl Session {
         self.stopping && !self.running.load(Ordering::Acquire)
     }
 
-    fn join(mut self) -> Result<PathBuf, String> {
+    /// Reap the encoder's result — never a blocking join, which
+    /// `TaskHandle` refuses from the UI thread. `is_finished` already told
+    /// the caller the worker set `running` false, so `try_take` normally
+    /// answers at once; `None` here just means the completion has not
+    /// posted yet and the caller polls again next frame.
+    fn try_finish(&mut self) -> Option<Result<PathBuf, String>> {
         match self.join.take() {
-            Some(handle) => handle
-                .join()
-                .unwrap_or_else(|_| Err("encoder thread panicked".to_string())),
-            None => Err("encoder thread could not be started".to_string()),
+            Some(mut handle) => match handle.try_take() {
+                Some(result) => Some(match result {
+                    Ok(outcome) => outcome,
+                    Err(task_error) => Err(format!("encoder thread panicked: {task_error}")),
+                }),
+                None => {
+                    self.join = Some(handle);
+                    None
+                }
+            },
+            None => Some(Err("encoder thread could not be started".to_string())),
         }
     }
 }

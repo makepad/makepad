@@ -40,7 +40,7 @@
 
 use crate::media_scan::{self, FileOutcome, FileProgress, ImportCtx, MediaFile, MediaScan};
 use makepad_asset_client::{ApiEndpoints, AssetClient, ClientConfig};
-use makepad_widgets::makepad_platform::thread::ThreadSpawner;
+use makepad_widgets::makepad_platform::thread::{Lane, TaskPool};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -129,7 +129,7 @@ pub struct ImportPanel {
     pub status: String,
     cancel: Arc<AtomicBool>,
     rx: Option<Receiver<Msg>>,
-    spawner: Option<ThreadSpawner>,
+    pool: Option<TaskPool>,
 }
 
 impl Default for ImportPanel {
@@ -142,14 +142,14 @@ impl Default for ImportPanel {
             status: "drop a folder here, or type a path".to_string(),
             cancel: Arc::new(AtomicBool::new(false)),
             rx: None,
-            spawner: None,
+            pool: None,
         }
     }
 }
 
 impl ImportPanel {
-    pub fn set_spawner(&mut self, spawner: ThreadSpawner) {
-        self.spawner = Some(spawner);
+    pub fn set_task_pool(&mut self, pool: TaskPool) {
+        self.pool = Some(pool);
     }
 
     pub fn set_path(&mut self, path: impl Into<String>) {
@@ -225,17 +225,17 @@ impl ImportPanel {
 
         let cache = cache_parent.join("import-cache");
         let convert = self.convert_video;
-        let spawner = self
-            .spawner
+        let pool = self
+            .pool
             .clone()
             .ok_or_else(|| self.refuse("import worker is not started"))?;
-        spawner.spawn(move || {
+        pool.submit(Lane::Heavy, move || {
                 let verdict =
                     run(&root, endpoints, server_id, token, cache, convert, &tx, &cancel);
                 let _ = tx.send(Msg::Finished(verdict));
             })
             .map(|handle| handle.detach())
-            .map_err(|e| self.refuse(format!("cannot start the import thread: {e}")))?;
+            .map_err(|e| self.refuse(format!("cannot start the import job: {e}")))?;
         Ok(())
     }
 

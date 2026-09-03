@@ -711,8 +711,9 @@ pub struct AsyncImageLoad {
 
 pub struct ImageCache {
     pub map: HashMap<PathBuf, ImageCacheEntry>,
-    pub thread_pool: Option<TaskPool>,
-    thread_pool_unavailable: bool,
+    /// Decodes staged newest-first in front of the runtime pool's light
+    /// lane; a re-request of the same path replaces the staged decode.
+    pub decode_queue: TaskQueue<PathBuf>,
     pub pending_http_requests: HashMap<LiveId, PathBuf>,
 }
 
@@ -730,8 +731,7 @@ impl ImageCache {
     pub fn new() -> Self {
         Self {
             map: HashMap::new(),
-            thread_pool: None,
-            thread_pool_unavailable: false,
+            decode_queue: TaskQueue::new(Lane::Light, MAX_POOL_WORKERS, 1024),
             pending_http_requests: HashMap::new(),
         }
     }
@@ -1700,35 +1700,11 @@ mod tests {
     }
 }
 
-fn ensure_thread_pool(cx: &mut Cx) {
-    ensure_image_cache_inner(cx);
-    if cx.get_global::<ImageCache>().thread_pool.is_none()
-        && !cx.get_global::<ImageCache>().thread_pool_unavailable
-    {
-        let spawner = cx.thread_spawner();
-        let pool = TaskPool::new(
-            spawner.clone(),
-            PoolOptions {
-                workers: spawner.worker_count(2, 8),
-                capacity: std::num::NonZeroUsize::new(1024).unwrap(),
-                name: "image-decode".into(),
-            },
-        );
-        match pool {
-            Ok(pool) => cx.get_global::<ImageCache>().thread_pool = Some(pool),
-            Err(error) => {
-                error!("ImageCache: decode pool unavailable, using serial decode: {error}");
-                cx.get_global::<ImageCache>().thread_pool_unavailable = true;
-            }
-        }
-    }
-}
-
 fn spawn_decode_job<D>(cx: &mut Cx, image_path: PathBuf, data: Arc<D>)
 where
     D: AsRef<[u8]> + Send + Sync + ?Sized + 'static,
 {
-    ensure_thread_pool(cx);
+    ensure_image_cache_inner(cx);
     let image_size_bytes = (*data).as_ref().len();
     let task_key = image_path.clone();
     let job = move || {
@@ -1771,17 +1747,19 @@ where
                 result: RefCell::new(Some(result)),
             });
         };
-    if let Some(pool) = cx.get_global::<ImageCache>().thread_pool.as_mut() {
-        match pool.submit_tagged(task_key.clone(), true, QueueOrder::Lifo, job) {
-            Ok(task) => task.detach(),
-            Err(error) => Cx::post_action(AsyncImageLoad {
+    let pool = cx.task_pool();
+    if pool.is_open() {
+        let queue = &mut cx.get_global::<ImageCache>().decode_queue;
+        queue.set_in_flight_limit(pool.worker_count());
+        if let Err(error) = queue.push(&pool, task_key.clone(), true, QueueOrder::Lifo, job) {
+            Cx::post_action(AsyncImageLoad {
                 image_path: task_key,
                 result: RefCell::new(Some(Err(ImageError::Worker(error.to_string())))),
-            }),
+            });
         }
     } else {
         // A non-threaded wasm build has an explicit serial path for this pure
-        // CPU decode; dedicated blocking services still report Unsupported.
+        // CPU decode.
         job();
     }
 }
@@ -1796,6 +1774,9 @@ pub fn process_async_image_load(
     result: Result<ImageBuffer, ImageError>,
 ) {
     ensure_image_cache_inner(cx);
+    // A finished decode frees a slot: hand the next staged one over.
+    let pool = cx.task_pool();
+    cx.get_global::<ImageCache>().decode_queue.pump(&pool);
     if let Ok(data) = result {
         let width = data.width;
         let height = data.height;

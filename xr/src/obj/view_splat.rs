@@ -688,7 +688,7 @@ impl ViewSplat {
             .receiver()
             .expect("depth sort receiver is taken exactly once per channel");
         let result_tx = self.depth_sort_result_rx.sender();
-        if let Ok(task) = cx.spawn_thread(move || run_sort_worker(request_rx, result_tx)) {
+        if let Ok(task) = cx.spawn_worker(move || run_sort_worker(request_rx, result_tx)) {
             task.detach();
         }
         self.depth_sort_thread_started = true;

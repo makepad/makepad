@@ -425,7 +425,7 @@ impl Cx {
         }
         self.run_view_frame_encode_in_flight = true;
         let sender = self.run_view_frame_results.sender();
-        if let Ok(task) = self.spawn_thread(move || {
+        if let Ok(task) = self.task_pool().submit(crate::thread::Lane::Heavy, move || {
             let result = Cx::prepare_studio_run_view_rgba(&request, width, height, rgba).and_then(
                 |(width, height, rgba)| {
                     Cx::encode_rgba_as_png(width, height, &rgba).map(|png| RunViewFrameData {
@@ -1165,6 +1165,9 @@ impl Cx {
         }
         if matches!(event, Event::Startup) {
             self.initialize_memory_budget();
+            // The workers boot now, before the app exists, so the first job
+            // never waits for a thread (a Web Worker takes hundreds of ms).
+            self.warm_task_pool();
         }
         if !matches!(event, Event::Shutdown) {
             crate::thread::service_scheduler(self, event);
@@ -1216,6 +1219,7 @@ impl Cx {
         self.handle_pending_clear_hover();
         if matches!(event, Event::Shutdown) {
             crate::thread::service_scheduler(self, event);
+            self.close_task_pool();
             self.thread_spawner.close_runtime();
         }
     }
