@@ -103,6 +103,11 @@ const CACHE_MAGIC: &[u8; 8] = b"VJWAVE\0\0";
 /// second application can reach a coarser rung the first was too far
 /// from -- so a change to the ladder is a version bump, which is exactly
 /// what this number is for.
+/// Version 14 says whether the record was measured whole or only its
+/// first minute. A version 13 sidecar was measured whole, and reading it
+/// as partial would re-measure the library for nothing -- so, like every
+/// other bump, it is re-analysed rather than guessed about.
+///
 /// Version 13 carries a version PER PRODUCT, so a change to one detector
 /// no longer throws away the others' work. The format version still
 /// guards the bytes -- a layout change re-analyses everything, because
@@ -116,7 +121,15 @@ const CACHE_MAGIC: &[u8; 8] = b"VJWAVE\0\0";
 /// Version 11 carries the record's measured loudness. A version 10
 /// sidecar has none, and there is no way to derive one without the
 /// samples, so it is re-analysed like every other bump.
-const CACHE_VERSION: u32 = 13;
+const CACHE_VERSION: u32 = 14;
+
+/// How much of a record a fast pass looks at.
+///
+/// A minute is enough for the columns -- a tempo and a key from the first
+/// minute of a dance record are almost always the record's -- and it is
+/// not enough to be trusted on a deck, which is why a partial result says
+/// so and is measured again the moment a deck asks for it.
+pub const FAST_SECS: f64 = 60.0;
 
 /// What each product was measured by, so a change to one detector costs
 /// only that product's work.
@@ -742,6 +755,12 @@ pub struct TrackAnalysis {
     /// load, and without this it would undo the better measurement every
     /// time the record came back.
     pub from_stems: bool,
+    /// Only the first [`FAST_SECS`] of the record were looked at.
+    ///
+    /// Good enough to fill a library's columns and never good enough for
+    /// a deck: a partial result is measured again in full the moment a
+    /// deck asks for the record.
+    pub partial: bool,
     /// Which of these products this build would measure differently.
     ///
     /// About the LOAD rather than the record, like the timing beside it,
@@ -2346,6 +2365,33 @@ pub fn repair(
 }
 
 /// The same analysis, saying where its time went.
+/// The first minute of a record, for a pass whose answer only has to
+/// fill a column.
+///
+/// Marked partial, which is what stops a deck trusting it: the whole
+/// point of looking at less is that it is less, and a grid from one
+/// minute of a record played by people is not that record's grid.
+pub fn analyze_fast(pcm: &TrackPcm, tag_bpm: Option<f64>) -> TrackAnalysis {
+    let rate = pcm.sample_rate.max(1) as usize;
+    let head = (rate as f64 * FAST_SECS) as usize;
+    if pcm.frames.len() <= head {
+        // Nothing to save: a record shorter than the window is measured
+        // whole, and says so, so nothing re-measures it later for nothing.
+        return analyze_timed(pcm, tag_bpm).0;
+    }
+    let head_pcm = TrackPcm {
+        frames: pcm.frames[..head].to_vec(),
+        sample_rate: pcm.sample_rate,
+    };
+    let mut analysis = analyze_timed(&head_pcm, tag_bpm).0;
+    // The DURATION is the record's, not the window's: it is read off the
+    // file rather than measured, and a column saying every long record is
+    // one minute long would be worse than a blank one.
+    analysis.duration_secs = pcm.seconds();
+    analysis.partial = true;
+    analysis
+}
+
 /// `tag_bpm` is what the FILE claims its tempo is, when it claims one.
 /// It is used for one thing and nothing else: breaking the octave tie,
 /// which is the detector's own weakest decision and the one a human
@@ -2421,6 +2467,7 @@ pub fn analyze_timed(
         }),
         loudness_lufs,
         from_stems: false,
+        partial: false,
         stale: Stale::default(),
     };
     (analysis, timing)
@@ -2586,6 +2633,7 @@ pub fn encode_analysis(analysis: &TrackAnalysis) -> Vec<u8> {
         None => out.extend_from_slice(&[0u8; 9]),
     }
     out.push(u8::from(analysis.from_stems));
+    out.push(u8::from(analysis.partial));
     for version in [
         PRODUCTS.grid,
         PRODUCTS.tiles,
@@ -2687,6 +2735,7 @@ pub fn decode_analysis(bytes: &[u8]) -> Result<TrackAnalysis, String> {
         }
     };
     let from_stems = take(1)?[0] != 0;
+    let partial = take(1)?[0] != 0;
     // A sidecar written before the products were versioned reads as all
     // zeroes, which differs from every real version and so re-measures
     // everything -- the honest answer for bytes that never said.
@@ -2705,6 +2754,7 @@ pub fn decode_analysis(bytes: &[u8]) -> Result<TrackAnalysis, String> {
     let _ = refined_by_beats;
     Ok(TrackAnalysis {
         stale: Stale::between(stored, PRODUCTS),
+        partial,
         sound,
         loudness_lufs,
         from_stems,
@@ -3047,6 +3097,9 @@ pub struct AnalysisJob {
     pub beats_model: Option<PathBuf>,
     /// What the file claims its tempo is, for the octave tie only.
     pub tag_bpm: Option<f64>,
+    /// Look at the first minute only. Ignored for a deck's own load: a
+    /// deck is where the answer has to be right.
+    pub fast: bool,
 }
 
 pub struct AnalysisDone {
@@ -3096,6 +3149,12 @@ fn run_analysis_jobs(jobs: Receiver<AnalysisJob>, done_tx: Sender<AnalysisDone>)
                 // would keep writing sidecars where nothing reads them.
                 let dir = cache_dir();
                 let (mut analysis, cached) = match load_cached(&dir, &job.key) {
+                    // A partial result is not something a deck may have:
+                    // it was measured to fill a column, and this is the
+                    // moment the record has to be right.
+                    Some(hit) if hit.partial && job.deck.is_some() => {
+                        (analyze_timed(&job.pcm, job.tag_bpm).0, false)
+                    }
                     // A stored record whose products this build would
                     // measure differently is repaired in place rather than
                     // thrown away: only what changed is measured again,
@@ -3110,7 +3169,11 @@ fn run_analysis_jobs(jobs: Receiver<AnalysisJob>, done_tx: Sender<AnalysisDone>)
                         (hit, !repaired)
                     }
                     None => {
-                        let (analysis, timing) = analyze_timed(&job.pcm, job.tag_bpm);
+                        let fast = job.fast && job.deck.is_none();
+                        let (analysis, timing) = match fast {
+                            true => (analyze_fast(&job.pcm, job.tag_bpm), AnalysisTiming::default()),
+                            false => analyze_timed(&job.pcm, job.tag_bpm),
+                        };
                         // Where the time went, per stage. A track that
                         // took four seconds took them somewhere, and
                         // the total alone cannot say whether that is a
@@ -4320,6 +4383,7 @@ mod tests {
                 pcm: pcm.clone(),
                 beats_model: None,
                 tag_bpm: None,
+                fast: false,
             });
         }
         pool.submit(AnalysisJob {
@@ -4329,6 +4393,7 @@ mod tests {
             pcm: pcm.clone(),
             beats_model: None,
             tag_bpm: None,
+            fast: false,
         });
         // The deck's answer comes back without the ten in front of it
         // having to finish first.
@@ -4354,6 +4419,29 @@ mod tests {
     /// A change to one detector costs that product's work and no more.
     /// A file that says its tempo answers the detector's weakest
     /// question -- which octave -- and nothing else.
+    /// The first minute is enough to fill a column, and says that is all
+    /// it looked at.
+    #[test]
+    fn a_fast_pass_looks_at_the_first_minute_and_says_so() {
+        // Three minutes at 128, so the window is a third of it.
+        let pcm = click_track(48_000, 128.0, 180.0, 0.41);
+        let fast = analyze_fast(&pcm, None);
+        assert!(fast.partial, "and it says so");
+        assert!((fast.grid.bpm - 128.0).abs() < 0.2, "{}", fast.grid.bpm);
+        // The DURATION is the record's, not the window's: it is read off
+        // the file, and a column saying every long record is a minute
+        // long would be worse than a blank one.
+        assert!((fast.duration_secs - 180.0).abs() < 0.1, "{}", fast.duration_secs);
+        // A record shorter than the window is measured whole, and does
+        // not claim to be partial -- nothing should re-measure it later
+        // for nothing.
+        let short = analyze_fast(&click_track(48_000, 128.0, 20.0, 0.41), None);
+        assert!(!short.partial);
+        // And a partial answer survives the sidecar as partial.
+        let back = decode_analysis(&encode_analysis(&fast)).expect("a round trip");
+        assert!(back.partial);
+    }
+
     #[test]
     fn a_tagged_tempo_breaks_the_octave_tie() {
         // A pulse with an even, weaker beat between each pair: the comb

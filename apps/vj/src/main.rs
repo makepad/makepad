@@ -14211,6 +14211,8 @@ p2 {}
             pcm,
             beats_model,
             tag_bpm,
+            // Never for a deck: this is where the answer has to be right.
+            fast: false,
         });
     }
 
@@ -18875,6 +18877,7 @@ p2 {}
         {
             field.set_value(cx, self.prep.concurrency as f64);
         }
+        self.paint_lit(cx, ids!(prep_fast), self.prep.fast);
         let root = match &self.prep.cache_root {
             Some(root) => root.display().to_string(),
             None => "default (beside the app's local state)".to_string(),
@@ -19004,6 +19007,10 @@ p2 {}
                     self.prep.concurrency = value.clamp(1, preprocess::MAX_CONCURRENCY)
                 }
             }
+            changed = true;
+        }
+        if self.ui.button(cx, ids!(prep_fast)).clicked(actions) {
+            self.prep.fast = !self.prep.fast;
             changed = true;
         }
         if changed {
@@ -22024,6 +22031,7 @@ p2 {}
                     &key,
                 )
                 .and_then(|tags| tags.tag_bpm),
+                fast: self.prep.fast,
             }),
             Err(error) => {
                 // Stays in `prep_analysed`, so an unreadable file is not

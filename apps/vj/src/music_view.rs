@@ -3765,6 +3765,16 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
+                        MusicLabel{width: 110 text: "FIRST MINUTE"}
+                        prep_fast := MusicChipButton{height: 20 text: "FAST"}
+                        MusicLabel{width: Fill text: "columns sooner; a deck still measures the whole record"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: 110 text: "AT ONCE"}
                         prep_concurrency := ValueInput{
                             width: 70

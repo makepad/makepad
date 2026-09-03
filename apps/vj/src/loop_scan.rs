@@ -902,6 +902,7 @@ mod tests {
             sound: None,
             loudness_lufs: None,
             from_stems: false,
+            partial: false,
             stale: Default::default(),
             duration_secs: beats as f64 * 0.5,
             sample_rate: 22050,

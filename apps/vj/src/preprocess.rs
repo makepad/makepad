@@ -164,6 +164,14 @@ pub struct PreprocessSettings {
     /// this many tracks — which is what "twenty ahead in the set list AND
     /// twenty down the listing" plainly means.
     pub ahead: usize,
+    /// Look at only the first minute of each record.
+    ///
+    /// For a library big enough that the columns are what matter and the
+    /// wait is what hurts. A partial answer says so, and any record that
+    /// reaches a deck is measured again in full before it plays -- so the
+    /// only thing traded away is the accuracy of a column on a record
+    /// nobody has touched yet.
+    pub fast: bool,
     /// Analysis jobs at once. Ignored by the warm-up group, which is serial
     /// by construction; see [`Group`].
     pub concurrency: usize,
@@ -178,6 +186,9 @@ impl Default for PreprocessSettings {
         PreprocessSettings {
             scopes: [Scope { explorer: true, queue: true }; 4],
             ahead: DEFAULT_AHEAD,
+            // Off: a partial answer is a trade, and a trade is the
+            // operator's to make.
+            fast: false,
             concurrency: DEFAULT_CONCURRENCY,
             cache_root: None,
         }
@@ -224,6 +235,8 @@ impl PreprocessSettings {
         }
         out.push_str(&format!("ahead {}\n", self.ahead));
         out.push_str(&format!("concurrency {}\n", self.concurrency));
+        out.push_str(&format!("fast {}
+", u8::from(self.fast)));
         // An empty value is a real state — "use the built-in root" — and has
         // to be distinguishable from the line never having been written.
         match &self.cache_root {
@@ -243,6 +256,9 @@ impl PreprocessSettings {
                     if let Some(value) = parts.next().and_then(|v| v.parse::<usize>().ok()) {
                         out.ahead = value.clamp(1, MAX_AHEAD);
                     }
+                }
+                "fast" => {
+                    out.fast = matches!(parts.next(), Some("1") | Some("true") | Some("on"));
                 }
                 "concurrency" => {
                     if let Some(value) = parts.next().and_then(|v| v.parse::<usize>().ok()) {
