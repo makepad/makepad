@@ -1627,23 +1627,28 @@ impl DeckEcho {
         }
     }
 
-    /// Empty the line and every cursor; the knobs (feedback, ping-pong)
-    /// stand, the way the EQ's own gains survive its `reset`. Off the
-    /// audio thread only -- a fresh record, a cleared deck.
-    pub fn reset(&mut self) {
-        self.line.fill([0.0, 0.0]);
-        self.write = 0;
-        self.written = 0;
-        self.silence_mark = 0;
-        self.delay = 1;
-        self.delay_prev = 1;
+    /// Forget whatever the line was carrying, and any handover or parked
+    /// retune in progress. The operator's own settings -- the rung,
+    /// the feedback, ping-pong -- are the STRIP's, not the record's
+    /// (the doc on `resonance` says the same: a load leaves them), so
+    /// they are left exactly as they stand and simply carry on, echoing
+    /// whatever plays next.
+    ///
+    /// Safe on ANY thread, the audio callback's own included: nothing
+    /// here writes to `line`. A tap older than `silence_mark` already
+    /// reads as silence (`tap_at`), so moving the mark past everything
+    /// written so far does the memset's job without touching the 2 MiB
+    /// the line actually occupies -- which a bulk clear from inside the
+    /// callback would have been a real-time violation to do.
+    pub fn silence(&mut self) {
         self.pending = None;
         self.handover = 0;
-        self.fraction = None;
-        self.send.jump(0.0);
-        self.tail_peak = 0.0;
-        self.period_left = 0;
-        self.quiet = true;
+        self.silence_mark = self.written;
+        // Still engaged, still not quiet: content the record about to
+        // play writes is real content, and the drain bookkeeping is what
+        // gets to notice it decayed away, not this call pretending it
+        // already has. Off, there is nothing left to protect.
+        self.quiet = self.fraction.is_none();
     }
 
     /// The rung to echo at, or none for off. Off rings the tail out over
@@ -1685,6 +1690,11 @@ impl DeckEcho {
         self.fraction.is_some()
     }
 
+    /// The rung the operator has asked for, or none for off.
+    pub fn fraction(&self) -> Option<(u32, u32)> {
+        self.fraction
+    }
+
     #[cfg(test)]
     fn delay(&self) -> u32 {
         self.delay
@@ -1698,6 +1708,20 @@ impl DeckEcho {
     #[cfg(test)]
     fn handover(&self) -> u32 {
         self.handover
+    }
+
+    /// The write cursor and the raw content sitting `frames_ago` behind
+    /// it -- unlike `tap_at`, this does not consult `silence_mark`, so a
+    /// test can tell a genuine memset apart from a mark that only makes
+    /// old content unreadable.
+    #[cfg(test)]
+    fn raw_write(&self) -> usize {
+        self.write
+    }
+
+    #[cfg(test)]
+    fn raw_at(&self, frames_ago: usize) -> [f32; 2] {
+        self.line[(self.write + ECHO_MAX_FRAMES - frames_ago.min(ECHO_MAX_FRAMES)) & ECHO_MASK]
     }
 
     /// Retune the tap to `beat_frames` (device frames per beat, at the
@@ -2078,6 +2102,32 @@ mod tests {
         for i in 0..1_000 {
             let x = (i as f32 * 0.037).sin() * 0.5;
             assert_eq!(echo.process([x, -x], rate), [x, -x], "a bit-exact bypass, not merely quiet");
+        }
+    }
+
+    /// `silence`, unlike `reset`, is safe from the audio thread precisely
+    /// because it never writes to the line: a memset over 2 MiB inside
+    /// the callback is the one thing this type exists to avoid. Prove it
+    /// two ways -- the raw memory is untouched, and yet nothing before
+    /// the mark can be read back.
+    #[test]
+    fn silence_never_touches_the_line_only_the_reach_of_it() {
+        let rate = 48_000.0f32;
+        let mut echo = settled_echo(rate, (1, 1), 0.0, 6_000.0);
+        echo.process([0.8, -0.8], rate);
+        let write_before = echo.raw_write();
+        let raw_before = echo.raw_at(1);
+        assert!(raw_before[0].abs() > 0.1, "a real value is there to protect: {raw_before:?}");
+        echo.silence();
+        assert_eq!(echo.raw_write(), write_before, "silence must not move the write cursor");
+        assert_eq!(echo.raw_at(1), raw_before, "and must not have memset the line either");
+        // The setting the operator asked for is the strip's and stands.
+        assert!(echo.engaged());
+        assert_eq!(echo.fraction(), Some((1, 1)));
+        // But the record changed underneath it: for as long as the delay
+        // would still be looking at the old content, nothing comes back.
+        for _ in 0..5_000 {
+            assert_eq!(echo.process([0.0, 0.0], rate), [0.0, 0.0], "stale content must not resurface");
         }
     }
 

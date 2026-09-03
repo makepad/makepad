@@ -1059,7 +1059,7 @@ impl DeckVoice {
         self.playing = load.play;
         self.seek_frames(0.0);
         self.eq.reset();
-        self.echo.reset();
+        self.echo.silence();
         self.reset_blend();
         if load.play {
             self.transport.slew(1.0, LOAD_SWAP_SECS);
@@ -2105,7 +2105,7 @@ impl Mixer {
                 d.transport = Ramp::at(0.0);
                 d.seek_frames(0.0);
                 d.eq.reset();
-                d.echo.reset();
+                d.echo.silence();
                 d.reset_blend();
             } else {
                 d.pending = Some(PendingLoad { pcm, play: keep_playing, grid: None });
@@ -2153,7 +2153,7 @@ impl Mixer {
         // With no pcm the clamp parks the playhead at zero; this also
         // clears `ended`, so a later install re-arms end reporting.
         d.seek_frames(0.0);
-        d.echo.reset();
+        d.echo.silence();
         d.reset_blend();
         self.publish_deck(&s, deck.index());
         drop(s);
@@ -2783,6 +2783,12 @@ impl Mixer {
         dst.seek_frames(at);
         dst.stretch.copy_state_from(&src.stretch);
         dst.stretching = src.stretching;
+        // The echo is the destination's own, like the EQ beside it, and
+        // is not copied -- but whatever the destination's line was still
+        // carrying from ITS previous record must not bleed into this
+        // one, so it is silenced the same way any other record change
+        // silences it.
+        dst.echo.silence();
         let to_index = to.index();
         self.publish_deck(&s, to_index);
     }
@@ -5639,6 +5645,71 @@ mod tests {
         let pfl = cue_energy(CueMode::Pfl);
         let raw = cue_energy(CueMode::Raw);
         assert!(pfl > raw * 1.8, "PFL must hear the repeats RAW skips: pfl={pfl} raw={raw}");
+    }
+
+    /// A load over a playing deck takes the parked path: the OLD track
+    /// keeps sounding while it fades, and the swap itself lands later,
+    /// on the audio thread's own turn. The echo is the strip's, not
+    /// either record's, and neither side of that swap may drop it.
+    #[test]
+    fn a_load_over_a_playing_deck_keeps_the_operators_echo_setting() {
+        let mixer = Mixer::new();
+        mixer.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 8.0));
+        mixer.set_deck_playing(DeckId::A, true);
+        mixer.set_deck_echo(DeckId::A, Some((1, 2)));
+        assert!(mixer.state.lock().unwrap().decks[0].echo.engaged());
+        // Audible, so this is the parked path, not the immediate cut.
+        mixer.install_deck_over(DeckId::A, tone_pcm(220.0, 48_000, 8.0), true);
+        assert!(
+            mixer.state.lock().unwrap().decks[0].echo.engaged(),
+            "still parked -- nothing has moved yet either way"
+        );
+        // Render past the outgoing track's short fade and the swap that
+        // spends the parked load, on the audio thread's own next turn.
+        spin_render(&mixer, 32);
+        assert!(
+            mixer.state.lock().unwrap().decks[0].echo.engaged(),
+            "the swap landed, and the operator's rung must have survived it"
+        );
+    }
+
+    /// The destination keeps its OWN echo setting through a clone -- it
+    /// is the strip's, and a clone does not touch the strip -- but the
+    /// STALE TAIL from whatever the destination was playing before must
+    /// not bleed into the record that just landed on it.
+    #[test]
+    fn a_clone_keeps_the_destinations_own_echo_setting_and_forgets_its_tail() {
+        let rate = 48_000.0;
+        let mixer = Mixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(1.0); // deck B
+        mixer.install_deck(DeckId::B, click_pcm(0.05, 48_000, 4.0));
+        mixer.set_deck_keylock(DeckId::B, false);
+        mixer.set_deck_grid(DeckId::B, Some(clock_grid(120.0)));
+        mixer.set_deck_echo(DeckId::B, Some((1, 1))); // whole beat, 24 000 frames
+        mixer.set_deck_echo_feedback(DeckId::B, 0.8);
+        mixer.set_deck_playing(DeckId::B, true);
+        // B's own click and its repeat both land: a real tail exists.
+        render_out(&mixer, rate, 100, 512);
+        // Silent, but PLAYING: a silent, paused source would clone its
+        // own paused transport onto B too, and a paused deck's frame
+        // loop never touches its echo at all -- which would hide a
+        // leak regardless of whether this fix is in place.
+        mixer.install_deck(DeckId::A, const_pcm(0, 480_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        render_out(&mixer, rate, 4, 512); // let A's transport settle
+        mixer.clone_deck(DeckId::A, DeckId::B);
+        assert_eq!(
+            mixer.state.lock().unwrap().decks[1].echo.fraction(),
+            Some((1, 1)),
+            "the clone did not touch the destination's own setting"
+        );
+        // Whatever B was about to repeat next -- its own earlier click,
+        // one more beat on -- must not be heard: the record under it is
+        // now silence, and the stale content must have gone with it.
+        let out = render_out(&mixer, rate, 100, 512);
+        let (peak, _) = peak_near(&out, rate, 0.5, 24_000);
+        assert!(peak.abs() < 0.05, "a stale tail bled through the clone: {peak}");
     }
 
     /// The read path folds the playhead into an active span before every
