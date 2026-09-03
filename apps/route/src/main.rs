@@ -92,6 +92,47 @@ app_main!(App);
 /// lands.
 pub(crate) const AMSTERDAM_CENTER: (f64, f64) = (4.8952, 52.3702);
 
+const THEME_STORAGE: &str = "route";
+const THEME_KEY: &str = "theme";
+
+#[derive(Default)]
+struct ThemePreference {
+    load: Option<StorageRequestId>,
+}
+
+impl ThemePreference {
+    fn start(&mut self, cx: &mut Cx) {
+        self.load = Some(cx.storage(THEME_STORAGE).get(cx, THEME_KEY));
+    }
+
+    fn restored(&mut self, event: &Event) -> Option<u32> {
+        let Event::Storage(responses) = event else {
+            return None;
+        };
+        let request_id = self.load?;
+        let response = responses
+            .iter()
+            .find(|response| response.request_id == request_id)?;
+        self.load = None;
+        let Ok(StorageResult::Value(Some(bytes))) = &response.result else {
+            return None;
+        };
+        match bytes.as_slice() {
+            b"light" => Some(0),
+            b"night" => Some(1),
+            b"circuit" => Some(2),
+            _ => None,
+        }
+    }
+
+    fn save(&mut self, cx: &mut Cx, theme: u32) {
+        self.load = None;
+        let name = ["light", "night", "circuit"][theme.min(2) as usize];
+        cx.storage(THEME_STORAGE)
+            .set(cx, THEME_KEY, name.as_bytes().to_vec());
+    }
+}
+
 #[cfg(feature = "native")]
 const SYSTEM_PROMPT: &str = "\
 You are the route assistant inside a live map app (Netherlands detail, Europe-wide places), \
@@ -707,6 +748,8 @@ pub struct App {
     ui: WidgetRef,
     #[rust]
     started: bool,
+    #[rust]
+    theme_preference: ThemePreference,
     /// Route's tools toward the WM assistant (or a parked in-process host).
     #[rust]
     ai_port: Option<AiServicePort>,
@@ -816,76 +859,6 @@ pub struct App {
     last_tool_call: Option<(String, String)>,
 }
 
-/// The machine's UTC offset in seconds, read once. The platform has no
-/// timezone database, so we ask the system's own `date` — which knows about
-/// DST — instead of guessing. Same house pattern as
-/// `apps/files/src/model.rs::local_utc_offset_secs`.
-#[cfg(feature = "native")]
-fn local_utc_offset_secs() -> i64 {
-    static OFFSET: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
-    *OFFSET.get_or_init(|| {
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
-        {
-            let Ok(out) = std::process::Command::new("date").arg("+%z").output() else {
-                return 0;
-            };
-            return parse_utc_offset(String::from_utf8_lossy(&out.stdout).trim());
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        0
-    })
-}
-
-/// `+0200` / `-0730` -> seconds east of UTC.
-#[cfg(feature = "native")]
-fn parse_utc_offset(text: &str) -> i64 {
-    let bytes = text.as_bytes();
-    if bytes.len() < 5 || (bytes[0] != b'+' && bytes[0] != b'-') {
-        return 0;
-    }
-    let Ok(hours) = text[1..3].parse::<i64>() else {
-        return 0;
-    };
-    let Ok(minutes) = text[3..5].parse::<i64>() else {
-        return 0;
-    };
-    let magnitude = hours * 3600 + minutes * 60;
-    if bytes[0] == b'-' {
-        -magnitude
-    } else {
-        magnitude
-    }
-}
-
-/// The current local hour-of-day (0..24), wall clock + system UTC offset.
-/// `--hour=N` on the command line pins it: a render gate compares grabs
-/// taken at different times of day against one daylight baseline.
-#[cfg(feature = "native")]
-fn local_hour_now() -> u32 {
-    if let Some(hour) = std::env::args()
-        .find_map(|arg| arg.strip_prefix("--hour=").and_then(|v| v.parse::<u32>().ok()))
-    {
-        return hour % 24;
-    }
-    let epoch_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let local_secs = epoch_secs + local_utc_offset_secs();
-    (local_secs.rem_euclid(86_400) / 3600) as u32
-}
-
-/// Civil-twilight approximation for the startup theme, no location lookup:
-/// night from 19:00 through 06:59, light from 07:00 through 18:59.
-#[cfg(feature = "native")]
-fn theme_name_for_hour(hour: u32) -> &'static str {
-    if hour >= 19 || hour < 7 {
-        "night"
-    } else {
-        "light"
-    }
-}
-
 /// Pull "ctx USED/MAX" out of the local timing status line.
 #[cfg(feature = "native")]
 fn parse_ctx_usage(timing: &str) -> Option<(usize, usize)> {
@@ -928,15 +901,10 @@ impl App {
             return;
         }
         self.started = true;
+        self.theme_preference.start(cx);
         self.ai_port = AiServicePort::open(cx, ai::manifest());
         self.assistant.configure_ui(cx, &self.ui);
         start_memory_watchdog(None);
-        // Civil-twilight default (route.md follow-up): night 19:00-06:59,
-        // light 07:00-18:59, local wall clock, no location lookup. Same
-        // set_theme_name + apply_layers path the "Night theme" checkbox
-        // uses, so the checkbox, the chrome and the map all agree; the
-        // user can still flip it manually afterwards.
-        let _ = self.layers.set_theme_name(theme_name_for_hour(local_hour_now()));
         self.layers.dirty = false;
         let maps_root = testmap::resolve_maps_root();
         log!("maps root: {}", maps_root.display());
@@ -2207,11 +2175,13 @@ impl MatchEvent for App {
         }
         if let Some(on) = self.ui.check_box(cx, ids!(theme_night)).changed(actions) {
             let _ = self.layers.set_theme_name(if on { "night" } else { "light" });
+            self.theme_preference.save(cx, self.layers.theme);
             self.layers.dirty = false;
             self.apply_layers(cx);
         }
         if let Some(on) = self.ui.check_box(cx, ids!(theme_circuit)).changed(actions) {
             let _ = self.layers.set_theme_name(if on { "circuit" } else { "light" });
+            self.theme_preference.save(cx, self.layers.theme);
             self.layers.dirty = false;
             self.apply_layers(cx);
         }
@@ -2276,6 +2246,11 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.ensure_started(cx);
+        if let Some(theme) = self.theme_preference.restored(event) {
+            self.layers.theme = theme;
+            self.layers.dirty = false;
+            self.apply_layers(cx);
+        }
         let map = self.ui.map_view(cx, ids!(map));
         self.terrain_layer.handle_event(cx, event, &map);
         self.drain_ai_port(cx, event);
@@ -2489,28 +2464,6 @@ mod ui_parity_tests {
 #[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
-
-    /// 19:00 through 06:59 is night; 07:00 through 18:59 is light — the
-    /// boundary hours (6/7/18/19) are the ones a fencepost bug would miss.
-    #[test]
-    fn theme_for_hour_matches_civil_twilight_rule() {
-        assert_eq!(theme_name_for_hour(19), "night");
-        assert_eq!(theme_name_for_hour(7), "light");
-        assert_eq!(theme_name_for_hour(6), "night");
-        assert_eq!(theme_name_for_hour(18), "light");
-        assert_eq!(theme_name_for_hour(0), "night");
-        assert_eq!(theme_name_for_hour(23), "night");
-        assert_eq!(theme_name_for_hour(12), "light");
-        assert_eq!(theme_name_for_hour(20), "night");
-    }
-
-    #[test]
-    fn utc_offset_parses_sign_and_magnitude() {
-        assert_eq!(parse_utc_offset("+0200"), 7200);
-        assert_eq!(parse_utc_offset("-0730"), -27000);
-        assert_eq!(parse_utc_offset("+0000"), 0);
-        assert_eq!(parse_utc_offset("garbage"), 0);
-    }
 
     #[test]
     fn demo_provisioner_configuration_installs_on_real_map_view() {
