@@ -100,13 +100,21 @@ pub struct EngineCore {
     turn_active: bool,
     subscriptions: HashMap<String, Subscription>,
     subscription_order: Vec<String>,
+    lease_id: u64,
     next_subscription: u64,
     wake_cursor: usize,
     last_wake: Option<f64>,
 }
 
 impl EngineCore {
-    pub fn new(registry: ServiceRegistry, model: Box<dyn Model>, doctrine: Option<&str>) -> EngineCore {
+    /// Start a conversation lease. `lease_id` must be unique for this host
+    /// process; it namespaces every subscription id exposed to services.
+    pub fn new(
+        registry: ServiceRegistry,
+        model: Box<dyn Model>,
+        doctrine: Option<&str>,
+        lease_id: u64,
+    ) -> EngineCore {
         let mut state = EngineState::default();
         state.provider_label = model.label();
         EngineCore {
@@ -123,6 +131,7 @@ impl EngineCore {
             turn_active: false,
             subscriptions: HashMap::new(),
             subscription_order: Vec::new(),
+            lease_id,
             next_subscription: 0,
             wake_cursor: 0,
             last_wake: None,
@@ -147,6 +156,12 @@ impl EngineCore {
 
     pub fn queued_message_count(&self) -> usize {
         self.subscriptions.values().map(|subscription| subscription.queue.len()).sum()
+    }
+
+    /// End this conversation lease while its transport is still available.
+    /// Hosts must flush their hosted adapter after this call.
+    pub fn shutdown(&mut self) {
+        self.drop_subscriptions();
     }
 
     /// Whether the host should keep scheduling pumps even though the model
@@ -675,7 +690,7 @@ impl EngineCore {
             return;
         }
         let requests = std::mem::take(&mut result.subscribe);
-        if self.subscription_count() + requests.len() > MAX_SUBSCRIPTIONS {
+        if self.subscriptions.len() + requests.len() > MAX_SUBSCRIPTIONS {
             *result = ToolResult::refused(
                 result.call_id.clone(),
                 format!("subscription limit ({MAX_SUBSCRIPTIONS}) reached"),
@@ -701,7 +716,7 @@ impl EngineCore {
         let mut enrolled = Vec::new();
         for request in requests {
             self.next_subscription += 1;
-            let sub_id = format!("s{}", self.next_subscription);
+            let sub_id = format!("l{:x}-s{}", self.lease_id, self.next_subscription);
             if !self.registry.send(
                 endpoint,
                 ServiceDown::Subscribe {
@@ -760,6 +775,9 @@ impl EngineCore {
         }
         subscription.closing = message.final_;
         subscription.queue.push_back(message);
+        if subscription.closing {
+            self.seen_generation = None;
+        }
     }
 
     fn close_gone_subscriptions(&mut self) {
@@ -783,6 +801,7 @@ impl EngineCore {
             }
             subscription.closing = true;
             subscription.queue.push_back(message);
+            self.seen_generation = None;
         }
     }
 
@@ -973,7 +992,7 @@ impl EngineCore {
 
 impl Drop for EngineCore {
     fn drop(&mut self) {
-        self.drop_subscriptions();
+        self.shutdown();
     }
 }
 
@@ -1074,14 +1093,21 @@ mod tests {
         vec![ModelEvent::Delta(text.into()), ModelEvent::TurnDone { tool_calls: 0 }]
     }
 
-    fn setup(script: Vec<Vec<ModelEvent>>) -> (EngineCore, std::sync::Arc<std::sync::Mutex<Scripted>>, AiServicePort, EndpointId) {
+    fn setup_with_lease(
+        script: Vec<Vec<ModelEvent>>,
+        lease_id: u64,
+    ) -> (EngineCore, std::sync::Arc<std::sync::Mutex<Scripted>>, AiServicePort, EndpointId) {
         let reg = ServiceRegistry::new();
         let (mut port, link) = AiServicePort::in_process(files()).unwrap();
         let e = reg.register(link, "the Files tile", None).unwrap();
         reg.pump();
         port.test_drain();
         let (model, shared) = scripted(script);
-        (EngineCore::new(reg, model, None), shared, port, e)
+        (EngineCore::new(reg, model, None, lease_id), shared, port, e)
+    }
+
+    fn setup(script: Vec<Vec<ModelEvent>>) -> (EngineCore, std::sync::Arc<std::sync::Mutex<Scripted>>, AiServicePort, EndpointId) {
+        setup_with_lease(script, 1)
     }
 
     #[test]
@@ -1198,7 +1224,7 @@ mod tests {
         let (model, _shared) = scripted(vec![
             vec![call("files.list_dir", r#"{"path":"~","instance":"Files"}"#), ModelEvent::TurnDone { tool_calls: 1 }],
         ]);
-        let mut core = EngineCore::new(reg, model, None);
+        let mut core = EngineCore::new(reg, model, None, 1);
         core.send("list", 0.0);
         core.pump(0.1);
         let got = p1.test_drain();
@@ -1353,7 +1379,7 @@ mod tests {
             vec![ModelEvent::ToolCall { call_id: "m2".into(), name: "photos.search".into(), args: r#"{"query":"dogs"}"#.into() }, ModelEvent::TurnDone { tool_calls: 1 }],
             done("Two dog comics."),
         ]);
-        let mut core = EngineCore::new(reg.clone(), model, None);
+        let mut core = EngineCore::new(reg.clone(), model, None, 1);
         core.send("find the pictures about dogs", 0.0);
         core.pump(0.1);
         let ev = os_port.test_drain();
@@ -1397,7 +1423,7 @@ mod tests {
             vec![call("os.launch", r#"{"app":"photos"}"#), ModelEvent::TurnDone { tool_calls: 1 }],
             done("Photos did not come up."),
         ]);
-        let mut core = EngineCore::new(reg, model, None);
+        let mut core = EngineCore::new(reg, model, None, 1);
         core.send("open photos", 0.0);
         core.pump(0.1);
         let ev = os_port.test_drain();
@@ -1550,22 +1576,59 @@ mod tests {
     }
 
     #[test]
+    fn a_queued_message_then_final_keeps_only_the_final_while_busy() {
+        let (mut core, model, mut port, endpoint) = setup(vec![done("Complete.")]);
+        let sub_id = add_subscription(&mut core, &endpoint, 0.0);
+        let _ = port.test_drain();
+        core.turn_active = true;
+        port.publish(&sub_id, Message::new("watch", "working"));
+        port.publish(&sub_id, Message::new("watch", "finished").final_message());
+        core.pump(0.1);
+        assert_eq!(core.queued_message_count(), 1);
+        core.turn_active = false;
+        core.deliver_next_message(0.2);
+        assert!(matches!(
+            core.state().entries.last(),
+            Some(Entry::Event(event))
+                if event.final_ && event.text == "finished" && event.dropped == 1
+        ));
+        assert_eq!(model.lock().unwrap().sends.len(), 1);
+    }
+
+    #[test]
+    fn a_pending_final_is_removed_from_the_next_turns_prompt() {
+        let (mut core, model, mut port, endpoint) = setup(vec![vec![]]);
+        let sub_id = add_subscription(&mut core, &endpoint, 0.0);
+        let _ = port.test_drain();
+        core.pump(0.0);
+        assert!(model.lock().unwrap().configured.last().unwrap().0.contains(&sub_id));
+        core.last_wake = Some(0.0);
+        port.publish(&sub_id, Message::new("watch", "finished").final_message());
+        core.pump(0.1);
+        assert_eq!(core.subscription_count(), 0);
+        assert_eq!(core.queued_message_count(), 1, "the rate-limited final remains bounded until delivery");
+        assert!(!model.lock().unwrap().configured.last().unwrap().0.contains(&sub_id));
+        core.send("what is live now?", 0.2);
+        assert!(!model.lock().unwrap().configured.last().unwrap().0.contains(&sub_id));
+    }
+
+    #[test]
     fn bus_unsubscribe_ends_delivery() {
         let (mut core, model, mut port, endpoint) = setup(vec![
-            vec![call("bus.unsubscribe", r#"{"sub_id":"s1"}"#), ModelEvent::TurnDone { tool_calls: 1 }],
+            vec![call("bus.unsubscribe", r#"{"sub_id":"l1-s1"}"#), ModelEvent::TurnDone { tool_calls: 1 }],
             done("Stopped."),
         ]);
         let sub_id = add_subscription(&mut core, &endpoint, 0.0);
-        assert_eq!(sub_id, "s1");
+        assert_eq!(sub_id, "l1-s1");
         let _ = port.test_drain();
         core.send("stop the updates", 0.0);
         core.pump(0.1);
         assert_eq!(core.subscription_count(), 0);
         assert!(matches!(
             port.test_drain().as_slice(),
-            [PortEvent::Unsubscribe { sub_id }] if sub_id == "s1"
+            [PortEvent::Unsubscribe { sub_id }] if sub_id == "l1-s1"
         ));
-        port.publish("s1", Message::new("watch", "too late"));
+        port.publish("l1-s1", Message::new("watch", "too late"));
         core.pump(3.0);
         assert_eq!(model.lock().unwrap().sends.len(), 1, "an ended subscription cannot wake the model");
         assert!(matches!(
@@ -1588,6 +1651,22 @@ mod tests {
     }
 
     #[test]
+    fn clear_discards_publications_already_queued_upstream() {
+        let (mut core, model, mut port, endpoint) = setup(vec![]);
+        let sub_id = add_subscription(&mut core, &endpoint, 0.0);
+        let _ = port.test_drain();
+        port.publish(&sub_id, Message::new("watch", "queued before clear"));
+        core.clear(0.1);
+        assert!(matches!(
+            port.test_drain().as_slice(),
+            [PortEvent::Unsubscribe { sub_id: ended }] if ended == &sub_id
+        ));
+        core.pump(0.2);
+        assert!(model.lock().unwrap().sends.is_empty());
+        assert!(!core.state().entries.iter().any(|entry| matches!(entry, Entry::Event(_))));
+    }
+
+    #[test]
     fn ending_the_engine_lease_unsubscribes_every_service() {
         let (mut core, _model, mut port, endpoint) = setup(vec![]);
         let sub_id = add_subscription(&mut core, &endpoint, 0.0);
@@ -1604,7 +1683,7 @@ mod tests {
         let (mut core, _model, mut port, endpoint) = setup(vec![]);
         for index in 0..MAX_SUBSCRIPTIONS {
             let sub_id = add_subscription(&mut core, &endpoint, index as f64);
-            assert_eq!(sub_id, format!("s{}", index + 1));
+            assert_eq!(sub_id, format!("l1-s{}", index + 1));
         }
         let _ = port.test_drain();
         let mut overflow = ToolResult::ok("overflow", "watching", "")
@@ -1617,11 +1696,52 @@ mod tests {
     }
 
     #[test]
+    fn pending_finals_cannot_expand_retained_subscription_state() {
+        let (mut core, _model, mut port, endpoint) = setup(vec![]);
+        let mut sub_ids = Vec::new();
+        for index in 0..MAX_SUBSCRIPTIONS {
+            sub_ids.push(add_subscription(&mut core, &endpoint, index as f64));
+        }
+        let _ = port.test_drain();
+        core.turn_active = true;
+        for sub_id in &sub_ids {
+            port.publish(sub_id, Message::new("watch", "finished").final_message());
+        }
+        core.pump(0.1);
+        assert_eq!(core.subscription_count(), 0);
+        assert_eq!(core.subscriptions.len(), MAX_SUBSCRIPTIONS);
+        assert_eq!(core.queued_message_count(), MAX_SUBSCRIPTIONS);
+        for attempt in 0..MAX_SUBSCRIPTIONS {
+            let mut next = ToolResult::ok(format!("next-{attempt}"), "watching", "")
+                .with_subscription(SubscriptionRequest::new("watch"));
+            core.install_subscriptions(&endpoint, &mut next, 1.0 + attempt as f64);
+            assert_eq!(next.outcome, ToolOutcome::Refused);
+        }
+        assert_eq!(core.subscriptions.len(), MAX_SUBSCRIPTIONS);
+        assert!(core.queued_message_count() <= MAX_SUBSCRIPTIONS * MAX_SUBSCRIPTION_QUEUE);
+        assert!(port.test_drain().is_empty(), "refused subscriptions send no frames");
+    }
+
+    #[test]
+    fn subscription_ids_are_namespaced_by_conversation_lease() {
+        let (mut first, _model, mut first_port, first_endpoint) = setup_with_lease(vec![], 0x2a);
+        let first_id = add_subscription(&mut first, &first_endpoint, 0.0);
+        let _ = first_port.test_drain();
+        let (mut second, _model, mut second_port, second_endpoint) = setup_with_lease(vec![], 0x2b);
+        let second_id = add_subscription(&mut second, &second_endpoint, 0.0);
+        let _ = second_port.test_drain();
+        assert_eq!(first_id, "l2a-s1");
+        assert_eq!(second_id, "l2b-s1");
+        assert_ne!(first_id, second_id);
+    }
+
+    #[test]
     fn a_service_unregister_is_delivered_as_a_synthetic_final_event() {
         let (mut core, model, mut port, endpoint) = setup(vec![done("Gone.")]);
         let sub_id = add_subscription(&mut core, &endpoint, 0.0);
         let _ = port.test_drain();
         port.unregister();
+        port.publish(&sub_id, Message::new("watch", "after unregister"));
         core.pump(0.1);
         assert_eq!(core.subscription_count(), 0);
         assert!(model.lock().unwrap().sends[0].0.contains("service disconnected"));
@@ -1629,5 +1749,7 @@ mod tests {
             core.state().entries.last(),
             Some(Entry::Event(event)) if event.sub_id == sub_id && event.final_
         ));
+        core.pump(3.0);
+        assert_eq!(model.lock().unwrap().sends.len(), 1, "the synthetic final is emitted once");
     }
 }

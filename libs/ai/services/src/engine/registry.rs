@@ -527,7 +527,10 @@ impl ServiceRegistry {
                             message: Message { topic, text, data, final_ },
                         });
                     }
-                    ServiceUp::Unregister => dead.push(endpoint.clone()),
+                    ServiceUp::Unregister => {
+                        dead.push(endpoint.clone());
+                        break;
+                    }
                 }
             }
         }
@@ -626,5 +629,30 @@ mod tests {
         assert!(matches!(&ups[1], RegistryUp::Result(ep, r) if ep == &e && r.call_id == "c1"));
         assert_eq!(reg.dynamic_context(), "Running now — call their tools directly: Files (files.stat)\n[Files] cwd=~\n");
         assert!(!reg.send(&EndpointId("nope".into()), ServiceDown::ChatOpen { open: true }));
+    }
+
+    #[test]
+    fn unregister_discards_later_frames_from_the_same_endpoint_queue() {
+        let reg = ServiceRegistry::new();
+        let manifest = app("files", "Files", &["stat"])
+            .with_topic(TopicDef::new("watch", "File changes."));
+        let (link, host) = crate::port::ServiceLink::pair(manifest);
+        let endpoint = reg.register(link, "", None).unwrap();
+        host.up.send(HostedUp { from: None, msg: ServiceUp::Unregister }).unwrap();
+        host.up
+            .send(HostedUp {
+                from: None,
+                msg: ServiceUp::Message {
+                    sub_id: "lease-s1".into(),
+                    topic: "watch".into(),
+                    text: "too late".into(),
+                    data: None,
+                    final_: false,
+                },
+            })
+            .unwrap();
+        assert!(reg.pump().is_empty(), "nothing after Unregister is delivered");
+        assert!(reg.manifest(&endpoint).is_none());
+        assert!(reg.pump().is_empty(), "the discarded queue cannot surface later");
     }
 }

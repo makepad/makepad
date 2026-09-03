@@ -291,6 +291,7 @@ impl AiChatPanel {
     /// and no host pays it before the person opens the pane.
     fn ensure_engine(&mut self) -> &mut EngineCore {
         if self.engine.is_none() {
+            let lease_id = self.widget_uid().0;
             let settings = self.settings().clone();
             // The real models ride the `engine` feature; a build without a
             // runtime (the web page) says so and keeps the tool console.
@@ -305,7 +306,7 @@ impl AiChatPanel {
             #[cfg(not(feature = "engine"))]
             let (model, rows): (Box<dyn makepad_ai_services::Model>, Vec<ProviderRow>) =
                 (Box::new(NoModelWithReason::new("this build has no model runtime")), Vec::new());
-            let mut core = EngineCore::new(self.registry.clone(), model, None);
+            let mut core = EngineCore::new(self.registry.clone(), model, None, lease_id);
             // The state is the panel's window into the core; the core owns
             // it, so provider facts go in through the core.
             core.set_provider_facts(settings.provider.clone(), rows, settings.local_only);
@@ -364,6 +365,17 @@ impl AiChatPanel {
             Status::WaitingForTool => "waiting for the app…".to_string(),
             Status::Error(e) => e.clone(),
         }
+    }
+}
+
+impl Drop for AiChatPanel {
+    fn drop(&mut self) {
+        // The engine only enqueues Unsubscribe frames. Flush them while the
+        // hosted bus and registry still exist; field destruction is too late.
+        if let Some(engine) = self.engine.as_mut() {
+            engine.shutdown();
+        }
+        self.bus.relay_down(&self.registry);
     }
 }
 

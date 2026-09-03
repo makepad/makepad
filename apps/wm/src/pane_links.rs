@@ -30,6 +30,15 @@ pub enum PaneCall {
     Instance(ClientId, ServiceCall),
     /// The assistant gave up on an instance's call.
     Cancel(ClientId, String),
+    /// The assistant subscribed to a module topic.
+    Subscribe {
+        client: ClientId,
+        sub_id: String,
+        topic: String,
+        filter: Option<String>,
+    },
+    /// The assistant ended a module subscription.
+    Unsubscribe { client: ClientId, sub_id: String },
 }
 
 #[derive(Default)]
@@ -96,6 +105,12 @@ impl PaneLinks {
                 match host.down.try_recv() {
                     Ok(HostedDown { msg: ServiceDown::Call(call), .. }) => out.push(PaneCall::Instance(*client, call)),
                     Ok(HostedDown { msg: ServiceDown::Cancel { call_id }, .. }) => out.push(PaneCall::Cancel(*client, call_id)),
+                    Ok(HostedDown { msg: ServiceDown::Subscribe { sub_id, topic, filter }, .. }) => {
+                        out.push(PaneCall::Subscribe { client: *client, sub_id, topic, filter })
+                    }
+                    Ok(HostedDown { msg: ServiceDown::Unsubscribe { sub_id }, .. }) => {
+                        out.push(PaneCall::Unsubscribe { client: *client, sub_id })
+                    }
                     Ok(_) => {}
                     Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
                 }
@@ -111,8 +126,25 @@ impl PaneLinks {
     }
 
     pub fn reply(&self, client: ClientId, result: ToolResult) -> bool {
+        self.send_up(client, ServiceUp::Result(result))
+    }
+
+    pub fn publish(&self, client: ClientId, sub_id: String, message: Message) -> bool {
+        self.send_up(
+            client,
+            ServiceUp::Message {
+                sub_id,
+                topic: message.topic,
+                text: message.text,
+                data: message.data,
+                final_: message.final_,
+            },
+        )
+    }
+
+    fn send_up(&self, client: ClientId, msg: ServiceUp) -> bool {
         match self.instances.get(&client) {
-            Some(host) => host.up.send(HostedUp { from: None, msg: ServiceUp::Result(result) }).is_ok(),
+            Some(host) => host.up.send(HostedUp { from: None, msg }).is_ok(),
             None => false,
         }
     }
@@ -124,12 +156,14 @@ mod tests {
     use makepad_ai_services::engine::ServiceRegistry;
 
     fn sheets() -> ServiceManifest {
-        ServiceManifest::new("sheets", "Sheets", "The spreadsheet.").with_tool(ToolDef::new(
-            "summary",
-            "The sheet on screen.",
-            r#"{"type":"object","properties":{}}"#,
-            Risk::Read,
-        ))
+        ServiceManifest::new("sheets", "Sheets", "The spreadsheet.")
+            .with_tool(ToolDef::new(
+                "summary",
+                "The sheet on screen.",
+                r#"{"type":"object","properties":{}}"#,
+                Risk::Read,
+            ))
+            .with_topic(TopicDef::new("watch", "Sheet changes."))
     }
 
     #[test]
@@ -157,6 +191,37 @@ mod tests {
         assert!(links.reply(4, ToolResult::ok("c1", "Sheet 1", "")));
         let up = registry.pump();
         assert_eq!(up.len(), 1);
+        // Subscriptions use the same down leg, and module publications use
+        // the same authenticated up leg back into the engine registry.
+        assert!(registry.send(
+            &endpoints[1],
+            ServiceDown::Subscribe {
+                sub_id: "lease-s1".into(),
+                topic: "watch".into(),
+                filter: Some(r#"{"sheet":1}"#.into()),
+            },
+        ));
+        assert!(matches!(
+            links.drain().as_slice(),
+            [PaneCall::Subscribe { client: 4, sub_id, topic, filter: Some(filter) }]
+                if sub_id == "lease-s1" && topic == "watch" && filter.contains("sheet")
+        ));
+        assert!(links.publish(4, "lease-s1".into(), Message::new("watch", "A1 changed")));
+        assert!(matches!(
+            registry.pump().as_slice(),
+            [makepad_ai_services::engine::RegistryUp::Message { endpoint, sub_id, message }]
+                if endpoint == &endpoints[1]
+                    && sub_id == "lease-s1"
+                    && message.text == "A1 changed"
+        ));
+        assert!(registry.send(
+            &endpoints[1],
+            ServiceDown::Unsubscribe { sub_id: "lease-s1".into() },
+        ));
+        assert!(matches!(
+            links.drain().as_slice(),
+            [PaneCall::Unsubscribe { client: 4, sub_id }] if sub_id == "lease-s1"
+        ));
         // Closing the instance closes its link: the registry forgets it.
         assert!(links.close_instance(4));
         assert!(!links.close_instance(4));

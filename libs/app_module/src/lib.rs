@@ -15,8 +15,8 @@
 //!   warns about.
 //! - [`InstanceHandles`]: what the host OWNS and hands the instance — the
 //!   scope token every long-lived operation carries, the storage jail, the
-//!   viewport, the reply sink for calls that finish later. Never a path,
-//!   never a socket, never a process.
+//!   viewport, and the upstream sink for calls that finish later or topic
+//!   publications. Never a path, never a socket, never a process.
 //! - [`InstanceParts`]: what an instance IS to the host — its root widget,
 //!   its [`ServiceExecutor`] (the tools the assistant may call, addressed
 //!   on their own because a widget cannot lend out the state route's tools
@@ -33,9 +33,10 @@
 pub use makepad_ai_services;
 pub use makepad_widgets;
 
-use makepad_ai_services::wire::{ServiceCall, ServiceManifest, ToolResult};
+use makepad_ai_services::wire::{Message, ServiceCall, ServiceManifest, ToolResult};
 use makepad_strict_json as json;
 use makepad_widgets::makepad_platform::storage::StorageHandle;
+use makepad_widgets::makepad_platform::thread::SignalToUI;
 use makepad_widgets::*;
 use std::fmt;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -104,16 +105,16 @@ pub struct Viewport {
     pub size: DVec2,
 }
 
-/// Where an executor that answered [`ExecOutcome::Pending`] sends the
-/// result when it has it. Cloneable, so a worker can hold one; the host
-/// drains the other end on its own events.
+/// Where a module sends pending results and subscription publications.
+/// Cloneable, so a worker can hold one; the host drains the other end on
+/// its own events.
 #[derive(Clone)]
 pub struct ReplySink {
-    tx: Sender<ToolResult>,
+    tx: Sender<ModuleUpstream>,
 }
 
 impl ReplySink {
-    pub fn pair() -> (ReplySink, Receiver<ToolResult>) {
+    pub fn pair() -> (ReplySink, Receiver<ModuleUpstream>) {
         let (tx, rx) = channel();
         (ReplySink { tx }, rx)
     }
@@ -121,8 +122,28 @@ impl ReplySink {
     /// Hand a finished result to the host. Nothing happens when the host
     /// side is gone (the instance was torn down).
     pub fn reply(&self, result: ToolResult) {
-        let _ = self.tx.send(result);
+        self.send(ModuleUpstream::Result(result));
     }
+
+    /// Publish an asynchronous message for a subscription the host passed
+    /// to this module. The host supplies the wire identity; the module only
+    /// retains and returns the opaque `sub_id` it received.
+    pub fn publish(&self, sub_id: impl Into<String>, mut message: Message) {
+        message.bound();
+        self.send(ModuleUpstream::Message { sub_id: sub_id.into(), message });
+    }
+
+    fn send(&self, message: ModuleUpstream) {
+        if self.tx.send(message).is_ok() {
+            SignalToUI::set_ui_signal();
+        }
+    }
+}
+
+/// Anything an in-process module sends back up its service link.
+pub enum ModuleUpstream {
+    Result(ToolResult),
+    Message { sub_id: String, message: Message },
 }
 
 /// Everything the host hands one instance at `create`. Owned handles, no
@@ -144,10 +165,10 @@ pub enum ExecOutcome {
     Pending,
 }
 
-/// The instance's tools, as the assistant calls them. Executors are
-/// addressed on their own — separately from the root widget — because the
-/// tools of an app like route need simultaneous mutable access to trip,
-/// map and marker state a generic widget reference cannot lend out.
+/// The instance's tools and subscriptions, as the assistant calls them.
+/// Executors are addressed on their own — separately from the root widget
+/// — because an app may need simultaneous mutable access to state a generic
+/// widget reference cannot lend out.
 pub trait ServiceExecutor {
     /// The manifest the host registers on the AI bus for this instance.
     fn manifest(&self) -> ServiceManifest;
@@ -157,6 +178,10 @@ pub trait ServiceExecutor {
     fn execute(&mut self, cx: &mut Cx, call: &ServiceCall) -> ExecOutcome;
     /// The person or the router gave up on this call; stop if you can.
     fn cancel(&mut self, _cx: &mut Cx, _call_id: &str) {}
+    /// Start publishing one manifest topic under the host-issued id.
+    fn subscribe(&mut self, _cx: &mut Cx, _sub_id: &str, _topic: &str, _filter: Option<&str>) {}
+    /// Stop publishing the host-issued subscription id.
+    fn unsubscribe(&mut self, _cx: &mut Cx, _sub_id: &str) {}
     /// The host's chat surface came up or went away.
     fn chat_open(&mut self, _cx: &mut Cx, _open: bool) {}
 }
@@ -365,8 +390,15 @@ mod tests {
     fn a_reply_sink_reaches_its_receiver_and_survives_a_gone_host() {
         let (sink, rx) = ReplySink::pair();
         sink.reply(ToolResult::ok("c1", "done", ""));
-        assert_eq!(rx.try_recv().unwrap().call_id, "c1");
+        assert!(matches!(rx.try_recv().unwrap(), ModuleUpstream::Result(result) if result.call_id == "c1"));
+        sink.publish("lease-s1", Message::new("watch", "changed"));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ModuleUpstream::Message { sub_id, message }
+                if sub_id == "lease-s1" && message.topic == "watch" && message.text == "changed"
+        ));
         drop(rx);
         sink.reply(ToolResult::ok("c2", "late", ""));
+        sink.publish("lease-s1", Message::new("watch", "late"));
     }
 }

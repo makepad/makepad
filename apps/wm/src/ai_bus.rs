@@ -87,7 +87,26 @@ impl AiBus {
 
     /// An in-process instance's answer, as a frame for the pane.
     pub fn local_reply(&self, client: ClientId, result: ToolResult) -> String {
-        HostedUp { from: Some(self.endpoint_for(client)), msg: ServiceUp::Result(result) }.to_json()
+        self.local_up(client, ServiceUp::Result(result))
+    }
+
+    /// An in-process instance's asynchronous publication, stamped with the
+    /// same module endpoint as its call results.
+    pub fn local_message(&self, client: ClientId, sub_id: String, message: Message) -> String {
+        self.local_up(
+            client,
+            ServiceUp::Message {
+                sub_id,
+                topic: message.topic,
+                text: message.text,
+                data: message.data,
+                final_: message.final_,
+            },
+        )
+    }
+
+    fn local_up(&self, client: ClientId, msg: ServiceUp) -> String {
+        HostedUp { from: Some(self.endpoint_for(client)), msg }.to_json()
     }
 
     pub fn local_clients(&self) -> Vec<ClientId> {
@@ -461,6 +480,15 @@ mod local_tests {
         let reply = bus.local_reply(4, ToolResult::ok("c1", "Sheet 1", ""));
         let up = HostedUp::parse(&reply).unwrap();
         assert_eq!(up.from, Some(EndpointId("m4".into())));
+        let publication = bus.local_message(4, "lease-s1".into(), Message::new("watch", "changed"));
+        let up = HostedUp::parse(&publication).unwrap();
+        assert!(matches!(
+            up,
+            HostedUp {
+                from: Some(EndpointId(ref from)),
+                msg: ServiceUp::Message { ref sub_id, ref text, .. },
+            } if from == "m4" && sub_id == "lease-s1" && text == "changed"
+        ));
         // ChatOpen goes to process clients only; the host tells locals itself.
         assert!(bus.chat_open_frames(true).is_empty());
         // Death: an Unregister from the local endpoint, then nothing.
