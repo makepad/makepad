@@ -1,0 +1,15 @@
+use mod.flow.*
+
+let VideoGen = Gen{
+    domain: "video"
+    quality: 3
+    ports: { in: [@prompt] out: [@video] }
+}
+let clip = VideoGen{ prompt: "waves" quality: 4 }
+let result = Output{ type: @video value: clip.out(@video) }
+
+Flow{
+    label: "Generic generation"
+    brief: "Exercises the Gen primitive."
+    clip, result
+}

@@ -44,6 +44,7 @@ workspace.members = [
     "libs/show_control",
     "libs/asset/creator",
     "libs/bounded_http",
+    "libs/flow",
     "libs/strict_json",
     # === remesh (FaithC port) / xatlas (jpcy port) ===
     "libs/remesh",
