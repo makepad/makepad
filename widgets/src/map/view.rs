@@ -317,9 +317,9 @@ script_mod! {
         shiny_gates: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         // x=dynamic_sun (reserved), y=shadow_alpha, z/w unused.
         shiny_gates2: uniform(vec4(0.0, 0.22, 0.0, 0.0))
-        // Water/foliage shimmer clock, stamped from Rust each draw
-        // (`stamp_map_uniforms`) as elapsed seconds. NEVER read
-        // `draw_pass.time` here: the platform statically flags any shader
+        // Water/foliage shimmer clock, written once into the map's pass
+        // uniforms as elapsed seconds. NEVER read `draw_pass.time` here:
+        // the platform statically flags any shader
         // whose compiled source contains that accessor as `uses_time`,
         // which forces a full-pass GPU repaint on EVERY frame forever —
         // for as long as ANY draw call using this shader is on screen —
@@ -327,10 +327,10 @@ script_mod! {
         // Since this pixel function is inherited by every DrawMap* variant
         // (road/wall/roof/icon/prop/shadow/fill), that pinned the whole map
         // at display-rate GPU cost permanently, in 2D and 3D alike. A
-        // Rust-pushed uniform carries the same value without tripping the
-        // static check; the interaction-gated `shiny_anim_timer` heartbeat
-        // advances it at 20 Hz, then leaves its last drawn value frozen.
-        shiny_time: uniform(0.0)
+        // The dedicated pass slot carries the same value without tripping
+        // the static check; the interaction-gated `shiny_anim_timer`
+        // heartbeat advances it at 20 Hz, then leaves its last drawn value
+        // frozen.
         sun_dir: uniform(vec3(-0.379, -0.575, 0.724))
         sun_color: uniform(vec3(1.0, 0.98, 0.94))
         sun_sky: uniform(vec3(0.55, 0.62, 0.72))
@@ -456,7 +456,7 @@ script_mod! {
                 }
                 let k = self.shiny_gates2.z
                 let uv = vec2(self.v_param1, self.v_param2) * k
-                let t = self.shiny_time
+                let t = self.draw_pass.shiny_time
                 let ct = clamp(self.tilt_params.x, 0.0, 1.0)
                 let st = sqrt(max(1.0 - ct * ct, 0.0))
                 let closeness = clamp(1.6 - k, 0.0, 1.0)
@@ -607,7 +607,7 @@ script_mod! {
                 }
                 let k = self.shiny_gates2.z
                 let uv = vec2(self.v_param1, self.v_param2) * k
-                let t = self.shiny_time
+                let t = self.draw_pass.shiny_time
                 // Broad meadow tone patches (static).
                 let patch = self.mat_noise(uv * 0.023) * 0.65 + self.mat_noise(uv * 0.11) * 0.35
                 var f = 0.93 + 0.11 * patch
@@ -2888,7 +2888,6 @@ pub struct DrawRainOverlay {
 /// disagree.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MapDrawUniforms {
-    pub shiny_time: f32,
     pub map_scale: Vec2f,
     pub map_offset: Vec2f,
     pub fade: f32,
@@ -2958,7 +2957,6 @@ impl UniformSlot {
 /// thirty times per draw call.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MapUniformSlots {
-    shiny_time: UniformSlot,
     tile_fade: UniformSlot,
     map_scale: UniformSlot,
     map_offset: UniformSlot,
@@ -2992,7 +2990,6 @@ impl Default for MapUniformSlots {
     fn default() -> Self {
         let a = UniformSlot::ABSENT;
         Self {
-            shiny_time: a,
             tile_fade: a,
             map_scale: a,
             map_offset: a,
@@ -3041,7 +3038,6 @@ impl MapUniformSlots {
                 .unwrap_or(UniformSlot::ABSENT)
         };
         Self {
-            shiny_time: find(live_id!(shiny_time)),
             tile_fade: find(live_id!(tile_fade)),
             map_scale: find(live_id!(map_scale)),
             map_offset: find(live_id!(map_offset)),
@@ -3094,11 +3090,6 @@ pub(crate) fn stamp_map_uniforms(
     env: &MapDrawEnv,
 ) {
     let buf = &mut draw_vars.dyn_uniforms[..];
-    // Rust-pushed shimmer clock (see the `shiny_time` uniform comment in the
-    // DrawMapVector DSL above): never read the shader's own `draw_pass.time`
-    // accessor from a DrawMap* pixel shader, or the platform's static
-    // `uses_time` scan pins the whole map at full-pass GPU repaint forever.
-    slots.shiny_time.put(buf, &[u.shiny_time]);
     slots.tile_fade.put(buf, &[u.fade]);
     slots.map_scale.put(buf, &[u.map_scale.x, u.map_scale.y]);
     slots.map_offset.put(buf, &[u.map_offset.x, u.map_offset.y]);
@@ -4495,6 +4486,7 @@ impl Widget for MapView {
         let rect = cx.turtle().rect();
         self.view_rect = rect;
         self.draw_bg.draw_abs(cx, rect);
+        self.write_shimmer_pass_uniform(cx.cx, false);
         self.ensure_visible_tiles(cx, rect);
 
         let view_zoom = self.view_zoom();
@@ -4750,7 +4742,6 @@ impl Widget for MapView {
             shadow_sun: [-sun_2d.x * len_per_m, -sun_2d.y * len_per_m],
             space_warp: warp_uniform,
             space_warp2: warp2_uniform,
-            shiny_time: self.shiny_time,
             shiny,
         };
         let slots = TileDrawCtx::resolve_slots(
@@ -5265,40 +5256,35 @@ impl MapView {
         }
     }
 
-    /// The 20 Hz shimmer heartbeat: the clock advances IN PLACE on every
-    /// retained tile call and the map's pass repaints. Never a redraw —
-    /// that re-records the map's own list and re-places the labels twenty
-    /// times a second for one uniform, while the resident tile lists only
-    /// need the value written (`TileCallSpec` keeps each call's area).
-    /// Before the first tile is resident there is nothing to patch and the
-    /// classic redraw carries the clock into the next record.
+    /// Write the map's clock into the pass block shared by its retained child
+    /// lists. Child lists bind their own draw-list block, so the map root's
+    /// draw-list uniforms cannot carry this value to them.
+    fn write_shimmer_pass_uniform(&self, cx: &mut Cx, repaint: bool) -> bool {
+        let area = self.draw_bg.area();
+        if !area.is_valid(cx) {
+            return false;
+        }
+        let Some(draw_list_id) = area.draw_list_id() else {
+            return false;
+        };
+        let Some(pass_id) = cx.draw_lists[draw_list_id].draw_pass_id else {
+            return false;
+        };
+        cx.passes[pass_id].pass_uniforms.shiny_time = self.shiny_time;
+        if repaint {
+            cx.repaint_pass(pass_id);
+        }
+        true
+    }
+
+    /// The 20 Hz shimmer heartbeat: the clock advances in the map's one
+    /// pass-uniform slot and the pass repaints. Never a redraw — that would
+    /// re-record the map's own list and re-place the labels twenty times a
+    /// second for one float. Before the first draw establishes an owning pass,
+    /// the classic redraw carries the clock into the next record.
     fn advance_shimmer(&mut self, cx: &mut Cx, now: f64) {
         self.shiny_time = now as f32;
-        let shiny_time = [self.shiny_time];
-        let mut patched = false;
-        for entry in self.tiles.values() {
-            for spec in entry.draw.calls() {
-                let draw_vars: &DrawVars = match spec.drawer {
-                    TileDrawer::Vector => &self.draw_map.draw_super.draw_vars,
-                    TileDrawer::Fill => &self.draw_fill.draw_vars,
-                    TileDrawer::Road => &self.draw_road.draw_vars,
-                    TileDrawer::Face => &self.draw_face.road.draw_vars,
-                    TileDrawer::Roof => &self.draw_roof.draw_vars,
-                    TileDrawer::Icon => &self.draw_icon.draw_vars,
-                    TileDrawer::Prop => &self.draw_prop.draw_vars,
-                    TileDrawer::Wall => &self.draw_wall.draw_vars,
-                    TileDrawer::Shadow => &self.draw_shadow.draw_vars,
-                    TileDrawer::ShadowDisc => &self.draw_shadow_disc.draw_vars,
-                };
-                patched |= draw_vars.set_uniform_on_draw_call(
-                    cx,
-                    spec.area,
-                    live_id!(shiny_time),
-                    &shiny_time,
-                );
-            }
-        }
-        if !patched {
+        if !self.write_shimmer_pass_uniform(cx, true) {
             self.redraw(cx);
         }
     }
