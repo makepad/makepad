@@ -209,6 +209,8 @@ impl CancellationToken {
     }
 
     /// Park a worker until cancellation or a `Cx::monotonic_now()` deadline.
+    // The std condvar deadline clock is unavailable in wasm workers.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn wait_until(&self, deadline: f64) -> WaitOutcome {
         if self.is_cancelled() {
             return WaitOutcome::Cancelled;
