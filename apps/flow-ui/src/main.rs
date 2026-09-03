@@ -19,6 +19,7 @@ mod panels;
 mod testpattern;
 mod theme;
 mod values;
+mod wire_route;
 
 use canvas::{CanvasEdit, FlowCanvas, FlowCanvasAction, NodeStatus};
 use faces::{model_choices, BridgeCall, FaceBridgeCall, FaceHost, ModelChoice};
@@ -74,7 +75,7 @@ const HELP_SHORTCUTS: &str = "⌘N  new flow from a template
 ⌘Z / ⇧⌘Z  undo / redo a graph edit
 ⌘⌫  delete the selected node
 ⌘D  duplicate the selected node
-⌘R  run · ⌘.  cancel · ⌥⌘R  run to the selected node
+⌘R  run · ⌘.  cancel · ⇧⌘K  clear outputs · ⌥⌘R  run to the selected node
 ⌘1 / ⌘2 / ⌘3  canvas · app view · source
 ⌘= / ⌘-  zoom in / out · ⌘0  100 % · Home  fit
 drag empty canvas to pan · wheel to zoom at the cursor
@@ -206,6 +207,7 @@ script_mod! {
                             {label: "Run" items: [
                                 {id: @run label: "Run" shortcut: "Cmd+R"}
                                 {id: @cancel label: "Cancel" shortcut: "Cmd+Period"}
+                                {id: @clear_outputs label: "Clear outputs" shortcut: "Shift+Cmd+K"}
                                 {id: @run_to_node label: "Run to selected node" shortcut: "Alt+Cmd+R"}
                             ]}
                             {label: "Help" items: [
@@ -283,6 +285,7 @@ script_mod! {
                                 View{width: 10 height: 1}
                                 run_btn := Button{text: "▶ Run"}
                                 cancel_btn := ButtonFlat{text: "Cancel"}
+                                clear_btn := ButtonFlat{text: "Clear"}
                                 run_bar := RunBar{width: 220 height: 6 margin: Inset{left: 6 right: 6}}
                                 run_state := ToolText{width: Fill}
                                 zoom_label := ToolText{text: "100 %"}
@@ -517,6 +520,41 @@ script_mod! {
                                 }
                             }
                         }
+                        clear_confirm := Modal{
+                            content +: {
+                                width: 420
+                                height: Fit
+                                confirm_panel := HelpPanel{
+                                    Label{
+                                        width: Fill
+                                        height: Fit
+                                        text: "Cancel this run and clear generated output?"
+                                        draw_text +: {
+                                            color: theme.flow_text
+                                            text_style: theme.font_bold{font_size: 11}
+                                        }
+                                    }
+                                    Label{
+                                        width: Fill
+                                        height: Fit
+                                        text: "Node results, streamed text and progress will be removed. Your inputs and flow file stay unchanged."
+                                        draw_text +: {
+                                            color: theme.flow_text_body
+                                            text_style: theme.font_regular{font_size: 9.5}
+                                        }
+                                    }
+                                    View{
+                                        width: Fill
+                                        height: Fit
+                                        flow: Right
+                                        spacing: theme.space_2
+                                        align: Align{x: 1.0 y: 0.5}
+                                        clear_cancel := ButtonFlat{text: "Keep running"}
+                                        clear_confirm_btn := Button{text: "Cancel and clear"}
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -588,6 +626,11 @@ enum IoResult {
         generation: u64,
         run_id: String,
         result: Result<RunRowDto, ClientError>,
+    },
+    InstanceCleared {
+        instance: String,
+        generation: u64,
+        result: Result<(), ClientError>,
     },
     Done(Result<(), ClientError>),
 }
@@ -683,6 +726,8 @@ pub struct App {
     #[rust]
     outputs: HashMap<String, Vec<(String, ValueRef)>>,
     #[rust]
+    cleared_instances: HashSet<String>,
+    #[rust]
     unsaved: bool,
     #[rust]
     connected_server: Option<[u8; 16]>,
@@ -734,7 +779,7 @@ pub struct App {
     #[rust]
     last_error: Option<String>,
     #[rust]
-    menu_state: (bool, bool, bool, bool),
+    menu_state: (bool, bool, bool, bool, bool),
     #[rust]
     menu_state_initialized: bool,
     /// Splitter positions are widget state; these two slots only remember a
@@ -834,6 +879,9 @@ impl App {
     }
 
     fn display_run(&mut self, cx: &mut Cx, run: RunInfo) {
+        if let Some(instance) = self.instance.as_ref() {
+            self.cleared_instances.remove(instance);
+        }
         let changed = self.run.as_ref().map(|old| old.run_id.as_str())
             != Some(run.run_id.as_str());
         self.run = Some(run);
@@ -1479,7 +1527,14 @@ impl App {
                 }
                 IoResult::Instances(result) => {
                     self.io.fetching_instances = false;
-                    if let Ok(rows) = result {
+                    if let Ok(mut rows) = result {
+                        for row in &mut rows {
+                            if self.cleared_instances.contains(&row.instance) && row.state == "idle" {
+                                row.state = "idle · cleared".to_string();
+                            } else if row.state != "idle" && row.state != "idle · cleared" {
+                                self.cleared_instances.remove(&row.instance);
+                            }
+                        }
                         self.instances = rows.clone();
                         if let Some(mut list) =
                             self.ui.widget(cx, ids!(running)).borrow_mut::<RunningList>()
@@ -1510,11 +1565,16 @@ impl App {
                                 self.focus_instance(cx, instance, Some(row.flow.clone()));
                             }
                             let chip = format!(
-                                "{} · {}",
+                                "{} · {}{}",
                                 row.label
                                     .clone()
                                     .unwrap_or_else(|| row.instance.chars().take(8).collect()),
-                                row.state
+                                row.state,
+                                if self.cleared_instances.contains(&row.instance) {
+                                    " · cleared"
+                                } else {
+                                    ""
+                                }
                             );
                             self.ui.label(cx, ids!(instance_chip)).set_text(cx, &chip);
                             let recover_run = !self.run_is_active()
@@ -1669,6 +1729,24 @@ impl App {
                     }
                     match result {
                         Ok(row) => self.apply_run_row(cx, row),
+                        Err(error) => self.show_error(cx, &error),
+                    }
+                }
+                IoResult::InstanceCleared {
+                    instance,
+                    generation,
+                    result,
+                } => {
+                    if !attachment_matches(
+                        self.instance.as_deref(),
+                        self.attachment_generation,
+                        &instance,
+                        generation,
+                    ) {
+                        continue;
+                    }
+                    match result {
+                        Ok(()) => self.apply_instance_cleared(cx, &instance),
                         Err(error) => self.show_error(cx, &error),
                     }
                 }
@@ -1941,7 +2019,8 @@ impl App {
         let has_selected = self.selected_node.is_some();
         let can_undo = self.revisions.len() >= 2;
         let can_redo = !self.redo.is_empty();
-        let next = (running, has_selected, can_undo, can_redo);
+        let has_instance = self.instance.is_some();
+        let next = (running, has_selected, can_undo, can_redo, has_instance);
         if self.menu_state_initialized && next == self.menu_state {
             return;
         }
@@ -1949,6 +2028,7 @@ impl App {
         self.menu_state = next;
         let menu = self.ui.menu_bar(cx, ids!(menu_bar));
         menu.set_enabled(cx, live_id!(cancel), running);
+        menu.set_enabled(cx, live_id!(clear_outputs), has_instance);
         menu.set_enabled(cx, live_id!(delete_node), has_selected);
         menu.set_enabled(cx, live_id!(duplicate), has_selected);
         menu.set_enabled(cx, live_id!(run_to_node), has_selected);
@@ -1956,6 +2036,7 @@ impl App {
         menu.set_enabled(cx, live_id!(redo), can_redo);
         menu.set_enabled(cx, live_id!(revert), can_undo);
         self.ui.button(cx, ids!(cancel_btn)).set_visible(cx, running);
+        self.ui.button(cx, ids!(clear_btn)).set_enabled(cx, has_instance);
     }
 
     // -- events from the server ------------------------------------------------
@@ -2018,6 +2099,14 @@ impl App {
             }
             _ => {}
         }
+        if event.kind == "instance.cleared"
+            && event.instance.as_deref() == self.instance.as_deref()
+        {
+            if let Some(instance) = event.instance.as_deref() {
+                self.apply_instance_cleared(cx, instance);
+            }
+            return;
+        }
         if event.topic == "instance" || event.kind.starts_with("instance.") {
             self.refresh_instances();
             if event.instance.as_deref() == self.instance.as_deref() {
@@ -2064,6 +2153,7 @@ impl App {
                     faces.push_delta(cx, &node, &port, &text);
                 }
                 if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
+                    canvas.pulse(cx, &node, false);
                     canvas.set_streaming(cx, &node, true);
                 }
             }
@@ -2077,6 +2167,9 @@ impl App {
             "node.answered" => self.set_node_status(cx, &node, "running", 0, false, "", None),
             "node.done" => {
                 self.set_node_status(cx, &node, "done", 1000, true, "", None);
+                if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
+                    canvas.pulse(cx, &node, true);
+                }
                 let outputs = event.output_values();
                 for (port, value) in outputs {
                     self.record_value(cx, &node, &port, value);
@@ -2111,6 +2204,11 @@ impl App {
                     let port = self.output_face_port(&output_node);
                     self.record_value(cx, &output_node, &port, value);
                     self.set_node_status(cx, &output_node, "done", 1000, true, "", None);
+                    if let Some(mut canvas) =
+                        self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>()
+                    {
+                        canvas.pulse(cx, &output_node, true);
+                    }
                 }
                 self.request_wanted_values(cx);
                 if let Some(run) = self.run.as_mut() {
@@ -2452,6 +2550,102 @@ impl App {
         self.io(move |client| IoResult::Done(client.cancel_run(&run.run_id)));
     }
 
+    fn clear_instance(&mut self, cx: &mut Cx) {
+        if self.instance.is_none() {
+            return;
+        }
+        if self.run_is_active() {
+            self.ui.modal(cx, ids!(clear_confirm)).open(cx);
+        } else {
+            self.request_clear_instance(false);
+        }
+    }
+
+    fn request_clear_instance(&self, cancel_first: bool) {
+        let (Some(instance), Some(_client)) = (self.instance.clone(), self.client()) else {
+            return;
+        };
+        let generation = self.attachment_generation;
+        self.io(move |client| {
+            let result = (|| {
+                if cancel_first {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                    loop {
+                        for row in client.runs(Some(&instance))? {
+                            if matches!(
+                                row.state,
+                                RunState::Queued | RunState::Running | RunState::Waiting
+                            ) {
+                                client.cancel_run(&row.run_id)?;
+                            }
+                        }
+                        match client.clear_instance(&instance) {
+                            Ok(()) => break,
+                            Err(ClientError::Http { status: 409, .. })
+                                if std::time::Instant::now() < deadline =>
+                            {
+                                std::thread::sleep(std::time::Duration::from_millis(20));
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    Ok(())
+                } else {
+                    client.clear_instance(&instance)
+                }
+            })();
+            IoResult::InstanceCleared {
+                instance,
+                generation,
+                result,
+            }
+        });
+    }
+
+    fn apply_instance_cleared(&mut self, cx: &mut Cx, instance: &str) {
+        if self.cleared_instances.contains(instance) && self.run.is_none() && self.outputs.is_empty()
+        {
+            return;
+        }
+        self.cleared_instances.insert(instance.to_string());
+        self.run = None;
+        self.outputs.clear();
+        self.current_node = None;
+        self.values = ValueCache::default();
+        self.close_preview(cx);
+        if let Some(row) = self.instance_row.as_mut() {
+            row.outputs.clear();
+            row.run = None;
+            row.waiting = None;
+            row.state = "idle".to_string();
+        }
+        if let Some(row) = self.instances.iter_mut().find(|row| row.instance == instance) {
+            row.outputs.clear();
+            row.run = None;
+            row.waiting = None;
+            row.state = "idle · cleared".to_string();
+        }
+        if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
+            canvas.clear_run(cx);
+        }
+        if let Some(mut app_view) = self.ui.widget(cx, ids!(app_view)).borrow_mut::<AppView>() {
+            app_view.waiting = None;
+        }
+        // Re-evaluating the faces is the narrowest way to restore every
+        // generated widget to its declared empty state; fill_inputs below
+        // immediately restores the preserved instance inputs.
+        self.remount_faces(cx);
+        if let Some(mut list) = self.ui.widget(cx, ids!(running)).borrow_mut::<RunningList>() {
+            list.set_rows(cx, self.instances.clone(), self.instance.clone());
+        }
+        self.update_run_bar(cx);
+        self.ui
+            .label(cx, ids!(run_state))
+            .set_text(cx, "idle · cleared");
+        self.fetch_instance();
+        self.refresh_instances();
+    }
+
     fn undo(&mut self) {
         if self.revisions.len() < 2 {
             return;
@@ -2747,6 +2941,7 @@ impl App {
             id if id == live_id!(zoom_100) => self.with_canvas(cx, |cx, canvas| canvas.zoom_reset(cx)),
             id if id == live_id!(run) => self.start_run(None),
             id if id == live_id!(cancel) => self.cancel_run(),
+            id if id == live_id!(clear_outputs) => self.clear_instance(cx),
             id if id == live_id!(run_to_node) => {
                 if let Some(node) = self.selected_node.clone() {
                     self.start_run(Some(vec![node]));
@@ -2927,6 +3122,18 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(cancel_btn)).clicked(actions) {
             self.cancel_run();
+        }
+        if self.ui.button(cx, ids!(clear_btn)).clicked(actions) {
+            self.clear_instance(cx);
+        }
+        if self.ui.button(cx, ids!(clear_cancel)).clicked(actions)
+            || self.ui.modal(cx, ids!(clear_confirm)).dismissed(actions)
+        {
+            self.ui.modal(cx, ids!(clear_confirm)).close(cx);
+        }
+        if self.ui.button(cx, ids!(clear_confirm_btn)).clicked(actions) {
+            self.ui.modal(cx, ids!(clear_confirm)).close(cx);
+            self.request_clear_instance(true);
         }
         if self.ui.button(cx, ids!(fit_btn)).clicked(actions) {
             self.with_canvas(cx, |cx, canvas| canvas.fit(cx));

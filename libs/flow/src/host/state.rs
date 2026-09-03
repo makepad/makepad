@@ -462,6 +462,12 @@ pub(crate) enum StartRunOutcome {
     Busy,
 }
 
+pub(crate) enum ClearInstanceOutcome {
+    Cleared,
+    InstanceNotFound,
+    Busy,
+}
+
 /// Instances, runs, values: the F2 lane's slice of `FlowState`.
 impl FlowState {
     fn file_path(&self, flow: &str) -> PathBuf {
@@ -910,6 +916,42 @@ impl FlowState {
         self.instances.remove(id);
         self.publish_instance_lifecycle("instance.removed", id, &flow);
         true
+    }
+
+    /// Forget only state produced by runs. User-entered/default inputs and
+    /// the flow definition remain intact.
+    pub(crate) fn clear_instance(&mut self, id: &InstanceId) -> ClearInstanceOutcome {
+        let Some(instance) = self.instances.get(id) else {
+            return ClearInstanceOutcome::InstanceNotFound;
+        };
+        if !instance.active.is_empty() || !instance.runs.is_empty() {
+            return ClearInstanceOutcome::Busy;
+        }
+        let flow = instance.flow.clone();
+        let run_ids: HashSet<RunId> = self
+            .runs
+            .iter()
+            .filter(|(_, row)| &row.instance == id)
+            .map(|(run_id, _)| run_id.clone())
+            .collect();
+        self.runs.retain(|run_id, _| !run_ids.contains(run_id));
+        self.pending_answer_actor
+            .retain(|(run_id, _), _| !run_ids.contains(run_id));
+        self.pending_input_runs.remove(id);
+        if let Some(instance) = self.instances.get_mut(id) {
+            instance.outputs.clear();
+            instance.waiting = None;
+            instance.last_activity_ms = engine::unix_ms();
+        }
+        self.events.publish(
+            "instance",
+            "instance.cleared",
+            JsonValue::Object(HashMap::from([
+                ("instance".to_string(), JsonValue::String(id.0.clone())),
+                ("flow".to_string(), JsonValue::String(flow)),
+            ])),
+        );
+        ClearInstanceOutcome::Cleared
     }
 
     pub(crate) fn set_instance_inputs(

@@ -1,7 +1,8 @@
 use super::config::SharedConfig;
 use super::events::{EventCursor, EventHub};
 use super::state::{
-    CreateInstanceOutcome, SetInputsOutcome, SourceResult, StartRunOutcome, StateHandle,
+    ClearInstanceOutcome, CreateInstanceOutcome, SetInputsOutcome, SourceResult, StartRunOutcome,
+    StateHandle,
 };
 use super::util::log;
 use crate::{
@@ -252,6 +253,17 @@ pub(crate) fn dispatch(
                 return call(&ctx.state, |_| message(405, "method not allowed"));
             }
             put_instance_inputs(conn, head, ctx, id)
+        }
+        [v1, instances, id, clear]
+            if v1 == "v1" && instances == "instances" && clear == "clear" =>
+        {
+            if !valid_id(id) {
+                return Outcome::Resp(message(400, "invalid instance id"));
+            }
+            if head.method != Method::Post {
+                return call(&ctx.state, |_| message(405, "method not allowed"));
+            }
+            clear_instance(ctx, id)
         }
         [v1, instances, id, runs_segment]
             if v1 == "v1" && instances == "instances" && runs_segment == "runs" =>
@@ -633,6 +645,15 @@ fn delete_instance(ctx: &RouteCtx, id: &str) -> Outcome {
         } else {
             message(404, "instance not found")
         }
+    })
+}
+
+fn clear_instance(ctx: &RouteCtx, id: &str) -> Outcome {
+    let id = InstanceId(id.to_string());
+    call(&ctx.state, move |state| match state.clear_instance(&id) {
+        ClearInstanceOutcome::Cleared => Resp::empty(200),
+        ClearInstanceOutcome::InstanceNotFound => message(404, "instance not found"),
+        ClearInstanceOutcome::Busy => message(409, "instance has a run in flight; cancel it first"),
     })
 }
 
