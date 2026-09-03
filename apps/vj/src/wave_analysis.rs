@@ -233,6 +233,45 @@ impl TrackGrid {
         (beat + self.downbeat_phase as i64).rem_euclid(4) == 0
     }
 
+    /// The same line re-cut to another tempo, hinged where the record is.
+    ///
+    /// The beat number at `secs` and the fraction of a beat past it come
+    /// back exactly, so `beat_at`, `phase_at`, `bar_at` and `is_downbeat`
+    /// all answer at that second what they answered before. What changes
+    /// is the LENGTH of a beat, which is what a local tempo is.
+    ///
+    /// The first beat is re-reduced into its own period with the bar phase
+    /// moved to match, the same law the tempo pull follows: the published
+    /// first beat is the first at or after zero and the phase names the
+    /// bar position OF that beat.
+    pub fn hinged_at(&self, secs: f64, bpm: f64) -> TrackGrid {
+        if !self.has_grid() || !bpm.is_finite() || bpm <= 1.0 {
+            return *self;
+        }
+        let beat_secs = 60.0 / bpm;
+        if (beat_secs - self.beat_secs).abs() < 1e-12 {
+            return *self;
+        }
+        let beat = self.beat_at(secs);
+        let mut first = secs - beat * beat_secs;
+        let mut phase = self.downbeat_phase as i64;
+        // Dropping whole periods off the anchor RAISES every beat number
+        // by as many, so the bar phase comes down by the same amount and
+        // the second that was a downbeat still is one. Counted rather than
+        // stepped: a long record and a real tempo change move the anchor
+        // by many beats, not by one.
+        let steps = (first / beat_secs).floor();
+        first -= steps * beat_secs;
+        phase -= steps as i64;
+        TrackGrid {
+            bpm,
+            beat_secs,
+            first_beat_secs: first,
+            downbeat_phase: phase.rem_euclid(4) as u32,
+            confidence: self.confidence,
+        }
+    }
+
     /// The same grid played at `rate` (a tempo-matched deck): the beats get
     /// closer together but stay anchored at the same source positions.
     pub fn effective_bpm(&self, rate: f64) -> f64 {
@@ -525,6 +564,30 @@ impl TempoMap {
             return 0.0;
         }
         60.0 / self.segment_for_time(secs).period_secs
+    }
+
+    /// The tempo AROUND `secs`: the eight beats centred on it, as one
+    /// number.
+    ///
+    /// The same tempo [`bpm_at`] holds, box-filtered over the window --
+    /// and that filtering is the whole point. Segments are at least eight
+    /// beats long and usually far longer, so `bpm_at` is piecewise
+    /// CONSTANT and steps at a segment edge; a step in a leader's tempo is
+    /// a step in a follower's rate, and the room hears it. This is
+    /// continuous in `secs`, because the beat coordinate is.
+    ///
+    /// Only ever a LENGTH, never a beat number: the difference cancels the
+    /// map's own numbering, which is the decoder's array index and not the
+    /// published grid's counting from its first beat.
+    ///
+    /// [`bpm_at`]: Self::bpm_at
+    pub fn local_bpm(&self, secs: f64) -> Option<f64> {
+        if self.is_empty() || !secs.is_finite() {
+            return None;
+        }
+        let beat = self.beat_at(secs);
+        let span = self.secs_at_beat(beat + 4.0) - self.secs_at_beat(beat - 4.0);
+        (span > 1e-6).then(|| 60.0 * 8.0 / span)
     }
 }
 
@@ -3166,6 +3229,81 @@ mod tests {
         let pcm = click_track(44_100, 128.5, 30.0, 0.41);
         let bpm = analyze(&pcm).grid.bpm;
         assert!((bpm - 128.5).abs() < 1e-6, "{bpm}");
+    }
+
+    fn ramp_map(from_bpm: f64, to_bpm: f64, beats_each: f64) -> TempoMap {
+        let mut segments = Vec::new();
+        let mut at = 0.0;
+        let mut beat = 0.0;
+        for step in 0..4 {
+            let bpm = from_bpm + (to_bpm - from_bpm) * step as f64 / 3.0;
+            let period = 60.0 / bpm;
+            segments.push(TempoSegment { start_secs: at, start_beat: beat, period_secs: period });
+            at += period * beats_each;
+            beat += beats_each;
+        }
+        TempoMap { segments }
+    }
+
+    /// The window is the same tempo the map holds, box-filtered over eight
+    /// beats -- so it is continuous where the map itself steps.
+    #[test]
+    fn the_local_tempo_is_a_window_rather_than_a_step() {
+        let map = ramp_map(120.0, 132.0, 16.0);
+        // Deep inside the first segment, the window sees only that tempo.
+        let inside = map.local_bpm(1.0).expect("a tempo");
+        assert!((inside - 120.0).abs() < 1e-9, "{inside}");
+
+        // Across a segment edge the window blends rather than jumping. The
+        // map's own answer steps by four BPM at that edge.
+        let edge_secs = map.secs_at_beat(16.0);
+        let step = map.bpm_at(edge_secs + 1e-6) - map.bpm_at(edge_secs - 1e-6);
+        assert!(step > 3.9, "the map itself steps by {step}");
+        let before = map.local_bpm(edge_secs - 0.01).expect("a tempo");
+        let after = map.local_bpm(edge_secs + 0.01).expect("a tempo");
+        assert!((after - before).abs() < 0.05, "{before} -> {after}");
+
+        // An empty map has no local answer at all.
+        assert!(TempoMap::default().local_bpm(1.0).is_none());
+    }
+
+    /// The hinge re-cuts the line to a new tempo and pins the record where
+    /// it is: the beat number and the fraction of a beat at that second
+    /// come back exactly.
+    #[test]
+    fn a_hinged_grid_keeps_the_beat_it_is_on() {
+        let grid = TrackGrid {
+            bpm: 120.0,
+            beat_secs: 0.5,
+            first_beat_secs: 0.1,
+            downbeat_phase: 2,
+            confidence: 0.9,
+        };
+        let at = 61.35;
+        let hinged = grid.hinged_at(at, 126.0);
+        assert!((hinged.bpm - 126.0).abs() < 1e-9);
+        assert!((hinged.beat_secs - 60.0 / 126.0).abs() < 1e-12);
+        // The FRACTION of a beat is what a hinge promises, not the beat's
+        // absolute number: the published anchor has to stay inside its own
+        // period, so the numbering slides and the bar phase slides back.
+        let (was, now) = (grid.beat_at(at), hinged.beat_at(at));
+        assert!((was.fract() - now.fract()).abs() < 1e-9, "{was} vs {now}");
+        // And the second that was a downbeat still is one.
+        let downbeat = grid.first_beat_secs + was.floor() * grid.beat_secs;
+        assert!(grid.is_downbeat(grid.beat_at(downbeat).round() as i64));
+        assert!(
+            hinged.is_downbeat(hinged.beat_at(downbeat).round() as i64),
+            "the bar moved"
+        );
+        assert!(
+            (0.0..hinged.beat_secs).contains(&hinged.first_beat_secs),
+            "first beat {}",
+            hinged.first_beat_secs
+        );
+        // A tempo that is not one, or the same tempo, changes nothing.
+        assert_eq!(grid.hinged_at(at, 120.0), grid);
+        assert_eq!(grid.hinged_at(at, f64::NAN), grid);
+        assert_eq!(grid.hinged_at(at, 0.0), grid);
     }
 
     #[test]

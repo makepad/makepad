@@ -20783,8 +20783,17 @@ p2 {}
             let index = deck.index();
             // The grid goes to the engine first: it decides whether this
             // arrival should engage a sync.
-            let cmds =
-                    self.decks.grid_ready(deck, done.gen, done.analysis.grid, done.analysis.sound);
+            // The fitted moving tempo travels with the grid: on the two
+            // percent of records it is non-empty for, it is what the lock
+            // and the readout answer with.
+            let tempo_map = Arc::new(done.analysis.tempo_map.clone());
+            let cmds = self.decks.grid_ready(
+                deck,
+                done.gen,
+                done.analysis.grid,
+                done.analysis.sound,
+                Some(tempo_map),
+            );
             if self.decks.deck(deck).load_gen != done.gen {
                 continue;
             }
@@ -22399,7 +22408,12 @@ p2 {}
                 DeckLoad::Failed { item, error } => (item.title.clone(), error.clone()),
             };
             // Copy what the paint pass needs: `paint_lit` takes &mut self.
-            let grid = state.grid;
+            // The grid AT THE PLAYHEAD: on a record with a fitted moving
+            // tempo the readout and the ruled lane answer with the tempo
+            // around the playhead rather than the whole record's average.
+            // Falls back to the published line, which is what every
+            // machine-made record has and is byte-identical.
+            let grid = state.local_grid().or(state.grid);
             let rate = state.rate;
             let pitch = state.pitch;
             let bend = state.bend;

@@ -1083,6 +1083,11 @@ pub struct DeckState {
     pub splat: Option<SplatUiState>,
     /// Source-time playhead, mirrored from the mixer.
     pub position_secs: f64,
+    /// The fitted moving tempo, when the analysis found one worth having.
+    ///
+    /// Shared rather than copied: it is a vector, it never changes once
+    /// the analysis lands, and both the engine and the host read it.
+    pub tempo_map: Option<std::sync::Arc<crate::wave_analysis::TempoMap>>,
     /// Being walked back to the phase a released record left, if so.
     ///
     /// While this stands the standing servo trims the rate as usual and
@@ -1201,6 +1206,7 @@ impl Default for DeckState {
             grid: None,
             splat: None,
             position_secs: 0.0,
+            tempo_map: None,
             reland: None,
             rate: 1.0,
             platter_rate: 1.0,
@@ -1306,7 +1312,7 @@ impl DeckState {
     }
 
     pub fn effective_bpm(&self) -> Option<f64> {
-        self.true_grid().map(|grid| grid.effective_bpm(self.rate))
+        self.local_grid().map(|grid| grid.effective_bpm(self.rate))
     }
 
     /// Where this deck is in its count, given a playhead and how the
@@ -1376,6 +1382,27 @@ impl DeckState {
         }
     }
 
+    /// The grid as it stands AT THE PLAYHEAD.
+    ///
+    /// On a record made by a machine this is the published line exactly --
+    /// one straight line describes it to the millisecond and there is no
+    /// map to consult, which is nearly every record and is why this is
+    /// safe to put in front of the arithmetic. On a record played by
+    /// people it is that line re-cut to the tempo around the playhead,
+    /// hinged there so the beat the deck is on does not move.
+    ///
+    /// Used where a tempo has to be RIGHT NOW -- the lock, the readout,
+    /// the ruled grid. Placement still goes through the published line:
+    /// a mark belongs to the record, not to the moment it was dropped.
+    pub fn local_grid(&self) -> Option<TrackGrid> {
+        let grid = self.true_grid()?;
+        let Some(map) = self.tempo_map.as_deref() else { return Some(grid) };
+        match map.local_bpm(self.position_secs) {
+            Some(bpm) => Some(grid.hinged_at(self.position_secs, bpm)),
+            None => Some(grid),
+        }
+    }
+
     /// The tempo the record is turning at THIS instant, gesture and all.
     ///
     /// Third of three, and the three are three named accessors on one
@@ -1387,7 +1414,7 @@ impl DeckState {
     ///
     /// [`effective_bpm`]: Self::effective_bpm
     pub fn live_bpm(&self) -> Option<f64> {
-        self.true_grid().map(|grid| grid.effective_bpm(self.platter_rate))
+        self.local_grid().map(|grid| grid.effective_bpm(self.platter_rate))
     }
 
     /// A view for the sync arithmetic.
@@ -1397,7 +1424,7 @@ impl DeckState {
     /// this is the line that keeps the published instantaneous number from
     /// quietly becoming a rate command.
     pub fn sync_view(&self) -> Option<SyncView> {
-        let grid = self.true_grid()?;
+        let grid = self.local_grid()?;
         Some(SyncView {
             grid,
             position_secs: self.position_secs,
@@ -1812,6 +1839,7 @@ impl DeckEngine {
         // sync the next load to a tempo it never had. Tone and stem knobs
         // stay where the operator left them, like a real channel strip.
         state.grid = None;
+        state.tempo_map = None;
         state.splat = None;
         state.position_secs = 0.0;
         state.synced = false;
@@ -2959,6 +2987,7 @@ impl DeckEngine {
         state.playing = false;
         state.duration_secs = 0.0;
         state.grid = None;
+        state.tempo_map = None;
         state.splat = None;
         state.position_secs = 0.0;
         state.synced = false;
@@ -3208,6 +3237,7 @@ impl DeckEngine {
         gen: DeckGen,
         grid: TrackGrid,
         sound: Option<SoundSpan>,
+        tempo_map: Option<std::sync::Arc<crate::wave_analysis::TempoMap>>,
     ) -> Vec<DeckCmd> {
         let mut cmds = Vec::new();
         {
@@ -3216,6 +3246,7 @@ impl DeckEngine {
                 return cmds;
             }
             state.grid = Some(grid);
+            state.tempo_map = tempo_map.filter(|map| !map.is_empty());
             if let Some(first) = sound
                 .map(|span| span.first_secs)
                 .filter(|first| *first > 0.0 && !state.cue_placed)
@@ -4955,7 +4986,7 @@ mod tests {
         e.loop_in(DeckId::A);
         assert!((e.deck(DeckId::A).loop_span.unwrap().end_secs - 14.0).abs() < 1e-9);
         // 120 BPM: four beats is two seconds, not four.
-        e.grid_ready(deck, gen, grid(120.0, 0.0), None);
+        e.grid_ready(deck, gen, grid(120.0, 0.0), None, None);
         assert!(e.deck(DeckId::A).has_true_beats());
         e.observe(DeckId::A, 30.0, true);
         e.loop_in(DeckId::A);
@@ -5902,6 +5933,52 @@ mod tests {
         assert_eq!(on.index, 2);
     }
 
+    /// A record played by people: the tempo the lock and the readout
+    /// answer with is the one AROUND the playhead, not the whole
+    /// record's average.
+    #[test]
+    fn a_deck_with_a_moving_tempo_answers_at_the_playhead() {
+        use crate::wave_analysis::{TempoMap, TempoSegment};
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        // Four segments walking 120 to 132 over sixteen beats each.
+        let mut segments = Vec::new();
+        let (mut at, mut beat) = (0.0, 0.0);
+        for step in 0..4 {
+            let bpm = 120.0 + 4.0 * step as f64;
+            let period = 60.0 / bpm;
+            segments.push(TempoSegment { start_secs: at, start_beat: beat, period_secs: period });
+            at += period * 16.0;
+            beat += 16.0;
+        }
+        let map = std::sync::Arc::new(TempoMap { segments });
+        let gen = e.deck(DeckId::A).load_gen;
+        e.grid_ready(DeckId::A, gen, grid(120.0, 0.0), None, Some(map.clone()));
+
+        e.observe(DeckId::A, 1.0, true);
+        let early = e.deck(DeckId::A).effective_bpm().expect("a tempo");
+        e.observe(DeckId::A, 28.0, true);
+        let late = e.deck(DeckId::A).effective_bpm().expect("a tempo");
+        assert!((early - 120.0).abs() < 0.2, "early {early}");
+        assert!(late > early + 5.0, "the record sped up: {early} -> {late}");
+        // And the deck's answer IS the map's window, not something new.
+        let want = map.local_bpm(28.0).expect("a tempo");
+        assert!((late - want).abs() < 1e-9, "{late} vs {want}");
+    }
+
+    /// Nearly every record: one straight line describes it, there is no
+    /// map, and the whole tab answers exactly what it always did.
+    #[test]
+    fn a_record_with_no_moving_tempo_is_the_published_line_exactly() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        e.observe(DeckId::A, 61.35, true);
+        let state = e.deck(DeckId::A);
+        assert_eq!(state.local_grid(), state.true_grid());
+        assert_eq!(state.sync_view().map(|view| view.grid), state.true_grid());
+        assert_eq!(state.effective_bpm(), Some(128.0));
+    }
+
     #[test]
     fn each_deck_owns_its_own_snap_unit() {
         let mut e = DeckEngine::new();
@@ -5961,7 +6038,7 @@ mod tests {
         };
         let (deck, gen) = load_gen(&engine.click(item(seed), target));
         engine.track_ready(deck, gen, 300.0);
-        engine.grid_ready(deck, gen, grid(bpm, first_beat_secs), None);
+        engine.grid_ready(deck, gen, grid(bpm, first_beat_secs), None, None);
     }
 
     // ---- momentary pitch bend -------------------------------------------
@@ -6700,7 +6777,7 @@ mod tests {
             downbeat_phase: 2,
             confidence: 0.9,
         };
-        engine.grid_ready(DeckId::A, gen, grid, None);
+        engine.grid_ready(DeckId::A, gen, grid, None, None);
         let (flipped, _) = engine.flip_beat_phase(DeckId::A).expect("a grid to flip");
         // 0.4 + 0.25 = 0.65 wraps to 0.15: the ruling before the old first
         // beat, one beat earlier in the bar.
@@ -6727,6 +6804,7 @@ mod tests {
             DeckId::A,
             gen,
             TrackGrid { bpm: 120.0, beat_secs: 0.5, first_beat_secs: 0.0, downbeat_phase: 0, confidence: 0.9 },
+            None,
             None,
         );
         engine.seek_secs(DeckId::A, 10.0);
@@ -6773,7 +6851,7 @@ mod tests {
         let target = DeckTarget::B;
         let (deck, gen) = load_gen(&engine.click(item(2), target));
         engine.track_ready(deck, gen, 240.0);
-        let cmds = engine.grid_ready(deck, gen, grid(100.0, 0.0), None);
+        let cmds = engine.grid_ready(deck, gen, grid(100.0, 0.0), None, None);
 
         assert_eq!(engine.sync_leader(), Some(DeckId::A));
         assert!(engine.deck(DeckId::B).synced, "B must be held to A");
@@ -7319,9 +7397,9 @@ mod tests {
         let (deck, first) = load_gen(&engine.click(item(1), DeckTarget::A));
         let (_, second) = load_gen(&engine.click(item(2), DeckTarget::A));
         engine.track_ready(deck, second, 100.0);
-        assert!(engine.grid_ready(deck, first, grid(120.0, 0.0), None).is_empty());
+        assert!(engine.grid_ready(deck, first, grid(120.0, 0.0), None, None).is_empty());
         assert!(engine.deck(DeckId::A).grid.is_none(), "stale grid must not land");
-        engine.grid_ready(deck, second, grid(126.0, 0.0), None);
+        engine.grid_ready(deck, second, grid(126.0, 0.0), None, None);
         assert_eq!(engine.deck(DeckId::A).grid.map(|g| g.bpm), Some(126.0));
         // Loading again clears it rather than syncing to the old tempo.
         engine.click(item(3), DeckTarget::A);
@@ -8622,7 +8700,7 @@ mod tests {
         e.track_ready(deck, gen, 300.0);
         assert_eq!(e.deck(DeckId::A).cue_secs, 0.0, "nothing measured yet");
         let cmds =
-            e.grid_ready(deck, gen, grid(120.0, 0.0), Some(SoundSpan { first_secs: 2.5, last_secs: 290.0 }));
+            e.grid_ready(deck, gen, grid(120.0, 0.0), Some(SoundSpan { first_secs: 2.5, last_secs: 290.0 }), None);
         assert_eq!(e.deck(DeckId::A).cue_secs, 2.5, "the mark lands on the first sound");
         // And the deck, still parked at its top, goes with it -- left
         // behind, the lamp blinks and the first CUE press drags the mark
@@ -8640,7 +8718,7 @@ mod tests {
         e.track_ready(deck, gen, 300.0);
         e.set_cue(DeckId::A, 40.0);
         assert!(e.deck(DeckId::A).cue_placed);
-        e.grid_ready(deck, gen, grid(120.0, 0.0), Some(SoundSpan { first_secs: 2.5, last_secs: 290.0 }));
+        e.grid_ready(deck, gen, grid(120.0, 0.0), Some(SoundSpan { first_secs: 2.5, last_secs: 290.0 }), None);
         assert_eq!(e.deck(DeckId::A).cue_secs, 40.0, "the analysis does not move a hand's mark");
     }
 
@@ -8650,7 +8728,7 @@ mod tests {
         let (deck, gen) = load_gen(&e.click(item(1), DeckTarget::A));
         e.track_ready(deck, gen, 300.0);
         let cmds =
-            e.grid_ready(deck, gen, grid(120.0, 0.0), Some(SoundSpan { first_secs: 0.0, last_secs: 300.0 }));
+            e.grid_ready(deck, gen, grid(120.0, 0.0), Some(SoundSpan { first_secs: 0.0, last_secs: 300.0 }), None);
         assert_eq!(e.deck(DeckId::A).cue_secs, 0.0);
         assert!(!cmds.iter().any(|c| matches!(c, DeckCmd::SeekSeconds { .. })), "and nothing seeks");
     }
@@ -8663,7 +8741,7 @@ mod tests {
         e.play_pause(DeckId::A);
         e.observe(DeckId::A, 12.0, true);
         let cmds =
-            e.grid_ready(deck, gen, grid(120.0, 0.0), Some(SoundSpan { first_secs: 2.5, last_secs: 290.0 }));
+            e.grid_ready(deck, gen, grid(120.0, 0.0), Some(SoundSpan { first_secs: 2.5, last_secs: 290.0 }), None);
         assert_eq!(e.deck(DeckId::A).cue_secs, 2.5, "the mark still lands");
         assert_eq!(e.deck(DeckId::A).position_secs, 12.0, "but the record does not jump");
         assert!(!cmds.iter().any(|c| matches!(c, DeckCmd::SeekSeconds { .. })));
