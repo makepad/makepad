@@ -258,6 +258,9 @@ pub struct Graph {
     pub edges: Vec<Edge>,
     pub tools: Vec<ToolEntry>,
     pub flow_ui_src: Option<String>,
+    /// Non-fatal notes surfaced with the evaluated graph, for example a
+    /// node still using the deprecated `ports: { in: [...] }` array form.
+    pub warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, SerJson, DeJson)]

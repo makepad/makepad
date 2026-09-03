@@ -383,7 +383,10 @@ fn deterministic_golden_rewrites_graph_and_indexes_every_route() {
     assert_eq!(report_a.revisions, 2);
     assert_eq!(report_a.aliases, 2);
     assert_eq!(report_a.snapshot_id.len(), 32);
-    assert_eq!(report_a.snapshot_id, "78d089faf3fa7a7405a73da60b4a8f10");
+    assert_eq!(
+        report_a.snapshot_id, "7331ed62a0e519599984c2ae4904f6a4",
+        "static export contract changed; if intentional, bump this golden to the `left` value printed above",
+    );
     assert!(report_a.snapshot_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
 
     let alias = parse_file(&out_a.join("v1/aliases/pub/fixture/parent"));

@@ -20,6 +20,7 @@ let image = Image{
 let video = Video{
     prompt: expand.text()
     image: image.image()
+    last_frame: image.image()
     width: 640
     height: 352
     frames: 39
