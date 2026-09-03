@@ -3,7 +3,10 @@
 //! the template picker behind New, the run's total progress bar, and the
 //! App view that shows a flow as a product.
 
-use crate::faces::{param_text, FaceHost, ModelChoice, HUB_PICKS};
+use crate::faces::{
+    format_options_for_node, format_preset_name, node_dimensions, param_text, FaceHost,
+    FormatOptions, ModelChoice, CUSTOM_FORMAT, HUB_PICKS,
+};
 use makepad_flow::{
     FlowSummary, Graph, InstanceRow, Literal, Node, NodeInputValue, NodeTypeCatalog,
     TemplateSummary, ValueBytes, ValueRef,
@@ -368,6 +371,33 @@ script_mod! {
                     quantize: true
                 }
             }
+            Dimensions := Row{
+                spacing: theme.space_1
+                w_field := mod.widgets.FabValueInput{
+                    width: 54
+                    height: 24
+                    label: "w"
+                    precision: 0
+                    quantize: true
+                }
+                h_field := mod.widgets.FabValueInput{
+                    width: 54
+                    height: 24
+                    label: "h"
+                    precision: 0
+                    quantize: true
+                }
+                format := DropDown{
+                    width: Fill
+                    height: 26
+                    labels: ["Custom"]
+                }
+                swap := ButtonFlatter{
+                    width: 26
+                    height: 26
+                    text: "⇄"
+                }
+            }
             Choice := Row{
                 name := RowLabel{}
                 value := DropDown{
@@ -651,6 +681,10 @@ pub enum InspectorAction {
         key: String,
         value: Literal,
     },
+    SetParams {
+        node: String,
+        values: Vec<(String, Literal)>,
+    },
     SetFnSrc {
         node: String,
         src: String,
@@ -693,6 +727,11 @@ enum Row {
         max: f64,
         step: f64,
     },
+    Dimensions {
+        width: u32,
+        height: u32,
+        options: FormatOptions,
+    },
     Choice {
         key: String,
         value: String,
@@ -732,6 +771,7 @@ impl Row {
             Row::Text { .. } => live_id!(Text),
             Row::Multiline { .. } => live_id!(Multiline),
             Row::Number { .. } => live_id!(Number),
+            Row::Dimensions { .. } => live_id!(Dimensions),
             Row::Choice { .. } => live_id!(Choice),
             Row::Model { .. } => live_id!(Model),
             Row::Bool { .. } => live_id!(Bool),
@@ -848,6 +888,10 @@ pub struct Inspector {
     /// The hub's models for the shown node's domain (`Model` rows).
     #[rust]
     models: Vec<ModelChoice>,
+    #[rust]
+    dimensions_dirty: bool,
+    #[rust]
+    dimensions_signature: Option<(String, u32, u32, FormatOptions)>,
 }
 
 impl Inspector {
@@ -865,6 +909,8 @@ impl Inspector {
         self.node = node_id.map(str::to_string);
         let node = graph.and_then(|graph| graph.nodes.iter().find(|node| Some(node.id.as_str()) == node_id));
         let Some(node) = node else {
+            self.dimensions_dirty = false;
+            self.dimensions_signature = None;
             self.rows.push(Row::Empty {
                 title: "Nothing selected".into(),
                 doc: "Click a node on the canvas to edit its params; drag a palette card onto the canvas to add one.".into(),
@@ -882,6 +928,14 @@ impl Inspector {
                 .unwrap_or_default(),
         });
         self.rows.push(Row::Section("Params".into()));
+        let dimensions = format_options_for_node(node, catalog)
+            .and_then(|options| node_dimensions(node).map(|size| (size, options)));
+        let dimensions_signature = dimensions.as_ref().map(|((width, height), options)| {
+            (node.id.clone(), *width, *height, options.clone())
+        });
+        self.dimensions_dirty = self.dimensions_signature.as_ref() != dimensions_signature.as_ref();
+        self.dimensions_signature = dimensions_signature;
+        let mut dimensions_added = false;
         for (key, value) in &node.params {
             if matches!(key.as_str(), "ui" | "at" | "ports" | "domain" | "out" if node.type_name == "Fn" || key != "out")
             {
@@ -893,6 +947,19 @@ impl Inspector {
                     });
                 }
                 continue;
+            }
+            if matches!(key.as_str(), "width" | "height") {
+                if let Some(((width, height), options)) = dimensions.as_ref() {
+                    if !dimensions_added {
+                        self.rows.push(Row::Dimensions {
+                            width: *width,
+                            height: *height,
+                            options: options.clone(),
+                        });
+                        dimensions_added = true;
+                    }
+                    continue;
+                }
             }
             let doc = entry
                 .and_then(|entry| entry.params.iter().find(|param| &param.name == key))
@@ -1140,6 +1207,78 @@ impl Inspector {
                         });
                     }
                 }
+                Row::Dimensions { options, .. } => {
+                    let width_field = item.fab_value_input(cx, ids!(w_field));
+                    let height_field = item.fab_value_input(cx, ids!(h_field));
+                    let picker = item.drop_down(cx, ids!(format));
+                    if let Some(index) = picker.changed(actions) {
+                        if let Some(preset) = index
+                            .checked_sub(1)
+                            .and_then(|index| options.presets.get(index))
+                        {
+                            width_field.set_value(cx, preset.width as f64);
+                            height_field.set_value(cx, preset.height as f64);
+                            out.push(InspectorAction::SetParams {
+                                node: node.clone(),
+                                values: vec![
+                                    ("width".into(), Literal::Num(preset.width as f64)),
+                                    ("height".into(), Literal::Num(preset.height as f64)),
+                                ],
+                            });
+                        }
+                        continue;
+                    }
+                    if item.button(cx, ids!(swap)).clicked(actions) {
+                        let width = width_field.value().round().max(0.0) as u32;
+                        let height = height_field.value().round().max(0.0) as u32;
+                        width_field.set_value(cx, height as f64);
+                        height_field.set_value(cx, width as f64);
+                        picker.set_selected_by_label(
+                            format_preset_name(&options.presets, height, width),
+                            cx,
+                        );
+                        out.push(InspectorAction::SetParams {
+                            node: node.clone(),
+                            values: vec![
+                                ("width".into(), Literal::Num(height as f64)),
+                                ("height".into(), Literal::Num(width as f64)),
+                            ],
+                        });
+                        continue;
+                    }
+                    let width_ended = width_field.ended(actions);
+                    let height_ended = height_field.ended(actions);
+                    if width_ended.is_some() || height_ended.is_some() {
+                        let width = width_field.value().round().max(0.0) as u32;
+                        let height = height_field.value().round().max(0.0) as u32;
+                        picker.set_selected_by_label(
+                            format_preset_name(&options.presets, width, height),
+                            cx,
+                        );
+                        match (width_ended, height_ended) {
+                            (Some(width), Some(height)) => {
+                                out.push(InspectorAction::SetParams {
+                                    node: node.clone(),
+                                    values: vec![
+                                        ("width".into(), Literal::Num(width)),
+                                        ("height".into(), Literal::Num(height)),
+                                    ],
+                                });
+                            }
+                            (Some(value), None) => out.push(InspectorAction::SetParam {
+                                node: node.clone(),
+                                key: "width".into(),
+                                value: Literal::Num(value),
+                            }),
+                            (None, Some(value)) => out.push(InspectorAction::SetParam {
+                                node: node.clone(),
+                                key: "height".into(),
+                                value: Literal::Num(value),
+                            }),
+                            (None, None) => {}
+                        }
+                    }
+                }
                 Row::Choice { key, .. } => {
                     if let Some(label) = item.drop_down(cx, ids!(value)).changed_label(actions) {
                         let value = if matches!(key.as_str(), "type" | "method" | "out" | "on_fail") {
@@ -1260,6 +1399,45 @@ impl Widget for Inspector {
                                 precision: #(if integral { 0usize } else { 2usize })
                             });
                             field.set_value(cx, *value);
+                        }
+                    }
+                    Row::Dimensions {
+                        width,
+                        height,
+                        options,
+                    } => {
+                        let width_field = item.fab_value_input(cx, ids!(w_field));
+                        let height_field = item.fab_value_input(cx, ids!(h_field));
+                        let picker = item.drop_down(cx, ids!(format));
+                        if !existed || self.dimensions_dirty {
+                            let (width_min, width_max, width_step) = options.width_range;
+                            let (height_min, height_max, height_step) = options.height_range;
+                            let mut width_field_inner = width_field.clone();
+                            script_apply_eval!(cx, width_field_inner, {
+                                min: #(width_min)
+                                max: #(width_max)
+                                step: #((width_step * 0.125).max(1.0))
+                                snap: #(width_step)
+                            });
+                            let mut height_field_inner = height_field.clone();
+                            script_apply_eval!(cx, height_field_inner, {
+                                min: #(height_min)
+                                max: #(height_max)
+                                step: #((height_step * 0.125).max(1.0))
+                                snap: #(height_step)
+                            });
+                            width_field.set_value(cx, *width as f64);
+                            height_field.set_value(cx, *height as f64);
+                            let mut labels = vec![CUSTOM_FORMAT.to_string()];
+                            labels.extend(
+                                options.presets.iter().map(|preset| preset.name.clone()),
+                            );
+                            picker.set_labels(cx, labels);
+                            picker.set_selected_by_label(
+                                format_preset_name(&options.presets, *width, *height),
+                                cx,
+                            );
+                            self.dimensions_dirty = false;
                         }
                     }
                     Row::Choice {

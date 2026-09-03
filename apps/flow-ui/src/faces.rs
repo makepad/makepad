@@ -34,8 +34,171 @@ const FLOW_INSTRUCTION_LIMIT: usize = 5_000_000;
 const HANDLER_INSTRUCTION_LIMIT: usize = 200_000;
 /// The model picker's first entry: the hub elects the box and the model.
 pub const HUB_PICKS: &str = "hub picks";
+/// The first entry in every size preset picker.
+pub const CUSTOM_FORMAT: &str = "Custom";
 /// The caret shown at the end of streaming text.
 const STREAM_CARET: &str = " ▌";
+
+/// One width × height choice shown by the face and inspector pickers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FormatPreset {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl FormatPreset {
+    pub fn new(name: impl Into<String>, width: u32, height: u32) -> Self {
+        Self {
+            name: name.into(),
+            width,
+            height,
+        }
+    }
+
+    pub const fn dimensions(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+}
+
+const IMAGE_FORMAT_PRESETS: &[(&str, u32, u32)] = &[
+    ("512×512", 512, 512),
+    ("768×768", 768, 768),
+    ("1024×1024", 1024, 1024),
+    ("1536×1536", 1536, 1536),
+    ("2048×2048", 2048, 2048),
+    ("1024×768 (4:3)", 1024, 768),
+    ("768×1024 (3:4)", 768, 1024),
+    ("1280×720 (16:9)", 1280, 720),
+    ("720×1280 (9:16)", 720, 1280),
+    ("1920×1080 (16:9)", 1920, 1080),
+    ("1080×1920 (9:16)", 1080, 1920),
+    ("1024×576 (16:9)", 1024, 576),
+    ("576×1024 (9:16)", 576, 1024),
+    ("1344×768 (7:4)", 1344, 768),
+    ("768×1344 (4:7)", 768, 1344),
+];
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FormatOptions {
+    pub presets: Vec<FormatPreset>,
+    pub width_range: (f64, f64, f64),
+    pub height_range: (f64, f64, f64),
+}
+
+/// The matching preset label, with `Custom` for a hand-entered size.
+pub fn format_preset_name(presets: &[FormatPreset], width: u32, height: u32) -> &str {
+    presets
+        .iter()
+        .find(|preset| preset.dimensions() == (width, height))
+        .map(|preset| preset.name.as_str())
+        .unwrap_or(CUSTOM_FORMAT)
+}
+
+fn doc_format_presets(entry: &NodeTypeCatalog) -> Vec<FormatPreset> {
+    let mut dimensions = Vec::new();
+    for param in &entry.params {
+        if !matches!(param.name.as_str(), "width" | "height") {
+            continue;
+        }
+        for word in param.doc.split(|c: char| c.is_whitespace() || c == ',') {
+            let word = word.trim_matches(|c: char| {
+                !(c.is_ascii_digit() || matches!(c, 'x' | '×'))
+            });
+            let pair = word.split_once('x').or_else(|| word.split_once('×'));
+            let Some((width, height)) = pair else {
+                continue;
+            };
+            let (Ok(width), Ok(height)) = (width.parse::<u32>(), height.parse::<u32>()) else {
+                continue;
+            };
+            if !dimensions.contains(&(width, height)) {
+                dimensions.push((width, height));
+            }
+        }
+    }
+    dimensions
+        .into_iter()
+        .map(|(width, height)| {
+            FormatPreset::new(format!("{width}×{height}"), width, height)
+        })
+        .collect()
+}
+
+fn catalog_range(entry: Option<&NodeTypeCatalog>, name: &str) -> Option<(f64, f64, f64)> {
+    entry?
+        .params
+        .iter()
+        .find(|param| param.name == name)?
+        .range
+        .as_ref()
+        .map(|range| (range.min, range.max, range.step.unwrap_or(1.0)))
+}
+
+fn in_range(value: u32, range: Option<(f64, f64, f64)>) -> bool {
+    range.is_none_or(|(min, max, _)| (value as f64) >= min && (value as f64) <= max)
+}
+
+/// Size choices and number-field bounds for a node that owns both params.
+/// Pair lists in catalog docs (notably `Video`) win; otherwise the image
+/// presets are clipped to the documented numeric width and height ranges.
+pub fn format_options_for_node(
+    node: &Node,
+    catalog: &[NodeTypeCatalog],
+) -> Option<FormatOptions> {
+    node_dimensions(node)?;
+    // Recipe-derived generators currently retain `Gen` in evaluated nodes,
+    // while their catalog row carries the specialised type name. The domain
+    // is the stable join for those rows (and maps `video` to `Video`).
+    let entry = node
+        .domain
+        .as_deref()
+        .filter(|domain| !domain.is_empty())
+        .and_then(|domain| {
+            catalog
+                .iter()
+                .find(|entry| entry.domain.as_deref() == Some(domain))
+        })
+        .or_else(|| {
+            catalog
+                .iter()
+                .find(|entry| entry.type_name == node.type_name)
+        });
+    let documented = entry.map(doc_format_presets).unwrap_or_default();
+    if !documented.is_empty() {
+        let width_min = documented.iter().map(|preset| preset.width).min()? as f64;
+        let width_max = documented.iter().map(|preset| preset.width).max()? as f64;
+        let height_min = documented.iter().map(|preset| preset.height).min()? as f64;
+        let height_max = documented.iter().map(|preset| preset.height).max()? as f64;
+        return Some(FormatOptions {
+            presets: documented,
+            width_range: catalog_range(entry, "width").unwrap_or((width_min, width_max, 1.0)),
+            height_range: catalog_range(entry, "height")
+                .unwrap_or((height_min, height_max, 1.0)),
+        });
+    }
+    let width_range = catalog_range(entry, "width").unwrap_or((256.0, 2048.0, 64.0));
+    let height_range = catalog_range(entry, "height").unwrap_or((256.0, 2048.0, 64.0));
+    Some(FormatOptions {
+        presets: IMAGE_FORMAT_PRESETS
+            .iter()
+            .filter(|(_, width, height)| {
+                in_range(*width, Some(width_range)) && in_range(*height, Some(height_range))
+            })
+            .map(|(name, width, height)| FormatPreset::new(*name, *width, *height))
+            .collect(),
+        width_range,
+        height_range,
+    })
+}
+
+pub fn node_dimensions(node: &Node) -> Option<(u32, u32)> {
+    let dimension = |name| match node_param(node, name) {
+        Some(Literal::Num(value)) if value.is_finite() && *value >= 0.0 => Some(*value as u32),
+        _ => None,
+    };
+    Some((dimension("width")?, dimension("height")?))
+}
 
 /// One model id after collapsing the per-fleet-node rows returned by the hub.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,17 +261,25 @@ script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
 
-    // A picture that fills its card: rounded corners come from the mask in
-    // the pixel shader, the height follows the picture's aspect.
+    // A picture that fills its card. The transparent two-pixel rim exposes
+    // the card border, which was drawn first, while the SDF keeps every
+    // resized/zoomed image inside the same rounded body.
     let RoundedPicture = Image{
         width: Fill
         height: Fit
         fit: ImageFit.Horizontal
         draw_bg +: {
             radius: uniform(16.0)
+            content_inset: uniform(2.0)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, self.radius)
+                sdf.box(
+                    self.content_inset
+                    self.content_inset
+                    self.rect_size.x - self.content_inset * 2.0
+                    self.rect_size.y - self.content_inset * 2.0
+                    self.radius
+                )
                 let c = self.get_color()
                 sdf.fill(vec4(c.rgb, c.a * self.opacity))
                 return sdf.result
@@ -134,6 +305,19 @@ script_mod! {
         draw_bg +: {
             color: #x151517
             border_radius: 16.0
+            content_inset: uniform(2.0)
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(
+                    self.content_inset
+                    self.content_inset
+                    self.rect_size.x - self.content_inset * 2.0
+                    self.rect_size.y - self.content_inset * 2.0
+                    self.border_radius
+                )
+                sdf.fill(self.color)
+                return sdf.result
+            }
         }
         icon := EmptyIcon{
             draw_svg +: {svg: crate_resource("self:resources/icons/image.svg")}
@@ -223,6 +407,49 @@ script_mod! {
             width: Fill
             height: 26
             labels: ["hub picks"]
+        }
+    }
+
+    mod.flow.ui.FormatPickerBase = #(FormatPicker::register_widget(vm))
+    mod.flow.ui.FormatPicker = set_type_default() do mod.flow.ui.FormatPickerBase{
+        width: Fill
+        height: Fit
+        flow: Right
+        spacing: theme.space_1
+        align: Align{y: 0.5}
+        w_field := mod.widgets.FabValueInput{
+            width: 54
+            height: 24
+            label: "w"
+            min: 256
+            max: 2048
+            step: 8
+            snap: 64
+            precision: 0
+            quantize: true
+            param_bind := @width
+        }
+        h_field := mod.widgets.FabValueInput{
+            width: 54
+            height: 24
+            label: "h"
+            min: 256
+            max: 2048
+            step: 8
+            snap: 64
+            precision: 0
+            quantize: true
+            param_bind := @height
+        }
+        picker := DropDown{
+            width: Fill
+            height: 26
+            labels: ["Custom"]
+        }
+        swap := ButtonFlatter{
+            width: 26
+            height: 26
+            text: "⇄"
         }
     }
 
@@ -479,6 +706,131 @@ impl ValueView {
 
     pub fn is_loaded(&self) -> bool {
         self.loaded
+    }
+}
+
+/// A compact width, height, preset, and orientation control used by the
+/// built-in generation faces. Its number fields remain ordinary
+/// `param_bind` widgets; preset and swap changes return both values together.
+#[derive(Script, ScriptHook, Widget)]
+pub struct FormatPicker {
+    #[deref]
+    view: View,
+    #[rust]
+    presets: Vec<FormatPreset>,
+    #[rust]
+    width: u32,
+    #[rust]
+    height: u32,
+}
+
+impl Widget for FormatPicker {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.view.draw_walk(cx, scope, walk)
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+}
+
+impl FormatPicker {
+    fn field_value(&self, cx: &Cx, id: &[LiveId]) -> u32 {
+        self.view
+            .fab_value_input(cx, id)
+            .value()
+            .round()
+            .max(0.0) as u32
+    }
+
+    fn sync_selected(&self, cx: &mut Cx) {
+        let selected = self
+            .presets
+            .iter()
+            .position(|preset| preset.dimensions() == (self.width, self.height))
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        self.view
+            .drop_down(cx, ids!(picker))
+            .set_selected_item(cx, selected);
+    }
+
+    fn set_dimensions(&mut self, cx: &mut Cx, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+        self.view
+            .fab_value_input(cx, ids!(w_field))
+            .set_value(cx, width as f64);
+        self.view
+            .fab_value_input(cx, ids!(h_field))
+            .set_value(cx, height as f64);
+        self.sync_selected(cx);
+    }
+
+    fn set_config(
+        &mut self,
+        cx: &mut Cx,
+        options: FormatOptions,
+        dimensions: Option<(u32, u32)>,
+    ) {
+        self.presets = options.presets;
+        let mut labels = vec![CUSTOM_FORMAT.to_string()];
+        labels.extend(self.presets.iter().map(|preset| preset.name.clone()));
+        self.view.drop_down(cx, ids!(picker)).set_labels(cx, labels);
+        let (width_min, width_max, width_step) = options.width_range;
+        let (height_min, height_max, height_step) = options.height_range;
+        let mut width = self.view.fab_value_input(cx, ids!(w_field));
+        script_apply_eval!(cx, width, {
+            min: #(width_min)
+            max: #(width_max)
+            step: #((width_step * 0.125).max(1.0))
+            snap: #(width_step)
+        });
+        let mut height = self.view.fab_value_input(cx, ids!(h_field));
+        script_apply_eval!(cx, height, {
+            min: #(height_min)
+            max: #(height_max)
+            step: #((height_step * 0.125).max(1.0))
+            snap: #(height_step)
+        });
+        self.view.set_visible(cx, dimensions.is_some());
+        if let Some((width, height)) = dimensions {
+            self.set_dimensions(cx, width, height);
+        }
+    }
+
+    /// A preset or swap click. Manual number edits only resynchronise the
+    /// label; the ordinary param bindings carry that one changed dimension.
+    fn changed(&mut self, cx: &mut Cx, actions: &Actions) -> Option<(u32, u32)> {
+        let width_ended = self
+            .view
+            .fab_value_input(cx, ids!(w_field))
+            .ended(actions)
+            .is_some();
+        let height_ended = self
+            .view
+            .fab_value_input(cx, ids!(h_field))
+            .ended(actions)
+            .is_some();
+        if width_ended || height_ended {
+            self.width = self.field_value(cx, ids!(w_field));
+            self.height = self.field_value(cx, ids!(h_field));
+            self.sync_selected(cx);
+        }
+        if let Some(index) = self.view.drop_down(cx, ids!(picker)).changed(actions) {
+            let preset = index
+                .checked_sub(1)
+                .and_then(|index| self.presets.get(index))?
+                .clone();
+            self.set_dimensions(cx, preset.width, preset.height);
+            return Some(preset.dimensions());
+        }
+        if self.view.button(cx, ids!(swap)).clicked(actions) {
+            let dimensions = (self.height, self.width);
+            self.set_dimensions(cx, dimensions.0, dimensions.1);
+            return Some(dimensions);
+        }
+        None
     }
 }
 
@@ -948,6 +1300,7 @@ pub struct MountedFace {
     pub shows: Vec<Bind>,
     pub params: Vec<(WidgetRef, String)>,
     pub param_binds: Vec<(WidgetRef, String)>,
+    pub format_pickers: Vec<WidgetRef>,
     pub dropdowns: Vec<WidgetRef>,
     pub on_value: Option<ScriptFnRef>,
     pub on_state: Option<ScriptFnRef>,
@@ -1218,8 +1571,19 @@ impl FaceHost {
                 .map(|entry| entry.face.clone())
                 .unwrap_or_else(|| "NodeFace".to_string());
             let face = match flow.as_ref() {
-                Some(flow) => host.mount_one(cx, parent, flow, node, Some(&face_name), graph),
-                None => host.mount_value(cx, parent, None, "ui", &node.id, Some(&face_name), graph),
+                Some(flow) => {
+                    host.mount_one(cx, parent, flow, node, Some(&face_name), graph, catalog)
+                }
+                None => host.mount_value(
+                    cx,
+                    parent,
+                    None,
+                    "ui",
+                    &node.id,
+                    Some(&face_name),
+                    graph,
+                    catalog,
+                ),
             };
             host.faces.insert(node.id.clone(), face);
         }
@@ -1233,7 +1597,16 @@ impl FaceHost {
                 deep_value(vm, flow_obj, "ui").is_some_and(|value| value.as_object().is_some())
             });
             if has_face {
-                let face = host.mount_value(cx, parent, Some(flow_obj), "ui", "flow", None, graph);
+                let face = host.mount_value(
+                    cx,
+                    parent,
+                    Some(flow_obj),
+                    "ui",
+                    "flow",
+                    None,
+                    graph,
+                    catalog,
+                );
                 host.flow_face = Some(face);
             }
         }
@@ -1249,6 +1622,7 @@ impl FaceHost {
         node: &Node,
         default_face: Option<&str>,
         graph: &Graph,
+        catalog: &[NodeTypeCatalog],
     ) -> MountedFace {
         let flow_obj = flow.as_object();
         let node_obj = cx.with_script_vm_id_trusted(self.vm_id, |vm| {
@@ -1260,7 +1634,16 @@ impl FaceHost {
                 ..Default::default()
             };
         };
-        self.mount_value(cx, parent, Some(node_obj), "ui", &node.id, default_face, graph)
+        self.mount_value(
+            cx,
+            parent,
+            Some(node_obj),
+            "ui",
+            &node.id,
+            default_face,
+            graph,
+            catalog,
+        )
     }
 
     /// Mount `owner.<field>` (or the named default face) for `node_id`.
@@ -1273,6 +1656,7 @@ impl FaceHost {
         node_id: &str,
         default_face: Option<&str>,
         graph: &Graph,
+        catalog: &[NodeTypeCatalog],
     ) -> MountedFace {
         let vm_id = self.vm_id;
         let node_objects = self.node_objects.clone();
@@ -1336,6 +1720,9 @@ impl FaceHost {
             let mut widgets = Vec::new();
             collect_widgets(&root, &mut widgets);
             for widget in widgets {
+                if widget.borrow::<FormatPicker>().is_some() {
+                    face.format_pickers.push(widget.clone());
+                }
                 if widget.borrow::<DropDown>().is_some() {
                     face.dropdowns.push(widget.clone());
                 }
@@ -1396,6 +1783,20 @@ impl FaceHost {
         let _ = parent;
         if let Some(node) = graph.nodes.iter().find(|node| node.id == node_id) {
             self.fill_params_for(cx, &mounted, node);
+            let isolate = enter_isolate(cx, self.vm_id);
+            if let Some(options) = format_options_for_node(node, catalog) {
+                let dimensions = node_dimensions(node);
+                for widget in &mounted.format_pickers {
+                    if let Some(mut picker) = widget.borrow_mut::<FormatPicker>() {
+                        picker.set_config(cx, options.clone(), dimensions);
+                    }
+                }
+            } else {
+                for widget in &mounted.format_pickers {
+                    widget.set_visible(cx, false);
+                }
+            }
+            leave_isolate(cx, isolate);
         }
         for show in &mounted.shows {
             let Some(ty) = graph
@@ -1630,6 +2031,13 @@ impl FaceHost {
                 set_widget_text(cx, widget, &text);
             }
         }
+        if let Some((width, height)) = node_dimensions(node) {
+            for widget in &face.format_pickers {
+                if let Some(mut picker) = widget.borrow_mut::<FormatPicker>() {
+                    picker.set_dimensions(cx, width, height);
+                }
+            }
+        }
         // An input's declared default fills its textbox until the instance
         // carries a value of its own.
         for bind in &face.binds {
@@ -1740,7 +2148,11 @@ impl FaceHost {
     }
 
     /// Widget changes on `param_bind` widgets → `(node, key, literal)`.
-    pub fn param_changes(&self, actions: &Actions) -> Vec<(String, String, Literal)> {
+    pub fn param_changes(
+        &self,
+        cx: &mut Cx,
+        actions: &Actions,
+    ) -> Vec<(String, String, Literal)> {
         let mut out = Vec::new();
         for (node, face) in &self.faces {
             for (widget, key) in &face.param_binds {
@@ -1762,6 +2174,15 @@ impl FaceHost {
                     if let Some(label) = widget.as_drop_down().changed_label(actions) {
                         out.push((node.clone(), key.clone(), Literal::Str(label)));
                     }
+                }
+            }
+            for widget in &face.format_pickers {
+                let dimensions = widget
+                    .borrow_mut::<FormatPicker>()
+                    .and_then(|mut picker| picker.changed(cx, actions));
+                if let Some((width, height)) = dimensions {
+                    out.push((node.clone(), "width".into(), Literal::Num(width as f64)));
+                    out.push((node.clone(), "height".into(), Literal::Num(height as f64)));
                 }
             }
         }
@@ -2245,6 +2666,55 @@ mod tests {
     }
 
     #[test]
+    fn format_preset_maps_to_dimensions() {
+        let presets: Vec<_> = IMAGE_FORMAT_PRESETS
+            .iter()
+            .map(|(name, width, height)| FormatPreset::new(*name, *width, *height))
+            .collect();
+        let portrait = presets
+            .iter()
+            .find(|preset| preset.name == "768×1024 (3:4)")
+            .unwrap();
+        assert_eq!(portrait.dimensions(), (768, 1024));
+    }
+
+    #[test]
+    fn dimensions_map_to_preset_name_or_custom() {
+        let presets: Vec<_> = IMAGE_FORMAT_PRESETS
+            .iter()
+            .map(|(name, width, height)| FormatPreset::new(*name, *width, *height))
+            .collect();
+        assert_eq!(format_preset_name(&presets, 1280, 720), "1280×720 (16:9)");
+        assert_eq!(format_preset_name(&presets, 1111, 777), CUSTOM_FORMAT);
+    }
+
+    #[test]
+    fn format_presets_are_filtered_per_node_catalog() {
+        let catalog = makepad_flow::graph::prelude_catalog().unwrap();
+        let graph = makepad_flow::graph::evaluate(
+            "use mod.flow.*\nlet image = Image{}\nlet video = Video{}\nlet generic = Gen{width: 800 height: 600}\nFlow{image video generic}\n",
+            "<format-presets>",
+        )
+        .unwrap();
+        let node = |name: &str| graph.nodes.iter().find(|node| node.id == name).unwrap();
+        let image = format_options_for_node(node("image"), &catalog).unwrap();
+        assert_eq!(image.presets.len(), IMAGE_FORMAT_PRESETS.len());
+
+        let video = format_options_for_node(node("video"), &catalog).unwrap();
+        assert_eq!(
+            video
+                .presets
+                .iter()
+                .map(FormatPreset::dimensions)
+                .collect::<Vec<_>>(),
+            vec![(640, 352), (864, 480), (960, 544)]
+        );
+
+        let generic = format_options_for_node(node("generic"), &catalog).unwrap();
+        assert_eq!(generic.presets.len(), IMAGE_FORMAT_PRESETS.len());
+    }
+
+    #[test]
     fn placeholder_icon_maps_every_port_type() {
         for (ty, svg) in [
             (PortType::Text, include_str!("../resources/icons/text.svg")),
@@ -2312,7 +2782,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "F3h: FnFace gains a params strip so a face-declared control mounts as a labelled row (the picker moved to add_style)"]
     fn face_declared_picker_is_mounted_as_a_labelled_strip_row() {
         let source = include_str!("../../../libs/flow/recipes/templates/prompt-to-image.splash");
         let graph = makepad_flow::graph::evaluate(source, "<face-row>").unwrap();
