@@ -253,6 +253,9 @@ impl Cx {
                     continue;
                 };
 
+                if self.geometries.skip_stale(geometry_id) {
+                    continue;
+                }
                 let geometry = &mut self.geometries[geometry_id];
 
                 if !crate::geometry::geometry_backend_supports_typed(
