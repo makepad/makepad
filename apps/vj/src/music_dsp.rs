@@ -281,6 +281,11 @@ const WSOLA_CORR_STRIDE: usize = 2;
 const WSOLA_REGION: usize = 2 * WSOLA_SEARCH + WSOLA_CORR;
 /// Ratios inside this band are treated as "no stretch" and bypass entirely.
 pub const STRETCH_BYPASS_EPSILON: f64 = 1e-4;
+/// The ratio at which the stretcher ENGAGES; it disengages back at
+/// [`STRETCH_BYPASS_EPSILON`]. The gap is hysteresis: a sync servo trimming
+/// the rate around unity would otherwise switch the stretcher in and out
+/// many times a second, and every switch re-seats the playhead.
+pub const STRETCH_ENGAGE_EPSILON: f64 = 1e-3;
 /// Widest stretch the grain search can still track. A caller that splits a
 /// tempo between the stretcher and a resampler must clamp to the SAME pair
 /// and recover the resampler from the result, or the two disagree about the
@@ -378,6 +383,19 @@ impl Stretcher {
 
     pub fn ended(&self) -> bool {
         self.ended
+    }
+
+    /// The source frame the ear is actually at: the grain the search
+    /// chose, plus what has been emitted of it. `position()` is the
+    /// IDEAL anchor the search worked from and can sit up to a search
+    /// width away; a hand-over to direct reading has to continue from
+    /// here, or the join is heard as a small skip.
+    pub fn heard_position(&self) -> f64 {
+        if self.primed {
+            (self.last_start + self.emitted) as f64
+        } else {
+            self.anchor
+        }
     }
 
     /// One output frame at the source sample rate, pitch unchanged.

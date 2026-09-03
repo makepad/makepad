@@ -14250,6 +14250,9 @@ p2 {}
                 DeckCmd::SeekSeconds { deck, secs } => {
                     self.mixer.seek_deck_seconds(deck, secs)
                 }
+                DeckCmd::SeekRelative { deck, delta_secs } => {
+                    self.mixer.nudge_deck_seconds(deck, delta_secs)
+                }
                 DeckCmd::Scratch { deck, motion } => self.mixer.scratch_deck(deck, motion),
                 DeckCmd::SetKeylock { deck, on } => self.mixer.set_deck_keylock(deck, on),
                 DeckCmd::SetKeyShift { deck, semitones } => {
@@ -22586,8 +22589,15 @@ p2 {}
             }
             return Some(("analysing the beat grid…".to_string(), None));
         }
+        // The banner is for something PENDING on the stems: a separation
+        // or a fetch in flight. Once they are in, or nothing is running —
+        // finished, never asked for, or failed (the deck's own status line
+        // carries the reason) — the grid has nothing to wait for, whatever
+        // the coverage counter got to say: a side-channel fetch never
+        // files a complete one, which is what left "stems: live" over the
+        // grid for good.
         let complete = self.deck_stem_coverage[index].is_some_and(|(_, complete)| complete);
-        if complete && self.deck_stems[index].is_some() {
+        if self.deck_stem_busy[index] != Some(true) || (complete && self.deck_stems[index].is_some()) {
             return None;
         }
         let progress = self.deck_stem_coverage[index].and_then(|(covered, _)| {
@@ -26121,10 +26131,6 @@ impl MatchEvent for App {
         // only party with a clock, so it seeds once here.
         let seed = Cx::time_now().to_bits().max(1);
         self.decks.seed_shuffle(seed);
-        // A sync landing is computed from playheads that keep moving while
-        // the seek crosses to the audio thread — place it where the lock
-        // will be true when it arrives (UI pump + one audio block).
-        self.decks.land_lookahead_secs = 0.012;
         self.poll_timer = cx.start_interval(0.05);
         self.refresh_timer = cx.start_interval(1.0);
         self.video_loop = true;
