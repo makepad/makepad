@@ -1115,25 +1115,51 @@ fn load_attribution(audio: &PreparedAudio) -> Result<TrackAttribution, String> {
     Ok(attribution)
 }
 
+/// The licences a public demo may redistribute — attribution and share-alike in every CC version,
+/// and the public domain. Returns the SPDX-style id, its version and the licence text URL.
+fn licence_spec(text: &str) -> Option<(String, String, String)> {
+    let text = text.trim();
+    if text == "Public Domain (CC0 1.0)" || text == "CC0 1.0" {
+        return Some((
+            "CC0-1.0".to_string(),
+            "1.0".to_string(),
+            "https://creativecommons.org/publicdomain/zero/1.0/legalcode".to_string(),
+        ));
+    }
+    if text == "Public Domain" || text == "Public Domain Mark 1.0" {
+        return Some((
+            "PDM-1.0".to_string(),
+            "1.0".to_string(),
+            "https://creativecommons.org/publicdomain/mark/1.0/".to_string(),
+        ));
+    }
+    let (version, slug) = if let Some(rest) = text.strip_prefix("CC BY-SA ") {
+        (rest.trim(), "by-sa")
+    } else if let Some(rest) = text.strip_prefix("CC BY ") {
+        (rest.trim(), "by")
+    } else {
+        return None;
+    };
+    if !matches!(version, "1.0" | "2.0" | "2.5" | "3.0" | "4.0") {
+        return None;
+    }
+    Some((
+        format!("CC-{}-{version}", slug.to_ascii_uppercase()),
+        version.to_string(),
+        format!("https://creativecommons.org/licenses/{slug}/{version}/legalcode"),
+    ))
+}
+
 fn attribution_rights(
     audio: &PreparedAudio,
     attribution: &TrackAttribution,
 ) -> Result<(Rights, String), String> {
-    let (license, revision) = match attribution.license.as_str() {
-        "CC BY 4.0" => ("CC-BY-4.0", "4.0"),
-        "CC BY-SA 3.0" => ("CC-BY-SA-3.0", "3.0"),
-        "Public Domain (CC0 1.0)" => ("CC0-1.0", "1.0"),
-        other => {
-            return Err(format!(
-                "{}: unsupported licence {other:?}; expected CC BY 4.0, CC BY-SA 3.0, or Public Domain (CC0 1.0)",
-                audio.path.display()
-            ));
-        }
-    };
-    let default_terms_url = match attribution.license.as_str() {
-        "CC BY 4.0" => "https://creativecommons.org/licenses/by/4.0/legalcode",
-        "CC BY-SA 3.0" => "https://creativecommons.org/licenses/by-sa/3.0/legalcode",
-        _ => "https://creativecommons.org/publicdomain/zero/1.0/legalcode",
+    let Some((license, revision, default_terms_url)) = licence_spec(&attribution.license) else {
+        return Err(format!(
+            "{}: unsupported licence {:?}; expected \"CC BY <version>\", \"CC BY-SA <version>\", \"Public Domain (CC0 1.0)\" or \"Public Domain\"",
+            audio.path.display(),
+            attribution.license
+        ));
     };
     let rights = Rights {
         license: license.to_string(),
