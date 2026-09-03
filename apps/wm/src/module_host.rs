@@ -19,7 +19,7 @@
 //! — is the InstanceScope gap the next phase closes.
 
 use crate::hub::ClientId;
-use makepad_ai_services::wire::{ServiceCall, ServiceManifest, ToolResult};
+use makepad_ai_services::wire::{ServiceCall, ServiceManifest};
 use makepad_app_module::*;
 use makepad_widgets::*;
 use std::collections::HashMap;
@@ -35,8 +35,8 @@ pub struct AppInstance {
     pub root: WidgetRef,
     executor: Box<dyn ServiceExecutor>,
     shutdown: Option<Box<dyn FnOnce(&mut ScriptVm)>>,
-    /// Results of calls the executor answered later.
-    replies: Receiver<ToolResult>,
+    /// Results and publications the executor sent later.
+    upstream: Receiver<ModuleUpstream>,
 }
 
 impl AppInstance {
@@ -76,7 +76,7 @@ impl ModuleHost {
         // The storage jail: a namespace of the Cx storage API, one per
         // instance (§3b's mount and the web's IndexedDB sit under it).
         let storage = cx.storage(&format!("{}.{}", module.id(), instance_no));
-        let (replies, rx) = ReplySink::pair();
+        let (replies, upstream) = ReplySink::pair();
         let handles = InstanceHandles { scope, storage, viewport: Viewport { size: viewport }, replies };
         let vm_id = cx.alloc_splash_vm_with_network(false);
         let parts = cx.with_script_vm_id_trusted(vm_id, |vm| {
@@ -105,7 +105,7 @@ impl ModuleHost {
                 root: parts.root,
                 executor: parts.executor,
                 shutdown: Some(parts.shutdown),
-                replies: rx,
+                upstream,
             },
         );
         Ok(())
@@ -139,18 +139,37 @@ impl ModuleHost {
         }
     }
 
+    pub fn subscribe(
+        &mut self,
+        cx: &mut Cx,
+        client: ClientId,
+        sub_id: &str,
+        topic: &str,
+        filter: Option<&str>,
+    ) {
+        if let Some(instance) = self.instances.get_mut(&client) {
+            instance.executor.subscribe(cx, sub_id, topic, filter);
+        }
+    }
+
+    pub fn unsubscribe(&mut self, cx: &mut Cx, client: ClientId, sub_id: &str) {
+        if let Some(instance) = self.instances.get_mut(&client) {
+            instance.executor.unsubscribe(cx, sub_id);
+        }
+    }
+
     pub fn chat_open(&mut self, cx: &mut Cx, open: bool) {
         for instance in self.instances.values_mut() {
             instance.executor.chat_open(cx, open);
         }
     }
 
-    /// Every result an executor answered later, with its client.
-    pub fn drain_replies(&mut self) -> Vec<(ClientId, ToolResult)> {
+    /// Every result or publication an executor sent later, with its client.
+    pub fn drain_upstream(&mut self) -> Vec<(ClientId, ModuleUpstream)> {
         let mut out = Vec::new();
         for (client, instance) in &self.instances {
-            while let Ok(result) = instance.replies.try_recv() {
-                out.push((*client, result));
+            while let Ok(message) = instance.upstream.try_recv() {
+                out.push((*client, message));
             }
         }
         out
