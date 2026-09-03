@@ -21051,6 +21051,7 @@ p2 {}
                 ),
             );
             self.deck_analysis[index] = Some(done.analysis);
+            self.say_key_against_the_room(cx, deck);
             if self.deck_stem_coverage[index].is_some_and(|(_, complete)| complete) {
                 self.submit_splat_refinement(deck, done.gen);
             }
@@ -23410,7 +23411,8 @@ p2 {}
             .into_iter()
             .map(|(index, asset, title)| {
                 let key = TrackKey::Asset(asset);
-                let (bpm, musical_key, key_order, duration) = self.row_analysis_cells(&key);
+                let (bpm, musical_key, key_order, key_fit, duration) =
+                    self.row_analysis_cells(&key);
                 let (artist, album, genre, year, bitrate) = self.row_metadata(&key);
                 let side = self
                     .music_model_tile(asset)
@@ -23427,6 +23429,7 @@ p2 {}
                     bpm,
                     musical_key,
                     key_order,
+                    key_fit,
                     duration,
                     tags: String::new(),
                     stem: side.is_some_and(|side| side.stems.is_some()),
@@ -23585,15 +23588,63 @@ p2 {}
 
     /// The two analysed columns as the cells want them: blank when nothing
     /// has judged this track, rather than a zero that reads as a fact.
+    /// Say how this deck's key sits with what the room is hearing -- and,
+    /// when it clashes, whether a semitone would fix it.
+    ///
+    /// Said once, when the analysis lands, and only about the deck that is
+    /// NOT the one leading: an operator who has just cued a record up
+    /// wants to know before they bring it in, and telling them about the
+    /// record already playing is telling them about a decision they cannot
+    /// take back.
+    fn say_key_against_the_room(&mut self, cx: &mut Cx, deck: DeckId) {
+        let Some(room) = self.room_key() else { return };
+        if self.decks.sync_leader() == Some(deck) {
+            return;
+        }
+        let Some(mine) = self.deck_analysis[deck.index()].as_ref().and_then(|a| a.key) else {
+            return;
+        };
+        let name = if deck == DeckId::A { "A" } else { "B" };
+        let fit = crate::track_key::key_fit(room, mine);
+        if fit >= crate::music_view::KEY_FIT_GOOD {
+            return;
+        }
+        let (shift, shifted) = crate::track_key::key_shift_to_fit(room, mine);
+        let line = match shift != 0 && shifted >= crate::music_view::KEY_FIT_GOOD {
+            true => format!(
+                "deck {name} is {} against the room, and {shift:+} semitone would sit right",
+                mine.label(self.key_notation)
+            ),
+            false => format!(
+                "deck {name} is {} against the room",
+                mine.label(self.key_notation)
+            ),
+        };
+        self.set_music_import_status(cx, &line);
+    }
+
+    /// The key the room is hearing, if it is hearing one: the leading
+    /// deck's, and only while that deck is actually audible. A key nobody
+    /// can hear is not a reference to judge a library against.
+    fn room_key(&self) -> Option<crate::track_key::KeyEstimate> {
+        let deck = self.decks.sync_leader()?;
+        if !self.decks.deck_audible(deck) {
+            return None;
+        }
+        self.deck_analysis[deck.index()].as_ref()?.key
+    }
+
     fn row_analysis_cells(
         &mut self,
         key: &TrackKey,
-    ) -> (String, String, u8, String) {
+    ) -> (String, String, u8, Option<f32>, String) {
+        let room = self.room_key();
         let Some(summary) = self.row_summary(key) else {
             return (
                 String::new(),
                 String::new(),
                 crate::music_view::NO_KEY_ORDER,
+                None,
                 String::new(),
             );
         };
@@ -23605,11 +23656,16 @@ p2 {}
             summary.key.map(|key| key.label(self.key_notation)).unwrap_or_default();
         let key_order =
             summary.key.map_or(crate::music_view::NO_KEY_ORDER, |key| key.wheel_order());
+        // Against what the room is hearing, when there is something to
+        // compare with. Neither half missing is a clash.
+        let key_fit = room
+            .zip(summary.key)
+            .map(|(room, mine)| crate::track_key::key_fit(room, mine));
         let duration = match summary.duration_secs > 0.0 {
             true => format_duration(summary.duration_secs),
             false => String::new(),
         };
-        (bpm, musical_key, key_order, duration)
+        (bpm, musical_key, key_order, key_fit, duration)
     }
 
     /// The explorer's rows: the store's music catalog, or local files —
@@ -23622,7 +23678,8 @@ p2 {}
                 .map(|path| {
                     let key = TrackKey::Local(path.clone());
                     let (badge, live) = self.deck_badge(&key);
-                    let (bpm, musical_key, key_order, duration) = self.row_analysis_cells(&key);
+                    let (bpm, musical_key, key_order, key_fit, duration) =
+                    self.row_analysis_cells(&key);
                     let (artist, album, genre, year, bitrate) = self.row_metadata(&key);
                     // The file's own title tag beats its filename — the
                     // filename is a naming convention, the tag is what the
@@ -23642,6 +23699,7 @@ p2 {}
                         bpm,
                         musical_key,
                         key_order,
+                        key_fit,
                         duration,
                         tags: path
                             .parent()
@@ -23680,7 +23738,7 @@ p2 {}
                 // to be holding it, which meant a record that had been
                 // analysed a hundred times still showed blank columns the
                 // moment it was unloaded.
-                let (mut bpm, musical_key, key_order, mut duration) =
+                let (mut bpm, musical_key, key_order, key_fit, mut duration) =
                     self.row_analysis_cells(&key);
                 // A deck that is holding this track knows its length before
                 // the analysis lands, and has the live grid if the operator
@@ -23709,6 +23767,7 @@ p2 {}
                     bpm,
                     musical_key,
                     key_order,
+                    key_fit,
                     duration,
                     tags: alias.unwrap_or_default(),
                     stem,

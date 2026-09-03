@@ -6151,6 +6151,10 @@ pub struct TrackRowEntry {
     /// musically without the list having to know what the text means.
     /// [`NO_KEY_ORDER`] for a track nothing has judged.
     pub key_order: u8,
+    /// How this record's key sits with what the room is hearing, 0..=1.
+    /// `None` when nothing is playing, or when either key is unknown --
+    /// which is not the same as a clash and must not be painted like one.
+    pub key_fit: Option<f32>,
     pub duration: String,
     pub tags: String,
     /// The store holds this track's four separated stems.
@@ -6176,6 +6180,7 @@ impl TrackRowEntry {
             bpm: String::new(),
             musical_key: String::new(),
             key_order: NO_KEY_ORDER,
+            key_fit: None,
             duration: String::new(),
             tags: String::new(),
             stem: false,
@@ -6835,6 +6840,23 @@ pub fn column_text(column: Column, entry: &TrackRowEntry) -> String {
 /// A column's ink. Tempo and key wear their own colours because they are
 /// what the eye hunts for while beatmatching; the rest are quieter than the
 /// title so a full row still reads title-first.
+/// A key that shares most of its notes with what the room is hearing.
+/// Below this the two records are far enough round the wheel to be heard
+/// arguing.
+pub const KEY_FIT_GOOD: f32 = 0.85;
+
+/// The colour a KEY cell is drawn in, given how that key sits with the
+/// room. Deliberately only three answers: it is a glance, not a reading.
+pub fn key_cell_color(fit: Option<f32>) -> u32 {
+    match fit {
+        // Nothing to compare against: the column's own colour, exactly as
+        // every other cell gets.
+        None => column_color(Column::Key),
+        Some(fit) if fit >= KEY_FIT_GOOD => 0x9be8b0ff,
+        Some(_) => 0xd8776bff,
+    }
+}
+
 pub fn column_color(column: Column) -> u32 {
     match column {
         Column::Title => 0xd6dee6ff,
@@ -7082,7 +7104,10 @@ impl Widget for VjTrackList {
                         let mut cell_ref = widget.borrow_mut::<Label>();
                         let Some(label) = cell_ref.as_mut() else { continue };
                         label.walk.width = column_size(column, self.narrow);
-                        label.draw_text.color = Vec4f::from_u32(column_color(column));
+                        label.draw_text.color = Vec4f::from_u32(match column {
+                            Column::Key => key_cell_color(entry.key_fit),
+                            other => column_color(other),
+                        });
                         drop(cell_ref);
                         item.label(cx, cell).set_text(cx, &column_text(column, entry));
                     }
@@ -7269,6 +7294,20 @@ pub fn format_key_shift(semitones: f64) -> String {
 mod tests {
     use super::*;
 
+    /// The key cell says at a glance whether a record will sit with the
+    /// room, and says nothing at all when there is nothing to sit with.
+    #[test]
+    fn the_key_cell_is_coloured_by_how_it_sits_with_the_room() {
+        let plain = column_color(Column::Key);
+        assert_eq!(key_cell_color(None), plain, "no reference is not a clash");
+        assert_ne!(key_cell_color(Some(1.0)), plain, "a match reads as one");
+        assert_ne!(key_cell_color(Some(0.4)), key_cell_color(Some(1.0)));
+        // The threshold is a share of the notes two keys have in common,
+        // so a neighbour on the wheel still reads as agreeable.
+        assert_eq!(key_cell_color(Some(KEY_FIT_GOOD)), key_cell_color(Some(1.0)));
+    }
+
+
     fn filled_row() -> TrackRowEntry {
         TrackRowEntry {
             key: TrackKey::Local(PathBuf::from("a.mp3")),
@@ -7281,6 +7320,7 @@ mod tests {
             bpm: "123.0".into(),
             musical_key: "8A".into(),
             key_order: 14,
+            key_fit: None,
             duration: "3:16".into(),
             tags: "Tags".into(),
             stem: true,
