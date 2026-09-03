@@ -1145,10 +1145,68 @@ export class WasmWebGL extends WasmWebBrowser {
         0,
       );
     }
-    // TODO implement depth target
+    // Depth target: a real depth/stencil texture, so a texture pass
+    // depth-tests exactly like the canvas and like Metal. Without it every
+    // 3D scene rendered into a texture (the tilted map under its tilt-shift
+    // blur, effect thumbnails) was draw-order only: roofs overpainted by
+    // the walls drawn after them, buildings hollow, landmarks buried.
+    let dt = args.depth_target;
+    if (dt.attached) {
+      var gl_dtex =
+        this.textures[dt.texture_id] ||
+        (this.textures[dt.texture_id] = gl.createTexture());
+      if (
+        gl_dtex._width != args.width ||
+        gl_dtex._height != args.height ||
+        !gl_dtex._depth
+      ) {
+        gl.bindTexture(gl.TEXTURE_2D, gl_dtex);
+        gl_dtex._width = args.width;
+        gl_dtex._height = args.height;
+        gl_dtex._depth = true;
+        gl_dtex._format = -1;
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(
+          gl.TEXTURE_2D,
+          0,
+          gl.DEPTH24_STENCIL8,
+          args.width,
+          args.height,
+          0,
+          gl.DEPTH_STENCIL,
+          gl.UNSIGNED_INT_24_8,
+          null,
+        );
+        clear_flags |= gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT;
+      } else if (!dt.init_only) {
+        clear_flags |= gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT;
+      }
+      clear_depth = dt.clear_depth;
+      gl.framebufferTexture2D(
+        gl.FRAMEBUFFER,
+        gl.DEPTH_STENCIL_ATTACHMENT,
+        gl.TEXTURE_2D,
+        gl_dtex,
+        0,
+      );
+    } else {
+      gl.framebufferTexture2D(
+        gl.FRAMEBUFFER,
+        gl.DEPTH_STENCIL_ATTACHMENT,
+        gl.TEXTURE_2D,
+        null,
+        0,
+      );
+    }
     gl.viewport(0, 0, args.width, args.height);
 
     if (clear_flags !== 0) {
+      // glClear honours the depth mask; the previous draw call may have
+      // left it off.
+      gl.depthMask(true);
       gl.clearColor(clear_color.r, clear_color.g, clear_color.b, clear_color.a);
       gl.clearDepth(clear_depth);
       gl.clear(clear_flags);
@@ -1301,6 +1359,7 @@ export class WasmWebGL extends WasmWebBrowser {
       gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     }
     let c = args.clear_color;
+    gl.depthMask(true);
     gl.clearColor(c.r, c.g, c.b, c.a);
     gl.clearDepth(args.clear_depth);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
