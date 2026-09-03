@@ -442,29 +442,25 @@ impl Cx {
                 // camera, so the flip must never accumulate) and upload a
                 // flipped copy instead.
                 let mut flipped = pass.pass_uniforms.clone();
-                for m in [&mut flipped.camera_projection, &mut flipped.camera_projection_r] {
-                    m.v[1] = -m.v[1];
-                    m.v[5] = -m.v[5];
-                    m.v[9] = -m.v[9];
-                    m.v[13] = -m.v[13];
-                }
+                flip_projection_y(&mut flipped.camera_projection);
+                flip_projection_y(&mut flipped.camera_projection_r);
                 pass.os.flipped_uniforms = Some(flipped.as_slice().to_vec());
                 pass.mark_pass_uniforms_dirty(changed_uniforms_gen);
             } else {
-                let offset = pass_rect.pos + pass.view_shift;
-                let size = pass_rect.size * pass.view_scale;
-                pass.pass_uniforms.camera_projection = Mat4f::ortho(
-                    offset.x as f32,
-                    (offset.x + size.x) as f32,
-                    (offset.y + size.y) as f32,
-                    offset.y as f32,
-                    100.0,
-                    -100.0,
-                    1.0,
-                    1.0,
-                );
-                pass.pass_uniforms.camera_view = Mat4f::identity();
-                pass.mark_pass_uniforms_dirty(changed_uniforms_gen);
+                // The 2D camera is built in ONE place, `set_ortho_matrix`,
+                // on every backend — it is also where the exploded view's
+                // `camera_view` comes from (`crate::sploded`). Building the
+                // ortho by hand here, with the identity for `camera_view`,
+                // dropped that camera for the exploded BODY pass, which
+                // renders through a texture: its draw calls sit at
+                // `nesting_depth * SPLODED_DEPTH_UNIT` in z, which without
+                // the explode camera's z scale lies far outside the ortho's
+                // clip range, so every one of them was clipped away and the
+                // web showed a bare window where Metal drew the stack. Same
+                // matrix as the canvas, then the Y inversion for the
+                // bottom-up target, as the custom-camera branch above.
+                pass.set_ortho_matrix(pass_rect.pos, pass_rect.size, changed_uniforms_gen);
+                flip_projection_y(&mut pass.pass_uniforms.camera_projection);
             }
         } else {
             if !pass.keep_camera_matrix {
@@ -799,6 +795,16 @@ vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
             pixel,
         }
     }
+}
+
+/// WebGL renders a texture pass into a bottom-up target: negate the
+/// projection's Y row so the texels land in the top-left row order Metal and
+/// D3D produce (see `Cx::setup_render_pass`).
+fn flip_projection_y(m: &mut Mat4f) {
+    m.v[1] = -m.v[1];
+    m.v[5] = -m.v[5];
+    m.v[9] = -m.v[9];
+    m.v[13] = -m.v[13];
 }
 
 #[derive(Default, Clone, Debug)]
