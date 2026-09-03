@@ -1235,6 +1235,26 @@ fn extract_node(
             &loc,
         ));
     }
+    let size_source = fields.get("size").copied().or_else(|| {
+        source_field_in_chain(vm, obj, source, file_name, "size")
+    });
+    let size_value = size_source.and_then(|range| {
+        let value = source[range.0..range.1].trim();
+        (value != "nil").then(|| parse_vec2(value)).flatten()
+    });
+    if size_source.is_some()
+        && size_value.is_none()
+        && size_source.is_some_and(|range| source[range.0..range.1].trim() != "nil")
+    {
+        return Err(field_error(
+            source,
+            span,
+            "size",
+            file_name,
+            "size must be nil or vec2(number, number)",
+            &loc,
+        ));
+    }
     let fn_src = if type_name == "Fn" {
         let run = deep_value(vm, obj, "run").unwrap_or(NIL);
         let is_fn = run
@@ -1289,7 +1309,7 @@ fn extract_node(
             )
         })?),
     };
-    let domain = if spec.kind == "gen" {
+    let domain = if matches!(spec.kind, "gen" | "chat") {
         Some(expect_string_field(vm, obj, "domain", source, span, file_name)?)
     } else {
         None
@@ -1306,6 +1326,7 @@ fn extract_node(
         inputs,
         outputs,
         at: at_value,
+        size: size_value,
         loc,
         fn_src,
         face_src,
@@ -1386,7 +1407,7 @@ fn generic_gen_params(
     input_names: &HashSet<String>,
 ) -> Result<Vec<(String, Literal)>, EvalError> {
     let reserved: HashSet<&str> = [
-        "kind", "type_name", "domain", "ports", "at", "ui", "on_fail", "label", "out",
+        "kind", "type_name", "domain", "ports", "at", "size", "ui", "on_fail", "label", "out",
     ]
     .into_iter()
     .collect();

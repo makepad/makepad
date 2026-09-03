@@ -27,6 +27,8 @@ mod.flow.Node = {
     type_name: "Node"
     /** Canvas position. */
     at: nil
+    /** Optional canvas size. */
+    size: nil
     /** Optional node face. */
     ui: nil
     /** Failure policy: fail or skip. */
@@ -76,6 +78,7 @@ mod.flow.Output = mod.flow.Node{
 mod.flow.Llm = mod.flow.Node{
     kind: @chat
     type_name: "Llm"
+    domain: "text"
     /** Instruction for the language model. */
     system: ""
     /** Text sent to the language model. */
