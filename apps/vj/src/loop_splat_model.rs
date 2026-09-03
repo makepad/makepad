@@ -36,29 +36,16 @@ pub fn splat_view_model(
     enabled: bool,
     snapshot: Option<&SplatSnapshot>,
     coverage: &SplatCoverage,
-    duration_secs: f64,
 ) -> SplatViewModel {
     let mut model = SplatViewModel::empty(splat_deck(deck));
     model.enabled = snapshot.map_or(enabled, |snapshot| snapshot.active);
     model.cols = grid.sections.len();
     model.col_bars = grid.bars_per_col;
-    model.duration_secs = if duration_secs.is_finite() {
-        duration_secs.clamp(0.0, f32::MAX as f64) as f32
-    } else {
-        0.0
-    };
-    for (target, section) in model.col_start_secs.iter_mut().zip(&grid.sections) {
-        *target = section.start_secs;
-    }
     model.bar_phase = snapshot.map_or(0.0, |snapshot| snapshot.bar_phase);
 
     for (row_index, row) in SplatRow::ALL.into_iter().enumerate() {
         for col in 0..SPLAT_COLS {
             let Some(cell) = grid.cells[row_index][col] else { continue };
-            model.spans[row_index][col] = (
-                cell.span.start_secs as f32,
-                cell.span.len_secs().max(0.0) as f32,
-            );
             if row.stem().is_some()
                 && (!coverage.stems_present
                     || cell.span.end_secs * coverage.model_rate as f64
@@ -147,13 +134,13 @@ mod tests {
         grid.cells[SplatRow::Drums.index()][1] = Some(cell(2.0, 4.0, 0.7, false));
         grid.cells[SplatRow::Mix.index()][1] = Some(cell(2.0, 4.0, 0.8, false));
 
-        let model = splat_view_model(DeckId::A, &grid, false, None, &coverage(20), 4.0);
+        let model = splat_view_model(DeckId::A, &grid, false, None, &coverage(20));
         assert_eq!(model.cells[SplatRow::Drums.index()][0], SplatCellView::Ready { energy: 0.6 });
         assert_eq!(model.cells[SplatRow::Drums.index()][1], SplatCellView::Empty);
         assert_eq!(model.cells[SplatRow::Mix.index()][1], SplatCellView::Ready { energy: 0.8 });
 
         let no_stems = SplatCoverage { stems_present: false, ..coverage(usize::MAX) };
-        let model = splat_view_model(DeckId::A, &grid, false, None, &no_stems, 4.0);
+        let model = splat_view_model(DeckId::A, &grid, false, None, &no_stems);
         assert_eq!(model.cells[SplatRow::Drums.index()][0], SplatCellView::Empty);
         assert_eq!(model.cells[SplatRow::Mix.index()][1], SplatCellView::Ready { energy: 0.8 });
     }
@@ -184,7 +171,6 @@ mod tests {
             false,
             Some(&snapshot),
             &coverage(usize::MAX),
-            4.0,
         );
         assert!(model.enabled);
         assert_eq!(model.bar_phase, 0.3);
@@ -215,48 +201,23 @@ mod tests {
             true,
             Some(&snapshot),
             &coverage(usize::MAX),
-            2.0,
         );
         assert_eq!(model.cells[row][0], SplatCellView::Silent);
     }
 
     #[test]
-    fn columns_and_section_starts_are_copied() {
+    fn columns_and_bar_counts_are_copied() {
         let mut grid = grid(3);
         grid.bars_per_col[..3].copy_from_slice(&[1, 2, 4]);
-        let model = splat_view_model(DeckId::B, &grid, true, None, &coverage(0), 6.25);
+        let model = splat_view_model(DeckId::B, &grid, true, None, &coverage(0));
         assert_eq!(model.deck, SplatDeck::B);
         assert_eq!(model.cols, 3);
         assert_eq!(&model.col_bars[..3], &[1, 2, 4]);
-        assert_eq!(&model.col_start_secs[..3], &[0.0, 2.0, 4.0]);
-        assert_eq!(model.duration_secs, 6.25);
-    }
-
-    #[test]
-    fn cell_spans_are_copied_and_missing_cells_stay_zero() {
-        let mut grid = grid(2);
-        let drums = SplatRow::Drums.index();
-        let mix = SplatRow::Mix.index();
-        grid.cells[drums][0] = Some(cell(1.25, 2.75, 0.6, false));
-        grid.cells[mix][1] = Some(cell(4.0, 5.5, 0.8, true));
-
-        let model = splat_view_model(
-            DeckId::A,
-            &grid,
-            false,
-            None,
-            &coverage(usize::MAX),
-            8.0,
-        );
-
-        assert_eq!(model.spans[drums][0], (1.25, 1.5));
-        assert_eq!(model.spans[mix][1], (4.0, 1.5));
-        assert_eq!(model.spans[drums][1], (0.0, 0.0));
     }
 
     #[test]
     fn an_empty_grid_maps_to_an_empty_model() {
-        let model = splat_view_model(DeckId::A, &grid(0), false, None, &coverage(0), 0.0);
+        let model = splat_view_model(DeckId::A, &grid(0), false, None, &coverage(0));
         assert_eq!(model, SplatViewModel::empty(SplatDeck::A));
     }
 

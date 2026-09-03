@@ -51,6 +51,21 @@ pub fn stem_color(stem: usize) -> Vec4f {
     vec4(c[0], c[1], c[2], c[3])
 }
 
+const DECK_ACCENTS: [[f32; 4]; 2] = [
+    [1.0, 0.361, 0.224, 1.0],
+    [0.416, 0.659, 1.0, 1.0],
+];
+
+fn deck_accent(deck: DeckId) -> Vec4f {
+    let c = DECK_ACCENTS[deck.index()];
+    vec4(c[0], c[1], c[2], c[3])
+}
+
+fn set_loop_color_uniform(lane: &mut DrawWaveLane, cx: &Cx2d, color: Vec4f) {
+    lane.draw_vars
+        .set_uniform(cx, live_id!(color_loop), &[color.x, color.y, color.z, 0.18]);
+}
+
 /// Push the stem palette into the wave-lane shader's four colour uniforms.
 fn set_stem_color_uniforms(lane: &mut DrawWaveLane, cx: &Cx2d) {
     for (id, stem) in [
@@ -209,73 +224,7 @@ script_mod! {
 
     set_type_default() do #(DrawSplatCell::script_shader(vm)){
         ..mod.draw.DrawQuad
-        tex_mix: texture_2d(float)
-        tex_stems: texture_2d(float)
         time: uniform(0.0)
-
-        mix_level_at: fn(column: float, base_row: float, level_cols: float, scale: float) -> vec4 {
-            let c = clamp(floor(column / scale), 0.0, max(level_cols - 1.0, 0.0))
-            let wrap = floor(c / self.tex_w)
-            let u = (c - wrap * self.tex_w + 0.5) / self.tex_w
-            let v = (base_row + wrap + 0.5) / self.tex_h
-            return self.tex_mix.sample_as_bgra(vec2(u, v))
-        }
-
-        mix_span: fn(column: float) -> vec4 {
-            let lo = self.mix_level_at(column, self.lo_row, self.lo_cols, self.lo_scale)
-            if self.lod_blend <= 0.0 {
-                if self.lo_scale <= 1.0 {
-                    let base = floor(column - 0.5)
-                    let f = column - 0.5 - base
-                    let a = self.mix_level_at(base, self.lo_row, self.lo_cols, 1.0)
-                    let b = self.mix_level_at(base + 1.0, self.lo_row, self.lo_cols, 1.0)
-                    return a * (1.0 - f) + b * f
-                }
-                return lo
-            }
-            let hi = self.mix_level_at(column, self.hi_row, self.hi_cols, self.hi_scale)
-            return lo * (1.0 - self.lod_blend) + hi * self.lod_blend
-        }
-
-        stem_level_at: fn(column: float, base_row: float, level_cols: float, scale: float) -> vec4 {
-            let c = clamp(floor(column / scale), 0.0, max(level_cols - 1.0, 0.0))
-            let wrap = floor(c / self.tex_w)
-            let u = (c - wrap * self.tex_w + 0.5) / self.tex_w
-            let v = (base_row + wrap + 0.5) / self.tex_h
-            return self.tex_stems.sample_as_bgra(vec2(u, v))
-        }
-
-        stem_span: fn(column: float) -> vec4 {
-            let lo = self.stem_level_at(column, self.lo_row, self.lo_cols, self.lo_scale)
-            if self.lod_blend <= 0.0 {
-                return lo
-            }
-            let hi = self.stem_level_at(column, self.hi_row, self.hi_cols, self.hi_scale)
-            return lo * (1.0 - self.lod_blend) + hi * self.lod_blend
-        }
-
-        playing_progress: fn(base: vec4) -> vec4 {
-            let playing = step(3.5, self.state)
-            let p = self.pos * self.rect_size
-            let w = self.rect_size.x
-            let h = self.rect_size.y
-            let x0 = clamp(self.part_x0 * w, 0.0, w)
-            let x1 = clamp(self.part_x1 * w, x0, w)
-            let y0 = clamp(self.part_y0 * h, 0.0, h)
-            let y1 = clamp(self.part_y1 * h, y0, h)
-            let inside_y = step(y0 + 2.0, p.y) * step(p.y, y1 - 2.0)
-            let play_x = x0 + 2.0
-                + clamp(self.phase, 0.0, 1.0) * max(x1 - x0 - 4.0, 0.0)
-            let played = step(x0 + 2.0, p.x) * step(p.x, play_x) * inside_y * playing
-            let filled = base.mix(vec4(1.0, 1.0, 1.0, 1.0), played * 0.18)
-            // A dark one-pixel edge around the white two-pixel hairline
-            // keeps it crisp over both pale hits and saturated waveforms.
-            let distance = abs(p.x - play_x)
-            let edge = (1.0 - smoothstep(1.5, 2.0, distance)) * inside_y * playing
-            let line = (1.0 - smoothstep(0.75, 1.0, distance)) * inside_y * playing
-            let edged = filled.mix(vec4(0.0, 0.0, 0.0, 1.0), edge * 0.55)
-            return edged.mix(vec4(1.0, 1.0, 1.0, 1.0), line * 0.95)
-        }
 
         countdown: fn(base: vec4) -> vec4 {
             let armed = step(2.5, self.state) - step(3.5, self.state)
@@ -310,49 +259,13 @@ script_mod! {
                 sdf.stroke(vec4(rgb.x, rgb.y, rgb.z, 0.10), 1.0)
                 return sdf.result
             }
-
-            let is_mix = step(3.5, self.channel)
-            let wave_available = self.has_mix
-                * mix(self.has_stems, 1.0, is_mix)
-                * step(0.001, self.span_cols)
-            if wave_available < 0.5 {
-                // Analysis is still pending: retain the old flat state fill.
-                if self.state < 1.5 {
-                    sdf.stroke(vec4(rgb.x, rgb.y, rgb.z, 0.25), 1.0)
-                } else if self.state < 2.5 {
-                    sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.45))
-                    sdf.stroke(vec4(rgb.x, rgb.y, rgb.z, 0.68), 1.0)
-                } else {
-                    sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.05))
-                    sdf.stroke(vec4(rgb.x, rgb.y, rgb.z, 0.68), 1.0)
-                    sdf.box(
-                        part_x0 + 1.0,
-                        part_y0 + 1.0,
-                        max(part_x1 - part_x0 - 2.0, 1.0),
-                        max(part_y1 - part_y0 - 2.0, 1.0),
-                        1.0
-                    )
-                    if self.state < 3.5 {
-                    let pulse = 0.5 + 0.5 * sin(self.time * 12.5663706)
-                    sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.34 + pulse * 0.34))
-                    sdf.stroke(vec4(1.0, 1.0, 1.0, 0.45 + pulse * 0.5), 2.0)
-                    } else {
-                        sdf.fill(vec4(rgb.x * 0.82, rgb.y * 0.82, rgb.z * 0.82, 0.92))
-                        sdf.stroke(vec4(1.0, 1.0, 1.0, 0.95), 2.0)
-                    }
-                }
-                return self.countdown(self.playing_progress(sdf.result))
-            }
-
-            // The rounded pad remains quiet behind the waveform; state is
-            // carried by its outline and by the envelope itself.
             if self.state < 1.5 {
                 sdf.stroke(vec4(rgb.x, rgb.y, rgb.z, 0.25), 1.0)
             } else if self.state < 2.5 {
-                sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.07))
+                sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.45))
                 sdf.stroke(vec4(rgb.x, rgb.y, rgb.z, 0.68), 1.0)
             } else {
-                sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.03))
+                sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.05))
                 sdf.stroke(vec4(rgb.x, rgb.y, rgb.z, 0.68), 1.0)
                 sdf.box(
                     part_x0 + 1.0,
@@ -365,69 +278,14 @@ script_mod! {
                     // Up next: a pulsing white frame, and the bar countdown
                     // strip along the active slot's top edge.
                     let pulse = 0.5 + 0.5 * sin(self.time * 12.5663706)
-                    sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.08))
+                    sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.34 + pulse * 0.34))
                     sdf.stroke(vec4(1.0, 1.0, 1.0, 0.45 + pulse * 0.5), 2.0)
                 } else {
-                    sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.10))
+                    sdf.fill(vec4(rgb.x * 0.82, rgb.y * 0.82, rgb.z * 0.82, 0.92))
                     sdf.stroke(vec4(1.0, 1.0, 1.0, 0.95), 2.0)
                 }
             }
-
-            let inner_w = max(w - 8.0, 1.0)
-            let inner_x = clamp((p.x - 4.0) / inner_w, 0.0, 1.0)
-            let column = self.span_start + inner_x * self.span_cols
-            let tile = self.mix_span(column)
-            let stems = self.stem_span(column)
-            let present = max(stems.x + stems.y + stems.z + stems.w, 0.0001)
-            let c0 = 1.0 - step(0.5, self.channel)
-            let c1 = step(0.5, self.channel) - step(1.5, self.channel)
-            let c2 = step(1.5, self.channel) - step(2.5, self.channel)
-            let c3 = step(2.5, self.channel) - step(3.5, self.channel)
-            let stem_level = (stems.x * c0 + stems.y * c1 + stems.z * c2 + stems.w * c3) / present
-            let level = clamp(mix(tile.w * stem_level, tile.w, is_mix), 0.0, 1.0) * 0.80
-
-            // Symmetric envelope with a one-pixel feather and a four-pixel
-            // inset, so the wave never spills through the rounded corners.
-            let active = step(2.5, self.state)
-            let part_h = max(self.part_y1 - self.part_y0, 0.001)
-            let part_y = clamp((self.pos.y - self.part_y0) / part_h, 0.0, 1.0)
-            let display_y = mix(self.pos.y, part_y, active)
-            let display_h = mix(h, part_y1 - part_y0, active)
-            let inner_scale = max(display_h - 8.0, 1.0) / max(display_h, 1.0)
-            let y = abs(display_y - 0.5) * 2.0
-            let feather = 2.0 / max(h, 2.0)
-            let envelope = (1.0 - smoothstep(
-                level * inner_scale - feather,
-                level * inner_scale + feather,
-                y
-            )) * step(0.002, level)
-            let in_x = smoothstep(3.0, 4.0, p.x)
-                * (1.0 - smoothstep(w - 4.0, w - 3.0, p.x))
-            let part_mask = step(part_x0, p.x) * step(p.x, part_x1)
-                * step(part_y0, p.y) * step(p.y, part_y1)
-            let cover = envelope * in_x * mix(1.0, part_mask, active)
-
-            let pulse = 0.5 + 0.5 * sin(self.time * 12.5663706)
-            let part_w = max(self.part_x1 - self.part_x0, 0.001)
-            let part_x = clamp((self.pos.x - self.part_x0) / part_w, 0.0, 1.0)
-            let played = step(part_x, clamp(self.phase, 0.0, 1.0))
-            let silent = 1.0 - step(1.5, self.state)
-            let ready = step(1.5, self.state) - step(2.5, self.state)
-            let queued = step(2.5, self.state) - step(3.5, self.state)
-            let playing = step(3.5, self.state)
-            let alpha = (silent * 0.20
-                + ready * 0.35
-                + queued * (0.45 + pulse * 0.40)
-                + playing * (0.55 + played * 0.35))
-                * mix(1.0, 0.55, self.has_blocks)
-            let gain = 1.0 + playing * played * 0.12
-            let wave = vec4(
-                min(rgb.x * gain, 1.0),
-                min(rgb.y * gain, 1.0),
-                min(rgb.z * gain, 1.0),
-                alpha
-            )
-            return self.countdown(self.playing_progress(sdf.result.mix(wave, cover)))
+            return self.countdown(sdf.result)
         }
     }
 
@@ -469,7 +327,7 @@ script_mod! {
         color_grid_bar: uniform(#xffffff6e)
         // The running loop, in the app-wide accent. Low alpha: a wash the
         // waveform stays readable through, not a fill that replaces it.
-        color_loop: uniform(#xff5c3924)
+        color_loop: uniform(#xff5c392e)
         // The loop's span as (start_col, end_col, _, _). A UNIFORM and not
         // two `#[live]` fields: those become per-instance VERTEX INPUTS,
         // and this lane already sits on the vs_5_0 limit of 32 — two more
@@ -563,18 +421,25 @@ script_mod! {
             return vec4(c.x, c.y, c.z, c.w * a)
         }
 
-        // The running loop: a wash across the span, and a hard rule on each
-        // edge. The edges are the seam — where the sound actually jumps —
-        // so they are drawn as firmly as a bar ruling rather than fading
-        // out with the wash.
+        // The running loop: a translucent wash plus one-pixel bracket
+        // edges. The short top/bottom caps make IN and OUT read as a pair,
+        // not as two unrelated grid rules.
         loop_at: fn(column: float) -> float {
             if self.loop_span.y <= self.loop_span.x {
                 return 0.0
             }
             let inside = step(self.loop_span.x, column) * step(column, self.loop_span.y)
-            let de = min(abs(column - self.loop_span.x), abs(column - self.loop_span.y))
-            let edge = 1.0 - smoothstep(0.5, 1.8, de / max(self.cols_per_px, 0.0001))
-            return max(inside * self.color_loop.w, edge)
+            let scale = max(self.cols_per_px, 0.0001)
+            let from_in = (column - self.loop_span.x) / scale
+            let from_out = (self.loop_span.y - column) / scale
+            let edge_in = 1.0 - smoothstep(0.5, 1.0, abs(from_in))
+            let edge_out = 1.0 - smoothstep(0.5, 1.0, abs(from_out))
+            let y = min(self.pos.y, 1.0 - self.pos.y) * self.rect_size.y
+            let cap_y = 1.0 - smoothstep(0.5, 1.0, y)
+            let cap_in = step(0.0, from_in) * step(from_in, 6.0)
+            let cap_out = step(0.0, from_out) * step(from_out, 6.0)
+            let bracket = max(max(edge_in, edge_out), cap_y * max(cap_in, cap_out))
+            return max(inside * self.color_loop.w, bracket)
         }
 
         // A drag's would-be landing: the same band at reduced weight, so
@@ -677,8 +542,8 @@ script_mod! {
             // A whisper of the rulings survives on top, so the two decks
             // can be read against each other through a loud passage.
             let ruled = body.mix(vec4(g.x, g.y, g.z, 1.0), g.w * 0.30)
-            // The overview strip carries its own playhead; the zoomed lanes
-            // share one drawn over both, so they pass head_on = 0.
+            // The overview and a stationary loop lane carry an in-shader
+            // playhead; normally the zoomed lanes share the centre overlay.
             // The loop sits over the picture, under the playhead: you have
             // to be able to see the band through a loud passage.
             let la = max(self.loop_at(column), self.preview_at(column))
@@ -3700,6 +3565,8 @@ pub struct WaveLane {
     /// The running loop in source seconds — the tile timebase, so this
     /// converts to columns exactly the way the grid does.
     pub loop_span: Option<(f64, f64)>,
+    /// One-based loop slot shown at the overlay's top-left.
+    pub loop_slot: Option<u8>,
     /// Playback rate, so the grid rules where the music actually lands.
     pub rate: f64,
     pub playing: bool,
@@ -3724,7 +3591,13 @@ impl WaveLane {
             return self.position_secs;
         }
         let elapsed = (now - self.stamp).clamp(0.0, 0.5);
-        (self.position_secs + elapsed * self.rate.max(0.0)).max(0.0)
+        let position = (self.position_secs + elapsed * self.rate.max(0.0)).max(0.0);
+        match self.loop_span {
+            Some((start, end)) if end > start && position >= start => {
+                start + (position - start).rem_euclid(end - start)
+            }
+            _ => position,
+        }
     }
 
     /// The tile column under the playhead.
@@ -3807,6 +3680,10 @@ pub struct VjWaveScroll {
     zoom_secs: f64,
     #[rust]
     lane_rects: [Rect; 2],
+    /// The viewport centre captured when a loop becomes active. The wave
+    /// stays put at the user's current zoom while its head crosses the band.
+    #[rust]
+    loop_centres: [Option<f64>; 2],
     /// Which lane a pointer is holding, and where/when it was last seen.
     #[rust]
     drag: Option<DragState>,
@@ -3938,7 +3815,17 @@ struct DragState {
 impl VjWaveScroll {
     pub fn set_lane(&mut self, cx: &mut Cx, deck: DeckId, lane: WaveLane) {
         let stamp = cx.seconds_since_app_start();
-        self.lanes[deck.index()] = WaveLane { stamp, ..lane };
+        let index = deck.index();
+        if self.lanes[index].loop_span != lane.loop_span {
+            self.loop_centres[index] = lane.loop_span.map(|(start, end)| {
+                if end > start {
+                    lane.position_secs.clamp(start, end) * ZOOM_COLS_PER_SEC
+                } else {
+                    lane.position_secs * ZOOM_COLS_PER_SEC
+                }
+            });
+        }
+        self.lanes[index] = WaveLane { stamp, ..lane };
         self.area.redraw(cx);
     }
 
@@ -3977,12 +3864,29 @@ impl VjWaveScroll {
 
     /// The deck's running loop, for the band. Diffed: this comes off the
     /// status pump and hardly ever changes between ticks.
-    pub fn set_loop_span(&mut self, cx: &mut Cx, deck: DeckId, span: Option<(f64, f64)>) {
-        let lane = &mut self.lanes[deck.index()];
-        if lane.loop_span == span {
+    pub fn set_loop_span(
+        &mut self,
+        cx: &mut Cx,
+        deck: DeckId,
+        span: Option<(f64, f64)>,
+        slot: Option<u8>,
+    ) {
+        let index = deck.index();
+        let lane = &mut self.lanes[index];
+        if lane.loop_span == span && lane.loop_slot == slot {
             return;
         }
+        if lane.loop_span != span {
+            self.loop_centres[index] = span.map(|(start, end)| {
+                if end > start {
+                    lane.position_secs.clamp(start, end) * ZOOM_COLS_PER_SEC
+                } else {
+                    lane.position_secs * ZOOM_COLS_PER_SEC
+                }
+            });
+        }
         lane.loop_span = span;
+        lane.loop_slot = slot;
         self.area.redraw(cx);
     }
 
@@ -4156,8 +4060,8 @@ impl Widget for VjWaveScroll {
             return DrawStep::done();
         }
         let now = cx.seconds_since_app_start();
-        // A playing deck redraws every frame: the waveform scrolls with the
-        // music rather than in twenty-hertz steps.
+        // A playing deck redraws every frame: the normal waveform scrolls,
+        // while a loop keeps the waveform still and advances only its head.
         if self.lanes.iter().any(|lane| lane.playing) {
             self.next_frame = cx.new_next_frame();
         }
@@ -4166,6 +4070,7 @@ impl Widget for VjWaveScroll {
         let gutter = 14.0f64;
         let lane_h = ((rect.size.y - gutter) * 0.5).max(8.0);
         let cols_per_px = (self.zoom_secs * ZOOM_COLS_PER_SEC / rect.size.x) as f32;
+        let mut moving_heads = [false; 2];
         for index in 0..2 {
             let y = if index == 0 {
                 rect.pos.y
@@ -4214,13 +4119,17 @@ impl Widget for VjWaveScroll {
             self.draw_lane.gain_drums = lane.stem_gain[1];
             self.draw_lane.gain_bass = lane.stem_gain[2];
             self.draw_lane.gain_other = lane.stem_gain[3];
-            // The shared playhead is one quad over both lanes.
-            self.draw_lane.head_on = 0.0;
             self.draw_lane.cols = lane.cols as f32;
             // Snap the scroll to whole device pixels. A sub-pixel offset
             // makes every column's sample point crawl between neighbours
             // frame to frame, which reads as a shimmer over the whole wave.
-            let raw_centre = lane.head_column_at(now);
+            let head = lane.head_column_at(now);
+            let loop_columns = lane.loop_columns();
+            moving_heads[index] = loop_columns.is_some();
+            // A loop captures the viewport where it engaged. The waveform
+            // and user zoom stay untouched while the in-shader head moves
+            // through (and wraps inside) the highlighted source span.
+            let raw_centre = self.loop_centres[index].filter(|_| moving_heads[index]).unwrap_or(head);
             let columns_per_pixel = cols_per_px as f64;
             let centre = if columns_per_pixel > 0.0 {
                 (raw_centre / columns_per_pixel).round() * columns_per_pixel
@@ -4229,7 +4138,10 @@ impl Widget for VjWaveScroll {
             };
             self.draw_lane.centre_col = centre as f32;
             self.draw_lane.cols_per_px = cols_per_px;
-            set_loop_span_uniform(&mut self.draw_lane, cx, lane.loop_columns());
+            self.draw_lane.head_col = head as f32;
+            self.draw_lane.head_on = if moving_heads[index] { 1.0 } else { 0.0 };
+            set_loop_color_uniform(&mut self.draw_lane, cx, deck_accent(if index == 0 { DeckId::A } else { DeckId::B }));
+            set_loop_span_uniform(&mut self.draw_lane, cx, loop_columns);
             set_preview_span_uniform(&mut self.draw_lane, cx, None);
             let (beat_cols, phase) = lane.grid_columns().unwrap_or((0.0, 0.0));
             self.draw_lane.beat_cols = beat_cols as f32;
@@ -4238,13 +4150,40 @@ impl Widget for VjWaveScroll {
             self.draw_lane.draw_abs(cx, lane_rect);
         }
 
+        // Slot number at the visible top-left of the active band. Text is
+        // direct-drawn over the same lane; the overlay remains one widget.
+        for index in 0..2 {
+            let lane = &self.lanes[index];
+            let Some(slot) = lane.loop_slot.filter(|_| moving_heads[index]) else { continue };
+            let Some((start, end)) = lane.loop_columns() else { continue };
+            let centre = self.loop_centres[index].unwrap_or_else(|| lane.head_column_at(now));
+            let start_x = rect.pos.x + rect.size.x * 0.5
+                + (start - centre) / cols_per_px.max(1e-4) as f64;
+            let end_x = rect.pos.x + rect.size.x * 0.5
+                + (end - centre) / cols_per_px.max(1e-4) as f64;
+            let lane_rect = self.lane_rects[index];
+            if end_x < lane_rect.pos.x || start_x > lane_rect.pos.x + lane_rect.size.x {
+                continue;
+            }
+            self.draw_text.color = Vec4f::from_u32(0xf4f7faff);
+            self.draw_text.text_style.font_size = 9.0;
+            self.draw_text.draw_abs(
+                cx,
+                dvec2(start_x.max(lane_rect.pos.x) + 3.0, lane_rect.pos.y + 2.0),
+                &slot.to_string(),
+            );
+        }
+
         // Bar numbers, ruled off whichever deck is leading the view.
+        self.draw_text.color = Vec4f::from_u32(0x8e9aa7ff);
         let ruler = if self.lanes[0].grid.is_some() { 0 } else { 1 };
         let lane = &self.lanes[ruler];
         if let Some((beat_cols, phase)) = lane.grid_columns() {
             let bar_cols = beat_cols * 4.0;
             if bar_cols > 1.0 {
-                let centre = lane.head_column_at(now);
+                let centre = self.loop_centres[ruler]
+                    .filter(|_| moving_heads[ruler])
+                    .unwrap_or_else(|| lane.head_column_at(now));
                 let half_cols = self.zoom_secs * ZOOM_COLS_PER_SEC * 0.5;
                 let first = ((centre - half_cols - phase) / bar_cols).floor();
                 let last = ((centre + half_cols - phase) / bar_cols).ceil();
@@ -4294,14 +4233,31 @@ impl Widget for VjWaveScroll {
             );
         }
 
-        // The one shared playhead, straight through both lanes.
-        self.draw_head.draw_abs(
-            cx,
-            Rect {
-                pos: dvec2(rect.pos.x + rect.size.x * 0.5 - 6.0, rect.pos.y),
-                size: dvec2(12.0, rect.size.y),
-            },
-        );
+        // Unlooped lanes keep the familiar fixed centre head. A looping
+        // lane draws its moving head in the waveform shader instead.
+        if !moving_heads[0] && !moving_heads[1] {
+            self.draw_head.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(rect.pos.x + rect.size.x * 0.5 - 6.0, rect.pos.y),
+                    size: dvec2(12.0, rect.size.y),
+                },
+            );
+        } else {
+            for index in 0..2 {
+                if moving_heads[index] {
+                    continue;
+                }
+                let lane_rect = self.lane_rects[index];
+                self.draw_head.draw_abs(
+                    cx,
+                    Rect {
+                        pos: dvec2(lane_rect.pos.x + lane_rect.size.x * 0.5 - 6.0, lane_rect.pos.y),
+                        size: dvec2(12.0, lane_rect.size.y),
+                    },
+                );
+            }
+        }
         DrawStep::done()
     }
 }
@@ -4846,6 +4802,7 @@ impl Widget for VjWaveOverview {
         let columns = self
             .loop_span
             .map(|(start, end)| (start * ZOOM_COLS_PER_SEC, end * ZOOM_COLS_PER_SEC));
+        set_loop_color_uniform(&mut self.draw_lane, cx, self.draw_load.color);
         set_loop_span_uniform(&mut self.draw_lane, cx, columns);
         // During a drag the ghost above stays put and this is where release
         // will land — the pair is the whole point of the ghost model.
@@ -6293,6 +6250,16 @@ mod tests {
         // the edge rules would still draw on top of each other.
         lane.loop_span = Some((2.0, 2.0));
         assert!(lane.loop_columns().is_none());
+    }
+
+    #[test]
+    fn the_loop_playhead_wraps_without_moving_the_waveform_timebase() {
+        let mut lane = lane(120.0, 3.9);
+        lane.playing = true;
+        lane.stamp = 10.0;
+        lane.loop_span = Some((2.0, 4.0));
+        assert!((lane.position_at(10.2) - 2.1).abs() < 1e-9);
+        assert_eq!(lane.loop_columns(), Some((200.0, 400.0)));
     }
 
     #[test]

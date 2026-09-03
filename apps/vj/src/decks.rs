@@ -486,6 +486,30 @@ pub struct SplatUiState {
     pub grid: Arc<SplatGrid>,
     pub enabled: bool,
     pub last: SplatSnapshot,
+    /// The slot whose source position drives the deck picture. This mirrors
+    /// the audio state's view choice without putting UI metadata in audio.
+    pub view: Option<(SplatRow, u8, SplatPart)>,
+}
+
+impl SplatUiState {
+    /// The exact source sub-span highlighted on the large waveform, plus
+    /// its one-based column label. A disabled grid has no overlay.
+    pub fn view_loop(&self) -> Option<(LoopSpan, u8)> {
+        if !self.enabled {
+            return None;
+        }
+        let (row, col, part) = self.view?;
+        if usize::from(col) >= SPLAT_COLS {
+            return None;
+        }
+        if !part.is_valid() {
+            return None;
+        }
+        let cell = self.grid.cells[row.index()][usize::from(col)]?;
+        let len = cell.span.len_secs() / f64::from(part.den);
+        let start = cell.span.start_secs + f64::from(part.num) * len;
+        Some((LoopSpan { start_secs: start, end_secs: start + len }, col + 1))
+    }
 }
 
 impl LoopSpan {
@@ -885,16 +909,21 @@ impl DeckEngine {
         }
         let enabled = self.splat(deck).is_some_and(|splat| splat.enabled);
         let last = self.splat(deck).map(|splat| splat.last).unwrap_or_default();
+        let view = self.splat(deck).and_then(|splat| splat.view);
         self.deck_mut(deck).splat = Some(SplatUiState {
             grid: grid.clone(),
             enabled,
             last,
+            view,
         });
         vec![DeckCmd::SplatSet { deck, grid }]
     }
 
     pub fn splat_enable(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
         let Some(splat) = self.deck_mut(deck).splat.as_mut() else { return Vec::new() };
+        if splat.enabled != on {
+            splat.view = None;
+        }
         splat.enabled = on;
         vec![DeckCmd::SplatEnable { deck, on }]
     }
@@ -914,6 +943,7 @@ impl DeckEngine {
         {
             return Vec::new();
         }
+        self.deck_mut(deck).splat.as_mut().unwrap().view = Some((row, col, part));
         vec![DeckCmd::SplatLaunch { deck, row, col, part }]
     }
 
@@ -926,9 +956,17 @@ impl DeckEngine {
     }
 
     pub fn splat_scene(&mut self, deck: DeckId, col: u8) -> Vec<DeckCmd> {
-        if self.splat(deck).is_none() || col as usize >= SPLAT_COLS {
+        let Some(splat) = self.splat(deck) else { return Vec::new() };
+        if col as usize >= SPLAT_COLS {
             return Vec::new();
         }
+        let view = SplatRow::ALL
+            .into_iter()
+            .filter(|row| *row != SplatRow::Mix)
+            .filter(|row| splat.grid.cells[row.index()][usize::from(col)].is_some())
+            .last()
+            .map(|row| (row, col, SplatPart::WHOLE));
+        self.deck_mut(deck).splat.as_mut().unwrap().view = view;
         vec![DeckCmd::SplatLaunchScene { deck, col }]
     }
 
@@ -944,6 +982,21 @@ impl DeckEngine {
         if let (Some(state), Some(snapshot)) = (self.deck_mut(deck).splat.as_mut(), snapshot) {
             state.enabled = snapshot.active;
             state.last = snapshot;
+            if !snapshot.active {
+                state.view = None;
+                return;
+            }
+            let view_is_live = state.view.is_some_and(|(row, col, part)| {
+                snapshot.playing[row.index()] == Some((col, part))
+                    || snapshot.queued[row.index()] == Some((col, part))
+            });
+            if !view_is_live {
+                state.view = SplatRow::ALL.into_iter().find_map(|row| {
+                    snapshot.queued[row.index()]
+                        .or(snapshot.playing[row.index()])
+                        .map(|(col, part)| (row, col, part))
+                });
+            }
         }
     }
 
@@ -4437,6 +4490,43 @@ mod tests {
         engine.observe(DeckId::B, 20.7, true);
         let cmds = engine.apply_auto_sync();
         assert!(moved(&cmds), "the landing is back once the grid is off: {cmds:?}");
+    }
+
+    #[test]
+    fn a_splat_loop_exposes_its_exact_subspan_and_slot_to_the_wave_lane() {
+        let mut engine = DeckEngine::new();
+        load_analysed(&mut engine, DeckId::A, 1, 120.0, 0.0);
+        let mut cells = [[None; SPLAT_COLS]; crate::loop_splat::SPLAT_ROWS];
+        cells[SplatRow::Drums.index()][2] = Some(crate::loop_splat::SplatCell {
+            span: LoopSpan { start_secs: 8.0, end_secs: 12.0 },
+            bars: 2,
+            energy: 1.0,
+            silent: false,
+        });
+        let grid = Arc::new(SplatGrid {
+            bpm: 120.0,
+            bar_secs: 2.0,
+            first_bar_secs: 0.0,
+            sections: Vec::new(),
+            cells,
+            bars_per_col: [1; SPLAT_COLS],
+        });
+        engine.splat_set(DeckId::A, grid);
+        engine.splat_enable(DeckId::A, true);
+        let part = SplatPart { num: 1, den: 2 };
+        engine.splat_launch(DeckId::A, SplatRow::Drums, 2, part);
+        assert_eq!(
+            engine.splat(DeckId::A).and_then(SplatUiState::view_loop),
+            Some((LoopSpan { start_secs: 10.0, end_secs: 12.0 }, 3))
+        );
+        let mut snapshot = SplatSnapshot { active: true, ..SplatSnapshot::default() };
+        snapshot.playing[SplatRow::Drums.index()] = Some((2, part));
+        engine.observe_splat(DeckId::A, Some(snapshot));
+
+        assert_eq!(
+            engine.splat(DeckId::A).and_then(SplatUiState::view_loop),
+            Some((LoopSpan { start_secs: 10.0, end_secs: 12.0 }, 3))
+        );
     }
 
     /// The press ladder with both decks lit: the follower's press locks it,
