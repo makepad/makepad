@@ -538,68 +538,186 @@ pub fn prelude_catalog() -> Result<Vec<NodeTypeCatalog>, EvalError> {
     let module = own_value(&vm, vm.bx.heap.modules, "flow")
         .and_then(|value| value.as_object())
         .ok_or_else(|| at(PRELUDE_FILE, 1, 1, "prelude module is missing"))?;
+    let ui_module = own_value(&vm, module, "ui").and_then(|value| value.as_object());
+
+    // Walk every key `mod.flow` itself sets rather than a hard-coded name
+    // list, so every recipe type built purely in splash (Mesh, Video,
+    // Music, Inpaint, ...) reaches the catalog alongside the language's
+    // built-in kinds.
+    let mut raw = Vec::new();
+    vm.bx.heap.object_data(module).map_iter_ordered(|key, value| {
+        if let Some(name) = key_name(&vm, key) {
+            raw.push((name, value));
+        }
+    });
+    for entry in &vm.bx.heap.object_data(module).vec {
+        if let Some(name) = key_name(&vm, entry.key) {
+            raw.push((name, entry.value));
+        }
+    }
 
     let mut out = Vec::new();
-    for type_name in [
-        "Input", "Text", "Output", "Llm", "Fn", "Http", "Ask", "Gen", "Image", "Upscale",
-    ] {
-        let obj = own_value(&vm, module, type_name)
-            .and_then(|value| value.as_object())
-            .ok_or_else(|| at(PRELUDE_FILE, 1, 1, format!("prelude did not register `{type_name}`")))?;
-        let spec = type_spec(type_name).expect("catalog type has a graph specification");
+    let mut seen = HashSet::new();
+    for (_key, value) in raw {
+        let Some(obj) = value.as_object() else { continue };
+        let Some(type_name) = own_value(&vm, obj, "type_name").and_then(|v| value_string(&vm, v))
+        else {
+            continue;
+        };
+        let kind = deep_value(&vm, obj, "kind").and_then(value_id).unwrap_or_default();
+        if !matches!(
+            kind.as_str(),
+            "input" | "output" | "chat" | "fn" | "http" | "ask" | "gen"
+        ) {
+            continue;
+        }
+        if !seen.insert(type_name.clone()) {
+            continue;
+        }
+        let domain = deep_value(&vm, obj, "domain")
+            .and_then(|v| value_string(&vm, v))
+            .filter(|value| !value.is_empty());
+
         let chain = vm.construction_chain(obj.into());
         let doc = chain.iter().find_map(|level| level.doc.clone()).unwrap_or_default();
         let field_doc = |name: &str| {
             let wanted = LiveId::from_str(name);
             chain
                 .iter()
-                .find_map(|level| level.field_docs.iter().find_map(|(id, text)| (*id == wanted).then(|| text.clone())))
+                .find_map(|level| {
+                    level
+                        .field_docs
+                        .iter()
+                        .find_map(|(id, text)| (*id == wanted).then(|| text.clone()))
+                })
                 .unwrap_or_default()
         };
-        let params = spec
-            .params
-            .iter()
-            .map(|param| {
-                let doc = field_doc(param.name);
-                let hint = parse_doc_hint(&doc);
-                let range = match (hint.min, hint.max) {
-                    (Some(min), Some(max)) => Some(ParamRange {
-                        min,
-                        max,
-                        step: hint.step,
-                    }),
-                    _ => None,
-                };
-                NodeParamCatalog {
-                    name: param.name.to_string(),
-                    default: default_json(param.default),
-                    doc,
-                    range,
-                }
-            })
+
+        let (ports_in, ports_out, params) = if let Some(spec) = type_spec(&type_name) {
+            // One of the language's Rust-defined kinds: params and the
+            // fixed input ports come from its specification.
+            let params = spec
+                .params
+                .iter()
+                .map(|param| {
+                    let doc = field_doc(param.name);
+                    let hint = parse_doc_hint(&doc);
+                    let range = match (hint.min, hint.max) {
+                        (Some(min), Some(max)) => Some(ParamRange {
+                            min,
+                            max,
+                            step: hint.step,
+                        }),
+                        _ => None,
+                    };
+                    NodeParamCatalog {
+                        name: param.name.to_string(),
+                        default: default_json(param.default),
+                        doc,
+                        range,
+                    }
+                })
+                .collect();
+            let ports_in = spec
+                .inputs
+                .iter()
+                .map(|port| Port { name: port.name.to_string(), ty: port.ty })
+                .collect();
+            (ports_in, catalog_outputs(&type_name), params)
+        } else {
+            // A recipe-domain type built purely in splash over `Gen`: read
+            // its declared typed ports and generic parameters the same way
+            // a flow file's node extraction does.
+            let mut discard = Vec::new();
+            let loc = Loc { line: 1, col: 1 };
+            let ports_in: Vec<Port> = ports_side_typed(
+                &vm, obj, "in", "", None, RECIPE_PRELUDE_FILE, &loc, &type_name, &mut discard,
+            )?
+            .into_iter()
+            .map(|(name, ty)| Port { name, ty })
             .collect();
-        let inputs = spec
-            .inputs
-            .iter()
-            .map(|port| Port { name: port.name.to_string(), ty: port.ty })
+            let ports_out: Vec<Port> = ports_side_typed(
+                &vm, obj, "out", "", None, RECIPE_PRELUDE_FILE, &loc, &type_name, &mut discard,
+            )?
+            .into_iter()
+            .map(|(name, ty)| Port { name, ty })
             .collect();
-        let outputs = catalog_outputs(type_name);
-        let domain = match type_name {
-            "Image" => Some("image".to_string()),
-            "Upscale" => Some("upscale".to_string()),
-            _ => None,
+            let input_names: HashSet<String> =
+                ports_in.iter().map(|port| port.name.clone()).collect();
+            let generic_params =
+                generic_gen_params(&vm, obj, "", None, RECIPE_PRELUDE_FILE, &loc, &input_names)?;
+            let params = generic_params
+                .into_iter()
+                .map(|(name, literal)| {
+                    let doc = field_doc(&name);
+                    let hint = parse_doc_hint(&doc);
+                    let range = match (hint.min, hint.max) {
+                        (Some(min), Some(max)) => Some(ParamRange {
+                            min,
+                            max,
+                            step: hint.step,
+                        }),
+                        _ => None,
+                    };
+                    NodeParamCatalog {
+                        name,
+                        default: literal_to_json_value(&literal),
+                        doc,
+                        range,
+                    }
+                })
+                .collect();
+            (ports_in, ports_out, params)
         };
+
+        let face = ui_module
+            .and_then(|ui_module| face_name(&vm, ui_module, obj))
+            .unwrap_or_default();
+
         out.push(NodeTypeCatalog {
-            type_name: type_name.to_string(),
-            kind: spec.kind.to_string(),
+            type_name,
+            kind,
             domain,
-            ports: NodePortsCatalog { _in: inputs, out: outputs },
+            ports: NodePortsCatalog { _in: ports_in, out: ports_out },
             params,
-            face: format!("{type_name}Face"),
+            face,
             doc,
         });
     }
+    out.sort_by(|a, b| a.type_name.cmp(&b.type_name));
     Ok(out)
+}
+
+/// Resolve a node's `ui:` value back to its name in `mod.flow.ui` (for
+/// example `"GenFace"`), for the catalog's descriptive `face` field.
+fn face_name(vm: &ScriptVm<'_>, ui_module: ScriptObject, obj: ScriptObject) -> Option<String> {
+    let ui_obj = deep_value(vm, obj, "ui")?.as_object()?;
+    let mut found = None;
+    vm.bx.heap.object_data(ui_module).map_iter_ordered(|key, value| {
+        if found.is_some() {
+            return;
+        }
+        if value.as_object() == Some(ui_obj) {
+            found = key_name(vm, key);
+        }
+    });
+    found
+}
+
+fn literal_to_json_value(value: &Literal) -> JsonValue {
+    match value {
+        Literal::Null => JsonValue::Null,
+        Literal::Bool(value) => JsonValue::Bool(*value),
+        Literal::Num(value) => JsonValue::F64(*value),
+        Literal::Str(value) | Literal::Id(value) => JsonValue::String(value.clone()),
+        Literal::Arr(values) => JsonValue::Array(values.iter().map(literal_to_json_value).collect()),
+        Literal::Obj(values) => JsonValue::Object(
+            values
+                .iter()
+                .map(|(name, value)| (name.clone(), literal_to_json_value(value)))
+                .collect(),
+        ),
+    }
 }
 
 fn catalog_outputs(type_name: &str) -> Vec<Port> {
@@ -793,6 +911,7 @@ fn extract(
     }
 
     let mut nodes = Vec::with_capacity(raw_nodes.len());
+    let mut warnings = Vec::new();
     for (id, value) in &raw_nodes {
         let obj = value.as_object().unwrap();
         let type_name = prototypes.type_of(vm, obj).ok_or_else(|| {
@@ -821,6 +940,7 @@ fn extract(
             obj,
             &type_name,
             &object_ids,
+            &mut warnings,
         )?);
     }
 
@@ -856,6 +976,7 @@ fn extract(
         edges,
         tools,
         flow_ui_src,
+        warnings,
     })
 }
 
@@ -935,11 +1056,13 @@ fn extract_node(
     obj: ScriptObject,
     type_name: &str,
     object_ids: &HashMap<ScriptObject, String>,
+    warnings: &mut Vec<String>,
 ) -> Result<Node, EvalError> {
     let spec = type_spec(type_name).unwrap();
     let loc = object_loc(vm, obj, file_name);
     let span = object_span(vm, obj, source);
     let fields = span.map(|span| field_sources(source, span)).unwrap_or_default();
+    let context = format!("node `{id}`");
     let mut params = Vec::new();
     for param in spec.params {
         let value = deep_value(vm, obj, param.name).unwrap_or(NIL);
@@ -951,8 +1074,21 @@ fn extract_node(
         })?;
         params.push((param.name.to_string(), literal));
     }
+    let gen_inputs = if type_name == "Gen" {
+        Some(ports_side_typed(
+            vm, obj, "in", source, span, file_name, &loc, &context, warnings,
+        )?)
+    } else {
+        None
+    };
     if type_name == "Gen" {
-        params = generic_gen_params(vm, obj, source, span, file_name, &loc)?;
+        let input_names: HashSet<String> = gen_inputs
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        params = generic_gen_params(vm, obj, source, span, file_name, &loc, &input_names)?;
     }
 
     let mut inputs = Vec::new();
@@ -994,8 +1130,7 @@ fn extract_node(
             )?);
         }
     } else if type_name == "Gen" {
-        let input_names = ports_side(vm, obj, "in", source, span, file_name, &loc)?;
-        for name in input_names {
+        for (name, ty) in gen_inputs.unwrap() {
             let value = input_value(vm, obj, &name, DefaultValue::Null);
             inputs.push(extract_input(
                 vm,
@@ -1004,7 +1139,7 @@ fn extract_node(
                 span,
                 &loc,
                 &name,
-                input_port_type(&name),
+                ty,
                 false,
                 value,
                 object_ids,
@@ -1032,7 +1167,9 @@ fn extract_node(
         }
     }
 
-    let outputs = outputs_for(vm, obj, type_name, &params, source, span, file_name, &loc)?;
+    let outputs = outputs_for(
+        vm, obj, type_name, &params, source, span, file_name, &loc, &context, warnings,
+    )?;
     let at_source = fields.get("at").copied().or_else(|| {
         source_field_in_chain(vm, obj, source, file_name, "at")
     });
@@ -1182,12 +1319,8 @@ fn generic_gen_params(
     span: Option<(usize, usize)>,
     file_name: &str,
     loc: &Loc,
+    input_names: &HashSet<String>,
 ) -> Result<Vec<(String, Literal)>, EvalError> {
-    let input_names: HashSet<String> = ports_side(
-        vm, obj, "in", source, span, file_name, loc,
-    )?
-    .into_iter()
-    .collect();
     let reserved: HashSet<&str> = [
         "kind", "type_name", "domain", "ports", "at", "ui", "on_fail", "label", "out",
     ]
@@ -1306,6 +1439,8 @@ fn outputs_for(
     span: Option<(usize, usize)>,
     file_name: &str,
     loc: &Loc,
+    context: &str,
+    warnings: &mut Vec<String>,
 ) -> Result<Vec<Port>, EvalError> {
     Ok(match type_name {
         "Input" | "Text" | "Ask" => vec![Port {
@@ -1354,18 +1489,23 @@ fn outputs_for(
             name: "image".to_string(),
             ty: PortType::Image,
         }],
-        "Gen" => ports_side(vm, obj, "out", source, span, file_name, loc)?
+        "Gen" => ports_side_typed(vm, obj, "out", source, span, file_name, loc, context, warnings)?
             .into_iter()
-            .map(|name| Port {
-                ty: port_type(&name).unwrap_or(PortType::Json),
-                name,
-            })
+            .map(|(name, ty)| Port { name, ty })
             .collect(),
         _ => unreachable!(),
     })
 }
 
-fn ports_side(
+/// Read one side (`"in"` or `"out"`) of a `Gen`-kind node's `ports:`
+/// declaration.
+///
+/// The current form is a typed map, `{name: @type, ...}`, and every named
+/// port carries its own declared type. The old form, `[@name, ...]`, still
+/// parses for one release: the type is inferred from the port's name (the
+/// historical, ambiguous behavior a second image or text port could not
+/// escape), and a deprecation note is pushed to `warnings`.
+fn ports_side_typed(
     vm: &ScriptVm<'_>,
     obj: ScriptObject,
     side: &str,
@@ -1373,7 +1513,9 @@ fn ports_side(
     span: Option<(usize, usize)>,
     file_name: &str,
     loc: &Loc,
-) -> Result<Vec<String>, EvalError> {
+    context: &str,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<(String, PortType)>, EvalError> {
     let ports = deep_value(vm, obj, "ports")
         .and_then(|v| v.as_object())
         .ok_or_else(|| {
@@ -1387,16 +1529,72 @@ fn ports_side(
             )
         })?;
     let value = deep_value(vm, ports, side).unwrap_or(NIL);
-    id_array(vm, value).ok_or_else(|| {
-        field_error(
-            source,
-            span,
-            "ports",
-            file_name,
-            format!("Gen.ports.{side} must be an array of port ids"),
-            loc,
-        )
-    })
+    if let Some(map_obj) = value.as_object() {
+        if !vm.bx.heap.is_fn(map_obj) {
+            let mut pairs = Vec::new();
+            vm.bx.heap.object_data(map_obj).map_iter_ordered(|key, val| {
+                if let Some(name) = key_name(vm, key) {
+                    pairs.push((name, val));
+                }
+            });
+            let mut out = Vec::with_capacity(pairs.len());
+            for (name, val) in pairs {
+                let ty = value_id(val).and_then(|id| port_type(&id)).ok_or_else(|| {
+                    field_error(
+                        source,
+                        span,
+                        "ports",
+                        file_name,
+                        format!("Gen.ports.{side}.{name} must be a port type"),
+                        loc,
+                    )
+                })?;
+                out.push((name, ty));
+            }
+            return Ok(out);
+        }
+    }
+    if value.as_array().is_some() {
+        let names = id_array(vm, value).ok_or_else(|| {
+            field_error(
+                source,
+                span,
+                "ports",
+                file_name,
+                format!("Gen.ports.{side} must be an array of port ids"),
+                loc,
+            )
+        })?;
+        if !names.is_empty() {
+            warnings.push(format!(
+                "{context}: ports.{side} uses the deprecated array form `[{}]`; declare `{side}: {{ name: @type, ... }}` with explicit types",
+                names
+                    .iter()
+                    .map(|name| format!("@{name}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ));
+        }
+        return Ok(names
+            .into_iter()
+            .map(|name| {
+                let ty = if side == "in" {
+                    input_port_type(&name)
+                } else {
+                    port_type(&name).unwrap_or(PortType::Json)
+                };
+                (name, ty)
+            })
+            .collect());
+    }
+    Err(field_error(
+        source,
+        span,
+        "ports",
+        file_name,
+        format!("Gen.ports.{side} must be an object or an array of port ids"),
+        loc,
+    ))
 }
 
 fn validate_param(param: &ParamSpec, value: &Literal) -> Result<(), String> {

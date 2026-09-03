@@ -145,23 +145,25 @@ fn write_node(
             out.push_str("    domain: ");
             write_string(out, node.domain.as_deref().unwrap_or(""));
             out.push('\n');
-            out.push_str("    ports: { in: [");
+            out.push_str("    ports: { in: {");
             for (index, input) in node.inputs.iter().enumerate() {
                 if index > 0 {
                     out.push_str(", ");
                 }
-                out.push('@');
                 out.push_str(&input.port);
+                out.push_str(": @");
+                out.push_str(port_type_name(input.ty));
             }
-            out.push_str("]  out: [");
+            out.push_str("}  out: {");
             for (index, port) in node.outputs.iter().enumerate() {
                 if index > 0 {
                     out.push_str(", ");
                 }
-                out.push('@');
                 out.push_str(&port.name);
+                out.push_str(": @");
+                out.push_str(port_type_name(port.ty));
             }
-            out.push_str("] }\n");
+            out.push_str("} }\n");
             for (name, value) in &node.params {
                 out.push_str("    ");
                 out.push_str(name);

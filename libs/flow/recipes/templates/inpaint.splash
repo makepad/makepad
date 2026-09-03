@@ -1,0 +1,26 @@
+use mod.flow.*
+
+/** What to paint into the masked region. */
+let prompt = Input{ type: @text  default: "a matching patch of clear sky"  at: vec2(40, 80) }
+
+/** The image to fill or extend. */
+let image = Input{ type: @image  at: vec2(320, 80) }
+
+/** The mask marking the region to regenerate; white is edited, black is kept. */
+let mask = Input{ type: @image  at: vec2(320, 300) }
+
+let inpaint = Inpaint{
+    prompt: prompt.text()
+    image: image.image()
+    mask: mask.image()
+    at: vec2(680, 160)
+}
+
+/** The inpainted image. */
+let picture = Output{ type: @image  value: inpaint.out(@image)  at: vec2(1000, 160) }
+
+Flow{
+    label: "Inpaint"
+    brief: "Fills or extends a masked region of a supplied image using a text instruction."
+    prompt, image, mask, inpaint, picture
+}
