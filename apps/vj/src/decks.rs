@@ -692,6 +692,16 @@ impl ProcessMode {
 /// with no out — no loop, just a position saved as a marker to jump to.
 pub const LOOP_BEATS_INF: u32 = u32::MAX;
 
+/// The tempo a beat COUNT falls back to when nothing has measured the
+/// track: one beat a second, so a four-beat loop is four seconds and a
+/// sixteen-beat jump is sixteen.
+///
+/// A unit for counting, never a tempo the deck claims to have. It reaches
+/// the loop lengths and the jumps and nothing else — snapping, syncing and
+/// every tempo readout ask `true_grid`, which answers only for a grid
+/// something actually measured.
+pub const COUNTED_BPM: f64 = 60.0;
+
 /// How many loops a track can keep as blue markers. Eight is more than a
 /// set ever needs and small enough that the strip stays readable.
 pub const LOOP_SLOT_CAP: usize = 8;
@@ -977,15 +987,36 @@ impl DeckState {
     }
 
     /// The tempo actually being played, or `None` without a grid.
+    /// The grid something MEASURED, and only that.
+    ///
+    /// `grid` itself can hold a default: the analysis lands on every track,
+    /// and one whose tempo fell outside the detector's window comes back
+    /// with a grid that has no beats in it. Everything that snaps, syncs or
+    /// shows a tempo asks this, so a counted beat can never leak into a
+    /// place that would treat it as a fact.
+    pub fn true_grid(&self) -> Option<TrackGrid> {
+        self.grid.filter(|grid| grid.has_grid())
+    }
+
+    /// Whether this deck's beats are real ones.
+    pub fn has_true_beats(&self) -> bool {
+        self.true_grid().is_some()
+    }
+
+    /// How long one counted beat is here. A LENGTH, with no phase: a
+    /// bare number cannot be handed to anything that would place a mark
+    /// or land a lock on it.
+    pub fn counted_beat_secs(&self) -> f64 {
+        self.true_grid().map_or(60.0 / COUNTED_BPM, |grid| grid.beat_secs)
+    }
+
     pub fn effective_bpm(&self) -> Option<f64> {
-        self.grid
-            .filter(|grid| grid.has_grid())
-            .map(|grid| grid.effective_bpm(self.rate))
+        self.true_grid().map(|grid| grid.effective_bpm(self.rate))
     }
 
     /// A view for the sync arithmetic.
     pub fn sync_view(&self) -> Option<SyncView> {
-        let grid = self.grid.filter(|grid| grid.has_grid())?;
+        let grid = self.true_grid()?;
         Some(SyncView {
             grid,
             position_secs: self.position_secs,
@@ -1580,8 +1611,13 @@ impl DeckEngine {
         if state.loop_beats == 0 || state.loop_beats == LOOP_BEATS_INF {
             return None;
         }
-        let grid = state.grid.filter(|grid| grid.has_grid())?;
-        Some(grid.beat_secs * state.loop_beats as f64)
+        // A deck with no track has no length to measure against, and
+        // `click` does not clear the duration -- without this a bracket
+        // pressed during a load would size itself on the outgoing record.
+        if !state.is_loaded() {
+            return None;
+        }
+        Some(state.counted_beat_secs() * state.loop_beats as f64)
     }
 
     /// A span is only worth engaging if it fits inside the track and is
@@ -1738,7 +1774,7 @@ impl DeckEngine {
     pub fn move_loop(&mut self, deck: DeckId, start_secs: f64) -> Vec<DeckCmd> {
         let Some(span) = self.deck(deck).loop_span else { return Vec::new() };
         let unit = self.snap_beats;
-        let start = match self.deck(deck).grid {
+        let start = match self.deck(deck).true_grid() {
             Some(grid) => grid.snap_translate(start_secs, span.start_secs, unit),
             None => start_secs,
         };
@@ -1848,7 +1884,7 @@ impl DeckEngine {
     pub fn set_cue(&mut self, deck: DeckId, secs: f64) {
         let unit = self.snap_beats;
         let state = self.deck(deck);
-        let target = match state.grid {
+        let target = match state.true_grid() {
             Some(grid) => grid.snap_translate(secs, state.cue_secs, unit),
             None => secs,
         };
@@ -3074,12 +3110,7 @@ impl DeckEngine {
         if !state.is_loaded() || !beats.is_finite() {
             return Vec::new();
         }
-        let beat_secs = state
-            .grid
-            .filter(|grid| grid.has_grid())
-            .map(|grid| grid.beat_secs)
-            .unwrap_or(0.5);
-        let secs = state.position_secs + beats * beat_secs;
+        let secs = state.position_secs + beats * state.counted_beat_secs();
         self.seek_secs(deck, secs)
     }
 
@@ -3180,11 +3211,7 @@ impl DeckEngine {
         if !state.is_loaded() || state.scratching {
             return Vec::new();
         }
-        let Some(grid) = state.grid else { return Vec::new() };
-        if !(grid.beat_secs > 0.0) {
-            return Vec::new();
-        }
-        let target = (state.position_secs + beats * grid.beat_secs).max(0.0);
+        let target = (state.position_secs + beats * state.counted_beat_secs()).max(0.0);
         self.seek_secs(deck, target)
     }
 
@@ -3194,7 +3221,7 @@ impl DeckEngine {
     /// not be displaced.
     pub fn seek_secs_snapped(&mut self, deck: DeckId, secs: f64) -> Vec<DeckCmd> {
         let unit = self.snap_beats;
-        let snapped = match self.deck(deck).grid {
+        let snapped = match self.deck(deck).true_grid() {
             Some(grid) => grid.snap_translate(secs, self.snap_reference(deck), unit),
             None => secs,
         };
@@ -3744,15 +3771,79 @@ mod tests {
     }
 
     #[test]
-    fn beat_brackets_are_refused_without_a_grid() {
+    fn beat_brackets_count_in_seconds_without_a_grid() {
+        // The count used to be dead here, so a 4 on the dial did nothing at
+        // all until the analysis landed. It counts in SECONDS now -- one
+        // beat a second -- which is a unit, not a claim about the record.
         let mut e = DeckEngine::new();
         load_unanalysed(&mut e, DeckId::A, 1);
+        assert!(!e.deck(DeckId::A).has_true_beats());
         e.deck_mut(DeckId::A).loop_beats = 4;
         e.observe(DeckId::A, 10.0, true);
-        assert!(e.loop_in(DeckId::A).is_empty(), "N > 0 has no beat to measure");
-        assert!(e.loop_out(DeckId::A).is_empty());
-        assert!(e.deck(DeckId::A).loop_span.is_none());
+        assert!(!e.loop_in(DeckId::A).is_empty(), "the bracket engages");
+        let span = e.deck(DeckId::A).loop_span.expect("a span");
+        assert!((span.start_secs - 10.0).abs() < 1e-9);
+        assert!((span.end_secs - 14.0).abs() < 1e-9, "four counted beats is four seconds");
         assert!(e.deck(DeckId::A).loop_armed.is_none(), "a beat count must not arm MAN");
+
+        // And `]` sizes the same span backwards from where the record is.
+        e.observe(DeckId::A, 20.0, true);
+        assert!(!e.loop_out(DeckId::A).is_empty());
+        let span = e.deck(DeckId::A).loop_span.expect("a span");
+        assert!((span.start_secs - 16.0).abs() < 1e-9 && (span.end_secs - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_deck_with_no_track_still_has_no_count_to_measure() {
+        let mut e = DeckEngine::new();
+        e.deck_mut(DeckId::A).loop_beats = 4;
+        assert!(e.loop_in(DeckId::A).is_empty(), "no record, no length");
+        assert!(e.deck(DeckId::A).loop_span.is_none());
+    }
+
+    #[test]
+    fn a_measured_grid_takes_the_count_back_off_seconds() {
+        let mut e = DeckEngine::new();
+        let (deck, gen) = load_gen(&e.click(item(1), DeckTarget::A));
+        e.track_ready(deck, gen, 300.0);
+        e.deck_mut(DeckId::A).loop_beats = 4;
+        e.observe(DeckId::A, 10.0, true);
+        e.loop_in(DeckId::A);
+        assert!((e.deck(DeckId::A).loop_span.unwrap().end_secs - 14.0).abs() < 1e-9);
+        // 120 BPM: four beats is two seconds, not four.
+        e.grid_ready(deck, gen, grid(120.0, 0.0), None);
+        assert!(e.deck(DeckId::A).has_true_beats());
+        e.observe(DeckId::A, 30.0, true);
+        e.loop_in(DeckId::A);
+        assert!((e.deck(DeckId::A).loop_span.unwrap().end_secs - 32.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_jump_and_a_nudge_move_in_seconds_without_a_grid() {
+        let mut e = DeckEngine::new();
+        load_unanalysed(&mut e, DeckId::A, 1);
+        e.observe(DeckId::A, 40.0, true);
+        e.beat_jump(DeckId::A, 16.0);
+        assert!(
+            (e.deck(DeckId::A).position_secs - 56.0).abs() < 1e-9,
+            "sixteen counted beats is sixteen seconds, at {}",
+            e.deck(DeckId::A).position_secs,
+        );
+        e.nudge_beats(DeckId::A, -1.0);
+        assert!((e.deck(DeckId::A).position_secs - 55.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_counted_beat_never_reaches_the_things_that_take_a_grid_as_a_fact() {
+        // The whole point of keeping the fallback out of `grid`: nothing
+        // that snaps, syncs or shows a tempo may see it.
+        let mut e = DeckEngine::new();
+        load_unanalysed(&mut e, DeckId::A, 1);
+        let state = e.deck(DeckId::A);
+        assert!(state.true_grid().is_none());
+        assert!(state.effective_bpm().is_none(), "no tempo is claimed");
+        assert!(state.sync_view().is_none(), "and nothing can lock to it");
+        assert!((state.counted_beat_secs() - 1.0).abs() < 1e-9);
     }
 
     #[test]

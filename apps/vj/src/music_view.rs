@@ -2238,9 +2238,9 @@ script_mod! {
                         // One beat either way — the nudge a hand makes when the
                         // drop lands a hair off — and a phrase with a modifier held:
                         // shift takes four bars, control sixteen.
-                        // A beat is a GRID measurement,
-                        // so these do nothing until a grid does: there is no
-                        // length to step by before one lands.
+                        // A beat is a measured one where the analysis found
+                        // beats, and a second where it did not, so these
+                        // always step something.
                         //
                         // The chevrons point at the TRACK, not at the playhead:
                         // < sends the track a beat FORWARD past the head, > a

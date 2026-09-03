@@ -22316,6 +22316,14 @@ p2 {}
                         if refined_by_beats { " · beat this" } else { "" },
                     )
                 }
+                // Two different states wore one word. A deck whose
+                // analysis has LANDED and found no steady beat is not
+                // still working -- it is finished, and its answer is that
+                // this record has no beats to count. The dials still work
+                // there; they count in seconds.
+                _ if loaded && self.deck_analysis[index].is_some() => {
+                    "no steady beat · counts are seconds".to_string()
+                }
                 _ if loaded => "analysing…".to_string(),
                 _ => String::new(),
             };
@@ -24707,9 +24715,10 @@ p2 {}
                 self.run_deck_cmds(cx, cmds);
             }
             // One beat either way, or a phrase with a modifier held: shift is
-            // four bars, control sixteen. Dead until the grid lands — the
-            // engine refuses rather than guessing a beat length, so an early
-            // press does nothing instead of throwing the playhead somewhere.
+            // four bars, control sixteen. A beat is a MEASURED one where the
+            // analysis found beats and a second where it did not, so an
+            // early press moves the record by a length that is at least
+            // predictable rather than doing nothing at all.
             //
             // Which GLYPH sits on which of these lives in the DSL: the
             // chevrons point at the track rather than the playhead, so <
