@@ -257,7 +257,7 @@ impl Cx {
         *sender = Some(tx);
         drop(sender);
 
-        if let Ok(task) = self.spawn_thread(move || {
+        if let Ok(task) = self.spawn_worker(move || {
             let mut app_to_studio = AppToStudioVec(Vec::new());
             let mut first_message_time = None;
             let default_collect_time = Duration::from_millis(16);

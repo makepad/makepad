@@ -19,7 +19,7 @@
 //! deeper. The layout itself is pure arithmetic and runs inline, throttled
 //! while a scan is still feeding it.
 
-use makepad_widgets::makepad_platform::thread::SignalToUI;
+use makepad_widgets::makepad_platform::thread::{Lane, SignalToUI};
 use makepad_widgets::*;
 
 use std::{
@@ -30,7 +30,6 @@ use std::{
         mpsc::{channel, Receiver, Sender},
         Arc, Mutex,
     },
-    thread,
     time::Duration,
 };
 
@@ -980,6 +979,8 @@ impl TreemapView {
         };
         let root = self.root.clone();
         let instant = crate::vfs::vfs().is_instant();
+        let pool = cx.task_pool();
+        let scan_pool = pool.clone();
         let scan = move || {
             // The four scan threads all report through here, so the channel
             // and the signal clock live behind one lock. Waking the UI is the
@@ -1031,7 +1032,7 @@ impl TreemapView {
                 SignalToUI::set_ui_signal();
                 return;
             }
-            let ok = crate::vfs::vfs().scan_stream(&root, &cancel, &sink);
+            let ok = crate::vfs::vfs().scan_stream(&root, &cancel, &sink, &scan_pool);
             let _ = sender.send(ScanMessage {
                 generation,
                 step: None,
@@ -1043,7 +1044,16 @@ impl TreemapView {
             scan();
             self.drain(cx);
         } else {
-            thread::spawn(scan);
+            match pool.submit(Lane::Heavy, scan) {
+                Ok(handle) => handle.detach(),
+                Err(_) => {
+                    // The pool refused the job (closed or saturated): don't
+                    // spin the "Scanning…" state forever with nothing behind it.
+                    self.scanning = false;
+                    self.cancel = None;
+                    self.error = Some("background scan unavailable".to_string());
+                }
+            }
         }
         self.redraw(cx);
     }
@@ -1131,7 +1141,7 @@ impl TreemapView {
                 match outcome {
                     Outcome::Scanned => {
                         self.scanned_at = crate::sizecache::now();
-                        self.save_cache();
+                        self.save_cache(cx);
                     }
                     Outcome::Loaded { scanned_at } => self.scanned_at = scanned_at,
                     Outcome::Failed => {
@@ -1749,7 +1759,7 @@ impl TreemapView {
     /// Write the finished tree out for next time. Encoding walks the whole
     /// tree so it happens here, where the tree is; the file write is somebody
     /// else's problem, on a thread nobody is waiting for.
-    fn save_cache(&self) {
+    fn save_cache(&self, cx: &Cx) {
         if crate::vfs::vfs().is_demo() {
             return;
         }
@@ -1759,10 +1769,10 @@ impl TreemapView {
         let root = self.root.clone();
         if crate::vfs::vfs().is_instant() {
             let _ = crate::vfs::vfs().store_scan_cache(&root, &bytes);
-        } else {
-            thread::spawn(move || {
-                let _ = crate::vfs::vfs().store_scan_cache(&root, &bytes);
-            });
+        } else if let Ok(handle) = cx.task_pool().submit(Lane::Light, move || {
+            let _ = crate::vfs::vfs().store_scan_cache(&root, &bytes);
+        }) {
+            handle.detach();
         }
     }
 
@@ -1882,7 +1892,7 @@ impl TreemapView {
         self.totals_dirty = true;
         self.tree_rev = self.tree_rev.wrapping_add(1);
         self.last_layout = None;
-        self.save_cache();
+        self.save_cache(cx);
         self.redraw(cx);
     }
 

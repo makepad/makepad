@@ -24,7 +24,7 @@ use makepad_mp4_index::{
 use makepad_widgets::makepad_platform::video_file::{
     nv12, DecodedFrame, StreamVideoCodec, VideoStreamDecoder,
 };
-use makepad_widgets::makepad_platform::thread::ThreadSpawner;
+use makepad_widgets::makepad_platform::thread::{ThreadOptions, ThreadSpawner};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -121,7 +121,10 @@ impl StreamSwatch {
         let cancel = CancelToken::new();
         let (thread_shared, thread_cancel) = (shared.clone(), cancel.clone());
         let stream_spawner = spawner.clone();
-        match spawner.spawn(move || {
+        // The decode loop lives as long as this stream is open; it feeds a
+        // fetch loop of its own over a channel.
+        let options = ThreadOptions { name: Some("vj-archive-stream".into()), ..Default::default() };
+        match spawner.spawn_worker(options, move || {
                 if let Err(failure) = stream_main(
                     url,
                     format,
@@ -364,8 +367,9 @@ fn stream_main(
     let (cmd_tx, cmd_rx) = mpsc::channel::<FetchCmd>();
     let (win_tx, win_rx) = mpsc::sync_channel::<Window>(WINDOWS_AHEAD);
     let fetch_shared = shared.clone();
+    let options = ThreadOptions { name: Some("vj-archive-fetch".into()), ..Default::default() };
     spawner
-        .spawn(move || fetch_loop(source, cmd_rx, win_tx, fetch_shared))
+        .spawn_worker(options, move || fetch_loop(source, cmd_rx, win_tx, fetch_shared))
         .map(|handle| handle.detach())
         .map_err(|e| StreamFailure::Setup(e.to_string()))?;
 

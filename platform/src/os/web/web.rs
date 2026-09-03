@@ -415,6 +415,7 @@ impl Cx {
                         }
                         4 => {
                             self.call_event_handler(&Event::Shutdown);
+                            self.close_task_pool();
                             self.thread_spawner.close_runtime();
                         }
                         _ => {}

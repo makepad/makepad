@@ -28,7 +28,7 @@ use makepad_audio_decode::{
     decode_audio_limited, mp3::Mp3Decoder, vorbis::VorbisDecoder, AudioFormat,
     Limits as AudioLimits,
 };
-use makepad_widgets::makepad_platform::thread::ThreadSpawner;
+use makepad_widgets::makepad_platform::thread::{Lane, TaskPool, ThreadOptions, ThreadSpawner};
 use makepad_widgets::makepad_platform::video_file::{nv12, VideoFileDecoder, VideoFileInfo};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -401,6 +401,7 @@ impl SlotPlayer {
         loop_on: bool,
         start_paused: bool,
         spawner: ThreadSpawner,
+        pool: TaskPool,
     ) -> Result<SlotPlayer, String> {
         let input = DecoderInput::prepare(Path::new(path), media)?;
         let info = VideoFileDecoder::open(&input.path)
@@ -442,9 +443,11 @@ impl SlotPlayer {
         mixer.set_slot_paused(slot, start_paused);
         let thread_shared = shared.clone();
         let thread_mixer = mixer.clone();
-        let fill_spawner = spawner.clone();
+        // The slot's decode loop lives as long as the slot; its repeat-cache
+        // fills are heavy pool jobs.
+        let options = ThreadOptions { name: Some("vj-slot-decode".into()), ..Default::default() };
         spawner
-            .spawn(move || decode_loop(slot, input, thread_mixer, thread_shared, fill_spawner))
+            .spawn_worker(options, move || decode_loop(slot, input, thread_mixer, thread_shared, pool))
             .map(|handle| handle.detach())
             .map_err(|e| e.to_string())?;
         Ok(SlotPlayer {
@@ -795,7 +798,7 @@ fn decode_loop(
     input: DecoderInput,
     mixer: Mixer,
     shared: Arc<SlotShared>,
-    spawner: ThreadSpawner,
+    pool: TaskPool,
 ) {
     let path = &input.path;
     let mut decoder = match VideoFileDecoder::open(path) {
@@ -826,7 +829,7 @@ fn decode_loop(
         }
         // The eager fill worker: spawned/refreshed here (a no-op lock
         // when settled). Trim-epoch invalidation lives inside it.
-        ensure_repeat_fill(&shared, path, &info, &spawner);
+        ensure_repeat_fill(&shared, path, &info, &pool);
         // Seek: reopen and discard up to the target.
         let seek = shared.seek_100ns.swap(-1, Ordering::AcqRel);
         if seek >= 0 {
@@ -1312,7 +1315,7 @@ fn ensure_repeat_fill(
     shared: &Arc<SlotShared>,
     path: &str,
     info: &VideoFileInfo,
-    spawner: &ThreadSpawner,
+    pool: &TaskPool,
 ) {
     if PlayMode::from_u8(shared.mode.load(Ordering::Acquire)) == PlayMode::Once {
         return;
@@ -1361,7 +1364,7 @@ fn ensure_repeat_fill(
     }
     let shared = shared.clone();
     let path = path.to_string();
-    match spawner.spawn(move || {
+    match pool.submit(Lane::Heavy, move || {
         let t0 = Instant::now();
         let ok = repeat_fill_worker(&shared, &path, epoch, t_in, t_out, open_ended);
         shared.repeat_cache.lock().unwrap().filling = false;
@@ -4109,7 +4112,8 @@ impl DecodePool {
         for i in 0..heavy_workers {
             let jobs = job_rx.clone();
             let done = self.done_tx.clone();
-            match spawner.spawn(move || loop {
+            let options = ThreadOptions { name: Some(format!("vj-decode-{i}").into()), ..Default::default() };
+            match spawner.spawn_worker(options, move || loop {
                     let job = {
                         let guard = jobs.lock().unwrap();
                         guard.recv()
@@ -4128,7 +4132,8 @@ impl DecodePool {
         for i in 0..thumb_workers {
             let queue = self.thumb_queue.clone();
             let done = self.done_tx.clone();
-            match spawner.spawn(move || loop {
+            let options = ThreadOptions { name: Some(format!("vj-thumb-{i}").into()), ..Default::default() };
+            match spawner.spawn_worker(options, move || loop {
                     let Some((ticket, job)) = queue.pop() else { return };
                     let result = decode_thumb_source(&job.source, job.sheet, job.legacy_may_be_sheet);
                     if !queue.finished(ticket) {
@@ -5782,6 +5787,7 @@ mod mode_flip_tests {
             true,  // loop on
             false, // playing
             crate::test_thread_spawner(),
+            crate::test_task_pool(),
         )
         .expect("open");
         player.set_muted(true);

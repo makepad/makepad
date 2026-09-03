@@ -18,11 +18,13 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc, Arc, Mutex,
     },
-    thread,
 };
 
+use makepad_widgets::makepad_platform::thread::{ThreadOptions, ThreadSpawner};
 use makepad_widgets::Cx;
 
+#[cfg(test)]
+use std::thread;
 #[cfg(test)]
 use std::time::Duration;
 
@@ -500,8 +502,9 @@ pub struct Ops {
 impl Ops {
     /// `notify` is called (from the worker thread) whenever an update is
     /// queued, so the UI can wake itself. Pass a closure that raises the
-    /// framework's UI signal.
-    pub fn new(notify: Box<dyn Fn() + Send + Sync>) -> Self {
+    /// framework's UI signal. `spawner` creates the one dedicated worker
+    /// thread this engine runs on for the life of the app.
+    pub fn new(notify: Box<dyn Fn() + Send + Sync>, spawner: &ThreadSpawner) -> Self {
         let (request_tx, request_rx) = mpsc::channel::<Job>();
         let updates: Arc<Mutex<VecDeque<OpUpdate>>> = Arc::new(Mutex::new(VecDeque::new()));
         let cancel_flags: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -512,9 +515,14 @@ impl Ops {
         let worker_cancel_flags = cancel_flags.clone();
         let worker_busy_count = busy_count.clone();
         let worker_notify = notify.clone();
-        thread::spawn(move || {
-            worker_loop(request_rx, worker_updates, worker_cancel_flags, worker_busy_count, worker_notify);
-        });
+        if let Ok(handle) = spawner.spawn_worker(
+            ThreadOptions { name: Some("files-ops".into()), ..Default::default() },
+            move || {
+                worker_loop(request_rx, worker_updates, worker_cancel_flags, worker_busy_count, worker_notify);
+            },
+        ) {
+            handle.detach();
+        }
 
         Ops { request_tx, updates, cancel_flags, busy_count }
     }
@@ -562,9 +570,11 @@ impl Ops {
     }
 }
 
+#[cfg(test)]
 impl Default for Ops {
     fn default() -> Self {
-        Ops::new(Box::new(|| {}))
+        let spawner = Cx::new(Box::new(|_, _| {})).thread_spawner();
+        Ops::new(Box::new(|| {}), &spawner)
     }
 }
 

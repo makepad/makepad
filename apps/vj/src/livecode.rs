@@ -303,7 +303,11 @@ pub fn start_worker(spawner: makepad_widgets::makepad_platform::thread::ThreadSp
         // outlives the app by design: there is nothing to shut down and
         // nothing it holds that matters at exit. The web build has no
         // observed origin on disk, so the status files are not written.
-        match spawner.spawn(move || {
+        let options = makepad_widgets::makepad_platform::thread::ThreadOptions {
+            name: Some("vj-livecode-status".into()),
+            ..Default::default()
+        };
+        match spawner.spawn_worker(options, move || {
                 let mut queue: VecDeque<Job> = VecDeque::new();
                 loop {
                     // Wait for work, then drain what is already queued.

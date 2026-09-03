@@ -30,7 +30,7 @@ use crate::decks::DeckId;
 use crate::mixer::TrackPcm;
 use makepad_ai_beats::BeatsModel;
 use makepad_asset_data::{BlobId, MediaType};
-use makepad_widgets::makepad_platform::thread::ThreadSpawner;
+use makepad_widgets::makepad_platform::thread::{ThreadOptions, ThreadSpawner};
 use std::f32::consts::PI;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
@@ -2366,7 +2366,8 @@ impl AnalysisPool {
     pub fn start(&mut self, spawner: ThreadSpawner) {
         let Some(jobs) = self.jobs.take() else { return };
         let done_tx = self.done_tx.clone();
-        match spawner.spawn(move || {
+        let options = ThreadOptions { name: Some("vj-analysis".into()), ..Default::default() };
+        match spawner.spawn_worker(options, move || {
                 let dir = cache_dir();
                 let mut beats_checkpoint: Option<PathBuf> = None;
                 let mut beats_model: Option<BeatsModel> = None;

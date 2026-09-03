@@ -485,7 +485,7 @@ impl TileGrid {
         };
         self.items = rows.iter().filter_map(item_of).collect();
         self.visible = (0..self.items.len()).collect();
-        let store = store::spawn(library);
+        let store = store::spawn(library, &cx.thread_spawner());
         for shard in shards.iter().filter(|s| s.sealed) {
             store.need_page(shard.id, LEVELS - 1, 1);
             self.requested.insert((shard.id, LEVELS - 1));

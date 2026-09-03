@@ -3809,10 +3809,11 @@ pub struct MapView {
     local_source_missing_logged: bool,
     #[rust]
     tile_worker_rx: ToUIReceiver<TileWorkerMessage>,
-    #[rust]
-    tile_thread_pool: Option<TaskPool>,
-    #[rust]
-    tile_thread_pool_unavailable: bool,
+    /// Tile parses/bakes staged newest-first in front of the runtime pool's
+    /// light lane; a re-request replaces the staged job for its key and a pan
+    /// prunes what has not been handed over yet.
+    #[rust(TaskQueue::new(Lane::Light, 1, 1024))]
+    tile_queue: TaskQueue<TileKey>,
     #[rust]
     local_requested_tiles: HashMap<TileKey, f64>,
     #[rust]
@@ -4117,6 +4118,12 @@ impl Widget for MapView {
             self.handle_archive_events(cx, event);
         }
         self.handle_tile_worker_messages(cx);
+        if matches!(event, Event::Signal) {
+            self.pump_tile_queue(cx);
+            if let Some(workers) = self.archive_worker_pool.as_ref() {
+                workers.pump();
+            }
+        }
         if self.archive_request_watchdog_rx.try_recv_flush().is_ok() {
             self.archive_request_watchdog_handle = None;
             self.expire_archive_requests(cx);
@@ -4684,6 +4691,7 @@ impl Widget for MapView {
                 // contended lock there is an `Atomics.wait` the main thread
                 // may not make. No pool: the staging simply stays.
                 if pass == 0 {
+                    let pool = cx.cx.task_pool();
                     for geometry in fill_geometry
                         .iter()
                         .chain(fill_misc_geometry.iter())
@@ -4703,15 +4711,15 @@ impl Widget for MapView {
                         .chain(stalk_template_geometry.iter())
                         .chain(stoplight_template_geometry.iter())
                     {
-                        let Some(pool) = self.tile_thread_pool.as_ref() else {
+                        if !pool.is_open() {
                             break;
-                        };
+                        }
                         let Some((indices, vertices)) =
                             geometry.take_cpu_buffers_if_uploaded(cx.cx)
                         else {
                             continue;
                         };
-                        match pool.submit(QueueOrder::Fifo, move || drop((indices, vertices))) {
+                        match pool.submit(Lane::Light, move || drop((indices, vertices))) {
                             Ok(handle) => handle.detach(),
                             Err(_) => {
                                 // The pool is full: keep the staging until a
@@ -7302,20 +7310,19 @@ impl MapView {
         if let Some(archive) = self.detail_archive.as_mut() {
             archive.flush(cx);
         }
-        if let Some(pool) = self.tile_thread_pool.as_ref() {
-            let dropped = pool
-                .retain_queued::<TileKey>(|key| key.z == request_zoom && visible.contains(key));
-            for key in dropped {
-                self.local_requested_tiles.remove(&key);
-                // A queued-then-dropped placeholder must not linger as
-                // Loading forever; keep-stale Ready entries stay.
-                if self
-                    .tiles
-                    .get(&key)
-                    .is_some_and(|entry| matches!(entry.state, TileLoadState::LoadingLocal))
-                {
-                    self.tiles.remove(&key);
-                }
+        let dropped = self
+            .tile_queue
+            .retain(|key| key.z == request_zoom && visible.contains(key));
+        for key in dropped {
+            self.local_requested_tiles.remove(&key);
+            // A staged-then-dropped placeholder must not linger as
+            // Loading forever; keep-stale Ready entries stay.
+            if self
+                .tiles
+                .get(&key)
+                .is_some_and(|entry| matches!(entry.state, TileLoadState::LoadingLocal))
+            {
+                self.tiles.remove(&key);
             }
         }
         self.sync_archive_request_watchdog(cx);
@@ -7687,45 +7694,33 @@ impl MapView {
         self.redraw(cx);
     }
 
-    fn ensure_tile_thread_pool(&mut self, cx: &mut Cx) {
-        if self.tile_thread_pool.is_none() && !self.tile_thread_pool_unavailable {
-            let spawner = cx.thread_spawner();
-            match TaskPool::new(
-                spawner.clone(),
-                PoolOptions {
-                    workers: spawner.worker_count(2, 8),
-                    capacity: std::num::NonZeroUsize::new(1024).unwrap(),
-                    name: "map-tile".into(),
-                },
-            ) {
-                Ok(pool) => self.tile_thread_pool = Some(pool),
-                Err(error) => {
-                    log!("MapView: tile pool unavailable, using serial work: {error}");
-                    self.tile_thread_pool_unavailable = true;
-                }
-            }
-        }
-    }
-
     fn submit_tile_job<F>(&mut self, cx: &mut Cx, key: TileKey, job: F) -> Result<(), SubmitError>
     where
         F: FnOnce() + Send + 'static,
     {
-        self.ensure_tile_thread_pool(cx);
-        if let Some(pool) = self.tile_thread_pool.as_ref() {
-            match pool.submit_tagged(key, true, QueueOrder::Lifo, job) {
-                Ok(task) => {
-                    task.detach();
-                    Ok(())
-                }
-                Err(error) => Err(error),
-            }
+        let pool = cx.task_pool();
+        if pool.is_open() {
+            let window = pool_window(&pool, self.tile_queue.in_flight());
+            self.tile_queue.set_in_flight_limit(window);
+            self.tile_queue.push(&pool, key, true, QueueOrder::Lifo, job)
         } else {
             // Pure parsing/tessellation has an explicit serial fallback when
             // wasm was built without atomics.
             job();
             Ok(())
         }
+    }
+
+    /// Hand staged tile jobs over as workers free up: after every request
+    /// pass and on the UI signal each pool completion raises.
+    fn pump_tile_queue(&mut self, cx: &mut Cx) {
+        if self.tile_queue.staged_len() == 0 {
+            return;
+        }
+        let pool = cx.task_pool();
+        let window = pool_window(&pool, self.tile_queue.in_flight());
+        self.tile_queue.set_in_flight_limit(window);
+        self.tile_queue.pump(&pool);
     }
 
     fn ensure_visible_tiles(&mut self, cx: &mut Cx, rect: Rect) {
@@ -7768,8 +7763,8 @@ impl MapView {
             self.redraw(cx);
         }
 
-        self.ensure_tile_thread_pool(cx);
         self.request_visible_tiles_from_local_source(cx);
+        self.pump_tile_queue(cx);
 
         let mut visible_set = HashSet::with_capacity(self.visible_tiles.len());
         for key in &self.visible_tiles {
@@ -10956,27 +10951,21 @@ mod tests {
             },
         );
         map.local_source_zoom_range = Some((3, 3));
-        map.ensure_tile_thread_pool(&mut cx);
-        let thread_count = cx.thread_spawner().worker_count(2, 8).get();
+        // Park every pool worker so tile builds stay staged in the map's
+        // queue, where a pan can still prune them.
+        let pool = cx.task_pool();
+        let thread_count = pool.worker_count();
         let reached = Arc::new(std::sync::Barrier::new(thread_count + 1));
         let release = Arc::new(std::sync::Barrier::new(thread_count + 1));
-        for index in 0..thread_count {
+        for _ in 0..thread_count {
             let reached = reached.clone();
             let release = release.clone();
-            map.tile_thread_pool
-                .as_ref()
-                .unwrap()
-                .submit_tagged(
-                    TileKey { z: 30, x: index as i32, y: 0 },
-                    true,
-                    QueueOrder::Lifo,
-                    move || {
-                    reached.wait();
-                    release.wait();
-                },
-                )
-                .unwrap()
-                .detach();
+            pool.submit(Lane::Light, move || {
+                reached.wait();
+                release.wait();
+            })
+            .unwrap()
+            .detach();
         }
         reached.wait();
         let rect = Rect {
@@ -10999,9 +10988,19 @@ mod tests {
             .filter(|key| !map.visible_tiles.contains(key))
             .collect::<Vec<_>>();
         assert!(!stale.is_empty());
-        for key in stale {
-            assert!(!map.local_requested_tiles.contains_key(&key));
-            assert!(!map.tiles.contains_key(&key));
+        // With every worker parked the queue hands over at most one job (its
+        // window never closes below one); everything staged is pruned.
+        let handed_over = map.tile_queue.in_flight();
+        assert!(handed_over <= 1, "saturated pool, yet {handed_over} tile jobs were handed over");
+        let leaked = stale
+            .iter()
+            .filter(|key| map.local_requested_tiles.contains_key(key))
+            .count();
+        assert!(leaked <= handed_over, "{leaked} stale builds survived the pan");
+        for key in &stale {
+            if !map.local_requested_tiles.contains_key(key) {
+                assert!(!map.tiles.contains_key(key));
+            }
         }
         assert!(map
             .local_requested_tiles
@@ -11010,7 +11009,7 @@ mod tests {
 
         map.visible_tiles.clear();
         map.request_visible_tiles_from_local_source(&mut cx);
-        assert!(map.local_requested_tiles.is_empty());
+        assert!(map.local_requested_tiles.len() <= handed_over);
         release.wait();
         std::fs::remove_file(path).unwrap();
     }

@@ -22,6 +22,8 @@ use std::{
     sync::{atomic::AtomicBool, Arc, OnceLock},
 };
 
+use makepad_widgets::makepad_platform::thread::TaskPool;
+
 use crate::{
     model::{self, FileEntry},
     ops::{OpKind, OpRequest, Undo},
@@ -165,6 +167,7 @@ pub trait Vfs: Send + Sync {
         root: &Path,
         cancel: &AtomicBool,
         sink: &(dyn Fn(ScanStep) + Sync),
+        _pool: &TaskPool,
     ) -> bool {
         match self.scan(root, cancel, &|_| {}) {
             Some(node) => {
@@ -364,6 +367,7 @@ impl Vfs for RealVfs {
         root: &Path,
         cancel: &AtomicBool,
         sink: &(dyn Fn(ScanStep) + Sync),
+        pool: &TaskPool,
     ) -> bool {
         let classify = |p: &Path, is_dir: bool| model::kind_for(p, is_dir) as u8;
         let home = self.home();
@@ -372,7 +376,7 @@ impl Vfs for RealVfs {
             classify: &classify,
             skip: &skip,
         };
-        treemap::scan_stream(root, &rules, cancel, sink)
+        treemap::scan_stream(root, &rules, cancel, sink, pool)
     }
 
     fn perform(&self, _request: &OpRequest) -> Result<OpOutcome, String> {

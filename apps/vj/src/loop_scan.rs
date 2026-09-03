@@ -12,7 +12,7 @@
 
 use crate::mixer::TrackPcm;
 use makepad_ai_stems::stft::Stft;
-use makepad_widgets::makepad_platform::thread::ThreadSpawner;
+use makepad_widgets::makepad_platform::thread::{ThreadOptions, ThreadSpawner};
 
 /// STFT geometry for the feature pass.  2048/512 at the track's native rate
 /// gives ~86 Hz feature frames — a dozen per beat at any sane tempo.
@@ -704,7 +704,8 @@ impl LoopScanPool {
     pub fn start(&mut self, spawner: ThreadSpawner) {
         let Some(jobs) = self.jobs.take() else { return };
         let done_tx = self.done_tx.clone();
-        match spawner.spawn(move || {
+        let options = ThreadOptions { name: Some("vj-loop-scan".into()), ..Default::default() };
+        match spawner.spawn_worker(options, move || {
                 while let Ok(job) = jobs.recv() {
                     let stems = job.stems_root.as_ref().and_then(|root| {
                         load_scan_stems(root, &job.pcm, job.digest.as_deref())

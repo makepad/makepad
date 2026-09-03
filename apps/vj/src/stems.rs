@@ -38,7 +38,7 @@ use crate::mixer::{encode_stem_sample, TrackPcm};
 use makepad_ai_stems::{CacheHeader, Demixer, StemCache, StemSet, StemsModel, StereoBuf, CHUNK_STEP};
 pub(crate) use makepad_ai_stems::SAMPLE_RATE as STEMS_RATE;
 use makepad_asset_data::Sha256;
-use makepad_widgets::makepad_platform::thread::ThreadSpawner;
+use makepad_widgets::makepad_platform::thread::{ThreadOptions, ThreadSpawner};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -1072,7 +1072,8 @@ impl StemsPool {
         let checkpoint = self.checkpoint.clone();
         let budget_bytes = self.budget_bytes;
         let waiting = self.deck_waiting.clone();
-        match spawner.spawn(move || {
+        let options = ThreadOptions { name: Some("vj-stems".into()), ..Default::default() };
+        match spawner.spawn_worker(options, move || {
                 let mut model: Option<StemsModel> = None;
                 // The track most recently opened per deck: whatever is on a
                 // deck is pinned against the budget, so a set in progress is

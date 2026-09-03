@@ -85,7 +85,7 @@ impl Fonts {
             .receiver()
             .expect("MSDF worker receiver is taken exactly once");
         let worker_tx = msdf_result_receiver.sender();
-        if let Ok(task) = cx.spawn_thread(move || {
+        if let Ok(task) = cx.spawn_worker(move || {
             let mut msdfer = Msdfer::new(msdfer_settings);
             while let Ok(job) = worker_rx.recv() {
                 let mut msdf = Image::<Bgra>::new(job.key.size);

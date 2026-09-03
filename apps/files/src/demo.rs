@@ -1151,7 +1151,15 @@ impl Vfs for DemoVfs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use makepad_widgets::makepad_platform::thread::TaskPool;
+    use makepad_widgets::Cx;
     use std::collections::HashSet;
+
+    /// `DemoVfs::scan_stream` uses the `Vfs` default impl, which never
+    /// touches the pool — a throwaway one just satisfies the signature.
+    fn test_pool() -> TaskPool {
+        Cx::new(Box::new(|_, _| {})).task_pool()
+    }
 
     fn listing(vfs: &DemoVfs, path: &str) -> Vec<FileEntry> {
         vfs.read_dir(Path::new(path), true).unwrap()
@@ -1399,9 +1407,10 @@ mod tests {
             .scan(&vfs.home(), &AtomicBool::new(false), &|_| {})
             .expect("initial demo scan should complete");
         let rescanned = Mutex::new(Node::dir(initial.name.clone(), initial.kind));
+        let pool = test_pool();
         assert!(vfs.scan_stream(&vfs.home(), &AtomicBool::new(false), &|step| {
             assert!(rescanned.lock().unwrap().apply(step));
-        }));
+        }, &pool));
         let rescanned = rescanned.into_inner().unwrap();
         assert_eq!((rescanned.size, rescanned.files), (initial.size, initial.files));
     }
@@ -1625,7 +1634,7 @@ mod tests {
         assert!(!listing.is_empty());
 
         let scan_ok = if spy.is_instant() {
-            spy.scan_stream(&home, &AtomicBool::new(false), &|_| {})
+            spy.scan_stream(&home, &AtomicBool::new(false), &|_| {}, &test_pool())
         } else {
             spy.dispatch_scan()
         };

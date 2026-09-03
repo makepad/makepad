@@ -29,7 +29,7 @@ use makepad_asset_importer::music_import::{
 #[cfg(target_arch = "wasm32")]
 use makepad_asset_importer::music_import::{self, TrackOutcome};
 use makepad_widgets::makepad_platform::file_dialogs::VirtualFile;
-use makepad_widgets::makepad_platform::thread::ThreadSpawner;
+use makepad_widgets::makepad_platform::thread::{Lane, TaskPool};
 use std::collections::{HashSet, VecDeque};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
@@ -175,12 +175,12 @@ pub struct MusicImporter {
     prepared_done: usize,
     prepared_total: usize,
     prepared_summary: Option<MusicImportSummary>,
-    spawner: Option<ThreadSpawner>,
+    pool: Option<TaskPool>,
 }
 
 impl MusicImporter {
-    pub fn set_spawner(&mut self, spawner: ThreadSpawner) {
-        self.spawner = Some(spawner);
+    pub fn set_task_pool(&mut self, pool: TaskPool) {
+        self.pool = Some(pool);
     }
 
     pub fn busy(&self) -> bool {
@@ -229,16 +229,16 @@ impl MusicImporter {
         self.rx = Some(rx);
         self.phase = MusicImportPhase::Reading { done: 0, total: 0, current: String::new() };
         let cache = cache_parent.join("music-import-cache");
-        let spawner = self
-            .spawner
+        let pool = self
+            .pool
             .clone()
             .ok_or_else(|| self.refuse("import worker is not started"))?;
-        spawner.spawn(move || {
+        pool.submit(Lane::Heavy, move || {
                 let verdict = run(&paths, endpoints, server_id, token, cache, &tx, &cancel);
                 let _ = tx.send(Msg::Finished(verdict));
             })
             .map(|handle| handle.detach())
-            .map_err(|e| self.refuse(format!("cannot start the import thread: {e}")))?;
+            .map_err(|e| self.refuse(format!("cannot start the import job: {e}")))?;
         Ok(())
     }
 
@@ -266,11 +266,11 @@ impl MusicImporter {
         let cancel = self.cancel.clone();
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
-        let spawner = self
-            .spawner
+        let pool = self
+            .pool
             .clone()
             .ok_or_else(|| self.refuse("import worker is not started"))?;
-        launch_file_preparation(files, tx, cancel, spawner)
+        launch_file_preparation(files, tx, cancel, pool)
             .map_err(|error| self.refuse(format!("cannot start the import: {error}")))?;
         Ok(())
     }
@@ -406,10 +406,9 @@ fn launch_file_preparation(
     files: Vec<VirtualFile>,
     tx: mpsc::Sender<Msg>,
     cancel: Arc<AtomicBool>,
-    spawner: ThreadSpawner,
+    pool: TaskPool,
 ) -> Result<(), String> {
-    spawner
-        .spawn(move || {
+    pool.submit(Lane::Heavy, move || {
             let (imports, summary, cancelled) = prepare_files(files, &tx, &cancel);
             let _ = tx.send(Msg::Prepared {
                 imports,

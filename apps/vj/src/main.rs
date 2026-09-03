@@ -23,7 +23,9 @@ use makepad_widgets::value_input::{ValueInput, ValueInputAction};
 use makepad_widgets::makepad_platform::file_dialogs::{
     FileDialog, FileDialogAction, VirtualFile,
 };
-use makepad_widgets::makepad_platform::thread::{ThreadSpawner, ToUIReceiver, ToUISender};
+use makepad_widgets::makepad_platform::thread::{
+    Lane, TaskPool, ThreadOptions, ThreadSpawner, ToUIReceiver, ToUISender,
+};
 use crate::import_ui::ImportPanel;
 use crate::local_store::LocalStore;
 use crate::music_import_ui::{MusicImporter, PreparedMusicImport};
@@ -223,6 +225,13 @@ use crate::clock::Instant;
 #[cfg(test)]
 pub(crate) fn test_thread_spawner() -> ThreadSpawner {
     Cx::new(Box::new(|_, _| {})).thread_spawner()
+}
+
+/// A two-worker pool for tests that exercise one-shot jobs.
+#[cfg(test)]
+pub(crate) fn test_task_pool() -> TaskPool {
+    let options = makepad_widgets::makepad_platform::thread::PoolOptions::with_workers(2, 0);
+    TaskPool::new(test_thread_spawner(), options).expect("test pool")
 }
 use std::time::Duration;
 
@@ -2874,17 +2883,17 @@ script_mod! {
 struct SungWorker {
     tx: std::sync::mpsc::Sender<(usize, u64, crate::blend::SungMap)>,
     rx: std::sync::mpsc::Receiver<(usize, u64, crate::blend::SungMap)>,
-    spawner: Option<ThreadSpawner>,
+    pool: Option<TaskPool>,
 }
 
 impl SungWorker {
     fn new() -> SungWorker {
         let (tx, rx) = std::sync::mpsc::channel();
-        SungWorker { tx, rx, spawner: None }
+        SungWorker { tx, rx, pool: None }
     }
 
-    fn set_spawner(&mut self, spawner: ThreadSpawner) {
-        self.spawner = Some(spawner);
+    fn set_task_pool(&mut self, pool: TaskPool) {
+        self.pool = Some(pool);
     }
 }
 
@@ -2908,7 +2917,7 @@ impl SplatRefineWorker {
 
     fn submit(
         &self,
-        spawner: ThreadSpawner,
+        pool: TaskPool,
         deck: DeckId,
         gen: u64,
         stems: Arc<TrackStems>,
@@ -2916,7 +2925,7 @@ impl SplatRefineWorker {
         analysis: Arc<TrackAnalysis>,
     ) -> bool {
         let tx = self.tx.clone();
-        match spawner.spawn(move || {
+        match pool.submit(Lane::Heavy, move || {
                 let levels = Arc::new(splat_stem_levels(&stems, &pcm, &analysis));
                 let grid = build_splat(&analysis, Some(&levels)).map(Arc::new);
                 let _ = tx.send(SplatRefineDone { deck, gen, grid });
@@ -2975,7 +2984,7 @@ mod splat_refine_tests {
         });
 
         assert!(worker.submit(
-            cx.thread_spawner(),
+            cx.task_pool(),
             DeckId::B,
             17,
             Arc::new(stems),
@@ -3162,7 +3171,7 @@ struct LoopScoreWorker {
     notes_model: Arc<
         std::sync::Mutex<Option<(std::path::PathBuf, makepad_ai_notes::NotesModel)>>,
     >,
-    spawner: Option<ThreadSpawner>,
+    pool: Option<TaskPool>,
 }
 
 impl LoopScoreWorker {
@@ -3177,12 +3186,12 @@ impl LoopScoreWorker {
             active: Vec::new(),
             next_thread: 0,
             notes_model: Arc::new(std::sync::Mutex::new(None)),
-            spawner: None,
+            pool: None,
         }
     }
 
-    fn set_spawner(&mut self, spawner: ThreadSpawner) {
-        self.spawner = Some(spawner);
+    fn set_task_pool(&mut self, pool: TaskPool) {
+        self.pool = Some(pool);
     }
 
     fn submit(&mut self, job: LoopScoreJob) -> bool {
@@ -3201,11 +3210,11 @@ impl LoopScoreWorker {
             let tx = self.tx.clone();
             let notes_model = self.notes_model.clone();
             self.next_thread = self.next_thread.wrapping_add(1);
-            let Some(spawner) = self.spawner.as_ref() else {
+            let Some(pool) = self.pool.as_ref() else {
                 self.pending.push_front(job);
                 break;
             };
-            let spawned = spawner.spawn(move || {
+            let spawned = pool.submit(Lane::Heavy, move || {
                 let mono = copy_loop_mono(
                     &job.pcm,
                     job.stems.as_ref().map(|(stems, stem)| (stems.as_ref(), *stem)),
@@ -5254,7 +5263,8 @@ impl SyncWorker {
         let thread_stop = stop.clone();
         let thread_resync = resync.clone();
         let thread_suppress = suppress.clone();
-        match spawner.spawn(move || {
+        let options = ThreadOptions { name: Some("vj-sync".into()), ..Default::default() };
+        match spawner.spawn_worker(options, move || {
             let mut scratch: Vec<f32> = Vec::with_capacity(CAPTURE_RING);
             let mut analyzer: Option<BeatSyncAnalyzer> = None;
             let mut lock_started_beat: Option<i64> = None;
@@ -6000,7 +6010,8 @@ fn start_loop_worker(spawner: ThreadSpawner) -> (
 ) {
     let (tx, rx) = std::sync::mpsc::channel::<LoopScanCtl>();
     let (worker_results, results) = std::sync::mpsc::channel::<(AssetRevisionId, LoopReport)>();
-    match spawner.spawn(move || {
+    let options = ThreadOptions { name: Some("vj-loop-worker".into()), ..Default::default() };
+    match spawner.spawn_worker(options, move || {
         let mut slots: [LoopAccum; 2] = Default::default();
         for accum in &mut slots {
             accum.accept_mod = 1;
@@ -6378,6 +6389,9 @@ pub struct App {
     started: bool,
     #[rust]
     thread_spawner: Option<ThreadSpawner>,
+    /// The runtime pool every one-shot job runs on.
+    #[rust]
+    task_pool: Option<TaskPool>,
     /// The IMPORT CONTENT panel: its path, its worker and its progress.
     #[rust]
     import: ImportPanel,
@@ -12775,10 +12789,10 @@ p2 {}
         self.drum_bank_requested = Some(dir.clone());
         self.drum_bank_rx = Some(receiver);
         if let Err(error) = self
-            .thread_spawner
+            .task_pool
             .as_ref()
             .expect("thread workers are not started")
-            .spawn(move || {
+            .submit(Lane::Heavy, move || {
                 let result = makepad_drumkit::SampleBank::load(&dir).map(|bank| {
                     let summary = bank.summary();
                     (Arc::new(bank), summary)
@@ -13869,6 +13883,7 @@ p2 {}
                                 self.video_loop,
                                 true,
                                 self.thread_spawner.clone().expect("thread workers are not started"),
+                                self.task_pool.clone().expect("thread workers are not started"),
                             ) {
                                 Ok(mut player) => {
                                     // STICKY per-clip profile: the same
@@ -14395,10 +14410,10 @@ p2 {}
             };
             let analysis = flipped.clone();
             match self
-                .thread_spawner
+                .task_pool
                 .as_ref()
                 .expect("thread workers are not started")
-                .spawn(move || crate::wave_analysis::store_analysis(&key, &analysis))
+                .submit(Lane::Heavy, move || crate::wave_analysis::store_analysis(&key, &analysis))
             {
                 Ok(handle) => handle.detach(),
                 Err(error) => log!("analysis-cache worker unavailable: {error}"),
@@ -14836,11 +14851,15 @@ p2 {}
                         // fresh publish as it commits.
                         let (bundle_tx, bundle_rx) = std::sync::mpsc::channel();
                         self.fx_bundle_rx = Some(bundle_rx);
+                        let seed_options = ThreadOptions {
+                            name: Some("vj-fx-bundle".into()),
+                            ..Default::default()
+                        };
                         let seed_worker = self
                             .thread_spawner
                             .as_ref()
                             .expect("thread workers are not started")
-                            .spawn(move || {
+                            .spawn_worker(seed_options, move || {
                             let _ = std::fs::create_dir_all(&cache);
                             let connect = || {
                                 let mut cfg =
@@ -15973,10 +15992,10 @@ p2 {}
         if let Some(up) = self.up.take() {
             // Runtime joins wait out in-flight transfers: never on the UI thread.
             match self
-                .thread_spawner
+                .task_pool
                 .as_ref()
                 .expect("thread workers are not started")
-                .spawn(move || up.shutdown())
+                .submit(Lane::Heavy, move || up.shutdown())
             {
                 Ok(handle) => handle.detach(),
                 Err(error) => log!("session teardown worker unavailable: {error}"),
@@ -16808,10 +16827,10 @@ p2 {}
             let (tx, rx) = std::sync::mpsc::channel();
             self.import_scan_rx = Some(rx);
             match self
-                .thread_spawner
+                .task_pool
                 .as_ref()
                 .expect("thread workers are not started")
-                .spawn(move || {
+                .submit(Lane::Heavy, move || {
                 let _ = tx.send(media_scan::scan(&root).files.len());
             }) {
                 Ok(handle) => handle.detach(),
@@ -21570,7 +21589,7 @@ p2 {}
         self.model_install_note = "models: starting download…".to_string();
         self.model_install = Some(models::start_install(
             missing,
-            self.thread_spawner.clone().expect("thread workers are not started"),
+            self.task_pool.clone().expect("thread workers are not started"),
         ));
         self.refresh_models_row(cx);
     }
@@ -21808,7 +21827,7 @@ p2 {}
         ) {
             if self
                 .splat_refine
-                .submit(cx.thread_spawner(), deck, gen, stems, pcm, analysis)
+                .submit(cx.task_pool(), deck, gen, stems, pcm, analysis)
             {
                 self.deck_splat_refining[index] = Some(gen);
             }
@@ -25433,10 +25452,10 @@ p2 {}
             self.autopilot_sung_fed[index] = Some((gen, false));
             match self
                 .autopilot_sung_results
-                .spawner
+                .pool
                 .as_ref()
                 .expect("thread workers are not started")
-                .spawn(move || {
+                .submit(Lane::Heavy, move || {
                 // Decimated mono of the vocals lane: ×4 costs nothing a
                 // phrase map can feel, and quarters the arithmetic.
                 let lane = &stems.lanes[crate::blend::VOCALS];
@@ -26030,14 +26049,20 @@ impl MatchEvent for App {
         let startup_started = Cx::monotonic_now();
         #[cfg(target_arch = "wasm32")]
         log!("startup: app setup begin");
+        // The spawner makes the app's dedicated loops (once, here); every
+        // one-shot job goes to the runtime pool, warm since Event::Startup.
         let spawner = cx.thread_spawner();
+        let pool = cx.task_pool();
         self.thread_spawner = Some(spawner.clone());
-        self.import.set_spawner(spawner.clone());
-        self.music_import_run.set_spawner(spawner.clone());
+        self.task_pool = Some(pool.clone());
+        self.import.set_task_pool(pool.clone());
+        self.music_import_run.set_task_pool(pool.clone());
         self.archive.set_spawner(spawner.clone());
+        self.archive.set_task_pool(pool.clone());
         self.pipelines.set_spawner(spawner.clone());
-        self.autopilot_sung_results.set_spawner(spawner.clone());
-        self.loop_score_worker.set_spawner(spawner.clone());
+        self.pipelines.set_task_pool(pool.clone());
+        self.autopilot_sung_results.set_task_pool(pool.clone());
+        self.loop_score_worker.set_task_pool(pool.clone());
         livecode::start_worker(spawner.clone());
         self.analysis.start(spawner.clone());
         self.loop_scan.start(spawner.clone());
@@ -26062,7 +26087,7 @@ impl MatchEvent for App {
             );
         }
         self.decode.start(spawner.clone());
-        self.sidechan.start(spawner);
+        self.sidechan.start(spawner, pool);
         self.paint_lit(cx, ids!(loop_score_loop), self.loop_score_loop);
         // THE GRID IS FULL BEFORE THE FIRST FRAME. The effect library is
         // compiled in, so its art is generated here — ahead of any store,

@@ -16,7 +16,7 @@
 //! texture (and, through `Image::set_texture`'s redraw, spin the frame clock).
 
 use makepad_widgets::*;
-use makepad_widgets::makepad_platform::thread::SignalToUI;
+use makepad_widgets::makepad_platform::thread::{SignalToUI, ThreadOptions};
 #[cfg(not(target_arch = "wasm32"))]
 use makepad_widgets::makepad_platform::video_file::VideoFileDecoder;
 
@@ -27,7 +27,6 @@ use std::{
         mpsc::{channel, Receiver, Sender},
         Arc, OnceLock,
     },
-    thread,
 };
 
 use crate::model::FileKind;
@@ -112,7 +111,7 @@ impl Thumbs {
         }
     }
 
-    fn ensure_started(&mut self) {
+    fn ensure_started(&mut self, cx: &Cx) {
         if self.started {
             return;
         }
@@ -121,21 +120,27 @@ impl Thumbs {
         if self.instant {
             return;
         }
+        let spawner = cx.thread_spawner();
         self.senders.reserve(WORKERS);
-        for _ in 0..WORKERS {
+        for index in 0..WORKERS {
             let (tx, rx) = channel::<PathBuf>();
             let done = self.done_tx.clone();
             // A dedicated channel per worker (instead of one shared, mutex-guarded
             // receiver) keeps a blocking `recv` from serializing the pool.
-            thread::spawn(move || {
-                while let Ok(path) = rx.recv() {
-                    let pixels = decode_thumb(&path);
-                    if done.send(ThumbDone { path, pixels }).is_err() {
-                        return;
+            if let Ok(handle) = spawner.spawn_worker(
+                ThreadOptions { name: Some(format!("files-thumb-{index}").into()), ..Default::default() },
+                move || {
+                    while let Ok(path) = rx.recv() {
+                        let pixels = decode_thumb(&path);
+                        if done.send(ThumbDone { path, pixels }).is_err() {
+                            return;
+                        }
+                        SignalToUI::set_ui_signal();
                     }
-                    SignalToUI::set_ui_signal();
-                }
-            });
+                },
+            ) {
+                handle.detach();
+            }
             self.senders.push(tx);
         }
     }
@@ -143,7 +148,7 @@ impl Thumbs {
     /// The texture for `path` if it is decoded; queues a decode if it is not.
     /// Returns `None` while the decode is pending or after it failed.
     pub fn get_or_request(&mut self, cx: &mut Cx, path: &Path) -> Option<Texture> {
-        self.ensure_started();
+        self.ensure_started(cx);
         self.tick += 1;
         let tick = self.tick;
         if let Some(slot) = self.slots.get_mut(path) {

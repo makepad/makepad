@@ -12,7 +12,9 @@
 
 use crate::library::{display_frame, ItemId, Library};
 use crate::tape::{full_frame, read_frame, FullFrame, Planes};
-use makepad_widgets::makepad_platform::thread::{ToUIReceiver, ToUISender};
+use makepad_widgets::makepad_platform::thread::{
+    ThreadOptions, ThreadSpawner, ToUIReceiver, ToUISender,
+};
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -156,17 +158,20 @@ impl StoreHandle {
 }
 
 /// Bring up the decode pool over a baked library.
-pub fn spawn(library: Library) -> StoreHandle {
+pub fn spawn(library: Library, spawner: &ThreadSpawner) -> StoreHandle {
     let queue = Arc::new(WorkQueue::new());
     let events = ToUIReceiver::default();
-    let workers = std::thread::available_parallelism().map_or(4, |n| (n.get() / 2).clamp(2, 8));
+    let workers = spawner.worker_count(2, 8).get();
     for i in 0..workers {
         let queue = queue.clone();
         let events: ToUISender<StoreEvent> = events.sender();
         let library = library.clone();
-        let _ = std::thread::Builder::new()
-            .name(format!("tiles-decode-{i}"))
-            .spawn(move || worker(library, queue, events));
+        if let Ok(handle) = spawner.spawn_worker(
+            ThreadOptions { name: Some(format!("tiles-decode-{i}").into()), ..Default::default() },
+            move || worker(library, queue, events),
+        ) {
+            handle.detach();
+        }
     }
     StoreHandle { queue, events, library }
 }

@@ -2,8 +2,10 @@ use super::geometry::TileKey;
 use crate::makepad_draw::*;
 use makepad_mbtile_reader::{mkmap_tile_id, BlobRef, MkmapLeaf, MkmapRoot};
 use makepad_platform::archive_cache::ArchiveCacheStore;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use makepad_platform::thread::lock_from_ui;
@@ -22,16 +24,27 @@ const DEFAULT_COALESCE_MAX_LEN: u64 = 4 * 1024 * 1024;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ReadToken(pub u64);
 
+const ARCHIVE_QUEUE_CAPACITY: usize = 256;
+
+/// Archive reads and parses go to the runtime pool's light lane through a
+/// UI-owned staging queue (newest first, one job per token, prunable until
+/// handed over). The queue is shared by the byte source and the tile archive
+/// of one map, on the UI thread only — hence `Rc`, never a lock.
 #[derive(Clone)]
 pub enum ArchiveWorkerPool {
-    Threaded(Arc<TaskPool>),
+    Threaded {
+        pool: TaskPool,
+        queue: Rc<RefCell<TaskQueue<ReadToken>>>,
+    },
     Serial,
 }
 
 impl ArchiveWorkerPool {
     pub fn ptr_eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Threaded(left), Self::Threaded(right)) => Arc::ptr_eq(left, right),
+            (Self::Threaded { queue: left, .. }, Self::Threaded { queue: right, .. }) => {
+                Rc::ptr_eq(left, right)
+            }
             (Self::Serial, Self::Serial) => true,
             _ => false,
         }
@@ -42,37 +55,60 @@ impl ArchiveWorkerPool {
         F: FnOnce() + Send + 'static,
     {
         match self {
-            Self::Threaded(pool) => {
-                let task = pool.submit_tagged(key, true, QueueOrder::Lifo, job)?;
-                task.detach();
+            Self::Threaded { pool, queue } => {
+                let mut queue = queue.borrow_mut();
+                let window = pool_window(pool, queue.in_flight());
+                queue.set_in_flight_limit(window);
+                queue.push(pool, key, true, QueueOrder::Lifo, job)
             }
-            Self::Serial => job(),
+            Self::Serial => {
+                job();
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     pub fn retain_queued(&self, keep: impl FnMut(&ReadToken) -> bool) -> Vec<ReadToken> {
         match self {
-            Self::Threaded(pool) => pool.retain_queued::<ReadToken>(keep),
+            Self::Threaded { queue, .. } => queue.borrow_mut().retain(keep),
             Self::Serial => Vec::new(),
+        }
+    }
+
+    /// Hand staged jobs over once workers free up. Called whenever read
+    /// completions are drained and on the UI signal.
+    pub fn pump(&self) {
+        if let Self::Threaded { pool, queue } = self {
+            let mut queue = queue.borrow_mut();
+            if queue.staged_len() == 0 {
+                return;
+            }
+            let window = pool_window(pool, queue.in_flight());
+            queue.set_in_flight_limit(window);
+            queue.pump(pool);
         }
     }
 }
 
+/// How many jobs a light-lane staging queue may have with the pool: what it
+/// has in flight plus the workers parked right now. Jobs handed over beyond
+/// that would only sit in the pool's channel, out of reach of the queue's
+/// newest-first order and pruning.
+pub fn pool_window(pool: &TaskPool, in_flight: usize) -> usize {
+    in_flight + pool.idle_workers()
+}
+
 pub fn new_archive_worker_pool(cx: &mut Cx) -> ArchiveWorkerPool {
-    match TaskPool::new(
-        cx.thread_spawner(),
-        PoolOptions {
-            workers: std::num::NonZeroUsize::new(2).unwrap(),
-            capacity: std::num::NonZeroUsize::new(256).unwrap(),
-            name: "map-archive".into(),
-        },
-    ) {
-        Ok(pool) => ArchiveWorkerPool::Threaded(Arc::new(pool)),
-        Err(error) => {
-            error!("Map archive pool unavailable, using serial work: {error}");
-            ArchiveWorkerPool::Serial
+    let pool = cx.task_pool();
+    if pool.is_open() {
+        let queue = TaskQueue::new(Lane::Light, pool.worker_count(), ARCHIVE_QUEUE_CAPACITY);
+        ArchiveWorkerPool::Threaded {
+            pool,
+            queue: Rc::new(RefCell::new(queue)),
         }
+    } else {
+        error!("Map archive pool unavailable, using serial work");
+        ArchiveWorkerPool::Serial
     }
 }
 
@@ -330,6 +366,7 @@ impl ByteSource for FileByteSource {
         while let Ok(completion) = self.completions.try_recv() {
             out.push(completion);
         }
+        self.workers.pump();
         out
     }
 }
@@ -1314,6 +1351,7 @@ impl<S: ByteSource> TileArchive<S> {
     }
 
     pub fn drain(&mut self, cx: &mut Cx, event: &Event) -> Vec<TileBytes> {
+        self.workers.pump();
         for completion in self.source.poll(cx, event) {
             let Some(pending) = self.pending_reads.get(&completion.token).copied() else {
                 continue;

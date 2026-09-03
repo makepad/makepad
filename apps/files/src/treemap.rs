@@ -29,10 +29,10 @@ use std::{
         atomic::{AtomicBool, AtomicU32, Ordering},
         Condvar, Mutex,
     },
-    thread,
     time::Duration,
 };
 
+use makepad_widgets::makepad_platform::thread::{Lane, TaskPool};
 use makepad_widgets::Cx;
 
 /// A rectangle in treemap space. Plain `f64` so this module stays free of
@@ -454,6 +454,7 @@ fn read_listing(
     rules: &ScanRules,
     device: Option<u64>,
     growth: &mut Growth,
+    pool: Option<&TaskPool>,
 ) -> Listing {
     let read_dir = match fs::read_dir(dir) {
         Ok(read_dir) => read_dir,
@@ -499,11 +500,18 @@ fn read_listing(
     // it to matter they are made to wait in parallel rather than in turn —
     // a folder with a quarter of a million files is otherwise one thread at
     // disk latency while five others have nothing to do.
-    if found.len() >= STAT_PARALLEL_MIN {
+    if let (true, Some(pool)) = (found.len() >= STAT_PARALLEL_MIN, pool) {
+        // Independent, so a folder big enough for it to matter waits for its
+        // `lstat`s in parallel rather than in turn — the caller-helping
+        // `fan_out` replacement for the `std::thread::scope` this used to be.
         let chunk = found.len().div_ceil(STAT_THREADS);
-        thread::scope(|scope| {
-            for slice in found.chunks_mut(chunk) {
-                scope.spawn(move || stat_all(slice, device));
+        let slices: Vec<Option<&mut [Found]>> = found.chunks_mut(chunk).map(Some).collect();
+        let count = slices.len();
+        let slices = Mutex::new(slices);
+        pool.fan_out(Lane::Heavy, count, |index| {
+            let slice = slices.lock().unwrap_or_else(|e| e.into_inner())[index].take();
+            if let Some(slice) = slice {
+                stat_all(slice, device);
             }
         });
     } else {
@@ -718,6 +726,7 @@ pub fn scan_stream(
     rules: &ScanRules,
     cancel: &AtomicBool,
     sink: &(dyn Fn(ScanStep) + Sync),
+    pool: &TaskPool,
 ) -> bool {
     if cancel.load(Ordering::Relaxed) {
         return false;
@@ -732,19 +741,16 @@ pub fn scan_stream(
     });
     let wake = Condvar::new();
     let open = AtomicU32::new(1);
-    thread::scope(|scope| {
-        for _ in 0..SCAN_THREADS {
-            let queue = &queue;
-            let wake = &wake;
-            let open = &open;
-            scope.spawn(move || {
-                let mut growth = Growth::new(sink, open);
-                while let Some(job) = take(queue, wake, cancel) {
-                    let children = run_job(job, rules, device, cancel, sink, &mut growth);
-                    finish(queue, wake, children, open);
-                    growth.pace();
-                }
-            });
+    // The walk's own worker loop, run on the pool AND the calling thread —
+    // the caller-helping `fan_out` replacement for the `std::thread::scope`
+    // this used to be. `scan_stream` only ever runs as a Heavy pool job
+    // itself (see `treemap_view`), never on the UI thread.
+    pool.fan_out(Lane::Heavy, SCAN_THREADS, |_index| {
+        let mut growth = Growth::new(sink, &open);
+        while let Some(job) = take(&queue, &wake, cancel) {
+            let children = run_job(job, rules, device, cancel, sink, &mut growth, pool);
+            finish(&queue, &wake, children, &open);
+            growth.pace();
         }
     });
     !cancel.load(Ordering::Relaxed)
@@ -799,6 +805,7 @@ fn run_job(
     cancel: &AtomicBool,
     sink: &(dyn Fn(ScanStep) + Sync),
     growth: &mut Growth,
+    pool: &TaskPool,
 ) -> Vec<Job> {
     if cancel.load(Ordering::Relaxed) {
         return Vec::new();
@@ -807,7 +814,7 @@ fn run_job(
     // read, which on a folder with a quarter of a million files is most of
     // the time this job takes.
     growth.start(&job.at);
-    let listing = read_listing(&job.path, rules, device, growth);
+    let listing = read_listing(&job.path, rules, device, growth, Some(pool));
     growth.start(&[]);
     sink(ScanStep::Opened {
         at: job.at.clone(),
@@ -883,7 +890,9 @@ fn scan_blocking(
         return None;
     }
     let idle = AtomicU32::new(0);
-    let listing = read_listing(dir, rules, device, &mut Growth::new(&|_| {}, &idle));
+    // The simple blocking form has no pool of its own to fan a big
+    // directory's `lstat`s out on; it stats serially.
+    let listing = read_listing(dir, rules, device, &mut Growth::new(&|_| {}, &idle), None);
     let denied = listing.denied;
     let mut children = Vec::with_capacity(listing.entries.len());
     for entry in listing.entries {
@@ -1846,6 +1855,16 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    /// `scan_stream` fans out on its pool and helps with the work itself, so
+    /// it must never run on the thread that owns the pool (`fan_out` asserts
+    /// against that). Give it a pool built here and a dedicated thread to
+    /// call from, same as production code does with a Heavy pool job.
+    fn with_pool<R: Send>(f: impl FnOnce(&TaskPool) -> R + Send) -> R {
+        let cx = Cx::new(Box::new(|_, _| {}));
+        let pool = cx.task_pool();
+        std::thread::scope(|scope| scope.spawn(|| f(&pool)).join().unwrap())
+    }
+
     fn leaf(name: &str, size: u64) -> Node {
         Node::file(name.to_string(), 0, size)
     }
@@ -2526,8 +2545,10 @@ mod tests {
 
         let cancel = AtomicBool::new(false);
         let steps = Mutex::new(Vec::new());
-        let ok = scan_stream(&root, &open_rules(), &cancel, &|step| {
-            steps.lock().unwrap().push(step);
+        let ok = with_pool(|pool| {
+            scan_stream(&root, &open_rules(), &cancel, &|step| {
+                steps.lock().unwrap().push(step);
+            }, pool)
         });
         assert!(ok);
 
@@ -2567,8 +2588,10 @@ mod tests {
 
         let cancel = AtomicBool::new(false);
         let steps = Mutex::new(Vec::new());
-        assert!(scan_stream(&root, &open_rules(), &cancel, &|step| {
-            steps.lock().unwrap().push(step);
+        assert!(with_pool(|pool| {
+            scan_stream(&root, &open_rules(), &cancel, &|step| {
+                steps.lock().unwrap().push(step);
+            }, pool)
         }));
 
         let mut opened_ats: Vec<Vec<u32>> = Vec::new();
@@ -2596,14 +2619,16 @@ mod tests {
 
         let cancel = AtomicBool::new(false);
         let first = Mutex::new(None);
-        scan_stream(&root, &open_rules(), &cancel, &|step| {
-            let mut slot = first.lock().unwrap();
-            if slot.is_none() {
-                *slot = Some(match step {
-                    ScanStep::Opened { at, children, .. } => (at, children.len()),
-                    other => panic!("first step was {other:?}, not the root listing"),
-                });
-            }
+        with_pool(|pool| {
+            scan_stream(&root, &open_rules(), &cancel, &|step| {
+                let mut slot = first.lock().unwrap();
+                if slot.is_none() {
+                    *slot = Some(match step {
+                        ScanStep::Opened { at, children, .. } => (at, children.len()),
+                        other => panic!("first step was {other:?}, not the root listing"),
+                    });
+                }
+            }, pool)
         });
         let (at, count) = first.into_inner().unwrap().expect("no steps at all");
         assert!(at.is_empty());
@@ -2617,7 +2642,7 @@ mod tests {
         let root = temp_root("stream-cancel");
         sample_tree(&root);
         let cancel = AtomicBool::new(true);
-        assert!(!scan_stream(&root, &open_rules(), &cancel, &|_| {}));
+        assert!(!with_pool(|pool| scan_stream(&root, &open_rules(), &cancel, &|_| {}, pool)));
         fs::remove_dir_all(&root).ok();
     }
 
@@ -2735,8 +2760,10 @@ mod tests {
         fs::write(root.join("sub/a.txt"), b"aa").unwrap();
         let cancel = AtomicBool::new(false);
         let steps = Mutex::new(Vec::new());
-        assert!(scan_stream(&root, &open_rules(), &cancel, &|step| {
-            steps.lock().unwrap().push(step);
+        assert!(with_pool(|pool| {
+            scan_stream(&root, &open_rules(), &cancel, &|step| {
+                steps.lock().unwrap().push(step);
+            }, pool)
         }));
         let mut tree = Node::dir("root".into(), 0);
         for step in steps.into_inner().unwrap() {

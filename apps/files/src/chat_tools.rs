@@ -26,10 +26,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 #[cfg(feature = "chat")]
-use std::{
-    sync::mpsc::{channel, Receiver, Sender},
-    thread,
-};
+use std::sync::mpsc::{channel, Receiver, Sender};
 
 #[cfg(feature = "chat")]
 use makepad_ai_hub::local_llm::ToolSpec;
@@ -156,25 +153,26 @@ pub struct ToolRunner {
 }
 
 #[cfg(feature = "chat")]
-impl Default for ToolRunner {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(feature = "chat")]
 impl ToolRunner {
-    pub fn new() -> Self {
+    pub fn new(spawner: &makepad_widgets::makepad_platform::thread::ThreadSpawner) -> Self {
         let (jobs, job_rx) = channel::<ToolJob>();
         let (result_tx, results) = channel();
-        thread::spawn(move || {
-            while let Ok(job) = job_rx.recv() {
-                if result_tx.send(run(&job)).is_err() {
-                    return;
+        if let Ok(handle) = spawner.spawn_worker(
+            makepad_widgets::makepad_platform::thread::ThreadOptions {
+                name: Some("files-chat-tools".into()),
+                ..Default::default()
+            },
+            move || {
+                while let Ok(job) = job_rx.recv() {
+                    if result_tx.send(run(&job)).is_err() {
+                        return;
+                    }
+                    makepad_widgets::makepad_platform::thread::SignalToUI::set_ui_signal();
                 }
-                makepad_widgets::makepad_platform::thread::SignalToUI::set_ui_signal();
-            }
-        });
+            },
+        ) {
+            handle.detach();
+        }
         Self { jobs, results }
     }
 

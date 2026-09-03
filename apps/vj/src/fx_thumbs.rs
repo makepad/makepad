@@ -79,7 +79,7 @@ use makepad_asset_data::{AssetId, AssetRevisionId, ThumbnailCells};
 use makepad_widgets::*;
 use makepad_widgets::makepad_platform::{
     storage::{StorageHandle, StorageRequestId, StorageResult},
-    thread::TaskHandle,
+    thread::{Lane as PoolLane, TaskHandle},
 };
 use std::collections::{HashMap, HashSet};
 use crate::clock::Instant;
@@ -1715,8 +1715,8 @@ impl VjFxThumbs {
         let revision = active.job.revision;
         active.phase = Phase::Encoding;
         match cx
-            .thread_spawner()
-            .spawn(move || encode_jpeg(bytes, w, h, revision))
+            .task_pool()
+            .submit(PoolLane::Light, move || encode_jpeg(bytes, w, h, revision))
         {
             Ok(handle) => {
                 active.encoder = Some(handle);
