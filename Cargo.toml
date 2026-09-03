@@ -43,6 +43,7 @@ workspace.members = [
     "libs/sim/math",
     "libs/show_control",
     "libs/asset/creator",
+    "libs/bounded_http",
     "libs/strict_json",
     # === remesh (FaithC port) / xatlas (jpcy port) ===
     "libs/remesh",

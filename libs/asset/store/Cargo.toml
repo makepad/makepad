@@ -13,6 +13,7 @@ autotests = false
 default = ["native"]
 native = [
     "dep:makepad-asset-client",
+    "dep:makepad-bounded-http",
     "dep:makepad-filesystem-watcher",
     "dep:jpeg-encoder",
 ]
@@ -54,6 +55,7 @@ makepad-platform = { path = "../../../platform", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 makepad-asset-client = { path = "../client", optional = true }
+makepad-bounded-http = { path = "../../bounded_http", optional = true }
 makepad-filesystem-watcher = { path = "../../filesystem_watcher", optional = true }
 jpeg-encoder = { path = "../../jpeg-encoder", version = "0.6.1", optional = true }
 
