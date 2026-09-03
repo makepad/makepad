@@ -147,7 +147,7 @@ use crate::loop_splat_view::{
 use crate::autopilot::{AutoCmd, AutoDeckObs, AutoLoad, AutoObs, AutoPilot, AutoStyle};
 use crate::blend::MixBrain;
 use crate::decks::{
-    DeckCmd, DeckEngine, DeckId, DeckLoad, DeckTarget, ScratchMotion, SyncMode,
+    DeckCmd, DeckEngine, DeckId, DeckLoad, DeckState, DeckTarget, ScratchMotion, SyncMode,
     SyncView, TrackItem, TrackSideChannels,
 };
 use crate::console_scale::TabStage;
@@ -22449,13 +22449,15 @@ p2 {}
             })
             .unwrap_or(0);
         let state = self.decks.deck(deck);
+        let (loop_span, loop_slot) = Self::wave_loop_overlay(state);
         let lane = WaveLane {
             pyramid,
             stem_pyramid,
             cols,
             position_secs: state.position_secs,
             grid: state.grid,
-            loop_span: state.loop_span.map(|s| (s.start_secs, s.end_secs)),
+            loop_span,
+            loop_slot,
             rate: state.rate,
             playing: state.playing,
             loaded: state.is_loaded(),
@@ -22484,6 +22486,24 @@ p2 {}
                 cols,
             );
         };
+    }
+
+    /// The large lane follows the loop-splat slot that drives the deck
+    /// picture. Ordinary deck loops use the same overlay; a saved one also
+    /// carries its one-based slot number.
+    fn wave_loop_overlay(state: &DeckState) -> (Option<(f64, f64)>, Option<u8>) {
+        if let Some((span, slot)) = state.splat.as_ref().and_then(|splat| splat.view_loop()) {
+            return (Some((span.start_secs, span.end_secs)), Some(slot));
+        }
+        let Some(span) = state.loop_span else {
+            return (state.bookmark.map(|mark| (mark, mark)), None);
+        };
+        let slot = state
+            .loop_slots
+            .iter()
+            .position(|saved| *saved == span)
+            .and_then(|slot| u8::try_from(slot + 1).ok());
+        (Some((span.start_secs, span.end_secs)), slot)
     }
 
     fn overview_path(deck: DeckId) -> &'static [LiveId] {
@@ -22547,7 +22567,6 @@ p2 {}
                 }
             }
         }
-        let duration_secs = self.decks.deck(deck).duration_secs;
         let mut model = match self.decks.splat(deck) {
             Some(splat) => {
                 let (covered_frames, complete) =
@@ -22564,7 +22583,6 @@ p2 {}
                     splat.enabled,
                     self.deck_splat_snapshot_seen[index].then_some(&splat.last),
                     &coverage,
-                    duration_secs,
                 )
             }
             None => SplatViewModel::empty(splat_deck(deck)),
@@ -22578,12 +22596,9 @@ p2 {}
         self.paint_lit(cx, ids!(splat_on), active && model.enabled);
         self.paint_lit(cx, ids!(splat_score), self.loop_score_open);
         self.splat_model = model.clone();
-        let mix = self.deck_zoom_tex[index].clone();
-        let stems = self.deck_stem_tex[index].clone();
         let splat = self.ui.vj_loop_splat(cx, ids!(loop_splat));
         if let Some(mut splat) = splat.borrow_mut() {
             splat.set_model(cx, model);
-            splat.set_waves(cx, mix, stems);
         };
     }
 
@@ -22717,6 +22732,7 @@ p2 {}
                 .loop_span
                 .map(|span| (span.start_secs, span.end_secs))
                 .or(state.bookmark.map(|mark| (mark, mark)));
+            let (wave_loop_span, wave_loop_slot) = Self::wave_loop_overlay(state);
             let muted = state.muted;
             let keylock = state.keylock;
             let key_shift = state.key_shift;
@@ -22892,7 +22908,7 @@ p2 {}
             if let Some(mut scroll) = self.music_refs.waves.borrow_mut::<VjWaveScroll>() {
                 scroll.set_position(cx, deck, position, playing, scratching);
                 scroll.set_grid(cx, deck, grid, rate);
-                scroll.set_loop_span(cx, deck, loop_span);
+                scroll.set_loop_span(cx, deck, wave_loop_span, wave_loop_slot);
                 scroll.set_stem_gain(cx, deck, stem_gains);
             };
             if let Some(mut strip) =

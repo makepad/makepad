@@ -2,8 +2,7 @@
 
 use crate::loop_blocks::CellBlocks;
 use crate::loop_splat::SplatPart;
-use crate::music_view::{WavePyramid, STEM_COLORS};
-use crate::wave_analysis::ZOOM_COLS_PER_SEC;
+use crate::music_view::STEM_COLORS;
 use makepad_widgets::*;
 use std::sync::Arc;
 
@@ -70,10 +69,6 @@ pub struct SplatViewModel {
     pub enabled: bool,
     pub cols: usize,
     pub col_bars: [u8; SPLAT_COLS],
-    pub col_start_secs: [f64; SPLAT_COLS],
-    /// Each cell's source-time start and length. Missing cells stay zeroed.
-    pub spans: [[(f32, f32); SPLAT_COLS]; SPLAT_ROWS],
-    pub duration_secs: f32,
     pub cells: [[SplatCellView; SPLAT_COLS]; SPLAT_ROWS],
     pub blocks: [[Option<Arc<CellBlocks>>; SPLAT_COLS]; SPLAT_ROWS],
     pub bar_phase: f32,
@@ -90,9 +85,6 @@ impl PartialEq for SplatViewModel {
             && self.enabled == other.enabled
             && self.cols == other.cols
             && self.col_bars == other.col_bars
-            && self.col_start_secs == other.col_start_secs
-            && self.spans == other.spans
-            && self.duration_secs == other.duration_secs
             && self.cells == other.cells
             && self.bar_phase == other.bar_phase
             && self.preview == other.preview
@@ -114,9 +106,6 @@ impl SplatViewModel {
             enabled: false,
             cols: 0,
             col_bars: [0; SPLAT_COLS],
-            col_start_secs: [0.0; SPLAT_COLS],
-            spans: [[(0.0, 0.0); SPLAT_COLS]; SPLAT_ROWS],
-            duration_secs: 0.0,
             cells: [[SplatCellView::Empty; SPLAT_COLS]; SPLAT_ROWS],
             blocks: std::array::from_fn(|_| std::array::from_fn(|_| None)),
             bar_phase: 0.0,
@@ -154,8 +143,6 @@ pub struct DrawSplatCell {
     pub draw_super: DrawQuad,
     #[live]
     pub color: Vec4f,
-    #[live]
-    pub phase: f32,
     /// Progress through the current bar: the countdown to a queued launch.
     #[live]
     pub bar_phase: f32,
@@ -171,38 +158,6 @@ pub struct DrawSplatCell {
     pub part_y0: f32,
     #[live(1.0)]
     pub part_y1: f32,
-    /// Source span in finest-level pyramid columns.
-    #[live]
-    pub span_start: f32,
-    #[live]
-    pub span_cols: f32,
-    /// vocals/drums/bass/other = 0/1/2/3; mix = 4.
-    #[live]
-    pub channel: f32,
-    #[live(1.0)]
-    pub tex_w: f32,
-    #[live(1.0)]
-    pub tex_h: f32,
-    #[live]
-    pub lo_row: f32,
-    #[live(1.0)]
-    pub lo_cols: f32,
-    #[live(1.0)]
-    pub lo_scale: f32,
-    #[live]
-    pub hi_row: f32,
-    #[live(1.0)]
-    pub hi_cols: f32,
-    #[live(2.0)]
-    pub hi_scale: f32,
-    #[live]
-    pub lod_blend: f32,
-    #[live]
-    pub has_mix: f32,
-    #[live]
-    pub has_stems: f32,
-    #[live]
-    pub has_blocks: f32,
 }
 
 #[derive(Script, ScriptHook)]
@@ -214,16 +169,6 @@ pub struct DrawSplatBlock {
     pub color: Vec4f,
     #[live]
     pub alpha: f32,
-}
-
-/// Convert the model's `(start_secs, len_secs)` span to the waveform
-/// pyramid's finest-column timebase.
-pub(crate) fn span_to_pyramid_columns(span: (f32, f32)) -> (f32, f32) {
-    let rate = ZOOM_COLS_PER_SEC as f32;
-    if !span.0.is_finite() || !span.1.is_finite() {
-        return (0.0, 0.0);
-    }
-    (span.0.max(0.0) * rate, span.1.max(0.0) * rate)
 }
 
 const PAD: f64 = 8.0;
@@ -425,10 +370,6 @@ pub struct VjLoopSplat {
     #[rust]
     model: SplatViewModel,
     #[rust]
-    mix_pyramid: Option<WavePyramid>,
-    #[rust]
-    stem_pyramid: Option<WavePyramid>,
-    #[rust]
     hover: Option<SplatHit>,
     #[rust]
     pressed: Option<SplatHit>,
@@ -456,19 +397,6 @@ impl VjLoopSplat {
         &self.model
     }
 
-    pub fn set_waves(
-        &mut self,
-        cx: &mut Cx,
-        mix: Option<WavePyramid>,
-        stems: Option<WavePyramid>,
-    ) {
-        if self.mix_pyramid != mix || self.stem_pyramid != stems {
-            self.mix_pyramid = mix;
-            self.stem_pyramid = stems;
-            self.area.redraw(cx);
-        }
-    }
-
     pub fn set_selected(&mut self, cx: &mut Cx, row: SplatRowView, col: u8) {
         let selected = ((col as usize) < SPLAT_COLS).then_some((row, col));
         if self.selected != selected {
@@ -489,7 +417,7 @@ impl VjLoopSplat {
             .cells
             .iter()
             .flatten()
-            .any(|cell| matches!(cell, SplatCellView::Queued { .. } | SplatCellView::Playing { .. } ))
+            .any(|cell| matches!(cell, SplatCellView::Queued { .. }))
     }
 
     fn hit_at(&self, cx: &Cx, pos: DVec2) -> Option<SplatHit> {
@@ -564,8 +492,6 @@ impl VjLoopSplat {
         cell: SplatCellView,
         hover: bool,
         enabled: bool,
-        span: (f32, f32),
-        has_blocks: bool,
     ) {
         let mut c = row.color();
         if !enabled {
@@ -574,16 +500,15 @@ impl VjLoopSplat {
             c[2] *= 0.55;
         }
         self.draw_cell.color = vec4(c[0], c[1], c[2], c[3]);
-        let (state, phase, part) = match cell {
-            SplatCellView::Empty => (0.0, 0.0, SplatPart::WHOLE),
-            SplatCellView::Silent => (1.0, 0.0, SplatPart::WHOLE),
-            SplatCellView::Ready { .. } => (2.0, 0.0, SplatPart::WHOLE),
-            SplatCellView::Queued { part, .. } => (3.0, 0.0, part),
-            SplatCellView::Playing { phase, part, .. } => (4.0, phase, part),
+        let (state, part) = match cell {
+            SplatCellView::Empty => (0.0, SplatPart::WHOLE),
+            SplatCellView::Silent => (1.0, SplatPart::WHOLE),
+            SplatCellView::Ready { .. } => (2.0, SplatPart::WHOLE),
+            SplatCellView::Queued { part, .. } => (3.0, part),
+            SplatCellView::Playing { part, .. } => (4.0, part),
         };
         self.draw_cell.state = state;
         self.draw_cell.bar_phase = self.model.bar_phase.clamp(0.0, 1.0);
-        self.draw_cell.phase = phase.clamp(0.0, 1.0);
         self.draw_cell.hover = if hover { 1.0 } else { 0.0 };
         let part_rect = slot_rect(rect, part);
         let width = rect.size.x.max(1.0);
@@ -592,41 +517,6 @@ impl VjLoopSplat {
         self.draw_cell.part_x1 = ((part_rect.pos.x + part_rect.size.x - rect.pos.x) / width) as f32;
         self.draw_cell.part_y0 = ((part_rect.pos.y - rect.pos.y) / height) as f32;
         self.draw_cell.part_y1 = ((part_rect.pos.y + part_rect.size.y - rect.pos.y) / height) as f32;
-        self.draw_cell.has_blocks = if has_blocks { 1.0 } else { 0.0 };
-        self.draw_cell.channel = match row {
-            SplatRowView::Vocals => 0.0,
-            SplatRowView::Drums => 1.0,
-            SplatRowView::Bass => 2.0,
-            SplatRowView::Other => 3.0,
-            SplatRowView::Mix => 4.0,
-        };
-        let (span_start, mut span_cols) = span_to_pyramid_columns(span);
-        let duration_cols = self.model.duration_secs.max(0.0) * ZOOM_COLS_PER_SEC as f32;
-        self.draw_cell.span_start = span_start.min(duration_cols);
-        span_cols = span_cols.min((duration_cols - self.draw_cell.span_start).max(0.0));
-        self.draw_cell.span_cols = span_cols;
-        if let Some(pyramid) = self.mix_pyramid.as_ref() {
-            self.draw_cell.tex_w = pyramid.width.max(1) as f32;
-            self.draw_cell.tex_h = pyramid.height.max(1) as f32;
-            let inner_width = (rect.size.x - 8.0).max(1.0);
-            let cols_per_px = (span_cols as f64 / inner_width).max(0.001);
-            let (lo, lo_scale, hi, hi_scale, blend) = pyramid.levels_for(cols_per_px);
-            self.draw_cell.lo_row = lo.base_row as f32;
-            self.draw_cell.lo_cols = lo.cols.max(1) as f32;
-            self.draw_cell.lo_scale = lo_scale as f32;
-            self.draw_cell.hi_row = hi.base_row as f32;
-            self.draw_cell.hi_cols = hi.cols.max(1) as f32;
-            self.draw_cell.hi_scale = hi_scale as f32;
-            self.draw_cell.lod_blend = blend as f32;
-        } else {
-            self.draw_cell.tex_w = 1.0;
-            self.draw_cell.tex_h = 1.0;
-            self.draw_cell.lo_cols = 1.0;
-            self.draw_cell.hi_cols = 1.0;
-            self.draw_cell.lo_scale = 1.0;
-            self.draw_cell.hi_scale = 2.0;
-            self.draw_cell.lod_blend = 0.0;
-        }
         self.draw_cell.draw_abs(cx, rect);
     }
 
@@ -848,26 +738,6 @@ impl Widget for VjLoopSplat {
         self.draw_cell
             .draw_vars
             .set_uniform(cx, live_id!(time), &[now]);
-        match self.mix_pyramid.as_ref() {
-            Some(pyramid) => {
-                self.draw_cell.draw_vars.set_texture(0, &pyramid.texture);
-                self.draw_cell.has_mix = 1.0;
-            }
-            None => {
-                self.draw_cell.draw_vars.empty_texture(0);
-                self.draw_cell.has_mix = 0.0;
-            }
-        }
-        match self.stem_pyramid.as_ref() {
-            Some(pyramid) => {
-                self.draw_cell.draw_vars.set_texture(1, &pyramid.texture);
-                self.draw_cell.has_stems = 1.0;
-            }
-            None => {
-                self.draw_cell.draw_vars.empty_texture(1);
-                self.draw_cell.has_stems = 0.0;
-            }
-        }
         if self.animates() {
             self.anim_frame = cx.new_next_frame();
         }
@@ -895,8 +765,8 @@ impl Widget for VjLoopSplat {
             self.draw_centered(cx, stop, "■", vec4(rc[0], rc[1], rc[2], if active { 1.0 } else { 0.35 }), true);
         }
 
-        // Every pad is one instance of the same textured material. Level
-        // selection and source span vary per instance; the textures do not.
+        // Every selector is one instance of the same flat state material.
+        // The source waveform belongs to the large deck lane, never here.
         self.draw_cell.begin_many_instances(cx);
         for row in 0..SPLAT_ROWS {
             let row_view = SplatRowView::ALL[row];
@@ -913,8 +783,6 @@ impl Widget for VjLoopSplat {
                     cell,
                     self.hovered_part(row, col).is_some(),
                     self.model.enabled || !active,
-                    if active { self.model.spans[row][col] } else { (0.0, 0.0) },
-                    active && self.model.blocks[row][col].is_some(),
                 );
             }
         }
@@ -1095,9 +963,6 @@ mod tests {
         assert!(!model.enabled);
         assert_eq!(model.cols, 0);
         assert_eq!(model.col_bars, [0; SPLAT_COLS]);
-        assert_eq!(model.col_start_secs, [0.0; SPLAT_COLS]);
-        assert_eq!(model.spans, [[(0.0, 0.0); SPLAT_COLS]; SPLAT_ROWS]);
-        assert_eq!(model.duration_secs, 0.0);
         assert!(model.blocks.iter().flatten().all(Option::is_none));
         assert_eq!(model.bar_phase, 0.0);
         assert_eq!(model.preview, None);
@@ -1114,13 +979,6 @@ mod tests {
 
         right.blocks[0][0] = Some(Arc::new((*shared).clone()));
         assert_ne!(left, right);
-    }
-
-    #[test]
-    fn span_seconds_convert_to_finest_pyramid_columns() {
-        assert_eq!(span_to_pyramid_columns((1.25, 2.5)), (125.0, 250.0));
-        assert_eq!(span_to_pyramid_columns((3.0, 0.0)), (300.0, 0.0));
-        assert_eq!(span_to_pyramid_columns((f32::NAN, 1.0)), (0.0, 0.0));
     }
 
     #[test]
