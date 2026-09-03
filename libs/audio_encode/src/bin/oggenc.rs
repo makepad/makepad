@@ -5,9 +5,16 @@
 //! cargo run --release -p makepad-audio-encode --bin oggenc -- in.wav out.ogg [quality] [threads]
 //! ```
 
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+// This filesystem benchmark is a native developer tool, not part of the wasm library graph.
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
+
 use makepad_audio_encode::{encode_vorbis, EncodeOptions};
 
-fn main() {
+pub(super) fn run() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         eprintln!("usage: oggenc <in.wav> <out.ogg> [quality 0..1] [threads]");
@@ -97,4 +104,11 @@ fn read_wav(bytes: &[u8]) -> (u32, u16, Vec<f32>) {
         other => panic!("unsupported wav format {other:?}"),
     };
     (rate, channels, pcm)
+}
+
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn main() {
+    native::run();
 }
