@@ -185,9 +185,6 @@ pub fn set_pass_camera(cx: &mut Cx, pass: &DrawPass, scene: &SceneState3D) {
     pass_uniforms.depth_view_r = scene.view;
     pass_uniforms.camera_inv = camera_inv;
     pass_uniforms.camera_inv_r = camera_inv;
-    // A direct camera write: the web backend uploads a pass block only when
-    // its generation moved.
-    cx.passes[pass.draw_pass_id()].mark_pass_uniforms_dirty();
 }
 
 #[cfg(test)]

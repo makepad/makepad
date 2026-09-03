@@ -36,7 +36,9 @@ impl DrawListExt for DrawList {
             /*if cx.draw_lists[draw_list_id].locked_view_transform {
                 return
             }*/
-            cx.draw_lists[draw_list_id].set_uniform_view_transform(mat);
+            cx.draw_lists[draw_list_id]
+                .draw_list_uniforms
+                .view_transform = *mat;
             let draw_order_len = cx.draw_lists[draw_list_id].draw_item_order_len();
             for order_index in 0..draw_order_len {
                 let Some(draw_item_id) =
@@ -58,7 +60,7 @@ impl DrawListExt for DrawList {
     }
 
     fn set_view_transform_self_only(&self, cx: &mut Cx, mat: &Mat4f) {
-        cx.draw_lists[self.id()].set_uniform_view_transform(mat);
+        cx.draw_lists[self.id()].draw_list_uniforms.view_transform = *mat;
     }
 
     fn begin_always(&mut self, cx: &mut CxDraw) {
