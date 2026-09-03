@@ -1,0 +1,283 @@
+/**
+Recipe prototypes for the asset creator's generation kinds.
+
+`text.expand` deliberately uses the existing `mod.flow.Llm` node instead of
+adding an `Expand` prototype: expansion is a pure text turn, and `Llm` exposes
+the system instruction that makes the rewrite inspectable in each template.
+*/
+use mod.flow.*
+
+/** Ask a vision model a question about an image. Default face: `mod.flow.ui.GenFace`. */
+mod.flow.Vision = Gen{
+    kind: @gen
+    domain: "vision"
+    type_name: "Vision"
+    /** 16..512 */ max_tokens: 512
+    /** Empty selects the hub's best model for the vision domain. */ model: ""
+    ports: { in: [@prompt, @image], out: [@text] }
+    text: fn() { self.out(@text) }
+    /** Generic parameter and text-result face. */ ui: mod.flow.ui.GenFace
+}
+
+/** Paint an image from a prompt. Default face: `mod.flow.ui.ImageFace`. */
+mod.flow.Image = Gen{
+    kind: @gen
+    domain: "image"
+    type_name: "Image"
+    /** one of: 512x512, 768x768, 1024x1024, 768x512, 512x768, 1024x576 */ width: 1024
+    /** one of: 512x512, 768x768, 1024x1024, 768x512, 512x768, 1024x576 */ height: 1024
+    /** one of: 4, 8, 12, 20, 28, 50 */ steps: 8
+    /** 0 is the deterministic default seed. */ seed: 0
+    /** Empty means no negative prompt. */ negative: ""
+    /** Empty selects the hub's best model for the image domain. */ model: ""
+    /** LoRA list; each strength is one of: 1.0, 0.8, 0.6, 0.4, 1.2. */ loras: []
+    ports: { in: [@prompt, @image], out: [@image] }
+    image: fn() { self.out(@image) }
+    /** Image preview and image-generation controls. */ ui: mod.flow.ui.ImageFace
+}
+
+/** Edit a primary image with an instruction and up to three PNG references. Default face: `mod.flow.ui.ImageFace`. */
+mod.flow.ImageEdit = Gen{
+    kind: @gen
+    domain: "edit"
+    type_name: "ImageEdit"
+    /** one of: 1.0, 0.85, 0.7, 0.55, 0.4, 0.25 */ strength: 1.0
+    /** 0 is the deterministic default seed. */ seed: 0
+    /** Empty selects the hub's best model for the edit domain. */ model: ""
+    ports: { in: [@prompt, @image, @reference_1, @reference_2, @reference_3], out: [@image] }
+    image: fn() { self.out(@image) }
+    /** Image preview with generic edit parameters. */ ui: mod.flow.ui.ImageFace
+}
+
+/** Repaint the white area of a mask over an image. Default face: `mod.flow.ui.ImageFace`. */
+mod.flow.Inpaint = Gen{
+    kind: @gen
+    domain: "inpaint"
+    type_name: "Inpaint"
+    /** 1..200; the Fill backend default is 50. */ steps: 50
+    /** The Fill backend default is 30. */ guidance: 30.0
+    /** 0 is the deterministic default seed. */ seed: 0
+    /** Empty selects the hub's best model for the inpaint domain. */ model: ""
+    ports: { in: [@prompt, @image, @mask], out: [@image] }
+    image: fn() { self.out(@image) }
+    /** Image preview with generic inpaint parameters. */ ui: mod.flow.ui.ImageFace
+}
+
+/** Render an image constrained by a control image. Default face: `mod.flow.ui.ImageFace`. */
+mod.flow.Control = Gen{
+    kind: @gen
+    domain: "control"
+    type_name: "Control"
+    /** 1..200; the control backend default is 30. */ steps: 30
+    /** 0..2000; Canny default is 50. */ canny_low: 50.0
+    /** 0..2000; Canny default is 200. */ canny_high: 200.0
+    /** 0 is the deterministic default seed. */ seed: 0
+    /** Empty selects depth or Canny control by hub affinity. */ model: ""
+    ports: { in: [@prompt, @control], out: [@image] }
+    image: fn() { self.out(@image) }
+    /** Image preview with generic control parameters. */ ui: mod.flow.ui.ImageFace
+}
+
+/** Upscale an image with the hub's image-upscale lane. Default face: `mod.flow.ui.ImageFace`. */
+mod.flow.Upscale = Gen{
+    kind: @gen
+    domain: "upscale"
+    type_name: "Upscale"
+    /** 2 is the flow-language default; the current RealESRGAN recipe produces 4x. */ factor: 2
+    /** Empty selects the hub's best model for the upscale domain. */ model: ""
+    ports: { in: [@image], out: [@image] }
+    image: fn() { self.out(@image) }
+    /** Image preview with generic upscale parameters. */ ui: mod.flow.ui.ImageFace
+}
+
+/** Extract a soft alpha matte from an image. Default face: `mod.flow.ui.ImageFace`. */
+mod.flow.Matte = Gen{
+    kind: @gen
+    domain: "matte"
+    type_name: "Matte"
+    /** Empty selects the hub's best model for the matte domain. */ model: ""
+    ports: { in: [@image], out: [@image] }
+    image: fn() { self.out(@image) }
+    /** Image preview with generic matte parameters. */ ui: mod.flow.ui.ImageFace
+}
+
+/** Estimate a metric depth map from an image. Default face: `mod.flow.ui.ImageFace`. */
+mod.flow.Depth = Gen{
+    kind: @gen
+    domain: "depth"
+    type_name: "Depth"
+    /** Empty selects the hub's best model for the depth domain. */ model: ""
+    ports: { in: [@image], out: [@image] }
+    image: fn() { self.out(@image) }
+    /** Image preview with generic depth parameters. */ ui: mod.flow.ui.ImageFace
+}
+
+/** Generate a video, optionally between first and last image keyframes. Default face: `mod.flow.ui.GenFace`. */
+mod.flow.Video = Gen{
+    kind: @gen
+    domain: "video"
+    type_name: "Video"
+    /** one of: 640x352, 864x480, 960x544 */ width: 640
+    /** one of: 640x352, 864x480, 960x544 */ height: 352
+    /** one of: 39, 65, 97, 129 */ frames: 39
+    /** paired with frames: one of 30, 30, 40, 50 */ steps: 30
+    /** one of: h264, h265, hevc */ codec: "h264"
+    /** Decode and mux the jointly generated audio track. */ audio: true
+    /** one of: 1, 2, 4 */ interpolate: 1
+    /** 0 is the deterministic default seed. */ seed: 0
+    /** Empty selects the hub's best model for the video domain. */ model: ""
+    ports: { in: [@prompt, @image, @last_frame], out: [@video] }
+    video: fn() { self.out(@video) }
+    /** Generic parameter and video-result face. */ ui: mod.flow.ui.GenFace
+}
+
+/** Upscale, interpolate, or add motion metadata to a video. Default face: `mod.flow.ui.GenFace`. */
+mod.flow.VideoEnhance = Gen{
+    kind: @gen
+    domain: "enhance"
+    type_name: "VideoEnhance"
+    /** one of: 1, 2, 4 */ upscale: 2
+    /** one of: 1, 2, 4 */ interpolate: 2
+    /** Append the `mkfl` motion-field sidecar. */ flow_map: true
+    /** Empty selects the hub's best model for the enhance domain. */ model: ""
+    ports: { in: [@video], out: [@video] }
+    video: fn() { self.out(@video) }
+    /** Generic parameter and video-result face. */ ui: mod.flow.ui.GenFace
+}
+
+/** Generate a sound effect from a description. Default face: `mod.flow.ui.GenFace`. */
+mod.flow.Sfx = Gen{
+    kind: @gen
+    domain: "audio"
+    type_name: "Sfx"
+    /** 0.5..120; the current creator default is 4 seconds. */ seconds: 4.0
+    /** 1..200; the SA3 default is 8. */ steps: 8
+    /** 0 is the deterministic default seed. */ seed: 0
+    /** Empty selects the hub's best model for the audio domain. */ model: ""
+    ports: { in: [@prompt], out: [@audio] }
+    audio: fn() { self.out(@audio) }
+    /** Generic parameter and audio-result face. */ ui: mod.flow.ui.GenFace
+}
+
+/** Generate a song from a production brief, lyrics, and optional reference audio. Default face: `mod.flow.ui.GenFace`. */
+mod.flow.Music = Gen{
+    kind: @gen
+    domain: "music"
+    type_name: "Music"
+    /** one of: 60, 120, 180, 240, 300; accepted range 5..300 */ seconds: 180
+    /** 0..1; 0.8 matches the backend's default reference cadence. */ strength: 0.8
+    /** 0 is the deterministic default seed. */ seed: 0
+    /** Empty selects the hub's best model for the music domain. */ model: ""
+    ports: { in: [@prompt, @lyrics, @audio], out: [@audio] }
+    audio: fn() { self.out(@audio) }
+    /** Generic parameter and audio-result face. */ ui: mod.flow.ui.GenFace
+}
+
+/** Speak text, optionally cloning a reference-audio voice. Default face: `mod.flow.ui.GenFace`. */
+mod.flow.Speech = Gen{
+    kind: @gen
+    domain: "speech"
+    type_name: "Speech"
+    /** Empty uses the selected backend's default voice. */ voice: ""
+    /** 0.25..4 */ speed: 1.0
+    /** Empty uses the model's default language. */ language: ""
+    /** Eight values in 0..1.2; empty is neutral/reference affect. */ emotion: []
+    /** 0 is the deterministic default seed. */ seed: 0
+    /** Empty selects the hub's best model for the speech domain. */ model: ""
+    ports: { in: [@text, @audio], out: [@audio] }
+    audio: fn() { self.out(@audio) }
+    /** Generic parameter and audio-result face. */ ui: mod.flow.ui.GenFace
+}
+
+/** Reconstruct a GLB mesh from a reference image. Default face: `mod.flow.ui.GenFace`. */
+mod.flow.Mesh = Gen{
+    kind: @gen
+    domain: "mesh"
+    type_name: "Mesh"
+    /** 0 for raw decode, otherwise 16..512; creator chains use 512. */ remesh_resolution: 512
+    /** Keep TRELLIS's own baked texture. */ texture: true
+    /** one of: 12000, 20000, 40000, 80000, 160000; creator object default is 12000. */ decimation_target: 12000
+    /** one of: 1024, 2048, 4096 */ texture_size: 1024
+    /** 0 is the deterministic default seed. */ seed: 0
+    /** Empty selects the hub's best model for the mesh domain. */ model: ""
+    ports: { in: [@prompt, @image], out: [@mesh] }
+    mesh: fn() { self.out(@mesh) }
+    /** Generic parameter and mesh-result face. */ ui: mod.flow.ui.GenFace
+}
+
+/** Paint PBR materials onto a mesh from a reference image. Default face: `mod.flow.ui.GenFace`. */
+mod.flow.Paint = Gen{
+    kind: @gen
+    domain: "paint"
+    type_name: "Paint"
+    /** one of: 1024, 2048, 4096 */ texture_size: 1024
+    /** 0 is the deterministic default seed. */ seed: 0
+    /** Empty selects the hub's best model for the paint domain. */ model: ""
+    ports: { in: [@prompt, @mesh, @reference_image], out: [@mesh] }
+    mesh: fn() { self.out(@mesh) }
+    /** Generic parameter and mesh-result face. */ ui: mod.flow.ui.GenFace
+}
+
+/** Skin and rig a GLB mesh. Default face: `mod.flow.ui.GenFace`. */
+mod.flow.Rig = Gen{
+    kind: @gen
+    domain: "rig"
+    type_name: "Rig"
+    /** 0 is the deterministic default seed. */ seed: 0
+    /** Empty selects the hub's best model for the rig domain. */ model: ""
+    ports: { in: [@prompt, @mesh], out: [@mesh] }
+    mesh: fn() { self.out(@mesh) }
+    /** Generic parameter and mesh-result face. */ ui: mod.flow.ui.GenFace
+}
+
+/** Animate a rigged GLB mesh. Default face: `mod.flow.ui.GenFace`. */
+mod.flow.Motion = Gen{
+    kind: @gen
+    domain: "motion"
+    type_name: "Motion"
+    /** one of: playable, prompt */ motion_mode: "playable"
+    /** 0 is the deterministic default seed. */ seed: 0
+    /** Empty selects the hub's best model for the motion domain. */ model: ""
+    ports: { in: [@prompt, @mesh], out: [@mesh] }
+    mesh: fn() { self.out(@mesh) }
+    /** Generic parameter and mesh-result face. */ ui: mod.flow.ui.GenFace
+}
+
+/** Reconstruct one object as a Gaussian-splat PLY. Default face: `mod.flow.ui.GenFace`. */
+mod.flow.Splat = Gen{
+    kind: @gen
+    domain: "splat"
+    type_name: "Splat"
+    /** 1..200; the TripoSplat default is 20. */ steps: 20
+    /** The TripoSplat default is 3. */ guidance: 3.0
+    /** 32768..262144 step 32 */ gaussians: 262144
+    /** 0 is the deterministic default seed. */ seed: 0
+    /** Empty selects the hub's best model for the splat domain. */ model: ""
+    ports: { in: [@prompt, @image], out: [@mesh] }
+    mesh: fn() { self.out(@mesh) }
+    /** Generic parameter and mesh-result face. */ ui: mod.flow.ui.GenFace
+}
+
+/** Generate a walkable world as a Gaussian-splat PLY. Default face: `mod.flow.ui.GenFace`. */
+mod.flow.World = Gen{
+    kind: @gen
+    domain: "world"
+    type_name: "World"
+    /** 0 is the deterministic default seed. */ seed: 0
+    /** Empty selects the hub's best model for the world domain. */ model: ""
+    ports: { in: [@prompt, @image], out: [@mesh] }
+    mesh: fn() { self.out(@mesh) }
+    /** Generic parameter and mesh-result face. */ ui: mod.flow.ui.GenFace
+}
+
+/** Apply a vision answer to an existing asset's annotation record. Default face: `mod.flow.ui.GenFace`. */
+mod.flow.Annotate = Gen{
+    kind: @gen
+    domain: "vision"
+    type_name: "Annotate"
+    /** The current nine-line annotation record needs about 200 tokens. */ max_tokens: 200
+    /** Empty selects the hub's best model for the vision domain. */ model: ""
+    ports: { in: [@prompt, @image], out: [@json] }
+    json: fn() { self.out(@json) }
+    /** Generic parameter and annotation-receipt face. */ ui: mod.flow.ui.GenFace
+}

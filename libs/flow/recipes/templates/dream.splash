@@ -1,0 +1,39 @@
+use mod.flow.*
+
+/** The subject and motion to dream. */
+let prompt = Input{ type: @text  default: "a luminous jellyfish drifting through a cathedral"  at: vec2(40, 120) }
+
+let expand = Llm{
+    system: "Rewrite the prompt as one continuous cinematic shot for both an image keyframe and a video model. Keep the subject and add steady forward motion."
+    prompt: prompt.text()
+    at: vec2(360, 120)
+}
+
+let image = Image{
+    prompt: expand.text()
+    width: 640
+    height: 352
+    steps: 8
+    at: vec2(680, 120)
+}
+
+let video = Video{
+    prompt: expand.text()
+    image: image.image()
+    last_frame: image.image()
+    width: 640
+    height: 352
+    frames: 39
+    steps: 30
+    audio: false
+    at: vec2(1000, 120)
+}
+
+/** The finished looping dream clip. */
+let movie = Output{ type: @video  value: video.video()  at: vec2(1320, 120) }
+
+Flow{
+    label: "DREAM"
+    brief: "Expands one idea, paints its keyframe, and closes a generated clip back onto that frame."
+    prompt, expand, image, video, movie
+}
