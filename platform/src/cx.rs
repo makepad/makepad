@@ -185,7 +185,7 @@ pub struct Cx {
     pub performance_stats: PerformanceStats,
     /// Frame monitor behind the PerfGraph widget; off until the widget enables it.
     pub perf_monitor: PerfMonitor,
-    /// The F10 exploded z-layer inspection view. Inert while off.
+    /// The exploded z-layer inspection view. Inert while off.
     pub sploded: SplodedView,
     /// How many `WidgetRef` draw scopes deep the current draw is — the turtle
     /// nesting AS COMPONENTS SEE IT. Maintained by `WidgetRef::draw_walk` and

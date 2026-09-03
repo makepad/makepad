@@ -1323,7 +1323,7 @@ mod imp {
              /snap?q=&w=&all=  widget rects, ready to click: {{\"s\":[{{\"i\":id,\"ty\":type,\"r\":[x,y,w,h],\"w\":win,\"t\":text}}]}}\n\
              \x20                 q= filters id/type/text (substring); default lists only visible, sized widgets\n\
              /d                whole widget tree as indented text (id, type, x y w h)\n\
-             /tweak?on=1|0     the TWEAKER design-feedback overlay (also F12 in-app). hover outlines widgets; click pins; buttons never fire\n\
+             /tweak?on=1|0     the TWEAKER design-feedback overlay (also Shift+F10 in-app). hover outlines widgets; click pins; buttons never fire\n\
              /tweak/state      selection + its editable properties + diff log + annotations, one JSON\n\
              /tweak/apply      POST {{\"path\":\"a.b.c\",\"splash\":\"{{padding: 20}}\"}} or {{\"path\":..,\"prop\":\"padding\",\"value\":\"20\"}} — live-apply + relayout\n\
              /tweak/diff       the raw edit log; POST /tweak/clear resets it\n\
