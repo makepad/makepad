@@ -35,6 +35,8 @@ mod.flow.Node = {
     at: nil
     /** Optional canvas size. */
     size: nil
+    /** Face ports right-to-left (inputs right, outputs left). */
+    flip: false
     /** Optional node face. */
     ui: nil
     /** Failure policy: fail or skip. */
