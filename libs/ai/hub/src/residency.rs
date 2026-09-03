@@ -29,6 +29,7 @@ use crate::error::AssetAiError;
 use crate::gpu::query_gpu;
 use crate::registry::ModelSpec;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Default admission safety reserve on top of a model's estimated peak.
@@ -39,6 +40,52 @@ pub const EVICT_VERIFY_TIMEOUT: Duration = Duration::from_secs(15);
 /// (driver bookkeeping can trail the allocator by seconds on WDDM).
 pub const ADMIT_TIMEOUT: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+const UNKNOWN_USABLE_MB: u64 = u64::MAX;
+
+/// Last measured post-eviction VRAM ceiling. The measurement itself happens
+/// only at startup or when the service has retired every resident; ordinary
+/// `/health` polling must not mistake a currently loaded model for permanent
+/// driver/display overhead.
+#[derive(Debug)]
+pub struct UsableVram(AtomicU64);
+
+impl UsableVram {
+    pub fn new(value: Option<u64>) -> Self {
+        Self(AtomicU64::new(value.unwrap_or(UNKNOWN_USABLE_MB)))
+    }
+
+    pub fn get(&self) -> Option<u64> {
+        match self.0.load(Ordering::Relaxed) {
+            UNKNOWN_USABLE_MB => None,
+            value => Some(value),
+        }
+    }
+
+    pub fn refresh(&self) -> Option<u64> {
+        let value = usable_vram_mb(&query_gpu());
+        if let Some(value) = value {
+            self.0.store(value, Ordering::Relaxed);
+            Some(value)
+        } else {
+            self.get()
+        }
+    }
+}
+
+/// `total - non_evictable_baseline`, expressed from one idle-card sample.
+/// Clamping protects the public health contract from inconsistent driver
+/// samples that briefly report free memory above total memory.
+pub fn usable_vram_mb(gpu: &crate::gpu::GpuInfo) -> Option<u64> {
+    Some(gpu.vram_free_mb?.min(gpu.vram_total_mb?))
+}
+
+/// Why a model can never pass the load-time byte gate on this node.
+pub fn too_small_note(spec: &ModelSpec, reserve_mb: u64, usable_mb: u64) -> Option<String> {
+    let estimate_mb = estimated_peak_mb(spec);
+    let need_mb = estimate_mb.saturating_add(reserve_mb);
+    (estimate_mb > 0 && need_mb > usable_mb)
+        .then(|| format!("needs {need_mb} MB, this card can free {usable_mb}"))
+}
 
 #[derive(Clone, Debug)]
 pub struct ResidencyConfig {
@@ -187,6 +234,21 @@ mod tests {
         assert_eq!(estimated_peak_mb(&spec(Some(0.5))), 512);
         // Rounds UP: a 1.1 GB estimate must not admit at 1.0 GB free.
         assert_eq!(estimated_peak_mb(&spec(Some(1.1))), 1127);
+    }
+
+    #[test]
+    fn usable_vram_is_the_idle_free_ceiling_and_drives_too_small_notes() {
+        let gpu = crate::gpu::GpuInfo {
+            vram_free_mb: Some(30_603),
+            vram_total_mb: Some(32_607),
+            ..Default::default()
+        };
+        assert_eq!(usable_vram_mb(&gpu), Some(30_603));
+        assert_eq!(
+            too_small_note(&spec(Some(29.0)), DEFAULT_RESERVE_MB, 30_603).as_deref(),
+            Some("needs 31744 MB, this card can free 30603")
+        );
+        assert!(too_small_note(&spec(Some(29.0)), DEFAULT_RESERVE_MB, 36_535).is_none());
     }
 
     #[test]

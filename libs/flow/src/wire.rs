@@ -377,6 +377,10 @@ pub struct FleetNodeDto {
     pub base_url: String,
     pub fleet: String,
     pub healthy: bool,
+    pub gpu: Option<String>,
+    pub vram_total_mb: Option<u64>,
+    pub vram_usable_mb: Option<u64>,
+    pub vram_free_mb: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
