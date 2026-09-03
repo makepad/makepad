@@ -9,7 +9,7 @@ pub struct HostedConfig {
 }
 
 pub const HOSTED_CONFIG: HostedConfig = HostedConfig {
-    tiles: "https://makepad.nl/maps/world.mkmap",
+    tiles: "https://makepad.nl/maps/world-20260903.mkmap",
     api: "https://makepad.nl/api",
 };
 
