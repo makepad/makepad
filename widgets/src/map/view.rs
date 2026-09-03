@@ -7924,19 +7924,24 @@ impl MapView {
             .map(|(_, entry)| entry.bytes)
             .sum();
         let budgets = MapMemoryBudgets::from_cx(cx);
+        // Both source kinds need the SAME margin beyond the exact visible
+        // set: a budget pinned at visible_bytes (as the HttpArchive branch
+        // used to be) evicts the trailing edge of a pan on literally the
+        // next frame, and the leading edge re-enters a moment later with
+        // no head start — a continuous evict-then-refetch churn during any
+        // sustained pan. Small-memory wasm still gets no multiplier (that
+        // headroom doesn't exist to spend).
+        let visible_floor = if cfg!(target_arch = "wasm32") && cx.memory_budget_bytes() < 1024 * 1024 * 1024 {
+            visible_bytes
+        } else {
+            visible_bytes.saturating_mul(2)
+        };
         let byte_budget = if matches!(
             self.tile_source_config,
             Some(TileSourceConfig::HttpArchive { .. })
         ) {
-            budgets.http_tile_cache.max(visible_bytes)
+            budgets.http_tile_cache.max(visible_floor)
         } else {
-            let visible_floor = if cfg!(target_arch = "wasm32")
-                && cx.memory_budget_bytes() < 1024 * 1024 * 1024
-            {
-                visible_bytes
-            } else {
-                visible_bytes.saturating_mul(2)
-            };
             budgets.tile_cache.max(visible_floor)
         };
         if total_bytes > byte_budget {
