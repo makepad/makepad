@@ -1,6 +1,7 @@
 pub mod engine;
 pub mod graph;
 pub mod instance;
+pub mod templates;
 pub mod values;
 pub mod wire;
 

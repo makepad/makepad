@@ -6,10 +6,11 @@ use super::state::{
 };
 use super::util::log;
 use crate::{
-    graph, CreateInstanceRequest, CreateInstanceResponse, CreateRunRequest, CreateRunResponse,
-    EvalErrorResponse, EventsResponse, FlowMutationResponse, FlowResponse, FlowSummary,
-    HealthResponse, InstanceId, MessageResponse, NodesResponse, PortType, PutGraphRequest,
-    PutSourceRequest, PutValueResponse, RevertRequest, RunId, Value,
+    graph, CreateFromTemplateRequest, CreateInstanceRequest, CreateInstanceResponse,
+    CreateRunRequest, CreateRunResponse, EvalErrorResponse, EventsResponse, FlowMutationResponse,
+    FlowResponse, FlowSummary, HealthResponse, InstanceId, MessageResponse, NodesResponse,
+    PortType, PutGraphRequest, PutSourceRequest, PutValueResponse, RevertRequest, RunId,
+    TemplateResponse, Value,
 };
 use makepad_bounded_http::{
     etag_matches, if_range_matches, parse_range, BodyError, Conn, Head, Method, RangeSpec, Resp,
@@ -101,6 +102,35 @@ pub(crate) fn dispatch(
                 )
             })
         }
+        [v1, templates] if v1 == "v1" && templates == "templates" => {
+            if head.method != Method::Get {
+                return call(&ctx.state, |_| message(405, "method not allowed"));
+            }
+            let mut summaries: Vec<_> = crate::templates::TEMPLATES
+                .iter()
+                .map(crate::templates::template_summary)
+                .collect();
+            summaries.sort_by(|left, right| left.name.cmp(&right.name));
+            Outcome::Resp(json(200, &summaries))
+        }
+        [v1, templates, name] if v1 == "v1" && templates == "templates" => {
+            if head.method != Method::Get {
+                return call(&ctx.state, |_| message(405, "method not allowed"));
+            }
+            let Some(template) = crate::templates::template(name) else {
+                return Outcome::Resp(message(404, "template not found"));
+            };
+            let summary = crate::templates::template_summary(template);
+            Outcome::Resp(json(
+                200,
+                &TemplateResponse {
+                    name: summary.name,
+                    label: summary.label,
+                    brief: summary.brief,
+                    source: template.source.to_string(),
+                },
+            ))
+        }
         [v1, flows] if v1 == "v1" && flows == "flows" => {
             if head.method != Method::Get {
                 return call(&ctx.state, |_| message(405, "method not allowed"));
@@ -146,6 +176,7 @@ pub(crate) fn dispatch(
             }
             match head.method {
                 Method::Get => get_flow(ctx, name),
+                Method::Post => create_from_template(conn, head, ctx, name),
                 Method::Put => put_source(conn, head, ctx, name),
                 Method::Delete => delete_flow(ctx, name),
                 _ => call(&ctx.state, |_| message(405, "method not allowed")),
@@ -303,6 +334,32 @@ fn put_source(conn: &mut Conn, head: &mut Head, ctx: &RouteCtx, name: &str) -> O
     put_source_value(ctx, name.to_string(), request.source)
 }
 
+fn create_from_template(
+    conn: &mut Conn,
+    head: &mut Head,
+    ctx: &RouteCtx,
+    name: &str,
+) -> Outcome {
+    let request: CreateFromTemplateRequest = match read_json(conn, head) {
+        Ok(request) => request,
+        Err(outcome) => return outcome,
+    };
+    let Some(template) = crate::templates::template(&request.template) else {
+        return Outcome::Resp(message(404, "template not found"));
+    };
+    let name = name.to_string();
+    let source = template.source.to_string();
+    let config = ctx.config.clone();
+    call(&ctx.state, move |state| match state.create_source(name, source) {
+        Ok(Some(result)) => create_mutation_result(result),
+        Ok(None) => message(409, "flow already exists"),
+        Err(error) => {
+            log(&config, &format!("flow create failed: {error}"));
+            message(500, "internal server error")
+        }
+    })
+}
+
 fn put_graph(conn: &mut Conn, head: &mut Head, ctx: &RouteCtx, name: &str) -> Outcome {
     let request: PutGraphRequest = match read_json(conn, head) {
         Ok(request) => request,
@@ -372,6 +429,19 @@ fn mutation_result(result: SourceResult) -> Resp {
         None => match result.graph {
             Some(graph) => json(
                 200,
+                &FlowMutationResponse { revision: result.revision, graph },
+            ),
+            None => message(500, "missing evaluated graph"),
+        },
+    }
+}
+
+fn create_mutation_result(result: SourceResult) -> Resp {
+    match result.error {
+        Some(error) => json(422, &EvalErrorResponse { error }),
+        None => match result.graph {
+            Some(graph) => json(
+                201,
                 &FlowMutationResponse { revision: result.revision, graph },
             ),
             None => message(500, "missing evaluated graph"),

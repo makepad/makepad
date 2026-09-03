@@ -256,6 +256,18 @@ impl FlowState {
         Ok(self.set_source(name, source))
     }
 
+    pub(crate) fn create_source(
+        &mut self,
+        name: String,
+        source: String,
+    ) -> Result<Option<SourceResult>, ServerError> {
+        let path = self.root.join("flows").join(format!("{name}.splash"));
+        if self.definitions.contains_key(&name) || path.exists() {
+            return Ok(None);
+        }
+        self.put_source(name, source).map(Some)
+    }
+
     pub(crate) fn revert(&mut self, name: &str, revision: u64) -> Result<Option<SourceResult>, ServerError> {
         let source = self
             .definitions
