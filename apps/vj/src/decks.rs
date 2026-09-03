@@ -2212,6 +2212,38 @@ impl DeckEngine {
 
     /// Dragging a blue marker off its spot: forget that saved loop. The
     /// running span is untouched — this deletes the memory, not the sound.
+    /// Move ONE end of the running loop, anchored on the other.
+    ///
+    /// A resize rather than a move: the far end stays exactly where it is,
+    /// which is what makes an edge draggable at all -- moving the whole
+    /// span would take the anchor with it. The loop keeps running
+    /// throughout, because a resize emits no seek and stamps the command
+    /// as a change, and the mixer folds a stranded head modulo the new
+    /// length against the real playhead rather than the engine's mirror.
+    ///
+    /// Snapped under QUANT against the loop's OWN other end, so a dragged
+    /// edge lands a whole number of units from its anchor.
+    pub fn set_loop_edge(&mut self, deck: DeckId, out: bool, secs: f64) -> Vec<DeckCmd> {
+        let Some(span) = self.deck(deck).loop_span else { return Vec::new() };
+        if !secs.is_finite() {
+            return Vec::new();
+        }
+        let unit = self.snap_beats;
+        let anchor = if out { span.start_secs } else { span.end_secs };
+        let target = match self.deck(deck).true_grid() {
+            Some(grid) => grid.snap_translate(secs, anchor, unit),
+            None => secs,
+        };
+        let (start, end) = if out { (span.start_secs, target) } else { (target, span.end_secs) };
+        // Refused rather than clamped, the way every other span edit is:
+        // a clamp would move the ANCHOR, which is the one thing this
+        // gesture promises to leave alone.
+        let Some(resized) = self.usable_span(deck, start, end) else {
+            return Vec::new();
+        };
+        self.engage_loop(deck, resized, false)
+    }
+
     /// Put a mark on THIS number, at the playhead.
     ///
     /// The bank could only ever be written to by saving whatever was
@@ -6993,6 +7025,65 @@ mod tests {
 
 
 
+
+    #[test]
+    fn dragging_one_end_of_a_loop_leaves_the_other_exactly_where_it_is() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        e.observe(DeckId::A, 10.0, true);
+        e.engage_loop(DeckId::A, LoopSpan { start_secs: 10.0, end_secs: 12.0 }, false);
+
+        // The OUT end out to 13.5: the IN does not budge.
+        let cmds = e.set_loop_edge(DeckId::A, true, 13.5);
+        let span = e.deck(DeckId::A).loop_span.expect("still looping");
+        assert!((span.start_secs - 10.0).abs() < 1e-9, "the anchor holds");
+        assert!((span.end_secs - 13.5).abs() < 1e-9, "at {}", span.end_secs);
+        // A resize, so no seek -- the loop keeps running while it stretches.
+        assert!(!cmds.iter().any(|c| matches!(c, DeckCmd::SeekSeconds { .. })));
+        assert!(cmds.iter().any(|c| matches!(
+            c,
+            DeckCmd::SetLoopSpan { seek: LoopSeek::Changed, .. }
+        )));
+
+        // And the IN end in to 9.0, with the OUT anchored.
+        e.set_loop_edge(DeckId::A, false, 9.0);
+        let span = e.deck(DeckId::A).loop_span.expect("still looping");
+        assert!((span.start_secs - 9.0).abs() < 1e-9);
+        assert!((span.end_secs - 13.5).abs() < 1e-9, "the other anchor holds");
+    }
+
+    #[test]
+    fn an_edge_that_would_cross_its_anchor_is_refused_rather_than_clamped() {
+        // A clamp would move the ANCHOR, which is the one thing this
+        // gesture promises to leave alone.
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        e.observe(DeckId::A, 10.0, true);
+        e.engage_loop(DeckId::A, LoopSpan { start_secs: 10.0, end_secs: 12.0 }, false);
+        let before = e.deck(DeckId::A).loop_span;
+        assert!(e.set_loop_edge(DeckId::A, true, 9.0).is_empty(), "out behind in");
+        assert_eq!(e.deck(DeckId::A).loop_span, before);
+        assert!(e.set_loop_edge(DeckId::A, false, 13.0).is_empty(), "in past out");
+        assert_eq!(e.deck(DeckId::A).loop_span, before);
+        // And with no loop at all there is no edge to move.
+        e.toggle_loop(DeckId::A);
+        assert!(e.set_loop_edge(DeckId::A, true, 20.0).is_empty());
+    }
+
+    #[test]
+    fn a_dragged_edge_snaps_against_its_own_anchor() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0); // half a second a beat
+        e.set_snap_beats(1);
+        e.observe(DeckId::A, 10.2, true);
+        e.engage_loop(DeckId::A, LoopSpan { start_secs: 10.2, end_secs: 12.2 }, false);
+        // A whole number of units from the IN, not from the track's grid:
+        // the loop's own phase is what the operator is working in.
+        e.set_loop_edge(DeckId::A, true, 13.35);
+        let span = e.deck(DeckId::A).loop_span.expect("still looping");
+        assert!((span.end_secs - 13.2).abs() < 1e-9, "at {}", span.end_secs);
+        assert!((span.start_secs - 10.2).abs() < 1e-9);
+    }
     // ---- the bank: a number, a kind and a colour ------------------------
 
     #[test]

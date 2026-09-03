@@ -26166,6 +26166,10 @@ p2 {}
                         let cmds = self.decks.seek_secs_snapped(deck, fraction * duration);
                         self.run_deck_cmds(cx, cmds);
                     }
+                    OverviewEvent::MoveLoopEdge { out, secs } => {
+                        let cmds = self.decks.set_loop_edge(deck, out, secs);
+                        self.run_deck_cmds(cx, cmds);
+                    }
                     OverviewEvent::MoveLoop { start_secs } => {
                         let cmds = self.decks.move_loop(deck, start_secs);
                         self.run_deck_cmds(cx, cmds);

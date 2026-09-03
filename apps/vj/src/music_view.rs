@@ -187,6 +187,28 @@ fn nudge_delta(scroll: DVec2, fine: bool, residue: &mut f64) -> f64 {
 /// Where inside the loop band `secs` landed, or `None` if it did not. The
 /// offset is what makes a drag feel pinned: the band travels with the
 /// finger instead of snapping its in point under the cursor.
+/// Which END of the running band a press landed on, if either.
+///
+/// The interior keeps the whole-band move it has always had; only the
+/// last few pixels at each end resize. A band shorter than two grab
+/// zones has no interior to move by, so its ends win -- a one-beat loop
+/// is exactly the one you want to be able to stretch.
+fn band_edge(span: Option<(f64, f64)>, secs: f64, tolerance_secs: f64) -> Option<bool> {
+    let (start, end) = span?;
+    if secs < start - tolerance_secs || secs > end + tolerance_secs {
+        return None;
+    }
+    let near_in = (secs - start).abs() <= tolerance_secs;
+    let near_out = (secs - end).abs() <= tolerance_secs;
+    match (near_in, near_out) {
+        // Inside a very short band both are in reach: the nearer wins.
+        (true, true) => Some((secs - start) > (end - secs)),
+        (true, false) => Some(false),
+        (false, true) => Some(true),
+        (false, false) => None,
+    }
+}
+
 fn band_grab(span: Option<(f64, f64)>, secs: f64, tolerance_secs: f64) -> Option<f64> {
     let (start, end) = span?;
     if secs < start - tolerance_secs || secs > end + tolerance_secs {
@@ -5268,6 +5290,8 @@ pub enum OverviewEvent {
     /// A completed loop drag: put the loop's IN point here. Raw source
     /// seconds — the host owns QUANT, so the policy lives in one place.
     MoveLoop { start_secs: f64 },
+    /// One end of the running loop dragged, the other left where it is.
+    MoveLoopEdge { out: bool, secs: f64 },
     /// A yellow marker was clicked: go into that found loop.
     RecallFound { index: usize },
     /// A yellow marker was dragged off its spot: forget that finding.
@@ -5287,6 +5311,8 @@ enum OverviewDrag {
     /// previews the snapped landing; release commits the jump.
     GhostSeek,
     MoveLoop { grab_offset_secs: f64 },
+    /// Dragging one end of the band. `out` says which.
+    MoveLoopEdge { out: bool },
 }
 
 #[derive(Script, ScriptHook, WidgetRef, WidgetRegister)]
@@ -5608,6 +5634,16 @@ impl Widget for VjWaveOverview {
                     // anywhere else lands IN under the finger. Seeking
                     // waits for the loop to be exited — the loop owns the
                     // deck while it plays.
+                    // The last few pixels at each end resize; everything
+                    // between them still moves the whole band.
+                    let edge = self
+                        .secs_at(cx, fe.abs.x)
+                        .and_then(|(secs, tol)| band_edge(self.loop_span, secs, tol));
+                    if let Some(out) = edge {
+                        self.drag = Some(OverviewDrag::MoveLoopEdge { out });
+                        self.area.redraw(cx);
+                        return;
+                    }
                     let grab_offset_secs = self
                         .secs_at(cx, fe.abs.x)
                         .and_then(|(secs, tol)| band_grab(self.loop_span, secs, tol))
@@ -5639,6 +5675,14 @@ impl Widget for VjWaveOverview {
                     // The live loop does not move: the playhead keeps
                     // living in the ghost until the hand commits.
                     self.preview_move(cx, fe.abs.x, grab_offset_secs);
+                }
+                Some(OverviewDrag::MoveLoopEdge { out }) => {
+                    // An edge moves LIVE, unlike the whole-band drag: the
+                    // loop goes on sounding while it is stretched, which
+                    // is the point of being able to stretch it.
+                    if let Some((secs, _)) = self.secs_at(cx, fe.abs.x) {
+                        self.events.push(OverviewEvent::MoveLoopEdge { out, secs });
+                    }
                 }
                 None => {}
             },
@@ -5689,6 +5733,7 @@ impl Widget for VjWaveOverview {
                             }
                         }
                     }
+                    (Some(OverviewDrag::MoveLoopEdge { .. }), _, _) => {}
                     (Some(OverviewDrag::MoveLoop { .. }), Some(raw), Some(preview)) => {
                         // One event per completed drag — and none for a
                         // drag that came home.
@@ -7488,6 +7533,21 @@ mod tests {
         assert_eq!(band_grab(span, 9.8, 0.35), Some(0.0), "clamped at the in edge");
     }
 
+
+    #[test]
+    fn the_ends_of_a_band_resize_and_its_middle_still_moves() {
+        let span = Some((10.0, 20.0));
+        assert_eq!(band_edge(span, 10.1, 0.35), Some(false), "near IN");
+        assert_eq!(band_edge(span, 19.9, 0.35), Some(true), "near OUT");
+        assert_eq!(band_edge(span, 15.0, 0.35), None, "the middle still moves");
+        assert_eq!(band_edge(span, 30.0, 0.35), None, "and outside is neither");
+        // A band shorter than two grab zones has no middle: the nearer end
+        // wins, so a one-beat loop can still be stretched.
+        let tiny = Some((10.0, 10.4));
+        assert_eq!(band_edge(tiny, 10.05, 0.35), Some(false));
+        assert_eq!(band_edge(tiny, 10.35, 0.35), Some(true));
+        assert_eq!(band_edge(None, 10.0, 0.35), None);
+    }
     #[test]
     fn no_span_means_every_grab_is_a_seek() {
         assert!(band_grab(None, 12.0, 0.35).is_none());
