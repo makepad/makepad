@@ -103,6 +103,11 @@ const CACHE_MAGIC: &[u8; 8] = b"VJWAVE\0\0";
 /// second application can reach a coarser rung the first was too far
 /// from -- so a change to the ladder is a version bump, which is exactly
 /// what this number is for.
+/// Version 13 carries a version PER PRODUCT, so a change to one detector
+/// no longer throws away the others' work. The format version still
+/// guards the bytes -- a layout change re-analyses everything, because
+/// nothing can be read -- and the product versions guard the content.
+///
 /// Version 12 says whether the grid and key were read off the separated
 /// stems rather than the mix. A version 11 sidecar was measured on the
 /// mix, and there is no way to tell from the bytes, so it is re-analysed
@@ -111,7 +116,68 @@ const CACHE_MAGIC: &[u8; 8] = b"VJWAVE\0\0";
 /// Version 11 carries the record's measured loudness. A version 10
 /// sidecar has none, and there is no way to derive one without the
 /// samples, so it is re-analysed like every other bump.
-const CACHE_VERSION: u32 = 12;
+const CACHE_VERSION: u32 = 13;
+
+/// What each product was measured by, so a change to one detector costs
+/// only that product's work.
+///
+/// The rule for touching these: bump the one whose ANSWER would change.
+/// A faster tempo search that lands on the same grid changes nothing and
+/// needs no bump; a different onset function does. Bumping too eagerly
+/// costs a re-measure, bumping too late leaves stale answers on disk, and
+/// of the two the second is the one that misleads.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProductVersions {
+    /// The comb search, the least-squares fit, the tempo pull, the tempo
+    /// map and the downbeat.
+    pub grid: u16,
+    /// The waveform texture pyramid.
+    pub tiles: u16,
+    /// The chroma pass and the key profiles.
+    pub key: u16,
+    /// The first-and-last-sound scan.
+    pub sound: u16,
+    /// The loudness measurement.
+    pub loudness: u16,
+}
+
+/// What this build measures with.
+const PRODUCTS: ProductVersions =
+    ProductVersions { grid: 1, tiles: 1, key: 1, sound: 1, loudness: 1 };
+
+/// Which of a stored record's products were measured by something this
+/// build no longer agrees with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stale {
+    pub grid: bool,
+    pub tiles: bool,
+    pub key: bool,
+    pub sound: bool,
+    pub loudness: bool,
+}
+
+impl Stale {
+    fn between(stored: ProductVersions, now: ProductVersions) -> Stale {
+        Stale {
+            grid: stored.grid != now.grid,
+            tiles: stored.tiles != now.tiles,
+            key: stored.key != now.key,
+            sound: stored.sound != now.sound,
+            loudness: stored.loudness != now.loudness,
+        }
+    }
+
+    pub fn any(self) -> bool {
+        self.grid || self.tiles || self.key || self.sound || self.loudness
+    }
+
+    /// Whether repairing this needs the three-band envelopes rebuilt --
+    /// which is most of an analysis, and the reason a grid change is not
+    /// cheap while a key change is.
+    fn needs_envelopes(self) -> bool {
+        self.grid || self.tiles || self.sound
+    }
+}
 /// Longest local file the music explorer will lift into memory.
 pub const MAX_LOCAL_TRACK_FRAMES: usize = 48_000 * 60 * 15;
 
@@ -676,6 +742,12 @@ pub struct TrackAnalysis {
     /// load, and without this it would undo the better measurement every
     /// time the record came back.
     pub from_stems: bool,
+    /// Which of these products this build would measure differently.
+    ///
+    /// About the LOAD rather than the record, like the timing beside it,
+    /// and never written down: a freshly measured analysis has nothing
+    /// stale in it by construction.
+    pub stale: Stale,
 }
 
 impl TrackAnalysis {
@@ -2208,6 +2280,67 @@ pub fn analyze(pcm: &TrackPcm) -> TrackAnalysis {
     analyze_timed(pcm).0
 }
 
+/// Measure again only what this build no longer agrees with.
+///
+/// The point of versioning the products separately: a change to the key
+/// profiles costs the chroma pass and nothing else, where before it threw
+/// away the waveform, the tempo map and the loudness too. A grid change
+/// is still most of an analysis, because the envelopes it reads are.
+pub fn repair(analysis: &mut TrackAnalysis, pcm: &TrackPcm) -> bool {
+    let stale = analysis.stale;
+    if !stale.any() {
+        return false;
+    }
+    if stale.needs_envelopes() {
+        let envelopes = build_envelopes(pcm);
+        if stale.grid {
+            let prior = streaming_prior(pcm);
+            analysis.grid = snap_tempo(estimate_grid(&envelopes, prior), pcm.seconds());
+            analysis.tempo_map = match analysis.grid.has_grid() {
+                true => {
+                    let hop_rate = envelopes.sample_rate / envelopes.hop as f64;
+                    build_tempo_map(
+                        &envelopes,
+                        analysis.grid.beat_secs * hop_rate,
+                        analysis.grid.first_beat_secs * hop_rate - HOP_CENTRE,
+                    )
+                }
+                false => TempoMap::default(),
+            };
+            let hop_secs = envelopes.hop as f64 / envelopes.sample_rate;
+            analysis.changes_secs = structural_changes(&envelopes)
+                .into_iter()
+                .map(|hop| hop * hop_secs)
+                .collect();
+            // A grid measured again by the mix is a mix answer, whatever
+            // the stems said last time.
+            analysis.from_stems = false;
+        }
+        if stale.tiles {
+            analysis.tiles = build_tiles(&envelopes, pcm);
+        }
+        if stale.sound {
+            analysis.sound = envelopes.sound.map(|(first, last)| {
+                let rate = pcm.sample_rate.max(1) as f64;
+                SoundSpan {
+                    first_secs: first as f64 / rate,
+                    last_secs: last as f64 / rate,
+                }
+            });
+        }
+    }
+    if stale.key {
+        analysis.key = crate::track_key::estimate_key(&pcm.frames, pcm.sample_rate);
+        analysis.from_stems = false;
+    }
+    if stale.loudness {
+        analysis.loudness_lufs =
+            crate::loudness::integrated_lufs(&pcm.frames, pcm.sample_rate);
+    }
+    analysis.stale = Stale::default();
+    true
+}
+
 /// The same analysis, saying where its time went.
 pub fn analyze_timed(pcm: &TrackPcm) -> (TrackAnalysis, AnalysisTiming) {
     let mut timing = AnalysisTiming::default();
@@ -2274,6 +2407,7 @@ pub fn analyze_timed(pcm: &TrackPcm) -> (TrackAnalysis, AnalysisTiming) {
         }),
         loudness_lufs,
         from_stems: false,
+        stale: Stale::default(),
     };
     (analysis, timing)
 }
@@ -2438,6 +2572,15 @@ pub fn encode_analysis(analysis: &TrackAnalysis) -> Vec<u8> {
         None => out.extend_from_slice(&[0u8; 9]),
     }
     out.push(u8::from(analysis.from_stems));
+    for version in [
+        PRODUCTS.grid,
+        PRODUCTS.tiles,
+        PRODUCTS.key,
+        PRODUCTS.sound,
+        PRODUCTS.loudness,
+    ] {
+        out.extend_from_slice(&version.to_le_bytes());
+    }
     out
 }
 
@@ -2530,9 +2673,24 @@ pub fn decode_analysis(bytes: &[u8]) -> Result<TrackAnalysis, String> {
         }
     };
     let from_stems = take(1)?[0] != 0;
+    // A sidecar written before the products were versioned reads as all
+    // zeroes, which differs from every real version and so re-measures
+    // everything -- the honest answer for bytes that never said.
+    let stored = {
+        let field = take(10)?;
+        let word = |at: usize| u16::from_le_bytes(field[at..at + 2].try_into().unwrap());
+        ProductVersions {
+            grid: word(0),
+            tiles: word(2),
+            key: word(4),
+            sound: word(6),
+            loudness: word(8),
+        }
+    };
     #[cfg(test)]
     let _ = refined_by_beats;
     Ok(TrackAnalysis {
+        stale: Stale::between(stored, PRODUCTS),
         sound,
         loudness_lufs,
         from_stems,
@@ -2922,7 +3080,19 @@ fn run_analysis_jobs(jobs: Receiver<AnalysisJob>, done_tx: Sender<AnalysisDone>)
                 // would keep writing sidecars where nothing reads them.
                 let dir = cache_dir();
                 let (mut analysis, cached) = match load_cached(&dir, &job.key) {
-                    Some(hit) => (hit, true),
+                    // A stored record whose products this build would
+                    // measure differently is repaired in place rather than
+                    // thrown away: only what changed is measured again,
+                    // and it counts as freshly measured from then on.
+                    Some(mut hit) => {
+                        let repaired = repair(&mut hit, &job.pcm);
+                        if repaired {
+                            makepad_widgets::log!(
+                                "analysis: repaired what this build measures differently"
+                            );
+                        }
+                        (hit, !repaired)
+                    }
                     None => {
                         let (analysis, timing) = analyze_timed(&job.pcm);
                         // Where the time went, per stage. A track that
@@ -4161,6 +4331,46 @@ mod tests {
         }
         let deck_at = deck_at.expect("the deck's analysis came back");
         assert!(deck_at < 9, "it waited for {deck_at} background jobs");
+    }
+
+    /// A change to one detector costs that product's work and no more.
+    #[test]
+    fn only_the_product_that_changed_is_measured_again() {
+        let pcm = click_track(48_000, 128.0, 8.0, 0.0);
+        let fresh = analyze(&pcm);
+        assert!(!fresh.stale.any(), "a fresh measurement is never stale");
+
+        // A stored record read back by this build is agreed with entirely.
+        let bytes = encode_analysis(&fresh);
+        let back = decode_analysis(&bytes).expect("a round trip");
+        assert!(!back.stale.any());
+
+        // One whose key was measured by something else: only the key.
+        let mut older = back.clone();
+        older.stale = Stale { key: true, ..Default::default() };
+        let before = older.grid;
+        let tiles = older.tiles.overview.len();
+        older.key = None;
+        assert!(repair(&mut older, &pcm), "there was something to repair");
+        assert!(older.key.is_some(), "the key was measured again");
+        assert_eq!(older.grid, before, "and the grid was not touched");
+        assert_eq!(older.tiles.overview.len(), tiles, "nor the waveform");
+        assert!(!older.stale.any(), "and it is agreed with now");
+
+        // Nothing stale is nothing to do.
+        assert!(!repair(&mut older, &pcm));
+    }
+
+    /// A sidecar written before the products were versioned says nothing
+    /// about them, and "nothing" has to mean "measure it all again".
+    #[test]
+    fn a_sidecar_that_never_said_is_treated_as_stale() {
+        let pcm = click_track(48_000, 128.0, 8.0, 0.0);
+        let mut bytes = encode_analysis(&analyze(&pcm));
+        let tail = bytes.len() - 10;
+        bytes[tail..].fill(0);
+        let back = decode_analysis(&bytes).expect("a round trip");
+        assert!(back.stale.grid && back.stale.key && back.stale.loudness);
     }
 
     #[test]
