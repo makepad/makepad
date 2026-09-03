@@ -3,6 +3,11 @@ import { WasmBridge } from "../makepad_wasm_bridge/wasm_bridge.js"
 const MAKEPAD_CRASH_MAX_REPORTS = 20;
 const MAKEPAD_CRASH_POST_BYTES = 64 * 1024;
 const MAKEPAD_CRASH_GET_BYTES = 8 * 1024;
+const makepad_page_console = {};
+for (const level of ["log", "warn", "error"]) {
+    const method = typeof console !== "undefined" ? console[level] : undefined;
+    makepad_page_console[level] = typeof method === "function" ? method.bind(console) : () => {};
+}
 
 function makepad_json_replacer(_key, value) {
     if (typeof value === "bigint") {
@@ -464,6 +469,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.xr_supported = false;
         this.signal_timeout = null;
         this.workers = new Map();
+        this.worker_console_recent = new Map();
         this.thread_stack_arena = [];
         this.thread_stack_size = 2 * 1024 * 1024;
         this.ui_wake_queued = false;
@@ -1280,9 +1286,6 @@ export class WasmWebBrowser extends WasmBridge {
             if (this.audio_context !== audio_context) {
                 return;
             }
-            console.log(
-                `web audio: resume state=${audio_context.state} sample_rate=${audio_context.sampleRate} buffer=pending`,
-            );
             if (audio_context.state === "running") {
                 this.watch_audio_callback(audio_context);
             } else {
@@ -1306,7 +1309,6 @@ export class WasmWebBrowser extends WasmBridge {
         // start-up; the first click or key press creates the context and the worklet.
         if (!this.had_user_gesture) {
             this.audio_start_args = args;
-            console.log("web audio: output requested — waiting for the first click or key press");
             return;
         }
         this.start_audio_output(args, 1);
@@ -1327,9 +1329,6 @@ export class WasmWebBrowser extends WasmBridge {
         }
         this.audio_context = audio_context;
         this.audio_callback_started = false;
-        console.log(
-            `web audio: context created state=${audio_context.state} sample_rate=${audio_context.sampleRate} buffer=pending`,
-        );
 
         const start_worklet = async () => {
             if (this.wasm._secondary_ready) {
@@ -1411,7 +1410,6 @@ export class WasmWebBrowser extends WasmBridge {
             this.audio_context = null;
             audio_context.close().catch(() => {});
             if (attempt < 3) {
-                console.log(`web audio: retrying the output on a fresh context (attempt ${attempt + 1})`);
                 this.start_audio_output(args, attempt + 1);
             }
         });
@@ -1524,9 +1522,7 @@ export class WasmWebBrowser extends WasmBridge {
                     this.reload_midi_ports();
                 }
                 this.reload_midi_ports();
-            }, () => {
-                console.error("Cannot open midi");
-            });
+            }, () => {});
         }
     }
 
@@ -1631,11 +1627,25 @@ export class WasmWebBrowser extends WasmBridge {
                 const message = event.data || {};
                 const message_kind = message.kind || message.type;
                 if (message_kind === 'breadcrumb') {
-                    makepad_crash_reporter.add_breadcrumb(
-                        `worker.${message.level || "log"}`,
-                        [message.text || ""],
-                        args.request_id
-                    );
+                    const level = ["log", "warn", "error"].includes(message.level)
+                        ? message.level
+                        : "log";
+                    const text = message.text || "";
+                    makepad_crash_reporter.add_breadcrumb(`worker.${level}`, [text], args.request_id);
+                    const key = `${level}\n${text}`;
+                    const now = performance.now();
+                    const previous = this.worker_console_recent.get(key);
+                    this.worker_console_recent.set(key, now);
+                    if (previous === undefined || now - previous > 100) {
+                        makepad_page_console[level](`[worker ${args.request_id}] ${text}`);
+                    }
+                    if (this.worker_console_recent.size > 100) {
+                        for (const [old_key, seen_at] of this.worker_console_recent) {
+                            if (now - seen_at > 100) {
+                                this.worker_console_recent.delete(old_key);
+                            }
+                        }
+                    }
                 } else if (message_kind === 'panic') {
                     record.last_panic = { text: String(message.text || ""), time: Date.now() };
                 } else if (message_kind === 'spawn_request') {
@@ -1945,12 +1955,6 @@ export class WasmWebBrowser extends WasmBridge {
             0,
             0
         );
-        console.log(
-            "[makepad][http][req]",
-            entry.method,
-            entry.fetch_url,
-            `tiles=${entry.tile_keys}`
-        );
         fetch(entry.fetch_url, {
             method: entry.method,
             headers: entry.headers,
@@ -1995,14 +1999,9 @@ export class WasmWebBrowser extends WasmBridge {
             let headers_u8 = this.string_to_u8(response_headers);
             let body_u8 = this.array_to_u8(response_body);
             entry.response_bytes = response_body.length;
-            console.log(
-                "[makepad][http][res]",
-                response.status,
-                entry.fetch_url,
-                response_body.length,
-                `tiles=${entry.tile_keys}`,
-                `ms=${Math.round(performance.now() - entry.started_at)}`
-            );
+            if (response.status >= 400) {
+                console.error("[makepad][http][fail]", response.status, entry.fetch_url);
+            }
             this.exports.wasm_network_http_response(
                 entry.request_id_lo,
                 entry.request_id_hi,
@@ -2060,15 +2059,6 @@ export class WasmWebBrowser extends WasmBridge {
         this.network_http_pump(entry.host_key);
         if (host.pending === 0) {
             if (host.round) {
-                const tiles = Array.from(host.round.tiles).sort().join(",");
-                console.log(
-                    "[makepad][http][round]",
-                    entry.host_key,
-                    `ranges=${host.round.ranges}`,
-                    `bytes=${host.round.bytes}`,
-                    `ms=${Math.round(performance.now() - host.round.started_at)}`,
-                    `tiles=${tiles}`
-                );
                 host.round = null;
             }
             if (host.active === 0 && host.queue.length === 0) {
@@ -2089,15 +2079,6 @@ export class WasmWebBrowser extends WasmBridge {
                 host.queue = host.queue.filter(item => item !== entry);
                 host.pending = Math.max(0, host.pending - 1);
                 if (host.pending === 0 && host.round) {
-                    const tiles = Array.from(host.round.tiles).sort().join(",");
-                    console.log(
-                        "[makepad][http][round]",
-                        entry.host_key,
-                        `ranges=${host.round.ranges}`,
-                        `bytes=${host.round.bytes}`,
-                        `ms=${Math.round(performance.now() - host.round.started_at)}`,
-                        `tiles=${tiles}`
-                    );
                     host.round = null;
                 }
             }

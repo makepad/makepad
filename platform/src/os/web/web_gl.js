@@ -347,9 +347,11 @@ export class WasmWebGL extends WasmWebBrowser {
       if (this.pending_webgl_shader_count != 0) {
         return;
       }
-      console.log(
-        `webgl shaders: ${this.webgl_shader_batch_program_count} programs, ${this.webgl_shader_batch_failed_count} failed, ${(performance.now() - this.webgl_shader_timeline_start).toFixed(1)} ms`,
-      );
+      if (this.webgl_shader_batch_failed_count > 0) {
+        console.error(
+          `webgl shaders: ${this.webgl_shader_batch_program_count} programs, ${this.webgl_shader_batch_failed_count} failed, ${(performance.now() - this.webgl_shader_timeline_start).toFixed(1)} ms`,
+        );
+      }
       this.webgl_shader_timeline_start = undefined;
       this.webgl_shader_batch_program_count = 0;
       this.webgl_shader_batch_failed_count = 0;

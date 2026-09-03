@@ -747,8 +747,6 @@ impl VjFxThumbs {
         self.cache_sweep.finished = true;
         if let Some(error) = self.cache_sweep.error.as_deref() {
             log!("fx thumbs: sweep failed: {error}");
-        } else {
-            log!("fx thumbs: swept {} stale entries", self.cache_sweep.stale_count);
         }
     }
 
@@ -2058,9 +2056,7 @@ impl Widget for VjFxThumbs {
             self.next_frame = cx.cx.new_next_frame();
         } else {
             if let Some(started) = self.batch_started.take() {
-                if self.batch_rendered + self.batch_cached + self.batch_stored + self.batch_failed
-                    > 0
-                {
+                if self.batch_rendered > 0 || self.batch_failed > 0 {
                     log!(
                         "fx thumbs: {} rendered, {} cached, {} stored, {} failed, {:.1} s, all cached visible {:.1} s",
                         self.batch_rendered,
