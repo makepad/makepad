@@ -102,6 +102,8 @@ pub struct HubChatConfig {
     /// Engine limits and the local weights. The path may be empty or point
     /// at nothing: a machine with no weights still gets the fleet.
     pub llm: LocalLlmConfig,
+    /// Exact fleet model id to prefer. `None` lets the hub elect normally.
+    pub preferred_model: Option<String>,
     pub system_prompt: String,
     pub tools: Vec<ToolSpec>,
     pub wake: Option<WakeHook>,
@@ -203,7 +205,8 @@ fn elect_and_run(
                 let base = format!("http://127.0.0.1:{port}");
                 let route = ChatRoute::MachineNode { port };
                 set_route(Some(route.clone()));
-                let provider = FleetQwenChatProvider::new(HttpFleetTransport, vec![base]);
+                let provider = FleetQwenChatProvider::new(HttpFleetTransport, vec![base])
+                    .with_preferred_model(config.preferred_model.clone());
                 match run_proxy(provider, &config, first.take(), &msg_rx, &send, &cancel, route) {
                     ProxyExit::Ended => return,
                     ProxyExit::Reelect(msg) => {
@@ -215,7 +218,7 @@ fn elect_and_run(
         }
 
         // 2. A fleet chat node on the LAN.
-        let fleet_reason = match fleet_provider(&send) {
+        let fleet_reason = match fleet_provider(&send, config.preferred_model.as_deref()) {
             Ok((provider, route)) => {
                 set_route(Some(route.clone()));
                 match run_proxy(provider, &config, first.take(), &msg_rx, &send, &cancel, route) {
@@ -320,11 +323,19 @@ pub fn fleet_chat_bases(nodes: &[crate::discovery::DiscoveredNode]) -> Vec<Strin
 /// node and model. `Err` names why there is none.
 fn fleet_provider(
     send: &impl Fn(ChatEvent),
+    preferred_model: Option<&str>,
 ) -> Result<(FleetQwenChatProvider<HttpFleetTransport>, ChatRoute), String> {
     let discovery = crate::discovery::start_listener();
     let started = Instant::now();
     let bases = loop {
-        let bases = fleet_chat_bases(&discovery.nodes());
+        let mut bases = fleet_chat_bases(&discovery.nodes());
+        // A serving node on this machine does not need to announce over LAN
+        // discovery. Probe its loopback surface by advertised model too.
+        bases.extend(crate::machine::read_node_entries().into_iter().filter_map(
+            |(_, entry)| (entry.port != 0).then(|| format!("http://127.0.0.1:{}", entry.port)),
+        ));
+        bases.sort();
+        bases.dedup();
         if !bases.is_empty() {
             break bases;
         }
@@ -341,7 +352,8 @@ fn fleet_provider(
         });
         std::thread::sleep(FLEET_POLL);
     };
-    let mut provider = FleetQwenChatProvider::new(HttpFleetTransport, bases);
+    let mut provider = FleetQwenChatProvider::new(HttpFleetTransport, bases)
+        .with_preferred_model(preferred_model.map(str::to_string));
     match provider.availability() {
         ProviderAvailability::Available { model, detail } => {
             Ok((provider, ChatRoute::Fleet { base: detail, model }))
@@ -420,17 +432,21 @@ fn run_proxy<T: FleetTransport>(
             }
         }
         let input = TurnInput::new(system.clone(), history.clone());
-        if let Err(error) = provider.begin_turn(&input) {
-            send(ChatEvent::Failed(format!("{}: {error}", route.label())));
-            return match wait_next_user(msg_rx, None) {
-                Some(msg) => ProxyExit::Reelect(msg),
-                None => ProxyExit::Ended,
-            };
-        }
-        let started = Instant::now();
-        let mut splitter = MarkupSplitter::default();
-        let mut gen_tokens = 0u32;
-        'turn: loop {
+        let mut attempt = 0;
+        'attempt: loop {
+            if let Err(error) = provider.begin_turn(&input) {
+                send(ChatEvent::Failed(format!("{}: {error}", route.label())));
+                return match wait_next_user(msg_rx, None) {
+                    Some(msg) => ProxyExit::Reelect(msg),
+                    None => ProxyExit::Ended,
+                };
+            }
+            let started = Instant::now();
+            let mut splitter = MarkupSplitter::default();
+            let mut gen_tokens = 0u32;
+            let mut pending_visible = String::new();
+            let mut has_visible_text = false;
+            'turn: loop {
             if cancel.load(Ordering::Relaxed) {
                 provider.cancel();
                 break 'turn;
@@ -457,7 +473,15 @@ fn run_proxy<T: FleetTransport>(
                     ProviderEvent::Delta(text) => {
                         let visible = splitter.push(&text);
                         if !visible.is_empty() {
-                            send(ChatEvent::Delta(visible));
+                            if has_visible_text {
+                                send(ChatEvent::Delta(visible));
+                            } else {
+                                pending_visible.push_str(&visible);
+                                if !pending_visible.trim().is_empty() {
+                                    has_visible_text = true;
+                                    send(ChatEvent::Delta(std::mem::take(&mut pending_visible)));
+                                }
+                            }
                         }
                     }
                     ProviderEvent::Serving(facts) => gen_tokens = facts.gen_tokens,
@@ -468,7 +492,23 @@ fn run_proxy<T: FleetTransport>(
                     ProviderEvent::Done { text } => {
                         let (visible, bodies) = splitter.finish();
                         if !visible.is_empty() {
-                            send(ChatEvent::Delta(visible));
+                            if has_visible_text {
+                                send(ChatEvent::Delta(visible));
+                            } else {
+                                pending_visible.push_str(&visible);
+                                if !pending_visible.trim().is_empty() {
+                                    has_visible_text = true;
+                                    send(ChatEvent::Delta(std::mem::take(&mut pending_visible)));
+                                }
+                            }
+                        }
+                        if !has_visible_text && bodies.is_empty() {
+                            if attempt == 0 {
+                                attempt += 1;
+                                continue 'attempt;
+                            }
+                            send(ChatEvent::Failed("empty completion".to_string()));
+                            break 'attempt;
                         }
                         // The FULL reply is the history's: the provider's
                         // wire mirror is what the node's KV extends, and
@@ -510,6 +550,8 @@ fn run_proxy<T: FleetTransport>(
                 break 'turn;
             }
             std::thread::sleep(POLL);
+            }
+            break 'attempt;
         }
     }
 }
@@ -766,6 +808,7 @@ mod tests {
         let provider = FleetQwenChatProvider::new(node.clone(), vec!["http://10.0.0.165:8123".into()]);
         let config = HubChatConfig {
             llm: LocalLlmConfig::new("".into()),
+            preferred_model: None,
             system_prompt: "You run the desktop.".into(),
             tools: tools(),
             wake: None,
@@ -840,5 +883,82 @@ mod tests {
             ProxyExit::Reelect(WorkerMsg::UserTurn(text)) => assert_eq!(text, "hello again"),
             _ => panic!("expected a re-election with the next line"),
         }
+    }
+
+    fn run_scripted_turn(replies: &[&str]) -> (Vec<ChatEvent>, Vec<Value>) {
+        let node = Scripted::default();
+        node.replies
+            .lock()
+            .unwrap()
+            .extend(replies.iter().map(|reply| (*reply).to_string()));
+        let provider =
+            FleetQwenChatProvider::new(node.clone(), vec!["http://10.0.0.165:8123".into()]);
+        let config = HubChatConfig {
+            llm: LocalLlmConfig::new("".into()),
+            preferred_model: None,
+            system_prompt: "Answer directly.".into(),
+            tools: Vec::new(),
+            wake: None,
+        };
+        let (to_worker, msg_rx) = channel();
+        let (event_tx, events) = channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker = std::thread::spawn(move || {
+            let send = |event| {
+                let _ = event_tx.send(event);
+            };
+            run_proxy(
+                provider,
+                &config,
+                None,
+                &msg_rx,
+                &send,
+                &cancel,
+                ChatRoute::Fleet {
+                    base: "http://10.0.0.165:8123".into(),
+                    model: "qwen3.8-27b".into(),
+                },
+            )
+        });
+        to_worker.send(WorkerMsg::UserTurn("hello".into())).unwrap();
+        let output = collect_until_turn_done(&events);
+        drop(to_worker);
+        assert!(matches!(worker.join().unwrap(), ProxyExit::Ended));
+        let generates = node.generates.lock().unwrap().clone();
+        (output, generates)
+    }
+
+    #[test]
+    fn a_think_only_completion_retries_once_then_returns_the_answer() {
+        let (events, generates) = run_scripted_turn(&[
+            "reasoning without an answer",
+            "new reasoning\n</think>\n\nA visible answer.",
+        ]);
+        let visible: String = events
+            .iter()
+            .filter_map(|event| match event {
+                ChatEvent::Delta(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(visible.trim(), "A visible answer.");
+        assert!(matches!(events.last(), Some(ChatEvent::TurnDone { .. })), "{events:?}");
+        assert_eq!(generates.len(), 2);
+        assert_ne!(
+            generates[0].get("seed").and_then(Value::as_u64),
+            generates[1].get("seed").and_then(Value::as_u64),
+        );
+    }
+
+    #[test]
+    fn two_think_only_completions_fail_without_a_whitespace_delta() {
+        let (events, generates) =
+            run_scripted_turn(&["first reasoning only", "second reasoning only"]);
+        assert_eq!(generates.len(), 2);
+        assert!(
+            events.iter().all(|event| !matches!(event, ChatEvent::Delta(_))),
+            "{events:?}"
+        );
+        assert!(matches!(events.last(), Some(ChatEvent::Failed(error)) if error == "empty completion"));
     }
 }

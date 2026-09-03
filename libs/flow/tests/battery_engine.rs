@@ -61,6 +61,36 @@ fn temp_dir(name: &str) -> PathBuf {
 }
 
 #[test]
+fn llm_forwards_empty_local_file_and_fleet_model_values_to_the_chat_seam() {
+    let root = temp_dir("chat-models");
+    let local = root.join("local.gguf");
+    std::fs::write(&local, b"fixture").unwrap();
+    let cases = ["".to_string(), local.display().to_string(), "qwen3.8-27b".to_string()];
+
+    for (index, model) in cases.iter().enumerate() {
+        let chat = FakeChat::done("answer");
+        let requests = chat.requests.clone();
+        let source = format!(
+            "use mod.flow.*\nlet llm = Llm{{prompt: \"hello\" model: {:?}}}\nlet out = Output{{value: llm.text()}}\nFlow{{llm, out}}\n",
+            model
+        );
+        let (sender, receiver) = mpsc::channel();
+        let handle = spawn_run(
+            run_input(&source, &format!("chat-model-{index}.splash")),
+            seams(chat, FakeGen::done(), FakeHttp::json(200, "{}")),
+            sender,
+        );
+        handle.join.join().unwrap();
+        let _: Vec<_> = receiver.try_iter().collect();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].2, *model);
+    }
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn fan_out_starts_four_generation_nodes_in_one_scheduler_burst() {
     let source = r#"use mod.flow.*
 let prompt = Input{default: "x"}
