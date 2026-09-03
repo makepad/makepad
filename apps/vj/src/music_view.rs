@@ -98,6 +98,11 @@ pub enum MarkerHit {
     /// the loop. `Found` beside it keeps an index, because a scanner
     /// finding has no identity to keep.
     Recall(u16),
+    /// One of the shape's four edges: where the intro ends, where the
+    /// outro starts, and the two the recording itself gives. Carried as
+    /// its own index rather than a kind, because the strip needs only to
+    /// say WHICH of the four the wheel is over.
+    Shape(u8),
     /// The red marker: drag to move where CUE lands.
     Cue,
     /// A yellow marker on the BOTTOM edge: a scanner-found loop.
@@ -5365,6 +5370,11 @@ pub struct VjWaveOverview {
     /// track that opens with silence.
     #[rust]
     sound: Option<(f64, f64)>,
+    /// The record's shape: the four edges, in order. Drawn under every
+    /// chip and moved by the wheel over the strip's middle band, which
+    /// nothing else claims.
+    #[rust]
+    shape: Option<[f64; 4]>,
     /// The chip under the cursor, for the hover scale-up. Pressing takes
     /// it back to normal size — the pressed-down feel.
     #[rust]
@@ -5474,7 +5484,30 @@ impl VjWaveOverview {
         if from_bottom <= MARKER_STRIP_PX {
             return found_marker_hit(&self.found_loops, secs, tol);
         }
+        // The band between the two marker rows, which nothing else
+        // claims: the shape's edges answer there, so the wheel can move
+        // them without competing with a chip.
+        if let Some(edges) = self.shape {
+            let nearest = edges
+                .iter()
+                .enumerate()
+                .map(|(index, at)| (index, (at - secs).abs()))
+                .filter(|(_, distance)| *distance <= tol)
+                .min_by(|a, b| a.1.total_cmp(&b.1));
+            if let Some((index, _)) = nearest {
+                return Some(MarkerHit::Shape(index as u8));
+            }
+        }
         None
+    }
+
+    /// The record's four edges, diffed like the rest.
+    pub fn set_shape(&mut self, cx: &mut Cx, shape: Option<[f64; 4]>) {
+        if self.shape == shape {
+            return;
+        }
+        self.shape = shape;
+        self.area.redraw(cx);
     }
 
     /// Where the recording begins and ends, diffed like the rest.
@@ -5691,6 +5724,10 @@ impl Widget for VjWaveOverview {
                     (Some(OverviewDrag::Marker { hit, origin, at }), _, _) => {
                         let travelled = (at - origin).length();
                         match hit {
+                            // The shape's edges are the wheel's, not a
+                            // drag's: a chip can be picked up and moved,
+                            // an edge of the record cannot.
+                            MarkerHit::Shape(_) => {}
                             MarkerHit::Recall(slot) if travelled >= MARKER_DELETE_PX => {
                                 // Dropped ON another saved loop, this is a
                                 // swap; dropped anywhere else it is the
@@ -5924,19 +5961,23 @@ impl Widget for VjWaveOverview {
                     }
                 }
             }
-            // Where the recording itself starts and stops: two hairlines
-            // under every chip, so a long silent head reads as one rather
-            // than as a track that begins late.
-            if let Some((first, last)) = self.sound {
-                for at in [first, last] {
-                    self.draw_edge_sound.draw_abs(
-                        cx,
-                        Rect {
-                            pos: dvec2(centre_of(at) - 0.75, rect.pos.y),
-                            size: dvec2(1.5, rect.size.y),
-                        },
-                    );
-                }
+            // The record's shape: four hairlines under every chip. The
+            // outer two are where the recording itself starts and stops,
+            // so a long silent head reads as one rather than as a track
+            // that begins late; the inner two are where the body arrives
+            // and leaves, which is what the automation aims at.
+            let edges: Vec<f64> = match self.shape {
+                Some(edges) => edges.to_vec(),
+                None => self.sound.map(|(a, b)| vec![a, b]).unwrap_or_default(),
+            };
+            for at in edges {
+                self.draw_edge_sound.draw_abs(
+                    cx,
+                    Rect {
+                        pos: dvec2(centre_of(at) - 0.75, rect.pos.y),
+                        size: dvec2(1.5, rect.size.y),
+                    },
+                );
             }
             // CUE's landing, under everything else. While dragged, the
             // solid chip holds its ground and a ghost shows the landing.

@@ -972,6 +972,13 @@ pub struct DeckState {
     /// under which it may move the mark. One bool beside the number it
     /// qualifies, the way `rate_from_lock` sits beside the rate.
     pub cue_placed: bool,
+    /// Where this record's intro and outro are: four edges, the outer two
+    /// from the sound scan and the inner two from the loudness envelope.
+    pub shape: Option<crate::track_shape::TrackShape>,
+    /// Whether a HAND put them there. Same pair, same reason, as the mark
+    /// beside it: the analysis lands after the marks file does, and it may
+    /// only fill a shape nobody has placed.
+    pub shape_placed: bool,
     /// The current BOOKMARK — an in point with no out, placed by `[` on
     /// the infinity rung. Green until its chip is clicked into the saved
     /// row. Mutually exclusive with a running span: the count dial
@@ -1078,6 +1085,8 @@ impl Default for DeckState {
             found_loops: Vec::new(),
             cue_secs: 0.0,
             cue_placed: false,
+            shape: None,
+            shape_placed: false,
             bookmark: None,
             muted: false,
             gain: 1.0,
@@ -1309,6 +1318,7 @@ pub enum DeckCmd {
         cue_secs: Option<f64>,
         bookmark: Option<f64>,
         slots: Vec<LoopSlot>,
+        shape: Option<crate::track_shape::TrackShape>,
     },
 }
 
@@ -1648,6 +1658,8 @@ impl DeckEngine {
         state.found_loops.clear();
         state.cue_secs = 0.0;
         state.cue_placed = false;
+        state.shape = None;
+        state.shape_placed = false;
         state.bookmark = None;
         // A rate the LOCK worked out matched this deck to the one on the
         // other side. That match described a pair of tracks and one of them
@@ -2126,6 +2138,7 @@ impl DeckEngine {
             cue_secs: state.cue_placed.then_some(state.cue_secs),
             bookmark: state.bookmark,
             slots: state.loop_slots.clone(),
+            shape: state.shape_placed.then_some(state.shape).flatten(),
         })
     }
 
@@ -2212,6 +2225,54 @@ impl DeckEngine {
 
     /// Dragging a blue marker off its spot: forget that saved loop. The
     /// running span is untouched — this deletes the memory, not the sound.
+    /// The analysis's answer for where the intro and outro are. Refused
+    /// on a shape a hand has placed, exactly as the mark beside it is.
+    pub fn shape_ready(&mut self, deck: DeckId, gen: DeckGen, shape: crate::track_shape::TrackShape) {
+        let state = self.deck_mut(deck);
+        if state.load_gen != gen || state.shape_placed {
+            return;
+        }
+        state.shape = Some(shape);
+    }
+
+    /// Restore a shape a hand placed on this record before.
+    pub fn restore_shape(&mut self, deck: DeckId, shape: crate::track_shape::TrackShape) {
+        let state = self.deck_mut(deck);
+        state.shape = Some(shape);
+        state.shape_placed = true;
+    }
+
+    /// Move one edge of the shape by hand.
+    ///
+    /// Under QUANT it lands on the grid, the way a placed mark does; a
+    /// nudge asks with `snap` false, because the hair a grid cannot
+    /// express is the whole reason that gesture exists. Returns whether
+    /// the edge moved -- an edit that would cross a neighbour is refused,
+    /// so the four stay a shape.
+    pub fn set_shape_edge(
+        &mut self,
+        deck: DeckId,
+        edge: crate::track_shape::ShapeEdge,
+        secs: f64,
+        snap: bool,
+    ) -> bool {
+        let unit = self.snap_beats;
+        let state = self.deck(deck);
+        let Some(shape) = state.shape else { return false };
+        let duration = state.duration_secs;
+        let target = match state.true_grid() {
+            Some(grid) if snap => grid.snap_translate(secs, shape.edge(edge), unit),
+            _ => secs,
+        };
+        let Some(moved) = shape.with_edge(edge, target, duration) else {
+            return false;
+        };
+        let state = self.deck_mut(deck);
+        state.shape = Some(moved);
+        state.shape_placed = true;
+        true
+    }
+
     /// Move ONE end of the running loop, anchored on the other.
     ///
     /// A resize rather than a move: the far end stays exactly where it is,

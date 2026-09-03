@@ -11049,6 +11049,7 @@ p2 {}
             state.cue_placed.then_some(state.cue_secs),
             state.bookmark,
             &state.loop_slots,
+            state.shape_placed.then_some(state.shape).flatten(),
         );
     }
 
@@ -11061,11 +11062,32 @@ p2 {}
         cue_secs: Option<f64>,
         bookmark: Option<f64>,
         slots: &[crate::decks::LoopSlot],
+        shape: Option<crate::track_shape::TrackShape>,
     ) {
         let path = Self::loop_marks_path(item);
         let mut record = crate::marks::MarkRecord::default();
         record.set_cue(cue_secs);
         record.set_bookmark(bookmark);
+        // The record's shape, when a HAND placed it. The detector's own
+        // answer is derived and would come back looking like a decision.
+        if let Some(shape) = shape {
+            record.put(crate::marks::Mark {
+                kind: crate::marks::MarkKind::Intro,
+                start_secs: shape.intro_start_secs,
+                len_secs: (shape.intro_end_secs - shape.intro_start_secs).max(0.0),
+                slot: 0,
+                label: String::new(),
+                colour: 0,
+            });
+            record.put(crate::marks::Mark {
+                kind: crate::marks::MarkKind::Outro,
+                start_secs: shape.outro_start_secs,
+                len_secs: (shape.outro_end_secs - shape.outro_start_secs).max(0.0),
+                slot: 0,
+                label: String::new(),
+                colour: 0,
+            });
+        }
         // Per slot, with its NUMBER, rather than renumbering the row from
         // zero: the gaps an operator left are theirs, and the file has
         // always been able to carry them.
@@ -13733,8 +13755,8 @@ p2 {}
                     self.deck_splat_refining[b] = None;
                     self.sync_deck_controls(cx);
                 }
-                DeckCmd::RetireMarks { item, cue_secs, bookmark, slots } => {
-                    Self::write_marks(&item, cue_secs, bookmark, &slots);
+                DeckCmd::RetireMarks { item, cue_secs, bookmark, slots, shape } => {
+                    Self::write_marks(&item, cue_secs, bookmark, &slots, shape);
                 }
                 DeckCmd::UnloadTrack { deck } => {
                     // The mirror of InstallTrack's clear block: the engine
@@ -13840,8 +13862,10 @@ p2 {}
             &flipped.tiles.overview,
             flipped.duration_secs,
             &flipped.grid,
+            flipped.sound,
         );
         self.autopilot.shape_ready(gen, shape);
+        self.decks.shape_ready(deck, gen, shape);
         if let Some(item) = self.decks.deck(deck).item() {
             let key = match self.local_by_asset.get(&item.asset) {
                 Some(path) => AnalysisKey::from_path(path),
@@ -16148,6 +16172,29 @@ p2 {}
                                     .collect();
                                 if !slots.is_empty() || record.bookmark().is_some() {
                                     self.decks.restore_marks(deck, slots, record.bookmark());
+                                }
+                                // A shape a hand placed on this record
+                                // before. It outranks whatever the
+                                // analysis will say when it lands.
+                                let intro = record
+                                    .of_kind(crate::marks::MarkKind::Intro)
+                                    .next()
+                                    .cloned();
+                                let outro = record
+                                    .of_kind(crate::marks::MarkKind::Outro)
+                                    .next()
+                                    .cloned();
+                                if let (Some(intro), Some(outro)) = (intro, outro) {
+                                    self.decks.restore_shape(
+                                        deck,
+                                        crate::track_shape::TrackShape {
+                                            intro_start_secs: intro.start_secs,
+                                            intro_end_secs: intro.end_secs(),
+                                            outro_start_secs: outro.start_secs,
+                                            outro_end_secs: outro.end_secs(),
+                                            detected: true,
+                                        },
+                                    );
                                 }
                                 if let Some(cue) =
                                     record.cue().filter(|secs| *secs > 0.0)
@@ -20684,8 +20731,13 @@ p2 {}
                 &done.analysis.tiles.overview,
                 done.analysis.duration_secs,
                 &done.analysis.grid,
+                done.analysis.sound,
             );
             self.autopilot.shape_ready(done.gen, shape);
+            // The deck keeps its own copy: the strip draws it, and a
+            // hand may move its edges. Refused on a shape already
+            // placed, the way the mark beside it is.
+            self.decks.shape_ready(deck, done.gen, shape);
             self.autopilot.changes_ready(done.gen, done.analysis.changes_secs.clone());
             self.autopilot.bars_ready(
                 done.gen,
@@ -22307,6 +22359,14 @@ p2 {}
             let refined_by_beats = self.deck_analysis[index]
                 .as_ref()
                 .is_some_and(|analysis| analysis.refined_by_beats());
+            let shape = state.shape.map(|s| {
+                [
+                    s.intro_start_secs,
+                    s.intro_end_secs,
+                    s.outro_start_secs,
+                    s.outro_end_secs,
+                ]
+            });
             let sound = self.deck_analysis[index]
                 .as_ref()
                 .and_then(|analysis| analysis.sound)
@@ -22535,6 +22595,7 @@ p2 {}
                 strip.set_found_loops(cx, &found_loops);
                 strip.set_cue_marker(cx, cue_secs);
                 strip.set_sound(cx, sound);
+                strip.set_shape(cx, shape);
                 strip.set_snap_grid(cx, grid, self.decks.snap_beats);
             };
             self.music_refs.decks[index] = refs;
@@ -26201,6 +26262,36 @@ p2 {}
                                 Some(crate::decks::NudgeTarget::Slot(slot))
                             }
                             crate::music_view::MarkerHit::Found(_) => None,
+                            // The shape's edges are not deck commands --
+                            // nothing about them reaches the mixer.
+                            crate::music_view::MarkerHit::Shape(index) => {
+                                use crate::track_shape::ShapeEdge;
+                                let edge = match index {
+                                    0 => ShapeEdge::IntroStart,
+                                    1 => ShapeEdge::IntroEnd,
+                                    2 => ShapeEdge::OutroStart,
+                                    _ => ShapeEdge::OutroEnd,
+                                };
+                                let at = self
+                                    .decks
+                                    .deck(deck)
+                                    .shape
+                                    .map(|s| s.edge(edge))
+                                    .unwrap_or(0.0);
+                                let moved =
+                                    self.decks.set_shape_edge(deck, edge, at + delta_secs, false);
+                                if moved {
+                                    // The automation keys shapes by the
+                                    // load generation, so an edit has to
+                                    // re-publish or it reads the old one.
+                                    let gen = self.decks.deck(deck).load_gen;
+                                    if let Some(shape) = self.decks.deck(deck).shape {
+                                        self.autopilot.shape_ready(gen, shape);
+                                    }
+                                    self.save_loop_marks(deck);
+                                }
+                                None
+                            }
                         };
                         if let Some(target) = target {
                             let cmds = self.decks.nudge_mark(deck, target, delta_secs);

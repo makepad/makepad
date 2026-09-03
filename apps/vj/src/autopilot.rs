@@ -1185,7 +1185,13 @@ mod tests {
     }
 
     fn shape(intro: f64, outro: f64) -> TrackShape {
-        TrackShape { intro_end_secs: intro, outro_start_secs: outro, detected: true }
+        TrackShape {
+            intro_start_secs: 0.0,
+            intro_end_secs: intro,
+            outro_start_secs: outro,
+            outro_end_secs: outro.max(intro) + 60.0,
+            detected: true,
+        }
     }
 
     fn armed_pilot(w: &mut World) -> AutoPilot {
