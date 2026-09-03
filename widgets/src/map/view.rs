@@ -2759,6 +2759,10 @@ const LABEL_PLACE_BUDGET_MS: f64 = 7.0;
 /// every pass restarts from the top candidates, so a tail that never fits
 /// the rest budget must not become a standing 12 Hz re-place loop.
 const LABEL_FOLLOWUP_MAX: u32 = 4;
+/// Label cross-fade: a name entering the placed set rises from transparent
+/// over this long; one leaving it sinks over the same time from its last
+/// placement, riding the camera — a re-place never pops a label.
+const LABEL_FADE_SECONDS: f64 = 0.25;
 
 /// Inclusive tile-index span covering the half-open world-space interval
 /// `[world_min, world_max)` plus one prefetch tile on either side.
@@ -3951,11 +3955,96 @@ struct LabelListSig {
     shader: bool,
 }
 
-/// The map's retained glyph batches: `[street labels, pin text]`.
+/// One placed label in a retained batch: a glyph range in the owning
+/// glyph buffer plus what the draw needs to shift, colour and fade it.
+#[derive(Clone, Copy, Debug)]
+struct LabelPlan {
+    score: f64,
+    glyph_start: usize,
+    glyph_end: usize,
+    color_class: u8,
+    post_icon: bool,
+    upright: bool,
+    anchor: Vec2f,
+    baked_lift: f32,
+    /// `stable_label_key` — the identity carried across re-places.
+    key: u64,
+    /// App seconds when the label entered the placed set; survivors keep
+    /// theirs across re-places so a fade-in never restarts.
+    born: f64,
+}
+
+/// The camera a label placement was computed for: its glyphs live in that
+/// camera's screen space and ride the per-frame delta from it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct LabelCacheCam {
+    offset: Vec2d,
+    zoom: f64,
+    rotation: f64,
+    tilt: f64,
+}
+
+/// The per-frame delta from a placement's camera to the drawn frame, as
+/// the glyph shader consumes it (`label_cache_transform`).
+#[derive(Clone, Copy, Debug)]
+struct LabelDrawXf {
+    scale: f32,
+    shift: Vec2f,
+    rot: f32,
+    pivot: Vec2f,
+    cached_tilt_cos: f32,
+}
+
+impl Default for LabelDrawXf {
+    fn default() -> Self {
+        Self {
+            scale: 1.0,
+            shift: Vec2f { x: 0.0, y: 0.0 },
+            rot: 0.0,
+            pivot: Vec2f { x: 0.0, y: 0.0 },
+            cached_tilt_cos: 1.0,
+        }
+    }
+}
+
+/// Labels that left the placed set at a re-place: their old glyphs keep
+/// drawing from the old placement's camera space, sinking to transparent
+/// over `LABEL_FADE_SECONDS`, so a re-place never pops a name.
+#[derive(Default, Debug)]
+struct LabelRetiring {
+    plans: Vec<LabelPlan>,
+    glyphs: Vec<PathGlyphInstance>,
+    cam: LabelCacheCam,
+    /// Fade-out start; None = slot free.
+    since: Option<f64>,
+    /// Batch generation for the retained list signature.
+    gen: u64,
+    /// This frame's transform, replayed by the pin-text phase.
+    xf: LabelDrawXf,
+}
+
+/// Two retiring slots: a re-place inside a still-running fade (an at-rest
+/// follow-up pass) keeps the earlier fade running instead of cutting it.
+const LABEL_RETIRING_SLOTS: usize = 2;
+
+#[derive(Default, Debug)]
+struct LabelRetiringSet {
+    slots: [LabelRetiring; LABEL_RETIRING_SLOTS],
+}
+
+/// Which placement a glyph batch draws from.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum LabelSet {
+    Live,
+    Retiring(usize),
+}
+
+/// The map's retained glyph batches: `[street labels, pin text]` for the
+/// live set, then the same pair per retiring slot.
 #[derive(Default, Debug)]
 struct LabelLists {
-    lists: [Option<DrawList2d>; 2],
-    sigs: [Option<LabelListSig>; 2],
+    lists: [Option<DrawList2d>; 2 + 2 * LABEL_RETIRING_SLOTS],
+    sigs: [Option<LabelListSig>; 2 + 2 * LABEL_RETIRING_SLOTS],
 }
 
 // --- MapView widget ---
@@ -4252,14 +4341,33 @@ pub struct MapView {
     scratch_accepted_centers: HashMap<String, Vec<Vec2d>>,
     #[rust]
     scratch_accepted_bounds: Vec<Rect>,
+    /// The live placement's plans (glyph ranges into `path_glyphs`).
     #[rust]
-    scratch_accepted_plans: Vec<(f64, usize, usize, u8, bool, bool, Vec2f, f32)>,
-    // Labels drawn last frame (hashed name+position key); kept to stabilize
-    // placement while panning instead of flickering between candidates.
+    scratch_accepted_plans: Vec<LabelPlan>,
+    /// Labels placed by the previous pass, key -> birth time: the
+    /// hysteresis set (a previous winner outscores an equal newcomer, so
+    /// panning doesn't flicker between candidates) and the fade-in carry.
     #[rust]
-    prev_label_keys: HashSet<u64>,
+    prev_label_keys: HashMap<u64, f64>,
+    /// Keys this pass placed (retire test for the previous placement).
     #[rust]
-    scratch_accepted_hashes: Vec<u64>,
+    scratch_new_keys: HashSet<u64>,
+    /// The previous placement's buffers, swapped aside at a re-place so its
+    /// dropped labels can move into a retiring slot without a copy.
+    #[rust]
+    old_plans: Vec<LabelPlan>,
+    #[rust]
+    old_glyphs: Vec<PathGlyphInstance>,
+    /// Labels fading out from their last placement (see `LabelRetiring`).
+    #[rust]
+    label_retiring: LabelRetiringSet,
+    #[rust]
+    retire_gen: u64,
+    /// 60 Hz wake while a label fade is live (uniform-only re-presents).
+    #[rust]
+    label_fade_timer: Timer,
+    #[rust]
+    label_fade_until: f64,
     // Frame of the last zoom change; zoom-bucket restyles are deferred until
     // the gesture settles so widths don't flicker mid-zoom.
     #[rust]
@@ -4293,13 +4401,13 @@ pub struct MapView {
     label_cache_tiles: Vec<TileKey>,
     #[rust]
     label_cache_generation: u64,
-    #[rust((1.0, Vec2f { x: 0.0, y: 0.0 }, 0.0, Vec2f { x: 0.0, y: 0.0 }, 1.0))]
-    label_draw_transform: (f32, Vec2f, f32, Vec2f, f32),
-    #[rust(1.0)]
-    label_cache_tilt_cos_for_delta: f32,
-    /// The two retained glyph batches (street labels; pin text drawn over
-    /// the icons), recorded on a full label place and re-presented under
-    /// the camera-delta / fold / pan uniforms on every other frame.
+    /// The live set's transform this frame, replayed by the pin-text phase.
+    #[rust]
+    label_draw_transform: LabelDrawXf,
+    /// The retained glyph batches (street labels; pin text drawn over the
+    /// icons — for the live set and each retiring slot), recorded on a
+    /// full label place and re-presented under the camera-delta / fold /
+    /// pan / fade-clock uniforms on every other frame.
     #[rust]
     label_lists: LabelLists,
     /// Bumped whenever the accepted label plans are rebuilt.
@@ -4322,15 +4430,15 @@ pub struct MapView {
     tiles_generation: u64,
     #[rust]
     last_full_place_time: Option<f64>,
-    /// When the camera (rotation/tilt/zoom/warp tween) last CHANGED — the
-    /// full label re-place waits for ~a beat of camera quiet, so labels
+    /// When the camera (pan/rotation/tilt/zoom/warp tween) last CHANGED —
+    /// the full label re-place waits for ~a beat of camera quiet, so labels
     /// ride the exact GPU transforms through the whole gesture and settle
     /// once, where the transforms already put them.
     #[rust]
     camera_motion_last: Option<f64>,
     /// Camera signature of the previous draw, for the motion detector.
     #[rust]
-    camera_motion_sig: (f64, f64, f64, f64),
+    camera_motion_sig: (f64, f64, f64, f64, f64, f64),
     #[rust]
     needs_label_followup: bool,
     /// Consecutive at-rest follow-up passes since the last complete one
@@ -4513,6 +4621,12 @@ impl Widget for MapView {
             self.redraw(cx);
             if self.tiles.values().any(|entry| entry.fade.is_some()) {
                 self.tile_fade_timer = cx.start_timeout(0.016);
+            }
+        }
+        if self.label_fade_timer.is_event(event).is_some() {
+            self.redraw(cx);
+            if cx.seconds_since_app_start() < self.label_fade_until {
+                self.label_fade_timer = cx.start_timeout(0.016);
             }
         }
         if self.zoom_settle_timer.is_event(event).is_some() {
@@ -8140,26 +8254,20 @@ impl MapView {
             && self.label_cache_generation == self.tiles_generation
             && self.label_cache_tiles.as_slice() == draw_tiles
             && pan_dist < LABEL_REPLACE_PAN_PX;
-        // Softly-stale cache is still fine to show briefly; rate-limit the
-        // expensive full re-place. This covers active zooming too — labels
-        // stay pinned in screen space for up to ~125ms during the gesture
-        // (pinch behavior a la Google Maps) instead of re-placing every
-        // frame, which was 5-20ms/frame at label-dense zooms. Small
-        // rotation deltas reuse the cache RIGIDLY rotated about the pivot —
-        // that's what keeps labels from wiggling during heading-up nav —
-        // but only at identical zoom (rotation+zoom compose non-affinely
-        // with the cached-screen transform below).
-        // While the camera is MOVING (rotation, tilt, zoom gesture, warp
-        // tween), keep riding the cached placement on the GPU transforms —
-        // a mid-gesture re-place costs 5-20ms AND lands on positions a
-        // frame stale, which reads as labels trailing the map. The full
-        // re-place runs once the camera has been quiet for a beat, and
-        // lands where the transforms already put everything.
+        // The motion detector: ANY camera change — pan, zoom, rotation,
+        // tilt, the fold tween, a fly-to — marks the camera as moving for
+        // the settle window. A pan counts too: a slow drag used to look
+        // "quiet" to this detector, so every tile entering the view (the
+        // strict cache misses on the tile set) re-placed mid-drag on the
+        // gesture budget — a different subset of the candidates each time,
+        // names swapping and jumping under the finger.
         let camera_sig = (
             self.rotation,
             self.tilt,
             view_zoom,
             self.space_warp_eff.amount,
+            map_offset.x,
+            map_offset.y,
         );
         if camera_sig != self.camera_motion_sig {
             self.camera_motion_sig = camera_sig;
@@ -8168,11 +8276,32 @@ impl MapView {
         let camera_moving = self
             .camera_motion_last
             .is_some_and(|at| now - at < LABEL_SETTLE_SECONDS);
-        let cache_soft = self.label_cache_valid
-            && ((rot_delta == 0.0 && !tilt_delta)
-                || self.label_cache_zoom == view_zoom)
-            && (self.label_cache_zoom - view_zoom).abs() < 0.5
-            && (camera_moving
+        // The cached placement is DRAWABLE while the GPU delta from its
+        // camera is exact: screen positions transform affinely under
+        // zoom-about-cursor and pan, and small rotation/tilt deltas ride the
+        // 2x2 camera matrix — but only at identical zoom (rotation+zoom
+        // compose non-affinely with the cached-screen transform). Within
+        // half a zoom level the glyphs scale acceptably (pinch behaviour a
+        // la Google Maps: labels stay pinned to the map through the gesture).
+        let cache_drawable = self.label_cache_valid
+            && ((rot_delta == 0.0 && !tilt_delta) || self.label_cache_zoom == view_zoom)
+            && (self.label_cache_zoom - view_zoom).abs() < 0.5;
+        // The gesture hold: while the camera moves, the settled placement
+        // (its identities, positions and fades) rides the GPU transforms —
+        // no re-place lands mid-gesture (5-20 ms a beat AND a frame stale,
+        // which read as labels trailing the map). The full re-place runs
+        // once the camera has been quiet for a beat, where the transforms
+        // already put everything. The hold yields only when a same-zoom pan
+        // outruns the margin law (the cached set no longer covers the
+        // viewport edge): that mid-gesture pass keeps the previous winners
+        // through the hysteresis bonus and cross-fades the rest.
+        let hold = camera_moving
+            && (self.label_cache_zoom != view_zoom || pan_dist < LABEL_REPLACE_PAN_PX);
+        // Softly-stale cache is still fine to show briefly; at rest the
+        // expensive full re-place is rate-limited (tile arrivals invalidated
+        // the strict cache almost every other frame while a burst landed).
+        let cache_soft = cache_drawable
+            && (hold
                 || self
                     .last_full_place_time
                     .is_some_and(|at| now - at < LABEL_REPLACE_MIN_SECONDS));
@@ -8184,112 +8313,59 @@ impl MapView {
                 cx.cx.stop_timer(self.zoom_settle_timer);
                 self.zoom_settle_timer = cx.cx.start_timeout(LABEL_SETTLE_SECONDS + 0.02);
             }
-            // Screen positions transform affinely under zoom-about-cursor:
-            // s_new = s_old * k + R·(off_new - off_old * k) with the
-            // heading-up rotation R applied about the view pivot. A plain
-            // offset during zoom flung cached labels thousands of px away.
-            let k = 2.0_f64.powf(view_zoom - self.label_cache_zoom);
-            let raw_shift = map_offset - self.label_cache_offset * k;
-            let camera_vec = |v: Vec2d| {
-                let r = self.rotate_screen_vec(v);
-                dvec2(r.x, r.y * self.tilt_cos())
-            };
-            let mut shift = camera_vec(raw_shift);
-            if k != 1.0 {
-                let pivot = rect.pos + rect.size * 0.5;
-                shift += (pivot - camera_vec(pivot)) * (1.0 - k);
-            }
-            // The GPU camera-delta matrix transforms everything AFTER the
-            // CPU offsets are applied — pre-invert the pan shift so it
-            // lands where intended: shift_pre = M^-1 * shift.
-            {
-                let (dc, ds) = ((-rot_delta).to_radians().cos(), (-rot_delta).to_radians().sin());
-                let t0 = self
-                    .label_cache_tilt
-                    .clamp(0.0, TILT_HARD_MAX_DEG)
-                    .to_radians()
-                    .cos()
-                    .max(1e-6);
-                let t1 = self.tilt_cos().max(1e-6);
-                let (a, b, c, d) = (dc, -ds / t0, t1 * ds, t1 * dc / t0);
-                let det = a * d - b * c;
-                if det.abs() > 1e-9 {
-                    let (sx, sy) = (shift.x, shift.y);
-                    shift = dvec2((d * sx - b * sy) / det, (-c * sx + a * sy) / det);
-                }
-            }
-            // Screen-space delta rotation about the view pivot (phi = -rotation);
-            // the cached placement's tilt_cos rides along so the draw can
-            // build the exact non-commuting delta matrix.
-            let rot_rad = (-rot_delta).to_radians() as f32;
-            let cached_tilt_cos =
-                (self.label_cache_tilt.clamp(0.0, TILT_HARD_MAX_DEG).to_radians().cos() as f32).max(1e-4);
-            let pivot = rect.pos + rect.size * 0.5;
-            self.draw_label_plans_scaled(
-                cx,
-                k as f32,
-                Vec2f {
-                    x: shift.x as f32,
-                    y: shift.y as f32,
-                },
-                rot_rad,
-                Vec2f {
-                    x: pivot.x as f32,
-                    y: pivot.y as f32,
-                },
-                cached_tilt_cos,
-                false,
-            );
+            let xf = self.label_cache_transform(self.label_cache_cam(), view_zoom, map_offset, rect);
+            self.draw_label_set(cx, xf, false, LabelSet::Live);
+            self.draw_retiring_labels(cx, view_zoom, map_offset, rect, now);
             return false;
         }
         self.last_full_place_time = Some(now);
 
         let mut label_perf = LabelPerfStats::default();
         self.collect_label_candidates(draw_tiles, view_zoom, map_offset, rect, &mut label_perf);
-        if self.scratch_candidates.is_empty() {
-            self.path_glyphs.clear();
-            self.scratch_accepted_plans.clear();
-            self.needs_label_followup = false;
-            self.label_followups = 0;
-            self.store_label_cache(draw_tiles, view_zoom, map_offset);
-            self.label_perf = label_perf;
-            return true;
-        }
-        self.scratch_candidates
-            .sort_unstable_by(|a, b| {
-                b.score
-                    .total_cmp(&a.score)
-                    .then_with(|| a.name_key.cmp(&b.name_key))
-            });
-        let candidate_budget = label_candidate_budget(view_zoom);
-        if self.scratch_candidates.len() > candidate_budget {
-            self.scratch_candidates.truncate(candidate_budget);
-        }
-        label_perf.candidates_kept = self.scratch_candidates.len();
-        label_perf.shape_budget = label_shape_attempt_budget(view_zoom);
 
+        // The placement being replaced steps aside (the buffers swap, no
+        // copy): whatever it placed that this pass does not keeps drawing
+        // from its own placement space while it fades out (`retire_labels`).
+        std::mem::swap(&mut self.path_glyphs, &mut self.old_glyphs);
+        std::mem::swap(&mut self.scratch_accepted_plans, &mut self.old_plans);
         self.path_glyphs.clear();
+        self.scratch_accepted_plans.clear();
+        self.scratch_new_keys.clear();
         // Clear but retain allocations from previous frames
         for v in self.scratch_accepted_centers.values_mut() {
             v.clear();
         }
         self.scratch_accepted_bounds.clear();
-        self.scratch_accepted_plans.clear();
 
-        // During gestures the budget keeps re-places to ~a frame; at rest run
-        // a full pass, otherwise the tail (house numbers) would never place —
-        // each pass restarts from the same highest-scored candidates.
-        let at_rest = pan_dist < 1.0
-            && (self.label_cache_zoom - view_zoom).abs() < 1e-9
+        // At rest = the camera has been quiet for the settle window (the
+        // wake after a gesture lands here) and no zoom step is in flight:
+        // run the full pass, otherwise the tail (house numbers) would never
+        // place — each pass restarts from the same highest-scored
+        // candidates. A pass forced mid-gesture keeps to ~a frame.
+        let at_rest = !camera_moving
             && self
                 .last_zoom_change_time
                 .is_none_or(|at| now - at > 0.25);
         let place_budget_ms = if at_rest { 40.0 } else { LABEL_PLACE_BUDGET_MS };
         // The budget is for placement: candidate collection and the sort
-        // above are already paid for, and on a slow frame (the web at dense
+        // below are already paid for, and on a slow frame (the web at dense
         // zooms spends 5-6 ms collecting) charging them here left nothing
         // for the loop — a pass that placed zero labels and committed that.
         let place_start = cx.seconds_since_app_start();
+        if !self.scratch_candidates.is_empty() {
+            self.scratch_candidates
+                .sort_unstable_by(|a, b| {
+                    b.score
+                        .total_cmp(&a.score)
+                        .then_with(|| a.name_key.cmp(&b.name_key))
+                });
+            let candidate_budget = label_candidate_budget(view_zoom);
+            if self.scratch_candidates.len() > candidate_budget {
+                self.scratch_candidates.truncate(candidate_budget);
+            }
+            label_perf.candidates_kept = self.scratch_candidates.len();
+            label_perf.shape_budget = label_shape_attempt_budget(view_zoom);
+        }
         for candidate_index in 0..self.scratch_candidates.len() {
             if (cx.seconds_since_app_start() - place_start).max(0.0) * 1000.0 > place_budget_ms {
                 label_perf.rejected_budget +=
@@ -8389,8 +8465,11 @@ impl MapView {
             label_perf.drawn_labels += 1;
             label_perf.drawn_glyphs += glyph_count;
             let score = candidate.score + candidate.source_rank as f64 * 2.0;
-            self.scratch_accepted_hashes
-                .push(stable_label_key(&candidate.name_key, &candidate.road_kind));
+            let key = stable_label_key(&candidate.name_key, &candidate.road_kind);
+            // A survivor keeps its birth (no fade restarts); a newcomer
+            // rises from transparent starting now.
+            let born = self.prev_label_keys.get(&key).copied().unwrap_or(now);
+            self.scratch_new_keys.insert(key);
             // Post-icon phase: in-pin text and charger brand draw AFTER
             // the symbol pass so they sit on the pins, not under them.
             let post_icon = candidate.color_class == LABEL_CLASS_PIN
@@ -8413,37 +8492,80 @@ impl MapView {
             } else {
                 (0.0, 0.0)
             };
-            self.scratch_accepted_plans.push((
+            self.scratch_accepted_plans.push(LabelPlan {
                 score,
-                placement.glyph_start,
-                placement.glyph_end,
-                candidate.color_class,
+                glyph_start: placement.glyph_start,
+                glyph_end: placement.glyph_end,
+                color_class: candidate.color_class,
                 post_icon,
-                candidate.screen_point,
-                Vec2f {
+                upright: candidate.screen_point,
+                anchor: Vec2f {
                     x: placement.center.x as f32 - layout_shift.0,
                     y: placement.center.y as f32 - layout_shift.1,
                 },
-                candidate.baked_lift_px,
-            ));
+                baked_lift: candidate.baked_lift_px,
+                key,
+                born,
+            });
+        }
+        let truncated = label_perf.rejected_budget > 0;
+
+        // Retire what this pass no longer places (it moved out of the accept
+        // window, lost a collision, or fell past the budget): those glyphs
+        // fade out from the OLD placement's space, riding the camera like
+        // everything else, instead of popping.
+        let old_cam = self.label_cache_cam();
+        self.old_plans
+            .retain(|plan| !self.scratch_new_keys.contains(&plan.key));
+        let retired = !self.old_plans.is_empty() && self.label_cache_valid;
+        if retired {
+            self.retire_labels(old_cam, now);
+        }
+        let born_now = self
+            .scratch_accepted_plans
+            .iter()
+            .any(|plan| plan.born == now);
+        if retired || born_now {
+            // Fades need frames: a 60 Hz wake for the fade window, each
+            // re-presenting the batches under a new clock (uniforms only).
+            self.label_fade_until = now + LABEL_FADE_SECONDS;
+            cx.cx.stop_timer(self.label_fade_timer);
+            self.label_fade_timer = cx.cx.start_timeout(0.016);
+        }
+        // The hysteresis set for the next pass (and the births it carries).
+        self.prev_label_keys.clear();
+        for plan in &self.scratch_accepted_plans {
+            self.prev_label_keys.insert(plan.key, plan.born);
         }
 
-        self.prev_label_keys.clear();
-        self.prev_label_keys
-            .extend(self.scratch_accepted_hashes.drain(..));
-
         self.scratch_accepted_plans
-            .sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+            .sort_unstable_by(|a, b| a.score.total_cmp(&b.score));
         // The cache (and `label_gen`) first: the batch recorded below is
         // the one this generation keeps.
         self.store_label_cache(draw_tiles, view_zoom, map_offset);
-        self.draw_label_plans(cx, Vec2f { x: 0.0, y: 0.0 });
+        // A fresh placement draws at identity — but the fold's origin is
+        // the view pivot in EVERY frame: the shader folds the ground about
+        // `cam_pivot`, so the fresh frame must carry the same pivot the
+        // cached frames do (a zero pivot folded about the screen corner and
+        // blew the whole label set up for one frame at every re-place).
+        let pivot = rect.pos + rect.size * 0.5;
+        let xf = LabelDrawXf {
+            scale: 1.0,
+            shift: Vec2f { x: 0.0, y: 0.0 },
+            rot: 0.0,
+            pivot: Vec2f {
+                x: pivot.x as f32,
+                y: pivot.y as f32,
+            },
+            cached_tilt_cos: (self.tilt_cos() as f32).max(1e-4),
+        };
+        self.draw_label_set(cx, xf, false, LabelSet::Live);
+        self.draw_retiring_labels(cx, view_zoom, map_offset, rect, now);
         // A budget-truncated pass leaves a tail (on a slow gesture frame:
         // most of the labels) unplaced: flag it and arm the settle wake so
         // the next quiet frame runs the full at-rest pass — `cache_strict`
         // yields to the flag. At rest the chain is capped (every pass
         // restarts from the top candidates).
-        let truncated = label_perf.rejected_budget > 0;
         self.label_followups = if at_rest && truncated {
             self.label_followups + 1
         } else {
@@ -8458,43 +8580,152 @@ impl MapView {
         true
     }
 
-    /// Draw the current accepted label plans (halo underdraw + colored text)
-    /// as one glyph instance batch, optionally shifted by a screen offset
-    /// (used to redraw the cached placement while panning).
-    fn draw_label_plans(&mut self, cx: &mut Cx2d, extra_offset: Vec2f) {
-        let current_tilt_cos = (self.tilt_cos() as f32).max(1e-4);
-        self.draw_label_plans_scaled(
-            cx,
-            1.0,
-            extra_offset,
-            0.0,
-            Vec2f { x: 0.0, y: 0.0 },
-            current_tilt_cos,
-            false,
-        );
+    /// The camera the live placement was computed for.
+    fn label_cache_cam(&self) -> LabelCacheCam {
+        LabelCacheCam {
+            offset: self.label_cache_offset,
+            zoom: self.label_cache_zoom,
+            rotation: self.label_cache_rotation,
+            tilt: self.label_cache_tilt,
+        }
+    }
+
+    /// The exact per-frame delta from a placement's camera to this frame's,
+    /// for the glyph shader: screen positions transform affinely under
+    /// zoom-about-cursor, s_new = s_old * k + R·(off_new - off_old * k)
+    /// with the heading-up rotation R applied about the view pivot (a plain
+    /// offset during zoom flung cached labels thousands of px away), and
+    /// the rotation/tilt delta is the general 2x2 S(t1)*R(d)*S(1/t0).
+    fn label_cache_transform(
+        &self,
+        cam: LabelCacheCam,
+        view_zoom: f64,
+        map_offset: Vec2d,
+        rect: Rect,
+    ) -> LabelDrawXf {
+        let rot_delta = self.rotation - cam.rotation;
+        let k = 2.0_f64.powf(view_zoom - cam.zoom);
+        let raw_shift = map_offset - cam.offset * k;
+        let camera_vec = |v: Vec2d| {
+            let r = self.rotate_screen_vec(v);
+            dvec2(r.x, r.y * self.tilt_cos())
+        };
+        let mut shift = camera_vec(raw_shift);
+        let pivot = rect.pos + rect.size * 0.5;
+        if k != 1.0 {
+            shift += (pivot - camera_vec(pivot)) * (1.0 - k);
+        }
+        // The GPU camera-delta matrix transforms everything AFTER the
+        // CPU offsets are applied — pre-invert the pan shift so it
+        // lands where intended: shift_pre = M^-1 * shift.
+        let cached_tilt_cos = cam
+            .tilt
+            .clamp(0.0, TILT_HARD_MAX_DEG)
+            .to_radians()
+            .cos()
+            .max(1e-6);
+        {
+            let (dc, ds) = ((-rot_delta).to_radians().cos(), (-rot_delta).to_radians().sin());
+            let t0 = cached_tilt_cos;
+            let t1 = self.tilt_cos().max(1e-6);
+            let (a, b, c, d) = (dc, -ds / t0, t1 * ds, t1 * dc / t0);
+            let det = a * d - b * c;
+            if det.abs() > 1e-9 {
+                let (sx, sy) = (shift.x, shift.y);
+                shift = dvec2((d * sx - b * sy) / det, (-c * sx + a * sy) / det);
+            }
+        }
+        LabelDrawXf {
+            scale: k as f32,
+            shift: Vec2f {
+                x: shift.x as f32,
+                y: shift.y as f32,
+            },
+            rot: (-rot_delta).to_radians() as f32,
+            pivot: Vec2f {
+                x: pivot.x as f32,
+                y: pivot.y as f32,
+            },
+            cached_tilt_cos: (cached_tilt_cos as f32).max(1e-4),
+        }
+    }
+
+    /// Move the labels the current pass dropped (already filtered into
+    /// `old_plans`, their glyphs in `old_glyphs`) into a retiring slot: a
+    /// free one, else the one furthest into its fade.
+    fn retire_labels(&mut self, cam: LabelCacheCam, now: f64) {
+        let slots = &mut self.label_retiring.slots;
+        let slot = (0..LABEL_RETIRING_SLOTS)
+            .find(|&i| slots[i].since.is_none())
+            .unwrap_or_else(|| {
+                (0..LABEL_RETIRING_SLOTS)
+                    .min_by(|&a, &b| {
+                        slots[a]
+                            .since
+                            .unwrap_or(0.0)
+                            .total_cmp(&slots[b].since.unwrap_or(0.0))
+                    })
+                    .unwrap_or(0)
+            });
+        let retiring = &mut slots[slot];
+        std::mem::swap(&mut retiring.glyphs, &mut self.old_glyphs);
+        std::mem::swap(&mut retiring.plans, &mut self.old_plans);
+        retiring.cam = cam;
+        retiring.since = Some(now);
+        self.retire_gen = self.retire_gen.wrapping_add(1);
+        retiring.gen = self.retire_gen;
+    }
+
+    /// Draw the retiring sets under the delta from THEIR placement camera,
+    /// freeing a slot once its fade has run out.
+    fn draw_retiring_labels(
+        &mut self,
+        cx: &mut Cx2d,
+        view_zoom: f64,
+        map_offset: Vec2d,
+        rect: Rect,
+        now: f64,
+    ) {
+        for i in 0..LABEL_RETIRING_SLOTS {
+            let Some(since) = self.label_retiring.slots[i].since else {
+                continue;
+            };
+            if now - since >= LABEL_FADE_SECONDS {
+                let slot = &mut self.label_retiring.slots[i];
+                slot.since = None;
+                slot.plans.clear();
+                continue;
+            }
+            let cam = self.label_retiring.slots[i].cam;
+            let xf = self.label_cache_transform(cam, view_zoom, map_offset, rect);
+            self.label_retiring.slots[i].xf = xf;
+            self.draw_label_set(cx, xf, false, LabelSet::Retiring(i));
+        }
     }
 
     /// Redraw only the pin-class (in-bubble) label plans — called after
     /// the icon pass so kW text sits on top of the charger pins.
     fn draw_pin_label_phase(&mut self, cx: &mut Cx2d) {
-        let (scale, offset, rot, pivot, cached_tilt_cos) = self.label_draw_transform;
-        self.draw_label_plans_scaled(cx, scale, offset, rot, pivot, cached_tilt_cos, true);
+        let xf = self.label_draw_transform;
+        self.draw_label_set(cx, xf, true, LabelSet::Live);
+        for i in 0..LABEL_RETIRING_SLOTS {
+            if self.label_retiring.slots[i].since.is_some() {
+                let xf = self.label_retiring.slots[i].xf;
+                self.draw_label_set(cx, xf, true, LabelSet::Retiring(i));
+            }
+        }
     }
 
-    fn draw_label_plans_scaled(
-        &mut self,
-        cx: &mut Cx2d,
-        scale: f32,
-        extra_offset: Vec2f,
-        rot: f32,
-        pivot: Vec2f,
-        cached_tilt_cos: f32,
-        pin_phase: bool,
-    ) {
-        // Remember the transform so the pin-text phase redraws with the
-        // exact same mapping after the icon pass.
-        self.label_draw_transform = (scale, extra_offset, rot, pivot, cached_tilt_cos);
-        self.label_cache_tilt_cos_for_delta = cached_tilt_cos;
+    /// Draw one placement's label plans (halo underdraw + colored text) as
+    /// one retained glyph batch under the transform `xf` from its camera to
+    /// this frame's; `pin_phase` selects the in-pin plans drawn after the
+    /// icon pass.
+    fn draw_label_set(&mut self, cx: &mut Cx2d, xf: LabelDrawXf, pin_phase: bool, set: LabelSet) {
+        if set == LabelSet::Live {
+            // Remember the transform so the pin-text phase redraws with the
+            // exact same mapping after the icon pass.
+            self.label_draw_transform = xf;
+        }
         // 4 diagonal offsets read as a solid halo at map label sizes and
         // halve the glyph volume vs an 8-direction ring
         const HALO_OFFSETS: [(f32, f32); 4] = [
@@ -8508,19 +8739,17 @@ impl MapView {
             let style = self.active_style();
             (style.label, style.label_halo)
         };
-        // Rigid delta-rotation of the cached placement about the pivot
-        // (heading-up nav): transform a copy once, draw slices from it.
         // Camera-delta on the GPU: the EXACT delta between the cached
         // placement's camera and now. The placement maps world points as
         // rotate-about-pivot THEN y-compress by tilt_cos; the delta from
         // (r0, t0) to (r1, t1) is S(t1)*R(d)*S(1/t0) — a general 2x2 (S
         // and R do not commute), which is why a plain rotate+scale
         // snapped visibly at every re-place in 2.5D.
-        let (dc, ds) = (rot.cos(), rot.sin());
-        let t0 = self.label_cache_tilt_cos_for_delta;
+        let (dc, ds) = (xf.rot.cos(), xf.rot.sin());
+        let t0 = xf.cached_tilt_cos;
         let t1 = self.tilt_cos() as f32;
         let m = [dc, -ds / t0, t1 * ds, t1 * dc / t0];
-        self.draw_label.set_camera_delta(cx.cx, m, pivot);
+        self.draw_label.set_camera_delta(cx.cx, m, xf.pivot);
         // The fold, stamped with the SAME values the tile shader carries
         // this frame: labels are emitted unwarped and bend on the GPU, so
         // they track rotation/tilt/warp exactly like tile geometry.
@@ -8533,25 +8762,27 @@ impl MapView {
         );
         // Pan/zoom ride uniforms too (same-frame as the tile map_offset):
         // glyphs below emit in CACHED placement space, scale 1, no offset.
-        self.draw_label.set_pan_delta(
-            cx.cx,
-            scale,
-            Vec2f {
-                x: extra_offset.x,
-                y: extra_offset.y,
-            },
-        );
+        self.draw_label.set_pan_delta(cx.cx, xf.scale, xf.shift);
+        // The fade clock: every glyph carries its fade start as an instance
+        // value; the clock is the one per-frame uniform that moves them.
+        let clock = cx.seconds_since_app_start() as f32;
+        self.draw_label
+            .set_fade_clock(cx.cx, clock, LABEL_FADE_SECONDS as f32);
         // The batch is a retained draw list: recorded when the plans, the
         // clip, the theme or the shader changed, else re-presented under
         // the uniforms staged above — a pan frame uploads no glyphs.
+        let (gen, set_index) = match set {
+            LabelSet::Live => (self.label_gen, 0),
+            LabelSet::Retiring(i) => (self.label_retiring.slots[i].gen, 1 + i),
+        };
         let sig = LabelListSig {
-            gen: self.label_gen,
+            gen,
             clip: self.view_rect,
             theme: self.effective_theme(),
             dark_theme,
             shader: self.draw_label.draw_super.draw_vars.draw_shader_id.is_some(),
         };
-        let slot = usize::from(pin_phase);
+        let slot = set_index * 2 + usize::from(pin_phase);
         let list = self.label_lists.lists[slot].get_or_insert_with(|| DrawList2d::new(cx));
         let record = self.label_lists.sigs[slot] != Some(sig);
         if list.begin_maybe(cx, record).is_not_redrawing() {
@@ -8559,17 +8790,32 @@ impl MapView {
             return;
         }
         self.draw_label.begin_glyph_batch(cx);
-        for i in 0..self.scratch_accepted_plans.len() {
-            let (_, start, end, color_class, post_icon, upright, anchor, baked_lift) =
-                self.scratch_accepted_plans[i];
-            if post_icon != pin_phase {
+        // Retiring glyphs all sink from the moment the set was retired;
+        // live glyphs rise from their own birth (long past for survivors).
+        let (plans, glyphs, fade_at, fade_in): (&[LabelPlan], &[PathGlyphInstance], Option<f32>, f32) =
+            match set {
+                LabelSet::Live => (&self.scratch_accepted_plans, &self.path_glyphs, None, 1.0),
+                LabelSet::Retiring(i) => {
+                    let retiring = &self.label_retiring.slots[i];
+                    (
+                        &retiring.plans,
+                        &retiring.glyphs,
+                        retiring.since.map(|since| since as f32),
+                        -1.0,
+                    )
+                }
+            };
+        for plan in plans {
+            if plan.post_icon != pin_phase {
                 continue;
             }
-            self.draw_label.lift = baked_lift;
-            let glyphs = &self.path_glyphs[start..end];
-            let billboard = pin_phase && upright;
+            self.draw_label.lift = plan.baked_lift;
+            self.draw_label.fade_at = fade_at.unwrap_or(plan.born as f32);
+            self.draw_label.fade_in = fade_in;
+            let glyphs = &glyphs[plan.glyph_start..plan.glyph_end];
+            let billboard = pin_phase && plan.upright;
             // In-pin text sits on a solid pin color: no halo underdraw.
-            if color_class != LABEL_CLASS_PIN {
+            if plan.color_class != LABEL_CLASS_PIN {
                 self.draw_label.draw_super.color = halo_color;
                 for offset in HALO_OFFSETS {
                     let off = Vec2f {
@@ -8578,29 +8824,31 @@ impl MapView {
                     };
                     if billboard {
                         self.draw_label
-                            .draw_path_glyphs_billboard(cx, glyphs, 1.0, off, anchor);
-                    } else if upright {
+                            .draw_path_glyphs_billboard(cx, glyphs, 1.0, off, plan.anchor);
+                    } else if plan.upright {
                         self.draw_label
-                            .draw_path_glyphs_upright(cx, glyphs, 1.0, off, anchor);
+                            .draw_path_glyphs_upright(cx, glyphs, 1.0, off, plan.anchor);
                     } else {
                         self.draw_label.draw_path_glyphs_scaled(cx, glyphs, 1.0, off);
                     }
                 }
             }
             self.draw_label.draw_super.color =
-                label_class_color(color_class, label_color, dark_theme);
+                label_class_color(plan.color_class, label_color, dark_theme);
             let zero = Vec2f { x: 0.0, y: 0.0 };
             if billboard {
                 self.draw_label
-                    .draw_path_glyphs_billboard(cx, glyphs, 1.0, zero, anchor);
-            } else if upright {
+                    .draw_path_glyphs_billboard(cx, glyphs, 1.0, zero, plan.anchor);
+            } else if plan.upright {
                 self.draw_label
-                    .draw_path_glyphs_upright(cx, glyphs, 1.0, zero, anchor);
+                    .draw_path_glyphs_upright(cx, glyphs, 1.0, zero, plan.anchor);
             } else {
                 self.draw_label.draw_path_glyphs_scaled(cx, glyphs, 1.0, zero);
             }
         }
         self.draw_label.lift = 0.0;
+        self.draw_label.fade_at = 0.0;
+        self.draw_label.fade_in = 0.0;
         self.draw_label.end_glyph_batch(cx);
         // One paint-order step per glyph call, as the immediate batch took.
         let list_id = list.id();
@@ -8960,7 +9208,7 @@ impl MapView {
                 // panning doesn't flicker between competing candidates.
                 if self
                     .prev_label_keys
-                    .contains(&stable_label_key(name_key, &label.road_kind))
+                    .contains_key(&stable_label_key(name_key, &label.road_kind))
                 {
                     score += 350.0;
                 }
