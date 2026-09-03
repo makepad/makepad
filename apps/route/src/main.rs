@@ -401,23 +401,6 @@ script_mod! {
                                 }
                                 theme_night := LayerCheck{text: "Night theme"}
                                 theme_circuit := LayerCheck{text: "Circuit City"}
-                                Hr{
-                                    height: 16
-                                }
-                                Label{
-                                    text: "Maps folder (next launch)"
-                                    draw_text +: {
-                                        color: #x223038
-                                        text_style: theme.font_regular{font_size: 9}
-                                    }
-                                }
-                                maps_root_input := TextInput{
-                                    width: 270
-                                    empty_text: "Automatic"
-                                }
-                                maps_root_save := AppButton{
-                                    text: "Save maps folder"
-                                }
                             }
                             layers_button := AppButton{
                                 margin: Inset{left: 14, bottom: 16}
@@ -957,9 +940,6 @@ impl App {
         self.layers.dirty = false;
         let maps_root = testmap::resolve_maps_root();
         log!("maps root: {}", maps_root.display());
-        self.ui
-            .text_input(cx, ids!(maps_root_input))
-            .set_text(cx, &maps_root.to_string_lossy());
         self.layers.set_maps_root(maps_root.clone());
         // Applies the theme above (chrome + map + checkboxes) and reflects
         // the rest of the LayerState defaults (e.g. tilt-shift on) in the
@@ -2186,13 +2166,6 @@ impl MatchEvent for App {
             self.ui
                 .widget(cx, ids!(layers_panel))
                 .set_visible(cx, self.layers_panel_open);
-        }
-        if self.ui.button(cx, ids!(maps_root_save)).clicked(actions) {
-            let value = self.ui.text_input(cx, ids!(maps_root_input)).text();
-            match testmap::save_maps_root_setting(&value) {
-                Ok(()) => self.set_status(cx, "maps folder saved; it will apply next launch"),
-                Err(error) => self.set_status(cx, &format!("maps folder: {error}")),
-            }
         }
         if self.ui.button(cx, ids!(assistant_button)).clicked(actions) {
             self.assistant_panel_open = !self.assistant_panel_open;

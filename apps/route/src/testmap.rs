@@ -52,7 +52,8 @@ pub fn production_archive(maps_root: &Path) -> Option<PathBuf> {
 
 /// Resolve once at startup: a checked-out executable uses that checkout's
 /// `local/maps`; an installed/copied executable uses Makepad's per-user home.
-/// The saved setting wins over both. The process cwd is deliberately absent.
+/// A developer override in `route/maps-root` wins over both. The process cwd
+/// is deliberately absent.
 pub fn resolve_maps_root() -> PathBuf {
     static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     ROOT.get_or_init(|| {
@@ -95,32 +96,6 @@ fn resolve_maps_root_with(
         directory = candidate.parent();
     }
     home.join("maps")
-}
-
-/// Persist the settings-panel override. Empty restores automatic resolution;
-/// a non-empty setting must be absolute so it can never regain cwd semantics.
-pub fn save_maps_root_setting(value: &str) -> Result<(), String> {
-    let home = makepad_widgets::makepad_platform::home::makepad_home();
-    let path = home.join(MAPS_ROOT_PREF);
-    let value = value.trim();
-    if value.is_empty() {
-        match fs::remove_file(&path) {
-            Ok(()) => return Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(format!("remove {}: {error}", path.display())),
-        }
-    }
-    let root = Path::new(value);
-    if !root.is_absolute() {
-        return Err("maps root must be an absolute path".to_string());
-    }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("create {}: {error}", parent.display()))?;
-    }
-    let partial = path.with_extension("part");
-    fs::write(&partial, value).map_err(|error| format!("write {}: {error}", partial.display()))?;
-    fs::rename(&partial, &path).map_err(|error| format!("publish {}: {error}", path.display()))
 }
 
 /// What the worker thread sends back.
