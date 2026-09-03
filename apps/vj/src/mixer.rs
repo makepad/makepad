@@ -460,6 +460,25 @@ pub(crate) fn wrapped_into_span(pos: f64, start: f64, end: f64) -> f64 {
     start + (pos - start).rem_euclid(len)
 }
 
+/// The source-seconds-per-output-second this voice is turning at right
+/// now: a running splat owns it outright (1.0, whatever the fader says),
+/// a hand or a motor owns it next, the fader otherwise -- and a deck with
+/// nothing to play, or a record with nothing IN it, turns at nothing.
+/// Shared by the render prelude and by every setter that has to answer
+/// the same question between callbacks, so the two can never disagree.
+fn deck_platter(voice: &DeckVoice) -> f64 {
+    let has_frames = voice.pcm.as_ref().is_some_and(|pcm| !pcm.frames.is_empty());
+    if !has_frames {
+        0.0
+    } else if voice.splat.as_ref().is_some_and(|splat| splat.active) {
+        1.0
+    } else if voice.scratch.active() {
+        voice.scratch.rate() as f64
+    } else {
+        voice.rate.current() as f64
+    }
+}
+
 /// Where one callback's time went, in nanoseconds.
 ///
 /// Three phases, not five: the render is one frame loop with setup before
@@ -2364,7 +2383,7 @@ impl Mixer {
             Some(load) => load.grid = grid,
             None => {
                 d.grid = grid;
-                let platter = d.clock.platter_rate;
+                let platter = deck_platter(d);
                 let pos_secs = d
                     .pcm
                     .as_ref()
@@ -3145,30 +3164,41 @@ impl Mixer {
             voice.eq.set_sample_rate(rate);
             voice.eq.prepare_block();
             // The musical clock, once per buffer per deck, from the same
-            // platter the snapshot reports: a running splat advances at
-            // the record's own speed whatever the fader says, a hand or
-            // a motor owns the rate while it lasts, and otherwise it is
-            // the fader's. Travel is only promised when the read path
-            // will actually read this buffer -- the same four exits it
-            // takes -- so a paused deck keeps its tempo and goes nowhere.
-            let platter = if voice.pcm.is_none() {
-                0.0
-            } else if voice.splat.as_ref().is_some_and(|splat| splat.active) {
-                1.0
-            } else if voice.scratch.active() {
-                voice.scratch.rate() as f64
+            // platter the snapshot reports. Travel is only promised when
+            // the read path will actually read this buffer, and a splat
+            // deck's read path takes ONE exit -- `!playing` -- not the
+            // ordinary four, so it is asked separately rather than folded
+            // into the same guard as everything else.
+            let platter = deck_platter(voice);
+            let sample_rate = voice.pcm.as_ref().map(|pcm| pcm.sample_rate.max(1) as f64);
+            let pos_frames = voice.playhead_frames();
+            let pos_secs = sample_rate.map(|sr| pos_frames / sr).unwrap_or(0.0);
+            let is_splat = voice.splat.as_ref().is_some_and(|splat| splat.active);
+            let reads = if is_splat {
+                voice.playing
             } else {
-                voice.rate.current() as f64
+                voice.scratch.active()
+                    || !(voice.transport.current <= 0.0 && (!voice.playing || voice.ended))
             };
-            let pos_secs = voice
-                .pcm
-                .as_ref()
-                .map(|pcm| voice.playhead_frames() / pcm.sample_rate.max(1) as f64)
-                .unwrap_or(0.0);
-            let reads = voice.scratch.active()
-                || !(voice.transport.current <= 0.0 && (!voice.playing || voice.ended));
-            let travel = if reads { platter * frames as f64 / rate as f64 } else { 0.0 };
-            voice.clock = DeckClock::at(voice.grid.as_ref(), pos_secs, platter, travel);
+            let travel_secs = if reads { platter * frames as f64 / rate as f64 } else { 0.0 };
+            // A span owns the playhead on the read path (above, per frame);
+            // the clock's single-shot prediction folds the same way, so a
+            // roll's landing does not publish a fraction the head is about
+            // to leave behind. Two-sided, because a reversed platter can
+            // leave a span at IN.
+            let predicted_secs = match (sample_rate, voice.loop_span) {
+                (Some(sr), Some((start, end))) => {
+                    let predicted = pos_frames + travel_secs * sr;
+                    let folded = if predicted >= end || (platter < 0.0 && predicted < start) {
+                        wrapped_into_span(predicted, start, end)
+                    } else {
+                        predicted
+                    };
+                    folded / sr
+                }
+                _ => pos_secs + travel_secs,
+            };
+            voice.clock = DeckClock::at(voice.grid.as_ref(), predicted_secs, platter, 0.0);
             // The ghost moves here, once per buffer, and not in the frame
             // loop below: its rate is latched so a buffer is one multiply,
             // and the read path has four early exits (no pcm, empty pcm,
@@ -5258,7 +5288,18 @@ mod tests {
         assert!(!mixer.deck_snapshot(DeckId::A).clock.has_grid, "no grid yet");
         let grid = clock_grid(120.0);
         mixer.set_deck_grid(DeckId::A, Some(grid));
-        assert!(mixer.deck_snapshot(DeckId::A).clock.has_grid, "the setter republishes");
+        let fresh = mixer.deck_snapshot(DeckId::A).clock;
+        assert!(fresh.has_grid, "the setter republishes");
+        // No callback has run yet, so the setter has to work out the
+        // platter itself rather than read the last published one -- which
+        // is still `DeckClock::default()`'s zero, indistinguishable from
+        // a stopped record. A load-then-set-grid in one tick is exactly
+        // the sequence a real load takes.
+        assert_eq!(
+            fresh.beat_len(),
+            Some(0.5),
+            "before any buffer has rendered, {fresh:?}"
+        );
         mixer.set_deck_playing(DeckId::A, true);
         spin_render(&mixer, 8);
         render(&mixer, 48_000.0, 512);
@@ -5353,6 +5394,17 @@ mod tests {
         mixer.clear_deck(DeckId::B);
         spin_render(&mixer, 4);
         assert!(!mixer.deck_snapshot(DeckId::B).clock.has_grid, "a cleared deck has no beat");
+        // A fresh load drops whatever grid was there, which a deck with
+        // no grid at all cannot prove: put a real one back on B, let its
+        // transport fade all the way down so the load takes the
+        // immediate branch, then load over it and watch it go.
+        mixer.install_deck(DeckId::B, tone_pcm(330.0, 48_000, 8.0));
+        mixer.set_deck_grid(DeckId::B, Some(clock_grid(140.0)));
+        mixer.set_deck_playing(DeckId::B, true);
+        spin_render(&mixer, 2);
+        assert!(mixer.deck_snapshot(DeckId::B).clock.has_grid, "the grid is there to lose");
+        mixer.set_deck_playing(DeckId::B, false);
+        spin_render(&mixer, 2); // the pause fade is one buffer; two is headroom
         mixer.install_deck(DeckId::B, tone_pcm(330.0, 48_000, 8.0));
         spin_render(&mixer, 4);
         assert!(!mixer.deck_snapshot(DeckId::B).clock.has_grid, "a fresh record has none until its analysis lands");
@@ -5375,6 +5427,77 @@ mod tests {
     /// A running splat advances at the record's own speed whatever the
     /// tempo fader says, so its clock reports the platter at exactly one
     /// -- and hands the fader back the moment the splat stops.
+    /// A running splat's own read path exits on `!playing` alone -- not
+    /// the four exits an ordinary deck takes -- so the clock has to be
+    /// asked separately. Missing that, a pause under a splat kept
+    /// promising travel for the length of its fade and any buffer with a
+    /// hand held on a paused splat deck promised it forever.
+    #[test]
+    fn a_paused_splat_deck_does_not_travel_either() {
+        let (mixer, rate) = splat_fixture(false);
+        let grid = clock_grid(120.0);
+        mixer.set_deck_grid(DeckId::A, Some(grid));
+        render_count(&mixer, rate, 4096, 256);
+        mixer.set_deck_playing(DeckId::A, false);
+        let before = mixer.deck_snapshot(DeckId::A).position_secs;
+        render_count(&mixer, rate, 256, 256);
+        let after = mixer.deck_snapshot(DeckId::A);
+        assert_eq!(after.position_secs, before, "a paused splat's master does not move");
+        assert_eq!(
+            after.clock.beat_frac_end,
+            grid.phase_at(after.position_secs),
+            "and the clock must not predict a buffer of travel the head never made"
+        );
+        // A hand on the very deck the splat has parked keeps `scratch`
+        // active for as long as it is held; that must not revive travel
+        // either, because the splat -- not the hand -- owns the read.
+        mixer.scratch_deck(DeckId::A, ScratchMotion::Grab);
+        mixer.scratch_deck(DeckId::A, ScratchMotion::Move { secs: 0.01, rate: 1.0 });
+        render_count(&mixer, rate, 256, 256);
+        let held = mixer.deck_snapshot(DeckId::A);
+        assert_eq!(held.position_secs, before, "the splat still owns the master, hand or no hand");
+        assert_eq!(held.clock.beat_frac_end, grid.phase_at(held.position_secs));
+    }
+
+    /// The read path folds the playhead into an active span before every
+    /// read; the clock's single-shot prediction now folds the same
+    /// travel the same way, so a lap that wraps mid-buffer does not
+    /// publish a fraction for a beat position the head is about to
+    /// leave behind.
+    #[test]
+    fn the_clock_folds_a_loop_wrap_the_way_the_read_path_does() {
+        let mixer = Mixer::new();
+        mixer.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 8.0));
+        let grid = clock_grid(120.0);
+        mixer.set_deck_grid(DeckId::A, Some(grid));
+        mixer.set_deck_playing(DeckId::A, true);
+        // A quarter-beat span: not a whole number of beats, so a wrap
+        // that ignored it would land on the wrong beat fraction.
+        mixer.set_deck_loop_span(DeckId::A, Some((2.0, 2.125)), crate::decks::LoopSeek::MovedOut);
+        // Well inside the span, but close enough to OUT that one buffer's
+        // travel overshoots it with a clear margin, so the wrap is not
+        // riding a floating-point coin toss at the boundary.
+        let start_secs = (102_000.0 - 350.0) / 48_000.0;
+        mixer.seek_deck_seconds(DeckId::A, start_secs);
+        render(&mixer, 48_000.0, 512);
+        let snap = mixer.deck_snapshot(DeckId::A);
+        assert!(
+            snap.position_secs >= 2.0 && snap.position_secs < 2.125,
+            "the read path already wrapped the real head: {}",
+            snap.position_secs
+        );
+        assert_eq!(
+            snap.clock.beat_frac_end,
+            grid.phase_at(snap.position_secs),
+            "the clock must agree with where the head actually is"
+        );
+        let unfolded = grid.phase_at(start_secs + 512.0 / 48_000.0);
+        assert!(
+            (unfolded - snap.clock.beat_frac_end).abs() > 0.01,
+            "and that has to be a different answer from ignoring the span entirely"
+        );
+    }
+
     #[test]
     fn a_running_splat_keeps_the_records_own_tempo() {
         let (mixer, rate) = splat_fixture(false);
