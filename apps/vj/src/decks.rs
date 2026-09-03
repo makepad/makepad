@@ -4142,6 +4142,23 @@ mod tests {
     }
 
     #[test]
+    fn seek_to_start_preserves_play_state_and_clamps_a_stopped_deck() {
+        let mut engine = DeckEngine::new();
+        let (deck, gen) = load_gen(&engine.click(item(1), DeckTarget::A));
+        engine.track_ready(deck, gen, 30.0);
+
+        engine.observe(deck, 12.0, true);
+        engine.seek_secs(deck, 0.0);
+        assert!(engine.deck(deck).playing);
+        assert_eq!(engine.deck(deck).position_secs, 0.0);
+
+        engine.observe(deck, 12.0, false);
+        engine.seek_secs(deck, -1.0);
+        assert!(!engine.deck(deck).playing);
+        assert_eq!(engine.deck(deck).position_secs, 0.0);
+    }
+
+    #[test]
     fn a_fresh_load_carries_the_channel_strip_onto_the_deck() {
         let mut engine = DeckEngine::new();
         engine.set_eq(DeckId::B, 2, 0.3);

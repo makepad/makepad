@@ -2062,6 +2062,9 @@ script_mod! {
                             spacing: 5
                             wrap_spacing: 5
                             align: Align{x: 0.0, y: 0.5}
+                            deck_a_to_start := MusicTransportIconButton{
+                                draw_icon +: { svg: crate_resource("self:resources/icons/skip_start.svg") }
+                            }
                             deck_a_play := MusicTransportIconButton{
                                 draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
                             }
@@ -2611,6 +2614,9 @@ script_mod! {
                                 draw_icon +: { svg: crate_resource("self:resources/icons/headphones.svg") }
                             }
                             deck_b_cue := MusicTransportButton{width: 52 text: "CUE"}
+                            deck_b_to_start := MusicTransportIconButton{
+                                draw_icon +: { svg: crate_resource("self:resources/icons/skip_start.svg") }
+                            }
                             deck_b_play := MusicTransportIconButton{
                                 draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
                             }
