@@ -1,4 +1,5 @@
 use crate::wire::*;
+use crate::Value;
 use makepad_micro_serde::*;
 use makepad_script::*;
 use std::collections::{HashMap, HashSet};
@@ -8,6 +9,164 @@ const HEAP_LIMIT: usize = 64 * 1024 * 1024;
 const PRELUDE_FILE: &str = "<makepad-flow-prelude>";
 const RECIPE_PRELUDE_FILE: &str = "<makepad-flow-recipe-prelude>";
 const RECIPE_PRELUDE: &str = include_str!("../../recipes/prelude_recipes.splash");
+const FN_INSTRUCTION_LIMIT: usize = 200_000;
+
+/// A loaded flow and the splash heap that owns its run-time closures.
+pub struct FlowVm {
+    host: Box<ScriptVmHost<i32, ()>>,
+    bx: Option<Box<ScriptVmBase>>,
+    flow: ScriptObjectRef,
+    graph: Graph,
+}
+
+impl FlowVm {
+    pub fn load(source: &str, file_name: &str) -> Result<(Self, Graph), EvalError> {
+        let mut host = Box::new(ScriptVmHost::new(0i32, ()));
+        let mut vm = ScriptVm {
+            host: host.as_mut(),
+            bx: Box::new(ScriptVmBase::new()),
+        };
+        vm.bx.captured_errors = Some(Vec::new());
+        let (result, allocation) = vm.with_heap_allocation_limit(HEAP_LIMIT, |vm| {
+            vm.with_instruction_limit(INSTRUCTION_LIMIT, |vm| {
+                vm.new_module(id!(flow));
+                vm.eval(make_mod(PRELUDE_FILE, crate::PRELUDE));
+                let prelude_errors = vm.take_errors();
+                if !prelude_errors.is_empty() {
+                    return Err(error_from_vm(&prelude_errors[0], PRELUDE_FILE));
+                }
+                vm.bx.captured_errors = Some(Vec::new());
+                vm.eval(make_mod(RECIPE_PRELUDE_FILE, RECIPE_PRELUDE));
+                let recipe_errors = vm.take_errors();
+                if !recipe_errors.is_empty() {
+                    return Err(error_from_vm(&recipe_errors[0], RECIPE_PRELUDE_FILE));
+                }
+                vm.bx.captured_errors = Some(Vec::new());
+                let eval_source = source_for_eval(source);
+                let value = vm.eval(make_mod(file_name, &eval_source));
+                let errors = vm.take_errors();
+                if !errors.is_empty() {
+                    return Err(error_from_vm(&errors[0], file_name));
+                }
+                let graph = extract(vm, value, source, file_name)?;
+                let flow = value
+                    .as_object()
+                    .ok_or_else(|| at(file_name, 1, 1, "last expression is not a Flow{}"))?;
+                Ok((graph, vm.bx.heap.new_object_ref(flow)))
+            })
+        });
+        if allocation.exceeded {
+            return Err(at(
+                file_name,
+                1,
+                1,
+                "flow exceeded the 64 MiB heap allocation limit",
+            ));
+        }
+        let (graph, flow) = result?;
+        let bx = vm.bx;
+        let loaded = Self {
+            host,
+            bx: Some(bx),
+            flow,
+            graph: graph.clone(),
+        };
+        Ok((loaded, graph))
+    }
+
+    pub fn call_fn(
+        &mut self,
+        node_id: &str,
+        inputs: &[(String, Value)],
+    ) -> Result<Vec<(String, Value)>, String> {
+        let node = self
+            .graph
+            .nodes
+            .iter()
+            .find(|node| node.id == node_id && node.kind == "fn")
+            .cloned()
+            .ok_or_else(|| format!("Fn node `{node_id}` is not declared"))?;
+        let media: HashMap<_, _> = inputs
+            .iter()
+            .filter(|(_, value)| value.ty.is_media())
+            .map(|(_, value)| (value.digest_hex(), value.clone()))
+            .collect();
+        for (port, value) in inputs {
+            let declared = node
+                .inputs
+                .iter()
+                .find(|input| input.port == *port)
+                .ok_or_else(|| format!("Fn node `{node_id}` has no input port `{port}`"))?;
+            if declared.ty != value.ty {
+                return Err(format!(
+                    "Fn node `{node_id}` input `{port}` expected {}, got {}",
+                    declared.ty.as_str(),
+                    value.ty.as_str()
+                ));
+            }
+        }
+        let flow = self.flow.as_object();
+        self.with_vm(|vm| {
+            let node_value = own_value(vm, flow, node_id)
+                .ok_or_else(|| format!("Fn node `{node_id}` is missing from run VM"))?;
+            let node_obj = node_value
+                .as_object()
+                .ok_or_else(|| format!("Fn node `{node_id}` is not an object"))?;
+            let run = deep_value(vm, node_obj, "run")
+                .ok_or_else(|| format!("Fn node `{node_id}` has no run closure"))?;
+            let args = vm.bx.heap.new_object();
+            for (port, value) in inputs {
+                let script_value = value_to_script(vm, value)?;
+                vm.bx.heap.set_value_def(
+                    args,
+                    LiveId::from_str(port).into(),
+                    script_value,
+                );
+            }
+            vm.bx.captured_errors = Some(Vec::new());
+            let returned = vm.with_instruction_limit(FN_INSTRUCTION_LIMIT, |vm| {
+                vm.call(run, &[args.into()])
+            });
+            let errors = vm.take_errors();
+            if let Some(error) = errors.first() {
+                return Err(trim_origin(error).to_string());
+            }
+            if returned.is_err() {
+                return Err("Fn closure failed".to_string());
+            }
+            let object = returned
+                .as_object()
+                .ok_or_else(|| format!("Fn node `{node_id}` must return an object"))?;
+            let mut outputs = Vec::with_capacity(node.outputs.len());
+            for output in &node.outputs {
+                let value = own_value(vm, object, &output.name).ok_or_else(|| {
+                    format!(
+                        "Fn node `{node_id}` returned no declared output key `{}`",
+                        output.name
+                    )
+                })?;
+                outputs.push((
+                    output.name.clone(),
+                    script_to_value(vm, value, output.ty, &media).map_err(|error| {
+                        format!("Fn node `{node_id}` output `{}`: {error}", output.name)
+                    })?,
+                ));
+            }
+            Ok(outputs)
+        })
+    }
+
+    fn with_vm<R>(&mut self, f: impl FnOnce(&mut ScriptVm<'_>) -> R) -> R {
+        let bx = self.bx.take().expect("FlowVm re-entered");
+        let mut vm = ScriptVm {
+            host: self.host.as_mut(),
+            bx,
+        };
+        let result = f(&mut vm);
+        self.bx = Some(vm.bx);
+        result
+    }
+}
 
 #[derive(Clone)]
 struct TypeSpec {
@@ -243,50 +402,114 @@ fn make_mod(file: &str, code: &str) -> ScriptMod {
 
 /// Evaluate one flow source in an isolated, budgeted splash VM.
 pub fn evaluate(source: &str, file_name: &str) -> Result<Graph, EvalError> {
-    let mut host = ScriptVmHost::new(0i32, ());
-    let mut vm = ScriptVm {
-        host: &mut host,
-        bx: Box::new(ScriptVmBase::new()),
-    };
-    vm.bx.captured_errors = Some(Vec::new());
-    let (result, allocation) = vm.with_heap_allocation_limit(HEAP_LIMIT, |vm| {
-        vm.with_instruction_limit(INSTRUCTION_LIMIT, |vm| {
-            vm.new_module(id!(flow));
-            vm.eval(make_mod(PRELUDE_FILE, crate::PRELUDE));
-            let prelude_errors = vm.take_errors();
-            if !prelude_errors.is_empty() {
-                return Err(error_from_vm(&prelude_errors[0], PRELUDE_FILE));
+    FlowVm::load(source, file_name).map(|(_, graph)| graph)
+}
+
+fn value_to_script(vm: &mut ScriptVm<'_>, value: &Value) -> Result<ScriptValue, String> {
+    if value.ty == PortType::Text {
+        return Ok(vm.bx.heap.new_string_from_str(value.as_text()?).into());
+    }
+    if matches!(value.ty, PortType::Json | PortType::List) {
+        let text = value.as_text()?;
+        let parsed = makepad_strict_json::parse(text.as_bytes())
+            .map_err(|error| format!("invalid JSON value: {error}"))?;
+        if value.ty == PortType::List
+            && !matches!(parsed, makepad_strict_json::Value::Arr(_))
+        {
+            return Err("list value must be a JSON array".to_string());
+        }
+        return Ok(json_to_script(vm, &parsed));
+    }
+    let object = vm.bx.heap.new_object();
+    let digest = vm.bx.heap.new_string_from_str(&value.digest_hex());
+    let content_type = vm.bx.heap.new_string_from_str(&value.content_type);
+    vm.bx
+        .heap
+        .set_value_def(object, id!(digest).into(), digest);
+    vm.bx
+        .heap
+        .set_value_def(object, id!(content_type).into(), content_type);
+    vm.bx.heap.set_value_def(
+        object,
+        id!(bytes).into(),
+        ScriptValue::from_f64(value.bytes.len() as f64),
+    );
+    Ok(object.into())
+}
+
+fn json_to_script(vm: &mut ScriptVm<'_>, value: &makepad_strict_json::Value) -> ScriptValue {
+    use makepad_strict_json::Value as Json;
+    match value {
+        Json::Null => NIL,
+        Json::Bool(value) => ScriptValue::from_bool(*value),
+        Json::Int(value) => ScriptValue::from_f64(*value as f64),
+        Json::F64(value) => ScriptValue::from_f64(*value),
+        Json::Str(value) => vm.bx.heap.new_string_from_str(value),
+        Json::Arr(values) => {
+            let array = vm.bx.heap.new_array();
+            for value in values {
+                let value = json_to_script(vm, value);
+                vm.bx.heap.array_push_unchecked(array, value);
             }
-            vm.bx.captured_errors = Some(Vec::new());
-            vm.eval(make_mod(RECIPE_PRELUDE_FILE, RECIPE_PRELUDE));
-            let recipe_errors = vm.take_errors();
-            if !recipe_errors.is_empty() {
-                return Err(error_from_vm(
-                    &recipe_errors[0],
-                    RECIPE_PRELUDE_FILE,
+            array.into()
+        }
+        Json::Obj(values) => {
+            let object = vm.bx.heap.new_object();
+            vm.bx.heap.set_string_keys(object);
+            for (name, value) in values {
+                let key = vm.bx.heap.new_string_from_str(name);
+                let value = json_to_script(vm, value);
+                vm.bx.heap.set_value_def(object, key, value);
+            }
+            object.into()
+        }
+    }
+}
+
+fn script_to_value(
+    vm: &mut ScriptVm<'_>,
+    value: ScriptValue,
+    ty: PortType,
+    media: &HashMap<String, Value>,
+) -> Result<Value, String> {
+    match ty {
+        PortType::Text => value_string(vm, value)
+            .map(Value::text)
+            .ok_or_else(|| "expected a string".to_string()),
+        PortType::Json | PortType::List => {
+            if ty == PortType::List && value.as_array().is_none() {
+                return Err("expected an array".to_string());
+            }
+            let json = vm.bx.heap.to_json(value);
+            let text = value_string(vm, json)
+                .ok_or_else(|| "value could not be serialized as JSON".to_string())?;
+            makepad_strict_json::parse(text.as_bytes())
+                .map_err(|error| format!("invalid JSON output: {error}"))?;
+            Ok(if ty == PortType::List {
+                Value::list(text)
+            } else {
+                Value::json(text)
+            })
+        }
+        _ => {
+            let object = value
+                .as_object()
+                .ok_or_else(|| "expected an opaque media handle".to_string())?;
+            let digest = deep_value(vm, object, "digest")
+                .and_then(|value| value_string(vm, value))
+                .ok_or_else(|| "media handle has no digest".to_string())?;
+            let existing = media
+                .get(&digest)
+                .ok_or_else(|| "media handle is not one of this call's inputs".to_string())?;
+            if existing.ty != ty {
+                return Err(format!(
+                    "media handle has type {}, expected {}",
+                    existing.ty.as_str(),
+                    ty.as_str()
                 ));
             }
-            vm.bx.captured_errors = Some(Vec::new());
-            let eval_source = source_for_eval(source);
-            let value = vm.eval(make_mod(file_name, &eval_source));
-            let errors = vm.take_errors();
-            if !errors.is_empty() {
-                return Err(error_from_vm(&errors[0], file_name));
-            }
-            extract(&vm, value, source, file_name)
-        })
-    });
-    if allocation.exceeded {
-        result.and_then(|_| {
-            Err(at(
-                file_name,
-                1,
-                1,
-                "flow exceeded the 64 MiB heap allocation limit",
-            ))
-        })
-    } else {
-        result
+            Ok(existing.clone())
+        }
     }
 }
 
@@ -305,6 +528,12 @@ pub fn prelude_catalog() -> Result<Vec<NodeTypeCatalog>, EvalError> {
     let errors = vm.take_errors();
     if !errors.is_empty() {
         return Err(error_from_vm(&errors[0], PRELUDE_FILE));
+    }
+    vm.bx.captured_errors = Some(Vec::new());
+    vm.eval(make_mod(RECIPE_PRELUDE_FILE, RECIPE_PRELUDE));
+    let errors = vm.take_errors();
+    if !errors.is_empty() {
+        return Err(error_from_vm(&errors[0], RECIPE_PRELUDE_FILE));
     }
     let module = own_value(&vm, vm.bx.heap.modules, "flow")
         .and_then(|value| value.as_object())
@@ -1964,61 +2193,9 @@ fn parse_vec2(value: &str) -> Option<(f64, f64)> {
     Some((x, y))
 }
 
-// `in` is a language keyword in the current parser, although the flow syntax uses
-// it as the conventional Fn closure argument. Rewrite only that closure binding
-// and its body for VM execution. The replacement is the same byte width, so all
-// source locations and slices continue to address the original file.
 fn source_for_eval(source: &str) -> String {
-    let bytes = source.as_bytes();
-    let mut out = bytes.to_vec();
+    let mut out = source.as_bytes().to_vec();
     mask_ui_values(source, &mut out);
-    let mut index = 0usize;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'"' => {
-                index = skip_string(bytes, index).unwrap_or(bytes.len());
-                continue;
-            }
-            b'/' if bytes.get(index + 1) == Some(&b'/') => {
-                index = skip_line_comment(bytes, index);
-                continue;
-            }
-            b'/' if bytes.get(index + 1) == Some(&b'*') => {
-                index = skip_block_comment(bytes, index).unwrap_or(bytes.len());
-                continue;
-            }
-            b'|' => {
-                let mut name_start = index + 1;
-                while bytes.get(name_start).is_some_and(u8::is_ascii_whitespace) {
-                    name_start += 1;
-                }
-                if bytes.get(name_start..name_start + 2) == Some(b"in")
-                    && !bytes
-                        .get(name_start + 2)
-                        .is_some_and(|byte| is_ident_continue(*byte))
-                {
-                    let mut pipe = name_start + 2;
-                    while bytes.get(pipe).is_some_and(u8::is_ascii_whitespace) {
-                        pipe += 1;
-                    }
-                    if bytes.get(pipe) == Some(&b'|') {
-                        let Some(open) = find_next_code_char(source, pipe + 1, b'{') else {
-                            break;
-                        };
-                        let Some(close) = matching_delimiter(source, open, b'{', b'}') else {
-                            break;
-                        };
-                        out[name_start + 1] = b't';
-                        rewrite_identifier(bytes, &mut out, open + 1, close, b"in", b"it");
-                        index = close + 1;
-                        continue;
-                    }
-                }
-            }
-            _ => {}
-        }
-        index += 1;
-    }
     String::from_utf8(out).unwrap()
 }
 
@@ -2064,58 +2241,6 @@ fn mask_ui_values(source: &str, out: &mut [u8]) {
             out[range.0..range.0 + 3].copy_from_slice(b"nil");
         } else if range.0 < range.1 {
             out[range.0] = b'0';
-        }
-    }
-}
-
-fn rewrite_identifier(
-    source: &[u8],
-    out: &mut [u8],
-    mut index: usize,
-    end: usize,
-    from: &[u8; 2],
-    to: &[u8; 2],
-) {
-    while index < end {
-        match source[index] {
-            b'"' => {
-                index = skip_string(source, index).unwrap_or(end);
-                continue;
-            }
-            b'/' if source.get(index + 1) == Some(&b'/') => {
-                index = skip_line_comment(source, index);
-                continue;
-            }
-            b'/' if source.get(index + 1) == Some(&b'*') => {
-                index = skip_block_comment(source, index).unwrap_or(end);
-                continue;
-            }
-            byte if is_ident_start(byte) => {
-                let start = index;
-                index += 1;
-                while index < end && is_ident_continue(source[index]) {
-                    index += 1;
-                }
-                let previous = source[..start]
-                    .iter()
-                    .rev()
-                    .copied()
-                    .find(|byte| !byte.is_ascii_whitespace());
-                let next = source[index..end]
-                    .iter()
-                    .copied()
-                    .find(|byte| !byte.is_ascii_whitespace());
-                let is_variable_use = next == Some(b'.')
-                    || (previous != Some(b'.')
-                        && previous != Some(b'@')
-                        && next != Some(b':')
-                        && !next.is_some_and(is_ident_start));
-                if &source[start..index] == from && is_variable_use {
-                    out[start..index].copy_from_slice(to);
-                }
-                continue;
-            }
-            _ => index += 1,
         }
     }
 }

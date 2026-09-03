@@ -127,7 +127,7 @@ mod.flow.Http = mod.flow.Node{
     content_type: ""
     /** Response value type: text, json, image, audio, video, or bytes. */
     out: @text
-    /** Accepted response content types. */
+    /** Error status codes that should be accepted, for example [404]. */
     accept: []
     ui: mod.flow.ui.HttpFace
     value: fn() { {node: self, port: @value} }
@@ -227,11 +227,6 @@ mod.flow.Flow = {
     ui: nil
 }
 
-// A few names commonly used in custom faces; explicit ui values are carried as source.
-mod.flow.DropDown = {}
-mod.flow.View = {}
-mod.flow.Label = {}
-mod.flow.Button = {}
 mod.flow.vec2 = fn(x, y) { [x, y] }
 
 nil

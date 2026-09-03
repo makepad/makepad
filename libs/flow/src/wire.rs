@@ -18,6 +18,164 @@ pub enum PortType {
     Bytes,
 }
 
+impl PortType {
+    pub fn is_media(self) -> bool {
+        matches!(
+            self,
+            Self::Image | Self::Audio | Self::Video | Self::Mesh | Self::Bytes
+        )
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Image => "image",
+            Self::Audio => "audio",
+            Self::Video => "video",
+            Self::Mesh => "mesh",
+            Self::Json => "json",
+            Self::List => "list",
+            Self::Bytes => "bytes",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SerJson, DeJson)]
+pub enum RunState {
+    Queued,
+    Running,
+    Waiting,
+    Done,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SerJson, DeJson)]
+pub enum NodeState {
+    Pending,
+    Ready,
+    Running,
+    Waiting,
+    Done,
+    Failed,
+    Skipped,
+    Cancelled,
+}
+
+/// Content-addressed value metadata used by route/event DTOs. The bytes travel
+/// on the value plane and deliberately are not embedded in JSON events.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct ValueRef {
+    #[rename(type)]
+    pub ty: PortType,
+    pub content_type: String,
+    pub digest: String,
+    pub bytes: usize,
+    pub preview: Option<Literal>,
+}
+
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct PortValueRef {
+    pub port: String,
+    pub value: ValueRef,
+}
+
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub enum RunEventPayload {
+    RunStarted {
+        run_id: String,
+        instance: String,
+        flow: String,
+        revision: u64,
+    },
+    NodeStarted {
+        node: String,
+    },
+    NodeProgress {
+        node: String,
+        permille: u16,
+        stage: String,
+    },
+    NodeDelta {
+        node: String,
+        port: String,
+        text: String,
+    },
+    NodeWaiting {
+        node: String,
+        question: String,
+        ty: PortType,
+        options: Vec<Literal>,
+    },
+    NodeAnswered {
+        node: String,
+        by: String,
+    },
+    NodeDone {
+        node: String,
+        outputs: Vec<PortValueRef>,
+    },
+    NodeFailed {
+        node: String,
+        error: String,
+    },
+    NodeSkipped {
+        node: String,
+        reason: String,
+    },
+    RunFinished {
+        state: RunState,
+        secs: f64,
+        outputs: Vec<(String, ValueRef)>,
+        http_log: Vec<HttpLogEntryDto>,
+        warnings: Vec<String>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct HttpLogEntryDto {
+    pub ms: u64,
+    pub method: String,
+    pub url: String,
+    pub status: Option<u16>,
+}
+
+impl From<&crate::Value> for ValueRef {
+    fn from(value: &crate::Value) -> Self {
+        Self {
+            ty: value.ty,
+            content_type: value.content_type.clone(),
+            digest: value.digest_hex(),
+            bytes: value.bytes.len(),
+            preview: value_preview(value),
+        }
+    }
+}
+
+fn value_preview(value: &crate::Value) -> Option<Literal> {
+    if matches!(value.ty, PortType::Text | PortType::Json | PortType::List) {
+        return Some(Literal::Str(
+            String::from_utf8_lossy(&value.bytes)
+                .chars()
+                .take(512)
+                .collect(),
+        ));
+    }
+    if value.ty == PortType::Image
+        && value.content_type.eq_ignore_ascii_case("image/png")
+        && value.bytes.len() >= 24
+        && &value.bytes[..8] == b"\x89PNG\r\n\x1a\n"
+    {
+        let width = u32::from_be_bytes(value.bytes[16..20].try_into().unwrap());
+        let height = u32::from_be_bytes(value.bytes[20..24].try_into().unwrap());
+        return Some(Literal::Obj(vec![
+            ("width".to_string(), Literal::Num(width as f64)),
+            ("height".to_string(), Literal::Num(height as f64)),
+        ]));
+    }
+    None
+}
+
 #[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
 pub enum Literal {
     Null,

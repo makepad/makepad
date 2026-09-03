@@ -16,7 +16,7 @@ fn design_fixture_evaluates() {
     assert_eq!(graph.nodes[0].at, Some((40.0, 120.0)));
     assert_eq!(graph.tools[0].inputs, ["prompt"]);
     assert_eq!(graph.tools[0].outputs, ["picture"]);
-    assert!(graph.nodes[2].fn_src.as_deref().unwrap().starts_with("|in|"));
+    assert!(graph.nodes[2].fn_src.as_deref().unwrap().starts_with("|i|"));
     assert!(graph.nodes[3]
         .face_src
         .as_deref()
@@ -79,6 +79,15 @@ fn errors_have_locations() {
             "{file}: expected {expected:?}, got {error:?}"
         );
     }
+}
+
+#[test]
+fn reserved_in_closure_parameter_is_a_vm_error() {
+    let source = "use mod.flow.*\nlet f = Fn{in: {text: \"x\"} out: [@text] run: |in| {{text: in.text}}}\nFlow{f}";
+    let error = evaluate(source, "reserved_in.splash").unwrap_err();
+    assert_eq!(error.file, "reserved_in.splash");
+    assert!(error.message.contains("reserved"), "{error:?}");
+    assert!(error.line > 0 && error.col > 0);
 }
 
 #[test]
