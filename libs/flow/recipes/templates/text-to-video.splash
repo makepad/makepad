@@ -1,0 +1,29 @@
+use mod.flow.*
+
+/** The clip to generate. */
+let prompt = Input{ type: @text  default: "rain sliding across a neon train window"  at: vec2(40, 120) }
+
+let expand = Llm{
+    system: "Rewrite the prompt as one continuous video shot with subject, camera, light, and steady motion. No cuts and no lists."
+    prompt: prompt.text()
+    at: vec2(360, 120)
+}
+
+let video = Video{
+    prompt: expand.text()
+    width: 640
+    height: 352
+    frames: 39
+    steps: 30
+    audio: false
+    at: vec2(680, 120)
+}
+
+/** The generated clip. */
+let movie = Output{ type: @video  value: video.video()  at: vec2(1000, 120) }
+
+Flow{
+    label: "Text to video"
+    brief: "Expands a short direction into one shot and generates a video from it."
+    prompt, expand, video, movie
+}
