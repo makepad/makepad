@@ -93,6 +93,11 @@ impl Layouter {
         self.cache_generation += 1;
     }
 
+    /// Bytes retained by the laid-out text cache.
+    pub fn cache_bytes(&self) -> usize {
+        self.cache_bytes
+    }
+
     pub fn rasterizer(&self) -> &Rc<RefCell<Rasterizer>> {
         self.loader.rasterizer()
     }

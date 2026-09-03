@@ -1,6 +1,6 @@
 use makepad_widgets::*;
 use makepad_widgets::map::{
-    archive::{new_archive_worker_pool, MapTileArchive, TileBytesResult},
+    archive::{new_archive_worker_pool, MapTileArchive, TileBlob, TileBytesResult},
     geometry::TileKey,
 };
 use makepad_geodata::terrain_shade::{
@@ -153,7 +153,7 @@ enum TerrainJobTiles {
     Archive {
         min_zoom: u32,
         max_zoom: u32,
-        tiles: HashMap<TerrainTileKey, Option<Arc<[u8]>>>,
+        tiles: HashMap<TerrainTileKey, Option<TileBlob>>,
     },
 }
 
@@ -211,6 +211,13 @@ impl TerrainWorker {
         let landcover = spec.landcover_path.as_deref().and_then(|path| {
             makepad_mbtile_reader::MbtilesReader::open(Path::new(path)).ok()
         });
+        log!(
+            "terrain scratch {}x{} ({:.1} MiB)",
+            spec.max_width,
+            spec.max_height,
+            TerrainScratch::capacity_bytes(spec.max_width, spec.max_height) as f64
+                / (1024.0 * 1024.0)
+        );
         Ok(Self {
             scratch: TerrainScratch::with_capacity(spec.max_width, spec.max_height),
             shader,
@@ -231,8 +238,15 @@ impl TerrainWorker {
             tiles,
         } = &mut tiles
         {
+            // Packed archive tiles decode here, on the render job.
+            let decoded = std::mem::take(tiles)
+                .into_iter()
+                .map(|(key, blob)| {
+                    Ok((key, blob.as_ref().map(TileBlob::decode).transpose()?))
+                })
+                .collect::<Result<HashMap<_, _>, String>>()?;
             self.shader
-                .replace_archive_tiles(*min_zoom, *max_zoom, std::mem::take(tiles))?;
+                .replace_archive_tiles(*min_zoom, *max_zoom, decoded)?;
         }
         self.shader.sun = request.sun;
         self.shader.cast_shadows = request.cast_shadows;
@@ -312,7 +326,7 @@ enum TerrainInput {
 pub struct TerrainLayer {
     enabled: bool,
     input: Option<TerrainInput>,
-    tile_cache: HashMap<TileKey, Option<Arc<[u8]>>>,
+    tile_cache: HashMap<TileKey, Option<TileBlob>>,
     pending: Option<PendingTerrainFetch>,
     last_view: Option<TerrainViewKey>,
     next_request_id: u64,
@@ -376,6 +390,12 @@ impl TerrainLayer {
         self.cancel_pending(cx);
         if !enabled {
             map.set_terrain_overlay(cx, TerrainOverlayData::default());
+            // The worker owns the render scratch (tens of MB at the caps) and
+            // the tile cache holds the fetched elevation tiles; neither has a
+            // use while the layer is off. Swapping the slot lets the last
+            // in-flight job drop the old worker on its own thread.
+            self.worker = Arc::new(Mutex::new(None));
+            self.tile_cache.clear();
             return;
         }
         if self.input.is_none() {
@@ -436,6 +456,11 @@ impl TerrainLayer {
         let render_scale = (width_limit / 4.0).min(height_limit / 3.0).max(0.25);
         let width = (render_scale * 4.0).round().max(1.0) as usize;
         let height = (render_scale * 3.0).round().max(1.0) as usize;
+        // The worker's scratch is reserved once at its cap, so the cap
+        // follows the viewport (rounded up so a small resize keeps the
+        // worker) instead of the absolute maximum.
+        let max_width = width.div_ceil(256).saturating_mul(256).clamp(1, max_width);
+        let max_height = height.div_ceil(256).saturating_mul(256).clamp(1, max_height);
 
         let zoom = map.map_zoom().unwrap_or(10.0);
         let tilt = map.tilt();

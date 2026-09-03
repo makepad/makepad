@@ -35,6 +35,72 @@ static TEST_LIVE_CHUNKS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static TEST_TOTAL_CHUNKS: AtomicUsize = AtomicUsize::new(0);
 
+// Owner accounting. These touch only the slow paths (a direct System
+// allocation above the largest size class, or a 64 KiB chunk refill/release),
+// never the per-block cached path.
+static LARGE_LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
+static LARGE_LIVE_COUNT: AtomicUsize = AtomicUsize::new(0);
+static CHUNK_LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
+/// A direct allocation at or above this size is recorded in `BIG_RING` so a
+/// memory report can name the single requests that grew the wasm heap.
+const BIG_EVENT_BYTES: usize = 4 * 1024 * 1024;
+const BIG_RING_LEN: usize = 32;
+static BIG_RING: [[AtomicUsize; 2]; BIG_RING_LEN] =
+    [const { [AtomicUsize::new(0), AtomicUsize::new(0)] }; BIG_RING_LEN];
+static BIG_RING_NEXT: AtomicUsize = AtomicUsize::new(0);
+static BIG_RING_READ: AtomicUsize = AtomicUsize::new(0);
+
+/// Bytes the allocator currently holds from the system heap, by kind.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WebAllocStats {
+    /// Live direct allocations (above the largest size class).
+    pub large_bytes: usize,
+    pub large_count: usize,
+    /// Live 64 KiB size-class chunks (including their cached free blocks).
+    pub chunk_bytes: usize,
+}
+
+pub(crate) fn stats() -> WebAllocStats {
+    WebAllocStats {
+        large_bytes: LARGE_LIVE_BYTES.load(Ordering::Relaxed),
+        large_count: LARGE_LIVE_COUNT.load(Ordering::Relaxed),
+        chunk_bytes: CHUNK_LIVE_BYTES.load(Ordering::Relaxed),
+    }
+}
+
+/// Linear memory size in bytes (0 outside wasm32).
+pub(crate) fn wasm_memory_bytes() -> usize {
+    #[cfg(target_arch = "wasm32")]
+    {
+        core::arch::wasm32::memory_size(0) * 65536
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        0
+    }
+}
+
+fn record_big_event(size: usize) {
+    let slot = BIG_RING_NEXT.fetch_add(1, Ordering::Relaxed) % BIG_RING_LEN;
+    BIG_RING[slot][0].store(size, Ordering::Relaxed);
+    BIG_RING[slot][1].store(wasm_memory_bytes(), Ordering::Relaxed);
+}
+
+/// Direct allocations of `BIG_EVENT_BYTES` or more since the previous call,
+/// oldest first, as `(bytes, linear memory bytes at that moment)`. At most
+/// the last `BIG_RING_LEN` are kept between calls.
+pub(crate) fn take_big_events() -> Vec<(usize, usize)> {
+    let next = BIG_RING_NEXT.load(Ordering::Relaxed);
+    let read = BIG_RING_READ.swap(next, Ordering::Relaxed);
+    let start = read.max(next.saturating_sub(BIG_RING_LEN));
+    (start..next)
+        .map(|index| {
+            let slot = &BIG_RING[index % BIG_RING_LEN];
+            (slot[0].load(Ordering::Relaxed), slot[1].load(Ordering::Relaxed))
+        })
+        .collect()
+}
+
 #[repr(C, align(16))]
 struct BlockHeader {
     chunk: *mut ChunkHeader,
@@ -86,7 +152,15 @@ unsafe impl GlobalAlloc for ThreadCachingAllocator {
                 // SAFETY: `layout` came from GlobalAlloc and is forwarded
                 // unchanged to System. Exercised by
                 // `alloc_free_across_all_classes`.
-                unsafe { system_alloc(layout, is_main) }
+                let ptr = unsafe { system_alloc(layout, is_main) };
+                if !ptr.is_null() {
+                    LARGE_LIVE_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+                    LARGE_LIVE_COUNT.fetch_add(1, Ordering::Relaxed);
+                    if layout.size() >= BIG_EVENT_BYTES {
+                        record_big_event(layout.size());
+                    }
+                }
+                ptr
             }
         }
     }
@@ -108,6 +182,8 @@ unsafe impl GlobalAlloc for ThreadCachingAllocator {
             }
         } else {
             let is_main = with_cache_mut(|cache| cache.is_main()).unwrap_or(true);
+            LARGE_LIVE_BYTES.fetch_sub(layout.size(), Ordering::Relaxed);
+            LARGE_LIVE_COUNT.fetch_sub(1, Ordering::Relaxed);
             // SAFETY: `ptr` and `layout` are the pair returned by System on the
             // direct path. Exercised by `alloc_free_across_all_classes`.
             unsafe { system_dealloc(ptr, layout, is_main) };
@@ -278,6 +354,7 @@ impl ThreadCache {
         if allocation.is_null() {
             return false;
         }
+        CHUNK_LIVE_BYTES.fetch_add(CHUNK_SIZE, Ordering::Relaxed);
         #[cfg(test)]
         {
             TEST_LIVE_CHUNKS.fetch_add(1, Ordering::Relaxed);
@@ -535,6 +612,7 @@ unsafe fn alloc_abandoned_block(class_index: usize) -> *mut u8 {
     if allocation.is_null() {
         return null_mut();
     }
+    CHUNK_LIVE_BYTES.fetch_add(allocation_size, Ordering::Relaxed);
     let chunk = allocation.cast::<ChunkHeader>();
     // SAFETY: allocation_size contains one aligned ChunkHeader and one aligned
     // BlockHeader plus its full size-class payload. Exercised by
@@ -680,6 +758,7 @@ unsafe fn release_chunk(chunk: *mut ChunkHeader, is_main: bool) {
     // before returning the chunk. Exercised by all allocator release tests.
     let allocation_size = unsafe { (*chunk).allocation_size };
     let layout = Layout::from_size_align(allocation_size, BLOCK_ALIGN).unwrap();
+    CHUNK_LIVE_BYTES.fetch_sub(allocation_size, Ordering::Relaxed);
     #[cfg(test)]
     TEST_LIVE_CHUNKS.fetch_sub(1, Ordering::Relaxed);
     // SAFETY: the caller owns the sole RELEASING claim and has proved that no

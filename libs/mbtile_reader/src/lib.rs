@@ -27,8 +27,8 @@ pub use codec::{
 };
 pub use map_tags::{DETAIL_POINT_EXTRA_KEYS, DETAIL_WAY_KEYS};
 pub use mkmap::{
-    mkmap_tile_id, mkmap_zxy_from_tile_id, BlobRef, MkmapLeaf, MkmapRoot, MkmapTileRef,
-    RootRecordRef, TileArchiveReader,
+    mkmap_tile_id, mkmap_zxy_from_tile_id, BlobRef, LeafParseLimits, MkmapLeaf, MkmapRoot,
+    MkmapTileRef, RootRecordRef, TileArchiveReader,
 };
 pub use protobuf::{read_pb_len_slice, read_pb_varint, skip_pb_field};
 #[cfg(not(target_arch = "wasm32"))]

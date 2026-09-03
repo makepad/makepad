@@ -306,6 +306,10 @@ pub struct WebParams {
     pub search: String,
     #[live]
     pub hash: String,
+    /// Phone-class browser (see `WasmBridge.is_phone`): the memory budget is
+    /// `PHONE_WEB_MEMORY_BUDGET_BYTES` and the wasm heap maximum is 512 MiB.
+    #[live]
+    pub is_phone: bool,
 }
 
 #[derive(Clone, Debug, Default, Script, ScriptHook)]
@@ -419,6 +423,10 @@ impl OsType {
 }
 
 const DEFAULT_MEMORY_BUDGET_BYTES: usize = 1536 * 1024 * 1024;
+/// Working budget for a phone-class browser tab: the wasm heap maximum there
+/// is 512 MiB and the tab dies around 1 GiB total, so elastic caches must
+/// stop well below the heap ceiling.
+pub const PHONE_WEB_MEMORY_BUDGET_BYTES: usize = 320 * 1024 * 1024;
 #[allow(dead_code)]
 const LOW_MEMORY_DEVICE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 #[allow(dead_code)]
@@ -522,7 +530,11 @@ fn windows_physical_memory_bytes() -> Option<u64> {
 
 #[cfg(target_arch = "wasm32")]
 fn platform_memory_budget(web_memory_bytes: usize) -> (usize, &'static str) {
-    (web_memory_bytes, "wasm memory maximum")
+    if web_memory_bytes == PHONE_WEB_MEMORY_BUDGET_BYTES {
+        (web_memory_bytes, "phone web policy")
+    } else {
+        (web_memory_bytes, "wasm memory maximum")
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -597,6 +609,31 @@ fn platform_memory_budget(default: usize) -> (usize, &'static str) {
     (default, "default")
 }
 
+/// Owner breakdown of the process memory the platform itself holds: CPU-side
+/// geometry staging, draw-list instance buffers, texture data, script
+/// resources (font files) and, on wasm, what the allocator holds from the
+/// linear memory. Walks the pools once; read it from a slow timer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CxMemoryReport {
+    /// Linear memory size on wasm; 0 elsewhere.
+    pub wasm_memory_bytes: usize,
+    /// Live direct (above the size classes) allocations on wasm; 0 elsewhere.
+    pub alloc_large_bytes: usize,
+    pub alloc_large_count: usize,
+    /// Live 64 KiB size-class chunks on wasm; 0 elsewhere.
+    pub alloc_chunk_bytes: usize,
+    /// CPU vertex/index staging still held by geometry slots (free slots included).
+    pub geometry_cpu_bytes: usize,
+    pub geometry_slots: usize,
+    /// CPU instance buffers held by draw items across every draw-list slot.
+    pub instance_cpu_bytes: usize,
+    pub draw_list_slots: usize,
+    /// CPU pixel data held by texture slots.
+    pub texture_cpu_bytes: usize,
+    /// Loaded script resource bytes (font files and other crate resources).
+    pub resource_bytes: usize,
+}
+
 impl Cx {
     /// Issue the next nonzero, process-wide uniform generation.
     #[inline]
@@ -632,6 +669,63 @@ impl Cx {
             budget / (1024 * 1024),
             source
         );
+    }
+
+    pub fn memory_report(&self) -> CxMemoryReport {
+        let mut report = CxMemoryReport::default();
+        #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+        {
+            let stats = crate::web_alloc::stats();
+            report.wasm_memory_bytes = crate::web_alloc::wasm_memory_bytes();
+            report.alloc_large_bytes = stats.large_bytes;
+            report.alloc_large_count = stats.large_count;
+            report.alloc_chunk_bytes = stats.chunk_bytes;
+        }
+        for slot in &self.geometries.0.pool {
+            report.geometry_slots += 1;
+            report.geometry_cpu_bytes = report
+                .geometry_cpu_bytes
+                .saturating_add(slot.item.vertices.capacity_bytes())
+                .saturating_add(slot.item.indices.capacity_bytes());
+        }
+        for slot in &self.draw_lists.0.pool {
+            report.draw_list_slots += 1;
+            for item in &slot.item.draw_items.buffer {
+                if let Some(instances) = &item.instances {
+                    report.instance_cpu_bytes = report
+                        .instance_cpu_bytes
+                        .saturating_add(instances.capacity().saturating_mul(4));
+                }
+            }
+        }
+        for slot in &self.textures.0.pool {
+            report.texture_cpu_bytes = report
+                .texture_cpu_bytes
+                .saturating_add(slot.item.format.cpu_data_bytes());
+        }
+        report.resource_bytes = self
+            .script_data
+            .resources
+            .resources
+            .borrow()
+            .iter()
+            .map(|resource| resource.loaded_len())
+            .fold(0usize, usize::saturating_add);
+        report
+    }
+
+    /// Direct allocations of 4 MiB or more since the previous call, oldest
+    /// first, as `(bytes, linear memory bytes at that moment)`. Empty outside
+    /// wasm. Names the requests that grew the heap between two reports.
+    pub fn take_big_allocation_events(&self) -> Vec<(usize, usize)> {
+        #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+        {
+            crate::web_alloc::take_big_events()
+        }
+        #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
+        {
+            Vec::new()
+        }
     }
 
     /// Select the application's font policy before script/theme registration.
