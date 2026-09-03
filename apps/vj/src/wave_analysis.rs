@@ -212,6 +212,75 @@ pub struct TrackGrid {
     pub confidence: f32,
 }
 
+/// The record's beat, as the audio thread reads it: worked out once per
+/// callback per deck and handed to every stage that wants to count.
+///
+/// A beat here is an OUTPUT length -- source seconds per beat divided by
+/// how fast the platter is turning -- so an echo set to a beat stays a
+/// beat when the record is pitched up, and a freeze the size of a beat
+/// is the size of a beat under a hand. The fraction is where the beat
+/// will be when the buffer being rendered ENDS, because that is the
+/// moment the next buffer's first sample belongs to.
+///
+/// Pure arithmetic on `Copy` values: nothing here allocates, locks or can
+/// fail, which is the whole contract of the thread that calls it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DeckClock {
+    /// Output seconds one beat takes at the platter's current speed. Zero
+    /// without a grid, and zero when the platter is stopped -- a brake's
+    /// bottom, a hand holding the record still -- because a beat that
+    /// never arrives has no length. Read it through [`beat_len`], which
+    /// refuses to hand that zero to anything that would divide by it.
+    ///
+    /// [`beat_len`]: Self::beat_len
+    pub beat_secs_out: f64,
+    /// Where in the beat, `[0, 1)`, the playhead will be at the end of
+    /// this buffer. Zero without a grid.
+    pub beat_frac_end: f64,
+    /// Source seconds per output second: the tempo fader's rate normally,
+    /// the platter's under a hand or a motor, negative under a reverse
+    /// hold, exactly one under a running splat, zero with no record.
+    pub platter_rate: f64,
+    /// Whether there is a measured grid behind the numbers at all.
+    pub has_grid: bool,
+}
+
+impl DeckClock {
+    /// The clock for a playhead at `pos_secs` turning at `platter_rate`,
+    /// about to travel `travel_secs` of source before the buffer ends.
+    ///
+    /// The caller decides the travel, because only it knows whether the
+    /// deck will read this buffer: a paused deck keeps its TEMPO (the
+    /// beat is still half a second long) and goes nowhere.
+    pub fn at(
+        grid: Option<&TrackGrid>,
+        pos_secs: f64,
+        platter_rate: f64,
+        travel_secs: f64,
+    ) -> DeckClock {
+        let platter_rate = if platter_rate.is_finite() { platter_rate } else { 0.0 };
+        let Some(grid) = grid.filter(|grid| grid.has_grid()) else {
+            return DeckClock { platter_rate, ..DeckClock::default() };
+        };
+        let speed = platter_rate.abs();
+        let beat_secs_out = if speed > 1e-6 { grid.beat_secs / speed } else { 0.0 };
+        let travel = if travel_secs.is_finite() { travel_secs } else { 0.0 };
+        DeckClock {
+            beat_secs_out,
+            beat_frac_end: grid.phase_at(pos_secs + travel),
+            platter_rate,
+            has_grid: true,
+        }
+    }
+
+    /// One beat in output seconds, or nothing: never the zero that stands
+    /// for "no grid" or "stopped", so no stage builds a zero-length delay
+    /// out of a record that is not moving.
+    pub fn beat_len(&self) -> Option<f64> {
+        (self.has_grid && self.beat_secs_out > 0.0).then_some(self.beat_secs_out)
+    }
+}
+
 impl Default for TrackGrid {
     fn default() -> Self {
         TrackGrid {
@@ -3945,6 +4014,73 @@ mod tests {
             timing.envelopes + timing.key + timing.prior > 0,
             "twelve seconds of audio measured as no time at all: {timing:?}"
         );
+    }
+
+    fn clock_grid() -> TrackGrid {
+        TrackGrid {
+            bpm: 120.0,
+            beat_secs: 0.5,
+            first_beat_secs: 0.0,
+            downbeat_phase: 0,
+            confidence: 0.9,
+        }
+    }
+
+    /// No grid is no clock -- but the platter is still reported, because
+    /// a stage that only wants the speed should not have to know whether
+    /// the record was ever measured.
+    #[test]
+    fn a_clock_without_a_grid_says_so_and_still_reports_the_platter() {
+        let clock = DeckClock::at(None, 3.0, 1.25, 0.01);
+        assert!(!clock.has_grid);
+        assert_eq!(clock.beat_secs_out, 0.0);
+        assert_eq!(clock.beat_len(), None);
+        assert_eq!(clock.beat_frac_end, 0.0);
+        assert_eq!(clock.platter_rate, 1.25);
+        // A grid with no beats is no grid.
+        let none = DeckClock::at(Some(&TrackGrid::default()), 3.0, 1.0, 0.01);
+        assert!(!none.has_grid);
+        assert_eq!(none.beat_len(), None);
+        // And a speed that is not a number is a stopped platter.
+        assert_eq!(DeckClock::at(Some(&clock_grid()), 3.0, f64::NAN, 0.0).platter_rate, 0.0);
+    }
+
+    /// A beat is an OUTPUT length: pitched up it is shorter, backwards it
+    /// is the same length, and stopped it has none.
+    #[test]
+    fn a_clock_reads_the_beat_length_at_the_platters_speed() {
+        let grid = clock_grid();
+        assert_eq!(DeckClock::at(Some(&grid), 0.0, 1.0, 0.0).beat_secs_out, 0.5);
+        let fast = DeckClock::at(Some(&grid), 0.0, 1.25, 0.0);
+        assert!((fast.beat_secs_out - 0.4).abs() < 1e-12, "{}", fast.beat_secs_out);
+        assert_eq!(fast.beat_len(), Some(fast.beat_secs_out));
+        let back = DeckClock::at(Some(&grid), 0.0, -1.0, 0.0);
+        assert_eq!(back.beat_secs_out, 0.5, "a length has no sign");
+        assert_eq!(back.platter_rate, -1.0);
+        let still = DeckClock::at(Some(&grid), 0.0, 0.0, 0.0);
+        assert_eq!(still.beat_secs_out, 0.0);
+        assert_eq!(still.beat_len(), None, "a beat that never arrives has no length");
+        assert!(still.has_grid, "but the grid is still there");
+    }
+
+    /// The fraction is for the END of the buffer: the same arithmetic the
+    /// grid uses everywhere, pushed forward by the travel the caller says
+    /// the deck will make.
+    #[test]
+    fn a_clock_says_where_the_beat_will_be_when_the_buffer_ends() {
+        let grid = clock_grid();
+        let travel = 512.0 / 48_000.0;
+        let ahead = DeckClock::at(Some(&grid), 0.1, 1.0, travel);
+        assert_eq!(ahead.beat_frac_end, grid.phase_at(0.1 + travel));
+        let faster = DeckClock::at(Some(&grid), 0.1, 2.0, 2.0 * travel);
+        assert_eq!(faster.beat_frac_end, grid.phase_at(0.1 + 2.0 * travel));
+        // Backwards stays inside [0, 1): the grid's own wrap does that.
+        let back = DeckClock::at(Some(&grid), 0.1, -1.0, -travel);
+        assert_eq!(back.beat_frac_end, grid.phase_at(0.1 - travel));
+        assert!((0.0..1.0).contains(&back.beat_frac_end));
+        // And a deck told it will not travel answers for where it IS.
+        let parked = DeckClock::at(Some(&grid), 0.1, 1.0, 0.0);
+        assert_eq!(parked.beat_frac_end, grid.phase_at(0.1));
     }
 
     #[test]

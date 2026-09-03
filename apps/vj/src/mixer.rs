@@ -24,6 +24,7 @@ use crate::decks::{crossfader_gains, DeckId, FadeCurve, ScratchMotion, SpinMotio
 use crate::loop_splat::{
     SplatGrid, SplatPart, SplatRow, SplatSnapshot, SPLAT_COLS, SPLAT_ROWS,
 };
+use crate::wave_analysis::{DeckClock, TrackGrid};
 use crate::music_dsp::{
     audible, knob, knob64,
     DeckEq, FrameSource, MotorEnd, ParamRamp, RateReader, ScratchRamp, Stretcher, STEM_COUNT,
@@ -526,6 +527,9 @@ pub struct DeckSnapshot {
     /// publishes 0.0, which is also what `Default` gives before the first
     /// buffer: nothing is turning either way.
     pub platter_rate: f64,
+    /// The beat as the last rendered buffer saw it. Default before the
+    /// first buffer and on a deck with no grid; `has_grid` says which.
+    pub clock: DeckClock,
     pub splat: Option<SplatSnapshot>,
 }
 
@@ -844,6 +848,11 @@ struct PendingLoad {
     pcm: Arc<TrackPcm>,
     /// Whether the deck comes straight back up on the new track.
     play: bool,
+    /// The new record's grid, when it arrived before the swap was spent:
+    /// a fast sidecar lands the analysis while the old track is still
+    /// fading, and a grid written onto the OLD voice would be nulled by
+    /// the swap it was meant to survive.
+    grid: Option<TrackGrid>,
 }
 
 /// What a swap took off a deck, kept alive until a caller thread can drop
@@ -859,6 +868,14 @@ struct DeckVoice {
     pcm: Option<Arc<TrackPcm>>,
     stems: Option<Arc<TrackStems>>,
     splat: Option<SplatState>,
+    /// The record's published beat grid, sent by the engine wherever it
+    /// writes its own. `Copy`, so the callback never frees one; written
+    /// from a caller thread only, and parked with a pending load.
+    grid: Option<TrackGrid>,
+    /// The beat as this buffer sees it: worked out ONCE per callback in
+    /// the prelude and read by every stage that counts. Never written
+    /// from the frame loop.
+    clock: DeckClock,
     /// Playhead in SOURCE frames. Fractional, and free to run backwards
     /// under a hand on the waveform.
     pos: f64,
@@ -938,6 +955,8 @@ impl DeckVoice {
             pcm: None,
             stems: None,
             splat: None,
+            grid: None,
+            clock: DeckClock::default(),
             pos: 0.0,
             playing: false,
             loop_span: None,
@@ -995,6 +1014,11 @@ impl DeckVoice {
         }
         let Some(load) = self.pending.take() else { return };
         self.retired.pcm = self.pcm.replace(load.pcm);
+        // The grid is the record's: the one that was parked with the load,
+        // or nothing until the new record's analysis lands. A `Copy`
+        // write, so nothing is freed here.
+        self.grid = load.grid;
+        self.clock = DeckClock::default();
         self.retired.stems = self.stems.take();
         self.retired.splat = self.splat.take();
         self.stem_seam = Ramp::at(0.0);
@@ -1657,7 +1681,11 @@ impl Mixer {
     fn publish_deck(&self, s: &MixState, index: usize) {
         let d = &s.decks[index];
         let snapshot = match &d.pcm {
-            None => DeckSnapshot { scratching: d.scratch.active(), ..DeckSnapshot::default() },
+            None => DeckSnapshot {
+                scratching: d.scratch.active(),
+                clock: d.clock,
+                ..DeckSnapshot::default()
+            },
             Some(pcm) => DeckSnapshot {
                 position_secs: d.playhead_frames() / pcm.sample_rate.max(1) as f64,
                 duration_secs: pcm.seconds(),
@@ -1670,6 +1698,7 @@ impl Mixer {
                     true => d.scratch.rate() as f64,
                     false => d.rate.current() as f64,
                 },
+                clock: d.clock,
                 splat: d.splat.as_ref().map(SplatState::snapshot),
             },
         };
@@ -2041,6 +2070,9 @@ impl Mixer {
                 d.pcm = Some(pcm);
                 d.stems = None;
                 d.splat = None;
+                // A fresh record has no grid until its analysis lands.
+                d.grid = None;
+                d.clock = DeckClock::default();
                 d.playing = false;
                 d.pause_at = None;
                 d.stem_seam = Ramp::at(0.0);
@@ -2050,7 +2082,7 @@ impl Mixer {
                 d.eq.reset();
                 d.reset_blend();
             } else {
-                d.pending = Some(PendingLoad { pcm, play: keep_playing });
+                d.pending = Some(PendingLoad { pcm, play: keep_playing, grid: None });
                 // The give-back belongs to the track that is leaving, and
                 // that track is about to be gone.
                 d.pause_at = None;
@@ -2080,6 +2112,8 @@ impl Mixer {
         d.pcm = None;
         d.stems = None;
         d.splat = None;
+        d.grid = None;
+        d.clock = DeckClock::default();
         d.playing = false;
         d.transport = Ramp::at(0.0);
         // The gestures go with the track they were made on. A reverse hold
@@ -2312,6 +2346,34 @@ impl Mixer {
             span: d.loop_span,
         });
         true
+    }
+
+    /// The record's published beat grid, or none. Stored as given: the
+    /// engine sends its own `true_grid`, so a synthetic grid with no
+    /// beats never reaches here and the filter lives in one place.
+    ///
+    /// While a load is parked the grid is parked with it, because it
+    /// belongs to the record on its way IN and the swap would otherwise
+    /// throw it away. The snapshot is republished so the clock is honest
+    /// in the same tick rather than one buffer later.
+    pub fn set_deck_grid(&self, deck: DeckId, grid: Option<TrackGrid>) {
+        let mut s = self.state.lock().unwrap();
+        let index = deck.index();
+        let d = &mut s.decks[index];
+        match d.pending.as_mut() {
+            Some(load) => load.grid = grid,
+            None => {
+                d.grid = grid;
+                let platter = d.clock.platter_rate;
+                let pos_secs = d
+                    .pcm
+                    .as_ref()
+                    .map(|pcm| d.playhead_frames() / pcm.sample_rate.max(1) as f64)
+                    .unwrap_or(0.0);
+                d.clock = DeckClock::at(d.grid.as_ref(), pos_secs, platter, 0.0);
+            }
+        }
+        self.publish_deck(&s, index);
     }
 
     /// How hard this deck's sweep rings at its corner.
@@ -2654,6 +2716,10 @@ impl Mixer {
         dst.stem_seam = src.stem_seam;
         // A splat grid is the other deck's launch state, not the record.
         dst.splat = None;
+        // The beat grid IS the record's, and comes with it -- a double onto
+        // a deck with no grid would otherwise silence the double's clock.
+        dst.grid = src.grid;
+        dst.clock = src.clock;
         dst.loop_span = src.loop_span;
         dst.slip = None;
         dst.pause_at = None;
@@ -3078,6 +3144,31 @@ impl Mixer {
             // the expensive part and a buffer is well under a millisecond.
             voice.eq.set_sample_rate(rate);
             voice.eq.prepare_block();
+            // The musical clock, once per buffer per deck, from the same
+            // platter the snapshot reports: a running splat advances at
+            // the record's own speed whatever the fader says, a hand or
+            // a motor owns the rate while it lasts, and otherwise it is
+            // the fader's. Travel is only promised when the read path
+            // will actually read this buffer -- the same four exits it
+            // takes -- so a paused deck keeps its tempo and goes nowhere.
+            let platter = if voice.pcm.is_none() {
+                0.0
+            } else if voice.splat.as_ref().is_some_and(|splat| splat.active) {
+                1.0
+            } else if voice.scratch.active() {
+                voice.scratch.rate() as f64
+            } else {
+                voice.rate.current() as f64
+            };
+            let pos_secs = voice
+                .pcm
+                .as_ref()
+                .map(|pcm| voice.playhead_frames() / pcm.sample_rate.max(1) as f64)
+                .unwrap_or(0.0);
+            let reads = voice.scratch.active()
+                || !(voice.transport.current <= 0.0 && (!voice.playing || voice.ended));
+            let travel = if reads { platter * frames as f64 / rate as f64 } else { 0.0 };
+            voice.clock = DeckClock::at(voice.grid.as_ref(), pos_secs, platter, travel);
             // The ghost moves here, once per buffer, and not in the frame
             // loop below: its rate is latched so a buffer is one multiply,
             // and the read path has four early exits (no pcm, empty pcm,
@@ -5144,6 +5235,160 @@ mod tests {
         assert!((a - b).abs() < 1e-9, "{a} against {b}");
         assert!(mixer.deck_snapshot(DeckId::B).playing, "and it is running");
         assert!(b > 0.0, "on the record, not at its head");
+    }
+
+    fn clock_grid(bpm: f64) -> TrackGrid {
+        TrackGrid {
+            bpm,
+            beat_secs: 60.0 / bpm,
+            first_beat_secs: 0.1,
+            downbeat_phase: 0,
+            confidence: 0.9,
+        }
+    }
+
+    /// The callback works the clock out once per buffer and the snapshot
+    /// carries it: the beat's length at the platter's speed, and the
+    /// fraction predicted for the END of the buffer, which is exactly
+    /// where the playhead then is.
+    #[test]
+    fn a_deck_publishes_its_clock_from_the_callback() {
+        let mixer = Mixer::new();
+        mixer.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 8.0));
+        assert!(!mixer.deck_snapshot(DeckId::A).clock.has_grid, "no grid yet");
+        let grid = clock_grid(120.0);
+        mixer.set_deck_grid(DeckId::A, Some(grid));
+        assert!(mixer.deck_snapshot(DeckId::A).clock.has_grid, "the setter republishes");
+        mixer.set_deck_playing(DeckId::A, true);
+        spin_render(&mixer, 8);
+        render(&mixer, 48_000.0, 512);
+        let snap = mixer.deck_snapshot(DeckId::A);
+        assert!(snap.clock.has_grid);
+        assert!((snap.clock.beat_secs_out - 0.5).abs() < 1e-9, "{}", snap.clock.beat_secs_out);
+        assert_eq!(snap.clock.beat_len(), Some(snap.clock.beat_secs_out));
+        assert_eq!(snap.clock.platter_rate, 1.0);
+        let arrived = grid.phase_at(snap.position_secs);
+        assert!(
+            (snap.clock.beat_frac_end - arrived).abs() < 1e-6,
+            "predicted {} for the buffer's end, the head arrived at {arrived}",
+            snap.clock.beat_frac_end
+        );
+    }
+
+    /// A beat is an output length: pitch the record up and it gets shorter.
+    #[test]
+    fn the_clock_follows_the_tempo_fader() {
+        let mixer = Mixer::new();
+        mixer.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 8.0));
+        mixer.set_deck_grid(DeckId::A, Some(clock_grid(120.0)));
+        mixer.set_deck_playing(DeckId::A, true);
+        mixer.set_deck_rate(DeckId::A, 1.25);
+        spin_render(&mixer, 64);
+        let clock = mixer.deck_snapshot(DeckId::A).clock;
+        assert!((clock.platter_rate - 1.25).abs() < 1e-6, "{}", clock.platter_rate);
+        assert!((clock.beat_secs_out - 0.4).abs() < 1e-6, "{}", clock.beat_secs_out);
+    }
+
+    /// Pause keeps the TEMPO -- the beat is still half a second long, so
+    /// an echo set to a beat does not collapse -- and promises no travel,
+    /// so the fraction is for where the head IS.
+    #[test]
+    fn a_paused_deck_keeps_its_tempo_and_does_not_travel() {
+        let mixer = Mixer::new();
+        mixer.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 8.0));
+        let grid = clock_grid(120.0);
+        mixer.set_deck_grid(DeckId::A, Some(grid));
+        mixer.set_deck_playing(DeckId::A, true);
+        spin_render(&mixer, 8);
+        mixer.set_deck_playing(DeckId::A, false);
+        spin_render(&mixer, 64);
+        let snap = mixer.deck_snapshot(DeckId::A);
+        assert!(!snap.playing);
+        assert!(snap.clock.has_grid);
+        assert!((snap.clock.beat_secs_out - 0.5).abs() < 1e-9, "{}", snap.clock.beat_secs_out);
+        assert_eq!(snap.clock.beat_frac_end, grid.phase_at(snap.position_secs));
+    }
+
+    /// The engine sends `true_grid`, but the mixer holds the line too: a
+    /// grid with no beats, or none at all, is no clock.
+    #[test]
+    fn a_grid_with_no_beats_is_no_grid_to_the_callback() {
+        let mixer = Mixer::new();
+        mixer.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 8.0));
+        mixer.set_deck_playing(DeckId::A, true);
+        mixer.set_deck_grid(DeckId::A, Some(TrackGrid::default()));
+        spin_render(&mixer, 4);
+        let clock = mixer.deck_snapshot(DeckId::A).clock;
+        assert!(!clock.has_grid);
+        assert_eq!(clock.beat_len(), None);
+        assert_eq!(clock.platter_rate, 1.0, "the platter is still reported");
+        mixer.set_deck_grid(DeckId::A, Some(clock_grid(120.0)));
+        spin_render(&mixer, 4);
+        assert!(mixer.deck_snapshot(DeckId::A).clock.has_grid);
+        mixer.set_deck_grid(DeckId::A, None);
+        spin_render(&mixer, 4);
+        assert!(!mixer.deck_snapshot(DeckId::A).clock.has_grid);
+    }
+
+    /// The grid is the record's: a double carries it (a different grid on
+    /// the other deck proves it was carried, not kept), a clear drops it,
+    /// a fresh load starts without one, and a grid that lands while a
+    /// load is parked belongs to the record coming IN -- the outgoing one
+    /// keeps its own beat until it is gone.
+    #[test]
+    fn the_grid_travels_with_the_record_and_leaves_with_it() {
+        let mixer = Mixer::new();
+        mixer.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 8.0));
+        mixer.install_deck(DeckId::B, tone_pcm(330.0, 48_000, 8.0));
+        mixer.set_deck_grid(DeckId::A, Some(clock_grid(120.0)));
+        mixer.set_deck_grid(DeckId::B, Some(clock_grid(126.0)));
+        mixer.set_deck_playing(DeckId::A, true);
+        mixer.set_deck_playing(DeckId::B, true);
+        spin_render(&mixer, 4);
+        assert!((mixer.deck_snapshot(DeckId::B).clock.beat_secs_out - 60.0 / 126.0).abs() < 1e-9);
+        mixer.clone_deck(DeckId::A, DeckId::B);
+        spin_render(&mixer, 4);
+        let b = mixer.deck_snapshot(DeckId::B).clock;
+        assert!((b.beat_secs_out - 0.5).abs() < 1e-9, "the double reads its record's beat: {}", b.beat_secs_out);
+        mixer.clear_deck(DeckId::B);
+        spin_render(&mixer, 4);
+        assert!(!mixer.deck_snapshot(DeckId::B).clock.has_grid, "a cleared deck has no beat");
+        mixer.install_deck(DeckId::B, tone_pcm(330.0, 48_000, 8.0));
+        spin_render(&mixer, 4);
+        assert!(!mixer.deck_snapshot(DeckId::B).clock.has_grid, "a fresh record has none until its analysis lands");
+        // A load over the playing deck A parks the new record; the grid
+        // that lands now is the new record's.
+        mixer.install_deck_over(DeckId::A, tone_pcm(440.0, 48_000, 8.0), true);
+        mixer.set_deck_grid(DeckId::A, Some(clock_grid(126.0)));
+        let outgoing = mixer.deck_snapshot(DeckId::A).clock;
+        assert!((outgoing.beat_secs_out - 0.5).abs() < 1e-9, "the outgoing record keeps its beat while it fades");
+        spin_render(&mixer, 32);
+        let incoming = mixer.deck_snapshot(DeckId::A).clock;
+        assert!(incoming.has_grid, "the parked grid came in with the record");
+        assert!(
+            (incoming.beat_secs_out - 60.0 / 126.0).abs() < 1e-9,
+            "and it is the new record's: {}",
+            incoming.beat_secs_out
+        );
+    }
+
+    /// A running splat advances at the record's own speed whatever the
+    /// tempo fader says, so its clock reports the platter at exactly one
+    /// -- and hands the fader back the moment the splat stops.
+    #[test]
+    fn a_running_splat_keeps_the_records_own_tempo() {
+        let (mixer, rate) = splat_fixture(false);
+        mixer.set_deck_grid(DeckId::A, Some(clock_grid(120.0)));
+        mixer.set_deck_rate(DeckId::A, 1.25);
+        render_count(&mixer, rate, 4096, 256);
+        let clock = mixer.deck_snapshot(DeckId::A).clock;
+        assert_eq!(clock.platter_rate, 1.0, "the splat owns the platter");
+        assert!((clock.beat_secs_out - 0.5).abs() < 1e-9, "{}", clock.beat_secs_out);
+        mixer.set_deck_splat_enabled(DeckId::A, false);
+        render_count(&mixer, rate, 4096, 256);
+        let clock = mixer.deck_snapshot(DeckId::A).clock;
+        assert!((clock.platter_rate - 1.25).abs() < 1e-6, "{}", clock.platter_rate);
+        assert!((clock.beat_secs_out - 0.4).abs() < 1e-6, "{}", clock.beat_secs_out);
     }
 
     #[test]

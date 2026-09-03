@@ -13929,6 +13929,7 @@ p2 {}
                 DeckCmd::SetCurve { curve } => self.mixer.set_curve(curve),
                 // ---- music mode: tempo, scratch, tone, stems ----
                 DeckCmd::SetRate { deck, rate } => self.mixer.set_deck_rate(deck, rate),
+                DeckCmd::SetGrid { deck, grid } => self.mixer.set_deck_grid(deck, grid),
                 DeckCmd::SeekSeconds { deck, secs } => {
                     self.mixer.seek_deck_seconds(deck, secs)
                 }
@@ -16574,7 +16575,7 @@ p2 {}
                                 // before, likewise: it outranks the
                                 // analysis when that lands.
                                 if let Some((bpm, first, phase, locked)) = record.grid() {
-                                    self.decks.restore_grid(
+                                    let cmds = self.decks.restore_grid(
                                         deck,
                                         crate::wave_analysis::TrackGrid {
                                             bpm,
@@ -16585,6 +16586,7 @@ p2 {}
                                         },
                                         locked,
                                     );
+                                    self.run_deck_cmds(cx, cmds);
                                 }
                                 if let Some(cue) =
                                     record.cue().filter(|secs| *secs > 0.0)

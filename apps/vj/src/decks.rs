@@ -1586,6 +1586,10 @@ pub enum DeckCmd {
     CloneDeck { from: DeckId, to: DeckId },
     /// Playback rate multiplier (tempo). Pitch-preserving when key lock is on.
     SetRate { deck: DeckId, rate: f64 },
+    /// The record's beat grid as the engine holds it, or none: sent from
+    /// EVERY path that writes one, so the callback's musical clock reads
+    /// the grid the operator sees and never one the engine has replaced.
+    SetGrid { deck: DeckId, grid: Option<TrackGrid> },
     /// Absolute playhead in source seconds.
     SeekSeconds { deck: DeckId, secs: f64 },
     /// Pointer on the waveform: vinyl-style rate override.
@@ -3354,6 +3358,7 @@ impl DeckEngine {
             if !state.grid_placed && !state.grid_locked {
                 state.grid = Some(grid);
                 state.tempo_map = tempo_map.filter(|map| !map.is_empty());
+                cmds.push(DeckCmd::SetGrid { deck, grid: state.true_grid() });
             }
             if let Some(first) = sound
                 .map(|span| span.first_secs)
@@ -4482,11 +4487,10 @@ impl DeckEngine {
         // moving tempo is concerned: it was fitted against the line that
         // has just been replaced.
         state.tempo_map = None;
-        let cmds = if self.deck(deck).synced || self.auto_sync {
-            self.apply_auto_sync_with(Some(SyncQuantize::Beat))
-        } else {
-            Vec::new()
-        };
+        let mut cmds = vec![self.grid_cmd(deck)];
+        if self.deck(deck).synced || self.auto_sync {
+            cmds.extend(self.apply_auto_sync_with(Some(SyncQuantize::Beat)));
+        }
         Some((grid, cmds))
     }
 
@@ -4546,11 +4550,10 @@ impl DeckEngine {
         state.grid = Some(grid);
         state.grid_placed = true;
         state.tempo_map = None;
-        let cmds = if self.deck(deck).synced || self.auto_sync {
-            self.apply_auto_sync_with(Some(SyncQuantize::Beat))
-        } else {
-            Vec::new()
-        };
+        let mut cmds = vec![self.grid_cmd(deck)];
+        if self.deck(deck).synced || self.auto_sync {
+            cmds.extend(self.apply_auto_sync_with(Some(SyncQuantize::Beat)));
+        }
         Some((grid, cmds))
     }
 
@@ -4574,11 +4577,10 @@ impl DeckEngine {
             return None;
         }
         self.deck_mut(deck).grid = Some(grid);
-        let cmds = if self.deck(deck).synced || self.auto_sync {
-            self.apply_auto_sync_with(Some(SyncQuantize::Beat))
-        } else {
-            Vec::new()
-        };
+        let mut cmds = vec![self.grid_cmd(deck)];
+        if self.deck(deck).synced || self.auto_sync {
+            cmds.extend(self.apply_auto_sync_with(Some(SyncQuantize::Beat)));
+        }
         Some((grid, cmds))
     }
 
@@ -4588,16 +4590,23 @@ impl DeckEngine {
     }
 
     /// A grid a hand corrected on this record before, and whether they
-    /// settled it.
-    pub fn restore_grid(&mut self, deck: DeckId, grid: TrackGrid, locked: bool) {
+    /// settled it. Returns the command that carries it to the mixer.
+    pub fn restore_grid(&mut self, deck: DeckId, grid: TrackGrid, locked: bool) -> Vec<DeckCmd> {
         if !grid.has_grid() {
-            return;
+            return Vec::new();
         }
         let state = self.deck_mut(deck);
         state.grid = Some(grid);
         state.grid_placed = true;
         state.grid_locked = locked;
         state.tempo_map = None;
+        vec![self.grid_cmd(deck)]
+    }
+
+    /// The command that hands this deck's grid, as it stands, to the
+    /// mixer. `true_grid`, so a grid with no beats is no grid there.
+    fn grid_cmd(&self, deck: DeckId) -> DeckCmd {
+        DeckCmd::SetGrid { deck, grid: self.deck(deck).true_grid() }
     }
 
     /// Flip the deck's grid half a beat. The analyser's known failure mode
@@ -4638,11 +4647,10 @@ impl DeckEngine {
         }
         state.phase_flipped = !state.phase_flipped;
         let flipped = *grid;
-        let cmds = if self.deck(deck).synced || self.auto_sync {
-            self.apply_auto_sync_with(Some(SyncQuantize::Beat))
-        } else {
-            Vec::new()
-        };
+        let mut cmds = vec![self.grid_cmd(deck)];
+        if self.deck(deck).synced || self.auto_sync {
+            cmds.extend(self.apply_auto_sync_with(Some(SyncQuantize::Beat)));
+        }
         Some((flipped, cmds))
     }
 
@@ -6402,6 +6410,46 @@ mod tests {
         e.deck_mut(DeckId::B).phase_offset_beats = 0.25;
         e.eject(DeckId::B);
         assert_eq!(e.deck(DeckId::B).phase_offset_beats, 0.0);
+    }
+
+    /// The mixer's clock reads the grid the engine holds, so every path
+    /// that writes one sends it -- and a landing that wrote nothing,
+    /// because a hand had placed or locked the grid, sends nothing.
+    #[test]
+    fn every_grid_the_engine_writes_is_sent_to_the_mixer() {
+        fn sent(cmds: &[DeckCmd]) -> Vec<Option<f64>> {
+            cmds.iter()
+                .filter_map(|cmd| match cmd {
+                    DeckCmd::SetGrid { deck: DeckId::A, grid } => Some(grid.map(|g| g.bpm)),
+                    _ => None,
+                })
+                .collect()
+        }
+        let mut e = DeckEngine::new();
+        let (deck, gen) = load_gen(&e.click(item(1), DeckTarget::A));
+        e.track_ready(deck, gen, 300.0);
+        // The analysis landing.
+        let cmds = e.grid_ready(deck, gen, grid(120.0, 0.0), None, None);
+        assert_eq!(sent(&cmds), vec![Some(120.0)]);
+        // A hand's correction, in each of its forms.
+        e.observe(DeckId::A, 30.08, true);
+        let (_, cmds) = e.edit_grid(DeckId::A, GridEdit::Scale(2.0)).unwrap();
+        assert_eq!(sent(&cmds), vec![Some(240.0)]);
+        let (_, cmds) = e.tap_grid(DeckId::A, 128.0, 30.0).unwrap();
+        assert_eq!(sent(&cmds), vec![Some(128.0)]);
+        let (_, cmds) = e.undo_grid(DeckId::A).unwrap();
+        assert_eq!(sent(&cmds), vec![Some(240.0)]);
+        let (_, cmds) = e.flip_beat_phase(DeckId::A).unwrap();
+        assert_eq!(sent(&cmds), vec![Some(240.0)]);
+        // A grid remembered from a previous night.
+        let cmds = e.restore_grid(DeckId::A, grid(96.0, 0.25), true);
+        assert_eq!(sent(&cmds), vec![Some(96.0)]);
+        assert!(e.restore_grid(DeckId::A, TrackGrid::default(), false).is_empty());
+        // And the analysis landing on a placed, locked grid writes
+        // nothing, so it sends nothing: the mixer keeps the hand's.
+        let cmds = e.grid_ready(deck, gen, grid(120.0, 0.0), None, None);
+        assert!(sent(&cmds).is_empty(), "{cmds:?}");
+        assert_eq!(e.deck(DeckId::A).grid.unwrap().bpm, 96.0);
     }
 
     /// The analyser rules a grid; a hand corrects it. The nearest ruling
