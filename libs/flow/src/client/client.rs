@@ -1,6 +1,7 @@
 use super::http::{HttpClient, Method};
 use crate::{
-    EvalError, EventsPage, FlowDefinition, FlowSummary, Graph, Health, PutFlowResponse,
+    CreateFromTemplateRequest, EvalError, EventsPage, FlowDefinition, FlowSummary, Graph, Health,
+    PutFlowResponse, TemplateResponse, TemplateSummary,
 };
 use makepad_micro_serde::{DeJson, SerJson};
 use makepad_strict_json::Value;
@@ -151,6 +152,17 @@ impl FlowClient {
         parse_json(&body)
     }
 
+    pub fn templates(&self) -> ClientResult<Vec<TemplateSummary>> {
+        let body = self.call(Method::Get, "/v1/templates", None, true, None)?;
+        decode(&body, "template list")
+    }
+
+    pub fn template(&self, name: &str) -> ClientResult<TemplateResponse> {
+        let target = format!("/v1/templates/{}", flow_name(name)?);
+        let body = self.call(Method::Get, &target, None, true, None)?;
+        decode(&body, "template response")
+    }
+
     pub fn flows(&self) -> ClientResult<Vec<FlowSummary>> {
         let body = self.call(Method::Get, "/v1/flows", None, true, None)?;
         decode(&body, "flow list")
@@ -169,6 +181,19 @@ impl FlowClient {
             .into_bytes();
         let response = self.call(Method::Put, &target, Some(&body), true, None)?;
         decode(&response, "put source response")
+    }
+
+    pub fn create_from_template(
+        &self,
+        name: &str,
+        template: &str,
+    ) -> ClientResult<PutFlowResponse> {
+        let target = format!("/v1/flows/{}", flow_name(name)?);
+        let body = CreateFromTemplateRequest { template: template.to_string() }
+            .serialize_json()
+            .into_bytes();
+        let response = self.call(Method::Post, &target, Some(&body), true, None)?;
+        decode(&response, "create from template response")
     }
 
     pub fn put_graph(&self, name: &str, graph: &Graph) -> ClientResult<PutFlowResponse> {

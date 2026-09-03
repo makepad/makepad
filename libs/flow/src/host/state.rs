@@ -16,7 +16,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, SystemTime};
 
-pub(crate) const MAX_SOURCE_BYTES: u64 = 1024 * 1024;
+pub(crate) const MAX_SOURCE_BYTES: u64 = graph::MAX_SOURCE_BYTES as u64;
 
 #[derive(Clone, Debug)]
 pub struct Definition {
@@ -205,15 +205,7 @@ impl FlowState {
             let metadata = std::fs::metadata(&path)
                 .map_err(|error| ServerError::io("stat flow source", error))?;
             if metadata.len() > MAX_SOURCE_BYTES {
-                state.set_load_error(
-                    name,
-                    EvalError {
-                        file: path.display().to_string(),
-                        line: 1,
-                        col: 1,
-                        message: "flow source exceeds 1 MiB".to_string(),
-                    },
-                );
+                state.set_load_error(name, graph::source_size_error(&path.display().to_string()));
                 continue;
             }
             let source = std::fs::read_to_string(&path)
@@ -254,6 +246,18 @@ impl FlowState {
         let path = self.root.join("flows").join(format!("{name}.splash"));
         atomic_write(&path, source.as_bytes(), self.temp_serial)?;
         Ok(self.set_source(name, source))
+    }
+
+    pub(crate) fn create_source(
+        &mut self,
+        name: String,
+        source: String,
+    ) -> Result<Option<SourceResult>, ServerError> {
+        let path = self.root.join("flows").join(format!("{name}.splash"));
+        if self.definitions.contains_key(&name) || path.exists() {
+            return Ok(None);
+        }
+        self.put_source(name, source).map(Some)
     }
 
     pub(crate) fn revert(&mut self, name: &str, revision: u64) -> Result<Option<SourceResult>, ServerError> {
@@ -365,10 +369,10 @@ impl FlowState {
         }
     }
 
-    pub(crate) fn set_watched_oversize(&mut self, name: String, error: EvalError) {
+    pub(crate) fn set_watched_oversize(&mut self, name: String, _error: EvalError) {
         let path = self.root.join("flows").join(format!("{name}.splash"));
-        if std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > MAX_SOURCE_BYTES) {
-            self.set_load_error(name, error);
+        if std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() > MAX_SOURCE_BYTES) {
+            self.set_load_error(name, graph::source_size_error(&path.display().to_string()));
         }
     }
 
