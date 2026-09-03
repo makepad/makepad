@@ -2413,7 +2413,18 @@ impl Mixer {
 
     /// The deck's loop in source SECONDS, converted here against the
     /// track's own rate so the render path only ever deals in frames.
-    pub fn set_deck_loop_span(&self, deck: DeckId, span: Option<(f64, f64)>) {
+    /// Install a loop span, and do what the gesture MEANT for the playhead.
+    ///
+    /// The engine decides the intent from a position mirror the UI pump
+    /// refreshes twenty times a second; the head here is the real one,
+    /// sample by sample, so the decision is made against the truth rather
+    /// than guessed from a bare span.
+    pub fn set_deck_loop_span(
+        &self,
+        deck: DeckId,
+        span: Option<(f64, f64)>,
+        seek: crate::decks::LoopSeek,
+    ) {
         let mut s = self.state.lock().unwrap();
         let d = &mut s.decks[deck.index()];
         let Some(pcm) = d.pcm.as_ref() else {
@@ -2425,6 +2436,8 @@ impl Mixer {
         // can land a hair ABOVE it, and an OUT past the last frame lets the
         // end-of-track check win over the wrap — a dead deck with LOOP lit.
         let frames = pcm.frames.len() as f64;
+        // The span the head belonged to, taken before it is replaced.
+        let was = d.loop_span;
         d.loop_span = span.map(|(start, end)| {
             (start.max(0.0) * rate, (end.max(0.0) * rate).min(frames))
         });
@@ -2433,8 +2446,15 @@ impl Mixer {
         // deck never renders — without this, a resize on a paused deck
         // parks the playhead outside the span until play is pressed.
         if let Some((start, end)) = d.loop_span {
-            if d.playhead_frames() >= end {
-                let from = d.playhead_frames();
+            let from = d.playhead_frames();
+            // Behind IN is folded forward only when the head BELONGED to
+            // the span that just changed. A head sitting behind a loop it
+            // was never in is playing its way into it, deliberately and
+            // audibly, and folding it would teleport it over the run-up --
+            // which is a rule this tab has and tests.
+            let belonged = matches!(seek, crate::decks::LoopSeek::Changed)
+                && was.is_some_and(|(old_start, old_end)| from >= old_start && from < old_end);
+            if from >= end || (belonged && from < start) {
                 d.seek_frames(wrapped_into_span(from, start, end));
                 // A live resize yanking a playing playhead is a jump like
                 // any other and gets the same blend.
@@ -3605,6 +3625,55 @@ mod tests {
 
 
 
+
+    #[test]
+    fn a_resize_folds_a_head_that_belonged_to_the_old_span() {
+        // The engine's mirror of the playhead is a stale 20 Hz number, so
+        // it says what it MEANT and the mixer does it against the real one.
+        let mixer = spin_deck_a(16_384, 480_000);
+        mixer.set_deck_loop_span(
+            DeckId::A,
+            Some((2.0, 6.0)),
+            crate::decks::LoopSeek::MovedOut,
+        );
+        mixer.seek_deck_seconds(DeckId::A, 5.5);
+        // Halve it from IN: the head is now past the new OUT.
+        mixer.set_deck_loop_span(
+            DeckId::A,
+            Some((2.0, 4.0)),
+            crate::decks::LoopSeek::Changed,
+        );
+        let at = mixer.deck_snapshot(DeckId::A).position_secs;
+        assert!(
+            (at - 3.5).abs() < 1e-6,
+            "folded by a whole length, keeping its phase, at {at}",
+        );
+
+        // And backwards: move the span forward under a head that was in it.
+        mixer.set_deck_loop_span(
+            DeckId::A,
+            Some((6.0, 8.0)),
+            crate::decks::LoopSeek::Changed,
+        );
+        let at = mixer.deck_snapshot(DeckId::A).position_secs;
+        assert!(at >= 6.0 && at < 8.0, "and into the new span, at {at}");
+    }
+
+    #[test]
+    fn a_head_that_never_belonged_to_the_span_is_left_to_play_its_way_in() {
+        // The patient rule: a deck sitting behind a loop is playing into
+        // it, deliberately and audibly. Folding it forward would teleport
+        // it over the run-up.
+        let mixer = spin_deck_a(16_384, 480_000);
+        mixer.seek_deck_seconds(DeckId::A, 2.0);
+        mixer.set_deck_loop_span(
+            DeckId::A,
+            Some((5.0, 9.0)),
+            crate::decks::LoopSeek::Changed,
+        );
+        let at = mixer.deck_snapshot(DeckId::A).position_secs;
+        assert!((at - 2.0).abs() < 1e-6, "left exactly where it was, at {at}");
+    }
     // ---- the reverse hold, and the platter driving itself ---------------
 
     /// Buffers of 512 frames at 48 kHz, the size the device asks for.
@@ -3704,7 +3773,7 @@ mod tests {
     #[test]
     fn reverse_inside_a_loop_wraps_back_to_the_out_point() {
         let mixer = spin_deck_a(16_384, 480_000);
-        mixer.set_deck_loop_span(DeckId::A, Some((4.0, 5.0)));
+        mixer.set_deck_loop_span(DeckId::A, Some((4.0, 5.0)), crate::decks::LoopSeek::MovedOut);
         mixer.seek_deck_seconds(DeckId::A, 4.5);
         mixer.set_deck_playing(DeckId::A, true);
         spin_render(&mixer, 8);
@@ -4463,7 +4532,7 @@ mod tests {
         // A deck inside a span never reaches an end to report. The mixer
         // honours any span; LOOP_MIN_SECS is enforced up in `decks`.
         mixer.install_deck(DeckId::B, const_pcm(1000, 100, 48_000));
-        mixer.set_deck_loop_span(DeckId::B, Some((0.0, 100.0 / 48_000.0)));
+        mixer.set_deck_loop_span(DeckId::B, Some((0.0, 100.0 / 48_000.0)), crate::decks::LoopSeek::MovedOut);
         mixer.set_deck_playing(DeckId::B, true);
         render(&mixer, 48_000.0, 1024);
         assert!(mixer.drain_ended_decks().is_empty());
@@ -4477,7 +4546,7 @@ mod tests {
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000)); // 10 s
         mixer.set_crossfader(0.0);
-        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)));
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)), crate::decks::LoopSeek::MovedOut);
         mixer.seek_deck_seconds(DeckId::A, 1.0);
         mixer.set_deck_playing(DeckId::A, true);
         // Four seconds of audio through a one-second loop.
@@ -4499,7 +4568,7 @@ mod tests {
         mixer.set_crossfader(0.0);
         mixer.set_deck_playing(DeckId::A, true);
         render(&mixer, 48_000.0, 48_000); // a second of free play first
-        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)));
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)), crate::decks::LoopSeek::MovedOut);
         for _ in 0..46 {
             render(&mixer, 48_000.0, 4096);
             let (position, _, _) = mixer.deck_position(DeckId::A);
@@ -4513,7 +4582,7 @@ mod tests {
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
         mixer.set_crossfader(0.0);
-        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)));
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)), crate::decks::LoopSeek::MovedOut);
         mixer.set_deck_playing(DeckId::A, true);
         render(&mixer, 48_000.0, 4096); // settle the master and gain ramps
         let steady = render(&mixer, 48_000.0, 64).channel(0)[32].abs();
@@ -4542,7 +4611,7 @@ mod tests {
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
         mixer.set_crossfader(0.0);
-        mixer.set_deck_loop_span(DeckId::A, Some((5.0, 6.0)));
+        mixer.set_deck_loop_span(DeckId::A, Some((5.0, 6.0)), crate::decks::LoopSeek::MovedOut);
         mixer.set_deck_playing(DeckId::A, true);
         render(&mixer, 48_000.0, 4096); // settle ramps
         // The patient rule: a playhead behind IN plays at FULL level until
@@ -4563,13 +4632,13 @@ mod tests {
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
         mixer.set_crossfader(0.0);
-        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 5.0)));
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 5.0)), crate::decks::LoopSeek::MovedOut);
         mixer.seek_deck_seconds(DeckId::A, 3.5);
         mixer.set_deck_playing(DeckId::A, true);
         // Halve out from under the playhead: 3.5 is 2.5 into the old span,
         // which is 0.5 into the new one modulo its length — the subdivision
         // continues instead of re-triggering the downbeat at IN.
-        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)));
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)), crate::decks::LoopSeek::MovedOut);
         render(&mixer, 48_000.0, 256);
         let (position, _, _) = mixer.deck_position(DeckId::A);
         assert!(
@@ -4590,7 +4659,7 @@ mod tests {
         // A length deliberately NOT commensurate with the 44.1k -> 48k step:
         // a round 0.1 s is exactly 4800 device frames and wraps with zero
         // overshoot, which would hide the discard this test exists to catch.
-        mixer.set_deck_loop_span(DeckId::A, Some((0.5, 0.60001)));
+        mixer.set_deck_loop_span(DeckId::A, Some((0.5, 0.60001)), crate::decks::LoopSeek::MovedOut);
         mixer.seek_deck_seconds(DeckId::A, 0.5);
         mixer.set_deck_playing(DeckId::A, true);
         let step = 44_100.0 / 48_000.0;
@@ -4864,7 +4933,7 @@ mod tests {
     fn a_ghost_wraps_through_the_loop_that_was_running_when_slip_was_armed() {
         let mixer = Mixer::new();
         mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
-        mixer.set_deck_loop_span(DeckId::A, Some((0.0, 0.1)));
+        mixer.set_deck_loop_span(DeckId::A, Some((0.0, 0.1)), crate::decks::LoopSeek::MovedOut);
         mixer.set_deck_playing(DeckId::A, true);
         render(&mixer, 48_000.0, 512);
         mixer.set_deck_slip(DeckId::A, true, false);
@@ -5237,7 +5306,7 @@ mod tests {
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
         mixer.set_crossfader(0.0);
-        mixer.set_deck_loop_span(DeckId::A, Some((5.0, 6.0)));
+        mixer.set_deck_loop_span(DeckId::A, Some((5.0, 6.0)), crate::decks::LoopSeek::MovedOut);
         mixer.set_deck_playing(DeckId::A, true);
         render(&mixer, 48_000.0, 4096); // settle ramps
         // Straddle the IN crossing: the run-up must hand over to the seam
@@ -5261,7 +5330,7 @@ mod tests {
         // last frame and the end-of-track check wins over the wrap.
         mixer.install_deck(DeckId::A, const_pcm(16_384, 48_003, 48_000));
         mixer.set_crossfader(0.0);
-        mixer.set_deck_loop_span(DeckId::A, Some((0.0, 48_003.0 / 48_000.0)));
+        mixer.set_deck_loop_span(DeckId::A, Some((0.0, 48_003.0 / 48_000.0)), crate::decks::LoopSeek::MovedOut);
         mixer.set_deck_playing(DeckId::A, true);
         for _ in 0..24 {
             render(&mixer, 48_000.0, 4096);
@@ -5283,7 +5352,7 @@ mod tests {
         // the track — so a span whose OUT hugs the end can never see
         // playhead >= end and used to die through the ran-out path.
         mixer.set_deck_rate(DeckId::A, 1.05);
-        mixer.set_deck_loop_span(DeckId::A, Some((9.0, 10.0)));
+        mixer.set_deck_loop_span(DeckId::A, Some((9.0, 10.0)), crate::decks::LoopSeek::MovedOut);
         mixer.seek_deck_seconds(DeckId::A, 9.0);
         mixer.set_deck_playing(DeckId::A, true);
         for _ in 0..24 {
@@ -5300,12 +5369,12 @@ mod tests {
         let mixer = Mixer::new();
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
-        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 5.0)));
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 5.0)), crate::decks::LoopSeek::MovedOut);
         mixer.seek_deck_seconds(DeckId::A, 3.5);
         // Paused: the render loop skips this deck entirely, so the catch
         // has to happen when the span is SET or the playhead sits parked
         // outside the loop until play is pressed.
-        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)));
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)), crate::decks::LoopSeek::MovedOut);
         let (position, _, _) = mixer.deck_position(DeckId::A);
         assert!(
             (1.49..1.51).contains(&position),
@@ -5346,7 +5415,7 @@ mod tests {
         let mixer = Mixer::new();
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
-        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)));
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)), crate::decks::LoopSeek::MovedOut);
         mixer.seek_deck_seconds(DeckId::A, 1.0);
         mixer.set_deck_playing(DeckId::A, true);
         mixer.swap_decks();

@@ -222,7 +222,7 @@ fn golden_loop_wrap() {
     // 0.23 s of a 440 Hz tone is not a whole number of cycles, so the wrap
     // is a real seam and its crossfade is what gets pinned; a quarter
     // second would have wrapped in phase and pinned nothing.
-    mixer.set_deck_loop_span(DeckId::A, Some((1.0, 1.23)));
+    mixer.set_deck_loop_span(DeckId::A, Some((1.0, 1.23)), crate::decks::LoopSeek::MovedOut);
     mixer.seek_deck_seconds(DeckId::A, 1.0);
     mixer.set_deck_playing(DeckId::A, true);
     settle(&mixer, SETTLE);

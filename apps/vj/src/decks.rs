@@ -378,6 +378,29 @@ fn semitones_of_rate(rate: f64) -> f64 {
     12.0 * rate.max(f64::MIN_POSITIVE).log2()
 }
 
+/// What a loop mutation MEANS for the playhead.
+///
+/// The engine decides this from a position mirror the UI pump refreshes
+/// twenty times a second; the mixer owns the real one, sample by sample.
+/// So the engine says what it INTENDED and the mixer does it against the
+/// truth, instead of being handed a bare span and left to guess.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum LoopSeek {
+    /// Leave the playhead alone. A span placed around where the record
+    /// already is, or moved with the head riding along inside it.
+    #[default]
+    None,
+    /// The span changed under a head that belonged to it. Fold the head by
+    /// whole loop lengths so it keeps its PHASE.
+    ///
+    /// Only for a head that was inside the OLD span: a head sitting behind
+    /// IN is playing its way in, deliberately and audibly, and folding it
+    /// forward would teleport it over the run-up.
+    Changed,
+    /// The head is being sent to IN outright: a recall, a fresh engage.
+    MovedOut,
+}
+
 /// Which mark a nudge is aimed at.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum NudgeTarget {
@@ -1097,7 +1120,7 @@ pub enum DeckCmd {
     SetPlaying { deck: DeckId, playing: bool },
     SeekFraction { deck: DeckId, fraction: f64 },
     /// The deck's loop span in source seconds, or `None` to run free.
-    SetLoopSpan { deck: DeckId, span: Option<LoopSpan> },
+    SetLoopSpan { deck: DeckId, span: Option<LoopSpan>, seek: LoopSeek },
     SetMute { deck: DeckId, muted: bool },
     SetGain { deck: DeckId, gain: f32 },
     /// Jump the crossfader (mixer slews internally against clicks).
@@ -1530,7 +1553,7 @@ impl DeckEngine {
         // transport, tone, stems and the rate the pitch slider is sitting at.
         let mut cmds = vec![
             DeckCmd::InstallTrack { deck, keep_playing },
-            DeckCmd::SetLoopSpan { deck, span: None },
+            DeckCmd::SetLoopSpan { deck, span: None, seek: LoopSeek::None },
             DeckCmd::SetMute { deck, muted: state.muted },
             DeckCmd::SetGain { deck, gain: state.effective_gain(normalise) },
             DeckCmd::SetKeylock { deck, on: state.keylock },
@@ -1587,13 +1610,13 @@ impl DeckEngine {
         let state = self.deck_mut(deck);
         if let Some(span) = state.loop_span.take() {
             state.loop_memory = Some(span);
-            return vec![DeckCmd::SetLoopSpan { deck, span: None }];
+            return vec![DeckCmd::SetLoopSpan { deck, span: None, seek: LoopSeek::None }];
         }
         let Some(span) = state.loop_memory else { return Vec::new() };
         state.loop_span = Some(span);
         vec![
             DeckCmd::SeekSeconds { deck, secs: span.start_secs },
-            DeckCmd::SetLoopSpan { deck, span: Some(span) },
+            DeckCmd::SetLoopSpan { deck, span: Some(span), seek: LoopSeek::MovedOut },
         ]
     }
 
@@ -1613,7 +1636,7 @@ impl DeckEngine {
         if self.deck(deck).repeats_whole_track() {
             let state = self.deck_mut(deck);
             state.loop_span = None;
-            return vec![DeckCmd::SetLoopSpan { deck, span: None }];
+            return vec![DeckCmd::SetLoopSpan { deck, span: None, seek: LoopSeek::None }];
         }
         if !self.deck(deck).is_loaded() {
             return Vec::new();
@@ -1629,7 +1652,7 @@ impl DeckEngine {
         state.loop_armed = None;
         // No seek: the playhead is inside the whole file by definition, so
         // there is nowhere for a repeat to move the record to.
-        vec![DeckCmd::SetLoopSpan { deck, span: Some(span) }]
+        vec![DeckCmd::SetLoopSpan { deck, span: Some(span), seek: LoopSeek::None }]
     }
 
     /// Give the sync pin to the other deck, if it can carry it.
@@ -1686,6 +1709,7 @@ impl DeckEngine {
     fn engage_loop(&mut self, deck: DeckId, span: LoopSpan, seek: bool) -> Vec<DeckCmd> {
         let position = self.deck(deck).position_secs;
         let state = self.deck_mut(deck);
+        let was = state.loop_span;
         state.loop_span = Some(span);
         state.loop_armed = None;
         state.bookmark = None;
@@ -1693,8 +1717,18 @@ impl DeckEngine {
         let mut cmds = Vec::new();
         if seek && (position < span.start_secs || position >= span.end_secs) {
             cmds.push(DeckCmd::SeekSeconds { deck, secs: span.start_secs });
+            cmds.push(DeckCmd::SetLoopSpan { deck, span: Some(span), seek: LoopSeek::MovedOut });
+            return cmds;
         }
-        cmds.push(DeckCmd::SetLoopSpan { deck, span: Some(span) });
+        // A RESIZE -- the same loop with a different length -- is the one
+        // case where the head may need folding: it belonged to the span
+        // that just changed. A span placed somewhere new is not.
+        let resized = was.is_some_and(|old| {
+            (old.start_secs - span.start_secs).abs() < 1e-6
+                || (old.end_secs - span.end_secs).abs() < 1e-6
+        });
+        let seek = if resized { LoopSeek::Changed } else { LoopSeek::None };
+        cmds.push(DeckCmd::SetLoopSpan { deck, span: Some(span), seek });
         cmds
     }
 
@@ -1710,7 +1744,7 @@ impl DeckEngine {
             state.bookmark = Some(position);
             state.loop_armed = None;
             if state.loop_span.take().is_some() {
-                return vec![DeckCmd::SetLoopSpan { deck, span: None }];
+                return vec![DeckCmd::SetLoopSpan { deck, span: None, seek: LoopSeek::None }];
             }
             return Vec::new();
         }
@@ -1852,7 +1886,11 @@ impl DeckEngine {
             // re-lock has no business firing inside a hand gesture.
             cmds.push(DeckCmd::SeekSeconds { deck, secs });
         }
-        cmds.push(DeckCmd::SetLoopSpan { deck, span: Some(moved) });
+        // NOT `Changed`: the ride above keeps the head at the same OFFSET
+        // inside the span, and a fold would keep it at the same PHASE.
+        // Those agree only when the move happens to be a whole multiple of
+        // the loop's length.
+        cmds.push(DeckCmd::SetLoopSpan { deck, span: Some(moved), seek: LoopSeek::None });
         cmds
     }
 
@@ -1873,7 +1911,7 @@ impl DeckEngine {
             let Some(span) = state.loop_span.take() else { return Vec::new() };
             state.bookmark = Some(span.start_secs);
             state.loop_memory = Some(span);
-            return vec![DeckCmd::SetLoopSpan { deck, span: None }];
+            return vec![DeckCmd::SetLoopSpan { deck, span: None, seek: LoopSeek::None }];
         }
         self.deck_mut(deck).loop_beats = beats;
         if current == LOOP_BEATS_INF {
@@ -2070,7 +2108,11 @@ impl DeckEngine {
                 if running.is_some() {
                     state.loop_span = Some(moved);
                     state.loop_memory = Some(moved);
-                    return vec![DeckCmd::SetLoopSpan { deck, span: Some(moved) }];
+                    return vec![DeckCmd::SetLoopSpan {
+                        deck,
+                        span: Some(moved),
+                        seek: LoopSeek::None,
+                    }];
                 }
                 Vec::new()
             }
@@ -2208,7 +2250,7 @@ impl DeckEngine {
         state.loop_armed = None;
         state.loop_memory = None;
         match had_span {
-            true => vec![DeckCmd::SetLoopSpan { deck, span: None }],
+            true => vec![DeckCmd::SetLoopSpan { deck, span: None, seek: LoopSeek::None }],
             false => Vec::new(),
         }
     }
@@ -3896,7 +3938,7 @@ mod tests {
         e.set_gain(DeckId::B, 0.5);
         let (d, g) = load_gen(&e.click(item(3), DeckTarget::B));
         let cmds = e.track_ready(d, g, 20.0);
-        assert!(cmds.contains(&DeckCmd::SetLoopSpan { deck: DeckId::B, span: None }));
+        assert!(cmds.contains(&DeckCmd::SetLoopSpan { deck: DeckId::B, span: None , seek: LoopSeek::None }));
         assert!(cmds.contains(&DeckCmd::SetMute { deck: DeckId::B, muted: true }));
         assert!(cmds.contains(&DeckCmd::SetGain { deck: DeckId::B, gain: 0.5 }));
     }
@@ -3955,7 +3997,7 @@ mod tests {
         assert!(state.loop_span.is_none(), "a span belongs to the track it was measured on");
         assert!(state.loop_memory.is_none() && state.loop_armed.is_none());
         assert_eq!(state.loop_beats, 16, "the armed length is an operator preference");
-        assert!(cmds.contains(&DeckCmd::SetLoopSpan { deck: DeckId::B, span: None }));
+        assert!(cmds.contains(&DeckCmd::SetLoopSpan { deck: DeckId::B, span: None , seek: LoopSeek::None }));
     }
 
     /// A deck with a track and no analysis: MAN's home ground.
@@ -3978,7 +4020,7 @@ mod tests {
         let span = e.deck(DeckId::A).loop_span.expect("a span");
         assert!((span.start_secs - 10.25).abs() < 1e-9, "IN sits exactly at the playhead");
         assert!((span.len_secs() - 2.0).abs() < 1e-9, "4 beats at 120 BPM = 2 s");
-        assert!(cmds.contains(&DeckCmd::SetLoopSpan { deck: DeckId::A, span: Some(span) }));
+        assert!(cmds.contains(&DeckCmd::SetLoopSpan { deck: DeckId::A, span: Some(span) , seek: LoopSeek::None }));
         assert!(seek_of(&cmds, DeckId::A).is_none(), "the playhead is already at IN");
     }
 
@@ -4178,7 +4220,14 @@ mod tests {
         // length, keeping the subdivision's phase instead of re-triggering
         // IN. Seeking from here was the historical stutter.
         assert!(seek_of(&cmds, DeckId::A).is_none(), "a resize must not seek");
-        assert!(cmds.contains(&DeckCmd::SetLoopSpan { deck: DeckId::A, span: Some(span) }));
+        // But it SAYS it is a resize, so the mixer -- which has the real
+        // playhead rather than a 20 Hz mirror of it -- can fold a head
+        // that belonged to the old span into the new one.
+        assert!(cmds.contains(&DeckCmd::SetLoopSpan {
+            deck: DeckId::A,
+            span: Some(span),
+            seek: LoopSeek::Changed,
+        }));
     }
 
     #[test]
@@ -4386,7 +4435,7 @@ mod tests {
         // goes back in.
         let cmds = e.recall_loop(DeckId::A, 0);
         assert!(!e.deck(DeckId::A).loop_on(), "second click exits");
-        assert!(cmds.contains(&DeckCmd::SetLoopSpan { deck: DeckId::A, span: None }));
+        assert!(cmds.contains(&DeckCmd::SetLoopSpan { deck: DeckId::A, span: None , seek: LoopSeek::None }));
         e.recall_loop(DeckId::A, 0);
         assert!(e.deck(DeckId::A).loop_on(), "third click re-enters");
         // Dragging the marker away deletes the slot; the running span and
@@ -4474,7 +4523,7 @@ mod tests {
         assert_eq!(e.deck(DeckId::A).loop_beats, LOOP_BEATS_INF);
         assert!(e.deck(DeckId::A).loop_span.is_none(), "no out point, no loop");
         assert_eq!(e.deck(DeckId::A).bookmark, Some(10.2));
-        assert!(cmds.contains(&DeckCmd::SetLoopSpan { deck: DeckId::A, span: None }));
+        assert!(cmds.contains(&DeckCmd::SetLoopSpan { deck: DeckId::A, span: None , seek: LoopSeek::None }));
         // And a plain 4-beat loop dialed all the way up collapses too.
         e.deck_mut(DeckId::A).loop_beats = 4;
         e.observe(DeckId::A, 20.0, true);
@@ -4773,7 +4822,8 @@ mod tests {
             cmds,
             vec![DeckCmd::SetLoopSpan {
                 deck: DeckId::A,
-                span: Some(LoopSpan { start_secs: 0.0, end_secs: duration })
+                span: Some(LoopSpan { start_secs: 0.0, end_secs: duration }),
+                seek: LoopSeek::None,
             }],
             "one span, no seek: the playhead is already inside the whole file"
         );
@@ -4787,7 +4837,7 @@ mod tests {
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
         e.repeat_track(DeckId::A);
         let cmds = e.repeat_track(DeckId::A);
-        assert_eq!(cmds, vec![DeckCmd::SetLoopSpan { deck: DeckId::A, span: None }]);
+        assert_eq!(cmds, vec![DeckCmd::SetLoopSpan { deck: DeckId::A, span: None , seek: LoopSeek::None }]);
         assert!(!e.deck(DeckId::A).loop_on());
         assert!(!e.deck(DeckId::A).repeats_whole_track());
     }
@@ -4814,7 +4864,11 @@ mod tests {
             cmds,
             vec![
                 DeckCmd::SeekSeconds { deck: DeckId::A, secs: 30.0 },
-                DeckCmd::SetLoopSpan { deck: DeckId::A, span: Some(kept) },
+                DeckCmd::SetLoopSpan {
+                    deck: DeckId::A,
+                    span: Some(kept),
+                    seek: LoopSeek::MovedOut,
+                },
             ],
             "and RELOOP brings back the loop, not the whole track"
         );
@@ -7124,7 +7178,7 @@ mod tests {
         // A second click on the RUNNING found loop exits, like RELOOP/EXIT.
         let cmds = e.recall_found(DeckId::A, 0);
         assert!(!e.deck(DeckId::A).loop_on());
-        assert!(cmds.contains(&DeckCmd::SetLoopSpan { deck: DeckId::A, span: None }));
+        assert!(cmds.contains(&DeckCmd::SetLoopSpan { deck: DeckId::A, span: None , seek: LoopSeek::None }));
         // Deletes: out of range is inert, in range removes only the memory.
         e.recall_found(DeckId::A, 1);
         e.delete_found(DeckId::A, 99);

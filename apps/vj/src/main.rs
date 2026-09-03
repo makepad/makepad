@@ -179,7 +179,7 @@ use crate::arc::Curve;
 use crate::set_history::SetHistory;
 use crate::blend::MixBrain;
 use crate::decks::{
-    DeckCmd, DeckEngine, DeckId, DeckLoad, DeckTarget, EjectPress, LoadReset, OverPlaying, ScratchMotion, SpinMotion, SyncMode,
+    DeckCmd, DeckEngine, DeckId, DeckLoad, DeckTarget, EjectPress, LoadReset, LoopSeek, OverPlaying, ScratchMotion, SpinMotion, SyncMode,
     SyncView, TrackItem, TrackSideChannels,
 };
 use crate::console_scale::TabStage;
@@ -13649,9 +13649,11 @@ p2 {}
                 DeckCmd::SeekFraction { deck, fraction } => {
                     self.mixer.seek_deck_fraction(deck, fraction)
                 }
-                DeckCmd::SetLoopSpan { deck, span } => self
-                    .mixer
-                    .set_deck_loop_span(deck, span.map(|s| (s.start_secs, s.end_secs))),
+                DeckCmd::SetLoopSpan { deck, span, seek } => self.mixer.set_deck_loop_span(
+                    deck,
+                    span.map(|s| (s.start_secs, s.end_secs)),
+                    seek,
+                ),
                 DeckCmd::SetMute { deck, muted } => self.mixer.set_deck_mute(deck, muted),
                 DeckCmd::SetGain { deck, gain } => self.mixer.set_deck_gain(deck, gain),
                 DeckCmd::SetCrossfader { position } => self.mixer.set_crossfader(position),
