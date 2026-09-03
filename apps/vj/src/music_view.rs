@@ -1718,6 +1718,19 @@ script_mod! {
                     border_size: 1.0
                     border_radius: 8.0
                 }
+                // Retire the deck. It sits at the head's outer corner
+                // beside the letter it clears, mirrored across the centre
+                // line the way the rest of this row is. A press on a
+                // PLAYING deck is refused and the button greys to say so;
+                // a second press within half a second puts the track back.
+                //
+                // The room for it comes out of the title column's Fill, so
+                // nothing below moves.
+                deck_a_retire := MusicButton{
+                    width: 22 height: 22 padding: 0
+                    align: Align{x: 0.5, y: 0.5}
+                    text: "×"
+                }
                 Label{
                     text: "A"
                     draw_text.color: #xff5c39
@@ -1802,6 +1815,11 @@ script_mod! {
                     text: "B"
                     draw_text.color: #x6aa8ff
                     draw_text.text_style: theme.font_bold{font_size: 13}
+                }
+                deck_b_retire := MusicButton{
+                    width: 22 height: 22 padding: 0
+                    align: Align{x: 0.5, y: 0.5}
+                    text: "×"
                 }
             }
         }

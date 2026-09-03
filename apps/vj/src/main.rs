@@ -179,7 +179,7 @@ use crate::arc::Curve;
 use crate::set_history::SetHistory;
 use crate::blend::MixBrain;
 use crate::decks::{
-    DeckCmd, DeckEngine, DeckId, DeckLoad, DeckTarget, ScratchMotion, SyncMode,
+    DeckCmd, DeckEngine, DeckId, DeckLoad, DeckTarget, EjectPress, ScratchMotion, SyncMode,
     SyncView, TrackItem, TrackSideChannels,
 };
 use crate::console_scale::TabStage;
@@ -3341,6 +3341,7 @@ struct DeckRefs {
     stem_state: LabelRef,
     range: ButtonRef,
     play: ButtonRef,
+    retire: ButtonRef,
     cue: ButtonRef,
     hp: ButtonRef,
     loop_button: ButtonRef,
@@ -3394,6 +3395,7 @@ impl DeckRefs {
             stem_state: ui.label(cx, ids.stem_state),
             range: ui.button(cx, ids.range),
             play: ui.button(cx, ids.play),
+            retire: ui.button(cx, ids.retire),
             cue: ui.button(cx, ids.cue),
             hp: ui.button(cx, ids.hp),
             loop_button: ui.button(cx, ids.loop_button),
@@ -3498,6 +3500,10 @@ struct MusicDeckIds {
     range: &'static [LiveId],
     loop_len: &'static [LiveId],
     play: &'static [LiveId],
+    /// The deck's own retire button. NOT `deck_a_eject`: that id belongs
+    /// to the video console's ×, and a duplicated id resolves to whichever
+    /// page drew first, leaving the other page's button dead.
+    retire: &'static [LiveId],
     cue: &'static [LiveId],
     hp: &'static [LiveId],
     loop_button: &'static [LiveId],
@@ -3553,6 +3559,7 @@ impl MusicDeckIds {
                 range: ids!(deck_a_range),
                 loop_len: ids!(deck_a_loop_len),
                 play: ids!(deck_a_play),
+                retire: ids!(deck_a_retire),
                 cue: ids!(deck_a_cue),
                 hp: ids!(deck_a_hp),
                 loop_button: ids!(deck_a_loop),
@@ -3636,6 +3643,7 @@ impl MusicDeckIds {
                 range: ids!(deck_b_range),
                 loop_len: ids!(deck_b_loop_len),
                 play: ids!(deck_b_play),
+                retire: ids!(deck_b_retire),
                 cue: ids!(deck_b_cue),
                 hp: ids!(deck_b_hp),
                 loop_button: ids!(deck_b_loop),
@@ -7067,6 +7075,12 @@ pub struct App {
     /// Last lit/unlit state pushed into each chrome button.
     #[rust]
     lit_state: HashMap<u64, bool>,
+    /// Last face painted onto each deck's retire button. `paint_text_face`
+    /// has no cache of its own — it DROPS the `lit_state` entry — so the
+    /// guard lives here, or the button's shader properties are re-applied
+    /// on every refresh pass.
+    #[rust]
+    retire_face: [Option<bool>; 2],
     /// Last string pushed into each status label. The status panel is
     /// mirrored on a 20 Hz pump and most of it never changes between
     /// ticks; `set_text` on an unchanged string still costs a widget
@@ -22097,6 +22111,16 @@ p2 {}
             let bend = state.bend;
             let synced = state.synced;
             let loaded = state.is_loaded();
+            // What a fresh press of the retire button would do. Read off
+            // the ENGINE's own mirror, which is the one `eject_press`
+            // consults, so the face and the refusal cannot disagree: a
+            // loaded deck standing still clears, a failed load clears, and
+            // everything else is refused.
+            let can_retire = match &state.load {
+                DeckLoad::Loaded { .. } => !state.playing,
+                DeckLoad::Failed { .. } => true,
+                DeckLoad::Empty | DeckLoad::Loading { .. } => false,
+            };
             let loop_on = state.loop_on();
             let loop_slots: Vec<(f64, f64)> = state
                 .loop_slots
@@ -22223,6 +22247,16 @@ p2 {}
 
             // Lit chrome for the toggles the host owns.
             self.paint_lit(cx, ids.play, playing);
+            // The retire button says what a press would do without a word:
+            // grey whenever it would be refused, which is the console's
+            // existing way of saying "not now" — the no-push law that
+            // ghosts an empty deck's transport rather than moving it.
+            if self.retire_face[index] != Some(can_retire) {
+                self.retire_face[index] = Some(can_retire);
+                let face =
+                    if can_retire { LatchPaint::icon(false) } else { LatchPaint::ghost() };
+                self.paint_text_face(cx, ids.retire, face);
+            }
             self.paint_lit(cx, ids.loop_button, loop_on);
             let stems_have = self.deck_stems[index].is_some();
             self.paint_stem_state_color(cx, ids.stem_mix, index, stems_mode, stems_have);
@@ -24489,6 +24523,22 @@ p2 {}
                 self.deck_hands_on();
                 let cmds = self.decks.play_pause(deck);
                 self.run_deck_cmds(cx, cmds);
+            }
+            // Retire the deck, and take it back. A press on a playing deck
+            // does nothing on purpose, and a refusal must not stand the
+            // autopilot down — only a press that DID something counts as
+            // hands on the console. Nothing pumps the queue afterwards
+            // either: the operator cleared this deck deliberately, and
+            // filling it again in the same frame fights them.
+            if refs.retire.clicked(actions) {
+                let (press, cmds) = self.decks.eject_press(deck, now_ms());
+                if !matches!(press, EjectPress::Busy | EjectPress::Nothing) {
+                    self.deck_hands_on();
+                    self.run_deck_cmds(cx, cmds);
+                    // The undo can push a pumped track back to the head of
+                    // the queue.
+                    self.queue_rows_dirty = true;
+                }
             }
             // CUE reads its own edges rather than a click, because holding
             // it is a different instruction from tapping it. Down: a

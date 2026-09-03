@@ -202,6 +202,24 @@ pub struct LoadReset {
     pub stems: bool,
 }
 
+/// What a press of a deck's retire button did.
+///
+/// The button is one control with two meanings, told apart by how soon the
+/// second press lands: the first clears the deck, a second inside
+/// `EJECT_UNDO_MS` puts the track back. Everything the press REFUSED to do
+/// is a value here too, because the console paints the refusal rather than
+/// printing it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EjectPress {
+    /// Nothing to clear and nothing to put back.
+    Nothing,
+    /// Refused on purpose: the deck is playing, or a load is in flight.
+    Busy,
+    Ejected,
+    /// The undo landed and this track is on its way back.
+    Restored { title: String },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum DeckLoad {
     #[default]
@@ -647,6 +665,16 @@ pub const LOOP_SLOT_CAP: usize = 8;
 /// blue cap: a "find the 10 best" scan must fit with room to spare.
 pub const FOUND_LOOP_CAP: usize = 16;
 
+/// How soon a second press of a deck's retire button reads as the operator
+/// taking the first one back rather than as a fresh press. Half a second is
+/// a double-click and not a stray one.
+pub const EJECT_UNDO_MS: u64 = 500;
+
+/// How many retired tracks the undo can reach. Two deep, because that is
+/// all the gesture can reach: the deck's own last track, and the one before
+/// it if the last is already back on a deck.
+pub const EJECT_HISTORY: usize = 2;
+
 /// A loop, in SOURCE seconds — the timebase the beat grid and the wave
 /// tiles already share, so neither placing one nor drawing one has to
 /// convert.
@@ -1040,6 +1068,15 @@ pub struct DeckEngine {
     /// The asset the last hand-back pushed, spared from the very next
     /// shuffle draw so a two-track queue alternates instead of repeating.
     last_requeued: Option<AssetId>,
+    /// The tracks the operator's retire button cleared, newest first,
+    /// bounded by EJECT_HISTORY. This is the MEMORY and it lives as long as
+    /// the app does; nothing expires it on a timer and nothing writes it to
+    /// disk. An entry leaves when it is put back.
+    ejected: Vec<TrackItem>,
+    /// When each deck was last retired by hand. This is the GESTURE, and it
+    /// is all that tells a second press from a first. A refusal arms
+    /// nothing, and an undo spends the stamp so one eject buys one undo.
+    last_eject_ms: [Option<u64>; 2],
     /// The deck an autopilot fade is retiring: auto sync must not re-seek
     /// it when the fader crosses the middle and leadership flips.
     auto_fade_hold: Option<DeckId>,
@@ -1074,6 +1111,8 @@ impl Default for DeckEngine {
             shuffle: false,
             shuffle_rng: 1,
             last_requeued: None,
+            ejected: Vec::new(),
+            last_eject_ms: [None; 2],
             auto_fade_hold: None,
             sync_master: None,
             land_lookahead_secs: 0.0,
@@ -1941,6 +1980,12 @@ impl DeckEngine {
     /// Retire a deck's track: load to Empty so the queue can take the deck.
     /// A load in flight is never ejected — latest-wins holds. Resets what
     /// `click()` resets; the channel strip stands.
+    ///
+    /// This is the AUTOPILOT's hand-back and it retires the deck whatever
+    /// it is doing: a fade that has landed hands back a deck that is still
+    /// sounding, and a refusal here would leave that deck stranded and the
+    /// set with nowhere to load. The operator's button goes through
+    /// `eject_press`, which is where the refusal lives.
     pub fn eject(&mut self, deck: DeckId) -> Vec<DeckCmd> {
         if matches!(self.deck(deck).load, DeckLoad::Loading { .. }) {
             return Vec::new();
@@ -1973,6 +2018,80 @@ impl DeckEngine {
         vec![DeckCmd::UnloadTrack { deck }]
     }
 
+    /// The tracks the undo can reach, newest first. For the tests and for
+    /// anything that wants to say what a second press would put back.
+    pub fn ejected_titles(&self) -> Vec<&str> {
+        self.ejected.iter().map(|i| i.title.as_str()).collect()
+    }
+
+    /// The operator's retire button, which is one control with two meanings.
+    ///
+    /// A first press clears the deck — unless the deck is playing, in
+    /// which case it does nothing at all. A DJ does not eject the record
+    /// the room is dancing to, and the one time a press could mean that is
+    /// the one time it is a mistake.
+    ///
+    /// A second press inside `EJECT_UNDO_MS` is the operator taking the
+    /// first one back, so it loads the retired track again. The undo is not
+    /// refused on a playing deck: the second press is deliberate, and by
+    /// then the deck is carrying something the operator did not choose.
+    ///
+    /// The host passes its own clock rather than the engine keeping one, so
+    /// the window is pinnable in a test.
+    pub fn eject_press(&mut self, deck: DeckId, now_ms: u64) -> (EjectPress, Vec<DeckCmd>) {
+        let armed = self.last_eject_ms[deck.index()]
+            .is_some_and(|t| now_ms.saturating_sub(t) <= EJECT_UNDO_MS);
+        if armed {
+            // One eject buys one undo, however many times the button is hit.
+            self.last_eject_ms[deck.index()] = None;
+            // Skip anything already back on a deck — that is what makes
+            // the reach "the last one, or the second-last if the last is
+            // already back".
+            let on_decks: Vec<AssetId> = [DeckId::A, DeckId::B]
+                .iter()
+                .filter_map(|d| self.deck(*d).item().map(|i| i.asset))
+                .collect();
+            let Some(at) = self.ejected.iter().position(|i| !on_decks.contains(&i.asset)) else {
+                return (EjectPress::Nothing, Vec::new());
+            };
+            // The queue can refill the gap within a frame of the eject. That
+            // track never sounded, so it is still the NEXT track: it goes to
+            // the head of the queue, not its tail. Only a load in flight is
+            // reclaimed — anything the operator loaded and started by
+            // hand inside the window is theirs, and is left where it is.
+            if let DeckLoad::Loading { item, .. } = self.deck(deck).load.clone() {
+                if !self.deck(deck).playing {
+                    self.queue.insert(0, item);
+                }
+            }
+            let item = self.ejected.remove(at);
+            let title = item.title.clone();
+            let target = match deck {
+                DeckId::A => DeckTarget::A,
+                DeckId::B => DeckTarget::B,
+            };
+            // `click` supersedes a load in flight, so no eject comes first.
+            return (EjectPress::Restored { title }, self.click(item, target));
+        }
+        match self.deck(deck).load.clone() {
+            // A refusal arms no undo: there is nothing to take back.
+            DeckLoad::Loading { .. } => (EjectPress::Busy, Vec::new()),
+            DeckLoad::Empty => (EjectPress::Nothing, Vec::new()),
+            // A track that never sounded is not worth offering back —
+            // the same law the autopilot's `requeue: false` follows.
+            DeckLoad::Failed { .. } => (EjectPress::Ejected, self.eject(deck)),
+            DeckLoad::Loaded { item } => {
+                if self.deck(deck).playing {
+                    return (EjectPress::Busy, Vec::new());
+                }
+                self.ejected.insert(0, item);
+                self.ejected.truncate(EJECT_HISTORY);
+                self.last_eject_ms[deck.index()] = Some(now_ms);
+                (EjectPress::Ejected, self.eject(deck))
+            }
+        }
+    }
+
     /// Hold auto sync off the retiring deck while an autopilot fade runs:
     /// once the fader crosses the middle, leadership flips and the standing
     /// auto sync would beat-seek the still-audible outgoing track.
@@ -1989,6 +2108,9 @@ impl DeckEngine {
     pub fn swap(&mut self) -> Vec<DeckCmd> {
         self.decks.swap(0, 1);
         self.last_loaded = self.last_loaded.map(DeckId::other);
+        // The undo window belongs to the deck's CONTENTS, which is what a
+        // swap moves. Left behind, it arms the undo on the wrong side.
+        self.last_eject_ms.swap(0, 1);
         self.crossfader = 1.0 - self.crossfader;
         vec![
             DeckCmd::SwapVoices,
@@ -5701,6 +5823,165 @@ mod tests {
         engine.click(item(2), DeckTarget::A);
         assert!(engine.eject(DeckId::A).is_empty());
         assert!(matches!(engine.deck(DeckId::A).load, DeckLoad::Loading { .. }));
+    }
+
+    // ---- the operator's eject, and the press that takes it back ---------
+
+    #[test]
+    fn a_hand_eject_is_refused_while_the_deck_is_playing() {
+        let mut engine = DeckEngine::new();
+        load_analysed(&mut engine, DeckId::A, 1, 128.0, 0.0);
+        engine.play_pause(DeckId::A);
+        engine.observe(DeckId::A, 30.0, true);
+        let gen_before = engine.deck(DeckId::A).load_gen;
+        assert_eq!(engine.eject_press(DeckId::A, 1_000), (EjectPress::Busy, vec![]));
+        let state = engine.deck(DeckId::A);
+        assert!(matches!(state.load, DeckLoad::Loaded { .. }), "the track stands");
+        assert!(state.playing);
+        // A refusal retires no generation: analysis and stems still in
+        // flight for this load must keep passing the host's gen guard.
+        assert_eq!(state.load_gen, gen_before);
+    }
+
+    #[test]
+    fn the_autopilot_hand_back_still_retires_a_playing_deck() {
+        // The guard is on the PRESS, not on eject. A landed fade hands back
+        // a deck that is still sounding; refusing there would strand it.
+        let mut engine = DeckEngine::new();
+        load_analysed(&mut engine, DeckId::A, 1, 128.0, 0.0);
+        engine.play_pause(DeckId::A);
+        engine.observe(DeckId::A, 30.0, true);
+        assert_eq!(engine.eject(DeckId::A), vec![DeckCmd::UnloadTrack { deck: DeckId::A }]);
+        assert!(matches!(engine.deck(DeckId::A).load, DeckLoad::Empty));
+    }
+
+    #[test]
+    fn a_second_press_inside_the_window_puts_the_ejected_track_back() {
+        let mut engine = DeckEngine::new();
+        load_analysed(&mut engine, DeckId::A, 1, 128.0, 0.0);
+        let retired_gen = engine.deck(DeckId::A).load_gen;
+        let (press, cmds) = engine.eject_press(DeckId::A, 1_000);
+        assert_eq!(press, EjectPress::Ejected);
+        assert_eq!(cmds, vec![DeckCmd::UnloadTrack { deck: DeckId::A }]);
+
+        let (press, cmds) = engine.eject_press(DeckId::A, 1_400);
+        assert_eq!(press, EjectPress::Restored { title: item(1).title });
+        match cmds.as_slice() {
+            [DeckCmd::LoadTrack { deck, gen, item: back }] => {
+                assert_eq!(*deck, DeckId::A);
+                assert_eq!(back.asset, item(1).asset);
+                assert!(*gen > retired_gen, "the restore is a fresh generation");
+            }
+            other => panic!("expected one LoadTrack, got {other:?}"),
+        }
+        // The undo spent the entry, and the deck now has a load in flight,
+        // so a third press is a refusal rather than a second undo.
+        assert_eq!(engine.eject_press(DeckId::A, 1_500), (EjectPress::Busy, vec![]));
+    }
+
+    #[test]
+    fn a_press_after_the_window_closes_is_a_fresh_press_and_not_an_undo() {
+        let mut engine = DeckEngine::new();
+        load_analysed(&mut engine, DeckId::A, 1, 128.0, 0.0);
+        assert_eq!(engine.eject_press(DeckId::A, 1_000).0, EjectPress::Ejected);
+        // Half a second and one millisecond later the gesture is over. The
+        // deck is Empty and there is nothing for a press to do.
+        assert_eq!(engine.eject_press(DeckId::A, 1_501), (EjectPress::Nothing, vec![]));
+        // It is the GESTURE that expired, not the memory: the track is
+        // still on the stack, waiting for the next eject's window.
+        load_analysed(&mut engine, DeckId::A, 2, 128.0, 0.0);
+        assert_eq!(engine.eject_press(DeckId::A, 3_000).0, EjectPress::Ejected);
+        assert_eq!(
+            engine.eject_press(DeckId::A, 3_200).0,
+            EjectPress::Restored { title: item(2).title },
+        );
+    }
+
+    #[test]
+    fn the_undo_reaches_the_second_last_track_when_the_last_one_is_back_on_a_deck() {
+        let mut engine = DeckEngine::new();
+        load_analysed(&mut engine, DeckId::A, 1, 128.0, 0.0);
+        assert_eq!(engine.eject_press(DeckId::A, 1_000).0, EjectPress::Ejected);
+        load_analysed(&mut engine, DeckId::A, 2, 128.0, 0.0);
+        assert_eq!(engine.eject_press(DeckId::A, 2_000).0, EjectPress::Ejected);
+        // Seed 2 is back on a deck by hand, so the newest entry is spoken
+        // for and the undo has to reach past it to the one before.
+        load_analysed(&mut engine, DeckId::B, 2, 128.0, 0.0);
+        let (press, _) = engine.eject_press(DeckId::A, 2_300);
+        assert_eq!(press, EjectPress::Restored { title: item(1).title });
+        // Seed 2 stays on the stack: it was skipped, not spent.
+        assert_eq!(engine.ejected_titles(), vec!["track 2"]);
+    }
+
+    #[test]
+    fn the_undo_supersedes_a_track_the_queue_pumped_into_the_gap() {
+        let mut engine = DeckEngine::new();
+        // B holds the set together so auto_target sends the pump to A.
+        load_analysed(&mut engine, DeckId::B, 9, 128.0, 0.0);
+        engine.play_pause(DeckId::B);
+        engine.observe(DeckId::B, 30.0, true);
+        load_analysed(&mut engine, DeckId::A, 1, 128.0, 0.0);
+        engine.enqueue(item(7));
+
+        assert_eq!(engine.eject_press(DeckId::A, 1_000).0, EjectPress::Ejected);
+        let pumped = engine.pump_queue();
+        assert!(!pumped.is_empty(), "the queue filled the gap");
+        assert!(matches!(engine.deck(DeckId::A).load, DeckLoad::Loading { .. }));
+
+        let (press, cmds) = engine.eject_press(DeckId::A, 1_300);
+        assert_eq!(press, EjectPress::Restored { title: item(1).title });
+        match cmds.as_slice() {
+            [DeckCmd::LoadTrack { deck: DeckId::A, item: back, .. }] => {
+                assert_eq!(back.asset, item(1).asset);
+            }
+            other => panic!("expected the ejected track back on A, got {other:?}"),
+        }
+        // The pumped track never sounded, so it is the NEXT track, not a
+        // played-out one: it goes to the head of the queue, not its tail.
+        assert_eq!(engine.queue().first().map(|q| q.asset), Some(item(7).asset));
+    }
+
+    #[test]
+    fn the_ejected_stack_keeps_two_tracks_and_the_third_press_drops_the_oldest() {
+        let mut engine = DeckEngine::new();
+        // Spaced past the window, or presses two and three would be undos.
+        for (seed, at) in [(1u8, 1_000u64), (2, 2_000), (3, 3_000)] {
+            load_analysed(&mut engine, DeckId::A, seed, 128.0, 0.0);
+            assert_eq!(engine.eject_press(DeckId::A, at).0, EjectPress::Ejected);
+        }
+        assert_eq!(
+            engine.ejected_titles(),
+            vec!["track 3", "track 2"],
+            "newest first, bounded by what the gesture can reach",
+        );
+    }
+
+    #[test]
+    fn a_failed_load_is_cleared_by_the_press_but_never_enters_the_undo_stack() {
+        let mut engine = DeckEngine::new();
+        let (deck, gen) = load_gen(&engine.click(item(1), DeckTarget::A));
+        engine.track_failed(deck, gen, "no bytes".into());
+        assert!(matches!(engine.deck(DeckId::A).load, DeckLoad::Failed { .. }));
+        let (press, cmds) = engine.eject_press(DeckId::A, 1_000);
+        assert_eq!(press, EjectPress::Ejected);
+        assert_eq!(cmds, vec![DeckCmd::UnloadTrack { deck: DeckId::A }]);
+        // A track that never sounded is not offered back.
+        assert!(engine.ejected_titles().is_empty());
+        assert_eq!(engine.eject_press(DeckId::A, 1_200), (EjectPress::Nothing, vec![]));
+    }
+
+    #[test]
+    fn the_double_press_window_follows_the_decks_through_a_swap() {
+        let mut engine = DeckEngine::new();
+        load_analysed(&mut engine, DeckId::A, 1, 128.0, 0.0);
+        assert_eq!(engine.eject_press(DeckId::A, 1_000).0, EjectPress::Ejected);
+        engine.swap();
+        // The window rides with the deck's CONTENTS, the way last_loaded does.
+        assert_eq!(engine.eject_press(DeckId::A, 1_200), (EjectPress::Nothing, vec![]));
+        assert_eq!(
+            engine.eject_press(DeckId::B, 1_200).0,
+            EjectPress::Restored { title: item(1).title },
+        );
     }
 
     #[test]
