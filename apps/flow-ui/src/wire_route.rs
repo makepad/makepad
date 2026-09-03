@@ -9,6 +9,8 @@ use std::cmp::Ordering;
 
 const ENDPOINT_STUB_DISTANCE: f64 = 24.0;
 const COLLISION_TOLERANCE: f64 = 4.0;
+const CHANNEL_CELL: f64 = 8.0;
+const ROUTE_SWITCH_RATIO: f64 = 0.95;
 
 /// The card edge occupied by a port. For a target this is the side the
 /// cable approaches from; for a source it is the side the cable leaves.
@@ -71,6 +73,33 @@ impl Obstacle {
     fn contains_strict(self, point: Point) -> bool {
         point.x > self.min.x && point.x < self.max.x && point.y > self.min.y && point.y < self.max.y
     }
+
+    fn intersects(self, other: Self) -> bool {
+        self.min.x <= other.max.x
+            && self.max.x >= other.min.x
+            && self.min.y <= other.max.y
+            && self.max.y >= other.min.y
+    }
+}
+
+/// Obstacles close enough to affect this edge. Keeping this set local is also
+/// what lets a caller cache each cable independently while an unrelated card
+/// is moving elsewhere on the canvas.
+pub fn obstacles_in_corridor(
+    from: Point,
+    to: Point,
+    obstacles: &[Obstacle],
+    margin: f64,
+) -> Vec<Obstacle> {
+    let corridor = Obstacle {
+        min: Point::new(from.x.min(to.x) - margin, from.y.min(to.y) - margin),
+        max: Point::new(from.x.max(to.x) + margin, from.y.max(to.y) + margin),
+    };
+    obstacles
+        .iter()
+        .copied()
+        .filter(|obstacle| obstacle.intersects(corridor))
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -98,6 +127,14 @@ pub enum RouteKind {
     Orthogonal { points: Vec<Point>, radius: f64 },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RouteChoice {
+    Straight,
+    CorridorX,
+    Above,
+    Below,
+}
+
 /// A drawable route plus a dense-enough arc-length table for animation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WireRoute {
@@ -107,6 +144,8 @@ pub struct WireRoute {
     samples: Vec<Point>,
     cumulative: Vec<f64>,
     length: f64,
+    choice: RouteChoice,
+    tie_x: f64,
 }
 
 impl WireRoute {
@@ -161,6 +200,14 @@ impl WireRoute {
         self.samples
             .windows(2)
             .any(|pair| segment_intersection(pair[0], pair[1], from, to).is_some())
+    }
+
+    /// Shortest distance from a point to the cached, rendered polyline.
+    pub fn distance_to_point(&self, point: Point) -> f64 {
+        self.samples
+            .windows(2)
+            .map(|pair| point_segment_distance(point, pair[0], pair[1]))
+            .fold(f64::INFINITY, f64::min)
     }
 
     /// Arc-length midpoint and its unit tangent in source-to-target order.
@@ -253,7 +300,14 @@ fn cubic_route(from: Point, source_side: PortSide, to: Point, target_side: PortS
     let samples = (0..=64)
         .map(|step| cubic_point(from, control_1, control_2, to, step as f64 / 64.0))
         .collect();
-    build_route(from, to, RouteKind::Cubic { control_1, control_2 }, samples)
+    build_route(
+        from,
+        to,
+        RouteKind::Cubic { control_1, control_2 },
+        samples,
+        RouteChoice::Straight,
+        f64::INFINITY,
+    )
 }
 
 fn cubic_point(from: Point, c1: Point, c2: Point, to: Point, t: f64) -> Point {
@@ -264,7 +318,14 @@ fn cubic_point(from: Point, c1: Point, c2: Point, to: Point, t: f64) -> Point {
     )
 }
 
-fn build_route(from: Point, to: Point, kind: RouteKind, samples: Vec<Point>) -> WireRoute {
+fn build_route(
+    from: Point,
+    to: Point,
+    kind: RouteKind,
+    samples: Vec<Point>,
+    choice: RouteChoice,
+    tie_x: f64,
+) -> WireRoute {
     let mut cumulative = Vec::with_capacity(samples.len());
     let mut length = 0.0;
     cumulative.push(0.0);
@@ -272,7 +333,16 @@ fn build_route(from: Point, to: Point, kind: RouteKind, samples: Vec<Point>) -> 
         length += pair[0].distance(pair[1]);
         cumulative.push(length);
     }
-    WireRoute { from, to, kind, samples, cumulative, length }
+    WireRoute {
+        from,
+        to,
+        kind,
+        samples,
+        cumulative,
+        length,
+        choice,
+        tie_x,
+    }
 }
 
 /// Route one output-to-input cable. `corridor_offset` is stable per parallel
@@ -286,6 +356,30 @@ pub fn route_wire(
     style: RouteStyle,
     corridor_offset: f64,
 ) -> WireRoute {
+    route_wire_sticky(
+        from,
+        source_side,
+        to,
+        target_side,
+        obstacles,
+        style,
+        corridor_offset,
+        None,
+    )
+}
+
+/// Route a cable while retaining the previous broad route choice unless a
+/// different choice is at least five percent shorter.
+pub fn route_wire_sticky(
+    from: Point,
+    source_side: PortSide,
+    to: Point,
+    target_side: PortSide,
+    obstacles: &[Obstacle],
+    style: RouteStyle,
+    corridor_offset: f64,
+    previous: Option<&WireRoute>,
+) -> WireRoute {
     let radius = style.corner_radius.max(16.0);
     let stub = style.port_stub.max(radius * 2.0).max(24.0);
     let source_stub = Point::new(from.x + source_side.sign() * stub, from.y);
@@ -294,14 +388,12 @@ pub fn route_wire(
     let target_owner = endpoint_obstacle(to, obstacles, target_side);
 
     let straight = cubic_route(from, source_side, to, target_side);
-    if route_samples_clear(
+    let straight_is_clear = route_samples_clear(
         &straight.samples,
         obstacles,
         source_owner,
         target_owner,
-    ) {
-        return straight;
-    }
+    );
 
     if !segment_clear_except(from, source_stub, obstacles, source_owner)
         || !segment_clear_except(target_stub, to, obstacles, target_owner)
@@ -314,19 +406,32 @@ pub fn route_wire(
     // card margin.
     let reserve = radius + corridor_offset.abs();
     let guides: Vec<Obstacle> = obstacles.iter().map(|rect| rect.inflate(reserve)).collect();
-    let mut candidates = Vec::with_capacity(3 + obstacles.len() * 2);
+    let mut candidates = Vec::with_capacity(4 + obstacles.len() * 2);
+    if straight_is_clear {
+        candidates.push(Some(straight.clone()));
+    }
 
     if source_stub.x <= target_stub.x {
         if let Some(channel) = choose_forward_channel(source_stub, target_stub, &guides, corridor_offset)
         {
-            candidates.push(vec![
+            candidates.push(build_orthogonal_candidate(
                 from,
-                source_stub,
-                Point::new(channel, source_stub.y),
-                Point::new(channel, target_stub.y),
-                target_stub,
                 to,
-            ]);
+                vec![
+                    from,
+                    source_stub,
+                    Point::new(channel, source_stub.y),
+                    Point::new(channel, target_stub.y),
+                    target_stub,
+                    to,
+                ],
+                radius,
+                obstacles,
+                source_owner,
+                target_owner,
+                RouteChoice::CorridorX,
+                channel,
+            ));
         }
     }
 
@@ -336,30 +441,77 @@ pub fn route_wire(
     // finds the useful row between two stacked cards instead of needlessly
     // going around the entire graph.
     for row in routing_rows(from, to, obstacles, radius, corridor_offset) {
-        candidates.push(vec![
+        let choice = if row <= (from.y + to.y) * 0.5 {
+            RouteChoice::Above
+        } else {
+            RouteChoice::Below
+        };
+        candidates.push(build_orthogonal_candidate(
             from,
-            source_stub,
-            Point::new(source_stub.x, row),
-            Point::new(target_stub.x, row),
-            target_stub,
             to,
-        ]);
+            vec![
+                from,
+                source_stub,
+                Point::new(source_stub.x, row),
+                Point::new(target_stub.x, row),
+                target_stub,
+                to,
+            ],
+            radius,
+            obstacles,
+            source_owner,
+            target_owner,
+            choice,
+            source_stub.x.min(target_stub.x),
+        ));
     }
 
-    let best = candidates
-        .into_iter()
-        .map(simplify)
-        .filter_map(|points| {
-            if !valid_orthogonal(&points, radius) {
-                return None;
+    let candidates: Vec<WireRoute> = candidates.into_iter().flatten().collect();
+    let Some(best) = candidates.iter().min_by(|left, right| compare_routes(left, right)) else {
+        return straight;
+    };
+    if let Some(previous) = previous {
+        if let Some(sticky) = candidates
+            .iter()
+            .filter(|candidate| candidate.choice == previous.choice)
+            .min_by(|left, right| compare_routes(left, right))
+        {
+            if best.choice != sticky.choice && best.length() >= sticky.length() * ROUTE_SWITCH_RATIO
+            {
+                return sticky.clone();
             }
-            let samples = rounded_samples(&points, radius);
-            route_samples_clear(&samples, obstacles, source_owner, target_owner).then(|| {
-                build_route(from, to, RouteKind::Orthogonal { points, radius }, samples)
-            })
-        })
-        .min_by(|left, right| compare_routes(left, right));
-    best.unwrap_or(straight)
+        }
+    }
+    best.clone()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_orthogonal_candidate(
+    from: Point,
+    to: Point,
+    points: Vec<Point>,
+    radius: f64,
+    obstacles: &[Obstacle],
+    source_owner: Option<usize>,
+    target_owner: Option<usize>,
+    choice: RouteChoice,
+    tie_x: f64,
+) -> Option<WireRoute> {
+    let points = simplify(points);
+    if !valid_orthogonal(&points, radius) {
+        return None;
+    }
+    let samples = rounded_samples(&points, radius);
+    route_samples_clear(&samples, obstacles, source_owner, target_owner).then(|| {
+        build_route(
+            from,
+            to,
+            RouteKind::Orthogonal { points, radius },
+            samples,
+            choice,
+            tie_x,
+        )
+    })
 }
 
 /// Ease used by the 600 ms value pulse. Kept here so animation timing is as
@@ -458,12 +610,18 @@ fn choose_forward_channel(from: Point, to: Point, obstacles: &[Obstacle], offset
     let desired = (low + high) * 0.5 + offset;
     gaps.into_iter()
         .filter(|(a, b)| b - a >= 32.0)
-        .map(|(a, b)| desired.clamp(a + 16.0, b - 16.0))
+        .map(|(a, b)| {
+            let low = a + 16.0;
+            let high = b - 16.0;
+            let channel = desired.clamp(low, high);
+            ((channel / CHANNEL_CELL).round() * CHANNEL_CELL).clamp(low, high)
+        })
         .min_by(|a, b| {
             (a - desired)
                 .abs()
                 .partial_cmp(&(b - desired).abs())
                 .unwrap_or(Ordering::Equal)
+                .then_with(|| a.partial_cmp(b).unwrap_or(Ordering::Equal))
         })
 }
 
@@ -556,11 +714,32 @@ fn route_samples_clear(
 }
 
 fn compare_routes(left: &WireRoute, right: &WireRoute) -> Ordering {
-    left.bends().cmp(&right.bends()).then_with(|| {
-        left.length()
-            .partial_cmp(&right.length())
-            .unwrap_or(Ordering::Equal)
-    })
+    left.bends()
+        .cmp(&right.bends())
+        .then_with(|| left.length().partial_cmp(&right.length()).unwrap_or(Ordering::Equal))
+        .then_with(|| left.tie_x.partial_cmp(&right.tie_x).unwrap_or(Ordering::Equal))
+        .then_with(|| route_choice_rank(left.choice).cmp(&route_choice_rank(right.choice)))
+}
+
+fn route_choice_rank(choice: RouteChoice) -> u8 {
+    match choice {
+        RouteChoice::Straight => 0,
+        RouteChoice::CorridorX => 1,
+        RouteChoice::Above => 2,
+        RouteChoice::Below => 3,
+    }
+}
+
+fn point_segment_distance(point: Point, from: Point, to: Point) -> f64 {
+    let dx = to.x - from.x;
+    let dy = to.y - from.y;
+    let length_squared = dx * dx + dy * dy;
+    if length_squared <= f64::EPSILON {
+        return point.distance(from);
+    }
+    let t = (((point.x - from.x) * dx + (point.y - from.y) * dy) / length_squared)
+        .clamp(0.0, 1.0);
+    point.distance(Point::new(from.x + dx * t, from.y + dy * t))
 }
 
 fn path_length(points: &[Point]) -> f64 {
@@ -929,6 +1108,67 @@ mod tests {
     }
 
     #[test]
+    fn point_to_routed_polyline_distance_uses_nearest_segment() {
+        let route = route(Point::new(0.0, 20.0), Point::new(240.0, 20.0), &[]);
+        assert!((route.distance_to_point(Point::new(80.0, 25.5)) - 5.5).abs() < 0.01);
+        assert!((route.distance_to_point(Point::new(-3.0, 24.0)) - 5.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn unrelated_card_motion_does_not_change_an_edges_obstacles_or_route() {
+        let from = Point::new(0.0, 20.0);
+        let to = Point::new(240.0, 20.0);
+        let blocker = Obstacle::from_xywh(90.0, -20.0, 60.0, 80.0);
+        let first = obstacles_in_corridor(
+            from,
+            to,
+            &[blocker, Obstacle::from_xywh(900.0, 900.0, 100.0, 100.0)],
+            64.0,
+        );
+        let second = obstacles_in_corridor(
+            from,
+            to,
+            &[blocker, Obstacle::from_xywh(901.0, 900.0, 100.0, 100.0)],
+            64.0,
+        );
+        assert_eq!(first, second);
+        assert_eq!(route(from, to, &first), route(from, to, &second));
+    }
+
+    #[test]
+    fn near_tie_keeps_the_previous_route_choice_across_recomputes() {
+        let from = Point::new(0.0, 20.0);
+        let to = Point::new(240.0, 20.0);
+        let style = RouteStyle::default();
+        let seed_obstacle = Obstacle::from_xywh(90.0, -25.0, 60.0, 80.0);
+        let mut previous = route_wire(
+            from,
+            PortSide::Right,
+            to,
+            PortSide::Left,
+            &[seed_obstacle],
+            style,
+            0.0,
+        );
+        assert_eq!(previous.choice, RouteChoice::Below);
+        for step in 0..20 {
+            let y = if step % 2 == 0 { -20.5 } else { -19.5 };
+            let obstacle = Obstacle::from_xywh(90.0, y, 60.0, 80.0);
+            previous = route_wire_sticky(
+                from,
+                PortSide::Right,
+                to,
+                PortSide::Left,
+                &[obstacle],
+                style,
+                0.0,
+                Some(&previous),
+            );
+            assert_eq!(previous.choice, RouteChoice::Below, "step {step}");
+        }
+    }
+
+    #[test]
     fn arc_length_parameterisation_has_exact_ends_and_midpoint() {
         let route = route(Point::new(0.0, 0.0), Point::new(100.0, 0.0), &[]);
         assert_eq!(route.point_at(0.0), Point::new(0.0, 0.0));
@@ -983,6 +1223,8 @@ mod tests {
                 radius: 0.0,
             },
             vec![Point::new(0.0, 0.0), Point::new(100.0, 100.0)],
+            RouteChoice::Below,
+            0.0,
         );
         let up = build_route(
             Point::new(0.0, 100.0),
@@ -992,6 +1234,8 @@ mod tests {
                 radius: 0.0,
             },
             vec![Point::new(0.0, 100.0), Point::new(100.0, 0.0)],
+            RouteChoice::Above,
+            0.0,
         );
         assert_eq!(down.crossings_with(&up), 1);
     }
@@ -1016,6 +1260,8 @@ mod tests {
                 Point::new(100.0, 100.0),
                 Point::new(100.0, 0.0),
             ],
+            RouteChoice::Below,
+            0.0,
         );
         assert!(looped.is_loop());
         assert!(!route(Point::new(0.0, 0.0), Point::new(100.0, 0.0), &[]).is_loop());
@@ -1039,6 +1285,8 @@ mod tests {
             to,
             RouteKind::Cubic { control_1, control_2 },
             samples,
+            RouteChoice::Straight,
+            f64::INFINITY,
         );
         let (_, tangent) = s_route.midpoint_tangent();
         assert!(tangent.x.abs() < 0.05 && tangent.y > 0.99, "{tangent:?}");

@@ -439,14 +439,42 @@ pub fn connect(
     Ok(next)
 }
 
-/// Drop the edge into an input; the input becomes literal `nil`.
+fn empty_literal(ty: PortType) -> Literal {
+    match ty {
+        PortType::Text => Literal::Str(String::new()),
+        PortType::Json => Literal::Obj(Vec::new()),
+        PortType::List => Literal::Arr(Vec::new()),
+        PortType::Image
+        | PortType::Audio
+        | PortType::Video
+        | PortType::Mesh
+        | PortType::Bytes => Literal::Null,
+    }
+}
+
+fn disconnected_default(type_name: &str, input: &NodeInput) -> Literal {
+    match (type_name, input.port.as_str()) {
+        ("Llm", "prompt") | ("Http", "url") | ("Image" | "Gen", "prompt") => {
+            Literal::Str(String::new())
+        }
+        ("Http", "headers") => Literal::Obj(Vec::new()),
+        ("Fn", _) => empty_literal(input.ty),
+        _ => Literal::Null,
+    }
+}
+
+/// Drop the edge into an input. Dynamic `Fn.in` fields and built-in inputs
+/// regain their empty literal default; an already-literal input is untouched.
 pub fn disconnect(graph: &Graph, to_node: &str, to_port: &str) -> Graph {
     let mut next = graph.clone();
     next.edges
         .retain(|edge| !(edge.to_node == to_node && edge.to_port == to_port));
     if let Some(node) = next.nodes.iter_mut().find(|node| node.id == to_node) {
+        let type_name = node.type_name.clone();
         if let Some(input) = node.inputs.iter_mut().find(|input| input.port == to_port) {
-            input.value = NodeInputValue::Literal(Literal::Null);
+            if matches!(input.value, NodeInputValue::Edge(_)) {
+                input.value = NodeInputValue::Literal(disconnected_default(&type_name, input));
+            }
         }
     }
     next
@@ -792,7 +820,44 @@ mod tests {
         assert!(g.edges.is_empty());
         assert!(matches!(
             g.nodes[1].inputs.iter().find(|i| i.port == "prompt").unwrap().value,
-            NodeInputValue::Literal(Literal::Null)
+            NodeInputValue::Literal(Literal::Str(ref value)) if value.is_empty()
+        ));
+    }
+
+    #[test]
+    fn disconnect_restores_llm_prompt_default() {
+        let input = catalog("Input", "input", &[], &[("text", PortType::Text)]);
+        let llm = catalog("Llm", "chat", &[("prompt", PortType::Text)], &[("text", PortType::Text)]);
+        let (graph, source) = add_node(&empty(), &input, (0.0, 0.0));
+        let (graph, target) = add_node(&graph, &llm, (300.0, 0.0));
+        let graph = connect(&graph, &source, "text", &target, "prompt").unwrap();
+        let graph = disconnect(&graph, &target, "prompt");
+        assert!(matches!(
+            graph.nodes[1].inputs[0].value,
+            NodeInputValue::Literal(Literal::Str(ref value)) if value.is_empty()
+        ));
+    }
+
+    #[test]
+    fn disconnect_restores_fn_text_input_and_preserves_a_literal() {
+        let input = catalog("Input", "input", &[], &[("text", PortType::Text)]);
+        let function = catalog("Fn", "fn", &[("text", PortType::Text)], &[("text", PortType::Text)]);
+        let (graph, source) = add_node(&empty(), &input, (0.0, 0.0));
+        let (graph, target) = add_node(&graph, &function, (300.0, 0.0));
+        let graph = connect(&graph, &source, "text", &target, "text").unwrap();
+        let graph = disconnect(&graph, &target, "text");
+        assert!(matches!(
+            graph.nodes[1].inputs[0].value,
+            NodeInputValue::Literal(Literal::Str(ref value)) if value.is_empty()
+        ));
+
+        let mut literal_graph = graph.clone();
+        literal_graph.nodes[1].inputs[0].value =
+            NodeInputValue::Literal(Literal::Str("kept".into()));
+        let literal_graph = disconnect(&literal_graph, &target, "text");
+        assert!(matches!(
+            literal_graph.nodes[1].inputs[0].value,
+            NodeInputValue::Literal(Literal::Str(ref value)) if value == "kept"
         ));
     }
 
