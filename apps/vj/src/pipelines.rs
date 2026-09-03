@@ -45,6 +45,7 @@ use makepad_asset_importer::gen_publish::{
 use makepad_asset_importer::gen_kinds::kind_of;
 use makepad_asset_importer::gen_profiles::build_profiles;
 use makepad_asset_client::PipelineStageSpec;
+use makepad_widgets::makepad_platform::thread::ThreadSpawner;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -123,16 +124,21 @@ pub struct Pipelines {
     done_tx: Sender<PipeDone>,
     done_rx: Receiver<PipeDone>,
     queued: usize,
+    spawner: Option<ThreadSpawner>,
 }
 
 impl Default for Pipelines {
     fn default() -> Self {
         let (done_tx, done_rx) = channel();
-        Pipelines { tx: None, done_tx, done_rx, queued: 0 }
+        Pipelines { tx: None, done_tx, done_rx, queued: 0, spawner: None }
     }
 }
 
 impl Pipelines {
+    pub fn set_spawner(&mut self, spawner: ThreadSpawner) {
+        self.spawner = Some(spawner);
+    }
+
     /// (Re)point the transport at a verified session. The endpoints/token
     /// are for PUBLISHING results into the same store as ever; the runs
     /// themselves execute against the fleet directly. Live runs survive a
@@ -141,10 +147,20 @@ impl Pipelines {
     pub fn connect(&mut self, endpoints: ApiEndpoints, token: Option<String>) {
         let (tx, rx) = channel::<PipeReq>();
         let done = self.done_tx.clone();
-        let spawned = std::thread::Builder::new()
-            .name("vj-pipelines".to_string())
-            .spawn(move || worker(endpoints, token, rx, done));
-        self.tx = spawned.is_ok().then_some(tx);
+        let spawned = self.spawner.as_ref().and_then(|spawner| {
+            let worker_spawner = spawner.clone();
+            match spawner.spawn(move || worker(endpoints, token, rx, done, worker_spawner)) {
+                Ok(handle) => {
+                    handle.detach();
+                    Some(())
+                }
+                Err(error) => {
+                    makepad_widgets::log!("vj pipeline worker unavailable: {error}");
+                    None
+                }
+            }
+        });
+        self.tx = spawned.map(|()| tx);
         self.queued = 0;
     }
 
@@ -255,6 +271,7 @@ fn worker(
     token: Option<String>,
     rx: Receiver<PipeReq>,
     done: Sender<PipeDone>,
+    spawner: ThreadSpawner,
 ) {
     // The registry outlives any one worker: a reconnect must keep answering
     // for runs the previous worker spawned.
@@ -278,6 +295,7 @@ fn worker(
                     title,
                     prompt,
                     stages,
+                    &spawner,
                 );
                 PipeDone::Created { tag, result }
             }
@@ -291,7 +309,16 @@ fn worker(
                 PipeDone::Detail { pipeline, result }
             }
             PipeReq::EnqueueJob { tag, namespace, kind, body } => {
-                let result = spawn_job(&jobs, &endpoints, token.clone(), tag, namespace, kind, body);
+                let result = spawn_job(
+                    &jobs,
+                    &endpoints,
+                    token.clone(),
+                    tag,
+                    namespace,
+                    kind,
+                    body,
+                    &spawner,
+                );
                 PipeDone::JobQueued { tag, result }
             }
             PipeReq::JobStatus { job } => {
@@ -381,6 +408,7 @@ fn spawn_run(
     title: String,
     prompt: String,
     stages: Vec<PipelineStageSpec>,
+    spawner: &ThreadSpawner,
 ) -> Result<PipelineCreatedDto, String> {
     // Translate every declared stage before anything runs: a refusal here
     // is the whole declaration refusing, exactly like the server's 400.
@@ -469,12 +497,13 @@ fn spawn_run(
     registry.lock().unwrap().insert(pipeline.0, handle.clone());
 
     let endpoints = endpoints.clone();
-    let spawn = std::thread::Builder::new()
-        .name(format!("vj-dream-{tag}"))
-        .spawn(move || run_thread(handle, spec, orders, endpoints, token, namespace, prompt));
-    if spawn.is_err() {
-        return Err("could not spawn the run thread".to_string());
-    }
+    let run_spawner = spawner.clone();
+    spawner
+        .spawn(move || {
+            run_thread(handle, spec, orders, endpoints, token, namespace, prompt, run_spawner)
+        })
+        .map(|handle| handle.detach())
+        .map_err(|error| format!("could not spawn the run thread: {error}"))?;
     Ok(PipelineCreatedDto { pipeline, stages: created_jobs })
 }
 
@@ -559,13 +588,12 @@ fn run_thread(
     token: Option<String>,
     namespace: String,
     typed_prompt: String,
+    spawner: ThreadSpawner,
 ) {
     let (events_tx, events_rx) = channel();
     let cancel = handle.cancel.clone();
     let engine_spec = spec.clone();
-    let engine = std::thread::Builder::new()
-        .name("vj-dream-engine".to_string())
-        .spawn(move || {
+    let engine = spawner.spawn(move || {
             engine::run(
                 &engine_spec,
                 &orders,
@@ -760,6 +788,7 @@ fn spawn_job(
     namespace: String,
     kind_name: String,
     body: Value,
+    spawner: &ThreadSpawner,
 ) -> Result<JobId, String> {
     // Validate at enqueue so a typo refuses before any thread spawns.
     let _ = makepad_asset_creator::runner::translate(&kind_name, &body, tag)?;
@@ -779,10 +808,10 @@ fn spawn_job(
     });
     jobs.lock().unwrap().insert(job.0, handle.clone());
     let endpoints = endpoints.clone();
-    std::thread::Builder::new()
-        .name(format!("vj-gen-{tag}"))
+    spawner
         .spawn(move || job_thread(handle, endpoints, token, namespace, kind_name, body, tag))
-        .map_err(|_| "could not spawn the job thread".to_string())?;
+        .map(|handle| handle.detach())
+        .map_err(|error| format!("could not spawn the job thread: {error}"))?;
     Ok(job)
 }
 

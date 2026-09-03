@@ -30,6 +30,7 @@ use crate::decks::DeckId;
 use crate::mixer::TrackPcm;
 use makepad_ai_beats::BeatsModel;
 use makepad_asset_data::{BlobId, MediaType};
+use makepad_widgets::makepad_platform::thread::ThreadSpawner;
 use std::f32::consts::PI;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
@@ -2344,6 +2345,8 @@ pub struct AnalysisDone {
 /// must never touch the UI thread or the audio callback.
 pub struct AnalysisPool {
     tx: Sender<AnalysisJob>,
+    jobs: Option<Receiver<AnalysisJob>>,
+    done_tx: Sender<AnalysisDone>,
     rx: Receiver<AnalysisDone>,
 }
 
@@ -2357,9 +2360,13 @@ impl AnalysisPool {
     pub fn new() -> AnalysisPool {
         let (tx, jobs) = channel::<AnalysisJob>();
         let (done_tx, rx) = channel::<AnalysisDone>();
-        let _ = std::thread::Builder::new()
-            .name("vj-wave-analysis".into())
-            .spawn(move || {
+        AnalysisPool { tx, jobs: Some(jobs), done_tx, rx }
+    }
+
+    pub fn start(&mut self, spawner: ThreadSpawner) {
+        let Some(jobs) = self.jobs.take() else { return };
+        let done_tx = self.done_tx.clone();
+        match spawner.spawn(move || {
                 let dir = cache_dir();
                 let mut beats_checkpoint: Option<PathBuf> = None;
                 let mut beats_model: Option<BeatsModel> = None;
@@ -2445,8 +2452,10 @@ impl AnalysisPool {
                         return;
                     }
                 }
-            });
-        AnalysisPool { tx, rx }
+            }) {
+            Ok(handle) => handle.detach(),
+            Err(error) => makepad_widgets::log!("vj analysis worker unavailable: {error}"),
+        }
     }
 
     pub fn submit(&self, job: AnalysisJob) {

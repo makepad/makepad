@@ -393,7 +393,6 @@ fn install_lyrics(source: &FetchedSource, digest: &str) -> Option<makepad_audio_
 /// How long the write-back stands aside before it starts. Separation has
 /// just finished, the deck is probably playing, and nothing about this work
 /// is urgent — it is for the NEXT machine to load this track.
-#[cfg(not(target_arch = "wasm32"))]
 const WRITE_BACK_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Read a completed span cache back and encode it, so the store can have it.
@@ -416,7 +415,10 @@ pub enum WriteBackMsg {
 /// One worker, so two tracks separated back to back never encode at once.
 pub struct WriteBackPool {
     tx: Sender<WriteBackJob>,
+    jobs: Option<Receiver<WriteBackJob>>,
+    out: Sender<WriteBackMsg>,
     rx: Receiver<WriteBackMsg>,
+    root: PathBuf,
 }
 
 impl Default for WriteBackPool {
@@ -433,10 +435,14 @@ impl WriteBackPool {
     pub fn with_root(root: PathBuf) -> WriteBackPool {
         let (tx, jobs) = channel::<WriteBackJob>();
         let (out, rx) = channel::<WriteBackMsg>();
-        #[cfg(not(target_arch = "wasm32"))]
-        let _ = std::thread::Builder::new()
-            .name("vj-sidechannel-writeback".into())
-            .spawn(move || {
+        WriteBackPool { tx, jobs: Some(jobs), out, rx, root }
+    }
+
+    pub fn start(&mut self, spawner: ThreadSpawner) {
+        let Some(jobs) = self.jobs.take() else { return };
+        let out = self.out.clone();
+        let root = self.root.clone();
+        match spawner.spawn(move || {
                 while let Ok(job) = jobs.recv() {
                     std::thread::sleep(WRITE_BACK_DELAY);
                     let message = match encode_from_cache(&root, &job) {
@@ -447,10 +453,10 @@ impl WriteBackPool {
                         return;
                     }
                 }
-            });
-        #[cfg(target_arch = "wasm32")]
-        drop((jobs, out, root));
-        WriteBackPool { tx, rx }
+            }) {
+            Ok(handle) => handle.detach(),
+            Err(error) => makepad_widgets::log!("vj write-back worker unavailable: {error}"),
+        }
     }
 
     pub fn submit(&self, job: WriteBackJob) {

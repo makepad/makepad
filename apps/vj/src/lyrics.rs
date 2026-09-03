@@ -33,13 +33,11 @@
 use crate::decks::DeckId;
 use crate::wave_analysis::TrackGrid;
 use makepad_ai_stems::{CacheHeader, StemCache, Stem};
+use makepad_widgets::makepad_platform::thread::ThreadSpawner;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::mpsc::RecvTimeoutError;
-#[cfg(not(target_arch = "wasm32"))]
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::Duration;
 
 /// How long the worker waits on the deck inbox before looking at the
@@ -1353,9 +1351,12 @@ pub enum LyricsMsg {
 /// thread-affine (Metal), so it is created here and never leaves.
 pub struct LyricsPool {
     tx: Sender<LyricsJob>,
+    jobs: Option<Receiver<LyricsJob>>,
     /// The BACKGROUND inbox, kept apart so a queued track's transcript can
     /// never sit in front of the deck the operator just cued.
     prefetch_tx: Sender<LyricsJob>,
+    prefetch_jobs: Option<Receiver<LyricsJob>>,
+    out: Sender<LyricsMsg>,
     rx: Receiver<LyricsMsg>,
 }
 
@@ -1370,10 +1371,21 @@ impl LyricsPool {
         let (tx, jobs) = channel::<LyricsJob>();
         let (prefetch_tx, prefetch_jobs) = channel::<LyricsJob>();
         let (out, rx) = channel::<LyricsMsg>();
-        #[cfg(not(target_arch = "wasm32"))]
-        let _ = std::thread::Builder::new()
-            .name("vj-lyrics".into())
-            .spawn(move || {
+        LyricsPool {
+            tx,
+            jobs: Some(jobs),
+            prefetch_tx,
+            prefetch_jobs: Some(prefetch_jobs),
+            out,
+            rx,
+        }
+    }
+
+    pub fn start(&mut self, spawner: ThreadSpawner) {
+        let Some(jobs) = self.jobs.take() else { return };
+        let Some(prefetch_jobs) = self.prefetch_jobs.take() else { return };
+        let out = self.out.clone();
+        match spawner.spawn(move || {
                 let mut backend: Option<Transcriber> = None;
                 let mut backend_failed = false;
                 loop {
@@ -1402,10 +1414,10 @@ impl LyricsPool {
                         let _ = out.send(LyricsMsg::PrefetchDone { digest });
                     }
                 }
-            });
-        #[cfg(target_arch = "wasm32")]
-        drop((jobs, prefetch_jobs, out));
-        LyricsPool { tx, prefetch_tx, rx }
+            }) {
+            Ok(handle) => handle.detach(),
+            Err(error) => makepad_widgets::log!("vj lyrics worker unavailable: {error}"),
+        }
     }
 
     /// Bake a queued track's transcript while nothing is asking. Carries

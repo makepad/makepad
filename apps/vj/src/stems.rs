@@ -38,11 +38,10 @@ use crate::mixer::{encode_stem_sample, TrackPcm};
 use makepad_ai_stems::{CacheHeader, Demixer, StemCache, StemSet, StemsModel, StereoBuf, CHUNK_STEP};
 pub(crate) use makepad_ai_stems::SAMPLE_RATE as STEMS_RATE;
 use makepad_asset_data::Sha256;
+use makepad_widgets::makepad_platform::thread::ThreadSpawner;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::mpsc::RecvTimeoutError;
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1008,16 +1007,22 @@ fn prune_cache(root: &Path, budget_bytes: u64, pinned: &[Option<String>; 2]) {
 /// so it lives here and nowhere else.
 pub struct StemsPool {
     tx: Sender<(StemsJob, SeparationBackend)>,
+    jobs: Option<Receiver<(StemsJob, SeparationBackend)>>,
     /// The BACKGROUND inbox. Kept apart from `tx` so the two lanes cannot
     /// spoil each other: deck jobs are latest-wins and would otherwise
     /// discard a queued track's work, and a queued track must never sit in
     /// front of the deck the operator is about to play.
     prefetch_tx: Sender<(StemsJob, SeparationBackend)>,
+    prefetch_jobs: Option<Receiver<(StemsJob, SeparationBackend)>>,
     /// Raised the instant a deck job is posted and lowered when the worker
     /// takes one. A background run reads it at every span boundary and
     /// lets go. Racing it costs at most one needless yield.
     deck_waiting: Arc<AtomicBool>,
+    out: Sender<StemsMsg>,
     rx: Receiver<StemsMsg>,
+    root: PathBuf,
+    checkpoint: PathBuf,
+    budget_bytes: u64,
 }
 
 impl Default for StemsPool {
@@ -1045,12 +1050,29 @@ impl StemsPool {
         let (prefetch_tx, prefetch_jobs) = channel::<(StemsJob, SeparationBackend)>();
         let (out, rx) = channel::<StemsMsg>();
         let deck_waiting = Arc::new(AtomicBool::new(false));
-        #[cfg(not(target_arch = "wasm32"))]
-        let waiting = deck_waiting.clone();
-        #[cfg(not(target_arch = "wasm32"))]
-        let _ = std::thread::Builder::new()
-            .name("vj-stems".into())
-            .spawn(move || {
+        StemsPool {
+            tx,
+            jobs: Some(jobs),
+            prefetch_tx,
+            prefetch_jobs: Some(prefetch_jobs),
+            deck_waiting,
+            out,
+            rx,
+            root,
+            checkpoint,
+            budget_bytes,
+        }
+    }
+
+    pub fn start(&mut self, spawner: ThreadSpawner) {
+        let Some(jobs) = self.jobs.take() else { return };
+        let Some(prefetch_jobs) = self.prefetch_jobs.take() else { return };
+        let out = self.out.clone();
+        let root = self.root.clone();
+        let checkpoint = self.checkpoint.clone();
+        let budget_bytes = self.budget_bytes;
+        let waiting = self.deck_waiting.clone();
+        match spawner.spawn(move || {
                 let mut model: Option<StemsModel> = None;
                 // The track most recently opened per deck: whatever is on a
                 // deck is pinned against the budget, so a set in progress is
@@ -1113,6 +1135,7 @@ impl StemsPool {
                             continue;
                         }
                     }
+                    #[cfg(not(target_arch = "wasm32"))]
                     if backend == SeparationBackend::Hub {
                         if let Err(error) = run_hub(&job, &root, &out) {
                             if job.gen == PREFETCH_GEN {
@@ -1135,6 +1158,16 @@ impl StemsPool {
                                 });
                             }
                         }
+                        continue;
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    if backend == SeparationBackend::Hub {
+                        let _ = out.send(StemsMsg::Status {
+                            deck: job.deck,
+                            gen: job.gen,
+                            text: "stems: unavailable".to_string(),
+                            working: false,
+                        });
                         continue;
                     }
                     // Whatever a previous session separated is free. Serve it
@@ -1292,10 +1325,10 @@ impl StemsPool {
                         });
                     }
                 }
-            });
-        #[cfg(target_arch = "wasm32")]
-        drop((jobs, prefetch_jobs, out, root, checkpoint, budget_bytes));
-        StemsPool { tx, prefetch_tx, deck_waiting, rx }
+            }) {
+            Ok(handle) => handle.detach(),
+            Err(error) => makepad_widgets::log!("vj stems worker unavailable: {error}"),
+        }
     }
 
     fn submit_to(&self, job: StemsJob, backend: SeparationBackend) {
@@ -1678,11 +1711,12 @@ mod tests {
         let digest = track_digest(&pcm);
         write_entry(&root, &digest, 2);
 
-        let pool = StemsPool::with_paths(
+        let mut pool = StemsPool::with_paths(
             root.clone(),
             root.join("no-such-checkpoint.ckpt"),
             u64::MAX,
         );
+        pool.start(crate::test_thread_spawner());
         pool.submit(cache_job(pcm.clone(), 0.0));
         let messages = run_to_done(&pool, std::time::Duration::from_secs(30));
 
@@ -1723,7 +1757,8 @@ mod tests {
         let digest = track_digest(&pcm);
         write_entry(&root, &digest, 1);
 
-        let pool = StemsPool::with_paths(root.clone(), root.join("no-such.ckpt"), 0);
+        let mut pool = StemsPool::with_paths(root.clone(), root.join("no-such.ckpt"), 0);
+        pool.start(crate::test_thread_spawner());
         pool.submit(cache_job(pcm.clone(), 0.0));
         let messages = run_to_done(&pool, std::time::Duration::from_secs(30));
         assert!(

@@ -36,8 +36,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
-#[cfg(not(target_arch = "wasm32"))]
-use std::thread;
 
 /// Namespace imported tracks land in. The asset UI's music importer uses
 /// the same one, so a library filled from either app is one library.
@@ -177,9 +175,14 @@ pub struct MusicImporter {
     prepared_done: usize,
     prepared_total: usize,
     prepared_summary: Option<MusicImportSummary>,
+    spawner: Option<ThreadSpawner>,
 }
 
 impl MusicImporter {
+    pub fn set_spawner(&mut self, spawner: ThreadSpawner) {
+        self.spawner = Some(spawner);
+    }
+
     pub fn busy(&self) -> bool {
         self.phase.busy()
     }
@@ -226,12 +229,15 @@ impl MusicImporter {
         self.rx = Some(rx);
         self.phase = MusicImportPhase::Reading { done: 0, total: 0, current: String::new() };
         let cache = cache_parent.join("music-import-cache");
-        thread::Builder::new()
-            .name("vj-music-import".into())
-            .spawn(move || {
+        let spawner = self
+            .spawner
+            .clone()
+            .ok_or_else(|| self.refuse("import worker is not started"))?;
+        spawner.spawn(move || {
                 let verdict = run(&paths, endpoints, server_id, token, cache, &tx, &cancel);
                 let _ = tx.send(Msg::Finished(verdict));
             })
+            .map(|handle| handle.detach())
             .map_err(|e| self.refuse(format!("cannot start the import thread: {e}")))?;
         Ok(())
     }
@@ -243,7 +249,6 @@ impl MusicImporter {
     pub fn start_files(
         &mut self,
         files: Vec<VirtualFile>,
-        spawner: ThreadSpawner,
     ) -> Result<(), String> {
         if self.busy() {
             return Err("an import is already running".to_string());
@@ -261,6 +266,10 @@ impl MusicImporter {
         let cancel = self.cancel.clone();
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
+        let spawner = self
+            .spawner
+            .clone()
+            .ok_or_else(|| self.refuse("import worker is not started"))?;
         launch_file_preparation(files, tx, cancel, spawner)
             .map_err(|error| self.refuse(format!("cannot start the import: {error}")))?;
         Ok(())

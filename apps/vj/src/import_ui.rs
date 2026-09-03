@@ -40,12 +40,11 @@
 
 use crate::media_scan::{self, FileOutcome, FileProgress, ImportCtx, MediaFile, MediaScan};
 use makepad_asset_client::{ApiEndpoints, AssetClient, ClientConfig};
+use makepad_widgets::makepad_platform::thread::ThreadSpawner;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
-#[cfg(not(target_arch = "wasm32"))]
-use std::thread;
 
 /// What the panel is doing right now.
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -130,6 +129,7 @@ pub struct ImportPanel {
     pub status: String,
     cancel: Arc<AtomicBool>,
     rx: Option<Receiver<Msg>>,
+    spawner: Option<ThreadSpawner>,
 }
 
 impl Default for ImportPanel {
@@ -142,11 +142,16 @@ impl Default for ImportPanel {
             status: "drop a folder here, or type a path".to_string(),
             cancel: Arc::new(AtomicBool::new(false)),
             rx: None,
+            spawner: None,
         }
     }
 }
 
 impl ImportPanel {
+    pub fn set_spawner(&mut self, spawner: ThreadSpawner) {
+        self.spawner = Some(spawner);
+    }
+
     pub fn set_path(&mut self, path: impl Into<String>) {
         self.path = path.into();
         if !self.phase.busy() {
@@ -220,13 +225,16 @@ impl ImportPanel {
 
         let cache = cache_parent.join("import-cache");
         let convert = self.convert_video;
-        thread::Builder::new()
-            .name("vj-media-import".into())
-            .spawn(move || {
+        let spawner = self
+            .spawner
+            .clone()
+            .ok_or_else(|| self.refuse("import worker is not started"))?;
+        spawner.spawn(move || {
                 let verdict =
                     run(&root, endpoints, server_id, token, cache, convert, &tx, &cancel);
                 let _ = tx.send(Msg::Finished(verdict));
             })
+            .map(|handle| handle.detach())
             .map_err(|e| self.refuse(format!("cannot start the import thread: {e}")))?;
         Ok(())
     }
