@@ -1787,6 +1787,13 @@ impl TextInput {
         }
     }
 
+    /// The platform keyboard configuration currently requested by this
+    /// field. Hosts that render the field through a draw-list transform use
+    /// this when they re-anchor the native IME candidate rectangle.
+    pub fn ime_config(&self) -> TextInputConfig {
+        self.get_ime_config()
+    }
+
     /// Resolves the soft-keyboard layout for this field.
     ///
     /// An explicitly-set `input_mode` always wins. `InputMode::Text` is the
@@ -3318,6 +3325,12 @@ impl TextInputRef {
     /// text hasn't been laid out yet. Useful for anchoring a popup to the cursor.
     pub fn cursor_rect_in_absolute(&self, cx: &Cx) -> Option<Rect> {
         self.borrow().and_then(|inner| inner.cursor_rect_in_absolute(cx))
+    }
+
+    pub fn ime_config(&self) -> TextInputConfig {
+        self.borrow()
+            .map(|inner| inner.ime_config())
+            .unwrap_or_default()
     }
 
     pub fn set_cursor(&self, cx: &mut Cx, cursor: Cursor, keep_selection: bool) {

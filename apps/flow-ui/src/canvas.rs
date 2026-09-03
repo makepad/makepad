@@ -133,9 +133,9 @@ script_mod! {
         border_color: #x2b2b30
         border_size: 1.0
         border_radius: 16.0
-        shadow_color: #0008
-        shadow_radius: 18.0
-        shadow_offset: vec2(0.0, 10.0)
+        shadow_color: #0005
+        shadow_radius: 12.0
+        shadow_offset: vec2(0.0, 0.0)
 
         rect_size2: varying(vec2(0.0))
         rect_size3: varying(vec2(0.0))
@@ -1143,6 +1143,11 @@ impl FlowCanvas {
 
     /// Wires are one vector batch; each card is its own shadowed quad.
     fn draw_cards(&mut self, cx: &mut Cx2d, graph: &Graph) {
+        // Keep the halo at twelve screen pixels under the draw-list camera.
+        // It remains part of this same quad, so drag/zoom can never leave a
+        // separately positioned shadow behind the card.
+        self.draw_card.shadow_radius = (12.0 / self.camera.scale.max(0.01)) as f32;
+        self.draw_card.shadow_offset = vec2(0.0, 0.0);
         let hover = self.hover;
         let dragging_wire = matches!(self.drag, Some(Drag::Wire { .. }));
         let time = self.time;
