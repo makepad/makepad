@@ -3406,6 +3406,7 @@ struct DeckRefs {
     grid_state: LabelRef,
     stem_state: LabelRef,
     range: ButtonRef,
+    to_start: ButtonRef,
     play: ButtonRef,
     cue: ButtonRef,
     hp: ButtonRef,
@@ -3459,6 +3460,7 @@ impl DeckRefs {
             grid_state: ui.label(cx, ids.grid_state),
             stem_state: ui.label(cx, ids.stem_state),
             range: ui.button(cx, ids.range),
+            to_start: ui.button(cx, ids.to_start),
             play: ui.button(cx, ids.play),
             cue: ui.button(cx, ids.cue),
             hp: ui.button(cx, ids.hp),
@@ -3565,6 +3567,7 @@ struct MusicDeckIds {
     stem_state: &'static [LiveId],
     range: &'static [LiveId],
     loop_len: &'static [LiveId],
+    to_start: &'static [LiveId],
     play: &'static [LiveId],
     cue: &'static [LiveId],
     hp: &'static [LiveId],
@@ -3622,6 +3625,7 @@ impl MusicDeckIds {
                 stem_state: ids!(deck_a_stem_state),
                 range: ids!(deck_a_range),
                 loop_len: ids!(deck_a_loop_len),
+                to_start: ids!(deck_a_to_start),
                 play: ids!(deck_a_play),
                 cue: ids!(deck_a_cue),
                 hp: ids!(deck_a_hp),
@@ -3707,6 +3711,7 @@ impl MusicDeckIds {
                 stem_state: ids!(deck_b_stem_state),
                 range: ids!(deck_b_range),
                 loop_len: ids!(deck_b_loop_len),
+                to_start: ids!(deck_b_to_start),
                 play: ids!(deck_b_play),
                 cue: ids!(deck_b_cue),
                 hp: ids!(deck_b_hp),
@@ -24804,6 +24809,11 @@ p2 {}
             // Take the resolved refs out for the duration: every check below
             // is a pointer deref, not a walk of the widget tree.
             let refs = std::mem::take(&mut self.music_refs.decks[deck.index()]);
+            if refs.to_start.clicked(actions) {
+                self.deck_hands_on();
+                let cmds = self.decks.seek_secs(deck, 0.0);
+                self.run_deck_cmds(cx, cmds);
+            }
             if refs.play.clicked(actions) {
                 self.deck_hands_on();
                 let cmds = self.decks.play_pause(deck);
