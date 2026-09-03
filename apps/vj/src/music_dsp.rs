@@ -1082,6 +1082,11 @@ struct EqChannelState {
     band_ap: BiquadState,
     /// Sweepable filter, 4th order.
     sweep: [BiquadState; 2],
+    /// The same filter at its PREVIOUS setting, kept running while a
+    /// change crossfades. Its own state, because a biquad's state means
+    /// nothing to a different set of coefficients -- handing the old
+    /// state to new numbers is exactly the click this exists to remove.
+    sweep_out: [BiquadState; 2],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1093,6 +1098,9 @@ struct EqCoeffs {
     band_ap: Biquad,
     sweep: [Biquad; 2],
     sweep_on: bool,
+    /// What the sweep was, for the frames it takes to hand over.
+    sweep_prev: [Biquad; 2],
+    sweep_prev_on: bool,
 }
 
 impl EqCoeffs {
@@ -1105,6 +1113,8 @@ impl EqCoeffs {
             band_ap: Biquad::allpass(EQ_LOW_HZ, sample_rate, LR4_Q),
             sweep: [Biquad::default(); 2],
             sweep_on: false,
+            sweep_prev: [Biquad::default(); 2],
+            sweep_prev_on: false,
         }
     }
 }
@@ -1126,6 +1136,8 @@ pub struct DeckEq {
     blend_filter: ParamRamp,
     /// Cutoff the coefficients were last built for.
     filter_built: f32,
+    /// Frames left in a filter handover; zero when nothing is changing.
+    handover: u32,
     /// Crossfade between the dry input and the processed chain.
     wet: ParamRamp,
 }
@@ -1141,6 +1153,7 @@ impl DeckEq {
             filter: ParamRamp::at(0.5),
             blend_filter: ParamRamp::at(0.0),
             filter_built: f32::NAN,
+            handover: 0,
             wet: ParamRamp::at(0.0),
         }
     }
@@ -1263,6 +1276,15 @@ impl DeckEq {
             && (self.effective_filter() - 0.5).abs() <= FILTER_DEADZONE
     }
 
+    /// How long a filter change takes to hand over, in frames.
+    ///
+    /// About a millisecond and a half at 48 kHz: long enough that the two
+    /// filters' outputs are blended rather than switched, short enough
+    /// that a hand sweeping the knob hears a sweep and not a smear. A
+    /// fixed length rather than a share of the buffer, so the answer does
+    /// not change with the device's block size.
+    const FILTER_HANDOVER_FRAMES: u32 = 64;
+
     /// Rebuild rate-dependent coefficients. Called once per device buffer,
     /// never per frame — the trig is the expensive part and the ear cannot
     /// hear a cutoff quantized to one buffer.
@@ -1274,6 +1296,16 @@ impl DeckEq {
             return;
         }
         self.filter_built = position;
+        // What the filter WAS keeps running for the handover: new
+        // coefficients meeting the old filter's state is a discontinuity
+        // in the output, which is a click, and no ramp on the outside can
+        // take it back out.
+        self.coeffs.sweep_prev = self.coeffs.sweep;
+        self.coeffs.sweep_prev_on = self.coeffs.sweep_on;
+        self.handover = Self::FILTER_HANDOVER_FRAMES;
+        for channel in &mut self.channels {
+            channel.sweep_out = channel.sweep;
+        }
         let centre = 0.5;
         if (position - centre).abs() <= FILTER_DEADZONE {
             self.coeffs.sweep_on = false;
@@ -1307,6 +1339,9 @@ impl DeckEq {
         self.filter.tick(device_rate);
         self.blend_filter.tick(device_rate);
         let wet = self.wet.tick(device_rate);
+        // Counted once per FRAME, not per channel: the two channels are
+        // the same moment in time and must land on the same blend.
+        let handover_after = self.handover.saturating_sub(1);
         if wet <= 0.0 {
             // Untouched deck: the sample the decoder produced, unchanged.
             return frame;
@@ -1338,15 +1373,34 @@ impl DeckEq {
             // three bands stay phase-coherent and sum flat at unity.
             let high = self.coeffs.band_ap.process(&mut state.band_ap, high_branch);
 
-            let mut wet_sample = low * gains[0] + mid * gains[1] + high * gains[2];
+            let banded = low * gains[0] + mid * gains[1] + high * gains[2];
+            let mut wet_sample = banded;
             if self.coeffs.sweep_on {
                 for index in 0..2 {
                     wet_sample =
                         self.coeffs.sweep[index].process(&mut state.sweep[index], wet_sample);
                 }
             }
+            // Both filters run while the handover lasts, on the same
+            // input, and the output walks from one to the other. The old
+            // one is fed even when it is being faded out: a biquad that
+            // stops seeing input does not hold its last output, it rings
+            // down, and the ring is what would be heard.
+            if self.handover > 0 {
+                let mut going = banded;
+                if self.coeffs.sweep_prev_on {
+                    for index in 0..2 {
+                        going = self.coeffs.sweep_prev[index]
+                            .process(&mut state.sweep_out[index], going);
+                    }
+                }
+                let t = 1.0
+                    - self.handover as f32 / Self::FILTER_HANDOVER_FRAMES as f32;
+                wet_sample = going + (wet_sample - going) * t;
+            }
             out[channel] = x + (wet_sample - x) * wet;
         }
+        self.handover = handover_after;
         out
     }
 }
@@ -1410,6 +1464,44 @@ static COUNTING_ALLOCATOR: alloc_probe::CountingAllocator = alloc_probe::Countin
 
 #[cfg(test)]
 mod tests {
+    /// A filter sweep is a gesture, and a gesture must not click.
+    ///
+    /// Moving the knob replaces four biquads' coefficients while their
+    /// state is mid-ring. Handed straight over, the output steps; the two
+    /// filters are run side by side and blended instead.
+    #[test]
+    fn a_filter_change_hands_over_without_a_step() {
+        let rate = 48_000.0f32;
+        let mut eq = DeckEq::new(rate);
+        let mut phase = 0.0f32;
+        let mut out = Vec::with_capacity(4096);
+        // A tone the filter really acts on, so a discontinuity in the
+        // filter shows up in the output.
+        let mut render = |eq: &mut DeckEq, frames: usize, out: &mut Vec<f32>, phase: &mut f32| {
+            eq.prepare_block();
+            for _ in 0..frames {
+                *phase += 2.0 * std::f32::consts::PI * 220.0 / rate;
+                let x = phase.sin() * 0.5;
+                out.push(eq.process([x, x], rate)[0]);
+            }
+        };
+        // Settle with the filter well into the low-pass side.
+        eq.set_filter(0.2);
+        render(&mut eq, 2048, &mut out, &mut phase);
+        let settled = out.len();
+        // Then a big jump the other way, which is the worst a hand can do.
+        eq.set_filter(0.85);
+        render(&mut eq, 2048, &mut out, &mut phase);
+        let worst = out[settled - 1..]
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0.0f32, f32::max);
+        // The tone itself steps by about 0.014 per sample at 220 Hz and
+        // half scale, so anything under the click rule is the filter
+        // adding nothing of its own.
+        assert!(worst < 0.02, "a filter change stepped by {worst}");
+    }
+
     use super::*;
 
     pub struct Buffer {
