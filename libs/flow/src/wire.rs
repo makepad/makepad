@@ -356,6 +356,7 @@ pub struct NodeTypeCatalog {
     pub type_name: String,
     pub kind: String,
     pub domain: Option<String>,
+    pub models: Vec<String>,
     pub ports: NodePortsCatalog,
     pub params: Vec<NodeParamCatalog>,
     pub face: String,
@@ -366,6 +367,33 @@ pub struct NodeTypeCatalog {
 pub struct NodesResponse {
     pub types: Vec<NodeTypeCatalog>,
     pub brief: String,
+}
+
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct FleetNodeDto {
+    pub base_url: String,
+    pub fleet: String,
+    pub healthy: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct ModelInfoDto {
+    pub id: String,
+    pub domain: String,
+    pub backend: String,
+    pub node: String,
+    pub available: bool,
+    pub gated: bool,
+    pub state: String,
+    pub vram_gb: Option<f64>,
+    pub note: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct ModelsResponse {
+    pub nodes: Vec<FleetNodeDto>,
+    pub models: Vec<ModelInfoDto>,
+    pub snapshot_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
