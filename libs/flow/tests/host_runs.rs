@@ -278,6 +278,8 @@ fn full_run_streams_the_design_pipeline_and_serves_the_picture() {
                 .to_string(),
             "a lighthouse at dusk".to_string(),
             String::new(),
+            None,
+            Some(false),
         )]
     );
     let kinds: Vec<&str> = events.iter().map(event_kind).collect();

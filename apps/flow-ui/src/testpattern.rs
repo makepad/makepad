@@ -69,6 +69,8 @@ impl ChatSeam for TestpatternChat {
         _system: &str,
         prompt: &str,
         _model: &str,
+        _max_tokens: Option<u32>,
+        _thinking: Option<bool>,
     ) -> Result<Box<dyn ChatTurn>, String> {
         let subject = prompt.trim().trim_end_matches('.');
         let subject = if subject.is_empty() { "an empty scene" } else { subject };

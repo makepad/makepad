@@ -116,10 +116,11 @@ script_mod! {
         }
     }
 
-    let EmptyIcon = Icon{
-        visible: false
-        icon_walk: Walk{width: 26 height: Fit}
-        draw_icon +: {
+    let EmptyIcon = Svg{
+        width: 26
+        height: Fit
+        animating: false
+        draw_svg +: {
             color: #x3a3a40
         }
     }
@@ -134,27 +135,8 @@ script_mod! {
             color: #x151517
             border_radius: 16.0
         }
-        icon_text := EmptyIcon{
-            draw_icon +: {svg: crate_resource("self:resources/icons/text.svg")}
-        }
-        icon_image := EmptyIcon{
-            visible: true
-            draw_icon +: {svg: crate_resource("self:resources/icons/image.svg")}
-        }
-        icon_audio := EmptyIcon{
-            draw_icon +: {svg: crate_resource("self:resources/icons/audio.svg")}
-        }
-        icon_video := EmptyIcon{
-            draw_icon +: {svg: crate_resource("self:resources/icons/video.svg")}
-        }
-        icon_mesh := EmptyIcon{
-            draw_icon +: {svg: crate_resource("self:resources/icons/mesh.svg")}
-        }
-        icon_json := EmptyIcon{
-            draw_icon +: {svg: crate_resource("self:resources/icons/json.svg")}
-        }
-        icon_bytes := EmptyIcon{
-            draw_icon +: {svg: crate_resource("self:resources/icons/bytes.svg")}
+        icon := EmptyIcon{
+            draw_svg +: {svg: crate_resource("self:resources/icons/image.svg")}
         }
         note := Label{
             width: Fit
@@ -290,19 +272,24 @@ fn empty_note(ty: PortType) -> &'static str {
     }
 }
 
+fn empty_icon_svg(ty: PortType) -> &'static str {
+    match PortIcon::for_type(ty) {
+        PortIcon::Text => include_str!("../resources/icons/text.svg"),
+        PortIcon::Image => include_str!("../resources/icons/image.svg"),
+        PortIcon::Audio => include_str!("../resources/icons/audio.svg"),
+        PortIcon::Video => include_str!("../resources/icons/video.svg"),
+        PortIcon::Mesh => include_str!("../resources/icons/mesh.svg"),
+        PortIcon::Json => include_str!("../resources/icons/json.svg"),
+        PortIcon::Bytes => include_str!("../resources/icons/bytes.svg"),
+    }
+}
+
 fn set_empty_type(view: &mut View, cx: &mut Cx, ty: PortType) {
-    let icon = PortIcon::for_type(ty);
-    for (id, visible) in [
-        (live_id!(icon_text), icon == PortIcon::Text),
-        (live_id!(icon_image), icon == PortIcon::Image),
-        (live_id!(icon_audio), icon == PortIcon::Audio),
-        (live_id!(icon_video), icon == PortIcon::Video),
-        (live_id!(icon_mesh), icon == PortIcon::Mesh),
-        (live_id!(icon_json), icon == PortIcon::Json),
-        (live_id!(icon_bytes), icon == PortIcon::Bytes),
-    ] {
-        view.widget(cx, &[live_id!(empty), id])
-            .set_visible(cx, visible);
+    let icon = view.widget(cx, ids!(empty.icon));
+    if let Some(mut icon) = icon.borrow_mut::<Svg>() {
+        icon.draw_svg.svg = None;
+        icon.draw_svg.load_from_str(empty_icon_svg(ty));
+        icon.redraw(cx);
     }
     view.label(cx, ids!(empty.note))
         .set_text(cx, empty_note(ty));
@@ -2170,6 +2157,58 @@ mod tests {
         assert_eq!(choices[1].id, "z-absent");
         assert_eq!(choices[1].label, "z-absent · 1 nodes");
         assert!(choices[1].dimmed);
+    }
+
+    #[test]
+    fn placeholder_icon_maps_every_port_type() {
+        for (ty, svg) in [
+            (PortType::Text, include_str!("../resources/icons/text.svg")),
+            (PortType::Image, include_str!("../resources/icons/image.svg")),
+            (PortType::Audio, include_str!("../resources/icons/audio.svg")),
+            (PortType::Video, include_str!("../resources/icons/video.svg")),
+            (PortType::Mesh, include_str!("../resources/icons/mesh.svg")),
+            (PortType::Json, include_str!("../resources/icons/json.svg")),
+            (PortType::List, include_str!("../resources/icons/json.svg")),
+            (PortType::Bytes, include_str!("../resources/icons/bytes.svg")),
+        ] {
+            assert_eq!(empty_icon_svg(ty), svg, "wrong icon for {}", ty.as_str());
+        }
+    }
+
+    #[test]
+    fn mounted_placeholder_contains_one_type_icon() {
+        let source = include_str!("../../../libs/flow/recipes/templates/prompt-to-image.splash");
+        let graph = makepad_flow::graph::evaluate(source, "<placeholder-icon>").unwrap();
+        let catalog = makepad_flow::graph::prelude_catalog().unwrap();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        let host = FaceHost::mount(
+            &mut cx,
+            WidgetUid(0),
+            "test",
+            "<placeholder-icon>",
+            source,
+            &graph,
+            &catalog,
+        );
+        assert!(host.error.is_none(), "{:?}", host.error);
+        let empty = host
+            .faces
+            .get("image")
+            .unwrap()
+            .root
+            .child(live_id!(preview))
+            .child(live_id!(empty));
+        let mut widgets = Vec::new();
+        collect_widgets(&empty, &mut widgets);
+        assert_eq!(
+            widgets
+                .iter()
+                .filter(|widget| widget.borrow::<Svg>().is_some())
+                .count(),
+            1
+        );
+        host.free(&mut cx);
     }
 
     #[test]

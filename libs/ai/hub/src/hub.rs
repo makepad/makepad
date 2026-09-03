@@ -63,6 +63,11 @@ impl AiHub {
         HubChatSession::start(HubChatConfig {
             llm: config.llm,
             preferred_model: None,
+            // Existing app chat callers keep the previous unbounded fleet
+            // request and provider-default thinking behaviour. Callers that
+            // need per-turn controls use HubChatConfig directly.
+            max_tokens: Some(u32::MAX),
+            thinking: None,
             system_prompt: config.system_prompt,
             tools: config.tools,
             wake: config.wake,

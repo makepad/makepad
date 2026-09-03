@@ -91,6 +91,30 @@ fn llm_forwards_empty_local_file_and_fleet_model_values_to_the_chat_seam() {
 }
 
 #[test]
+fn llm_omits_a_zero_token_cap_forwards_positive_caps_and_disables_thinking() {
+    for (index, (configured, expected)) in [(0, None), (73, Some(73))].into_iter().enumerate() {
+        let chat = FakeChat::done("answer");
+        let requests = chat.requests.clone();
+        let source = format!(
+            "use mod.flow.*\nlet llm = Llm{{prompt: \"hello\" max_tokens: {configured}}}\n\
+             let out = Output{{value: llm.text()}}\nFlow{{llm, out}}\n"
+        );
+        let (sender, receiver) = mpsc::channel();
+        let handle = spawn_run(
+            run_input(&source, &format!("chat-options-{index}.splash")),
+            seams(chat, FakeGen::done(), FakeHttp::json(200, "{}")),
+            sender,
+        );
+        handle.join.join().unwrap();
+        let _: Vec<_> = receiver.try_iter().collect();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].3, expected);
+        assert_eq!(requests[0].4, Some(false));
+    }
+}
+
+#[test]
 fn fan_out_starts_four_generation_nodes_in_one_scheduler_burst() {
     let source = r#"use mod.flow.*
 let prompt = Input{default: "x"}

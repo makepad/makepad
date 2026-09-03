@@ -104,6 +104,11 @@ pub struct HubChatConfig {
     pub llm: LocalLlmConfig,
     /// Exact fleet model id to prefer. `None` lets the hub elect normally.
     pub preferred_model: Option<String>,
+    /// Fleet generation cap. `None` omits the field and lets the node use
+    /// its provider default.
+    pub max_tokens: Option<u32>,
+    /// Fleet thinking control. `None` preserves the provider default.
+    pub thinking: Option<bool>,
     pub system_prompt: String,
     pub tools: Vec<ToolSpec>,
     pub wake: Option<WakeHook>,
@@ -206,7 +211,9 @@ fn elect_and_run(
                 let route = ChatRoute::MachineNode { port };
                 set_route(Some(route.clone()));
                 let provider = FleetQwenChatProvider::new(HttpFleetTransport, vec![base])
-                    .with_preferred_model(config.preferred_model.clone());
+                    .with_preferred_model(config.preferred_model.clone())
+                    .with_max_tokens(config.max_tokens)
+                    .with_thinking(config.thinking);
                 match run_proxy(provider, &config, first.take(), &msg_rx, &send, &cancel, route) {
                     ProxyExit::Ended => return,
                     ProxyExit::Reelect(msg) => {
@@ -218,7 +225,12 @@ fn elect_and_run(
         }
 
         // 2. A fleet chat node on the LAN.
-        let fleet_reason = match fleet_provider(&send, config.preferred_model.as_deref()) {
+        let fleet_reason = match fleet_provider(
+            &send,
+            config.preferred_model.as_deref(),
+            config.max_tokens,
+            config.thinking,
+        ) {
             Ok((provider, route)) => {
                 set_route(Some(route.clone()));
                 match run_proxy(provider, &config, first.take(), &msg_rx, &send, &cancel, route) {
@@ -324,6 +336,8 @@ pub fn fleet_chat_bases(nodes: &[crate::discovery::DiscoveredNode]) -> Vec<Strin
 fn fleet_provider(
     send: &impl Fn(ChatEvent),
     preferred_model: Option<&str>,
+    max_tokens: Option<u32>,
+    thinking: Option<bool>,
 ) -> Result<(FleetQwenChatProvider<HttpFleetTransport>, ChatRoute), String> {
     let discovery = crate::discovery::start_listener();
     let started = Instant::now();
@@ -353,7 +367,9 @@ fn fleet_provider(
         std::thread::sleep(FLEET_POLL);
     };
     let mut provider = FleetQwenChatProvider::new(HttpFleetTransport, bases)
-        .with_preferred_model(preferred_model.map(str::to_string));
+        .with_preferred_model(preferred_model.map(str::to_string))
+        .with_max_tokens(max_tokens)
+        .with_thinking(thinking);
     match provider.availability() {
         ProviderAvailability::Available { model, detail } => {
             Ok((provider, ChatRoute::Fleet { base: detail, model }))
@@ -809,6 +825,8 @@ mod tests {
         let config = HubChatConfig {
             llm: LocalLlmConfig::new("".into()),
             preferred_model: None,
+            max_tokens: Some(u32::MAX),
+            thinking: None,
             system_prompt: "You run the desktop.".into(),
             tools: tools(),
             wake: None,
@@ -896,6 +914,8 @@ mod tests {
         let config = HubChatConfig {
             llm: LocalLlmConfig::new("".into()),
             preferred_model: None,
+            max_tokens: Some(u32::MAX),
+            thinking: None,
             system_prompt: "Answer directly.".into(),
             tools: Vec::new(),
             wake: None,
