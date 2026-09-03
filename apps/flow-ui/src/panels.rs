@@ -468,6 +468,19 @@ script_mod! {
                 }
                 help := MetaText{margin: Inset{left: 88}}
             }
+            SelectedEdge := View{
+                width: Fill height: Fit flow: Down spacing: theme.space_2
+                padding: Inset{left: 2 right: 2 top: 8 bottom: 8}
+                route := Label{
+                    width: Fill height: Fit
+                    draw_text +: {text_style: theme.font_bold{font_size: 10.5}}
+                }
+                detail := Row{
+                    type_icon := Image{width: 14 height: 14 fit: ImageFit.Smallest}
+                    port_type := MetaText{width: Fill}
+                    delete := ButtonFlat{text: "Delete"}
+                }
+            }
             Port := View{
                 width: Fill height: Fit flow: Down spacing: 2
                 top := Row{
@@ -828,6 +841,13 @@ enum Row {
         from_node: String,
         from_port: String,
     },
+    SelectedEdge {
+        from_node: String,
+        from_port: String,
+        to_node: String,
+        to_port: String,
+        ty: makepad_flow::PortType,
+    },
     Port {
         port: String,
         ty: makepad_flow::PortType,
@@ -856,6 +876,7 @@ impl Row {
             Row::Bool { .. } => live_id!(Bool),
             Row::Color { .. } => live_id!(Color),
             Row::Edge { .. } => live_id!(Edge),
+            Row::SelectedEdge { .. } => live_id!(SelectedEdge),
             Row::Port { .. } => live_id!(Port),
             Row::Result { .. } => live_id!(Result),
             Row::Advanced => live_id!(Advanced),
@@ -1162,6 +1183,52 @@ pub struct Inspector {
 }
 
 impl Inspector {
+    pub fn show_edge(
+        &mut self,
+        cx: &mut Cx,
+        graph: Option<&Graph>,
+        from_node: &str,
+        from_port: &str,
+        to_node: &str,
+        to_port: &str,
+    ) {
+        self.rows.clear();
+        self.advanced_rows.clear();
+        self.advanced_open = false;
+        self.node = Some(to_node.to_string());
+        let ty = graph.and_then(|graph| {
+            let exists = graph.edges.iter().any(|edge| {
+                edge.from_node == from_node
+                    && edge.from_port == from_port
+                    && edge.to_node == to_node
+                    && edge.to_port == to_port
+            });
+            exists.then(|| {
+                graph
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == from_node)?
+                    .outputs
+                    .iter()
+                    .find(|port| port.name == from_port)
+                    .map(|port| port.ty)
+            })?
+        });
+        if let Some(ty) = ty {
+            self.rows.push(Row::Section("CONNECTION".into()));
+            self.rows.push(Row::SelectedEdge {
+                from_node: from_node.to_string(),
+                from_port: from_port.to_string(),
+                to_node: to_node.to_string(),
+                to_port: to_port.to_string(),
+                ty,
+            });
+        } else {
+            self.rows.push(Row::Empty("That connection no longer exists.".into()));
+        }
+        self.redraw(cx);
+    }
+
     /// Rebuild the rows for a node from the graph, the catalog and the run's
     /// last outputs for it.
     pub fn show_node(
@@ -1477,6 +1544,14 @@ impl Inspector {
                         });
                     }
                 }
+                Row::SelectedEdge { to_node, to_port, .. } => {
+                    if item.button(cx, ids!(delete)).clicked(actions) {
+                        out.push(InspectorAction::Disconnect {
+                            node: to_node.clone(),
+                            port: to_port.clone(),
+                        });
+                    }
+                }
                 Row::Port { consumers, .. } => {
                     if item.button(cx, ids!(consumers)).clicked(actions) {
                         if let Some((consumer, _)) = consumers.first() {
@@ -1728,6 +1803,25 @@ impl Widget for Inspector {
                             .set_text(cx, &format!("← {from_node}.{from_port}"));
                         item.label(cx, ids!(help))
                             .set_text(cx, &format!("{} input", ty.as_str()));
+                        if !existed {
+                            let _ = item
+                                .image(cx, ids!(type_icon))
+                                .load_svg_from_data(cx, port_icon_svg(*ty).as_bytes());
+                        }
+                    }
+                    Row::SelectedEdge {
+                        from_node,
+                        from_port,
+                        to_node,
+                        to_port,
+                        ty,
+                    } => {
+                        item.label(cx, ids!(route)).set_text(
+                            cx,
+                            &format!("{from_node}.{from_port} → {to_node}.{to_port}"),
+                        );
+                        item.label(cx, ids!(port_type))
+                            .set_text(cx, &format!("{} connection", ty.as_str()));
                         if !existed {
                             let _ = item
                                 .image(cx, ids!(type_icon))
