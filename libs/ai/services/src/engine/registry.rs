@@ -51,6 +51,7 @@ struct Inner {
 pub enum RegistryUp {
     Result(EndpointId, ToolResult),
     Progress { endpoint: EndpointId, call_id: String, note: String, permille: u16 },
+    Message { endpoint: EndpointId, sub_id: String, message: Message },
 }
 
 #[derive(Clone, Default)]
@@ -377,6 +378,15 @@ impl ServiceRegistry {
                 })
                 .collect();
             out.push_str(&format!("## {} (tools `{}.*`)\n{}\n", m.label, m.id, m.brief.trim()));
+            if !m.topics.is_empty() {
+                let topics = m
+                    .topics
+                    .iter()
+                    .map(|topic| format!("`{}` — {}", topic.name, topic.description.trim()))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                out.push_str(&format!("Topics: {topics}\n"));
+            }
             if instances.len() > 1 {
                 out.push_str("Running instances (say which with the `instance` argument when it matters): ");
                 out.push_str(&instances.join("; "));
@@ -510,7 +520,17 @@ impl ServiceRegistry {
                     ServiceUp::Context(c) => {
                         inner.entries.get_mut(&endpoint).unwrap().context = c.text;
                     }
-                    ServiceUp::Unregister => dead.push(endpoint.clone()),
+                    ServiceUp::Message { sub_id, topic, text, data, final_ } => {
+                        out.push(RegistryUp::Message {
+                            endpoint: endpoint.clone(),
+                            sub_id,
+                            message: Message { topic, text, data, final_ },
+                        });
+                    }
+                    ServiceUp::Unregister => {
+                        dead.push(endpoint.clone());
+                        break;
+                    }
                 }
             }
         }
@@ -609,5 +629,30 @@ mod tests {
         assert!(matches!(&ups[1], RegistryUp::Result(ep, r) if ep == &e && r.call_id == "c1"));
         assert_eq!(reg.dynamic_context(), "Running now — call their tools directly: Files (files.stat)\n[Files] cwd=~\n");
         assert!(!reg.send(&EndpointId("nope".into()), ServiceDown::ChatOpen { open: true }));
+    }
+
+    #[test]
+    fn unregister_discards_later_frames_from_the_same_endpoint_queue() {
+        let reg = ServiceRegistry::new();
+        let manifest = app("files", "Files", &["stat"])
+            .with_topic(TopicDef::new("watch", "File changes."));
+        let (link, host) = crate::port::ServiceLink::pair(manifest);
+        let endpoint = reg.register(link, "", None).unwrap();
+        host.up.send(HostedUp { from: None, msg: ServiceUp::Unregister }).unwrap();
+        host.up
+            .send(HostedUp {
+                from: None,
+                msg: ServiceUp::Message {
+                    sub_id: "lease-s1".into(),
+                    topic: "watch".into(),
+                    text: "too late".into(),
+                    data: None,
+                    final_: false,
+                },
+            })
+            .unwrap();
+        assert!(reg.pump().is_empty(), "nothing after Unregister is delivered");
+        assert!(reg.manifest(&endpoint).is_none());
+        assert!(reg.pump().is_empty(), "the discarded queue cannot surface later");
     }
 }

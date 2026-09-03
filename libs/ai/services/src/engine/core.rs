@@ -16,7 +16,7 @@ use crate::engine::{Model, ModelEvent, ToolDefinition};
 use crate::state::*;
 use crate::wire::*;
 use makepad_strict_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 /// The base doctrine every conversation starts with.
 pub const DOCTRINE: &str = include_str!("doctrine.md");
@@ -28,6 +28,12 @@ pub const CALL_HARD_CAP_SECS: f64 = 600.0;
 pub const MAX_TOOL_ROUNDS: u32 = 16;
 /// The reserved argument the model may use to pick an instance.
 pub const INSTANCE_KEY: &str = "instance";
+/// Live subscriptions one conversation lease may own.
+pub const MAX_SUBSCRIPTIONS: usize = 16;
+/// Messages retained for one subscription while wakes are throttled.
+pub const MAX_SUBSCRIPTION_QUEUE: usize = 64;
+/// Minimum time between model wakes for one conversation.
+pub const WAKE_INTERVAL_SECS: f64 = 2.0;
 
 /// What the host should do after a `pump`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,6 +74,18 @@ struct AwaitingApp {
     deadline: f64,
 }
 
+struct Subscription {
+    endpoint: EndpointId,
+    service_label: String,
+    topic: String,
+    filter: Option<String>,
+    created: f64,
+    queue: VecDeque<Message>,
+    dropped: u32,
+    /// A final publication has arrived; remove the row when it is delivered.
+    closing: bool,
+}
+
 pub struct EngineCore {
     registry: ServiceRegistry,
     model: Box<dyn Model>,
@@ -80,10 +98,23 @@ pub struct EngineCore {
     next_call: u64,
     doctrine: String,
     turn_active: bool,
+    subscriptions: HashMap<String, Subscription>,
+    subscription_order: Vec<String>,
+    lease_id: u64,
+    next_subscription: u64,
+    wake_cursor: usize,
+    last_wake: Option<f64>,
 }
 
 impl EngineCore {
-    pub fn new(registry: ServiceRegistry, model: Box<dyn Model>, doctrine: Option<&str>) -> EngineCore {
+    /// Start a conversation lease. `lease_id` must be unique for this host
+    /// process; it namespaces every subscription id exposed to services.
+    pub fn new(
+        registry: ServiceRegistry,
+        model: Box<dyn Model>,
+        doctrine: Option<&str>,
+        lease_id: u64,
+    ) -> EngineCore {
         let mut state = EngineState::default();
         state.provider_label = model.label();
         EngineCore {
@@ -98,6 +129,12 @@ impl EngineCore {
             next_call: 0,
             doctrine: doctrine.unwrap_or(DOCTRINE).to_string(),
             turn_active: false,
+            subscriptions: HashMap::new(),
+            subscription_order: Vec::new(),
+            lease_id,
+            next_subscription: 0,
+            wake_cursor: 0,
+            last_wake: None,
         }
     }
 
@@ -111,6 +148,26 @@ impl EngineCore {
 
     pub fn model_mut(&mut self) -> &mut dyn Model {
         self.model.as_mut()
+    }
+
+    pub fn subscription_count(&self) -> usize {
+        self.subscriptions.values().filter(|subscription| !subscription.closing).count()
+    }
+
+    pub fn queued_message_count(&self) -> usize {
+        self.subscriptions.values().map(|subscription| subscription.queue.len()).sum()
+    }
+
+    /// End this conversation lease while its transport is still available.
+    /// Hosts must flush their hosted adapter after this call.
+    pub fn shutdown(&mut self) {
+        self.drop_subscriptions();
+    }
+
+    /// Whether the host should keep scheduling pumps even though the model
+    /// is idle (normally because a rate-limited publication is waiting).
+    pub fn needs_pump(&self) -> bool {
+        self.turn_active || self.awaiting.is_some() || self.queued_message_count() != 0
     }
 
     /// What the provider chip shows: the choice, the rows it may switch
@@ -161,7 +218,8 @@ impl EngineCore {
 
     fn console(&mut self, line: &str, now: f64) {
         if line.is_empty() || line == "help" {
-            let names: Vec<String> = self.registry.tool_definitions().into_iter().map(|t| t.name).collect();
+            let mut names: Vec<String> = self.registry.tool_definitions().into_iter().map(|t| t.name).collect();
+            names.push("bus.unsubscribe".into());
             let text = if names.is_empty() {
                 "no tools: no app is connected".to_string()
             } else {
@@ -200,6 +258,7 @@ impl EngineCore {
     /// A new conversation: same services, same provider, empty transcript.
     pub fn clear(&mut self, now: f64) {
         self.cancel(now);
+        self.drop_subscriptions();
         self.model.reset();
         self.state.entries.clear();
         self.state.thinking.clear();
@@ -251,8 +310,12 @@ impl EngineCore {
                         }
                     }
                 }
+                RegistryUp::Message { endpoint, sub_id, message } => {
+                    self.on_message(&endpoint, &sub_id, message);
+                }
             }
         }
+        self.close_gone_subscriptions();
         self.pump_awaiting(now);
         if !self.turn_active {
             self.reconfigure_if_needed();
@@ -276,6 +339,9 @@ impl EngineCore {
             let result = ToolResult::timed_out(&call_id, format!("{label} did not answer in time"));
             self.finish_call(&call_id, result, p.from_console);
         }
+        if !self.turn_active {
+            self.deliver_next_message(now);
+        }
         let services = self.registry.services();
         if services != self.state.services {
             self.state.services = services;
@@ -292,8 +358,18 @@ impl EngineCore {
         if self.seen_generation == Some(generation) {
             return;
         }
-        let system = format!("{}\n# Applications\n{}", self.doctrine.trim(), self.registry.briefs());
-        let tools: Vec<ToolDefinition> = self.registry.tool_definitions();
+        let system = format!(
+            "{}\n# Applications\n{}{}",
+            self.doctrine.trim(),
+            self.registry.briefs(),
+            self.subscription_prompt()
+        );
+        let mut tools: Vec<ToolDefinition> = self.registry.tool_definitions();
+        tools.push(ToolDefinition {
+            name: "bus.unsubscribe".into(),
+            description: "Stop one live asynchronous subscription by its sub_id.".into(),
+            parameters: r#"{"type":"object","properties":{"sub_id":{"type":"string"}},"required":["sub_id"]}"#.into(),
+        });
         if let Err(e) = self.model.configure(&system, &tools) {
             // Never let the table drift: restart the conversation instead.
             self.model.reset();
@@ -308,6 +384,33 @@ impl EngineCore {
     fn mint_call_id(&mut self) -> String {
         self.next_call += 1;
         format!("c{}", self.next_call)
+    }
+
+    fn subscription_prompt(&self) -> String {
+        if self.subscriptions.is_empty() {
+            return String::new();
+        }
+        let mut rows: Vec<(&String, &Subscription)> =
+            self.subscriptions.iter().filter(|(_, subscription)| !subscription.closing).collect();
+        if rows.is_empty() {
+            return String::new();
+        }
+        rows.sort_by(|(a_id, a), (b_id, b)| {
+            a.created.total_cmp(&b.created).then_with(|| a_id.cmp(b_id))
+        });
+        let mut out = String::from("\n# Live subscriptions\n");
+        for (sub_id, subscription) in rows {
+            out.push_str(&format!(
+                "- {} · {} (`{}`)",
+                subscription.service_label, subscription.topic, sub_id
+            ));
+            if let Some(filter) = &subscription.filter {
+                out.push_str(&format!(" filter {filter}"));
+            }
+            out.push('\n');
+        }
+        out.push_str("Use `bus.unsubscribe` with a sub_id when updates are no longer wanted.\n");
+        out
     }
 
     fn on_model_event(&mut self, ev: ModelEvent, now: f64) -> Option<EngineEvent> {
@@ -389,13 +492,16 @@ impl EngineCore {
 
     fn card(&self, call_id: &str, service: &str, name: &str, args: &str) -> ToolEntry {
         let (app, tool) = split_name(name);
-        let label = self
-            .registry
-            .instances_of(app)
-            .first()
-            .and_then(|e| self.registry.meta(e))
-            .map(|m| m.display_name)
-            .unwrap_or_else(|| if app.is_empty() { "?".into() } else { app.to_string() });
+        let label = if app == "bus" {
+            "Bus".into()
+        } else {
+            self.registry
+                .instances_of(app)
+                .first()
+                .and_then(|e| self.registry.meta(e))
+                .map(|m| m.display_name)
+                .unwrap_or_else(|| if app.is_empty() { "?".into() } else { app.to_string() })
+        };
         let mut summary = args.trim().trim_start_matches('{').trim_end_matches('}').trim().to_string();
         truncate_to_char_boundary(&mut summary, 60);
         ToolEntry {
@@ -417,6 +523,10 @@ impl EngineCore {
         let (app, tool) = split_name(name);
         let (app, tool) = (app.to_string(), tool.to_string());
         self.state.push(Entry::Tool(self.card(&call_id, &app, name, args)));
+        if app == "bus" {
+            self.dispatch_bus(call_id, &tool, args, from_console);
+            return None;
+        }
         if app.is_empty() || self.registry.instances_of(&app).is_empty() {
             let result = if !app.is_empty() && self.registry.is_launchable(&app) {
                 ToolResult::unavailable(&call_id, format!("{app} is not running; `os.launch` can start it"))
@@ -481,6 +591,48 @@ impl EngineCore {
         None
     }
 
+    fn dispatch_bus(&mut self, call_id: String, tool: &str, args: &str, from_console: bool) {
+        if tool != "unsubscribe" {
+            self.finish_call(
+                &call_id,
+                ToolResult::refused(&call_id, "bus has one tool: bus.unsubscribe"),
+                from_console,
+            );
+            return;
+        }
+        let sub_id = match makepad_strict_json::parse(args.as_bytes()) {
+            Ok(Value::Obj(fields)) => fields
+                .into_iter()
+                .find(|(key, _)| key == "sub_id")
+                .and_then(|(_, value)| value.as_str().map(str::to_string)),
+            _ => None,
+        };
+        let Some(sub_id) = sub_id.filter(|id| is_opaque_id(id)) else {
+            self.finish_call(
+                &call_id,
+                ToolResult::refused(&call_id, "bus.unsubscribe needs a valid string sub_id"),
+                from_console,
+            );
+            return;
+        };
+        let Some(subscription) = self.subscriptions.remove(&sub_id) else {
+            self.finish_call(
+                &call_id,
+                ToolResult::refused(&call_id, format!("no live subscription '{sub_id}'")),
+                from_console,
+            );
+            return;
+        };
+        self.subscription_order.retain(|id| id != &sub_id);
+        self.registry.send(&subscription.endpoint, ServiceDown::Unsubscribe { sub_id: sub_id.clone() });
+        self.seen_generation = None;
+        self.finish_call(
+            &call_id,
+            ToolResult::ok(&call_id, format!("unsubscribed {sub_id}"), "unsubscribed"),
+            from_console,
+        );
+    }
+
     fn launch(&mut self, endpoint: EndpointId, call: ServiceCall, from_console: bool, now: f64) {
         let call_id = call.call_id.clone();
         if !self.registry.send(&endpoint, ServiceDown::Call(call)) {
@@ -507,6 +659,7 @@ impl EngineCore {
         self.pending.remove(&result.call_id);
         result.bound();
         let call_id = result.call_id.clone();
+        self.install_subscriptions(endpoint, &mut result, now);
         // An `os.launch` that worked is held until the app it started is on
         // the bus, so the model gets its tools with the result and goes on
         // in the same turn instead of stopping at "it is opening".
@@ -530,6 +683,201 @@ impl EngineCore {
             }
         }
         self.finish_call(&call_id, result, from_console);
+    }
+
+    fn install_subscriptions(&mut self, endpoint: &EndpointId, result: &mut ToolResult, now: f64) {
+        if !result.outcome.is_ok() || result.subscribe.is_empty() {
+            return;
+        }
+        let requests = std::mem::take(&mut result.subscribe);
+        if self.subscriptions.len() + requests.len() > MAX_SUBSCRIPTIONS {
+            *result = ToolResult::refused(
+                result.call_id.clone(),
+                format!("subscription limit ({MAX_SUBSCRIPTIONS}) reached"),
+            );
+            return;
+        }
+        let Some(manifest) = self.registry.manifest(endpoint) else {
+            *result = ToolResult::unavailable(result.call_id.clone(), "the app went away before subscribing");
+            return;
+        };
+        if let Some(missing) = requests.iter().find(|request| manifest.topic(&request.topic).is_none()) {
+            *result = ToolResult::refused(
+                result.call_id.clone(),
+                format!("{} does not publish topic '{}'", manifest.id, missing.topic),
+            );
+            return;
+        }
+        let service_label = self
+            .registry
+            .meta(endpoint)
+            .map(|meta| meta.display_name)
+            .unwrap_or_else(|| manifest.label.clone());
+        let mut enrolled = Vec::new();
+        for request in requests {
+            self.next_subscription += 1;
+            let sub_id = format!("l{:x}-s{}", self.lease_id, self.next_subscription);
+            if !self.registry.send(
+                endpoint,
+                ServiceDown::Subscribe {
+                    sub_id: sub_id.clone(),
+                    topic: request.topic.clone(),
+                    filter: request.filter.clone(),
+                },
+            ) {
+                for (created_id, _) in &enrolled {
+                    self.subscriptions.remove(created_id);
+                    self.subscription_order.retain(|id| id != created_id);
+                }
+                *result = ToolResult::unavailable(result.call_id.clone(), "the app went away before subscribing");
+                return;
+            }
+            self.subscriptions.insert(
+                sub_id.clone(),
+                Subscription {
+                    endpoint: endpoint.clone(),
+                    service_label: service_label.clone(),
+                    topic: request.topic.clone(),
+                    filter: request.filter,
+                    created: now,
+                    queue: VecDeque::new(),
+                    dropped: 0,
+                    closing: false,
+                },
+            );
+            self.subscription_order.push(sub_id.clone());
+            enrolled.push((sub_id, request.topic));
+        }
+        self.seen_generation = None;
+        let subscriptions = enrolled
+            .iter()
+            .map(|(sub_id, topic)| format!("{topic} (sub_id: {sub_id})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !result.text.trim().is_empty() {
+            result.text.push('\n');
+        }
+        result.text.push_str(&format!("Subscribed: {subscriptions}."));
+        result.bound();
+    }
+
+    fn on_message(&mut self, endpoint: &EndpointId, sub_id: &str, message: Message) {
+        let Some(subscription) = self.subscriptions.get_mut(sub_id) else { return };
+        if &subscription.endpoint != endpoint || subscription.topic != message.topic || subscription.closing {
+            return;
+        }
+        if self.turn_active && !subscription.queue.is_empty() {
+            subscription.dropped = subscription.dropped.saturating_add(subscription.queue.len() as u32);
+            subscription.queue.clear();
+        } else if subscription.queue.len() >= MAX_SUBSCRIPTION_QUEUE {
+            subscription.queue.pop_front();
+            subscription.dropped = subscription.dropped.saturating_add(1);
+        }
+        subscription.closing = message.final_;
+        subscription.queue.push_back(message);
+        if subscription.closing {
+            self.seen_generation = None;
+        }
+    }
+
+    fn close_gone_subscriptions(&mut self) {
+        let gone: Vec<String> = self
+            .subscriptions
+            .iter()
+            .filter(|(_, subscription)| {
+                !subscription.closing && self.registry.manifest(&subscription.endpoint).is_none()
+            })
+            .map(|(sub_id, _)| sub_id.clone())
+            .collect();
+        for sub_id in gone {
+            let Some(subscription) = self.subscriptions.get_mut(&sub_id) else { continue };
+            let message = Message::new(&subscription.topic, "service disconnected").final_message();
+            if self.turn_active && !subscription.queue.is_empty() {
+                subscription.dropped = subscription.dropped.saturating_add(subscription.queue.len() as u32);
+                subscription.queue.clear();
+            } else if subscription.queue.len() >= MAX_SUBSCRIPTION_QUEUE {
+                subscription.queue.pop_front();
+                subscription.dropped = subscription.dropped.saturating_add(1);
+            }
+            subscription.closing = true;
+            subscription.queue.push_back(message);
+            self.seen_generation = None;
+        }
+    }
+
+    fn deliver_next_message(&mut self, now: f64) {
+        if self
+            .last_wake
+            .is_some_and(|last_wake| now - last_wake < WAKE_INTERVAL_SECS)
+        {
+            return;
+        }
+        let count = self.subscription_order.len();
+        if count == 0 {
+            return;
+        }
+        let mut selected = None;
+        for offset in 0..count {
+            let index = (self.wake_cursor + offset) % count;
+            let sub_id = &self.subscription_order[index];
+            if self.subscriptions.get(sub_id).is_some_and(|subscription| !subscription.queue.is_empty()) {
+                selected = Some((index, sub_id.clone()));
+                break;
+            }
+        }
+        let Some((index, sub_id)) = selected else { return };
+        self.wake_cursor = (index + 1) % count;
+        let (message, service_label, dropped, closing) = {
+            let subscription = self.subscriptions.get_mut(&sub_id).unwrap();
+            let message = subscription.queue.pop_front().unwrap();
+            let dropped = std::mem::take(&mut subscription.dropped);
+            let closing = message.final_;
+            (message, subscription.service_label.clone(), dropped, closing)
+        };
+        if closing {
+            self.subscriptions.remove(&sub_id);
+            self.subscription_order.retain(|id| id != &sub_id);
+            self.seen_generation = None;
+        }
+        let entry = EventEntry {
+            sub_id: sub_id.clone(),
+            service_label: service_label.clone(),
+            topic: message.topic.clone(),
+            text: message.text.clone(),
+            data: message.data.clone(),
+            dropped,
+            final_: message.final_,
+        };
+        let mut input = format!("[event] {service_label} · {} · {}\nsub_id: {sub_id}", message.topic, message.text);
+        if let Some(data) = &message.data {
+            input.push_str(&format!("\ndata: {data}"));
+        }
+        if dropped != 0 {
+            input.push_str(&format!("\ndropped: {dropped}"));
+        }
+        self.reconfigure_if_needed();
+        self.state.push(Entry::Event(entry));
+        self.state.status = Status::Thinking;
+        self.state.thinking.clear();
+        self.state.rate = None;
+        self.turn_active = true;
+        self.tool_rounds = 0;
+        self.last_wake = Some(now);
+        let dynamic = self.registry.dynamic_context();
+        self.model.send_user(&input, &dynamic);
+        self.state.touch();
+    }
+
+    fn drop_subscriptions(&mut self) {
+        for (sub_id, subscription) in self.subscriptions.drain() {
+            if !subscription.closing {
+                self.registry.send(&subscription.endpoint, ServiceDown::Unsubscribe { sub_id });
+            }
+        }
+        self.subscription_order.clear();
+        self.wake_cursor = 0;
+        self.last_wake = None;
+        self.seen_generation = None;
     }
 
     /// The app an `os.launch` card asked for, when `call_id` is one.
@@ -632,12 +980,19 @@ impl EngineCore {
                 self.end_turn();
             }
             Disposition::ResetConversation => {
+                self.drop_subscriptions();
                 self.model.reset();
                 self.seen_generation = None;
                 self.end_turn();
                 self.state.push(Entry::System { text: "the conversation was reset by the app".into() });
             }
         }
+    }
+}
+
+impl Drop for EngineCore {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -727,6 +1082,7 @@ mod tests {
             .with_tool(ToolDef::new("list_dir", "List a folder.", r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#, Risk::Read))
             .with_tool(ToolDef::new("trash", "Move a file to the trash.", r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#, Risk::Destructive))
             .with_tool(ToolDef::new("open", "Show a folder.", r#"{"type":"object","properties":{"path":{"type":"string"}}}"#, Risk::Act).with_preview())
+            .with_topic(TopicDef::new("watch", "Changes to a watched folder."))
     }
 
     fn call(name: &str, args: &str) -> ModelEvent {
@@ -737,14 +1093,21 @@ mod tests {
         vec![ModelEvent::Delta(text.into()), ModelEvent::TurnDone { tool_calls: 0 }]
     }
 
-    fn setup(script: Vec<Vec<ModelEvent>>) -> (EngineCore, std::sync::Arc<std::sync::Mutex<Scripted>>, AiServicePort, EndpointId) {
+    fn setup_with_lease(
+        script: Vec<Vec<ModelEvent>>,
+        lease_id: u64,
+    ) -> (EngineCore, std::sync::Arc<std::sync::Mutex<Scripted>>, AiServicePort, EndpointId) {
         let reg = ServiceRegistry::new();
         let (mut port, link) = AiServicePort::in_process(files()).unwrap();
         let e = reg.register(link, "the Files tile", None).unwrap();
         reg.pump();
         port.test_drain();
         let (model, shared) = scripted(script);
-        (EngineCore::new(reg, model, None), shared, port, e)
+        (EngineCore::new(reg, model, None, lease_id), shared, port, e)
+    }
+
+    fn setup(script: Vec<Vec<ModelEvent>>) -> (EngineCore, std::sync::Arc<std::sync::Mutex<Scripted>>, AiServicePort, EndpointId) {
+        setup_with_lease(script, 1)
     }
 
     #[test]
@@ -759,7 +1122,10 @@ mod tests {
             assert_eq!(m.sends.len(), 1);
             let (system, tools) = &m.configured[0];
             assert!(system.contains("Files"), "brief in the system prompt");
-            assert_eq!(tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), vec!["files.list_dir", "files.trash", "files.open"]);
+            assert_eq!(
+                tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+                vec!["files.list_dir", "files.trash", "files.open", "bus.unsubscribe"]
+            );
         }
         core.pump(0.1);
         assert_eq!(core.state().status, Status::WaitingForTool);
@@ -858,7 +1224,7 @@ mod tests {
         let (model, _shared) = scripted(vec![
             vec![call("files.list_dir", r#"{"path":"~","instance":"Files"}"#), ModelEvent::TurnDone { tool_calls: 1 }],
         ]);
-        let mut core = EngineCore::new(reg, model, None);
+        let mut core = EngineCore::new(reg, model, None, 1);
         core.send("list", 0.0);
         core.pump(0.1);
         let got = p1.test_drain();
@@ -1013,7 +1379,7 @@ mod tests {
             vec![ModelEvent::ToolCall { call_id: "m2".into(), name: "photos.search".into(), args: r#"{"query":"dogs"}"#.into() }, ModelEvent::TurnDone { tool_calls: 1 }],
             done("Two dog comics."),
         ]);
-        let mut core = EngineCore::new(reg.clone(), model, None);
+        let mut core = EngineCore::new(reg.clone(), model, None, 1);
         core.send("find the pictures about dogs", 0.0);
         core.pump(0.1);
         let ev = os_port.test_drain();
@@ -1057,7 +1423,7 @@ mod tests {
             vec![call("os.launch", r#"{"app":"photos"}"#), ModelEvent::TurnDone { tool_calls: 1 }],
             done("Photos did not come up."),
         ]);
-        let mut core = EngineCore::new(reg, model, None);
+        let mut core = EngineCore::new(reg, model, None, 1);
         core.send("open photos", 0.0);
         core.pump(0.1);
         let ev = os_port.test_drain();
@@ -1081,5 +1447,309 @@ mod tests {
         let ctx = core.registry().dynamic_context();
         assert!(ctx.contains("Running now — call their tools directly: Files (files.list_dir, files.trash, files.open)"), "{ctx}");
         assert!(ctx.contains("Not running — os.launch starts them: Photos (`photos`)"), "{ctx}");
+    }
+
+    #[test]
+    fn a_tool_result_subscribes_the_port_and_an_idle_message_wakes_as_an_event() {
+        let (mut core, model, mut port, _endpoint) = setup(vec![
+            vec![call("files.open", r#"{"path":"~"}"#), ModelEvent::TurnDone { tool_calls: 1 }],
+            done("Watching."),
+            done("I saw it."),
+        ]);
+        core.send("watch home", 0.0);
+        core.pump(0.1);
+        let call = match &port.test_drain()[0] {
+            PortEvent::Call(call) => call.clone(),
+            other => panic!("{other:?}"),
+        };
+        port.reply(
+            ToolResult::ok(&call.call_id, "watch started", "watching")
+                .with_subscription(SubscriptionRequest::new("watch").with_filter(r#"{"path":"~"}"#)),
+        );
+        core.pump(0.2);
+        let subscribed = port.test_drain();
+        let sub_id = match &subscribed[0] {
+            PortEvent::Subscribe { sub_id, topic, filter } => {
+                assert_eq!(topic, "watch");
+                assert_eq!(filter.as_deref(), Some(r#"{"path":"~"}"#));
+                sub_id.clone()
+            }
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(core.subscription_count(), 1);
+        port.publish(&sub_id, Message::new("watch", "notes.txt changed"));
+        core.pump(0.3);
+        let m = model.lock().unwrap();
+        assert_eq!(m.sends.len(), 2, "the idle publication starts exactly one new turn");
+        assert!(m.sends[1].0.starts_with("[event] Files · watch · notes.txt changed"));
+        assert!(m.sends[1].0.contains(&format!("sub_id: {sub_id}")));
+        assert!(m.configured.last().unwrap().0.contains(&format!("watch (`{sub_id}`)")));
+        drop(m);
+        assert!(matches!(
+            core.state().entries.iter().find(|entry| matches!(entry, Entry::Event(_))),
+            Some(Entry::Event(event)) if event.sub_id == sub_id && event.text == "notes.txt changed"
+        ));
+    }
+
+    fn add_subscription(core: &mut EngineCore, endpoint: &EndpointId, now: f64) -> String {
+        let mut result = ToolResult::ok("seed", "watching", "")
+            .with_subscription(SubscriptionRequest::new("watch"));
+        core.install_subscriptions(endpoint, &mut result, now);
+        assert!(result.outcome.is_ok(), "{result:?}");
+        core.subscription_order.last().unwrap().clone()
+    }
+
+    #[test]
+    fn a_busy_turn_coalesces_per_subscription_and_reports_drops() {
+        let (mut core, model, mut port, endpoint) = setup(vec![vec![], done("Noted.")]);
+        let sub_id = add_subscription(&mut core, &endpoint, 0.0);
+        let _ = port.test_drain();
+        core.send("keep working", 0.0);
+        for index in 0..3 {
+            port.publish(&sub_id, Message::new("watch", format!("change {index}")));
+        }
+        core.pump(0.1);
+        assert_eq!(core.queued_message_count(), 1);
+        assert_eq!(model.lock().unwrap().sends.len(), 1, "a busy turn is not interrupted");
+        model.lock().unwrap().out.push(ModelEvent::TurnDone { tool_calls: 0 });
+        core.pump(0.2);
+        let m = model.lock().unwrap();
+        assert_eq!(m.sends.len(), 2);
+        assert!(m.sends[1].0.contains("change 2") && m.sends[1].0.contains("dropped: 2"), "{:?}", m.sends[1]);
+        drop(m);
+        assert!(matches!(
+            core.state().entries.last(),
+            Some(Entry::Event(event)) if event.dropped == 2 && event.text == "change 2"
+        ));
+    }
+
+    #[test]
+    fn five_idle_messages_in_a_burst_obey_the_two_second_wake_law() {
+        let (mut core, model, mut port, endpoint) = setup(vec![done("one"), done("two")]);
+        let sub_id = add_subscription(&mut core, &endpoint, 0.0);
+        let _ = port.test_drain();
+        for index in 0..5 {
+            port.publish(&sub_id, Message::new("watch", format!("change {index}")));
+        }
+        core.pump(0.1);
+        assert_eq!(model.lock().unwrap().sends.len(), 1);
+        assert_eq!(core.queued_message_count(), 4);
+        core.pump(0.2);
+        core.pump(1.0);
+        core.pump(2.09);
+        assert_eq!(model.lock().unwrap().sends.len(), 1, "no second wake inside two seconds");
+        core.pump(2.11);
+        assert_eq!(model.lock().unwrap().sends.len(), 2);
+        assert_eq!(core.queued_message_count(), 3);
+    }
+
+    #[test]
+    fn a_subscription_queue_keeps_sixty_four_and_reports_overflow() {
+        let (mut core, model, mut port, endpoint) = setup(vec![done("Noted.")]);
+        let sub_id = add_subscription(&mut core, &endpoint, 0.0);
+        let _ = port.test_drain();
+        for index in 0..(MAX_SUBSCRIPTION_QUEUE + 1) {
+            port.publish(&sub_id, Message::new("watch", format!("change {index}")));
+        }
+        core.pump(0.1);
+        assert_eq!(core.queued_message_count(), MAX_SUBSCRIPTION_QUEUE - 1);
+        let input = &model.lock().unwrap().sends[0].0;
+        assert!(input.contains("change 1") && input.contains("dropped: 1"), "{input}");
+    }
+
+    #[test]
+    fn a_final_message_delivers_once_and_closes_the_subscription() {
+        let (mut core, model, mut port, endpoint) = setup(vec![done("Complete.")]);
+        let sub_id = add_subscription(&mut core, &endpoint, 0.0);
+        let _ = port.test_drain();
+        port.publish(&sub_id, Message::new("watch", "finished").final_message());
+        core.pump(0.1);
+        assert_eq!(core.subscription_count(), 0);
+        assert_eq!(model.lock().unwrap().sends.len(), 1);
+        assert!(matches!(
+            core.state().entries.last(),
+            Some(Entry::Event(event)) if event.final_ && event.text == "finished"
+        ));
+        port.publish(&sub_id, Message::new("watch", "after final"));
+        core.pump(3.0);
+        assert_eq!(model.lock().unwrap().sends.len(), 1);
+    }
+
+    #[test]
+    fn a_queued_message_then_final_keeps_only_the_final_while_busy() {
+        let (mut core, model, mut port, endpoint) = setup(vec![done("Complete.")]);
+        let sub_id = add_subscription(&mut core, &endpoint, 0.0);
+        let _ = port.test_drain();
+        core.turn_active = true;
+        port.publish(&sub_id, Message::new("watch", "working"));
+        port.publish(&sub_id, Message::new("watch", "finished").final_message());
+        core.pump(0.1);
+        assert_eq!(core.queued_message_count(), 1);
+        core.turn_active = false;
+        core.deliver_next_message(0.2);
+        assert!(matches!(
+            core.state().entries.last(),
+            Some(Entry::Event(event))
+                if event.final_ && event.text == "finished" && event.dropped == 1
+        ));
+        assert_eq!(model.lock().unwrap().sends.len(), 1);
+    }
+
+    #[test]
+    fn a_pending_final_is_removed_from_the_next_turns_prompt() {
+        let (mut core, model, mut port, endpoint) = setup(vec![vec![]]);
+        let sub_id = add_subscription(&mut core, &endpoint, 0.0);
+        let _ = port.test_drain();
+        core.pump(0.0);
+        assert!(model.lock().unwrap().configured.last().unwrap().0.contains(&sub_id));
+        core.last_wake = Some(0.0);
+        port.publish(&sub_id, Message::new("watch", "finished").final_message());
+        core.pump(0.1);
+        assert_eq!(core.subscription_count(), 0);
+        assert_eq!(core.queued_message_count(), 1, "the rate-limited final remains bounded until delivery");
+        assert!(!model.lock().unwrap().configured.last().unwrap().0.contains(&sub_id));
+        core.send("what is live now?", 0.2);
+        assert!(!model.lock().unwrap().configured.last().unwrap().0.contains(&sub_id));
+    }
+
+    #[test]
+    fn bus_unsubscribe_ends_delivery() {
+        let (mut core, model, mut port, endpoint) = setup(vec![
+            vec![call("bus.unsubscribe", r#"{"sub_id":"l1-s1"}"#), ModelEvent::TurnDone { tool_calls: 1 }],
+            done("Stopped."),
+        ]);
+        let sub_id = add_subscription(&mut core, &endpoint, 0.0);
+        assert_eq!(sub_id, "l1-s1");
+        let _ = port.test_drain();
+        core.send("stop the updates", 0.0);
+        core.pump(0.1);
+        assert_eq!(core.subscription_count(), 0);
+        assert!(matches!(
+            port.test_drain().as_slice(),
+            [PortEvent::Unsubscribe { sub_id }] if sub_id == "l1-s1"
+        ));
+        port.publish("l1-s1", Message::new("watch", "too late"));
+        core.pump(3.0);
+        assert_eq!(model.lock().unwrap().sends.len(), 1, "an ended subscription cannot wake the model");
+        assert!(matches!(
+            core.state().tool("m1").map(|tool| &tool.status),
+            Some(ToolStatus::Done { outcome: ToolOutcome::Ok, .. })
+        ));
+    }
+
+    #[test]
+    fn clearing_the_conversation_drops_its_subscription_table() {
+        let (mut core, _model, mut port, endpoint) = setup(vec![]);
+        let sub_id = add_subscription(&mut core, &endpoint, 0.0);
+        let _ = port.test_drain();
+        core.clear(0.1);
+        assert_eq!(core.subscription_count(), 0);
+        assert!(matches!(
+            port.test_drain().as_slice(),
+            [PortEvent::Unsubscribe { sub_id: ended }] if ended == &sub_id
+        ));
+    }
+
+    #[test]
+    fn clear_discards_publications_already_queued_upstream() {
+        let (mut core, model, mut port, endpoint) = setup(vec![]);
+        let sub_id = add_subscription(&mut core, &endpoint, 0.0);
+        let _ = port.test_drain();
+        port.publish(&sub_id, Message::new("watch", "queued before clear"));
+        core.clear(0.1);
+        assert!(matches!(
+            port.test_drain().as_slice(),
+            [PortEvent::Unsubscribe { sub_id: ended }] if ended == &sub_id
+        ));
+        core.pump(0.2);
+        assert!(model.lock().unwrap().sends.is_empty());
+        assert!(!core.state().entries.iter().any(|entry| matches!(entry, Entry::Event(_))));
+    }
+
+    #[test]
+    fn ending_the_engine_lease_unsubscribes_every_service() {
+        let (mut core, _model, mut port, endpoint) = setup(vec![]);
+        let sub_id = add_subscription(&mut core, &endpoint, 0.0);
+        let _ = port.test_drain();
+        drop(core);
+        assert!(matches!(
+            port.test_drain().as_slice(),
+            [PortEvent::Unsubscribe { sub_id: ended }] if ended == &sub_id
+        ));
+    }
+
+    #[test]
+    fn a_seventeenth_subscription_is_a_typed_refusal() {
+        let (mut core, _model, mut port, endpoint) = setup(vec![]);
+        for index in 0..MAX_SUBSCRIPTIONS {
+            let sub_id = add_subscription(&mut core, &endpoint, index as f64);
+            assert_eq!(sub_id, format!("l1-s{}", index + 1));
+        }
+        let _ = port.test_drain();
+        let mut overflow = ToolResult::ok("overflow", "watching", "")
+            .with_subscription(SubscriptionRequest::new("watch"));
+        core.install_subscriptions(&endpoint, &mut overflow, 17.0);
+        assert_eq!(overflow.outcome, ToolOutcome::Refused);
+        assert!(overflow.text.contains("subscription limit"));
+        assert_eq!(core.subscription_count(), MAX_SUBSCRIPTIONS);
+        assert!(port.test_drain().is_empty(), "nothing is sent for the refused seventeenth subscription");
+    }
+
+    #[test]
+    fn pending_finals_cannot_expand_retained_subscription_state() {
+        let (mut core, _model, mut port, endpoint) = setup(vec![]);
+        let mut sub_ids = Vec::new();
+        for index in 0..MAX_SUBSCRIPTIONS {
+            sub_ids.push(add_subscription(&mut core, &endpoint, index as f64));
+        }
+        let _ = port.test_drain();
+        core.turn_active = true;
+        for sub_id in &sub_ids {
+            port.publish(sub_id, Message::new("watch", "finished").final_message());
+        }
+        core.pump(0.1);
+        assert_eq!(core.subscription_count(), 0);
+        assert_eq!(core.subscriptions.len(), MAX_SUBSCRIPTIONS);
+        assert_eq!(core.queued_message_count(), MAX_SUBSCRIPTIONS);
+        for attempt in 0..MAX_SUBSCRIPTIONS {
+            let mut next = ToolResult::ok(format!("next-{attempt}"), "watching", "")
+                .with_subscription(SubscriptionRequest::new("watch"));
+            core.install_subscriptions(&endpoint, &mut next, 1.0 + attempt as f64);
+            assert_eq!(next.outcome, ToolOutcome::Refused);
+        }
+        assert_eq!(core.subscriptions.len(), MAX_SUBSCRIPTIONS);
+        assert!(core.queued_message_count() <= MAX_SUBSCRIPTIONS * MAX_SUBSCRIPTION_QUEUE);
+        assert!(port.test_drain().is_empty(), "refused subscriptions send no frames");
+    }
+
+    #[test]
+    fn subscription_ids_are_namespaced_by_conversation_lease() {
+        let (mut first, _model, mut first_port, first_endpoint) = setup_with_lease(vec![], 0x2a);
+        let first_id = add_subscription(&mut first, &first_endpoint, 0.0);
+        let _ = first_port.test_drain();
+        let (mut second, _model, mut second_port, second_endpoint) = setup_with_lease(vec![], 0x2b);
+        let second_id = add_subscription(&mut second, &second_endpoint, 0.0);
+        let _ = second_port.test_drain();
+        assert_eq!(first_id, "l2a-s1");
+        assert_eq!(second_id, "l2b-s1");
+        assert_ne!(first_id, second_id);
+    }
+
+    #[test]
+    fn a_service_unregister_is_delivered_as_a_synthetic_final_event() {
+        let (mut core, model, mut port, endpoint) = setup(vec![done("Gone.")]);
+        let sub_id = add_subscription(&mut core, &endpoint, 0.0);
+        let _ = port.test_drain();
+        port.unregister();
+        port.publish(&sub_id, Message::new("watch", "after unregister"));
+        core.pump(0.1);
+        assert_eq!(core.subscription_count(), 0);
+        assert!(model.lock().unwrap().sends[0].0.contains("service disconnected"));
+        assert!(matches!(
+            core.state().entries.last(),
+            Some(Entry::Event(event)) if event.sub_id == sub_id && event.final_
+        ));
+        core.pump(3.0);
+        assert_eq!(model.lock().unwrap().sends.len(), 1, "the synthetic final is emitted once");
     }
 }

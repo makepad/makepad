@@ -50,7 +50,7 @@ use shell::panels::ShellPanelAction;
 use ai_bus::{AiBus, Route};
 use apps::{AppRegistry, Hosting};
 use makepad_ai_services::wire::{ServiceCall, ServiceDown, ToolResult};
-use makepad_app_module::{AppModule, ExecOutcome};
+use makepad_app_module::{AppModule, ExecOutcome, ModuleUpstream};
 use module_host::ModuleHost;
 use pane_links::{PaneCall, PaneLinks};
 use makepad_widgets::ai_slot::AiSlotRequests;
@@ -1914,6 +1914,10 @@ impl App {
                 self.send_to_pane(frame);
             }
             ServiceDown::Cancel { call_id } => self.module_host.cancel(cx, client, &call_id),
+            ServiceDown::Subscribe { sub_id, topic, filter } => {
+                self.module_host.subscribe(cx, client, &sub_id, &topic, filter.as_deref())
+            }
+            ServiceDown::Unsubscribe { sub_id } => self.module_host.unsubscribe(cx, client, &sub_id),
             // The pane state reaches instances through `broadcast_chat_open`.
             ServiceDown::ChatOpen { .. } | ServiceDown::Registered { .. } => {}
         }
@@ -1922,13 +1926,25 @@ impl App {
     /// Results in-process executors answered later, up to the pane: down
     /// the instance's link when the assistant is in-process, as a frame to
     /// the aichat child otherwise.
-    fn drain_module_replies(&mut self) {
-        for (client, result) in self.module_host.drain_replies() {
-            if self.pane_links.is_instance(client) {
-                self.pane_links.reply(client, result);
-            } else {
-                let frame = self.ai_bus.local_reply(client, result);
-                self.send_to_pane(frame);
+    fn drain_module_upstream(&mut self) {
+        for (client, upstream) in self.module_host.drain_upstream() {
+            match upstream {
+                ModuleUpstream::Result(result) => {
+                    if self.pane_links.is_instance(client) {
+                        self.pane_links.reply(client, result);
+                    } else {
+                        let frame = self.ai_bus.local_reply(client, result);
+                        self.send_to_pane(frame);
+                    }
+                }
+                ModuleUpstream::Message { sub_id, message } => {
+                    if self.pane_links.is_instance(client) {
+                        self.pane_links.publish(client, sub_id, message);
+                    } else {
+                        let frame = self.ai_bus.local_message(client, sub_id, message);
+                        self.send_to_pane(frame);
+                    }
+                }
             }
         }
     }
@@ -1966,6 +1982,12 @@ impl App {
                     self.pane_links.reply(client, result);
                 }
                 PaneCall::Cancel(client, call_id) => self.module_host.cancel(cx, client, &call_id),
+                PaneCall::Subscribe { client, sub_id, topic, filter } => {
+                    self.module_host.subscribe(cx, client, &sub_id, &topic, filter.as_deref())
+                }
+                PaneCall::Unsubscribe { client, sub_id } => {
+                    self.module_host.unsubscribe(cx, client, &sub_id)
+                }
             }
         }
         // The chat's own Escape (an idle, empty composer) asks the slot it
@@ -3897,7 +3919,7 @@ impl MatchEvent for App {
         if self.state.is_some() {
             self.drain_hub(cx);
             self.drain_client_lines(cx);
-            self.drain_module_replies();
+            self.drain_module_upstream();
         }
     }
 }

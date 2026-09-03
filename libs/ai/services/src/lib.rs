@@ -18,10 +18,11 @@ pub mod wire;
 pub use engine::{EngineCore, EngineEvent, Model, ModelEvent, ServiceRegistry, ToolDefinition};
 pub use port::{AiServicePort, PortEvent, ServiceLink, ServiceLinkHost};
 pub use state::{
-    EngineState, Entry, ProviderChoice, ProviderRow, ServiceInfo, Status, ToolEntry, ToolStatus,
+    EngineState, Entry, EventEntry, ProviderChoice, ProviderRow, ServiceInfo, Status, ToolEntry,
+    ToolStatus,
 };
 pub use wire::{
     api_name, canonical_name, split_name, Disposition, EndpointId, HostedDown, HostedUp,
-    InstanceMeta, Risk, ServiceCall, ServiceContext, ServiceDown, ServiceManifest, ServiceUp,
-    ToolDef, ToolOutcome, ToolResult,
+    InstanceMeta, Message, Risk, ServiceCall, ServiceContext, ServiceDown, ServiceManifest,
+    ServiceUp, SubscriptionRequest, ToolDef, ToolOutcome, ToolResult, TopicDef,
 };

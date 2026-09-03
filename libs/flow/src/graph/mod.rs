@@ -700,6 +700,7 @@ pub fn prelude_catalog() -> Result<Vec<NodeTypeCatalog>, EvalError> {
             type_name,
             kind,
             domain,
+            models: Vec::new(),
             ports: NodePortsCatalog { _in: ports_in, out: ports_out },
             params,
             face,

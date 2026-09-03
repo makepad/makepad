@@ -47,6 +47,12 @@ pub const MAX_DESCRIPTION_BYTES: usize = 512;
 pub const MAX_PARAMETERS_BYTES: usize = 8 * 1024;
 /// Tools one service may declare.
 pub const MAX_TOOLS: usize = 64;
+/// Topics one service may publish.
+pub const MAX_TOPICS: usize = 16;
+/// Bytes of a subscription filter JSON object.
+pub const MAX_FILTER_BYTES: usize = 1024;
+/// Bytes of a message's model-facing text.
+pub const MAX_MESSAGE_BYTES: usize = 4 * 1024;
 /// Bytes of a result's model-facing text; the router truncates past this.
 pub const MAX_RESULT_BYTES: usize = 16 * 1024;
 /// Bytes of a result's structured data (JSON).
@@ -103,6 +109,28 @@ pub struct ToolDef {
     pub preview: bool,
 }
 
+/// One named stream a service may publish.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct TopicDef {
+    /// Short name, unique within the service: `[a-z0-9_]{1,32}`.
+    pub name: String,
+    /// What arrives on this stream and when to subscribe.
+    pub description: String,
+    /// Optional JSON schema for the message's `data` field.
+    pub schema: Option<String>,
+}
+
+impl TopicDef {
+    pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
+        Self { name: name.into(), description: description.into(), schema: None }
+    }
+
+    pub fn with_schema(mut self, schema: impl Into<String>) -> Self {
+        self.schema = Some(schema.into());
+        self
+    }
+}
+
 impl ToolDef {
     pub fn new(
         name: impl Into<String>,
@@ -136,6 +164,7 @@ pub struct ServiceManifest {
     /// The doctrine paragraph the model reads about this app.
     pub brief: String,
     pub tools: Vec<ToolDef>,
+    pub topics: Vec<TopicDef>,
 }
 
 impl ServiceManifest {
@@ -145,12 +174,22 @@ impl ServiceManifest {
             label: label.into(),
             brief: brief.into(),
             tools: Vec::new(),
+            topics: Vec::new(),
         }
     }
 
     pub fn with_tool(mut self, tool: ToolDef) -> Self {
         self.tools.push(tool);
         self
+    }
+
+    pub fn with_topic(mut self, topic: TopicDef) -> Self {
+        self.topics.push(topic);
+        self
+    }
+
+    pub fn topic(&self, name: &str) -> Option<&TopicDef> {
+        self.topics.iter().find(|t| t.name == name)
     }
 
     pub fn tool(&self, name: &str) -> Option<&ToolDef> {
@@ -170,6 +209,14 @@ impl ServiceManifest {
         }
         if self.tools.len() > MAX_TOOLS {
             return Err(format!("service '{}' declares {} tools; the cap is {}", self.id, self.tools.len(), MAX_TOOLS));
+        }
+        if self.topics.len() > MAX_TOPICS {
+            return Err(format!(
+                "service '{}' declares {} topics; the cap is {}",
+                self.id,
+                self.topics.len(),
+                MAX_TOPICS
+            ));
         }
         let mut total = self.brief.len() + self.label.len();
         for (i, tool) in self.tools.iter().enumerate() {
@@ -199,10 +246,109 @@ impl ServiceManifest {
             }
             total += tool.description.len() + tool.parameters.len() + tool.name.len();
         }
+        for (i, topic) in self.topics.iter().enumerate() {
+            if !is_ident(&topic.name, MAX_TOOL_NAME) {
+                return Err(format!(
+                    "service '{}' topic '{}' is not [a-z0-9_]{{1,{}}}",
+                    self.id, topic.name, MAX_TOOL_NAME
+                ));
+            }
+            if self.topics[..i].iter().any(|t| t.name == topic.name) {
+                return Err(format!("service '{}' declares topic '{}' twice", self.id, topic.name));
+            }
+            if topic.description.trim().is_empty() || topic.description.len() > MAX_DESCRIPTION_BYTES {
+                return Err(format!(
+                    "topic '{}.{}' description must be 1..{} bytes",
+                    self.id, topic.name, MAX_DESCRIPTION_BYTES
+                ));
+            }
+            if let Some(schema) = &topic.schema {
+                if schema.len() > MAX_PARAMETERS_BYTES {
+                    return Err(format!(
+                        "topic '{}.{}' schema is {} bytes; the cap is {}",
+                        self.id,
+                        topic.name,
+                        schema.len(),
+                        MAX_PARAMETERS_BYTES
+                    ));
+                }
+                if !matches!(makepad_strict_json::parse(schema.as_bytes()), Ok(makepad_strict_json::Value::Obj(_))) {
+                    return Err(format!("topic '{}.{}' schema is not a JSON object", self.id, topic.name));
+                }
+                total += schema.len();
+            }
+            total += topic.description.len() + topic.name.len();
+        }
         if total > MAX_MANIFEST_BYTES {
             return Err(format!("service '{}' manifest is {} bytes; the cap is {}", self.id, total, MAX_MANIFEST_BYTES));
         }
         Ok(())
+    }
+}
+
+/// A subscription requested as part of a tool result.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct SubscriptionRequest {
+    pub topic: String,
+    /// A JSON object the service may use to narrow the stream.
+    pub filter: Option<String>,
+}
+
+impl SubscriptionRequest {
+    pub fn new(topic: impl Into<String>) -> Self {
+        Self { topic: topic.into(), filter: None }
+    }
+
+    pub fn with_filter(mut self, filter: impl Into<String>) -> Self {
+        self.filter = Some(filter.into());
+        self
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if !is_ident(&self.topic, MAX_TOOL_NAME) {
+            return Err("subscription: bad topic name".into());
+        }
+        validate_filter(self.filter.as_deref(), "subscription")
+    }
+}
+
+/// One publication. The subscription id is supplied separately to
+/// [`crate::port::AiServicePort::publish`] and carried beside this value on
+/// the wire.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct Message {
+    pub topic: String,
+    pub text: String,
+    /// Optional JSON value for structured consumers.
+    pub data: Option<String>,
+    /// The service closes the subscription after this publication.
+    #[rename(final)]
+    pub final_: bool,
+}
+
+impl Message {
+    pub fn new(topic: impl Into<String>, text: impl Into<String>) -> Self {
+        Self { topic: topic.into(), text: text.into(), data: None, final_: false }
+    }
+
+    pub fn with_data(mut self, data: impl Into<String>) -> Self {
+        self.data = Some(data.into());
+        self
+    }
+
+    pub fn final_message(mut self) -> Self {
+        self.final_ = true;
+        self
+    }
+
+    pub fn bound(&mut self) {
+        if self.text.len() > MAX_MESSAGE_BYTES {
+            truncate_to_char_boundary(&mut self.text, MAX_MESSAGE_BYTES - 32);
+            self.text.push_str("\n…[truncated by the router]");
+        }
+        if self.data.as_ref().is_some_and(|data| data.len() > MAX_DATA_BYTES) {
+            self.data = None;
+        }
     }
 }
 
@@ -349,6 +495,8 @@ pub struct ToolResult {
     /// Show the service's live preview under this call's card.
     pub preview: bool,
     pub disposition: Disposition,
+    /// Streams this successful result asks the conversation to join.
+    pub subscribe: Vec<SubscriptionRequest>,
 }
 
 impl ToolResult {
@@ -361,6 +509,7 @@ impl ToolResult {
             note,
             preview: false,
             disposition: Disposition::Continue,
+            subscribe: Vec::new(),
         }
     }
 
@@ -412,6 +561,11 @@ impl ToolResult {
         self
     }
 
+    pub fn with_subscription(mut self, subscription: SubscriptionRequest) -> Self {
+        self.subscribe.push(subscription);
+        self
+    }
+
     /// Enforce the caps in place. Truncated text says so at its end, so the
     /// model knows it is reading a head, not the whole. Data that does not
     /// fit is dropped whole — a truncated JSON is worse than none.
@@ -449,6 +603,15 @@ pub enum ServiceUp {
     /// A long call is still alive. Resets the router's deadline.
     Progress { call_id: String, note: String, permille: u16 },
     Context(ServiceContext),
+    /// A publication for a subscription the engine created.
+    Message {
+        sub_id: String,
+        topic: String,
+        text: String,
+        data: Option<String>,
+        #[rename(final)]
+        final_: bool,
+    },
     /// Going away on purpose (the host also forgets a service whose
     /// transport dies).
     Unregister,
@@ -464,6 +627,8 @@ pub enum ServiceDown {
     /// The person or the router gave up on this call; the service should
     /// stop if it can and need not reply.
     Cancel { call_id: String },
+    Subscribe { sub_id: String, filter: Option<String>, topic: String },
+    Unsubscribe { sub_id: String },
     /// The host's chat pane is showing (or not). Informational: an
     /// embedded panel may hide itself while the desktop one is up.
     ChatOpen { open: bool },
@@ -489,6 +654,12 @@ impl ServiceUp {
                 if r.note.len() > MAX_NOTE_BYTES + 4 {
                     return Err("result: note over cap".into());
                 }
+                if r.subscribe.len() > MAX_TOPICS {
+                    return Err("result: subscriptions over cap".into());
+                }
+                for subscription in &r.subscribe {
+                    subscription.validate()?;
+                }
                 Ok(())
             }
             ServiceUp::Progress { call_id, note, permille } => {
@@ -503,6 +674,26 @@ impl ServiceUp {
             ServiceUp::Context(c) => {
                 if c.text.len() > MAX_CONTEXT_BYTES + 4 {
                     return Err("context: over cap".into());
+                }
+                Ok(())
+            }
+            ServiceUp::Message { sub_id, topic, text, data, .. } => {
+                if !is_opaque_id(sub_id) {
+                    return Err("message: bad subscription id".into());
+                }
+                if !is_ident(topic, MAX_TOOL_NAME) {
+                    return Err("message: bad topic name".into());
+                }
+                if text.len() > MAX_MESSAGE_BYTES {
+                    return Err("message: text over cap".into());
+                }
+                if let Some(data) = data {
+                    if data.len() > MAX_DATA_BYTES {
+                        return Err("message: data over cap".into());
+                    }
+                    if makepad_strict_json::parse(data.as_bytes()).is_err() {
+                        return Err("message: data is not JSON".into());
+                    }
                 }
                 Ok(())
             }
@@ -539,9 +730,35 @@ impl ServiceDown {
                 }
                 Ok(())
             }
+            ServiceDown::Subscribe { sub_id, topic, filter } => {
+                if !is_opaque_id(sub_id) {
+                    return Err("subscribe: bad subscription id".into());
+                }
+                if !is_ident(topic, MAX_TOOL_NAME) {
+                    return Err("subscribe: bad topic name".into());
+                }
+                validate_filter(filter.as_deref(), "subscribe")
+            }
+            ServiceDown::Unsubscribe { sub_id } => {
+                if !is_opaque_id(sub_id) {
+                    return Err("unsubscribe: bad subscription id".into());
+                }
+                Ok(())
+            }
             ServiceDown::ChatOpen { .. } => Ok(()),
         }
     }
+}
+
+fn validate_filter(filter: Option<&str>, frame: &str) -> Result<(), String> {
+    let Some(filter) = filter else { return Ok(()) };
+    if filter.len() > MAX_FILTER_BYTES {
+        return Err(format!("{frame}: filter over cap"));
+    }
+    if !matches!(makepad_strict_json::parse(filter.as_bytes()), Ok(makepad_strict_json::Value::Obj(_))) {
+        return Err(format!("{frame}: filter is not a JSON object"));
+    }
+    Ok(())
 }
 
 /// A hosted up-frame: the message and, once the host has stamped it, the
@@ -633,6 +850,10 @@ mod tests {
                 .with_preview(),
             )
             .with_tool(ToolDef::new("status", "The trip so far.", r#"{"type":"object","properties":{}}"#, Risk::Read))
+            .with_topic(
+                TopicDef::new("trip", "Trip progress and arrival.")
+                    .with_schema(r#"{"type":"object","properties":{"minutes":{"type":"number"}}}"#),
+            )
     }
 
     fn ep(s: &str) -> EndpointId {
@@ -654,7 +875,12 @@ mod tests {
     fn every_up_and_down_variant_round_trips() {
         let ups = vec![
             ServiceUp::Register { manifest: route(), port_tag: 1 },
-            ServiceUp::Result(ToolResult::ok("c1", "41 min", "planned").with_preview().with_data(r#"{"minutes":41}"#)),
+            ServiceUp::Result(
+                ToolResult::ok("c1", "41 min", "planned")
+                    .with_preview()
+                    .with_data(r#"{"minutes":41}"#)
+                    .with_subscription(SubscriptionRequest::new("trip").with_filter(r#"{"trip":"t1"}"#)),
+            ),
             ServiceUp::Result(ToolResult::failed("c2", "no route")),
             ServiceUp::Result(ToolResult::refused("c3", "not a tool")),
             ServiceUp::Result(ToolResult::denied("c4", "no")),
@@ -663,22 +889,48 @@ mod tests {
             ServiceUp::Result(ToolResult::timed_out("c7", "60 s").with_disposition(Disposition::EndTurn)),
             ServiceUp::Progress { call_id: "c1".into(), note: "routing".into(), permille: 500 },
             ServiceUp::Context(ServiceContext { text: "[route] gps=…".into() }),
+            ServiceUp::Message {
+                sub_id: "s1".into(),
+                topic: "trip".into(),
+                text: "arrived".into(),
+                data: Some(r#"{"minutes":41}"#.into()),
+                final_: true,
+            },
+            ServiceUp::Message {
+                sub_id: "s2".into(),
+                topic: "trip".into(),
+                text: "departed".into(),
+                data: None,
+                final_: false,
+            },
             ServiceUp::Unregister,
         ];
         for msg in ups {
             let f = HostedUp { from: Some(ep("e9")), msg };
             let json = f.to_json();
+            if matches!(&f.msg, ServiceUp::Message { final_: true, .. }) {
+                assert!(json.contains(r#""final":true"#) && !json.contains("final_"), "{json}");
+            }
+            makepad_strict_json::parse(json.as_bytes()).unwrap_or_else(|error| panic!("invalid JSON: {error}: {json}"));
             assert_eq!(HostedUp::parse(&json).as_ref(), Some(&f), "{json}");
         }
         let downs = vec![
             ServiceDown::Registered { port_tag: 1, endpoint: ep("e9") },
             ServiceDown::Call(ServiceCall { call_id: "c1".into(), tool: "plan".into(), args: r#"{"to":"Utrecht"}"#.into() }),
             ServiceDown::Cancel { call_id: "c1".into() },
+            ServiceDown::Subscribe {
+                sub_id: "s1".into(),
+                topic: "trip".into(),
+                filter: Some(r#"{"trip":"t1"}"#.into()),
+            },
+            ServiceDown::Subscribe { sub_id: "s2".into(), topic: "trip".into(), filter: None },
+            ServiceDown::Unsubscribe { sub_id: "s1".into() },
             ServiceDown::ChatOpen { open: true },
         ];
         for msg in downs {
             let f = HostedDown { to: Some(ep("e9")), msg };
             let json = f.to_json();
+            makepad_strict_json::parse(json.as_bytes()).unwrap_or_else(|error| panic!("invalid JSON: {error}: {json}"));
             assert_eq!(HostedDown::parse(&json).as_ref(), Some(&f), "{json}");
         }
     }
@@ -729,6 +981,14 @@ mod tests {
         let mut brief = route();
         brief.brief = "x".repeat(MAX_BRIEF_BYTES + 1);
         assert!(brief.validate().unwrap_err().contains("brief"));
+        let mut topics = route();
+        topics.topics = (0..17)
+            .map(|index| TopicDef::new(format!("topic_{index}"), "Updates."))
+            .collect();
+        assert!(topics.validate().unwrap_err().contains("17 topics"));
+        let mut topic_schema = route();
+        topic_schema.topics[0].schema = Some("[]".into());
+        assert!(topic_schema.validate().unwrap_err().contains("schema is not a JSON object"));
     }
 
     #[test]
@@ -749,5 +1009,57 @@ mod tests {
         assert!(!is_opaque_id(""));
         assert!(!is_opaque_id("c 1"));
         assert!(!is_opaque_id(&"x".repeat(MAX_ID_BYTES + 1)));
+    }
+
+    #[test]
+    fn subscription_and_message_caps_are_enforced_on_arrival() {
+        let oversized_filter = HostedDown {
+            to: Some(ep("e1")),
+            msg: ServiceDown::Subscribe {
+                sub_id: "s1".into(),
+                topic: "trip".into(),
+                filter: Some(format!(r#"{{"value":"{}"}}"#, "x".repeat(MAX_FILTER_BYTES))),
+            },
+        };
+        assert_eq!(HostedDown::parse(&oversized_filter.to_json()), None);
+        let non_object_filter = HostedDown {
+            to: Some(ep("e1")),
+            msg: ServiceDown::Subscribe {
+                sub_id: "s1".into(),
+                topic: "trip".into(),
+                filter: Some("[]".into()),
+            },
+        };
+        assert_eq!(HostedDown::parse(&non_object_filter.to_json()), None);
+        let unsubscribed = HostedDown {
+            to: Some(ep("e1")),
+            msg: ServiceDown::Unsubscribe { sub_id: "x".repeat(MAX_ID_BYTES + 1) },
+        };
+        assert_eq!(HostedDown::parse(&unsubscribed.to_json()), None);
+        for (text, data) in [
+            ("x".repeat(MAX_MESSAGE_BYTES + 1), None),
+            (String::new(), Some(format!(r#""{}""#, "x".repeat(MAX_DATA_BYTES)))),
+            (String::new(), Some("not-json".into())),
+        ] {
+            let up = HostedUp {
+                from: Some(ep("e1")),
+                msg: ServiceUp::Message {
+                    sub_id: "s1".into(),
+                    topic: "trip".into(),
+                    text,
+                    data,
+                    final_: false,
+                },
+            };
+            assert_eq!(HostedUp::parse(&up.to_json()), None);
+        }
+        let too_many = HostedUp {
+            from: Some(ep("e1")),
+            msg: ServiceUp::Result(ToolResult {
+                subscribe: (0..17).map(|_| SubscriptionRequest::new("trip")).collect(),
+                ..ToolResult::ok("c1", "started", "")
+            }),
+        };
+        assert_eq!(HostedUp::parse(&too_many.to_json()), None);
     }
 }

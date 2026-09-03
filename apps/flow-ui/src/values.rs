@@ -109,6 +109,11 @@ impl ValueCache {
 
     /// Everything the workers delivered since the last drain; arrivals are
     /// stored before they are returned, so callers only need the digests.
+    #[cfg(test)]
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
     pub fn drain(&mut self) -> Vec<Result<String, (String, ClientError)>> {
         let mut out = Vec::new();
         loop {
@@ -125,10 +130,6 @@ impl ValueCache {
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => return out,
             }
         }
-    }
-
-    pub fn bytes(&self) -> usize {
-        self.bytes
     }
 }
 

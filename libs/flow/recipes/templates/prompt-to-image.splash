@@ -23,7 +23,7 @@ let image = Image{
     at: vec2(1000, 120)
     ui: ImageFace{
         /* the AI added a style picker; its value feeds the Fn above */
-        style := DropDown{ labels: ["photo", "anime", "oil paint"]  bind: styled.style }
+        style := DropDown{ labels: ["photo", "anime", "oil paint"]  bind := "styled.style" }
     }
 }
 

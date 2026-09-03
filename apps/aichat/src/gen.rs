@@ -84,7 +84,10 @@ impl GenService {
                         job.cancel.store(true, Ordering::Relaxed);
                     }
                 }
-                PortEvent::Registered(_) | PortEvent::ChatOpen { .. } => {}
+                PortEvent::Registered(_)
+                | PortEvent::ChatOpen { .. }
+                | PortEvent::Subscribe { .. }
+                | PortEvent::Unsubscribe { .. } => {}
             }
         }
         self.poll();
