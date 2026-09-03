@@ -15,9 +15,12 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use makepad_widgets::{log, ScriptMod, ScriptVm, Vec4f};
 
 pub const DEFAULT_THEME: &str = "tokyo-night";
+/// The bundled Liquid Glass theme (see BUNDLED_MAKEOS_SPLASH).
+pub const MAKEOS_THEME: &str = "makeos";
 
 /// The omarchy theme catalog (basecamp/omarchy `themes/`), the import
 /// menu's list. Importing any of them writes a self-contained theme.splash
@@ -48,8 +51,10 @@ pub const OMARCHY_THEMES: &[&str] = &[
 ];
 
 /// Stamped into every generated theme.splash. Bump it whenever the emitted
-/// key set changes: `ensure_default_theme` reseeds the bundled theme when
-/// the marker on disk is older, so new keys reach existing installs.
+/// key set changes: `ensure_bundled_themes` reseeds the bundled themes when
+/// the marker on disk is older, so new keys reach existing installs. Keys
+/// the chrome generates at evaluation time (`material`, `desk`) need no
+/// bump.
 pub const THEME_FORMAT: &str = "(format 3)";
 
 /// The alpha omarchy's templates give every border stop: `rgba(...ee)`.
@@ -550,43 +555,75 @@ pub fn load_theme_source(name: &str) -> String {
         .unwrap_or_else(|_| BUNDLED_TOKYO_NIGHT_SPLASH.to_string())
 }
 
-/// Sorted background images of an installed theme.
-pub fn theme_backgrounds(name: &str) -> Vec<PathBuf> {
-    let dir = themes_dir().join(name).join("backgrounds");
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+/// The pictures in `dir`, sorted by lowercased name: rasters the async
+/// decoder takes, and `.svg` (the bundled MakeOS scene) for the vector
+/// engine.
+pub fn backgrounds_in(dir: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
         .map(|entries| {
             entries
                 .flatten()
                 .map(|e| e.path())
                 .filter(|p| {
-                    matches!(
-                        p.extension().and_then(|e| e.to_str()),
-                        Some("jpg" | "jpeg" | "png" | "webp" | "bmp" | "gif")
-                    )
+                    p.extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| {
+                            matches!(
+                                e.to_ascii_lowercase().as_str(),
+                                "jpg" | "jpeg" | "png" | "webp" | "bmp" | "gif" | "svg"
+                            )
+                        })
+                        .unwrap_or(false)
                 })
                 .collect()
         })
         .unwrap_or_default();
-    files.sort();
+    files.sort_by_key(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()));
     files
 }
 
-/// Seed the default theme locally without touching the network (a later
-/// `--import-theme` upgrades it with the real backgrounds).
-pub fn ensure_default_theme() {
-    let path = theme_splash_path(DEFAULT_THEME);
+/// Sorted background images of an installed theme.
+pub fn theme_backgrounds(name: &str) -> Vec<PathBuf> {
+    backgrounds_in(&themes_dir().join(name).join("backgrounds"))
+}
+
+/// Seed the bundled themes into `dir` (`themes_dir()` in production):
+/// tokyo-night — omarchy's default, colours only; a later import adds its
+/// pictures — and makeos, colours, material and its own vector wallpaper.
+/// A theme.splash already on disk is left alone unless it predates the
+/// current format marker or carries the retired `#x` colour form (the
+/// runtime tokenizer never understood it), so new keys reach old installs
+/// and a person's edits survive. The wallpaper is written only when
+/// missing: a person may replace it with their own pictures, and a changed
+/// bundled scene reaches an install only when its file is deleted. Never
+/// touches the network.
+pub fn ensure_bundled_themes_in(dir: &Path) {
+    seed_theme(dir, DEFAULT_THEME, BUNDLED_TOKYO_NIGHT_SPLASH);
+    seed_theme(dir, MAKEOS_THEME, BUNDLED_MAKEOS_SPLASH);
+    let wallpaper = dir.join(MAKEOS_THEME).join("backgrounds").join("makeos.svg");
+    if !wallpaper.exists() {
+        if let Some(parent) = wallpaper.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&wallpaper, BUNDLED_MAKEOS_WALLPAPER);
+    }
+}
+
+fn seed_theme(dir: &Path, name: &str, splash: &str) {
+    let path = dir.join(name).join("theme.splash");
     if let Ok(existing) = std::fs::read_to_string(&path) {
-        // Reseed files generated with the retired `#x` color form (the
-        // runtime tokenizer never understood it) and anything older than
-        // the current key set.
         if !existing.contains("#x") && existing.contains(THEME_FORMAT) {
             return;
         }
     }
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(&path, BUNDLED_TOKYO_NIGHT_SPLASH);
+    let _ = std::fs::write(&path, splash);
+}
+
+pub fn ensure_bundled_themes() {
+    ensure_bundled_themes_in(&themes_dir());
 }
 
 fn curl(url: &str) -> Option<Vec<u8>> {
@@ -847,6 +884,88 @@ mod.wm_theme = {
 }
 "##;
 
+/// MakeOS: the Liquid Glass look, bundled so it needs no network. A dark
+/// navy ground with a cool-blue accent, white-on-dark type, the glass
+/// material, rounded tiles, and its own vector wallpaper
+/// (`resources/wallpapers/makeos.svg`, seeded next to it).
+pub const BUNDLED_MAKEOS_SPLASH: &str = r##"// wm theme "makeos" — the Liquid Glass look, bundled. This splash file
+// IS the theme. Edit freely. (format 3)
+mod.wm_theme = {
+    accent: #5b9dff
+    selection: #1d2b4a
+    muted: #34415f
+    background: #0b1220
+    dark_background: #080d18
+    darker_background: #05070e
+    lighter_background: #16203a
+    foreground: #d6e2ff
+    dark_foreground: #6b7a99
+    light_foreground: #e6eeff
+    bright_foreground: #ffffff
+    cursor: #ffffff
+    active_border: #7cc4ff
+    active_border_end: #5b9dff
+    active_border_angle: 45.0
+    active_border_alpha: 0.900
+    inactive_border: #ffffff
+    inactive_border_alpha: 0.180
+    light_mode: false
+    material: {
+        glass: 1.0
+        corner_radius: 12.0
+        control_radius: 8.0
+        blur_level: 5.2
+        lensing_effect: 0.94
+        lensing_strength: 28.0
+        lensing_width: 20.0
+        diffraction_strength: 4.4
+        tint_color: #f8fbff
+        tint_alpha: 0.06
+        border_color: #ffffff
+        border_alpha: 0.55
+        border_width: 1.0
+        specular_strength: 0.22
+        noise_strength: 0.004
+        shadow_color: #000000
+        shadow_alpha: 0.44
+        shadow_radius: 13.0
+        shadow_offset_y: 5.0
+        fallback_color: #334156
+    }
+    desk: {
+        gaps_in: 6.0
+        gaps_out: 12.0
+        border_size: 1.5
+        corner_radius: 12.0
+    }
+    term: {
+        color0: #0b1220
+        color1: #ff6b81
+        color2: #4fe3a3
+        color3: #ffd166
+        color4: #5b9dff
+        color5: #c792ea
+        color6: #5ee7f2
+        color7: #d6e2ff
+        color8: #34415f
+        color9: #ff8a9b
+        color10: #7dffc0
+        color11: #ffe08a
+        color12: #7cc4ff
+        color13: #d9b3ff
+        color14: #8ef3fb
+        color15: #ffffff
+        foreground: #d6e2ff
+        background: #0b1220
+        cursor: #ffffff
+        selection: #1d2b4a
+    }
+}
+"##;
+
+/// The MakeOS wallpaper, written to the theme's `backgrounds/` on seeding.
+pub const BUNDLED_MAKEOS_WALLPAPER: &str = include_str!("../resources/wallpapers/makeos.svg");
+
 // ----------------------------------------------------------------------
 // The shell token object — `default/themed/shell.toml.tpl`
 // ----------------------------------------------------------------------
@@ -865,6 +984,57 @@ fn scan_rgb(source: &str, key: &str) -> Option<Rgb> {
     None
 }
 
+/// One `key: #rrggbb` of a theme.splash as a colour (alpha 1), top level:
+/// the dotted path `scan_values` gives it, so a nested `term.background`
+/// never stands in for `background`, and a trailing comment is no part
+/// of the value.
+pub fn scan_color(source: &str, key: &str) -> Option<Vec4f> {
+    let values = scan_values(source);
+    let rgb = parse_hex(values.get(key)?)?;
+    Some(Vec4f {
+        x: rgb.r as f32 / 255.0,
+        y: rgb.g as f32 / 255.0,
+        z: rgb.b as f32 / 255.0,
+        w: 1.0,
+    })
+}
+
+/// The palette colours the chrome bakes in at DSL time and re-pushes on a
+/// live switch (`App::apply_theme_to_chrome`) — the wallpaper gradient,
+/// the bar strip, the tile wash and tab strip, the module ground, the AI
+/// pane. A key the theme lacks takes the bundled default's value.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaletteColors {
+    pub background: Vec4f,
+    pub darker_background: Vec4f,
+    pub lighter_background: Vec4f,
+    pub foreground: Vec4f,
+    pub dark_foreground: Vec4f,
+    pub accent: Vec4f,
+}
+
+pub fn scan_palette(source: &str) -> PaletteColors {
+    let pick = |key: &str| {
+        scan_color(source, key)
+            .or_else(|| scan_color(BUNDLED_TOKYO_NIGHT_SPLASH, key))
+            .expect("the bundled theme names every palette key")
+    };
+    PaletteColors {
+        background: pick("background"),
+        darker_background: pick("darker_background"),
+        lighter_background: pick("lighter_background"),
+        foreground: pick("foreground"),
+        dark_foreground: pick("dark_foreground"),
+        accent: pick("accent"),
+    }
+}
+
+impl Default for PaletteColors {
+    fn default() -> Self {
+        scan_palette("")
+    }
+}
+
 /// True when the theme ships its own `shell: { ... }` block, in which case
 /// it replaces the generated one wholesale (omarchy's rule for a theme
 /// shipping `themes/<name>/shell.toml` instead of the generated file).
@@ -872,6 +1042,247 @@ pub fn theme_defines_shell(source: &str) -> bool {
     source
         .lines()
         .any(|l| l.trim_start().starts_with("shell:") || l.trim_start().starts_with("shell :"))
+}
+
+/// Every scalar `key: value` line of a theme.splash, keyed by its dotted
+/// path — `accent`, `term.color0`, `material.glass`. Values are the source
+/// text, untouched (`#7aa2f7`, `12.0`, `true`); a trailing `// comment` is
+/// dropped. Blocks nest by the emitted shape's `key: {` / `}` lines. A
+/// one-line block (`material: { glass: 1.0, corner_radius: 12.0 }`) is
+/// scanned too, its pairs comma-separated. Anything from `//` on is a
+/// comment, so a value cannot contain `//` (no key does today), and a line
+/// without a colon — the `mod.wm_theme = {` wrapper — is skipped and adds
+/// no prefix.
+pub fn scan_values(source: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let mut prefix: Vec<String> = Vec::new();
+    for line in source.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("//") {
+            continue;
+        }
+        if line.starts_with('}') {
+            prefix.pop();
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.split("//").next().unwrap_or("").trim().trim_end_matches(',').trim();
+        if value == "{" {
+            if !key.starts_with("mod.") {
+                prefix.push(key.to_string());
+            }
+            continue;
+        }
+        if value.starts_with('{') && value.ends_with('}') {
+            // A one-line block: `material: { glass: 1.0, corner_radius: 12.0 }`
+            // — its pairs are comma-separated.
+            let inner = &value[1..value.len() - 1];
+            for pair in inner.split(',') {
+                let Some((k, v)) = pair.split_once(':') else {
+                    continue;
+                };
+                let (k, v) = (k.trim(), v.trim());
+                if k.is_empty() || v.is_empty() {
+                    continue;
+                }
+                let mut path = prefix.clone();
+                path.push(key.to_string());
+                path.push(k.to_string());
+                out.insert(path.join("."), v.to_string());
+            }
+            continue;
+        }
+        if value.is_empty() {
+            continue;
+        }
+        let full = if prefix.is_empty() {
+            key.to_string()
+        } else {
+            format!("{}.{}", prefix.join("."), key)
+        };
+        out.insert(full, value.to_string());
+    }
+    out
+}
+
+/// A number as the VM wants it: `12` becomes `12.0` (an int literal does
+/// not apply to an f32/f64 field); anything else passes through.
+fn float_literal(s: &str) -> String {
+    if s.parse::<i64>().is_ok() {
+        format!("{}.0", s)
+    } else {
+        s.to_string()
+    }
+}
+
+/// One generated block: the theme's own `<section>.<key>` values where it
+/// names them, `defaults` elsewhere. Numbers get their decimal point.
+fn filled_block(
+    source: &str,
+    target: &str,
+    section: &str,
+    numbers: &[(&str, &str)],
+    colors: &[(&str, &str)],
+) -> String {
+    let v = scan_values(source);
+    let mut s = String::new();
+    let _ = writeln!(s, "{} = {{", target);
+    for (key, default) in numbers {
+        let value = v
+            .get(&format!("{}.{}", section, key))
+            .map(|x| float_literal(x))
+            .unwrap_or_else(|| default.to_string());
+        let _ = writeln!(s, "    {}: {}", key, value);
+    }
+    for (key, default) in colors {
+        let value = v
+            .get(&format!("{}.{}", section, key))
+            .cloned()
+            .unwrap_or_else(|| default.to_string());
+        let _ = writeln!(s, "    {}: {}", key, value);
+    }
+    let _ = writeln!(s, "}}");
+    s
+}
+
+/// `mod.wm_theme.material = { ... }`, complete: the theme's own material
+/// keys where present, the flat defaults elsewhere — so a theme may say
+/// just `material: { glass: 1.0 }`. Evaluated after every theme (the DSL
+/// reads every key).
+pub fn material_splash_block(source: &str) -> String {
+    filled_block(
+        source,
+        "mod.wm_theme.material",
+        "material",
+        &[
+            ("glass", "0.0"),
+            ("corner_radius", "0.0"),
+            ("control_radius", "0.0"),
+            ("blur_level", "5.2"),
+            ("lensing_effect", "0.94"),
+            ("lensing_strength", "28.0"),
+            ("lensing_width", "20.0"),
+            ("diffraction_strength", "4.4"),
+            ("tint_alpha", "0.06"),
+            ("border_alpha", "0.55"),
+            ("border_width", "1.0"),
+            ("specular_strength", "0.22"),
+            ("noise_strength", "0.004"),
+            ("shadow_alpha", "0.44"),
+            ("shadow_radius", "13.0"),
+            ("shadow_offset_y", "5.0"),
+        ],
+        &[
+            ("tint_color", "#f8fbff"),
+            ("border_color", "#ffffff"),
+            ("shadow_color", "#000000"),
+            ("fallback_color", "#334156"),
+        ],
+    )
+}
+
+/// `mod.wm_theme.desk = { ... }`, complete, omarchy's geometry by default.
+pub fn desk_splash_block(source: &str) -> String {
+    filled_block(
+        source,
+        "mod.wm_theme.desk",
+        "desk",
+        &[
+            ("gaps_in", "5.0"),
+            ("gaps_out", "10.0"),
+            ("border_size", "2.0"),
+            ("corner_radius", "0.0"),
+        ],
+        &[],
+    )
+}
+
+// ----------------------------------------------------------------------
+// Evaluation into the script VM — startup and every live switch
+// ----------------------------------------------------------------------
+
+/// A splash source as an eval body: leading blank and comment lines are
+/// dropped (they shift the runtime parser's span tracking), and a trailing
+/// `true` makes the final assignment a real statement — the eval body's
+/// last statement is otherwise treated as its result expression and a
+/// trailing `mod.x = {...}` never commits.
+pub fn eval_body(source: &str) -> String {
+    let mut lines = source.lines().peekable();
+    while let Some(line) = lines.peek() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with("//") {
+            lines.next();
+        } else {
+            break;
+        }
+    }
+    let mut s = lines.collect::<Vec<_>>().join("\n");
+    s.push_str("\ntrue\n");
+    s
+}
+
+fn eval_block(vm: &mut ScriptVm, name: &str, code: &str) -> bool {
+    let script_mod_id = ScriptMod {
+        cargo_manifest_path: env!("CARGO_MANIFEST_DIR").to_string(),
+        module_path: name.to_string(),
+        file: format!("{}.splash", name),
+        line: 0,
+        column: 0,
+        code: code.to_string(),
+        values: vec![],
+    };
+    // Parse errors are dropped and runtime errors logged by the VM's own
+    // core unless a sink is installed; without one `take_errors` sees
+    // nothing and a broken theme reports success. Save and restore: hosts
+    // (splash, tweaker) install sinks of their own.
+    let prev = vm.bx.captured_errors.replace(Vec::new());
+    let value = vm.eval(script_mod_id);
+    let errors = vm.take_errors();
+    vm.bx.captured_errors = prev;
+    for e in &errors {
+        log!("wm theme: {}", e);
+    }
+    !value.is_err() && errors.is_empty()
+}
+
+/// Evaluate a theme into `vm`: `mod.wm_theme` from `source` (the bundled
+/// default when the file does not evaluate), then the blocks the chrome
+/// reads and a theme may leave out — `mod.wm_theme.shell` unless the theme
+/// ships its own, and `.material` / `.desk` always, the theme's values
+/// filled up with the defaults. Startup (`AppMain::script_mod`) and every
+/// live switch (`App::set_theme`) go through here. True when `source`
+/// itself evaluated; a source with no statements did not.
+pub fn eval_into(vm: &mut ScriptVm, source: &str) -> bool {
+    let body = eval_body(source);
+    if body.trim() == "true" {
+        log!("wm theme: no statements in the theme file; using the bundled default");
+    }
+    let ok = body.trim() != "true" && eval_block(vm, "wm_theme", &body);
+    if !ok {
+        eval_block(vm, "wm_theme_fallback", &eval_body(BUNDLED_TOKYO_NIGHT_SPLASH));
+    }
+    let effective = if ok { source } else { BUNDLED_TOKYO_NIGHT_SPLASH };
+    if !theme_defines_shell(effective) {
+        eval_block(vm, "wm_theme_shell", &eval_body(&shell_splash_block(effective)));
+    }
+    if !eval_block(vm, "wm_theme_material", &eval_body(&material_splash_block(effective))) {
+        eval_block(
+            vm,
+            "wm_theme_material",
+            &eval_body(&material_splash_block(BUNDLED_TOKYO_NIGHT_SPLASH)),
+        );
+    }
+    if !eval_block(vm, "wm_theme_desk", &eval_body(&desk_splash_block(effective))) {
+        eval_block(
+            vm,
+            "wm_theme_desk",
+            &eval_body(&desk_splash_block(BUNDLED_TOKYO_NIGHT_SPLASH)),
+        );
+    }
+    ok
 }
 
 /// `mod.wm_theme.shell = { ... }`, resolved from the theme's own palette
@@ -1075,6 +1486,40 @@ pub fn shell_splash_block(source: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use makepad_widgets::makepad_script::{ScriptValue, ScriptVmBase, ScriptVmHost};
+
+    /// A bare VM, built the way `platform/script/tests` build one.
+    fn test_vm() -> ScriptVm<'static> {
+        let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
+        ScriptVm {
+            host,
+            bx: Box::new(ScriptVmBase::new()),
+        }
+    }
+
+    /// The value of `expr` in `vm`, read back the way the chrome reads
+    /// `mod.wm_theme.*`: a probe block whose result expression it is.
+    fn read(vm: &mut ScriptVm, expr: &str) -> ScriptValue {
+        vm.eval(ScriptMod {
+            cargo_manifest_path: String::new(),
+            module_path: "probe".to_string(),
+            file: "probe.splash".to_string(),
+            line: 0,
+            column: 0,
+            code: format!("({expr})\n"),
+            values: vec![],
+        })
+    }
+
+    /// A colour value as the `#rrggbb` a theme file spells it; anything
+    /// else as its debug form, so a failed assertion says what came back.
+    fn hex(v: ScriptValue) -> String {
+        match v.as_color() {
+            Some(c) => format!("#{:06x}", c >> 8),
+            None => format!("{v:?}"),
+        }
+    }
+
 
     const TOKYO_TOML: &str = r##"mode = "dark"
 accent = "#7aa2f7"
@@ -1315,5 +1760,263 @@ bright_magenta = "#bb9af7"
         assert!(resolve_omarchy_colors("x", light).unwrap().light_mode);
         let lum = "background = \"#f0f0f0\"\nforeground = \"#000000\"\n";
         assert!(resolve_omarchy_colors("x", lum).unwrap().light_mode);
+    }
+
+    #[test]
+    fn scan_values_reads_nested_keys_and_strips_comments() {
+        let v = scan_values(
+            "// c\nmod.wm_theme = {\n    accent: #7aa2f7 // the blue\n    material: {\n        glass: 1.0\n    }\n    term: {\n        color0: #1a1b26\n    }\n}\n",
+        );
+        assert_eq!(v.get("accent").map(String::as_str), Some("#7aa2f7"));
+        assert_eq!(v.get("material.glass").map(String::as_str), Some("1.0"));
+        assert_eq!(v.get("term.color0").map(String::as_str), Some("#1a1b26"));
+        assert!(v.get("mod.wm_theme").is_none());
+    }
+
+    #[test]
+    fn material_block_fills_in_the_flat_defaults() {
+        let block = material_splash_block(BUNDLED_TOKYO_NIGHT_SPLASH);
+        assert!(block.starts_with("mod.wm_theme.material = {\n"));
+        assert!(block.contains("    glass: 0.0\n"));
+        assert!(block.contains("    corner_radius: 0.0\n"));
+        assert!(block.contains("    tint_color: #f8fbff\n"));
+        assert!(block.contains("    fallback_color: #334156\n"));
+        assert!(block.ends_with("}\n"));
+        // A theme that names only some keys gets the rest from the defaults,
+        // and an int gets its decimal point.
+        let partial = "mod.wm_theme = {\n    material: {\n        glass: 1\n        corner_radius: 12.0\n        tint_color: #102030\n    }\n}\n";
+        let block = material_splash_block(partial);
+        assert!(block.contains("    glass: 1.0\n"));
+        assert!(block.contains("    corner_radius: 12.0\n"));
+        assert!(block.contains("    tint_color: #102030\n"));
+        assert!(block.contains("    blur_level: 5.2\n"));
+    }
+
+    #[test]
+    fn desk_block_defaults_to_omarchy_geometry() {
+        let block = desk_splash_block(BUNDLED_TOKYO_NIGHT_SPLASH);
+        assert_eq!(
+            block,
+            "mod.wm_theme.desk = {\n    gaps_in: 5.0\n    gaps_out: 10.0\n    border_size: 2.0\n    corner_radius: 0.0\n}\n"
+        );
+        let rounded = "mod.wm_theme = {\n    desk: {\n        corner_radius: 12\n        gaps_out: 12.0\n    }\n}\n";
+        let block = desk_splash_block(rounded);
+        assert!(block.contains("    corner_radius: 12.0\n"));
+        assert!(block.contains("    gaps_out: 12.0\n"));
+        assert!(block.contains("    gaps_in: 5.0\n"));
+    }
+
+    #[test]
+    fn generated_defaults_match_the_token_structs() {
+        use crate::shell::{DeskTokens, MaterialTokens};
+        let m = MaterialTokens::default();
+        let v = scan_values(&material_splash_block(""));
+        assert_eq!(v.len(), 20, "16 numbers + 4 colours");
+        let num = |k: &str| v[k].parse::<f64>().unwrap();
+        let near = |a: f64, b: f32| (a as f32 - b).abs() < 1e-6;
+        let col = |k: &str| {
+            let rgb = parse_hex(&v[k]).unwrap();
+            (rgb.r as f32 / 255.0, rgb.g as f32 / 255.0, rgb.b as f32 / 255.0)
+        };
+        assert_eq!(num("glass"), m.glass);
+        assert_eq!(num("corner_radius"), m.corner_radius);
+        assert_eq!(num("control_radius"), m.control_radius);
+        assert_eq!(num("blur_level"), m.blur_level);
+        assert_eq!(num("lensing_effect"), m.lensing_effect);
+        assert_eq!(num("lensing_strength"), m.lensing_strength);
+        assert_eq!(num("lensing_width"), m.lensing_width);
+        assert_eq!(num("diffraction_strength"), m.diffraction_strength);
+        assert!(near(num("tint_alpha"), m.tint_alpha));
+        assert!(near(num("border_alpha"), m.border_alpha));
+        assert_eq!(num("border_width"), m.border_width);
+        assert!(near(num("specular_strength"), m.specular_strength));
+        assert!(near(num("noise_strength"), m.noise_strength));
+        assert!(near(num("shadow_alpha"), m.shadow_alpha));
+        assert_eq!(num("shadow_radius"), m.shadow_radius);
+        assert_eq!(num("shadow_offset_y"), m.shadow_offset_y);
+        assert_eq!(col("tint_color"), (m.tint_color.x, m.tint_color.y, m.tint_color.z));
+        assert_eq!(col("border_color"), (m.border_color.x, m.border_color.y, m.border_color.z));
+        assert_eq!(col("shadow_color"), (m.shadow_color.x, m.shadow_color.y, m.shadow_color.z));
+        assert_eq!(col("fallback_color"), (m.fallback_color.x, m.fallback_color.y, m.fallback_color.z));
+        let d = DeskTokens::default();
+        let v = scan_values(&desk_splash_block(""));
+        assert_eq!(v.len(), 4);
+        assert_eq!(v["gaps_in"].parse::<f64>().unwrap(), d.gaps_in);
+        assert_eq!(v["gaps_out"].parse::<f64>().unwrap(), d.gaps_out);
+        assert_eq!(v["border_size"].parse::<f64>().unwrap(), d.border_size);
+        assert_eq!(v["corner_radius"].parse::<f64>().unwrap(), d.corner_radius);
+    }
+
+    #[test]
+    fn scan_values_reads_the_bundled_shape_and_hand_edits() {
+        let v = scan_values(BUNDLED_TOKYO_NIGHT_SPLASH);
+        assert_eq!(v.get("background").map(String::as_str), Some("#1a1b26"));
+        assert_eq!(v.get("term.background").map(String::as_str), Some("#1a1b26"));
+        assert_eq!(v.get("active_border_angle").map(String::as_str), Some("45.0"));
+        assert_eq!(v.len(), 39, "19 top-level keys + 20 term keys");
+        // A one-line block, and whitespace before a trailing comma.
+        let v = scan_values(
+            "mod.wm_theme = {\n    material: { glass: 1.0, corner_radius: 12 }\n    accent: #7aa2f7 ,\n}\n",
+        );
+        assert_eq!(v.get("material.glass").map(String::as_str), Some("1.0"));
+        assert_eq!(v.get("material.corner_radius").map(String::as_str), Some("12"));
+        assert_eq!(v.get("accent").map(String::as_str), Some("#7aa2f7"));
+        let block = material_splash_block("mod.wm_theme = {\n    material: { glass: 1 }\n}\n");
+        assert!(block.contains("    glass: 1.0\n"));
+        assert!(block.contains("    blur_level: 5.2\n"));
+    }
+
+    #[test]
+    fn eval_body_drops_leading_comments_and_commits_the_last_statement() {
+        let body = eval_body("// a\n\n// b\nmod.wm_theme = {\n    accent: #7aa2f7\n}\n");
+        assert!(body.starts_with("mod.wm_theme = {"));
+        assert!(body.ends_with("\ntrue\n"));
+        assert_eq!(eval_body("x = 1\n"), "x = 1\ntrue\n");
+    }
+
+    #[test]
+    fn the_format_marker_is_unchanged() {
+        // material and desk are generated at evaluation time, so no installed
+        // theme needs reseeding for them.
+        assert_eq!(THEME_FORMAT, "(format 3)");
+        assert!(BUNDLED_TOKYO_NIGHT_SPLASH.contains(THEME_FORMAT));
+    }
+
+    #[test]
+    fn eval_into_defines_every_object_a_good_theme_needs() {
+        let mut vm = test_vm();
+        assert!(eval_into(&mut vm, BUNDLED_TOKYO_NIGHT_SPLASH));
+        assert_eq!(hex(read(&mut vm, "mod.wm_theme.accent")), "#7aa2f7");
+        assert_eq!(hex(read(&mut vm, "mod.wm_theme.shell.bar.background")), "#1a1b26");
+        assert_eq!(read(&mut vm, "mod.wm_theme.material.glass").as_f64(), Some(0.0));
+        assert_eq!(read(&mut vm, "mod.wm_theme.desk.gaps_out").as_f64(), Some(10.0));
+    }
+
+    #[test]
+    fn eval_into_falls_back_when_the_theme_is_broken() {
+        let mut vm = test_vm();
+        assert!(!eval_into(&mut vm, "mod.wm_theme = {\n    accent: nothing_here.foo\n}\n"));
+        assert_eq!(hex(read(&mut vm, "mod.wm_theme.accent")), "#7aa2f7");
+        // No statements at all is not a theme either.
+        let mut vm = test_vm();
+        assert!(!eval_into(&mut vm, ""));
+        assert_eq!(hex(read(&mut vm, "mod.wm_theme.accent")), "#7aa2f7");
+    }
+
+    #[test]
+    fn eval_into_keeps_a_theme_that_ships_its_own_shell() {
+        let mut vm = test_vm();
+        let source = "mod.wm_theme = {\n    accent: #7aa2f7\n    shell: {\n        bar: {\n            background: #123456\n        }\n    }\n}\n";
+        assert!(eval_into(&mut vm, source));
+        assert_eq!(hex(read(&mut vm, "mod.wm_theme.shell.bar.background")), "#123456");
+    }
+
+    #[test]
+    fn eval_into_can_run_again_without_growing_the_vm() {
+        let mut vm = test_vm();
+        assert!(eval_into(&mut vm, BUNDLED_TOKYO_NIGHT_SPLASH));
+        let bodies = vm.bx.code.bodies.borrow().len();
+        let red = BUNDLED_TOKYO_NIGHT_SPLASH.replace("accent: #7aa2f7", "accent: #ff0000");
+        assert!(eval_into(&mut vm, &red));
+        assert_eq!(vm.bx.code.bodies.borrow().len(), bodies);
+        assert_eq!(hex(read(&mut vm, "mod.wm_theme.accent")), "#ff0000");
+    }
+
+    #[test]
+    fn scan_palette_reads_the_theme_and_falls_back_to_the_bundled_default() {
+        let p = scan_palette(BUNDLED_TOKYO_NIGHT_SPLASH);
+        assert!((p.accent.x - 0x7a as f32 / 255.0).abs() < 0.01);
+        assert!((p.background.z - 0x26 as f32 / 255.0).abs() < 0.01);
+        assert_eq!(p.accent.w, 1.0);
+        // A theme naming only an accent keeps the default's other colours.
+        let q = scan_palette("mod.wm_theme = {\n    accent: #ff0000\n}\n");
+        assert_eq!(q.accent.x, 1.0);
+        assert_eq!(q.background, p.background);
+        assert_eq!(PaletteColors::default(), p);
+        // A nested block's key of the same name does not stand in for the
+        // top-level one, and a trailing comment is no part of the value.
+        let nested = "mod.wm_theme = {\n    term: {\n        background: #000000\n    }\n    background: #123456 // navy\n}\n";
+        let n = scan_palette(nested);
+        assert!((n.background.x - 0x12 as f32 / 255.0).abs() < 0.01);
+        assert!((n.background.z - 0x56 as f32 / 255.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn bundled_makeos_is_a_complete_glass_theme() {
+        let src = BUNDLED_MAKEOS_SPLASH;
+        assert!(src.contains(THEME_FORMAT));
+        assert!(!src.contains("#x"));
+        assert!(scan_term_palette(src).is_some(), "the term block stays scannable");
+        let v = scan_values(src);
+        assert_eq!(v.get("material.glass").map(String::as_str), Some("1.0"));
+        assert_eq!(v.get("material.corner_radius").map(String::as_str), Some("12.0"));
+        assert_eq!(v.get("desk.corner_radius").map(String::as_str), Some("12.0"));
+        let (active, inactive) = scan_borders(src);
+        assert_eq!(active.start.rgb.hex(), "#7cc4ff");
+        assert_eq!(active.end.rgb.hex(), "#5b9dff");
+        assert!((inactive.alpha - 0.18).abs() < 0.001);
+        assert!(material_splash_block(src).contains("    glass: 1.0\n"));
+        assert!(desk_splash_block(src).contains("    gaps_out: 12.0\n"));
+        assert!(!theme_defines_shell(src));
+        let p = scan_palette(src);
+        assert!((p.accent.x - 0x5b as f32 / 255.0).abs() < 0.01);
+        assert!(BUNDLED_MAKEOS_WALLPAPER.starts_with("<svg"));
+        let mut vm = test_vm();
+        assert!(eval_into(&mut vm, BUNDLED_MAKEOS_SPLASH));
+        assert_eq!(hex(read(&mut vm, "mod.wm_theme.accent")), "#5b9dff");
+        assert_eq!(read(&mut vm, "mod.wm_theme.material.glass").as_f64(), Some(1.0));
+        assert_eq!(read(&mut vm, "mod.wm_theme.desk.corner_radius").as_f64(), Some(12.0));
+        assert_eq!(hex(read(&mut vm, "mod.wm_theme.shell.bar.active")), "#ff6b81");
+    }
+
+    #[test]
+    fn seeding_writes_both_bundled_themes_and_respects_edits() {
+        let dir = std::env::temp_dir().join(format!("wm-themes-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        ensure_bundled_themes_in(&dir);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("tokyo-night/theme.splash")).unwrap(),
+            BUNDLED_TOKYO_NIGHT_SPLASH
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("makeos/theme.splash")).unwrap(),
+            BUNDLED_MAKEOS_SPLASH
+        );
+        assert_eq!(
+            backgrounds_in(&dir.join("makeos/backgrounds")),
+            vec![dir.join("makeos/backgrounds/makeos.svg")]
+        );
+        // A person's edit survives as long as it carries the current marker.
+        let edited = BUNDLED_MAKEOS_SPLASH.replace("accent: #5b9dff", "accent: #ff00ff");
+        std::fs::write(dir.join("makeos/theme.splash"), &edited).unwrap();
+        ensure_bundled_themes_in(&dir);
+        assert_eq!(std::fs::read_to_string(dir.join("makeos/theme.splash")).unwrap(), edited);
+        // An older format is reseeded.
+        std::fs::write(dir.join("makeos/theme.splash"), edited.replace(THEME_FORMAT, "(format 0)")).unwrap();
+        ensure_bundled_themes_in(&dir);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("makeos/theme.splash")).unwrap(),
+            BUNDLED_MAKEOS_SPLASH
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn backgrounds_accept_vector_and_raster_pictures_sorted() {
+        let dir = std::env::temp_dir().join(format!("wm-bg-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // `C.jpg` sorts first by byte order and third by lowercased name.
+        // (Not `B.jpg`: beside `b.jpg` it is the same file on a
+        // case-insensitive filesystem, and a tie elsewhere.)
+        for f in ["b.jpg", "a.svg", "c.txt", "d.PNG", "C.jpg"] {
+            std::fs::write(dir.join(f), b"x").unwrap();
+        }
+        let got: Vec<String> = backgrounds_in(&dir)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(got, vec!["a.svg", "b.jpg", "C.jpg", "d.PNG"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

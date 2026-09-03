@@ -462,6 +462,30 @@ impl Widget for Image {
     }
 }
 
+/// The rect of aspect `aspect` (width / height) that covers `rect`: at least as large
+/// in both dimensions, centred, the overflow clipped by the view — `ImageFit::CropToFill`
+/// for a vector image, which has no UV to crop. A degenerate aspect or rect (zero,
+/// negative, NaN) is returned unchanged.
+fn cover_rect(rect: Rect, aspect: f64) -> Rect {
+    if !(rect.size.x > 0.0) || !(rect.size.y > 0.0) || !(aspect > 0.0) {
+        return rect;
+    }
+    let size = if rect.size.x / rect.size.y > aspect {
+        // Wider than the content: match the width, grow in height.
+        dvec2(rect.size.x, rect.size.x / aspect)
+    } else {
+        // Taller (or the same): match the height, grow in width.
+        dvec2(rect.size.y * aspect, rect.size.y)
+    };
+    Rect {
+        pos: dvec2(
+            rect.pos.x + (rect.size.x - size.x) * 0.5,
+            rect.pos.y + (rect.size.y - size.y) * 0.5,
+        ),
+        size,
+    }
+}
+
 impl Image {
     fn set_crop_to_fill_transform(
         &mut self,
@@ -602,7 +626,21 @@ impl Image {
         }
         let svg_time = self.svg_time as f32;
         if let Some(draw_svg) = self.draw_svg.as_mut() {
-            draw_svg.draw_walk_time(cx, walk, svg_time);
+            // The cover needs a sized walk: a `Fit` dimension makes the turtle
+            // yield NaN, so such a walk takes the plain path, which sizes it.
+            let sized = !matches!(walk.width, Size::Fit { .. })
+                && !matches!(walk.height, Size::Fit { .. });
+            if matches!(self.fit, ImageFit::CropToFill) && sized {
+                // A vector image has no UV to crop: cover the walk rect with a
+                // rect of the content's aspect instead, the overflow clipped by
+                // the view. The aspect is the one `render_to_rect` fits.
+                let rect = cx.walk_turtle(walk);
+                let size = draw_svg.content_size;
+                let aspect = if size.x > 0.0 && size.y > 0.0 { size.x / size.y } else { 0.0 };
+                draw_svg.render_to_rect(cx, &cover_rect(rect, aspect), svg_time);
+            } else {
+                draw_svg.draw_walk_time(cx, walk, svg_time);
+            }
             let animating = draw_svg.has_animations;
             if animating {
                 // Keep ticking so SMIL/CSS-animated SVGs advance.
@@ -1068,5 +1106,33 @@ impl ImageRef {
         } else {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cover_rect_covers_and_centres() {
+        // a 16:10 scene over a 16:9 window grows in height and centres vertically
+        let r = cover_rect(Rect { pos: dvec2(0.0, 0.0), size: dvec2(1920.0, 1080.0) }, 1.6);
+        assert!((r.size.x - 1920.0).abs() < 1e-6);
+        assert!((r.size.y - 1200.0).abs() < 1e-6);
+        assert!((r.pos.y + 60.0).abs() < 1e-6);
+        // over a taller window it grows in width
+        let r = cover_rect(Rect { pos: dvec2(0.0, 0.0), size: dvec2(1000.0, 1000.0) }, 1.6);
+        assert!((r.size.y - 1000.0).abs() < 1e-6);
+        assert!((r.size.x - 1600.0).abs() < 1e-6);
+        assert!((r.pos.x + 300.0).abs() < 1e-6);
+        // the same aspect covers exactly; a degenerate aspect leaves the rect alone
+        let r = cover_rect(Rect { pos: dvec2(10.0, 20.0), size: dvec2(1600.0, 1000.0) }, 1.6);
+        assert!((r.pos.x - 10.0).abs() < 1e-6 && (r.pos.y - 20.0).abs() < 1e-6);
+        assert!((r.size.x - 1600.0).abs() < 1e-6 && (r.size.y - 1000.0).abs() < 1e-6);
+        let r = cover_rect(Rect { pos: dvec2(0.0, 0.0), size: dvec2(100.0, 50.0) }, 0.0);
+        assert!((r.size.x - 100.0).abs() < 1e-6 && (r.size.y - 50.0).abs() < 1e-6);
+        // a rect the turtle could not size (NaN width) is returned unchanged
+        let r = cover_rect(Rect { pos: dvec2(0.0, 0.0), size: dvec2(f64::NAN, 500.0) }, 1.6);
+        assert!(r.size.x.is_nan() && (r.size.y - 500.0).abs() < 1e-6);
     }
 }

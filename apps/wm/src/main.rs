@@ -2309,7 +2309,7 @@ impl App {
         if let Some(palette) = theme::scan_term_palette(&source) {
             state.term_env = palette.env_value();
         }
-        if let Some(rgb) = scan_theme_color(&source, "accent") {
+        if let Some(rgb) = theme::scan_color(&source, "accent") {
             state.accent = rgb;
         }
         state.borders = desk::BorderTheme::from_theme_source(&source);
@@ -2364,8 +2364,25 @@ impl App {
         let path = &backgrounds[index % backgrounds.len()];
         let image = self.ui.widget(cx, ids!(bg_image));
         let image_ref = self.ui.image(cx, ids!(bg_image));
-        if image_ref.load_image_file_by_path_async(cx, path).is_ok() {
+        // A vector wallpaper (the bundled MakeOS scene) goes through the
+        // vector engine; a picture through the async raster decoder.
+        let is_svg = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("svg"))
+            .unwrap_or(false);
+        let loaded = if is_svg {
+            match std::fs::read(path) {
+                Ok(bytes) => image_ref.load_svg_from_data(cx, &bytes).is_ok(),
+                Err(_) => false,
+            }
+        } else {
+            image_ref.load_image_file_by_path_async(cx, path).is_ok()
+        };
+        if loaded {
             image.set_visible(cx, true);
+        } else {
+            log!("wm: wallpaper {} did not load", path.display());
         }
         self.redraw_all(cx);
     }
@@ -3547,25 +3564,6 @@ fn super_chord(m: &KeyModifiers) -> bool {
     }
 }
 
-fn scan_theme_color(source: &str, key: &str) -> Option<Vec4f> {
-    for line in source.lines() {
-        let line = line.trim();
-        let Some((k, v)) = line.split_once(':') else {
-            continue;
-        };
-        if k.trim() == key {
-            let rgb = theme::parse_hex(v.trim())?;
-            return Some(Vec4f {
-                x: rgb.r as f32 / 255.0,
-                y: rgb.g as f32 / 255.0,
-                z: rgb.b as f32 / 255.0,
-                w: 1.0,
-            });
-        }
-    }
-    None
-}
-
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         // CLI: --import-theme <name> pulls an omarchy theme and converts
@@ -3590,7 +3588,7 @@ impl MatchEvent for App {
         let term_env = theme::scan_term_palette(&source)
             .map(|p| p.env_value())
             .unwrap_or_default();
-        let accent = scan_theme_color(&source, "accent").unwrap_or(Vec4f {
+        let accent = theme::scan_color(&source, "accent").unwrap_or(Vec4f {
             x: 0.48,
             y: 0.63,
             z: 0.97,
@@ -3654,6 +3652,7 @@ impl MatchEvent for App {
             }
             self.ui.widget(cx, ids!(gallery_holder)).set_visible(cx, true);
             self.ui.widget(cx, ids!(main_column)).set_visible(cx, false);
+            self.apply_background(cx, 0);
             self.redraw_all(cx);
             return;
         }
@@ -3857,64 +3856,12 @@ impl AppMain for App {
         crate::makepad_widgets::script_mod(vm);
 
         // The theme: evaluated before any module that reads
-        // mod.wm_theme. This IS the theming system — splash.
-        theme::ensure_default_theme();
+        // mod.wm_theme. This IS the theming system — splash. The same
+        // evaluation runs again on a live switch (`set_theme`).
+        theme::ensure_bundled_themes();
         let theme_name = App::theme_name_from_env();
         let source = theme::load_theme_source(&theme_name);
-        let eval_theme = |vm: &mut ScriptVm, name: &str, code: &str| -> bool {
-            let script_mod_id = ScriptMod {
-                cargo_manifest_path: env!("CARGO_MANIFEST_DIR").to_string(),
-                module_path: name.to_string(),
-                file: "theme.splash".to_string(),
-                line: 0,
-                column: 0,
-                code: code.to_string(),
-                values: vec![],
-            };
-            let value = vm.eval(script_mod_id);
-            let errors = vm.take_errors();
-            for e in &errors {
-                log!("wm theme: {}", e);
-            }
-            !value.is_err() && errors.is_empty()
-        };
-        // Leading comment lines shift the runtime parser's span tracking
-        // (the script_mod! gotcha applies to eval bodies too): start the
-        // body at the first real statement.
-        let source: String = {
-            let mut lines = source.lines().peekable();
-            while let Some(line) = lines.peek() {
-                let t = line.trim();
-                if t.is_empty() || t.starts_with("//") {
-                    lines.next();
-                } else {
-                    break;
-                }
-            }
-            let mut s = lines.collect::<Vec<_>>().join("\n");
-            // Parser quirk: the FINAL statement of an eval body is treated
-            // as its result expression — a trailing `mod.x = {...}` never
-            // commits. A benign trailing statement makes the assignment a
-            // real statement. (Same class as the splash auto-close notes.)
-            s.push_str("\ntrue\n");
-            s
-        };
-        if !eval_theme(vm, "wm_theme", &source) {
-            // Fall back to the bundled default so the DSL still evaluates.
-            let mut fallback = theme::BUNDLED_TOKYO_NIGHT_SPLASH.to_string();
-            fallback.push_str("\ntrue\n");
-            eval_theme(vm, "wm_theme_fallback", &fallback);
-        }
-
-        // The shell token object (`mod.wm_theme.shell`): the omarchy
-        // `shell.toml.tpl` contract, resolved from this theme's palette —
-        // unless the theme ships its own `shell: {...}` block, which
-        // replaces it wholesale.
-        if !theme::theme_defines_shell(&source) {
-            let mut block = theme::shell_splash_block(&source);
-            block.push_str("\ntrue\n");
-            eval_theme(vm, "wm_theme_shell", &block);
-        }
+        theme::eval_into(vm, &source);
 
         run_view::script_mod(vm);
         module_view::script_mod(vm);
