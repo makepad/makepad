@@ -10,7 +10,8 @@ use crate::{
     PathGlyphInstance, PathTextPlacement, PreparedTextRun, WidgetMatchEvent,
 };
 use crate::makepad_draw::vector::{
-    FACE_IMPLICIT_UV, MAP_VERTEX_POSITION_SCALE, VECTOR_ZBIAS_STEP,
+    FACE_IMPLICIT_UV, FACE_TYPED_VERTEX_BYTES, FILL_TYPED_VERTEX_BYTES,
+    MAP_VERTEX_POSITION_SCALE, ROAD_TYPED_VERTEX_BYTES, VECTOR_ZBIAS_STEP,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -4627,6 +4628,12 @@ impl Widget for MapView {
         } else {
             -cx.current_pass_zbias_step()
         };
+        // Every chunk after the first is an implementation-only draw call.
+        // Cancel its paint-order step, and carry that correction forward to
+        // later typed streams, so chunk boundaries cannot change flat-map
+        // depth ordering.
+        let chunk_call_depth_fix = face_call_depth_fix;
+        let mut chunk_extra_calls = 0usize;
 
         // Four global passes (carto layer order): every tile's fills, then
         // every tile's road casings, then road centers, then POI symbols.
@@ -4677,27 +4684,24 @@ impl Widget for MapView {
                 // contended lock there is an `Atomics.wait` the main thread
                 // may not make. No pool: the staging simply stays.
                 if pass == 0 {
-                    for geometry in [
-                        fill_geometry,
-                        fill_misc_geometry,
-                        face_geometry,
-                        casing_geometry,
-                        stroke_geometry,
-                        icon_geometry,
-                        icon_high_geometry,
-                        fringe_geometry,
-                        fill_3d_geometry,
-                        fill_3d_misc_geometry,
-                        wall_geometry,
-                        tree_geometry,
-                        tree_cross_geometry,
-                        tree_template_geometry,
-                        tree_cross_template_geometry,
-                        stalk_template_geometry,
-                        stoplight_template_geometry,
-                    ]
-                    .into_iter()
-                    .flatten()
+                    for geometry in fill_geometry
+                        .iter()
+                        .chain(fill_misc_geometry.iter())
+                        .chain(face_geometry.iter())
+                        .chain(casing_geometry.iter())
+                        .chain(stroke_geometry.iter())
+                        .chain(icon_geometry.iter())
+                        .chain(icon_high_geometry.iter())
+                        .chain(fringe_geometry.iter())
+                        .chain(fill_3d_geometry.iter())
+                        .chain(fill_3d_misc_geometry.iter())
+                        .chain(wall_geometry.iter())
+                        .chain(tree_geometry.iter())
+                        .chain(tree_cross_geometry.iter())
+                        .chain(tree_template_geometry.iter())
+                        .chain(tree_cross_template_geometry.iter())
+                        .chain(stalk_template_geometry.iter())
+                        .chain(stoplight_template_geometry.iter())
                     {
                         let Some(pool) = self.tile_thread_pool.as_ref() else {
                             break;
@@ -4730,11 +4734,11 @@ impl Widget for MapView {
                 {
                     continue;
                 }
-                let geometry = match pass {
-                    1 => casing_geometry,
-                    2 => stroke_geometry,
-                    3 => icon_geometry,
-                    _ => icon_high_geometry,
+                let geometries: &[Geometry] = match pass {
+                    1 => casing_geometry.as_slice(),
+                    2 => stroke_geometry.as_slice(),
+                    3 => icon_geometry.as_slice(),
+                    _ => icon_high_geometry.as_slice(),
                 };
                 let scale = 2.0_f64.powf(view_zoom - key.z as f64);
                 let tile_offset = map_offset
@@ -4778,15 +4782,17 @@ impl Widget for MapView {
                             space_warp: self.draw_map.space_warp_u,
                             space_warp2: self.draw_map.space_warp2_u,
                         };
-                        if let Some(outgoing) = &fade.fill_geometry {
+                        for (chunk_index, outgoing) in fade.fill_geometry.iter().enumerate() {
                             self.draw_fill.draw_geometry(
                                 cx,
                                 outgoing.geometry_id(),
                                 &uniforms,
                                 &terrain_tex,
-                                0.0,
+                                chunk_call_depth_fix
+                                    * (chunk_extra_calls + chunk_index) as f32,
                             );
                         }
+                        chunk_extra_calls += fade.fill_geometry.len().saturating_sub(1);
                         if let Some(outgoing) = &fade.fill_misc_geometry {
                             self.draw_map.draw_geometry(
                                 cx,
@@ -4804,13 +4810,15 @@ impl Widget for MapView {
                                 terrain_span,
                                 terrain_uvfit,
                                 &terrain_tex,
-                                0.0,
+                                chunk_call_depth_fix * chunk_extra_calls as f32,
                                 terrain_fill_lift,
                             );
                         }
                     } else {
                         if pass == 1 {
-                            if let Some(outgoing) = &fade.face_geometry {
+                            for (chunk_index, outgoing) in
+                                fade.face_geometry.iter().enumerate()
+                            {
                                 self.draw_face.draw_geometry(
                                     cx,
                                     outgoing.geometry_id(),
@@ -4828,18 +4836,23 @@ impl Widget for MapView {
                                     terrain_uvfit,
                                     &terrain_tex,
                                     if tilt_rad > 1e-4 { pass_boost } else { 0.0 }
-                                        + face_call_depth_fix * face_calls as f32,
+                                        + face_call_depth_fix * face_calls as f32
+                                        + chunk_call_depth_fix
+                                            * (chunk_extra_calls + chunk_index) as f32,
                                     terrain_fill_lift,
                                 );
-                                face_calls += 1;
                             }
+                            face_calls += usize::from(!fade.face_geometry.is_empty());
+                            chunk_extra_calls +=
+                                fade.face_geometry.len().saturating_sub(1);
                         }
-                        if let Some(outgoing) = match pass {
-                            1 => &fade.casing_geometry,
-                            2 => &fade.stroke_geometry,
-                            3 => &fade.icon_geometry,
-                            _ => &None,
-                        } {
+                        let outgoing_geometries: &[Geometry] = match pass {
+                            1 => fade.casing_geometry.as_slice(),
+                            2 => fade.stroke_geometry.as_slice(),
+                            3 => fade.icon_geometry.as_slice(),
+                            _ => &[],
+                        };
+                        for (chunk_index, outgoing) in outgoing_geometries.iter().enumerate() {
                             let outgoing_id = outgoing.geometry_id();
                             let road_pass = matches!(pass, 1 | 2);
                             if road_pass {
@@ -4863,7 +4876,9 @@ impl Widget for MapView {
                                         pass_boost + (pass - 1) as f32 * 0.02
                                     } else {
                                         0.0
-                                    } + face_call_depth_fix * face_calls as f32,
+                                    } + face_call_depth_fix * face_calls as f32
+                                        + chunk_call_depth_fix
+                                            * (chunk_extra_calls + chunk_index) as f32,
                                     terrain_fill_lift,
                                 );
                             } else {
@@ -4892,6 +4907,9 @@ impl Widget for MapView {
                                 );
                             }
                         }
+                        if matches!(pass, 1 | 2) {
+                            chunk_extra_calls += outgoing_geometries.len().saturating_sub(1);
+                        }
                     }
                 }
                 let reused_road_pass = matches!(pass, 1 | 2)
@@ -4911,7 +4929,7 @@ impl Widget for MapView {
                 // Faces lead the tile's casing pass, so the incoming faces
                 // draw before the strokes' correction is taken.
                 if pass == 1 {
-                    if let Some(geometry) = face_geometry {
+                    for (chunk_index, geometry) in face_geometry.iter().enumerate() {
                         self.draw_face.draw_geometry(
                             cx,
                             geometry.geometry_id(),
@@ -4929,17 +4947,21 @@ impl Widget for MapView {
                             terrain_uvfit,
                             &terrain_tex,
                             if tilt_rad > 1e-4 { pass_boost } else { 0.0 }
-                                + face_call_depth_fix * face_calls as f32,
+                                + face_call_depth_fix * face_calls as f32
+                                + chunk_call_depth_fix
+                                    * (chunk_extra_calls + chunk_index) as f32,
                             terrain_fill_lift,
                         );
-                        face_calls += 1;
                     }
+                    face_calls += usize::from(!face_geometry.is_empty());
+                    chunk_extra_calls += face_geometry.len().saturating_sub(1);
                 }
                 let pass_depth = if tilt_rad > 1e-4 && pass != 0 {
                     pass_boost + (pass - 1) as f32 * 0.02
                 } else {
                     0.0
-                } + face_call_depth_fix * face_calls as f32;
+                } + face_call_depth_fix * face_calls as f32
+                    + chunk_call_depth_fix * chunk_extra_calls as f32;
                 if pass == 0 {
                     let uniforms = MapDrawUniforms {
                         map_scale,
@@ -4963,15 +4985,16 @@ impl Widget for MapView {
                         space_warp: self.draw_map.space_warp_u,
                         space_warp2: self.draw_map.space_warp2_u,
                     };
-                    if let Some(geometry) = fill_geometry {
+                    for (chunk_index, geometry) in fill_geometry.iter().enumerate() {
                         self.draw_fill.draw_geometry(
                             cx,
                             geometry.geometry_id(),
                             &uniforms,
                             &terrain_tex,
-                            pass_depth,
+                            pass_depth + chunk_call_depth_fix * chunk_index as f32,
                         );
                     }
+                    chunk_extra_calls += fill_geometry.len().saturating_sub(1);
                     if let Some(geometry) = fill_misc_geometry {
                         self.draw_map.draw_geometry(
                             cx,
@@ -4989,11 +5012,14 @@ impl Widget for MapView {
                             terrain_span,
                             terrain_uvfit,
                             &terrain_tex,
-                            pass_depth,
+                            pass_depth
+                                + chunk_call_depth_fix
+                                    * fill_geometry.len().saturating_sub(1) as f32,
                             terrain_fill_lift,
                         );
                     }
-                } else if let Some(geometry) = geometry {
+                } else {
+                    for (chunk_index, geometry) in geometries.iter().enumerate() {
                     draw_map_or_road!(
                         self,
                         matches!(pass, 1 | 2),
@@ -5012,9 +5038,11 @@ impl Widget for MapView {
                         terrain_span,
                         terrain_uvfit,
                         &terrain_tex,
-                        pass_depth,
+                        pass_depth + chunk_call_depth_fix * chunk_index as f32,
                         terrain_fill_lift,
                     );
+                    }
+                    chunk_extra_calls += geometries.len().saturating_sub(1);
                 }
                 // 3D volume rides the fill pass with a ground-circle
                 // distance fade from the view focus: the far field under
@@ -5058,7 +5086,9 @@ impl Widget for MapView {
                             1.0
                         };
                     if lod > 0.003 && lod <= 1.01 {
-                        if let Some(roof) = fill_3d_geometry {
+                        let roof_base_depth =
+                            chunk_call_depth_fix * chunk_extra_calls as f32;
+                        for (chunk_index, roof) in fill_3d_geometry.iter().enumerate() {
                             self.draw_roof.draw_geometry(
                                 cx,
                                 roof.geometry_id(),
@@ -5088,9 +5118,10 @@ impl Widget for MapView {
                                     space_warp2: self.draw_map.space_warp2_u,
                                 },
                                 &terrain_tex,
-                                0.0,
+                                roof_base_depth + chunk_call_depth_fix * chunk_index as f32,
                             );
                         }
+                        chunk_extra_calls += fill_3d_geometry.len().saturating_sub(1);
                     }
                     // Marker stalks and complete stoplights occupy the same
                     // 3D-volume phase and LOD/grow gate as the generic misc
@@ -5260,7 +5291,7 @@ impl Widget for MapView {
                 // 3D density hide it, and the fringes are ~2/3 of the
                 // casing vertex mass on street tiles.
                 if pass == 1 && self.tilt < 25.0 {
-                    if let Some(fringe) = fringe_geometry {
+                    for (chunk_index, fringe) in fringe_geometry.iter().enumerate() {
                         let fringe_id = fringe.geometry_id();
                         self.draw_road.draw_geometry(
                             cx,
@@ -5279,10 +5310,13 @@ impl Widget for MapView {
                             terrain_uvfit,
                             &terrain_tex,
                             if tilt_rad > 1e-4 { pass_boost } else { 0.0 }
-                                + face_call_depth_fix * face_calls as f32,
+                                + face_call_depth_fix * face_calls as f32
+                                + chunk_call_depth_fix
+                                    * (chunk_extra_calls + chunk_index) as f32,
                             terrain_fill_lift,
                         );
                     }
+                    chunk_extra_calls += fringe_geometry.len().saturating_sub(1);
                 }
             }
         }
@@ -5335,12 +5369,12 @@ impl Widget for MapView {
                 {
                     continue;
                 }
-                let geometry = match pass {
-                    0 => fill_geometry,
-                    1 => casing_geometry,
-                    2 => stroke_geometry,
-                    3 => icon_geometry,
-                    _ => icon_high_geometry,
+                let geometries: &[Geometry] = match pass {
+                    0 => fill_geometry.as_slice(),
+                    1 => casing_geometry.as_slice(),
+                    2 => stroke_geometry.as_slice(),
+                    3 => icon_geometry.as_slice(),
+                    _ => icon_high_geometry.as_slice(),
                 };
                 let scale = 2.0_f64.powf(view_zoom - key.z as f64);
                 let tile_offset = map_offset
@@ -5361,14 +5395,14 @@ impl Widget for MapView {
                     fade_alpha = (((perf_start - fade.started).max(0.0) / TILE_FADE_SECONDS)
                         as f32)
                         .clamp(0.0, 1.0);
-                    let outgoing = match pass {
-                        0 => &fade.fill_geometry,
-                        1 => &fade.casing_geometry,
-                        2 => &fade.stroke_geometry,
-                        3 => &fade.icon_geometry,
-                        _ => &None,
+                    let outgoing_geometries: &[Geometry] = match pass {
+                        0 => fade.fill_geometry.as_slice(),
+                        1 => fade.casing_geometry.as_slice(),
+                        2 => fade.stroke_geometry.as_slice(),
+                        3 => fade.icon_geometry.as_slice(),
+                        _ => &[],
                     };
-                    if let Some(outgoing) = outgoing {
+                    for outgoing in outgoing_geometries {
                         let outgoing_id = outgoing.geometry_id();
                         draw_map_or_road!(
                             self,
@@ -5465,9 +5499,7 @@ impl Widget for MapView {
                         );
                     }
                 }
-                let Some(geometry) = geometry else {
-                    continue;
-                };
+                for geometry in geometries {
                 let geometry_id = geometry.geometry_id();
                 self.draw_map.draw_geometry(
                     cx,
@@ -5496,6 +5528,7 @@ impl Widget for MapView {
                             },
                     terrain_fill_lift,
                 );
+                }
             }
         }
 
@@ -5871,13 +5904,22 @@ impl MapView {
     fn handle_archive_watch(&mut self, _cx: &mut Cx, _event: &Event) {}
 }
 
-fn typed_index_data(indices: Vec<u32>, vertex_count: usize) -> IndexData {
-    if vertex_count < 65_536 {
-        debug_assert!(indices.iter().all(|&index| index < 65_536));
-        IndexData::U16(indices.into_iter().map(|index| index as u16).collect())
-    } else {
-        IndexData::U32(indices)
-    }
+fn upload_typed_stream(
+    cx: &mut Cx,
+    stream: TypedStream,
+    layout: &DrawShaderInputs,
+) -> Vec<Geometry> {
+    stream
+        .chunks
+        .into_iter()
+        .filter(|chunk| !chunk.indices.is_empty() && !chunk.vertices.is_empty())
+        .map(|chunk| {
+            debug_assert!(chunk.vertices.len() / layout.stride_bytes < 65_536);
+            let geometry = Geometry::new(cx);
+            geometry.update_typed(cx, IndexData::U16(chunk.indices), chunk.vertices, layout);
+            geometry
+        })
+        .collect()
 }
 
 /// The typed upload needs the shader's physical layout, which exists once the
@@ -6154,7 +6196,7 @@ impl MapView {
             self.draw_road.shadow_dir = shadow_dir;
             self.draw_road.shadow_mask = None;
             self.draw_road.shadow_mask_on = 0.0;
-            if let Some(geometry) = fill_3d_geometry {
+            for geometry in fill_3d_geometry {
                 self.draw_roof.draw_geometry(
                     cx,
                     geometry.geometry_id(),
@@ -6165,17 +6207,10 @@ impl MapView {
             }
             // The face stream is not cast: every face record is grounded,
             // so each of its fragments would discard here.
-            for (geometry, road) in [
-                (fill_3d_misc_geometry, false),
-                (casing_geometry, true),
-                (stroke_geometry, true),
-            ] {
-                let Some(geometry) = geometry else {
-                    continue;
-                };
+            if let Some(geometry) = fill_3d_misc_geometry {
                 draw_map_or_road!(
                     self,
-                    road,
+                    false,
                     cx,
                     geometry.geometry_id(),
                     map_scale,
@@ -6192,6 +6227,22 @@ impl MapView {
                     terrain_uvfit,
                     terrain_tex,
                     0.0,
+                    terrain_fill_lift,
+                );
+            }
+            for geometry in casing_geometry {
+                draw_map_or_road!(
+                    self, true, cx, geometry.geometry_id(), map_scale, screen_offset, 1.0,
+                    width_correction, view_rot, rot_pivot, tilt_params, view_zoom as f32, 1.0,
+                    terrain_org, terrain_span, terrain_uvfit, terrain_tex, 0.0,
+                    terrain_fill_lift,
+                );
+            }
+            for geometry in stroke_geometry {
+                draw_map_or_road!(
+                    self, true, cx, geometry.geometry_id(), map_scale, screen_offset, 1.0,
+                    width_correction, view_rot, rot_pivot, tilt_params, view_zoom as f32, 1.0,
+                    terrain_org, terrain_span, terrain_uvfit, terrain_tex, 0.0,
                     terrain_fill_lift,
                 );
             }
@@ -6213,7 +6264,7 @@ impl MapView {
 
             // c. Footprint cut-out at ground.
             self.draw_map.shadow_cast = 2.0;
-            if let Some(geometry) = fill_3d_geometry {
+            for geometry in fill_3d_geometry {
                 self.draw_roof.draw_geometry(
                     cx,
                     geometry.geometry_id(),
@@ -6351,11 +6402,11 @@ impl MapView {
             _ => (
                 buffers.render_zoom,
                 false,
+                Vec::new(),
                 None,
-                None,
-                None,
-                None,
-                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
                 None,
                 0,
                 0,
@@ -6390,35 +6441,70 @@ impl MapView {
         if self.space_warp_want {
             let scale = (self.view_zoom() - tile_key.z as f64).exp2().max(1.0);
             let max_edge = (64.0 / scale).clamp(4.0, 64.0) as f32;
+            let (mut fill_indices, mut fill_vertices) =
+                std::mem::take(&mut buffers.fill).into_u32(FILL_TYPED_VERTEX_BYTES);
             crate::makepad_draw::vector::subdivide_fill_packed_mesh(
-                &mut buffers.fill_indices,
-                &mut buffers.fill_vertices,
+                &mut fill_indices,
+                &mut fill_vertices,
                 max_edge,
+            );
+            buffers.fill = TypedStream::from_u32(
+                fill_indices,
+                fill_vertices,
+                FILL_TYPED_VERTEX_BYTES,
             );
             crate::makepad_draw::vector::subdivide_packed_mesh(
                 &mut buffers.fill_misc_indices,
                 &mut buffers.fill_misc_vertices,
                 max_edge,
             );
+            let (mut face_indices, mut face_vertices) =
+                std::mem::take(&mut buffers.face).into_u32(FACE_TYPED_VERTEX_BYTES);
             crate::makepad_draw::vector::subdivide_face_typed_mesh(
-                &mut buffers.face_indices,
-                &mut buffers.face_vertices,
+                &mut face_indices,
+                &mut face_vertices,
                 max_edge,
             );
+            buffers.face = TypedStream::from_u32(
+                face_indices,
+                face_vertices,
+                FACE_TYPED_VERTEX_BYTES,
+            );
+            let (mut casing_indices, mut casing_vertices) =
+                std::mem::take(&mut buffers.casing).into_u32(ROAD_TYPED_VERTEX_BYTES);
             crate::makepad_draw::vector::subdivide_road_mesh(
-                &mut buffers.casing_indices,
-                &mut buffers.casing_vertices,
+                &mut casing_indices,
+                &mut casing_vertices,
                 max_edge,
             );
+            buffers.casing = TypedStream::from_u32(
+                casing_indices,
+                casing_vertices,
+                ROAD_TYPED_VERTEX_BYTES,
+            );
+            let (mut stroke_indices, mut stroke_vertices) =
+                std::mem::take(&mut buffers.stroke).into_u32(ROAD_TYPED_VERTEX_BYTES);
             crate::makepad_draw::vector::subdivide_road_mesh(
-                &mut buffers.stroke_indices,
-                &mut buffers.stroke_vertices,
+                &mut stroke_indices,
+                &mut stroke_vertices,
                 max_edge,
             );
+            buffers.stroke = TypedStream::from_u32(
+                stroke_indices,
+                stroke_vertices,
+                ROAD_TYPED_VERTEX_BYTES,
+            );
+            let (mut fringe_indices, mut fringe_vertices) =
+                std::mem::take(&mut buffers.fringe).into_u32(ROAD_TYPED_VERTEX_BYTES);
             crate::makepad_draw::vector::subdivide_road_mesh(
-                &mut buffers.fringe_indices,
-                &mut buffers.fringe_vertices,
+                &mut fringe_indices,
+                &mut fringe_vertices,
                 max_edge,
+            );
+            buffers.fringe = TypedStream::from_u32(
+                fringe_indices,
+                fringe_vertices,
+                ROAD_TYPED_VERTEX_BYTES,
             );
         }
         let tile_bytes = if reuse_road_core {
@@ -6436,20 +6522,7 @@ impl MapView {
             cx.redraw_all();
             return;
         };
-        let fill_geometry = if !buffers.fill_indices.is_empty() && !buffers.fill_vertices.is_empty()
-        {
-            let geometry = Geometry::new(cx);
-            let vertex_count = buffers.fill_vertices.len() / fill_layout.stride_bytes;
-            geometry.update_typed(
-                cx,
-                typed_index_data(buffers.fill_indices, vertex_count),
-                buffers.fill_vertices,
-                &fill_layout,
-            );
-            Some(geometry)
-        } else {
-            None
-        };
+        let fill_geometry = upload_typed_stream(cx, buffers.fill, &fill_layout);
         let fill_misc_geometry = if !buffers.fill_misc_indices.is_empty()
             && !buffers.fill_misc_vertices.is_empty()
         {
@@ -6460,62 +6533,23 @@ impl MapView {
             None
         };
 
-        let new_face_geometry =
-            if !buffers.face_indices.is_empty() && !buffers.face_vertices.is_empty() {
-                let geometry = Geometry::new(cx);
-                let vertex_count = buffers.face_vertices.len() / face_layout.stride_bytes;
-                geometry.update_typed(
-                    cx,
-                    typed_index_data(buffers.face_indices, vertex_count),
-                    buffers.face_vertices,
-                    &face_layout,
-                );
-                Some(geometry)
-            } else {
-                None
-            };
+        let new_face_geometry = upload_typed_stream(cx, buffers.face, &face_layout);
         let (face_geometry, fade_face_geometry) = if reuse_road_core {
-            (old_face, None)
+            (old_face, Vec::new())
         } else {
             (new_face_geometry, old_face)
         };
 
-        let new_casing_geometry =
-            if !buffers.casing_indices.is_empty() && !buffers.casing_vertices.is_empty() {
-                let geometry = Geometry::new(cx);
-                let vertex_count = buffers.casing_vertices.len() / road_layout.stride_bytes;
-                geometry.update_typed(
-                    cx,
-                    typed_index_data(buffers.casing_indices, vertex_count),
-                    buffers.casing_vertices,
-                    &road_layout,
-                );
-                Some(geometry)
-            } else {
-                None
-            };
+        let new_casing_geometry = upload_typed_stream(cx, buffers.casing, &road_layout);
         let (casing_geometry, fade_casing_geometry) = if reuse_road_core {
-            (old_casing, None)
+            (old_casing, Vec::new())
         } else {
             (new_casing_geometry, old_casing)
         };
 
-        let new_stroke_geometry =
-            if !buffers.stroke_indices.is_empty() && !buffers.stroke_vertices.is_empty() {
-                let geometry = Geometry::new(cx);
-                let vertex_count = buffers.stroke_vertices.len() / road_layout.stride_bytes;
-                geometry.update_typed(
-                    cx,
-                    typed_index_data(buffers.stroke_indices, vertex_count),
-                    buffers.stroke_vertices,
-                    &road_layout,
-                );
-                Some(geometry)
-            } else {
-                None
-            };
+        let new_stroke_geometry = upload_typed_stream(cx, buffers.stroke, &road_layout);
         let (stroke_geometry, fade_stroke_geometry) = if reuse_road_core {
-            (old_stroke, None)
+            (old_stroke, Vec::new())
         } else {
             (new_stroke_geometry, old_stroke)
         };
@@ -6537,36 +6571,8 @@ impl MapView {
         } else {
             None
         };
-        let fringe_geometry = if !buffers.fringe_indices.is_empty()
-            && !buffers.fringe_vertices.is_empty()
-        {
-            let geometry = Geometry::new(cx);
-            let vertex_count = buffers.fringe_vertices.len() / road_layout.stride_bytes;
-            geometry.update_typed(
-                cx,
-                typed_index_data(buffers.fringe_indices, vertex_count),
-                buffers.fringe_vertices,
-                &road_layout,
-            );
-            Some(geometry)
-        } else {
-            None
-        };
-        let fill_3d_geometry = if !buffers.fill_3d_indices.is_empty()
-            && !buffers.fill_3d_vertices.is_empty()
-        {
-            let geometry = Geometry::new(cx);
-            let vertex_count = buffers.fill_3d_vertices.len() / roof_layout.stride_bytes;
-            geometry.update_typed(
-                cx,
-                typed_index_data(buffers.fill_3d_indices, vertex_count),
-                buffers.fill_3d_vertices,
-                &roof_layout,
-            );
-            Some(geometry)
-        } else {
-            None
-        };
+        let fringe_geometry = upload_typed_stream(cx, buffers.fringe, &road_layout);
+        let fill_3d_geometry = upload_typed_stream(cx, buffers.fill_3d, &roof_layout);
         let mut band = |indices: Vec<u32>, vertices: Vec<f32>| {
             if indices.is_empty() || vertices.is_empty() {
                 None
@@ -6607,13 +6613,13 @@ impl MapView {
                 .tiles
                 .values()
                 .any(|entry| entry.baked_3d && matches!(entry.state, TileLoadState::Ready { .. }));
-        let fade = if old_fill.is_some()
+        let fade = if !old_fill.is_empty()
             || old_fill_misc.is_some()
             || old_icon.is_some()
             || !old_icon_instances.is_empty()
-            || fade_face_geometry.is_some()
-            || fade_casing_geometry.is_some()
-            || fade_stroke_geometry.is_some()
+            || !fade_face_geometry.is_empty()
+            || !fade_casing_geometry.is_empty()
+            || !fade_stroke_geometry.is_empty()
         {
             Some(TileFade {
                 started: cx.seconds_since_app_start(),
@@ -6636,11 +6642,11 @@ impl MapView {
                 bucket: buffers.render_zoom,
                 grow_heights: new_baked_3d && !three_d_established,
                 reuse_road_core: false,
-                fill_geometry: None,
+                fill_geometry: Vec::new(),
                 fill_misc_geometry: None,
-                face_geometry: None,
-                casing_geometry: None,
-                stroke_geometry: None,
+                face_geometry: Vec::new(),
+                casing_geometry: Vec::new(),
+                stroke_geometry: Vec::new(),
                 icon_geometry: None,
                 icon_instances: Vec::new(),
             })
@@ -7981,11 +7987,11 @@ impl MapView {
     fn tile_fading_from_empty(&self, key: TileKey) -> bool {
         self.tiles.get(&key).is_some_and(|entry| {
             entry.fade.as_ref().is_some_and(|fade| {
-                fade.fill_geometry.is_none()
+                fade.fill_geometry.is_empty()
                     && fade.fill_misc_geometry.is_none()
-                    && fade.face_geometry.is_none()
-                    && fade.casing_geometry.is_none()
-                    && fade.stroke_geometry.is_none()
+                    && fade.face_geometry.is_empty()
+                    && fade.casing_geometry.is_empty()
+                    && fade.stroke_geometry.is_empty()
                     && fade.icon_geometry.is_none()
                     && fade.icon_instances.is_empty()
             })
@@ -8050,7 +8056,7 @@ impl MapView {
                 ..
             } = &entry.state
             {
-                *feature_count > 0 || fill_geometry.is_some() || stroke_geometry.is_some()
+                *feature_count > 0 || !fill_geometry.is_empty() || !stroke_geometry.is_empty()
             } else {
                 false
             }
@@ -10571,17 +10577,6 @@ fn label_class_color(color_class: u8, default_color: Vec4f, dark_theme: bool) ->
 mod tests {
     use super::*;
 
-    #[test]
-    fn typed_indices_use_u16_below_limit_and_u32_at_limit() {
-        assert!(matches!(
-            typed_index_data(vec![0, 65_534], 65_535),
-            IndexData::U16(indices) if indices == vec![0, 65_534]
-        ));
-        assert!(matches!(
-            typed_index_data(vec![0, 65_535], 65_536),
-            IndexData::U32(indices) if indices == vec![0, 65_535]
-        ));
-    }
     use makepad_mbtile_reader::MbtilesWriter;
 
     fn test_map(cx: &mut Cx) -> MapView {
