@@ -19,19 +19,19 @@ out below and in [GAPS.md](GAPS.md).
 | `text.expand` | `prompt-to-image.splash`, `dream.splash`, `image-enhance.splash`, `text-to-video.splash` | `text` | `prompt:text` | `text:text` | `model=""` (auto), `target_domain="image"`, `identity_anchor=""`, `style=""`, `max_tokens=512` (minimum 16), `temperature=0.7` (0..2), `variants=1` (1..8). Music expansion raises the budget to 3000/3600/4096 by song length; character expansion uses temperature 0. | Asset UI expand-only and prefixed chains, `apps/asset-ui/src/pipeline.rs:425-426,1472-1533`; VJ DREAM declares the real job at `apps/vj/src/gen.rs:944-957`. Flow recipes use `Llm`, because this pure-text rewrite benefits from an explicit per-template system turn. |
 | `vision.describe` | `annotate.splash` | `vision` | `prompt:text`, `image:image` | `text:text` | `model=""` (auto), `max_tokens=512` (vision backend ceiling; annotation requests use about 200). | No selectable Asset UI chain in `PRESETS`; the annotation contract routes its question to a vision box in `libs/asset/annotate/src/pass.rs:1-8`. |
 | `image.generate` | `prompt-to-image.splash`, `dream.splash`, `image-enhance.splash` | `image` | `prompt:text`, `image:image?` | `image:image` (PNG) | Flow default `width=1024`, `height=1024`, `steps=8`; creator picker default is 512×512 and model-default steps. Size choices: 512×512, 768×768, 1024×1024, 768×512, 512×768, 1024×576. Step choices: 4, 8, 12, 20, 28, 50. `seed=0`, `negative=""` (`negative_prompt` on the wire), `model=""`, `loras=[]`; LoRA strength choices 1.0, 0.8, 0.6, 0.4, 1.2. | Asset UI `image`/`expand → image`, `apps/asset-ui/src/pipeline.rs:424-425`; VJ image and DREAM, `apps/vj/src/gen.rs:968-973,1013-1030`. |
-| `image.edit` | `image-enhance.splash` | `edit` | `prompt:text`, `image:image` | `image:image` (PNG) | `strength=1.0`; choices 1.0, 0.85, 0.7, 0.55, 0.4, 0.25. `seed=0`, `model=""` in the prototype; current instruction edit pins `flux2-klein-4b`, and sprite enhancement pins `flux2-dev`. Additional references await typed named ports. | Asset UI instruction edit and sprite enhancement, `apps/asset-ui/src/pipeline.rs:501-508`; three-reference cap is `apps/asset-ui/src/store_views.rs:311-319`. |
-| `image.inpaint` | — (typed named ports gap) | `inpaint` | named `prompt:text`, `image:image`, `mask:image` | `image:image` (PNG) | Not in the recipe prelude: the closed language cannot type two differently named mandatory image ports. Intended defaults are `steps=50`, `guidance=30`, `seed=0`, `model=""`. | Asset UI inpaint/outpaint, `apps/asset-ui/src/pipeline.rs:532-539`; named-input construction at `apps/asset-ui/src/pipeline.rs:1722-1747`. |
-| `image.control` | — | `control` | `prompt:text`, `image:image` (executor alias: `control`) | `image:image` (PNG) | `steps=30`; guidance defaults by model (depth 10, Canny 30); `canny_low=50`, `canny_high=200` (wire bounds 0..2000); `seed=0`, `model=""`. Current presets pin `flux1-depth-dev` or `flux1-canny-dev`. | Asset UI depth- and edge-guided image chains, `apps/asset-ui/src/pipeline.rs:518-530`. |
+| `image.edit` | `image-enhance.splash` | `edit` | `prompt:text`, `image:image`, `reference_1:image?`, `reference_2:image?`, `reference_3:image?` | `image:image` (PNG) | `strength=1.0`; choices 1.0, 0.85, 0.7, 0.55, 0.4, 0.25. `seed=0`, `model=""` in the prototype; current instruction edit pins `flux2-klein-4b`, and sprite enhancement pins `flux2-dev`. Up to three optional typed reference-image ports, matching Asset UI's cap. | Asset UI instruction edit and sprite enhancement, `apps/asset-ui/src/pipeline.rs:501-508`; three-reference cap is `apps/asset-ui/src/store_views.rs:311-319`. |
+| `image.inpaint` | `inpaint.splash` | `inpaint` | `prompt:text`, `image:image`, `mask:image` | `image:image` (PNG) | Typed named ports: `image` and `mask` are both mandatory `image` ports, distinguished by declared type rather than name inference. Defaults are `steps=50`, `guidance=30`, `seed=0`, `model=""`. | Asset UI inpaint/outpaint, `apps/asset-ui/src/pipeline.rs:532-539`; named-input construction at `apps/asset-ui/src/pipeline.rs:1722-1747`. |
+| `image.control` | — | `control` | `prompt:text`, `control:image` | `image:image` (PNG) | `steps=30`; guidance defaults by model (depth 10, Canny 30); `canny_low=50`, `canny_high=200` (wire bounds 0..2000); `seed=0`, `model=""`. Current presets pin `flux1-depth-dev` or `flux1-canny-dev`. The port is named `control` directly, matching the hub wire field. | Asset UI depth- and edge-guided image chains, `apps/asset-ui/src/pipeline.rs:518-530`. |
 | `image.upscale` | `image-upscale.splash` | `upscale` | `image:image` | `image:image` (PNG) | RealESRGAN recipe is fixed 4× and pins `realesrgan-x4plus`; no factor field is sent by the current hub request. The base flow language nevertheless exposes `factor=2`; the template sets 4. | Asset UI image upscale, `apps/asset-ui/src/pipeline.rs:510-516`; request follows source dimensions at `apps/asset-ui/src/pipeline.rs:5371-5390`. |
 | `image.matte` | `matte.splash` | `matte` | `image:image` | `image:image` (RGBA PNG) | `model=""`; current character/cutout recipe pins `birefnet-hr`. No creator preset parameter. | Asset UI cutout and character chains, `apps/asset-ui/src/pipeline.rs:444-450,485,545-563`. |
 | `image.depth` | `depth.splash` | `depth` | `image:image` | `image:image` (16-bit metric-depth PNG) | `model=""`; current registry model is `da3-metric-large`. No creator preset parameter. | Asset UI depth-map and depth-control chains, `apps/asset-ui/src/pipeline.rs:522-525,540`. |
-| `video.generate` | `dream.splash`, `image-to-video.splash`, `text-to-video.splash` | `video` | `prompt:text`, `image:image?` (first frame) | `video:video` (MP4) | Creator default/first choices: 640×352, 39 frames, 30 steps; size choices 640×352, 864×480, 960×544; `(frames,steps)` choices (39,30), (65,30), (97,40), (129,50). `codec="h264"` in creator translation (`h265`/`hevc` also accepted), `audio=true`, `interpolate=1` with choices 1/2/4, `seed=0`, `model=""`. A second named `last_frame` image awaits typed named ports. | Asset UI video/i2v/loop chains, `apps/asset-ui/src/pipeline.rs:429-430,453-465,607-608`; VJ video/DREAM, `apps/vj/src/gen.rs:975-1008,1033-1050`. |
+| `video.generate` | `dream.splash`, `image-to-video.splash`, `text-to-video.splash` | `video` | `prompt:text`, `image:image?` (first frame), `last_frame:image?` (loop-closure keyframe) | `video:video` (MP4) | Creator default/first choices: 640×352, 39 frames, 30 steps; size choices 640×352, 864×480, 960×544; `(frames,steps)` choices (39,30), (65,30), (97,40), (129,50). `codec="h264"` in creator translation (`h265`/`hevc` also accepted), `audio=true`, `interpolate=1` with choices 1/2/4, `seed=0`, `model=""`. `last_frame` is a typed named port; DREAM sends its keyframe to both `image` and `last_frame`. | Asset UI video/i2v/loop chains, `apps/asset-ui/src/pipeline.rs:429-430,453-465,607-608`; VJ video/DREAM, `apps/vj/src/gen.rs:975-1008,1033-1050`. |
 | `video.enhance` | — (no tween template) | `enhance` | `video:video` | `video:video` (MP4) | `upscale=2`, `interpolate=2`, `flow_map=true`; upscale/interpolate choices are 1, 2, 4. `model=""` in the prototype; current recipes pin `video-enhance`. | Asset UI video post-process, `apps/asset-ui/src/pipeline.rs:491-500`; VJ deck-clip enhance sends the same defaults at `apps/vj/src/gen.rs:1538-1547`. |
 | `audio.generate` | `sfx.splash` | `audio` | `prompt:text` | `audio:audio` (WAV) | `seconds=4.0` (0.5..120), `steps=8` (wire 1..200), `seed=0`, `model=""`. No creator duration preset exists. | Asset UI audio/SFX and expand→SFX, `apps/asset-ui/src/pipeline.rs:428,481`; request default at `apps/asset-ui/src/pipeline.rs:1596-1599`. |
-| `music.generate` | `music.splash` | `music` | `prompt:text`, `audio:audio?` reference clip | `audio:audio` (WAV) | Creator `seconds=180`; choices 60, 120, 180, 240, 300 and accepted range 5..300. `strength=0.8` represents the default every-fifth-frame reference cadence (wire range 0..1), `seed=0`, `model=""`. The template folds lyrics into `prompt`; a separate lyrics field awaits typed named ports. Reference audio must be 2..60 s and ≤50 MB. | Asset UI music and expand→music, `apps/asset-ui/src/pipeline.rs:482-484,1600-1629`; VJ expand→music, `apps/vj/src/gen.rs:1063-1073`. |
+| `music.generate` | `music.splash` | `music` | `prompt:text`, `lyrics:text?`, `audio:audio?` reference clip | `audio:audio` (WAV) | Creator `seconds=180`; choices 60, 120, 180, 240, 300 and accepted range 5..300. `strength=0.8` represents the default every-fifth-frame reference cadence (wire range 0..1), `seed=0`, `model=""`. `lyrics` is a typed named text port, fed by its own `Input` in the template rather than folded into `prompt`. Reference audio must be 2..60 s and ≤50 MB. | Asset UI music and expand→music, `apps/asset-ui/src/pipeline.rs:482-484,1600-1629`; VJ expand→music, `apps/vj/src/gen.rs:1063-1073`. |
 | `speech.generate` | `speech.splash` | `speech` | `text:text`, `audio:audio?` reference voice | `audio:audio` (WAV) | `voice=""` (backend default; Kokoro's concrete default is `bm_daniel`), `speed=1.0` (0.25..4), `language=""`, `emotion=[]` or exactly eight values each 0..1.2, `seed=0`, `model=""`. | Asset UI speech, `apps/asset-ui/src/pipeline.rs:427,1585-1595`; its template uses `bm_daniel`, matching the current Kokoro default. |
 | `mesh.generate` | `image-to-mesh.splash` | `mesh` | `prompt:text`, `image:image` | `mesh:mesh` (GLB) | Creator chains send `remesh_resolution=512` (0 raw, otherwise 16..512), `texture=true` unless a paint stage follows, `decimation_target=12000` for objects/20000 for characters, and `texture_size=1024`; face choices Auto, 12000, 20000, 40000, 80000, 160000; texture choices 1024, 2048, 4096. `seed=0`, `model=""`. | Asset UI mesh/PBR/character chains, `apps/asset-ui/src/pipeline.rs:431-450,545-605`; request construction at `apps/asset-ui/src/pipeline.rs:1651-1673`. |
-| `mesh.paint` | `image-to-mesh.splash` | `paint` | `prompt:text`, `mesh:mesh`, `image:image` (executor alias: `reference_image`) | `mesh:mesh` (PBR GLB) | Creator `texture_size=1024`; choices 1024, 2048, 4096. `seed=0`, `model=""`; current chain pins `hunyuan3d-paint-2.1`. | Asset UI PBR chains, `apps/asset-ui/src/pipeline.rs:433-450,592-605`; wire inputs at `apps/asset-ui/src/pipeline.rs:1766-1784`. |
+| `mesh.paint` | `image-to-mesh.splash` | `paint` | `prompt:text`, `mesh:mesh`, `reference_image:image` | `mesh:mesh` (PBR GLB) | Creator `texture_size=1024`; choices 1024, 2048, 4096. `seed=0`, `model=""`; current chain pins `hunyuan3d-paint-2.1`. The port is named `reference_image` directly, matching the hub wire field. | Asset UI PBR chains, `apps/asset-ui/src/pipeline.rs:433-450,592-605`; wire inputs at `apps/asset-ui/src/pipeline.rs:1766-1784`. |
 | `mesh.rig` | `rig-and-motion.splash` | `rig` | `prompt:text` trace, `mesh:mesh` | `mesh:mesh` (rigged GLB) | `seed=0`, `model=""`; current quality recipe pins `skintokens`. No creator preset parameter. | Asset UI character and selected-mesh chains, `apps/asset-ui/src/pipeline.rs:545-590`; request at `apps/asset-ui/src/pipeline.rs:1679-1684`. |
 | `mesh.motion` | `rig-and-motion.splash` | `motion` | `prompt:text`, `mesh:mesh` (rigged) | `mesh:mesh` (animated GLB) | `motion_mode="playable"`; choices `playable` (fixed clip set) or `prompt` (one generated take). `seed=0`, `model=""`; current recipe pins `hy-motion`. | Asset UI character and selected-mesh chains, `apps/asset-ui/src/pipeline.rs:545-590`; override behavior at `apps/asset-ui/src/pipeline.rs:1685-1696`. |
 | `splat.generate` | `splat.splash` | `splat` | `prompt:text` trace, `image:image` | `mesh:mesh` (object PLY) | `steps=20` (1..200), `guidance=3`, `gaussians=262144` (32768..262144 step 32), `seed=0`, `model=""`; current recipes pin `triposplat`. | Asset UI object-splat chains, `apps/asset-ui/src/pipeline.rs:468-479`; model/request semantics at `apps/asset-ui/src/pipeline.rs:1571-1575`. |
@@ -59,10 +59,10 @@ Asset UI's shorter expand→image recipe is `apps/asset-ui/src/pipeline.rs:425`.
 ### `dream.splash`
 
 Stages: prompt → LLM expansion → image → video. `expand.text()` feeds both
-generation prompts; `image.image()` feeds the video's primary image. Parameters
-are 640×352, 39 frames/30 steps, and silent video. This covers VJ
-`dream_stages` except for its second named `last_frame` image, which the closed
-flow port vocabulary cannot type yet; that gap is recorded in GAPS.
+generation prompts; `image.image()` feeds both the video's primary `image`
+port and its typed `last_frame` port, closing the loop the way VJ's
+`dream_stages` does. Parameters are 640×352, 39 frames/30 steps, and silent
+video.
 
 ### `text-to-video.splash`
 
@@ -100,12 +100,18 @@ the actual model contract. Current recipe:
 
 Stages: prompt + image → TRELLIS mesh → Hunyuan paint → mesh output. Mesh
 gets the source image as its primary binary input. Paint gets two named
-inputs, `mesh` from the mesh stage and `image` from the original image. The
-executor maps that typed image port to the hub's `reference_image` wire field
-from `apps/asset-ui/src/pipeline.rs:1766-1784`.
+inputs, `mesh` from the mesh stage and `reference_image` from the original
+image, matching the hub's `reference_image` wire field directly
+(`apps/asset-ui/src/pipeline.rs:1766-1784`).
 The mesh is geometry-only (`texture=false`) at 512 remesh resolution and
 12000 faces; paint bakes a 1024 atlas. There is no separate UV-atlas job, so
 the template stops at paint (`apps/asset-ui/src/pipeline.rs:433-450`).
+
+### `inpaint.splash`
+
+Stages: prompt + image + mask inputs → `Inpaint` → image output. `image` and
+`mask` are both mandatory, distinctly typed `image` ports, matching
+`apps/asset-ui/src/pipeline.rs:532-539,1722-1747`.
 
 ### `annotate.splash`
 
@@ -120,11 +126,10 @@ approximation.
 
 ### `music.splash`
 
-Stages: prompt + lyrics inputs → pure prompt assembly → music → audio
-output. The `Fn` folds lyrics into the production prompt because the closed
-language cannot type a second named text port; parameters use the creator
-default of 180 seconds. The current direct and expanded chains live at
-`apps/asset-ui/src/pipeline.rs:482-484,1600-1629`.
+Stages: prompt + lyrics inputs → music → audio output. `lyrics` wires
+directly to `Music.lyrics`, a typed named text port distinct from `prompt`;
+parameters use the creator default of 180 seconds. The current direct and
+expanded chains live at `apps/asset-ui/src/pipeline.rs:482-484,1600-1629`.
 
 ### `speech.splash`
 

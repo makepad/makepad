@@ -20,7 +20,7 @@ let mesh = Mesh{
 let paint = Paint{
     prompt: prompt.text()
     mesh: mesh.out(@mesh)
-    image: image.image()
+    reference_image: image.image()
     texture_size: 1024
     model: "hunyuan3d-paint-2.1"
     at: vec2(680, 160)
