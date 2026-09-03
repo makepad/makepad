@@ -496,6 +496,10 @@ pub struct SyncView {
     pub grid: TrackGrid,
     pub position_secs: f64,
     pub rate: f64,
+    /// Where this deck is asked to sit against the lock, in beats. Read
+    /// off the FOLLOWER only -- a leader is the reference and has no
+    /// offset from itself.
+    pub offset_beats: f64,
 }
 
 /// The result of a tempo match: the follower's new rate, and where to put
@@ -622,6 +626,14 @@ pub fn sync_plan(
             follower.grid.secs_at_beat(units * 4.0 - follower.grid.downbeat_phase as f64)
         }
     };
+    // The follower's kept nudge shifts where "in phase" IS: a deck asked
+    // to sit a quarter beat ahead lands a quarter beat ahead, and the
+    // rounding is done about that point rather than about dead phase.
+    let offset = match quantize {
+        SyncQuantize::Beat => follower.offset_beats,
+        SyncQuantize::Bar => follower.offset_beats * 0.25,
+    };
+    let leader_phase = leader_phase + offset;
     let mut want_units = (follower_units - leader_phase).round() + leader_phase;
     let mut want_secs = to_secs(want_units);
     // The nearest in-phase landing can fall before the start of the file
@@ -752,7 +764,10 @@ pub fn external_follow(
     // faster than the external one, so divide before comparing.
     let external_beats = external.grid.beat_at(external.position_secs);
     let follower_beats = follower.grid.beat_at(follower.position_secs) / fold.max(1e-9);
-    let mut error = (external_beats - follower_beats).rem_euclid(1.0);
+    // Where the deck is ASKED to sit, not where dead phase is: a kept
+    // nudge is the target, and the error is measured against it.
+    let mut error =
+        (external_beats - follower_beats + follower.offset_beats).rem_euclid(1.0);
     if error > 0.5 {
         error -= 1.0;
     }
@@ -1121,6 +1136,13 @@ pub struct DeckState {
     pub rate_from_lock: bool,
     /// Operator pitch offset as a fraction (−0.08 = 8% slow).
     pub pitch: f64,
+    /// Where this deck is asked to sit against the lock, in beats: 0 is
+    /// dead phase, positive is ahead of it.
+    ///
+    /// A hand's nudge, kept. The servo used to pull a bent deck straight
+    /// back to dead phase the moment the button came up, which threw away
+    /// the one thing the gesture was for.
+    pub phase_offset_beats: f64,
     /// A HELD bend, on top of whatever the fader says, in the same units.
     /// Deliberately not part of `pitch`: moving the fader opts a follower
     /// out of the lock, and nudging a deck back into place must not cost it
@@ -1211,6 +1233,7 @@ impl Default for DeckState {
             rate: 1.0,
             platter_rate: 1.0,
             rate_from_lock: false,
+            phase_offset_beats: 0.0,
             bend: 0.0,
             pitch: 0.0,
             pitch_range: PitchRange::default(),
@@ -1429,6 +1452,7 @@ impl DeckState {
             grid,
             position_secs: self.position_secs,
             rate: self.rate,
+            offset_beats: self.phase_offset_beats,
         })
     }
 
@@ -1843,6 +1867,7 @@ impl DeckEngine {
         state.splat = None;
         state.position_secs = 0.0;
         state.synced = false;
+        state.phase_offset_beats = 0.0;
         state.auto_opt_out = false;
         state.stems_ready = false;
         state.scratching = false;
@@ -2991,6 +3016,7 @@ impl DeckEngine {
         state.splat = None;
         state.position_secs = 0.0;
         state.synced = false;
+        state.phase_offset_beats = 0.0;
         state.ext_sync = false;
         state.auto_opt_out = false;
         state.stems_ready = false;
@@ -3554,6 +3580,12 @@ impl DeckEngine {
                 cmds.push(DeckCmd::SetRate { deck: follower, rate: plan.rate });
             }
         }
+        // A press whose meaning is "put this deck in step" is also the
+        // press that gives up a kept nudge: nothing else clears it, and
+        // there has to be one gesture that does.
+        if verb.takes_phase() && !verb.latches() {
+            state.phase_offset_beats = 0.0;
+        }
         // The landing lead is worked out from the rate the deck is ACTUALLY
         // running at. With the tempo half skipped it is still the fader's,
         // and reading the plan's would put every landing wrong by the
@@ -3913,11 +3945,45 @@ impl DeckEngine {
         vec![DeckCmd::SetRate { deck, rate: self.bent(deck, base) }]
     }
 
-    /// Let it go: straight back to whatever the fader says.
+    /// Let it go: straight back to whatever the fader says, and the
+    /// phase the hand walked to is the phase the lock now holds.
+    ///
+    /// Without this the servo pulls the deck back to dead phase the
+    /// instant the button comes up, and the nudge -- the whole point of
+    /// the gesture -- lasts about a second.
     pub fn release_bend(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        if self.deck(deck).bend != 0.0 {
+            self.keep_nudge(deck);
+        }
         self.deck_mut(deck).bend = 0.0;
         let rate = self.deck(deck).rate;
         vec![DeckCmd::SetRate { deck, rate }]
+    }
+
+    /// Take where the deck is SITTING as where it is asked to sit.
+    ///
+    /// Measured through the servo's own error rather than re-derived, so
+    /// the number kept is exactly the number the servo would have spent
+    /// closing: the residual against the current target, folded into it.
+    fn keep_nudge(&mut self, deck: DeckId) {
+        let state = self.deck(deck);
+        if !state.synced || state.ext_sync {
+            return;
+        }
+        let Some(leader) = self.sync_leader().filter(|id| *id != deck) else { return };
+        let (Some(lead), Some(follow)) =
+            (self.deck(leader).sync_view(), self.deck(deck).sync_view())
+        else {
+            return;
+        };
+        let envelope = state.pitch_range.fraction();
+        let Some(follow) = external_follow(&lead, &follow, envelope) else { return };
+        // The servo reports how far SHORT of the target the deck is, so
+        // the new target is the old one less that much. Wrapped to half a
+        // beat either way, which is all the error can ever be.
+        let want = (state.phase_offset_beats - follow.error_beats).rem_euclid(1.0);
+        let want = if want > 0.5 { want - 1.0 } else { want };
+        self.deck_mut(deck).phase_offset_beats = want;
     }
 
     /// Trim the tempo permanently by a small step: `direction` is +1 to
@@ -5979,6 +6045,86 @@ mod tests {
         assert_eq!(state.effective_bpm(), Some(128.0));
     }
 
+    /// Two locked decks, both playing and in phase, A leading.
+    fn locked_pair() -> DeckEngine {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        load_analysed(&mut e, DeckId::B, 2, 120.0, 0.0);
+        e.play_pause(DeckId::A);
+        e.play_pause(DeckId::B);
+        e.observe(DeckId::A, 30.0, true);
+        e.observe(DeckId::B, 30.0, true);
+        e.apply_auto_sync();
+        assert_eq!(e.sync_master(), Some(DeckId::A));
+        e
+    }
+
+    /// A bend is how a hand says "sit a little ahead of the beat". Letting
+    /// go used to throw that away: the servo pulled the deck straight back
+    /// to dead phase. The offset is kept now.
+    #[test]
+    fn a_deliberate_nudge_becomes_the_phase_the_lock_holds() {
+        let mut e = locked_pair();
+        // The hand pushes the deck a sixth of a beat ahead and lets go.
+        e.hold_bend(DeckId::B, 1.0, false);
+        e.observe(DeckId::B, 30.0 + 1.0 / 12.0, true);
+        e.release_bend(DeckId::B);
+        let kept = e.deck(DeckId::B).phase_offset_beats;
+        assert!((kept - 1.0 / 6.0).abs() < 1e-6, "kept {kept}");
+
+        // And the servo now holds it THERE rather than pulling it back:
+        // pumped from that very position it asks for nothing.
+        let cmds = e.hold_deck_sync();
+        assert!(seek_of(&cmds, DeckId::B).is_none(), "{cmds:?}");
+        assert!(
+            rate_of(&cmds, DeckId::B).is_none_or(|rate| (rate - 1.0).abs() < 1e-3),
+            "{cmds:?}"
+        );
+    }
+
+    /// The offset is a property of how the operator wants the decks to
+    /// sit, so it survives a seek and the lock being let go and taken
+    /// again -- and it is what a landing lands on.
+    #[test]
+    fn a_kept_nudge_survives_a_seek_and_the_lock_being_toggled() {
+        let mut e = locked_pair();
+        e.deck_mut(DeckId::B).phase_offset_beats = 0.25;
+
+        // A seek re-locks, and lands a quarter beat ahead of dead phase.
+        e.seek_secs(DeckId::B, 60.13);
+        let landed = e.deck(DeckId::B).position_secs;
+        let phase_a = e.deck(DeckId::A).grid.unwrap().beat_at(30.0).fract();
+        let phase_b = e.deck(DeckId::B).grid.unwrap().beat_at(landed).fract();
+        let gap = (phase_b - phase_a).rem_euclid(1.0);
+        assert!((gap - 0.25).abs() < 1e-6, "landed at {gap} of a beat");
+
+        // Off and on again keeps it: the hand chose that offset, and only
+        // a press that means "put this deck in step" clears it.
+        e.toggle_sync(DeckId::B);
+        e.toggle_sync(DeckId::B);
+        assert!((e.deck(DeckId::B).phase_offset_beats - 0.25).abs() < 1e-9);
+    }
+
+    /// The gesture that clears it is the one whose whole meaning is "in
+    /// step, now".
+    #[test]
+    fn a_one_shot_match_puts_a_nudged_deck_back_in_step() {
+        let mut e = locked_pair();
+        e.deck_mut(DeckId::B).phase_offset_beats = 0.25;
+        e.sync_verb(DeckId::B, SyncVerb::Tempo);
+        assert!(
+            (e.deck(DeckId::B).phase_offset_beats - 0.25).abs() < 1e-9,
+            "the tempo half is not a phase press"
+        );
+        e.sync_verb(DeckId::B, SyncVerb::Match);
+        assert_eq!(e.deck(DeckId::B).phase_offset_beats, 0.0);
+
+        // And a record leaving the deck takes it with it.
+        e.deck_mut(DeckId::B).phase_offset_beats = 0.25;
+        e.eject(DeckId::B);
+        assert_eq!(e.deck(DeckId::B).phase_offset_beats, 0.0);
+    }
+
     #[test]
     fn each_deck_owns_its_own_snap_unit() {
         let mut e = DeckEngine::new();
@@ -6720,8 +6866,8 @@ mod tests {
 
     #[test]
     fn sync_matches_tempo_and_lands_the_follower_in_phase() {
-        let leader = SyncView { grid: grid(128.0, 0.1), position_secs: 10.0, rate: 1.0 };
-        let follower = SyncView { grid: grid(124.0, 0.05), position_secs: 30.0, rate: 1.0 };
+        let leader = SyncView { grid: grid(128.0, 0.1), position_secs: 10.0, rate: 1.0, offset_beats: 0.0 };
+        let follower = SyncView { grid: grid(124.0, 0.05), position_secs: 30.0, rate: 1.0, offset_beats: 0.0 };
         let plan = sync_plan(&leader, &follower, SyncQuantize::Beat).expect("plan");
 
         // Tempos match after the rate change.
@@ -6754,8 +6900,8 @@ mod tests {
     fn sync_uses_half_or_double_time_across_an_octave() {
         // A 150 BPM track under a 75 BPM one plays at its own speed: one
         // beat in two lines up, and nobody hears a chipmunk.
-        let leader = SyncView { grid: grid(150.0, 0.0), position_secs: 4.0, rate: 1.0 };
-        let follower = SyncView { grid: grid(75.0, 0.0), position_secs: 9.0, rate: 1.0 };
+        let leader = SyncView { grid: grid(150.0, 0.0), position_secs: 4.0, rate: 1.0, offset_beats: 0.0 };
+        let follower = SyncView { grid: grid(75.0, 0.0), position_secs: 9.0, rate: 1.0, offset_beats: 0.0 };
         let plan = sync_plan(&leader, &follower, SyncQuantize::Beat).expect("plan");
         assert!((plan.rate - 1.0).abs() < 1e-9, "rate {}", plan.rate);
 
@@ -6817,8 +6963,8 @@ mod tests {
 
     #[test]
     fn a_bar_sync_lands_on_a_downbeat() {
-        let leader = SyncView { grid: grid(120.0, 0.0), position_secs: 8.0, rate: 1.0 };
-        let follower = SyncView { grid: grid(120.0, 0.0), position_secs: 33.3, rate: 1.0 };
+        let leader = SyncView { grid: grid(120.0, 0.0), position_secs: 8.0, rate: 1.0, offset_beats: 0.0 };
+        let follower = SyncView { grid: grid(120.0, 0.0), position_secs: 33.3, rate: 1.0, offset_beats: 0.0 };
         let plan = sync_plan(&leader, &follower, SyncQuantize::Bar).expect("plan");
         let landed = plan.seek_secs.expect("a move");
         // The leader is exactly on a downbeat (8 s at 120 = beat 16 = bar 4),
@@ -6833,8 +6979,8 @@ mod tests {
 
     #[test]
     fn sync_needs_two_grids() {
-        let with = SyncView { grid: grid(120.0, 0.0), position_secs: 1.0, rate: 1.0 };
-        let without = SyncView { grid: TrackGrid::default(), position_secs: 1.0, rate: 1.0 };
+        let with = SyncView { grid: grid(120.0, 0.0), position_secs: 1.0, rate: 1.0, offset_beats: 0.0 };
+        let without = SyncView { grid: TrackGrid::default(), position_secs: 1.0, rate: 1.0, offset_beats: 0.0 };
         assert!(sync_plan(&with, &without, SyncQuantize::Beat).is_none());
         assert!(sync_plan(&without, &with, SyncQuantize::Beat).is_none());
     }
@@ -7792,14 +7938,14 @@ mod tests {
     /// The published clock as a leader: a grid with its origin at zero, so
     /// `position_secs` IS the beat position in seconds.
     fn external(bpm: f64, beats: f64) -> SyncView {
-        SyncView { grid: grid(bpm, 0.0), position_secs: beats * 60.0 / bpm, rate: 1.0 }
+        SyncView { grid: grid(bpm, 0.0), position_secs: beats * 60.0 / bpm, rate: 1.0, offset_beats: 0.0 }
     }
 
     #[test]
     fn ext_matches_the_rooms_tempo_and_trims_toward_its_phase() {
         // A 124 BPM track under a 128 BPM room, exactly in phase.
         let room = external(128.0, 8.0);
-        let deck = SyncView { grid: grid(124.0, 0.0), position_secs: 8.0 * 60.0 / 124.0, rate: 1.0 };
+        let deck = SyncView { grid: grid(124.0, 0.0), position_secs: 8.0 * 60.0 / 124.0, rate: 1.0, offset_beats: 0.0 };
         let follow = external_follow(&room, &deck, 0.08).expect("both have grids");
         assert!((follow.error_beats).abs() < 1e-9, "{follow:?}");
         assert!((follow.rate - 128.0 / 124.0).abs() < 1e-9, "{follow:?}");
@@ -7811,7 +7957,7 @@ mod tests {
     fn ext_speeds_up_when_the_deck_is_behind_and_never_by_much() {
         let room = external(128.0, 8.2);
         // The deck is a fifth of a beat behind the room.
-        let deck = SyncView { grid: grid(128.0, 0.0), position_secs: 8.0 * 60.0 / 128.0, rate: 1.0 };
+        let deck = SyncView { grid: grid(128.0, 0.0), position_secs: 8.0 * 60.0 / 128.0, rate: 1.0, offset_beats: 0.0 };
         let follow = external_follow(&room, &deck, 0.08).unwrap();
         assert!(follow.error_beats > 0.15, "{follow:?}");
         assert!(follow.rate > 1.0, "behind means catch up: {follow:?}");
@@ -7819,7 +7965,7 @@ mod tests {
         assert!(follow.reseek_secs.is_none(), "a fifth of a beat is trimmable");
 
         // Half a beat out is not drift — it was moved. Land it.
-        let deck = SyncView { grid: grid(128.0, 0.0), position_secs: 8.7 * 60.0 / 128.0, rate: 1.0 };
+        let deck = SyncView { grid: grid(128.0, 0.0), position_secs: 8.7 * 60.0 / 128.0, rate: 1.0, offset_beats: 0.0 };
         let follow = external_follow(&room, &deck, 0.08).unwrap();
         assert!(follow.reseek_secs.is_some(), "{follow:?}");
     }
@@ -7828,14 +7974,14 @@ mod tests {
     fn ext_folds_octaves_and_reports_walking_out_of_the_envelope() {
         // A 64 BPM track under a 128 BPM room plays at 1.0, one beat in two.
         let room = external(128.0, 4.0);
-        let deck = SyncView { grid: grid(64.0, 0.0), position_secs: 2.0 * 60.0 / 64.0, rate: 1.0 };
+        let deck = SyncView { grid: grid(64.0, 0.0), position_secs: 2.0 * 60.0 / 64.0, rate: 1.0, offset_beats: 0.0 };
         let follow = external_follow(&room, &deck, 0.08).unwrap();
         assert!((follow.rate - 1.0).abs() < 0.03, "{follow:?}");
         assert!(follow.within_envelope);
         // A room 12% faster than the track needs more stretch than ±8%: it
         // still follows, but the operator has to be told.
         let room = external(140.0, 0.0);
-        let deck = SyncView { grid: grid(125.0, 0.0), position_secs: 0.0, rate: 1.0 };
+        let deck = SyncView { grid: grid(125.0, 0.0), position_secs: 0.0, rate: 1.0, offset_beats: 0.0 };
         let follow = external_follow(&room, &deck, 0.08).unwrap();
         assert!(!follow.within_envelope, "{follow:?}");
         assert!(external_follow(&room, &deck, 0.16).unwrap().within_envelope, "±16% covers it");

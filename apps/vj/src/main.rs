@@ -11388,6 +11388,8 @@ p2 {}
             },
             position_secs: self.beat_clock.position_at(secs) * beat_secs,
             rate: 1.0,
+            // The room is the reference; it sits nowhere but where it is.
+            offset_beats: 0.0,
         })
     }
 
