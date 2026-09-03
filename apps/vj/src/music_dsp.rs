@@ -1566,11 +1566,11 @@ const ECHO_MASK: usize = ECHO_MAX_FRAMES - 1;
 /// block size.
 const ECHO_HANDOVER_FRAMES: u32 = 256;
 
-const ECHO_FEEDBACK_MAX: f32 = 0.95;
+pub(crate) const ECHO_FEEDBACK_MAX: f32 = 0.95;
 /// Below a 16-bit step: past here the tail is inaudible.
 const ECHO_QUIET: f32 = 1e-5;
 const ECHO_SEND: f32 = 0.5;
-const ECHO_FEEDBACK: f32 = 0.55;
+pub(crate) const ECHO_FEEDBACK: f32 = 0.55;
 
 /// One deck's beat-quantised echo: a stereo delay line whose tap follows
 /// the record's own tempo.

@@ -2442,6 +2442,30 @@ script_mod! {
                                     sfx_stop := ChromeButton{text: "stop pad"}
                                     sfx_stop_all := ChromeButton{text: "stop all"}
                                 }
+                                // Deck FX: the echo's feedback has no home
+                                // on the deck header (the FILTER row is
+                                // already three chips wide) and the
+                                // accordion is fixed at three panels, so it
+                                // lives here instead. A / B picks a deck;
+                                // MIX writes both at once.
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    PanelLabel{text: "deck fx"}
+                                    sfx_fx_a := PillButton{width: 32 text: "A"}
+                                    sfx_fx_b := PillButton{width: 32 text: "B"}
+                                    sfx_fx_mix := PillButton{width: 44 text: "MIX"}
+                                    sfx_fx_feedback := Slider{
+                                        width: 170
+                                        text: "echo feedback"
+                                        min: 0.0
+                                        max: 0.95
+                                        default: 0.55
+                                    }
+                                }
                             }
 
                             // ============ MESH ============
@@ -4128,6 +4152,17 @@ enum LowerTab {
     Grid,
     Lights,
     Archive,
+}
+
+/// Which deck the SFX page's echo-feedback slider edits. MIX writes
+/// the same value to both decks at once rather than reading a blend of
+/// them -- there is no third feedback state, only a broadcast mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum FxTarget {
+    A,
+    B,
+    #[default]
+    Mix,
 }
 
 impl LowerTab {
@@ -6212,6 +6247,9 @@ pub struct App {
     music_model: BrowseModel,
     #[rust(BrowseModel::new(AssetKind::Audio, "sfx"))]
     sfx_model: BrowseModel,
+    /// Which deck the SFX page's echo-feedback slider currently edits.
+    #[rust]
+    sfx_fx_target: FxTarget,
     #[rust(BrowseModel::dance())]
     mesh_model: BrowseModel,
     #[rust(CueEngine::new())]
@@ -13978,6 +14016,9 @@ p2 {}
                 DeckCmd::SetEchoPingpong { deck, on } => {
                     self.mixer.set_deck_echo_pingpong(deck, on)
                 }
+                DeckCmd::SetEchoFeedback { deck, feedback } => {
+                    self.mixer.set_deck_echo_feedback(deck, feedback)
+                }
                 DeckCmd::SetStemGain { deck, stem, gain } => {
                     self.mixer.set_deck_stem_gain(deck, stem, gain)
                 }
@@ -14104,6 +14145,27 @@ p2 {}
         }
         let pos = self.decks.crossfader as f64;
         self.ui.slider(cx, ids!(xfader)).set_value(cx, pos);
+    }
+
+    /// The deck the SFX page's echo-feedback slider currently reads and
+    /// writes for target `A`/`B`; MIX reads deck A as its anchor, since
+    /// there is nothing to blend -- moving the slider is what makes the
+    /// two agree.
+    fn sfx_fx_deck(&self) -> DeckId {
+        match self.sfx_fx_target {
+            FxTarget::A | FxTarget::Mix => DeckId::A,
+            FxTarget::B => DeckId::B,
+        }
+    }
+
+    /// Put the A/B/MIX chips and the feedback slider back in step with
+    /// `self.sfx_fx_target` and the deck(s) it points at.
+    fn sync_sfx_fx_ui(&mut self, cx: &mut Cx) {
+        self.paint_chip(cx, ids!(sfx_fx_a), self.sfx_fx_target == FxTarget::A, None);
+        self.paint_chip(cx, ids!(sfx_fx_b), self.sfx_fx_target == FxTarget::B, None);
+        self.paint_chip(cx, ids!(sfx_fx_mix), self.sfx_fx_target == FxTarget::Mix, None);
+        let feedback = self.decks.deck(self.sfx_fx_deck()).echo_feedback as f64;
+        self.ui.slider(cx, ids!(sfx_fx_feedback)).set_value(cx, feedback);
     }
 
     /// Push a deck's tone/stem knob positions back onto the surface, so the
@@ -27513,6 +27575,7 @@ impl MatchEvent for App {
         self.midi_output = cx.midi_output();
         self.start_lighting();
         self.sync_lighting_controls_ui(cx);
+        self.sync_sfx_fx_ui(cx);
         // LIVECODING: tap the app's own error reporting before anything can
         // load a document, so a shader that fails to compile reaches
         // whoever just saved the file. Installed whether or not THIS
@@ -28906,6 +28969,28 @@ impl MatchEvent for App {
                 let cmds = self.pads.stop_pad(key);
                 self.run_pad_cmds(cmds);
             }
+        }
+        for (chip, target) in [
+            (ids!(sfx_fx_a), FxTarget::A),
+            (ids!(sfx_fx_b), FxTarget::B),
+            (ids!(sfx_fx_mix), FxTarget::Mix),
+        ] {
+            if self.ui.button(cx, chip).clicked(actions) {
+                self.sfx_fx_target = target;
+                self.sync_sfx_fx_ui(cx);
+            }
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_feedback)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_echo_feedback(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_echo_feedback(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_echo_feedback(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_echo_feedback(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
         }
 
         // ---- IMPORT: one quiet button, one live mini-panel ----

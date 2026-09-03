@@ -1253,6 +1253,12 @@ pub struct DeckState {
     pub echo_rung: usize,
     /// Whether the echo's repeats land on the other channel.
     pub echo_pingpong: bool,
+    /// How much of an echo repeat feeds the next one, in
+    /// [`crate::music_dsp::ECHO_FEEDBACK_MAX`]'s range. Edited from the
+    /// SFX page rather than the deck header -- there is no room there
+    /// for a fourth knob -- so it is part of the channel strip like the
+    /// rung beside it: a swap carries it and a load leaves it.
+    pub echo_feedback: f32,
     /// Per-stem gains, in [`crate::music_dsp::StemKind`] order.
     pub stem_gain: [f32; STEM_COUNT],
     pub stem_kill: [bool; STEM_COUNT],
@@ -1320,6 +1326,7 @@ impl Default for DeckState {
             resonance: 0,
             echo_rung: 0,
             echo_pingpong: false,
+            echo_feedback: crate::music_dsp::ECHO_FEEDBACK,
             stem_gain: [1.0; STEM_COUNT],
             stem_kill: [false; STEM_COUNT],
             stem_solo: [false; STEM_COUNT],
@@ -1641,6 +1648,8 @@ pub enum DeckCmd {
     SetEcho { deck: DeckId, fraction: Option<(u32, u32)> },
     /// Whether the echo's repeats cross channels.
     SetEchoPingpong { deck: DeckId, on: bool },
+    /// How much of a repeat feeds the next one.
+    SetEchoFeedback { deck: DeckId, feedback: f32 },
     /// One stem lane's gain, 0 = muted.
     SetStemGain { deck: DeckId, stem: usize, gain: f32 },
     SplatSet { deck: DeckId, grid: Arc<SplatGrid> },
@@ -2082,6 +2091,7 @@ impl DeckEngine {
             DeckCmd::SetResonance { deck, lift: state.resonance_lift() },
             DeckCmd::SetEcho { deck, fraction: state.echo_fraction() },
             DeckCmd::SetEchoPingpong { deck, on: state.echo_pingpong },
+            DeckCmd::SetEchoFeedback { deck, feedback: state.echo_feedback },
         ];
         for band in 0..3 {
             cmds.push(DeckCmd::SetEqBand { deck, band, gain: state.eq_effective(band) });
@@ -4914,6 +4924,15 @@ impl DeckEngine {
         vec![DeckCmd::SetEchoPingpong { deck, on: state.echo_pingpong }]
     }
 
+    /// How much of a repeat feeds the next one. The same clamp the
+    /// mixer's own setter applies, so the stored state and the audible
+    /// one never disagree.
+    pub fn set_echo_feedback(&mut self, deck: DeckId, feedback: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.echo_feedback = feedback.clamp(0.0, crate::music_dsp::ECHO_FEEDBACK_MAX);
+        vec![DeckCmd::SetEchoFeedback { deck, feedback: state.echo_feedback }]
+    }
+
     /// Stem knob. Inert until the separated stems are loaded — the deck is
     /// playing the full mix and there is nothing to turn down.
     pub fn set_stem(&mut self, deck: DeckId, stem: usize, gain: f32) -> Vec<DeckCmd> {
@@ -5317,6 +5336,32 @@ mod tests {
         assert!(cmds.contains(&DeckCmd::SetLoopSpan { deck: DeckId::B, span: None , seek: LoopSeek::None }));
         assert!(cmds.contains(&DeckCmd::SetMute { deck: DeckId::B, muted: true }));
         assert!(cmds.contains(&DeckCmd::SetGain { deck: DeckId::B, gain: 0.5 }));
+    }
+
+    #[test]
+    fn echo_feedback_clamps_to_the_mixers_own_ceiling() {
+        let mut e = DeckEngine::new();
+        assert_eq!(
+            e.set_echo_feedback(DeckId::A, 5.0),
+            vec![DeckCmd::SetEchoFeedback {
+                deck: DeckId::A,
+                feedback: crate::music_dsp::ECHO_FEEDBACK_MAX,
+            }]
+        );
+        assert_eq!(
+            e.set_echo_feedback(DeckId::A, -1.0),
+            vec![DeckCmd::SetEchoFeedback { deck: DeckId::A, feedback: 0.0 }]
+        );
+        assert_eq!(e.deck(DeckId::A).echo_feedback, 0.0);
+    }
+
+    #[test]
+    fn a_load_carries_the_operators_echo_feedback() {
+        let mut e = DeckEngine::new();
+        e.set_echo_feedback(DeckId::B, 0.8);
+        let (d, g) = load_gen(&e.click(item(3), DeckTarget::B));
+        let cmds = e.track_ready(d, g, 20.0);
+        assert!(cmds.contains(&DeckCmd::SetEchoFeedback { deck: DeckId::B, feedback: 0.8 }));
     }
 
     // -----------------------------------------------------------------
