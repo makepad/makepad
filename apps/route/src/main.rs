@@ -37,6 +37,7 @@ mod layers;
 #[cfg(feature = "native")]
 mod local_agent;
 mod nav;
+mod overlays;
 #[cfg(any(feature = "demo", test))]
 mod nav_api;
 mod provisioner;
@@ -172,7 +173,6 @@ script_mod! {
                             mbtiles_path: "local/maps/world.mkmap"
                             detail_mbtiles_path: "local/maps/world.mkmap"
                             bridge_dz_mbtiles_path: "local/maps/nl-bridge-dz.mbtiles"
-                            overlay_mbtiles_paths: "local/maps/ocean-low.mbtiles;local/maps/ocean-high.mbtiles"
                             buildings_3d: true
                         }
 
@@ -1914,19 +1914,7 @@ impl App {
     /// Mirror LayerState into the popover checkboxes (agent tools and the
     /// UI share one state).
     fn sync_layer_checkboxes(&mut self, cx: &mut Cx) {
-        let overlay_ids = [
-            ids!(layer_chargers),
-            ids!(layer_transit),
-            ids!(layer_nature),
-            ids!(layer_districts),
-            ids!(layer_buildings),
-            ids!(layer_demographics),
-        ];
-        for (i, id) in overlay_ids.iter().enumerate() {
-            self.ui
-                .check_box(cx, *id)
-                .set_active(cx, self.layers.overlay_on[i], Animate::No);
-        }
+        overlays::sync_checkboxes(cx, &self.ui, &self.layers.overlays);
         self.ui
             .check_box(cx, ids!(layer_rain))
             .set_active(cx, self.layers.rain, Animate::No);
@@ -2035,7 +2023,11 @@ impl App {
         self.sync_layer_checkboxes(cx);
         self.apply_ui_theme(cx);
         let map = self.ui.map_view(cx, ids!(map));
-        map.set_overlay_paths(cx, &self.layers.overlay_paths());
+        map.set_overlays(
+            cx,
+            self.testmap
+                .overlay_sources(&self.layers.overlays, &self.layers.maps_root),
+        );
         map.set_theme(cx, self.layers.theme);
 
         let bbox = nav_data::radar_display_bbox();
@@ -2213,17 +2205,15 @@ impl MatchEvent for App {
                 .widget(cx, ids!(assistant_panel))
                 .set_visible(cx, self.assistant_panel_open);
         }
-        let layer_checks: [(&[LiveId], &str); 10] = [
+        if overlays::handle_checkboxes(cx, &self.ui, actions, &mut self.layers.overlays) {
+            self.layers.dirty = false;
+            self.apply_layers(cx);
+        }
+        let layer_checks: [(&[LiveId], &str); 4] = [
             (ids!(layer_rain), "rain"),
             (ids!(layer_wind), "wind"),
             (ids!(layer_terrain), "terrain"),
             (ids!(tilt_check), "tiltshift"),
-            (ids!(layer_chargers), "chargers"),
-            (ids!(layer_transit), "transit"),
-            (ids!(layer_nature), "nature"),
-            (ids!(layer_districts), "districts"),
-            (ids!(layer_buildings), "buildings_age"),
-            (ids!(layer_demographics), "demographics"),
         ];
         for (id, name) in layer_checks {
             if let Some(on) = self.ui.check_box(cx, id).changed(actions) {

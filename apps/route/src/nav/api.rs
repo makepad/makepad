@@ -7,6 +7,7 @@ use crate::{
     assistant::{AssistantController, AssistantService},
     clock,
     nav_api::{ApiOperation, NavApi, NavApiEvent, RadarManifest, RouteRequestContext},
+    overlays::{self, OverlaySelection},
     provisioner::MapProvisioner,
     side_panel::{PanelAction, PanelController},
     ChatEntry, ChatState, EntryKind, AMSTERDAM_CENTER,
@@ -105,7 +106,7 @@ impl NavService for NavApi {
 
 #[derive(Default)]
 struct DemoLayers {
-    overlays: [bool; 6],
+    overlays: OverlaySelection,
     rain: bool,
     wind: bool,
     terrain: bool,
@@ -206,13 +207,8 @@ impl App {
     }
 
     fn sync_layer_checkboxes(&self, cx: &mut Cx) {
+        overlays::sync_checkboxes(cx, &self.ui, &self.layers.overlays);
         for (id, on) in [
-            (ids!(layer_chargers), self.layers.overlays[0]),
-            (ids!(layer_transit), self.layers.overlays[1]),
-            (ids!(layer_nature), self.layers.overlays[2]),
-            (ids!(layer_districts), self.layers.overlays[3]),
-            (ids!(layer_buildings), self.layers.overlays[4]),
-            (ids!(layer_demographics), self.layers.overlays[5]),
             (ids!(layer_rain), self.layers.rain),
             (ids!(layer_wind), self.layers.wind),
             (ids!(layer_terrain), self.layers.terrain),
@@ -287,7 +283,9 @@ impl App {
     fn apply_layers(&mut self, cx: &mut Cx) {
         self.sync_layer_checkboxes(cx);
         self.apply_ui_theme(cx);
-        self.ui.map_view(cx, ids!(map)).set_theme(cx, self.layers.theme);
+        let map = self.ui.map_view(cx, ids!(map));
+        map.set_overlays(cx, self.provisioner.overlay_sources(&self.layers.overlays));
+        map.set_theme(cx, self.layers.theme);
     }
 
     fn set_rain(&mut self, cx: &mut Cx, on: bool) {
@@ -458,14 +456,8 @@ impl MatchEvent for App {
             self.assistant_panel_open = !self.assistant_panel_open;
             self.ui.widget(cx, ids!(assistant_panel)).set_visible(cx, self.assistant_panel_open);
         }
-        let overlay_ids = [
-            ids!(layer_chargers), ids!(layer_transit), ids!(layer_nature),
-            ids!(layer_districts), ids!(layer_buildings), ids!(layer_demographics),
-        ];
-        for (index, id) in overlay_ids.into_iter().enumerate() {
-            if let Some(on) = self.ui.check_box(cx, id).changed(actions) {
-                self.layers.overlays[index] = on;
-            }
+        if overlays::handle_checkboxes(cx, &self.ui, actions, &mut self.layers.overlays) {
+            self.apply_layers(cx);
         }
         if let Some(on) = self.ui.check_box(cx, ids!(layer_rain)).changed(actions) {
             self.set_rain(cx, on);
