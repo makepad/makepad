@@ -179,8 +179,8 @@ use crate::arc::Curve;
 use crate::set_history::SetHistory;
 use crate::blend::MixBrain;
 use crate::decks::{
-    DeckCmd, DeckEngine, DeckId, DeckLoad, DeckTarget, EjectPress, LoadReset, LoopSeek, OverPlaying, ScratchMotion, SpinMotion, SyncMode,
-    SyncView, TrackItem, TrackSideChannels,
+    DeckCmd, DeckEngine, DeckId, DeckLoad, DeckTarget, EjectPress, LoadReset, OverPlaying, ScratchMotion, SpinMotion, SyncMode,
+    SyncVerb, SyncView, TrackItem, TrackSideChannels,
 };
 use crate::console_scale::TabStage;
 use crate::deck_sections::{DeckSection, DeckSections, Fold};
@@ -25040,8 +25040,35 @@ p2 {}
                 // SYNC is a plain toggle: lock to the group's master (or
                 // claim master with nothing to follow), press again to let
                 // go. Alt+click toggles EXT — follow the room's clock.
+                //
+                // A lock is two things at once, the tempo and the phase,
+                // and the modifiers hand them over one at a time: control
+                // takes the tempo, shift takes the phase, both take both.
+                // All three are ONE-SHOTS — they match the decks and hand
+                // the deck straight back, so the button does not light and
+                // the servo does not follow.
+                let verb = match (km.control, km.shift) {
+                    (true, true) => Some(SyncVerb::Match),
+                    (true, false) => Some(SyncVerb::Tempo),
+                    (false, true) => Some(SyncVerb::Phase),
+                    (false, false) => None,
+                };
                 let cmds = if km.alt {
                     self.decks.toggle_ext_sync(deck)
+                } else if let Some(verb) = verb {
+                    let cmds = self.decks.sync_verb(deck, verb);
+                    // A one-shot leaves no lamp behind, so a press that
+                    // found no leader is indistinguishable from a press
+                    // that missed the button. Both are said out loud.
+                    let name = if deck == DeckId::A { "A" } else { "B" };
+                    let said = match (verb, cmds.is_empty()) {
+                        (_, true) => format!("deck {name}: nothing to match against"),
+                        (SyncVerb::Tempo, _) => format!("deck {name} took the tempo"),
+                        (SyncVerb::Phase, _) => format!("deck {name} took the phase"),
+                        _ => format!("deck {name} matched, once"),
+                    };
+                    self.set_music_import_status(cx, &said);
+                    cmds
                 } else {
                     self.decks.toggle_sync(deck)
                 };

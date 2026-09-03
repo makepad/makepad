@@ -439,6 +439,37 @@ pub enum ScratchMotion {
     Release,
 }
 
+/// What a press of SYNC is asking for.
+///
+/// All four have always been in the arithmetic -- a plan carries a rate
+/// and a landing, separately -- and the button could only ever ask for
+/// both of them, latched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyncVerb {
+    /// Both halves, once, and then let go: the decks are matched and the
+    /// deck is the operator's again.
+    Match,
+    /// Both halves, and keep correcting. What the button has always done.
+    Lock,
+    /// The tempo only. The phase is the operator's to place.
+    Tempo,
+    /// The phase only. The tempo is whatever the fader says.
+    Phase,
+}
+
+impl SyncVerb {
+    pub fn takes_tempo(self) -> bool {
+        matches!(self, SyncVerb::Match | SyncVerb::Lock | SyncVerb::Tempo)
+    }
+    pub fn takes_phase(self) -> bool {
+        matches!(self, SyncVerb::Match | SyncVerb::Lock | SyncVerb::Phase)
+    }
+    /// Whether the correction goes on after the press.
+    pub fn latches(self) -> bool {
+        matches!(self, SyncVerb::Lock)
+    }
+}
+
 /// How tightly a sync lands the follower.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SyncQuantize {
@@ -3135,7 +3166,23 @@ impl DeckEngine {
     }
 
     fn sync_to(&mut self, leader: DeckId, follower: DeckId) -> Vec<DeckCmd> {
-        self.sync_to_with(leader, follower, None)
+        self.sync_to_with(leader, follower, None, SyncVerb::Lock)
+    }
+
+    /// SYNC asking for one of its four meanings rather than the latch.
+    ///
+    /// `Lock` is what the button has always done and is what `sync` is;
+    /// the other three are one-shots -- they match the decks once and hand
+    /// the follower back, which is why a deck that was not already latched
+    /// opts out of auto sync when it takes one.
+    pub fn sync_verb(&mut self, follower: DeckId, verb: SyncVerb) -> Vec<DeckCmd> {
+        let Some(leader) = self.sync_leader().filter(|id| *id != follower) else {
+            return Vec::new();
+        };
+        if verb.latches() {
+            self.deck_mut(follower).auto_opt_out = false;
+        }
+        self.sync_to_with(leader, follower, None, verb)
     }
 
     fn sync_to_with(
@@ -3143,6 +3190,7 @@ impl DeckEngine {
         leader: DeckId,
         follower: DeckId,
         quantize: Option<SyncQuantize>,
+        verb: SyncVerb,
     ) -> Vec<DeckCmd> {
         let (Some(lead), Some(follow)) = (
             self.deck(leader).sync_view(),
@@ -3164,8 +3212,9 @@ impl DeckEngine {
         };
         // The first successful lock PINS the master: from here the group has
         // one fixed reference, and the crossfader stops re-deciding who
-        // corrects whom at every event.
-        if self.sync_master_valid().is_none() {
+        // corrects whom at every event. A one-shot pins nothing and joins
+        // nothing -- it matches the decks and hands the follower back.
+        if verb.latches() && self.sync_master_valid().is_none() {
             self.sync_master = Some(leader);
         }
         // A paused leader is a frozen phase: match the tempo so the decks
@@ -3176,17 +3225,36 @@ impl DeckEngine {
         let lookahead = self.land_lookahead_secs;
         let mut cmds = Vec::new();
         let state = self.deck_mut(follower);
-        state.synced = true;
-        // Outside the guard on purpose: a lock that works out the rate the
-        // deck already has still means that rate describes a PAIR of
-        // tracks, and marking it only when it moved would miss exactly the
-        // case where the two tracks already agreed.
-        state.rate_from_lock = true;
-        if (state.rate - plan.rate).abs() > 1e-9 {
-            state.rate = plan.rate;
-            // Show the operator the rate the sync chose on the pitch slider.
-            state.pitch = (plan.rate - 1.0).clamp(-0.5, 0.5);
-            cmds.push(DeckCmd::SetRate { deck: follower, rate: plan.rate });
+        if verb.latches() {
+            state.synced = true;
+        } else if !state.synced {
+            // Without this the one-shot is a fiction: auto sync re-locks
+            // any deck that has not opted out, so the very next pump would
+            // turn a tap into the latch. A tap on a deck that IS latched
+            // leaves both flags alone -- that is a re-land, not a release,
+            // and only the hold toggles the latch.
+            state.auto_opt_out = true;
+        }
+        if verb.takes_tempo() {
+            // Outside the guard on purpose: a lock that works out the rate
+            // the deck already has still means that rate describes a PAIR
+            // of tracks, and marking it only when it moved would miss
+            // exactly the case where the two tracks already agreed.
+            state.rate_from_lock = true;
+            if (state.rate - plan.rate).abs() > 1e-9 {
+                state.rate = plan.rate;
+                // Show the operator the rate the sync chose on the slider.
+                state.pitch = (plan.rate - 1.0).clamp(-0.5, 0.5);
+                cmds.push(DeckCmd::SetRate { deck: follower, rate: plan.rate });
+            }
+        }
+        // The landing lead is worked out from the rate the deck is ACTUALLY
+        // running at. With the tempo half skipped it is still the fader's,
+        // and reading the plan's would put every landing wrong by the
+        // difference times the lookahead.
+        let landing_rate = state.rate;
+        if !verb.takes_phase() {
+            return cmds;
         }
         // A hand on the record owns the playhead; the phase lock waits.
         if !state.scratching && leader_playing && state.playing {
@@ -3195,7 +3263,7 @@ impl DeckEngine {
                 // decks keep moving while the command crosses to the audio
                 // thread, so an uncompensated landing is late by exactly
                 // that much, every time.
-                let secs = secs + plan.rate * lookahead;
+                let secs = secs + landing_rate * lookahead;
                 state.position_secs = secs;
                 cmds.push(DeckCmd::SeekSeconds { deck: follower, secs });
             }
@@ -3238,7 +3306,7 @@ impl DeckEngine {
         if state.sync_view().is_none() {
             return Vec::new();
         }
-        self.sync_to_with(leader, follower, quantize)
+        self.sync_to_with(leader, follower, quantize, SyncVerb::Lock)
     }
 
     // ---- external sync (the room is the leader) -----------------------------
@@ -6893,6 +6961,118 @@ mod tests {
             (landed - (bare + rate * 0.02)).abs() < 1e-9,
             "landed {landed}, uncompensated {bare}, rate {rate}"
         );
+    }
+
+    /// A verb that does not latch matches the decks and hands the deck
+    /// back: no pin, no lock, and the deck opts out of auto sync so the
+    /// next pump cannot turn the tap into the latch it refused.
+    #[test]
+    fn a_one_shot_sync_matches_the_decks_and_lets_go() {
+        let mut engine = DeckEngine::new();
+        engine.set_auto_sync(false);
+        load_analysed(&mut engine, DeckId::A, 1, 128.0, 0.0);
+        load_analysed(&mut engine, DeckId::B, 2, 100.0, 0.0);
+        engine.play_pause(DeckId::A);
+        engine.play_pause(DeckId::B);
+        engine.observe(DeckId::A, 12.0, true);
+        engine.observe(DeckId::B, 7.0, true);
+
+        let before = engine.deck(DeckId::B).position_secs;
+        engine.sync_verb(DeckId::B, SyncVerb::Match);
+        assert!((engine.deck(DeckId::B).rate - 1.28).abs() < 1e-9, "tempo taken");
+        assert!(engine.deck(DeckId::B).position_secs != before, "phase taken");
+        assert!(!engine.deck(DeckId::B).synced, "and then let go");
+        assert!(engine.deck(DeckId::B).auto_opt_out, "so auto sync cannot re-latch it");
+        assert_eq!(engine.sync_master(), None, "a one-shot pins nothing");
+    }
+
+    /// The tempo half alone: the rate is the leader's, the playhead is
+    /// exactly where the operator left it.
+    #[test]
+    fn a_tempo_only_sync_moves_no_music() {
+        let mut engine = DeckEngine::new();
+        engine.set_auto_sync(false);
+        load_analysed(&mut engine, DeckId::A, 1, 128.0, 0.0);
+        load_analysed(&mut engine, DeckId::B, 2, 100.0, 0.0);
+        engine.play_pause(DeckId::A);
+        engine.play_pause(DeckId::B);
+        engine.observe(DeckId::A, 12.0, true);
+        engine.observe(DeckId::B, 7.0, true);
+
+        let before = engine.deck(DeckId::B).position_secs;
+        let cmds = engine.sync_verb(DeckId::B, SyncVerb::Tempo);
+        assert!((engine.deck(DeckId::B).rate - 1.28).abs() < 1e-9);
+        assert_eq!(engine.deck(DeckId::B).position_secs, before, "no seek");
+        assert!(
+            !cmds.iter().any(|c| matches!(c, DeckCmd::SeekSeconds { .. })),
+            "and none asked for"
+        );
+    }
+
+    /// The phase half alone: the deck lands on the leader's grid at
+    /// whatever tempo the fader is holding.
+    #[test]
+    fn a_phase_only_sync_changes_no_tempo() {
+        let mut engine = DeckEngine::new();
+        engine.set_auto_sync(false);
+        load_analysed(&mut engine, DeckId::A, 1, 128.0, 0.0);
+        load_analysed(&mut engine, DeckId::B, 2, 100.0, 0.0);
+        engine.play_pause(DeckId::A);
+        engine.play_pause(DeckId::B);
+        engine.observe(DeckId::A, 12.0, true);
+        engine.observe(DeckId::B, 7.0, true);
+
+        let before = engine.deck(DeckId::B).position_secs;
+        let cmds = engine.sync_verb(DeckId::B, SyncVerb::Phase);
+        assert_eq!(engine.deck(DeckId::B).rate, 1.0, "the fader still owns the tempo");
+        assert!(engine.deck(DeckId::B).position_secs != before, "phase taken");
+        assert!(!cmds.iter().any(|c| matches!(c, DeckCmd::SetRate { .. })));
+    }
+
+    /// A phase-only landing leads by the DECK'S rate, not the rate the
+    /// plan worked out: with the tempo half skipped the deck is still
+    /// running at whatever the fader says, and reading the plan's rate puts
+    /// every landing wrong by the difference times the lookahead.
+    #[test]
+    fn a_phase_only_landing_leads_by_the_deck_s_own_rate() {
+        let landed = |lookahead: f64| {
+            let mut engine = DeckEngine::new();
+            engine.set_auto_sync(false);
+            engine.land_lookahead_secs = lookahead;
+            load_analysed(&mut engine, DeckId::A, 1, 128.0, 0.1);
+            load_analysed(&mut engine, DeckId::B, 2, 100.0, 0.05);
+            engine.play_pause(DeckId::A);
+            engine.play_pause(DeckId::B);
+            engine.observe(DeckId::A, 30.0, true);
+            engine.observe(DeckId::B, 20.0, true);
+            engine.sync_verb(DeckId::B, SyncVerb::Phase);
+            engine.deck(DeckId::B).position_secs
+        };
+        let bare = landed(0.0);
+        let led = landed(0.02);
+        // 1.0 is the deck's own rate; the plan's would be 1.28, which would
+        // overshoot by 5.6 ms.
+        assert!((led - (bare + 1.0 * 0.02)).abs() < 1e-9, "bare {bare}, led {led}");
+    }
+
+    /// A one-shot on a deck that IS latched is a re-land, not a release:
+    /// only the hold toggles the lock.
+    #[test]
+    fn a_one_shot_on_a_latched_deck_leaves_the_lock_alone() {
+        let mut engine = DeckEngine::new();
+        engine.set_auto_sync(false);
+        load_analysed(&mut engine, DeckId::A, 1, 128.0, 0.0);
+        load_analysed(&mut engine, DeckId::B, 2, 100.0, 0.0);
+        engine.play_pause(DeckId::A);
+        engine.play_pause(DeckId::B);
+        engine.observe(DeckId::A, 12.0, true);
+        engine.observe(DeckId::B, 7.0, true);
+        engine.toggle_sync(DeckId::B);
+        assert!(engine.deck(DeckId::B).synced);
+
+        engine.sync_verb(DeckId::B, SyncVerb::Match);
+        assert!(engine.deck(DeckId::B).synced, "still locked");
+        assert!(!engine.deck(DeckId::B).auto_opt_out, "and not opted out");
     }
 
     /// The press ladder with both decks lit: the follower's press locks it,
