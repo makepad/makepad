@@ -161,6 +161,17 @@ fn shoulder(x: f32, from: f32, to: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// Below this a record has stopped being in the room, for the purpose of
+/// deciding which deck the group follows. A policy number, about -40 dB:
+/// a record still on its way down a fader is audible; one muted, faded
+/// off, or crossed all the way out is not.
+///
+/// Compared with a bare `>` and never against an absolute value: the
+/// equal-power curve at the far end gives cos(PI/2), which in f32 is a
+/// tiny NEGATIVE number, and an abs() test would call that silent for the
+/// wrong reason.
+pub const AUDIBLE_FLOOR: f32 = 0.01;
+
 /// Per-deck gains for a crossfader position in [0,1] (0 = full A, 1 = full B).
 pub fn crossfader_gains(pos: f32, curve: FadeCurve) -> (f32, f32) {
     let x = pos.clamp(0.0, 1.0);
@@ -3178,7 +3189,7 @@ impl DeckEngine {
     /// however the crossfader moves. Only with no master does the audible
     /// heuristic elect one.
     pub fn sync_leader(&self) -> Option<DeckId> {
-        self.sync_master_valid().or_else(|| self.heuristic_leader())
+        self.sync_master_valid().or_else(|| self.elect_leader())
     }
 
     /// The pinned master, only while it can actually lead (loaded, with a
@@ -3197,19 +3208,70 @@ impl DeckEngine {
         self.sync_master_valid()
     }
 
-    /// Whichever deck is audibly leading: a playing deck beats a stopped
-    /// one; when both play, the side the crossfader favours.
-    fn heuristic_leader(&self) -> Option<DeckId> {
-        let a = self.deck(DeckId::A);
-        let b = self.deck(DeckId::B);
+    /// The level this deck's channel strip is set to, as the room would
+    /// hear it: the fader the operator set, the level-match trim when
+    /// NORMALISE is asking for one, the mute, and the crossfader's side.
+    ///
+    /// The same product the render forms per block, read off the intent
+    /// the engine already holds rather than measured. Scoped deliberately
+    /// to the channel STRIP: the transport is ranked separately (folding
+    /// it in would make a paused deck with its fader up indistinguishable
+    /// from a muted one), and the tone chain, the sweep filter and the
+    /// per-stem gains are not counted -- a deck with every stem killed is
+    /// inaudible and this still reports its fader, which is the honest
+    /// answer to the question actually being asked.
+    pub fn deck_strip_gain(&self, deck: DeckId) -> f32 {
+        let state = self.deck(deck);
+        if !state.is_loaded() || state.muted {
+            return 0.0;
+        }
+        let (side_a, side_b) = crossfader_gains(self.crossfader, self.curve);
+        let side = match deck {
+            DeckId::A => side_a,
+            DeckId::B => side_b,
+        };
+        state.effective_gain(self.normalise) * side
+    }
+
+    /// Whether the room is hearing this deck at all.
+    pub fn deck_audible(&self, deck: DeckId) -> bool {
+        self.deck(deck).playing && self.deck_strip_gain(deck) > AUDIBLE_FLOOR
+    }
+
+    /// Whichever deck is audibly leading, with no pin standing.
+    ///
+    /// Ranked: exactly one deck the room can hear leads; with both audible
+    /// the louder side leads, and dead centre the deck that has been
+    /// playing keeps the grid; with neither audible a playing deck still
+    /// beats a stopped one, because a record running quietly is a better
+    /// reference than one that is not running at all.
+    ///
+    /// There is no rung for a stopped deck: with nothing running there is
+    /// nothing to follow, and naming a leader anyway would let a press or
+    /// a load place a parked record nobody asked to move.
+    ///
+    /// The HYSTERESIS is not here -- it is the pin, which `sync_leader`
+    /// consults first and which this is only reached in the absence of.
+    fn elect_leader(&self) -> Option<DeckId> {
         let ready = |state: &DeckState| state.is_loaded() && state.sync_view().is_some();
-        match (ready(a) && a.playing, ready(b) && b.playing) {
+        let running = |id: DeckId| ready(self.deck(id)) && self.deck(id).playing;
+        match (
+            running(DeckId::A) && self.deck_audible(DeckId::A),
+            running(DeckId::B) && self.deck_audible(DeckId::B),
+        ) {
             (true, false) => return Some(DeckId::A),
             (false, true) => return Some(DeckId::B),
-            (false, false) => return None,
+            // Neither is in the room: a playing record still beats a
+            // parked one, and two parked records elect nobody.
+            (false, false) => {
+                return [DeckId::A, DeckId::B].into_iter().find(|id| running(*id))
+            }
             (true, true) => {}
         }
-        let (gain_a, gain_b) = crossfader_gains(self.crossfader, self.curve);
+        let (gain_a, gain_b) = (
+            self.deck_strip_gain(DeckId::A),
+            self.deck_strip_gain(DeckId::B),
+        );
         if gain_a - gain_b > 1e-5 {
             Some(DeckId::A)
         } else if gain_b - gain_a > 1e-5 {
@@ -3220,11 +3282,15 @@ impl DeckEngine {
         }
     }
 
-    /// Keep the pin honest: drop a master that can no longer lead, and hand
-    /// the pin to a playing group member when the master has stopped — a
-    /// paused playhead is a frozen phase, and a servo chasing it would drag
-    /// a live deck backwards. Called once per pump and from the events that
-    /// change who could lead.
+    /// Keep the pin honest: drop a master that can no longer lead, hand the
+    /// pin to a playing group member when the master has stopped — a paused
+    /// playhead is a frozen phase, and a servo chasing it would drag a live
+    /// deck backwards — and hand it on again when the room stops hearing
+    /// the master at all.
+    ///
+    /// Called once per pump, and that is the right cadence rather than a
+    /// shortcoming: a fade is a continuous condition with no event to hang
+    /// a handover on, so the answer is taken at the servo's own rate.
     fn refresh_sync_master(&mut self) {
         let Some(master) = self.sync_master else { return };
         let valid = {
@@ -3243,6 +3309,22 @@ impl DeckEngine {
         }
         if !self.deck(master).playing {
             if let Some(next) = successor(self).filter(|id| self.deck(*id).playing) {
+                self.sync_master = Some(next);
+            }
+            // Returning matters: `successor` closed over the master this
+            // call started with, and below it would be reasoning about the
+            // deck that has just given the pin up.
+            return;
+        }
+        // A master the room cannot hear has stopped leading, whatever it is
+        // doing: the pin goes to the group member that IS audible. Nothing
+        // audible moves nothing — a silent group keeps the reference it
+        // had, because there is nowhere better to put it. Deliberately not
+        // symmetric with a stopped master: this one is a continuous
+        // condition, so between the two ends of a fade both records are up,
+        // both are audible, and the standing pin keeps its direction.
+        if !self.deck_audible(master) {
+            if let Some(next) = successor(self).filter(|id| self.deck_audible(*id)) {
                 self.sync_master = Some(next);
             }
         }
@@ -5532,6 +5614,126 @@ mod tests {
         assert!((e.deck(DeckId::A).cue_secs - 30.19).abs() < 1e-9, "exact");
         // And the placement is remembered, so the analysis cannot overwrite it.
         assert!(e.deck(DeckId::A).cue_placed);
+    }
+
+    /// The level factor the channel strip forms, off the intent the engine
+    /// already holds -- and nothing else: the transport is ranked
+    /// separately, and the tone chain is somebody else's answer.
+    #[test]
+    fn the_strip_gain_is_the_level_the_channel_is_set_to() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        load_analysed(&mut e, DeckId::B, 2, 120.0, 0.0);
+        e.set_crossfader(0.0); // hard over to A
+        assert!((e.deck_strip_gain(DeckId::A) - 1.0).abs() < 1e-4);
+        assert!(e.deck_strip_gain(DeckId::B) <= AUDIBLE_FLOOR, "B is out");
+
+        e.set_crossfader(0.5);
+        for deck in [DeckId::A, DeckId::B] {
+            let at = e.deck_strip_gain(deck);
+            assert!((at - 0.7071).abs() < 1e-3, "{deck:?} at {at}");
+        }
+
+        // The channel fader multiplies in.
+        e.set_gain(DeckId::A, 0.5);
+        assert!((e.deck_strip_gain(DeckId::A) - 0.3536).abs() < 1e-3);
+
+        // Mute is silence whatever the faders say.
+        e.toggle_mute(DeckId::A);
+        assert_eq!(e.deck_strip_gain(DeckId::A), 0.0);
+        e.toggle_mute(DeckId::A);
+
+        // And an empty deck is silent by definition.
+        assert_eq!(DeckEngine::new().deck_strip_gain(DeckId::A), 0.0);
+    }
+
+    /// A record the room cannot hear has stopped leading, whatever it is
+    /// doing. Fading it out by hand hands the group over on its own.
+    #[test]
+    fn a_faded_out_master_hands_the_pin_to_the_deck_the_room_can_hear() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        load_analysed(&mut e, DeckId::B, 2, 120.0, 0.0);
+        e.play_pause(DeckId::A);
+        e.play_pause(DeckId::B);
+        e.observe(DeckId::A, 10.0, true);
+        e.observe(DeckId::B, 10.0, true);
+        e.apply_auto_sync();
+        assert_eq!(e.sync_master(), Some(DeckId::A));
+
+        // Halfway across, both records are up: the pin does not move.
+        e.set_crossfader(0.5);
+        e.hold_deck_sync();
+        assert_eq!(e.sync_master(), Some(DeckId::A), "the pin is the hysteresis");
+
+        // All the way: A is out of the room, so it stops leading it.
+        e.set_crossfader(1.0);
+        e.hold_deck_sync();
+        assert_eq!(e.sync_master(), Some(DeckId::B));
+    }
+
+    /// The same law, reached by the other control.
+    #[test]
+    fn a_muted_master_stops_leading_too() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        load_analysed(&mut e, DeckId::B, 2, 120.0, 0.0);
+        e.play_pause(DeckId::A);
+        e.play_pause(DeckId::B);
+        e.observe(DeckId::A, 10.0, true);
+        e.observe(DeckId::B, 10.0, true);
+        e.set_crossfader(0.5);
+        e.apply_auto_sync();
+        assert_eq!(e.sync_master(), Some(DeckId::A));
+
+        e.toggle_mute(DeckId::A);
+        e.hold_deck_sync();
+        assert_eq!(e.sync_master(), Some(DeckId::B), "a muted deck leads nothing");
+    }
+
+    /// Nothing audible moves nothing: a silent group keeps the reference it
+    /// had, rather than handing the pin round a room hearing neither deck.
+    #[test]
+    fn a_silent_group_keeps_the_reference_it_had() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        load_analysed(&mut e, DeckId::B, 2, 120.0, 0.0);
+        e.play_pause(DeckId::A);
+        e.play_pause(DeckId::B);
+        e.observe(DeckId::A, 10.0, true);
+        e.observe(DeckId::B, 10.0, true);
+        e.apply_auto_sync();
+        assert_eq!(e.sync_master(), Some(DeckId::A));
+
+        e.toggle_mute(DeckId::A);
+        e.toggle_mute(DeckId::B);
+        e.hold_deck_sync();
+        assert_eq!(e.sync_master(), Some(DeckId::A), "nowhere better to put it");
+    }
+
+    /// With no pin standing, the unpinned chain ranks by audibility -- and
+    /// still never lets a stopped deck lead a playing one.
+    #[test]
+    fn the_unpinned_election_ranks_by_audibility() {
+        let mut e = DeckEngine::new();
+        e.set_auto_sync(false);
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        load_analysed(&mut e, DeckId::B, 2, 120.0, 0.0);
+        assert_eq!(e.sync_master(), None, "nothing pinned");
+
+        e.play_pause(DeckId::A);
+        e.observe(DeckId::A, 10.0, true);
+        e.set_crossfader(1.0); // A is playing but out of the room
+        assert_eq!(e.sync_leader(), Some(DeckId::A), "still the only record running");
+
+        e.play_pause(DeckId::B);
+        e.observe(DeckId::B, 10.0, true);
+        assert_eq!(e.sync_leader(), Some(DeckId::B), "and now one of them is heard");
+
+        // A stopped deck never leads a playing one, however loud it is.
+        e.play_pause(DeckId::B);
+        e.set_crossfader(0.0);
+        assert_eq!(e.sync_leader(), Some(DeckId::A));
     }
 
     #[test]
@@ -8604,9 +8806,11 @@ mod tests {
         engine.apply_auto_sync();
         assert_eq!(engine.sync_master(), Some(DeckId::A));
 
-        // The fader crossing to B used to flip leadership and yank A.
-        // Pinned, the master stands and corrections keep their direction.
-        engine.set_crossfader(1.0);
+        // The fader most of the way to B with A's record still up: both
+        // are audible, so the pin stands and corrections keep their
+        // direction. (All the way over is the other law -- a master the
+        // room cannot hear hands the group on.)
+        engine.set_crossfader(0.8);
         assert_eq!(engine.sync_leader(), Some(DeckId::A));
         let cmds = engine.apply_auto_sync();
         assert!(
