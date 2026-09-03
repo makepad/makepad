@@ -3212,6 +3212,9 @@ export class WasmWebBrowser extends WasmBridge {
             //if (code == 91) {firefox_logo_key = true; e.preventDefault();}
             if (code == 18 || code == 17 || code == 16) e.preventDefault(); // alt
             if (code === 8 || code === 9) e.preventDefault() // backspace/tab
+            if (code === 121 && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+                e.preventDefault() // Shift+F10: tweaker
+            }
             if ((code === 88 || code == 67) && (e.metaKey || e.ctrlKey)) { // copy or cut
                 // we need to request the clipboard
                 this.to_wasm.ToWasmTextCopy();

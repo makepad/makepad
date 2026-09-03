@@ -1,6 +1,6 @@
 //! The AI chat slot: F10 in every standalone `Window`.
 //!
-//! The way every app grew the F12 designer, every app gets the assistant:
+//! The way every app grew the Shift+F10 designer, every app gets the assistant:
 //! `Window` declares `ai_chat := AiChatSlot{}` beside the tweaker,
 //! hardcoded, zero cost while off. The slot owns nothing of the chat — it
 //! is a place. On the first F10 it instantiates the chat's module root BY

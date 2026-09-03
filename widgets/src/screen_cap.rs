@@ -7,9 +7,8 @@
 //! the file — the indicator is drawn into the same pass the recorder reads
 //! back).
 //!
-//! The key sits beside the AI's plain F10 and the debugger's Shift+F10 on
-//! purpose: one assistant key, one debugger key, one recorder key. `widgets/src/tweaker.rs` explicitly lets the shifted
-//! chord through so the two never fire together.
+//! The key sits beside the AI's plain F10 and the tweaker's Shift+F10 on
+//! purpose: one assistant key, one designer key, one recorder key.
 //!
 //! Both halves come off platform seams added for this:
 //!
@@ -158,7 +157,7 @@ pub struct ScreenCap {
     #[live(KeyCode::F10)]
     hotkey: KeyCode,
     /// Whether the hotkey needs Shift held (false by default: Shift+F10 is
-    /// the exploded-view debugger).
+    /// the design tweaker).
     #[live(false)]
     hotkey_shift: bool,
     /// Whether the hotkey needs Ctrl held. Ctrl+F10 by default, so the

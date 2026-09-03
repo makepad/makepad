@@ -544,7 +544,7 @@ pub struct CxDrawPass {
     pub view_scale: Vec2d,
     pub pass_uniforms: DrawPassUniforms,
     pub zbias_step: f32,
-    /// Set while the F10 exploded z-layer view is up on this pass; `None` is
+    /// Set while the exploded z-layer view is up on this pass; `None` is
     /// ordinary flat 2D and leaves `camera_view` the identity it always was.
     pub sploded: Option<crate::sploded::SplodedParams>,
     pub os: CxOsPass,

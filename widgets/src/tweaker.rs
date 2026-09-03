@@ -1,7 +1,7 @@
 //! The TWEAKER — the design-feedback overlay every `--remote` app grows.
 //!
 //! Hardcoded into `Window` (like the caption bar: zero app wiring), inert
-//! unless the remote bridge is live, zero cost while off. Turned on (F12 or
+//! unless the remote bridge is live, zero cost while off. Turned on (Shift+F10 or
 //! `GET /tweak?on=1`), a person points at the UI and live-edits it while the
 //! AI watches the same session through the bridge:
 //!
@@ -156,7 +156,7 @@ pub struct TweakStroke {
 
 #[derive(Default)]
 struct TweakSession {
-    /// Guards against N windows toggling N times on one F12 event.
+    /// Guards against N windows toggling N times on one Shift+F10 event.
     toggle_event_id: u64,
     /// The pinned selection (click pins; remote applies re-pin by path).
     pinned: Option<TweakPick>,
@@ -285,7 +285,7 @@ pub fn set_tweak_on(cx: &mut Cx, on: bool) {
             s.down_consumed = false;
             s.live_stroke = None;
             drop(s);
-            // F12 closes the whole design surface: the exploded view goes
+            // Shift+F10 closes the whole design surface: the exploded view goes
             // with the panel (deferred toggle — performed pre-dispatch at
             // the next event), the marks and the flat band with it, so
             // the app is never left tilted without its panel.
@@ -689,23 +689,23 @@ fn ancestor_pick(
 
 /// Called by `Window::handle_event` in place of ordinary dispatch. Returns
 /// `true` when the event was swallowed (the window must NOT hand it to its
-/// view children). Off: one atomic load (plus an F12 check on key events).
+/// view children). Off: one atomic load (plus a shortcut check on key events).
 pub fn window_intercept(
     cx: &mut Cx,
     event: &Event,
     window_view: &mut View,
     window_id: WindowId,
 ) -> bool {
-    // F12 toggles the mode, bridge or no bridge: the design surface is
+    // Shift+F10 toggles the mode, bridge or no bridge: the design surface is
     // in-process and owes the remote nothing. Only the HTTP endpoints and
     // the AI vibecode loop need --remote; without it they simply are not
     // there, and the panel still is.
     //
-    // CTRL+F10 is not ours: that is the screen recorder
+    // Ctrl+F10 is not ours: that is the screen recorder
     // (widgets/src/screen_cap.rs), and it must not drag the design surface
     // into every recording.
     if let Event::KeyDown(key_event) = event {
-        if key_event.key_code == KeyCode::F12 && !key_event.modifiers.shift {
+        if key_event.is_tweaker_toggle() {
             let flip = {
                 let mut s = session().lock().unwrap();
                 if s.toggle_event_id != cx.event_id() {
@@ -4829,7 +4829,7 @@ pub struct Tweaker {
     /// renderer; until then this is the mode flag + visual state).
     #[rust]
     sploded_armed: bool,
-    /// Which side-panel tab is active (persists across F12).
+    /// Which side-panel tab is active (persists across Shift+F10).
     #[rust]
     panel_tab: PanelTab,
     /// The shader tab's draw layer (clicking a material thumbnail switches
@@ -8072,7 +8072,7 @@ impl Tweaker {
             if self.sploded_uid != 0 && widget_action.widget_uid.0 == self.sploded_uid {
                 if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
                     // The 2.5D exploded z-layer view. Inspection-only while
-                    // up (input belongs to the mode): exit with Esc or F10.
+                    // up (input belongs to the mode): exit with Escape or this button.
                     cx.sploded_toggle();
                     // The toggle is deferred to the next event; read the
                     // state it WILL have, not the one it still has.
@@ -9432,7 +9432,7 @@ impl Widget for Tweaker {
             // Tear the surface down for real: both overlay lists are
             // RETAINED by the window's overlay (a stored sub-list keeps its
             // slot and its last items), so skipping them here left the
-            // panel, the outlines and the note card painted after F12.
+            // panel, the outlines and the note card painted after Shift+F10.
             // Begin and end them empty so nothing of the mode remains.
             for list in [self.overlay_list.as_mut(), self.sidebar_list.as_mut()]
                 .into_iter()
