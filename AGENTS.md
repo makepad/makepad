@@ -151,6 +151,59 @@ this pattern as an executable end-to-end test across three example apps.
 - **Cost when idle is zero.** The event loop only upshifts its paint clock
   while a remote request is in flight.
 
+### The F12 design overlay and the note cards (how the human talks back)
+
+`--remote` also switches on the in-app dev overlays, and the one that matters
+for agent work is the **tweaker** — the F12 design panel. It is a two-way
+channel: the human points at the running UI, and you read what they pointed at.
+
+**Selection.** F12 (or `GET /tweak?on=1`) turns it on. Hovering outlines a
+widget, clicking pins it; clicking again inside the same widget climbs to its
+parent, so a container hidden under its children is still reachable. The
+pinned selection wears a dashed ring and four corner brackets.
+
+**You already know what is selected — always.** `GET /tweak/state` reports the
+pinned widget as `sel` (`path`, `ty`, rect) together with every editable
+property, its cascade (the `file:line` an edit would land in) and the current
+diff log. So when the human says "make this bigger" in your console with
+nothing else said, `/tweak/state` is the answer to "this". There is nothing to
+switch on beyond `--remote` and the panel being up.
+
+**Note cards.** A note is the human's written instruction attached to one
+widget:
+
+| gesture | what it does |
+| --- | --- |
+| `Insert`, or `Ctrl+Shift+N` (`Cmd+Shift+N`), or the panel's `note` button | open / close the card on the selection (or, with nothing pinned, on the hovered widget) |
+| drag the header strip | move the card; a leader line in the selection colour keeps it joined to its widget |
+| drag the bottom-right grip | resize it |
+| `Ctrl+Enter` / the ✦ button | **send the note to you** |
+| the ✕ button | clear the text |
+| the 📌 button | pin the note to disk so it survives the run |
+| the — button, or `Esc` | put the card away, keeping the text |
+
+The card is opaque and picking cannot reach through it: nothing behind a note
+can be hovered or selected.
+
+**Reading the notes.** `/tweak/state` carries a `notes` array of
+`{path, text}`. Two extra keys matter:
+
+- `"ask": N` — the human pressed Ctrl+Enter (or the sparkle) on this note.
+  **That is a request to act, not just a note to read.** `N` rises with each
+  send, so a note you have already handled is one whose `ask` has not moved.
+  Each send also logs `TWEAK ask #N <path>: <text>`, so `/log` sees it too.
+- `"pinned": 1` — the note is stored in `.makepad-notes.txt` in the app's
+  working directory and comes back next run. That file is plain tab-separated
+  text (`path  dx  dy  w  h  text`) — readable and editable without the app.
+
+So the loop is: poll `/tweak/state`, act on any note whose `ask` count is new,
+and use `sel` for anything the human says in the console.
+
+**Hierarchy walk.** With something selected the arrow keys walk the live tree
+the way a scene editor does — Up to the parent, Down to the first child,
+Left/Right to the previous/next sibling — and each step logs `TWEAK walk <dir> → <path>`. With
+*nothing* selected the same arrows still orbit the F10 exploded view.
+
 ### Studio remote bridge (the older path)
 
 The studio (`studio/desktop` + `studio/hub`) drives a hosted app over a
