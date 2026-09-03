@@ -1498,6 +1498,7 @@ impl App {
                 }
                 SubscriptionEvent::Events(events) => {
                     for event in events {
+                        self.services.handle_flow_event(&event);
                         self.handle_flow_event(cx, event);
                     }
                 }
