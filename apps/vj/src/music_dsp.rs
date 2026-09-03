@@ -1916,8 +1916,21 @@ impl Freeze {
         // lap's own start to pre-roll from (see `process`), so what is
         // actually available to draw a lap from is `fresh` less that.
         let available = self.fresh.saturating_sub(xf);
+        // Under `2 * xf` and there is not enough freshly-written content
+        // to fill even the shortest lap the seam blend can work with --
+        // a hold this soon after a reset (a fresh load, a clone, or a
+        // release that only just let go) would have to reach past what
+        // `fresh` actually certifies and read whatever the ring was
+        // last carrying, load or lifetime before this one. The floor
+        // used to be applied AFTER this clamp, which defeated it outright
+        // in exactly this case; refusing outright is what the doc above
+        // on `fresh` has always promised, so nothing here forces a lap
+        // across that boundary instead.
+        if available < 2 * xf {
+            return;
+        }
         let ceiling = cap.saturating_sub(2 * xf).max(2 * xf);
-        let len = requested_len.min(available).max(2 * xf).min(ceiling);
+        let len = requested_len.clamp(2 * xf, available.min(ceiling));
         let start = (self.write + cap - len) % cap;
         self.held = Some(Held { start, len, xf, pos: 0 });
         self.wet.slew(1.0, FREEZE_BLEND_SECS);
@@ -2306,6 +2319,54 @@ mod tests {
             assert_eq!(freeze.process(frame, rate), frame);
         }
         assert!(!freeze.held());
+    }
+
+    /// A hold pressed before enough has genuinely been written since the
+    /// ring last resumed is refused outright, rather than reaching past
+    /// what `fresh` can vouch for and reading whatever the ring was
+    /// carrying from a previous life -- a previous record, or the tail
+    /// of a hold that only just let go. `reset` deliberately never
+    /// touches the ring (that would be the bulk clear the echo commit's
+    /// own review found unsafe on the audio thread), so old content is
+    /// genuinely still sitting there to be misread if the clamp does
+    /// not refuse in time.
+    #[test]
+    fn a_hold_pressed_too_soon_after_a_reset_is_refused_rather_than_reaching_into_stale_content() {
+        let rate = 48_000.0f32;
+        let xf = 480usize; // FREEZE_XFADE_SECS * 48 kHz
+        let mut freeze = Freeze::new();
+        // Old, distinctive content: what a previous life of this ring
+        // left behind.
+        for _ in 0..5_000 {
+            freeze.process([-0.9, -0.9], rate);
+        }
+        freeze.reset();
+        // Nothing written since: the ring is entirely old content.
+        freeze.hold(100, rate);
+        assert!(!freeze.held(), "no fresh content at all -- must refuse");
+        // Still short of 2*xf frames of fresh content.
+        for _ in 0..900 {
+            assert_eq!(freeze.process([0.9, 0.9], rate), [0.9, 0.9], "still the bypass");
+        }
+        freeze.hold(100, rate);
+        assert!(!freeze.held(), "still short of 2*xf frames since the reset");
+        // Now exactly enough: fresh reaches 3*xf, leaving `available`
+        // (fresh less the seam's own pre-roll) at exactly 2*xf.
+        for _ in 0..(3 * xf - 900) {
+            freeze.process([0.9, 0.9], rate);
+        }
+        freeze.hold(100, rate); // asks for far less; the floor takes over
+        assert!(freeze.held(), "2*xf of certified content is exactly enough");
+        let mut settled = false;
+        for i in 0..1_000 {
+            let out = freeze.process([0.0, 0.0], rate);
+            assert!(out[0] > -1e-6, "the stale -0.9 must never surface: {out:?} at {i}");
+            if i > 400 {
+                assert!(out[0] > 0.5, "and once settled it reads the real +0.9: {out:?} at {i}");
+                settled = true;
+            }
+        }
+        assert!(settled);
     }
 
     /// Once the wet ramp has settled, a held lap repeats sample for

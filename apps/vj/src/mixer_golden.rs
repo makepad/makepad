@@ -335,10 +335,15 @@ fn golden_load_over_playing() {
 
 /// A held beat and its release, pinned window by window: the press
 /// crossfading in, the lap repeating on itself, and the release
-/// crossfading back to the live tone wherever it has got to.
+/// crossfading back to the live tone wherever it has got to. 443 Hz,
+/// not 440: a 0.25 s lap of 440 Hz is exactly 110 whole cycles, so the
+/// frozen loop and the live tone underneath it would be numerically
+/// identical and this reference would not move if freeze were deleted
+/// outright -- diffed against golden_tone_play and confirmed exactly
+/// that before 443 Hz replaced it.
 #[test]
 fn golden_freeze_hold() {
-    let mixer = deck_a(tone_pcm(440.0, 48_000, 3.0));
+    let mixer = deck_a(tone_pcm(443.0, 48_000, 3.0));
     mixer.set_deck_playing(DeckId::A, true);
     settle(&mixer, SETTLE);
     let (left, right) = capture(&mixer, CAPTURE, |index| match index {

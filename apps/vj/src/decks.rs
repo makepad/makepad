@@ -3406,6 +3406,13 @@ impl DeckEngine {
         dst.splat = None;
         let mut cmds: Vec<DeckCmd> = retire.into_iter().collect();
         cmds.push(DeckCmd::CloneDeck { from, to });
+        // The destination can genuinely be held -- `to` is whichever
+        // deck the crossfader currently favours less, not necessarily
+        // the quiet one -- and the mixer's own clone forgets the ring
+        // underneath it regardless. Without this the chip stays lit on
+        // a freeze that just went silent, and the next press on `to` is
+        // swallowed by the engine's own already-held gate.
+        cmds.extend(self.freeze_release(to));
         cmds
     }
 
@@ -5413,6 +5420,30 @@ mod tests {
         let cmds = e.swap();
         assert!(cmds.contains(&DeckCmd::Freeze { deck: DeckId::A, secs: None }));
         assert!(!e.frozen(DeckId::A) && !e.frozen(DeckId::B));
+    }
+
+    /// A DOUBLE lands on whichever deck the crossfader currently favours
+    /// LESS -- not necessarily a silent one -- and that deck can
+    /// genuinely have a freeze held on it. The mixer's own clone forgets
+    /// the ring underneath either way; without this the engine's chip
+    /// stays lit on a freeze that just went silent.
+    #[test]
+    fn instant_double_releases_a_held_freeze_on_the_deck_it_lands_on() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        load_analysed(&mut e, DeckId::B, 2, 120.0, 0.0);
+        e.deck_mut(DeckId::A).playing = true;
+        e.deck_mut(DeckId::A).position_secs = 10.0;
+        e.deck_mut(DeckId::B).playing = true;
+        e.deck_mut(DeckId::B).position_secs = 10.0;
+        // The fader favours A, so DOUBLE lands on the quieter B.
+        e.set_crossfader(0.0);
+        assert_eq!(e.auto_target(), DeckId::B);
+        e.freeze_press(DeckId::B);
+        assert!(e.frozen(DeckId::B));
+        let cmds = e.instant_double();
+        assert!(cmds.contains(&DeckCmd::Freeze { deck: DeckId::B, secs: None }));
+        assert!(!e.frozen(DeckId::B), "the destination's chip must not stay lit");
     }
 
     // -----------------------------------------------------------------
