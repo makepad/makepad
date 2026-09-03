@@ -11043,7 +11043,10 @@ p2 {}
         let Some(item) = state.item() else { return };
         let path = Self::loop_marks_path(item);
         let mut record = crate::marks::MarkRecord::default();
-        record.set_cue(Some(state.cue_secs));
+        // Only a mark a HAND put there. The first-sound default is
+        // derived, and writing it here would freeze it against any later
+        // re-analysis while looking exactly like a placement.
+        record.set_cue(state.cue_placed.then_some(state.cue_secs));
         record.set_bookmark(state.bookmark);
         let spans: Vec<(f64, f64)> =
             state.loop_slots.iter().map(|slot| (slot.start_secs, slot.end_secs)).collect();
@@ -20606,7 +20609,8 @@ p2 {}
             let index = deck.index();
             // The grid goes to the engine first: it decides whether this
             // arrival should engage a sync.
-            let cmds = self.decks.grid_ready(deck, done.gen, done.analysis.grid);
+            let cmds =
+                    self.decks.grid_ready(deck, done.gen, done.analysis.grid, done.analysis.sound);
             if self.decks.deck(deck).load_gen != done.gen {
                 continue;
             }
@@ -22240,6 +22244,10 @@ p2 {}
             let refined_by_beats = self.deck_analysis[index]
                 .as_ref()
                 .is_some_and(|analysis| analysis.refined_by_beats());
+            let sound = self.deck_analysis[index]
+                .as_ref()
+                .and_then(|analysis| analysis.sound)
+                .map(|span| (span.first_secs, span.last_secs));
             // A bookmark rides the same channel as a zero-length span: the
             // band and its out edge draw nothing, the green chip draws at
             // its point, and the save click works unchanged.
@@ -22455,6 +22463,7 @@ p2 {}
                 strip.set_loop_slots(cx, &loop_slots);
                 strip.set_found_loops(cx, &found_loops);
                 strip.set_cue_marker(cx, cue_secs);
+                strip.set_sound(cx, sound);
                 strip.set_snap_grid(cx, grid, self.decks.snap_beats);
             };
             self.music_refs.decks[index] = refs;

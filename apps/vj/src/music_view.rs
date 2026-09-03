@@ -817,6 +817,10 @@ script_mod! {
         draw_edge_live +: { color: #x35c05f }
         draw_edge_saved +: { color: #x3d8bff }
         draw_edge_found +: { color: #xf5c542 }
+        // Where the file starts and stops making a sound. Quiet, because
+        // it is a fact about the recording rather than a mark anybody put
+        // there, and every chip draws over it.
+        draw_edge_sound +: { color: #x6b7683 }
         draw_marker_found +: {
             color: uniform(#xf5c542)
             pixel: fn() {
@@ -5277,6 +5281,11 @@ pub struct VjWaveOverview {
     /// Where CUE lands — the red chip. Source seconds.
     #[rust]
     cue_secs: f64,
+    /// Where the recording itself begins and ends, in source seconds. Not
+    /// a mark: a measurement, and the reason CUE lands where it does on a
+    /// track that opens with silence.
+    #[rust]
+    sound: Option<(f64, f64)>,
     /// The chip under the cursor, for the hover scale-up. Pressing takes
     /// it back to normal size — the pressed-down feel.
     #[rust]
@@ -5302,6 +5311,8 @@ pub struct VjWaveOverview {
     draw_edge_saved: DrawColor,
     #[live]
     draw_edge_found: DrawColor,
+    #[live]
+    draw_edge_sound: DrawColor,
     /// The red chip at CUE's landing — the track start — so the button's
     /// destination is visible at a glance.
     #[live]
@@ -5382,6 +5393,15 @@ impl VjWaveOverview {
             return found_marker_hit(&self.found_loops, secs, tol);
         }
         None
+    }
+
+    /// Where the recording begins and ends, diffed like the rest.
+    pub fn set_sound(&mut self, cx: &mut Cx, span: Option<(f64, f64)>) {
+        if self.sound == span {
+            return;
+        }
+        self.sound = span;
+        self.area.redraw(cx);
     }
 
     /// The red chip's home, diffed like the others.
@@ -5774,6 +5794,20 @@ impl Widget for VjWaveOverview {
                             },
                         );
                     }
+                }
+            }
+            // Where the recording itself starts and stops: two hairlines
+            // under every chip, so a long silent head reads as one rather
+            // than as a track that begins late.
+            if let Some((first, last)) = self.sound {
+                for at in [first, last] {
+                    self.draw_edge_sound.draw_abs(
+                        cx,
+                        Rect {
+                            pos: dvec2(centre_of(at) - 0.75, rect.pos.y),
+                            size: dvec2(1.5, rect.size.y),
+                        },
+                    );
                 }
             }
             // CUE's landing, under everything else. While dragged, the

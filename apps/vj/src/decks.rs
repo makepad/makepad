@@ -23,7 +23,7 @@
 //! the decision the running app makes.
 
 use crate::loop_splat::{SplatGrid, SplatPart, SplatRow, SplatSnapshot, SPLAT_COLS};
-use crate::wave_analysis::TrackGrid;
+use crate::wave_analysis::{SoundSpan, TrackGrid};
 use makepad_asset_data::{AssetId, AssetRevisionId, BlobId, MediaType};
 use std::sync::Arc;
 
@@ -778,6 +778,12 @@ pub struct DeckState {
     /// Where CUE sends the deck — the red marker. A position on THIS
     /// track, so a fresh install puts it back at the top.
     pub cue_secs: f64,
+    /// Whether a hand put the mark above where it is, rather than a load
+    /// leaving it at the value it defaults to. The analysis lands after the
+    /// decode does, and "nobody has cued this track" is the only condition
+    /// under which it may move the mark. One bool beside the number it
+    /// qualifies, the way `rate_from_lock` sits beside the rate.
+    pub cue_placed: bool,
     /// The current BOOKMARK — an in point with no out, placed by `[` on
     /// the infinity rung. Green until its chip is clicked into the saved
     /// row. Mutually exclusive with a running span: the count dial
@@ -883,6 +889,7 @@ impl Default for DeckState {
             loop_slots: Vec::new(),
             found_loops: Vec::new(),
             cue_secs: 0.0,
+            cue_placed: false,
             bookmark: None,
             muted: false,
             gain: 1.0,
@@ -1404,6 +1411,7 @@ impl DeckEngine {
         state.loop_slots.clear();
         state.found_loops.clear();
         state.cue_secs = 0.0;
+        state.cue_placed = false;
         state.bookmark = None;
         // A rate the LOCK worked out matched this deck to the one on the
         // other side. That match described a pair of tracks and one of them
@@ -1851,6 +1859,7 @@ impl DeckEngine {
         } else {
             target.max(0.0)
         };
+        state.cue_placed = true;
     }
 
     /// The green marker click: keep the running span as a blue marker.
@@ -2231,8 +2240,8 @@ impl DeckEngine {
         let (duration, position, playing, grid) =
             (src.duration_secs, src.position_secs, src.playing, src.grid);
         let (rate, from_lock, pitch) = (src.rate, src.rate_from_lock, src.pitch);
-        let (key_shift, keylock, span, cue) =
-            (src.key_shift, src.keylock, src.loop_span, src.cue_secs);
+        let (key_shift, keylock, span, cue, cue_placed) =
+            (src.key_shift, src.keylock, src.loop_span, src.cue_secs, src.cue_placed);
         let dst = self.deck_mut(to);
         dst.load = DeckLoad::Loaded { item };
         dst.duration_secs = duration;
@@ -2246,6 +2255,9 @@ impl DeckEngine {
         dst.keylock = keylock;
         dst.loop_span = span;
         dst.cue_secs = cue;
+        // The mark travels with the record, and so does whether a hand put
+        // it there rather than the analysis.
+        dst.cue_placed = cue_placed;
         // The record travels; the marks the operator placed on the OTHER
         // slot do not, and neither does anything half-placed.
         dst.loop_armed = None;
@@ -2271,15 +2283,49 @@ impl DeckEngine {
 
     /// The whole-track analysis landed. Stale generations are dropped; a
     /// fresh grid is what makes the deck syncable, so auto sync re-runs.
-    pub fn grid_ready(&mut self, deck: DeckId, gen: DeckGen, grid: TrackGrid) -> Vec<DeckCmd> {
+    /// The analysis landed. Take its grid, and — if nobody has cued this
+    /// track — put the main mark where the file starts making a sound.
+    ///
+    /// A track that opens with two seconds of nothing used to cue to its
+    /// own silence, so the first press of PLAY was a wait. The mark is
+    /// written DIRECTLY rather than through `set_cue`: that one snaps under
+    /// QUANT, and the first sounding sample is a measured fact rather than
+    /// a placement to be rounded onto a beat. `cue_placed` stays false,
+    /// because this is the default and not a hand.
+    pub fn grid_ready(
+        &mut self,
+        deck: DeckId,
+        gen: DeckGen,
+        grid: TrackGrid,
+        sound: Option<SoundSpan>,
+    ) -> Vec<DeckCmd> {
+        let mut cmds = Vec::new();
         {
             let state = self.deck_mut(deck);
             if state.load_gen != gen || !matches!(state.load, DeckLoad::Loaded { .. }) {
-                return Vec::new();
+                return cmds;
             }
             state.grid = Some(grid);
+            if let Some(first) = sound
+                .map(|span| span.first_secs)
+                .filter(|first| *first > 0.0 && !state.cue_placed)
+            {
+                state.cue_secs = first;
+                // And take a deck still parked at its top along with it.
+                // Left behind, the mark sits off zero while the playhead
+                // does not: the lamp blinks, and the first CUE press reads
+                // as "stopped, away from the mark" and drags the default
+                // back to where it came from.
+                if !state.playing && state.position_secs < CUE_AT_MARK_SECS {
+                    state.position_secs = first;
+                    cmds.push(DeckCmd::SeekSeconds { deck, secs: first });
+                }
+            }
         }
-        self.apply_auto_sync()
+        // After the block: the sync pass cannot run while the deck is
+        // borrowed, and the seek has to reach the mixer before it.
+        cmds.extend(self.apply_auto_sync());
+        cmds
     }
 
     /// The stem separation for this deck's track is available.
@@ -2879,7 +2925,9 @@ impl DeckEngine {
         let at_mark = (state.position_secs - state.cue_secs).abs() < CUE_AT_MARK_SECS;
         if !state.playing && !at_mark {
             let secs = state.position_secs;
-            self.deck_mut(deck).cue_secs = secs;
+            let state = self.deck_mut(deck);
+            state.cue_secs = secs;
+            state.cue_placed = true;
             return Vec::new();
         }
         let cue = state.cue_secs;
@@ -4266,7 +4314,7 @@ mod tests {
         };
         let (deck, gen) = load_gen(&engine.click(item(seed), target));
         engine.track_ready(deck, gen, 300.0);
-        engine.grid_ready(deck, gen, grid(bpm, first_beat_secs));
+        engine.grid_ready(deck, gen, grid(bpm, first_beat_secs), None);
     }
 
     // ---- momentary pitch bend -------------------------------------------
@@ -5000,7 +5048,7 @@ mod tests {
             downbeat_phase: 2,
             confidence: 0.9,
         };
-        engine.grid_ready(DeckId::A, gen, grid);
+        engine.grid_ready(DeckId::A, gen, grid, None);
         let (flipped, _) = engine.flip_beat_phase(DeckId::A).expect("a grid to flip");
         // 0.4 + 0.25 = 0.65 wraps to 0.15: the ruling before the old first
         // beat, one beat earlier in the bar.
@@ -5027,6 +5075,7 @@ mod tests {
             DeckId::A,
             gen,
             TrackGrid { bpm: 120.0, beat_secs: 0.5, first_beat_secs: 0.0, downbeat_phase: 0, confidence: 0.9 },
+            None,
         );
         engine.seek_secs(DeckId::A, 10.0);
         let cmds = engine.beat_jump(DeckId::A, 16.0);
@@ -5072,7 +5121,7 @@ mod tests {
         let target = DeckTarget::B;
         let (deck, gen) = load_gen(&engine.click(item(2), target));
         engine.track_ready(deck, gen, 240.0);
-        let cmds = engine.grid_ready(deck, gen, grid(100.0, 0.0));
+        let cmds = engine.grid_ready(deck, gen, grid(100.0, 0.0), None);
 
         assert_eq!(engine.sync_leader(), Some(DeckId::A));
         assert!(engine.deck(DeckId::B).synced, "B must be held to A");
@@ -5376,9 +5425,9 @@ mod tests {
         let (deck, first) = load_gen(&engine.click(item(1), DeckTarget::A));
         let (_, second) = load_gen(&engine.click(item(2), DeckTarget::A));
         engine.track_ready(deck, second, 100.0);
-        assert!(engine.grid_ready(deck, first, grid(120.0, 0.0)).is_empty());
+        assert!(engine.grid_ready(deck, first, grid(120.0, 0.0), None).is_empty());
         assert!(engine.deck(DeckId::A).grid.is_none(), "stale grid must not land");
-        engine.grid_ready(deck, second, grid(126.0, 0.0));
+        engine.grid_ready(deck, second, grid(126.0, 0.0), None);
         assert_eq!(engine.deck(DeckId::A).grid.map(|g| g.bpm), Some(126.0));
         // Loading again clears it rather than syncing to the old tempo.
         engine.click(item(3), DeckTarget::A);
@@ -6119,6 +6168,62 @@ mod tests {
         let cmds = engine.track_ready(deck, gen, 300.0);
         assert!(cmds.contains(&DeckCmd::InstallTrack { deck: DeckId::A, keep_playing: false }));
         assert!(!engine.deck(DeckId::A).playing);
+    }
+
+    // ---- the mark lands where the record starts -------------------------
+
+    #[test]
+    fn a_track_that_opens_with_silence_cues_past_it() {
+        let mut e = DeckEngine::new();
+        let (deck, gen) = load_gen(&e.click(item(1), DeckTarget::A));
+        e.track_ready(deck, gen, 300.0);
+        assert_eq!(e.deck(DeckId::A).cue_secs, 0.0, "nothing measured yet");
+        let cmds =
+            e.grid_ready(deck, gen, grid(120.0, 0.0), Some(SoundSpan { first_secs: 2.5, last_secs: 290.0 }));
+        assert_eq!(e.deck(DeckId::A).cue_secs, 2.5, "the mark lands on the first sound");
+        // And the deck, still parked at its top, goes with it -- left
+        // behind, the lamp blinks and the first CUE press drags the mark
+        // back to the silence it came from.
+        assert_eq!(e.deck(DeckId::A).position_secs, 2.5);
+        assert!(cmds.contains(&DeckCmd::SeekSeconds { deck: DeckId::A, secs: 2.5 }));
+        // It is a default, not a placement: nothing was put there by hand.
+        assert!(!e.deck(DeckId::A).cue_placed);
+    }
+
+    #[test]
+    fn a_mark_a_hand_placed_outranks_the_first_sound() {
+        let mut e = DeckEngine::new();
+        let (deck, gen) = load_gen(&e.click(item(1), DeckTarget::A));
+        e.track_ready(deck, gen, 300.0);
+        e.set_cue(DeckId::A, 40.0);
+        assert!(e.deck(DeckId::A).cue_placed);
+        e.grid_ready(deck, gen, grid(120.0, 0.0), Some(SoundSpan { first_secs: 2.5, last_secs: 290.0 }));
+        assert_eq!(e.deck(DeckId::A).cue_secs, 40.0, "the analysis does not move a hand's mark");
+    }
+
+    #[test]
+    fn a_track_that_sounds_from_its_first_sample_leaves_the_mark_alone() {
+        let mut e = DeckEngine::new();
+        let (deck, gen) = load_gen(&e.click(item(1), DeckTarget::A));
+        e.track_ready(deck, gen, 300.0);
+        let cmds =
+            e.grid_ready(deck, gen, grid(120.0, 0.0), Some(SoundSpan { first_secs: 0.0, last_secs: 300.0 }));
+        assert_eq!(e.deck(DeckId::A).cue_secs, 0.0);
+        assert!(!cmds.iter().any(|c| matches!(c, DeckCmd::SeekSeconds { .. })), "and nothing seeks");
+    }
+
+    #[test]
+    fn the_first_sound_never_moves_a_deck_that_is_already_running() {
+        let mut e = DeckEngine::new();
+        let (deck, gen) = load_gen(&e.click(item(1), DeckTarget::A));
+        e.track_ready(deck, gen, 300.0);
+        e.play_pause(DeckId::A);
+        e.observe(DeckId::A, 12.0, true);
+        let cmds =
+            e.grid_ready(deck, gen, grid(120.0, 0.0), Some(SoundSpan { first_secs: 2.5, last_secs: 290.0 }));
+        assert_eq!(e.deck(DeckId::A).cue_secs, 2.5, "the mark still lands");
+        assert_eq!(e.deck(DeckId::A).position_secs, 12.0, "but the record does not jump");
+        assert!(!cmds.iter().any(|c| matches!(c, DeckCmd::SeekSeconds { .. })));
     }
     // ---- the operator's eject, and the press that takes it back ---------
 

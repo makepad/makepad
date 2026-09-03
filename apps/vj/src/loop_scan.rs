@@ -899,6 +899,7 @@ mod tests {
 
     fn analysis_120bpm(beats: usize) -> TrackAnalysis {
         TrackAnalysis {
+            sound: None,
             duration_secs: beats as f64 * 0.5,
             sample_rate: 22050,
             grid: TrackGrid {

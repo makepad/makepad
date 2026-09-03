@@ -65,6 +65,11 @@ pub const WAVE_CURVE: f32 = 0.62;
 /// The percentile a track is normalized against, rather than its maximum,
 /// so a single clipped transient cannot flatten the whole picture.
 const REFERENCE_PERCENTILE: f64 = 0.995;
+/// The level a sample has to reach to count as sound: -60 dB of full
+/// scale. ABSOLUTE on purpose, where every other measure in this module is
+/// relative — the question is where the file starts making a noise, not
+/// where it gets loud compared with itself.
+const SOUND_FLOOR: f32 = 0.001;
 /// Cache format magic + version. Version 2 is the least-squares beat grid:
 /// version 1 sidecars carry a grid that drifts off the transients, so they
 /// are re-analysed rather than reused. Version 3 adds the level channel to
@@ -86,7 +91,12 @@ const CACHE_MAGIC: &[u8; 8] = b"VJWAVE\0\0";
 /// triad as its relative major are subtracted, and noise now returns no key
 /// instead of a confident wrong one. A version 7 key is not wrong-format, it
 /// is wrong — which is worse, because nothing about it looks stale.
-const CACHE_VERSION: u32 = 8;
+///
+/// Version 9 carries the first and last sounding sample. A version 8
+/// sidecar has no record of them, and "no span" is the honest answer for a
+/// file that never makes a sound — indistinguishable from "nobody looked" —
+/// so it is re-analysed rather than reused.
+const CACHE_VERSION: u32 = 9;
 /// Longest local file the music explorer will lift into memory.
 pub const MAX_LOCAL_TRACK_FRAMES: usize = 48_000 * 60 * 15;
 
@@ -511,6 +521,16 @@ impl WaveTiles {
 }
 
 /// Everything a worker produces for one track.
+/// The stretch of a file that actually makes a sound: the first sample at
+/// or above [`SOUND_FLOOR`] and the last. A silent stretch in between never
+/// shortens it — the last is refreshed by every sounding sample, so a
+/// break in the middle of a track cannot truncate the end.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SoundSpan {
+    pub first_secs: f64,
+    pub last_secs: f64,
+}
+
 #[derive(Clone, Debug)]
 pub struct TrackAnalysis {
     pub duration_secs: f64,
@@ -533,6 +553,14 @@ pub struct TrackAnalysis {
     /// one. `None` is a real answer — too short, too quiet, or no tonal
     /// centre — and reads as an empty cell rather than as a guess.
     pub key: Option<KeyEstimate>,
+    /// Where this file's sound begins and ends. `None` when nothing in it
+    /// reaches the floor, which is a real answer and the one a wholly
+    /// silent import gives.
+    ///
+    /// A plain field rather than the `cfg(not(test))` the refinement flag
+    /// uses: the round-trip test has to set it and read it back, which a
+    /// test-invisible field cannot do.
+    pub sound: Option<SoundSpan>,
 }
 
 impl TrackAnalysis {
@@ -636,6 +664,10 @@ impl OnePole {
 
 /// Per-hop band envelopes over the whole track.
 struct Envelopes {
+    /// First and last frame index whose magnitude reaches [`SOUND_FLOOR`].
+    /// Sample-exact rather than hop-exact: it rides the same walk over the
+    /// samples the envelopes are built from, so it costs no second pass.
+    sound: Option<(usize, usize)>,
     /// RMS per band per hop, in `[low, mid, high]` order.
     band_rms: Vec<[f32; 3]>,
     /// Broadband peak per hop.
@@ -660,7 +692,19 @@ fn build_envelopes(pcm: &TrackPcm) -> Envelopes {
     let mut sums = [0.0f64; 3];
     let mut hop_peak = 0.0f32;
     let mut in_hop = 0usize;
-    for frame in &pcm.frames {
+    // The floor in the file's own units. A `let` rather than a const so no
+    // float arithmetic sits in a const context.
+    let floor_units = (SOUND_FLOOR * 32_768.0).ceil() as u16;
+    let mut first_sound: Option<usize> = None;
+    let mut last_sound = 0usize;
+    for (index, frame) in pcm.frames.iter().enumerate() {
+        // Per CHANNEL, not the mono fold below: an anti-phase stereo
+        // passage folds to zero there and would read as silence.
+        // `unsigned_abs` because `i16::MIN.abs()` panics.
+        if frame[0].unsigned_abs().max(frame[1].unsigned_abs()) >= floor_units {
+            first_sound.get_or_insert(index);
+            last_sound = index;
+        }
         let mono = crate::dsp_math::mono(*frame);
         let low_band = low.process(mono);
         let mid_band = mid.process(mono) - low_band;
@@ -723,6 +767,7 @@ fn build_envelopes(pcm: &TrackPcm) -> Envelopes {
     }
 
     Envelopes {
+        sound: first_sound.map(|first| (first, last_sound)),
         band_rms,
         peak,
         onset,
@@ -1906,6 +1951,13 @@ pub fn analyze(pcm: &TrackPcm) -> TrackAnalysis {
         tiles,
         changes_secs,
         key,
+        sound: envelopes.sound.map(|(first, last)| {
+            let rate = pcm.sample_rate.max(1) as f64;
+            SoundSpan {
+                first_secs: first as f64 / rate,
+                last_secs: last as f64 / rate,
+            }
+        }),
     }
 }
 
@@ -2048,6 +2100,16 @@ pub fn encode_analysis(analysis: &TrackAnalysis) -> Vec<u8> {
     for change in &analysis.changes_secs {
         out.extend_from_slice(&change.to_le_bytes());
     }
+    // At the END on purpose: the summary header's offsets are hand-indexed
+    // and its length is a seek target, and neither wants this field.
+    match analysis.sound {
+        Some(span) => {
+            out.push(1);
+            out.extend_from_slice(&span.first_secs.to_le_bytes());
+            out.extend_from_slice(&span.last_secs.to_le_bytes());
+        }
+        None => out.extend_from_slice(&[0u8; 17]),
+    }
     out
 }
 
@@ -2119,9 +2181,21 @@ pub fn decode_analysis(bytes: &[u8]) -> Result<TrackAnalysis, String> {
     for _ in 0..change_count {
         changes_secs.push(f64::from_le_bytes(take(8)?.try_into().unwrap()));
     }
+    let sound = {
+        let field = take(17)?;
+        match field[0] {
+            0 => None,
+            1 => Some(SoundSpan {
+                first_secs: f64::from_le_bytes(field[1..9].try_into().unwrap()),
+                last_secs: f64::from_le_bytes(field[9..17].try_into().unwrap()),
+            }),
+            _ => return Err("wave cache sound flag out of range".into()),
+        }
+    };
     #[cfg(test)]
     let _ = refined_by_beats;
     Ok(TrackAnalysis {
+        sound,
         duration_secs,
         sample_rate,
         #[cfg(not(test))]
@@ -3080,6 +3154,93 @@ mod tests {
         assert_eq!(analysis.tiles.overview.len(), OVERVIEW_COLS);
     }
 
+
+    // ---- where the file starts and stops making a sound -----------------
+
+    #[test]
+    fn the_scan_finds_the_first_and_last_sample_that_makes_a_sound() {
+        let rate = 48_000u32;
+        let mut frames = vec![[0i16; 2]; rate as usize * 6];
+        // Two seconds of nothing, then a second of tone, then nothing, then
+        // half a second more, then nothing again.
+        for (index, frame) in frames.iter_mut().enumerate() {
+            let secs = index as f64 / rate as f64;
+            let sounding = (2.0..3.0).contains(&secs) || (4.5..5.0).contains(&secs);
+            if sounding {
+                let value = ((secs * 440.0 * std::f64::consts::TAU).sin() * 8_000.0) as i16;
+                *frame = [value, value];
+            }
+        }
+        let envelopes = build_envelopes(&TrackPcm { frames, sample_rate: rate });
+        let (first, last) = envelopes.sound.expect("the file makes a sound");
+        assert!(
+            (first as f64 / rate as f64 - 2.0).abs() < 0.01,
+            "the first sound is where the tone starts, at {}",
+            first as f64 / rate as f64,
+        );
+        // The silence in the middle must not truncate it: the LAST sound is
+        // the last one, not the end of the first run.
+        assert!(
+            (last as f64 / rate as f64 - 5.0).abs() < 0.01,
+            "and the last is the end of the second run, at {}",
+            last as f64 / rate as f64,
+        );
+    }
+
+    #[test]
+    fn a_silent_file_has_no_sound_at_all_rather_than_a_span_at_zero() {
+        let rate = 48_000u32;
+        let envelopes = build_envelopes(&TrackPcm {
+            frames: vec![[0i16; 2]; rate as usize * 3],
+            sample_rate: rate,
+        });
+        assert!(envelopes.sound.is_none(), "nothing in it reaches the floor");
+    }
+
+    #[test]
+    fn a_passage_that_folds_to_silence_in_mono_is_still_a_sound() {
+        // Anti-phase stereo: the mono fold is zero everywhere, which is why
+        // the scan reads the channels rather than the fold.
+        let rate = 48_000u32;
+        let mut frames = vec![[0i16; 2]; rate as usize];
+        for (index, frame) in frames.iter_mut().enumerate().skip(rate as usize / 2) {
+            let value = ((index as f64 * 0.05).sin() * 8_000.0) as i16;
+            *frame = [value, -value];
+        }
+        let envelopes = build_envelopes(&TrackPcm { frames, sample_rate: rate });
+        let (first, _) = envelopes.sound.expect("a sound the fold cannot hear");
+        assert!(first >= rate as usize / 2 - 64);
+    }
+
+    #[test]
+    fn the_quietest_thing_that_counts_is_sixty_decibels_down() {
+        let rate = 48_000u32;
+        // A hair under the floor is silence; a hair over it is a sound.
+        let under = ((SOUND_FLOOR * 32_768.0).ceil() as i16) - 1;
+        let over = (SOUND_FLOOR * 32_768.0).ceil() as i16;
+        for (value, want) in [(under, false), (over, true)] {
+            let mut frames = vec![[0i16; 2]; rate as usize];
+            frames[rate as usize / 2] = [value, value];
+            let envelopes = build_envelopes(&TrackPcm { frames, sample_rate: rate });
+            assert_eq!(
+                envelopes.sound.is_some(),
+                want,
+                "a sample of {value} must{} count",
+                if want { "" } else { " not" },
+            );
+        }
+    }
+
+    #[test]
+    fn the_sound_span_survives_the_cache_as_itself() {
+        let mut analysis = analyze(&click_track(48_000, 120.0, 8.0, 0.0));
+        analysis.sound = Some(SoundSpan { first_secs: 1.25, last_secs: 7.5 });
+        let back = decode_analysis(&encode_analysis(&analysis)).expect("round trip");
+        assert_eq!(back.sound, analysis.sound);
+        analysis.sound = None;
+        let back = decode_analysis(&encode_analysis(&analysis)).expect("round trip");
+        assert_eq!(back.sound, None, "no sound at all is a value too");
+    }
     #[test]
     fn cache_round_trips_every_field() {
         let pcm = click_track(48_000, 124.0, 12.0, 0.2);
