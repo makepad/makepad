@@ -2847,6 +2847,7 @@ mod tests {
                     ("bytes".into(), JsonValue::U64(42)),
                 ])),
             ])])),
+            planned_nodes: Some(vec!["prompt".into(), "image".into()]),
         }
     }
 
