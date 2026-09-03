@@ -40,6 +40,8 @@ const ROOT_SIZE: f64 = 65536.0;
 const CARD_RADIUS: f32 = 16.0;
 /// The icon-and-title row above every card.
 const LABEL_H: f64 = 26.0;
+/// Top inset occupied by the card's in-body header/chrome before its ports.
+const CARD_HEADER_H: f64 = 14.0;
 const PORT_ROW_H: f64 = 24.0;
 const PORT_R: f64 = 11.0;
 const PORT_HIT_R: f64 = 16.0;
@@ -54,8 +56,53 @@ const GRID_CELL: f64 = 24.0;
 const GRID_MIN_PX: f64 = 14.0;
 const FIT_MARGIN: f64 = 32.0;
 const MIN_NODE_WIDTH: f64 = 160.0;
-const MIN_NODE_HEIGHT: f64 = 80.0;
+const MIN_TEXT_LINE_H: f64 = 18.0;
 const RESIZE_GRIP: f64 = 18.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CardContentRect {
+    rect: Rect,
+    pad_top: f64,
+    pad_bottom: f64,
+}
+
+fn card_content_rect(card: Rect, full_bleed: bool, port_rows: usize) -> CardContentRect {
+    if full_bleed {
+        return CardContentRect {
+            rect: card,
+            pad_top: 0.0,
+            pad_bottom: 0.0,
+        };
+    }
+    let pad_top = CARD_HEADER_H + port_rows as f64 * PORT_ROW_H;
+    let pad_bottom = CARD_PAD;
+    CardContentRect {
+        rect: Rect {
+            pos: card.pos + dvec2(CARD_PAD, pad_top),
+            size: dvec2(
+                (card.size.x - 2.0 * CARD_PAD).max(1.0),
+                (card.size.y - pad_top - pad_bottom).max(1.0),
+            ),
+        },
+        pad_top,
+        pad_bottom,
+    }
+}
+
+fn min_card_height(full_bleed: bool, port_rows: usize) -> f64 {
+    if full_bleed {
+        (CARD_RADIUS as f64 * 2.0).max(MIN_TEXT_LINE_H)
+    } else {
+        CARD_HEADER_H + port_rows as f64 * PORT_ROW_H + CARD_PAD + MIN_TEXT_LINE_H
+    }
+}
+
+fn clamp_card_size(size: DVec2, full_bleed: bool, port_rows: usize) -> DVec2 {
+    dvec2(
+        size.x.max(MIN_NODE_WIDTH),
+        size.y.max(min_card_height(full_bleed, port_rows)),
+    )
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PortIcon {
@@ -1046,6 +1093,8 @@ impl FlowCanvas {
     }
 
     fn node_size(&self, graph: &Graph, index: usize) -> DVec2 {
+        let node = &graph.nodes[index];
+        let min_height = min_card_height(Self::full_bleed(node), Self::port_rows(node));
         if let Some(Drag::Resize {
             index: resized,
             size,
@@ -1053,12 +1102,16 @@ impl FlowCanvas {
         }) = &self.drag
         {
             if *resized == index {
-                return dvec2(size.0, size.1);
+                return clamp_card_size(
+                    dvec2(size.0, size.1),
+                    Self::full_bleed(node),
+                    Self::port_rows(node),
+                );
             }
         }
-        graph.nodes[index]
+        node
             .size
-            .map(|(w, h)| dvec2(w.max(MIN_NODE_WIDTH), h.max(MIN_NODE_HEIGHT)))
+            .map(|(w, h)| clamp_card_size(dvec2(w, h), Self::full_bleed(node), Self::port_rows(node)))
             .unwrap_or_else(|| {
                 dvec2(
                     NODE_WIDTH,
@@ -1066,7 +1119,7 @@ impl FlowCanvas {
                         .get(index)
                         .copied()
                         .unwrap_or(0.0)
-                        .max(MIN_NODE_HEIGHT),
+                        .max(min_height),
                 )
             })
     }
@@ -1118,7 +1171,7 @@ impl FlowCanvas {
 
     fn port_local(&self, graph: &Graph, index: usize, port: usize, output: bool) -> DVec2 {
         let rect = self.card_rect(graph, index);
-        let y = rect.pos.y + 14.0 + (port as f64 + 0.5) * PORT_ROW_H;
+        let y = rect.pos.y + CARD_HEADER_H + (port as f64 + 0.5) * PORT_ROW_H;
         if output {
             dvec2(rect.pos.x + rect.size.x, y)
         } else {
@@ -1474,37 +1527,36 @@ impl FlowCanvas {
             let node = &graph.nodes[index];
             let r = self.card_rect(graph, index);
             let full_bleed = Self::full_bleed(node);
-            let strip = Self::port_rows(node) as f64 * PORT_ROW_H;
-            let (content_pos, content_w, pad_top, pad_bottom) = if full_bleed {
-                (r.pos, r.size.x, 0.0, 0.0)
-            } else {
-                (
-                    dvec2(r.pos.x + CARD_PAD, r.pos.y + 14.0 + strip),
-                    r.size.x - 2.0 * CARD_PAD,
-                    14.0 + strip,
-                    CARD_PAD,
-                )
-            };
+            let content = card_content_rect(r, full_bleed, Self::port_rows(node));
             let has_error = self.face_errors.contains_key(&node.id)
                 || self
                     .statuses
                     .get(&node.id)
                     .is_some_and(|status| status.error.is_some());
-            let fixed_height = node
-                .size
-                .map(|_| (r.size.y - pad_top - pad_bottom).max(1.0));
+            let is_resizing = matches!(
+                self.drag.as_ref(),
+                Some(Drag::Resize {
+                    index: resized,
+                    ..
+                }) if *resized == index
+            );
+            let fixed_height = (node.size.is_some() || is_resizing).then_some(content.rect.size.y);
+            // Generic draw clipping is rectangular. Full-bleed media also use
+            // the card's rounded SDF in their own shader; together these keep
+            // every face inside the card body at any camera transform.
+            cx.push_clip_rect(r);
             cx.begin_turtle(
                 Walk {
-                    abs_pos: Some(content_pos),
+                    abs_pos: Some(content.rect.pos),
                     margin: Inset::default(),
-                    width: Size::Fixed(content_w),
+                    width: Size::Fixed(content.rect.size.x),
                     height: fixed_height.map(Size::Fixed).unwrap_or_else(Size::fit),
                     metrics: Metrics::default(),
                 },
                 Layout {
                     flow: Flow::Down,
-                    clip_x: false,
-                    clip_y: fixed_height.is_some(),
+                    clip_x: true,
+                    clip_y: true,
                     ..Layout::default()
                 },
             );
@@ -1521,11 +1573,12 @@ impl FlowCanvas {
                 );
             }
             let rect = cx.end_turtle();
-            let mut height = rect.size.y + pad_top + pad_bottom;
+            cx.pop_clip_rect();
+            let mut height = rect.size.y + content.pad_top + content.pad_bottom;
             if has_error {
                 height += 20.0;
             }
-            let height = height.max(if full_bleed { 120.0 } else { 60.0 });
+            let height = height.max(min_card_height(full_bleed, Self::port_rows(node)));
             if node.size.is_none() && (self.heights[index] - height).abs() > 0.5 {
                 self.heights[index] = height;
                 changed = true;
@@ -1782,6 +1835,35 @@ mod tests {
         assert_eq!(order, vec!["a", "c", "b"]);
         raise_to_front(&mut order, "b");
         assert_eq!(order, vec!["a", "c", "b"]);
+    }
+
+    #[test]
+    fn card_content_rect_subtracts_header_ports_and_padding() {
+        let card = Rect {
+            pos: dvec2(100.0, 200.0),
+            size: dvec2(300.0, 220.0),
+        };
+        let content = card_content_rect(card, false, 2);
+        assert_eq!(content.pad_top, CARD_HEADER_H + 2.0 * PORT_ROW_H);
+        assert_eq!(content.pad_bottom, CARD_PAD);
+        assert_eq!(content.rect.pos, dvec2(114.0, 262.0));
+        assert_eq!(content.rect.size, dvec2(272.0, 144.0));
+
+        assert_eq!(card_content_rect(card, true, 0).rect, card);
+    }
+
+    #[test]
+    fn card_size_clamp_keeps_one_content_line() {
+        let min_height = CARD_HEADER_H + 2.0 * PORT_ROW_H + CARD_PAD + MIN_TEXT_LINE_H;
+        assert_eq!(min_card_height(false, 2), min_height);
+        assert_eq!(
+            clamp_card_size(dvec2(20.0, 20.0), false, 2),
+            dvec2(MIN_NODE_WIDTH, min_height)
+        );
+        assert_eq!(
+            clamp_card_size(dvec2(240.0, 180.0), false, 2),
+            dvec2(240.0, 180.0)
+        );
     }
 }
 
@@ -2082,13 +2164,21 @@ impl Widget for FlowCanvas {
                         ..
                     }) => {
                         let delta = (fm.abs - start) / s;
+                        let min_height = self
+                            .graph
+                            .as_ref()
+                            .and_then(|graph| graph.nodes.get(index))
+                            .map(|node| {
+                                min_card_height(Self::full_bleed(node), Self::port_rows(node))
+                            })
+                            .unwrap_or(MIN_TEXT_LINE_H);
                         self.drag = Some(Drag::Resize {
                             index,
                             start,
                             origin,
                             size: (
                                 (origin.0 + delta.x).max(MIN_NODE_WIDTH),
-                                (origin.1 + delta.y).max(MIN_NODE_HEIGHT),
+                                (origin.1 + delta.y).max(min_height),
                             ),
                         });
                     }

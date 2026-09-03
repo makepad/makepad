@@ -558,6 +558,48 @@ pub struct ValueImage {
     card_sized: bool,
 }
 
+const TEXT_SCROLL_MAX_HEIGHT: f64 = 160.0;
+
+fn card_height(sized: bool) -> Size {
+    if sized {
+        Size::fill()
+    } else {
+        Size::fit()
+    }
+}
+
+fn text_scroll_height(sized: bool) -> Size {
+    if sized {
+        Size::fill()
+    } else {
+        Size::Fit {
+            min: None,
+            max: Some(FitBound::Abs(TEXT_SCROLL_MAX_HEIGHT)),
+        }
+    }
+}
+
+fn set_view_ref_height(view: &ViewRef, cx: &mut Cx, height: Size) {
+    let mut walk = view.walk(cx);
+    walk.height = height;
+    view.set_walk(cx, walk);
+}
+
+fn set_image_card_layout(image: &ImageRef, cx: &mut Cx, sized: bool) {
+    let mut walk = image.walk(cx);
+    walk.width = Size::fill();
+    walk.height = card_height(sized);
+    image.set_walk_and_fit(
+        cx,
+        walk,
+        if sized {
+            ImageFit::Smallest
+        } else {
+            ImageFit::Horizontal
+        },
+    );
+}
+
 fn empty_note(ty: PortType) -> &'static str {
     match ty {
         PortType::Image => "no picture yet",
@@ -607,20 +649,17 @@ impl ValueImage {
             return;
         }
         self.card_sized = sized;
-        let mut image = self.view.image(cx, ids!(image));
-        if sized {
-            script_apply_eval!(cx, image, {
-                width: Fill
-                height: Fill
-                fit: ImageFit.Smallest
-            });
-        } else {
-            script_apply_eval!(cx, image, {
-                width: Fill
-                height: Fit
-                fit: ImageFit.Horizontal
-            });
-        }
+        self.view.walk.height = card_height(sized);
+        set_image_card_layout(&self.view.image(cx, ids!(image)), cx, sized);
+        set_view_ref_height(
+            &self.view.view(cx, ids!(empty)),
+            cx,
+            if sized {
+                Size::fill()
+            } else {
+                Size::Fixed(150.0)
+            },
+        );
         self.view.redraw(cx);
     }
 
@@ -667,6 +706,8 @@ pub struct ValueText {
     view: View,
     #[rust]
     value: String,
+    #[rust]
+    card_sized: bool,
 }
 
 impl Widget for ValueText {
@@ -683,6 +724,22 @@ impl Widget for ValueText {
     }
     fn text(&self) -> String {
         self.value.clone()
+    }
+}
+
+impl ValueText {
+    fn set_card_sized(&mut self, cx: &mut Cx, sized: bool) {
+        if self.card_sized == sized {
+            return;
+        }
+        self.card_sized = sized;
+        self.view.walk.height = card_height(sized);
+        set_view_ref_height(
+            &self.view.view(cx, ids!(text_scroll)),
+            cx,
+            text_scroll_height(sized),
+        );
+        self.view.redraw(cx);
     }
 }
 
@@ -731,20 +788,22 @@ impl ValueView {
             return;
         }
         self.card_sized = sized;
-        let mut image = self.view.image(cx, ids!(image));
-        if sized {
-            script_apply_eval!(cx, image, {
-                width: Fill
-                height: Fill
-                fit: ImageFit.Smallest
-            });
-        } else {
-            script_apply_eval!(cx, image, {
-                width: Fill
-                height: Fit
-                fit: ImageFit.Horizontal
-            });
-        }
+        self.view.walk.height = card_height(sized);
+        set_image_card_layout(&self.view.image(cx, ids!(image)), cx, sized);
+        set_view_ref_height(
+            &self.view.view(cx, ids!(empty)),
+            cx,
+            if sized {
+                Size::fill()
+            } else {
+                Size::Fixed(150.0)
+            },
+        );
+        set_view_ref_height(
+            &self.view.view(cx, ids!(text_scroll)),
+            cx,
+            text_scroll_height(sized),
+        );
         self.view.redraw(cx);
     }
 
@@ -850,20 +909,28 @@ impl FormatPicker {
         let (height_min, height_max, height_step) = options.height_range;
         self.width_range = options.width_range;
         self.height_range = options.height_range;
-        let mut width = self.view.fab_value_input(cx, ids!(w_field));
-        script_apply_eval!(cx, width, {
-            min: #(width_min)
-            max: #(width_max)
-            step: #((width_step * 0.125).max(1.0))
-            snap: #(width_step)
-        });
-        let mut height = self.view.fab_value_input(cx, ids!(h_field));
-        script_apply_eval!(cx, height, {
-            min: #(height_min)
-            max: #(height_max)
-            step: #((height_step * 0.125).max(1.0))
-            snap: #(height_step)
-        });
+        if let Some(mut width) = self
+            .view
+            .fab_value_input(cx, ids!(w_field))
+            .borrow_mut()
+        {
+            width.set_hint(
+                Some(width_min),
+                Some(width_max),
+                Some((width_step * 0.125).max(1.0)),
+            );
+        }
+        if let Some(mut height) = self
+            .view
+            .fab_value_input(cx, ids!(h_field))
+            .borrow_mut()
+        {
+            height.set_hint(
+                Some(height_min),
+                Some(height_max),
+                Some((height_step * 0.125).max(1.0)),
+            );
+        }
         self.view.set_visible(cx, dimensions.is_some());
         if let Some((width, height)) = dimensions {
             self.set_dimensions(cx, width, height);
@@ -1405,6 +1472,7 @@ pub struct MountedFace {
     pub format_pickers: Vec<WidgetRef>,
     pub dropdowns: Vec<WidgetRef>,
     text_scrolls: Vec<WidgetRef>,
+    flexible_roots: Vec<WidgetRef>,
     card_sized: bool,
     /// Ask controls are staged until this explicit button is pressed.
     pub answer_button: Option<WidgetRef>,
@@ -1442,6 +1510,21 @@ pub struct FaceHost {
     pending_stream_scrolls: HashSet<WidgetUid>,
 }
 
+fn is_text_scroll(
+    vm: &ScriptVm<'_>,
+    widget: &WidgetRef,
+    text_scroll_proto: Option<ScriptObject>,
+) -> bool {
+    text_scroll_proto.is_some_and(|prototype| {
+        let source = widget.script_source();
+        source != ScriptObject::ZERO
+            && vm
+                .construction_chain(source.into())
+                .iter()
+                .any(|level| level.object == prototype)
+    })
+}
+
 fn collect_widgets(
     vm: &ScriptVm<'_>,
     root: &WidgetRef,
@@ -1452,14 +1535,7 @@ fn collect_widgets(
     if root.is_empty() {
         return;
     }
-    let is_text_scroll = text_scroll_proto.is_some_and(|prototype| {
-        let source = root.script_source();
-        source != ScriptObject::ZERO
-            && vm
-                .construction_chain(source.into())
-                .iter()
-                .any(|level| level.object == prototype)
-    });
+    let is_text_scroll = is_text_scroll(vm, root, text_scroll_proto);
     let enclosing_scroll = if is_text_scroll {
         Some(root.clone())
     } else {
@@ -1475,6 +1551,44 @@ fn collect_widgets(
             out,
         )
     });
+}
+
+/// Collect the outermost flexible item in each branch. Value widgets own
+/// their internal image/scroll layout, so their descendants must not compete
+/// with the wrapper for the face's remaining height.
+fn collect_flexible_roots(
+    vm: &ScriptVm<'_>,
+    root: &WidgetRef,
+    text_scroll_proto: Option<ScriptObject>,
+    out: &mut Vec<WidgetRef>,
+) {
+    if root.is_empty() {
+        return;
+    }
+    if root.borrow::<ValueImage>().is_some()
+        || root.borrow::<ValueText>().is_some()
+        || root.borrow::<ValueView>().is_some()
+        || is_text_scroll(vm, root, text_scroll_proto)
+    {
+        out.push(root.clone());
+        return;
+    }
+    root.children(&mut |_, child| {
+        collect_flexible_roots(vm, &child, text_scroll_proto, out)
+    });
+}
+
+fn set_flexible_card_layout(widget: &WidgetRef, cx: &mut Cx, sized: bool) {
+    if let Some(mut image) = widget.borrow_mut::<ValueImage>() {
+        image.set_card_sized(cx, sized);
+    } else if let Some(mut text) = widget.borrow_mut::<ValueText>() {
+        text.set_card_sized(cx, sized);
+    } else if let Some(mut value) = widget.borrow_mut::<ValueView>() {
+        value.set_card_sized(cx, sized);
+    } else if let Some(mut scroll) = widget.borrow_mut::<View>() {
+        scroll.walk.height = text_scroll_height(sized);
+        scroll.redraw(cx);
+    }
 }
 
 fn subtree_owns_area(root: &WidgetRef, cx: &Cx, area: Area) -> bool {
@@ -1874,6 +1988,7 @@ impl FaceHost {
                 .and_then(|value| value.as_object());
             let mut widgets = Vec::new();
             collect_widgets(vm, &root, text_scroll_proto, None, &mut widgets);
+            collect_flexible_roots(vm, &root, text_scroll_proto, &mut face.flexible_roots);
             if graph_node.as_ref().is_some_and(|node| node.kind == "ask") {
                 let button = root.child(live_id!(answer_button));
                 if button.borrow::<Button>().is_some() {
@@ -2020,26 +2135,19 @@ impl FaceHost {
         let Some(face) = self.faces.get_mut(node) else {
             return;
         };
-        for show in &face.shows {
-            if let Some(mut image) = show.widget.borrow_mut::<ValueImage>() {
-                image.set_card_sized(cx, card_sized);
-            } else if let Some(mut value) = show.widget.borrow_mut::<ValueView>() {
-                value.set_card_sized(cx, card_sized);
-            }
-        }
         if face.card_sized != card_sized {
             face.card_sized = card_sized;
-            for scroll in &face.text_scrolls {
-                let Some(mut scroll) = scroll.borrow_mut::<View>() else {
-                    continue;
-                };
-                if card_sized {
-                    script_apply_eval!(cx, scroll, {height: Fill});
-                } else {
-                    script_apply_eval!(cx, scroll, {
-                        height: Fit{max: FitBound.Abs(160)}
-                    });
-                }
+            if let Some(mut root) = face.root.borrow_mut::<View>() {
+                root.walk.height = card_height(card_sized);
+                root.redraw(cx);
+            }
+            let last_flexible = face.flexible_roots.last().map(WidgetRef::widget_uid);
+            for flexible in &face.flexible_roots {
+                set_flexible_card_layout(
+                    flexible,
+                    cx,
+                    card_sized && Some(flexible.widget_uid()) == last_flexible,
+                );
             }
         }
         let root = face.root.clone();
@@ -3246,6 +3354,44 @@ Flow{llm function http ask output}
                 .count(),
             1
         );
+        host.free(&mut cx);
+    }
+
+    #[test]
+    fn card_sized_picture_uses_typed_fill_layout_without_script_eval() {
+        let source = include_str!("../../../libs/flow/recipes/templates/prompt-to-image.splash");
+        let graph = makepad_flow::graph::evaluate(source, "<typed-picture-size>").unwrap();
+        let catalog = makepad_flow::graph::prelude_catalog().unwrap();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        let host = FaceHost::mount(
+            &mut cx,
+            WidgetUid(0),
+            "test",
+            "<typed-picture-size>",
+            source,
+            &graph,
+            &catalog,
+        );
+        let preview = host.faces["image"].root.child(live_id!(preview));
+        let empty = preview.child(live_id!(empty));
+        let image = preview.child(live_id!(image));
+        cx.with_vm(|vm| vm.bx.captured_errors = Some(Vec::new()));
+
+        preview
+            .borrow_mut::<ValueImage>()
+            .unwrap()
+            .set_card_sized(&mut cx, true);
+
+        assert!(preview.walk(&mut cx).height.is_fill());
+        assert!(empty.walk(&mut cx).height.is_fill());
+        assert!(image.walk(&mut cx).width.is_fill());
+        assert!(image.walk(&mut cx).height.is_fill());
+        assert!(matches!(
+            image.borrow::<Image>().unwrap().fit(),
+            ImageFit::Smallest
+        ));
+        assert!(cx.with_vm(|vm| vm.take_errors()).is_empty());
         host.free(&mut cx);
     }
 
