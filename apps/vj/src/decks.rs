@@ -664,6 +664,28 @@ pub const EXT_RESEEK_BEATS: f64 = 0.25;
 /// stops a follower whose grid is wrong from refusing to land forever.
 pub const RELAND_BEATS: f64 = 32.0;
 
+/// Where a deck is in whatever it is counting, for the indicator beside
+/// its tempo.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DeckPulse {
+    /// Counts in the lap: four for a bar, the loop's length in beats for a
+    /// running loop, one for a loop shorter than a beat.
+    pub span_beats: u32,
+    /// Which count was crossed last, from 0.
+    pub index: u32,
+    /// How far past it the record is, in [0, 1).
+    pub phase: f64,
+    /// How fast the record is travelling and which way, as a multiple of
+    /// its own tempo. Carried unclamped: a spin-back is four times speed
+    /// and a throw can be five, and an indicator counting at one would be
+    /// wrong during exactly the gestures worth watching.
+    pub travel: f32,
+    /// Whether the beats being counted were measured. False means the
+    /// synthetic grid is being counted -- a beat is a second -- and the
+    /// indicator says so by burning lower rather than by lying.
+    pub measured: bool,
+}
+
 /// A follower being walked back to the phase a released record left.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Reland {
@@ -1285,6 +1307,73 @@ impl DeckState {
 
     pub fn effective_bpm(&self) -> Option<f64> {
         self.true_grid().map(|grid| grid.effective_bpm(self.rate))
+    }
+
+    /// Where this deck is in its count, given a playhead and how the
+    /// record is travelling.
+    ///
+    /// The position is an ARGUMENT and `self.position_secs` is deliberately
+    /// never read here: that mirror is refreshed at the pump's cadence, and
+    /// an indicator drawn from it would stutter a fifth of a second behind
+    /// the record. The caller passes what the mixer just published.
+    ///
+    /// Pure and clock-free, like everything else in this module: the
+    /// caller turns the answer into a time.
+    pub fn pulse_at(&self, position_secs: f64, travel: f32) -> Option<DeckPulse> {
+        if !self.is_loaded() || !position_secs.is_finite() {
+            return None;
+        }
+        let beat_len = self.counted_beat_secs();
+        if !(beat_len > 0.0) {
+            return None;
+        }
+        let measured = self.has_true_beats();
+        // A loop is the lap, and it counts from its own IN -- that is what
+        // the wrap is modulo, so counting from the track's downbeat would
+        // count something that is not sounding.
+        let (span_beats, beats) = match self.loop_span.filter(|_| self.loop_on()) {
+            Some(span) => {
+                let len = span.len_secs();
+                let beats = (len / beat_len).round();
+                if !(beats >= 1.0) {
+                    // Every rung below a beat rounds to no beats at all, so
+                    // the whole lap is the count.
+                    let lap = ((position_secs - span.start_secs) / len).rem_euclid(1.0);
+                    return Some(Self::pulse(1, lap, travel, measured));
+                }
+                (beats as u32, (position_secs - span.start_secs) / beat_len)
+            }
+            None => {
+                let beats = match self.true_grid() {
+                    // `beat_at` answers 0.0 for a grid with no beats, so the
+                    // synthetic count cannot go through it.
+                    Some(grid) => grid.beat_at(position_secs) + grid.downbeat_phase as f64,
+                    None => position_secs / beat_len,
+                };
+                (4, beats)
+            }
+        };
+        Some(Self::pulse(span_beats, beats, travel, measured))
+    }
+
+    /// One count out of a continuous coordinate: which one was crossed
+    /// last, and how far past it the record is.
+    ///
+    /// Backwards the record crosses each count from ABOVE, so the count
+    /// just passed is the one ahead and the phase runs the other way --
+    /// which is a ceiling rather than a floor, and lands exactly ON a
+    /// count without stepping past it.
+    fn pulse(span_beats: u32, beats: f64, travel: f32, measured: bool) -> DeckPulse {
+        let span = span_beats.max(1);
+        let edge = if travel < 0.0 { beats.ceil() } else { beats.floor() };
+        let phase = (beats - edge).abs();
+        DeckPulse {
+            span_beats: span,
+            index: (edge as i64).rem_euclid(span as i64) as u32,
+            phase: phase.clamp(0.0, 1.0),
+            travel,
+            measured,
+        }
     }
 
     /// The tempo the record is turning at THIS instant, gesture and all.
@@ -5734,6 +5823,83 @@ mod tests {
         e.play_pause(DeckId::B);
         e.set_crossfader(0.0);
         assert_eq!(e.sync_leader(), Some(DeckId::A));
+    }
+
+    /// A deck with a grid, playing forward, counts the bar it is in.
+    #[test]
+    fn a_deck_counts_the_bar_it_is_in() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0); // beats every 0.5 s
+        // Two and a quarter beats in: the third count of the bar, a
+        // quarter of the way through it.
+        let pulse = e.deck(DeckId::A).pulse_at(1.125, 1.0).expect("a pulse");
+        assert_eq!(pulse.span_beats, 4);
+        assert_eq!(pulse.index, 2);
+        assert!((pulse.phase - 0.25).abs() < 1e-9, "{}", pulse.phase);
+        assert!(pulse.measured);
+        // An empty deck has nothing to count.
+        assert!(DeckEngine::new().deck(DeckId::A).pulse_at(1.0, 1.0).is_none());
+    }
+
+    /// A record nothing has measured still counts: a beat is a second, and
+    /// the pulse says so rather than pretending.
+    #[test]
+    fn an_unmeasured_record_counts_seconds_and_says_so() {
+        let mut e = DeckEngine::new();
+        load_unanalysed(&mut e, DeckId::A, 1);
+        let pulse = e.deck(DeckId::A).pulse_at(2.5, 1.0).expect("a pulse");
+        assert_eq!(pulse.span_beats, 4);
+        assert_eq!(pulse.index, 2);
+        assert!((pulse.phase - 0.5).abs() < 1e-9);
+        assert!(!pulse.measured, "and the LED burns lower for it");
+    }
+
+    /// A loop is the lap, not the bar: the count anchors on the loop's IN,
+    /// because that is what the wrap is modulo.
+    #[test]
+    fn a_running_loop_counts_its_own_length_from_its_own_in() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        e.deck_mut(DeckId::A).loop_span = Some(LoopSpan { start_secs: 10.1, end_secs: 11.1 });
+        // Two beats long, anchored a tenth of a second off the grid.
+        let pulse = e.deck(DeckId::A).pulse_at(10.85, 1.0).expect("a pulse");
+        assert_eq!(pulse.span_beats, 2);
+        assert_eq!(pulse.index, 1);
+        assert!((pulse.phase - 0.5).abs() < 1e-9, "{}", pulse.phase);
+    }
+
+    /// Every rung below a beat rounds to no beats at all, so the whole lap
+    /// is the count.
+    #[test]
+    fn a_sub_beat_loop_counts_one_pulse_a_lap() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        e.deck_mut(DeckId::A).loop_span = Some(LoopSpan { start_secs: 10.0, end_secs: 10.125 });
+        let pulse = e.deck(DeckId::A).pulse_at(10.09375, 1.0).expect("a pulse");
+        assert_eq!(pulse.span_beats, 1);
+        assert_eq!(pulse.index, 0);
+        assert!((pulse.phase - 0.75).abs() < 1e-9, "{}", pulse.phase);
+    }
+
+    /// Backwards, the record crosses each count from above: the count just
+    /// passed is the one ahead, and the phase runs the other way.
+    #[test]
+    fn a_record_running_backwards_counts_down() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        let forward = e.deck(DeckId::A).pulse_at(1.125, 1.0).expect("a pulse");
+        let back = e.deck(DeckId::A).pulse_at(1.125, -1.6).expect("a pulse");
+        assert_eq!(forward.index, 2);
+        assert_eq!(back.index, 3, "the count just crossed is the one ahead");
+        assert!((back.phase - 0.75).abs() < 1e-9, "{}", back.phase);
+        assert_eq!(back.travel, -1.6, "carried unclamped: a spin-back is fast");
+
+        // Exactly ON a count, backwards, is that count: the record has
+        // just arrived at it from above, so the mirrored phase wraps to
+        // zero rather than reaching one.
+        let on = e.deck(DeckId::A).pulse_at(1.0, -1.0).expect("a pulse");
+        assert_eq!(on.phase, 0.0);
+        assert_eq!(on.index, 2);
     }
 
     #[test]

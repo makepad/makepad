@@ -3380,6 +3380,8 @@ struct DeckRefs {
     stem_labels: Vec<ButtonRef>,
     /// The transcript panel filling the bottom of the deck column.
     lyrics: WidgetRef,
+    /// The count indicator in the deck head.
+    beat: WidgetRef,
 }
 
 impl DeckRefs {
@@ -3401,6 +3403,7 @@ impl DeckRefs {
             loop_button: ui.button(cx, ids.loop_button),
             stem_state_btn: ui.button(cx, ids.stem_mix),
             kar_title: ui.button(cx, ids.kar_title),
+            beat: ui.widget(cx, ids.beat),
             loop_halve: ui.button(cx, ids.loop_halve),
             loop_double: ui.button(cx, ids.loop_double),
             beat_back: ui.button(cx, ids.beat_back),
@@ -3501,6 +3504,8 @@ struct MusicDeckIds {
     loop_len: &'static [LiveId],
     /// This deck's QUANT chip: the unit is the deck's, not the console's.
     snap: &'static [LiveId],
+    /// The count indicator beside this deck's tempo.
+    beat: &'static [LiveId],
     play: &'static [LiveId],
     /// The deck's own retire button. NOT `deck_a_eject`: that id belongs
     /// to the video console's ×, and a duplicated id resolves to whichever
@@ -3561,6 +3566,7 @@ impl MusicDeckIds {
                 range: ids!(deck_a_range),
                 loop_len: ids!(deck_a_loop_len),
                 snap: ids!(music_snap_a),
+                beat: ids!(deck_a_beat),
                 play: ids!(deck_a_play),
                 retire: ids!(deck_a_retire),
                 cue: ids!(deck_a_cue),
@@ -3646,6 +3652,7 @@ impl MusicDeckIds {
                 range: ids!(deck_b_range),
                 loop_len: ids!(deck_b_loop_len),
                 snap: ids!(music_snap_b),
+                beat: ids!(deck_b_beat),
                 play: ids!(deck_b_play),
                 retire: ids!(deck_b_retire),
                 cue: ids!(deck_b_cue),
@@ -5277,6 +5284,43 @@ fn resolve_clock_source(
         (_, false, true) => ClockSource::Detector,
         _ => ClockSource::None,
     }
+}
+
+/// One deck's count, as the indicator beside its tempo draws it.
+///
+/// The reference is fixed and the widget resolves the phase at draw time,
+/// so nothing is animated on this side. `None` when the record is not
+/// moving: a live reference on a stopped deck would hold the app awake
+/// re-arming a frame for a count that never comes.
+fn deck_beat_ref(
+    pulse: crate::decks::DeckPulse,
+    beat_secs: f64,
+    now_secs: f64,
+) -> Option<views::BeatRef> {
+    let speed = pulse.travel.abs() as f64;
+    // A hand holding a record dead still is "scratching" and travelling at
+    // nothing: its next count is hours away and would never arrive.
+    if !(speed > 1e-3) || !(beat_secs > 0.0) {
+        return None;
+    }
+    let period_secs = beat_secs / speed;
+    let span = pulse.span_beats.max(1);
+    // Backwards the next count is the one BEHIND, and the index has to say
+    // so: the widget steps from this reference in whichever direction
+    // `travel` names, and reading forward from a backward reference would
+    // accent a count two ahead of the one that just sounded.
+    let next_index = match pulse.travel < 0.0 {
+        true => (pulse.index + span - 1) % span,
+        false => (pulse.index + 1) % span,
+    };
+    Some(views::BeatRef {
+        next_beat_secs: now_secs + (1.0 - pulse.phase) * period_secs,
+        period_secs,
+        next_index,
+        bar_beats: span,
+        coasting: !pulse.measured,
+        travel: pulse.travel,
+    })
 }
 
 /// Whether the house clock should still be disciplined from this source.
@@ -11551,6 +11595,7 @@ p2 {}
                 next_index: beat.beat_index as u32,
                 bar_beats: BAR_BEATS as u32,
                 coasting: self.beat_clock.coasting(),
+                travel: 1.0,
             }
         });
         snap.wave.unroll(&mut self.wave_cols);
@@ -22321,6 +22366,11 @@ p2 {}
         if !self.ensure_music_refs(cx) {
             return;
         }
+        // Also from here, not only from the display-cadence pump: that pump
+        // stops being scheduled the moment nothing is moving, and a deck
+        // left holding a live reference would go on asking for frames
+        // forever, counting a record that has stopped.
+        self.push_deck_beats(cx);
         let levels = self.mixer.deck_levels();
         for deck in [DeckId::A, DeckId::B] {
             let index = deck.index();
@@ -26166,6 +26216,7 @@ p2 {}
     /// is on a record, so a scratch tracks at the display's rate rather
     /// than the console's poll rate.
     fn pump_music_frame(&mut self, cx: &mut Cx) {
+        self.push_deck_beats(cx);
         self.push_wave_positions(cx);
         self.push_phones_playhead(cx);
         self.track_crossfade(cx);
@@ -26200,6 +26251,35 @@ p2 {}
 
     /// Fresh playheads into the lanes, and nothing else: this runs at
     /// display cadence during a scratch, so it stays uniform-only work.
+    /// Feed each deck's count indicator from what the mixer just
+    /// published. One snapshot read per deck, the same single-read
+    /// discipline the paint pass keeps.
+    fn push_deck_beats(&mut self, cx: &mut Cx) {
+        let now_secs = cx.seconds_since_app_start();
+        for deck in [DeckId::A, DeckId::B] {
+            let snapshot = self.mixer.deck_snapshot(deck);
+            let beat_ref = match snapshot.playing || snapshot.scratching {
+                false => None,
+                true => self
+                    .decks
+                    .deck(deck)
+                    .pulse_at(snapshot.position_secs, snapshot.platter_rate as f32)
+                    .and_then(|pulse| {
+                        deck_beat_ref(
+                            pulse,
+                            self.decks.deck(deck).counted_beat_secs(),
+                            now_secs,
+                        )
+                    }),
+            };
+            let widget = self.music_refs.decks[deck.index()].beat.clone();
+            if let Some(mut led) = widget.borrow_mut::<views::VjBeatLed>() {
+                led.set_beat(cx, beat_ref);
+            }
+            drop(widget);
+        }
+    }
+
     fn push_wave_positions(&mut self, cx: &mut Cx) {
         for deck in [DeckId::A, DeckId::B] {
             let position = self.mixer.deck_snapshot(deck).position_secs;
@@ -29503,6 +29583,7 @@ mod sync_tests {
             next_index: beat.beat_index as u32,
             bar_beats: BAR_BEATS as u32,
             coasting: false,
+            travel: 1.0,
         };
         let (since, index) = led.at(10.0);
         assert!(since < 1e-9, "the tap itself is a beat: {since}");
@@ -29600,6 +29681,43 @@ mod sync_tests {
         assert_eq!(frame_at(2.0 - 1e-9), 7);
     }
 
+    /// The whole path, in both directions: a deck's pulse becomes a
+    /// reference, and the widget resolving that reference lands back on
+    /// the count that just sounded. Read forward from a backward
+    /// reference, the LED would accent a count two ahead of it.
+    #[test]
+    fn the_indicator_lands_on_the_count_that_just_sounded_either_way() {
+        for travel in [1.0f32, -1.0] {
+            for index in 0..4u32 {
+                let pulse = crate::decks::DeckPulse {
+                    span_beats: 4,
+                    index,
+                    phase: 0.3,
+                    travel,
+                    measured: true,
+                };
+                let led = deck_beat_ref(pulse, 0.5, 10.0).expect("a reference");
+                let (since, at) = led.at(10.0);
+                assert_eq!(at, index, "travel {travel}, count {index}");
+                assert!((since - 0.3 * 0.5).abs() < 1e-9, "{since}");
+            }
+        }
+    }
+
+    /// A record held dead still counts nothing: a reference whose next
+    /// count is hours away would hold the app awake asking for frames.
+    #[test]
+    fn a_record_that_is_not_moving_has_no_count() {
+        let pulse = crate::decks::DeckPulse {
+            span_beats: 4,
+            index: 1,
+            phase: 0.0,
+            travel: 0.0,
+            measured: true,
+        };
+        assert!(deck_beat_ref(pulse, 0.5, 10.0).is_none());
+    }
+
     #[test]
     fn a_beat_reference_resolves_the_phase_between_beats() {
         let led = views::BeatRef {
@@ -29608,6 +29726,7 @@ mod sync_tests {
             next_index: 0,
             bar_beats: BAR_BEATS as u32,
             coasting: false,
+            travel: 1.0,
         };
         // Half a beat before the one: the LED is dark and counting beat four.
         let (since, index) = led.at(3.75);

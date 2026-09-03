@@ -1817,6 +1817,17 @@ script_mod! {
                     }
                     deck_a_pitch_text := MusicLabel{text: "+0.0%"}
                 }
+                // The count, beside the tempo it is counting. Its own
+                // batch: the LED resolves its phase at draw time and
+                // redraws every frame, and the head's title, art, tempo
+                // and time must not be dragged along at that cadence.
+                View{
+                    width: Fit
+                    height: Fit
+                    new_batch: true
+                    align: Align{x: 0.5, y: 0.5}
+                    deck_a_beat := VjBeatLed{width: 18 height: 22}
+                }
                 deck_a_key := KeyReadout{text: "—"}
                 deck_a_time := MusicLabel{width: 78 text: "0:00 / 0:00"}
             }
@@ -1865,6 +1876,17 @@ script_mod! {
                 }
                 deck_b_time := MusicLabel{width: 78 text: "0:00 / 0:00"}
                 deck_b_key := KeyReadout{text: "—"}
+                // The count, beside the tempo it is counting. Its own
+                // batch: the LED resolves its phase at draw time and
+                // redraws every frame, and the head's title, art, tempo
+                // and time must not be dragged along at that cadence.
+                View{
+                    width: Fit
+                    height: Fit
+                    new_batch: true
+                    align: Align{x: 0.5, y: 0.5}
+                    deck_b_beat := VjBeatLed{width: 18 height: 22}
+                }
                 View{
                     width: Fit
                     height: Fit

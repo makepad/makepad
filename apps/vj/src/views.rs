@@ -2278,6 +2278,9 @@ pub struct BeatRef {
     /// The clock is flying on its own — no confident source behind it. It
     /// keeps the beat; the LED says so by burning lower.
     pub coasting: bool,
+    /// Which way the counts are being crossed: negative for a record
+    /// running backwards. The room's own clock only ever runs forward.
+    pub travel: f32,
 }
 
 impl BeatRef {
@@ -2291,8 +2294,12 @@ impl BeatRef {
         // boundary must read as ON that beat, not a whole beat behind it.
         let beats = (now - self.next_beat_secs) / self.period_secs;
         let n = (beats + 1e-9).floor();
+        // Time since the last crossing is the same quantity whichever way
+        // it was crossed; WHICH count it was is not, so only the index
+        // takes the sign. Forward is bit-identical to what it always was.
+        let step = if self.travel < 0.0 { -n } else { n };
         let since = now - (self.next_beat_secs + n * self.period_secs);
-        let index = (self.next_index as f64 + n).rem_euclid(bar) as u32;
+        let index = (self.next_index as f64 + step).rem_euclid(bar) as u32;
         (since.max(0.0), index)
     }
 
