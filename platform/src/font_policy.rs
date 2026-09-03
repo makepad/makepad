@@ -60,6 +60,68 @@ pub enum FontRole {
     Icons,
 }
 
+/// A large fallback family that is available to the Latin/UI set but loaded
+/// only after shaping proves that the currently loaded faces miss a glyph.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum LazyFontFamily {
+    Cjk,
+    Emoji,
+}
+
+impl LazyFontFamily {
+    pub fn contains(self, ch: char) -> bool {
+        let code = ch as u32;
+        match self {
+            Self::Cjk => {
+                !Self::Emoji.contains(ch)
+                    && matches!(
+                        code,
+                        0x2E80..=0x2FFF
+                            | 0x3000..=0x303F
+                            | 0x3040..=0x30FF
+                            | 0x3100..=0x31BF
+                            | 0x31C0..=0x31EF
+                            | 0x31F0..=0x31FF
+                            | 0x3200..=0x4DBF
+                            | 0x4E00..=0x9FFF
+                            | 0xAC00..=0xD7AF
+                            | 0xF900..=0xFAFF
+                            | 0x20000..=0x2FA1F
+                    )
+            }
+            Self::Emoji => matches!(
+                code,
+                0x00A9 | 0x00AE | 0x203C | 0x2049 | 0x20E3 | 0x2122 | 0x2139
+                    | 0x231A..=0x231B
+                    | 0x23E9..=0x23F3
+                    | 0x23F8..=0x23FA
+                    | 0x25AA..=0x25AB
+                    | 0x25B6
+                    | 0x25C0
+                    | 0x25FB..=0x25FE
+                    | 0x2600..=0x27BF
+                    | 0x2934..=0x2935
+                    | 0x2B05..=0x2B07
+                    | 0x2B1B..=0x2B1C
+                    | 0x2B50
+                    | 0x2B55
+                    | 0x3030
+                    | 0x303D
+                    | 0x3297
+                    | 0x3299
+                    | 0xFE0F
+                    | 0x1F000..=0x1FAFF
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LazyFontAsset {
+    pub family: LazyFontFamily,
+    pub asset: FontAsset,
+}
+
 impl FontRole {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -123,6 +185,45 @@ impl FontPolicy {
     pub const fn manifest_bytes(&self) -> &'static [u8] {
         self.set.manifest_bytes()
     }
+
+    /// Large fallback members registered with a Latin/UI family but excluded
+    /// from its eager asset set and manifest.
+    pub const fn lazy_chain(&self, role: FontRole) -> &'static [LazyFontAsset] {
+        if !matches!(self.set, FontSet::Latin) {
+            return NO_LAZY_FONTS;
+        }
+        match role {
+            FontRole::Regular | FontRole::Italic => LATIN_LAZY_REGULAR,
+            FontRole::Bold | FontRole::BoldItalic => LATIN_LAZY_BOLD,
+            FontRole::Monospace | FontRole::Icons => NO_LAZY_FONTS,
+        }
+    }
+
+    pub fn declares_asset_path(&self, path: &str) -> bool {
+        let mut index = 0;
+        while index < self.assets.len() {
+            if bytes_equal(self.assets[index].resource_path.as_bytes(), path.as_bytes()) {
+                return true;
+            }
+            index += 1;
+        }
+        for role in [
+            FontRole::Regular,
+            FontRole::Bold,
+            FontRole::Italic,
+            FontRole::BoldItalic,
+        ] {
+            let lazy = self.lazy_chain(role);
+            index = 0;
+            while index < lazy.len() {
+                if bytes_equal(lazy[index].asset.resource_path.as_bytes(), path.as_bytes()) {
+                    return true;
+                }
+                index += 1;
+            }
+        }
+        false
+    }
 }
 
 const IBM_PLEX_TEXT: FontAsset = FontAsset {
@@ -174,6 +275,13 @@ const JETBRAINS_UI_SYMBOLS: FontAsset = FontAsset {
     descender: 0.0,
     weight: 0.0,
 };
+const NOTO_SANS_REGULAR: FontAsset = FontAsset {
+    id: "noto_sans_regular",
+    resource_path: "makepad_widgets/resources/NotoSans-Regular.ttf",
+    ascender: 0.0,
+    descender: 0.0,
+    weight: 0.0,
+};
 const LXGW_REGULAR: FontAsset = FontAsset {
     id: "lxgw_wenkai_regular",
     resource_path: "makepad_widgets/resources/LXGWWenKaiRegular.ttf",
@@ -201,12 +309,26 @@ const NOTO_COLOR_EMOJI: FontAsset = FontAsset {
 /// the draw crate freezes both the license and required cmap in a test.
 pub const UI_SYMBOL_FALLBACK: Option<FontAsset> = Some(JETBRAINS_UI_SYMBOLS);
 
-const LATIN_REGULAR: &[FontAsset] = &[IBM_PLEX_TEXT, JETBRAINS_UI_SYMBOLS];
-const LATIN_BOLD: &[FontAsset] = &[IBM_PLEX_SEMIBOLD, JETBRAINS_UI_SYMBOLS];
-const LATIN_ITALIC: &[FontAsset] = &[IBM_PLEX_ITALIC, JETBRAINS_UI_SYMBOLS];
-const LATIN_BOLD_ITALIC: &[FontAsset] = &[IBM_PLEX_BOLD_ITALIC, JETBRAINS_UI_SYMBOLS];
+const LATIN_REGULAR: &[FontAsset] = &[IBM_PLEX_TEXT, NOTO_SANS_REGULAR, JETBRAINS_UI_SYMBOLS];
+const LATIN_BOLD: &[FontAsset] = &[IBM_PLEX_SEMIBOLD, NOTO_SANS_REGULAR, JETBRAINS_UI_SYMBOLS];
+const LATIN_ITALIC: &[FontAsset] = &[IBM_PLEX_ITALIC, NOTO_SANS_REGULAR, JETBRAINS_UI_SYMBOLS];
+const LATIN_BOLD_ITALIC: &[FontAsset] = &[
+    IBM_PLEX_BOLD_ITALIC,
+    NOTO_SANS_REGULAR,
+    JETBRAINS_UI_SYMBOLS,
+];
 const MONOSPACE: &[FontAsset] = &[LIBERATION_MONO];
 const ICONS: &[FontAsset] = &[FONT_AWESOME];
+
+const NO_LAZY_FONTS: &[LazyFontAsset] = &[];
+const LATIN_LAZY_REGULAR: &[LazyFontAsset] = &[
+    LazyFontAsset { family: LazyFontFamily::Cjk, asset: LXGW_REGULAR },
+    LazyFontAsset { family: LazyFontFamily::Emoji, asset: NOTO_COLOR_EMOJI },
+];
+const LATIN_LAZY_BOLD: &[LazyFontAsset] = &[
+    LazyFontAsset { family: LazyFontFamily::Cjk, asset: LXGW_BOLD },
+    LazyFontAsset { family: LazyFontFamily::Emoji, asset: NOTO_COLOR_EMOJI },
+];
 
 const INTERNATIONAL_REGULAR: &[FontAsset] = &[IBM_PLEX_TEXT, LXGW_REGULAR, NOTO_COLOR_EMOJI];
 const INTERNATIONAL_BOLD: &[FontAsset] = &[IBM_PLEX_SEMIBOLD, LXGW_BOLD, NOTO_COLOR_EMOJI];
@@ -222,6 +344,7 @@ const LATIN_ASSETS: &[FontAsset] = &[
     LIBERATION_MONO,
     FONT_AWESOME,
     JETBRAINS_UI_SYMBOLS,
+    NOTO_SANS_REGULAR,
 ];
 const INTERNATIONAL_ASSETS: &[FontAsset] = &[
     IBM_PLEX_TEXT,
@@ -257,7 +380,20 @@ const INTERNATIONAL_POLICY: FontPolicy = FontPolicy {
     assets: INTERNATIONAL_ASSETS,
 };
 
-pub const LATIN_FONT_ASSET_MANIFEST: &[u8; 432] = b"format=makepad.font-assets.v1\nset=Latin\nasset=makepad_widgets/resources/IBMPlexSans-Text.ttf\nasset=makepad_widgets/resources/IBMPlexSans-SemiBold.ttf\nasset=makepad_widgets/resources/IBMPlexSans-Italic.ttf\nasset=makepad_widgets/resources/IBMPlexSans-BoldItalic.ttf\nasset=makepad_widgets/resources/LiberationMono-Regular.ttf\nasset=makepad_widgets/resources/fa-solid-900.ttf\nasset=makepad_widgets/resources/jetbrains_mono_variable.ttf\n";
+pub const LATIN_FONT_ASSET_MANIFEST: &[u8; 485] = b"format=makepad.font-assets.v1\nset=Latin\nasset=makepad_widgets/resources/IBMPlexSans-Text.ttf\nasset=makepad_widgets/resources/IBMPlexSans-SemiBold.ttf\nasset=makepad_widgets/resources/IBMPlexSans-Italic.ttf\nasset=makepad_widgets/resources/IBMPlexSans-BoldItalic.ttf\nasset=makepad_widgets/resources/LiberationMono-Regular.ttf\nasset=makepad_widgets/resources/fa-solid-900.ttf\nasset=makepad_widgets/resources/jetbrains_mono_variable.ttf\nasset=makepad_widgets/resources/NotoSans-Regular.ttf\n";
+
+/// The wasm/package payload for the Latin/UI runtime set. The final three
+/// files remain distributable assets, but are not members of the eager Latin
+/// manifest above and are fetched/read only after a glyph miss.
+const LATIN_LAZY_PACKAGE_ASSETS: &[&str] = &[
+    LXGW_REGULAR.resource_path,
+    LXGW_BOLD.resource_path,
+    NOTO_COLOR_EMOJI.resource_path,
+];
+const LATIN_PACKAGE_MANIFEST_LEN: usize =
+    font_asset_manifest_len(LATIN_FONT_ASSET_MANIFEST, LATIN_LAZY_PACKAGE_ASSETS);
+pub const LATIN_FONT_ASSET_PACKAGE_MANIFEST: &[u8; LATIN_PACKAGE_MANIFEST_LEN] =
+    &extend_font_asset_manifest(LATIN_FONT_ASSET_MANIFEST, LATIN_LAZY_PACKAGE_ASSETS);
 
 pub const INTERNATIONAL_FONT_ASSET_MANIFEST: &[u8; 536] = b"format=makepad.font-assets.v1\nset=International\nasset=makepad_widgets/resources/IBMPlexSans-Text.ttf\nasset=makepad_widgets/resources/IBMPlexSans-SemiBold.ttf\nasset=makepad_widgets/resources/IBMPlexSans-Italic.ttf\nasset=makepad_widgets/resources/IBMPlexSans-BoldItalic.ttf\nasset=makepad_widgets/resources/LiberationMono-Regular.ttf\nasset=makepad_widgets/resources/fa-solid-900.ttf\nasset=makepad_widgets/resources/LXGWWenKaiRegular.ttf\nasset=makepad_widgets/resources/LXGWWenKaiBold.ttf\nasset=makepad_widgets/resources/NotoColorEmoji.ttf\n";
 
@@ -396,17 +532,26 @@ mod tests {
     #[test]
     fn policy_construction_has_ordered_latin_and_international_chains() {
         let latin = FontSet::Latin.policy();
-        assert_eq!(latin.regular.members, &[IBM_PLEX_TEXT, JETBRAINS_UI_SYMBOLS]);
-        assert_eq!(latin.bold.members, &[IBM_PLEX_SEMIBOLD, JETBRAINS_UI_SYMBOLS]);
+        assert_eq!(
+            latin.regular.members,
+            &[IBM_PLEX_TEXT, NOTO_SANS_REGULAR, JETBRAINS_UI_SYMBOLS]
+        );
+        assert_eq!(
+            latin.bold.members,
+            &[IBM_PLEX_SEMIBOLD, NOTO_SANS_REGULAR, JETBRAINS_UI_SYMBOLS]
+        );
         assert_eq!(latin.monospace.members, &[LIBERATION_MONO]);
         assert_eq!(latin.icons.members, &[FONT_AWESOME]);
         assert_eq!(UI_SYMBOL_FALLBACK, Some(JETBRAINS_UI_SYMBOLS));
+        assert_eq!(latin.lazy_chain(FontRole::Regular), LATIN_LAZY_REGULAR);
+        assert_eq!(latin.lazy_chain(FontRole::Bold), LATIN_LAZY_BOLD);
 
         let international = FontSet::International.policy();
         assert_eq!(international.regular.members, INTERNATIONAL_REGULAR);
         assert_eq!(international.bold.members, INTERNATIONAL_BOLD);
         assert_eq!(international.italic.members, INTERNATIONAL_ITALIC);
         assert_eq!(international.bold_italic.members, INTERNATIONAL_BOLD_ITALIC);
+        assert!(international.lazy_chain(FontRole::Regular).is_empty());
         assert_eq!(international.monospace, latin.monospace);
         assert_eq!(international.icons, latin.icons);
     }
@@ -486,6 +631,14 @@ mod tests {
         assert!(!manifest.contains("LXGW"));
         assert!(!manifest.contains("NotoColorEmoji"));
         assert!(!manifest.contains("GoNoto"));
+    }
+
+    #[test]
+    fn latin_package_keeps_lazy_international_assets() {
+        let manifest = std::str::from_utf8(LATIN_FONT_ASSET_PACKAGE_MANIFEST).unwrap();
+        assert!(manifest.contains("LXGWWenKaiRegular.ttf"));
+        assert!(manifest.contains("LXGWWenKaiBold.ttf"));
+        assert!(manifest.contains("NotoColorEmoji.ttf"));
     }
 
     #[test]

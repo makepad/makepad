@@ -1,4 +1,6 @@
-pub use crate::makepad_platform::{FontAsset, FontChain, FontPolicy, FontRole, FontSet};
+pub use crate::makepad_platform::{
+    FontAsset, FontChain, FontPolicy, FontRole, FontSet, LazyFontAsset, LazyFontFamily,
+};
 use crate::makepad_platform::{
     id, LiveId, NoTrap, ScriptApply, ScriptMod, ScriptValue, ScriptVm, ScriptVmCx,
 };
@@ -53,6 +55,50 @@ fn family_value(
             member,
             id!(weight).into(),
             (asset.weight as f64).into(),
+            NoTrap,
+        );
+        let member_id = LiveId::from_str_with_lut(asset.id)
+            .unwrap_or_else(|_| LiveId::from_str(asset.id));
+        vm.bx
+            .heap
+            .vec_push(family, member_id.into(), member.into(), NoTrap);
+    }
+    for lazy in set.policy().lazy_chain(chain.role) {
+        let asset = lazy.asset;
+        let member = vm.bx.heap.new_with_proto(member_proto);
+        let resource = crate::makepad_platform::script::res::register_crate_resource_path(
+            vm,
+            asset.resource_path,
+        );
+        vm.bx
+            .heap
+            .set_value(member, id!(res).into(), resource, NoTrap);
+        vm.bx.heap.set_value(
+            member,
+            id!(asc).into(),
+            (asset.ascender as f64).into(),
+            NoTrap,
+        );
+        vm.bx.heap.set_value(
+            member,
+            id!(desc).into(),
+            (asset.descender as f64).into(),
+            NoTrap,
+        );
+        vm.bx.heap.set_value(
+            member,
+            id!(weight).into(),
+            (asset.weight as f64).into(),
+            NoTrap,
+        );
+        let lazy_family = match lazy.family {
+            LazyFontFamily::Cjk => 1.0,
+            LazyFontFamily::Emoji => 2.0,
+        };
+        vm.bx.heap.set_value(
+            member,
+            id!(lazy).into(),
+            lazy_family.into(),
             NoTrap,
         );
         let member_id = LiveId::from_str_with_lut(asset.id)
@@ -155,7 +201,7 @@ mod tests {
     fn platform_policy_is_the_widgets_theme_contract() {
         assert_eq!(FontSet::Latin.policy().regular.role, FontRole::Regular);
         assert_eq!(FontSet::International.policy().icons.role, FontRole::Icons);
-        assert_eq!(FontSet::Latin.policy().regular.members.len(), 2);
+        assert_eq!(FontSet::Latin.policy().regular.members.len(), 3);
         assert_eq!(FontSet::International.policy().regular.members.len(), 3);
         assert_eq!(
             FontSet::International.policy().regular.members[2].id,
@@ -192,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn theme_registers_only_the_selected_policy_font_handles() {
+    fn theme_registers_selected_and_lazy_policy_font_handles() {
         for set in [FontSet::Latin, FontSet::International] {
             let mut expected = set
                 .policy()
@@ -200,7 +246,21 @@ mod tests {
                 .iter()
                 .map(|asset| asset.resource_path.to_string())
                 .collect::<Vec<_>>();
+            for role in [
+                FontRole::Regular,
+                FontRole::Bold,
+                FontRole::Italic,
+                FontRole::BoldItalic,
+            ] {
+                expected.extend(
+                    set.policy()
+                        .lazy_chain(role)
+                        .iter()
+                        .map(|lazy| lazy.asset.resource_path.to_string()),
+                );
+            }
             expected.sort();
+            expected.dedup();
             assert_eq!(registered_font_paths(set), expected);
         }
     }

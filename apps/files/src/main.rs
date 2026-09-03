@@ -82,7 +82,7 @@ mod no_chat {
     }
 }
 
-app_main!(App, font_set: International);
+app_main!(App);
 
 script_mod! {
     use mod.prelude.widgets.*

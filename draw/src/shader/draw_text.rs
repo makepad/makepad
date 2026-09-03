@@ -2729,7 +2729,7 @@ impl DrawText {
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         let mut fonts = fonts.borrow_mut();
 
-        fonts.get_or_layout(BorrowedLayoutParams {
+        let laidout = fonts.get_or_layout(BorrowedLayoutParams {
             text,
             style: Style {
                 font_family_id: self.text_style.font_family.to_font_family_id(),
@@ -2750,7 +2750,19 @@ impl DrawText {
                 },
                 ellipsis: self.text_overflow == TextOverflow::Ellipsis,
             },
-        })
+        });
+        drop(fonts);
+        let has_missing_glyph = laidout
+            .rows
+            .iter()
+            .flat_map(|row| &row.glyphs)
+            .any(|glyph| glyph.id == 0);
+        self.text_style.font_family.request_lazy_fonts_for_glyph_miss(
+            cx,
+            text,
+            has_missing_glyph,
+        );
+        laidout
     }
 
     fn draw_text(&mut self, cx: &mut Cx2d, origin_in_lpxs: Point<f32>, text: &LaidoutText) {
@@ -3426,6 +3438,10 @@ pub struct FontMember {
     /// Positive values map to the OpenType `wght` axis. `0.0` keeps the font default.
     #[live(0.0)]
     pub weight: f32,
+    /// `1` = CJK and `2` = emoji. These members are requested only after a
+    /// real glyph miss; zero keeps the ordinary eager behavior.
+    #[live(0.0)]
+    pub lazy: f32,
 }
 
 #[derive(Debug, Clone, Script, PartialEq)]
@@ -3447,6 +3463,7 @@ pub struct FontMemberDef {
     asc: f32,
     desc: f32,
     weight: f32,
+    lazy: Option<LazyFontFamily>,
 }
 
 impl FontFamily {
@@ -3461,14 +3478,25 @@ impl FontFamily {
 
     fn update_font_definitions(&self, cx: &mut Cx, fonts: &mut Fonts) {
         let mut font_ids = Vec::new();
+        let mut expected_member_count = 0;
+        let family_id = self.to_font_family_id();
 
         for member in &self.members {
+            if let Some(lazy) = member.lazy {
+                if !fonts.lazy_font_is_requested(family_id, lazy) {
+                    continue;
+                }
+            }
+            expected_member_count += 1;
             let font_id = font_member_font_id(member);
 
             if !fonts.is_font_known(font_id) {
                 let font_data = cx.get_resource_font_bytes(member.handle);
 
                 if let Some(data) = font_data {
+                    if let Some(family) = member.lazy {
+                        log!("lazy font family loaded: {:?} ({})", family, member.id);
+                    }
                     fonts.define_font(
                         font_id,
                         FontDefinition {
@@ -3489,14 +3517,23 @@ impl FontFamily {
         }
 
         fonts.set_font_family_definition(
-            self.to_font_family_id(),
+            family_id,
             FontFamilyDefinition {
                 font_ids,
-                expected_member_count: self.members.len(),
+                expected_member_count,
                 diagnostics: FontDiagnostics {
                     role: self.diagnostic_role.clone(),
                     set: self.diagnostic_set.clone(),
-                    tried: self.members.iter().map(|member| member.id.clone()).collect(),
+                    tried: self
+                        .members
+                        .iter()
+                        .filter(|member| {
+                            member
+                                .lazy
+                                .map_or(true, |lazy| fonts.lazy_font_is_requested(family_id, lazy))
+                        })
+                        .map(|member| member.id.clone())
+                        .collect(),
                 },
             },
         );
@@ -3507,26 +3544,87 @@ impl FontFamily {
 
         let family_id = self.to_font_family_id();
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
+        let expected_member_count = {
+            let fonts_ref = fonts.borrow();
+            self.members
+                .iter()
+                .filter(|member| {
+                    member
+                        .lazy
+                        .map_or(true, |lazy| fonts_ref.lazy_font_is_requested(family_id, lazy))
+                })
+                .count()
+        };
 
         {
             let fonts_ref = fonts.borrow();
-            if fonts_ref.is_font_family_complete(family_id) {
+            if fonts_ref.is_font_family_complete(family_id, expected_member_count) {
                 return;
             }
         }
 
-        for member in &self.members {
-            cx.load_script_resource(member.handle);
+        let handles = {
+            let fonts_ref = fonts.borrow();
+            self.members
+                .iter()
+                .filter(|member| {
+                    member
+                        .lazy
+                        .map_or(true, |lazy| fonts_ref.lazy_font_is_requested(family_id, lazy))
+                })
+                .map(|member| member.handle)
+                .collect::<Vec<_>>()
+        };
+        for handle in handles {
+            cx.load_script_resource(handle);
         }
         {
             let fonts_ref = fonts.borrow();
-            if fonts_ref.is_font_family_complete(family_id) {
+            if fonts_ref.is_font_family_complete(family_id, expected_member_count) {
                 return;
             }
         }
 
         let mut fonts_ref = fonts.borrow_mut();
         self.update_font_definitions(cx, &mut fonts_ref);
+    }
+
+    fn request_lazy_fonts_for_glyph_miss(
+        &self,
+        cx: &mut Cx,
+        text: &str,
+        has_missing_glyph: bool,
+    ) {
+        let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
+        let family_id = self.to_font_family_id();
+        let handles = {
+            let mut fonts_ref = fonts.borrow_mut();
+            self.members
+                .iter()
+                .filter_map(|member| {
+                    let family = member.lazy?;
+                    fonts_ref
+                        .take_lazy_font_request(
+                            family_id,
+                            family,
+                            text,
+                            has_missing_glyph,
+                        )
+                        .then_some(member.handle)
+                })
+                .collect::<Vec<_>>()
+        };
+        if handles.is_empty() {
+            return;
+        }
+        for handle in handles {
+            cx.load_script_resource(handle);
+        }
+
+        self.update_font_definitions(cx, &mut fonts.borrow_mut());
+        // Native file reads may have completed above; wasm will redraw again
+        // when the HTTP response populates the resource.
+        cx.redraw_all();
     }
 }
 
@@ -3617,6 +3715,11 @@ impl ScriptHook for FontFamily {
                     asc: member.asc,
                     desc: member.desc,
                     weight: member.weight,
+                    lazy: match member.lazy as u32 {
+                        1 => Some(LazyFontFamily::Cjk),
+                        2 => Some(LazyFontFamily::Emoji),
+                        _ => None,
+                    },
                 });
             }
         }

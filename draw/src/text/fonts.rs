@@ -10,8 +10,32 @@ use {
         slug_atlas::{SlugAtlas, SlugGlyphCacheResult},
     },
     crate::makepad_platform::*,
+    fxhash::FxHashSet,
     std::{cell::RefCell, mem::ManuallyDrop, rc::Rc},
 };
+
+#[derive(Default)]
+struct LazyFontRequests {
+    requested: FxHashSet<(FontFamilyId, LazyFontFamily)>,
+}
+
+impl LazyFontRequests {
+    fn take_for_glyph_miss(
+        &mut self,
+        family_id: FontFamilyId,
+        lazy_family: LazyFontFamily,
+        text: &str,
+        has_missing_glyph: bool,
+    ) -> bool {
+        has_missing_glyph
+            && text.chars().any(|ch| lazy_family.contains(ch))
+            && self.requested.insert((family_id, lazy_family))
+    }
+
+    fn contains(&self, family_id: FontFamilyId, lazy_family: LazyFontFamily) -> bool {
+        self.requested.contains(&(family_id, lazy_family))
+    }
+}
 
 fn default_slug_new_glyphs_per_redraw(cx: &Cx) -> usize {
     match cx.os_type() {
@@ -31,6 +55,7 @@ fn default_slug_min_dpxs_per_em(cx: &Cx, rasterizer: &Rasterizer) -> f32 {
 
 pub struct Fonts {
     layouter: Layouter,
+    lazy_font_requests: LazyFontRequests,
     needs_prepare_atlases: bool,
     atlas_texture: Texture,
     slug_atlas: SlugAtlas,
@@ -86,6 +111,7 @@ impl Fonts {
 
         Self {
             layouter,
+            lazy_font_requests: Default::default(),
             needs_prepare_atlases: false,
             atlas_texture: Texture::new_with_format(
                 cx,
@@ -199,12 +225,38 @@ impl Fonts {
         self.layouter.is_font_family_known(id)
     }
 
-    pub fn is_font_family_complete(&self, id: FontFamilyId) -> bool {
+    pub(crate) fn lazy_font_is_requested(
+        &self,
+        id: FontFamilyId,
+        family: LazyFontFamily,
+    ) -> bool {
+        self.lazy_font_requests.contains(id, family)
+    }
+
+    pub(crate) fn take_lazy_font_request(
+        &mut self,
+        id: FontFamilyId,
+        family: LazyFontFamily,
+        text: &str,
+        has_missing_glyph: bool,
+    ) -> bool {
+        self.lazy_font_requests
+            .take_for_glyph_miss(id, family, text, has_missing_glyph)
+    }
+
+    pub fn is_font_family_complete(
+        &self,
+        id: FontFamilyId,
+        expected_member_count: usize,
+    ) -> bool {
         self.layouter
             .loader
             .font_family_definitions
             .get(&id)
-            .map(|def| def.font_ids.len() == def.expected_member_count)
+            .map(|def| {
+                def.expected_member_count == expected_member_count
+                    && def.font_ids.len() == expected_member_count
+            })
             .unwrap_or(false)
     }
 
@@ -338,4 +390,49 @@ fn u32_vec_into_bgra(vec: Vec<u32>) -> Vec<Bgra> {
     // `Bgra` is `#[repr(transparent)]` over `u32`, so element layout matches exactly.
     // We preserve the same pointer/len/cap and only reinterpret the element type.
     unsafe { Vec::from_raw_parts(vec.as_mut_ptr().cast::<Bgra>(), vec.len(), vec.capacity()) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LazyFontRequests;
+    use crate::{
+        makepad_platform::LazyFontFamily,
+        text::font_family::FontFamilyId,
+    };
+
+    #[test]
+    fn glyph_miss_requests_each_lazy_family_once() {
+        let family_id: FontFamilyId = 0xFA17_u64.into();
+        let mut requests = LazyFontRequests::default();
+        assert!(!requests.take_for_glyph_miss(
+            family_id,
+            LazyFontFamily::Cjk,
+            "\u{4f60}",
+            false,
+        ));
+        assert!(requests.take_for_glyph_miss(
+            family_id,
+            LazyFontFamily::Cjk,
+            "\u{4f60}",
+            true,
+        ));
+        assert!(!requests.take_for_glyph_miss(
+            family_id,
+            LazyFontFamily::Cjk,
+            "\u{597d}",
+            true,
+        ));
+        assert!(requests.take_for_glyph_miss(
+            family_id,
+            LazyFontFamily::Emoji,
+            "\u{1f600}",
+            true,
+        ));
+        assert!(!requests.take_for_glyph_miss(
+            family_id,
+            LazyFontFamily::Emoji,
+            "\u{1f680}",
+            true,
+        ));
+    }
 }

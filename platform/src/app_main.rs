@@ -351,24 +351,24 @@ pub fn new_cx_with_font_set(
 macro_rules! app_main {
     ( $app:ident ) => {
         #[cfg(target_arch = "wasm32")]
-        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_MANIFEST, []);
+        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_PACKAGE_MANIFEST, []);
         #[cfg(not(target_arch = "wasm32"))]
         $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST, []);
     };
     ( $app:ident, font_assets: [$($asset:literal),* $(,)?] ) => {
         #[cfg(target_arch = "wasm32")]
-        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_MANIFEST, [$($asset),*]);
+        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_PACKAGE_MANIFEST, [$($asset),*]);
         #[cfg(not(target_arch = "wasm32"))]
         $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST, [$($asset),*]);
     };
     ( $app:ident, font_set: Latin ) => {
-        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_MANIFEST, []);
+        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_PACKAGE_MANIFEST, []);
     };
     ( $app:ident, font_set: International ) => {
         $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST, []);
     };
     ( $app:ident, font_set: Latin, font_assets: [$($asset:literal),* $(,)?] ) => {
-        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_MANIFEST, [$($asset),*]);
+        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_PACKAGE_MANIFEST, [$($asset),*]);
     };
     ( $app:ident, font_set: International, font_assets: [$($asset:literal),* $(,)?] ) => {
         $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST, [$($asset),*]);

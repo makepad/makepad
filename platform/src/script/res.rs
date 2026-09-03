@@ -371,11 +371,7 @@ fn font_policy_declares_path(font_set: crate::FontSet, dependency_path: Option<&
     let Some(dependency_path) = dependency_path else {
         return false;
     };
-    font_set
-        .policy()
-        .assets
-        .iter()
-        .any(|asset| asset.resource_path == dependency_path)
+    font_set.policy().declares_asset_path(dependency_path)
 }
 
 impl Cx {
@@ -590,7 +586,7 @@ mod tests {
             crate::FontSet::Latin,
             Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
         ));
-        assert!(!font_policy_declares_path(
+        assert!(font_policy_declares_path(
             crate::FontSet::Latin,
             Some("makepad_widgets/resources/LXGWWenKaiRegular.ttf")
         ));
