@@ -297,6 +297,26 @@ export class WasmBridge {
         return Date.now() / 1000.0;
     }
 
+    // A phone-class browser: the tab is killed near 1 GiB total on iOS and
+    // much lower on many Android devices, so the wasm heap gets a 512 MiB
+    // maximum and Cx a 320 MiB working budget (ToWasmInit.browser_info.is_phone).
+    static is_phone() {
+        try {
+            const nav = navigator;
+            if (typeof nav.deviceMemory === "number" && nav.deviceMemory <= 4) {
+                return true;
+            }
+            if (/Android|iPhone|iPad|iPod|Mobile/i.test(nav.userAgent || "")) {
+                return true;
+            }
+            const touch = (nav.maxTouchPoints || 0) > 0;
+            const short_side = Math.min(screen.width || 0, screen.height || 0);
+            return touch && short_side > 0 && short_side <= 900;
+        } catch (_e) {
+            return false;
+        }
+    }
+
     static create_shared_memory(limits) {
         let timeout = setTimeout(_ => {
             document.body.innerHTML = "<div style='margin-top:30px;margin-left:30px; color:white;'>Please close and re-open the browsertab - Shared memory allocation failed, this is a bug of iOS safari and apple needs to fix it.</div>"
@@ -307,7 +327,8 @@ export class WasmBridge {
         const declared_max = (limits && typeof limits.max === "number") ? limits.max : null;
         let mem = null;
         let used_maximum = null;
-        for (const candidate of [65536, 32768, 16384]) {
+        const candidates = this.is_phone() ? [8192, 4096] : [65536, 32768, 16384];
+        for (const candidate of candidates) {
             const maximum = declared_max != null ? Math.min(declared_max, candidate) : candidate;
             if (maximum < initial) {
                 continue;

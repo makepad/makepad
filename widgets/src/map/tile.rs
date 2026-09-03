@@ -3258,7 +3258,8 @@ fn merge_overlay_features(
     points: &mut Vec<((f32, f32), TagSet)>,
     ways: &mut Vec<TileWay>,
 ) -> Result<(), String> {
-    let pbf_data = decode_vector_tile_payload(&overlay.raw)?;
+    let raw = overlay.raw.decode()?;
+    let pbf_data = decode_vector_tile_payload(&raw)?;
     let mut collector = MvtLocalCollector::new(render_scale);
     parse_mvt_tile(&pbf_data, tile_key, &mut collector)?;
     let scale = (1u32 << overlay.shift) as f32;
@@ -8751,7 +8752,8 @@ fn project_way_points_with_nodes(
 /// the ancestor shift (0 = exact zoom) and the quadrant offsets that map the
 /// ancestor's local space into this tile's.
 pub struct OverlayTileData {
-    pub raw: std::sync::Arc<[u8]>,
+    /// Decoded on the bake job (`TileBlob::decode`), never on the UI thread.
+    pub raw: super::archive::TileBlob,
     pub shift: u32,
     pub quadrant_x: u32,
     pub quadrant_y: u32,

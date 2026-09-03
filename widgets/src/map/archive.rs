@@ -1,6 +1,6 @@
 use super::geometry::TileKey;
 use crate::makepad_draw::*;
-use makepad_mbtile_reader::{mkmap_tile_id, BlobRef, MkmapLeaf, MkmapRoot};
+use makepad_mbtile_reader::{mkmap_tile_id, BlobRef, LeafParseLimits, MkmapLeaf, MkmapRoot};
 use makepad_platform::archive_cache::ArchiveCacheStore;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -11,9 +11,16 @@ use std::sync::{Arc, Mutex};
 
 const LEAF_CACHE_CAPACITY: usize = 32;
 const LEAF_CACHE_BYTE_CAPACITY: usize = 64 * 1024 * 1024;
+/// A leaf directory too large for the leaf budget is decoded as a window
+/// around the waiting tiles' ids, widened by this much on each side so a pan
+/// keeps hitting the kept entries (ids are Hilbert-ordered per zoom band).
+const LEAF_WINDOW_MARGIN_IDS: u64 = 1 << 18;
 const FILE_CACHE_CAPACITY: usize = 8;
 const MAX_ARCHIVE_WAITERS: usize = 64;
 const MAX_ARCHIVE_IN_FLIGHT_BYTES: u64 = 64 * 1024 * 1024;
+/// The in-flight floor a budget cannot push below: one leaf directory of a
+/// hosted overlay is 8 MiB packed and must still be readable.
+const MIN_ARCHIVE_IN_FLIGHT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ROOT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RANGE_BYTES: u64 = 64 * 1024 * 1024;
 const HTTP_RANGE_CACHE_BYTE_CAPACITY: usize = 64 * 1024 * 1024;
@@ -135,6 +142,12 @@ pub trait ByteSource {
         tile_key: Option<TileKey>,
     );
     fn reprioritize(&mut self, _token: ReadToken, _priority: u64, _tile_key: TileKey) {}
+    /// Bytes this source retains in memory (range/root caches).
+    fn cache_bytes(&self) -> usize {
+        0
+    }
+    /// Ceiling for the source's in-memory caches; a ceiling, not a target.
+    fn set_cache_budget(&mut self, _bytes: usize) {}
     fn flush(&mut self, _cx: &mut Cx) {}
     fn cancel(&mut self, cx: &mut Cx, token: ReadToken);
     fn poll(&mut self, cx: &mut Cx, event: &Event) -> Vec<ReadCompletion>;
@@ -462,6 +475,7 @@ pub struct HttpRangeByteSource {
     root_cache: Option<Arc<[u8]>>,
     range_cache: HashMap<HttpRangeKey, CachedHttpRange>,
     range_cache_bytes: usize,
+    range_cache_budget: usize,
     cache_clock: u64,
     priority_dirty: bool,
     disk_range_count: u64,
@@ -489,6 +503,7 @@ impl HttpRangeByteSource {
             root_cache: None,
             range_cache: HashMap::new(),
             range_cache_bytes: 0,
+            range_cache_budget: HTTP_RANGE_CACHE_BYTE_CAPACITY,
             cache_clock: 0,
             priority_dirty: false,
             disk_range_count: 0,
@@ -602,8 +617,24 @@ impl HttpRangeByteSource {
         }
     }
 
+    fn evict_ranges_to_budget(&mut self) {
+        while self.range_cache_bytes > self.range_cache_budget {
+            let Some(oldest) = self
+                .range_cache
+                .iter()
+                .min_by_key(|(_, cached)| cached.used)
+                .map(|(key, _)| *key)
+            else {
+                break;
+            };
+            if let Some(old) = self.range_cache.remove(&oldest) {
+                self.range_cache_bytes = self.range_cache_bytes.saturating_sub(old.bytes.len());
+            }
+        }
+    }
+
     fn cache_range(&mut self, key: HttpRangeKey, bytes: Arc<[u8]>) {
-        if bytes.len() > HTTP_RANGE_CACHE_BYTE_CAPACITY {
+        if bytes.len() > self.range_cache_budget {
             return;
         }
         self.cache_clock = self.cache_clock.wrapping_add(1);
@@ -617,19 +648,7 @@ impl HttpRangeByteSource {
             self.range_cache_bytes = self.range_cache_bytes.saturating_sub(old.bytes.len());
         }
         self.range_cache_bytes = self.range_cache_bytes.saturating_add(bytes.len());
-        while self.range_cache_bytes > HTTP_RANGE_CACHE_BYTE_CAPACITY {
-            let Some(oldest) = self
-                .range_cache
-                .iter()
-                .min_by_key(|(_, cached)| cached.used)
-                .map(|(key, _)| *key)
-            else {
-                break;
-            };
-            if let Some(old) = self.range_cache.remove(&oldest) {
-                self.range_cache_bytes = self.range_cache_bytes.saturating_sub(old.bytes.len());
-            }
-        }
+        self.evict_ranges_to_budget();
     }
 
     fn complete_network_read(
@@ -782,6 +801,16 @@ impl HttpRangeByteSource {
 }
 
 impl ByteSource for HttpRangeByteSource {
+    fn cache_bytes(&self) -> usize {
+        self.range_cache_bytes
+            .saturating_add(self.root_cache.as_ref().map_or(0, |root| root.len()))
+    }
+
+    fn set_cache_budget(&mut self, bytes: usize) {
+        self.range_cache_budget = bytes;
+        self.evict_ranges_to_budget();
+    }
+
     fn request_root(&mut self, cx: &mut Cx, token: ReadToken) {
         if let Some(bytes) = self.root_cache.as_ref() {
             self.ready.push_back(ReadCompletion {
@@ -1079,9 +1108,62 @@ fn validate_http_response(
         .unwrap_or_else(|| Arc::from([])))
 }
 
+/// A tile's bytes as the archive holds them: the shared packed blob plus the
+/// root that knows how to decode it. Decoding happens where the bytes are
+/// consumed (a bake or terrain job on the pool), so the tiles staged behind
+/// the bake slots hold no private decoded copy each.
+#[derive(Clone, Debug)]
+pub enum TileBlob {
+    Decoded(Arc<[u8]>),
+    Packed { bytes: Arc<[u8]>, root: Arc<MkmapRoot> },
+}
+
+impl TileBlob {
+    pub fn decode(&self) -> Result<Arc<[u8]>, String> {
+        match self {
+            Self::Decoded(bytes) => Ok(bytes.clone()),
+            Self::Packed { bytes, root } => root.decode_blob(bytes).map(Arc::from),
+        }
+    }
+
+    /// Bytes this handle keeps alive (shared with the range cache when packed).
+    pub fn held_len(&self) -> usize {
+        match self {
+            Self::Decoded(bytes) | Self::Packed { bytes, .. } => bytes.len(),
+        }
+    }
+}
+
+impl PartialEq for TileBlob {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Decoded(a), Self::Decoded(b)) => a == b,
+            (
+                Self::Packed { bytes: a, root: ra },
+                Self::Packed { bytes: b, root: rb },
+            ) => Arc::ptr_eq(ra, rb) && a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for TileBlob {}
+
+impl From<Vec<u8>> for TileBlob {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self::Decoded(Arc::from(bytes))
+    }
+}
+
+impl From<Arc<[u8]>> for TileBlob {
+    fn from(bytes: Arc<[u8]>) -> Self {
+        Self::Decoded(bytes)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TileBytesResult {
-    Bytes(Arc<[u8]>),
+    Bytes(TileBlob),
     Missing,
     Error(String),
 }
@@ -1117,6 +1199,12 @@ enum PendingRead {
         start_tile_id: u64,
         end_tile_id: u64,
         dir_len: u64,
+        /// The parse keeps at most this many entries; a larger directory is
+        /// kept only inside `window` (inclusive tile ids), of which `core`
+        /// is the span the waiting tiles need.
+        max_entries: usize,
+        window: (u64, u64),
+        core: (u64, u64),
     },
     Blob { generation: u64, blob: BlobRef },
 }
@@ -1148,7 +1236,7 @@ struct BlobInFlight {
 enum ProcessedRead {
     Root(Result<MkmapRoot, String>),
     Leaf(Result<MkmapLeaf, String>),
-    Blob(Result<Arc<[u8]>, String>),
+    Blob(Result<TileBlob, String>),
 }
 
 struct ProcessedCompletion {
@@ -1173,6 +1261,10 @@ pub struct TileArchive<S: ByteSource> {
     root_error: Option<String>,
     root_in_flight: Option<ReadToken>,
     leaves: HashMap<usize, CachedLeaf>,
+    leaf_cache_budget: usize,
+    /// Bytes of reads allowed in flight at once; bodies in transit are
+    /// memory too, so this follows the cache budget.
+    in_flight_limit: u64,
     leaf_lru_clock: u64,
     leaf_in_flight: HashMap<usize, ReadToken>,
     blob_in_flight: HashMap<BlobRef, BlobInFlight>,
@@ -1194,6 +1286,8 @@ impl<S: ByteSource> TileArchive<S> {
             root_error: None,
             root_in_flight: None,
             leaves: HashMap::new(),
+            leaf_cache_budget: LEAF_CACHE_BYTE_CAPACITY,
+            in_flight_limit: MAX_ARCHIVE_IN_FLIGHT_BYTES,
             leaf_lru_clock: 0,
             leaf_in_flight: HashMap::new(),
             blob_in_flight: HashMap::new(),
@@ -1203,6 +1297,28 @@ impl<S: ByteSource> TileArchive<S> {
             generation: None,
             in_flight_bytes: 0,
         }
+    }
+
+    /// Ceiling for what this archive keeps in memory beyond in-flight reads:
+    /// half for decoded leaves, half for the source's range cache. A ceiling
+    /// only; nothing fills it ahead of use.
+    pub fn set_cache_budget(&mut self, bytes: usize) {
+        self.leaf_cache_budget = bytes / 2;
+        self.source.set_cache_budget(bytes - bytes / 2);
+        self.in_flight_limit = (bytes as u64)
+            .max(MIN_ARCHIVE_IN_FLIGHT_BYTES)
+            .min(MAX_ARCHIVE_IN_FLIGHT_BYTES);
+        self.enforce_leaf_cache_bounds();
+    }
+
+    /// Bytes retained by the leaf cache, the source's caches and the root
+    /// record together.
+    pub fn memory_bytes(&self) -> usize {
+        self.leaves
+            .values()
+            .map(|cached| cached.leaf.retained_bytes())
+            .fold(0usize, usize::saturating_add)
+            .saturating_add(self.source.cache_bytes())
     }
 
     pub fn zoom_range(&self) -> Option<(u32, u32)> {
@@ -1349,20 +1465,44 @@ impl<S: ByteSource> TileArchive<S> {
                 let result = match pending {
                     PendingRead::Root { .. } => ProcessedRead::Root(MkmapRoot::parse(&bytes)),
                     PendingRead::Leaf {
+                        index,
                         shard_count,
                         start_tile_id,
                         end_tile_id,
+                        max_entries,
+                        window,
+                        core,
                         ..
-                    } => ProcessedRead::Leaf(MkmapLeaf::parse_for_root(
-                        &bytes,
-                        shard_count,
-                        start_tile_id,
-                        end_tile_id,
-                    )),
+                    } => ProcessedRead::Leaf(
+                        MkmapLeaf::parse_for_root_limited(
+                            &bytes,
+                            shard_count,
+                            start_tile_id,
+                            end_tile_id,
+                            LeafParseLimits {
+                                max_entries,
+                                window: Some(window),
+                                core: Some(core),
+                            },
+                        )
+                        .inspect(|leaf| {
+                            if leaf.is_partial() {
+                                log!(
+                                    "mkmap leaf {index}: directory exceeds the {max_entries}-entry \
+budget; kept {} entries for tile ids {}..={}",
+                                    leaf.len(),
+                                    window.0,
+                                    window.1
+                                );
+                            }
+                        }),
+                    ),
+                    // Not decoded here: the consumer decodes on its own pool
+                    // job, so a tile waiting for a bake slot costs only its
+                    // packed bytes (shared with the range cache).
                     PendingRead::Blob { .. } => ProcessedRead::Blob(
                         root.ok_or_else(|| "mkmap root disappeared".to_string())
-                            .and_then(|root| root.decode_blob(&bytes))
-                            .map(Arc::from),
+                            .map(|root| TileBlob::Packed { bytes, root }),
                     ),
                 };
                 let _ = sender.send(ProcessedCompletion { token, result });
@@ -1395,10 +1535,48 @@ impl<S: ByteSource> TileArchive<S> {
                         }
                     }
                 }
-                (PendingRead::Leaf { generation, index, .. }, ProcessedRead::Leaf(result)) => {
+                (
+                    PendingRead::Leaf {
+                        generation,
+                        index,
+                        core,
+                        ..
+                    },
+                    ProcessedRead::Leaf(result),
+                ) => {
                     self.leaf_in_flight.remove(&index);
                     match result {
-                        Ok(leaf) => self.insert_leaf(index, leaf),
+                        Ok(leaf) => {
+                            // A window that could not hold every id it was
+                            // asked for fails those waiters instead of
+                            // re-requesting the same window forever; ids
+                            // outside the requested core fall through to a
+                            // fresh request with their own window.
+                            let uncovered: Vec<TileKey> = self
+                                .waiters
+                                .iter()
+                                .filter(|(key, waiter)| {
+                                    waiter.stage == WaitStage::Leaf(index)
+                                        && tile_id_for_key(**key).is_some_and(|id| {
+                                            id >= core.0 && id <= core.1 && !leaf.covers(id)
+                                        })
+                                })
+                                .map(|(key, _)| *key)
+                                .collect();
+                            self.insert_leaf(index, leaf);
+                            for key in uncovered {
+                                if let Some(waiter) = self.waiters.get(&key).copied() {
+                                    self.finish(
+                                        key,
+                                        waiter.generation,
+                                        TileBytesResult::Error(
+                                            "mkmap leaf window exceeds the archive cache budget"
+                                                .to_string(),
+                                        ),
+                                    );
+                                }
+                            }
+                        }
                         Err(error) => self.fail_waiters(
                             generation,
                             |waiter| waiter.stage == WaitStage::Leaf(index),
@@ -1457,11 +1635,11 @@ impl<S: ByteSource> TileArchive<S> {
     }
 
     fn can_start_range(&self, len: u64) -> bool {
-        len <= MAX_ARCHIVE_IN_FLIGHT_BYTES
+        len <= self.in_flight_limit
             && self
                 .in_flight_bytes
                 .checked_add(len)
-                .is_some_and(|total| total <= MAX_ARCHIVE_IN_FLIGHT_BYTES)
+                .is_some_and(|total| total <= self.in_flight_limit)
     }
 
     fn insert_pending_read(&mut self, token: ReadToken, pending: PendingRead, byte_len: u64) {
@@ -1503,12 +1681,13 @@ impl<S: ByteSource> TileArchive<S> {
                 self.finish(key, waiter.generation, TileBytesResult::Missing);
                 continue;
             };
-            let cached = if let Some(cached) = self.leaves.get_mut(&record.index) {
-                self.leaf_lru_clock = self.leaf_lru_clock.wrapping_add(1);
-                cached.used = self.leaf_lru_clock;
-                Some(cached.leaf.find(tile_id))
-            } else {
-                None
+            let cached = match self.leaves.get_mut(&record.index) {
+                Some(cached) if cached.leaf.covers(tile_id) => {
+                    self.leaf_lru_clock = self.leaf_lru_clock.wrapping_add(1);
+                    cached.used = self.leaf_lru_clock;
+                    Some(cached.leaf.find(tile_id))
+                }
+                _ => None,
             };
             match cached {
                 Some(Some(blob)) => {
@@ -1553,6 +1732,7 @@ impl<S: ByteSource> TileArchive<S> {
                         self.reprioritize_waiter(key);
                     } else if self.can_start_range(record.dir_len) {
                         self.waiters.get_mut(&key).unwrap().stage = WaitStage::Leaf(record.index);
+                        let (window, core) = self.leaf_window_for_record(record.index, tile_id);
                         let token = next_archive_task_token();
                         self.leaf_in_flight.insert(record.index, token);
                         self.insert_pending_read(
@@ -1564,6 +1744,10 @@ impl<S: ByteSource> TileArchive<S> {
                                 start_tile_id: record.start_tile_id,
                                 end_tile_id: record.end_tile_id,
                                 dir_len: record.dir_len,
+                                max_entries: (self.leaf_cache_budget / MkmapLeaf::ENTRY_BYTES)
+                                    .max(1),
+                                window,
+                                core,
                             },
                             record.dir_len,
                         );
@@ -1580,6 +1764,33 @@ impl<S: ByteSource> TileArchive<S> {
                 }
             }
         }
+    }
+
+    /// The inclusive id spans a leaf parse must cover: the core is every
+    /// waiter that resolves to this root record, the window widens it by
+    /// `LEAF_WINDOW_MARGIN_IDS` on each side. Only consulted when the
+    /// directory is over the leaf budget; a whole directory ignores both.
+    fn leaf_window_for_record(&self, index: usize, tile_id: u64) -> ((u64, u64), (u64, u64)) {
+        let Some(root) = self.root.as_ref() else {
+            return ((tile_id, tile_id), (tile_id, tile_id));
+        };
+        let (mut lo, mut hi) = (tile_id, tile_id);
+        for key in self.waiters.keys() {
+            let Some(id) = tile_id_for_key(*key) else {
+                continue;
+            };
+            if root.locate(id).is_some_and(|record| record.index == index) {
+                lo = lo.min(id);
+                hi = hi.max(id);
+            }
+        }
+        (
+            (
+                lo.saturating_sub(LEAF_WINDOW_MARGIN_IDS),
+                hi.saturating_add(LEAF_WINDOW_MARGIN_IDS),
+            ),
+            (lo, hi),
+        )
     }
 
     fn insert_leaf(&mut self, index: usize, leaf: MkmapLeaf) {
@@ -1600,7 +1811,7 @@ impl<S: ByteSource> TileArchive<S> {
                 .values()
                 .map(|cached| cached.leaf.retained_bytes())
                 .sum::<usize>()
-                > LEAF_CACHE_BYTE_CAPACITY
+                > self.leaf_cache_budget
         {
             if let Some(oldest) = self
                 .leaves
@@ -1640,7 +1851,7 @@ impl<S: ByteSource> TileArchive<S> {
         &mut self,
         generation: u64,
         blob: BlobRef,
-        result: Result<Arc<[u8]>, String>,
+        result: Result<TileBlob, String>,
     ) {
         let Some(in_flight) = self.blob_in_flight.remove(&blob) else {
             return;
@@ -1857,6 +2068,20 @@ impl MapTileArchive {
         match self {
             Self::File(archive) => archive.reset_generation(cx, generation),
             Self::Http(archive) => archive.reset_generation(cx, generation),
+        }
+    }
+
+    pub fn memory_bytes(&self) -> usize {
+        match self {
+            Self::File(archive) => archive.memory_bytes(),
+            Self::Http(archive) => archive.memory_bytes(),
+        }
+    }
+
+    pub fn set_cache_budget(&mut self, bytes: usize) {
+        match self {
+            Self::File(archive) => archive.set_cache_budget(bytes),
+            Self::Http(archive) => archive.set_cache_budget(bytes),
         }
     }
 
@@ -2465,7 +2690,7 @@ mod tests {
         let blobs = done
             .iter()
             .map(|tile| match &tile.result {
-                TileBytesResult::Bytes(bytes) => bytes,
+                TileBytesResult::Bytes(TileBlob::Packed { bytes, .. }) => bytes,
                 result => panic!("unexpected tile result: {result:?}"),
             })
             .collect::<Vec<_>>();

@@ -139,7 +139,7 @@ pub use {
         audio::*,
         component::{ComponentInfo, ComponentRegistries, ComponentRegistry},
         cursor::MouseCursor,
-        cx::{Cx, CxRef, LinuxWindowParams, OsType},
+        cx::{Cx, CxMemoryReport, CxRef, LinuxWindowParams, OsType},
         cx_api::{AccessibilityUpdatePayload, CxOsApi, CxOsOp, CxThreadPriority, OpenUrlInPlace},
         display_context::{DisplayContext, SystemBarAppearance},
         font_policy::{

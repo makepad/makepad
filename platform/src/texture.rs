@@ -623,6 +623,26 @@ impl CxTexture {
 }
 
 impl TextureFormat {
+    /// CPU pixel bytes this format currently holds (capacity, not length).
+    pub(crate) fn cpu_data_bytes(&self) -> usize {
+        match self {
+            TextureFormat::VecBGRAu8_32 { data, .. }
+            | TextureFormat::VecCubeBGRAu8_32 { data, .. }
+            | TextureFormat::VecMipBGRAu8_32 { data, .. } => {
+                data.as_ref().map_or(0, |data| data.capacity().saturating_mul(4))
+            }
+            TextureFormat::VecMipRGBAf32 { data, .. }
+            | TextureFormat::VecRGBAf32 { data, .. }
+            | TextureFormat::VecRf32 { data, .. } => {
+                data.as_ref().map_or(0, |data| data.capacity().saturating_mul(4))
+            }
+            TextureFormat::VecRu8 { data, .. } | TextureFormat::VecRGu8 { data, .. } => {
+                data.as_ref().map_or(0, |data| data.capacity())
+            }
+            _ => 0,
+        }
+    }
+
     pub fn is_shared(&self) -> bool {
         match self {
             Self::SharedBGRAu8 { .. } => true,

@@ -665,7 +665,8 @@ export class WasmWebBrowser extends WasmBridge {
                 pathname: location.pathname + "",
                 search: location.search + "",
                 hash: location.hash + "",
-                has_thread_support: this.wasm._has_thread_support
+                has_thread_support: this.wasm._has_thread_support,
+                is_phone: WasmBridge.is_phone()
             },
             window_info: this.window_info,
         });

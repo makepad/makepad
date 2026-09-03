@@ -37,6 +37,14 @@ pub struct CxScriptResource {
 }
 
 impl CxScriptResource {
+    /// Bytes held by this resource once loaded; 0 while pending or failed.
+    pub fn loaded_len(&self) -> usize {
+        match &self.data {
+            CxScriptResourceData::Loaded(data) => data.len(),
+            _ => 0,
+        }
+    }
+
     pub fn is_error(&self) -> bool {
         matches!(self.data, CxScriptResourceData::Error(_))
     }

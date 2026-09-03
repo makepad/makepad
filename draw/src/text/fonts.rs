@@ -53,6 +53,12 @@ fn default_slug_min_dpxs_per_em(cx: &Cx, rasterizer: &Rasterizer) -> f32 {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FontsMemoryBytes {
+    pub atlas_bytes: usize,
+    pub layout_cache_bytes: usize,
+}
+
 pub struct Fonts {
     layouter: Layouter,
     lazy_font_requests: LazyFontRequests,
@@ -217,6 +223,22 @@ impl Fonts {
 
     /// Uploads any newly appended SLUG curve/band data immediately so draw calls
     /// in the current frame can see glyphs cached during the draw loop.
+    /// CPU bytes the text system holds: the glyph atlas pixels while the
+    /// atlas (not its texture) owns them, and the laid-out text cache. Font
+    /// file bytes are script resources and are counted by `Cx::memory_report`.
+    pub fn memory_bytes(&self) -> FontsMemoryBytes {
+        let rasterizer = self.layouter.rasterizer().borrow();
+        FontsMemoryBytes {
+            atlas_bytes: rasterizer
+                .color_atlas()
+                .image()
+                .as_pixels()
+                .len()
+                .saturating_mul(4),
+            layout_cache_bytes: self.layouter.cache_bytes(),
+        }
+    }
+
     pub fn flush_slug_textures(&mut self, cx: &mut Cx) -> bool {
         self.slug_atlas.prepare_textures(cx)
     }

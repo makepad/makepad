@@ -120,6 +120,17 @@ pub struct TerrainScratch {
 }
 
 impl TerrainScratch {
+    /// Bytes `with_capacity` reserves for these caps.
+    pub fn capacity_bytes(max_width: usize, max_height: usize) -> usize {
+        let pixels = max_width.saturating_mul(max_height);
+        let apron = max_width
+            .saturating_add(2)
+            .saturating_mul(max_height.saturating_add(2));
+        apron
+            .saturating_mul(4)
+            .saturating_add(pixels.saturating_mul(4 + 4 + 1 + 4))
+    }
+
     pub fn with_capacity(max_width: usize, max_height: usize) -> Self {
         let pixels = max_width.saturating_mul(max_height);
         let apron = max_width

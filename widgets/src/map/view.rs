@@ -18,7 +18,10 @@ use crate::makepad_draw::event::{TouchState, TouchUpdateEvent};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
+use crate::makepad_draw::text::fonts::{Fonts, FontsMemoryBytes};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct MapMemoryBudgets {
@@ -26,6 +29,13 @@ struct MapMemoryBudgets {
     pending: usize,
     tile_cache: usize,
     http_tile_cache: usize,
+    /// In-memory archive caches (decoded leaves + fetched ranges) for the
+    /// base archive; the detail archive gets half, each overlay a quarter.
+    archive_cache: usize,
+    /// Tile bakes allowed in flight at once. A bake's working set (decoded
+    /// tile, features, geometry streams) is tens of MB, so the transient
+    /// peak scales with this, not with the core count.
+    bake_slots: usize,
 }
 
 impl MapMemoryBudgets {
@@ -48,6 +58,8 @@ impl MapMemoryBudgets {
             pending: fraction(1, 4),
             tile_cache,
             http_tile_cache: fraction(5, 32),
+            archive_cache: fraction(1, 16),
+            bake_slots: (total / (192 * 1024 * 1024)).clamp(1, 16),
         }
     }
 }
@@ -201,8 +213,8 @@ impl TileSourceConfig {
 #[derive(Debug)]
 struct ArchiveTileParts {
     generation: u64,
-    base: Option<Result<Option<Arc<[u8]>>, String>>,
-    detail: Option<Result<Option<Arc<[u8]>>, String>>,
+    base: Option<Result<Option<TileBlob>, String>>,
+    detail: Option<Result<Option<TileBlob>, String>>,
     detail_required: bool,
     reuse_base_as_detail: bool,
     overlays: Vec<ArchiveOverlayPart>,
@@ -214,7 +226,7 @@ struct ArchiveOverlayPart {
     name: String,
     filter: u8,
     fetch_key: Option<TileKey>,
-    result: Option<Result<Option<Arc<[u8]>>, String>>,
+    result: Option<Result<Option<TileBlob>, String>>,
 }
 
 struct ActiveOverlayArchive {
@@ -4386,6 +4398,16 @@ pub struct MapView {
     zoom_settle_timer: Timer,
     #[rust]
     tile_fade_timer: Timer,
+    /// One owner-breakdown line per second for the first minute, then one
+    /// whenever the heap grew; see `log_memory_report`.
+    #[rust]
+    memory_report_timer: Timer,
+    #[rust]
+    memory_report_armed: bool,
+    #[rust]
+    memory_report_slow: bool,
+    #[rust]
+    memory_report_last_bytes: usize,
     #[cfg(not(target_arch = "wasm32"))]
     #[rust]
     archive_watch_timer: Timer,
@@ -4584,6 +4606,179 @@ impl ScriptHook for MapView {
     }
 }
 
+const MEMORY_REPORT_EVERY_SECOND_UNTIL: f64 = 61.0;
+const MEMORY_REPORT_SLOW_INTERVAL: f64 = 10.0;
+const MEMORY_REPORT_GROWTH_BYTES: usize = 16 * 1024 * 1024;
+
+fn mib(bytes: usize) -> f64 {
+    bytes as f64 / (1024.0 * 1024.0)
+}
+
+impl MapView {
+    /// One line naming every owner of memory the map controls, next to what
+    /// the platform pools and the wasm allocator hold, so a heap number
+    /// always has an explanation. `unattributed` is allocator-live bytes no
+    /// counter here claims; `slack` is linear memory the allocator holds
+    /// free (wasm memory never shrinks). Walks the tile map once; runs from
+    /// a slow timer, never per frame.
+    fn log_memory_report(&mut self, cx: &mut Cx, reason: &str) {
+        let platform = cx.memory_report();
+        let now = cx.seconds_since_app_start();
+        let mut baked_bytes = 0usize;
+        let mut ready = 0usize;
+        let mut label_bytes = 0usize;
+        let mut instance_bytes = 0usize;
+        let mut road_icon_bytes = 0usize;
+        for entry in self.tiles.values() {
+            baked_bytes = baked_bytes.saturating_add(entry.bytes);
+            road_icon_bytes = road_icon_bytes
+                .saturating_add(entry.road_icon_vertices.capacity().saturating_mul(4))
+                .saturating_add(entry.road_icon_indices.capacity().saturating_mul(4));
+            if let TileLoadState::Ready {
+                labels,
+                wall_instances,
+                tree_instances,
+                stalk_instances,
+                stoplight_instances,
+                shadow_disc_instances,
+                ..
+            } = &entry.state
+            {
+                ready += 1;
+                label_bytes = label_bytes
+                    .saturating_add(labels.capacity().saturating_mul(std::mem::size_of::<TileLabel>()));
+                instance_bytes = instance_bytes
+                    .saturating_add(
+                        wall_instances
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<MapWallInstance>()),
+                    )
+                    .saturating_add(tree_instances.capacity().saturating_mul(4))
+                    .saturating_add(
+                        (stalk_instances.capacity() + stoplight_instances.capacity())
+                            .saturating_mul(std::mem::size_of::<MapPropInstance>()),
+                    )
+                    .saturating_add(shadow_disc_instances.capacity().saturating_mul(4));
+            }
+        }
+        let pending_bytes = self
+            .pending_ready_tiles
+            .iter()
+            .map(|(_, buffers)| buffers.byte_size())
+            .fold(0usize, usize::saturating_add);
+        let part_len = |part: &Option<Result<Option<TileBlob>, String>>| -> usize {
+            match part {
+                Some(Ok(Some(blob))) => blob.held_len(),
+                _ => 0,
+            }
+        };
+        let archive_pending_bytes = self
+            .archive_pending_tiles
+            .values()
+            .map(|parts| {
+                part_len(&parts.base)
+                    .saturating_add(part_len(&parts.detail))
+                    .saturating_add(
+                        parts
+                            .overlays
+                            .iter()
+                            .map(|overlay| part_len(&overlay.result))
+                            .fold(0usize, usize::saturating_add),
+                    )
+            })
+            .fold(0usize, usize::saturating_add);
+        let archive_bytes = self
+            .base_archive
+            .iter()
+            .chain(self.detail_archive.iter())
+            .chain(self.overlay_archives.iter().filter_map(|overlay| overlay.archive.as_ref()))
+            .map(MapTileArchive::memory_bytes)
+            .fold(0usize, usize::saturating_add);
+        let fonts = if cx.has_global::<Rc<RefCell<Fonts>>>() {
+            cx.get_global::<Rc<RefCell<Fonts>>>().borrow().memory_bytes()
+        } else {
+            FontsMemoryBytes::default()
+        };
+        let glyph_bytes = (self.path_glyphs.capacity() + self.old_glyphs.capacity())
+            .saturating_mul(std::mem::size_of::<PathGlyphInstance>());
+        let terrain_bytes = self.terrain_elev.capacity().saturating_mul(4);
+        let wind_bytes = self
+            .wind_field
+            .as_ref()
+            .map_or(0, |(_, _, u, v, _)| (u.capacity() + v.capacity()).saturating_mul(4))
+            .saturating_add(
+                self.wind_particles
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<WindParticle>()),
+            );
+        let known = [
+            platform.geometry_cpu_bytes,
+            platform.instance_cpu_bytes,
+            platform.texture_cpu_bytes,
+            platform.resource_bytes,
+            pending_bytes,
+            archive_pending_bytes,
+            archive_bytes,
+            fonts.atlas_bytes,
+            fonts.layout_cache_bytes,
+            road_icon_bytes,
+            label_bytes,
+            instance_bytes,
+            glyph_bytes,
+            terrain_bytes,
+            wind_bytes,
+        ]
+        .into_iter()
+        .fold(0usize, usize::saturating_add);
+        let alloc_live = platform
+            .alloc_large_bytes
+            .saturating_add(platform.alloc_chunk_bytes);
+        let big = cx
+            .take_big_allocation_events()
+            .into_iter()
+            .map(|(bytes, heap)| format!("{:.1}@{:.0}", mib(bytes), mib(heap)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.memory_report_last_bytes = platform.wasm_memory_bytes;
+        log!(
+            "map memory ({reason}) t={now:.1}s wasm={:.1} MiB alloc={:.1} (large {:.1} x{} + chunks {:.1}) \
+known={:.1} [geom_cpu={:.1} inst_cpu={:.1} tex_cpu={:.1} resources={:.1} pending={:.1} \
+arch_pending={:.1} archives={:.1} font_atlas={:.1} layout_cache={:.1} road_icons={:.1} \
+labels={:.1} tile_inst={:.1} glyphs={:.1} terrain={:.1} wind={:.1}] unattributed={:.1} \
+slack={:.1} tiles={}/{} baked={:.1} lists={} geoms={} budget={:.0} big=[{big}]",
+            mib(platform.wasm_memory_bytes),
+            mib(alloc_live),
+            mib(platform.alloc_large_bytes),
+            platform.alloc_large_count,
+            mib(platform.alloc_chunk_bytes),
+            mib(known),
+            mib(platform.geometry_cpu_bytes),
+            mib(platform.instance_cpu_bytes),
+            mib(platform.texture_cpu_bytes),
+            mib(platform.resource_bytes),
+            mib(pending_bytes),
+            mib(archive_pending_bytes),
+            mib(archive_bytes),
+            mib(fonts.atlas_bytes),
+            mib(fonts.layout_cache_bytes),
+            mib(road_icon_bytes),
+            mib(label_bytes),
+            mib(instance_bytes),
+            mib(glyph_bytes),
+            mib(terrain_bytes),
+            mib(wind_bytes),
+            mib(alloc_live.saturating_sub(known)),
+            mib(platform.wasm_memory_bytes.saturating_sub(alloc_live)),
+            ready,
+            self.tiles.len(),
+            mib(baked_bytes),
+            platform.draw_list_slots,
+            platform.geometry_slots,
+            mib(cx.memory_budget_bytes()),
+        );
+    }
+}
+
 impl Widget for MapView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.use_local_mbtiles {
@@ -4653,6 +4848,24 @@ impl Widget for MapView {
         // user types in a text input elsewhere (the old 'T' theme toggle).
         // Theme/layer switching is app UI now.
 
+        if self.memory_report_timer.is_event(event).is_some() {
+            let now = cx.seconds_since_app_start();
+            if now < MEMORY_REPORT_EVERY_SECOND_UNTIL {
+                self.log_memory_report(cx, "tick");
+            } else {
+                if !self.memory_report_slow {
+                    self.memory_report_slow = true;
+                    cx.stop_timer(self.memory_report_timer);
+                    self.memory_report_timer = cx.start_interval(MEMORY_REPORT_SLOW_INTERVAL);
+                }
+                let heap = cx.memory_report().wasm_memory_bytes;
+                if heap >= self.memory_report_last_bytes.saturating_add(MEMORY_REPORT_GROWTH_BYTES)
+                    || (heap == 0 && !cx.take_big_allocation_events().is_empty())
+                {
+                    self.log_memory_report(cx, "grew");
+                }
+            }
+        }
         if self.fly_timer.is_event(event).is_some() {
             self.tick_fly(cx);
         }
@@ -4801,6 +5014,11 @@ impl Widget for MapView {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         let perf_start = cx.seconds_since_app_start();
+        if !self.memory_report_armed {
+            self.memory_report_armed = true;
+            self.memory_report_timer = cx.start_interval(1.0);
+            self.log_memory_report(cx, "first draw");
+        }
         if let Some(last_frame) = self.perf_last_frame {
             let gap_ms = (perf_start - last_frame).max(0.0) * 1000.0;
             self.perf_ms_gap_max = self.perf_ms_gap_max.max(gap_ms);
@@ -6443,6 +6661,22 @@ impl MapView {
         self.archive_worker_pool.as_ref().unwrap().clone()
     }
 
+    /// Every archive's in-memory ceiling follows the one platform budget.
+    fn apply_archive_cache_budgets(&mut self, cx: &Cx) {
+        let budget = MapMemoryBudgets::from_cx(cx).archive_cache;
+        if let Some(archive) = self.base_archive.as_mut() {
+            archive.set_cache_budget(budget);
+        }
+        if let Some(archive) = self.detail_archive.as_mut() {
+            archive.set_cache_budget(budget / 2);
+        }
+        for overlay in &mut self.overlay_archives {
+            if let Some(archive) = overlay.archive.as_mut() {
+                archive.set_cache_budget(budget / 4);
+            }
+        }
+    }
+
     fn install_overlay_sources(&mut self, cx: &mut Cx) {
         let workers = self.ensure_archive_worker_pool(cx);
         self.overlay_archives = self
@@ -6479,6 +6713,7 @@ impl MapView {
                 }
             })
             .collect();
+        self.apply_archive_cache_budgets(cx);
     }
 
     fn install_archive_source(&mut self, cx: &mut Cx, config: TileSourceConfig) {
@@ -6524,6 +6759,7 @@ impl MapView {
             }
         }
         self.tile_source_config = Some(config);
+        self.apply_archive_cache_budgets(cx);
         self.archive_pending_tiles.clear();
         self.pending_ready_tiles.clear();
         self.local_source_zoom_range = None;
@@ -6707,8 +6943,8 @@ impl MapView {
         &mut self,
         cx: &mut Cx,
         key: TileKey,
-        base: Option<Arc<[u8]>>,
-        detail: Option<Arc<[u8]>>,
+        base: Option<TileBlob>,
+        detail: Option<TileBlob>,
         overlays: Vec<OverlayTileData>,
     ) {
         let sender = self.tile_worker_rx.sender();
@@ -6753,20 +6989,34 @@ impl MapView {
             })
             .collect::<Vec<_>>();
         if let Err(error) = self.submit_tile_job(cx, key, move || {
-            let result = build_local_tile_from_archive_bytes(
-                key,
-                base,
-                detail,
-                detail_path.as_deref().map(Path::new),
-                bridge_dz_path.as_deref().map(Path::new),
-                overlays,
-                &overlay_paths,
-                &theme_style,
-                bucket,
-                buildings_3d,
-                want_fringe,
-                build_road_core,
-            );
+            // The packed archive bytes decode here, on the bake job.
+            let decoded = base
+                .as_ref()
+                .map(TileBlob::decode)
+                .transpose()
+                .and_then(|base| {
+                    detail
+                        .as_ref()
+                        .map(TileBlob::decode)
+                        .transpose()
+                        .map(|detail| (base, detail))
+                });
+            let result = decoded.and_then(|(base, detail)| {
+                build_local_tile_from_archive_bytes(
+                    key,
+                    base,
+                    detail,
+                    detail_path.as_deref().map(Path::new),
+                    bridge_dz_path.as_deref().map(Path::new),
+                    overlays,
+                    &overlay_paths,
+                    &theme_style,
+                    bucket,
+                    buildings_3d,
+                    want_fringe,
+                    build_road_core,
+                )
+            });
             match result {
                 Ok(tile) => {
                     let _ = sender.send(TileWorkerMessage::LocalBatchLoaded {
@@ -7737,7 +7987,7 @@ impl MapView {
         };
         let pool = cx.task_pool();
         if pool.is_open() {
-            let window = pool_window(&pool, self.tile_queue.in_flight());
+            let window = self.bake_window(cx, &pool);
             self.tile_queue.set_in_flight_limit(window);
             self.tile_queue
                 .push(&pool, key, true, QueueOrder::Lifo, guarded_job)
@@ -7751,12 +8001,21 @@ impl MapView {
 
     /// Hand staged tile jobs over as workers free up: after every request
     /// pass and on the UI signal each pool completion raises.
+    /// Bakes in flight at once: the idle workers, capped by the memory
+    /// budget's bake slots so a burst of arrivals cannot park seven bakes'
+    /// working sets in memory at the same time on a small heap.
+    fn bake_window(&self, cx: &Cx, pool: &TaskPool) -> usize {
+        pool_window(pool, self.tile_queue.in_flight())
+            .min(MapMemoryBudgets::from_cx(cx).bake_slots)
+            .max(1)
+    }
+
     fn pump_tile_queue(&mut self, cx: &mut Cx) {
         if self.tile_queue.staged_len() == 0 {
             return;
         }
         let pool = cx.task_pool();
-        let window = pool_window(&pool, self.tile_queue.in_flight());
+        let window = self.bake_window(cx, &pool);
         self.tile_queue.set_in_flight_limit(window);
         self.tile_queue.pump(&pool);
     }
@@ -11053,6 +11312,16 @@ mod tests {
 
         let small_web = MapMemoryBudgets::from_total(512 * MIB, true);
         assert_eq!(small_web.tile_cache, 256 * MIB);
+
+        assert_eq!(baseline.archive_cache, 96 * MIB);
+        assert_eq!(scaled.archive_cache, 32 * MIB);
+        let phone = MapMemoryBudgets::from_total(320 * MIB, true);
+        assert_eq!(phone.archive_cache, 20 * MIB);
+        assert_eq!(phone.tile_cache, 160 * MIB);
+        assert_eq!(phone.pending, 80 * MIB);
+        assert_eq!(phone.bake_slots, 1);
+        assert_eq!(MapMemoryBudgets::from_total(1024 * MIB, true).bake_slots, 5);
+        assert_eq!(baseline.bake_slots, 8);
     }
 
     #[test]

@@ -32,6 +32,7 @@ pub struct WBrowserInfo {
     pub search: String,
     pub hash: String,
     pub has_thread_support: bool,
+    pub is_phone: bool,
 }
 
 impl Into<OsType> for WBrowserInfo {
@@ -43,6 +44,7 @@ impl Into<OsType> for WBrowserInfo {
             pathname: self.pathname,
             search: self.search,
             hash: self.hash,
+            is_phone: self.is_phone,
         })
     }
 }
