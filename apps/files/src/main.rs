@@ -2629,6 +2629,7 @@ impl App {
                         runner.cancel(&call_id);
                     }
                 }
+                PortEvent::Subscribe { .. } | PortEvent::Unsubscribe { .. } => {}
                 PortEvent::ChatOpen { open } => {
                     // The desktop's pane is the chat now: the app's own panel
                     // steps aside (Cmd+K brings it back on purpose).

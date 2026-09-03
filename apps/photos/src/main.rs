@@ -73,6 +73,7 @@ impl App {
                 // Nothing here runs long enough to cancel, and the wall has
                 // no chat of its own to step aside.
                 PortEvent::Cancel { .. } | PortEvent::ChatOpen { .. } => {}
+                PortEvent::Subscribe { .. } | PortEvent::Unsubscribe { .. } => {}
             }
         }
     }

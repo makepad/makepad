@@ -124,10 +124,25 @@ pub struct ToolEntry {
     pub expanded: bool,
 }
 
+/// One asynchronous service publication shown as its own card. It is sent
+/// to the provider as a synthetic user-role turn, but is deliberately not a
+/// user bubble in the transcript.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EventEntry {
+    pub sub_id: String,
+    pub service_label: String,
+    pub topic: String,
+    pub text: String,
+    pub data: Option<String>,
+    pub dropped: u32,
+    pub final_: bool,
+}
+
 /// One line of the transcript.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Entry {
     User { text: String },
+    Event(EventEntry),
     /// `streaming` while deltas still arrive; the panel draws the landed
     /// text with markup and the streaming text plain.
     Assistant { text: String, streaming: bool },

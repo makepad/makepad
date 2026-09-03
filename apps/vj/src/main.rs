@@ -7947,6 +7947,7 @@ impl App {
                     }
                 }
                 PortEvent::Cancel { .. } | PortEvent::ChatOpen { .. } => {}
+                PortEvent::Subscribe { .. } | PortEvent::Unsubscribe { .. } => {}
             }
         }
     }

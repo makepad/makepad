@@ -240,6 +240,7 @@ impl FlowServices {
                     }
                 }
                 PortEvent::Registered(_) | PortEvent::ChatOpen { .. } => {}
+                PortEvent::Subscribe { .. } | PortEvent::Unsubscribe { .. } => {}
             }
         }
         self.drain_workers(cx);

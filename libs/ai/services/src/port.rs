@@ -35,6 +35,10 @@ pub enum PortEvent {
     Call(ServiceCall),
     /// Stop this call if you can; no reply is expected.
     Cancel { call_id: String },
+    /// Start publishing matching messages under this host-issued id.
+    Subscribe { sub_id: String, topic: String, filter: Option<String> },
+    /// Stop publishing under this id.
+    Unsubscribe { sub_id: String },
     /// The host's chat pane came up or went away.
     ChatOpen { open: bool },
 }
@@ -185,6 +189,7 @@ impl AiServicePort {
 
     /// One frame through the address filter.
     fn accept(&mut self, frame: HostedDown) -> Option<PortEvent> {
+        frame.msg.validate().ok()?;
         match frame.msg {
             ServiceDown::Registered { port_tag, endpoint } => {
                 if port_tag != self.port_tag {
@@ -205,6 +210,10 @@ impl AiServicePort {
                     ServiceDown::Registered { .. } => unreachable!(),
                     ServiceDown::Call(call) => PortEvent::Call(call),
                     ServiceDown::Cancel { call_id } => PortEvent::Cancel { call_id },
+                    ServiceDown::Subscribe { sub_id, topic, filter } => {
+                        PortEvent::Subscribe { sub_id, topic, filter }
+                    }
+                    ServiceDown::Unsubscribe { sub_id } => PortEvent::Unsubscribe { sub_id },
                     ServiceDown::ChatOpen { open } => {
                         self.chat_open = open;
                         PortEvent::ChatOpen { open }
@@ -239,6 +248,20 @@ impl AiServicePort {
             text.push('…');
         }
         self.send(ServiceUp::Context(ServiceContext { text }));
+    }
+
+    /// Publish one message to a subscription the host asked this service
+    /// to maintain. Text is bounded and oversized structured data is
+    /// dropped whole before it leaves the app.
+    pub fn publish(&self, sub_id: impl Into<String>, mut message: Message) {
+        message.bound();
+        self.send(ServiceUp::Message {
+            sub_id: sub_id.into(),
+            topic: message.topic,
+            text: message.text,
+            data: message.data,
+            final_: message.final_,
+        });
     }
 
     /// Leave on purpose. The host also forgets a service whose process
@@ -286,6 +309,7 @@ mod tests {
             r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#,
             Risk::Read,
         ))
+        .with_topic(TopicDef::new("watch", "Changes to a watched path."))
     }
 
     fn ep(s: &str) -> EndpointId {
@@ -363,6 +387,53 @@ mod tests {
             ServiceUp::Result(r) => assert!(r.text.len() <= MAX_RESULT_BYTES),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn subscriptions_reach_the_port_and_publications_go_back_up() {
+        let (mut port, link) = AiServicePort::in_process(files()).unwrap();
+        let register = link.up.try_recv().unwrap();
+        let tag = match register.msg {
+            ServiceUp::Register { port_tag, .. } => port_tag,
+            other => panic!("{other:?}"),
+        };
+        link.down
+            .send(HostedDown {
+                to: None,
+                msg: ServiceDown::Registered { port_tag: tag, endpoint: ep("e1") },
+            })
+            .unwrap();
+        link.down
+            .send(HostedDown {
+                to: Some(ep("e1")),
+                msg: ServiceDown::Subscribe {
+                    sub_id: "s1".into(),
+                    topic: "watch".into(),
+                    filter: Some(r#"{"path":"/tmp"}"#.into()),
+                },
+            })
+            .unwrap();
+        link.down
+            .send(HostedDown {
+                to: Some(ep("e1")),
+                msg: ServiceDown::Unsubscribe { sub_id: "s1".into() },
+            })
+            .unwrap();
+        let events = pump(&mut port);
+        assert!(matches!(
+            events.as_slice(),
+            [
+                PortEvent::Registered(_),
+                PortEvent::Subscribe { sub_id, topic, filter: Some(filter) },
+                PortEvent::Unsubscribe { sub_id: unsubscribed }
+            ] if sub_id == "s1" && topic == "watch" && filter.contains("path") && unsubscribed == "s1"
+        ));
+        port.publish("s1", Message::new("watch", "changed").with_data(r#"{"path":"/tmp/a"}"#));
+        assert!(matches!(
+            link.up.try_recv().unwrap().msg,
+            ServiceUp::Message { sub_id, topic, text, .. }
+                if sub_id == "s1" && topic == "watch" && text == "changed"
+        ));
     }
 }
 

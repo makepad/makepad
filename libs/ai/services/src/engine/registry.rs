@@ -51,6 +51,7 @@ struct Inner {
 pub enum RegistryUp {
     Result(EndpointId, ToolResult),
     Progress { endpoint: EndpointId, call_id: String, note: String, permille: u16 },
+    Message { endpoint: EndpointId, sub_id: String, message: Message },
 }
 
 #[derive(Clone, Default)]
@@ -377,6 +378,15 @@ impl ServiceRegistry {
                 })
                 .collect();
             out.push_str(&format!("## {} (tools `{}.*`)\n{}\n", m.label, m.id, m.brief.trim()));
+            if !m.topics.is_empty() {
+                let topics = m
+                    .topics
+                    .iter()
+                    .map(|topic| format!("`{}` — {}", topic.name, topic.description.trim()))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                out.push_str(&format!("Topics: {topics}\n"));
+            }
             if instances.len() > 1 {
                 out.push_str("Running instances (say which with the `instance` argument when it matters): ");
                 out.push_str(&instances.join("; "));
@@ -509,6 +519,13 @@ impl ServiceRegistry {
                     }
                     ServiceUp::Context(c) => {
                         inner.entries.get_mut(&endpoint).unwrap().context = c.text;
+                    }
+                    ServiceUp::Message { sub_id, topic, text, data, final_ } => {
+                        out.push(RegistryUp::Message {
+                            endpoint: endpoint.clone(),
+                            sub_id,
+                            message: Message { topic, text, data, final_ },
+                        });
                     }
                     ServiceUp::Unregister => dead.push(endpoint.clone()),
                 }
