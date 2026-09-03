@@ -7506,7 +7506,11 @@ impl MapView {
                         self.redraw(cx);
                     }
                     TouchGestureMode::Tilt => {
-                        let delta_y = current.midpoint().y - start.midpoint().y;
+                        // Phone convention (Apple/Google Maps): two fingers
+                        // sliding UP tilt the camera into 3D, sliding down
+                        // flatten it — the opposite sign of the desktop
+                        // right-drag.
+                        let delta_y = start.midpoint().y - current.midpoint().y;
                         let raw_tilt =
                             (start_tilt + delta_y * 0.25).clamp(0.0, self.tilt_max_deg_now());
                         self.tilt = if raw_tilt < 6.0 { 0.0 } else { raw_tilt };
