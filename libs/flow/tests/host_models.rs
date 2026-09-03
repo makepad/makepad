@@ -45,19 +45,34 @@ fn start_hub(root: &Path) -> Option<ServiceHandle> {
         port: 0,
         cache_dir: root.join("hub"),
         registry: Registry {
-            models: vec![ModelSpec {
-                id: "testpattern".to_string(),
-                domain: Domain::Image,
-                backend: "testpattern".to_string(),
-                available: true,
-                gated: false,
-                vram_gb: Some(0.0),
-                min_vram_gb: None,
-                min_compute_cap: None,
-                note: None,
-                license: None,
-                files: Vec::new(),
-            }],
+            models: vec![
+                ModelSpec {
+                    id: "testpattern".to_string(),
+                    domain: Domain::Image,
+                    backend: "testpattern".to_string(),
+                    available: true,
+                    gated: false,
+                    vram_gb: Some(0.0),
+                    min_vram_gb: None,
+                    min_compute_cap: None,
+                    note: None,
+                    license: None,
+                    files: Vec::new(),
+                },
+                ModelSpec {
+                    id: "qwen-test".to_string(),
+                    domain: Domain::Text,
+                    backend: "llm".to_string(),
+                    available: true,
+                    gated: false,
+                    vram_gb: Some(0.0),
+                    min_vram_gb: None,
+                    min_compute_cap: None,
+                    note: None,
+                    license: None,
+                    files: Vec::new(),
+                },
+            ],
         },
         downloader: Downloader::new("http://127.0.0.1:1", None).unwrap(),
         peer: peer_off(),
@@ -135,6 +150,11 @@ fn models_lists_testpattern_and_filters_by_domain() {
     let video = client.models(Some("video")).unwrap();
     assert!(video.models.is_empty());
     assert_eq!(video.snapshot_ms, response.snapshot_ms);
+
+    let text = client.models(Some("text")).unwrap();
+    let qwen: Vec<_> = text.models.iter().filter(|model| model.id == "qwen-test").collect();
+    assert_eq!(qwen.len(), 1, "text/chat aliases must collapse to one picker entry");
+    assert_eq!(qwen[0].domain, "text");
 
     let catalog = client.nodes_catalog().unwrap();
     let image = catalog
