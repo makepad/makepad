@@ -15,9 +15,9 @@ and the closed flow language in the design of record.
   existing asset, parses a strict vision answer, and writes the asset's
   mutable annotation record; `Product::Annotation` publishes no artifact.
   The prototype exposes a `json` receipt so the graph remains typed, while
-  `annotate.splash` parses a generic vision-produced JSON record only. Exact parity
-  needs the F8 `Asset`/`Publish` capability plus either the existing parser as
-  a node or a faithful SPLASH port of it. The requested
+  `annotate.splash` parses a generic vision-produced JSON record only. Exact
+  parity needs the F8 `Asset`/`Publish` capability plus either the existing
+  parser as a node or a faithful SPLASH port of it. The requested
   `apps/asset-ui/src/annotate_queue.rs` is not present in this checkout, and
   `libs/asset/annotate/src/bin/asset_annotate.rs:1-10,361-364` says the old
   queue no longer runs.
@@ -60,6 +60,17 @@ and the closed flow language in the design of record.
   because F8's `Map` and the run-time `Ask` choice gate are not part of this
   lane's recipe prototype set. The linear image→video template covers the
   selected artifact after that gate.
+- The closed port type vocabulary has no syntax for giving a second image
+  input a wire-specific name. DREAM therefore feeds its generated keyframe
+  through `Video.image` but cannot also send the same image as `last_frame`;
+  exact loop closure needs typed named ports. `Paint.image` likewise maps to
+  the hub's `reference_image` field in the executor.
+- The same limitation means `ImageEdit` cannot expose `reference_1..3`, and
+  `Music` cannot type a separate `lyrics` text port. The music template folds
+  lyrics into its prompt with a pure `Fn`; edit retains its primary image.
+  `Inpaint` was removed from the recipe prelude because both its source image
+  and mask are mandatory and cannot be represented truthfully until typed
+  named ports exist. `Control.image` maps to the hub's `control` field.
 - The full playable-character recipes include matte, bounded image/mesh
   retries, rig/motion quality gates, and optional paint. The requested
   `rig-and-motion.splash` starts from an already accepted mesh and therefore
@@ -92,10 +103,10 @@ and the closed flow language in the design of record.
   inspector must keep them paired rather than offering their Cartesian
   product. Video `(frames, steps)` choices have the same coupling.
 - Dynamic edit references are named `reference_1..N` on the hub wire and
-  Asset UI caps them at three. The prototype spells three optional image
-  ports. Supporting a different cap requires either regenerating those ports
-  or a typed list-of-image port; the current closed `list` type does not carry
-  an element type.
+  Asset UI caps them at three. The recipe prototype cannot type those named
+  image ports today. Supporting them requires typed named ports or a typed
+  list-of-image port; the current closed `list` type does not carry an element
+  type.
 - `Music.strength=0.8` reproduces the backend's default every-fifth-frame
   reference cadence, but the wire's literal default is absence (`None`). An
   executor may omit 0.8 rather than serialize it; both resolve to the same

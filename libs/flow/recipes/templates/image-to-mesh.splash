@@ -19,15 +19,15 @@ let mesh = Mesh{
 
 let paint = Paint{
     prompt: prompt.text()
-    mesh: mesh.mesh()
-    reference_image: image.image()
+    mesh: mesh.out(@mesh)
+    image: image.image()
     texture_size: 1024
     model: "hunyuan3d-paint-2.1"
     at: vec2(680, 160)
 }
 
 /** The PBR-painted GLB. */
-let model = Output{ type: @mesh  value: paint.mesh()  at: vec2(1000, 160) }
+let model = Output{ type: @mesh  value: paint.out(@mesh)  at: vec2(1000, 160) }
 
 Flow{
     label: "Image to PBR mesh"

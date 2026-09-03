@@ -10,7 +10,7 @@ let depth = Depth{
 }
 
 /** The 16-bit metric depth map. */
-let depthmap = Output{ type: @image  value: depth.image()  at: vec2(680, 120) }
+let depthmap = Output{ type: @image  value: depth.out(@image)  at: vec2(680, 120) }
 
 Flow{
     label: "Metric depth"

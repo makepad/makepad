@@ -26,7 +26,7 @@ let enhance = ImageEdit{
 }
 
 /** The high-detail image. */
-let picture = Output{ type: @image  value: enhance.image()  at: vec2(1320, 120) }
+let picture = Output{ type: @image  value: enhance.out(@image)  at: vec2(1320, 120) }
 
 Flow{
     label: "Image enhance"

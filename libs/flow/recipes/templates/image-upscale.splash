@@ -11,7 +11,7 @@ let upscale = Upscale{
 }
 
 /** The four-times larger image. */
-let picture = Output{ type: @image  value: upscale.image()  at: vec2(680, 120) }
+let picture = Output{ type: @image  value: upscale.out(@image)  at: vec2(680, 120) }
 
 Flow{
     label: "Image upscale"

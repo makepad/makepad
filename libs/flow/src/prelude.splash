@@ -175,11 +175,11 @@ mod.flow.Image = mod.flow.Gen{
     domain: "image"
     /** Text describing the desired image. */
     prompt: ""
-    /** 256..2048 step 64 */
+    /** one of: 512x512, 768x768, 1024x1024, 768x512, 512x768, 1024x576 */
     width: 1024
-    /** 256..2048 step 64 */
+    /** one of: 512x512, 768x768, 1024x1024, 768x512, 512x768, 1024x576 */
     height: 1024
-    /** 1..50 */
+    /** one of: 4, 8, 12, 20, 28, 50 */
     steps: 8
     /** Reproducible seed; zero lets the provider choose. */
     seed: 0
@@ -187,6 +187,8 @@ mod.flow.Image = mod.flow.Gen{
     negative: ""
     /** Model name; empty lets the hub choose. */
     model: ""
+    /** LoRA list; each strength is one of: 1.0, 0.8, 0.6, 0.4, 1.2. */
+    loras: []
     ports: {in: [@prompt, @image] out: [@image]}
     image: fn() { self.out(@image) }
     ui: mod.flow.ui.ImageFace
@@ -196,8 +198,10 @@ mod.flow.Image = mod.flow.Gen{
 mod.flow.Upscale = mod.flow.Gen{
     type_name: "Upscale"
     domain: "upscale"
-    /** Upscale multiplier. */
+    /** Upscale multiplier; the current RealESRGAN recipe produces 4x. */
     factor: 2
+    /** Model name; empty lets the hub choose. */
+    model: ""
     ports: {in: [@image] out: [@image]}
     image: fn() { self.out(@image) }
     ui: mod.flow.ui.UpscaleFace
@@ -230,4 +234,4 @@ mod.flow.Label = {}
 mod.flow.Button = {}
 mod.flow.vec2 = fn(x, y) { [x, y] }
 
-mod.flow.freeze_module()
+nil

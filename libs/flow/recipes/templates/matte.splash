@@ -10,7 +10,7 @@ let matte = Matte{
 }
 
 /** The RGBA cutout with a soft alpha matte. */
-let cutout = Output{ type: @image  value: matte.image()  at: vec2(680, 120) }
+let cutout = Output{ type: @image  value: matte.out(@image)  at: vec2(680, 120) }
 
 Flow{
     label: "Image matte"
