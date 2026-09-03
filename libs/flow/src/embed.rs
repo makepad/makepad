@@ -33,6 +33,11 @@ pub fn embed_policy() -> EmbedPolicy {
 }
 
 pub fn default_root() -> PathBuf {
+    // Dev-only override: `FLOW_ROOT=<dir>` points a test instance at an
+    // isolated root so it never touches the user's `~/.makepad/flow`.
+    if let Some(root) = std::env::var_os("FLOW_ROOT").filter(|value| !value.is_empty()) {
+        return PathBuf::from(root);
+    }
     makepad_ai_hub::home::makepad_home().join("flow")
 }
 

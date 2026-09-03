@@ -66,6 +66,9 @@ impl Method {
 pub(crate) struct Response {
     pub status: u16,
     pub body: Vec<u8>,
+    /// The `Content-Type` header, when the server sent one (the data plane
+    /// types a value's bytes with it).
+    pub content_type: Option<String>,
 }
 
 #[derive(Debug)]
@@ -269,6 +272,7 @@ impl HttpClient {
             Response {
                 status: parsed.status,
                 body: body_bytes,
+                content_type: parsed.content_type,
             },
             !parsed.close,
         ))
@@ -279,6 +283,7 @@ struct ParsedHead {
     status: u16,
     content_length: u64,
     close: bool,
+    content_type: Option<String>,
 }
 
 fn parse_head(block: &[u8]) -> ClientResult<ParsedHead> {
@@ -309,6 +314,7 @@ fn parse_head(block: &[u8]) -> ClientResult<ParsedHead> {
     }
 
     let mut content_length = None;
+    let mut content_type = None;
     let mut close = false;
     let mut count = 0usize;
     for line in lines {
@@ -339,6 +345,9 @@ fn parse_head(block: &[u8]) -> ClientResult<ParsedHead> {
                     .map_err(|_| ClientError::Protocol("malformed Content-Length".into()))?,
             );
         }
+        if name.eq_ignore_ascii_case("content-type") {
+            content_type = Some(value.to_string());
+        }
         if name.eq_ignore_ascii_case("connection") {
             if value.eq_ignore_ascii_case("close") {
                 close = true;
@@ -356,6 +365,7 @@ fn parse_head(block: &[u8]) -> ClientResult<ParsedHead> {
         status,
         content_length,
         close,
+        content_type,
     })
 }
 

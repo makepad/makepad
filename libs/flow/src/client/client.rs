@@ -1,7 +1,8 @@
 use super::http::{HttpClient, Method};
 use crate::{
-    CreateFromTemplateRequest, EvalError, EventsPage, FlowDefinition, FlowSummary, Graph, Health,
-    PutFlowResponse, TemplateResponse, TemplateSummary,
+    CreateFromTemplateRequest, CreateInstanceRequest, CreateInstanceResponse, CreateRunResponse,
+    EvalError, EventsPage, FlowDefinition, FlowSummary, Graph, Health, InstanceRow, NodesResponse,
+    PutFlowResponse, RunRowDto, SetInputsResponse, TemplateResponse, TemplateSummary, ValueBytes,
 };
 use makepad_micro_serde::{DeJson, SerJson};
 use makepad_strict_json::Value;
@@ -70,16 +71,7 @@ pub struct FlowClient {
     token: String,
     server_id: [u8; 16],
     control: HttpClient,
-    _data: HttpClient,
-}
-
-/// Bytes fetched from the value plane. The current bounded transport does
-/// not expose response headers, so the content type is conservatively
-/// detected from well-known media signatures.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FetchedValue {
-    pub bytes: Vec<u8>,
-    pub content_type: String,
+    data: HttpClient,
 }
 
 impl std::fmt::Debug for FlowClient {
@@ -126,7 +118,7 @@ impl FlowClient {
             token,
             server_id,
             control: HttpClient::new(endpoints.control, CONTROL_BODY_CAP),
-            _data: HttpClient::new(endpoints.data, DATA_BODY_CAP),
+            data: HttpClient::new(endpoints.data, DATA_BODY_CAP),
         }
     }
 
@@ -161,6 +153,11 @@ impl FlowClient {
         let target = format!("/v1/templates/{}", flow_name(name)?);
         let body = self.call(Method::Get, &target, None, true, None)?;
         decode(&body, "template response")
+    }
+
+    pub fn nodes_catalog(&self) -> ClientResult<NodesResponse> {
+        let body = self.call(Method::Get, "/v1/nodes", None, true, None)?;
+        decode(&body, "node catalog")
     }
 
     pub fn flows(&self) -> ClientResult<Vec<FlowSummary>> {
@@ -216,48 +213,87 @@ impl FlowClient {
         Ok(())
     }
 
-    /// `GET /v1/instances`, optionally narrowed to one flow or waiting
-    /// instances. These runtime routes are intentionally projected as strict
-    /// JSON until their DTOs settle without coupling the client to host state.
-    pub fn instances(&self, flow: Option<&str>, waiting: bool) -> ClientResult<Value> {
-        let mut target = "/v1/instances".to_string();
-        let mut separator = '?';
-        if let Some(flow) = flow {
-            target.push(separator);
-            separator = '&';
-            target.push_str("flow=");
-            target.push_str(flow_name(flow)?);
-        }
-        if waiting {
-            target.push(separator);
-            target.push_str("waiting=1");
-        }
+    pub fn instances(
+        &self,
+        flow: Option<&str>,
+        waiting: bool,
+    ) -> ClientResult<Vec<InstanceRow>> {
+        let target = instances_target(flow, waiting)?;
+        let body = self.call(Method::Get, &target, None, true, None)?;
+        decode(&body, "instance list")
+    }
+
+    pub fn instances_json(&self, flow: Option<&str>, waiting: bool) -> ClientResult<Value> {
+        let target = instances_target(flow, waiting)?;
         self.call_json(Method::Get, &target, None)
     }
 
-    pub fn instance(&self, id: &str) -> ClientResult<Value> {
+    pub fn instance(&self, id: &str) -> ClientResult<InstanceRow> {
+        let target = format!("/v1/instances/{}", route_id(id, "instance")?);
+        let body = self.call(Method::Get, &target, None, true, None)?;
+        decode(&body, "instance row")
+    }
+
+    pub fn instance_json(&self, id: &str) -> ClientResult<Value> {
         let target = format!("/v1/instances/{}", route_id(id, "instance")?);
         self.call_json(Method::Get, &target, None)
     }
 
-    pub fn create_instance(&self, name: &str, request: &Value) -> ClientResult<Value> {
+    pub fn create_instance(
+        &self,
+        name: &str,
+        request: &CreateInstanceRequest,
+    ) -> ClientResult<CreateInstanceResponse> {
+        let target = format!("/v1/flows/{}/instances", flow_name(name)?);
+        let body = request.serialize_json().into_bytes();
+        let response = self.call(Method::Post, &target, Some(&body), true, None)?;
+        decode(&response, "create instance response")
+    }
+
+    pub fn create_instance_json(&self, name: &str, request: &Value) -> ClientResult<Value> {
         let target = format!("/v1/flows/{}/instances", flow_name(name)?);
         let body = request.to_json().into_bytes();
         self.call_json(Method::Post, &target, Some(&body))
     }
 
-    pub fn put_inputs(&self, id: &str, inputs: &Value) -> ClientResult<Value> {
-        let target = format!("/v1/instances/{}/inputs", route_id(id, "instance")?);
+    pub fn put_inputs(
+        &self,
+        id: &str,
+        actor: &str,
+        inputs: &Value,
+    ) -> ClientResult<SetInputsResponse> {
+        let target = instance_inputs_target(id, actor)?;
         let body = inputs.to_json().into_bytes();
         let response = self.call(Method::Put, &target, Some(&body), true, None)?;
-        if response.is_empty() {
-            Ok(Value::Obj(Vec::new()))
-        } else {
-            parse_json(&response)
-        }
+        decode(&response, "set inputs response")
     }
 
-    pub fn start_run(&self, id: &str, outputs: Option<&[String]>) -> ClientResult<Value> {
+    pub fn put_inputs_json(&self, id: &str, actor: &str, inputs: &Value) -> ClientResult<Value> {
+        let target = instance_inputs_target(id, actor)?;
+        let body = inputs.to_json().into_bytes();
+        self.call_json(Method::Put, &target, Some(&body))
+    }
+
+    pub fn start_run(
+        &self,
+        id: &str,
+        outputs: Option<&[String]>,
+    ) -> ClientResult<CreateRunResponse> {
+        let target = format!("/v1/instances/{}/runs", route_id(id, "instance")?);
+        let body = Value::Obj(match outputs {
+            Some(outputs) => vec![(
+                "outputs".to_string(),
+                Value::Arr(outputs.iter().cloned().map(Value::Str).collect()),
+            )],
+            None => Vec::new(),
+        })
+        .to_json()
+        .into_bytes();
+        let response = self.call(Method::Post, &target, Some(&body), true, None)?;
+        decode(&response, "start run response")
+    }
+
+    pub fn start_run_json(&self, id: &str, outputs: Option<&[String]>) -> ClientResult<Value> {
         let target = format!("/v1/instances/{}/runs", route_id(id, "instance")?);
         let body = Value::Obj(match outputs {
             Some(outputs) => vec![(
@@ -271,7 +307,13 @@ impl FlowClient {
         self.call_json(Method::Post, &target, Some(&body))
     }
 
-    pub fn run(&self, id: &str) -> ClientResult<Value> {
+    pub fn run(&self, id: &str) -> ClientResult<RunRowDto> {
+        let target = format!("/v1/runs/{}", route_id(id, "run")?);
+        let body = self.call(Method::Get, &target, None, true, None)?;
+        decode(&body, "run row")
+    }
+
+    pub fn run_json(&self, id: &str) -> ClientResult<Value> {
         let target = format!("/v1/runs/{}", route_id(id, "run")?);
         self.call_json(Method::Get, &target, None)
     }
@@ -282,21 +324,24 @@ impl FlowClient {
         Ok(())
     }
 
-    pub fn stop_instance(&self, id: &str) -> ClientResult<()> {
+    pub fn delete_instance(&self, id: &str) -> ClientResult<()> {
         let target = format!("/v1/instances/{}", route_id(id, "instance")?);
         let _ = self.call(Method::Delete, &target, None, true, None)?;
         Ok(())
     }
 
-    pub fn value(&self, digest: &str) -> ClientResult<FetchedValue> {
+    pub fn value(&self, digest: &str) -> ClientResult<ValueBytes> {
         let target = format!("/v1/values/{}", value_digest(digest)?);
         let response = self
-            ._data
+            .data
             .call(Method::Get, &target, Some(self.token.as_str()), None, None)?;
         match response.status {
-            200..=299 => Ok(FetchedValue {
-                content_type: sniff_content_type(&response.body).to_string(),
-                bytes: response.body,
+            200..=299 => Ok(ValueBytes {
+                digest: digest.to_string(),
+                content_type: response
+                    .content_type
+                    .unwrap_or_else(|| "application/octet-stream".to_string()),
+                bytes: response.body.into(),
             }),
             401 => Err(ClientError::Unauthorized),
             status => Err(http_error(status, &response.body)),
@@ -485,6 +530,32 @@ fn flow_name(name: &str) -> ClientResult<&str> {
     Ok(name)
 }
 
+fn instances_target(flow: Option<&str>, waiting: bool) -> ClientResult<String> {
+    let mut target = "/v1/instances".to_string();
+    let mut separator = '?';
+    if let Some(flow) = flow {
+        target.push(separator);
+        separator = '&';
+        target.push_str("flow=");
+        target.push_str(flow_name(flow)?);
+    }
+    if waiting {
+        target.push(separator);
+        target.push_str("waiting=1");
+    }
+    Ok(target)
+}
+
+fn instance_inputs_target(id: &str, actor: &str) -> ClientResult<String> {
+    if !matches!(actor, "tab" | "chat" | "service") {
+        return Err(ClientError::Protocol("invalid input actor".into()));
+    }
+    Ok(format!(
+        "/v1/instances/{}/inputs?actor={actor}",
+        route_id(id, "instance")?
+    ))
+}
+
 fn route_id<'a>(id: &'a str, what: &str) -> ClientResult<&'a str> {
     if id.is_empty()
         || id.len() > 128
@@ -506,26 +577,6 @@ fn value_digest(digest: &str) -> ClientResult<&str> {
         return Err(ClientError::Protocol("invalid value digest".into()));
     }
     Ok(digest)
-}
-
-fn sniff_content_type(bytes: &[u8]) -> &'static str {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        "image/png"
-    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
-        "image/jpeg"
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        "image/gif"
-    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
-        "image/webp"
-    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WAVE" {
-        "audio/wav"
-    } else if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
-        "video/mp4"
-    } else if bytes.starts_with(b"glTF") {
-        "model/gltf-binary"
-    } else {
-        "application/octet-stream"
-    }
 }
 
 pub(crate) fn parse_hex16(text: &str) -> Option<[u8; 16]> {
