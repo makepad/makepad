@@ -23,7 +23,7 @@ script_mod! {
         width: 84
         height: Fit
         draw_text +: {
-            color: #x8a8a92
+            color: theme.flow_text_muted
             text_style: theme.font_regular{font_size: 9}
         }
     }
@@ -36,10 +36,10 @@ script_mod! {
         spacing: theme.space_1
         show_bg: true
         draw_bg +: {
-            color: #x1c1c1f
+            color: theme.flow_surface
             border_radius: 10.0
             border_size: 1.0
-            border_color: #x2a2a30
+            border_color: theme.flow_surface_raised
         }
     }
 
@@ -48,7 +48,7 @@ script_mod! {
         height: 8
         draw_bg +: {
             border_radius: 4.0
-            color: #x4cc46a
+            color: theme.flow_success
         }
     }
 
@@ -58,7 +58,7 @@ script_mod! {
         padding: Inset{left: 0 right: 0 top: 2 bottom: 2}
         draw_text +: {
             text_style: theme.font_bold{font_size: 9.5}
-            color: #xe8e8ec
+            color: theme.flow_text
         }
     }
 
@@ -67,7 +67,7 @@ script_mod! {
         height: Fit
         text: ""
         draw_text +: {
-            color: #x8a8a92
+            color: theme.flow_text_muted
             text_style: theme.font_regular{font_size: 8.5}
         }
     }
@@ -78,7 +78,7 @@ script_mod! {
         margin: Inset{top: 8}
         text: ""
         draw_text +: {
-            color: #x5e5e66
+            color: theme.flow_text_hint
             text_style: theme.font_regular{font_size: 9}
         }
     }
@@ -110,7 +110,7 @@ script_mod! {
                         height: Fit
                         text: ""
                         draw_text +: {
-                            color: #x8a8a92
+                            color: theme.flow_text_muted
                             text_style: theme.font_regular{font_size: 8.5}
                         }
                     }
@@ -168,12 +168,12 @@ script_mod! {
         align: Align{x: 0.5 y: 0.5}
         draw_bg +: {
             border_radius: 8.0
-            color: #x2a2a30
+            color: theme.flow_surface_raised
         }
         icon := Icon{
             icon_walk: Walk{width: 16 height: Fit}
             draw_icon +: {
-                color: #xffffff
+                color: theme.flow_text_white
             }
         }
     }
@@ -192,10 +192,10 @@ script_mod! {
             cursor: MouseCursor.Hand
             show_bg: true
             draw_bg +: {
-                color: #x1c1c1f
+                color: theme.flow_surface
                 border_radius: 10.0
                 border_size: 1.0
-                border_color: #x2a2a30
+                border_color: theme.flow_surface_raised
             }
             badge := Badge{}
             View{
@@ -209,7 +209,7 @@ script_mod! {
                     text: ""
                     draw_text +: {
                         text_style: theme.font_bold{font_size: 9.5}
-                        color: #xe8e8ec
+                        color: theme.flow_text
                     }
                 }
                 doc := Label{
@@ -217,7 +217,7 @@ script_mod! {
                     height: Fit
                     text: ""
                     draw_text +: {
-                        color: #x8a8a92
+                        color: theme.flow_text_muted
                         text_style: theme.font_regular{font_size: 8}
                     }
                 }
@@ -225,7 +225,7 @@ script_mod! {
             grip := Icon{
                 icon_walk: Walk{width: 12 height: Fit}
                 draw_icon +: {
-                    color: #x4a4a52
+                    color: theme.flow_text_grip
                     svg: crate_resource("self:resources/icons/grip.svg")
                 }
             }
@@ -252,31 +252,31 @@ script_mod! {
                 title := Label{
                     text: ""
                     draw_text +: {
-                        color: #x6e6e76
+                        color: theme.flow_text_subtle
                         text_style: theme.font_bold{font_size: 8.5}
                     }
                 }
             }
             CardInput := PaletteCard{
-                card +: { badge +: { draw_bg +: {color: #x1f3a37} icon +: { draw_icon +: { color: #x3fb9a8 svg: crate_resource("self:resources/icons/input.svg") } } } }
+                card +: { badge +: { draw_bg +: {color: theme.flow_badge_input} icon +: { draw_icon +: { color: theme.flow_input svg: crate_resource("self:resources/icons/input.svg") } } } }
             }
             CardOutput := PaletteCard{
-                card +: { badge +: { draw_bg +: {color: #x1f3a26} icon +: { draw_icon +: { color: #x4cc46a svg: crate_resource("self:resources/icons/output.svg") } } } }
+                card +: { badge +: { draw_bg +: {color: theme.flow_badge_output} icon +: { draw_icon +: { color: theme.flow_success svg: crate_resource("self:resources/icons/output.svg") } } } }
             }
             CardChat := PaletteCard{
-                card +: { badge +: { draw_bg +: {color: #x2b2748} icon +: { draw_icon +: { color: #x8b7cf6 svg: crate_resource("self:resources/icons/chat.svg") } } } }
+                card +: { badge +: { draw_bg +: {color: theme.flow_badge_chat} icon +: { draw_icon +: { color: theme.flow_chat svg: crate_resource("self:resources/icons/chat.svg") } } } }
             }
             CardGen := PaletteCard{
-                card +: { badge +: { draw_bg +: {color: #x40301e} icon +: { draw_icon +: { color: #xf2994a svg: crate_resource("self:resources/icons/gen.svg") } } } }
+                card +: { badge +: { draw_bg +: {color: theme.flow_badge_generation} icon +: { draw_icon +: { color: theme.flow_generation svg: crate_resource("self:resources/icons/gen.svg") } } } }
             }
             CardFn := PaletteCard{
-                card +: { badge +: { draw_bg +: {color: #x3d3620} icon +: { draw_icon +: { color: #xe6c04a svg: crate_resource("self:resources/icons/fn.svg") } } } }
+                card +: { badge +: { draw_bg +: {color: theme.flow_badge_waiting} icon +: { draw_icon +: { color: theme.flow_function svg: crate_resource("self:resources/icons/fn.svg") } } } }
             }
             CardHttp := PaletteCard{
-                card +: { badge +: { draw_bg +: {color: #x1e363d} icon +: { draw_icon +: { color: #x4ac2e6 svg: crate_resource("self:resources/icons/http.svg") } } } }
+                card +: { badge +: { draw_bg +: {color: theme.flow_badge_http} icon +: { draw_icon +: { color: theme.flow_http svg: crate_resource("self:resources/icons/http.svg") } } } }
             }
             CardAsk := PaletteCard{
-                card +: { badge +: { draw_bg +: {color: #x3d3620} icon +: { draw_icon +: { color: #xf2c14e svg: crate_resource("self:resources/icons/ask.svg") } } } }
+                card +: { badge +: { draw_bg +: {color: theme.flow_badge_waiting} icon +: { draw_icon +: { color: theme.flow_waiting svg: crate_resource("self:resources/icons/ask.svg") } } } }
             }
         }
     }
@@ -313,7 +313,7 @@ script_mod! {
                     text: ""
                     draw_text +: {
                         text_style: theme.font_bold{font_size: 11}
-                        color: #xe8e8ec
+                        color: theme.flow_text
                     }
                 }
                 doc := MetaText{}
@@ -327,7 +327,7 @@ script_mod! {
                 title := Label{
                     text: ""
                     draw_text +: {
-                        color: #x6e6e76
+                        color: theme.flow_text_subtle
                         text_style: theme.font_bold{font_size: 8.5}
                     }
                 }
@@ -438,7 +438,7 @@ script_mod! {
                     text: ""
                     draw_text +: {
                         text_style: theme.font_code{font_size: 8.5}
-                        color: #xc8c8cc
+                        color: theme.flow_text_code
                     }
                 }
                 open := ButtonFlat{text: "Open"}
@@ -472,7 +472,7 @@ script_mod! {
                     text: ""
                     draw_text +: {
                         text_style: theme.font_bold{font_size: 10}
-                        color: #xd0d0d4
+                        color: theme.flow_text_body
                     }
                 }
                 doc := EmptyHint{margin: Inset{top: 0}}
@@ -494,10 +494,10 @@ script_mod! {
             padding: Inset{left: 14 right: 14 top: 12 bottom: 12}
             show_bg: true
             draw_bg +: {
-                color: #x1c1c1f
+                color: theme.flow_surface
                 border_radius: 14.0
                 border_size: 1.0
-                border_color: #x33333a
+                border_color: theme.flow_edge_soft
             }
             head := View{
                 width: Fill
@@ -510,7 +510,7 @@ script_mod! {
                     text: "New flow from a template"
                     draw_text +: {
                         text_style: theme.font_bold{font_size: 11}
-                        color: #xe8e8ec
+                        color: theme.flow_text
                     }
                 }
                 close := ButtonFlat{text: "Close"}
@@ -540,7 +540,7 @@ script_mod! {
                                 text: ""
                                 draw_text +: {
                                     text_style: theme.font_bold{font_size: 10}
-                                    color: #xe8e8ec
+                                    color: theme.flow_text
                                 }
                             }
                             brief := MetaText{}
@@ -570,23 +570,12 @@ script_mod! {
         flow: Down
         padding: theme.mspace_3
         spacing: theme.space_2
-        draw_bg +: {color: #x111111}
-        draw_frame +: {color: #x1c1c1f}
+        draw_bg +: {color: theme.flow_grid_a}
+        draw_frame +: {color: theme.flow_surface}
         draw_text +: {
             text_style: theme.font_bold{font_size: 10}
-            color: #xe8e8ec
+            color: theme.flow_text
         }
-    }
-}
-
-fn state_color(state: &str) -> Vec4f {
-    match state {
-        "running" | "ready" | "queued" => vec4(0.35, 0.62, 1.0, 1.0),
-        "done" | "ok" | "idle" => vec4(0.30, 0.77, 0.42, 1.0),
-        "failed" | "error" => vec4(0.95, 0.43, 0.43, 1.0),
-        "waiting" => vec4(0.95, 0.76, 0.3, 1.0),
-        "cancelled" | "skipped" => vec4(0.55, 0.55, 0.58, 1.0),
-        _ => vec4(0.45, 0.45, 0.5, 1.0),
     }
 }
 
@@ -656,7 +645,7 @@ impl Widget for FlowList {
                     String::new()
                 };
                 item.label(cx, ids!(count)).set_text(cx, &count);
-                set_dot(cx, &item, state_color(&row.state));
+                set_dot(cx, &item, crate::theme::state_color(&row.state));
                 item.draw_all_unscoped(cx);
             }
         }
@@ -1610,7 +1599,7 @@ impl Widget for RunningList {
                         .unwrap_or_else(|| row.instance.chars().take(8).collect())
                 );
                 item.button(cx, ids!(attach)).set_text(cx, &title);
-                set_dot(cx, &item, state_color(&row.state));
+                set_dot(cx, &item, crate::theme::state_color(&row.state));
                 let mut detail = format!("{} · {}", row.owner, row.state);
                 if row.state == "running" && self.now_ms > row.last_activity_ms {
                     detail.push_str(&format!(

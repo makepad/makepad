@@ -410,6 +410,7 @@ fn transform_popup_event(event: &Event, transform: PopupAnchorTransform) -> Opti
         Event::MouseMove(e) => {
             let mut e = e.clone();
             e.abs = transform.point(e.abs);
+            e.lock_delta *= transform.scale;
             Event::MouseMove(e)
         }
         Event::MouseUp(e) => {
@@ -425,6 +426,7 @@ fn transform_popup_event(event: &Event, transform: PopupAnchorTransform) -> Opti
         Event::Scroll(e) => {
             let mut e = e.clone();
             e.abs = transform.point(e.abs);
+            e.scroll *= transform.scale;
             Event::Scroll(e)
         }
         Event::LongPress(e) => {
@@ -436,6 +438,7 @@ fn transform_popup_event(event: &Event, transform: PopupAnchorTransform) -> Opti
             let mut e = e.clone();
             for touch in &mut e.touches {
                 touch.abs = transform.point(touch.abs);
+                touch.radius *= transform.scale;
             }
             Event::TouchUpdate(e)
         }
@@ -568,6 +571,27 @@ pub enum DropDownAction {
 }
 
 impl DropDown {
+    /// Remove every cached popup minted by one script heap before that heap's
+    /// isolate is freed. PopupMenu objects retain script refs (including their
+    /// item template), so allowing them to outlive the heap is both a leak and
+    /// an identity hazard when an allocator later reuses the heap address.
+    pub fn retire_popup_menus_for_heap(cx: &mut Cx, heap: usize) -> usize {
+        if heap == 0 {
+            return 0;
+        }
+        let global = cx.global::<PopupMenuGlobal>().clone();
+        let mut map = global.map.borrow_mut();
+        let before = map.len();
+        map.retain(|key, _| key.heap != heap);
+        before - map.len()
+    }
+
+    /// Test/diagnostic visibility for isolate lifecycle assertions.
+    #[doc(hidden)]
+    pub fn popup_menu_cache_len(cx: &mut Cx) -> usize {
+        cx.global::<PopupMenuGlobal>().map.borrow().len()
+    }
+
     fn popup_menu_key(&self) -> PopupMenuKey {
         PopupMenuKey {
             heap: self.source.heap_key(),
@@ -979,6 +1003,19 @@ impl DropDownRef {
 #[cfg(test)]
 mod anchor_tests {
     use super::*;
+    use crate::makepad_script::script;
+    use crate::makepad_platform::event::{ScrollEvent, ScrollPhase};
+    use std::cell::Cell;
+
+    fn popup(cx: &mut Cx) -> PopupMenu {
+        cx.with_vm(|vm| {
+            let value = vm.eval(script! {
+                use mod.prelude.widgets.*
+                PopupMenu{}
+            });
+            PopupMenu::script_from_value(vm, value)
+        })
+    }
 
     #[test]
     fn popup_anchor_rect_applies_camera_scale_and_translation() {
@@ -1001,5 +1038,64 @@ mod anchor_tests {
         .rect(rect);
         assert_eq!(double.pos, dvec2(190.0, 155.0));
         assert_eq!(double.size, dvec2(160.0, 48.0));
+
+        for transform in [
+            PopupAnchorTransform {
+                scale: 0.5,
+                translation: dvec2(20.0, -5.0),
+            },
+            PopupAnchorTransform {
+                scale: 2.0,
+                translation: dvec2(-30.0, 15.0),
+            },
+        ] {
+            let event = Event::Scroll(ScrollEvent {
+                window_id: WindowId(1, 1),
+                scroll: dvec2(8.0, -4.0),
+                abs: dvec2(110.0, 70.0),
+                modifiers: KeyModifiers::default(),
+                handled_x: Cell::new(false),
+                handled_y: Cell::new(false),
+                is_mouse: true,
+                time: 0.0,
+                phase: ScrollPhase::None,
+            });
+            assert!(matches!(
+                transform_popup_event(&event, transform),
+                Some(Event::Scroll(event))
+                    if event.abs == transform.point(dvec2(110.0, 70.0))
+                        && event.scroll == dvec2(8.0, -4.0) * transform.scale
+            ));
+        }
+    }
+
+    #[test]
+    fn popup_cache_can_retire_one_isolate_heap() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let global = cx.global::<PopupMenuGlobal>().clone();
+        let first = popup(&mut cx);
+        let second = popup(&mut cx);
+        {
+            let mut map = global.map.borrow_mut();
+            map.insert(
+                PopupMenuKey {
+                    heap: 11,
+                    template: ScriptValue::NIL,
+                },
+                first,
+            );
+            map.insert(
+                PopupMenuKey {
+                    heap: 22,
+                    template: ScriptValue::NIL,
+                },
+                second,
+            );
+        }
+        assert_eq!(DropDown::retire_popup_menus_for_heap(&mut cx, 11), 1);
+        let map = global.map.borrow();
+        assert!(!map.keys().any(|key| key.heap == 11));
+        assert!(map.keys().any(|key| key.heap == 22));
     }
 }
