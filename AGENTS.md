@@ -173,9 +173,11 @@ The panel's footer carries the selection's identity: its type and property
 count, and under that the path, head-clipped to fit. **Clicking that path
 line copies the full path to the clipboard** — the same string `/tweak/apply`
 and `/snap` take — so a human can paste an unambiguous reference into a note,
-an issue or a prompt. The `size` row shows what the layout actually produced
-(`measured 420.7 × 82.1` in layout points, plus the device pixels when the
-screen is not 1:1) under the Fill/Fit/number controls that asked for it.
+an issue or a prompt. A full-width line at the top of the Layout section
+shows what the layout actually produced —
+`measured 420.7 × 82.1 = 631 × 123 device px`, layout points first because
+that is the unit the size fields take — above the Fill/Fit/number controls
+that asked for it.
 
 **Note cards.** A note is the human's written instruction attached to one
 widget:
@@ -185,8 +187,8 @@ widget:
 | `Insert`, or `Ctrl+Shift+N` (`Cmd+Shift+N`), or the panel's `note` button | open / close the card on the selection (or, with nothing pinned, on the hovered widget) |
 | drag the header strip | move the card; a leader line in the selection colour joins its two closest points to the widget's outline, once they are more than 30pt apart |
 | drag the bottom-right grip | resize it |
-| `Ctrl+Enter` / the ✦ button | **send the note to you** |
-| the 📌 button | pin the note to disk so it survives the run |
+| `Ctrl+Enter` / the **Send** button | **send the note to you** |
+| the **Pin** button | pin the note to disk so it survives the run |
 | the — button (top left), or `Esc` | put the card away, keeping the text |
 
 The card is opaque and picking cannot reach through it: nothing behind a note
