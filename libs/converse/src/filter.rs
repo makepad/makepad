@@ -8,7 +8,7 @@
 //! (forward everything, for push-to-talk setups where intent is explicit) to a
 //! small local LLM judging and rewriting on its own worker thread.
 
-use makepad_widgets::makepad_draw::thread::SignalToUI;
+use makepad_widgets::makepad_draw::thread::{SignalToUI, ThreadOptions, ThreadSpawner};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 /// What to do with one heard utterance.
@@ -65,13 +65,19 @@ impl FilterWorker {
     /// `make_filter` runs on the worker thread, so the filter itself never
     /// crosses threads — only the factory must be `Send`.
     pub fn new(
+        spawner: ThreadSpawner,
         make_filter: impl FnOnce() -> Box<dyn TranscriptFilter> + Send + 'static,
     ) -> Self {
         let (jobs, job_rx) = mpsc::channel::<FilterJob>();
         let (result_tx, results) = mpsc::channel();
         let signal = SignalToUI::new();
         let worker_signal = signal.clone();
-        std::thread::spawn(move || {
+        let spawned = spawner.spawn_worker(
+            ThreadOptions {
+                name: Some("converse-filter".into()),
+                ..Default::default()
+            },
+            move || {
             let mut filter = make_filter();
             while let Ok(job) = job_rx.recv() {
                 let decision = filter.judge(&job.utterance, &job.recent_dialog);
@@ -87,6 +93,10 @@ impl FilterWorker {
                 worker_signal.set();
             }
         });
+        match spawned {
+            Ok(handle) => handle.detach(),
+            Err(error) => makepad_widgets::error!("converse filter worker unavailable: {error}"),
+        }
         Self {
             jobs,
             results,

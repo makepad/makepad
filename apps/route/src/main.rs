@@ -766,7 +766,7 @@ pub struct App {
     pending_cloud: Option<(String, String)>,
     /// Turn timing shared with the LocalAgent worker.
     #[rust]
-    local_timing: Option<std::sync::Arc<std::sync::Mutex<String>>>,
+    local_timing: Option<ToUIReceiver<String>>,
     #[rust]
     busy: bool,
     #[rust]
@@ -986,11 +986,15 @@ impl App {
         self.ui
             .drop_down(cx, ids!(tile_source))
             .set_selected_item(cx, self.testmap.active_choice().index());
-        nav_data::start_radar_worker(self.radar_rx.sender());
+        nav_data::start_radar_worker(
+            cx.thread_spawner(),
+            cx.task_pool(),
+            self.radar_rx.sender(),
+        );
         cx.start_location_updates();
         // Kokoro af_heart when weights are in reach (this process, the machine
         // node, a LAN box), else the OS voice — the hub decides.
-        let speech = SpeechOutput::new("af_heart");
+        let speech = SpeechOutput::new("af_heart", cx.thread_spawner());
         speech.install_audio_output(cx, 0);
         self.speech = Some(speech);
         self.init_agent(cx);
@@ -1069,12 +1073,12 @@ impl App {
     fn adopt_map_source(&mut self, cx: &mut Cx, maps_root: &std::path::Path) {
         let nav_basename = nav_data::nav_basename(maps_root);
         if let Some(basename) = nav_basename.clone() {
-            nav_data::start_nav_load(self.nav_rx.sender(), basename);
+            nav_data::start_nav_load(cx.task_pool(), self.nav_rx.sender(), basename);
         }
         let map = self.ui.map_view(cx, ids!(map));
         if let Some(basename) = self.testmap.ensure_source(cx, &map, maps_root) {
             if nav_basename.is_none() {
-                nav_data::start_nav_load(self.nav_rx.sender(), basename);
+                nav_data::start_nav_load(cx.task_pool(), self.nav_rx.sender(), basename);
             }
         }
         self.refresh_testmap_ui(cx);
@@ -1158,9 +1162,10 @@ impl App {
         } else {
             let model_path = std::env::var("MAKEPAD_ROUTE_LOCAL_MODEL")
                 .unwrap_or_else(|_| local_agent::DEFAULT_LOCAL_MODEL.to_string());
-            let timing = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-            self.local_timing = Some(timing.clone());
-            Box::new(local_agent::LocalAgent::new(model_path, timing))
+            let timing = ToUIReceiver::default();
+            let timing_sender = timing.sender();
+            self.local_timing = Some(timing);
+            Box::new(local_agent::LocalAgent::new(model_path, timing_sender))
         };
         let session = agent.create_session(
             cx,
@@ -1414,7 +1419,7 @@ impl App {
                 // resident so startup peaks don't stack (iPad jetsam kills
                 // on peak footprint, not steady state).
                 if self.voice_gate.is_none() {
-                    self.voice_gate = Some(VoiceGate::new());
+                    self.voice_gate = Some(VoiceGate::new(cx.thread_spawner()));
                 }
                 // Chain whisper after the LLMs (eager but serialized).
                 self.ui.voice_wave(cx, ids!(mic_wave)).prewarm(cx);
@@ -1447,11 +1452,15 @@ impl App {
                 }
                 self.busy = false;
                 self.current_prompt = None;
-                let timing = self
-                    .local_timing
-                    .as_ref()
-                    .and_then(|t| t.lock().ok().map(|s| s.clone()))
-                    .filter(|s| !s.is_empty())
+                let timing = self.local_timing.as_ref().and_then(|receiver| {
+                    let mut latest = None;
+                    while let Ok(value) = receiver.try_recv() {
+                        latest = Some(value);
+                    }
+                    latest
+                });
+                let timing = timing
+                    .filter(|value| !value.is_empty())
                     .unwrap_or_else(|| "ready".to_string());
                 // The session is append-only: once the context is nearly
                 // full it cannot recover — restart with a fresh session
@@ -1734,7 +1743,7 @@ impl App {
     /// Start/stop the VoiceWave capture and lazily spawn the gate worker.
     fn sync_voice_state(&mut self, cx: &mut Cx) {
         if self.mic_on && self.voice_gate.is_none() {
-            self.voice_gate = Some(VoiceGate::new());
+            self.voice_gate = Some(VoiceGate::new(cx.thread_spawner()));
         }
         let wave = self.ui.voice_wave(cx, ids!(mic_wave));
         wave.set_enabled(cx, self.mic_on);
@@ -2071,7 +2080,7 @@ impl App {
         if self.layers.wind {
             if !self.layers.wind_worker_started {
                 self.layers.wind_worker_started = true;
-                layers::start_wind_worker(self.wind_rx.sender());
+                layers::start_wind_worker(cx.thread_spawner(), self.wind_rx.sender());
             }
             if let Some(update) = &self.layers.wind_cache {
                 map.set_wind_field(
@@ -2090,6 +2099,7 @@ impl App {
         if self.layers.terrain {
             if self.layers.terrain_tx.is_none() {
                 self.layers.terrain_tx = Some(layers::start_terrain_worker(
+                    cx.thread_spawner(),
                     self.terrain_rx.sender(),
                     self.layers.maps_root.clone(),
                 ));
@@ -2115,7 +2125,7 @@ impl MatchEvent for App {
     }
 
     fn handle_http_response(&mut self, cx: &mut Cx, request_id: LiveId, response: &HttpResponse) {
-        if self.testmap.handle_http_response(request_id, response) {
+        if self.testmap.handle_http_response(cx, request_id, response) {
             self.refresh_testmap_ui(cx);
         }
     }
@@ -2459,7 +2469,7 @@ impl AppMain for App {
         let map = self.ui.map_view(cx, ids!(map));
         let provisioner_update = self.testmap.handle_event(cx, &map);
         if let Some(basename) = provisioner_update.nav_basename {
-            nav_data::start_nav_load(self.nav_rx.sender(), basename);
+            nav_data::start_nav_load(cx.task_pool(), self.nav_rx.sender(), basename);
             self.push_entry(
                 cx,
                 EntryKind::Info,

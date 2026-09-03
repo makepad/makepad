@@ -6,9 +6,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use makepad_platform::thread::lock_from_ui;
 
 const LEAF_CACHE_CAPACITY: usize = 32;
 const LEAF_CACHE_BYTE_CAPACITY: usize = 64 * 1024 * 1024;
@@ -62,8 +61,8 @@ impl ArchiveWorkerPool {
                 queue.push(pool, key, true, QueueOrder::Lifo, job)
             }
             Self::Serial => {
-                job();
-                Ok(())
+                drop(job);
+                Err(SubmitError::Closed)
             }
         }
     }
@@ -107,7 +106,7 @@ pub fn new_archive_worker_pool(cx: &mut Cx) -> ArchiveWorkerPool {
             queue: Rc::new(RefCell::new(queue)),
         }
     } else {
-        error!("Map archive pool unavailable, using serial work");
+        error!("Map archive pool unavailable; file reads will be refused");
         ArchiveWorkerPool::Serial
     }
 }
@@ -148,6 +147,7 @@ struct ShardFileCache {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 enum FileReadState {
     Queued,
     Running,
@@ -155,13 +155,18 @@ enum FileReadState {
     Cancelled,
 }
 
+struct FileReadEvent {
+    token: ReadToken,
+    result: Option<Result<Arc<[u8]>, String>>,
+}
+
 /// Local `.mkmap` reads performed by Makepad workers, never by the UI thread.
 pub struct FileByteSource {
     dir: PathBuf,
-    completions: ToUIReceiver<ReadCompletion>,
+    completions: ToUIReceiver<FileReadEvent>,
     workers: ArchiveWorkerPool,
     shard_files: Arc<Mutex<ShardFileCache>>,
-    token_states: Arc<Mutex<HashMap<ReadToken, FileReadState>>>,
+    token_states: HashMap<ReadToken, Arc<AtomicU8>>,
     #[cfg(test)]
     completion_barriers: Option<(
         Arc<std::sync::Barrier>,
@@ -190,56 +195,27 @@ impl FileByteSource {
 }
 
 fn begin_file_read(
-    states: &Mutex<HashMap<ReadToken, FileReadState>>,
-    token: ReadToken,
-    from_ui: bool,
+    state: &AtomicU8,
 ) -> bool {
-    let mut states = if from_ui {
-        lock_from_ui(states)
-    } else {
-        let Ok(states) = states.lock() else {
-            return false;
-        };
-        states
-    };
-    match states.get_mut(&token) {
-        Some(state @ FileReadState::Queued) => {
-            *state = FileReadState::Running;
-            true
-        }
-        Some(FileReadState::Cancelled) => {
-            states.remove(&token);
-            false
-        }
-        _ => false,
-    }
+    state
+        .compare_exchange(
+            FileReadState::Queued as u8,
+            FileReadState::Running as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_ok()
 }
 
-fn complete_file_read(
-    states: &Mutex<HashMap<ReadToken, FileReadState>>,
-    token: ReadToken,
-    from_ui: bool,
-) -> bool {
-    let mut states = if from_ui {
-        lock_from_ui(states)
-    } else {
-        let Ok(states) = states.lock() else {
-            return false;
-        };
-        states
-    };
-    match states.get_mut(&token) {
-        Some(state @ FileReadState::Running) => {
-            *state = FileReadState::Completed;
-            states.remove(&token);
-            true
-        }
-        Some(FileReadState::Cancelled) => {
-            states.remove(&token);
-            false
-        }
-        _ => false,
-    }
+fn complete_file_read(state: &AtomicU8) -> bool {
+    state
+        .compare_exchange(
+            FileReadState::Running as u8,
+            FileReadState::Completed as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_ok()
 }
 
 impl ByteSource for FileByteSource {
@@ -247,13 +223,13 @@ impl ByteSource for FileByteSource {
         let path = self.dir.join("root.mkidx");
         let sender = self.completions.sender();
         let rejected_sender = sender.clone();
-        let token_states = self.token_states.clone();
-        let read_runs_on_ui = matches!(self.workers, ArchiveWorkerPool::Serial);
-        lock_from_ui(&self.token_states).insert(token, FileReadState::Queued);
+        let state = Arc::new(AtomicU8::new(FileReadState::Queued as u8));
+        self.token_states.insert(token, state.clone());
         #[cfg(test)]
         let completion_barriers = self.completion_barriers.clone();
         match self.workers.submit(token, move || {
-            if !begin_file_read(&token_states, token, read_runs_on_ui) {
+            if !begin_file_read(&state) {
+                let _ = sender.send(FileReadEvent { token, result: None });
                 return;
             }
             let result = std::fs::read(&path)
@@ -268,16 +244,15 @@ impl ByteSource for FileByteSource {
                 reached.wait();
                 release.wait();
             }
-            if complete_file_read(&token_states, token, read_runs_on_ui) {
-                let _ = sender.send(ReadCompletion { token, result });
-            }
+            let result = complete_file_read(&state).then_some(result);
+            let _ = sender.send(FileReadEvent { token, result });
         }) {
             Ok(()) => {}
             Err(error) => {
-                lock_from_ui(&self.token_states).remove(&token);
-                let _ = rejected_sender.send(ReadCompletion {
+                self.token_states.remove(&token);
+                let _ = rejected_sender.send(FileReadEvent {
                     token,
-                    result: Err(format!("archive worker submission failed: {error}")),
+                    result: Some(Err(format!("archive worker submission failed: {error}"))),
                 });
             }
         }
@@ -294,9 +269,9 @@ impl ByteSource for FileByteSource {
         _tile_key: Option<TileKey>,
     ) {
         if len == 0 || len > MAX_RANGE_BYTES || offset.checked_add(len).is_none() {
-            let _ = self.completions.sender().send(ReadCompletion {
+            let _ = self.completions.sender().send(FileReadEvent {
                 token,
-                result: Err("invalid mkmap file range".to_string()),
+                result: Some(Err("invalid mkmap file range".to_string())),
             });
             return;
         }
@@ -304,13 +279,13 @@ impl ByteSource for FileByteSource {
         let sender = self.completions.sender();
         let rejected_sender = sender.clone();
         let shard_files = self.shard_files.clone();
-        let token_states = self.token_states.clone();
-        let read_runs_on_ui = matches!(self.workers, ArchiveWorkerPool::Serial);
-        lock_from_ui(&self.token_states).insert(token, FileReadState::Queued);
+        let state = Arc::new(AtomicU8::new(FileReadState::Queued as u8));
+        self.token_states.insert(token, state.clone());
         #[cfg(test)]
         let completion_barriers = self.completion_barriers.clone();
         match self.workers.submit(token, move || {
-            if !begin_file_read(&token_states, token, read_runs_on_ui) {
+            if !begin_file_read(&state) {
+                let _ = sender.send(FileReadEvent { token, result: None });
                 return;
             }
             let result = read_file_range(
@@ -319,52 +294,53 @@ impl ByteSource for FileByteSource {
                 offset,
                 len,
                 &shard_files,
-                read_runs_on_ui,
             );
             #[cfg(test)]
             if let Some((reached, release)) = completion_barriers {
                 reached.wait();
                 release.wait();
             }
-            if complete_file_read(&token_states, token, read_runs_on_ui) {
-                let _ = sender.send(ReadCompletion { token, result });
-            }
+            let result = complete_file_read(&state).then_some(result);
+            let _ = sender.send(FileReadEvent { token, result });
         }) {
             Ok(()) => {}
             Err(error) => {
-                lock_from_ui(&self.token_states).remove(&token);
-                let _ = rejected_sender.send(ReadCompletion {
+                self.token_states.remove(&token);
+                let _ = rejected_sender.send(FileReadEvent {
                     token,
-                    result: Err(format!("archive worker submission failed: {error}")),
+                    result: Some(Err(format!("archive worker submission failed: {error}"))),
                 });
             }
         }
     }
 
     fn cancel(&mut self, _cx: &mut Cx, token: ReadToken) {
-        let mut states = lock_from_ui(&self.token_states);
-        if let Some(state @ (FileReadState::Queued | FileReadState::Running)) =
-            states.get_mut(&token)
-        {
-            *state = FileReadState::Cancelled;
+        if let Some(state) = self.token_states.get(&token) {
+            let _ = state.fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                matches!(
+                    state,
+                    value if value == FileReadState::Queued as u8
+                        || value == FileReadState::Running as u8
+                )
+                .then_some(FileReadState::Cancelled as u8)
+            });
         }
-        drop(states);
         let dropped = self.workers.retain_queued(|queued| *queued != token);
         if !dropped.is_empty() {
-            let mut states = lock_from_ui(&self.token_states);
-            if matches!(
-                states.get(&token),
-                Some(FileReadState::Queued | FileReadState::Cancelled)
-            ) {
-                states.remove(&token);
-            }
+            self.token_states.remove(&token);
         }
     }
 
     fn poll(&mut self, _cx: &mut Cx, _event: &Event) -> Vec<ReadCompletion> {
         let mut out = Vec::new();
-        while let Ok(completion) = self.completions.try_recv() {
-            out.push(completion);
+        while let Ok(event) = self.completions.try_recv() {
+            self.token_states.remove(&event.token);
+            if let Some(result) = event.result {
+                out.push(ReadCompletion {
+                    token: event.token,
+                    result,
+                });
+            }
         }
         self.workers.pump();
         out
@@ -377,18 +353,13 @@ fn read_file_range(
     offset: u64,
     len: u64,
     shard_files: &Mutex<ShardFileCache>,
-    from_ui: bool,
 ) -> Result<Arc<[u8]>, String> {
     use std::io::{Read, Seek, SeekFrom};
 
     let len = usize::try_from(len).map_err(|_| "mkmap range is too large".to_string())?;
-    let mut files = if from_ui {
-        lock_from_ui(shard_files)
-    } else {
-        shard_files
-            .lock()
-            .map_err(|_| "mkmap shard file cache lock poisoned".to_string())?
-    };
+    let mut files = shard_files
+        .lock()
+        .map_err(|_| "mkmap shard file cache lock poisoned".to_string())?;
     if !files.files.contains_key(&shard) {
         while files.files.len() >= FILE_CACHE_CAPACITY {
             if let Some(oldest) = files.lru.pop_front() {
@@ -2709,18 +2680,20 @@ mod tests {
         reached.wait();
         source.cancel(&mut cx, token);
         assert_eq!(
-            source.token_states.lock().unwrap().get(&token),
-            Some(&FileReadState::Cancelled)
+            source.token_states[&token].load(Ordering::Acquire),
+            FileReadState::Cancelled as u8
         );
         release.wait();
         for _ in 0..2_000 {
-            if source.token_states.lock().unwrap().is_empty() {
+            let completions = source.poll(&mut cx, &Event::Startup);
+            assert!(completions.is_empty());
+            if source.token_states.is_empty() {
                 break;
             }
             std::thread::yield_now();
         }
         assert!(source.poll(&mut cx, &Event::Startup).is_empty());
-        assert!(source.token_states.lock().unwrap().is_empty());
+        assert!(source.token_states.is_empty());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
