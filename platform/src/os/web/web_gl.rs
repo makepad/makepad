@@ -23,9 +23,11 @@ impl Cx {
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
         // Exploded z-layer view: z is the call's nesting depth, not paint order.
         let sploded = self.passes[draw_pass_id].sploded.is_some();
-        self.draw_lists[draw_list_id]
-            .draw_list_uniforms
-            .view_transform = Mat4f::identity();
+        // The list's own `view_transform` is the app's (a magnifier well, a
+        // render stage matrix) and uploads as set — Metal and GL never reset
+        // it; this walk used to overwrite it with the identity, which drew the
+        // tweaker's mirrored material at the window's top-left instead of in
+        // its well on the web.
 
         for order_index in 0..draw_order_len {
             let Some(draw_item_id) =
