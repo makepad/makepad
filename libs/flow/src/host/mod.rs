@@ -11,5 +11,5 @@ mod watcher;
 pub use config::{DiscoveryConfig, FlowServerConfig};
 pub use events::{EventCursor, EventHub, FlowEvent};
 pub use server::{Endpoints, FlowServer, ServerError};
-pub use state::{Definition, FlowState, StateHandle};
+pub use state::{Definition, FlowState, NodeRow, RunRow, StateHandle};
 
