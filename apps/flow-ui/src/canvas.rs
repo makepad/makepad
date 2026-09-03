@@ -1170,6 +1170,11 @@ impl FlowCanvas {
         self.camera
     }
 
+    #[cfg(test)]
+    pub(crate) fn zoom(&self) -> f64 {
+        self.target_scale
+    }
+
     pub fn set_fit_insets(&mut self, insets: Inset) {
         self.fit_insets = insets;
     }
@@ -2608,6 +2613,13 @@ impl Widget for FlowCanvas {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        // Popup scroll views run before the canvas and claim the axis they
+        // consume. Scroll hits themselves do not consult those flags, so keep
+        // the graph still whenever any popup has already taken the wheel.
+        let scroll_is_handled = matches!(
+            event,
+            Event::Scroll(event) if event.handled_x.get() || event.handled_y.get()
+        );
         if let Some(nf) = self.next_frame.is_event(event) {
             let dt = (nf.time - self.last_time).clamp(0.0, 0.1);
             self.last_time = nf.time;
@@ -2714,7 +2726,9 @@ impl Widget for FlowCanvas {
             _ => false,
         };
         match event.hits_with_capture_overload(cx, self.area, capture_display_press) {
-            Hit::FingerScroll(fs) if !self.point_over_chrome(fs.abs) => {
+            Hit::FingerScroll(fs)
+                if !scroll_is_handled && !self.point_over_chrome(fs.abs) =>
+            {
                 // Wheel = zoom anchored at the cursor; a horizontal wheel pans.
                 if fs.scroll.x.abs() > fs.scroll.y.abs() * 1.5 {
                     self.target_pan.x -= fs.scroll.x;

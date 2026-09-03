@@ -275,6 +275,15 @@ fn ease(current: f64, target: f64, dt: f64) -> f64 {
 }
 
 impl ImageViewer {
+    pub fn is_open(&self) -> bool {
+        self.item.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn zoom(&self) -> f64 {
+        self.target_zoom
+    }
+
     pub fn show(&mut self, cx: &mut Cx, item: ImageViewerItem) -> Result<(), String> {
         let image = self.view.image(cx, ids!(image));
         image

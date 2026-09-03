@@ -71,6 +71,25 @@ fn is_focus_routed_input(event: &Event) -> bool {
     )
 }
 
+fn is_viewer_modal_input(event: &Event) -> bool {
+    is_focus_routed_input(event)
+        || matches!(
+            event,
+            Event::MouseDown(_)
+                | Event::MouseMove(_)
+                | Event::MouseUp(_)
+                | Event::MouseLeave(_)
+                | Event::TouchUpdate(_)
+                | Event::LongPress(_)
+                | Event::Scroll(_)
+                | Event::PhysicalKeyboard(_)
+                | Event::Drag(_)
+                | Event::Drop(_)
+                | Event::DragEnd
+                | Event::MacosMenuCommand(_)
+        )
+}
+
 const HELP_SHORTCUTS: &str = "⌘N  new flow from a template
 ⌘O  open the next flow
 ⌘S  save the source pane
@@ -2859,7 +2878,36 @@ impl App {
         if !self.left_hidden {
             rects.push(self.ui.widget(cx, ids!(left_panel)).area().rect(cx));
         }
+        let overlay_open = self.ui.view(cx, ids!(template_view)).visible()
+            || self.ui.view(cx, ids!(help_view)).visible()
+            || self.ui.view(cx, ids!(value_preview_view)).visible()
+            || self.ui.modal(cx, ids!(clear_confirm)).is_open()
+            || self
+                .ui
+                .widget(cx, ids!(image_viewer))
+                .borrow::<ImageViewer>()
+                .is_some_and(|viewer| viewer.is_open());
+        if overlay_open {
+            // App-owned overlays cover the graph. Popup widgets outside this
+            // tree use the framework sweep lock or the scroll handled flags.
+            rects.push(self.ui.widget(cx, ids!(canvas)).area().rect(cx));
+        }
         rects
+    }
+
+    fn route_viewer_modal_input(&mut self, cx: &mut Cx, event: &Event) -> bool {
+        if !is_viewer_modal_input(event) {
+            return false;
+        }
+        let viewer = self.ui.widget(cx, ids!(image_viewer));
+        let Some(mut viewer) = viewer.borrow_mut::<ImageViewer>() else {
+            return false;
+        };
+        if !viewer.is_open() {
+            return false;
+        }
+        viewer.handle_event(cx, event, &mut Scope::empty());
+        true
     }
 
     fn update_canvas_fit_insets(&mut self, cx: &mut Cx) {
@@ -3960,6 +4008,11 @@ impl AppMain for App {
         if let Event::NextFrame(nf) = event {
             self.time = nf.time;
         }
+        // The full-window viewer is modal. Route user input directly to it
+        // before selection, faces, the ordinary widget tree, and shortcuts.
+        if self.route_viewer_modal_input(cx, event) {
+            return;
+        }
         if matches!(event, Event::KeyDown(e) if e.key_code == KeyCode::Escape)
             && self.ui.view(cx, ids!(value_preview_view)).visible()
         {
@@ -4214,6 +4267,47 @@ fn node_state_name(state: NodeState) -> &'static str {
 mod layout_tests {
     use super::*;
     use makepad_flow::NodeRowDto;
+    use makepad_widgets::makepad_platform::event::{ScrollEvent, ScrollPhase};
+    use std::cell::Cell;
+
+    fn draw_canvas_and_viewer(
+        cx: &mut Cx,
+        app: &mut App,
+        pass: &DrawPass,
+        draw_list: &mut DrawList2d,
+        size: DVec2,
+    ) {
+        let event = DrawEvent {
+            redraw_all: true,
+            ..Default::default()
+        };
+        let canvas = app.ui.widget(cx, ids!(canvas));
+        let viewer = app.ui.widget(cx, ids!(image_viewer));
+        let mut cx_draw = CxDraw::new(cx, &event);
+        let cx = &mut Cx2d::new(&mut cx_draw);
+        cx.begin_pass(pass, Some(1.0));
+        draw_list.begin_always(cx);
+        cx.begin_root_turtle(size, Layout::flow_overlay());
+        canvas.draw_walk_all(cx, &mut Scope::empty(), Walk::fill());
+        viewer.draw_walk_all(cx, &mut Scope::empty(), Walk::fill());
+        cx.end_pass_sized_turtle();
+        draw_list.end(cx);
+        cx.end_pass(pass);
+    }
+
+    fn scroll_event(window_id: WindowId, abs: DVec2) -> Event {
+        Event::Scroll(ScrollEvent {
+            window_id,
+            scroll: dvec2(0.0, -60.0),
+            abs,
+            modifiers: KeyModifiers::default(),
+            handled_x: Cell::new(false),
+            handled_y: Cell::new(false),
+            is_mouse: true,
+            time: 0.0,
+            phase: ScrollPhase::None,
+        })
+    }
 
     #[test]
     fn splitter_panel_layout_mounts_headlessly() {
@@ -4251,6 +4345,89 @@ mod layout_tests {
             .widget(&cx, ids!(preview_value))
             .borrow::<faces::ValueView>()
             .is_some());
+    }
+
+    #[test]
+    fn image_viewer_owns_wheel_until_it_closes() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let mut app = cx.with_vm(|vm| App::from_script_mod(vm, <App as AppMain>::script_mod));
+        app.ui
+            .widget(&cx, ids!(image_viewer))
+            .borrow_mut::<ImageViewer>()
+            .unwrap()
+            .show(
+                &mut cx,
+                ImageViewerItem {
+                    node: "image".into(),
+                    port: "value".into(),
+                    bytes: makepad_flow::ValueBytes {
+                        digest: "test".into(),
+                        content_type: "image/svg+xml".into(),
+                        bytes: br#"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"/>"#
+                            .as_slice()
+                            .into(),
+                    },
+                },
+            )
+            .unwrap();
+
+        let size = dvec2(1000.0, 700.0);
+        let pass = DrawPass::new(&mut cx);
+        pass.set_size(&mut cx, size);
+        let mut draw_list = DrawList2d::new(&mut cx);
+        draw_canvas_and_viewer(&mut cx, &mut app, &pass, &mut draw_list, size);
+        draw_canvas_and_viewer(&mut cx, &mut app, &pass, &mut draw_list, size);
+        let viewer_area = app.ui.widget(&cx, ids!(image_viewer)).area();
+        let viewer_rect = viewer_area.rect(&cx);
+        let centre = viewer_rect.pos + viewer_rect.size * 0.5;
+        assert!(viewer_rect.size.x > 0.0 && viewer_rect.size.y > 0.0);
+        let window_id = app.ui.window(&cx, ids!(main_window)).window_id().unwrap();
+
+        let canvas_zoom = app
+            .ui
+            .widget(&cx, ids!(canvas))
+            .borrow::<FlowCanvas>()
+            .unwrap()
+            .zoom();
+        let viewer_zoom = app
+            .ui
+            .widget(&cx, ids!(image_viewer))
+            .borrow::<ImageViewer>()
+            .unwrap()
+            .zoom();
+        app.handle_event(&mut cx, &scroll_event(window_id, centre));
+        assert_eq!(
+            app.ui
+                .widget(&cx, ids!(canvas))
+                .borrow::<FlowCanvas>()
+                .unwrap()
+                .zoom(),
+            canvas_zoom
+        );
+        assert_ne!(
+            app.ui
+                .widget(&cx, ids!(image_viewer))
+                .borrow::<ImageViewer>()
+                .unwrap()
+                .zoom(),
+            viewer_zoom
+        );
+
+        app.ui
+            .widget(&cx, ids!(image_viewer))
+            .borrow_mut::<ImageViewer>()
+            .unwrap()
+            .close(&mut cx);
+        app.handle_event(&mut cx, &scroll_event(window_id, centre));
+        assert_ne!(
+            app.ui
+                .widget(&cx, ids!(canvas))
+                .borrow::<FlowCanvas>()
+                .unwrap()
+                .zoom(),
+            canvas_zoom
+        );
     }
 
     #[test]
