@@ -26,7 +26,7 @@
 
 use crate::faces::FaceHost;
 use crate::graph_edit::{self, GraphIndex, NODE_WIDTH};
-use crate::wire_route::{self, Obstacle, Point, RouteKind, RouteStyle, WireRoute};
+use crate::wire_route::{self, Obstacle, Point, PortSide, RouteKind, RouteStyle, WireRoute};
 use makepad_flow::{Graph, Literal, Node, NodeInputValue, PortType};
 use makepad_widgets::fab_controls::FabValueInput;
 use makepad_widgets::makepad_draw::DrawSvg;
@@ -66,6 +66,8 @@ const FIT_MARGIN: f64 = 32.0;
 const MIN_NODE_WIDTH: f64 = 160.0;
 const MIN_TEXT_LINE_H: f64 = 18.0;
 const RESIZE_GRIP: f64 = 18.0;
+const FLIP_SECONDS: f64 = 0.2;
+const AUTO_FLIP_RATIO: f64 = 0.8;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct CardOutlineGeometry {
@@ -420,6 +422,9 @@ pub enum CanvasEdit {
         node: String,
         size: (f64, f64),
     },
+    Flip {
+        node: String,
+    },
     Connect {
         from_node: String,
         from_port: String,
@@ -457,6 +462,9 @@ pub enum FlowCanvasAction {
     Camera {
         scale: f64,
     },
+    /// Facing changes chosen by the router. The app coalesces these into one
+    /// graph PUT on its 250 ms settle tick.
+    AutoFlip(Vec<(String, bool)>),
 }
 
 #[derive(Clone, Debug)]
@@ -595,7 +603,7 @@ struct PortHit {
 }
 
 /// One edge resolved to indices at `set_graph` time.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct EdgeIndex {
     from: usize,
     from_port: usize,
@@ -773,6 +781,15 @@ pub struct FlowCanvas {
     /// Card heights per node index, measured from the faces last frame.
     #[rust]
     heights: Vec<f64>,
+    /// Zero is the ordinary left-to-right facing and one is mirrored. Values
+    /// between them exist only during the 200 ms port-slide animation.
+    #[rust]
+    flip_positions: Vec<f64>,
+    /// A hand-set facing is local UI state and deliberately never serialized.
+    #[rust]
+    flip_lock: HashSet<String>,
+    #[rust]
+    auto_flip_pending: bool,
     #[rust]
     edges: Vec<EdgeIndex>,
     /// Geometry is retained until an endpoint card, another card, or the
@@ -860,6 +877,14 @@ fn ease(current: f64, target: f64, dt: f64) -> f64 {
     }
 }
 
+fn should_auto_flip(current: f64, flipped: f64, cables: usize, locked: bool) -> bool {
+    cables > 0
+        && !locked
+        && current.is_finite()
+        && flipped.is_finite()
+        && flipped < current * AUTO_FLIP_RATIO
+}
+
 impl FlowCanvas {
     // -- the app's view of the canvas ------------------------------------------
 
@@ -878,6 +903,8 @@ impl FlowCanvas {
         }
         // Keep the measured heights of the nodes that survive.
         let old = self.graph.take();
+        let old_edges = std::mem::take(&mut self.edges);
+        let old_wire_cache = std::mem::take(&mut self.wire_cache);
         let old_index: HashMap<String, usize> = old
             .as_ref()
             .map(|graph| {
@@ -891,6 +918,7 @@ impl FlowCanvas {
             .unwrap_or_default();
         let mut old_lists = std::mem::take(&mut self.card_draw_lists);
         let mut heights = Vec::new();
+        let mut flip_positions = Vec::new();
         let mut edges = Vec::new();
         let mut card_draw_lists = Vec::new();
         let mut node_index = HashMap::new();
@@ -904,6 +932,11 @@ impl FlowCanvas {
                     .and_then(|index| self.heights.get(index).copied())
                     .unwrap_or(0.0);
                 heights.push(height);
+                flip_positions.push(
+                    old_position
+                        .and_then(|index| self.flip_positions.get(index).copied())
+                        .unwrap_or(if node.flip { 1.0 } else { 0.0 }),
+                );
                 card_draw_lists.push(
                     old_position
                         .and_then(|index| old_lists.get_mut(index))
@@ -957,9 +990,14 @@ impl FlowCanvas {
                 offset
             })
             .collect();
-        self.wire_cache = std::iter::repeat_with(|| None).take(edges.len()).collect();
+        self.wire_cache = if edges == old_edges {
+            old_wire_cache
+        } else {
+            std::iter::repeat_with(|| None).take(edges.len()).collect()
+        };
         self.wire_cache_dirty = true;
         self.heights = heights;
+        self.flip_positions = flip_positions;
         self.edges = edges;
         self.card_draw_lists = card_draw_lists;
         self.node_index = node_index;
@@ -968,6 +1006,8 @@ impl FlowCanvas {
             .map(graph_edit::GraphIndex::new)
             .unwrap_or_default();
         self.graph = graph;
+        self.flip_lock.retain(|id| self.node_index.contains_key(id));
+        self.auto_flip_pending = self.graph.is_some();
         self.hover = None;
         if let Some(selected) = self.selected.clone() {
             if !self.has_node(&selected) {
@@ -980,8 +1020,15 @@ impl FlowCanvas {
 
     /// A different flow opened: fit it once its faces have been measured.
     pub fn reset_view(&mut self, cx: &mut Cx) {
+        self.flip_lock.clear();
+        self.auto_flip_pending = false;
         self.fit_pending = 2;
         self.redraw(cx);
+    }
+
+    /// Pin a user-chosen facing until they choose another facing by hand.
+    pub fn lock_flip(&mut self, node: &str) {
+        self.flip_lock.insert(node.to_string());
     }
 
     pub fn selected(&self) -> Option<&str> {
@@ -1315,14 +1362,45 @@ impl FlowCanvas {
         }
     }
 
-    fn port_local(&self, graph: &Graph, index: usize, port: usize, output: bool) -> DVec2 {
+    fn port_local_at_flip(
+        &self,
+        graph: &Graph,
+        index: usize,
+        port: usize,
+        output: bool,
+        flip: f64,
+    ) -> DVec2 {
         let rect = self.card_rect(graph, index);
         let y = rect.pos.y + CARD_HEADER_H + (port as f64 + 0.5) * PORT_ROW_H;
-        if output {
-            dvec2(rect.pos.x + rect.size.x, y)
+        let side = if output { 1.0 - flip } else { flip };
+        dvec2(rect.pos.x + rect.size.x * side, y)
+    }
+
+    fn port_local(&self, graph: &Graph, index: usize, port: usize, output: bool) -> DVec2 {
+        let flip = self
+            .flip_positions
+            .get(index)
+            .copied()
+            .unwrap_or(if graph.nodes[index].flip { 1.0 } else { 0.0 });
+        self.port_local_at_flip(graph, index, port, output, flip)
+    }
+
+    fn port_side_at_flip(output: bool, flip: f64) -> PortSide {
+        let on_right = if output { flip < 0.5 } else { flip >= 0.5 };
+        if on_right {
+            PortSide::Right
         } else {
-            dvec2(rect.pos.x, y)
+            PortSide::Left
         }
+    }
+
+    fn port_side(&self, graph: &Graph, index: usize, output: bool) -> PortSide {
+        let flip = self
+            .flip_positions
+            .get(index)
+            .copied()
+            .unwrap_or(if graph.nodes[index].flip { 1.0 } else { 0.0 });
+        Self::port_side_at_flip(output, flip)
     }
 
     fn port_at(&self, abs: DVec2) -> Option<PortHit> {
@@ -1482,7 +1560,9 @@ impl FlowCanvas {
     fn route_cache_key(
         edge: EdgeIndex,
         from: Point,
+        source_side: PortSide,
         to: Point,
+        target_side: PortSide,
         card_rects: &[Rect],
         offset: f64,
     ) -> u64 {
@@ -1491,6 +1571,8 @@ impl FlowCanvas {
         edge.from_port.hash(&mut hash);
         edge.to.hash(&mut hash);
         edge.to_port.hash(&mut hash);
+        source_side.hash(&mut hash);
+        target_side.hash(&mut hash);
         for value in [from.x, from.y, to.x, to.y, offset] {
             value.to_bits().hash(&mut hash);
         }
@@ -1514,8 +1596,18 @@ impl FlowCanvas {
             let edge = self.edges[index];
             let from = Self::route_point(self.port_local(graph, edge.from, edge.from_port, true));
             let to = Self::route_point(self.port_local(graph, edge.to, edge.to_port, false));
+            let source_side = self.port_side(graph, edge.from, true);
+            let target_side = self.port_side(graph, edge.to, false);
             let offset = self.parallel_offsets.get(index).copied().unwrap_or(0.0);
-            let key = Self::route_cache_key(edge, from, to, &card_rects, offset);
+            let key = Self::route_cache_key(
+                edge,
+                from,
+                source_side,
+                to,
+                target_side,
+                &card_rects,
+                offset,
+            );
             if self.wire_cache.get(index).and_then(Option::as_ref).is_some_and(|cached| cached.key == key)
             {
                 continue;
@@ -1527,16 +1619,149 @@ impl FlowCanvas {
                         .inflate(CARD_CLEARANCE)
                 })
                 .collect();
-            let route = wire_route::route_wire(from, to, &obstacles, RouteStyle::default(), offset);
+            let route = wire_route::route_wire(
+                from,
+                source_side,
+                to,
+                target_side,
+                &obstacles,
+                RouteStyle::default(),
+                offset,
+            );
             self.wire_cache[index] = Some(CachedWire { key, route });
         }
         self.wire_cache_dirty = false;
     }
 
-    fn preview_route(&self, graph: &Graph, from_index: usize, from_port: usize, to: DVec2) -> WireRoute {
+    fn flip_animation_active(&self, graph: &Graph) -> bool {
+        graph.nodes.iter().enumerate().any(|(index, node)| {
+            let target = if node.flip { 1.0 } else { 0.0 };
+            self.flip_positions
+                .get(index)
+                .is_some_and(|position| (position - target).abs() > 1e-4)
+        })
+    }
+
+    /// Compare only the routes incident to each card. Existing routes supply
+    /// the current total; the opposite facing reroutes just those cables.
+    fn maybe_auto_flip(&mut self, cx: &mut Cx, graph: &mut Graph) {
+        if !self.auto_flip_pending || self.drag.is_some() || self.flip_animation_active(graph) {
+            return;
+        }
+        const CARD_CLEARANCE: f64 = 12.0;
+        self.ensure_wire_routes(graph);
+        let card_rects: Vec<Rect> = (0..graph.nodes.len())
+            .map(|index| self.card_rect(graph, index))
+            .collect();
+        let obstacles: Vec<Obstacle> = card_rects
+            .iter()
+            .map(|rect| {
+                Obstacle::from_xywh(rect.pos.x, rect.pos.y, rect.size.x, rect.size.y)
+                    .inflate(CARD_CLEARANCE)
+            })
+            .collect();
+        let mut changes = Vec::new();
+        for node_index in 0..graph.nodes.len() {
+            let node_id = &graph.nodes[node_index].id;
+            let locked = self.flip_lock.contains(node_id);
+            let candidate_flip = !graph.nodes[node_index].flip;
+            let candidate_position = if candidate_flip { 1.0 } else { 0.0 };
+            let mut current_total = 0.0;
+            let mut candidate_total = 0.0;
+            let mut cable_count = 0;
+            for (edge_index, edge) in self.edges.iter().copied().enumerate() {
+                if edge.from != node_index && edge.to != node_index {
+                    continue;
+                }
+                let Some(current) = self
+                    .wire_cache
+                    .get(edge_index)
+                    .and_then(Option::as_ref)
+                    .map(|cached| cached.route.length())
+                else {
+                    continue;
+                };
+                let from_flip = if edge.from == node_index {
+                    candidate_position
+                } else if graph.nodes[edge.from].flip {
+                    1.0
+                } else {
+                    0.0
+                };
+                let to_flip = if edge.to == node_index {
+                    candidate_position
+                } else if graph.nodes[edge.to].flip {
+                    1.0
+                } else {
+                    0.0
+                };
+                let from = Self::route_point(self.port_local_at_flip(
+                    graph,
+                    edge.from,
+                    edge.from_port,
+                    true,
+                    from_flip,
+                ));
+                let to = Self::route_point(self.port_local_at_flip(
+                    graph,
+                    edge.to,
+                    edge.to_port,
+                    false,
+                    to_flip,
+                ));
+                let offset = self.parallel_offsets.get(edge_index).copied().unwrap_or(0.0);
+                let candidate = wire_route::route_wire(
+                    from,
+                    Self::port_side_at_flip(true, from_flip),
+                    to,
+                    Self::port_side_at_flip(false, to_flip),
+                    &obstacles,
+                    RouteStyle::default(),
+                    offset,
+                );
+                current_total += current;
+                candidate_total += candidate.length();
+                cable_count += 1;
+            }
+            if should_auto_flip(current_total, candidate_total, cable_count, locked) {
+                changes.push((node_id.clone(), candidate_flip));
+            }
+        }
+        self.auto_flip_pending = false;
+        if changes.is_empty() {
+            return;
+        }
+        for (id, flip) in &changes {
+            if let Some(node) = graph.nodes.iter_mut().find(|node| node.id == *id) {
+                node.flip = *flip;
+            }
+        }
+        self.wire_cache_dirty = true;
+        self.next_frame = cx.new_next_frame();
+        cx.widget_action(self.uid, FlowCanvasAction::AutoFlip(changes));
+        self.redraw(cx);
+    }
+
+    fn preview_route(
+        &self,
+        graph: &Graph,
+        from_index: usize,
+        from_port: usize,
+        pointer: DVec2,
+        target: Option<(usize, usize)>,
+    ) -> WireRoute {
         const CARD_CLEARANCE: f64 = 12.0;
         let from = Self::route_point(self.port_local(graph, from_index, from_port, true));
-        let to = Self::route_point(to);
+        let source_side = self.port_side(graph, from_index, true);
+        let (to, target_side) = target.map_or(
+            (Self::route_point(pointer), PortSide::Left),
+            |(node, port)| {
+                (
+                    Self::route_point(self.port_local(graph, node, port, false)),
+                    self.port_side(graph, node, false),
+                )
+            },
+        );
         let obstacles: Vec<Obstacle> = (0..graph.nodes.len())
             .map(|index| {
                 let rect = self.card_rect(graph, index);
@@ -1544,7 +1769,15 @@ impl FlowCanvas {
                     .inflate(CARD_CLEARANCE)
             })
             .collect();
-        wire_route::route_wire(from, to, &obstacles, RouteStyle::default(), 0.0)
+        wire_route::route_wire(
+            from,
+            source_side,
+            to,
+            target_side,
+            &obstacles,
+            RouteStyle::default(),
+            0.0,
+        )
     }
 
     fn text_width(&self, cx: &mut Cx2d, draw: &DrawText, text: &str) -> f64 {
@@ -1642,12 +1875,13 @@ impl FlowCanvas {
             from_port,
             ty,
             pos,
+            target,
             ..
         }) = self.drag
         {
             let b = self.camera.screen_to_local(pos);
             let color = self.port_color(ty);
-            let route = self.preview_route(graph, from, from_port, b);
+            let route = self.preview_route(graph, from, from_port, b, target);
             Self::set_color(&mut self.draw_vec, color, 1.0);
             Self::draw_route(&mut self.draw_vec, &route);
             self.draw_vec.stroke(3.0);
@@ -1793,15 +2027,22 @@ impl FlowCanvas {
                     } else {
                         self.color_port_label_open
                     };
-                    self.draw_port
-                        .draw_abs(cx, dvec2(p.x + PORT_R + 8.0, p.y - 6.0), &input.port);
+                    let w = self.text_width(cx, &self.draw_port, &input.port);
+                    let x = match self.port_side(graph, index, false) {
+                        PortSide::Left => p.x + PORT_R + 8.0,
+                        PortSide::Right => p.x - PORT_R - 8.0 - w,
+                    };
+                    self.draw_port.draw_abs(cx, dvec2(x, p.y - 6.0), &input.port);
                 }
                 for (port, output) in node.outputs.iter().enumerate() {
                     let p = self.port_local(graph, index, port, true);
                     let w = self.text_width(cx, &self.draw_port, &output.name);
                     self.draw_port.color = self.color_port_label_connected;
-                    self.draw_port
-                        .draw_abs(cx, dvec2(p.x - PORT_R - 8.0 - w, p.y - 6.0), &output.name);
+                    let x = match self.port_side(graph, index, true) {
+                        PortSide::Left => p.x + PORT_R + 8.0,
+                        PortSide::Right => p.x - PORT_R - 8.0 - w,
+                    };
+                    self.draw_port.draw_abs(cx, dvec2(x, p.y - 6.0), &output.name);
                 }
             }
             // Errors: the face's own, or the node's run error, one line.
@@ -2101,6 +2342,10 @@ impl FlowCanvas {
             })
             || (self.camera.pan - self.target_pan).length() > 0.05
             || (self.camera.scale - self.target_scale).abs() > 1e-4
+            || self
+                .graph
+                .as_ref()
+                .is_some_and(|graph| self.flip_animation_active(graph))
     }
 }
 
@@ -2204,6 +2449,59 @@ mod tests {
             dvec2(240.0, 180.0)
         );
     }
+
+    #[test]
+    fn auto_flip_shortens_the_image_to_below_left_picture_route() {
+        let style = RouteStyle::default();
+        let obstacles = [
+            Obstacle::from_xywh(1340.0, 180.0, 400.0, 400.0).inflate(12.0),
+            Obstacle::from_xywh(300.0, 580.0, 900.0, 650.0).inflate(12.0),
+        ];
+        let from = Point::new(1740.0, 206.0);
+        let current = wire_route::route_wire(
+            from,
+            PortSide::Right,
+            Point::new(300.0, 606.0),
+            PortSide::Left,
+            &obstacles,
+            style,
+            0.0,
+        );
+        let flipped = wire_route::route_wire(
+            from,
+            PortSide::Right,
+            Point::new(1200.0, 606.0),
+            PortSide::Right,
+            &obstacles,
+            style,
+            0.0,
+        );
+        assert!(
+            should_auto_flip(current.length(), flipped.length(), 1, false),
+            "current={} flipped={}",
+            current.length(),
+            flipped.length()
+        );
+    }
+
+    #[test]
+    fn auto_flip_uses_strict_twenty_percent_hysteresis() {
+        assert!(should_auto_flip(100.0, 79.99, 1, false));
+        assert!(!should_auto_flip(100.0, 80.0, 1, false));
+        assert!(!should_auto_flip(100.0, 10.0, 0, false));
+    }
+
+    #[test]
+    fn hand_flip_lock_blocks_an_otherwise_winning_auto_flip() {
+        let mut locks = HashSet::new();
+        locks.insert("picture".to_string());
+        assert!(!should_auto_flip(
+            1000.0,
+            100.0,
+            1,
+            locks.contains("picture")
+        ));
+    }
 }
 
 fn raise_to_front(order: &mut Vec<String>, node: &str) {
@@ -2245,7 +2543,7 @@ impl Widget for FlowCanvas {
         cx.push_clip_rect(local_view);
         self.draw_background(cx, local_view);
         let mut heights_changed = false;
-        if let Some(graph) = self.graph.take() {
+        if let Some(mut graph) = self.graph.take() {
             self.draw_wires(cx, &graph);
             let z_order = std::mem::take(&mut self.z_order);
             if let Some(faces) = scope.data.get_mut::<FaceHost>() {
@@ -2273,6 +2571,9 @@ impl Widget for FlowCanvas {
             }
             self.z_order = z_order;
             self.draw_top_overlay(cx);
+            if !heights_changed {
+                self.maybe_auto_flip(cx, &mut graph);
+            }
             self.graph = Some(graph);
         }
         cx.pop_clip_rect();
@@ -2327,6 +2628,28 @@ impl Widget for FlowCanvas {
             for status in self.statuses.values_mut() {
                 let target = status.target_fraction();
                 status.shown = ease(status.shown, target, dt);
+            }
+            if let Some(graph) = self.graph.as_ref() {
+                let step = dt / FLIP_SECONDS;
+                let mut changed = false;
+                for (index, node) in graph.nodes.iter().enumerate() {
+                    let target = if node.flip { 1.0 } else { 0.0 };
+                    let Some(position) = self.flip_positions.get_mut(index) else {
+                        continue;
+                    };
+                    let next = if *position < target {
+                        (*position + step).min(target)
+                    } else {
+                        (*position - step).max(target)
+                    };
+                    changed |= (next - *position).abs() > f64::EPSILON;
+                    *position = next;
+                }
+                if changed {
+                    // Endpoint coordinates change continuously. Route keys keep
+                    // every non-incident cable cached.
+                    self.wire_cache_dirty = true;
+                }
             }
             for pulse in &mut self.pulses {
                 if pulse.started.is_none() {

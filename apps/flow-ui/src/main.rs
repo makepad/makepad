@@ -79,6 +79,7 @@ const HELP_SHORTCUTS: &str = "⌘N  new flow from a template
 ⌘D  duplicate the selected node
 ⌘R  run · ⌘.  cancel · ⇧⌘K  clear outputs · ⌥⌘R  run to the selected node
 ⌘1 / ⌘2 / ⌘3  canvas · app view · source
+F  flip the selected card's input/output facing
 ⌘= / ⌘-  zoom in / out · ⌘0  100 % · Home  fit
 drag empty canvas to pan · wheel to zoom at the cursor
 drag from a port to wire it · drag a palette card onto the canvas";
@@ -198,6 +199,7 @@ script_mod! {
                                 {id: @view_app label: "App view" shortcut: "Cmd+2"}
                                 {id: @view_source label: "Source" shortcut: "Cmd+3"}
                                 {id: @view_inspector label: "Inspector" shortcut: "Cmd+I"}
+                                {id: @flip_card label: "Flip card" shortcut: "F"}
                                 {sep: true}
                                 {id: @toggle_left label: "Flows, Running and Palette" shortcut: "Cmd+L"}
                                 {sep: true}
@@ -758,6 +760,8 @@ pub struct App {
     #[rust]
     pending_graph: bool,
     #[rust]
+    pending_auto_flips: HashMap<String, bool>,
+    #[rust]
     app_mode: bool,
     #[rust]
     source_mode: bool,
@@ -1128,6 +1132,7 @@ impl App {
         self.definition = None;
         self.unsaved = false;
         self.deferred_flow_reload = false;
+        self.pending_auto_flips.clear();
         self.revisions.clear();
         self.redo.clear();
         self.ui.label(cx, ids!(flow_name)).set_text(cx, &name);
@@ -1211,6 +1216,7 @@ impl App {
         let Some(name) = self.selected.clone() else {
             return;
         };
+        self.pending_auto_flips.clear();
         let canonical = self
             .flows
             .iter()
@@ -1258,6 +1264,18 @@ impl App {
         let next = match edit {
             CanvasEdit::Move { node, at } => graph_edit::move_node(&graph, &node, at),
             CanvasEdit::Resize { node, size } => graph_edit::resize_node(&graph, &node, size),
+            CanvasEdit::Flip { node } => {
+                let Some(flip) = graph
+                    .nodes
+                    .iter()
+                    .find(|candidate| candidate.id == node)
+                    .map(|candidate| !candidate.flip)
+                else {
+                    return;
+                };
+                self.with_canvas(cx, |_, canvas| canvas.lock_flip(&node));
+                graph_edit::flip_node(&graph, &node, flip)
+            }
             CanvasEdit::Connect {
                 from_node,
                 from_port,
@@ -1302,6 +1320,7 @@ impl App {
             copy.fn_src = node.fn_src.clone();
             copy.face_src = node.face_src.clone();
             copy.size = node.size;
+            copy.flip = node.flip;
         }
         self.put_graph(cx, next);
     }
@@ -1376,7 +1395,14 @@ impl App {
                 IoResult::GraphPut { name, result } => {
                     self.pending_graph = false;
                     match result {
-                        Ok(response) => {
+                        Ok(mut response) => {
+                            for (id, flip) in &self.pending_auto_flips {
+                                if let Some(node) =
+                                    response.graph.nodes.iter_mut().find(|node| node.id == *id)
+                                {
+                                    node.flip = *flip;
+                                }
+                            }
                             if self.selected.as_deref() == Some(&name) {
                                 let remount = self
                                     .definition
@@ -1780,7 +1806,14 @@ impl App {
         }
     }
 
-    fn show_flow(&mut self, cx: &mut Cx, definition: FlowDefinition) {
+    fn show_flow(&mut self, cx: &mut Cx, mut definition: FlowDefinition) {
+        if let Some(graph) = definition.graph.as_mut() {
+            for (id, flip) in &self.pending_auto_flips {
+                if let Some(node) = graph.nodes.iter_mut().find(|node| node.id == *id) {
+                    node.flip = *flip;
+                }
+            }
+        }
         if !self.unsaved {
             self.ui
                 .text_input(cx, ids!(source))
@@ -2058,6 +2091,7 @@ impl App {
         menu.set_enabled(cx, live_id!(clear_outputs), has_instance);
         menu.set_enabled(cx, live_id!(delete_node), has_selected);
         menu.set_enabled(cx, live_id!(duplicate), has_selected);
+        menu.set_enabled(cx, live_id!(flip_card), has_selected);
         menu.set_enabled(cx, live_id!(run_to_node), has_selected);
         menu.set_enabled(cx, live_id!(undo), can_undo);
         menu.set_enabled(cx, live_id!(redo), can_redo);
@@ -2350,8 +2384,8 @@ impl App {
 
     // -- pending writes ----------------------------------------------------------
 
-    /// Text inputs are debounced by the poll tick (250 ms); everything else
-    /// is written on the same tick it changed.
+    /// Text inputs and auto-facing changes are coalesced on the 250 ms poll
+    /// tick; explicit controls are written on the tick they change.
     fn flush_pending(&mut self, cx: &mut Cx) {
         if !self.pending_inputs.is_empty()
             && !self.input_flush_in_flight
@@ -2373,15 +2407,23 @@ impl App {
                 }
             });
         }
-        if !self.pending_params.is_empty() && !self.pending_graph {
+        if (!self.pending_params.is_empty() || !self.pending_auto_flips.is_empty())
+            && !self.pending_graph
+        {
             if let Some(mut graph) = self.current_graph() {
                 let pending = std::mem::take(&mut self.pending_params);
                 for ((node, key), value) in pending {
                     graph = graph_edit::set_param(&graph, &node, &key, value);
                 }
+                for (id, flip) in &self.pending_auto_flips {
+                    if let Some(node) = graph.nodes.iter_mut().find(|node| node.id == *id) {
+                        node.flip = *flip;
+                    }
+                }
                 self.put_graph(cx, graph);
             } else {
                 self.pending_params.clear();
+                self.pending_auto_flips.clear();
             }
         }
     }
@@ -2958,6 +3000,11 @@ impl App {
                 self.source_mode = false;
                 self.set_modes(cx);
             }
+            id if id == live_id!(flip_card) => {
+                if let Some(node) = self.selected_node.clone() {
+                    self.apply_edit(cx, CanvasEdit::Flip { node });
+                }
+            }
             id if id == live_id!(toggle_left) => {
                 self.left_hidden = !self.left_hidden;
                 self.set_modes(cx);
@@ -3272,6 +3319,29 @@ impl MatchEvent for App {
                         .label(cx, ids!(zoom_label))
                         .set_text(cx, &format!("{:.0} %", scale * 100.0));
                 }
+                FlowCanvasAction::AutoFlip(changes) => {
+                    let Some(mut graph) = self.current_graph() else {
+                        continue;
+                    };
+                    let mut changed = false;
+                    let mut staged = Vec::new();
+                    for (id, flip) in changes {
+                        if let Some(node) = graph.nodes.iter_mut().find(|node| node.id == id) {
+                            if node.flip != flip {
+                                changed = true;
+                                staged.push((id, flip));
+                            }
+                            node.flip = flip;
+                        }
+                    }
+                    if changed {
+                        if let Some(definition) = self.definition.as_mut() {
+                            definition.graph = Some(graph);
+                        }
+                        self.show_graph(cx);
+                        self.pending_auto_flips.extend(staged);
+                    }
+                }
             }
         }
 
@@ -3353,6 +3423,9 @@ impl MatchEvent for App {
                         let next = graph_edit::set_face_src(&graph, &node, &src);
                         self.put_graph(cx, next);
                     }
+                }
+                InspectorAction::FlipCard { node } => {
+                    self.apply_edit(cx, CanvasEdit::Flip { node });
                 }
                 InspectorAction::RenameNode { node, new_id } => {
                     if !valid_node_id(&new_id) {
