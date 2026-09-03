@@ -396,8 +396,12 @@ pub enum SpinMotion {
 pub enum ScratchMotion {
     /// A hand landed on the record: brake to a stop.
     Grab,
-    /// Scrub at this rate; negative runs backwards.
-    Move { rate: f32 },
+    /// The finger is HERE on the record, in source seconds, travelling at
+    /// this speed. A place rather than a speed, because a speed alone is
+    /// open-loop: every clamp, every dropped frame and every coalesced
+    /// event is drift the record never recovers. The speed rides along as
+    /// the feed-forward, measured where the pointer timestamps are.
+    Move { secs: f64, rate: f32 },
     /// Let go: spin back up to the deck's tempo.
     Release,
 }
@@ -5232,7 +5236,7 @@ mod tests {
         engine.observe(DeckId::B, 3.17, false);
         let cmds = engine.apply_auto_sync();
         assert!(seek_of(&cmds, DeckId::B).is_none(), "no seek under a hand");
-        let cmds = engine.scratch(DeckId::B, ScratchMotion::Move { rate: -1.5 });
+        let cmds = engine.scratch(DeckId::B, ScratchMotion::Move { secs: 3.0, rate: -1.5 });
         assert!(seek_of(&cmds, DeckId::B).is_none());
 
         // Letting go re-locks it.

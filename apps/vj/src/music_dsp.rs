@@ -276,8 +276,24 @@ impl ParamRamp {
 pub const SCRATCH_GRAB_SECS: f32 = 0.045;
 /// Hand-off spin-up back to the deck's tempo.
 pub const SCRATCH_RELEASE_SECS: f32 = 0.22;
-/// How fast the rate follows the pointer while dragging.
+/// How fast the rate follows the pointer while dragging. This is the
+/// output smoother's time constant, well inside the position loop's own,
+/// so it damps the steps between pointer events without ringing.
 pub const SCRATCH_TRACK_SECS: f32 = 0.010;
+/// How hard the record is pulled back onto the finger, per second of
+/// position error. One over this is the time the loop takes to close a
+/// standing error, so it has to be quick enough to feel rigid and slow
+/// enough that a display frame's worth of disagreement is not a lurch.
+pub const SCRATCH_PULL: f32 = 8.0;
+/// How far a hand may drag the record from where it says it is, in source
+/// seconds. Past this the finger and the record have lost each other --
+/// a stall, a seek underneath, an anchor from another track -- and
+/// chasing it would be a jump, not a follow.
+pub const SCRATCH_ERROR_MAX: f32 = 0.5;
+/// A flick keeps spinning. The hand-off time grows with how far the
+/// platter is from tempo, so a hard throw coasts and a gentle let-go does
+/// not, and it is capped so nothing spins for a whole phrase.
+pub const SCRATCH_THROW_MAX: f32 = 5.0;
 
 // The MOTOR times. Everything above is a hand on the record; these are the
 // platter driving itself, and they are here beside the others so every
@@ -332,6 +348,22 @@ pub struct ScratchRamp {
     /// What the motor gesture does when it lands, armed here so the
     /// callback never needs a timer of its own.
     end: MotorEnd,
+    /// Where the finger says the record should be, in source seconds, and
+    /// how fast the finger itself is travelling. Both come from the
+    /// surface, which is the side with the pointer timestamps: a velocity
+    /// worked out in the callback from one pointer hop and a sample clock
+    /// is a hyperbola, not a speed.
+    target_secs: f64,
+    target_rate: f32,
+    /// What the loop wraps have moved the record by since the hand landed.
+    /// The SURFACE knows nothing about them — its anchor is where the
+    /// finger touched down — so the correction is kept here and applied to
+    /// every place it sends, rather than to the target once.
+    wrap_offset: f64,
+    /// A hand is dragging by POSITION. `held` alone is the brake that
+    /// follows the hand landing; this says the loop has something to
+    /// close on.
+    tracking: bool,
     /// How long the release currently in flight takes. Carried rather than
     /// hard-coded because a censor hands back in four milliseconds and a
     /// soft start winds up over more than a second, and the tempo-chase
@@ -347,6 +379,10 @@ impl Default for ScratchRamp {
             releasing: false,
             motor: false,
             end: MotorEnd::Retire,
+            target_secs: 0.0,
+            target_rate: 0.0,
+            wrap_offset: 0.0,
+            tracking: false,
             release_secs: SCRATCH_RELEASE_SECS,
         }
     }
@@ -364,21 +400,50 @@ impl ScratchRamp {
         self.held = true;
         self.releasing = false;
         self.motor = false;
+        self.tracking = false;
+        self.wrap_offset = 0.0;
         self.end = MotorEnd::Retire;
         self.rate.slew(0.0, SCRATCH_GRAB_SECS);
     }
 
-    /// Pointer motion: scrub at the drag rate (negative = backwards).
-    pub fn drag(&mut self, rate: f32) {
+    /// Pointer motion, as a PLACE rather than a speed.
+    ///
+    /// `secs` is where on the record the finger is; `rate` is how fast the
+    /// finger is travelling, measured on the surface where the pointer
+    /// timestamps are. The rate is the feed-forward — it is what sustains
+    /// a steady drag with no error at all — and the place is what closes
+    /// the loop, so a clamp, a dropped frame or a coalesced event is
+    /// recovered rather than lost forever.
+    pub fn drag(&mut self, secs: f64, rate: f32) {
         if !self.held {
             return;
         }
-        self.rate.slew(rate.clamp(-MAX_SCRATCH_RATE, MAX_SCRATCH_RATE), SCRATCH_TRACK_SECS);
+        self.target_secs = secs + self.wrap_offset;
+        self.target_rate = rate.clamp(-MAX_SCRATCH_RATE, MAX_SCRATCH_RATE);
+        self.tracking = true;
     }
 
-    /// Pointer up: spin back up to the deck's tempo.
+    /// The render wrapped the playhead through a loop. The finger did not,
+    /// so its target comes round too — otherwise the error is a whole loop
+    /// wide and the record runs at its clamp until the hand comes off.
+    pub fn note_wrap(&mut self, delta_secs: f64) {
+        if self.tracking {
+            self.wrap_offset += delta_secs;
+            self.target_secs += delta_secs;
+        }
+    }
+
+    /// Pointer up: let the platter carry on and settle back to tempo.
+    ///
+    /// The hand-off time grows with how far the record is from the deck's
+    /// own speed, so a flick coasts and a gentle let-go simply lands. It
+    /// stays a LINEAR ramp: it reaches the tempo exactly and hands the
+    /// rate back, where an asymptote would report a hand on the record for
+    /// seconds after there was one.
     pub fn release(&mut self, deck_rate: f32) {
-        self.release_over(deck_rate, SCRATCH_RELEASE_SECS);
+        let momentum = (self.rate.current() - deck_rate).abs();
+        let stretch = (1.0 + momentum).min(SCRATCH_THROW_MAX);
+        self.release_over(deck_rate, SCRATCH_RELEASE_SECS * stretch);
     }
 
     /// The same hand-back over a chosen time. A hand off the record takes
@@ -390,6 +455,7 @@ impl ScratchRamp {
         }
         self.held = false;
         self.motor = false;
+        self.tracking = false;
         self.end = MotorEnd::Retire;
         self.releasing = true;
         self.release_secs = secs;
@@ -445,7 +511,24 @@ impl ScratchRamp {
     /// Advance one output frame; returns the current rate. The release ramp
     /// hands control back to the deck once it lands on the deck rate.
     #[inline]
-    pub fn tick(&mut self, device_rate: f32, deck_rate: f32) -> f32 {
+    pub fn tick(&mut self, device_rate: f32, deck_rate: f32, pos_secs: f64) -> f32 {
+        // A hand dragging by POSITION runs its own loop: the finger's own
+        // speed sustains the drag, and the error pulls the record back
+        // onto the finger, so nothing lost along the way stays lost.
+        if self.tracking {
+            let error =
+                ((self.target_secs - pos_secs) as f32).clamp(-SCRATCH_ERROR_MAX, SCRATCH_ERROR_MAX);
+            let want =
+                (self.target_rate + SCRATCH_PULL * error).clamp(-MAX_SCRATCH_RATE, MAX_SCRATCH_RATE);
+            // One pole rather than a linear ramp: the steps between
+            // pointer events are smoothed without a target to overshoot.
+            // The reciprocal form is the tab's own, and needs no
+            // transcendental in the callback.
+            let pole = (1.0 / (SCRATCH_TRACK_SECS * device_rate.max(1.0))).min(1.0);
+            let value = self.rate.current() + (want - self.rate.current()) * pole;
+            self.rate.jump(value);
+            return value;
+        }
         if self.releasing {
             // Follow a tempo change made mid-release, over the time THIS
             // release was given. A censor hands back in four milliseconds
@@ -1667,21 +1750,27 @@ mod tests {
         assert!(scratch.active() && scratch.held());
         // Inside the brake time the platter reaches a stop.
         for _ in 0..(rate * SCRATCH_GRAB_SECS * 1.2) as usize {
-            scratch.tick(rate, 1.0);
+            scratch.tick(rate, 1.0, 0.0);
         }
         assert!(scratch.rate().abs() < 1e-3, "grab must stop the platter");
 
-        // A drag scrubs at the pointer's rate, backwards included.
-        scratch.drag(-2.0);
+        // A drag runs the record backwards under a finger going backwards.
+        // The record is HELD at zero here, so the error grows with every
+        // frame and the pull adds to the feed-forward; what is pinned is
+        // the direction and that the clamp is respected.
+        scratch.drag(-2.0, -2.0);
         for _ in 0..(rate * SCRATCH_TRACK_SECS * 2.0) as usize {
-            scratch.tick(rate, 1.0);
+            scratch.tick(rate, 1.0, 0.0);
         }
-        assert!((scratch.rate() + 2.0).abs() < 0.05, "drag rate {}", scratch.rate());
+        assert!(scratch.rate() <= -2.0, "a backward drag runs back: {}", scratch.rate());
+        assert!(scratch.rate() >= -MAX_SCRATCH_RATE, "and inside the clamp");
 
         scratch.release(1.0);
         assert!(scratch.active() && !scratch.held());
-        for _ in 0..(rate * SCRATCH_RELEASE_SECS * 1.2) as usize {
-            scratch.tick(rate, 1.0);
+        // The hand-off is longer the further the platter is from tempo, so
+        // this let-go from full reverse takes its longest.
+        for _ in 0..(rate * SCRATCH_RELEASE_SECS * SCRATCH_THROW_MAX * 1.2) as usize {
+            scratch.tick(rate, 1.0, 0.0);
         }
         assert!((scratch.rate() - 1.0).abs() < 1e-3, "release must reach tempo");
         assert!(!scratch.active(), "the deck owns the rate again");
@@ -1692,17 +1781,166 @@ mod tests {
         let rate = 48_000.0f32;
         let mut scratch = ScratchRamp::default();
         scratch.grab(1.0);
-        scratch.tick(rate, 1.0);
+        scratch.tick(rate, 1.0, 0.0);
         scratch.release(1.0);
         // The pitch slider moves while the platter is spinning back up.
-        for _ in 0..(rate * SCRATCH_RELEASE_SECS * 1.5) as usize {
-            scratch.tick(rate, 1.08);
+        for _ in 0..(rate * SCRATCH_RELEASE_SECS * 3.0) as usize {
+            scratch.tick(rate, 1.08, 0.0);
         }
         assert!((scratch.rate() - 1.08).abs() < 1e-3, "rate {}", scratch.rate());
         assert!(!scratch.active());
     }
 
 
+
+    // ---- the hand and the record, closed ---------------------------------
+
+    /// Drive the ramp the way the callback does: one tick per frame, with
+    /// the position the record has actually reached fed back in.
+    struct Platter {
+        scratch: ScratchRamp,
+        pos: f64,
+        rate: f32,
+        device: f32,
+    }
+
+    impl Platter {
+        fn new(pos: f64) -> Platter {
+            Platter { scratch: ScratchRamp::default(), pos, rate: 48_000.0, device: 48_000.0 }
+        }
+        /// One frame. Returns the rate the record is running at.
+        fn frame(&mut self, deck_rate: f32) -> f32 {
+            let rate = self.scratch.tick(self.device, deck_rate, self.pos);
+            if self.scratch.active() {
+                self.pos += rate as f64 / self.rate as f64;
+            } else {
+                self.pos += deck_rate as f64 / self.rate as f64;
+            }
+            rate
+        }
+        fn run(&mut self, secs: f32, deck_rate: f32) {
+            for _ in 0..(self.rate * secs) as usize {
+                self.frame(deck_rate);
+            }
+        }
+    }
+
+    #[test]
+    fn a_dragged_record_ends_up_where_the_finger_put_it() {
+        // The whole point of closing the loop. Every loss along the way --
+        // a clamp, a slew, a dropped frame, a coalesced event -- used to be
+        // drift the record never recovered.
+        let mut p = Platter::new(10.0);
+        p.scratch.grab(1.0);
+        p.run(0.05, 1.0);
+        // The finger walks the record forward a second, in twelve hops,
+        // and one hop is dropped entirely.
+        for hop in 1..=12 {
+            if hop != 7 {
+                p.scratch.drag(10.0 + hop as f64 / 12.0, 1.0);
+            }
+            p.run(1.0 / 12.0, 1.0);
+        }
+        // And stops. The surface says so — a finger that has held still
+        // for a moment publishes the same place at no speed.
+        p.scratch.drag(11.0, 0.0);
+        p.run(0.6, 1.0);
+        assert!(
+            (p.pos - 11.0).abs() < 0.01,
+            "the record lands where the finger left it: want 11.0, got {}",
+            p.pos,
+        );
+    }
+
+    #[test]
+    fn a_record_dragged_at_a_steady_speed_is_followed_without_a_standing_lag() {
+        // Feed-forward: the finger's own speed comes in from the surface
+        // that has the timestamps, so a steady drag needs no error to
+        // sustain it and the record does not trail behind.
+        let mut p = Platter::new(10.0);
+        p.scratch.grab(1.0);
+        p.run(0.05, 1.0);
+        let speed = 2.0f64;
+        let hop = 1.0 / 120.0;
+        for step in 1..=120 {
+            p.scratch.drag(10.0 + speed * hop * step as f64, speed as f32);
+            p.run(hop as f32, 1.0);
+        }
+        let rate = p.frame(1.0);
+        assert!(
+            (rate - speed as f32).abs() < 0.05,
+            "the record runs at the finger's speed, got {rate}",
+        );
+        let want = 10.0 + speed * hop * 120.0;
+        assert!((p.pos - want).abs() < 0.02, "and is where it should be: {} of {want}", p.pos);
+    }
+
+    #[test]
+    fn a_held_still_finger_stops_the_record() {
+        let mut p = Platter::new(10.0);
+        p.scratch.grab(1.0);
+        p.run(0.05, 1.0);
+        p.scratch.drag(10.5, 1.0);
+        p.run(0.4, 1.0);
+        // The target stops moving and the speed reported goes to zero.
+        p.scratch.drag(10.5, 0.0);
+        p.run(0.8, 1.0);
+        let before = p.pos;
+        p.run(0.2, 1.0);
+        assert!((p.pos - before).abs() < 1e-3, "the record stands still: {before} -> {}", p.pos);
+        assert!((p.pos - 10.5).abs() < 0.01, "under the finger, at {}", p.pos);
+    }
+
+    #[test]
+    fn a_flick_coasts_further_than_a_gentle_let_go() {
+        let coast = |speed: f32| {
+            let mut p = Platter::new(10.0);
+            p.scratch.grab(1.0);
+            p.run(0.02, 1.0);
+            let hop = 1.0 / 120.0;
+            for step in 1..=30 {
+                p.scratch.drag(10.0 + speed as f64 * hop * step as f64, speed);
+                p.run(hop as f32, 1.0);
+            }
+            p.scratch.release(1.0);
+            let mut frames = 0usize;
+            while p.scratch.active() && frames < 48_000 * 4 {
+                p.frame(1.0);
+                frames += 1;
+            }
+            frames as f32 / 48_000.0
+        };
+        let gentle = coast(1.1);
+        let hard = coast(6.0);
+        assert!(
+            hard > gentle * 1.5,
+            "a hard flick keeps spinning: gentle {gentle:.3} s, hard {hard:.3} s",
+        );
+        assert!(hard < 4.0, "but it does come to rest, at {hard:.3} s");
+    }
+
+    #[test]
+    fn a_loop_wrap_carries_the_finger_target_with_the_record() {
+        // Without this the record wraps and the finger does not, so the
+        // error becomes a whole loop and the controller drives the record
+        // at its clamp until the hand comes off.
+        let mut p = Platter::new(9.9);
+        p.scratch.grab(1.0);
+        p.run(0.05, 1.0);
+        p.scratch.drag(10.4, 1.0);
+        // The render wrapped the head back into a one-second span.
+        p.pos -= 1.0;
+        p.scratch.note_wrap(-1.0);
+        // The surface knows nothing of the wrap: its anchor is where the
+        // finger landed, so it goes on saying 10.4.
+        p.scratch.drag(10.4, 0.0);
+        p.run(0.8, 1.0);
+        assert!(
+            (p.pos - 9.4).abs() < 0.02,
+            "the target came round with the record, to {}",
+            p.pos,
+        );
+    }
     // ---- the platter driving itself --------------------------------------
 
     #[test]
@@ -1733,7 +1971,7 @@ mod tests {
         assert!(!scratch.held(), "but no hand is on the record");
         assert!(scratch.motoring());
         for _ in 0..(rate * BRAKE_SECS * 1.2) as usize {
-            scratch.tick(rate, 1.0);
+            scratch.tick(rate, 1.0, 0.0);
         }
         assert!(scratch.rate().abs() < 1e-3, "the platter stopped");
         // The load-bearing half: a motor that never retires holds the
@@ -1753,7 +1991,7 @@ mod tests {
             MotorEnd::Then(0.0, SPINBACK_FALL_SECS),
         );
         for _ in 0..(rate * SPINBACK_THROW_SECS * 1.1) as usize {
-            scratch.tick(rate, 1.0);
+            scratch.tick(rate, 1.0, 0.0);
         }
         assert!(
             (scratch.rate() - SPINBACK_PEAK).abs() < SPINBACK_PEAK.abs() * 0.05,
@@ -1762,7 +2000,7 @@ mod tests {
         );
         assert!(scratch.active(), "and the second leg is still to come");
         for _ in 0..(rate * SPINBACK_FALL_SECS * 1.2) as usize {
-            scratch.tick(rate, 1.0);
+            scratch.tick(rate, 1.0, 0.0);
         }
         assert!(scratch.rate().abs() < 1e-3, "the fall reaches rest");
         assert!(!scratch.active(), "with no timer on the caller thread");
@@ -1775,7 +2013,7 @@ mod tests {
         // The pitch slider moves throughout. A brake does not follow it.
         scratch.motor(1.0, 0.0, BRAKE_SECS, MotorEnd::Retire);
         for _ in 0..(rate * BRAKE_SECS * 1.2) as usize {
-            scratch.tick(rate, 1.08);
+            scratch.tick(rate, 1.08, 0.0);
         }
         assert!(scratch.rate().abs() < 1e-3, "a brake stops at zero, not at tempo");
 
@@ -1784,7 +2022,7 @@ mod tests {
         // it was handed, so the chase actually fires.
         scratch.spin_up_from(0.0, 1.0, SOFT_START_SECS);
         for _ in 0..(rate * SCRATCH_RELEASE_SECS * 1.5) as usize {
-            scratch.tick(rate, 1.08);
+            scratch.tick(rate, 1.08, 0.0);
         }
         assert!(
             scratch.active(),
@@ -1792,7 +2030,7 @@ mod tests {
             scratch.rate(),
         );
         for _ in 0..(rate * SOFT_START_SECS) as usize {
-            scratch.tick(rate, 1.08);
+            scratch.tick(rate, 1.08, 0.0);
         }
         assert!((scratch.rate() - 1.08).abs() < 1e-3, "rate {}", scratch.rate());
         assert!(!scratch.active());
@@ -1804,12 +2042,12 @@ mod tests {
         let mut scratch = ScratchRamp::default();
         scratch.motor(1.0, 0.0, BRAKE_SECS, MotorEnd::Retire);
         for _ in 0..(rate * BRAKE_SECS / 3.0) as usize {
-            scratch.tick(rate, 1.0);
+            scratch.tick(rate, 1.0, 0.0);
         }
         let coasting = scratch.rate();
         assert!(coasting < 1.0 && coasting > 0.0, "mid-brake, got {coasting}");
         scratch.grab(1.0);
-        let after = scratch.tick(rate, 1.0);
+        let after = scratch.tick(rate, 1.0, 0.0);
         assert!(
             after <= coasting + 1e-4,
             "a hand must not snap the platter back up to tempo first: {coasting} -> {after}",
@@ -1825,13 +2063,13 @@ mod tests {
         let mut scratch = ScratchRamp::default();
         scratch.motor(1.0, CENSOR_RATE, CENSOR_FLIP_SECS, MotorEnd::Hold);
         for _ in 0..(rate * CENSOR_FLIP_SECS * 20.0) as usize {
-            scratch.tick(rate, 1.0);
+            scratch.tick(rate, 1.0, 0.0);
         }
         assert!((scratch.rate() - CENSOR_RATE).abs() < 1e-3);
         assert!(scratch.active() && scratch.motoring(), "still holding");
         scratch.release_over(1.0, CENSOR_RETURN_SECS);
         for _ in 0..(rate * CENSOR_RETURN_SECS * 1.2) as usize {
-            scratch.tick(rate, 1.0);
+            scratch.tick(rate, 1.0, 0.0);
         }
         assert!(!scratch.active(), "and lets go when told");
     }
@@ -1842,12 +2080,12 @@ mod tests {
         let mut scratch = ScratchRamp::default();
         scratch.motor(1.0, CENSOR_RATE, CENSOR_FLIP_SECS, MotorEnd::Hold);
         for _ in 0..(rate * CENSOR_FLIP_SECS * 1.2) as usize {
-            scratch.tick(rate, 1.0);
+            scratch.tick(rate, 1.0, 0.0);
         }
         assert!((scratch.rate() - CENSOR_RATE).abs() < 1e-3, "in reverse");
         scratch.release_over(1.0, CENSOR_RETURN_SECS);
         for _ in 0..(rate * CENSOR_RETURN_SECS * 1.2) as usize {
-            scratch.tick(rate, 1.0);
+            scratch.tick(rate, 1.0, 0.0);
         }
         assert!((scratch.rate() - 1.0).abs() < 1e-3, "back at tempo");
         assert!(!scratch.active());
@@ -1867,11 +2105,11 @@ mod tests {
         let mut scratch = ScratchRamp::default();
         scratch.motor(1.0, CENSOR_RATE, CENSOR_FLIP_SECS, MotorEnd::Hold);
         for _ in 0..(rate * CENSOR_FLIP_SECS * 1.2) as usize {
-            scratch.tick(rate, 1.0);
+            scratch.tick(rate, 1.0, 0.0);
         }
         scratch.release_over(1.0, CENSOR_RETURN_SECS);
         for _ in 0..(rate * CENSOR_RETURN_SECS * 1.5) as usize {
-            scratch.tick(rate, 1.05);
+            scratch.tick(rate, 1.05, 0.0);
         }
         assert!(
             !scratch.active(),
@@ -1982,7 +2220,7 @@ mod tests {
             if let Some(frame) = reader.read(0.9188, &mut pull) {
                 eq.process(frame, 48_000.0);
             }
-            scratch.tick(48_000.0, 1.0);
+            scratch.tick(48_000.0, 1.0, 0.0);
         }
 
         let before = alloc_probe::count();
@@ -1991,7 +2229,7 @@ mod tests {
             if let Some(frame) = reader.read(0.9188, &mut pull) {
                 eq.process(frame, 48_000.0);
             }
-            scratch.tick(48_000.0, 1.0);
+            scratch.tick(48_000.0, 1.0, 0.0);
         }
         eq.prepare_block();
         let after = alloc_probe::count();

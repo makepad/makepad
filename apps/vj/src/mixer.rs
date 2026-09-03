@@ -2373,7 +2373,7 @@ impl Mixer {
         let deck_rate = d.rate.current();
         match motion {
             ScratchMotion::Grab => d.scratch.grab(deck_rate),
-            ScratchMotion::Move { rate } => d.scratch.drag(rate),
+            ScratchMotion::Move { secs, rate } => d.scratch.drag(secs, rate),
             ScratchMotion::Release => d.scratch.release(deck_rate),
         }
         self.publish_deck(&s, deck.index());
@@ -3013,7 +3013,18 @@ impl Mixer {
                 let side = if i == 0 { fader.0 } else { fader.1 };
                 let deck_rate = d.rate.tick(rate);
                 let key_ratio = d.key_ratio.tick(rate) as f64;
-                let scratch_rate = d.scratch.tick(rate, deck_rate);
+                // Where the record has actually reached, in the finger's
+                // own units, so the loop has something to close on. Read
+                // HERE, above the read path's early exits, for the same
+                // reason the slip ghost is: a ramp that stops ticking
+                // because a deck lost its track never settles, and a deck
+                // that reports a hand on it forever pins its own lane.
+                let pos_secs = d
+                    .pcm
+                    .as_ref()
+                    .map(|pcm| d.playhead_frames() / pcm.sample_rate.max(1) as f64)
+                    .unwrap_or(0.0);
+                let scratch_rate = d.scratch.tick(rate, deck_rate, pos_secs);
                 let scratching = d.scratch.active();
                 // Which way the record is travelling. Everything gated on
                 // this is bit-identical when it is false, which is every
@@ -3134,6 +3145,12 @@ impl Mixer {
                         // continues the subdivision in phase instead of
                         // re-triggering the downbeat at IN.
                         let landed = wrapped_into_span(d.playhead_frames(), start, end);
+                        // The finger did not come round with the record,
+                        // so its target does. Without this the error is a
+                        // whole loop wide and a hand on the record would
+                        // drive it at the clamp until it came off.
+                        let moved = landed - d.playhead_frames();
+                        d.scratch.note_wrap(moved / pcm.sample_rate.max(1) as f64);
                         d.seek_frames(landed);
                     }
                 }
@@ -4251,23 +4268,36 @@ mod tests {
         mixer.set_crossfader(0.0);
         mixer.install_deck(DeckId::A, tone_pcm(440.0, 48_000, 10.0));
         // Deliberately NOT playing: a hand on the record still moves it.
+        // The finger says where it is and how fast it is going; the record
+        // follows the place, not the speed.
         mixer.scratch_deck(DeckId::A, ScratchMotion::Grab);
-        mixer.scratch_deck(DeckId::A, ScratchMotion::Move { rate: 2.0 });
-        render(&mixer, 48_000.0, 24_000);
+        for step in 1..=24 {
+            mixer.scratch_deck(
+                DeckId::A,
+                ScratchMotion::Move { secs: step as f64 * 2.0 / 24.0, rate: 2.0 },
+            );
+            render(&mixer, 48_000.0, 1_000);
+        }
         let (scrubbed, _, playing) = mixer.deck_position(DeckId::A);
         assert!(!playing, "scrubbing is not playing");
         assert!(scrubbed > 0.5, "the hand moved the record: {scrubbed:.3} s");
         assert!(mixer.deck_scratching(DeckId::A));
 
         // Backwards, too.
-        mixer.scratch_deck(DeckId::A, ScratchMotion::Move { rate: -3.0 });
-        render(&mixer, 48_000.0, 12_000);
+        for step in 1..=12 {
+            mixer.scratch_deck(
+                DeckId::A,
+                ScratchMotion::Move { secs: scrubbed - step as f64 * 3.0 / 12.0, rate: -3.0 },
+            );
+            render(&mixer, 48_000.0, 1_000);
+        }
         let (back, _, _) = mixer.deck_position(DeckId::A);
         assert!(back < scrubbed, "a backward scrub must rewind: {back:.3}");
 
-        // Letting go of a paused deck stops it dead.
+        // Letting go of a paused deck stops it dead. The hand-off grows
+        // with the momentum it was let go at, so give it its longest.
         mixer.scratch_deck(DeckId::A, ScratchMotion::Release);
-        render(&mixer, 48_000.0, 48_000);
+        render(&mixer, 48_000.0, 48_000 * 2);
         assert!(!mixer.deck_scratching(DeckId::A), "the ramp must finish");
         let (settled, _, _) = mixer.deck_position(DeckId::A);
         render(&mixer, 48_000.0, 24_000);

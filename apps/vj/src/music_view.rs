@@ -4591,8 +4591,11 @@ impl WaveLane {
 pub enum WaveEvent {
     /// A pointer landed on a lane.
     ScratchStart { deck: DeckId },
-    /// Scrub at this rate (1.0 = normal speed forward, negative = back).
-    ScratchRate { deck: DeckId, rate: f32 },
+    /// The finger is at `secs` on the record and travelling at `rate`.
+    /// A PLACE as well as a speed: the place is what closes the loop so
+    /// nothing lost on the way is lost for good, and the speed is measured
+    /// here, on the side that has the pointer timestamps.
+    ScratchRate { deck: DeckId, secs: f64, rate: f32 },
     ScratchEnd { deck: DeckId },
     /// The reverse hold, on the same surface and the same hand: the record
     /// runs backwards while it is down and lands where it would have been.
@@ -4756,6 +4759,15 @@ struct DragState {
     last_time: f64,
     /// The last rate we published, so an idle pointer decays to a stop.
     idle_since: f64,
+    /// Where the record was when the finger landed, and where the finger
+    /// landed. Everything the drag publishes is measured from this pair,
+    /// so a pointer that goes back where it started puts the record back
+    /// where it started.
+    anchor_secs: f64,
+    anchor_x: f64,
+    /// The last place published, so an idle pointer can say "still here"
+    /// rather than having to say it in speed.
+    last_secs: f64,
     /// This drag is a reverse HOLD, not a scrub. Its rate is fixed, so no
     /// pointer motion and no idle decay may retune it.
     censor: bool,
@@ -4877,8 +4889,21 @@ impl VjWaveScroll {
         if delta_secs <= 1e-6 || width <= 1.0 {
             return 0.0;
         }
-        let secs_per_px = self.zoom_secs / width;
-        (-delta_x * secs_per_px / delta_secs) as f32
+        (-delta_x * self.secs_per_px(width) / delta_secs) as f32
+    }
+
+    /// How far along the record a pointer travel of `delta_x` moves it,
+    /// in the same direction convention as the rate above.
+    fn drag_offset(&self, width: f64, delta_x: f64) -> f64 {
+        -delta_x * self.secs_per_px(width)
+    }
+
+    fn secs_per_px(&self, width: f64) -> f64 {
+        if width <= 1.0 {
+            0.0
+        } else {
+            self.zoom_secs / width
+        }
     }
 }
 
@@ -4908,7 +4933,13 @@ impl Widget for VjWaveScroll {
             if let Some(drag) = self.drag.filter(|drag| !drag.censor) {
                 let now = cx.seconds_since_app_start();
                 if now - drag.idle_since > SCRATCH_IDLE_SECS {
-                    self.events.push(WaveEvent::ScratchRate { deck: drag.deck, rate: 0.0 });
+                    // Still here, and no longer moving. The place stands;
+                    // only the speed goes to zero.
+                    self.events.push(WaveEvent::ScratchRate {
+                        deck: drag.deck,
+                        secs: drag.last_secs,
+                        rate: 0.0,
+                    });
                 }
             }
             if self.drag.is_some() {
@@ -4941,11 +4972,18 @@ impl Widget for VjWaveScroll {
                 // scrub: the same hand, on the same surface, where the
                 // reversal is visible.
                 let censor = fe.mod_shift();
+                // Where the record is, as this surface last heard it. It
+                // is a display frame old at worst, and the loop closes
+                // that much of a disagreement inside a tenth of a second.
+                let anchor_secs = self.lanes[deck.index()].position_secs;
                 self.drag = Some(DragState {
                     deck,
                     last_x: fe.abs.x,
                     last_time: now,
                     idle_since: now,
+                    anchor_secs,
+                    anchor_x: fe.abs.x,
+                    last_secs: anchor_secs,
                     censor,
                 });
                 self.events.push(if censor {
@@ -4972,11 +5010,17 @@ impl Widget for VjWaveScroll {
                 }
                 let width = self.area.rect(cx).size.x;
                 let rate = self.drag_rate(width, delta_x, delta_secs);
+                // Measured from the anchor, not accumulated from the last
+                // event: a sum of hops loses whatever a coalesced or
+                // dropped event carried, and this is the number the whole
+                // change exists to make exact.
+                let secs = drag.anchor_secs + self.drag_offset(width, fe.abs.x - drag.anchor_x);
                 drag.last_x = fe.abs.x;
                 drag.last_time = now;
                 drag.idle_since = now;
+                drag.last_secs = secs;
                 self.drag = Some(drag);
-                self.events.push(WaveEvent::ScratchRate { deck: drag.deck, rate });
+                self.events.push(WaveEvent::ScratchRate { deck: drag.deck, secs, rate });
             }
             Hit::FingerUp(_) => {
                 if let Some(drag) = self.drag.take() {

@@ -25970,8 +25970,8 @@ p2 {}
                     let cmds = self.decks.scratch(deck, ScratchMotion::Grab);
                     self.run_deck_cmds(cx, cmds);
                 }
-                WaveEvent::ScratchRate { deck, rate } => {
-                    let cmds = self.decks.scratch(deck, ScratchMotion::Move { rate });
+                WaveEvent::ScratchRate { deck, secs, rate } => {
+                    let cmds = self.decks.scratch(deck, ScratchMotion::Move { secs, rate });
                     self.run_deck_cmds(cx, cmds);
                 }
                 WaveEvent::ScratchEnd { deck } => {
