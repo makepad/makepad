@@ -200,7 +200,7 @@ use crate::mix::MixState;
 use makepad_asset_client::side_channels::SideChannelOutcome;
 use makepad_asset_client::{
     select_file, CatalogSubscriptionEvent, ClientError, ClientEvent, ClientOutput, ClientRequest,
-    ClientMode, RequestId, SessionConnector, SessionHandles, SessionMsg, SessionStatus,
+    RequestId, SessionConnector, SessionHandles, SessionMsg, SessionStatus,
     TierPreference,
 };
 use makepad_asset_data::{
@@ -544,6 +544,27 @@ script_mod! {
         }
     }
 
+    // THE OUTPUT SURFACE: what the projector shows. One template, two
+    // hosts — the output window on a platform with a second window, and
+    // `output_layer` in the console on a platform with one (the web). The
+    // App addresses it through its host (`output_program_path` & co),
+    // never by a bare id: both hosts carry these names.
+    let OutputSurface = PageFlip{
+        width: Fill
+        height: Fill
+        active_page: @video_out_page
+        video_out_page := View{
+            width: Fill
+            height: Fill
+            program := VideoProgram{}
+        }
+        mesh_out_page := View{
+            width: Fill
+            height: Fill
+            mesh_program := VjMeshView{}
+        }
+    }
+
     startup() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
@@ -859,7 +880,9 @@ script_mod! {
                                     }
                                 }
                             }
-                            Tip{ text: "Output window"
+                            // Its text names the mode this platform gives the
+                            // output (`App::sync_output_button`).
+                            open_output_tip := Tip{ text: "Open output window"
                                 open_output := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/monitor.svg") } }
                             }
                             // MASTER VOLUME as a DROPDOWN SLIDER: the chip
@@ -2824,9 +2847,25 @@ script_mod! {
                             }
                         }
                     }
-                    // The system tooltip host: LAST in the overlay stack,
-                    // draws on the overlay layer over every panel.
+                    // The system tooltip host: draws on the overlay layer
+                    // over every panel.
                     tip_layer := TipLayer{}
+                    // The IN-PAGE OUTPUT: the program surface over the whole
+                    // console — the mode a one-window platform (the web)
+                    // gets instead of the projector window below
+                    // (`OutputWindowLifecycle::InPage`). Hidden until the
+                    // OUTPUT button asks for it; Esc, a double-click or the
+                    // button puts it away. Last in the stack, and with a
+                    // cursor so it takes every click the console under it
+                    // would otherwise get.
+                    output_layer := SolidView{
+                        visible: false
+                        width: Fill
+                        height: Fill
+                        cursor: MouseCursor.Default
+                        draw_bg.color: #x000000
+                        out_pages := OutputSurface{}
+                    }
                     }
                 }
             }
@@ -2847,21 +2886,7 @@ script_mod! {
                         height: Fill
                         flow: Down
                         draw_bg.color: #x000000
-                        out_pages := PageFlip{
-                            width: Fill
-                            height: Fill
-                            active_page: @video_out_page
-                            video_out_page := View{
-                                width: Fill
-                                height: Fill
-                                program := VideoProgram{}
-                            }
-                            mesh_out_page := View{
-                                width: Fill
-                                height: Fill
-                                mesh_program := VjMeshView{}
-                            }
-                        }
+                        out_pages := OutputSurface{}
                     }
                 }
             }
@@ -3844,12 +3869,27 @@ struct BillboardSlot {
     last: Option<f64>,
 }
 
+/// Where the OUTPUT is. `Opening`/`Open` are the projector window — a
+/// second OS window; `InPage` is the same surface as a layer over the
+/// console, which is what a platform with ONE window (the web) gets: a
+/// second window is a platform capability, not a service the web build
+/// could swap. One state machine either way — the button, the fill
+/// politeness and the mesh liveness read `is_up`, not the host.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum OutputWindowLifecycle {
     #[default]
     Closed,
     Opening,
     Open,
+    InPage,
+}
+
+impl OutputWindowLifecycle {
+    /// The output is on a screen: the projector window is up, or the
+    /// in-page layer is.
+    fn is_up(self) -> bool {
+        matches!(self, Self::Open | Self::InPage)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3857,28 +3897,22 @@ enum OutputWindowCommand {
     Recreate,
     Restore,
     Deminiaturize,
+    ShowInPage,
 }
 
+/// What the OUTPUT button does from `lifecycle`, on a platform with a
+/// second window or without one (`single_window`: `OsType::is_single_window`).
 fn output_window_command(
     lifecycle: OutputWindowLifecycle,
     is_macos: bool,
+    single_window: bool,
 ) -> Option<OutputWindowCommand> {
     match lifecycle {
+        OutputWindowLifecycle::Closed if single_window => Some(OutputWindowCommand::ShowInPage),
         OutputWindowLifecycle::Closed => Some(OutputWindowCommand::Recreate),
-        OutputWindowLifecycle::Opening => None,
+        OutputWindowLifecycle::Opening | OutputWindowLifecycle::InPage => None,
         OutputWindowLifecycle::Open if is_macos => Some(OutputWindowCommand::Deminiaturize),
         OutputWindowLifecycle::Open => Some(OutputWindowCommand::Restore),
-    }
-}
-
-fn output_window_available() -> Result<(), ClientError> {
-    if cfg!(target_arch = "wasm32") {
-        Err(ClientError::Unavailable {
-            capability: "output_window",
-            mode: ClientMode::StaticWeb,
-        })
-    } else {
-        Ok(())
     }
 }
 
@@ -7475,6 +7509,11 @@ pub struct App {
     // demand instead of leaving its WindowHandle permanently closed.
     #[rust(OutputWindowLifecycle::default())]
     output_window_lifecycle: OutputWindowLifecycle,
+    /// This platform has ONE window (`OsType::is_single_window`), so the
+    /// output is the in-page layer rather than a second window. Decided
+    /// once, at startup.
+    #[rust]
+    output_in_page: bool,
     /// Which console page and which output page are up. A walked level
     /// raycasts its collision mesh sixty times a second and re-renders a
     /// full pass; `sync_mesh_liveness` uses these to stop that for a picture
@@ -7919,6 +7958,34 @@ impl App {
         }
     }
 
+    /// The output surface's widgets in the host THIS platform gave them
+    /// (`output_in_page`). Both hosts carry the same `OutputSurface`
+    /// template, so a bare `program` would find the console's copy first
+    /// and the projector window would go dark.
+    fn output_pages_path(&self) -> &'static [LiveId] {
+        if self.output_in_page {
+            ids!(output_layer.out_pages)
+        } else {
+            ids!(output_window.out_pages)
+        }
+    }
+
+    fn output_program_path(&self) -> &'static [LiveId] {
+        if self.output_in_page {
+            ids!(output_layer.program)
+        } else {
+            ids!(output_window.program)
+        }
+    }
+
+    fn output_mesh_path(&self) -> &'static [LiveId] {
+        if self.output_in_page {
+            ids!(output_layer.mesh_program)
+        } else {
+            ids!(output_window.mesh_program)
+        }
+    }
+
     fn slot_splat_scene_path(slot: SlotId) -> &'static [LiveId] {
         match slot {
             SlotId::A => ids!(slot_splat_a),
@@ -8014,7 +8081,7 @@ impl App {
     /// page. Nothing is forgotten when a view goes dormant: the tour keeps
     /// its position and its map memory and resumes on the next frame.
     fn sync_mesh_liveness(&mut self, cx: &mut Cx) {
-        let output_up = self.output_window_lifecycle == OutputWindowLifecycle::Open;
+        let output_up = self.output_window_lifecycle.is_up();
         let video_front = self.console_page == live_id!(video_page);
         let program_up = output_up && self.out_page == live_id!(video_out_page);
         let mix = self.live_program_mix();
@@ -8034,7 +8101,7 @@ impl App {
             }
         }
         let live = output_up && self.out_page == live_id!(mesh_out_page);
-        let widget = self.ui.widget(cx, ids!(mesh_program));
+        let widget = self.ui.widget(cx, self.output_mesh_path());
         let view = widget.borrow_mut::<mesh_view::VjMeshView>();
         if let Some(mut view) = view {
             view.set_live(cx, live);
@@ -17162,7 +17229,7 @@ p2 {}
                     }
                     match result {
                         Ok(prepared) => {
-                            let mesh = self.ui.widget(cx, ids!(mesh_program));
+                            let mesh = self.ui.widget(cx, self.output_mesh_path());
                             let borrow = mesh.borrow_mut::<mesh_view::VjMeshView>();
                             if let Some(mut view) = borrow {
                                 view.set_prepared(cx, prepared);
@@ -17651,7 +17718,7 @@ p2 {}
         // POLITENESS: while a set is running — the program window on a
         // screen, or a deck playing — the renderer keeps to a single lane.
         // At boot, idle, or a bulk regen it opens up to the full bank.
-        let performing = self.output_window_lifecycle == OutputWindowLifecycle::Open
+        let performing = self.output_window_lifecycle.is_up()
             || self.decks.deck(DeckId::A).playing
             || self.decks.deck(DeckId::B).playing;
         // Same verdict, every fill lane: the render bank below, the catalog
@@ -18685,14 +18752,38 @@ p2 {}
     }
 
     fn handle_output_window_event(&mut self, cx: &mut Cx, event: &Event) {
+        let main_id = self.ui.window(cx, ids!(main_window)).window_id();
         // Closing the MAIN window is closing the app: the render/output
         // window must not survive it and keep the event loop alive — that
         // left a headless output window on screen blocking shutdown.
         if let Event::WindowClosed(ev) = event {
-            if Some(ev.window_id) == self.ui.window(cx, ids!(main_window)).window_id() {
+            if Some(ev.window_id) == main_id {
                 self.close_output_window(cx);
                 cx.quit();
                 return;
+            }
+        }
+        if self.output_window_lifecycle == OutputWindowLifecycle::InPage {
+            match event {
+                // Esc leaves the in-page output, the way it leaves a
+                // browser's fullscreen.
+                Event::KeyDown(ke) if ke.key_code == KeyCode::Escape => {
+                    self.close_output_window(cx);
+                    return;
+                }
+                // The browser left fullscreen by itself (its own Esc never
+                // reaches the page): the layer follows it down. Only a real
+                // fullscreen→windowed edge counts — a refused request never
+                // went fullscreen, and the layer stays up without it.
+                Event::WindowGeomChange(ev)
+                    if Some(ev.window_id) == main_id
+                        && ev.old_geom.is_fullscreen
+                        && !ev.new_geom.is_fullscreen =>
+                {
+                    self.close_output_window(cx);
+                    return;
+                }
+                _ => {}
             }
         }
         let Some(output_id) = self.ui.window(cx, ids!(output_window)).window_id() else {
@@ -18724,16 +18815,28 @@ p2 {}
         }
     }
 
-    fn open_output_window(&mut self, cx: &mut Cx) -> Result<(), ClientError> {
-        output_window_available()?;
-        let output = self.ui.window(cx, ids!(output_window));
-        let Some(window_id) = output.window_id() else {
-            return Ok(());
-        };
+    fn open_output_window(&mut self, cx: &mut Cx) {
         let command = output_window_command(
             self.output_window_lifecycle,
             matches!(cx.os_type(), OsType::Macos),
+            self.output_in_page,
         );
+        if command == Some(OutputWindowCommand::ShowInPage) {
+            self.ui.view(cx, ids!(output_layer)).set_visible(cx, true);
+            self.output_window_lifecycle = OutputWindowLifecycle::InPage;
+            // The projector case on the web: the browser's own fullscreen,
+            // which the viewer leaves with Esc as browsers do — and the
+            // layer follows (`handle_output_window_event`).
+            self.ui.window(cx, ids!(main_window)).fullscreen(cx);
+            self.sync_output_button(cx);
+            self.sync_mesh_liveness(cx);
+            self.ui.redraw(cx);
+            return;
+        }
+        let output = self.ui.window(cx, ids!(output_window));
+        let Some(window_id) = output.window_id() else {
+            return;
+        };
         match command {
             Some(OutputWindowCommand::Recreate) => {
                 // A closed native surface leaves its stable WindowId, widget
@@ -18758,49 +18861,71 @@ p2 {}
                     makepad_widgets::makepad_platform::CxOsOp::RestoreWindow(window_id),
                 );
             }
-            None => {}
+            Some(OutputWindowCommand::ShowInPage) | None => {}
         }
-        Ok(())
     }
 
-    /// Put the output window away. The widget tree, its render pass and the
-    /// stable `WindowId` all survive a closed native surface — that is what
+    /// Put the output away. The widget tree, its render pass and the stable
+    /// `WindowId` all survive a closed native surface — that is what
     /// `OutputWindowCommand::Recreate` reopens — so this is symmetric with
-    /// `open_output_window` and never rebuilds the Root.
+    /// `open_output_window` and never rebuilds the Root. The in-page layer
+    /// just hides, and gives the browser's fullscreen back if it took it.
     fn close_output_window(&mut self, cx: &mut Cx) {
-        if output_window_available().is_err()
-            || self.output_window_lifecycle == OutputWindowLifecycle::Closed
-        {
-            self.output_window_lifecycle = OutputWindowLifecycle::Closed;
-            self.sync_output_button(cx);
-            return;
-        }
-        let output = self.ui.window(cx, ids!(output_window));
-        let Some(window_id) = output.window_id() else {
-            return;
-        };
-        if cx.windows.is_valid(window_id) {
-            cx.push_unique_platform_op(
-                makepad_widgets::makepad_platform::CxOsOp::CloseWindow(window_id),
-            );
+        match self.output_window_lifecycle {
+            OutputWindowLifecycle::Closed => {}
+            OutputWindowLifecycle::InPage => {
+                self.ui.view(cx, ids!(output_layer)).set_visible(cx, false);
+                let main = self.ui.window(cx, ids!(main_window));
+                if main.is_fullscreen(cx) {
+                    main.disable_fullscreen(cx);
+                }
+            }
+            OutputWindowLifecycle::Opening | OutputWindowLifecycle::Open => {
+                let output = self.ui.window(cx, ids!(output_window));
+                if let Some(window_id) = output.window_id() {
+                    if cx.windows.is_valid(window_id) {
+                        cx.push_unique_platform_op(
+                            makepad_widgets::makepad_platform::CxOsOp::CloseWindow(window_id),
+                        );
+                    }
+                }
+            }
         }
         self.output_window_lifecycle = OutputWindowLifecycle::Closed;
         self.sync_output_button(cx);
+        self.sync_mesh_liveness(cx);
+        self.ui.redraw(cx);
     }
 
-    /// The OUTPUT button wears its state: lit while the window is up, plain
-    /// when it is not — including when the operator closed it with the
-    /// window's own close box, which is why this is driven from the
-    /// lifecycle rather than from the click.
+    /// The OUTPUT button wears its state: lit while the output is up, plain
+    /// when it is not — including when the operator closed the window with
+    /// its own close box, or left the layer with Esc, which is why this is
+    /// driven from the lifecycle rather than from the click. Its tip names
+    /// the mode this platform gives the output, and the way back.
     fn sync_output_button(&mut self, cx: &mut Cx) {
-        let open = matches!(self.output_window_lifecycle, OutputWindowLifecycle::Open);
-        // The button's COLOR is the whole story: orange = window up,
+        let up = self.output_window_lifecycle.is_up();
+        // The button's COLOR is the whole story: orange = output up,
         // black = off — the app's standard on/off language.
-        self.paint_icon_button(cx, ids!(open_output), open);
+        self.paint_icon_button(cx, ids!(open_output), up);
+        let text = match (self.output_in_page, up) {
+            (false, false) => "Open output window",
+            (false, true) => "Close output window",
+            (true, false) => "Output layer (full screen)",
+            (true, true) => "Leave output layer (Esc)",
+        };
+        if let Some(mut tip) = self
+            .ui
+            .widget(cx, ids!(open_output_tip))
+            .borrow_mut::<makepad_widgets::tip::Tip>()
+        {
+            tip.text = text.to_string();
+        }
     }
 
     fn show_output_page(&mut self, cx: &mut Cx, page: LiveId) {
-        self.ui.page_flip(cx, ids!(out_pages)).set_active_page(cx, page);
+        self.ui
+            .page_flip(cx, self.output_pages_path())
+            .set_active_page(cx, page);
         self.out_page = page;
         self.sync_mesh_liveness(cx);
         self.ui.redraw(cx);
@@ -24458,7 +24583,8 @@ p2 {}
             self.apply_fx_slots(cx, a, b, mix, mix_state);
         self.pump_fx_slot_tiles(cx);
         let karaoke = self.karaoke_overlay();
-        for (is_output, target) in [(true, ids!(program)), (false, ids!(preview))] {
+        let output_program = self.output_program_path();
+        for (is_output, target) in [(true, output_program), (false, &ids!(preview)[..])] {
             let widget = self.ui.widget(cx, target);
             let borrow = widget.borrow_mut::<views::VideoProgram>();
             if let Some(mut program) = borrow {
@@ -26103,13 +26229,10 @@ impl MatchEvent for App {
         self.writeback.start(spawner.clone());
         self.ai_port = AiServicePort::open(cx, ai::manifest());
         self.status_text = "starting…".to_string();
-        let output_available = output_window_available().is_ok();
-        self.ui
-            .button(cx, ids!(open_output))
-            .set_enabled(cx, output_available);
-        self.ui
-            .widget(cx, ids!(open_output))
-            .set_disabled(cx, !output_available);
+        // Where the output goes on THIS platform: a second OS window, or —
+        // where the OS has one window, the web — the layer over the console.
+        self.output_in_page = cx.os_type().is_single_window();
+        self.sync_output_button(cx);
         #[cfg(target_arch = "wasm32")]
         {
             self.browser_store.start(cx);
@@ -26838,7 +26961,7 @@ impl MatchEvent for App {
             // Turning it off has to clear the words that are already on the
             // program, not merely stop updating them.
             if !on {
-                for target in [ids!(program), ids!(preview)] {
+                for target in [self.output_program_path(), &ids!(preview)[..]] {
                     if let Some(mut program) = self
                         .ui
                         .widget(cx, target)
@@ -27660,14 +27783,23 @@ impl MatchEvent for App {
         // ---- output window ----
         if self.ui.button(cx, ids!(open_output)).clicked(actions) {
             // A toggle, not a one-way door: the second press puts the
-            // output window away again.
-            match self.output_window_lifecycle {
-                OutputWindowLifecycle::Open => self.close_output_window(cx),
-                _ => {
-                    if let Err(error) = self.open_output_window(cx) {
-                        log!("output window refused: {error}");
-                        self.status_text = error.to_string();
-                    }
+            // output away again — window or layer.
+            if self.output_window_lifecycle.is_up() {
+                self.close_output_window(cx);
+            } else {
+                self.open_output_window(cx);
+            }
+        }
+        // A double-click on the in-page output leaves it: the way out
+        // where there is no Esc key (a phone), and the same gesture the
+        // projector window answers with its maximize toggle.
+        let layer_uid = self.ui.widget(cx, ids!(output_layer)).widget_uid();
+        if let Some(action) = actions.find_widget_action(layer_uid) {
+            if let makepad_widgets::view::ViewAction::FingerDown(down) = action.cast() {
+                if down.tap_count >= 2
+                    && self.output_window_lifecycle == OutputWindowLifecycle::InPage
+                {
+                    self.close_output_window(cx);
                 }
             }
         }
@@ -28521,25 +28653,46 @@ mod sync_tests {
     #[test]
     fn output_window_recreates_after_close_and_restores_when_still_alive() {
         assert_eq!(
-            output_window_command(OutputWindowLifecycle::default(), false),
+            output_window_command(OutputWindowLifecycle::default(), false, false),
             Some(OutputWindowCommand::Recreate)
         );
         assert_eq!(
-            output_window_command(OutputWindowLifecycle::Closed, false),
+            output_window_command(OutputWindowLifecycle::Closed, false, false),
             Some(OutputWindowCommand::Recreate)
         );
         assert_eq!(
-            output_window_command(OutputWindowLifecycle::Open, false),
+            output_window_command(OutputWindowLifecycle::Open, false, false),
             Some(OutputWindowCommand::Restore)
         );
         assert_eq!(
-            output_window_command(OutputWindowLifecycle::Open, true),
+            output_window_command(OutputWindowLifecycle::Open, true, false),
             Some(OutputWindowCommand::Deminiaturize)
         );
         assert_eq!(
-            output_window_command(OutputWindowLifecycle::Opening, false),
+            output_window_command(OutputWindowLifecycle::Opening, false, false),
             None
         );
+    }
+
+    /// A platform with one window (the web) gets the output as the in-page
+    /// layer — never a second window, whatever the OS — and the layer,
+    /// once up, is closed by the toggle rather than reopened.
+    #[test]
+    fn output_window_is_the_in_page_layer_without_a_second_window() {
+        for is_macos in [false, true] {
+            assert_eq!(
+                output_window_command(OutputWindowLifecycle::Closed, is_macos, true),
+                Some(OutputWindowCommand::ShowInPage)
+            );
+            assert_eq!(
+                output_window_command(OutputWindowLifecycle::InPage, is_macos, true),
+                None
+            );
+        }
+        assert!(OutputWindowLifecycle::InPage.is_up());
+        assert!(OutputWindowLifecycle::Open.is_up());
+        assert!(!OutputWindowLifecycle::Opening.is_up());
+        assert!(!OutputWindowLifecycle::Closed.is_up());
     }
 
     #[test]

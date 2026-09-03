@@ -920,16 +920,21 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     FromWasmNormalScreen() {
-        if (this.canvas.exitFullscreen) {
-            this.canvas.exitFullscreen();
+        // Exiting is a DOCUMENT call (entering is on the element); nothing
+        // to do unless the page is actually fullscreen.
+        if (!is_fullscreen()) {
             return
         }
-        if (this.canvas.webkitExitFullscreen) {
-            this.canvas.webkitExitFullscreen();
+        if (document.exitFullscreen) {
+            document.exitFullscreen();
             return
         }
-        if (this.canvas.mozExitFullscreen) {
-            this.canvas.mozExitFullscreen();
+        if (document.webkitExitFullscreen) {
+            document.webkitExitFullscreen();
+            return
+        }
+        if (document.mozCancelFullScreen) {
+            document.mozCancelFullScreen();
             return
         }
     }
@@ -2702,6 +2707,13 @@ export class WasmWebBrowser extends WasmBridge {
 
         window.addEventListener('resize', _ => this.handlers.on_screen_resize())
         window.addEventListener('orientationchange', _ => this.handlers.on_screen_resize())
+        // Fullscreen is part of the window geometry (`is_fullscreen`), and
+        // the browser leaves it on its own Esc without telling the page a
+        // key was pressed — this is how the app learns. A resize does not
+        // always come with it (a viewport already at screen size, or an
+        // emulated one, keeps its size).
+        document.addEventListener('fullscreenchange', _ => this.handlers.on_screen_resize())
+        document.addEventListener('webkitfullscreenchange', _ => this.handlers.on_screen_resize())
     }
 
     bind_mouse_and_touch() {

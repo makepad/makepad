@@ -335,6 +335,10 @@ pub struct XrCapabilities {
 }
 
 impl OsType {
+    /// The platform has ONE window. A second `Window` is not created there
+    /// (the web reports it once and never paints its pass; the canvas is
+    /// window zero's), so an app that wants a second surface — a projector
+    /// output, say — hosts it in-page when this is true.
     pub fn is_single_window(&self) -> bool {
         match self {
             OsType::Web(_) => true,
