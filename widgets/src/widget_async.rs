@@ -8,7 +8,7 @@ use {
     std::any::Any,
     std::cell::RefCell,
     std::collections::{HashMap, VecDeque},
-    std::sync::atomic::{AtomicU64, Ordering},
+    std::sync::atomic::{AtomicU64, AtomicU8, Ordering},
 };
 
 static SCRIPT_ASYNC_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -31,6 +31,30 @@ impl ScriptAsyncId {
 pub struct SplashVmId(pub u64);
 
 pub const MAIN_SPLASH_VM_ID: SplashVmId = SplashVmId(0);
+
+/// The widget theme a Splash isolate boots with. A host picks its own theme
+/// after `theme_mod`, which an isolate's prelude never sees, so it says here.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SplashTheme {
+    #[default]
+    Dark,
+    Light,
+    Skeleton,
+}
+
+static SPLASH_THEME: AtomicU8 = AtomicU8::new(0);
+
+pub fn set_splash_theme(theme: SplashTheme) {
+    SPLASH_THEME.store(theme as u8, Ordering::Relaxed);
+}
+
+fn splash_theme() -> SplashTheme {
+    match SPLASH_THEME.load(Ordering::Relaxed) {
+        1 => SplashTheme::Light,
+        2 => SplashTheme::Skeleton,
+        _ => SplashTheme::Dark,
+    }
+}
 
 thread_local! {
     /// Splash isolate VMs whose owning `Splash` widget has been dropped, awaiting
@@ -394,7 +418,17 @@ impl CxSplashVmExt for Cx {
                 bx: Box::new(ScriptVmBase::new()),
             };
             crate::makepad_draw::makepad_platform::script::script_mod(&mut vm);
-            crate::script_mod(&mut vm);
+            crate::theme_mod(&mut vm);
+            match splash_theme() {
+                SplashTheme::Light => {
+                    vm.eval(crate::makepad_script::script! { mod.theme = mod.themes.light });
+                }
+                SplashTheme::Skeleton => {
+                    vm.eval(crate::makepad_script::script! { mod.theme = mod.themes.skeleton });
+                }
+                SplashTheme::Dark => {}
+            }
+            crate::widgets_mod(&mut vm);
             // Splash isolates run untrusted-ish mini-app script; strip the
             // ambient-authority modules from the isolate's namespace entirely:
             // filesystem access (`fs`), child processes (`run`), and the resource
