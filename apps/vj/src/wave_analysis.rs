@@ -2891,7 +2891,11 @@ pub struct AnalysisDone {
 /// One analysis thread. Track analysis is seconds of work on a long file and
 /// must never touch the UI thread or the audio callback.
 pub struct AnalysisPool {
-    tx: Sender<AnalysisJob>,
+    /// Jobs a deck is waiting on.
+    deck_tx: Sender<AnalysisJob>,
+    /// Jobs nothing on screen is waiting on: the background pass over the
+    /// library.
+    batch_tx: Sender<AnalysisJob>,
     rx: Receiver<AnalysisDone>,
 }
 
@@ -2901,126 +2905,152 @@ impl Default for AnalysisPool {
     }
 }
 
-impl AnalysisPool {
-    pub fn new() -> AnalysisPool {
-        let (tx, jobs) = channel::<AnalysisJob>();
-        let (done_tx, rx) = channel::<AnalysisDone>();
-        let _ = std::thread::Builder::new()
-            .name("vj-wave-analysis".into())
-            .spawn(move || {
-                let mut beats_checkpoint: Option<PathBuf> = None;
-                let mut beats_model: Option<BeatsModel> = None;
-                let mut beats_model_error: Option<String> = None;
-                while let Ok(job) = jobs.recv() {
-                    // Per job, not once per thread: the operator can move the
-                    // cache root mid-session, and a worker holding the old one
-                    // would keep writing sidecars where nothing reads them.
-                    let dir = cache_dir();
-                    let (mut analysis, cached) = match load_cached(&dir, &job.key) {
-                        Some(hit) => (hit, true),
-                        None => {
-                            let (analysis, timing) = analyze_timed(&job.pcm);
-                            // Where the time went, per stage. A track that
-                            // took four seconds took them somewhere, and
-                            // the total alone cannot say whether that is a
-                            // slow machine or one pathological file.
-                            makepad_widgets::log!(
-                                "analysis: {:.0}s of audio in {} ms                                  (envelopes {}, prior {}, grid {}, tiles {}, key {}, loudness {})",
-                                analysis.duration_secs,
-                                timing.total(),
-                                timing.envelopes,
-                                timing.prior,
-                                timing.grid,
-                                timing.tiles,
-                                timing.key,
-                                timing.loudness,
-                            );
-                            (analysis, false)
-                        }
-                    };
-                    let mut straight_from_cache = cached;
-                    let mut should_store = !cached;
-                    if let Some(checkpoint) = job.beats_model.as_ref() {
-                        if !analysis.refined_by_beats() {
-                            if beats_checkpoint.as_ref() != Some(checkpoint) {
-                                beats_checkpoint = Some(checkpoint.clone());
-                                beats_model = None;
-                                beats_model_error = None;
-                                match BeatsModel::load(checkpoint) {
-                                    Ok(model) => beats_model = Some(model),
-                                    Err(error) => beats_model_error = Some(error.to_string()),
-                                }
+/// One analysis worker: take jobs until the queue is gone.
+///
+/// A free function rather than a closure so the pool can run more than
+/// one of it. The model is loaded per THREAD (and reloaded when the
+/// checkpoint changes), so two workers hold two copies -- which is the
+/// price of not making a deck load wait, and is paid only when a model is
+/// installed at all.
+fn run_analysis_jobs(jobs: Receiver<AnalysisJob>, done_tx: Sender<AnalysisDone>) {
+            let mut beats_checkpoint: Option<PathBuf> = None;
+            let mut beats_model: Option<BeatsModel> = None;
+            let mut beats_model_error: Option<String> = None;
+            while let Ok(job) = jobs.recv() {
+                // Per job, not once per thread: the operator can move the
+                // cache root mid-session, and a worker holding the old one
+                // would keep writing sidecars where nothing reads them.
+                let dir = cache_dir();
+                let (mut analysis, cached) = match load_cached(&dir, &job.key) {
+                    Some(hit) => (hit, true),
+                    None => {
+                        let (analysis, timing) = analyze_timed(&job.pcm);
+                        // Where the time went, per stage. A track that
+                        // took four seconds took them somewhere, and
+                        // the total alone cannot say whether that is a
+                        // slow machine or one pathological file.
+                        makepad_widgets::log!(
+                            "analysis: {:.0}s of audio in {} ms                                  (envelopes {}, prior {}, grid {}, tiles {}, key {}, loudness {})",
+                            analysis.duration_secs,
+                            timing.total(),
+                            timing.envelopes,
+                            timing.prior,
+                            timing.grid,
+                            timing.tiles,
+                            timing.key,
+                            timing.loudness,
+                        );
+                        (analysis, false)
+                    }
+                };
+                let mut straight_from_cache = cached;
+                let mut should_store = !cached;
+                if let Some(checkpoint) = job.beats_model.as_ref() {
+                    if !analysis.refined_by_beats() {
+                        if beats_checkpoint.as_ref() != Some(checkpoint) {
+                            beats_checkpoint = Some(checkpoint.clone());
+                            beats_model = None;
+                            beats_model_error = None;
+                            match BeatsModel::load(checkpoint) {
+                                Ok(model) => beats_model = Some(model),
+                                Err(error) => beats_model_error = Some(error.to_string()),
                             }
-                            if let Some(error) = beats_model_error.as_ref() {
-                                makepad_widgets::log!(
-                                    "beats: kept comb grid; model load failed: {error}"
-                                );
-                            } else if let Some(model) = beats_model.as_mut() {
-                                let started = Instant::now();
-                                match mono_22k(&job.pcm) {
+                        }
+                        if let Some(error) = beats_model_error.as_ref() {
+                            makepad_widgets::log!(
+                                "beats: kept comb grid; model load failed: {error}"
+                            );
+                        } else if let Some(model) = beats_model.as_mut() {
+                            let started = Instant::now();
+                            match mono_22k(&job.pcm) {
+                                Err(error) => makepad_widgets::log!(
+                                    "beats: kept comb grid; resample failed: {error}"
+                                ),
+                                Ok(mono) => match model.analyze(&mono) {
                                     Err(error) => makepad_widgets::log!(
-                                        "beats: kept comb grid; resample failed: {error}"
+                                        "beats: kept comb grid; analysis failed: {error}"
                                     ),
-                                    Ok(mono) => match model.analyze(&mono) {
-                                        Err(error) => makepad_widgets::log!(
-                                            "beats: kept comb grid; analysis failed: {error}"
+                                    Ok(beats) => match refine_grid_with_beats(
+                                        &analysis.grid,
+                                        analysis.duration_secs,
+                                        &beats.beats_secs,
+                                        &beats.downbeats_secs,
+                                    ) {
+                                        None => makepad_widgets::log!(
+                                            "beats: kept comb grid; refinement rejected ({} beats, {} downbeats)",
+                                            beats.beats_secs.len(),
+                                            beats.downbeats_secs.len(),
                                         ),
-                                        Ok(beats) => match refine_grid_with_beats(
-                                            &analysis.grid,
-                                            analysis.duration_secs,
-                                            &beats.beats_secs,
-                                            &beats.downbeats_secs,
-                                        ) {
-                                            None => makepad_widgets::log!(
-                                                "beats: kept comb grid; refinement rejected ({} beats, {} downbeats)",
+                                        Some(refined) => {
+                                            let previous = analysis.grid;
+                                            analysis.grid = refined;
+                                            analysis.mark_refined_by_beats();
+                                            straight_from_cache = false;
+                                            should_store = true;
+                                            makepad_widgets::log!(
+                                                "beats: {:.2} → {:.2} bpm, phase {} → {}, {} beats {} downbeats, {} ms",
+                                                previous.bpm,
+                                                refined.bpm,
+                                                previous.downbeat_phase,
+                                                refined.downbeat_phase,
                                                 beats.beats_secs.len(),
                                                 beats.downbeats_secs.len(),
-                                            ),
-                                            Some(refined) => {
-                                                let previous = analysis.grid;
-                                                analysis.grid = refined;
-                                                analysis.mark_refined_by_beats();
-                                                straight_from_cache = false;
-                                                should_store = true;
-                                                makepad_widgets::log!(
-                                                    "beats: {:.2} → {:.2} bpm, phase {} → {}, {} beats {} downbeats, {} ms",
-                                                    previous.bpm,
-                                                    refined.bpm,
-                                                    previous.downbeat_phase,
-                                                    refined.downbeat_phase,
-                                                    beats.beats_secs.len(),
-                                                    beats.downbeats_secs.len(),
-                                                    started.elapsed().as_millis(),
-                                                );
-                                            }
-                                        },
+                                                started.elapsed().as_millis(),
+                                            );
+                                        }
                                     },
-                                }
+                                },
                             }
                         }
                     }
-                    if should_store {
-                        store_cached(&dir, &job.key, &analysis);
-                    }
-                    if done_tx
-                        .send(AnalysisDone {
-                            deck: job.deck,
-                            gen: job.gen,
-                            key: job.key,
-                            analysis: Arc::new(analysis),
-                            cached: straight_from_cache,
-                        })
-                        .is_err()
-                    {
-                        return;
-                    }
                 }
-            });
-        AnalysisPool { tx, rx }
+                if should_store {
+                    store_cached(&dir, &job.key, &analysis);
+                }
+                if done_tx
+                    .send(AnalysisDone {
+                        deck: job.deck,
+                        gen: job.gen,
+                        key: job.key,
+                        analysis: Arc::new(analysis),
+                        cached: straight_from_cache,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+}
+
+impl AnalysisPool {
+    pub fn new() -> AnalysisPool {
+        let (deck_tx, deck_jobs) = channel::<AnalysisJob>();
+        let (batch_tx, batch_jobs) = channel::<AnalysisJob>();
+        let (done_tx, rx) = channel::<AnalysisDone>();
+        // Two workers, and the whole reason for two: a deck waiting to be
+        // loaded must never queue behind a background pass over the
+        // library. One queue would make it, and the wait is the length of
+        // a whole analysis -- seconds, with a record on the way in.
+        for (name, jobs) in [
+            ("vj-wave-analysis", deck_jobs),
+            ("vj-wave-batch", batch_jobs),
+        ] {
+            let done_tx = done_tx.clone();
+            let _ = std::thread::Builder::new()
+                .name(name.into())
+                .spawn(move || run_analysis_jobs(jobs, done_tx));
+        }
+        AnalysisPool { deck_tx, batch_tx, rx }
     }
 
+    /// Queue a job on the lane its asker belongs to: a deck's own load
+    /// on the deck lane, the background pass on the batch lane.
     pub fn submit(&self, job: AnalysisJob) {
-        let _ = self.tx.send(job);
+        let lane = match job.deck {
+            Some(_) => &self.deck_tx,
+            None => &self.batch_tx,
+        };
+        let _ = lane.send(job);
     }
 
     pub fn poll(&self) -> Vec<AnalysisDone> {
@@ -4089,6 +4119,50 @@ mod tests {
     }
 
     /// Forgetting one record takes its stored answer and nothing else.
+    /// A deck's own load and the background pass over the library go
+    /// down different lanes, so neither can be stuck behind the other.
+    #[test]
+    fn a_deck_load_does_not_queue_behind_the_background_pass() {
+        let pool = AnalysisPool::new();
+        let pcm = Arc::new(click_track(48_000, 128.0, 2.0, 0.0));
+        // Ten background jobs, then one a deck is waiting on.
+        for n in 0..10 {
+            pool.submit(AnalysisJob {
+                deck: None,
+                gen: n,
+                key: AnalysisKey::from_blob(BlobId::hash_of(format!("batch{n}").as_bytes())),
+                pcm: pcm.clone(),
+                beats_model: None,
+            });
+        }
+        pool.submit(AnalysisJob {
+            deck: Some(DeckId::A),
+            gen: 99,
+            key: AnalysisKey::from_blob(BlobId::hash_of(b"the deck's own")),
+            pcm: pcm.clone(),
+            beats_model: None,
+        });
+        // The deck's answer comes back without the ten in front of it
+        // having to finish first.
+        let started = std::time::Instant::now();
+        let mut deck_at = None;
+        let mut batches = 0;
+        while started.elapsed() < std::time::Duration::from_secs(20) {
+            for done in pool.poll() {
+                match done.deck {
+                    Some(_) => deck_at = deck_at.or(Some(batches)),
+                    None => batches += 1,
+                }
+            }
+            if deck_at.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let deck_at = deck_at.expect("the deck's analysis came back");
+        assert!(deck_at < 9, "it waited for {deck_at} background jobs");
+    }
+
     #[test]
     fn a_record_can_be_forgotten_on_its_own() {
         let dir = std::env::temp_dir().join(format!("vj-forget-{}", std::process::id()));
