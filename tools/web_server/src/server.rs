@@ -26,6 +26,11 @@ pub fn run_with_registry(
         .map_err(|error| format!("canonicalize static root {}: {error}", config.root.display()))?;
     let data_root = canonical_data_root(&config, &static_root)?;
     let static_handler = StaticHandler::new_with_data_dir(&static_root, data_root.as_deref())?;
+    if load_production_data {
+        let live_cache = canonical_live_cache(&config, &static_root, data_root.as_deref())?;
+        let knmi_key = canonical_knmi_key(&config, &static_root)?;
+        registry.live.start(live_cache.as_deref(), knmi_key.as_deref())?;
+    }
     let runtime = NetworkRuntime::new(NetworkConfig::default());
     let (request_sender, request_receiver) = mpsc::channel::<HttpServerRequest>();
     let listen = config.listen;
@@ -99,7 +104,10 @@ pub fn run_with_registry(
 fn allowed_methods(path: &str) -> Option<&'static str> {
     match path {
         "/api/along" | "/api/crash" => Some("POST, OPTIONS"),
-        "/api/healthz" | "/api/search" | "/api/route" => Some("GET, HEAD, OPTIONS"),
+        "/api/healthz" | "/api/search" | "/api/route" | "/api/radar/manifest"
+        | "/api/radar/frame" | "/api/wind/current" | "/api/weather/now" => {
+            Some("GET, HEAD, OPTIONS")
+        }
         "/$report_error" => Some("GET, HEAD, POST, OPTIONS"),
         path if path.starts_with("/api/") => None,
         _ => Some("GET, HEAD, OPTIONS"),
@@ -118,6 +126,40 @@ fn canonical_data_root(config: &Config, static_root: &std::path::Path) -> Result
         return Err("--data-dir and --root must not overlap".into());
     }
     Ok(Some(data_root))
+}
+
+fn canonical_live_cache(
+    config: &Config,
+    static_root: &std::path::Path,
+    data_root: Option<&std::path::Path>,
+) -> Result<Option<PathBuf>, String> {
+    let Some(path) = &config.live_cache else { return Ok(None) };
+    std::fs::create_dir_all(path)
+        .map_err(|error| format!("create live cache {}: {error}", path.display()))?;
+    let path = path
+        .canonicalize()
+        .map_err(|error| format!("canonicalize live cache {}: {error}", path.display()))?;
+    if path.starts_with(static_root) || static_root.starts_with(&path) {
+        return Err("--live-cache and --root must not overlap".into());
+    }
+    if data_root.is_some_and(|data| path.starts_with(data) || data.starts_with(&path)) {
+        return Err("--live-cache and --data-dir must not overlap".into());
+    }
+    Ok(Some(path))
+}
+
+fn canonical_knmi_key(config: &Config, static_root: &std::path::Path) -> Result<Option<PathBuf>, String> {
+    let Some(path) = &config.knmi_key_file else { return Ok(None) };
+    let path = path
+        .canonicalize()
+        .map_err(|error| format!("canonicalize KNMI key file {}: {error}", path.display()))?;
+    if !path.is_file() {
+        return Err("--knmi-key-file must name a regular file".into());
+    }
+    if path.starts_with(static_root) {
+        return Err("--knmi-key-file must not be inside --root".into());
+    }
+    Ok(Some(path))
 }
 
 #[cfg(test)]

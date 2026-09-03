@@ -9,7 +9,6 @@
 //! simple packing, no bitmap) — anything else errors instead of guessing.
 
 use std::path::PathBuf;
-use std::process::Command;
 
 /// Subset region (lon 2..9 E, lat 48..56 N covers NL + approaches).
 pub const WIND_WEST: f64 = 2.0;
@@ -263,6 +262,23 @@ impl WindSync {
         decode_wind(&data).ok()
     }
 
+    pub fn cached_with_stamp(&self) -> Option<(u64, WindField)> {
+        let field = self.cached()?;
+        let stamp = std::fs::read_to_string(self.cache_dir.join("wind_updated_unix"))
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+            .or_else(|| {
+                std::fs::metadata(self.cache_dir.join("wind_nl.grib2"))
+                    .ok()?
+                    .modified()
+                    .ok()?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|duration| duration.as_secs())
+            })?;
+        Some((stamp, field))
+    }
+
     /// Poll-gated fetch: tries the newest plausible GFS runs (each run
     /// appears ~4 h after its nominal time) until one returns a GRIB.
     pub fn sync(&self) -> Result<Option<WindField>, String> {
@@ -296,22 +312,20 @@ impl WindSync {
                 WIND_NORTH, WIND_WEST, WIND_EAST, WIND_SOUTH
             );
             let tmp = self.cache_dir.join("wind_nl.grib2.part");
-            let status = Command::new("curl")
-                .args(["-sf", "--max-time", "30", "-o"])
-                .arg(&tmp)
-                .arg(&url)
-                .status()
-                .map_err(|e| format!("curl: {e}"))?;
-            if !status.success() {
-                continue;
-            }
-            let Ok(data) = std::fs::read(&tmp) else {
+            let Ok(response) = crate::http_fetch::get(&url, None, 1024 * 1024) else {
                 continue;
             };
-            if decode_wind(&data).is_ok() {
+            if !(200..300).contains(&response.status) {
+                continue;
+            }
+            if decode_wind(&response.body).is_ok() {
+                std::fs::write(&tmp, &response.body)
+                    .map_err(|e| format!("write wind download: {e}"))?;
                 let final_path = self.cache_dir.join("wind_nl.grib2");
                 std::fs::rename(&tmp, &final_path)
                     .map_err(|e| format!("rename: {e}"))?;
+                std::fs::write(self.cache_dir.join("wind_updated_unix"), now.to_string())
+                    .map_err(|e| format!("write wind update time: {e}"))?;
                 return Ok(self.cached());
             }
         }

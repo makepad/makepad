@@ -10,6 +10,8 @@ pub struct Config {
     pub places: Option<PathBuf>,
     pub major_graph: Option<PathBuf>,
     pub chargers: Option<PathBuf>,
+    pub live_cache: Option<PathBuf>,
+    pub knmi_key_file: Option<PathBuf>,
     pub route_workers: usize,
     pub route_queue: usize,
     pub query_workers: usize,
@@ -37,6 +39,8 @@ impl Config {
         let mut places = Some(PathBuf::from("maps/europe-places.search"));
         let mut major_graph = None;
         let mut chargers = None;
+        let mut live_cache = None;
+        let mut knmi_key_file = None;
         let mut route_workers = 1usize;
         let mut route_queue = 8usize;
         let mut query_workers = 2usize;
@@ -73,6 +77,10 @@ impl Config {
                     major_graph = optional_path(value("--major-graph", &mut args)?)
                 }
                 "--chargers" => chargers = optional_path(value("--chargers", &mut args)?),
+                "--live-cache" => live_cache = optional_path(value("--live-cache", &mut args)?),
+                "--knmi-key-file" => {
+                    knmi_key_file = optional_path(value("--knmi-key-file", &mut args)?)
+                }
                 "--route-workers" => {
                     route_workers = parse_count("--route-workers", value("--route-workers", &mut args)?, 1, 1)?
                 }
@@ -98,6 +106,8 @@ impl Config {
             places,
             major_graph,
             chargers,
+            live_cache,
+            knmi_key_file,
             route_workers,
             route_queue,
             query_workers,
@@ -120,7 +130,8 @@ fn parse_count(name: &str, value: String, min: usize, max: usize) -> Result<usiz
 pub fn usage() -> &'static str {
     "usage: makepad-web-server [ROOT] [--port PORT] [--listen ADDR] [--root ROOT] \
      [--data-dir DIR] [--nav-basename PATH] [--searchdb PATH|off] [--places PATH|off] \
-     [--major-graph PATH|off] [--chargers PATH|off] [--route-workers N] \
+     [--major-graph PATH|off] [--chargers PATH|off] [--live-cache DIR|off] \
+     [--knmi-key-file PATH|off] [--route-workers N] \
      [--route-queue N] [--query-workers N]"
 }
 
@@ -141,11 +152,14 @@ mod tests {
         let config = Config::parse([
             "--listen", "127.0.0.1:8080", "--root", "site", "--data-dir", "data",
             "--nav-basename", "maps/test", "--searchdb", "off", "--places", "places.search",
-            "--major-graph", "major.graph", "--chargers", "off", "--route-workers", "1",
+            "--major-graph", "major.graph", "--chargers", "off", "--live-cache", "live",
+            "--knmi-key-file", "knmi.key", "--route-workers", "1",
             "--route-queue", "4", "--query-workers", "3",
         ]).unwrap();
         assert_eq!(config.listen.port(), 8080);
         assert!(config.searchdb.is_none());
+        assert_eq!(config.live_cache, Some(PathBuf::from("live")));
+        assert_eq!(config.knmi_key_file, Some(PathBuf::from("knmi.key")));
         assert_eq!(config.route_workers, 1);
         assert_eq!(config.route_queue, 4);
         assert_eq!(config.query_workers, 3);
