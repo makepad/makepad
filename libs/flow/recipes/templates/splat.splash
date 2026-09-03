@@ -1,0 +1,24 @@
+use mod.flow.*
+
+/** A label retained as trace metadata for the reconstruction. */
+let prompt = Input{ type: @text  default: "a single isolated ceramic fox"  at: vec2(40, 80) }
+
+/** The single-object reference image. */
+let image = Input{ type: @image  at: vec2(40, 240) }
+
+let splat = Splat{
+    prompt: prompt.text()
+    image: image.image()
+    gaussians: 262144
+    model: "triposplat"
+    at: vec2(360, 160)
+}
+
+/** The reconstructed Gaussian-splat PLY. */
+let object = Output{ type: @mesh  value: splat.mesh()  at: vec2(680, 160) }
+
+Flow{
+    label: "Object splat"
+    brief: "Reconstructs one supplied object image as a detailed Gaussian-splat PLY."
+    prompt, image, splat, object
+}
