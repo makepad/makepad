@@ -6,7 +6,9 @@ use makepad_ai_hub::protocol::{
 };
 use makepad_ai_hub::registry::Domain;
 use makepad_ai_hub::{discovery, fleet, makepad_base64};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 #[derive(Clone, Copy)]
 enum MediaDestination {
@@ -103,26 +105,76 @@ impl GenSeam for FixedGen {
     }
 }
 
+struct UsedProvider {
+    provider: Arc<dyn ContentProvider>,
+    bye_sent: AtomicBool,
+}
+
+impl UsedProvider {
+    fn bye(&self) {
+        if !self.bye_sent.swap(true, Ordering::SeqCst) {
+            let _ = self.provider.bye();
+        }
+    }
+}
+
+/// Providers selected by one run, retained until the run exits so server
+/// shutdown can release their origin leases even after a node completed.
+#[derive(Clone, Default)]
+pub(crate) struct UsedProviders(Arc<Mutex<Vec<Arc<UsedProvider>>>>);
+
+impl UsedProviders {
+    fn track(&self, provider: Box<dyn ContentProvider>) -> Arc<UsedProvider> {
+        let provider = Arc::new(UsedProvider {
+            provider: provider.into(),
+            bye_sent: AtomicBool::new(false),
+        });
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(provider.clone());
+        provider
+    }
+
+    pub(crate) fn bye_all(&self) {
+        for provider in self.0.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+            provider.bye();
+        }
+    }
+}
+
 pub struct GenExecutor {
     seam: Arc<dyn GenSeam>,
     origin: (String, u64),
-    provider: Option<Box<dyn ContentProvider>>,
+    used_providers: UsedProviders,
+    provider: Option<Arc<UsedProvider>>,
     domain: Option<Domain>,
     job_id: Option<String>,
     node: Option<Node>,
     partial_text: String,
+    last_keepalive: Option<Instant>,
 }
 
 impl GenExecutor {
     pub fn new(seam: Arc<dyn GenSeam>, origin: (String, u64)) -> Self {
+        Self::with_used_providers(seam, origin, UsedProviders::default())
+    }
+
+    pub(crate) fn with_used_providers(
+        seam: Arc<dyn GenSeam>,
+        origin: (String, u64),
+        used_providers: UsedProviders,
+    ) -> Self {
         Self {
             seam,
             origin,
+            used_providers,
             provider: None,
             domain: None,
             job_id: None,
             node: None,
             partial_text: String::new(),
+            last_keepalive: None,
         }
     }
 }
@@ -137,11 +189,12 @@ impl Executor for GenExecutor {
         let job_id = provider
             .request(domain, &request)
             .map_err(|error| error.to_string())?;
+        let provider = self.used_providers.track(provider);
         self.domain = Some(domain);
         self.job_id = Some(job_id);
         self.node = Some(node.clone());
         self.provider = Some(provider);
-        // keepalive: F8
+        self.last_keepalive = Some(Instant::now());
         Ok(())
     }
 
@@ -153,10 +206,28 @@ impl Executor for GenExecutor {
         ) else {
             return Poll::Pending;
         };
-        let status = match provider.poll(job_id) {
+        let status = match provider.provider.poll(job_id) {
             Ok(status) => status,
             Err(error) => return Poll::Failed(error.to_string()),
         };
+        let active = matches!(
+            status.state.as_str(),
+            makepad_ai_hub::protocol::JOB_STATE_QUEUED
+                | makepad_ai_hub::protocol::JOB_STATE_RUNNING
+                | makepad_ai_hub::protocol::JOB_STATE_LIVE
+        );
+        if active
+            && self
+                .last_keepalive
+                .is_some_and(|last| last.elapsed() >= makepad_ai_hub::lease::KEEPALIVE_INTERVAL)
+        {
+            self.last_keepalive = Some(Instant::now());
+            if let Err(error) = provider.provider.keepalive(job_id) {
+                eprintln!("[flow] generation job {job_id} keepalive warning: {error}");
+            }
+        } else if !active {
+            self.last_keepalive = None;
+        }
         if let Some(partial) = status.partial_text.as_deref() {
             if let Some(delta) = partial.strip_prefix(&self.partial_text) {
                 if !delta.is_empty() {
@@ -170,7 +241,8 @@ impl Executor for GenExecutor {
         }
         match status.state.as_str() {
             makepad_ai_hub::protocol::JOB_STATE_QUEUED => Poll::Pending,
-            makepad_ai_hub::protocol::JOB_STATE_RUNNING => Poll::Progress {
+            makepad_ai_hub::protocol::JOB_STATE_RUNNING
+            | makepad_ai_hub::protocol::JOB_STATE_LIVE => Poll::Progress {
                 permille: (status.progress.unwrap_or(0.0).clamp(0.0, 1.0) * 1000.0) as u16,
                 stage: status.stage.unwrap_or_else(|| "running".to_string()),
             },
@@ -202,7 +274,7 @@ impl Executor for GenExecutor {
                         ));
                     };
                     artifact_index += 1;
-                    let artifact = match provider.fetch_artifact(&artifact_ref.id) {
+                    let artifact = match provider.provider.fetch_artifact(&artifact_ref.id) {
                         Ok(artifact) => artifact,
                         Err(error) => return Poll::Failed(error.to_string()),
                     };
@@ -245,8 +317,10 @@ impl Executor for GenExecutor {
 
     fn cancel(&mut self) {
         if let (Some(provider), Some(job_id)) = (self.provider.as_ref(), self.job_id.as_deref()) {
-            let _ = provider.cancel(job_id);
+            let _ = provider.provider.cancel(job_id);
+            provider.bye();
         }
+        self.last_keepalive = None;
     }
 }
 

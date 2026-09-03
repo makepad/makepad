@@ -4,12 +4,13 @@
 //! on a worker, including manifest refreshes and the 500 ms run wait loop.
 
 use makepad_ai_services::{
-    AiServicePort, PortEvent, Risk, ServiceCall, ServiceManifest, ToolDef, ToolResult,
+    AiServicePort, Disposition, Message, PortEvent, Risk, ServiceCall, ServiceManifest,
+    SubscriptionRequest, ToolDef, ToolResult, TopicDef,
 };
 use makepad_flow::client::{ClientError, FlowClient};
 use makepad_flow::{
-    FlowDefinition, FlowSummary, Graph, Node, NodeInputValue, PortType, ToolEntry, ToolSchema,
-    AUTHORING_BRIEF,
+    Event as FlowEvent, FlowDefinition, FlowSummary, Graph, ModelsResponse, Node, NodeInputValue,
+    PortType, TemplateSummary, ToolEntry, ToolSchema, AUTHORING_BRIEF,
 };
 use makepad_strict_json::Value as Json;
 use makepad_widgets::makepad_platform::makepad_micro_serde::SerJson;
@@ -20,12 +21,13 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const SERVICE_ID: &str = "flows";
 const UI_SERVICE_ID: &str = "flow_ui";
-const RUN_WAIT: Duration = Duration::from_secs(55);
+const RUN_WAIT: Duration = Duration::from_secs(8);
 const RUN_POLL: Duration = Duration::from_millis(500);
+const PROGRESS_INTERVAL_SECS: f64 = 0.5;
 const MAX_READ_TEXT: usize = 16 * 1024;
 const MAX_INLINE_VALUE: usize = 2 * 1024;
 
@@ -77,6 +79,133 @@ struct DefinitionPort {
     port: AiServicePort,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SubscriptionFilter {
+    All,
+    Instance(String),
+    Run(String),
+}
+
+#[derive(Clone, Debug)]
+struct LiveSubscription {
+    service: String,
+    service_flow: Option<String>,
+    sub_id: String,
+    topic: String,
+    filter: SubscriptionFilter,
+    last_progress_at: Option<f64>,
+    pending_progress: Option<FlowEvent>,
+}
+
+#[derive(Clone, Debug)]
+struct Publication {
+    service: String,
+    sub_id: String,
+    message: Message,
+}
+
+#[derive(Default)]
+struct SubscriptionTable {
+    live: BTreeMap<(String, String), LiveSubscription>,
+    run_instances: BTreeMap<String, String>,
+}
+
+impl SubscriptionTable {
+    fn insert(
+        &mut self,
+        service: String,
+        service_flow: Option<String>,
+        sub_id: String,
+        topic: String,
+        filter: SubscriptionFilter,
+    ) {
+        let key = (service.clone(), sub_id.clone());
+        self.live.insert(
+            key,
+            LiveSubscription {
+                service,
+                service_flow,
+                sub_id,
+                topic,
+                filter,
+                last_progress_at: None,
+                pending_progress: None,
+            },
+        );
+    }
+
+    fn remove(&mut self, service: &str, sub_id: &str) {
+        self.live
+            .remove(&(service.to_string(), sub_id.to_string()));
+    }
+
+    fn remove_service(&mut self, service: &str) {
+        self.live.retain(|(owner, _), _| owner != service);
+    }
+
+    fn clear(&mut self) {
+        self.live.clear();
+        self.run_instances.clear();
+    }
+
+    fn route(&mut self, event: &FlowEvent, now: f64) -> Vec<Publication> {
+        if let (Some(run_id), Some(instance)) = (&event.run_id, &event.instance) {
+            self.run_instances
+                .insert(run_id.clone(), instance.clone());
+        }
+
+        let mut publications = self.flush_due(now);
+        let mut finished = Vec::new();
+        for (key, subscription) in &mut self.live {
+            if !subscription_matches(subscription, event, &self.run_instances) {
+                continue;
+            }
+            let final_ = subscription.topic == "run" && event.kind == "run.finished"
+                || subscription_target_vanished(subscription, event, &self.run_instances);
+            if subscription.topic == "run" && event.kind == "node.progress" && !final_ {
+                if subscription
+                    .last_progress_at
+                    .is_some_and(|last| now - last < PROGRESS_INTERVAL_SECS)
+                {
+                    subscription.pending_progress = Some(event.clone());
+                    continue;
+                }
+                subscription.last_progress_at = Some(now);
+            }
+            if final_ {
+                subscription.pending_progress = None;
+                finished.push(key.clone());
+            }
+            publications.push(publication(subscription, event, final_));
+        }
+        for key in finished {
+            self.live.remove(&key);
+        }
+        publications
+    }
+
+    fn flush_due(&mut self, now: f64) -> Vec<Publication> {
+        let mut publications = Vec::new();
+        for subscription in self.live.values_mut() {
+            let due = subscription
+                .last_progress_at
+                .is_some_and(|last| now - last >= PROGRESS_INTERVAL_SECS);
+            if !due {
+                continue;
+            }
+            if let Some(event) = subscription.pending_progress.take() {
+                subscription.last_progress_at = Some(now);
+                publications.push(publication(subscription, &event, false));
+            }
+        }
+        publications
+    }
+
+    fn len(&self) -> usize {
+        self.live.len()
+    }
+}
+
 enum WorkerMessage {
     Definitions {
         epoch: u64,
@@ -110,6 +239,9 @@ pub struct FlowServices {
     syncing: bool,
     resync: bool,
     epoch: u64,
+    subscriptions: SubscriptionTable,
+    context: BridgeContext,
+    last_message_summary: String,
     last_context: String,
 }
 
@@ -128,6 +260,9 @@ impl Default for FlowServices {
             syncing: false,
             resync: false,
             epoch: 0,
+            subscriptions: SubscriptionTable::default(),
+            context: BridgeContext::default(),
+            last_message_summary: String::new(),
             last_context: String::new(),
         }
     }
@@ -161,6 +296,9 @@ impl FlowServices {
         self.client = None;
         self.syncing = false;
         self.resync = false;
+        self.subscriptions.clear();
+        self.context = BridgeContext::default();
+        self.last_message_summary.clear();
         self.last_context.clear();
         if let Ok(mut instances) = self.instances.lock() {
             instances.clear();
@@ -239,15 +377,40 @@ impl FlowServices {
                         cancel.store(true, Ordering::Release);
                     }
                 }
+                PortEvent::Subscribe {
+                    sub_id,
+                    topic,
+                    filter,
+                } => self.subscribe(&service, sub_id, topic, filter),
+                PortEvent::Unsubscribe { sub_id } => {
+                    self.subscriptions.remove(&service, &sub_id);
+                    self.publish_context();
+                }
                 PortEvent::Registered(_) | PortEvent::ChatOpen { .. } => {}
-                PortEvent::Subscribe { .. } | PortEvent::Unsubscribe { .. } => {}
             }
         }
+        let publications = self.subscriptions.flush_due(Cx::monotonic_now());
+        self.publish_all(publications);
         self.drain_workers(cx);
     }
 
+    /// Fan one event from the UI's existing `FlowSubscriber` into the AI bus.
+    pub fn handle_flow_event(&mut self, event: &FlowEvent) {
+        let publications = self.subscriptions.route(event, Cx::monotonic_now());
+        self.publish_all(publications);
+    }
+
     pub fn set_context(&mut self, context: BridgeContext) {
-        let text = render_context(&context);
+        self.context = context;
+        self.publish_context();
+    }
+
+    fn publish_context(&mut self) {
+        let text = render_context(
+            &self.context,
+            self.subscriptions.len(),
+            &self.last_message_summary,
+        );
         if text == self.last_context {
             return;
         }
@@ -255,6 +418,47 @@ impl FlowServices {
         if let Some(port) = self.flows.as_ref() {
             port.set_context(&text);
         }
+    }
+
+    fn subscribe(
+        &mut self,
+        service: &str,
+        sub_id: String,
+        topic: String,
+        filter: Option<String>,
+    ) {
+        let service_flow = self
+            .definitions
+            .get(service)
+            .map(|definition| definition.name.clone());
+        match subscription_filter(service, service_flow.as_deref(), &topic, filter.as_deref()) {
+            Ok(filter) => self.subscriptions.insert(
+                service.to_string(),
+                service_flow,
+                sub_id,
+                topic,
+                filter,
+            ),
+            Err(message) => {
+                if let Some(port) = self.port(service) {
+                    port.publish(
+                        sub_id,
+                        Message::new(topic, message).final_message(),
+                    );
+                }
+            }
+        }
+        self.publish_context();
+    }
+
+    fn publish_all(&mut self, publications: Vec<Publication>) {
+        for publication in publications {
+            if let Some(port) = self.port(&publication.service) {
+                port.publish(publication.sub_id, publication.message.clone());
+            }
+            self.last_message_summary = publication.message.text;
+        }
+        self.publish_context();
     }
 
     pub fn shutdown(&mut self) {
@@ -430,7 +634,8 @@ impl FlowServices {
     }
 
     fn install_definitions(&mut self, cx: &mut Cx, definitions: Vec<(String, FlowDefinition)>) {
-        for (_, service) in std::mem::take(&mut self.definitions) {
+        for (service_id, service) in std::mem::take(&mut self.definitions) {
+            self.subscriptions.remove_service(&service_id);
             service.port.unregister();
         }
         for (name, definition) in definitions {
@@ -469,15 +674,231 @@ impl FlowServices {
     }
 }
 
+fn subscription_filter(
+    service: &str,
+    service_flow: Option<&str>,
+    topic: &str,
+    raw: Option<&str>,
+) -> Result<SubscriptionFilter, String> {
+    let fields = match raw {
+        Some(raw) => match makepad_strict_json::parse(raw.as_bytes()) {
+            Ok(Json::Obj(fields)) => fields,
+            _ => return Err(format!("cannot subscribe to {topic}: filter must be a JSON object")),
+        },
+        None => Vec::new(),
+    };
+    if service == SERVICE_ID && topic == "flows" {
+        return if fields.is_empty() {
+            Ok(SubscriptionFilter::All)
+        } else {
+            Err("cannot subscribe to flows: this topic has no filters".into())
+        };
+    }
+    if service == SERVICE_ID && topic == "instance" {
+        return one_filter(&fields, "instance").map(SubscriptionFilter::Instance);
+    }
+    if (service == SERVICE_ID || service_flow.is_some()) && topic == "run" {
+        return one_filter(&fields, "run_id").map(SubscriptionFilter::Run);
+    }
+    Err(format!("service {service} does not publish topic {topic}"))
+}
+
+fn one_filter(fields: &[(String, Json)], name: &str) -> Result<String, String> {
+    if fields.len() != 1 {
+        return Err(format!("topic needs exactly one {{{name}}} filter"));
+    }
+    string_field(fields, name)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| format!("topic needs a string {{{name}}} filter"))
+}
+
+fn subscription_matches(
+    subscription: &LiveSubscription,
+    event: &FlowEvent,
+    run_instances: &BTreeMap<String, String>,
+) -> bool {
+    if subscription
+        .service_flow
+        .as_ref()
+        .is_some_and(|flow| event.flow.as_deref() != Some(flow.as_str()))
+    {
+        return false;
+    }
+    match (&subscription.topic[..], &subscription.filter) {
+        ("flows", SubscriptionFilter::All) => event.topic == "flows",
+        ("instance", SubscriptionFilter::Instance(instance)) => {
+            event.instance.as_deref() == Some(instance.as_str())
+                && (event.topic == "instance"
+                    || event.kind.starts_with("instance.")
+                    || event.kind == "node.failed")
+        }
+        ("run", SubscriptionFilter::Run(run_id)) => {
+            event.topic == "run" && event.run_id.as_deref() == Some(run_id.as_str())
+                || event.kind == "instance.removed"
+                    && event.instance.as_deref().is_some_and(|instance| {
+                        run_instances.get(run_id).map(String::as_str) == Some(instance)
+                    })
+        }
+        _ => false,
+    }
+}
+
+fn subscription_target_vanished(
+    subscription: &LiveSubscription,
+    event: &FlowEvent,
+    run_instances: &BTreeMap<String, String>,
+) -> bool {
+    if event.kind != "instance.removed" {
+        return false;
+    }
+    match &subscription.filter {
+        SubscriptionFilter::Instance(instance) => event.instance.as_deref() == Some(instance),
+        SubscriptionFilter::Run(run_id) => event.instance.as_deref().is_some_and(|instance| {
+            run_instances.get(run_id).map(String::as_str) == Some(instance)
+        }),
+        SubscriptionFilter::All => false,
+    }
+}
+
+fn publication(subscription: &LiveSubscription, event: &FlowEvent, final_: bool) -> Publication {
+    let mut message = Message::new(&subscription.topic, render_event_message(event))
+        .with_data(event.serialize_json());
+    if final_ {
+        message = message.final_message();
+    }
+    Publication {
+        service: subscription.service.clone(),
+        sub_id: subscription.sub_id.clone(),
+        message,
+    }
+}
+
+fn render_event_message(event: &FlowEvent) -> String {
+    let flow = event
+        .name
+        .as_deref()
+        .or(event.flow.as_deref())
+        .unwrap_or("?");
+    let instance = event.instance.as_deref().unwrap_or("?");
+    let run = event.run_id.as_deref().unwrap_or("?");
+    let node = event.node.as_deref().unwrap_or("?");
+    let state = event.state_text().unwrap_or_else(|| "done".into());
+    let outputs = render_event_outputs(event);
+    let text = match event.kind.as_str() {
+        "flow.changed" => format!(
+            "flow {flow} changed · revision {} · canonical={}",
+            event.revision.map_or_else(|| "?".into(), |value| value.to_string()),
+            event.canonical.map_or_else(|| "?".into(), |value| value.to_string())
+        ),
+        "flow.error" => format!(
+            "flow {flow} error · {}",
+            one_line(&event.error_text().unwrap_or_else(|| "unknown error".into()))
+        ),
+        "flow.removed" => format!("flow {flow} removed"),
+        "instance.created" => format!("instance {instance} started · {flow}"),
+        "instance.removed" => format!("instance {instance} stopped · {flow}"),
+        "instance.inputs" => format!("instance {instance} inputs changed"),
+        "run.started" => format!("run {run} started · instance {instance}"),
+        "node.started" => format!("node {node} · started"),
+        "node.progress" => format!(
+            "node {node} · progress {} %{}",
+            event.permille.unwrap_or(0).div_ceil(10),
+            event
+                .stage
+                .as_deref()
+                .filter(|stage| !stage.is_empty())
+                .map(|stage| format!(" · {}", one_line(stage)))
+                .unwrap_or_default()
+        ),
+        "node.delta" => format!(
+            "node {node} · {} · {}",
+            event.port.as_deref().unwrap_or("output"),
+            one_line(event.text.as_deref().unwrap_or(""))
+        ),
+        "node.waiting" => format!(
+            "instance {instance} waiting · {}",
+            one_line(event.question.as_deref().unwrap_or("answer required"))
+        ),
+        "node.answered" => format!(
+            "node {node} · answered · by {}",
+            event.by.as_deref().unwrap_or("unknown")
+        ),
+        "node.done" => append_event_outputs(format!("node {node} · done"), &outputs),
+        "node.failed" => format!(
+            "node {node} · failed · {}",
+            one_line(&event.error_text().unwrap_or_else(|| "unknown error".into()))
+        ),
+        "node.skipped" => format!(
+            "node {node} · skipped · {}",
+            one_line(event.reason.as_deref().unwrap_or("no reason given"))
+        ),
+        "run.finished" => {
+            let text = append_event_outputs(format!("run {run} finished · {state}"), &outputs);
+            match event.secs {
+                Some(secs) => format!("{text} · {secs:.1} s"),
+                None => text,
+            }
+        }
+        other => format!("{other} · instance {instance} · run {run}"),
+    };
+    one_line(&text)
+}
+
+fn append_event_outputs(mut text: String, outputs: &str) -> String {
+    if !outputs.is_empty() {
+        text.push_str(" · ");
+        text.push_str(outputs);
+    }
+    text
+}
+
+fn render_event_outputs(event: &FlowEvent) -> String {
+    event
+        .output_values()
+        .into_iter()
+        .map(|(name, value)| {
+            let mut text = format!("{name} sha256:{}", value.digest);
+            if !value.content_type.is_empty() {
+                text.push_str(&format!(" {}", value.content_type));
+            }
+            if value.bytes > 0 {
+                text.push_str(&format!(" {} bytes", value.bytes));
+            }
+            text
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub fn flows_manifest() -> ServiceManifest {
     let brief = bounded(
         format!(
-            "{AUTHORING_BRIEF}\nRead flows.nodes before writing a type you have not seen.\n\nExample file:\n{EXAMPLE_FLOW}"
+            "{AUTHORING_BRIEF}\nRead flows.nodes before writing a type you have not seen.\nRead flows.templates to discover reusable starting points.\nRead flows.models to inspect the live model fleet before choosing a model.\nUse flows.create to create a named flow from a template.\n\nExample file:\n{EXAMPLE_FLOW}"
         ),
         makepad_ai_services::wire::MAX_BRIEF_BYTES,
     );
     ServiceManifest::new(SERVICE_ID, "Flows", brief)
+        .with_topic(TopicDef::new(
+            "flows",
+            "Flow definitions and live instances being created, changed, or removed.",
+        ))
+        .with_topic(TopicDef::new(
+            "instance",
+            "One instance's input, run, node, question, output, and error events; filter with {instance}.",
+        ))
+        .with_topic(TopicDef::new(
+            "run",
+            "One run's full event stream including progress; filter with {run_id}; final on run.finished.",
+        ))
         .with_tool(tool("list", "List flow definitions with state, canonical status, and live instance counts.", empty_schema(), Risk::Read))
+        .with_tool(tool("templates", "List flow templates with labels, briefs, inputs, and outputs.", empty_schema(), Risk::Read))
+        .with_tool(tool("models", "List the live fleet's models, optionally restricted to one generation domain.", r#"{"type":"object","properties":{"domain":{"type":"string"}},"additionalProperties":false}"#, Risk::Read))
+        .with_tool(tool("create", "Create and evaluate a named flow definition from a built-in template.", r#"{"type":"object","properties":{"name":{"type":"string"},"template":{"type":"string"}},"required":["name","template"],"additionalProperties":false}"#, Risk::Act))
         .with_tool(tool("nodes", "Read runnable flow node types, ports, defaults, docs, and range hints before authoring unfamiliar nodes.", empty_schema(), Risk::Read))
         .with_tool(tool("read", "Read one flow's splash source, graph node summary, and last evaluation error.", one_string_schema("name", "flow definition name"), Risk::Read))
         .with_tool(tool("write", "Write and evaluate a complete splash flow definition; evaluation errors include file, line, and column for correction.", r#"{"type":"object","properties":{"name":{"type":"string"},"source":{"type":"string"}},"required":["name","source"],"additionalProperties":false}"#, Risk::Act))
@@ -489,10 +910,11 @@ pub fn flows_manifest() -> ServiceManifest {
         .with_tool(tool("send", "Set one node input on a live instance; omit port only when the node has one input value port.", r#"{"type":"object","properties":{"id":{"type":"string"},"node":{"type":"string"},"port":{"type":"string"},"value":{}},"required":["id","node","value"],"additionalProperties":false}"#, Risk::Act))
         .with_tool(tool("answer", "Answer the Ask node where an instance is waiting; fails if that instance is not waiting there.", r#"{"type":"object","properties":{"id":{"type":"string"},"node":{"type":"string"},"value":{}},"required":["id","node","value"],"additionalProperties":false}"#, Risk::Act))
         .with_tool(tool("waiting", "List instances currently parked on an Ask question, including its options.", empty_schema(), Risk::Read))
-        .with_tool(tool("run", "Start a run on an existing instance and wait up to 55 seconds for outputs.", r#"{"type":"object","properties":{"id":{"type":"string"},"outputs":{"type":"array","items":{"type":"string"}}},"required":["id"],"additionalProperties":false}"#, Risk::Act))
+        .with_tool(tool("run", "Start a run on an existing instance; after 8 seconds continue through a run subscription.", r#"{"type":"object","properties":{"id":{"type":"string"},"outputs":{"type":"array","items":{"type":"string"}}},"required":["id"],"additionalProperties":false}"#, Risk::Act))
         .with_tool(tool("status", "Read one run's state, node states, progress, errors, and outputs.", one_string_schema("run_id", "run id"), Risk::Read))
         .with_tool(tool("cancel", "Cancel one queued, running, or waiting run.", one_string_schema("run_id", "run id"), Risk::Act))
         .with_tool(tool("outputs", "Read an instance's last outputs, materializing media values to scratch paths.", one_string_schema("id", "instance id"), Risk::Read))
+        .with_tool(tool("watch", "Subscribe to one live instance's input, run, node, question, output, and error events.", one_string_schema("id", "instance id"), Risk::Act))
         .with_tool(tool("save", "Materialize one content-addressed value under the flow scratch values directory and return its path.", one_string_schema("digest", "64-character sha256 digest"), Risk::Act))
 }
 
@@ -566,6 +988,10 @@ fn definition_manifest_from_schema(
         ));
     }
     manifest
+        .with_topic(TopicDef::new(
+            "run",
+            "This flow's run events including progress; filter with {run_id}; final on run.finished.",
+        ))
         .with_tool(tool(
             "status",
             "List this flow's live instances and their current state.",
@@ -598,6 +1024,56 @@ fn run_flows_call(
             .with_data(rows.serialize_json()),
             Err(error) => client_error_result(&call.call_id, error),
         },
+        "templates" => match call_client(client, FlowClient::templates) {
+            Ok(templates) => ToolResult::ok(
+                &call.call_id,
+                render_templates(&templates),
+                format!("{} flow templates", templates.len()),
+            )
+            .with_data(templates.serialize_json()),
+            Err(error) => client_error_result(&call.call_id, error),
+        },
+        "models" => {
+            let fields = match call_fields(call) {
+                Ok(fields) => fields,
+                Err(result) => return result,
+            };
+            let domain = string_field(&fields, "domain").map(str::to_string);
+            match call_client(client, |client| client.models(domain.as_deref())) {
+                Ok(models) => ToolResult::ok(
+                    &call.call_id,
+                    render_models(&models),
+                    format!("{} fleet models", models.models.len()),
+                )
+                .with_data(models.serialize_json()),
+                Err(error) => client_error_result(&call.call_id, error),
+            }
+        }
+        "create" => {
+            let fields = match call_fields(call) {
+                Ok(fields) => fields,
+                Err(result) => return result,
+            };
+            let name = match string_field(&fields, "name") {
+                Some(name) => name.to_string(),
+                None => return refused_missing(call, "name"),
+            };
+            let template = match string_field(&fields, "template") {
+                Some(template) => template.to_string(),
+                None => return refused_missing(call, "template"),
+            };
+            match call_client(client, |client| {
+                client.create_from_template(&name, &template)
+            }) {
+                Ok(response) => ToolResult::ok(
+                    &call.call_id,
+                    render_write(&name, response.revision, &response.graph),
+                    format!("created {name} from {template}"),
+                )
+                .with_data(response.serialize_json()),
+                Err(error) => client_error_result(&call.call_id, error),
+            }
+        }
         "nodes" => match call_client(client, FlowClient::nodes) {
             Ok(nodes) => ToolResult::ok(
                 &call.call_id,
@@ -759,6 +1235,27 @@ fn run_flows_call(
             };
             match call_client(client, |client| client.instance_json(&id)) {
                 Ok(instance) => output_result(client, &call.call_id, &id, instance),
+                Err(error) => client_error_result(&call.call_id, error),
+            }
+        }
+        "watch" => {
+            let id = match required_string(call, "id") {
+                Ok(id) => id,
+                Err(result) => return result,
+            };
+            match call_client(client, |client| client.instance_json(&id)) {
+                Ok(instance) => ToolResult::ok(
+                    &call.call_id,
+                    format!("watching instance {id}"),
+                    format!("watching {id}"),
+                )
+                .with_data(instance.to_json())
+                .with_disposition(Disposition::Continue)
+                .with_subscription(
+                    SubscriptionRequest::new("instance").with_filter(
+                        Json::Obj(vec![("instance".into(), Json::Str(id))]).to_json(),
+                    ),
+                ),
                 Err(error) => client_error_result(&call.call_id, error),
             }
         }
@@ -1042,9 +1539,54 @@ fn start_and_wait(
     epoch: u64,
     service: &str,
 ) -> ToolResult {
-    let started = match call_client(client, |client| {
-        client.start_run_json(instance, outputs.as_deref())
-    }) {
+    start_and_wait_for(
+        client, call, instance, outputs, cancel, tx, epoch, service, RUN_WAIT,
+    )
+}
+
+trait RunWaitClient {
+    fn start_run(&self, instance: &str, outputs: Option<&[String]>) -> Result<Json, ClientError>;
+    fn run(&self, run_id: &str) -> Result<Json, ClientError>;
+    fn instance(&self, instance: &str) -> Result<Json, ClientError>;
+    fn cancel(&self, run_id: &str) -> Result<(), ClientError>;
+    fn finished(&self, call_id: &str, instance: &str, row: Json) -> ToolResult;
+}
+
+impl RunWaitClient for ClientHandle {
+    fn start_run(&self, instance: &str, outputs: Option<&[String]>) -> Result<Json, ClientError> {
+        call_client(self, |client| client.start_run_json(instance, outputs))
+    }
+
+    fn run(&self, run_id: &str) -> Result<Json, ClientError> {
+        call_client(self, |client| client.run_json(run_id))
+    }
+
+    fn instance(&self, instance: &str) -> Result<Json, ClientError> {
+        call_client(self, |client| client.instance_json(instance))
+    }
+
+    fn cancel(&self, run_id: &str) -> Result<(), ClientError> {
+        call_client(self, |client| client.cancel_run(run_id))
+    }
+
+    fn finished(&self, call_id: &str, instance: &str, row: Json) -> ToolResult {
+        run_output_result(self, call_id, instance, row)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_and_wait_for<C: RunWaitClient>(
+    client: &C,
+    call: &ServiceCall,
+    instance: &str,
+    outputs: Option<Vec<String>>,
+    cancel: &Arc<AtomicBool>,
+    tx: &Sender<WorkerMessage>,
+    epoch: u64,
+    service: &str,
+    max_wait: Duration,
+) -> ToolResult {
+    let started = match client.start_run(instance, outputs.as_deref()) {
         Ok(started) => started,
         Err(error) => return client_error_result(&call.call_id, error),
     };
@@ -1060,12 +1602,13 @@ fn start_and_wait(
         tx,
         epoch,
         service,
+        max_wait,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn wait_for_run(
-    client: &ClientHandle,
+fn wait_for_run<C: RunWaitClient>(
+    client: &C,
     call_id: &str,
     instance: &str,
     run_id: &str,
@@ -1073,15 +1616,16 @@ fn wait_for_run(
     tx: &Sender<WorkerMessage>,
     epoch: u64,
     service: &str,
+    max_wait: Duration,
 ) -> ToolResult {
-    let deadline = Cx::monotonic_now() + RUN_WAIT.as_secs_f64();
+    let deadline = Instant::now() + max_wait;
     let mut previous = BTreeMap::new();
     loop {
         if cancel.load(Ordering::Acquire) {
-            let _ = call_client(client, |client| client.cancel_run(run_id));
+            let _ = client.cancel(run_id);
             return ToolResult::cancelled(call_id);
         }
-        let row = match call_client(client, |client| client.run_json(run_id)) {
+        let row = match client.run(run_id) {
             Ok(row) => row,
             Err(error) => return client_error_result(call_id, error),
         };
@@ -1100,24 +1644,54 @@ fn wait_for_run(
         }
         let state = json_string_field(&row, &["state"]).unwrap_or_default();
         if terminal_state(&state) {
-            return run_output_result(client, call_id, instance, row);
+            return client.finished(call_id, instance, row);
         }
-        if Cx::monotonic_now() >= deadline {
-            let data = Json::Obj(vec![
-                ("run_id".into(), Json::Str(run_id.to_string())),
-                ("instance".into(), Json::Str(instance.to_string())),
-                ("state".into(), Json::Str("running".into())),
-            ])
-            .to_json();
-            return ToolResult::ok(
-                call_id,
-                format!("run {run_id} is still running; call flows.status"),
-                "run still running",
-            )
-            .with_data(data);
+        if state.eq_ignore_ascii_case("waiting") {
+            let waiting = client
+                .instance(instance)
+                .ok()
+                .and_then(|instance| instance.get("waiting").cloned());
+            return continuing_run_result(call_id, instance, run_id, &state, waiting);
+        }
+        if Instant::now() >= deadline {
+            return continuing_run_result(call_id, instance, run_id, &state, None);
         }
         wait_for_next_poll();
     }
+}
+
+fn continuing_run_result(
+    call_id: &str,
+    instance: &str,
+    run_id: &str,
+    state: &str,
+    waiting: Option<Json>,
+) -> ToolResult {
+    let state = nonempty(state, "running").to_ascii_lowercase();
+    let mut fields = vec![
+        ("run_id".into(), Json::Str(run_id.to_string())),
+        ("instance".into(), Json::Str(instance.to_string())),
+        ("state".into(), Json::Str(state.clone())),
+    ];
+    let text = if let Some(waiting) = waiting {
+        let question = waiting
+            .get("question")
+            .and_then(Json::as_str)
+            .unwrap_or("answer required")
+            .to_string();
+        fields.push(("waiting".into(), waiting));
+        format!("run {run_id} is waiting · {}", one_line(&question))
+    } else {
+        format!("run {run_id} is {state}; its result will arrive as a message")
+    };
+    ToolResult::ok(call_id, text, format!("run {run_id} {state}"))
+        .with_data(Json::Obj(fields).to_json())
+        .with_disposition(Disposition::Continue)
+        .with_subscription(
+            SubscriptionRequest::new("run").with_filter(
+                Json::Obj(vec![("run_id".into(), Json::Str(run_id.to_string()))]).to_json(),
+            ),
+        )
 }
 
 // flow-ui's HTTP client and embedded host are native-only. This worker wait
@@ -1443,6 +2017,61 @@ fn render_flow_list(rows: &[FlowSummary]) -> String {
         .join("\n")
 }
 
+fn render_templates(templates: &[TemplateSummary]) -> String {
+    if templates.is_empty() {
+        return "no flow templates".to_string();
+    }
+    templates
+        .iter()
+        .map(|template| {
+            let inputs = template
+                .inputs
+                .iter()
+                .map(|(name, ty)| format!("{name}:{ty}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let outputs = template
+                .outputs
+                .iter()
+                .map(|(name, ty)| format!("{name}:{ty}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "{} · {} · {} · inputs [{}] · outputs [{}]",
+                template.name,
+                template.label,
+                one_line(&template.brief),
+                inputs,
+                outputs
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_models(response: &ModelsResponse) -> String {
+    if response.models.is_empty() {
+        return "no fleet models available".to_string();
+    }
+    response
+        .models
+        .iter()
+        .map(|model| {
+            let availability = if model.available {
+                "available"
+            } else {
+                "unavailable"
+            };
+            let gated = if model.gated { " · gated" } else { "" };
+            format!(
+                "{} · {} · {} · {} · {}{}",
+                model.id, model.domain, model.backend, model.node, availability, gated
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn render_nodes(root: &Json) -> String {
     let Some(types) = root.get("types").and_then(Json::as_arr) else {
         return bounded(root.to_json(), MAX_READ_TEXT);
@@ -1653,7 +2282,11 @@ fn render_run_row(root: &Json) -> String {
     )
 }
 
-fn render_context(context: &BridgeContext) -> String {
+fn render_context(
+    context: &BridgeContext,
+    subscription_count: usize,
+    last_message_summary: &str,
+) -> String {
     let mut lines = vec![format!(
         "flow={} revision={} canonical={}",
         context.flow.as_deref().unwrap_or("none"),
@@ -1676,6 +2309,11 @@ fn render_context(context: &BridgeContext) -> String {
         "selected_node={} view={}",
         context.selected_node.as_deref().unwrap_or("none"),
         nonempty(&context.open_view, "source")
+    ));
+    lines.push(format!(
+        "subscriptions={} last_message={}",
+        subscription_count,
+        nonempty(last_message_summary, "none")
     ));
     if let Some(error) = &context.last_error {
         lines.push(format!("last_error={}", error.lines().next().unwrap_or(error)));
@@ -1983,6 +2621,7 @@ mod tests {
     use super::*;
     use makepad_ai_services::ToolOutcome;
     use makepad_flow::{EvalError, Loc, Port, PortType};
+    use makepad_widgets::makepad_platform::makepad_micro_serde::JsonValue;
 
     fn test_node() -> Node {
         Node {
@@ -2053,8 +2692,17 @@ mod tests {
         }
         let flows = flows_manifest();
         flows.validate().unwrap();
-        assert_eq!(flows.tools.len(), 17);
+        assert_eq!(flows.tools.len(), 21);
+        assert_eq!(flows.topics.len(), 3);
+        assert!(flows.topic("flows").is_some());
+        assert!(flows.topic("instance").is_some());
+        assert!(flows.topic("run").is_some());
+        assert_eq!(flows.tool("templates").unwrap().risk, Risk::Read);
+        assert_eq!(flows.tool("models").unwrap().risk, Risk::Read);
+        assert_eq!(flows.tool("create").unwrap().risk, Risk::Act);
+        assert_eq!(flows.tool("watch").unwrap().risk, Risk::Act);
         assert_eq!(flows.tool("delete").unwrap().risk, Risk::Destructive);
+        assert!(manifest.topic("run").is_some());
     }
 
     #[test]
@@ -2155,5 +2803,239 @@ mod tests {
             result.text,
             "demo.splash:7:11: expected expression"
         );
+    }
+
+    fn flow_event(topic: &str, kind: &str) -> FlowEvent {
+        FlowEvent {
+            seq: 1,
+            topic: topic.into(),
+            kind: kind.into(),
+            name: Some("demo".into()),
+            revision: Some(3),
+            canonical: Some(true),
+            error: Some(JsonValue::String("boom\nnow".into())),
+            instance: Some("inst_1".into()),
+            run_id: Some("r_1".into()),
+            flow: Some("demo".into()),
+            node: Some("image".into()),
+            port: Some("picture".into()),
+            text: Some("hello\nworld".into()),
+            permille: Some(410),
+            stage: Some("encode".into()),
+            state: Some(JsonValue::String("done".into())),
+            secs: Some(5.5),
+            by: Some("chat".into()),
+            reason: Some("dependency failed".into()),
+            question: Some("which one?".into()),
+            outputs: Some(JsonValue::Array(vec![JsonValue::Array(vec![
+                JsonValue::String("picture".into()),
+                JsonValue::Object(HashMap::from([
+                    ("type".into(), JsonValue::String("image".into())),
+                    (
+                        "content_type".into(),
+                        JsonValue::String("image/png".into()),
+                    ),
+                    ("digest".into(), JsonValue::String("a".repeat(64))),
+                    ("bytes".into(), JsonValue::U64(42)),
+                ])),
+            ])])),
+        }
+    }
+
+    #[test]
+    fn every_flow_event_kind_renders_as_one_model_readable_line() {
+        let cases = [
+            ("flows", "flow.changed"),
+            ("flows", "flow.error"),
+            ("flows", "flow.removed"),
+            ("flows", "instance.created"),
+            ("flows", "instance.removed"),
+            ("flows", "instance.inputs"),
+            ("run", "run.started"),
+            ("run", "node.started"),
+            ("run", "node.progress"),
+            ("run", "node.delta"),
+            ("run", "node.waiting"),
+            ("run", "node.answered"),
+            ("run", "node.done"),
+            ("run", "node.failed"),
+            ("run", "node.skipped"),
+            ("run", "run.finished"),
+        ];
+        for (topic, kind) in cases {
+            let text = render_event_message(&flow_event(topic, kind));
+            assert!(!text.is_empty(), "{kind}");
+            assert!(!text.contains('\n'), "{kind}: {text:?}");
+        }
+        assert_eq!(
+            render_event_message(&flow_event("run", "node.progress")),
+            "node image · progress 41 % · encode"
+        );
+        let finished = render_event_message(&flow_event("run", "run.finished"));
+        assert!(finished.starts_with("run r_1 finished · done · picture sha256:"));
+        assert!(finished.ends_with("· 5.5 s"));
+    }
+
+    fn test_subscriptions() -> SubscriptionTable {
+        let mut table = SubscriptionTable::default();
+        table.insert(
+            SERVICE_ID.into(),
+            None,
+            "flows_sub".into(),
+            "flows".into(),
+            SubscriptionFilter::All,
+        );
+        table.insert(
+            SERVICE_ID.into(),
+            None,
+            "instance_sub".into(),
+            "instance".into(),
+            SubscriptionFilter::Instance("inst_1".into()),
+        );
+        table.insert(
+            SERVICE_ID.into(),
+            None,
+            "run_sub".into(),
+            "run".into(),
+            SubscriptionFilter::Run("r_1".into()),
+        );
+        table.insert(
+            "flow_demo".into(),
+            Some("demo".into()),
+            "definition_sub".into(),
+            "run".into(),
+            SubscriptionFilter::Run("r_1".into()),
+        );
+        table
+    }
+
+    #[test]
+    fn topic_and_filters_match_only_the_requested_stream() {
+        let mut table = test_subscriptions();
+        let flows = table.route(&flow_event("flows", "flow.changed"), 0.0);
+        assert_eq!(flows.len(), 1);
+        assert_eq!(flows[0].sub_id, "flows_sub");
+
+        let instance = table.route(&flow_event("instance", "node.done"), 0.0);
+        assert_eq!(instance.len(), 1);
+        assert_eq!(instance[0].sub_id, "instance_sub");
+
+        let run = table.route(&flow_event("run", "node.done"), 0.0);
+        let ids = run
+            .iter()
+            .map(|publication| publication.sub_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["definition_sub", "run_sub"]);
+
+        let mut other = flow_event("run", "node.done");
+        other.run_id = Some("r_2".into());
+        assert!(table.route(&other, 0.0).is_empty());
+    }
+
+    #[test]
+    fn run_progress_is_coalesced_per_subscription_for_half_a_second() {
+        let mut table = SubscriptionTable::default();
+        table.insert(
+            SERVICE_ID.into(),
+            None,
+            "run_sub".into(),
+            "run".into(),
+            SubscriptionFilter::Run("r_1".into()),
+        );
+        let first = flow_event("run", "node.progress");
+        assert_eq!(table.route(&first, 0.0).len(), 1);
+        let mut latest = first.clone();
+        latest.permille = Some(730);
+        latest.stage = Some("decode".into());
+        assert!(table.route(&latest, 0.2).is_empty());
+        assert!(table.flush_due(0.49).is_empty());
+        let flushed = table.flush_due(0.5);
+        assert_eq!(flushed.len(), 1);
+        assert_eq!(flushed[0].message.text, "node image · progress 73 % · decode");
+    }
+
+    #[test]
+    fn run_finished_is_final_and_closes_only_the_run_subscription() {
+        let mut table = test_subscriptions();
+        let published = table.route(&flow_event("run", "run.finished"), 1.0);
+        assert_eq!(published.len(), 2);
+        assert!(published.iter().all(|item| item.message.final_));
+        assert_eq!(table.len(), 2);
+        assert!(table
+            .live
+            .values()
+            .any(|subscription| subscription.topic == "instance"));
+    }
+
+    struct FakeRunClient {
+        row: Json,
+        polls: Mutex<usize>,
+    }
+
+    impl RunWaitClient for FakeRunClient {
+        fn start_run(
+            &self,
+            _instance: &str,
+            _outputs: Option<&[String]>,
+        ) -> Result<Json, ClientError> {
+            Ok(Json::Obj(vec![(
+                "run_id".into(),
+                Json::Str("r_fake".into()),
+            )]))
+        }
+
+        fn run(&self, _run_id: &str) -> Result<Json, ClientError> {
+            *self.polls.lock().unwrap() += 1;
+            Ok(self.row.clone())
+        }
+
+        fn instance(&self, _instance: &str) -> Result<Json, ClientError> {
+            Ok(Json::Obj(Vec::new()))
+        }
+
+        fn cancel(&self, _run_id: &str) -> Result<(), ClientError> {
+            Ok(())
+        }
+
+        fn finished(&self, _call_id: &str, _instance: &str, _row: Json) -> ToolResult {
+            panic!("a running fake must return early")
+        }
+    }
+
+    #[test]
+    fn long_run_returns_continue_data_and_a_run_subscription() {
+        let fake = FakeRunClient {
+            row: Json::Obj(vec![("state".into(), Json::Str("running".into()))]),
+            polls: Mutex::new(0),
+        };
+        let call = ServiceCall {
+            call_id: "call_1".into(),
+            tool: "run".into(),
+            args: "{}".into(),
+        };
+        let (tx, _rx) = channel();
+        let result = start_and_wait_for(
+            &fake,
+            &call,
+            "inst_fake",
+            None,
+            &Arc::new(AtomicBool::new(false)),
+            &tx,
+            1,
+            SERVICE_ID,
+            Duration::ZERO,
+        );
+        assert_eq!(result.outcome, ToolOutcome::Ok);
+        assert_eq!(result.disposition, Disposition::Continue);
+        assert_eq!(result.subscribe.len(), 1);
+        assert_eq!(result.subscribe[0].topic, "run");
+        assert_eq!(
+            result.subscribe[0].filter.as_deref(),
+            Some(r#"{"run_id":"r_fake"}"#)
+        );
+        let data = makepad_strict_json::parse(result.data.as_bytes()).unwrap();
+        assert_eq!(data.get("instance").and_then(Json::as_str), Some("inst_fake"));
+        assert_eq!(data.get("state").and_then(Json::as_str), Some("running"));
+        assert_eq!(*fake.polls.lock().unwrap(), 1);
     }
 }
