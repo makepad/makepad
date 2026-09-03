@@ -3440,6 +3440,11 @@ script_mod! {
                         grid_tap := MusicButton{width: 40 height: 22 text: "tap"}
                         grid_undo := MusicButton{width: 44 height: 22 text: "undo"}
                         grid_lock := MusicButton{width: 40 height: 22 text: "lock"}
+                        // Measure this record again from nothing: for the
+                        // case where the analysis is simply wrong and a
+                        // model has been installed, or the stems have
+                        // arrived, since the last look at it.
+                        grid_rescan := MusicButton{width: 56 height: 22 text: "re-scan"}
                         View{width: Fill height: Fit}
                         splat_score := MusicButton{width: 52 height: 22 text: "score"}
                     }

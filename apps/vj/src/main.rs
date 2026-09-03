@@ -14210,6 +14210,41 @@ p2 {}
         });
     }
 
+    /// Measure this deck's record again from nothing.
+    ///
+    /// The stored analysis is thrown away and the pass re-run with
+    /// whatever is configured NOW -- which is the point: a record
+    /// analysed before a beat model was installed, or before its stems
+    /// existed, has a worse answer on disk than the machine can produce
+    /// today, and there was no way to ask for a better one short of
+    /// clearing the whole library's cache.
+    ///
+    /// The operator's own work is untouched: their marks and a grid they
+    /// corrected live outside this cache, which is exactly why they live
+    /// outside it.
+    fn rescan_deck_analysis(&mut self, cx: &mut Cx, deck: DeckId) {
+        let index = deck.index();
+        let Some(item) = self.decks.deck(deck).item().cloned() else {
+            self.set_music_import_status(cx, "nothing on that deck to measure");
+            return;
+        };
+        let Some((pcm, _)) = self.deck_tracks[index].clone() else {
+            self.set_music_import_status(cx, "that record is still loading");
+            return;
+        };
+        let key = match self.local_by_asset.get(&item.asset) {
+            Some(path) => AnalysisKey::from_path(path),
+            None => AnalysisKey::from_blob(item.media_blob),
+        };
+        crate::wave_analysis::forget_cached(&crate::wave_analysis::cache_dir(), &key);
+        // The memoized column answer goes with it, or the explorer would
+        // keep showing the tempo that has just been thrown away.
+        self.track_summaries.remove(&key);
+        self.submit_analysis(deck, pcm);
+        let name = if deck == DeckId::A { "A" } else { "B" };
+        self.set_music_import_status(cx, &format!("measuring deck {name} again"));
+    }
+
     fn run_pad_cmds(&mut self, cmds: Vec<PadCmd>) {
         for cmd in cmds {
             match cmd {
@@ -27788,6 +27823,9 @@ impl MatchEvent for App {
                     self.republish_grid(cx, deck, grid);
                     self.save_loop_marks(deck);
                 }
+            }
+            if self.ui.button(cx, ids!(grid_rescan)).clicked(actions) {
+                self.rescan_deck_analysis(cx, deck);
             }
             if self.ui.button(cx, ids!(grid_lock)).clicked(actions) {
                 let locked = !self.decks.deck(deck).grid_locked;

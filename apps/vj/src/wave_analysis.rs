@@ -2660,6 +2660,16 @@ fn load_cached(dir: &Path, key: &AnalysisKey) -> Option<TrackAnalysis> {
 
 /// Re-publish an analysis the operator corrected (a flipped beat pulse), so
 /// the next load of the same record starts from the corrected grid.
+/// Throw away one record's stored analysis, so the next look at it is a
+/// fresh one.
+///
+/// Returns whether there was anything to throw away. Only the derived
+/// cache: the operator's marks and their corrected grid live elsewhere
+/// on purpose, and a re-scan must not touch them.
+pub fn forget_cached(dir: &Path, key: &AnalysisKey) -> bool {
+    std::fs::remove_file(cache_path(dir, key)).is_ok()
+}
+
 pub fn store_analysis(key: &AnalysisKey, analysis: &TrackAnalysis) {
     store_cached(&cache_dir(), key, analysis);
 }
@@ -4075,6 +4085,25 @@ mod tests {
         let overview = load_cached_overview(&dir, &key).expect("overview off disk");
         assert_eq!(overview, analysis.tiles.overview, "byte for byte");
         assert!(!overview.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Forgetting one record takes its stored answer and nothing else.
+    #[test]
+    fn a_record_can_be_forgotten_on_its_own() {
+        let dir = std::env::temp_dir().join(format!("vj-forget-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mine = AnalysisKey::from_blob(BlobId::hash_of(b"forget me"));
+        let other = AnalysisKey::from_blob(BlobId::hash_of(b"keep me"));
+        let analysis = analyze(&click_track(48_000, 128.0, 8.0, 0.0));
+        store_cached(&dir, &mine, &analysis);
+        store_cached(&dir, &other, &analysis);
+        assert!(load_cached_summary(&dir, &mine).is_some());
+
+        assert!(forget_cached(&dir, &mine), "there was something to forget");
+        assert!(load_cached_summary(&dir, &mine).is_none(), "and it is gone");
+        assert!(load_cached_summary(&dir, &other).is_some(), "and only it");
+        assert!(!forget_cached(&dir, &mine), "forgetting it twice is not a lie");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
