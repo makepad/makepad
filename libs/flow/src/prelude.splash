@@ -184,9 +184,9 @@ mod.flow.Image = mod.flow.Gen{
     domain: "image"
     /** Text describing the desired image. */
     prompt: ""
-    /** 256..2048 step 64 */
+    /** 256..2048 step 16 */
     width: 1024
-    /** 256..2048 step 64 */
+    /** 256..2048 step 16 */
     height: 1024
     /** 1..50 */
     steps: 8

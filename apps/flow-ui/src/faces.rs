@@ -136,8 +136,50 @@ fn catalog_range(entry: Option<&NodeTypeCatalog>, name: &str) -> Option<(f64, f6
         .map(|range| (range.min, range.max, range.step.unwrap_or(1.0)))
 }
 
+fn node_param_range(
+    node: &Node,
+    catalog: &[NodeTypeCatalog],
+    name: &str,
+) -> Option<(f64, f64, f64)> {
+    catalog_range(catalog_entry_for_node(node, catalog), name)
+}
+
 fn in_range(value: u32, range: Option<(f64, f64, f64)>) -> bool {
     range.is_none_or(|(min, max, _)| (value as f64) >= min && (value as f64) <= max)
+}
+
+fn on_step(value: u32, range: (f64, f64, f64)) -> bool {
+    let step = range.2;
+    step <= 0.0 || ((value as f64 / step).round() * step - value as f64).abs() < 1e-9
+}
+
+pub(crate) fn snap_stepped_value(value: f64, range: (f64, f64, f64)) -> f64 {
+    let (min, max, step) = range;
+    let snapped = if step.is_finite() && step > 0.0 {
+        (value / step).round() * step
+    } else {
+        value
+    };
+    snapped.clamp(min, max)
+}
+
+fn catalog_entry_for_node<'a>(
+    node: &Node,
+    catalog: &'a [NodeTypeCatalog],
+) -> Option<&'a NodeTypeCatalog> {
+    node.domain
+        .as_deref()
+        .filter(|domain| !domain.is_empty())
+        .and_then(|domain| {
+            catalog
+                .iter()
+                .find(|entry| entry.domain.as_deref() == Some(domain))
+        })
+        .or_else(|| {
+            catalog
+                .iter()
+                .find(|entry| entry.type_name == node.type_name)
+        })
 }
 
 /// Size choices and number-field bounds for a node that owns both params.
@@ -151,40 +193,36 @@ pub fn format_options_for_node(
     // Recipe-derived generators currently retain `Gen` in evaluated nodes,
     // while their catalog row carries the specialised type name. The domain
     // is the stable join for those rows (and maps `video` to `Video`).
-    let entry = node
-        .domain
-        .as_deref()
-        .filter(|domain| !domain.is_empty())
-        .and_then(|domain| {
-            catalog
-                .iter()
-                .find(|entry| entry.domain.as_deref() == Some(domain))
-        })
-        .or_else(|| {
-            catalog
-                .iter()
-                .find(|entry| entry.type_name == node.type_name)
-        });
+    let entry = catalog_entry_for_node(node, catalog);
     let documented = entry.map(doc_format_presets).unwrap_or_default();
     if !documented.is_empty() {
         let width_min = documented.iter().map(|preset| preset.width).min()? as f64;
         let width_max = documented.iter().map(|preset| preset.width).max()? as f64;
         let height_min = documented.iter().map(|preset| preset.height).min()? as f64;
         let height_max = documented.iter().map(|preset| preset.height).max()? as f64;
+        let width_range = catalog_range(entry, "width").unwrap_or((width_min, width_max, 1.0));
+        let height_range =
+            catalog_range(entry, "height").unwrap_or((height_min, height_max, 1.0));
         return Some(FormatOptions {
-            presets: documented,
-            width_range: catalog_range(entry, "width").unwrap_or((width_min, width_max, 1.0)),
-            height_range: catalog_range(entry, "height")
-                .unwrap_or((height_min, height_max, 1.0)),
+            presets: documented
+                .into_iter()
+                .filter(|preset| {
+                    on_step(preset.width, width_range) && on_step(preset.height, height_range)
+                })
+                .collect(),
+            width_range,
+            height_range,
         });
     }
-    let width_range = catalog_range(entry, "width").unwrap_or((256.0, 2048.0, 64.0));
-    let height_range = catalog_range(entry, "height").unwrap_or((256.0, 2048.0, 64.0));
+    let width_range = catalog_range(entry, "width").unwrap_or((256.0, 2048.0, 1.0));
+    let height_range = catalog_range(entry, "height").unwrap_or((256.0, 2048.0, 1.0));
     Some(FormatOptions {
         presets: IMAGE_FORMAT_PRESETS
             .iter()
             .filter(|(_, width, height)| {
                 in_range(*width, Some(width_range)) && in_range(*height, Some(height_range))
+                    && on_step(*width, width_range)
+                    && on_step(*height, height_range)
             })
             .map(|(name, width, height)| FormatPreset::new(*name, *width, *height))
             .collect(),
@@ -347,18 +385,38 @@ script_mod! {
         }
     }
 
+    // Text in a card gets one quiet, bounded viewport. At canvas zoom this
+    // scales with the rest of the card; a user-sized card switches it to Fill.
+    mod.flow.ui.TextScroll = ScrollYView{
+        width: Fill
+        height: Fit{max: FitBound.Abs(160)}
+        scroll_bars +: {
+            scroll_bar_y +: {
+                bar_size: 8
+                bar_side_margin: 1
+                draw_bg +: {
+                    color: #xffffff18
+                    color_hover: #xffffff30
+                    color_drag: #xffffff48
+                }
+            }
+        }
+    }
+
     mod.flow.ui.ValueTextBase = #(ValueText::register_widget(vm))
     mod.flow.ui.ValueText = set_type_default() do mod.flow.ui.ValueTextBase{
         width: Fill
         height: Fit
         flow: Down
-        text := Label{
-            width: Fill
-            height: Fit
-            text: ""
-            draw_text +: {
-                text_style: theme.font_code{font_size: 9}
-                color: theme.flow_text_code
+        text_scroll := mod.flow.ui.TextScroll{
+            text := Label{
+                width: Fill
+                height: Fit
+                text: ""
+                draw_text +: {
+                    text_style: theme.font_code{font_size: 9}
+                    color: theme.flow_text_code
+                }
             }
         }
     }
@@ -376,15 +434,17 @@ script_mod! {
         image := RoundedPicture{
             visible: false
         }
-        text := Label{
-            width: Fill
-            height: Fit
+        text_scroll := mod.flow.ui.TextScroll{
             visible: false
-            margin: Inset{left: 14 right: 14 top: 12 bottom: 12}
-            text: ""
-            draw_text +: {
-                color: theme.flow_text_body
-                text_style: theme.font_regular{font_size: 9.5}
+            text := Label{
+                width: Fill
+                height: Fit
+                margin: Inset{left: 14 right: 14 top: 12 bottom: 12}
+                text: ""
+                draw_text +: {
+                    color: theme.flow_text_body
+                    text_style: theme.font_regular{font_size: 9.5}
+                }
             }
         }
     }
@@ -651,6 +711,9 @@ impl Widget for ValueView {
         self.value = v.to_string();
         self.loaded = false;
         self.view.image(cx, ids!(image)).set_visible(cx, false);
+        self.view
+            .view(cx, ids!(text_scroll))
+            .set_visible(cx, !v.is_empty());
         let text = self.view.label(cx, ids!(text));
         text.set_text(cx, v);
         text.set_visible(cx, !v.is_empty());
@@ -700,6 +763,9 @@ impl ValueView {
             Ok(()) => {
                 self.loaded = true;
                 image.set_visible(cx, true);
+                self.view
+                    .view(cx, ids!(text_scroll))
+                    .set_visible(cx, false);
                 self.view.label(cx, ids!(text)).set_visible(cx, false);
                 self.view.view(cx, ids!(empty)).set_visible(cx, false);
             }
@@ -729,6 +795,10 @@ pub struct FormatPicker {
     width: u32,
     #[rust]
     height: u32,
+    #[rust]
+    width_range: (f64, f64, f64),
+    #[rust]
+    height_range: (f64, f64, f64),
 }
 
 impl Widget for FormatPicker {
@@ -742,14 +812,6 @@ impl Widget for FormatPicker {
 }
 
 impl FormatPicker {
-    fn field_value(&self, cx: &Cx, id: &[LiveId]) -> u32 {
-        self.view
-            .fab_value_input(cx, id)
-            .value()
-            .round()
-            .max(0.0) as u32
-    }
-
     fn sync_selected(&self, cx: &mut Cx) {
         let selected = self
             .presets
@@ -786,6 +848,8 @@ impl FormatPicker {
         self.view.drop_down(cx, ids!(picker)).set_labels(cx, labels);
         let (width_min, width_max, width_step) = options.width_range;
         let (height_min, height_max, height_step) = options.height_range;
+        self.width_range = options.width_range;
+        self.height_range = options.height_range;
         let mut width = self.view.fab_value_input(cx, ids!(w_field));
         script_apply_eval!(cx, width, {
             min: #(width_min)
@@ -820,9 +884,20 @@ impl FormatPicker {
             .ended(actions)
             .is_some();
         if width_ended || height_ended {
-            self.width = self.field_value(cx, ids!(w_field));
-            self.height = self.field_value(cx, ids!(h_field));
-            self.sync_selected(cx);
+            let width = snap_stepped_value(
+                self.view.fab_value_input(cx, ids!(w_field)).value(),
+                self.width_range,
+            )
+            .round()
+            .max(0.0) as u32;
+            let height = snap_stepped_value(
+                self.view.fab_value_input(cx, ids!(h_field)).value(),
+                self.height_range,
+            )
+            .round()
+            .max(0.0) as u32;
+            self.set_dimensions(cx, width, height);
+            return Some((width, height));
         }
         if let Some(index) = self.view.drop_down(cx, ids!(picker)).changed(actions) {
             let preset = index
@@ -1297,6 +1372,15 @@ pub fn preview_text(value: &ValueRef) -> Option<String> {
     }
 }
 
+fn stream_scroll_for(show: &Bind) -> Option<WidgetRef> {
+    show.stream_scroll.clone().or_else(|| {
+        (show.widget.borrow::<ValueText>().is_some()
+            || show.widget.borrow::<ValueView>().is_some())
+        .then(|| show.widget.child(live_id!(text_scroll)))
+        .filter(|scroll| !scroll.is_empty())
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Mounted faces
 // ---------------------------------------------------------------------------
@@ -1306,6 +1390,7 @@ pub struct Bind {
     pub widget: WidgetRef,
     pub node: String,
     pub port: String,
+    stream_scroll: Option<WidgetRef>,
 }
 
 #[derive(Default)]
@@ -1316,8 +1401,11 @@ pub struct MountedFace {
     pub shows: Vec<Bind>,
     pub params: Vec<(WidgetRef, String)>,
     pub param_binds: Vec<(WidgetRef, String)>,
+    param_ranges: HashMap<WidgetUid, (f64, f64, f64)>,
     pub format_pickers: Vec<WidgetRef>,
     pub dropdowns: Vec<WidgetRef>,
+    text_scrolls: Vec<WidgetRef>,
+    card_sized: bool,
     /// Ask controls are staged until this explicit button is pressed.
     pub answer_button: Option<WidgetRef>,
     pub on_value: Option<ScriptFnRef>,
@@ -1350,14 +1438,43 @@ pub struct FaceHost {
     /// Canvas back-to-front order, used to offer hits to the visually
     /// frontmost face first.
     event_order: Vec<String>,
+    paused_stream_scrolls: HashSet<WidgetUid>,
+    pending_stream_scrolls: HashSet<WidgetUid>,
 }
 
-fn collect_widgets(root: &WidgetRef, out: &mut Vec<WidgetRef>) {
+fn collect_widgets(
+    vm: &ScriptVm<'_>,
+    root: &WidgetRef,
+    text_scroll_proto: Option<ScriptObject>,
+    enclosing_scroll: Option<WidgetRef>,
+    out: &mut Vec<(WidgetRef, Option<WidgetRef>, bool)>,
+) {
     if root.is_empty() {
         return;
     }
-    out.push(root.clone());
-    root.children(&mut |_, child| collect_widgets(&child, out));
+    let is_text_scroll = text_scroll_proto.is_some_and(|prototype| {
+        let source = root.script_source();
+        source != ScriptObject::ZERO
+            && vm
+                .construction_chain(source.into())
+                .iter()
+                .any(|level| level.object == prototype)
+    });
+    let enclosing_scroll = if is_text_scroll {
+        Some(root.clone())
+    } else {
+        enclosing_scroll
+    };
+    out.push((root.clone(), enclosing_scroll.clone(), is_text_scroll));
+    root.children(&mut |_, child| {
+        collect_widgets(
+            vm,
+            &child,
+            text_scroll_proto,
+            enclosing_scroll.clone(),
+            out,
+        )
+    });
 }
 
 fn subtree_owns_area(root: &WidgetRef, cx: &Cx, area: Area) -> bool {
@@ -1544,6 +1661,8 @@ impl FaceHost {
             camera_transform: None,
             staged_asks: HashMap::new(),
             event_order: graph.nodes.iter().map(|node| node.id.clone()).collect(),
+            paused_stream_scrolls: HashSet::new(),
+            pending_stream_scrolls: HashSet::new(),
         };
         let instance_name = instance.to_string();
         let nodes_for_bridge = node_objects.clone();
@@ -1747,15 +1866,24 @@ impl FaceHost {
                     }
                 }
             }
+            let text_scroll_proto = own_value(vm, vm.bx.heap.modules, "flow")
+                .and_then(|value| value.as_object())
+                .and_then(|flow| own_value(vm, flow, "ui"))
+                .and_then(|value| value.as_object())
+                .and_then(|ui| own_value(vm, ui, "TextScroll"))
+                .and_then(|value| value.as_object());
             let mut widgets = Vec::new();
-            collect_widgets(&root, &mut widgets);
+            collect_widgets(vm, &root, text_scroll_proto, None, &mut widgets);
             if graph_node.as_ref().is_some_and(|node| node.kind == "ask") {
                 let button = root.child(live_id!(answer_button));
                 if button.borrow::<Button>().is_some() {
                     face.answer_button = Some(button);
                 }
             }
-            for widget in widgets {
+            for (widget, stream_scroll, is_text_scroll) in widgets {
+                if is_text_scroll {
+                    face.text_scrolls.push(widget.clone());
+                }
                 if widget.borrow::<FormatPicker>().is_some() {
                     face.format_pickers.push(widget.clone());
                 }
@@ -1789,6 +1917,7 @@ impl FaceHost {
                             widget: widget.clone(),
                             node,
                             port,
+                            stream_scroll: stream_scroll.clone(),
                         });
                     }
                 }
@@ -1798,6 +1927,7 @@ impl FaceHost {
                             widget: widget.clone(),
                             node,
                             port,
+                            stream_scroll: stream_scroll.clone(),
                         });
                     }
                 }
@@ -1811,6 +1941,12 @@ impl FaceHost {
                     .filter(|v| !v.is_nil())
                     .and_then(|v| value_text(vm, v))
                 {
+                    if let Some(range) = graph_node
+                        .as_ref()
+                        .and_then(|node| node_param_range(node, catalog, &name))
+                    {
+                        face.param_ranges.insert(widget.widget_uid(), range);
+                    }
                     face.param_binds.push((widget.clone(), name));
                 }
             }
@@ -1881,7 +2017,7 @@ impl FaceHost {
     /// gets an empty scope: the host's scope data is the canvas's, not
     /// the isolate's.
     pub fn draw_face(&mut self, cx: &mut Cx2d, node: &str, walk: Walk, card_sized: bool) {
-        let Some(face) = self.faces.get(node) else {
+        let Some(face) = self.faces.get_mut(node) else {
             return;
         };
         for show in &face.shows {
@@ -1891,12 +2027,33 @@ impl FaceHost {
                 value.set_card_sized(cx, card_sized);
             }
         }
+        if face.card_sized != card_sized {
+            face.card_sized = card_sized;
+            for scroll in &face.text_scrolls {
+                let Some(mut scroll) = scroll.borrow_mut::<View>() else {
+                    continue;
+                };
+                if card_sized {
+                    script_apply_eval!(cx, scroll, {height: Fill});
+                } else {
+                    script_apply_eval!(cx, scroll, {
+                        height: Fit{max: FitBound.Abs(160)}
+                    });
+                }
+            }
+        }
         let root = face.root.clone();
+        let text_scrolls = face.text_scrolls.clone();
         if root.is_empty() {
             return;
         }
         let entry = enter_isolate(cx, self.vm_id);
         root.draw_walk_all(cx, &mut Scope::empty(), walk);
+        for scroll in text_scrolls {
+            if self.pending_stream_scrolls.remove(&scroll.widget_uid()) {
+                scroll.set_scroll_pos(cx, dvec2(0.0, f64::MAX));
+            }
+        }
         leave_isolate(cx, entry);
         if let Some(transform) = self.camera_transform {
             reposition_text_ime(cx, &root, transform);
@@ -1942,6 +2099,31 @@ impl FaceHost {
         }
         let remapped = camera.and_then(|camera| remap_event(event, camera));
         let delivered = remapped.as_ref().unwrap_or(event);
+        let scroll_up = matches!(delivered, Event::Scroll(event) if event.scroll.y < 0.0);
+        let scroll_bar_press = matches!(delivered, Event::MouseDown(_));
+        if scroll_up || scroll_bar_press {
+            let abs = match delivered {
+                Event::Scroll(event) => Some(event.abs),
+                Event::MouseDown(event) => Some(event.abs),
+                _ => None,
+            };
+            if let Some(abs) = abs {
+                for scroll in self
+                    .faces
+                    .values()
+                    .chain(self.flow_face.iter())
+                    .flat_map(|face| &face.text_scrolls)
+                {
+                    let rect = scroll.area().clipped_rect(cx);
+                    let over_scroll_bar = scroll_bar_press
+                        && abs.x >= rect.pos.x + (rect.size.x - 10.0).max(0.0);
+                    if rect.contains(abs) && (scroll_up || over_scroll_bar) {
+                        self.paused_stream_scrolls.insert(scroll.widget_uid());
+                        self.pending_stream_scrolls.remove(&scroll.widget_uid());
+                    }
+                }
+            }
+        }
         let entry = enter_isolate(cx, self.vm_id);
         for root in roots {
             root.handle_event(cx, delivered, scope);
@@ -2286,6 +2468,11 @@ impl FaceHost {
                     }
                 } else if widget.borrow::<FabValueInput>().is_some() {
                     if let Some(value) = widget.as_fab_value_input().ended(actions) {
+                        let value = face
+                            .param_ranges
+                            .get(&widget.widget_uid())
+                            .map_or(value, |range| snap_stepped_value(value, *range));
+                        widget.as_fab_value_input().set_value(cx, value);
                         out.push((node.clone(), key.clone(), Literal::Num(value)));
                     }
                 } else if widget.borrow::<CheckBox>().is_some() {
@@ -2493,6 +2680,12 @@ impl FaceHost {
             for show in &face.shows {
                 if show.node == node && show.port == port {
                     set_widget_text(cx, &show.widget, full);
+                    if let Some(scroll) = stream_scroll_for(show) {
+                        let uid = scroll.widget_uid();
+                        if !self.paused_stream_scrolls.contains(&uid) {
+                            self.pending_stream_scrolls.insert(uid);
+                        }
+                    }
                 }
             }
         }
@@ -2530,6 +2723,8 @@ impl FaceHost {
     pub fn reset_run(&mut self) {
         self.deltas.clear();
         self.staged_asks.clear();
+        self.paused_stream_scrolls.clear();
+        self.pending_stream_scrolls.clear();
     }
 
     /// Bytes arrived for a wanted digest: re-push every value that has it.
@@ -2892,6 +3087,14 @@ mod tests {
     }
 
     #[test]
+    fn stepped_values_snap_to_absolute_multiples_and_clamp() {
+        let range = (256.0, 2048.0, 16.0);
+        assert_eq!(snap_stepped_value(1064.0, range), 1072.0);
+        assert_eq!(snap_stepped_value(248.0, range), 256.0);
+        assert_eq!(snap_stepped_value(2057.0, range), 2048.0);
+    }
+
+    #[test]
     fn format_presets_are_filtered_per_node_catalog() {
         let catalog = makepad_flow::graph::prelude_catalog().unwrap();
         let graph = makepad_flow::graph::evaluate(
@@ -2901,9 +3104,15 @@ mod tests {
         .unwrap();
         let node = |name: &str| graph.nodes.iter().find(|node| node.id == name).unwrap();
         let image = format_options_for_node(node("image"), &catalog).unwrap();
-        assert_eq!(image.presets.len(), IMAGE_FORMAT_PRESETS.len());
+        assert_eq!(image.width_range.2, 16.0);
+        assert!(image
+            .presets
+            .iter()
+            .all(|preset| preset.width % 16 == 0 && preset.height % 16 == 0));
 
         let video = format_options_for_node(node("video"), &catalog).unwrap();
+        assert_eq!(video.width_range.2, 32.0);
+        assert_eq!(video.height_range.2, 32.0);
         assert_eq!(
             video
                 .presets
@@ -2915,6 +3124,75 @@ mod tests {
 
         let generic = format_options_for_node(node("generic"), &catalog).unwrap();
         assert_eq!(generic.presets.len(), IMAGE_FORMAT_PRESETS.len());
+    }
+
+    #[test]
+    fn face_number_commit_snaps_to_the_catalog_step() {
+        let source = "use mod.flow.*\nlet image = Image{}\nFlow{image}\n";
+        let graph = makepad_flow::graph::evaluate(source, "<number-snap>").unwrap();
+        let catalog = makepad_flow::graph::prelude_catalog().unwrap();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        let host = FaceHost::mount(
+            &mut cx,
+            WidgetUid(0),
+            "test",
+            "<number-snap>",
+            source,
+            &graph,
+            &catalog,
+        );
+        let width = host.faces["image"]
+            .param_binds
+            .iter()
+            .find(|(_, key)| key == "width")
+            .unwrap()
+            .0
+            .clone();
+        let actions: ActionsBuf = vec![Box::new(WidgetAction {
+            data: None,
+            action: Box::new(FabValueInputAction::Ended(1064.0)),
+            widget_uid: width.widget_uid(),
+            group: None,
+        })];
+        assert!(host.param_changes(&mut cx, &actions).iter().any(
+            |(node, key, value)| node == "image"
+                && key == "width"
+                && value == &Literal::Num(1072.0)
+        ));
+        assert_eq!(width.as_fab_value_input().value(), 1072.0);
+        host.free(&mut cx);
+    }
+
+    #[test]
+    fn built_in_text_faces_mount_bounded_scrolls() {
+        let source = r#"use mod.flow.*
+let llm = Llm{prompt: "hello"}
+let function = Fn{in: {} out: [@text] run: |i| {{text: "ok"}}}
+let http = Http{url: "https://example.com"}
+let ask = Ask{question: "Which?"}
+let output = Output{value: llm.text()}
+Flow{llm function http ask output}
+"#;
+        let graph = makepad_flow::graph::evaluate(source, "<text-scrolls>").unwrap();
+        let catalog = makepad_flow::graph::prelude_catalog().unwrap();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        let host = FaceHost::mount(
+            &mut cx,
+            WidgetUid(0),
+            "test",
+            "<text-scrolls>",
+            source,
+            &graph,
+            &catalog,
+        );
+        for node in ["llm", "function", "http", "ask", "output"] {
+            let face = &host.faces[node];
+            assert!(face.error.is_none(), "{node}: {:?}", face.error);
+            assert!(!face.text_scrolls.is_empty(), "{node} has no text scroll");
+        }
+        host.free(&mut cx);
     }
 
     #[test]
@@ -2958,11 +3236,13 @@ mod tests {
             .child(live_id!(preview))
             .child(live_id!(empty));
         let mut widgets = Vec::new();
-        collect_widgets(&empty, &mut widgets);
+        cx.with_script_vm_id_trusted(host.vm_id, |vm| {
+            collect_widgets(vm, &empty, None, None, &mut widgets)
+        });
         assert_eq!(
             widgets
                 .iter()
-                .filter(|widget| widget.borrow::<Svg>().is_some())
+                .filter(|(widget, _, _)| widget.borrow::<Svg>().is_some())
                 .count(),
             1
         );

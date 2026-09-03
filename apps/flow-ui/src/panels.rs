@@ -5,7 +5,7 @@
 
 use crate::faces::{
     format_options_for_node, format_preset_name, node_dimensions, param_text, FaceHost,
-    FormatOptions, ModelChoice, CUSTOM_FORMAT, HUB_PICKS,
+    snap_stepped_value, FormatOptions, ModelChoice, CUSTOM_FORMAT, HUB_PICKS,
 };
 use makepad_flow::{
     FlowSummary, Graph, InstanceRow, Literal, Node, NodeInputValue, NodeTypeCatalog,
@@ -292,6 +292,22 @@ script_mod! {
         align: Align{y: 0.5}
     }
 
+    let OutputScroll = ScrollYView{
+        width: Fill
+        height: Fit{max: FitBound.Abs(160)}
+        scroll_bars +: {
+            scroll_bar_y +: {
+                bar_size: 8
+                bar_side_margin: 1
+                draw_bg +: {
+                    color: #xffffff18
+                    color_hover: #xffffff30
+                    color_drag: #xffffff48
+                }
+            }
+        }
+    }
+
     mod.widgets.InspectorBase = #(Inspector::register_widget(vm))
     mod.widgets.Inspector = set_type_default() do mod.widgets.InspectorBase{
         width: Fill
@@ -432,13 +448,15 @@ script_mod! {
             }
             Output := Row{
                 name := RowLabel{}
-                value := Label{
-                    width: Fill
-                    height: Fit
-                    text: ""
-                    draw_text +: {
-                        text_style: theme.font_code{font_size: 8.5}
-                        color: theme.flow_text_code
+                output_scroll := OutputScroll{
+                    value := Label{
+                        width: Fill
+                        height: Fit
+                        text: ""
+                        draw_text +: {
+                            text_style: theme.font_code{font_size: 8.5}
+                            color: theme.flow_text_code
+                        }
                     }
                 }
                 open := ButtonFlat{text: "Open"}
@@ -820,6 +838,10 @@ fn parse_range(doc: &str) -> Option<(f64, f64, f64)> {
     Some((min, max, step))
 }
 
+fn inspector_commit_number(value: f64, range: (f64, f64, f64)) -> f64 {
+    snap_stepped_value(value, range)
+}
+
 fn parse_choices(doc: &str) -> Option<Vec<String>> {
     let (_, list) = doc.split_once("one of:")?;
     let list = list.split('.').next().unwrap_or(list);
@@ -1104,7 +1126,6 @@ impl Inspector {
             for (port, value) in outputs {
                 let chip = crate::faces::preview_text(value)
                     .unwrap_or_else(|| format!("{} · {}", value.content_type, crate::faces::size_text(value.bytes)));
-                let chip: String = chip.chars().take(80).collect();
                 self.rows.push(Row::Output {
                     port: port.clone(),
                     chip,
@@ -1187,8 +1208,16 @@ impl Inspector {
                         });
                     }
                 }
-                Row::Number { key, .. } => {
+                Row::Number {
+                    key,
+                    min,
+                    max,
+                    step,
+                    ..
+                } => {
                     if let Some(value) = item.fab_value_input(cx, ids!(value)).ended(actions) {
+                        let value = inspector_commit_number(value, (*min, *max, *step));
+                        item.fab_value_input(cx, ids!(value)).set_value(cx, value);
                         out.push(InspectorAction::SetParam {
                             node: node.clone(),
                             key: key.clone(),
@@ -1218,25 +1247,43 @@ impl Inspector {
                         continue;
                     }
                     if item.button(cx, ids!(swap)).clicked(actions) {
-                        let width = width_field.value().round().max(0.0) as u32;
-                        let height = height_field.value().round().max(0.0) as u32;
-                        width_field.set_value(cx, height as f64);
-                        height_field.set_value(cx, width as f64);
+                        let width = inspector_commit_number(
+                            height_field.value(),
+                            options.width_range,
+                        )
+                        .round()
+                        .max(0.0) as u32;
+                        let height = inspector_commit_number(
+                            width_field.value(),
+                            options.height_range,
+                        )
+                        .round()
+                        .max(0.0) as u32;
+                        width_field.set_value(cx, width as f64);
+                        height_field.set_value(cx, height as f64);
                         picker.set_selected_by_label(
-                            format_preset_name(&options.presets, height, width),
+                            format_preset_name(&options.presets, width, height),
                             cx,
                         );
                         out.push(InspectorAction::SetParams {
                             node: node.clone(),
                             values: vec![
-                                ("width".into(), Literal::Num(height as f64)),
-                                ("height".into(), Literal::Num(width as f64)),
+                                ("width".into(), Literal::Num(width as f64)),
+                                ("height".into(), Literal::Num(height as f64)),
                             ],
                         });
                         continue;
                     }
-                    let width_ended = width_field.ended(actions);
-                    let height_ended = height_field.ended(actions);
+                    let width_ended = width_field.ended(actions).map(|value| {
+                        let value = inspector_commit_number(value, options.width_range);
+                        width_field.set_value(cx, value);
+                        value
+                    });
+                    let height_ended = height_field.ended(actions).map(|value| {
+                        let value = inspector_commit_number(value, options.height_range);
+                        height_field.set_value(cx, value);
+                        value
+                    });
                     if width_ended.is_some() || height_ended.is_some() {
                         let width = width_field.value().round().max(0.0) as u32;
                         let height = height_field.value().round().max(0.0) as u32;
@@ -2096,4 +2143,16 @@ impl Widget for AppView {
     }
 
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::inspector_commit_number;
+
+    #[test]
+    fn inspector_number_commit_snaps_and_clamps() {
+        let range = (256.0, 2048.0, 16.0);
+        assert_eq!(inspector_commit_number(1064.0, range), 1072.0);
+        assert_eq!(inspector_commit_number(2057.0, range), 2048.0);
+    }
 }
