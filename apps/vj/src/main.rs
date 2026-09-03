@@ -3297,6 +3297,8 @@ struct ScanModalSnapshot {
 struct DeckRefs {
     title: LabelRef,
     artist: LabelRef,
+    credit_artist: LinkLabelRef,
+    credit_license: LinkLabelRef,
     bpm: LabelRef,
     pitch_text: LabelRef,
     time: LabelRef,
@@ -3348,6 +3350,8 @@ impl DeckRefs {
         DeckRefs {
             title: ui.label(cx, ids.title),
             artist: ui.label(cx, ids.artist),
+            credit_artist: ui.link_label(cx, ids.credit_artist),
+            credit_license: ui.link_label(cx, ids.credit_license),
             bpm: ui.label(cx, ids.bpm),
             pitch_text: ui.label(cx, ids.pitch_text),
             time: ui.label(cx, ids.time),
@@ -3450,6 +3454,9 @@ impl MusicRefs {
 struct MusicDeckIds {
     title: &'static [LiveId],
     artist: &'static [LiveId],
+    credit: &'static [LiveId],
+    credit_artist: &'static [LiveId],
+    credit_license: &'static [LiveId],
     bpm: &'static [LiveId],
     pitch_text: &'static [LiveId],
     time: &'static [LiveId],
@@ -3504,6 +3511,9 @@ impl MusicDeckIds {
             DeckId::A => MusicDeckIds {
                 title: ids!(deck_a_title),
                 artist: ids!(deck_a_artist),
+                credit: ids!(deck_a_credit),
+                credit_artist: ids!(deck_a_credit_artist),
+                credit_license: ids!(deck_a_credit_license),
                 bpm: ids!(deck_a_bpm),
                 pitch_text: ids!(deck_a_pitch_text),
                 time: ids!(deck_a_time),
@@ -3586,6 +3596,9 @@ impl MusicDeckIds {
             DeckId::B => MusicDeckIds {
                 title: ids!(deck_b_title),
                 artist: ids!(deck_b_artist),
+                credit: ids!(deck_b_credit),
+                credit_artist: ids!(deck_b_credit_artist),
+                credit_license: ids!(deck_b_credit_license),
                 bpm: ids!(deck_b_bpm),
                 pitch_text: ids!(deck_b_pitch_text),
                 time: ids!(deck_b_time),
@@ -6177,11 +6190,12 @@ enum MusicSort {
     Time,
     Stem,
     Krk,
+    License,
     Tags,
 }
 
 /// The heads, their ids and the words under the arrow.
-const MUSIC_HEADS: [(MusicSort, &[LiveId], &str); 8] = [
+const MUSIC_HEADS: [(MusicSort, &[LiveId], &str); 9] = [
     (MusicSort::Title, ids!(th_title), "TITLE"),
     (MusicSort::Artist, ids!(th_artist), "ARTIST"),
     (MusicSort::Bpm, ids!(th_bpm), "BPM"),
@@ -6189,8 +6203,17 @@ const MUSIC_HEADS: [(MusicSort, &[LiveId], &str); 8] = [
     (MusicSort::Time, ids!(th_time), "TIME"),
     (MusicSort::Stem, ids!(music_th_stem), "STEM"),
     (MusicSort::Krk, ids!(music_th_krk), "KRK"),
+    (MusicSort::License, ids!(th_license), "LICENSE"),
     (MusicSort::Tags, ids!(th_tags), "TAGS"),
 ];
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct MusicAttribution {
+    artist: String,
+    source_url: String,
+    license: String,
+    license_url: String,
+}
 /// The library row's chips and the words they wear when there is room. Below
 /// `LIBRARY_NARROW_WIDTH` they keep only their icons.
 const LIBRARY_CHIPS: [(&[LiveId], &str); 8] = [
@@ -7096,9 +7119,9 @@ pub struct App {
     /// Rows on screen, so a row click maps back to a track.
     #[rust]
     music_rows: Vec<TrackRowEntry>,
-    /// Public creator annotations from the static catalog projection.
+    /// Public track credits from the live/static catalog projection.
     #[rust]
-    music_artists: HashMap<AssetId, String>,
+    music_attributions: HashMap<AssetId, MusicAttribution>,
     #[rust]
     queue_rows: Vec<TrackRowEntry>,
     /// Browsing local audio files instead of the store catalog.
@@ -15092,9 +15115,20 @@ p2 {}
                     .hits
                     .into_iter()
                     .map(|h| {
-                        #[cfg(target_arch = "wasm32")]
                         if surface == Surface::Music {
-                            self.music_artists.insert(h.asset_id, h.creator.clone());
+                            self.music_attributions.insert(
+                                h.asset_id,
+                                MusicAttribution {
+                                    artist: if h.artist.is_empty() {
+                                        h.creator.clone()
+                                    } else {
+                                        h.artist.clone()
+                                    },
+                                    source_url: h.source_url.clone(),
+                                    license: h.license.clone(),
+                                    license_url: h.license_url.clone(),
+                                },
+                            );
                         }
                         catalog::HitRow {
                             updated_ms: h.updated_ms,
@@ -22461,6 +22495,11 @@ p2 {}
                 DeckLoad::Loaded { item } => (item.title.clone(), String::new()),
                 DeckLoad::Failed { item, error } => (item.title.clone(), error.clone()),
             };
+            let credit = state
+                .item()
+                .and_then(|item| self.music_attributions.get(&item.asset))
+                .cloned()
+                .unwrap_or_default();
             let load_failed = self.deck_load_progress[index].is_failed()
                 || matches!(&state.load, DeckLoad::Failed { .. });
             let load_visual = self.deck_load_progress[index].visual();
@@ -22518,6 +22557,19 @@ p2 {}
             let refs = std::mem::take(&mut self.music_refs.decks[index]);
             self.set_label(cx, base, &refs.title, &title);
             self.set_label(cx, base + 1, &refs.artist, &artist);
+            if self.label_cache.get(&(base + 9)) != Some(&credit.artist) {
+                self.label_cache.insert(base + 9, credit.artist.clone());
+                refs.credit_artist.set_text(cx, &credit.artist);
+            }
+            if self.label_cache.get(&(base + 10)) != Some(&credit.license) {
+                self.label_cache.insert(base + 10, credit.license.clone());
+                refs.credit_license.set_text(cx, &credit.license);
+            }
+            refs.credit_artist.set_url(&credit.source_url);
+            refs.credit_license.set_url(&credit.license_url);
+            self.ui
+                .view(cx, ids.credit)
+                .set_visible(cx, !credit.artist.is_empty() || !credit.license.is_empty());
             refs.artist.set_text_color(
                 cx,
                 Vec4f::from_u32(if load_failed { 0xe5484dff } else { 0xa6b1bdff }),
@@ -23020,6 +23072,7 @@ p2 {}
                 bpm: String::new(),
                 musical_key: String::new(),
                 duration: String::new(),
+                license: String::new(),
                 tags: String::new(),
                 stem: false,
                 krk: false,
@@ -23089,6 +23142,7 @@ p2 {}
                         bpm: String::new(),
                         musical_key: String::new(),
                         duration: String::new(),
+                        license: String::new(),
                         tags: path
                             .parent()
                             .map(|dir| dir.to_string_lossy().to_string())
@@ -23137,14 +23191,17 @@ p2 {}
                 TrackRowEntry {
                     key,
                     title: tile.title.clone(),
-                    artist: self
-                        .music_artists
+                    artist: self.music_attributions
                         .get(&tile.asset)
-                        .cloned()
+                        .map(|credit| credit.artist.clone())
                         .unwrap_or_default(),
                     bpm,
                     musical_key: String::new(),
                     duration,
+                    license: self.music_attributions
+                        .get(&tile.asset)
+                        .map(|credit| credit.license.clone())
+                        .unwrap_or_default(),
                     tags: tile.alias.clone().unwrap_or_default(),
                     stem,
                     krk,
@@ -23164,6 +23221,7 @@ p2 {}
                 bpm: String::new(),
                 musical_key: String::new(),
                 duration: String::new(),
+                license: String::new(),
                 tags: format!("browser local · {}", track.alias),
                 stem: false,
                 krk: false,
@@ -23212,6 +23270,7 @@ p2 {}
             }),
             MusicSort::Stem => rows.sort_by_key(|row| row.stem),
             MusicSort::Krk => rows.sort_by_key(|row| row.krk),
+            MusicSort::License => rows.sort_by(|a, b| text(&a.license, &b.license)),
             MusicSort::Tags => rows.sort_by(|a, b| text(&a.tags, &b.tags)),
         }
         if self.music_sort_desc {

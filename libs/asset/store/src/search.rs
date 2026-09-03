@@ -87,6 +87,12 @@ CREATE TABLE IF NOT EXISTS search_annotations(
     title TEXT NOT NULL,
     description TEXT NOT NULL,
     creator TEXT NOT NULL,
+    artist TEXT NOT NULL DEFAULT '',
+    artist_url TEXT NOT NULL DEFAULT '',
+    album TEXT NOT NULL DEFAULT '',
+    source_url TEXT NOT NULL DEFAULT '',
+    license TEXT NOT NULL DEFAULT '',
+    license_url TEXT NOT NULL DEFAULT '',
     generator TEXT NOT NULL,
     backend TEXT NOT NULL,
     model TEXT NOT NULL,
@@ -318,6 +324,17 @@ pub(crate) fn canon_alias_migration_sql() -> String {
     format!("ALTER TABLE search_annotations ADD COLUMN {CANON_ALIAS_DDL}")
 }
 
+/// The v13 -> v14 attribution columns. Empty defaults preserve annotations
+/// written before music credits became a typed catalog projection.
+pub(crate) const ATTRIBUTION_MIGRATION_SQL: [&str; 6] = [
+    "ALTER TABLE search_annotations ADD COLUMN artist TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE search_annotations ADD COLUMN artist_url TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE search_annotations ADD COLUMN album TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE search_annotations ADD COLUMN source_url TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE search_annotations ADD COLUMN license TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE search_annotations ADD COLUMN license_url TEXT NOT NULL DEFAULT ''",
+];
+
 /// The browse-mode total order, verbatim: `canon_alias ASC, asset_id ASC`.
 /// Without it every browse page is a full table scan plus a temp b-tree sort
 /// of the whole annotation table, and the keyset predicate cannot seek.
@@ -391,6 +408,12 @@ pub struct AssetAnnotation {
     pub categories: Vec<String>,
     pub tags: Vec<String>,
     pub creator: String,
+    pub artist: String,
+    pub artist_url: String,
+    pub album: String,
+    pub source_url: String,
+    pub license: String,
+    pub license_url: String,
     /// Owning principal. Required when visibility is Private; grants the
     /// owner private-field search and private-annotation visibility.
     pub owner: Option<PrincipalId>,
@@ -466,6 +489,13 @@ pub struct SearchHit {
     pub namespace: String,
     pub kind: Option<AssetKind>,
     pub title: String,
+    pub creator: String,
+    pub artist: String,
+    pub artist_url: String,
+    pub album: String,
+    pub source_url: String,
+    pub license: String,
+    pub license_url: String,
     pub snippet: String,
     pub score: u64,
     pub live: bool,
@@ -1145,6 +1175,16 @@ impl<'a> Search<'a> {
         ] {
             check_text(s, MAX_ANNOTATION_NAME_BYTES, false, wl, wc)?;
         }
+        for (s, wl, wc) in [
+            (&ann.artist, "annotation artist bytes", "annotation artist charset"),
+            (&ann.artist_url, "annotation artist url bytes", "annotation artist url charset"),
+            (&ann.album, "annotation album bytes", "annotation album charset"),
+            (&ann.source_url, "annotation source url bytes", "annotation source url charset"),
+            (&ann.license, "annotation license bytes", "annotation license charset"),
+            (&ann.license_url, "annotation license url bytes", "annotation license url charset"),
+        ] {
+            check_text(s, MAX_PROVENANCE_BYTES, false, wl, wc)?;
+        }
         check_text(&ann.prompt, MAX_PROMPT_BYTES, true, "annotation prompt bytes", "annotation prompt charset")?;
         check_text(
             &ann.provenance,
@@ -1229,13 +1269,15 @@ impl<'a> Search<'a> {
             let mut s = db.prepare(
                 "upsert annotation",
                 "INSERT INTO search_annotations(asset_id, namespace, kind, visibility, owner,
-                    title, description, creator, generator, backend, model,
-                    prompt, provenance, live, updated_ms, canon_alias)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+                    title, description, creator, artist, artist_url, album, source_url,
+                    license, license_url, generator, backend, model, prompt, provenance,
+                    live, updated_ms, canon_alias)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)
                  ON CONFLICT(asset_id) DO UPDATE SET
                     namespace=?2, kind=?3, visibility=?4, owner=?5, title=?6, description=?7,
-                    creator=?8, generator=?9, backend=?10, model=?11,
-                    prompt=?12, provenance=?13, live=?14, updated_ms=?15, canon_alias=?16",
+                    creator=?8, artist=?9, artist_url=?10, album=?11, source_url=?12,
+                    license=?13, license_url=?14, generator=?15, backend=?16, model=?17,
+                    prompt=?18, provenance=?19, live=?20, updated_ms=?21, canon_alias=?22",
             )?;
             s.bind_blob(1, asset_id.as_bytes())?;
             s.bind_text(2, &namespace)?;
@@ -1251,14 +1293,20 @@ impl<'a> Search<'a> {
             s.bind_text(6, &ann.title)?;
             s.bind_text(7, &ann.description)?;
             s.bind_text(8, &ann.creator)?;
-            s.bind_text(9, &ann.generator)?;
-            s.bind_text(10, &ann.backend)?;
-            s.bind_text(11, &ann.model)?;
-            s.bind_text(12, &ann.prompt)?;
-            s.bind_text(13, &ann.provenance)?;
-            s.bind_i64(14, live as i64)?;
-            s.bind_u64(15, now_ms)?;
-            s.bind_text(16, &canon_alias)?;
+            s.bind_text(9, &ann.artist)?;
+            s.bind_text(10, &ann.artist_url)?;
+            s.bind_text(11, &ann.album)?;
+            s.bind_text(12, &ann.source_url)?;
+            s.bind_text(13, &ann.license)?;
+            s.bind_text(14, &ann.license_url)?;
+            s.bind_text(15, &ann.generator)?;
+            s.bind_text(16, &ann.backend)?;
+            s.bind_text(17, &ann.model)?;
+            s.bind_text(18, &ann.prompt)?;
+            s.bind_text(19, &ann.provenance)?;
+            s.bind_i64(20, live as i64)?;
+            s.bind_u64(21, now_ms)?;
+            s.bind_text(22, &canon_alias)?;
             s.run()?;
             drop(s);
 
@@ -1317,8 +1365,9 @@ impl<'a> Search<'a> {
     pub fn annotation(&self, asset_id: &AssetId) -> ServerResult<Option<AssetAnnotation>> {
         let mut s = self.db.prepare(
             "read annotation",
-            "SELECT visibility, owner, title, description, creator, generator,
-                    backend, model, prompt, provenance, kind
+            "SELECT visibility, owner, title, description, creator, artist, artist_url,
+                    album, source_url, license, license_url, generator, backend, model,
+                    prompt, provenance, kind
              FROM search_annotations WHERE asset_id = ?1",
         )?;
         s.bind_blob(1, asset_id.as_bytes())?;
@@ -1332,7 +1381,7 @@ impl<'a> Search<'a> {
         } else {
             Some(PrincipalId(fixed16(&s.column_blob(1), "annotation owner")?))
         };
-        let kind = read_kind_column(&s, 10)?;
+        let kind = read_kind_column(&s, 16)?;
         let mut ann = AssetAnnotation {
             title: s.column_text(2),
             description: s.column_text(3),
@@ -1340,12 +1389,18 @@ impl<'a> Search<'a> {
             categories: Vec::new(),
             tags: Vec::new(),
             creator: s.column_text(4),
+            artist: s.column_text(5),
+            artist_url: s.column_text(6),
+            album: s.column_text(7),
+            source_url: s.column_text(8),
+            license: s.column_text(9),
+            license_url: s.column_text(10),
             owner,
-            generator: s.column_text(5),
-            backend: s.column_text(6),
-            model: s.column_text(7),
-            prompt: s.column_text(8),
-            provenance: s.column_text(9),
+            generator: s.column_text(11),
+            backend: s.column_text(12),
+            model: s.column_text(13),
+            prompt: s.column_text(14),
+            provenance: s.column_text(15),
             visibility,
         };
         drop(s);
@@ -1622,6 +1677,13 @@ impl<'a> Search<'a> {
                 let kind = read_kind_column(&s, 6)?;
                 let canon = s.column_text(7);
                 let updated_ms = s.column_u64(8);
+                let creator = s.column_text(9);
+                let artist = s.column_text(10);
+                let artist_url = s.column_text(11);
+                let album = s.column_text(12);
+                let source_url = s.column_text(13);
+                let license = s.column_text(14);
+                let license_url = s.column_text(15);
                 let snippet = build_snippet(
                     &title,
                     &description,
@@ -1634,6 +1696,13 @@ impl<'a> Search<'a> {
                     namespace,
                     kind,
                     title,
+                    creator,
+                    artist,
+                    artist_url,
+                    album,
+                    source_url,
+                    license,
+                    license_url,
                     snippet,
                     score,
                     live,
@@ -2038,7 +2107,8 @@ fn build_candidate_sql(
     if browse {
         sql.push_str(
             "SELECT a.asset_id, a.namespace, a.title, a.description, a.live, 0 AS score, a.kind,
-                    a.canon_alias, a.updated_ms
+                    a.canon_alias, a.updated_ms, a.creator, a.artist, a.artist_url,
+                    a.album, a.source_url, a.license, a.license_url
              FROM search_annotations a WHERE 1=1",
         );
     } else {
@@ -2080,7 +2150,7 @@ fn build_candidate_sql(
         // worker stack, so an over-wide query (which the term budget alone
         // could reach, and expansion is kept clear of) is served by the scan
         // instead. Both forms select exactly the same postings.
-        sql.push_str(") AS score, a.kind, a.canon_alias, a.updated_ms FROM (");
+        sql.push_str(") AS score, a.kind, a.canon_alias, a.updated_ms, a.creator, a.artist, a.artist_url, a.album, a.source_url, a.license, a.license_url FROM (");
         if seek {
             for (i, t) in groups.iter().flat_map(TermGroup::all).enumerate() {
                 if i > 0 {

@@ -113,6 +113,12 @@ struct SearchDoc {
     categories: Vec<String>,
     tags: Vec<String>,
     creator: String,
+    artist: String,
+    artist_url: String,
+    album: String,
+    source_url: String,
+    license: String,
+    license_url: String,
     live: bool,
     updated_ms: u64,
     aliases: Vec<AssetAlias>,
@@ -410,6 +416,12 @@ impl StaticStore {
                 kind: doc.kind,
                 title: doc.title.clone(),
                 creator: doc.creator.clone(),
+                artist: doc.artist.clone(),
+                artist_url: doc.artist_url.clone(),
+                album: doc.album.clone(),
+                source_url: doc.source_url.clone(),
+                license: doc.license.clone(),
+                license_url: doc.license_url.clone(),
                 snippet: snippet(&doc.title, &doc.description),
                 score: *score,
                 live: doc.live,
@@ -943,6 +955,24 @@ fn parse_search(values: &[crate::json::Value]) -> ClientResult<Vec<SearchDoc>> {
         let (creator, creator_changed) = tolerant_text(
             value, "creator", crate::wire::MAX_FILTER_VALUE_BYTES, "static search creator",
         )?;
+        let (artist, artist_changed) = optional_tolerant_text(
+            value, "artist", crate::wire::MAX_SNIPPET_BYTES, "static search artist",
+        )?;
+        let (artist_url, artist_url_changed) = optional_tolerant_text(
+            value, "artist_url", crate::wire::MAX_SNIPPET_BYTES, "static search artist url",
+        )?;
+        let (album, album_changed) = optional_tolerant_text(
+            value, "album", crate::wire::MAX_SNIPPET_BYTES, "static search album",
+        )?;
+        let (source_url, source_url_changed) = optional_tolerant_text(
+            value, "source_url", crate::wire::MAX_SNIPPET_BYTES, "static search source url",
+        )?;
+        let (license, license_changed) = optional_tolerant_text(
+            value, "license", crate::wire::MAX_SNIPPET_BYTES, "static search license",
+        )?;
+        let (license_url, license_url_changed) = optional_tolerant_text(
+            value, "license_url", crate::wire::MAX_SNIPPET_BYTES, "static search license url",
+        )?;
         let (_, generator_changed) = tolerant_text(
             value, "generator", crate::wire::MAX_FILTER_VALUE_BYTES, "static search generator",
         )?;
@@ -957,6 +987,12 @@ fn parse_search(values: &[crate::json::Value]) -> ClientResult<Vec<SearchDoc>> {
             || categories_changed
             || tags_changed
             || creator_changed
+            || artist_changed
+            || artist_url_changed
+            || album_changed
+            || source_url_changed
+            || license_changed
+            || license_url_changed
             || generator_changed
             || backend_changed
             || model_changed
@@ -986,6 +1022,12 @@ fn parse_search(values: &[crate::json::Value]) -> ClientResult<Vec<SearchDoc>> {
             categories,
             tags,
             creator,
+            artist,
+            artist_url,
+            album,
+            source_url,
+            license,
+            license_url,
             live: need_bool(value, "live", "static search live")?,
             updated_ms: need_u64(value, "updated_ms", "static search updated")?,
             aliases,
@@ -1378,6 +1420,20 @@ fn tolerant_text(
     let normalized = normalize_text(text, max);
     let changed = normalized != text;
     Ok((normalized, changed))
+}
+
+fn optional_tolerant_text(
+    value: &crate::json::Value, key: &str, max: usize, what: &'static str,
+) -> ClientResult<(String, bool)> {
+    match value.get(key) {
+        None | Some(crate::json::Value::Null) => Ok((String::new(), false)),
+        Some(text) => {
+            let text = text.as_str().ok_or(ClientError::Protocol { what })?;
+            let normalized = normalize_text(text, max);
+            let changed = normalized != text;
+            Ok((normalized, changed))
+        }
+    }
 }
 
 fn normalize_text(text: &str, max: usize) -> String {

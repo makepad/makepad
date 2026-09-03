@@ -883,6 +883,7 @@ script_mod! {
         // holds the word-aligned transcript.
         row_stem := TrackText{width: 36 draw_text.color: #x35c05f}
         row_krk := TrackText{width: 30 draw_text.color: #x35c05f}
+        row_license := TrackText{width: 128 draw_text.color: #x6f7b87}
         row_tags := TrackText{width: Fill{max: 190.} draw_text.color: #x6f7b87}
         // Headphone pre-listen: green while this row is the one in
         // the phones. Painted per row from the host's active key.
@@ -1512,6 +1513,26 @@ script_mod! {
         draw_text.text_style: theme.font_bold{font_size: 7}
     }
 
+    let AttributionLink = LinkLabel{
+        height: Fit
+        margin: 0
+        padding: 0
+        draw_bg +: {
+            color: #x00000000
+            color_focus: #x00000000
+            color_hover: #x00000000
+            color_down: #x00000000
+            border_size: 0.0
+        }
+        draw_text +: {
+            color: #x6f7b87
+            color_focus: #x6f7b87
+            color_hover: #x9fabb7
+            color_down: #x5f6a76
+            text_style: theme.font_bold{font_size: 7}
+        }
+    }
+
     let KnobStack = View{
         width: 46
         height: Fit
@@ -1687,6 +1708,20 @@ script_mod! {
                     height: Fit
                     flow: Down
                     deck_a_title := MusicValue{width: Fill text: "empty"}
+                    deck_a_credit := View{
+                        visible: false
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 3
+                        deck_a_credit_artist := AttributionLink{text: ""}
+                        Label{
+                            text: "·"
+                            draw_text.color: #x6f7b87
+                            draw_text.text_style: theme.font_bold{font_size: 7}
+                        }
+                        deck_a_credit_license := AttributionLink{text: ""}
+                    }
                     deck_a_artist := MusicLabel{width: Fill text: ""}
                 }
                 View{
@@ -1753,6 +1788,20 @@ script_mod! {
                     height: Fit
                     flow: Down
                     deck_b_title := MusicValue{width: Fill text: "empty"}
+                    deck_b_credit := View{
+                        visible: false
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 3
+                        deck_b_credit_artist := AttributionLink{text: ""}
+                        Label{
+                            text: "·"
+                            draw_text.color: #x6f7b87
+                            draw_text.text_style: theme.font_bold{font_size: 7}
+                        }
+                        deck_b_credit_license := AttributionLink{text: ""}
+                    }
                     deck_b_artist := MusicLabel{width: Fill text: ""}
                 }
                 deck_b_art := Image{width: 44 height: 44}
@@ -2905,6 +2954,7 @@ script_mod! {
                                 height: Fit
                                 music_th_krk := MusicColHead{width: Fill text: "KRK"}
                             }
+                            th_license := MusicColHead{width: 128 text: "LICENSE"}
                             th_tags := MusicColHead{width: Fill{max: 190.} text: "TAGS"}
                             MusicLabel{width: 26 text: ""}
                         }
@@ -5011,6 +5061,7 @@ pub struct TrackRowEntry {
     pub bpm: String,
     pub musical_key: String,
     pub duration: String,
+    pub license: String,
     pub tags: String,
     /// The store holds this track's four separated stems.
     pub stem: bool,
@@ -5031,6 +5082,7 @@ impl TrackRowEntry {
             bpm: String::new(),
             musical_key: String::new(),
             duration: String::new(),
+            license: String::new(),
             tags: String::new(),
             stem: false,
             krk: false,
@@ -5043,9 +5095,10 @@ impl TrackRowEntry {
 /// Below this list width the explorer drops its word headers: STEM and KRK
 /// read S and K, and their columns shrink to `MARK_COLUMN_NARROW`. Measured
 /// against the column set: badge, artist, bpm, key, time, the two marks,
-/// tags and the queue chip cost ~670 points before the title gets its floor
-/// of 180, so a list under ~900 is already spending pixels it does not have.
-pub const LIBRARY_NARROW_WIDTH: f64 = 900.0;
+/// licence, tags and the queue chip cost ~800 points before the title gets
+/// its floor of 180, so a list under ~1040 is already spending pixels it
+/// does not have.
+pub const LIBRARY_NARROW_WIDTH: f64 = 1040.0;
 
 // ---------------------------------------------------------------------------
 // the transport strip: three groups, an order that depends on the width
@@ -5795,6 +5848,7 @@ impl Widget for VjTrackList {
                         .set_text(cx, if entry.stem { "✓" } else { "" });
                     item.label(cx, ids!(row_krk))
                         .set_text(cx, if entry.krk { "✓" } else { "" });
+                    item.label(cx, ids!(row_license)).set_text(cx, &entry.license);
                     item.label(cx, ids!(row_tags)).set_text(cx, &entry.tags);
                     // The tick columns follow the header's S/K: one
                     // measurement (App::sync_library_density) decides both,
@@ -5819,6 +5873,7 @@ impl Widget for VjTrackList {
                         ids!(row_time),
                         ids!(row_stem),
                         ids!(row_krk),
+                        ids!(row_license),
                         ids!(row_tags),
                     ] {
                         item.widget(cx, column).set_visible(cx, wide);
