@@ -1,0 +1,13 @@
+use mod.flow.*
+
+let Portrait = Image{ width: 768 height: 1024 }
+let prompt = Text{ default: "portrait" at: vec2(10, 20) }
+let p = Portrait{ prompt: prompt.text() at: vec2(30, 40) }
+let up = Upscale{ image: p.image() factor: 4 }
+let result = Output{ type: @image value: up.out(@image) }
+
+Flow{
+    label: "Derived generators"
+    brief: "Exercises prototype derivation."
+    prompt, p, up, result
+}
