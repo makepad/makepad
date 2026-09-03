@@ -10,6 +10,13 @@ export function init_env(env) {
             _wasm._bridge.js_wake_ui();
         }
     };
+    // A pool worker parks on this between jobs; the page side only holds the import so the
+    // module links (web.js throws if it is ever reached on the UI thread).
+    env.js_worker_wait = (timeout_ms) => {
+        if (_wasm && _wasm._bridge && _wasm._bridge.js_worker_wait) {
+            return _wasm._bridge.js_worker_wait(timeout_ms);
+        }
+    };
     env.js_spawn_thread = (request_id, context_ptr, stack_size, name_ptr, name_len) => {
         if (_wasm && _wasm._bridge && _wasm._bridge.js_spawn_thread) {
             return _wasm._bridge.js_spawn_thread(
