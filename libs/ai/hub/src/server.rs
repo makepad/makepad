@@ -858,6 +858,11 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
         Ok(params) => params,
         Err(e) => return error_json(400, e.to_string()),
     };
+    // Tell chat clients what the prompt ACTUALLY did instead of making them
+    // infer it from the model id. In particular, a Qwen3.8 node in `brief`
+    // mode uses a closed prefill and its first token is already visible.
+    let think_open = (spec.backend == "llm" && params.target_domain == "chat")
+        .then(|| params.prompt.ends_with(crate::protocol::CHAT_THINK_PREFILL_OPEN));
     // Only the flux backend can apply LoRAs — refuse rather than render an
     // un-adapted image that looks like a broken adapter.
     if let Err(e) = validate_loras_for_backend(&spec.backend, &params.loras) {
@@ -917,6 +922,7 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
                 GenerateResponseJson {
                     job_id: Some(job_id),
                     error: None,
+                    think_open,
                 }
                 .serialize_json(),
             )
@@ -943,6 +949,7 @@ fn generate_refused(refused: &AssetAiError) -> HttpServerResponse {
         GenerateResponseJson {
             job_id: None,
             error: Some(refused.to_string()),
+            think_open: None,
         }
         .serialize_json(),
     )

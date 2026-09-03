@@ -340,41 +340,98 @@ fn fleet_provider(
     thinking: Option<bool>,
 ) -> Result<(FleetQwenChatProvider<HttpFleetTransport>, ChatRoute), String> {
     let discovery = crate::discovery::start_listener();
+    fleet_provider_with(
+        send,
+        preferred_model,
+        max_tokens,
+        thinking,
+        || {
+            let mut bases = fleet_chat_bases(&discovery.nodes());
+            // A serving node on this machine does not need to announce over
+            // LAN discovery. Entries may be stale; probing, not mere presence,
+            // decides whether they are usable.
+            bases.extend(crate::machine::read_node_entries().into_iter().filter_map(
+                |(_, entry)| (entry.port != 0).then(|| format!("http://127.0.0.1:{}", entry.port)),
+            ));
+            bases.sort();
+            bases.dedup();
+            bases
+        },
+        || HttpFleetTransport,
+        FLEET_PATIENCE,
+        FLEET_POLL,
+    )
+}
+
+fn fleet_provider_with<T: FleetTransport>(
+    send: &impl Fn(ChatEvent),
+    preferred_model: Option<&str>,
+    max_tokens: Option<u32>,
+    thinking: Option<bool>,
+    mut discovered_bases: impl FnMut() -> Vec<String>,
+    mut transport: impl FnMut() -> T,
+    patience: Duration,
+    poll: Duration,
+) -> Result<(FleetQwenChatProvider<T>, ChatRoute), String> {
     let started = Instant::now();
-    let bases = loop {
-        let mut bases = fleet_chat_bases(&discovery.nodes());
-        // A serving node on this machine does not need to announce over LAN
-        // discovery. Probe its loopback surface by advertised model too.
-        bases.extend(crate::machine::read_node_entries().into_iter().filter_map(
-            |(_, entry)| (entry.port != 0).then(|| format!("http://127.0.0.1:{}", entry.port)),
-        ));
+    let mut fallback = None;
+    let mut last_reason = None;
+    let mut final_pass = false;
+    loop {
+        let mut bases = discovered_bases();
         bases.sort();
         bases.dedup();
         if !bases.is_empty() {
-            break bases;
+            let mut provider = FleetQwenChatProvider::new(transport(), bases.clone())
+                .with_preferred_model(preferred_model.map(str::to_string))
+                .with_max_tokens(max_tokens)
+                .with_thinking(thinking);
+            match provider.availability() {
+                ProviderAvailability::Available { model, detail } => {
+                    let route = ChatRoute::Fleet { base: detail, model: model.clone() };
+                    if preferred_model.is_none_or(|preferred| preferred.trim() == model) {
+                        return Ok((provider, route));
+                    }
+                    // A healthy ordinary pick is remembered, but a preference
+                    // gets the full discovery window to announce before this
+                    // fallback is accepted.
+                    fallback = Some((provider, route));
+                }
+                ProviderAvailability::Unavailable { reason } => last_reason = Some(reason),
+            }
         }
-        if started.elapsed() > FLEET_PATIENCE {
-            return Err(format!(
-                "no fleet chat node heard on the LAN in {:.1} s (fleet '{}')",
-                FLEET_PATIENCE.as_secs_f64(),
-                crate::discovery::wanted_fleet()
-            ));
+        if started.elapsed() >= patience {
+            // A stale/unresponsive loopback entry may have consumed the whole
+            // patience window inside its HTTP timeout. Take one final roster
+            // snapshot so a LAN node announced during that probe is still
+            // considered instead of being hidden by the stale file.
+            if !final_pass {
+                let mut latest = discovered_bases();
+                latest.sort();
+                latest.dedup();
+                if latest != bases {
+                    final_pass = true;
+                    continue;
+                }
+            }
+            if let Some(fallback) = fallback {
+                return Ok(fallback);
+            }
+            return Err(last_reason.unwrap_or_else(|| {
+                format!(
+                    "no fleet chat node heard on the LAN in {:.1} s (fleet '{}')",
+                    patience.as_secs_f64(),
+                    crate::discovery::wanted_fleet()
+                )
+            }));
         }
         send(ChatEvent::Loading {
             phase: "listening for the fleet".to_string(),
-            fraction: (started.elapsed().as_secs_f64() / FLEET_PATIENCE.as_secs_f64()).min(0.99),
+            fraction: (started.elapsed().as_secs_f64() / patience.as_secs_f64()).min(0.99),
         });
-        std::thread::sleep(FLEET_POLL);
-    };
-    let mut provider = FleetQwenChatProvider::new(HttpFleetTransport, bases)
-        .with_preferred_model(preferred_model.map(str::to_string))
-        .with_max_tokens(max_tokens)
-        .with_thinking(thinking);
-    match provider.availability() {
-        ProviderAvailability::Available { model, detail } => {
-            Ok((provider, ChatRoute::Fleet { base: detail, model }))
+        if !poll.is_zero() {
+            std::thread::sleep(poll);
         }
-        ProviderAvailability::Unavailable { reason } => Err(reason),
     }
 }
 
@@ -748,6 +805,7 @@ mod tests {
     struct Scripted {
         generates: Arc<Mutex<Vec<Value>>>,
         replies: Arc<Mutex<VecDeque<String>>>,
+        think_open: Arc<Mutex<Option<bool>>>,
     }
 
     impl FleetTransport for Scripted {
@@ -758,7 +816,11 @@ mod tests {
             assert!(url.ends_with("/generate"), "{url}");
             let mut g = self.generates.lock().unwrap();
             g.push(body.clone());
-            Ok(json::obj(vec![("job_id", json::s(format!("j{}", g.len())))]))
+            let mut fields = vec![("job_id", json::s(format!("j{}", g.len())))];
+            if let Some(think_open) = *self.think_open.lock().unwrap() {
+                fields.push(("think_open", Value::Bool(think_open)));
+            }
+            Ok(json::obj(fields))
         }
         fn get_json(&mut self, url: &str) -> Result<Value, String> {
             if url.ends_with("/health") {
@@ -948,6 +1010,49 @@ mod tests {
         (output, generates)
     }
 
+    fn run_scripted_closed_think_turn(reply: &str) -> (Vec<ChatEvent>, Vec<Value>) {
+        let node = Scripted::default();
+        *node.think_open.lock().unwrap() = Some(false);
+        node.replies.lock().unwrap().push_back(reply.to_string());
+        let provider =
+            FleetQwenChatProvider::new(node.clone(), vec!["http://10.0.0.165:8123".into()]);
+        let config = HubChatConfig {
+            llm: LocalLlmConfig::new("".into()),
+            preferred_model: None,
+            max_tokens: None,
+            thinking: None,
+            system_prompt: "Answer directly.".into(),
+            tools: Vec::new(),
+            wake: None,
+        };
+        let (to_worker, msg_rx) = channel();
+        let (event_tx, events) = channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker = std::thread::spawn(move || {
+            let send = |event| {
+                let _ = event_tx.send(event);
+            };
+            run_proxy(
+                provider,
+                &config,
+                None,
+                &msg_rx,
+                &send,
+                &cancel,
+                ChatRoute::Fleet {
+                    base: "http://10.0.0.165:8123".into(),
+                    model: "qwen3.8-27b".into(),
+                },
+            )
+        });
+        to_worker.send(WorkerMsg::UserTurn("hello".into())).unwrap();
+        let output = collect_until_turn_done(&events);
+        drop(to_worker);
+        assert!(matches!(worker.join().unwrap(), ProxyExit::Ended));
+        let generates = node.generates.lock().unwrap().clone();
+        (output, generates)
+    }
+
     #[test]
     fn a_think_only_completion_retries_once_then_returns_the_answer() {
         let (events, generates) = run_scripted_turn(&[
@@ -968,6 +1073,16 @@ mod tests {
             generates[0].get("seed").and_then(Value::as_u64),
             generates[1].get("seed").and_then(Value::as_u64),
         );
+        assert_eq!(
+            generates[0].get("chat_system"),
+            generates[1].get("chat_system"),
+            "retry must preserve the exact system prompt"
+        );
+        assert_eq!(
+            generates[0].get("chat_messages"),
+            generates[1].get("chat_messages"),
+            "retry must preserve the exact transcript"
+        );
     }
 
     #[test]
@@ -980,5 +1095,87 @@ mod tests {
             "{events:?}"
         );
         assert!(matches!(events.last(), Some(ChatEvent::Failed(error)) if error == "empty completion"));
+    }
+
+    #[test]
+    fn closed_think_short_answers_are_visible_and_never_retried() {
+        for answer in ["x", "7", "✅"] {
+            let (events, generates) = run_scripted_closed_think_turn(answer);
+            let visible: String = events
+                .iter()
+                .filter_map(|event| match event {
+                    ChatEvent::Delta(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(visible, answer);
+            assert_eq!(generates.len(), 1, "{answer:?} was retried");
+            assert!(matches!(events.last(), Some(ChatEvent::TurnDone { .. })));
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct DelayedModels;
+
+    impl FleetTransport for DelayedModels {
+        fn post_json(&mut self, _url: &str, _body: &Value) -> Result<Value, String> {
+            unreachable!("discovery election does not submit a job")
+        }
+
+        fn get_json(&mut self, url: &str) -> Result<Value, String> {
+            if url.ends_with("/health") {
+                return Ok(json::obj(vec![(
+                    "capabilities",
+                    Value::Arr(vec![json::s("chat")]),
+                )]));
+            }
+            let id = if url.starts_with("http://n2") {
+                "qwen3.6-27b"
+            } else {
+                "qwen3.5-9b"
+            };
+            Ok(json::obj(vec![(
+                "models",
+                Value::Arr(vec![json::obj(vec![
+                    ("id", json::s(id)),
+                    ("domain", json::s("chat")),
+                    ("available", Value::Bool(true)),
+                    ("state", json::s("loaded")),
+                ])]),
+            )]))
+        }
+    }
+
+    #[test]
+    fn discovery_waits_for_a_preferred_model_not_on_the_first_node() {
+        let calls = std::cell::Cell::new(0usize);
+        let (provider, route) = fleet_provider_with(
+            &|_| {},
+            Some("qwen3.6-27b"),
+            None,
+            None,
+            || {
+                let call = calls.get();
+                calls.set(call + 1);
+                if call == 0 {
+                    vec!["http://n1:1".into()]
+                } else {
+                    vec!["http://n1:1".into(), "http://n2:2".into()]
+                }
+            },
+            || DelayedModels,
+            Duration::from_secs(1),
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(
+            route,
+            ChatRoute::Fleet {
+                base: "http://n2:2".into(),
+                model: "qwen3.6-27b".into(),
+            }
+        );
+        drop(provider);
+        assert!(calls.get() >= 2);
     }
 }
