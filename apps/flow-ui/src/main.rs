@@ -2593,6 +2593,14 @@ impl MatchEvent for App {
                         self.put_graph(cx, next);
                     }
                 }
+                InspectorAction::SetParams { node, values } => {
+                    if let Some(mut graph) = self.current_graph() {
+                        for (key, value) in values {
+                            graph = graph_edit::set_param(&graph, &node, &key, value);
+                        }
+                        self.put_graph(cx, graph);
+                    }
+                }
                 InspectorAction::SetFnSrc { node, src } => {
                     if let Some(graph) = self.current_graph() {
                         let next = graph_edit::set_fn_src(&graph, &node, &src);
@@ -2677,7 +2685,7 @@ impl MatchEvent for App {
             for (node, port, text) in faces.bind_changes(actions) {
                 self.pending_inputs.insert((node, port), text);
             }
-            let mut params = faces.param_changes(actions);
+            let mut params = faces.param_changes(cx, actions);
             params.extend(faces.model_changes(cx, actions));
             for (node, key, value) in params {
                 self.pending_params.insert((node, key), value);
