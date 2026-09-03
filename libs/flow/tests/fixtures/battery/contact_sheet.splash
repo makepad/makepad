@@ -1,0 +1,82 @@
+use mod.flow.*
+
+let feed = Http{
+    method: @get
+    url: "{{BASE_URL}}/today.json"
+    out: @json
+}
+let picked = Fn{
+    in: {json: feed.value()}
+    out: [@first, @second]
+    first: fn() {{node: self, port: @first}}
+    second: fn() {{node: self, port: @second}}
+    run: |i| {{first: i.json[0], second: i.json[1]}}
+}
+let first_prompt = Fn{
+    in: {json: picked.first()}
+    out: [@text]
+    run: |i| {{text: i.json}}
+}
+let second_prompt = Fn{
+    in: {json: picked.second()}
+    out: [@text]
+    run: |i| {{text: i.json}}
+}
+let first = Image{
+    model: "testpattern"
+    prompt: first_prompt.text()
+    width: 64
+    height: 48
+    steps: 1
+    seed: 11
+}
+let second = Image{
+    model: "testpattern"
+    prompt: second_prompt.text()
+    width: 64
+    height: 48
+    steps: 1
+    seed: 22
+}
+let first_option = Output{type: @image value: first.image()}
+let second_option = Output{type: @image value: second.image()}
+let choice = Ask{
+    question: "Which candidate should be painted?"
+    type: @text
+    options: ["first", "second"]
+}
+let selected = Fn{
+    in: {text: choice.text(), json: feed.value()}
+    out: [@text]
+    run: |i| {
+        if i.text == "first" {
+            {text: i.json[0]}
+        }
+        else {
+            {text: i.json[1]}
+        }
+    }
+}
+let image = Image{
+    model: "testpattern"
+    prompt: selected.text()
+    width: 96
+    height: 64
+    steps: 1
+    seed: 33
+}
+let post = Http{
+    method: @post
+    url: "{{BASE_URL}}/pictures"
+    body: image.image()
+    content_type: "image/png"
+    out: @json
+}
+let receipt = Output{type: @json value: post.value()}
+
+Flow{
+    label: "Contact sheet"
+    brief: "Paint two candidates, ask, repaint the choice and post it."
+    feed, picked, first_prompt, second_prompt, first, second, first_option,
+    second_option, choice, selected, image, post, receipt
+}
