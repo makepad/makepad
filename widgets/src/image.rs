@@ -27,6 +27,7 @@ script_mod! {
         fit_pan: vec2(0.0, 0.0)
         async_load: 0.0
         rotation: 0.0
+        sample_mode: 0.0
         image_dim_w: 0.0
         image_dim_h: 0.0
 
@@ -91,6 +92,8 @@ pub struct DrawImage {
     async_load: f32,
     #[live]
     pub rotation: f32,
+    #[live]
+    pub sample_mode: f32,
     /// When non-zero, `get_color` rotates the image rigidly (aspect-correct):
     /// the image of this pixel size is rotated by `rotation` and inscribed in the
     /// quad, instead of rotating texture UVs in normalized space (which squishes
