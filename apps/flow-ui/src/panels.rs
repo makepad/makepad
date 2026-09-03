@@ -1,11 +1,14 @@
-//! The panels around the canvas (DESIGN.md §8): the inspector for the
-//! selected node, the Running list of instances, the palette of prelude
-//! types, and the App view that shows a flow as a product.
+//! The panels around the canvas (DESIGN.md §8): the flow list, the Running
+//! list, the palette of prelude types, the inspector for the selected node,
+//! the template picker behind New, the run's total progress bar, and the
+//! App view that shows a flow as a product.
 
-use crate::faces::{param_text, FaceHost};
+use crate::faces::{param_text, FaceHost, HUB_PICKS};
 use makepad_flow::{
-    Graph, InstanceRow, Literal, Node, NodeInputValue, NodeTypeCatalog, ValueBytes, ValueRef,
+    FlowSummary, Graph, InstanceRow, Literal, Node, NodeInputValue, NodeTypeCatalog,
+    TemplateSummary, ValueBytes, ValueRef,
 };
+use makepad_widgets::fab_controls::*;
 use makepad_widgets::makepad_micro_serde::SerJson;
 use makepad_widgets::*;
 
@@ -14,9 +17,276 @@ script_mod! {
     use mod.widgets.*
 
     let RowLabel = Label{
-        width: 90
+        width: 84
         height: Fit
-        draw_text +: {color: theme.color_text_meta}
+        draw_text +: {
+            color: #x8a8a92
+            text_style: theme.font_regular{font_size: 9}
+        }
+    }
+
+    let Card = RoundedView{
+        width: Fill
+        height: Fit
+        flow: Down
+        padding: Inset{left: 10 right: 10 top: 8 bottom: 8}
+        spacing: theme.space_1
+        show_bg: true
+        draw_bg +: {
+            color: #x1c1c1f
+            border_radius: 10.0
+            border_size: 1.0
+            border_color: #x2a2a30
+        }
+    }
+
+    let Dot = RoundedView{
+        width: 8
+        height: 8
+        draw_bg +: {
+            border_radius: 4.0
+            color: #x4cc46a
+        }
+    }
+
+    let TitleButton = ButtonFlatter{
+        width: Fill
+        height: Fit
+        padding: Inset{left: 0 right: 0 top: 2 bottom: 2}
+        draw_text +: {
+            text_style: theme.font_bold{font_size: 9.5}
+            color: #xe8e8ec
+        }
+    }
+
+    let MetaText = Label{
+        width: Fill
+        height: Fit
+        text: ""
+        draw_text +: {
+            color: #x8a8a92
+            text_style: theme.font_regular{font_size: 8.5}
+        }
+    }
+
+    let EmptyHint = Label{
+        width: Fill
+        height: Fit
+        margin: Inset{top: 8}
+        text: ""
+        draw_text +: {
+            color: #x5e5e66
+            text_style: theme.font_regular{font_size: 9}
+        }
+    }
+
+    // -- flows ------------------------------------------------------------------
+
+    mod.widgets.FlowListBase = #(FlowList::register_widget(vm))
+    mod.widgets.FlowList = set_type_default() do mod.widgets.FlowListBase{
+        width: Fill
+        height: Fill
+        flow: Down
+        hint := EmptyHint{text: "No flows yet — New starts one from a template."}
+        list := PortalList{
+            width: Fill
+            height: Fill
+            scroll_bar: ScrollBar{}
+            Item := View{
+                width: Fill
+                height: Fit
+                padding: Inset{bottom: 4}
+                card := Card{
+                    flow: Right
+                    align: Align{y: 0.5}
+                    spacing: theme.space_2
+                    dot := Dot{}
+                    select := TitleButton{}
+                    count := Label{
+                        width: Fit
+                        height: Fit
+                        text: ""
+                        draw_text +: {
+                            color: #x8a8a92
+                            text_style: theme.font_regular{font_size: 8.5}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // -- running ----------------------------------------------------------------
+
+    mod.widgets.RunningListBase = #(RunningList::register_widget(vm))
+    mod.widgets.RunningList = set_type_default() do mod.widgets.RunningListBase{
+        width: Fill
+        height: Fill
+        flow: Down
+        hint := EmptyHint{text: "Nothing is running. Run starts an instance of the open flow."}
+        list := PortalList{
+            width: Fill
+            height: Fill
+            scroll_bar: ScrollBar{}
+            Item := View{
+                width: Fill
+                height: Fit
+                padding: Inset{bottom: 4}
+                card := Card{
+                    head := View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        align: Align{y: 0.5}
+                        spacing: theme.space_2
+                        dot := Dot{}
+                        attach := TitleButton{}
+                    }
+                    detail := MetaText{}
+                    actions := View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: theme.space_1
+                        stop := ButtonFlatter{text: "Stop"}
+                        dup := ButtonFlatter{text: "Duplicate"}
+                        copy := ButtonFlatter{text: "Copy id"}
+                    }
+                }
+            }
+        }
+    }
+
+    // -- palette ----------------------------------------------------------------
+
+    let Badge = RoundedView{
+        width: 30
+        height: 30
+        align: Align{x: 0.5 y: 0.5}
+        draw_bg +: {
+            border_radius: 8.0
+            color: #x2a2a30
+        }
+        icon := Icon{
+            icon_walk: Walk{width: 16 height: Fit}
+            draw_icon +: {
+                color: #xffffff
+            }
+        }
+    }
+
+    let PaletteCard = View{
+        width: Fill
+        height: Fit
+        padding: Inset{bottom: 6}
+        card := RoundedView{
+            width: Fill
+            height: Fit
+            flow: Right
+            align: Align{y: 0.5}
+            spacing: theme.space_2
+            padding: Inset{left: 8 right: 6 top: 6 bottom: 6}
+            cursor: MouseCursor.Hand
+            show_bg: true
+            draw_bg +: {
+                color: #x1c1c1f
+                border_radius: 10.0
+                border_size: 1.0
+                border_color: #x2a2a30
+            }
+            badge := Badge{}
+            View{
+                width: Fill
+                height: Fit
+                flow: Down
+                spacing: 1
+                name := Label{
+                    width: Fill
+                    height: Fit
+                    text: ""
+                    draw_text +: {
+                        text_style: theme.font_bold{font_size: 9.5}
+                        color: #xe8e8ec
+                    }
+                }
+                doc := Label{
+                    width: Fill
+                    height: Fit
+                    text: ""
+                    draw_text +: {
+                        color: #x8a8a92
+                        text_style: theme.font_regular{font_size: 8}
+                    }
+                }
+            }
+            grip := Icon{
+                icon_walk: Walk{width: 12 height: Fit}
+                draw_icon +: {
+                    color: #x4a4a52
+                    svg: crate_resource("self:resources/icons/grip.svg")
+                }
+            }
+        }
+    }
+
+    mod.widgets.PaletteBase = #(Palette::register_widget(vm))
+    mod.widgets.Palette = set_type_default() do mod.widgets.PaletteBase{
+        width: Fill
+        height: Fill
+        flow: Down
+        hint := EmptyHint{text: "Waiting for the server's node catalog…"}
+        list := PortalList{
+            width: Fill
+            height: Fill
+            // A press-and-drag here carries a type to the canvas; it must
+            // not scroll the list out from under the next pick.
+            drag_scrolling: false
+            scroll_bar: ScrollBar{}
+            Kind := View{
+                width: Fill
+                height: Fit
+                padding: Inset{left: 2 top: 8 bottom: 4}
+                title := Label{
+                    text: ""
+                    draw_text +: {
+                        color: #x6e6e76
+                        text_style: theme.font_bold{font_size: 8.5}
+                    }
+                }
+            }
+            CardInput := PaletteCard{
+                card +: { badge +: { draw_bg +: {color: #x1f3a37} icon +: { draw_icon +: { color: #x3fb9a8 svg: crate_resource("self:resources/icons/input.svg") } } } }
+            }
+            CardOutput := PaletteCard{
+                card +: { badge +: { draw_bg +: {color: #x1f3a26} icon +: { draw_icon +: { color: #x4cc46a svg: crate_resource("self:resources/icons/output.svg") } } } }
+            }
+            CardChat := PaletteCard{
+                card +: { badge +: { draw_bg +: {color: #x2b2748} icon +: { draw_icon +: { color: #x8b7cf6 svg: crate_resource("self:resources/icons/chat.svg") } } } }
+            }
+            CardGen := PaletteCard{
+                card +: { badge +: { draw_bg +: {color: #x40301e} icon +: { draw_icon +: { color: #xf2994a svg: crate_resource("self:resources/icons/gen.svg") } } } }
+            }
+            CardFn := PaletteCard{
+                card +: { badge +: { draw_bg +: {color: #x3d3620} icon +: { draw_icon +: { color: #xe6c04a svg: crate_resource("self:resources/icons/fn.svg") } } } }
+            }
+            CardHttp := PaletteCard{
+                card +: { badge +: { draw_bg +: {color: #x1e363d} icon +: { draw_icon +: { color: #x4ac2e6 svg: crate_resource("self:resources/icons/http.svg") } } } }
+            }
+            CardAsk := PaletteCard{
+                card +: { badge +: { draw_bg +: {color: #x3d3620} icon +: { draw_icon +: { color: #xf2c14e svg: crate_resource("self:resources/icons/ask.svg") } } } }
+            }
+        }
+    }
+
+    // -- inspector ----------------------------------------------------------------
+
+    let Row = View{
+        width: Fill
+        height: Fit
+        flow: Right
+        spacing: theme.space_2
+        padding: Inset{left: 2 right: 2 top: 3 bottom: 3}
+        align: Align{y: 0.5}
     }
 
     mod.widgets.InspectorBase = #(Inspector::register_widget(vm))
@@ -32,32 +302,40 @@ script_mod! {
                 width: Fill
                 height: Fit
                 flow: Down
-                padding: theme.mspace_2
-                title := H3{text: ""}
-                doc := Label{
+                padding: Inset{left: 2 right: 2 top: 4 bottom: 6}
+                spacing: 2
+                title := Label{
                     width: Fill
                     height: Fit
                     text: ""
-                    draw_text +: {color: theme.color_text_meta}
+                    draw_text +: {
+                        text_style: theme.font_bold{font_size: 11}
+                        color: #xe8e8ec
+                    }
                 }
+                doc := MetaText{}
             }
             Section := View{
                 width: Fill
                 height: Fit
-                padding: theme.mspace_2
-                title := H3{text: ""}
+                flow: Down
+                padding: Inset{left: 2 right: 2 top: 10 bottom: 2}
+                spacing: 4
+                title := Label{
+                    text: ""
+                    draw_text +: {
+                        color: #x6e6e76
+                        text_style: theme.font_bold{font_size: 8.5}
+                    }
+                }
+                Hr{}
             }
-            Text := View{
-                width: Fill
-                height: Fit
-                flow: Right
-                spacing: theme.space_2
-                padding: theme.mspace_1
-                align: Align{y: 0.5}
+            Text := Row{
                 name := RowLabel{}
                 value := TextInput{
                     width: Fill
-                    height: 28
+                    height: 26
+                    empty_text: ""
                 }
             }
             Multiline := View{
@@ -65,7 +343,7 @@ script_mod! {
                 height: Fit
                 flow: Down
                 spacing: theme.space_1
-                padding: theme.mspace_1
+                padding: Inset{left: 2 right: 2 top: 3 bottom: 3}
                 head := View{
                     width: Fill
                     height: Fit
@@ -78,63 +356,60 @@ script_mod! {
                     width: Fill
                     height: 110
                     is_multiline: true
-                    draw_text +: {text_style: theme.font_code{}}
+                    empty_text: ""
+                    draw_text +: {text_style: theme.font_code{font_size: 9}}
                 }
             }
-            Range := View{
-                width: Fill
-                height: Fit
-                flow: Right
-                spacing: theme.space_2
-                padding: theme.mspace_1
-                align: Align{y: 0.5}
+            Number := Row{
                 name := RowLabel{}
-                value := Slider{
+                value := mod.widgets.FabValueInput{
                     width: Fill
-                    height: Fit
-                    text: ""
+                    height: 24
+                    quantize: true
                 }
             }
-            Choice := View{
-                width: Fill
-                height: Fit
-                flow: Right
-                spacing: theme.space_2
-                padding: theme.mspace_1
-                align: Align{y: 0.5}
+            Choice := Row{
                 name := RowLabel{}
                 value := DropDown{
                     width: Fill
-                    height: Fit
+                    height: 26
                 }
             }
-            Wired := View{
-                width: Fill
-                height: Fit
-                flow: Right
-                spacing: theme.space_2
-                padding: theme.mspace_1
-                align: Align{y: 0.5}
+            Model := Row{
+                name := RowLabel{}
+                value := DropDown{
+                    width: Fill
+                    height: 26
+                    labels: ["hub picks"]
+                }
+            }
+            Bool := Row{
+                name := RowLabel{}
+                value := Toggle{
+                    text: ""
+                }
+            }
+            Color := Row{
+                name := RowLabel{}
+                value := mod.widgets.FabColorPick{
+                    width: 60
+                    height: 20
+                }
+            }
+            Wired := Row{
+                name := RowLabel{}
+                value := MetaText{}
+            }
+            Output := Row{
                 name := RowLabel{}
                 value := Label{
                     width: Fill
                     height: Fit
                     text: ""
-                }
-            }
-            Output := View{
-                width: Fill
-                height: Fit
-                flow: Right
-                spacing: theme.space_2
-                padding: theme.mspace_1
-                align: Align{y: 0.5}
-                name := RowLabel{}
-                value := Label{
-                    width: Fill
-                    height: Fit
-                    text: ""
-                    draw_text +: {text_style: theme.font_code{}}
+                    draw_text +: {
+                        text_style: theme.font_code{font_size: 8.5}
+                        color: #xc8c8cc
+                    }
                 }
                 open := ButtonFlat{text: "Open"}
             }
@@ -142,91 +417,121 @@ script_mod! {
                 width: Fill
                 height: Fit
                 flow: Down
-                padding: theme.mspace_1
+                padding: Inset{left: 2 right: 2 top: 4 bottom: 4}
                 text := Label{
                     width: Fill
                     height: Fit
                     text: ""
-                    draw_text +: {text_style: theme.font_code{}}
+                    draw_text +: {text_style: theme.font_code{font_size: 8.5}}
                 }
                 image := Image{
                     width: Fill
-                    height: 260
-                    fit: ImageFit.Smallest
+                    height: Fit
+                    fit: ImageFit.Horizontal
                 }
             }
-        }
-    }
-
-    mod.widgets.RunningListBase = #(RunningList::register_widget(vm))
-    mod.widgets.RunningList = set_type_default() do mod.widgets.RunningListBase{
-        width: Fill
-        height: Fill
-        list := PortalList{
-            width: Fill
-            height: Fill
-            scroll_bar: ScrollBar{}
-            Item := View{
+            Empty := View{
                 width: Fill
                 height: Fit
                 flow: Down
-                padding: theme.mspace_1
-                attach := ButtonFlatter{
-                    width: Fill
-                    text: ""
-                }
-                detail := Label{
+                padding: Inset{left: 2 right: 2 top: 4 bottom: 4}
+                spacing: 4
+                title := Label{
                     width: Fill
                     height: Fit
                     text: ""
-                    draw_text +: {color: theme.color_text_meta}
+                    draw_text +: {
+                        text_style: theme.font_bold{font_size: 10}
+                        color: #xd0d0d4
+                    }
                 }
-                actions := View{
+                doc := EmptyHint{margin: Inset{top: 0}}
+            }
+        }
+    }
+
+    // -- templates ----------------------------------------------------------------
+
+    mod.widgets.TemplatePickerBase = #(TemplatePicker::register_widget(vm))
+    mod.widgets.TemplatePicker = set_type_default() do mod.widgets.TemplatePickerBase{
+        width: Fit
+        height: Fit
+        panel := RoundedView{
+            width: 420
+            height: 520
+            flow: Down
+            spacing: theme.space_2
+            padding: Inset{left: 14 right: 14 top: 12 bottom: 12}
+            show_bg: true
+            draw_bg +: {
+                color: #x1c1c1f
+                border_radius: 14.0
+                border_size: 1.0
+                border_color: #x33333a
+            }
+            head := View{
+                width: Fill
+                height: Fit
+                flow: Right
+                align: Align{y: 0.5}
+                title := Label{
                     width: Fill
                     height: Fit
-                    flow: Right
-                    spacing: theme.space_1
-                    stop := ButtonFlatter{text: "Stop"}
-                    dup := ButtonFlatter{text: "Duplicate"}
-                    copy := ButtonFlatter{text: "Copy id"}
+                    text: "New flow from a template"
+                    draw_text +: {
+                        text_style: theme.font_bold{font_size: 11}
+                        color: #xe8e8ec
+                    }
+                }
+                close := ButtonFlat{text: "Close"}
+            }
+            MetaText{text: "The pipelines the fleet runs today. Pick one; it opens on the canvas with an instance bound."}
+            hint := EmptyHint{text: "Fetching the template list…"}
+            list := PortalList{
+                width: Fill
+                height: Fill
+                scroll_bar: ScrollBar{}
+                Item := View{
+                    width: Fill
+                    height: Fit
+                    padding: Inset{bottom: 6}
+                    card := Card{
+                        flow: Right
+                        align: Align{y: 0.5}
+                        spacing: theme.space_2
+                        View{
+                            width: Fill
+                            height: Fit
+                            flow: Down
+                            spacing: 2
+                            label := Label{
+                                width: Fill
+                                height: Fit
+                                text: ""
+                                draw_text +: {
+                                    text_style: theme.font_bold{font_size: 10}
+                                    color: #xe8e8ec
+                                }
+                            }
+                            brief := MetaText{}
+                            io := MetaText{}
+                        }
+                        create := Button{text: "Create"}
+                    }
                 }
             }
         }
     }
 
-    mod.widgets.PaletteBase = #(Palette::register_widget(vm))
-    mod.widgets.Palette = set_type_default() do mod.widgets.PaletteBase{
-        width: Fill
-        height: Fill
-        flow: Down
-        list := PortalList{
-            width: Fill
-            height: Fill
-            // A press-and-drag here carries a type to the canvas; it must
-            // not scroll the list out from under the next pick.
-            drag_scrolling: false
-            scroll_bar: ScrollBar{}
-            Kind := View{
-                width: Fill
-                height: Fit
-                padding: theme.mspace_1
-                title := Label{
-                    text: ""
-                    draw_text +: {color: theme.color_text_meta}
-                }
-            }
-            Type := View{
-                width: Fill
-                height: 30
-                flow: Right
-                align: Align{y: 0.5}
-                name := ButtonFlatter{
-                    width: Fill
-                    text: ""
-                }
-            }
-        }
+    // -- the run's total progress -----------------------------------------------------
+
+    mod.widgets.RunBarBase = #(RunBar::register_widget(vm))
+    mod.widgets.RunBar = set_type_default() do mod.widgets.RunBarBase{
+        width: 200
+        height: 6
     }
+
+    // -- app view -----------------------------------------------------------------------
 
     mod.widgets.AppViewBase = #(AppView::register_widget(vm))
     mod.widgets.AppView = set_type_default() do mod.widgets.AppViewBase{
@@ -235,12 +540,101 @@ script_mod! {
         flow: Down
         padding: theme.mspace_3
         spacing: theme.space_2
-        draw_bg +: {color: theme.color_bg_app}
-        draw_frame +: {color: theme.color_bg_container}
+        draw_bg +: {color: #x111111}
+        draw_frame +: {color: #x1c1c1f}
         draw_text +: {
             text_style: theme.font_bold{font_size: 10}
-            color: theme.color_label_inner
+            color: #xe8e8ec
         }
+    }
+}
+
+fn state_color(state: &str) -> Vec4f {
+    match state {
+        "running" | "ready" | "queued" => vec4(0.35, 0.62, 1.0, 1.0),
+        "done" | "ok" | "idle" => vec4(0.30, 0.77, 0.42, 1.0),
+        "failed" | "error" => vec4(0.95, 0.43, 0.43, 1.0),
+        "waiting" => vec4(0.95, 0.76, 0.3, 1.0),
+        "cancelled" | "skipped" => vec4(0.55, 0.55, 0.58, 1.0),
+        _ => vec4(0.45, 0.45, 0.5, 1.0),
+    }
+}
+
+fn set_dot(cx: &mut Cx, item: &WidgetRef, color: Vec4f) {
+    let mut dot = item.view(cx, ids!(dot));
+    script_apply_eval!(cx, dot, {draw_bg +: {color: #(color)}});
+}
+
+// ---------------------------------------------------------------------------
+// Flows
+// ---------------------------------------------------------------------------
+
+#[derive(Script, ScriptHook, Widget)]
+pub struct FlowList {
+    #[deref]
+    view: View,
+    #[rust]
+    rows: Vec<FlowSummary>,
+    #[rust]
+    selected: Option<String>,
+}
+
+impl FlowList {
+    pub fn set_rows(&mut self, cx: &mut Cx, rows: Vec<FlowSummary>, selected: Option<String>) {
+        self.rows = rows;
+        self.selected = selected;
+        self.view
+            .label(cx, ids!(hint))
+            .set_visible(cx, self.rows.is_empty());
+        self.redraw(cx);
+    }
+
+    pub fn selected(&self, cx: &mut Cx, actions: &Actions) -> Option<usize> {
+        let list = self.view.portal_list(cx, ids!(list));
+        for (index, item) in list.items_with_actions(actions) {
+            if item.button(cx, ids!(select)).clicked(actions) {
+                return Some(index);
+            }
+        }
+        None
+    }
+}
+
+impl Widget for FlowList {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
+            let list_ref = step.as_portal_list();
+            let Some(mut list) = list_ref.borrow_mut() else {
+                continue;
+            };
+            list.set_item_range(cx, 0, self.rows.len());
+            while let Some(index) = list.next_visible_item(cx) {
+                let Some(row) = self.rows.get(index) else {
+                    continue;
+                };
+                let item = list.item(cx, index, id!(Item));
+                let open = self.selected.as_deref() == Some(row.name.as_str());
+                let title = if open {
+                    format!("› {}", row.name)
+                } else {
+                    row.name.clone()
+                };
+                item.button(cx, ids!(select)).set_text(cx, &title);
+                let count = if row.instances > 0 {
+                    format!("{} live", row.instances)
+                } else {
+                    String::new()
+                };
+                item.label(cx, ids!(count)).set_text(cx, &count);
+                set_dot(cx, &item, state_color(&row.state));
+                item.draw_all_unscoped(cx);
+            }
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
     }
 }
 
@@ -268,13 +662,16 @@ pub enum InspectorAction {
     OpenValue {
         node: String,
         port: String,
-        value: ValueRef,
     },
 }
 
 #[derive(Clone, Debug)]
 enum Row {
     Head {
+        title: String,
+        doc: String,
+    },
+    Empty {
         title: String,
         doc: String,
     },
@@ -289,7 +686,7 @@ enum Row {
         key: String,
         value: String,
     },
-    Range {
+    Number {
         key: String,
         value: f64,
         min: f64,
@@ -301,13 +698,23 @@ enum Row {
         value: String,
         options: Vec<String>,
     },
+    Model {
+        value: String,
+    },
+    Bool {
+        key: String,
+        value: bool,
+    },
+    Color {
+        key: String,
+        rgba: [f32; 4],
+    },
     Wired {
         key: String,
         value: String,
     },
     Output {
         port: String,
-        value: ValueRef,
         chip: String,
     },
     Preview {
@@ -320,11 +727,15 @@ impl Row {
     fn template(&self) -> LiveId {
         match self {
             Row::Head { .. } => live_id!(Head),
+            Row::Empty { .. } => live_id!(Empty),
             Row::Section(_) => live_id!(Section),
             Row::Text { .. } => live_id!(Text),
             Row::Multiline { .. } => live_id!(Multiline),
-            Row::Range { .. } => live_id!(Range),
+            Row::Number { .. } => live_id!(Number),
             Row::Choice { .. } => live_id!(Choice),
+            Row::Model { .. } => live_id!(Model),
+            Row::Bool { .. } => live_id!(Bool),
+            Row::Color { .. } => live_id!(Color),
             Row::Wired { .. } => live_id!(Wired),
             Row::Output { .. } => live_id!(Output),
             Row::Preview { .. } => live_id!(Preview),
@@ -391,6 +802,39 @@ fn parse_choices(doc: &str) -> Option<Vec<String>> {
     (!options.is_empty()).then_some(options)
 }
 
+/// `#rrggbb` / `#rrggbbaa` → rgba 0..1.
+fn parse_hex_color(text: &str) -> Option<[f32; 4]> {
+    let hex = text.strip_prefix('#')?;
+    if hex.len() != 6 && hex.len() != 8 {
+        return None;
+    }
+    let channel = |index: usize| -> Option<f32> {
+        let byte = u8::from_str_radix(hex.get(index * 2..index * 2 + 2)?, 16).ok()?;
+        Some(byte as f32 / 255.0)
+    };
+    Some([
+        channel(0)?,
+        channel(1)?,
+        channel(2)?,
+        if hex.len() == 8 { channel(3)? } else { 1.0 },
+    ])
+}
+
+fn hex_color(rgba: Vec4f) -> String {
+    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    if rgba.w >= 0.999 {
+        format!("#{:02x}{:02x}{:02x}", byte(rgba.x), byte(rgba.y), byte(rgba.z))
+    } else {
+        format!(
+            "#{:02x}{:02x}{:02x}{:02x}",
+            byte(rgba.x),
+            byte(rgba.y),
+            byte(rgba.z),
+            byte(rgba.w)
+        )
+    }
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct Inspector {
     #[deref]
@@ -401,6 +845,9 @@ pub struct Inspector {
     node: Option<String>,
     #[rust]
     preview: Option<(String, ValueBytes)>,
+    /// The hub's models for the shown node's domain (`Model` rows).
+    #[rust]
+    models: Vec<String>,
 }
 
 impl Inspector {
@@ -418,9 +865,9 @@ impl Inspector {
         self.node = node_id.map(str::to_string);
         let node = graph.and_then(|graph| graph.nodes.iter().find(|node| Some(node.id.as_str()) == node_id));
         let Some(node) = node else {
-            self.rows.push(Row::Head {
+            self.rows.push(Row::Empty {
                 title: "Nothing selected".into(),
-                doc: "Click a node on the canvas to edit its params.".into(),
+                doc: "Click a node on the canvas to edit its params; drag a palette card onto the canvas to add one.".into(),
             });
             self.redraw(cx);
             return;
@@ -451,18 +898,35 @@ impl Inspector {
                 .and_then(|entry| entry.params.iter().find(|param| &param.name == key))
                 .map(|param| param.doc.clone())
                 .unwrap_or_default();
+            if key == "model" && node.domain.is_some() {
+                self.rows.push(Row::Model {
+                    value: literal_text(value),
+                });
+                continue;
+            }
             let range = entry
                 .and_then(|entry| entry.params.iter().find(|param| &param.name == key))
                 .and_then(|param| param.range.as_ref())
                 .map(|range| (range.min, range.max, range.step.unwrap_or(1.0)))
                 .or_else(|| parse_range(&doc));
-            if let (Some((min, max, step)), Literal::Num(number)) = (range, value) {
-                self.rows.push(Row::Range {
+            if let Literal::Num(number) = value {
+                let (min, max, step) = range.unwrap_or_else(|| {
+                    let magnitude = number.abs().max(1.0);
+                    (0.0, (magnitude * 4.0).max(10.0), if number.fract() == 0.0 { 1.0 } else { 0.01 })
+                });
+                self.rows.push(Row::Number {
                     key: key.clone(),
                     value: *number,
                     min,
                     max,
                     step,
+                });
+                continue;
+            }
+            if let Literal::Bool(flag) = value {
+                self.rows.push(Row::Bool {
+                    key: key.clone(),
+                    value: *flag,
                 });
                 continue;
             }
@@ -493,6 +957,17 @@ impl Inspector {
                 });
                 continue;
             }
+            if let Literal::Str(text) = value {
+                if let Some(rgba) = parse_hex_color(text) {
+                    if key.contains("color") || key.contains("colour") || key.contains("tint") {
+                        self.rows.push(Row::Color {
+                            key: key.clone(),
+                            rgba,
+                        });
+                        continue;
+                    }
+                }
+            }
             match value {
                 Literal::Str(text)
                     if matches!(
@@ -505,12 +980,6 @@ impl Inspector {
                         value: text.clone(),
                     });
                 }
-                Literal::Num(number) => self.rows.push(Row::Text {
-                    key: key.clone(),
-                    value: literal_text(&Literal::Num(*number)),
-                    id: false,
-                    number: true,
-                }),
                 Literal::Id(text) => self.rows.push(Row::Text {
                     key: key.clone(),
                     value: text.clone(),
@@ -547,11 +1016,18 @@ impl Inspector {
                         value: text.clone(),
                     })
                 }
+                NodeInputValue::Literal(Literal::Num(number)) => self.rows.push(Row::Number {
+                    key: input.port.clone(),
+                    value: *number,
+                    min: 0.0,
+                    max: (number.abs() * 4.0).max(10.0),
+                    step: if number.fract() == 0.0 { 1.0 } else { 0.01 },
+                }),
                 NodeInputValue::Literal(value) => self.rows.push(Row::Text {
                     key: input.port.clone(),
                     value: literal_text(value),
                     id: matches!(value, Literal::Id(_)),
-                    number: matches!(value, Literal::Num(_)),
+                    number: false,
                 }),
             }
         }
@@ -571,11 +1047,10 @@ impl Inspector {
             self.rows.push(Row::Section("Last outputs".into()));
             for (port, value) in outputs {
                 let chip = crate::faces::preview_text(value)
-                    .unwrap_or_else(|| format!("{} · {} bytes", value.content_type, value.bytes));
+                    .unwrap_or_else(|| format!("{} · {}", value.content_type, crate::faces::size_text(value.bytes)));
                 let chip: String = chip.chars().take(80).collect();
                 self.rows.push(Row::Output {
                     port: port.clone(),
-                    value: value.clone(),
                     chip,
                 });
             }
@@ -593,6 +1068,14 @@ impl Inspector {
 
     pub fn set_preview(&mut self, preview: Option<(String, ValueBytes)>) {
         self.preview = preview;
+    }
+
+    /// The hub's models for the shown node's domain.
+    pub fn set_models(&mut self, cx: &mut Cx, models: Vec<String>) {
+        if self.models != models {
+            self.models = models;
+            self.redraw(cx);
+        }
     }
 
     /// Edits made in the rows, as actions for the app.
@@ -648,8 +1131,8 @@ impl Inspector {
                         });
                     }
                 }
-                Row::Range { key, .. } => {
-                    if let Some(value) = item.slider(cx, ids!(value)).end_slide(actions) {
+                Row::Number { key, .. } => {
+                    if let Some(value) = item.fab_value_input(cx, ids!(value)).ended(actions) {
                         out.push(InspectorAction::SetParam {
                             node: node.clone(),
                             key: key.clone(),
@@ -673,12 +1156,39 @@ impl Inspector {
                         });
                     }
                 }
-                Row::Output { port, value, .. } => {
+                Row::Model { .. } => {
+                    if let Some(label) = item.drop_down(cx, ids!(value)).changed_label(actions) {
+                        let value = if label == HUB_PICKS { String::new() } else { label };
+                        out.push(InspectorAction::SetParam {
+                            node: node.clone(),
+                            key: "model".into(),
+                            value: Literal::Str(value),
+                        });
+                    }
+                }
+                Row::Bool { key, .. } => {
+                    if let Some(flag) = item.check_box(cx, ids!(value)).changed(actions) {
+                        out.push(InspectorAction::SetParam {
+                            node: node.clone(),
+                            key: key.clone(),
+                            value: Literal::Bool(flag),
+                        });
+                    }
+                }
+                Row::Color { key, .. } => {
+                    if let Some(rgba) = item.fab_color_pick(cx, ids!(value)).changed(actions) {
+                        out.push(InspectorAction::SetParam {
+                            node: node.clone(),
+                            key: key.clone(),
+                            value: Literal::Str(hex_color(rgba)),
+                        });
+                    }
+                }
+                Row::Output { port, .. } => {
                     if item.button(cx, ids!(open)).clicked(actions) {
                         out.push(InspectorAction::OpenValue {
                             node: node.clone(),
                             port: port.clone(),
-                            value: value.clone(),
                         });
                     }
                 }
@@ -703,7 +1213,7 @@ impl Widget for Inspector {
                 };
                 let (item, existed) = list.item_with_existed(cx, index, row.template());
                 match row {
-                    Row::Head { title, doc } => {
+                    Row::Head { title, doc } | Row::Empty { title, doc } => {
                         item.label(cx, ids!(title)).set_text(cx, title);
                         item.label(cx, ids!(doc)).set_text(cx, doc);
                     }
@@ -720,7 +1230,7 @@ impl Widget for Inspector {
                             item.text_input(cx, ids!(value)).set_text(cx, value);
                         }
                     }
-                    Row::Range {
+                    Row::Number {
                         key,
                         value,
                         min,
@@ -728,15 +1238,18 @@ impl Widget for Inspector {
                         step,
                     } => {
                         item.label(cx, ids!(name)).set_text(cx, key);
-                        let mut slider = item.slider(cx, ids!(value));
+                        let mut field = item.fab_value_input(cx, ids!(value));
                         if !existed {
-                            script_apply_eval!(cx, slider, {
+                            let integral = step.fract() == 0.0;
+                            let scrub = (*step * 0.25).max(if integral { 0.25 } else { *step });
+                            script_apply_eval!(cx, field, {
                                 min: #(*min)
                                 max: #(*max)
-                                step: #(*step)
-                                precision: #(if step.fract() == 0.0 { 0usize } else { 2usize })
+                                step: #(scrub)
+                                snap: #(*step)
+                                precision: #(if integral { 0usize } else { 2usize })
                             });
-                            slider.set_value(cx, *value);
+                            field.set_value(cx, *value);
                         }
                     }
                     Row::Choice {
@@ -749,6 +1262,30 @@ impl Widget for Inspector {
                         if !existed {
                             drop_down.set_labels(cx, options.clone());
                             drop_down.set_selected_by_label(value, cx);
+                        }
+                    }
+                    Row::Model { value } => {
+                        item.label(cx, ids!(name)).set_text(cx, "model");
+                        let drop_down = item.drop_down(cx, ids!(value));
+                        let mut labels = vec![HUB_PICKS.to_string()];
+                        labels.extend(self.models.iter().cloned());
+                        if !value.is_empty() && !labels.iter().any(|label| label == value) {
+                            labels.push(value.clone());
+                        }
+                        drop_down.set_labels(cx, labels);
+                        let selected = if value.is_empty() { HUB_PICKS } else { value.as_str() };
+                        drop_down.set_selected_by_label(selected, cx);
+                    }
+                    Row::Bool { key, value } => {
+                        item.label(cx, ids!(name)).set_text(cx, key);
+                        if !existed {
+                            item.check_box(cx, ids!(value)).set_active(cx, *value, Animate::No);
+                        }
+                    }
+                    Row::Color { key, rgba } => {
+                        item.label(cx, ids!(name)).set_text(cx, key);
+                        if !existed {
+                            item.fab_color_pick(cx, ids!(value)).set_rgba(cx, *rgba);
                         }
                     }
                     Row::Wired { key, value } => {
@@ -821,6 +1358,9 @@ impl RunningList {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
+        self.view
+            .label(cx, ids!(hint))
+            .set_visible(cx, self.rows.is_empty());
         self.redraw(cx);
     }
 
@@ -864,29 +1404,23 @@ impl Widget for RunningList {
                 let attached = self.attached.as_deref() == Some(row.instance.as_str());
                 let title = format!(
                     "{}{} · {}",
-                    if attached { "▸ " } else { "" },
+                    if attached { "› " } else { "" },
                     row.flow,
                     row.label
                         .clone()
-                        .unwrap_or_else(|| row.instance.chars().take(13).collect())
+                        .unwrap_or_else(|| row.instance.chars().take(8).collect())
                 );
                 item.button(cx, ids!(attach)).set_text(cx, &title);
-                let mut detail = format!(
-                    "{} · {}",
-                    row.owner,
-                    row.state,
-                );
-                if let Some(run) = &row.run {
-                    detail.push_str(&format!(" · {}", run.chars().take(13).collect::<String>()));
-                }
+                set_dot(cx, &item, state_color(&row.state));
+                let mut detail = format!("{} · {}", row.owner, row.state);
                 if row.state == "running" && self.now_ms > row.last_activity_ms {
                     detail.push_str(&format!(
-                        " · {:.1} s",
+                        " · {:.0} s ago",
                         (self.now_ms - row.last_activity_ms) as f64 / 1000.0
                     ));
                 }
                 if row.subscribers > 0 {
-                    detail.push_str(&format!(" · {} sub", row.subscribers));
+                    detail.push_str(&format!(" · {} watching", row.subscribers));
                 }
                 if let Some((name, value)) = row.outputs.iter().next() {
                     if let Some(text) = crate::faces::preview_text(value) {
@@ -914,9 +1448,9 @@ impl Widget for RunningList {
 pub enum PaletteAction {
     #[default]
     None,
-    /// A type was pressed: the canvas places it where the mouse is released.
+    /// A card was pressed: the canvas places the type where the mouse is released.
     Armed(String),
-    /// A type was clicked while the palette was filtered from a wire drop:
+    /// A card was clicked while the palette was filtered from a wire drop:
     /// place it at the drop point and connect.
     Picked(String),
 }
@@ -924,7 +1458,11 @@ pub enum PaletteAction {
 #[derive(Clone, Debug)]
 enum PaletteRow {
     Kind(String),
-    Type(String),
+    Type {
+        name: String,
+        kind: String,
+        doc: String,
+    },
 }
 
 #[derive(Script, ScriptHook, Widget)]
@@ -935,6 +1473,18 @@ pub struct Palette {
     rows: Vec<PaletteRow>,
     #[rust]
     filtered: bool,
+}
+
+fn kind_template(kind: &str) -> LiveId {
+    match kind {
+        "input" => live_id!(CardInput),
+        "output" => live_id!(CardOutput),
+        "chat" => live_id!(CardChat),
+        "fn" => live_id!(CardFn),
+        "http" => live_id!(CardHttp),
+        "ask" => live_id!(CardAsk),
+        _ => live_id!(CardGen),
+    }
 }
 
 impl Palette {
@@ -953,15 +1503,48 @@ impl Palette {
         });
         kinds.dedup();
         for kind in kinds {
+            let title = match kind {
+                "input" => "INPUTS",
+                "output" => "OUTPUTS",
+                "chat" => "LANGUAGE MODELS",
+                "fn" => "FUNCTIONS",
+                "http" => "HTTP",
+                "ask" => "ASK THE USER",
+                "gen" => "GENERATORS",
+                other => other,
+            };
             self.rows.push(PaletteRow::Kind(if filtered {
-                format!("{kind} · compatible")
+                format!("{title} · COMPATIBLE")
             } else {
-                kind.to_string()
+                title.to_string()
             }));
             for entry in catalog.iter().filter(|entry| entry.kind == kind) {
-                self.rows.push(PaletteRow::Type(entry.type_name.clone()));
+                let doc = entry
+                    .doc
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let doc = if doc.is_empty() {
+                    entry
+                        .domain
+                        .as_ref()
+                        .map(|domain| format!("{domain} domain"))
+                        .unwrap_or_default()
+                } else {
+                    doc
+                };
+                self.rows.push(PaletteRow::Type {
+                    name: entry.type_name.clone(),
+                    kind: entry.kind.clone(),
+                    doc,
+                });
             }
         }
+        self.view
+            .label(cx, ids!(hint))
+            .set_visible(cx, self.rows.is_empty());
         self.redraw(cx);
     }
 
@@ -969,16 +1552,16 @@ impl Palette {
         let mut out = Vec::new();
         let list = self.view.portal_list(cx, ids!(list));
         for (index, item) in list.items_with_actions(actions) {
-            let Some(PaletteRow::Type(type_name)) = self.rows.get(index) else {
+            let Some(PaletteRow::Type { name, .. }) = self.rows.get(index) else {
                 continue;
             };
-            let button = item.button(cx, ids!(name));
+            let card = item.view(cx, ids!(card));
             if self.filtered {
-                if button.clicked(actions) {
-                    out.push(PaletteAction::Picked(type_name.clone()));
+                if card.finger_up(actions).is_some_and(|up| up.is_over) {
+                    out.push(PaletteAction::Picked(name.clone()));
                 }
-            } else if button.pressed(actions) {
-                out.push(PaletteAction::Armed(type_name.clone()));
+            } else if card.finger_down(actions).is_some() {
+                out.push(PaletteAction::Armed(name.clone()));
             }
         }
         out
@@ -1003,9 +1586,10 @@ impl Widget for Palette {
                         item.label(cx, ids!(title)).set_text(cx, kind);
                         item.draw_all_unscoped(cx);
                     }
-                    PaletteRow::Type(type_name) => {
-                        let item = list.item(cx, index, id!(Type));
-                        item.button(cx, ids!(name)).set_text(cx, type_name);
+                    PaletteRow::Type { name, kind, doc } => {
+                        let item = list.item(cx, index, kind_template(kind));
+                        item.label(cx, ids!(name)).set_text(cx, name);
+                        item.label(cx, ids!(doc)).set_text(cx, doc);
                         item.draw_all_unscoped(cx);
                     }
                 }
@@ -1016,6 +1600,200 @@ impl Widget for Palette {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.view.handle_event(cx, event, scope);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Templates
+// ---------------------------------------------------------------------------
+
+#[derive(Script, ScriptHook, Widget)]
+pub struct TemplatePicker {
+    #[deref]
+    view: View,
+    #[rust]
+    rows: Vec<TemplateSummary>,
+}
+
+impl TemplatePicker {
+    pub fn set_templates(&mut self, cx: &mut Cx, rows: Vec<TemplateSummary>) {
+        self.rows = rows;
+        let hint = self.view.label(cx, ids!(hint));
+        if self.rows.is_empty() {
+            hint.set_text(cx, "The server lists no templates.");
+        }
+        hint.set_visible(cx, self.rows.is_empty());
+        self.redraw(cx);
+    }
+
+    /// The template whose Create was clicked.
+    pub fn picked(&self, cx: &mut Cx, actions: &Actions) -> Option<String> {
+        let list = self.view.portal_list(cx, ids!(list));
+        for (index, item) in list.items_with_actions(actions) {
+            if item.button(cx, ids!(create)).clicked(actions) {
+                return self.rows.get(index).map(|row| row.name.clone());
+            }
+        }
+        None
+    }
+
+    pub fn closed(&self, cx: &mut Cx, actions: &Actions) -> bool {
+        self.view.button(cx, ids!(close)).clicked(actions)
+    }
+}
+
+impl Widget for TemplatePicker {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
+            let list_ref = step.as_portal_list();
+            let Some(mut list) = list_ref.borrow_mut() else {
+                continue;
+            };
+            list.set_item_range(cx, 0, self.rows.len());
+            while let Some(index) = list.next_visible_item(cx) {
+                let Some(row) = self.rows.get(index) else {
+                    continue;
+                };
+                let item = list.item(cx, index, id!(Item));
+                item.label(cx, ids!(label)).set_text(cx, &row.label);
+                item.label(cx, ids!(brief)).set_text(cx, &row.brief);
+                let inputs: Vec<String> = row
+                    .inputs
+                    .iter()
+                    .map(|(name, ty)| format!("{name}: {ty}"))
+                    .collect();
+                let outputs: Vec<String> = row
+                    .outputs
+                    .iter()
+                    .map(|(name, ty)| format!("{name}: {ty}"))
+                    .collect();
+                item.label(cx, ids!(io)).set_text(
+                    cx,
+                    &format!(
+                        "{} nodes · in {} · out {}",
+                        row.node_count,
+                        inputs.join(", "),
+                        outputs.join(", ")
+                    ),
+                );
+                item.draw_all_unscoped(cx);
+            }
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The run's total progress
+// ---------------------------------------------------------------------------
+
+/// A thin luminous strip: the run's total progress, eased, in the state's colour.
+#[derive(Script, ScriptHook, Widget)]
+pub struct RunBar {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
+    #[redraw]
+    #[live]
+    draw_bar: DrawVector,
+    #[rust]
+    area: Area,
+    #[rust]
+    fraction: f64,
+    #[rust]
+    shown: f64,
+    #[rust]
+    state: String,
+    #[rust]
+    next_frame: NextFrame,
+    #[rust]
+    time: f64,
+    #[rust]
+    last_time: f64,
+}
+
+impl RunBar {
+    pub fn set_progress(&mut self, cx: &mut Cx, fraction: f64, state: &str) {
+        self.fraction = fraction.clamp(0.0, 1.0);
+        if self.state != state {
+            self.state = state.to_string();
+            if state.is_empty() {
+                self.shown = 0.0;
+            }
+        }
+        self.next_frame = cx.new_next_frame();
+        self.area.redraw(cx);
+    }
+}
+
+impl Widget for RunBar {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        let rect = cx.walk_turtle(walk);
+        cx.add_rect_area(&mut self.area, rect);
+        let (x, y, w, h) = (rect.pos.x as f32, rect.pos.y as f32, rect.size.x as f32, rect.size.y as f32);
+        self.draw_bar.begin();
+        self.draw_bar.set_color(1.0, 1.0, 1.0, 0.08);
+        self.draw_bar.rounded_rect(x, y, w, h, h * 0.5);
+        self.draw_bar.fill();
+        let color = match self.state.as_str() {
+            "" => None,
+            "done" => Some((0.30, 0.77, 0.42)),
+            "failed" => Some((0.95, 0.43, 0.43)),
+            "cancelled" => Some((0.55, 0.55, 0.58)),
+            _ => Some((0.35, 0.62, 1.0)),
+        };
+        if let Some((r, g, b)) = color {
+            let indeterminate = matches!(self.state.as_str(), "running" | "queued") && self.fraction <= 0.0;
+            if indeterminate {
+                let seg = w * 0.3;
+                let t = (self.time * 0.8).fract() as f32;
+                let sx = x + (w + seg) * t - seg;
+                let x0 = sx.max(x);
+                let x1 = (sx + seg).min(x + w);
+                if x1 > x0 {
+                    self.draw_bar.set_color(r, g, b, 0.95);
+                    self.draw_bar.rounded_rect(x0, y, x1 - x0, h, h * 0.5);
+                    self.draw_bar.fill();
+                }
+            } else if self.shown > 0.0 {
+                let fw = (w * self.shown as f32).max(h);
+                // A soft glow under the strip.
+                self.draw_bar.set_color(r, g, b, 0.35);
+                self.draw_bar
+                    .shadow(x, y, fw, h, h * 0.5, 4.0, 0.0, 0.0);
+                self.draw_bar.set_color(r, g, b, 1.0);
+                self.draw_bar.rounded_rect(x, y, fw, h, h * 0.5);
+                self.draw_bar.fill();
+            }
+        }
+        self.draw_bar.end(cx);
+        if !self.state.is_empty() {
+            self.next_frame = cx.new_next_frame();
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if let Some(nf) = self.next_frame.is_event(event) {
+            let dt = (nf.time - self.last_time).clamp(0.0, 0.1);
+            self.last_time = nf.time;
+            self.time = nf.time;
+            let k = 1.0 - (-dt * 10.0).exp();
+            self.shown += (self.fraction - self.shown) * k;
+            if (self.shown - self.fraction).abs() < 1e-3 {
+                self.shown = self.fraction;
+            }
+            self.area.redraw(cx);
+        }
     }
 }
 
@@ -1070,15 +1848,15 @@ impl AppView {
             Layout {
                 flow: Flow::Down,
                 padding: Inset {
-                    left: 8.0,
-                    right: 8.0,
-                    top: 4.0,
-                    bottom: 8.0,
+                    left: 12.0,
+                    right: 12.0,
+                    top: 6.0,
+                    bottom: 12.0,
                 },
                 ..Layout::default()
             },
         );
-        let header = cx.walk_turtle(Walk::fixed(width - 16.0, 22.0));
+        let header = cx.walk_turtle(Walk::fixed(width - 24.0, 22.0));
         let title = node
             .doc
             .clone()
@@ -1089,7 +1867,7 @@ impl AppView {
             faces.draw_face(cx, &node.id, Walk::fill_fit());
         } else {
             let text = param_text(node, "default");
-            let rect = cx.walk_turtle(Walk::fixed(width - 16.0, 20.0));
+            let rect = cx.walk_turtle(Walk::fixed(width - 24.0, 20.0));
             self.draw_text.draw_abs(cx, rect.pos, &text);
         }
         self.draw_frame.end(cx);

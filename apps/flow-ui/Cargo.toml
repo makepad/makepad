@@ -11,3 +11,4 @@ makepad-strict-json = { path = "../../libs/strict_json" }
 makepad-flow = { path = "../../libs/flow", features = ["host"] }
 makepad-aichat = { path = "../aichat" }
 makepad-ai-services = { path = "../../libs/ai/services" }
+makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false, features = ["llm"] }

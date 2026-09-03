@@ -8,12 +8,14 @@
 //! is posted as a [`FaceBridgeCall`] action and the app acts on it on the
 //! next event dispatch.
 
+use crate::canvas::{declared_output_type, Camera, PortIcon};
 use crate::values::ValueCache;
 use makepad_code_editor::code_view::CodeView;
 use makepad_flow::{
     Graph, InstanceRow, Literal, Node, NodeTypeCatalog, PortType, ValueBytes, ValueRef,
     PRELUDE,
 };
+use makepad_widgets::fab_controls::*;
 use makepad_widgets::makepad_micro_serde::SerJson;
 use makepad_widgets::makepad_script::*;
 use makepad_widgets::widget_async::{enter_isolate, leave_isolate, CxSplashVmExt, SplashVmId};
@@ -30,27 +32,93 @@ const FACES_FILE: &str = "<flow-ui-faces>";
 const RECIPE_FILE: &str = "<makepad-flow-recipe-prelude>";
 const FLOW_INSTRUCTION_LIMIT: usize = 5_000_000;
 const HANDLER_INSTRUCTION_LIMIT: usize = 200_000;
+/// The model picker's first entry: the hub elects the box and the model.
+pub const HUB_PICKS: &str = "hub picks";
+/// The caret shown at the end of streaming text.
+const STREAM_CARET: &str = " ▌";
 
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
 
+    // A picture that fills its card: rounded corners come from the mask in
+    // the pixel shader, the height follows the picture's aspect.
+    let RoundedPicture = Image{
+        width: Fill
+        height: Fit
+        fit: ImageFit.Horizontal
+        draw_bg +: {
+            radius: uniform(16.0)
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, self.radius)
+                let c = self.get_color()
+                sdf.fill(vec4(c.rgb, c.a * self.opacity))
+                return sdf.result
+            }
+        }
+    }
+
+    let EmptyIcon = Icon{
+        visible: false
+        icon_walk: Walk{width: 26 height: Fit}
+        draw_icon +: {
+            color: #x3a3a40
+        }
+    }
+
+    let EmptyWell = RoundedView{
+        width: Fill
+        height: 150
+        flow: Down
+        align: Align{x: 0.5 y: 0.5}
+        spacing: theme.space_2
+        draw_bg +: {
+            color: #x151517
+            border_radius: 16.0
+        }
+        icon_text := EmptyIcon{
+            draw_icon +: {svg: crate_resource("self:resources/icons/text.svg")}
+        }
+        icon_image := EmptyIcon{
+            visible: true
+            draw_icon +: {svg: crate_resource("self:resources/icons/image.svg")}
+        }
+        icon_audio := EmptyIcon{
+            draw_icon +: {svg: crate_resource("self:resources/icons/audio.svg")}
+        }
+        icon_video := EmptyIcon{
+            draw_icon +: {svg: crate_resource("self:resources/icons/video.svg")}
+        }
+        icon_mesh := EmptyIcon{
+            draw_icon +: {svg: crate_resource("self:resources/icons/mesh.svg")}
+        }
+        icon_json := EmptyIcon{
+            draw_icon +: {svg: crate_resource("self:resources/icons/json.svg")}
+        }
+        icon_bytes := EmptyIcon{
+            draw_icon +: {svg: crate_resource("self:resources/icons/bytes.svg")}
+        }
+        note := Label{
+            width: Fit
+            height: Fit
+            text: "no picture yet"
+            draw_text +: {
+                color: #x6a6a72
+                text_style: theme.font_regular{font_size: 9}
+            }
+        }
+    }
+
     mod.flow.ui.ValueImageBase = #(ValueImage::register_widget(vm))
     mod.flow.ui.ValueImage = set_type_default() do mod.flow.ui.ValueImageBase{
         width: Fill
-        height: 180
+        height: Fit
         flow: Down
-        align: Align{x: 0.5 y: 0.5}
-        image := Image{
-            width: Fill
-            height: Fill
-            fit: ImageFit.Smallest
-        }
-        note := Label{
-            width: Fill
-            height: Fit
-            text: ""
-            draw_text +: {color: theme.color_text_meta}
+        cursor: MouseCursor.Hand
+        empty := EmptyWell{}
+        image := RoundedPicture{
+            visible: false
         }
     }
 
@@ -63,7 +131,10 @@ script_mod! {
             width: Fill
             height: Fit
             text: ""
-            draw_text +: {text_style: theme.font_code{}}
+            draw_text +: {
+                text_style: theme.font_code{font_size: 9}
+                color: #xc8c8cc
+            }
         }
     }
 
@@ -72,16 +143,23 @@ script_mod! {
         width: Fill
         height: Fit
         flow: Down
-        image := Image{
-            width: Fill
-            height: 180
+        cursor: MouseCursor.Hand
+        empty := EmptyWell{
+            note +: {text: "no value yet"}
+        }
+        image := RoundedPicture{
             visible: false
-            fit: ImageFit.Smallest
         }
         text := Label{
             width: Fill
             height: Fit
+            visible: false
+            margin: Inset{left: 14 right: 14 top: 12 bottom: 12}
             text: ""
+            draw_text +: {
+                color: #xd0d0d4
+                text_style: theme.font_regular{font_size: 9.5}
+            }
         }
     }
 
@@ -92,29 +170,59 @@ script_mod! {
         flow: Right
         spacing: theme.space_2
         align: Align{y: 0.5}
-        Label{text: "model"}
-        name := TextInput{
-            width: Fill
-            height: 28
-            empty_text: "hub picks"
+        Label{
+            width: 44
+            text: "model"
+            draw_text +: {
+                color: #x8a8a92
+                text_style: theme.font_regular{font_size: 9}
+            }
         }
-    }
-
-    mod.flow.ui.PortDot = RoundedView{
-        width: 10
-        height: 10
-        draw_bg +: {
-            border_radius: 5.0
-            color: theme.color_makepad
+        picker := DropDown{
+            width: Fill
+            height: 26
+            labels: ["hub picks"]
         }
     }
 }
 
-/// An image value: the PNG/JPEG bytes become the texture.
+/// An image value: the PNG/JPEG bytes become the texture; the picture fills
+/// the widget's width and a click asks the host to open it.
 #[derive(Script, ScriptHook, Widget)]
 pub struct ValueImage {
     #[deref]
     view: View,
+    #[rust]
+    loaded: bool,
+}
+
+fn empty_note(ty: PortType) -> &'static str {
+    match ty {
+        PortType::Image => "no picture yet",
+        PortType::Video => "no clip yet",
+        PortType::Audio => "no audio yet",
+        PortType::Mesh => "no mesh yet",
+        PortType::Text | PortType::Json | PortType::List | PortType::Bytes => "no value yet",
+    }
+}
+
+fn set_empty_type(view: &mut View, cx: &mut Cx, ty: PortType) {
+    let icon = PortIcon::for_type(ty);
+    for (id, visible) in [
+        (live_id!(icon_text), icon == PortIcon::Text),
+        (live_id!(icon_image), icon == PortIcon::Image),
+        (live_id!(icon_audio), icon == PortIcon::Audio),
+        (live_id!(icon_video), icon == PortIcon::Video),
+        (live_id!(icon_mesh), icon == PortIcon::Mesh),
+        (live_id!(icon_json), icon == PortIcon::Json),
+        (live_id!(icon_bytes), icon == PortIcon::Bytes),
+    ] {
+        view.widget(cx, &[live_id!(empty), id])
+            .set_visible(cx, visible);
+    }
+    view.label(cx, ids!(empty.note))
+        .set_text(cx, empty_note(ty));
+    view.redraw(cx);
 }
 
 impl Widget for ValueImage {
@@ -127,6 +235,10 @@ impl Widget for ValueImage {
 }
 
 impl ValueImage {
+    fn set_empty_type(&mut self, cx: &mut Cx, ty: PortType) {
+        set_empty_type(&mut self.view, cx, ty);
+    }
+
     pub fn set_value(&mut self, cx: &mut Cx, value: &ValueBytes) {
         let image = self.view.image(cx, ids!(image));
         let loaded = if value.content_type.contains("jpeg") || value.content_type.contains("jpg") {
@@ -134,17 +246,28 @@ impl ValueImage {
         } else {
             image.load_png_from_data(cx, &value.bytes)
         };
-        let note = match loaded {
-            Ok(()) => String::new(),
-            Err(error) => format!("{} · {:?}", value.content_type, error),
-        };
-        self.view.label(cx, ids!(note)).set_text(cx, &note);
+        match loaded {
+            Ok(()) => {
+                self.loaded = true;
+                image.set_visible(cx, true);
+                self.view.view(cx, ids!(empty)).set_visible(cx, false);
+            }
+            Err(error) => {
+                self.set_note(cx, &format!("{} · {:?}", value.content_type, error));
+            }
+        }
         self.view.redraw(cx);
     }
 
     pub fn set_note(&mut self, cx: &mut Cx, text: &str) {
-        self.view.label(cx, ids!(note)).set_text(cx, text);
+        if !self.loaded {
+            self.view.label(cx, ids!(empty.note)).set_text(cx, text);
+        }
         self.view.redraw(cx);
+    }
+
+    pub fn is_loaded(&self) -> bool {
+        self.loaded
     }
 }
 
@@ -182,6 +305,8 @@ pub struct ValueView {
     view: View,
     #[rust]
     value: String,
+    #[rust]
+    loaded: bool,
 }
 
 impl Widget for ValueView {
@@ -193,8 +318,14 @@ impl Widget for ValueView {
     }
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
         self.value = v.to_string();
+        if self.loaded {
+            return;
+        }
         self.view.image(cx, ids!(image)).set_visible(cx, false);
-        self.view.label(cx, ids!(text)).set_text(cx, v);
+        let text = self.view.label(cx, ids!(text));
+        text.set_text(cx, v);
+        text.set_visible(cx, !v.is_empty());
+        self.view.view(cx, ids!(empty)).set_visible(cx, v.is_empty());
         self.view.redraw(cx);
     }
     fn text(&self) -> String {
@@ -203,6 +334,10 @@ impl Widget for ValueView {
 }
 
 impl ValueView {
+    fn set_empty_type(&mut self, cx: &mut Cx, ty: PortType) {
+        set_empty_type(&mut self.view, cx, ty);
+    }
+
     pub fn set_image(&mut self, cx: &mut Cx, value: &ValueBytes) {
         let image = self.view.image(cx, ids!(image));
         let loaded = if value.content_type.contains("jpeg") || value.content_type.contains("jpg") {
@@ -212,27 +347,34 @@ impl ValueView {
         };
         match loaded {
             Ok(()) => {
+                self.loaded = true;
                 image.set_visible(cx, true);
-                self.view.label(cx, ids!(text)).set_text(cx, "");
+                self.view.label(cx, ids!(text)).set_visible(cx, false);
+                self.view.view(cx, ids!(empty)).set_visible(cx, false);
             }
             Err(error) => {
                 image.set_visible(cx, false);
-                self.view
-                    .label(cx, ids!(text))
-                    .set_text(cx, &format!("{} · {:?}", value.content_type, error));
+                self.set_text(cx, &format!("{} · {:?}", value.content_type, error));
             }
         }
         self.view.redraw(cx);
     }
+
+    pub fn is_loaded(&self) -> bool {
+        self.loaded
+    }
 }
 
-/// The model name: free text in v1 (the catalog carries no model list).
+/// The model name as a dropdown over the hub's live list; the first entry
+/// is always "hub picks" (an empty `model` param).
 #[derive(Script, ScriptHook, Widget)]
 pub struct ModelPicker {
     #[deref]
     view: View,
     #[rust]
     value: String,
+    #[rust]
+    models: Vec<String>,
 }
 
 impl Widget for ModelPicker {
@@ -244,10 +386,48 @@ impl Widget for ModelPicker {
     }
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
         self.value = v.to_string();
-        self.view.text_input(cx, ids!(name)).set_text(cx, v);
+        self.sync_labels(cx);
     }
     fn text(&self) -> String {
         self.value.clone()
+    }
+}
+
+impl ModelPicker {
+    /// The hub's models for this node's domain; the current value stays
+    /// selectable even when the list does not carry it.
+    pub fn set_models(&mut self, cx: &mut Cx, models: Vec<String>) {
+        if self.models != models {
+            self.models = models;
+            self.sync_labels(cx);
+        }
+    }
+
+    fn sync_labels(&mut self, cx: &mut Cx) {
+        let mut labels = vec![HUB_PICKS.to_string()];
+        labels.extend(self.models.iter().cloned());
+        if !self.value.is_empty() && !labels.iter().any(|label| *label == self.value) {
+            labels.push(self.value.clone());
+        }
+        let picker = self.view.drop_down(cx, ids!(picker));
+        picker.set_labels(cx, labels);
+        let selected = if self.value.is_empty() {
+            HUB_PICKS.to_string()
+        } else {
+            self.value.clone()
+        };
+        picker.set_selected_by_label(&selected, cx);
+        self.view.redraw(cx);
+    }
+
+    /// The label the user picked, as the `model` param value.
+    pub fn picked(&self, cx: &mut Cx, actions: &Actions) -> Option<String> {
+        let label = self.view.drop_down(cx, ids!(picker)).changed_label(actions)?;
+        Some(if label == HUB_PICKS {
+            String::new()
+        } else {
+            label
+        })
     }
 }
 
@@ -605,10 +785,14 @@ pub fn preview_text(value: &ValueRef) -> Option<String> {
             let width = fields.iter().find(|(k, _)| k == "width").map(|(_, v)| v);
             let height = fields.iter().find(|(k, _)| k == "height").map(|(_, v)| v);
             match (width, height) {
-                (Some(Literal::Num(w)), Some(Literal::Num(h))) => {
-                    Some(format!("{} {}×{} · {} bytes", value.content_type, w, h, value.bytes))
-                }
-                _ => Some(format!("{} · {} bytes", value.content_type, value.bytes)),
+                (Some(Literal::Num(w)), Some(Literal::Num(h))) => Some(format!(
+                    "{} {}×{} · {}",
+                    value.content_type,
+                    w,
+                    h,
+                    size_text(value.bytes)
+                )),
+                _ => Some(format!("{} · {}", value.content_type, size_text(value.bytes))),
             }
         }
         _ => None,
@@ -935,6 +1119,34 @@ impl FaceHost {
         if let Some(node) = graph.nodes.iter().find(|node| node.id == node_id) {
             self.fill_params_for(cx, &mounted, node);
         }
+        for show in &mounted.shows {
+            let Some(ty) = graph
+                .nodes
+                .iter()
+                .find(|node| node.id == show.node)
+                .and_then(|node| {
+                    declared_output_type(node).or_else(|| {
+                        node.outputs
+                            .iter()
+                            .find(|port| port.name == show.port)
+                            .map(|port| port.ty)
+                            .or_else(|| {
+                                node.inputs
+                                    .iter()
+                                    .find(|input| input.port == show.port)
+                                    .map(|input| input.ty)
+                            })
+                    })
+                })
+            else {
+                continue;
+            };
+            if let Some(mut image) = show.widget.borrow_mut::<ValueImage>() {
+                image.set_empty_type(cx, ty);
+            } else if let Some(mut view) = show.widget.borrow_mut::<ValueView>() {
+                view.set_empty_type(cx, ty);
+            }
+        }
         mounted
     }
 
@@ -945,10 +1157,6 @@ impl FaceHost {
         self.bridge = None;
         self.node_objects.borrow_mut().clear();
         cx.free_splash_vm(self.vm_id);
-    }
-
-    pub fn face(&self, node: &str) -> Option<&MountedFace> {
-        self.faces.get(node)
     }
 
     // -- drawing and events ---------------------------------------------------
@@ -981,8 +1189,11 @@ impl FaceHost {
     }
 
     /// Deliver an event to every mounted face (the ones on screen own the
-    /// hit; the rest see nothing they can act on).
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+    /// hit; the rest see nothing they can act on). The faces are laid out in
+    /// canvas units under the camera's transform, so pointer positions go
+    /// through the inverse camera first, and a hit they claim is written
+    /// back to the original event so the canvas does not claim it too.
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope, camera: Option<&Camera>) {
         let roots: Vec<WidgetRef> = self
             .faces
             .values()
@@ -993,11 +1204,75 @@ impl FaceHost {
         if roots.is_empty() {
             return;
         }
+        let remapped = camera.and_then(|camera| remap_event(event, camera));
+        let delivered = remapped.as_ref().unwrap_or(event);
         let entry = enter_isolate(cx, self.vm_id);
         for root in roots {
-            root.handle_event(cx, event, scope);
+            root.handle_event(cx, delivered, scope);
         }
         leave_isolate(cx, entry);
+        if let Some(remapped) = remapped.as_ref() {
+            sync_handled(event, remapped);
+        }
+    }
+
+    /// Every face's evaluation error by node: a face's own, plus the flow
+    /// file's error attributed to the node whose declaration owns that line.
+    pub fn face_errors(&self, graph: &Graph) -> HashMap<String, String> {
+        let mut out = HashMap::new();
+        for (node, face) in &self.faces {
+            if let Some(error) = face.error.as_ref() {
+                out.insert(node.clone(), error.clone());
+            }
+        }
+        if let Some(error) = self.error.as_ref() {
+            if let Some(owner) = error_owner(error, graph) {
+                out.entry(owner).or_insert_with(|| error.clone());
+            }
+        }
+        out
+    }
+
+    /// Picture widgets that were clicked → `(node, port)` to open at full size.
+    pub fn open_requests(&self, actions: &Actions) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for face in self.faces.values().chain(self.flow_face.iter()) {
+            for show in &face.shows {
+                let loaded = show
+                    .widget
+                    .borrow::<ValueImage>()
+                    .map(|image| image.is_loaded())
+                    .or_else(|| show.widget.borrow::<ValueView>().map(|view| view.is_loaded()))
+                    .unwrap_or(false);
+                if !loaded {
+                    continue;
+                }
+                let Some(action) = actions.find_widget_action(show.widget.widget_uid()) else {
+                    continue;
+                };
+                if let ViewAction::FingerUp(up) = action.cast() {
+                    if up.is_over {
+                        out.push((show.node.clone(), show.port.clone()));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The hub's model list for a node's `model` picker.
+    pub fn set_models(&mut self, cx: &mut Cx, node: &str, models: &[String]) {
+        let Some(face) = self.faces.get(node) else {
+            return;
+        };
+        for (widget, key) in &face.param_binds {
+            if key != "model" {
+                continue;
+            }
+            if let Some(mut picker) = widget.borrow_mut::<ModelPicker>() {
+                picker.set_models(cx, models.to_vec());
+            }
+        }
     }
 
     // -- filling widgets ------------------------------------------------------
@@ -1024,8 +1299,31 @@ impl FaceHost {
                 }
                 continue;
             }
+            if let Some(mut field) = widget.borrow_mut::<FabValueInput>() {
+                if let Literal::Num(number) = value {
+                    if (field.value() - *number).abs() > 1e-9 {
+                        field.set_value(cx, *number);
+                    }
+                }
+                continue;
+            }
             if let Some(text) = literal_text(value) {
                 set_widget_text(cx, widget, &text);
+            }
+        }
+        // An input's declared default fills its textbox until the instance
+        // carries a value of its own.
+        for bind in &face.binds {
+            if bind.node != node.id || bind.widget.borrow::<TextInput>().is_none() {
+                continue;
+            }
+            let text = param_text(node, "default");
+            if text.is_empty() {
+                continue;
+            }
+            let input = bind.widget.as_text_input();
+            if input.text().is_empty() {
+                input.set_text(cx, &text);
             }
         }
     }
@@ -1131,8 +1429,12 @@ impl FaceHost {
                     if let Some(value) = widget.as_slider().end_slide(actions) {
                         out.push((node.clone(), key.clone(), Literal::Num(value)));
                     }
+                } else if widget.borrow::<FabValueInput>().is_some() {
+                    if let Some(value) = widget.as_fab_value_input().ended(actions) {
+                        out.push((node.clone(), key.clone(), Literal::Num(value)));
+                    }
                 } else if widget.borrow::<ModelPicker>().is_some() {
-                    // Its inner text input is read by `model_changes`.
+                    // Its dropdown is read by `model_changes`.
                 } else if widget.borrow::<TextInput>().is_some() {
                     if let Some(text) = widget.as_text_input().changed(actions) {
                         out.push((node.clone(), key.clone(), Literal::Str(text)));
@@ -1147,15 +1449,16 @@ impl FaceHost {
         out
     }
 
-    /// A ModelPicker's inner text input changed → `(node, key, text)`.
+    /// A ModelPicker's dropdown changed → `(node, key, model id)`.
     pub fn model_changes(&self, cx: &mut Cx, actions: &Actions) -> Vec<(String, String, Literal)> {
         let mut out = Vec::new();
         for (node, face) in &self.faces {
             for (widget, key) in &face.param_binds {
-                if widget.borrow::<ModelPicker>().is_some() {
-                    if let Some(text) = widget.text_input(cx, ids!(name)).changed(actions) {
-                        out.push((node.clone(), key.clone(), Literal::Str(text)));
-                    }
+                let picked = widget
+                    .borrow::<ModelPicker>()
+                    .and_then(|picker| picker.picked(cx, actions));
+                if let Some(text) = picked {
+                    out.push((node.clone(), key.clone(), Literal::Str(text)));
                 }
             }
         }
@@ -1183,7 +1486,7 @@ impl FaceHost {
             .filter(|_| !value.ty.is_media())
             .map(|bytes| String::from_utf8_lossy(&bytes.bytes).into_owned())
             .or_else(|| preview_text(value))
-            .unwrap_or_else(|| format!("{} · {} bytes", value.content_type, value.bytes));
+            .unwrap_or_else(|| format!("{} · {}", value.content_type, size_text(value.bytes)));
         let mut hooks = Vec::new();
         for (id, face) in self.faces.iter().chain(
             self.flow_face
@@ -1298,11 +1601,12 @@ impl FaceHost {
         let key = (node.to_string(), port.to_string());
         let full = self.deltas.entry(key).or_default();
         full.push_str(text);
-        let full = full.clone();
+        let mut shown = full.clone();
+        shown.push_str(STREAM_CARET);
         for face in self.faces.values().chain(self.flow_face.iter()) {
             for show in &face.shows {
                 if show.node == node && show.port == port {
-                    set_widget_text(cx, &show.widget, &full);
+                    set_widget_text(cx, &show.widget, &shown);
                 }
             }
         }
@@ -1398,6 +1702,32 @@ pub fn param_text(node: &Node, name: &str) -> String {
         "run" => node.fn_src.clone().unwrap_or_default(),
         "ui" => node.face_src.clone().unwrap_or_default(),
         "domain" => node.domain.clone().unwrap_or_default(),
+        // One line for a gen node's picture params: `1024 × 1024 · 8 steps · seed 7 · hub picks`.
+        "summary" => {
+            let mut parts = Vec::new();
+            let num = |key: &str| match node_param(node, key) {
+                Some(Literal::Num(value)) => Some(*value as i64),
+                _ => None,
+            };
+            if let (Some(w), Some(h)) = (num("width"), num("height")) {
+                parts.push(format!("{w} × {h}"));
+            }
+            if let Some(steps) = num("steps") {
+                parts.push(format!("{steps} steps"));
+            }
+            if let Some(seed) = num("seed") {
+                parts.push(format!("seed {seed}"));
+            }
+            if let Some(seconds) = num("seconds") {
+                parts.push(format!("{seconds} s"));
+            }
+            let model = node_param(node, "model")
+                .and_then(literal_text)
+                .filter(|text| !text.is_empty())
+                .unwrap_or_else(|| HUB_PICKS.to_string());
+            parts.push(model);
+            parts.join(" · ")
+        }
         _ => match node_param(node, name) {
             Some(value) => literal_text(value).unwrap_or_default(),
             None => match node.inputs.iter().find(|input| input.port == name) {
@@ -1434,4 +1764,118 @@ fn set_widget_text(cx: &mut Cx, widget: &WidgetRef, text: &str) {
         return;
     }
     widget.set_text(cx, text);
+}
+
+// ---------------------------------------------------------------------------
+// Camera-mapped events
+// ---------------------------------------------------------------------------
+
+/// A pointer event with its positions mapped through the inverse camera, for
+/// faces laid out in canvas units; `None` for events without positions.
+fn remap_event(event: &Event, camera: &Camera) -> Option<Event> {
+    Some(match event {
+        Event::MouseDown(e) => {
+            let mut e = e.clone();
+            e.abs = camera.screen_to_local(e.abs);
+            Event::MouseDown(e)
+        }
+        Event::MouseMove(e) => {
+            let mut e = e.clone();
+            e.abs = camera.screen_to_local(e.abs);
+            Event::MouseMove(e)
+        }
+        Event::MouseUp(e) => {
+            let mut e = e.clone();
+            e.abs = camera.screen_to_local(e.abs);
+            Event::MouseUp(e)
+        }
+        Event::MouseLeave(e) => {
+            let mut e = e.clone();
+            e.abs = camera.screen_to_local(e.abs);
+            Event::MouseLeave(e)
+        }
+        Event::Scroll(e) => {
+            let mut e = e.clone();
+            e.abs = camera.screen_to_local(e.abs);
+            Event::Scroll(e)
+        }
+        Event::LongPress(e) => {
+            let mut e = e.clone();
+            e.abs = camera.screen_to_local(e.abs);
+            Event::LongPress(e)
+        }
+        Event::TouchUpdate(e) => {
+            let mut e = e.clone();
+            for touch in &mut e.touches {
+                touch.abs = camera.screen_to_local(touch.abs);
+            }
+            Event::TouchUpdate(e)
+        }
+        _ => return None,
+    })
+}
+
+/// A hit the faces claimed on the mapped clone is a hit on the original.
+fn sync_handled(original: &Event, remapped: &Event) {
+    match (original, remapped) {
+        (Event::MouseDown(a), Event::MouseDown(b)) => {
+            if a.handled.get().is_empty() {
+                a.handled.set(b.handled.get());
+            }
+        }
+        (Event::MouseMove(a), Event::MouseMove(b)) => {
+            if a.handled.get().is_empty() {
+                a.handled.set(b.handled.get());
+            }
+        }
+        (Event::MouseLeave(a), Event::MouseLeave(b)) => {
+            if a.handled.get().is_empty() {
+                a.handled.set(b.handled.get());
+            }
+        }
+        (Event::Scroll(a), Event::Scroll(b)) => {
+            if b.handled_x.get() {
+                a.handled_x.set(true);
+            }
+            if b.handled_y.get() {
+                a.handled_y.set(true);
+            }
+        }
+        (Event::TouchUpdate(a), Event::TouchUpdate(b)) => {
+            for (x, y) in a.touches.iter().zip(b.touches.iter()) {
+                if x.handled.get().is_empty() {
+                    x.handled.set(y.handled.get());
+                }
+                if x.sweep_lock.get().is_empty() {
+                    x.sweep_lock.set(y.sweep_lock.get());
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The node whose declaration owns the line an `file:line:col: message`
+/// error points at: the last node declared at or before it.
+fn error_owner(error: &str, graph: &Graph) -> Option<String> {
+    let mut parts = error.splitn(4, ':');
+    let _file = parts.next()?;
+    let line: u32 = parts.next()?.trim().parse().ok()?;
+    graph
+        .nodes
+        .iter()
+        .filter(|node| node.loc.line <= line)
+        .max_by_key(|node| node.loc.line)
+        .map(|node| node.id.clone())
+}
+
+/// `235 KB`, `1.2 MB`, `640 B`.
+pub fn size_text(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{} KB", bytes / 1024)
+    } else {
+        format!("{bytes} B")
+    }
 }

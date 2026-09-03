@@ -102,6 +102,24 @@ script_mod! {
                     }
                 }
             }
+            EventRow := Row{
+                margin: Inset{left: 10 right: 10 top: 5 bottom: 5}
+                padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                draw_bg +: { color: theme.color_bg_container }
+                event_title := Line{
+                    draw_text +: {
+                        color: theme.color_text_hl
+                        text_style: theme.font_bold{font_size: 8.5}
+                    }
+                }
+                event_text := Line{}
+                event_meta := Line{
+                    draw_text +: {
+                        color: theme.color_text_meta
+                        text_style: theme.font_regular{font_size: 8.0}
+                    }
+                }
+            }
             AssistantRow := Row{
                 assistant_md := Markdown{
                     width: Fill
@@ -273,6 +291,7 @@ impl AiChatPanel {
     /// and no host pays it before the person opens the pane.
     fn ensure_engine(&mut self) -> &mut EngineCore {
         if self.engine.is_none() {
+            let lease_id = self.widget_uid().0;
             let settings = self.settings().clone();
             // The real models ride the `engine` feature; a build without a
             // runtime (the web page) says so and keeps the tool console.
@@ -287,7 +306,7 @@ impl AiChatPanel {
             #[cfg(not(feature = "engine"))]
             let (model, rows): (Box<dyn makepad_ai_services::Model>, Vec<ProviderRow>) =
                 (Box::new(NoModelWithReason::new("this build has no model runtime")), Vec::new());
-            let mut core = EngineCore::new(self.registry.clone(), model, None);
+            let mut core = EngineCore::new(self.registry.clone(), model, None, lease_id);
             // The state is the panel's window into the core; the core owns
             // it, so provider facts go in through the core.
             core.set_provider_facts(settings.provider.clone(), rows, settings.local_only);
@@ -349,6 +368,17 @@ impl AiChatPanel {
     }
 }
 
+impl Drop for AiChatPanel {
+    fn drop(&mut self) {
+        // The engine only enqueues Unsubscribe frames. Flush them while the
+        // hosted bus and registry still exist; field destruction is too late.
+        if let Some(engine) = self.engine.as_mut() {
+            engine.shutdown();
+        }
+        self.bus.relay_down(&self.registry);
+    }
+}
+
 impl Widget for AiChatPanel {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if let Event::Custom(json) = event {
@@ -385,7 +415,9 @@ impl Widget for AiChatPanel {
                     EngineEvent::Confirm { .. } => changed = true,
                 }
             }
-            busy = engine.state().status.is_busy() || matches!(engine.state().status, Status::Loading { .. });
+            busy = engine.needs_pump()
+                || engine.state().status.is_busy()
+                || matches!(engine.state().status, Status::Loading { .. });
         }
         self.bus.relay_down(&self.registry);
         if changed {
@@ -419,6 +451,24 @@ impl Widget for AiChatPanel {
                     Entry::User { text } => {
                         let row = list.item(cx, index, id!(UserRow));
                         row.label(cx, ids!(user_text)).set_text(cx, text);
+                        row
+                    }
+                    Entry::Event(event) => {
+                        let row = list.item(cx, index, id!(EventRow));
+                        row.label(cx, ids!(event_title))
+                            .set_text(cx, &format!("→ {} · {}", event.service_label, event.topic));
+                        row.label(cx, ids!(event_text)).set_text(cx, &event.text);
+                        let mut meta = format!("sub_id: {}", event.sub_id);
+                        if event.dropped != 0 {
+                            meta.push_str(&format!(" · dropped: {}", event.dropped));
+                        }
+                        if event.final_ {
+                            meta.push_str(" · final");
+                        }
+                        if let Some(data) = &event.data {
+                            meta.push_str(&format!("\n{data}"));
+                        }
+                        row.label(cx, ids!(event_meta)).set_text(cx, &meta);
                         row
                     }
                     Entry::Assistant { text, streaming: false } => {

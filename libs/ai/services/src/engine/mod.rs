@@ -25,7 +25,10 @@ pub mod registry;
 #[cfg(feature = "engine")]
 pub mod models;
 
-pub use core::{EngineCore, EngineEvent, DOCTRINE};
+pub use core::{
+    EngineCore, EngineEvent, DOCTRINE, MAX_SUBSCRIPTIONS, MAX_SUBSCRIPTION_QUEUE,
+    WAKE_INTERVAL_SECS,
+};
 pub use no_model::{NoModel, NoModelWithReason};
 pub use registry::{RegistryUp, ServiceRegistry, MAX_INSTANCES};
 

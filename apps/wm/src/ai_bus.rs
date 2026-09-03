@@ -87,7 +87,26 @@ impl AiBus {
 
     /// An in-process instance's answer, as a frame for the pane.
     pub fn local_reply(&self, client: ClientId, result: ToolResult) -> String {
-        HostedUp { from: Some(self.endpoint_for(client)), msg: ServiceUp::Result(result) }.to_json()
+        self.local_up(client, ServiceUp::Result(result))
+    }
+
+    /// An in-process instance's asynchronous publication, stamped with the
+    /// same module endpoint as its call results.
+    pub fn local_message(&self, client: ClientId, sub_id: String, message: Message) -> String {
+        self.local_up(
+            client,
+            ServiceUp::Message {
+                sub_id,
+                topic: message.topic,
+                text: message.text,
+                data: message.data,
+                final_: message.final_,
+            },
+        )
+    }
+
+    fn local_up(&self, client: ClientId, msg: ServiceUp) -> String {
+        HostedUp { from: Some(self.endpoint_for(client)), msg }.to_json()
     }
 
     pub fn local_clients(&self) -> Vec<ClientId> {
@@ -259,6 +278,8 @@ impl AiBus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use makepad_ai_services::engine::{RegistryUp, ServiceRegistry};
+    use makepad_ai_services::port::ServiceLink;
 
     fn files() -> ServiceManifest {
         ServiceManifest::new("files", "Files", "The file browser.").with_tool(ToolDef::new(
@@ -329,6 +350,79 @@ mod tests {
     }
 
     #[test]
+    fn pubsub_frames_cross_the_hosted_bus_in_both_directions() {
+        let mut bus = AiBus { pane_client: Some(9), ..Default::default() };
+        let manifest = files().with_topic(TopicDef::new("changes", "File changes."));
+        let register = HostedUp {
+            from: None,
+            msg: ServiceUp::Register { manifest: manifest.clone(), port_tag: 0 },
+        };
+        let register = match bus.on_custom(4, &register.to_json()) {
+            Route::ToPane(json) => HostedUp::parse(&json).expect("valid registration"),
+            _ => panic!("expected the registration to reach the pane"),
+        };
+
+        // This is the aichat side of the same bridge: the registry owns
+        // the engine half and the WM endpoint remains its routing identity.
+        let registry = ServiceRegistry::new();
+        let endpoint = EndpointId("w4".into());
+        let (link, host) = ServiceLink::pair(manifest);
+        registry.register_as(link, endpoint.clone(), "hosted by wm", None).unwrap();
+        host.up.send(register).unwrap();
+        assert!(registry.pump().is_empty());
+        let _registered = host.down.try_recv().expect("registry acknowledgement");
+
+        assert!(registry.send(
+            &endpoint,
+            ServiceDown::Subscribe {
+                sub_id: "s1".into(),
+                topic: "changes".into(),
+                filter: Some(r#"{"kind":"done"}"#.into()),
+            },
+        ));
+        let subscribe = host.down.try_recv().expect("subscription from engine");
+        let routed = match bus.on_custom(9, &subscribe.to_json()) {
+            Route::ToClient(4, json) => HostedDown::parse(&json).expect("valid down-frame"),
+            _ => panic!("expected the subscription to reach client 4"),
+        };
+        assert_eq!(routed, subscribe);
+
+        assert!(registry.send(&endpoint, ServiceDown::Unsubscribe { sub_id: "s1".into() }));
+        let unsubscribe = host.down.try_recv().expect("unsubscription from engine");
+        let routed = match bus.on_custom(9, &unsubscribe.to_json()) {
+            Route::ToClient(4, json) => HostedDown::parse(&json).expect("valid down-frame"),
+            _ => panic!("expected the unsubscription to reach client 4"),
+        };
+        assert_eq!(routed, unsubscribe);
+
+        let message = HostedUp {
+            from: Some(EndpointId("forged".into())),
+            msg: ServiceUp::Message {
+                sub_id: "s1".into(),
+                topic: "changes".into(),
+                text: "finished".into(),
+                data: Some(r#"{"rows":3}"#.into()),
+                final_: true,
+            },
+        };
+        let message = match bus.on_custom(4, &message.to_json()) {
+            Route::ToPane(json) => HostedUp::parse(&json).expect("valid up-frame"),
+            _ => panic!("expected the message to reach the pane"),
+        };
+        assert_eq!(message.from, Some(endpoint.clone()));
+        host.up.send(message).unwrap();
+        assert!(matches!(
+            registry.pump().as_slice(),
+            [RegistryUp::Message { endpoint: from, sub_id, message }]
+                if from == &endpoint
+                    && sub_id == "s1"
+                    && message.topic == "changes"
+                    && message.text == "finished"
+                    && message.final_
+        ));
+    }
+
+    #[test]
     fn os_arguments_are_strings_or_nothing() {
         let c = call("open", r#"{"path":"  /tmp/a b.png ","app":"Image"}"#);
         assert_eq!(AiBus::str_arg(&c, "path").as_deref(), Some("/tmp/a b.png"));
@@ -386,6 +480,15 @@ mod local_tests {
         let reply = bus.local_reply(4, ToolResult::ok("c1", "Sheet 1", ""));
         let up = HostedUp::parse(&reply).unwrap();
         assert_eq!(up.from, Some(EndpointId("m4".into())));
+        let publication = bus.local_message(4, "lease-s1".into(), Message::new("watch", "changed"));
+        let up = HostedUp::parse(&publication).unwrap();
+        assert!(matches!(
+            up,
+            HostedUp {
+                from: Some(EndpointId(ref from)),
+                msg: ServiceUp::Message { ref sub_id, ref text, .. },
+            } if from == "m4" && sub_id == "lease-s1" && text == "changed"
+        ));
         // ChatOpen goes to process clients only; the host tells locals itself.
         assert!(bus.chat_open_frames(true).is_empty());
         // Death: an Unregister from the local endpoint, then nothing.

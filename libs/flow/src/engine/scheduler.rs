@@ -1,7 +1,7 @@
 use super::executors::ask::AskExecutor;
 use super::executors::chat::ChatExecutor;
 use super::executors::func::FuncExecutor;
-use super::executors::gen::{unsupported_params, GenExecutor};
+use super::executors::gen::{unsupported_params, GenExecutor, UsedProviders};
 use super::executors::http::HttpExecutor;
 use super::executors::input::InputExecutor;
 use super::executors::output::OutputExecutor;
@@ -69,6 +69,7 @@ pub(crate) fn run(
 ) {
     let started = Instant::now();
     let graph = &input.graph;
+    let used_providers = UsedProviders::default();
     let http_log = Arc::new(Mutex::new(Vec::<HttpLogEntry>::new()));
     if let Some(invalid) = input.outputs.as_ref().and_then(|outputs| {
         outputs.iter().find(|output| {
@@ -119,6 +120,7 @@ pub(crate) fn run(
                 executor.cancel();
                 states.insert(node.clone(), NodeState::Cancelled);
             }
+            used_providers.bye_all();
             finish(
                 &events,
                 RunState::Cancelled,
@@ -161,7 +163,16 @@ pub(crate) fn run(
                     continue;
                 }
             };
-            match start_executor(node, &resolved, vm, &seams, &input.origin, &policy, &http_log) {
+            match start_executor(
+                node,
+                &resolved,
+                vm,
+                &seams,
+                &input.origin,
+                &policy,
+                &http_log,
+                &used_providers,
+            ) {
                 Ok((executor, waiting)) => {
                     if waiting {
                         states.insert(node_id.clone(), NodeState::Waiting);
@@ -316,6 +327,7 @@ fn start_executor(
     origin: &(String, u64),
     policy: &NetPolicy,
     http_log: &Arc<Mutex<Vec<HttpLogEntry>>>,
+    used_providers: &UsedProviders,
 ) -> Result<(ActiveExecutor, bool), String> {
     match node.kind.as_str() {
         "input" => {
@@ -334,7 +346,11 @@ fn start_executor(
             Ok((ActiveExecutor::Chat(executor), false))
         }
         "gen" => {
-            let mut executor = GenExecutor::new(seams.gen.clone(), origin.clone());
+            let mut executor = GenExecutor::with_used_providers(
+                seams.gen.clone(),
+                origin.clone(),
+                used_providers.clone(),
+            );
             executor.start(node, inputs)?;
             Ok((ActiveExecutor::Gen(executor), false))
         }

@@ -2,7 +2,8 @@ use super::http::{HttpClient, Method};
 use crate::{
     CreateFromTemplateRequest, CreateInstanceRequest, CreateInstanceResponse, CreateRunResponse,
     EvalError, EventsPage, FlowDefinition, FlowSummary, Graph, Health, InstanceRow, NodesResponse,
-    PutFlowResponse, RunRowDto, SetInputsResponse, TemplateResponse, TemplateSummary, ValueBytes,
+    ModelsResponse, PutFlowResponse, RunRowDto, SetInputsResponse, TemplateResponse,
+    TemplateSummary, ValueBytes,
 };
 use makepad_micro_serde::{DeJson, SerJson};
 use makepad_strict_json::Value;
@@ -155,9 +156,20 @@ impl FlowClient {
         decode(&body, "template response")
     }
 
+    /// The hub fleet's live models, optionally for one domain (`image`,
+    /// `video`, …). Additive for flow-ui's model picker (lane F8b serves it).
     pub fn nodes_catalog(&self) -> ClientResult<NodesResponse> {
         let body = self.call(Method::Get, "/v1/nodes", None, true, None)?;
         decode(&body, "node catalog")
+    }
+
+    pub fn models(&self, domain: Option<&str>) -> ClientResult<ModelsResponse> {
+        let target = match domain {
+            Some(domain) => format!("/v1/models?domain={}", model_domain(domain)?),
+            None => "/v1/models".to_string(),
+        };
+        let body = self.call(Method::Get, &target, None, true, None)?;
+        decode(&body, "model list")
     }
 
     pub fn flows(&self) -> ClientResult<Vec<FlowSummary>> {
@@ -528,6 +540,18 @@ fn flow_name(name: &str) -> ClientResult<&str> {
         return Err(ClientError::Protocol("invalid flow name".into()));
     }
     Ok(name)
+}
+
+fn model_domain(domain: &str) -> ClientResult<&str> {
+    if domain.is_empty()
+        || domain.len() > 64
+        || !domain
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+    {
+        return Err(ClientError::Protocol("invalid model domain".into()));
+    }
+    Ok(domain)
 }
 
 fn instances_target(flow: Option<&str>, waiting: bool) -> ClientResult<String> {

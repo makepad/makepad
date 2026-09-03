@@ -1,7 +1,11 @@
 // integration notes
-// F3 supplies the canvas, faces, inspector, source/App views, and running list.
-// F4 supplies `services` and the aichat port/event/worker wiring retained here.
-// The client keeps typed instance/run/value methods plus `_json` render projections.
+// F3 supplied the canvas, faces, inspector, source/App views and running list;
+// F4 supplied `services` (the aichat bridge) and the port/event/worker wiring
+// kept here; F3b rewrote the canvas (transform camera, cards, progress bars),
+// the faces and the panels, and added the menu bar, the toolbar with the
+// run's total bar, the template picker behind New, the hub model lists and the
+// dev-only `FLOW_GEN_BASE_URL` seam. The client keeps typed instance/run/value
+// methods plus `_json` render projections; `FlowClient::models` is additive.
 
 mod services;
 
@@ -12,6 +16,7 @@ mod canvas;
 mod faces;
 mod graph_edit;
 mod panels;
+mod testpattern;
 mod values;
 
 use canvas::{CanvasEdit, FlowCanvas, FlowCanvasAction, NodeStatus};
@@ -21,16 +26,20 @@ use makepad_flow::client::{
     SessionConnector, SessionStatus, SubscriptionEvent,
 };
 use makepad_flow::embed::{default_root, resolve, EmbedPolicy, Resolved};
+use makepad_flow::engine::{FixedGen, HubChat, HubHttp, Seams};
 use makepad_flow::host::{FlowServer, FlowServerConfig};
 use makepad_flow::{
     CreateInstanceRequest, CreateInstanceResponse, CreateRunResponse, Event as FlowEvent,
-    FlowDefinition, FlowSummary, Graph, InstanceRow, Literal, NodeTypeCatalog, NodesResponse,
-    PortType, PutFlowResponse, ValueRef,
+    FlowDefinition, FlowSummary, Graph, InstanceRow, Literal, ModelsResponse, NodeTypeCatalog,
+    NodesResponse, PortType, PutFlowResponse, TemplateSummary, ValueRef,
 };
 use makepad_widgets::makepad_draw::text::selection::Cursor;
 use makepad_widgets::makepad_platform::thread::SignalToUI;
 use makepad_widgets::*;
-use panels::{AppView, Inspector, InspectorAction, Palette, PaletteAction, RunningAction, RunningList};
+use panels::{
+    AppView, FlowList, Inspector, InspectorAction, Palette, PaletteAction, RunBar, RunningAction,
+    RunningList, TemplatePicker,
+};
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -38,188 +47,299 @@ use values::ValueCache;
 
 app_main!(App);
 
-const EXAMPLE_FLOW_SOURCE: &str = r#"use mod.flow.*
+/// The template the app starts from when the root is empty.
+const FIRST_TEMPLATE: &str = "prompt-to-image";
+/// How often the hub's model lists are refreshed while a flow with generators is open.
+const MODELS_REFRESH_SECS: f64 = 10.0;
 
-/** What to paint. */
-let prompt = Input{ type: @text  default: "a lighthouse at dusk"  at: vec2(40, 120) }
+const HELP_SHORTCUTS: &str = "⌘N  new flow from a template
+⌘O  open the next flow
+⌘S  save the source pane
+⌘Z / ⇧⌘Z  undo / redo a graph edit
+⌘⌫  delete the selected node
+⌘D  duplicate the selected node
+⌘R  run · ⌘.  cancel · ⌥⌘R  run to the selected node
+⌘1 / ⌘2 / ⌘3  canvas · app view · source
+⌘= / ⌘-  zoom in / out · ⌘0  100 % · Home  fit
+drag empty canvas to pan · wheel to zoom at the cursor
+drag from a port to wire it · drag a palette card onto the canvas";
 
-let expand = Llm{
-    system: "Rewrite the prompt as one vivid paragraph for an image model.
-             Keep the subject. Add light, lens, material, mood. No lists."
-    prompt: prompt.text()
-    at: vec2(360, 120)
-}
-
-let styled = Fn{
-    in: { text: expand.text()  style: "photo" }
-    out: [@text]
-    run: |i| { {text: i.text + ", " + i.style + " style"} }
-    at: vec2(680, 120)
-}
-
-let image = Image{
-    prompt: styled.text()
-    width: 1024  height: 1024  steps: 8
-    at: vec2(1000, 120)
-    ui: ImageFace{
-        style := DropDown{ labels: ["photo", "anime", "oil paint"]  bind := "styled.style" }
-    }
-}
-
-/** The finished picture. */
-let picture = Output{ type: @image  value: image.image() }
-
-Flow{
-    label: "Prompt to image"
-    brief: "Expands a short prompt into a rich one and paints it."
-    prompt, expand, styled, image, picture
-}
-"#;
-
-const EMPTY_FLOW_SOURCE: &str = r#"use mod.flow.*
-
-Flow{
-    label: "New flow"
-    brief: ""
-}
-"#;
+const HELP_ABOUT: &str = "Flow — makepad's canvas for AI pipelines.
+Every node runs on the hub fleet; the file is the truth and this window is a view of it.
+The flow server runs embedded in this window unless another one already serves the root.";
 
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
 
-    mod.widgets.FlowListBase = #(FlowList::register_widget(vm))
-    mod.widgets.FlowList = set_type_default() do mod.widgets.FlowListBase{
+    let SectionTitle = Label{
         width: Fill
-        height: Fill
-        list := PortalList{
-            width: Fill
-            height: Fill
-            scroll_bar: ScrollBar{}
-            Item := View{
-                width: Fill
-                height: 30
-                flow: Right
-                spacing: theme.space_2
-                padding: theme.mspace_1
-                align: Align{y: 0.5}
-                state_dot := Label{
-                    width: 12
-                    text: "●"
-                }
-                select := ButtonFlatter{
-                    width: Fill
-                    text: ""
-                }
-            }
+        height: Fit
+        margin: Inset{top: 6 bottom: 2}
+        text: ""
+        draw_text +: {
+            color: #x6e6e76
+            text_style: theme.font_bold{font_size: 8.5}
         }
     }
 
-    let Column = SolidView{
-        width: 220
+    let Panel = RoundedView{
         height: Fill
         flow: Down
-        padding: theme.mspace_2
+        padding: Inset{left: 10 right: 10 top: 8 bottom: 10}
+        spacing: theme.space_1
+        show_bg: true
+        draw_bg +: {
+            color: #x161618
+            border_radius: 12.0
+            border_size: 1.0
+            border_color: #x232327
+        }
+    }
+
+    let ToolText = Label{
+        width: Fit
+        height: Fit
+        text: ""
+        draw_text +: {
+            color: #x8a8a92
+            text_style: theme.font_regular{font_size: 9.5}
+        }
+    }
+
+    let HelpPanel = RoundedView{
+        width: 560
+        height: Fit
+        flow: Down
         spacing: theme.space_2
-        draw_bg +: {color: theme.color_bg_container}
+        padding: Inset{left: 16 right: 16 top: 12 bottom: 14}
+        show_bg: true
+        draw_bg +: {
+            color: #x1c1c1f
+            border_radius: 14.0
+            border_size: 1.0
+            border_color: #x33333a
+        }
     }
 
     startup() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
                 window.title: "Flow"
-                window.inner_size: vec2(1500, 940)
-                pass.clear_color: theme.color_bg_app
+                window.inner_size: vec2(1800, 1000)
+                pass.clear_color: #x0f0f10
                 body +: {
                     width: Fill
                     height: Fill
                     flow: Down
 
-                    SolidView{
+                    menu_bar := MenuBar{
+                        menus: [
+                            {label: "File" items: [
+                                {id: @new_from_template label: "New from template…" shortcut: "Cmd+N"}
+                                {id: @open_flow label: "Open next flow" shortcut: "Cmd+O"}
+                                {id: @save label: "Save source" shortcut: "Cmd+S"}
+                                {id: @revert label: "Revert last edit"}
+                                {sep: true}
+                                {id: @delete_flow label: "Delete flow"}
+                                {sep: true}
+                                {id: @quit label: "Quit" shortcut: "Cmd+Q"}
+                            ]}
+                            {label: "Edit" items: [
+                                {id: @undo label: "Undo" shortcut: "Cmd+Z"}
+                                {id: @redo label: "Redo" shortcut: "Shift+Cmd+Z"}
+                                {sep: true}
+                                {id: @delete_node label: "Delete node" shortcut: "Cmd+Backspace"}
+                                {id: @select_all label: "Select all" shortcut: "Cmd+A"}
+                                {id: @duplicate label: "Duplicate node" shortcut: "Cmd+D"}
+                            ]}
+                            {label: "View" items: [
+                                {id: @view_canvas label: "Canvas" shortcut: "Cmd+1"}
+                                {id: @view_app label: "App view" shortcut: "Cmd+2"}
+                                {id: @view_source label: "Source" shortcut: "Cmd+3"}
+                                {id: @view_inspector label: "Inspector" shortcut: "Cmd+I"}
+                                {sep: true}
+                                {id: @toggle_left label: "Flows, Running and Palette" shortcut: "Cmd+L"}
+                                {sep: true}
+                                {id: @zoom_in label: "Zoom in" shortcut: "Cmd+Plus"}
+                                {id: @zoom_out label: "Zoom out" shortcut: "Cmd+Minus"}
+                                {id: @zoom_fit label: "Fit" shortcut: "Home"}
+                                {id: @zoom_100 label: "100 %" shortcut: "Cmd+0"}
+                            ]}
+                            {label: "Run" items: [
+                                {id: @run label: "Run" shortcut: "Cmd+R"}
+                                {id: @cancel label: "Cancel" shortcut: "Cmd+Period"}
+                                {id: @run_to_node label: "Run to selected node" shortcut: "Alt+Cmd+R"}
+                            ]}
+                            {label: "Help" items: [
+                                {id: @help_shortcuts label: "Keyboard shortcuts" shortcut: "F1"}
+                                {id: @help_language label: "Flow language cheat sheet"}
+                                {sep: true}
+                                {id: @help_about label: "About Flow"}
+                            ]}
+                        ]
+                    }
+
+                    toolbar := RoundedView{
                         width: Fill
-                        height: 38
+                        height: 46
                         flow: Right
                         spacing: theme.space_2
-                        padding: theme.mspace_2
+                        padding: Inset{left: 12 right: 12 top: 6 bottom: 6}
+                        margin: Inset{left: 8 right: 8 top: 4 bottom: 4}
                         align: Align{y: 0.5}
-                        draw_bg +: {color: theme.color_bg_container}
-                        status_chip := Label{
-                            width: 230
-                            text: "Discovering"
+                        show_bg: true
+                        draw_bg +: {
+                            color: #x161618
+                            border_radius: 12.0
+                            border_size: 1.0
+                            border_color: #x232327
                         }
+                        status_dot := RoundedView{
+                            width: 8
+                            height: 8
+                            draw_bg +: {
+                                border_radius: 4.0
+                                color: #x8a8a92
+                            }
+                        }
+                        status_chip := ToolText{text: "Discovering"}
                         flow_name := Label{
-                            width: 260
-                            text: "No flow selected"
+                            width: Fit
+                            height: Fit
+                            margin: Inset{left: 10}
+                            text: "No flow open"
+                            draw_text +: {
+                                color: #xe8e8ec
+                                text_style: theme.font_bold{font_size: 11}
+                            }
                         }
+                        instance_chip := ToolText{}
+                        View{width: 10 height: 1}
                         run_btn := Button{text: "▶ Run"}
-                        cancel_btn := Button{text: "Cancel"}
-                        run_state := Label{
-                            width: Fill
-                            text: ""
-                        }
-                        undo_btn := ButtonFlat{text: "Undo"}
+                        cancel_btn := ButtonFlat{text: "Cancel"}
+                        run_bar := RunBar{width: 220 height: 6 margin: Inset{left: 6 right: 6}}
+                        run_state := ToolText{width: Fill}
+                        zoom_label := ToolText{text: "100 %"}
+                        fit_btn := ButtonFlat{text: "Fit"}
                         view_btn := ButtonFlat{text: "App view"}
                         side_btn := ButtonFlat{text: "Source"}
                         new_btn := Button{text: "New"}
-                        example_btn := Button{text: "Example"}
                     }
 
                     View{
                         width: Fill
                         height: Fill
                         flow: Right
+                        spacing: theme.space_2
+                        padding: Inset{left: 8 right: 8 bottom: 8}
 
-                        Column{
-                            H3{text: "Flows"}
-                            flow_list := mod.widgets.FlowList{height: 150}
-                            H3{text: "Running"}
-                            running := mod.widgets.RunningList{height: 170}
-                            H3{text: "Palette"}
+                        left_panel := Panel{
+                            width: 236
+                            SectionTitle{text: "FLOWS"}
+                            flow_list := FlowList{height: 136}
+                            SectionTitle{text: "RUNNING"}
+                            running := RunningList{height: 150}
+                            SectionTitle{text: "PALETTE"}
                             palette_note := Label{
                                 width: Fill
                                 height: Fit
-                                text: "press a type, release on the canvas"
-                                draw_text +: {color: theme.color_text_meta}
+                                text: "Drag a card onto the canvas to add a node."
+                                draw_text +: {
+                                    color: #x5e5e66
+                                    text_style: theme.font_regular{font_size: 8.5}
+                                }
                             }
-                            palette := mod.widgets.Palette{height: Fill}
+                            palette := Palette{height: Fill}
                         }
 
                         View{
                             width: Fill
                             height: Fill
-                            flow: Down
+                            flow: Overlay
                             canvas_view := View{
                                 width: Fill
                                 height: Fill
-                                canvas := mod.widgets.FlowCanvas{}
+                                flow: Down
+                                canvas := FlowCanvas{}
                             }
                             app_view_view := View{
                                 width: Fill
                                 height: Fill
                                 visible: false
-                                app_view := mod.widgets.AppView{}
+                                app_view := AppView{}
                             }
-                            error_label := Label{
+                            error_line := View{
                                 width: Fill
-                                height: Fit
-                                text: ""
-                                draw_text +: {color: theme.color_makepad}
+                                height: Fill
+                                flow: Down
+                                align: Align{y: 1.0}
+                                padding: Inset{left: 12 right: 12 bottom: 10}
+                                error_label := Label{
+                                    width: Fill
+                                    height: Fit
+                                    text: ""
+                                    draw_text +: {
+                                        color: #xf26d6d
+                                        text_style: theme.font_regular{font_size: 9}
+                                    }
+                                }
+                            }
+                            template_view := View{
+                                width: Fill
+                                height: Fill
+                                align: Align{x: 0.5 y: 0.5}
+                                visible: false
+                                template_picker := TemplatePicker{}
+                            }
+                            help_view := View{
+                                width: Fill
+                                height: Fill
+                                align: Align{x: 0.5 y: 0.5}
+                                visible: false
+                                help := HelpPanel{
+                                    head := View{
+                                        width: Fill
+                                        height: Fit
+                                        flow: Right
+                                        align: Align{y: 0.5}
+                                        help_title := Label{
+                                            width: Fill
+                                            height: Fit
+                                            text: ""
+                                            draw_text +: {
+                                                text_style: theme.font_bold{font_size: 11}
+                                                color: #xe8e8ec
+                                            }
+                                        }
+                                        help_close := ButtonFlat{text: "Close"}
+                                    }
+                                    help_body := ScrollYView{
+                                        width: Fill
+                                        height: Fit{max: FitBound.Abs(520)}
+                                        help_text := Label{
+                                            width: Fill
+                                            height: Fit
+                                            text: ""
+                                            draw_text +: {
+                                                color: #xd0d0d4
+                                                text_style: theme.font_regular{font_size: 9.5}
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
 
-                        SolidView{
-                            width: 340
-                            height: Fill
-                            flow: Down
-                            padding: theme.mspace_2
-                            spacing: theme.space_2
-                            draw_bg +: {color: theme.color_bg_container}
+                        right_panel := Panel{
+                            width: 330
                             inspector_view := View{
                                 width: Fill
                                 height: Fill
                                 flow: Down
-                                H3{text: "Inspector"}
-                                inspector := mod.widgets.Inspector{}
+                                spacing: theme.space_1
+                                SectionTitle{text: "INSPECTOR"}
+                                inspector := Inspector{}
                             }
                             source_view := View{
                                 width: Fill
@@ -232,15 +352,15 @@ script_mod! {
                                     height: Fit
                                     flow: Right
                                     align: Align{y: 0.5}
-                                    H3{width: Fill text: "Source"}
+                                    SectionTitle{width: Fill text: "SOURCE"}
                                     save_btn := Button{text: "Save"}
                                 }
                                 source := TextInput{
                                     width: Fill
                                     height: Fill
                                     is_multiline: true
-                                    empty_text: "Select a flow to edit its source"
-                                    draw_text +: {text_style: theme.font_code{}}
+                                    empty_text: "Open a flow to edit its source"
+                                    draw_text +: {text_style: theme.font_code{font_size: 9}}
                                 }
                             }
                         }
@@ -248,68 +368,6 @@ script_mod! {
                 }
             }
         }
-    }
-}
-
-#[derive(Script, ScriptHook, Widget)]
-struct FlowList {
-    #[deref]
-    view: View,
-    #[rust]
-    rows: Vec<FlowSummary>,
-}
-
-impl FlowList {
-    fn set_rows(&mut self, cx: &mut Cx, rows: Vec<FlowSummary>) {
-        self.rows = rows;
-        self.redraw(cx);
-    }
-
-    fn selected(&self, cx: &mut Cx, actions: &Actions) -> Option<usize> {
-        let list = self.portal_list(cx, ids!(list));
-        for (index, item) in list.items_with_actions(actions) {
-            if item.button(cx, ids!(select)).clicked(actions) {
-                return Some(index);
-            }
-        }
-        None
-    }
-}
-
-impl Widget for FlowList {
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
-            let list_ref = step.as_portal_list();
-            let Some(mut list) = list_ref.borrow_mut() else {
-                continue;
-            };
-            list.set_item_range(cx, 0, self.rows.len());
-            while let Some(index) = list.next_visible_item(cx) {
-                let Some(row) = self.rows.get(index) else {
-                    continue;
-                };
-                let item = list.item(cx, index, id!(Item));
-                let title = if row.instances > 0 {
-                    format!("{} · {}", row.name, row.instances)
-                } else {
-                    row.name.clone()
-                };
-                item.button(cx, ids!(select)).set_text(cx, &title);
-                let mut dot = item.label(cx, ids!(state_dot));
-                let color = if row.state == "ok" {
-                    vec4(0.20, 0.78, 0.38, 1.0)
-                } else {
-                    vec4(0.90, 0.24, 0.24, 1.0)
-                };
-                script_apply_eval!(cx, dot, {draw_text +: {color: #(color)}});
-                item.draw_all_unscoped(cx);
-            }
-        }
-        DrawStep::done()
-    }
-
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        self.view.handle_event(cx, event, scope);
     }
 }
 
@@ -324,11 +382,20 @@ enum IoResult {
         source: String,
         result: Result<PutFlowResponse, ClientError>,
     },
+    Created {
+        name: String,
+        result: Result<PutFlowResponse, ClientError>,
+    },
     GraphPut {
         name: String,
         result: Result<PutFlowResponse, ClientError>,
     },
     Catalog(Result<NodesResponse, ClientError>),
+    Templates(Result<Vec<TemplateSummary>, ClientError>),
+    Models {
+        domain: String,
+        result: Result<ModelsResponse, ClientError>,
+    },
     InstanceCreated {
         flow: String,
         result: Result<CreateInstanceResponse, ClientError>,
@@ -349,6 +416,7 @@ struct IoMailbox {
     receiver: Option<Receiver<IoResult>>,
     fetching_flows: bool,
     fetching_instances: bool,
+    fetching_models: HashSet<String>,
 }
 
 impl IoMailbox {
@@ -384,13 +452,22 @@ pub struct App {
     #[rust]
     flows: Vec<FlowSummary>,
     #[rust]
+    templates: Vec<TemplateSummary>,
+    #[rust]
     catalog: Vec<NodeTypeCatalog>,
+    /// The hub's model ids by domain, from `GET /v1/models?domain=`.
+    #[rust]
+    models: HashMap<String, Vec<String>>,
+    #[rust]
+    models_fetched_at: f64,
     #[rust]
     selected: Option<String>,
     #[rust]
     definition: Option<FlowDefinition>,
     #[rust]
     revisions: Vec<u64>,
+    #[rust]
+    redo: Vec<u64>,
     #[rust]
     instance: Option<String>,
     #[rust]
@@ -412,6 +489,11 @@ pub struct App {
     #[rust]
     embedded: bool,
     #[rust]
+    auto_opened: bool,
+    /// An instance create for the open flow is in flight.
+    #[rust]
+    binding: bool,
+    #[rust]
     warned_custom: HashSet<String>,
     #[rust]
     palette_drop: Option<((f64, f64), String, String, PortType)>,
@@ -426,6 +508,8 @@ pub struct App {
     #[rust]
     source_mode: bool,
     #[rust]
+    left_hidden: bool,
+    #[rust]
     preview_digest: Option<(String, String)>,
     #[rust]
     time: f64,
@@ -437,6 +521,8 @@ pub struct App {
     selected_node: Option<String>,
     #[rust]
     last_error: Option<String>,
+    #[rust]
+    menu_state: (bool, bool, bool, bool),
 }
 
 impl App {
@@ -450,6 +536,41 @@ impl App {
                 let mut config = FlowServerConfig::new(root.clone());
                 config.control_addr = "127.0.0.1:0".to_string();
                 config.data_addr = "127.0.0.1:0".to_string();
+                // Dev-only: `FLOW_GEN_BASE_URL=<url>` points every gen node at
+                // one hub box instead of the fleet; `=testpattern` serves the
+                // hub's testpattern model in-process and streams a stand-in
+                // paragraph for the Llm nodes (see `testpattern.rs`).
+                if let Some(value) = std::env::var_os("FLOW_GEN_BASE_URL")
+                    .and_then(|value| value.into_string().ok())
+                    .filter(|value| !value.is_empty())
+                {
+                    let seams = if value == "testpattern" {
+                        match testpattern::start_service_url() {
+                            Ok(url) => {
+                                log!("flow-ui: testpattern hub service at {url} — gen and chat are stand-ins");
+                                Some(Seams {
+                                    chat: Arc::new(testpattern::TestpatternChat),
+                                    gen: Arc::new(FixedGen(url)),
+                                    http: Arc::new(HubHttp),
+                                })
+                            }
+                            Err(error) => {
+                                self.set_error(cx, &format!("testpattern service: {error}"));
+                                None
+                            }
+                        }
+                    } else {
+                        log!("flow-ui: FLOW_GEN_BASE_URL={value} — gen nodes use that box");
+                        Some(Seams {
+                            chat: Arc::new(HubChat::from_env()),
+                            gen: Arc::new(FixedGen(value)),
+                            http: Arc::new(HubHttp),
+                        })
+                    };
+                    if let Some(seams) = seams {
+                        config = config.with_seams(seams);
+                    }
+                }
                 match FlowServer::start(config) {
                     Ok(server) => {
                         let served = server.endpoints();
@@ -477,6 +598,7 @@ impl App {
             ..SessionConfig::default()
         }));
         self.update_connection(cx);
+        self.set_modes(cx);
     }
 
     fn client(&self) -> Option<Arc<Mutex<FlowClient>>> {
@@ -509,21 +631,27 @@ impl App {
             return;
         };
         let status = session.status();
-        let text = match &status {
-            SessionStatus::Discovering => "Discovering".to_string(),
-            SessionStatus::Connecting { .. } => "Connecting…".to_string(),
-            SessionStatus::Retrying { in_secs, .. } => format!("Retrying in {in_secs} s"),
-            SessionStatus::Connected { .. } => format!(
-                "Connected · {} · r{} · {} KB",
-                if self.embedded { "embedded" } else { "attached" },
-                self.definition
-                    .as_ref()
-                    .map(|definition| definition.revision)
-                    .unwrap_or(0),
-                self.values.bytes() / 1024
+        let (text, color) = match &status {
+            SessionStatus::Discovering => ("Discovering".to_string(), vec4(0.55, 0.55, 0.58, 1.0)),
+            SessionStatus::Connecting { .. } => ("Connecting…".to_string(), vec4(0.95, 0.76, 0.3, 1.0)),
+            SessionStatus::Retrying { in_secs, .. } => {
+                (format!("Retrying in {in_secs} s"), vec4(0.95, 0.43, 0.43, 1.0))
+            }
+            SessionStatus::Connected { .. } => (
+                format!(
+                    "{} · r{}",
+                    if self.embedded { "embedded" } else { "attached" },
+                    self.definition
+                        .as_ref()
+                        .map(|definition| definition.revision)
+                        .unwrap_or(0)
+                ),
+                vec4(0.30, 0.77, 0.42, 1.0),
             ),
         };
         self.ui.label(cx, ids!(status_chip)).set_text(cx, &text);
+        let mut dot = self.ui.view(cx, ids!(status_dot));
+        script_apply_eval!(cx, dot, {draw_bg +: {color: #(color)}});
         if let SessionStatus::Connected { server_id, .. } = status {
             if self.connected_server != Some(server_id) {
                 self.connected_server = Some(server_id);
@@ -533,6 +661,7 @@ impl App {
                         FlowSubscriber::start(client, FlowSubscriberConfig::default()).ok();
                     self.refresh_flows();
                     self.io(|client| IoResult::Catalog(client.nodes_catalog()));
+                    self.io(|client| IoResult::Templates(client.templates()));
                     self.refresh_instances();
                 }
             }
@@ -556,6 +685,37 @@ impl App {
         }
         self.io.fetching_instances = true;
         self.io(|client| IoResult::Instances(client.instances(None, false)));
+    }
+
+    /// The hub's models for every domain the open graph uses (the pickers
+    /// in the faces and the inspector fill from them).
+    fn refresh_models(&mut self, force: bool) {
+        let Some(graph) = self.current_graph() else {
+            return;
+        };
+        if !force && self.time - self.models_fetched_at < MODELS_REFRESH_SECS {
+            return;
+        }
+        let mut domains: Vec<String> = graph
+            .nodes
+            .iter()
+            .filter_map(|node| node.domain.clone())
+            .collect();
+        domains.sort();
+        domains.dedup();
+        if domains.is_empty() {
+            return;
+        }
+        self.models_fetched_at = self.time;
+        for domain in domains {
+            if !self.io.fetching_models.insert(domain.clone()) {
+                continue;
+            }
+            self.io(move |client| {
+                let result = client.models(Some(&domain));
+                IoResult::Models { domain, result }
+            });
+        }
     }
 
     fn fetch_instance(&mut self) {
@@ -583,6 +743,15 @@ impl App {
         });
     }
 
+    fn create_from_template(&mut self, template: &str) {
+        let name = self.fresh_flow_name(template);
+        let template = template.to_string();
+        self.io(move |client| {
+            let result = client.create_from_template(&name, &template);
+            IoResult::Created { name, result }
+        });
+    }
+
     fn open_flow(&mut self, cx: &mut Cx, name: String) {
         self.selected = Some(name.clone());
         self.unsaved = false;
@@ -591,9 +760,76 @@ impl App {
         self.run = None;
         self.outputs.clear();
         self.revisions.clear();
+        self.redo.clear();
         self.ui.label(cx, ids!(flow_name)).set_text(cx, &name);
+        self.ui.label(cx, ids!(instance_chip)).set_text(cx, "");
         self.set_error(cx, "");
-        self.load_flow(name.clone());
+        if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
+            canvas.clear_run(cx);
+            canvas.reset_view(cx);
+        }
+        self.update_run_bar(cx);
+        self.show_flow_list(cx);
+        self.load_flow(name);
+    }
+
+    /// Bind the open flow to an instance: the newest live one of its own,
+    /// else a fresh one — so the faces fill and Run is one click.
+    fn bind_instance(&mut self, cx: &mut Cx) {
+        if self.instance.is_some() || self.binding {
+            return;
+        }
+        let Some(flow) = self.selected.clone() else {
+            return;
+        };
+        let existing = self
+            .instances
+            .iter()
+            .filter(|row| row.flow == flow && row.live && row.owner == "tab")
+            .max_by_key(|row| row.last_activity_ms)
+            .map(|row| row.instance.clone());
+        if let Some(id) = existing {
+            self.instance = Some(id);
+            self.remount_faces(cx);
+            self.fetch_instance();
+            return;
+        }
+        self.binding = true;
+        self.io(move |client| {
+            let result = client.create_instance(&flow, &CreateInstanceRequest::default());
+            IoResult::InstanceCreated { flow, result }
+        });
+    }
+
+    /// Nothing open yet: the newest live instance's flow, else the
+    /// prompt-to-image flow, else the first flow; an empty root gets the
+    /// prompt-to-image template.
+    fn maybe_auto_open(&mut self, cx: &mut Cx) {
+        if self.auto_opened || self.selected.is_some() || self.io.fetching_flows || self.io.fetching_instances {
+            return;
+        }
+        self.auto_opened = true;
+        if self.flows.is_empty() {
+            self.create_from_template(FIRST_TEMPLATE);
+            return;
+        }
+        let from_instance = self
+            .instances
+            .iter()
+            .filter(|row| row.live && self.flows.iter().any(|flow| flow.name == row.flow))
+            .max_by_key(|row| row.last_activity_ms)
+            .map(|row| row.flow.clone());
+        let name = from_instance
+            .or_else(|| {
+                self.flows
+                    .iter()
+                    .find(|flow| flow.name.starts_with(FIRST_TEMPLATE))
+                    .map(|flow| flow.name.clone())
+            })
+            .or_else(|| self.flows.first().map(|flow| flow.name.clone()));
+        if let Some(name) = name {
+            self.open_flow(cx, name);
+        }
     }
 
     /// Every canvas / inspector / face edit ends here: the new graph goes to
@@ -621,6 +857,7 @@ impl App {
         }
         self.show_graph(cx);
         self.pending_graph = true;
+        self.redo.clear();
         self.io(move |client| {
             let result = client.put_graph(&name, &graph);
             IoResult::GraphPut { name, result }
@@ -666,6 +903,26 @@ impl App {
         self.put_graph(cx, next);
     }
 
+    fn duplicate_selected(&mut self, cx: &mut Cx) {
+        let (Some(graph), Some(selected)) = (self.current_graph(), self.selected_node.clone()) else {
+            return;
+        };
+        let Some(node) = graph.nodes.iter().find(|node| node.id == selected).cloned() else {
+            return;
+        };
+        let Some(entry) = self.catalog.iter().find(|entry| entry.type_name == node.type_name) else {
+            return;
+        };
+        let at = node.at.unwrap_or(graph_edit::FIRST_AT);
+        let (mut next, id) = graph_edit::add_node(&graph, entry, (at.0 + 40.0, at.1 + 60.0));
+        if let Some(copy) = next.nodes.iter_mut().find(|n| n.id == id) {
+            copy.params = node.params.clone();
+            copy.fn_src = node.fn_src.clone();
+            copy.face_src = node.face_src.clone();
+        }
+        self.put_graph(cx, next);
+    }
+
     fn drain_io(&mut self, cx: &mut Cx) {
         loop {
             let next = match self.io.receiver.as_ref().map(Receiver::try_recv) {
@@ -677,13 +934,10 @@ impl App {
                     self.io.fetching_flows = false;
                     match result {
                         Ok(flows) => {
-                            self.flows = flows.clone();
-                            if let Some(mut list) =
-                                self.ui.widget(cx, ids!(flow_list)).borrow_mut::<FlowList>()
-                            {
-                                list.set_rows(cx, flows);
-                            }
+                            self.flows = flows;
+                            self.show_flow_list(cx);
                             self.update_connection(cx);
+                            self.maybe_auto_open(cx);
                         }
                         Err(error) => self.show_error(cx, &error),
                     }
@@ -693,7 +947,11 @@ impl App {
                         continue;
                     }
                     match result {
-                        Ok(definition) => self.show_flow(cx, definition),
+                        Ok(definition) => {
+                            self.show_flow(cx, definition);
+                            self.bind_instance(cx);
+                            self.refresh_models(true);
+                        }
                         Err(error) => self.show_error(cx, &error),
                     }
                 }
@@ -715,6 +973,14 @@ impl App {
                         self.refresh_flows();
                         self.services.refresh_definitions();
                         self.load_flow(name);
+                    }
+                    Err(error) => self.show_error(cx, &error),
+                },
+                IoResult::Created { name, result } => match result {
+                    Ok(_) => {
+                        self.refresh_flows();
+                        self.services.refresh_definitions();
+                        self.open_flow(cx, name);
                     }
                     Err(error) => self.show_error(cx, &error),
                 },
@@ -756,7 +1022,42 @@ impl App {
                     }
                     Err(error) => self.show_error(cx, &error),
                 },
+                IoResult::Templates(result) => match result {
+                    Ok(templates) => {
+                        self.templates = templates;
+                        if let Some(mut picker) = self
+                            .ui
+                            .widget(cx, ids!(template_picker))
+                            .borrow_mut::<TemplatePicker>()
+                        {
+                            picker.set_templates(cx, self.templates.clone());
+                        }
+                    }
+                    Err(error) => self.show_error(cx, &error),
+                },
+                IoResult::Models { domain, result } => {
+                    self.io.fetching_models.remove(&domain);
+                    match result {
+                        Ok(response) => {
+                            let mut ids: Vec<String> = response
+                                .models
+                                .iter()
+                                .filter(|model| model.available)
+                                .map(|model| model.id.clone())
+                                .collect();
+                            ids.sort();
+                            ids.dedup();
+                            self.models.insert(domain, ids);
+                            self.push_models(cx);
+                        }
+                        Err(error) => {
+                            // A server without the route: the pickers keep "hub picks".
+                            log!("flow-ui: models for {domain}: {error}");
+                        }
+                    }
+                }
                 IoResult::InstanceCreated { flow, result } => {
+                    self.binding = false;
                     if self.selected.as_deref() != Some(&flow) {
                         continue;
                     }
@@ -792,23 +1093,21 @@ impl App {
                             self.remount_faces(cx);
                             self.fetch_instance();
                             self.refresh_instances();
-                            self.update_run_state(cx);
+                            self.update_run_bar(cx);
                         }
                         Err(error) => self.show_error(cx, &error),
                     }
                 }
                 IoResult::Instances(result) => {
                     self.io.fetching_instances = false;
-                    match result {
-                        Ok(rows) => {
-                            self.instances = rows.clone();
-                            if let Some(mut list) =
-                                self.ui.widget(cx, ids!(running)).borrow_mut::<RunningList>()
-                            {
-                                list.set_rows(cx, rows, self.instance.clone());
-                            }
+                    if let Ok(rows) = result {
+                        self.instances = rows.clone();
+                        if let Some(mut list) =
+                            self.ui.widget(cx, ids!(running)).borrow_mut::<RunningList>()
+                        {
+                            list.set_rows(cx, rows, self.instance.clone());
                         }
-                        Err(_) => {}
+                        self.maybe_auto_open(cx);
                     }
                 }
                 IoResult::Instance(result) => match result {
@@ -823,6 +1122,14 @@ impl App {
                                     .set_text(cx, &row.flow);
                                 self.load_flow(row.flow.clone());
                             }
+                            let chip = format!(
+                                "{} · {}",
+                                row.label
+                                    .clone()
+                                    .unwrap_or_else(|| row.instance.chars().take(8).collect()),
+                                row.state
+                            );
+                            self.ui.label(cx, ids!(instance_chip)).set_text(cx, &chip);
                             if let Some(faces) = self.faces.as_mut() {
                                 faces.fill_inputs(cx, &row);
                             }
@@ -849,7 +1156,7 @@ impl App {
                                 }
                             }
                             self.instance_row = Some(row);
-                            self.update_run_state(cx);
+                            self.update_run_bar(cx);
                         }
                     }
                     Err(error) => self.show_error(cx, &error),
@@ -866,7 +1173,7 @@ impl App {
                             started: self.time,
                             finished_secs: None,
                         });
-                        self.update_run_state(cx);
+                        self.update_run_bar(cx);
                     }
                     Err(error) => self.show_error(cx, &error),
                 },
@@ -885,6 +1192,12 @@ impl App {
             if self.revisions.len() > 32 {
                 self.revisions.remove(0);
             }
+        }
+    }
+
+    fn show_flow_list(&mut self, cx: &mut Cx) {
+        if let Some(mut list) = self.ui.widget(cx, ids!(flow_list)).borrow_mut::<FlowList>() {
+            list.set_rows(cx, self.flows.clone(), self.selected.clone());
         }
     }
 
@@ -944,15 +1257,45 @@ impl App {
             .as_ref()
             .and_then(|node| self.outputs.get(node).cloned())
             .unwrap_or_default();
+        let graph = self.current_graph();
+        let domain = selected
+            .as_ref()
+            .and_then(|id| graph.as_ref()?.nodes.iter().find(|node| &node.id == id)?.domain.clone());
+        let models = domain
+            .as_ref()
+            .and_then(|domain| self.models.get(domain).cloned())
+            .unwrap_or_default();
         if let Some(mut inspector) = self.ui.widget(cx, ids!(inspector)).borrow_mut::<Inspector>() {
+            inspector.set_models(cx, models);
             inspector.show_node(
                 cx,
-                self.current_graph().as_ref(),
+                graph.as_ref(),
                 &self.catalog,
                 selected.as_deref(),
                 &outputs,
             );
         }
+        if domain.is_some() {
+            self.refresh_models(false);
+        }
+    }
+
+    /// The hub's lists reach every picker: the faces' and the inspector's.
+    fn push_models(&mut self, cx: &mut Cx) {
+        let Some(graph) = self.current_graph() else {
+            return;
+        };
+        if let Some(faces) = self.faces.as_mut() {
+            for node in &graph.nodes {
+                let Some(domain) = node.domain.as_ref() else {
+                    continue;
+                };
+                if let Some(models) = self.models.get(domain) {
+                    faces.set_models(cx, &node.id, models);
+                }
+            }
+        }
+        self.refresh_inspector(cx);
     }
 
     /// Free the instance's isolate and evaluate the file again into a new one.
@@ -991,8 +1334,13 @@ impl App {
             &graph,
             &self.catalog,
         );
+        // A face error shows once in the strip and in the owning card only.
         if let Some(error) = faces.error.as_ref() {
             self.set_error(cx, &format!("faces: {error}"));
+        }
+        let face_errors = faces.face_errors(&graph);
+        if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
+            canvas.set_face_errors(cx, face_errors);
         }
         if let Some(row) = self.instance_row.as_ref() {
             faces.fill_inputs(cx, row);
@@ -1021,6 +1369,7 @@ impl App {
             canvas.set_face_roots(cx, roots);
         }
         self.faces = Some(faces);
+        self.push_models(cx);
         self.request_wanted_values(cx);
         self.ui.redraw(cx);
     }
@@ -1057,18 +1406,80 @@ impl App {
         self.set_error(cx, &text);
     }
 
-    fn update_run_state(&mut self, cx: &mut Cx) {
-        let text = match (&self.run, &self.instance_row) {
+    /// The run's total progress, computed here from the node rows (the
+    /// server's run row has no `progress` field): done nodes plus the running
+    /// ones' permille over the nodes in the run, skipped ones excluded.
+    fn update_run_bar(&mut self, cx: &mut Cx) {
+        let graph = self.current_graph();
+        let (fraction, done, total) = {
+            let canvas = self.ui.widget(cx, ids!(canvas));
+            let canvas = canvas.borrow::<FlowCanvas>();
+            let mut sum = 0.0;
+            let mut done = 0usize;
+            let mut total = 0usize;
+            if let (Some(graph), Some(canvas)) = (graph.as_ref(), canvas.as_ref()) {
+                for node in &graph.nodes {
+                    match canvas.statuses.get(&node.id) {
+                        Some(status) if status.state == "skipped" => {}
+                        Some(status) if matches!(status.state.as_str(), "done" | "failed") => {
+                            total += 1;
+                            done += 1;
+                            sum += 1.0;
+                        }
+                        Some(status) if status.state == "running" && status.has_progress => {
+                            total += 1;
+                            sum += status.permille as f64 / 1000.0;
+                        }
+                        _ => total += 1,
+                    }
+                }
+            }
+            (
+                if total > 0 { sum / total as f64 } else { 0.0 },
+                done,
+                total,
+            )
+        };
+        let (state, text) = match (&self.run, &self.instance_row) {
             (Some(run), _) => {
                 let secs = run
                     .finished_secs
                     .unwrap_or_else(|| (self.time - run.started).max(0.0));
-                format!("{} · {:.1} s", run.state, secs)
+                (
+                    run.state.clone(),
+                    format!("{} · {:.1} s · {done}/{total} nodes", run.state, secs),
+                )
             }
-            (None, Some(row)) => row.state.clone(),
-            (None, None) => String::new(),
+            (None, Some(row)) => (String::new(), row.state.clone()),
+            (None, None) => (String::new(), String::new()),
         };
+        let fraction = if state == "done" { 1.0 } else { fraction };
         self.ui.label(cx, ids!(run_state)).set_text(cx, &text);
+        if let Some(mut bar) = self.ui.widget(cx, ids!(run_bar)).borrow_mut::<RunBar>() {
+            bar.set_progress(cx, fraction, &state);
+        }
+        self.update_menu_state(cx);
+    }
+
+    fn update_menu_state(&mut self, cx: &mut Cx) {
+        let running = self.run.as_ref().is_some_and(|run| matches!(run.state.as_str(), "running" | "queued"));
+        let has_selected = self.selected_node.is_some();
+        let can_undo = self.revisions.len() >= 2;
+        let can_redo = !self.redo.is_empty();
+        let next = (running, has_selected, can_undo, can_redo);
+        if next == self.menu_state {
+            return;
+        }
+        self.menu_state = next;
+        let menu = self.ui.menu_bar(cx, ids!(menu_bar));
+        menu.set_enabled(cx, live_id!(cancel), running);
+        menu.set_enabled(cx, live_id!(delete_node), has_selected);
+        menu.set_enabled(cx, live_id!(duplicate), has_selected);
+        menu.set_enabled(cx, live_id!(run_to_node), has_selected);
+        menu.set_enabled(cx, live_id!(undo), can_undo);
+        menu.set_enabled(cx, live_id!(redo), can_redo);
+        menu.set_enabled(cx, live_id!(revert), can_undo);
+        self.ui.button(cx, ids!(cancel_btn)).set_visible(cx, running);
     }
 
     // -- events from the server ------------------------------------------------
@@ -1087,6 +1498,7 @@ impl App {
                 }
                 SubscriptionEvent::Events(events) => {
                     for event in events {
+                        self.services.handle_flow_event(&event);
                         self.handle_flow_event(cx, event);
                     }
                 }
@@ -1150,11 +1562,13 @@ impl App {
                     faces.reset_run();
                 }
                 self.refresh_instances();
+                self.update_run_bar(cx);
             }
-            "node.started" => self.set_node_status(cx, &node, "running", 0, None),
+            "node.started" => self.set_node_status(cx, &node, "running", 0, false, "", None),
             "node.progress" => {
                 let permille = event.permille.unwrap_or(0).min(1000) as u16;
-                self.set_node_status(cx, &node, "running", permille, None);
+                let stage = event.stage.clone().unwrap_or_default();
+                self.set_node_status(cx, &node, "running", permille, true, &stage, None);
             }
             "node.delta" => {
                 let port = event.port.clone().unwrap_or_else(|| "text".into());
@@ -1168,14 +1582,14 @@ impl App {
             }
             "node.waiting" => {
                 self.current_node = Some(node.clone());
-                self.set_node_status(cx, &node, "waiting", 0, None);
+                self.set_node_status(cx, &node, "waiting", 0, false, "", None);
                 if let Some(mut app_view) = self.ui.widget(cx, ids!(app_view)).borrow_mut::<AppView>() {
                     app_view.waiting = Some(node.clone());
                 }
             }
-            "node.answered" => self.set_node_status(cx, &node, "running", 0, None),
+            "node.answered" => self.set_node_status(cx, &node, "running", 0, false, "", None),
             "node.done" => {
-                self.set_node_status(cx, &node, "done", 1000, None);
+                self.set_node_status(cx, &node, "done", 1000, true, "", None);
                 let outputs = event.output_values();
                 for (port, value) in outputs {
                     self.record_value(cx, &node, &port, value);
@@ -1192,14 +1606,19 @@ impl App {
             }
             "node.failed" => {
                 let error = event.error_text();
-                self.set_node_status(cx, &node, "failed", 0, error);
+                self.set_node_status(cx, &node, "failed", 0, false, "", error);
             }
-            "node.skipped" => self.set_node_status(cx, &node, "skipped", 0, event.reason.clone()),
+            "node.skipped" => {
+                self.set_node_status(cx, &node, "skipped", 0, false, "", event.reason.clone())
+            }
             "run.finished" => {
                 let state = event.state_text().unwrap_or_else(|| "done".into());
+                // Output nodes get no node.* events of their own: the run's
+                // outputs are their values, so they finish with the run.
                 for (output_node, value) in event.output_values() {
                     let port = self.output_face_port(&output_node);
                     self.record_value(cx, &output_node, &port, value);
+                    self.set_node_status(cx, &output_node, "done", 1000, true, "", None);
                 }
                 self.request_wanted_values(cx);
                 if let Some(run) = self.run.as_mut() {
@@ -1218,30 +1637,42 @@ impl App {
                 self.current_node = None;
                 self.refresh_instances();
                 self.fetch_instance();
-                self.update_run_state(cx);
+                self.update_run_bar(cx);
             }
             _ => {}
         }
     }
 
-    fn set_node_status(&mut self, cx: &mut Cx, node: &str, state: &str, permille: u16, error: Option<String>) {
+    #[allow(clippy::too_many_arguments)]
+    fn set_node_status(
+        &mut self,
+        cx: &mut Cx,
+        node: &str,
+        state: &str,
+        permille: u16,
+        has_progress: bool,
+        stage: &str,
+        error: Option<String>,
+    ) {
         if matches!(state, "running" | "waiting") {
             self.current_node = Some(node.to_string());
         }
         if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
+            let stage = if state == "running" {
+                stage.to_string()
+            } else {
+                String::new()
+            };
             canvas.set_status(
                 cx,
                 node,
-                NodeStatus {
-                    state: state.to_string(),
-                    permille,
-                    error,
-                },
+                NodeStatus::new(state, permille, has_progress, &stage, error),
             );
         }
         if let Some(faces) = self.faces.as_mut() {
             faces.push_state(cx, node, state);
         }
+        self.update_run_bar(cx);
     }
 
     fn output_face_port(&self, node_id: &str) -> String {
@@ -1266,10 +1697,7 @@ impl App {
         } else {
             ports.push((port.to_string(), value.clone()));
         }
-        let chip = faces::preview_text(&value)
-            .unwrap_or_else(|| format!("{} · {} b", value.content_type, value.bytes));
         if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
-            canvas.set_chip(cx, node, port, chip);
             canvas.set_streaming(cx, node, false);
         }
         let bytes = self.values.get(&value.digest);
@@ -1404,6 +1832,33 @@ impl App {
         self.io(move |client| IoResult::Done(client.cancel_run(&run.run_id)));
     }
 
+    fn undo(&mut self) {
+        if self.revisions.len() < 2 {
+            return;
+        }
+        let current = self.revisions.pop().unwrap();
+        self.redo.push(current);
+        let revision = *self.revisions.last().unwrap();
+        self.revert_to(revision);
+    }
+
+    fn redo(&mut self) {
+        let Some(revision) = self.redo.pop() else {
+            return;
+        };
+        self.revisions.push(revision);
+        self.revert_to(revision);
+    }
+
+    fn revert_to(&mut self, revision: u64) {
+        if let Some(name) = self.selected.clone() {
+            self.io(move |client| {
+                let result = client.revert(&name, revision);
+                IoResult::GraphPut { name, result }
+            });
+        }
+    }
+
     // -- source pane ↔ canvas ----------------------------------------------------
 
     fn jump_to_node(&mut self, cx: &mut Cx, node: &str) {
@@ -1467,6 +1922,9 @@ impl App {
         self.ui
             .view(cx, ids!(source_view))
             .set_visible(cx, self.source_mode);
+        self.ui
+            .view(cx, ids!(left_panel))
+            .set_visible(cx, !self.left_hidden);
         self.ui.button(cx, ids!(view_btn)).set_text(
             cx,
             if self.app_mode { "Canvas" } else { "App view" },
@@ -1478,14 +1936,154 @@ impl App {
         self.ui.redraw(cx);
     }
 
-    fn fresh_flow_name(&self) -> String {
-        let mut number = self.flows.len() + 1;
+    fn show_templates(&mut self, cx: &mut Cx, visible: bool) {
+        if visible {
+            self.io(|client| IoResult::Templates(client.templates()));
+            self.ui.view(cx, ids!(help_view)).set_visible(cx, false);
+        }
+        self.ui.view(cx, ids!(template_view)).set_visible(cx, visible);
+        self.ui.redraw(cx);
+    }
+
+    fn show_help(&mut self, cx: &mut Cx, title: &str, body: &str) {
+        self.ui.view(cx, ids!(template_view)).set_visible(cx, false);
+        self.ui.label(cx, ids!(help_title)).set_text(cx, title);
+        self.ui.label(cx, ids!(help_text)).set_text(cx, body);
+        self.ui.view(cx, ids!(help_view)).set_visible(cx, true);
+        self.ui.redraw(cx);
+    }
+
+    fn fresh_flow_name(&self, base: &str) -> String {
+        if !self.flows.iter().any(|flow| flow.name == base) {
+            return base.to_string();
+        }
+        let mut number = 2;
         loop {
-            let name = format!("flow-{number}");
+            let name = format!("{base}-{number}");
             if !self.flows.iter().any(|flow| flow.name == name) {
                 return name;
             }
             number += 1;
+        }
+    }
+
+    fn open_next_flow(&mut self, cx: &mut Cx) {
+        if self.flows.is_empty() {
+            return;
+        }
+        let index = self
+            .selected
+            .as_ref()
+            .and_then(|name| self.flows.iter().position(|flow| &flow.name == name))
+            .map(|index| (index + 1) % self.flows.len())
+            .unwrap_or(0);
+        let name = self.flows[index].name.clone();
+        self.open_flow(cx, name);
+    }
+
+    fn delete_flow(&mut self, cx: &mut Cx) {
+        let Some(name) = self.selected.take() else {
+            return;
+        };
+        if let Some(faces) = self.faces.take() {
+            if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
+                canvas.set_face_roots(cx, Vec::new());
+            }
+            faces.free(cx);
+        }
+        self.definition = None;
+        self.instance = None;
+        self.instance_row = None;
+        self.run = None;
+        self.outputs.clear();
+        self.ui.label(cx, ids!(flow_name)).set_text(cx, "No flow open");
+        self.ui.label(cx, ids!(instance_chip)).set_text(cx, "");
+        self.show_graph(cx);
+        self.io(move |client| IoResult::Done(client.delete(&name)));
+        self.auto_opened = false;
+    }
+
+    fn handle_menu(&mut self, cx: &mut Cx, id: LiveId) {
+        match id {
+            id if id == live_id!(new_from_template) => self.show_templates(cx, true),
+            id if id == live_id!(open_flow) => self.open_next_flow(cx),
+            id if id == live_id!(save) => {
+                if let Some(name) = self.selected.clone() {
+                    let source = self.ui.text_input(cx, ids!(source)).text();
+                    if self.source_mode && !source.is_empty() {
+                        self.save_source(name, source);
+                    }
+                }
+            }
+            id if id == live_id!(revert) || id == live_id!(undo) => self.undo(),
+            id if id == live_id!(redo) => self.redo(),
+            id if id == live_id!(delete_flow) => self.delete_flow(cx),
+            id if id == live_id!(quit) => cx.quit(),
+            id if id == live_id!(delete_node) => {
+                if let Some(node) = self.selected_node.clone() {
+                    self.apply_edit(cx, CanvasEdit::Delete { node });
+                    if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
+                        canvas.select(cx, None);
+                    }
+                    self.selected_node = None;
+                    self.refresh_inspector(cx);
+                }
+            }
+            id if id == live_id!(select_all) => {
+                // One selection at a time: the first node stands for all.
+                let first = self
+                    .current_graph()
+                    .and_then(|graph| graph.nodes.first().map(|node| node.id.clone()));
+                if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
+                    canvas.select(cx, first.clone());
+                }
+                self.selected_node = first;
+                self.refresh_inspector(cx);
+            }
+            id if id == live_id!(duplicate) => self.duplicate_selected(cx),
+            id if id == live_id!(view_canvas) => {
+                self.app_mode = false;
+                self.set_modes(cx);
+            }
+            id if id == live_id!(view_app) => {
+                self.app_mode = true;
+                self.set_modes(cx);
+            }
+            id if id == live_id!(view_source) => {
+                self.source_mode = true;
+                self.set_modes(cx);
+            }
+            id if id == live_id!(view_inspector) => {
+                self.source_mode = false;
+                self.set_modes(cx);
+            }
+            id if id == live_id!(toggle_left) => {
+                self.left_hidden = !self.left_hidden;
+                self.set_modes(cx);
+            }
+            id if id == live_id!(zoom_in) => self.with_canvas(cx, |cx, canvas| canvas.zoom_by(cx, 1.25)),
+            id if id == live_id!(zoom_out) => self.with_canvas(cx, |cx, canvas| canvas.zoom_by(cx, 0.8)),
+            id if id == live_id!(zoom_fit) => self.with_canvas(cx, |cx, canvas| canvas.fit(cx)),
+            id if id == live_id!(zoom_100) => self.with_canvas(cx, |cx, canvas| canvas.zoom_reset(cx)),
+            id if id == live_id!(run) => self.start_run(None),
+            id if id == live_id!(cancel) => self.cancel_run(),
+            id if id == live_id!(run_to_node) => {
+                if let Some(node) = self.selected_node.clone() {
+                    self.start_run(Some(vec![node]));
+                }
+            }
+            id if id == live_id!(help_shortcuts) => self.show_help(cx, "Keyboard shortcuts", HELP_SHORTCUTS),
+            id if id == live_id!(help_language) => {
+                self.show_help(cx, "The flow language", makepad_flow::AUTHORING_BRIEF)
+            }
+            id if id == live_id!(help_about) => self.show_help(cx, "About Flow", HELP_ABOUT),
+            _ => {}
+        }
+    }
+
+    fn with_canvas(&mut self, cx: &mut Cx, f: impl FnOnce(&mut Cx, &mut FlowCanvas)) {
+        if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
+            f(cx, &mut canvas);
         }
     }
 
@@ -1532,6 +2130,33 @@ impl App {
             last_error: self.last_error.clone(),
         });
     }
+
+    fn open_value(&mut self, cx: &mut Cx, node: &str, port: &str) {
+        let value = self
+            .outputs
+            .get(node)
+            .and_then(|ports| ports.iter().find(|(name, _)| name == port))
+            .map(|(_, value)| value.clone());
+        let Some(value) = value else {
+            return;
+        };
+        self.preview_digest = Some((value.digest.clone(), format!("{node}.{port}")));
+        if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
+            canvas.select(cx, Some(node.to_string()));
+        }
+        self.selected_node = Some(node.to_string());
+        self.source_mode = false;
+        self.set_modes(cx);
+        match self.values.get(&value.digest) {
+            Some(bytes) => self.show_preview(cx, &bytes),
+            None => {
+                if let Some(client) = self.client() {
+                    self.values.request(&value.digest, client);
+                }
+                self.refresh_inspector(cx);
+            }
+        }
+    }
 }
 
 impl MatchEvent for App {
@@ -1562,6 +2187,9 @@ impl MatchEvent for App {
                 }
             }
         }
+        if let Some(id) = self.ui.menu_bar(cx, ids!(menu_bar)).selected(actions) {
+            self.handle_menu(cx, id);
+        }
         let selected_index = self
             .ui
             .widget(cx, ids!(flow_list))
@@ -1573,12 +2201,29 @@ impl MatchEvent for App {
             }
         }
         if self.ui.button(cx, ids!(new_btn)).clicked(actions) {
-            let name = self.fresh_flow_name();
-            self.save_source(name, EMPTY_FLOW_SOURCE.to_string());
+            let visible = self.ui.view(cx, ids!(template_view)).visible();
+            self.show_templates(cx, !visible);
         }
-        if self.ui.button(cx, ids!(example_btn)).clicked(actions) {
-            let name = self.fresh_flow_name();
-            self.save_source(name, EXAMPLE_FLOW_SOURCE.to_string());
+        let template_pick = self
+            .ui
+            .widget(cx, ids!(template_picker))
+            .borrow::<TemplatePicker>()
+            .and_then(|picker| picker.picked(cx, actions));
+        if let Some(template) = template_pick {
+            self.show_templates(cx, false);
+            self.create_from_template(&template);
+        }
+        if self
+            .ui
+            .widget(cx, ids!(template_picker))
+            .borrow::<TemplatePicker>()
+            .is_some_and(|picker| picker.closed(cx, actions))
+        {
+            self.show_templates(cx, false);
+        }
+        if self.ui.button(cx, ids!(help_close)).clicked(actions) {
+            self.ui.view(cx, ids!(help_view)).set_visible(cx, false);
+            self.ui.redraw(cx);
         }
         if self.ui.button(cx, ids!(save_btn)).clicked(actions) {
             if let Some(name) = self.selected.clone() {
@@ -1595,17 +2240,8 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(cancel_btn)).clicked(actions) {
             self.cancel_run();
         }
-        if self.ui.button(cx, ids!(undo_btn)).clicked(actions) {
-            if self.revisions.len() >= 2 {
-                self.revisions.pop();
-                let revision = *self.revisions.last().unwrap();
-                if let Some(name) = self.selected.clone() {
-                    self.io(move |client| {
-                        let result = client.revert(&name, revision);
-                        IoResult::GraphPut { name, result }
-                    });
-                }
-            }
+        if self.ui.button(cx, ids!(fit_btn)).clicked(actions) {
+            self.with_canvas(cx, |cx, canvas| canvas.fit(cx));
         }
         if self.ui.button(cx, ids!(view_btn)).clicked(actions) {
             self.app_mode = !self.app_mode;
@@ -1635,6 +2271,7 @@ impl MatchEvent for App {
                         }
                     }
                     self.refresh_inspector(cx);
+                    self.update_menu_state(cx);
                 }
                 FlowCanvasAction::Edit(edit) => self.apply_edit(cx, edit),
                 FlowCanvasAction::OpenPalette {
@@ -1653,8 +2290,13 @@ impl MatchEvent for App {
                     }
                     self.ui
                         .label(cx, ids!(palette_note))
-                        .set_text(cx, "click a type to add it at the drop point");
+                        .set_text(cx, "Click a card to add it at the drop point, wired.");
                     self.palette_drop = Some((at, from_node, from_port, ty));
+                }
+                FlowCanvasAction::Camera { scale } => {
+                    self.ui
+                        .label(cx, ids!(zoom_label))
+                        .set_text(cx, &format!("{:.0} %", scale * 100.0));
                 }
             }
         }
@@ -1705,7 +2347,7 @@ impl MatchEvent for App {
                     }
                     self.ui
                         .label(cx, ids!(palette_note))
-                        .set_text(cx, "press a type, release on the canvas");
+                        .set_text(cx, "Drag a card onto the canvas to add a node.");
                 }
             }
         }
@@ -1738,17 +2380,7 @@ impl MatchEvent for App {
                         self.put_graph(cx, next);
                     }
                 }
-                InspectorAction::OpenValue { node, port, value } => {
-                    self.preview_digest = Some((value.digest.clone(), format!("{node}.{port}")));
-                    match self.values.get(&value.digest) {
-                        Some(bytes) => self.show_preview(cx, &bytes),
-                        None => {
-                            if let Some(client) = self.client() {
-                                self.values.request(&value.digest, client);
-                            }
-                        }
-                    }
-                }
+                InspectorAction::OpenValue { node, port } => self.open_value(cx, &node, &port),
             }
         }
 
@@ -1774,6 +2406,7 @@ impl MatchEvent for App {
                             self.unsaved = false;
                             self.revisions.clear();
                             self.ui.label(cx, ids!(flow_name)).set_text(cx, &flow);
+                            self.show_flow_list(cx);
                             self.load_flow(flow);
                         }
                         self.instance = Some(id);
@@ -1813,7 +2446,8 @@ impl MatchEvent for App {
             }
         }
 
-        // Faces: bound widgets → instance inputs / graph params.
+        // Faces: bound widgets → instance inputs / graph params; pictures → open.
+        let mut opens = Vec::new();
         if let Some(faces) = self.faces.as_ref() {
             for (node, port, text) in faces.bind_changes(actions) {
                 self.pending_inputs.insert((node, port), text);
@@ -1823,6 +2457,10 @@ impl MatchEvent for App {
             for (node, key, value) in params {
                 self.pending_params.insert((node, key), value);
             }
+            opens = faces.open_requests(actions);
+        }
+        for (node, port) in opens {
+            self.open_value(cx, &node, &port);
         }
         self.refresh_ai_context();
     }
@@ -1886,10 +2524,22 @@ impl AppMain for App {
         self.services.handle_event(cx, event);
         self.match_event(cx, event);
         // The faces first: a click inside a face is the face's, and the
-        // canvas then sees it as handled.
+        // canvas then sees it as handled. Their positions go through the
+        // canvas camera.
         if !matches!(event, Event::Draw(_)) {
+            let camera = self
+                .ui
+                .widget(cx, ids!(canvas))
+                .borrow::<FlowCanvas>()
+                .map(|canvas| canvas.camera());
+            let mapped = !self.app_mode;
             if let Some(faces) = self.faces.as_mut() {
-                faces.handle_event(cx, event, &mut Scope::empty());
+                faces.handle_event(
+                    cx,
+                    event,
+                    &mut Scope::empty(),
+                    if mapped { camera.as_ref() } else { None },
+                );
             }
         }
         match self.faces.as_mut() {
@@ -1908,9 +2558,10 @@ impl AppMain for App {
             if self.source_mode {
                 self.highlight_caret_node(cx);
             }
-            if self.run.as_ref().is_some_and(|run| run.state == "running") {
-                self.update_run_state(cx);
+            if self.run.as_ref().is_some_and(|run| matches!(run.state.as_str(), "running" | "queued")) {
+                self.update_run_bar(cx);
             }
+            self.refresh_models(false);
         }
         self.refresh_ai_context();
         if let Event::Shutdown = event {
