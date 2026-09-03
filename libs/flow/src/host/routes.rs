@@ -1,20 +1,32 @@
 use super::config::SharedConfig;
 use super::events::{EventCursor, EventHub};
-use super::state::{SourceResult, StateHandle, MAX_SOURCE_BYTES};
+use super::state::{
+    CreateInstanceOutcome, SetInputsOutcome, SourceResult, StartRunOutcome, StateHandle,
+    MAX_SOURCE_BYTES,
+};
 use super::util::log;
 use crate::{
-    graph, EvalErrorResponse, EventsResponse, FlowMutationResponse, FlowResponse, FlowSummary,
-    HealthResponse, MessageResponse, NodesResponse, PutGraphRequest, PutSourceRequest,
-    RevertRequest,
+    graph, CreateInstanceRequest, CreateInstanceResponse, CreateRunRequest, CreateRunResponse,
+    EvalErrorResponse, EventsResponse, FlowMutationResponse, FlowResponse, FlowSummary,
+    HealthResponse, InstanceId, MessageResponse, NodesResponse, PortType, PutGraphRequest,
+    PutSourceRequest, PutValueResponse, RevertRequest, RunId, Value,
 };
-use makepad_bounded_http::{BodyError, Conn, Head, Method, Resp};
+use makepad_bounded_http::{
+    etag_matches, if_range_matches, parse_range, BodyError, Conn, Head, Method, RangeSpec, Resp,
+};
 use makepad_micro_serde::{DeJson, SerJson};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const BODY_DEADLINE_MS: u64 = 30_000;
 const EVENT_MAX_WAIT_MS: u64 = 30_000;
 const EVENT_MAX_BATCH: usize = 256;
+/// `PUT /v1/values` body cap: media only, generously above any test asset,
+/// well under the control plane's 1 MiB (the store's own blob cap shape).
+const MAX_VALUE_BYTES: u64 = 64 * 1024 * 1024;
+/// Values are scratch (§5.5): no long-lived caching contract.
+const VALUE_CACHE_CONTROL: &str = "private, max-age=60";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Plane {
@@ -67,7 +79,7 @@ pub(crate) fn dispatch(
     }
 
     if plane == Plane::Data {
-        return call(&ctx.state, |_| message(404, "not found"));
+        return data_dispatch(conn, head, ctx);
     }
 
     let segments = head.segs.clone();
@@ -99,6 +111,11 @@ pub(crate) fn dispatch(
                     .values()
                     .map(|definition| {
                         let graph = definition.graph.as_ref();
+                        let instances = state
+                            .instances
+                            .values()
+                            .filter(|instance| instance.flow == definition.name)
+                            .count() as u64;
                         FlowSummary {
                             name: definition.name.clone(),
                             label: graph
@@ -109,7 +126,7 @@ pub(crate) fn dispatch(
                                 .to_string(),
                             error: definition.error.clone(),
                             canonical: definition.canonical,
-                            instances: 0,
+                            instances,
                             autostart: graph.is_some_and(|graph| graph.autostart),
                         }
                     })
@@ -155,6 +172,102 @@ pub(crate) fn dispatch(
                 return call(&ctx.state, |_| message(405, "method not allowed"));
             }
             revert_flow(conn, head, ctx, name)
+        }
+        [v1, flows, name, instances_segment]
+            if v1 == "v1" && flows == "flows" && instances_segment == "instances" =>
+        {
+            if !valid_name(name) {
+                return Outcome::Resp(message(400, "invalid flow name"));
+            }
+            if head.method != Method::Post {
+                return call(&ctx.state, |_| message(405, "method not allowed"));
+            }
+            create_instance(conn, head, ctx, name)
+        }
+        [v1, instances] if v1 == "v1" && instances == "instances" => {
+            if head.method != Method::Get {
+                return call(&ctx.state, |_| message(405, "method not allowed"));
+            }
+            list_instances(head, ctx)
+        }
+        [v1, instances, id] if v1 == "v1" && instances == "instances" => {
+            if !valid_id(id) {
+                return Outcome::Resp(message(400, "invalid instance id"));
+            }
+            match head.method {
+                Method::Get => get_instance(ctx, id),
+                Method::Delete => delete_instance(ctx, id),
+                _ => call(&ctx.state, |_| message(405, "method not allowed")),
+            }
+        }
+        [v1, instances, id, inputs]
+            if v1 == "v1" && instances == "instances" && inputs == "inputs" =>
+        {
+            if !valid_id(id) {
+                return Outcome::Resp(message(400, "invalid instance id"));
+            }
+            if head.method != Method::Put {
+                return call(&ctx.state, |_| message(405, "method not allowed"));
+            }
+            put_instance_inputs(conn, head, ctx, id)
+        }
+        [v1, instances, id, runs_segment]
+            if v1 == "v1" && instances == "instances" && runs_segment == "runs" =>
+        {
+            if !valid_id(id) {
+                return Outcome::Resp(message(400, "invalid instance id"));
+            }
+            if head.method != Method::Post {
+                return call(&ctx.state, |_| message(405, "method not allowed"));
+            }
+            create_run(conn, head, ctx, id)
+        }
+        [v1, runs] if v1 == "v1" && runs == "runs" => {
+            if head.method != Method::Get {
+                return call(&ctx.state, |_| message(405, "method not allowed"));
+            }
+            list_runs(head, ctx)
+        }
+        [v1, runs, id] if v1 == "v1" && runs == "runs" => {
+            if !valid_id(id) {
+                return Outcome::Resp(message(400, "invalid run id"));
+            }
+            if head.method != Method::Get {
+                return call(&ctx.state, |_| message(405, "method not allowed"));
+            }
+            get_run(ctx, id)
+        }
+        [v1, runs, id, cancel]
+            if v1 == "v1" && runs == "runs" && cancel == "cancel" =>
+        {
+            if !valid_id(id) {
+                return Outcome::Resp(message(400, "invalid run id"));
+            }
+            if head.method != Method::Post {
+                return call(&ctx.state, |_| message(405, "method not allowed"));
+            }
+            cancel_run_route(ctx, id)
+        }
+        _ => call(&ctx.state, |_| message(404, "not found")),
+    }
+}
+
+/// Data plane: value bytes only (§5.5, §6). Instance/run/flow control-plane
+/// routes never touch this plane.
+fn data_dispatch(conn: &mut Conn, head: &mut Head, ctx: &RouteCtx) -> Outcome {
+    let segments = head.segs.clone();
+    match segments.as_slice() {
+        [v1, values, digest] if v1 == "v1" && values == "values" => {
+            if head.method != Method::Get {
+                return call(&ctx.state, |_| message(405, "method not allowed"));
+            }
+            get_value(head, ctx, digest)
+        }
+        [v1, values] if v1 == "v1" && values == "values" => {
+            if head.method != Method::Put {
+                return call(&ctx.state, |_| message(405, "method not allowed"));
+            }
+            put_value(conn, head, ctx)
         }
         _ => call(&ctx.state, |_| message(404, "not found")),
     }
@@ -385,4 +498,250 @@ pub(crate) fn valid_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_')
+}
+
+/// Instance and run ids are `Instance::new`/`Instance::request_run`'s own
+/// `<prefix>_<16 lowercase hex>` shape; checked loosely (safe charset,
+/// bounded length) rather than coupled to that exact format.
+fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 80
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+// ---------------------------------------------------------------------------
+// instances (§4.1, §6)
+// ---------------------------------------------------------------------------
+
+fn create_instance(conn: &mut Conn, head: &mut Head, ctx: &RouteCtx, name: &str) -> Outcome {
+    let request: CreateInstanceRequest = match read_json(conn, head) {
+        Ok(request) => request,
+        Err(outcome) => return outcome,
+    };
+    let name = name.to_string();
+    call(&ctx.state, move |state| {
+        let inputs = request.inputs.unwrap_or_default();
+        match state.create_instance(&name, request.label, request.pin.unwrap_or(false), inputs) {
+            CreateInstanceOutcome::Created(id) => {
+                json(201, &CreateInstanceResponse { instance: id.0 })
+            }
+            CreateInstanceOutcome::FlowNotFound => message(404, "flow not found"),
+            CreateInstanceOutcome::FlowInvalid => message(409, "flow has no valid graph"),
+            CreateInstanceOutcome::Error(error) => message(422, &error),
+        }
+    })
+}
+
+fn list_instances(head: &Head, ctx: &RouteCtx) -> Outcome {
+    let flow = head.query_get("flow").map(str::to_string);
+    let waiting_only = head.query_get("waiting") == Some("1");
+    call(&ctx.state, move |state| {
+        json(200, &state.list_instance_rows(flow.as_deref(), waiting_only))
+    })
+}
+
+fn get_instance(ctx: &RouteCtx, id: &str) -> Outcome {
+    let id = InstanceId(id.to_string());
+    call(&ctx.state, move |state| match state.instance_row(&id) {
+        Some(row) => json(200, &row),
+        None => message(404, "instance not found"),
+    })
+}
+
+fn delete_instance(ctx: &RouteCtx, id: &str) -> Outcome {
+    let id = InstanceId(id.to_string());
+    call(&ctx.state, move |state| {
+        if state.delete_instance(&id) {
+            Resp::empty(204)
+        } else {
+            message(404, "instance not found")
+        }
+    })
+}
+
+/// `X-Flow-Actor` (DESIGN.md §3) is not on `makepad-bounded-http`'s tracked
+/// header allowlist (shared with the asset store; out of this lane's
+/// ownership), so the caller identity travels as `?actor=tab|chat|service`
+/// instead — the same query-parameter workaround the store's own blob
+/// upload route uses for metadata the transport does not carry.
+fn put_instance_inputs(conn: &mut Conn, head: &mut Head, ctx: &RouteCtx, id: &str) -> Outcome {
+    let actor = match head.query_get("actor") {
+        Some("tab") => "tab",
+        Some("chat") => "chat",
+        _ => "service",
+    }
+    .to_string();
+    let raw: HashMap<String, HashMap<String, crate::InputValueDto>> = match read_json(conn, head) {
+        Ok(raw) => raw,
+        Err(outcome) => return outcome,
+    };
+    let id = InstanceId(id.to_string());
+    call(&ctx.state, move |state| {
+        match state.set_instance_inputs(&id, raw, &actor) {
+            SetInputsOutcome::Ok(inputs) => json(200, &crate::SetInputsResponse { inputs }),
+            SetInputsOutcome::InstanceNotFound => message(404, "instance not found"),
+            SetInputsOutcome::AskNotWaiting => message(409, "Ask is not waiting there"),
+            SetInputsOutcome::Error(error) => message(422, &error),
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// runs (§5.4, §6)
+// ---------------------------------------------------------------------------
+
+fn create_run(conn: &mut Conn, head: &mut Head, ctx: &RouteCtx, id: &str) -> Outcome {
+    let request: CreateRunRequest = match read_json(conn, head) {
+        Ok(request) => request,
+        Err(outcome) => return outcome,
+    };
+    let id = InstanceId(id.to_string());
+    call(&ctx.state, move |state| match state.start_run(&id, request.outputs) {
+        StartRunOutcome::Started { run_id, queued } => {
+            json(202, &CreateRunResponse { run_id, queued })
+        }
+        StartRunOutcome::InstanceNotFound => message(404, "instance not found"),
+        StartRunOutcome::FlowInvalid => message(409, "flow has no valid graph"),
+        StartRunOutcome::Busy => message(409, "concurrency is zero"),
+    })
+}
+
+fn list_runs(head: &Head, ctx: &RouteCtx) -> Outcome {
+    let instance = head.query_get("instance").map(|value| InstanceId(value.to_string()));
+    call(&ctx.state, move |state| {
+        json(200, &state.list_run_rows(instance.as_ref()))
+    })
+}
+
+fn get_run(ctx: &RouteCtx, id: &str) -> Outcome {
+    let run_id = RunId(id.to_string());
+    call(&ctx.state, move |state| match state.run_row(&run_id) {
+        Some(row) => json(200, &row),
+        None => message(404, "run not found"),
+    })
+}
+
+fn cancel_run_route(ctx: &RouteCtx, id: &str) -> Outcome {
+    let run_id = RunId(id.to_string());
+    call(&ctx.state, move |state| {
+        if state.cancel_run(&run_id) {
+            Resp::empty(200)
+        } else {
+            message(404, "run not found")
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// values (data plane, §5.5, §6)
+// ---------------------------------------------------------------------------
+
+fn get_value(head: &Head, ctx: &RouteCtx, digest_text: &str) -> Outcome {
+    let Some(digest) = super::util::from_hex_32(digest_text) else {
+        return Outcome::Resp(message(400, "malformed digest").closing());
+    };
+    let value = match ctx.state.call(move |state| state.get_value(&digest)) {
+        Some(value) => value,
+        None => return Outcome::Resp(message(503, "state unavailable")),
+    };
+    match value {
+        Some(value) => Outcome::Resp(serve_value(head, &value, &digest)),
+        None => Outcome::Resp(message(404, "value not found")),
+    }
+}
+
+fn serve_value(head: &Head, value: &Value, digest: &[u8; 32]) -> Resp {
+    let etag = format!("\"sha256:{}\"", super::util::to_hex(digest));
+    if let Some(inm) = &head.if_none_match {
+        if etag_matches(inm, &etag) {
+            return Resp::empty(304)
+                .with_header("ETag", etag)
+                .with_header("Cache-Control", VALUE_CACHE_CONTROL.to_string());
+        }
+    }
+    let size = value.bytes.len() as u64;
+    let range = match &head.range {
+        None => RangeSpec::None,
+        Some(_) => {
+            let honored = match &head.if_range {
+                None => true,
+                Some(if_range) => if_range_matches(if_range, &etag),
+            };
+            if honored {
+                parse_range(head.range.as_deref(), size)
+            } else {
+                RangeSpec::None
+            }
+        }
+    };
+    let (status, slice, content_range) = match range {
+        RangeSpec::Unsatisfiable => {
+            return Resp::bytes(416, "text/plain; charset=utf-8", b"range not satisfiable".to_vec())
+                .with_header("Content-Range", format!("bytes */{size}"))
+                .with_header("ETag", etag);
+        }
+        RangeSpec::None => (200, &value.bytes[..], None),
+        RangeSpec::Single { start, end } => (
+            206,
+            &value.bytes[start as usize..=end as usize],
+            Some(format!("bytes {start}-{end}/{size}")),
+        ),
+    };
+    let mut resp = Resp::bytes(status, &value.content_type, slice.to_vec())
+        .with_header("ETag", etag)
+        .with_header("Accept-Ranges", "bytes".to_string())
+        .with_header("Cache-Control", VALUE_CACHE_CONTROL.to_string());
+    if let Some(content_range) = content_range {
+        resp = resp.with_header("Content-Range", content_range);
+    }
+    resp
+}
+
+/// `PUT /v1/values?type=<port type>&content_type=<mime>`, body = raw bytes
+/// (media only — text/json/list values are constructed inline from a
+/// request's own literal, never uploaded). `content_type` (also a query
+/// parameter, for the same reason `actor` is: the transport does not carry
+/// `Content-Type` through to route handlers) defaults per `type` when
+/// omitted.
+fn put_value(conn: &mut Conn, head: &mut Head, ctx: &RouteCtx) -> Outcome {
+    let Some(ty) = head.query_get("type").and_then(parse_media_port_type) else {
+        return Outcome::Resp(message(400, "missing or non-media `type`").closing());
+    };
+    let content_type = head
+        .query_get("content_type")
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let bytes = match conn.read_body_full(head, MAX_VALUE_BYTES, BODY_DEADLINE_MS) {
+        Ok(bytes) => bytes,
+        Err(BodyError::Timeout) => return Outcome::Resp(message(408, "body timeout").closing()),
+        Err(BodyError::Malformed) => return Outcome::Resp(message(400, "malformed body").closing()),
+        Err(BodyError::TooLarge) => {
+            conn.drain_remaining(head, Instant::now() + Duration::from_millis(BODY_DEADLINE_MS));
+            return Outcome::Resp(message(413, "body too large").closing());
+        }
+        Err(BodyError::Io) => return Outcome::Hangup,
+    };
+    if bytes.is_empty() {
+        return Outcome::Resp(message(400, "empty value").closing());
+    }
+    let value = Value::media(ty, content_type, bytes);
+    call(&ctx.state, move |state| {
+        let digest = state.put_value(value);
+        json(201, &PutValueResponse { digest: super::util::to_hex(&digest) })
+    })
+}
+
+fn parse_media_port_type(text: &str) -> Option<PortType> {
+    let ty = match text {
+        "image" => PortType::Image,
+        "audio" => PortType::Audio,
+        "video" => PortType::Video,
+        "mesh" => PortType::Mesh,
+        "bytes" => PortType::Bytes,
+        _ => return None,
+    };
+    ty.is_media().then_some(ty)
 }

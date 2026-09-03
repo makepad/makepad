@@ -1,4 +1,5 @@
 use makepad_micro_serde::*;
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
 pub struct Loc {
@@ -451,4 +452,116 @@ pub struct EventsPage {
     /// Opaque, epoch-stamped (`<16 hex>-<seq>`); echo it back verbatim.
     pub cursor: String,
     pub gap: bool,
+}
+
+// ---------------------------------------------------------------------------
+// flow-server instance & run DTOs (§4.1, §5.4, §6)
+// ---------------------------------------------------------------------------
+
+/// One input value in a request body: `{type, text?, json?, digest?}`.
+/// Exactly one of `text` / `json` / `digest` is populated, selected by
+/// `ty` — `digest` references a value already in the store (an upload
+/// through `PUT /v1/values`, or a prior run's output).
+#[derive(Clone, Debug, SerJson, DeJson)]
+pub struct InputValueDto {
+    #[rename(type)]
+    pub ty: PortType,
+    pub text: Option<String>,
+    pub json: Option<JsonValue>,
+    pub digest: Option<String>,
+}
+
+/// `POST /v1/flows/{name}/instances {label?, inputs?, pin?}`.
+#[derive(Clone, Debug, Default, SerJson, DeJson)]
+pub struct CreateInstanceRequest {
+    pub label: Option<String>,
+    pub inputs: Option<HashMap<String, HashMap<String, InputValueDto>>>,
+    pub pin: Option<bool>,
+}
+
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct CreateInstanceResponse {
+    pub instance: String,
+}
+
+/// The question an instance is parked on, mirroring `RunEventPayload::NodeWaiting`.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct WaitingDto {
+    pub node: String,
+    pub question: String,
+    #[rename(type)]
+    pub ty: PortType,
+    pub options: Vec<Literal>,
+}
+
+/// One row from `GET /v1/instances` / `GET /v1/instances/{id}`.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct InstanceRow {
+    pub instance: String,
+    pub flow: String,
+    pub label: Option<String>,
+    pub revision: u64,
+    pub live: bool,
+    pub state: String,
+    pub run: Option<String>,
+    pub inputs: HashMap<String, HashMap<String, ValueRef>>,
+    pub outputs: HashMap<String, ValueRef>,
+    pub waiting: Option<WaitingDto>,
+    pub owner: String,
+    pub created_ms: u64,
+    pub last_activity_ms: u64,
+    pub subscribers: u64,
+}
+
+/// `PUT /v1/instances/{id}/inputs` succeeds with the instance's inputs as
+/// they stand after the write.
+#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
+pub struct SetInputsResponse {
+    pub inputs: HashMap<String, HashMap<String, ValueRef>>,
+}
+
+/// `POST /v1/instances/{id}/runs {outputs?}`.
+#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
+pub struct CreateRunRequest {
+    pub outputs: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct CreateRunResponse {
+    pub run_id: String,
+    pub queued: u64,
+}
+
+/// One node's row inside a run, keyed by node id in `RunRowDto::nodes`.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct NodeRowDto {
+    pub state: NodeState,
+    pub progress: Option<u16>,
+    pub stage: Option<String>,
+    pub outputs: Vec<PortValueRef>,
+    pub error: Option<String>,
+    /// Delta text accumulated so far (streaming nodes), capped at 16 KiB.
+    pub text: Option<String>,
+}
+
+/// `GET /v1/runs/{id}` and each row of `GET /v1/runs?instance=`.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct RunRowDto {
+    pub run_id: String,
+    pub instance: String,
+    pub flow: String,
+    pub revision: u64,
+    pub state: RunState,
+    pub nodes: HashMap<String, NodeRowDto>,
+    pub outputs: HashMap<String, ValueRef>,
+    pub http_log: Vec<HttpLogEntryDto>,
+    pub started_ms: u64,
+    pub finished_ms: Option<u64>,
+}
+
+/// `PUT /v1/values` (data plane, raw bytes body) succeeds with the
+/// content-addressed digest, matching `ValueRef::digest`.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct PutValueResponse {
+    pub digest: String,
 }
