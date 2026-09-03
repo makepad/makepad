@@ -97,6 +97,9 @@ mod.flow.ui.OutputFace = Face{
 }
 
 mod.flow.ui.LlmFace = Face{
+    model := mod.flow.ui.ModelPicker{
+        param_bind := @model
+    }
     system := FoldHeader{
         header: View{
             width: Fill
@@ -129,10 +132,14 @@ mod.flow.ui.LlmFace = Face{
 }
 
 mod.flow.ui.FnFace = Face{
-    code := CodeView{
-        editor +: {
-            width: Fill
-            height: Fit
+    code := Label{
+        width: Fill
+        height: Fit
+        max_lines: 2
+        text_overflow: TextOverflow.Ellipsis
+        draw_text +: {
+            color: #xc8c8cc
+            text_style: theme.font_code{font_size: 9}
         }
         param := @run
     }

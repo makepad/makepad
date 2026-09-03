@@ -11,6 +11,12 @@ const SNAPSHOT_TTL: Duration = Duration::from_secs(10);
 const NODE_BUDGET: Duration = Duration::from_millis(400);
 const JOIN_CAP: Duration = Duration::from_millis(1_500);
 
+fn matches_requested_domain(model_domain: &str, requested: Option<&str>) -> bool {
+    requested.is_none_or(|domain| {
+        model_domain == domain || (domain == "text" && model_domain == "chat")
+    })
+}
+
 #[derive(Clone)]
 struct Candidate {
     base_url: String,
@@ -54,7 +60,7 @@ impl FleetSnapshot {
         let models = self
             .models
             .iter()
-            .filter(|model| domain.is_none_or(|domain| model.domain == domain))
+            .filter(|model| matches_requested_domain(&model.domain, domain))
             .cloned()
             .collect();
         ModelsResponse {
@@ -78,7 +84,9 @@ impl FleetSnapshot {
             ty.models = self
                 .models
                 .iter()
-                .filter(|model| model.available && model.domain == domain)
+                .filter(|model| {
+                    model.available && matches_requested_domain(&model.domain, Some(domain))
+                })
                 .map(|model| model.id.clone())
                 .collect::<BTreeSet<_>>()
                 .into_iter()
@@ -266,6 +274,19 @@ fn join_finished_until(handles: &mut Vec<JoinHandle<()>>, deadline: Instant) {
         if !joined && !handles.is_empty() {
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::matches_requested_domain;
+
+    #[test]
+    fn text_picker_includes_chat_residency() {
+        assert!(matches_requested_domain("text", Some("text")));
+        assert!(matches_requested_domain("chat", Some("text")));
+        assert!(!matches_requested_domain("image", Some("text")));
+        assert!(!matches_requested_domain("chat", Some("image")));
     }
 }
 

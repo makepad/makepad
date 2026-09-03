@@ -39,13 +39,20 @@ let expand = Llm{
     prompt: prompt.text()
     at: vec2(360, 120)
 }
-let image = Image{ prompt: expand.text() width: 1024 height: 1024 steps: 8 at: vec2(680, 120) }
+/** Appends the chosen style to the expanded prompt. */
+let add_style = Fn{
+    in: { text: expand.text() style: "photo" }
+    out: [@text]
+    run: |i| { {text: i.text + ", " + i.style + " style"} }
+    at: vec2(680, 120)
+}
+let image = Image{ prompt: add_style.text() width: 1024 height: 1024 steps: 8 at: vec2(1000, 120) }
 /** The finished picture. */
 let picture = Output{ type: @image value: image.image() }
 Flow{
     label: "Prompt to image"
     brief: "Expands a short prompt into a rich one and paints it."
-    prompt, expand, image, picture
+    prompt, expand, add_style, image, picture
 }
 "#;
 
@@ -2635,6 +2642,7 @@ mod tests {
                 ty: PortType::Text,
             }],
             at: None,
+            size: None,
             loc: Loc { line: 2, col: 1 },
             fn_src: None,
             face_src: None,

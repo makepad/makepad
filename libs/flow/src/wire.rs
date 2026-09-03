@@ -262,6 +262,7 @@ pub struct Node {
     pub inputs: Vec<NodeInput>,
     pub outputs: Vec<Port>,
     pub at: Option<(f64, f64)>,
+    pub size: Option<(f64, f64)>,
     pub loc: Loc,
     pub fn_src: Option<String>,
     pub face_src: Option<String>,

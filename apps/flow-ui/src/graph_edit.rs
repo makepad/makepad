@@ -166,6 +166,7 @@ pub fn node_from_catalog(id: String, catalog: &NodeTypeCatalog, at: (f64, f64)) 
         inputs,
         outputs,
         at: Some(at),
+        size: None,
         loc: Default::default(),
         fn_src: (catalog.type_name == "Fn").then(|| "|i| { {text: i.text} }".to_string()),
         face_src: None,
@@ -187,9 +188,43 @@ pub fn add_node(graph: &Graph, catalog: &NodeTypeCatalog, at: (f64, f64)) -> (Gr
 pub fn move_node(graph: &Graph, id: &str, at: (f64, f64)) -> Graph {
     let mut next = graph.clone();
     if let Some(node) = next.nodes.iter_mut().find(|node| node.id == id) {
-        node.at = Some((at.0.round(), at.1.round()));
+        node.at = Some(at);
     }
     next
+}
+
+pub fn resize_node(graph: &Graph, id: &str, size: (f64, f64)) -> Graph {
+    let mut next = graph.clone();
+    if let Some(node) = next.nodes.iter_mut().find(|node| node.id == id) {
+        node.size = Some(size);
+    }
+    next
+}
+
+/// Mounted face trees only need rebuilding when their declarations or port
+/// shape changed. Position, size, values, docs and run state are refreshed
+/// in place and must not tear down an open popup or editor.
+pub fn needs_face_remount(old: &Graph, new: &Graph) -> bool {
+    if old.flow_ui_src != new.flow_ui_src || old.nodes.len() != new.nodes.len() {
+        return true;
+    }
+    old.nodes.iter().any(|old_node| {
+        let Some(new_node) = new.nodes.iter().find(|node| node.id == old_node.id) else {
+            return true;
+        };
+        old_node.type_name != new_node.type_name
+            || old_node.face_src != new_node.face_src
+            || old_node
+                .inputs
+                .iter()
+                .map(|input| (&input.port, input.ty))
+                .ne(new_node.inputs.iter().map(|input| (&input.port, input.ty)))
+            || old_node
+                .outputs
+                .iter()
+                .map(|output| (&output.name, output.ty))
+                .ne(new_node.outputs.iter().map(|output| (&output.name, output.ty)))
+    })
 }
 
 /// Remove a node; edges into and out of it go, dependents' inputs become
@@ -552,6 +587,7 @@ mod tests {
             type_name: type_name.to_string(),
             kind: kind.to_string(),
             domain: None,
+            models: Vec::new(),
             ports: NodePortsCatalog {
                 _in: ins
                     .iter()
@@ -618,6 +654,22 @@ mod tests {
     }
 
     #[test]
+    fn face_remount_ignores_layout_but_catches_structure() {
+        let input = catalog("Input", "input", &[], &[("text", PortType::Text)]);
+        let (graph, id) = add_node(&empty(), &input, (10.0, 20.0));
+        let moved = resize_node(&move_node(&graph, &id, (31.5, 47.25)), &id, (440.0, 180.0));
+        assert!(!needs_face_remount(&graph, &moved));
+
+        let mut changed_face = graph.clone();
+        changed_face.nodes[0].face_src = Some("View{}".into());
+        assert!(needs_face_remount(&graph, &changed_face));
+
+        let mut changed_ports = graph.clone();
+        changed_ports.nodes[0].outputs[0].ty = PortType::Image;
+        assert!(needs_face_remount(&graph, &changed_ports));
+    }
+
+    #[test]
     fn connect_checks_types_and_writes_the_edge() {
         let input = catalog("Input", "input", &[], &[("text", PortType::Text)]);
         let image = catalog(
@@ -667,7 +719,7 @@ mod tests {
         let (g, b) = add_node(&g, &llm, (0.0, 0.0));
         let g = connect(&g, &a, "text", &b, "prompt").unwrap();
         let g = move_node(&g, &b, (300.4, 99.6));
-        assert_eq!(g.nodes[1].at, Some((300.0, 100.0)));
+        assert_eq!(g.nodes[1].at, Some((300.4, 99.6)));
         let g = delete_node(&g, &a);
         assert_eq!(g.nodes.len(), 1);
         assert!(g.edges.is_empty());

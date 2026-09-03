@@ -379,6 +379,70 @@ pub enum PopupMenuPosition {
     BelowInput,
 }
 
+/// Optional affine mapping for a dropdown drawn under a scaled/translated
+/// parent draw list. Popup menus themselves are window-space overlays.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PopupAnchorTransform {
+    pub scale: f64,
+    pub translation: DVec2,
+}
+
+impl PopupAnchorTransform {
+    pub fn rect(self, rect: Rect) -> Rect {
+        Rect {
+            pos: rect.pos * self.scale + self.translation,
+            size: rect.size * self.scale,
+        }
+    }
+
+    fn point(self, point: DVec2) -> DVec2 {
+        point * self.scale + self.translation
+    }
+}
+
+fn transform_popup_event(event: &Event, transform: PopupAnchorTransform) -> Option<Event> {
+    Some(match event {
+        Event::MouseDown(e) => {
+            let mut e = e.clone();
+            e.abs = transform.point(e.abs);
+            Event::MouseDown(e)
+        }
+        Event::MouseMove(e) => {
+            let mut e = e.clone();
+            e.abs = transform.point(e.abs);
+            Event::MouseMove(e)
+        }
+        Event::MouseUp(e) => {
+            let mut e = e.clone();
+            e.abs = transform.point(e.abs);
+            Event::MouseUp(e)
+        }
+        Event::MouseLeave(e) => {
+            let mut e = e.clone();
+            e.abs = transform.point(e.abs);
+            Event::MouseLeave(e)
+        }
+        Event::Scroll(e) => {
+            let mut e = e.clone();
+            e.abs = transform.point(e.abs);
+            Event::Scroll(e)
+        }
+        Event::LongPress(e) => {
+            let mut e = e.clone();
+            e.abs = transform.point(e.abs);
+            Event::LongPress(e)
+        }
+        Event::TouchUpdate(e) => {
+            let mut e = e.clone();
+            for touch in &mut e.touches {
+                touch.abs = transform.point(touch.abs);
+            }
+            Event::TouchUpdate(e)
+        }
+        _ => return None,
+    })
+}
+
 #[derive(Script, WidgetRegister, WidgetRef, WidgetSet, Animator)]
 pub struct DropDown {
     #[uid]
@@ -410,11 +474,18 @@ pub struct DropDown {
     #[live]
     labels: Vec<String>,
 
+    /// Popup rows drawn with the disabled palette while remaining selectable.
+    #[rust]
+    dimmed_items: Vec<bool>,
+
     #[live]
     popup_menu_position: PopupMenuPosition,
 
     #[rust]
     is_active: bool,
+
+    #[rust]
+    popup_anchor_transform: Option<PopupAnchorTransform>,
 
     /// The menu store this dropdown draws from, kept so `children()` (which
     /// gets no `Cx`) can surface the open menu's items to the widget tree.
@@ -571,26 +642,42 @@ impl DropDown {
                         if i == self.selected_item {
                             item_pos = Some(cx.turtle().pos());
                         }
-                        popup_menu.draw_item(cx, node_id, &item);
+                        popup_menu.draw_item_dimmed(
+                            cx,
+                            node_id,
+                            &item,
+                            self.dimmed_items.get(i).copied().unwrap_or(false),
+                        );
                     }
 
+                    let area = self.draw_bg.area().rect(cx);
+                    let anchor = self
+                        .popup_anchor_transform
+                        .map(|transform| transform.rect(area))
+                        .unwrap_or(area);
                     popup_menu.end(
                         cx,
                         self.draw_bg.area(),
-                        -item_pos.unwrap_or(dvec2(0.0, 0.0)),
+                        anchor.pos - area.pos - item_pos.unwrap_or(dvec2(0.0, 0.0)),
                     );
                 }
                 PopupMenuPosition::BelowInput => {
                     for (i, item) in self.labels.iter().enumerate() {
                         let node_id = LiveId(i as u64).into();
-                        popup_menu.draw_item(cx, node_id, &item);
+                        popup_menu.draw_item_dimmed(
+                            cx,
+                            node_id,
+                            &item,
+                            self.dimmed_items.get(i).copied().unwrap_or(false),
+                        );
                     }
 
                     let area = self.draw_bg.area().rect(cx);
-                    let shift = Vec2d {
-                        x: 0.0,
-                        y: area.size.y,
-                    };
+                    let anchor = self
+                        .popup_anchor_transform
+                        .map(|transform| transform.rect(area))
+                        .unwrap_or(area);
+                    let shift = anchor.pos - area.pos + dvec2(0.0, anchor.size.y);
 
                     popup_menu.end(cx, self.draw_bg.area(), shift);
                 }
@@ -667,9 +754,13 @@ impl Widget for DropDown {
             let mut map = global.map.borrow_mut();
             let menu = map.get_mut(&self.popup_menu_key()).unwrap();
             let mut close = false;
+            let popup_event = self
+                .popup_anchor_transform
+                .and_then(|transform| transform_popup_event(event, transform));
+            let popup_event = popup_event.as_ref().unwrap_or(event);
             menu.handle_event_with(
                 cx,
-                event,
+                popup_event,
                 self.draw_bg.area(),
                 &mut |cx, action| match action {
                     PopupMenuAction::WasSweeped(_node_id) => {}
@@ -691,7 +782,7 @@ impl Widget for DropDown {
             }
 
             // check if we clicked outside of the popup menu
-            if let Event::MouseDown(e) = event {
+            if let Event::MouseDown(e) = popup_event {
                 if !menu.menu_contains_pos(cx, e.abs) {
                     self.set_closed(cx);
                     self.animator_play(cx, ids!(hover.off));
@@ -771,6 +862,19 @@ impl Widget for DropDown {
 }
 
 impl DropDownRef {
+    pub fn set_popup_anchor_transform(
+        &self,
+        cx: &mut Cx,
+        transform: Option<PopupAnchorTransform>,
+    ) {
+        if let Some(mut inner) = self.borrow_mut() {
+            if inner.popup_anchor_transform != transform {
+                inner.popup_anchor_transform = transform;
+                inner.draw_bg.redraw(cx);
+            }
+        }
+    }
+
     pub fn set_labels_with<F: FnMut(&mut String)>(&self, cx: &mut Cx, mut f: F) {
         if let Some(mut inner) = self.borrow_mut() {
             let mut i = 0;
@@ -794,6 +898,15 @@ impl DropDownRef {
     pub fn set_labels(&self, cx: &mut Cx, labels: Vec<String>) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.labels = labels;
+            inner.draw_bg.redraw(cx);
+        }
+    }
+
+    /// Set which popup rows use the disabled palette. These rows deliberately
+    /// stay selectable (for example a hub model that will be acquired).
+    pub fn set_dimmed_items(&self, cx: &mut Cx, dimmed_items: Vec<bool>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.dimmed_items = dimmed_items;
             inner.draw_bg.redraw(cx);
         }
     }
@@ -860,5 +973,33 @@ impl DropDownRef {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod anchor_tests {
+    use super::*;
+
+    #[test]
+    fn popup_anchor_rect_applies_camera_scale_and_translation() {
+        let rect = Rect {
+            pos: dvec2(110.0, 70.0),
+            size: dvec2(80.0, 24.0),
+        };
+        let half = PopupAnchorTransform {
+            scale: 0.5,
+            translation: dvec2(20.0, -5.0),
+        }
+        .rect(rect);
+        assert_eq!(half.pos, dvec2(75.0, 30.0));
+        assert_eq!(half.size, dvec2(40.0, 12.0));
+
+        let double = PopupAnchorTransform {
+            scale: 2.0,
+            translation: dvec2(-30.0, 15.0),
+        }
+        .rect(rect);
+        assert_eq!(double.pos, dvec2(190.0, 155.0));
+        assert_eq!(double.size, dvec2(160.0, 48.0));
     }
 }
