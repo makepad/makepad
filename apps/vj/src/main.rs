@@ -24757,7 +24757,15 @@ p2 {}
                 self.run_deck_cmds(cx, cmds);
             }
             // One beat either way, or a phrase with a modifier held: shift is
-            // four bars, control sixteen. A beat is a MEASURED one where the
+            // four bars, control sixteen. Those three ARE the size
+            // selector: a fourth control for it would cost this row a
+            // gesture it has no room to give, and a phrase is the size a
+            // jump is actually for.
+            //
+            // The tap stays a seek even inside a loop -- a one-beat nudge
+            // is a beatmatch correction, it means the RECORD, and the wrap
+            // folds it back in phase. The phrase jumps always exceed the
+            // span, so they move the loop instead. A beat is a MEASURED one where the
             // analysis found beats and a second where it did not, so an
             // early press moves the record by a length that is at least
             // predictable rather than doing nothing at all.

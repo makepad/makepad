@@ -3453,8 +3453,19 @@ impl DeckEngine {
         if !state.is_loaded() || !beats.is_finite() {
             return Vec::new();
         }
-        let secs = state.position_secs + beats * state.counted_beat_secs();
-        self.seek_secs(deck, secs)
+        let step = beats * state.counted_beat_secs();
+        // INSIDE A LOOP, a jump moves the LOOP.
+        //
+        // A seek would throw the record out of the span and the wrap would
+        // drag it straight back to an offset nobody chose -- so the
+        // gesture reads as a stutter rather than as a move, and the loop
+        // the operator was holding is still where it was. Moving the span
+        // takes the record with it, at the same place inside the loop, and
+        // that is what a jump means while one is running.
+        if let Some(span) = state.loop_span {
+            return self.move_loop(deck, span.start_secs + step);
+        }
+        self.seek_secs(deck, state.position_secs + step)
     }
 
     /// Flip the deck's grid half a beat. The analyser's known failure mode
@@ -4161,6 +4172,38 @@ mod tests {
         assert!((e.deck(DeckId::A).loop_span.unwrap().end_secs - 32.0).abs() < 1e-9);
     }
 
+
+    #[test]
+    fn a_jump_inside_a_loop_moves_the_loop_and_takes_the_record_with_it() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0); // half a second a beat
+        e.deck_mut(DeckId::A).loop_ticks = 4 * LOOP_TICKS_PER_BEAT;
+        e.observe(DeckId::A, 10.0, true);
+        e.loop_in(DeckId::A); // 10.0 .. 12.0
+        e.observe(DeckId::A, 10.5, true);
+
+        let cmds = e.beat_jump(DeckId::A, 8.0); // four seconds on
+        let span = e.deck(DeckId::A).loop_span.expect("still looping");
+        assert!((span.start_secs - 14.0).abs() < 1e-9, "the loop moved, to {}", span.start_secs);
+        assert!((span.len_secs() - 2.0).abs() < 1e-9, "and kept its length");
+        // The record keeps its place INSIDE the loop rather than being
+        // thrown out of it and dragged back by the wrap.
+        assert!((e.deck(DeckId::A).position_secs - 14.5).abs() < 1e-9);
+        assert!(cmds.iter().any(|c| matches!(c, DeckCmd::SetLoopSpan { .. })));
+
+        // And RELOOP remembers where it ended up.
+        assert_eq!(e.deck(DeckId::A).loop_memory, Some(span));
+    }
+
+    #[test]
+    fn a_jump_with_no_loop_running_is_the_seek_it_always_was() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        e.observe(DeckId::A, 10.0, true);
+        e.beat_jump(DeckId::A, 8.0);
+        assert!((e.deck(DeckId::A).position_secs - 14.0).abs() < 1e-9);
+        assert!(e.deck(DeckId::A).loop_span.is_none());
+    }
     #[test]
     fn a_jump_and_a_nudge_move_in_seconds_without_a_grid() {
         let mut e = DeckEngine::new();
