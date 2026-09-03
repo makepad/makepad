@@ -580,6 +580,15 @@ pub const WSOLA_CORR: usize = 512;
 /// Correlation subsampling: the similarity surface is smooth at audio rates,
 /// so every other sample scores the same peak for half the work.
 const WSOLA_CORR_STRIDE: usize = 2;
+/// How many scores the correlation actually takes, after subsampling.
+const WSOLA_CORR_TAPS: usize = WSOLA_CORR / WSOLA_CORR_STRIDE;
+/// The grain search walks the radius in two gears. The coarse pass steps
+/// this far, on the same bet the subsampling above already makes: the
+/// similarity surface is smooth, so a peak is not missed between strides.
+/// The fine pass then walks one frame at a time either side of what the
+/// coarse pass found, far enough to reach any candidate it stepped over.
+const WSOLA_COARSE_STRIDE: usize = 8;
+const WSOLA_FINE_RADIUS: usize = WSOLA_COARSE_STRIDE - 1;
 /// Ratios inside this band are treated as "no stretch" and bypass entirely.
 pub const STRETCH_BYPASS_EPSILON: f64 = 1e-4;
 /// Widest stretch the grain search can still track. A caller that splits a
@@ -607,6 +616,12 @@ pub struct Stretcher {
     anchor: f64,
     /// Source start actually chosen for the last grain.
     last_start: usize,
+    /// The waveform the last grain was heading into, read once per search
+    /// instead of once per candidate. The template is the same for every
+    /// candidate, and re-reading it through the source was half the work
+    /// -- and on a separated deck the source is a four-lane sum, so it was
+    /// half of something expensive.
+    template: Box<[f32; WSOLA_CORR_TAPS]>,
     ratio: f64,
     ended: bool,
 }
@@ -631,6 +646,7 @@ impl Stretcher {
             primed: false,
             anchor: 0.0,
             last_start: 0,
+            template: Box::new([0.0; WSOLA_CORR_TAPS]),
             ratio: 1.0,
             ended: false,
         }
@@ -772,7 +788,34 @@ impl Stretcher {
 
     /// The grain start near `ideal` whose head best continues the waveform
     /// the previous grain was heading into.
-    fn best_start<S: FrameSource>(&self, source: &S, ideal: usize, last: usize) -> usize {
+    /// How well the grain starting at `candidate` continues the waveform
+    /// the last grain was heading into. Higher is better.
+    #[inline]
+    fn score_at<S: FrameSource>(&self, source: &S, candidate: usize) -> f32 {
+        let mut dot = 0.0f32;
+        let mut energy = 1e-9f32;
+        for (tap, want) in self.template.iter().enumerate() {
+            let b = source.frame(candidate + tap * WSOLA_CORR_STRIDE);
+            let bm = b[0] + b[1];
+            dot += want * bm;
+            energy += bm * bm;
+        }
+        // Normalizing by the candidate's own energy keeps the search from
+        // always jumping onto the loudest nearby transient.
+        dot / energy.sqrt()
+    }
+
+    /// The grain start near `ideal` whose head best continues the waveform
+    /// the previous grain was heading into.
+    ///
+    /// Two gears rather than one. A full stride-one walk of the radius is
+    /// five hundred and thirteen candidates, and on a deck reading four
+    /// separated lanes that is most of a small buffer's whole budget --
+    /// two such decks advancing a grain in the same buffer were over the
+    /// deadline on their own. A coarse pass over the same radius followed
+    /// by a fine walk around what it found costs about a ninth of that,
+    /// on the same bet the correlation subsampling above already makes.
+    fn best_start<S: FrameSource>(&mut self, source: &S, ideal: usize, last: usize) -> usize {
         let template_at = self.last_start + WSOLA_HOP;
         if template_at + WSOLA_CORR >= source.frame_count() {
             return ideal;
@@ -782,28 +825,35 @@ impl Stretcher {
         if high <= low {
             return ideal.min(last);
         }
-        let mut best = ideal.min(last);
+        let reach = source.frame_count().saturating_sub(WSOLA_CORR + 1);
+        let high = high.min(reach);
+        if high <= low {
+            return ideal.min(last);
+        }
+        // Once per search, not once per candidate.
+        for (tap, slot) in self.template.iter_mut().enumerate() {
+            let a = source.frame(template_at + tap * WSOLA_CORR_STRIDE);
+            *slot = a[0] + a[1];
+        }
+
+        let mut best = ideal.min(high).max(low);
         let mut best_score = f32::NEG_INFINITY;
         let mut candidate = low;
         while candidate <= high {
-            if candidate + WSOLA_CORR >= source.frame_count() {
-                break;
+            let score = self.score_at(source, candidate);
+            if score > best_score {
+                best_score = score;
+                best = candidate;
             }
-            let mut dot = 0.0f32;
-            let mut energy = 1e-9f32;
-            let mut offset = 0;
-            while offset < WSOLA_CORR {
-                let a = source.frame(template_at + offset);
-                let b = source.frame(candidate + offset);
-                let am = a[0] + a[1];
-                let bm = b[0] + b[1];
-                dot += am * bm;
-                energy += bm * bm;
-                offset += WSOLA_CORR_STRIDE;
-            }
-            // Normalizing by the candidate's own energy keeps the search
-            // from always jumping onto the loudest nearby transient.
-            let score = dot / energy.sqrt();
+            candidate += WSOLA_COARSE_STRIDE;
+        }
+        // And again, one frame at a time, over what the coarse pass
+        // stepped across.
+        let fine_low = best.saturating_sub(WSOLA_FINE_RADIUS).max(low);
+        let fine_high = (best + WSOLA_FINE_RADIUS).min(high);
+        let mut candidate = fine_low;
+        while candidate <= fine_high {
+            let score = self.score_at(source, candidate);
             if score > best_score {
                 best_score = score;
                 best = candidate;
@@ -811,6 +861,12 @@ impl Stretcher {
             candidate += 1;
         }
         best
+    }
+
+    /// Where the last grain was taken from. For the tests: the search's
+    /// only observable output.
+    pub fn last_start(&self) -> usize {
+        self.last_start
     }
 }
 
@@ -1792,6 +1848,39 @@ mod tests {
     }
 
 
+
+    /// What the grain search costs, per second of stretched audio, on the
+    /// machine that runs it. Opt-in, because a wall-clock number is a
+    /// property of the machine and not of the code -- but it is the only
+    /// way to see the search's cost against the buffer deadline it has to
+    /// fit inside, which is what the two-gear walk exists for.
+    ///
+    /// `cargo test -p makepad-vj --release grain_search_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "opt-in: reports a wall-clock cost, not a pass or fail"]
+    fn grain_search_cost() {
+        let rate = 48_000.0;
+        let source = sine(220.0, rate, 30.0);
+        let mut stretch = Stretcher::new();
+        stretch.set_ratio(1.25);
+        stretch.reset_to(0.0);
+        // One second of output, so the figure reads per second per deck.
+        let began = std::time::Instant::now();
+        let mut frames = 0usize;
+        let mut sink = 0.0f32;
+        while frames < rate as usize {
+            let Some(out) = stretch.next(&source, false) else { break };
+            sink += out[0];
+            frames += 1;
+        }
+        assert!(sink.is_finite());
+        let took = began.elapsed().as_secs_f64() * 1000.0;
+        let grains = frames as f64 / WSOLA_HOP as f64;
+        println!(
+            "grain search: {took:.2} ms per second of stretched audio,              {:.4} ms per grain ({grains:.0} grains); a 64-frame buffer at              48 kHz is 1.33 ms",
+            took / grains,
+        );
+    }
 
     // ---- the hand and the record, closed ---------------------------------
 

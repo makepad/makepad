@@ -431,7 +431,14 @@ fn a_load_over_a_playing_deck_is_click_free() {
 
 #[test]
 fn a_keylock_toggle_is_click_free() {
-    let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
+    // A TONE, not DC. The two read paths hand the playhead over exactly but
+    // do not agree on PHASE, and DC is phase-invariant, so this test could
+    // not see the splice it is named for until the fixture had a waveform.
+    // Low, because the click rule is a bound on the step between two
+    // samples and a high tone's own slope would eat the whole budget: at
+    // 40 Hz the material moves 0.003 a sample and a phase splice moves it
+    // by up to a whole amplitude.
+    let mixer = deck_a(tone_pcm(40.0, 48_000, 10.0));
     mixer.set_deck_rate(DeckId::A, 1.05);
     mixer.set_deck_playing(DeckId::A, true);
     settle(&mixer, SETTLE_STRETCH);
