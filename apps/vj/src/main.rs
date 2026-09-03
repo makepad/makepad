@@ -3416,6 +3416,7 @@ struct DeckRefs {
     mute: ButtonRef,
     resonance: ButtonRef,
     echo: ButtonRef,
+    freeze: ButtonRef,
     sync: ButtonRef,
     slip: ButtonRef,
     keylock: ButtonRef,
@@ -3474,6 +3475,7 @@ impl DeckRefs {
             mute: ui.button(cx, ids.mute),
             resonance: ui.button(cx, ids.resonance),
             echo: ui.button(cx, ids.echo),
+            freeze: ui.button(cx, ids.freeze),
             sync: ui.button(cx, ids.sync),
             slip: ui.button(cx, ids.slip),
             keylock: ui.button(cx, ids.keylock),
@@ -3590,6 +3592,8 @@ struct MusicDeckIds {
     resonance: &'static [LiveId],
     /// The ECHO chip beside it: the beat-quantised repeat.
     echo: &'static [LiveId],
+    /// The momentary FREEZE chip: the third of the sweep row's three.
+    freeze: &'static [LiveId],
     sync: &'static [LiveId],
     slip: &'static [LiveId],
     keylock: &'static [LiveId],
@@ -3650,6 +3654,7 @@ impl MusicDeckIds {
                 mute: ids!(deck_a_mute),
                 resonance: ids!(deck_a_resonance),
                 echo: ids!(deck_a_echo),
+                freeze: ids!(deck_a_freeze),
                 sync: ids!(deck_a_sync),
                 slip: ids!(deck_a_slip),
                 keylock: ids!(deck_a_keylock),
@@ -3738,6 +3743,7 @@ impl MusicDeckIds {
                 mute: ids!(deck_b_mute),
                 resonance: ids!(deck_b_resonance),
                 echo: ids!(deck_b_echo),
+                freeze: ids!(deck_b_freeze),
                 sync: ids!(deck_b_sync),
                 slip: ids!(deck_b_slip),
                 keylock: ids!(deck_b_keylock),
@@ -13945,6 +13951,7 @@ p2 {}
                 }
                 DeckCmd::Scratch { deck, motion } => self.mixer.scratch_deck(deck, motion),
                 DeckCmd::Censor { deck, on } => self.mixer.set_deck_censor(deck, on),
+                DeckCmd::Freeze { deck, secs } => self.mixer.set_deck_freeze(deck, secs),
                 DeckCmd::RollPush { deck } => {
                     self.mixer.push_deck_roll(deck);
                 }
@@ -23234,30 +23241,34 @@ p2 {}
                 self.paint_lit(cx, kill, eq_kill[band]);
             }
             // Off the model, like the filter beside it: a swap carries
-            // the strip, and the chip has to follow it.
+            // the strip, and the chip has to follow it. Three chips
+            // share this row now (resonance, the echo, freeze), so each
+            // is a single letter at rest, the way M and S already are;
+            // resonance's top rung is the one exception that still
+            // needs a second character to say so.
             self.paint_lit(cx, ids.resonance, resonance > 0);
-            let word = if resonance >= 2 { "RES+" } else { "RES" };
+            let word = if resonance >= 2 { "R+" } else { "R" };
             if refs.resonance.text() != word {
                 refs.resonance.set_text(cx, word);
             }
             self.paint_lit(cx, ids.echo, echo_rung > 0);
-            // Three characters, the width RES and its own resting word
-            // already prove fits the halved slot ("ECHO" at four does
-            // not). ASCII only, like the key readout's own avoidance of
-            // a fraction glyph; "P" prefixes the word while ping-pong is
-            // on, "E" otherwise.
+            // Two characters, matching the row's other two-character
+            // state ("R+"): the rung as its own denominator (whole,
+            // half, quarter beat), "P" prefixed while ping-pong is on,
+            // "E" otherwise.
             let word = match (echo_rung, echo_pingpong) {
-                (0, _) => "ECH",
+                (0, _) => "E",
                 (1, false) => "E1",
                 (1, true) => "P1",
-                (2, false) => "E/2",
-                (2, true) => "P/2",
-                (_, false) => "E/4",
-                (_, true) => "P/4",
+                (2, false) => "E2",
+                (2, true) => "P2",
+                (_, false) => "E4",
+                (_, true) => "P4",
             };
             if refs.echo.text() != word {
                 refs.echo.set_text(cx, word);
             }
+            self.paint_lit(cx, ids.freeze, self.decks.frozen(deck));
             for (band, solo) in ids.eq_solos.iter().enumerate() {
                 self.paint_lit(cx, solo, eq_solo[band]);
             }
@@ -25962,6 +25973,21 @@ p2 {}
                 } else {
                     self.decks.cycle_echo(deck)
                 };
+                self.run_deck_cmds(cx, cmds);
+            }
+            if refs.freeze.pressed_modifiers(actions).is_some() {
+                let cmds = self.decks.freeze_press(deck);
+                self.run_deck_cmds(cx, cmds);
+            }
+            // The same either-or the roll's own release needs: a finger
+            // lifted inside the button reports Clicked, outside reports
+            // Released.
+            let freeze_let_go = refs
+                .freeze
+                .released_modifiers(actions)
+                .or_else(|| refs.freeze.clicked_modifiers(actions));
+            if freeze_let_go.is_some() {
+                let cmds = self.decks.freeze_release(deck);
                 self.run_deck_cmds(cx, cmds);
             }
             for (band, solo) in refs.eq_solos.iter().enumerate() {

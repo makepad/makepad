@@ -333,6 +333,42 @@ fn golden_load_over_playing() {
     assert_golden("load_over_playing", &left, &right);
 }
 
+/// A held beat and its release, pinned window by window: the press
+/// crossfading in, the lap repeating on itself, and the release
+/// crossfading back to the live tone wherever it has got to.
+#[test]
+fn golden_freeze_hold() {
+    let mixer = deck_a(tone_pcm(440.0, 48_000, 3.0));
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let (left, right) = capture(&mixer, CAPTURE, |index| match index {
+        // Not before buffer 20: SETTLE (4 096 frames) plus 20 buffers is
+        // comfortably more than the lap itself needs to have been
+        // freshly written, so the reference is not pinning a lap that
+        // is a third silence.
+        20 => mixer.set_deck_freeze(DeckId::A, Some(0.25)),
+        40 => mixer.set_deck_freeze(DeckId::A, None),
+        _ => {}
+    });
+    assert_golden("freeze_hold", &left, &right);
+}
+
+/// The finest rung on the sub-beat ladder at 60 BPM: a lap barely
+/// longer than the seam crossfade itself, pinning the small-buffer case
+/// where the blend covers most of the lap.
+#[test]
+fn golden_freeze_glitch() {
+    let mixer = deck_a(tone_pcm(440.0, 48_000, 3.0));
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let (left, right) = capture(&mixer, CAPTURE, |index| match index {
+        20 => mixer.set_deck_freeze(DeckId::A, Some(1.0 / 32.0)),
+        40 => mixer.set_deck_freeze(DeckId::A, None),
+        _ => {}
+    });
+    assert_golden("freeze_glitch", &left, &right);
+}
+
 // ---------------------------------------------------------------------------
 // clicks
 // ---------------------------------------------------------------------------
@@ -571,6 +607,27 @@ fn switching_ping_pong_is_click_free() {
         _ => {}
     });
     assert!(worst < CLICK, "a ping-pong switch must blend, biggest step {worst}");
+}
+
+/// A tone, not DC: DC would make the frozen lap and the live signal
+/// identical and hide a press or a release that switched rather than
+/// ramped. 101 Hz over a 0.25 s lap is 25.25 cycles -- not a whole
+/// number, so frozen and live genuinely disagree in phase at the press
+/// (a split signal was tried first, but a lap that reaches across the
+/// split's own hard edit point carries that edit's own click once a
+/// lap, which is the SOURCE's discontinuity, not a press or a release
+/// failing to ramp).
+#[test]
+fn a_freeze_hold_and_release_are_click_free() {
+    let mixer = deck_a(tone_pcm(101.0, 48_000, 3.0));
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| match index {
+        20 => mixer.set_deck_freeze(DeckId::A, Some(0.25)),
+        40 => mixer.set_deck_freeze(DeckId::A, None),
+        _ => {}
+    });
+    assert!(worst < CLICK, "a freeze press or release must ramp, biggest step {worst}");
 }
 
 /// The ordinary gesture: a sweep dragged from one side of the knob to the

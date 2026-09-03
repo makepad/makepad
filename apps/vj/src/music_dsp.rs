@@ -1824,6 +1824,167 @@ impl DeckEcho {
     }
 }
 
+/// A beat's worth of device audio the ring can hold. A generous few
+/// seconds rather than sized to any one tempo's worst case: `hold`
+/// clamps whatever it is asked for into this, and the lap is "up to a
+/// beat" rather than guaranteed to be a whole one at the far end of the
+/// tempo range.
+const FREEZE_CAP_FRAMES: usize = 240_000;
+/// The seam crossfade at the head of every lap after the first, and the
+/// floor a lap's length is never asked to go under -- the loop wrap's
+/// own width (`LOOP_XFADE_SECS`, mixer.rs), given its own name here
+/// because a freeze lap is not a loop span and has no track to measure
+/// a fraction of.
+const FREEZE_XFADE_SECS: f32 = 0.010;
+/// How long the press and the release each take to cross, the deck's
+/// own gesture ramp (`SLEW_SECS`, mixer.rs).
+const FREEZE_BLEND_SECS: f32 = 0.008;
+
+/// A momentary FREEZE: while held, repeats a beat-sized capture of what
+/// the deck just played, post-filter, while the record underneath keeps
+/// running at its own pace. Release blends back to the live signal
+/// where it has got to.
+///
+/// The ring is never bulk-cleared, on the audio thread or off it --
+/// `reset` is a field reset only, exactly the shape `DeckEcho::silence`
+/// settled on and for the same reason. Nothing here needs a write-count
+/// invalidation scheme the way the echo's arbitrary-length delay did:
+/// a lap can never reach back further than `2 * xf` frames beyond what
+/// has genuinely been written since writing last resumed (`fresh`,
+/// below), so the very worst a fresh load or a rapid re-press can leak
+/// is a seam-blended sliver on the order of the crossfade itself, not a
+/// standalone repeat of unrelated audio.
+pub struct Freeze {
+    ring: Box<[[f32; 2]]>,
+    write: usize,
+    /// Frames written since writing last resumed (after construction,
+    /// or after a release finished and a reset). Saturates at the
+    /// ring's capacity. `hold` clamps the requested length to this, so
+    /// a press can never reach back across a gap the ring never
+    /// actually recorded -- the ordinary "press, release, press again"
+    /// stutter would otherwise splice pre-hold audio straight onto
+    /// post-release audio with no crossfade to hide the seam.
+    fresh: usize,
+    held: Option<Held>,
+    wet: ParamRamp,
+}
+
+struct Held {
+    start: usize,
+    len: usize,
+    xf: usize,
+    pos: usize,
+}
+
+impl Freeze {
+    pub fn new() -> Freeze {
+        Freeze {
+            ring: vec![[0.0f32; 2]; FREEZE_CAP_FRAMES].into_boxed_slice(),
+            write: 0,
+            fresh: 0,
+            held: None,
+            wet: ParamRamp::at(0.0),
+        }
+    }
+
+    /// Forget where writing had got to and let go of any hold in
+    /// progress -- a fresh record, an emptied deck, or a deck another
+    /// record was just cloned onto. Never touches the ring itself, so
+    /// it is safe from any thread, the audio callback's own included.
+    pub fn reset(&mut self) {
+        self.held = None;
+        self.wet = ParamRamp::at(0.0);
+        self.fresh = 0;
+    }
+
+    /// Latch a lap `requested_len` frames long, ending at the write
+    /// cursor, and start crossfading it in. A press that arrives while
+    /// one is already sounding (wet at or heading to 1) changes
+    /// nothing, like a key already held; a press during the release
+    /// tail (wet heading to 0) re-latches onto the very same lap and
+    /// heads back up, rather than being dropped along with it.
+    pub fn hold(&mut self, requested_len: usize, device_rate: f32) {
+        let xf = ((FREEZE_XFADE_SECS * device_rate).round() as usize).max(1);
+        if self.held.is_some() {
+            if self.wet.target() <= 0.0 {
+                self.wet.slew(1.0, FREEZE_BLEND_SECS);
+            }
+            return;
+        }
+        let cap = FREEZE_CAP_FRAMES;
+        // The seam blend needs `xf` frames of genuine content BEFORE the
+        // lap's own start to pre-roll from (see `process`), so what is
+        // actually available to draw a lap from is `fresh` less that.
+        let available = self.fresh.saturating_sub(xf);
+        let ceiling = cap.saturating_sub(2 * xf).max(2 * xf);
+        let len = requested_len.min(available).max(2 * xf).min(ceiling);
+        let start = (self.write + cap - len) % cap;
+        self.held = Some(Held { start, len, xf, pos: 0 });
+        self.wet.slew(1.0, FREEZE_BLEND_SECS);
+    }
+
+    /// Let go: the tail keeps sounding, on the same crossfade, until the
+    /// blend has settled back on the live signal.
+    pub fn release(&mut self) {
+        if self.held.is_some() {
+            self.wet.slew(0.0, FREEZE_BLEND_SECS);
+        }
+    }
+
+    /// Whether a lap is sounding or crossfading toward one -- true from
+    /// `hold` until the release blend has fully settled.
+    pub fn held(&self) -> bool {
+        self.held.is_some()
+    }
+
+    /// Process one stereo frame.
+    #[inline]
+    pub fn process(&mut self, live: [f32; 2], device_rate: f32) -> [f32; 2] {
+        // Not held: `wet` is always 0 here (it is cleared to 0 in the
+        // very call that clears `held`, below, and `release` moves it
+        // only while `held` is Some), so the untouched path is the
+        // sample just read, bit-for-bit, exactly `DeckEcho`'s own rule.
+        let Some(h) = self.held.as_mut() else {
+            let cap = self.ring.len();
+            self.ring[self.write] = live;
+            self.write = (self.write + 1) % cap;
+            self.fresh = (self.fresh + 1).min(cap);
+            return live;
+        };
+        let cap = self.ring.len();
+        let frozen = h.pos;
+        let mut sample = self.ring[(h.start + frozen) % cap];
+        // The last `xf` frames of every lap blend the tail into the
+        // lap's own HEAD, exactly the loop wrap's crossfade (mixer.rs),
+        // so the seam lands in phase with itself rather than splicing.
+        if frozen + h.xf >= h.len {
+            let u = frozen + h.xf - h.len;
+            // A PRE-ROLL, not the lap's own head: read from just BEFORE
+            // `start`, walking up to (but not quite reaching) it, so
+            // the last blended frame sits one sample short of exactly
+            // where the wrap's own direct read picks up -- the same
+            // one-sample residual the loop wrap's own crossfade leaves
+            // (mixer.rs), not the several-hundred-sample phase jump a
+            // head read INSIDE the lap would have produced.
+            let head = self.ring[(h.start + cap - h.xf + u) % cap];
+            let t = u as f32 / h.xf as f32;
+            sample = crate::dsp_math::lerp_frame(sample, head, t);
+        }
+        h.pos = (h.pos + 1) % h.len;
+        let wet = self.wet.tick(device_rate);
+        if wet <= 0.0 && self.wet.target() <= 0.0 {
+            self.held = None;
+            self.fresh = 0;
+        }
+        crate::dsp_math::lerp_frame(live, sample, wet)
+    }
+
+    #[cfg(test)]
+    fn write_index(&self) -> usize {
+        self.write
+    }
+}
+
 // ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
@@ -2129,6 +2290,174 @@ mod tests {
         for _ in 0..5_000 {
             assert_eq!(echo.process([0.0, 0.0], rate), [0.0, 0.0], "stale content must not resurface");
         }
+    }
+
+    /// Off, a fresh unit is exactly the sample it was handed, over and
+    /// over -- the whole point, since every golden reference depends on
+    /// this stage being invisible when nothing is held.
+    #[test]
+    fn a_freeze_at_rest_is_the_sample_it_was_given() {
+        let rate = 48_000.0f32;
+        let mut freeze = Freeze::new();
+        assert!(!freeze.held());
+        for i in 0..4_000 {
+            let x = (i as f32 * 0.037).sin() * 0.6;
+            let frame = [x, -x];
+            assert_eq!(freeze.process(frame, rate), frame);
+        }
+        assert!(!freeze.held());
+    }
+
+    /// Once the wet ramp has settled, a held lap repeats sample for
+    /// sample, lap after lap, and (outside the seam it deliberately
+    /// reshapes) reads the exact frames it was given to repeat.
+    #[test]
+    fn a_held_freeze_repeats_the_beat_it_just_played() {
+        let rate = 48_000.0f32;
+        let mut freeze = Freeze::new();
+        let written: Vec<f32> = (0..40_000).map(|n| n as f32 / 1_000_000.0).collect();
+        for &x in &written {
+            freeze.process([x, x], rate);
+        }
+        freeze.hold(24_000, rate);
+        let lap = |freeze: &mut Freeze| -> Vec<f32> {
+            (0..24_000).map(|_| freeze.process([0.0, 0.0], rate)[0]).collect()
+        };
+        let lap1 = lap(&mut freeze);
+        let lap2 = lap(&mut freeze);
+        let lap3 = lap(&mut freeze);
+        let xf = 480usize;
+        let start = 40_000 - 24_000; // hold()'s own math: write - len
+        for k in 0..24_000 - xf {
+            assert_eq!(lap2[k], lap3[k], "steady state repeats sample for sample at {k}");
+        }
+        // Outside the wet ramp's own 384-frame settle and outside the
+        // seam it reshapes, even the FIRST lap already reads the ring
+        // directly.
+        for k in 384..24_000 - xf {
+            let expected = written[start + k];
+            assert!((lap1[k] - expected).abs() < 1e-6, "at {k}: {} vs {expected}", lap1[k]);
+        }
+    }
+
+    /// The last `xf` frames of a lap blend its own tail into its own
+    /// head -- the loop wrap's own crossfade, so the lap lands on
+    /// itself in phase instead of splicing. Pin the formula directly,
+    /// and pin that the whole thing stays click-free across a wrap.
+    #[test]
+    fn the_seam_of_a_frozen_lap_is_a_blend_into_its_own_head() {
+        let rate = 48_000.0f32;
+        let mut freeze = Freeze::new();
+        let mut phase = 0.0f32;
+        // 443 Hz over a 24 000-frame lap is 221.5 cycles -- not a whole
+        // number, so an unblended seam would genuinely step; kept at
+        // 0.2 scale so the TONE's own slope stays well under the click
+        // rule and any step measured is the seam's, not the signal's.
+        let mut written = Vec::with_capacity(40_000);
+        for _ in 0..40_000 {
+            phase += 2.0 * std::f32::consts::PI * 443.0 / rate;
+            let x = phase.sin() * 0.2;
+            written.push(x);
+            freeze.process([x, x], rate);
+        }
+        freeze.hold(24_000, rate);
+        let mut out = Vec::with_capacity(2 * 24_000);
+        for _ in 0..2 * 24_000 {
+            out.push(freeze.process([0.0, 0.0], rate)[0]);
+        }
+        let worst = out[384..].windows(2).map(|p| (p[1] - p[0]).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 0.02, "the seam (and the wrap into a second lap) must not click: {worst}");
+        let xf = 480usize;
+        let len = 24_000usize;
+        let start = 40_000 - len; // 16 000
+        // The blend is a PRE-ROLL, not the lap's own head: it reads from
+        // just BEFORE `start` (the same shape the loop wrap's own
+        // crossfade takes in mixer.rs), walking up to it as u grows, so
+        // out[len - xf + u] == lerp(ring[start + len - xf + u], ring[start - xf + u], u / xf).
+        for u in 0..xf {
+            let tail = written[start + len - xf + u];
+            let head = written[start - xf + u];
+            let t = u as f32 / xf as f32;
+            let expected = tail + (head - tail) * t;
+            let got = out[len - xf + u];
+            assert!((got - expected).abs() < 1e-6, "at u={u}: {got} vs {expected}");
+        }
+    }
+
+    /// Press and release both ramp rather than switch, and once release
+    /// has settled the output is exactly the live signal again. A tone
+    /// stands in for the record continuing to play underneath the
+    /// hold -- DC would make the frozen and the live sample identical
+    /// and hide a switch pretending to be a ramp.
+    #[test]
+    fn a_freeze_comes_in_and_goes_out_on_a_ramp() {
+        let rate = 48_000.0f32;
+        let mut freeze = Freeze::new();
+        let mut phase = 0.0f32;
+        let mut tone = move || {
+            phase += 2.0 * std::f32::consts::PI * 5.0 / rate;
+            phase.sin() * 0.5
+        };
+        let mut out = Vec::with_capacity(24_000 + 2_000);
+        for _ in 0..24_000 {
+            let x = tone();
+            out.push(freeze.process([x, x], rate)[0]);
+        }
+        assert!(!freeze.held());
+        freeze.hold(12_000, rate);
+        assert!(freeze.held());
+        for _ in 0..800 {
+            let x = tone(); // the record keeps running underneath
+            out.push(freeze.process([x, x], rate)[0]);
+        }
+        freeze.release();
+        for _ in 0..800 {
+            let x = tone();
+            out.push(freeze.process([x, x], rate)[0]);
+        }
+        let worst = out.windows(2).map(|p| (p[1] - p[0]).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 0.02, "press and release must ramp, biggest step {worst}");
+        assert!(!freeze.held(), "the release ramp has settled by now");
+        for _ in 0..100 {
+            let x = tone();
+            assert_eq!(freeze.process([x, x], rate), [x, x], "exactly live again, bit-exact");
+        }
+    }
+
+    /// A re-press landing while the release tail is still crossfading
+    /// out re-latches onto the lap and heads back up, rather than being
+    /// dropped the way a second press onto an ALREADY-sounding one is:
+    /// the tail has not finished, so `held` is still `Some`, and a
+    /// naive "already held, ignore" rule would silently swallow the
+    /// re-press and leave the chip lit on a freeze that has actually
+    /// gone quiet.
+    #[test]
+    fn a_re_press_during_the_release_tail_re_latches_rather_than_dropping() {
+        let rate = 48_000.0f32;
+        let mut freeze = Freeze::new();
+        for n in 0..24_000 {
+            let x = n as f32 / 24_000.0;
+            freeze.process([x, x], rate);
+        }
+        freeze.hold(12_000, rate);
+        for _ in 0..500 {
+            freeze.process([-9.0, -9.0], rate);
+        }
+        freeze.release();
+        // Only a little way into the release tail: well short of
+        // FREEZE_BLEND_SECS's 384-frame settle.
+        for _ in 0..50 {
+            freeze.process([-9.0, -9.0], rate);
+        }
+        assert!(freeze.held(), "the tail has not settled yet");
+        freeze.hold(12_000, rate); // the re-press
+        // Dropped, this would go on decaying toward -9.0 and settle
+        // there well inside 2 000 more frames; re-latched, it climbs
+        // back toward the lap and keeps sounding.
+        for _ in 0..2_000 {
+            freeze.process([-9.0, -9.0], rate);
+        }
+        assert!(freeze.held(), "the re-press kept it sounding rather than letting it settle");
     }
 
     /// The resonance a sweep is allowed, and where it is taken away:
@@ -3258,6 +3587,7 @@ mod tests {
         let mut echo = DeckEcho::new();
         echo.set_fraction(Some((1, 2)));
         echo.set_feedback(0.4);
+        let mut freeze = Freeze::new();
         let mut reader = RateReader::default();
         let mut scratch = ScratchRamp::default();
         // Warm the chain up so nothing lazily initializes inside the probe.
@@ -3266,23 +3596,32 @@ mod tests {
         for _ in 0..8_000 {
             let mut pull = || stretcher.next(&source, true);
             if let Some(frame) = reader.read(0.9188, &mut pull) {
-                echo.process(eq.process(frame, 48_000.0), 48_000.0);
+                echo.process(freeze.process(eq.process(frame, 48_000.0), 48_000.0), 48_000.0);
             }
             scratch.tick(48_000.0, 1.0, 0.0);
         }
+        freeze.hold(6_000, 48_000.0);
 
         let before = alloc_probe::count();
         // A retune every 512 frames, so the probe exercises the handover
-        // and the parked-retune path too, not only the settled one.
+        // and the parked-retune path too, not only the settled one; and a
+        // release plus a second hold, so the freeze's own idle write,
+        // held lap and both transitions are all inside the counted second.
         let mut beat = 24_000.0f64;
         for i in 0..48_000 {
             if i % 512 == 0 {
                 beat = if beat > 20_000.0 { 15_000.0 } else { 24_000.0 };
                 echo.prepare_block(beat);
             }
+            if i == 20_000 {
+                freeze.release();
+            }
+            if i == 24_000 {
+                freeze.hold(6_000, 48_000.0);
+            }
             let mut pull = || stretcher.next(&source, true);
             if let Some(frame) = reader.read(0.9188, &mut pull) {
-                echo.process(eq.process(frame, 48_000.0), 48_000.0);
+                echo.process(freeze.process(eq.process(frame, 48_000.0), 48_000.0), 48_000.0);
             }
             scratch.tick(48_000.0, 1.0, 0.0);
         }

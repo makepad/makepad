@@ -27,8 +27,8 @@ use crate::loop_splat::{
 use crate::wave_analysis::{DeckClock, TrackGrid};
 use crate::music_dsp::{
     audible, knob, knob64,
-    DeckEcho, DeckEq, FrameSource, MotorEnd, ParamRamp, RateReader, ScratchRamp, Stretcher,
-    STEM_COUNT,
+    DeckEcho, DeckEq, FrameSource, Freeze, MotorEnd, ParamRamp, RateReader, ScratchRamp,
+    Stretcher, STEM_COUNT,
     STRETCH_BYPASS_EPSILON, STRETCH_RATIO_MAX, STRETCH_RATIO_MIN, WSOLA_WINDOW,
     BRAKE_SECS, CENSOR_FLIP_SECS, CENSOR_RATE, CENSOR_RETURN_SECS, SOFT_START_SECS,
     SPINBACK_FALL_SECS, SPINBACK_PEAK, SPINBACK_THROW_SECS,
@@ -966,6 +966,9 @@ struct DeckVoice {
     /// The beat-quantised repeat. Retuned once per buffer from `clock`,
     /// beside the filter's own coefficient rebuild.
     echo: DeckEcho,
+    /// The momentary FREEZE, ahead of the echo in the chain so a held
+    /// glitch can itself be echoed rather than the other way round.
+    freeze: Freeze,
     stem_gain: [ParamRamp; STEM_COUNT],
     /// The autopilot's blend overlay on the stem lanes: multiplies the
     /// operator's gains, never moves them. 1.0 = hands off.
@@ -1005,6 +1008,7 @@ impl DeckVoice {
             reader: RateReader::default(),
             eq: DeckEq::new(48_000.0),
             echo: DeckEcho::new(),
+            freeze: Freeze::new(),
             stem_gain: [ParamRamp::at(1.0); STEM_COUNT],
             blend_stem: [ParamRamp::at(1.0); STEM_COUNT],
         }
@@ -1060,6 +1064,7 @@ impl DeckVoice {
         self.seek_frames(0.0);
         self.eq.reset();
         self.echo.silence();
+        self.freeze.reset();
         self.reset_blend();
         if load.play {
             self.transport.slew(1.0, LOAD_SWAP_SECS);
@@ -2106,6 +2111,7 @@ impl Mixer {
                 d.seek_frames(0.0);
                 d.eq.reset();
                 d.echo.silence();
+                d.freeze.reset();
                 d.reset_blend();
             } else {
                 d.pending = Some(PendingLoad { pcm, play: keep_playing, grid: None });
@@ -2154,6 +2160,7 @@ impl Mixer {
         // clears `ended`, so a later install re-arms end reporting.
         d.seek_frames(0.0);
         d.echo.silence();
+        d.freeze.reset();
         d.reset_blend();
         self.publish_deck(&s, deck.index());
         drop(s);
@@ -2430,6 +2437,42 @@ impl Mixer {
     pub fn set_deck_echo_pingpong(&self, deck: DeckId, on: bool) {
         let mut s = self.state.lock().unwrap();
         s.decks[deck.index()].echo.set_pingpong(on);
+    }
+
+    /// Momentary FREEZE: while held, the deck repeats a beat-sized
+    /// capture of what it just played, post-filter, while the record
+    /// itself keeps running underneath. `secs` is at the DEVICE --
+    /// already the engine's heard-beat seconds -- and `None` releases.
+    ///
+    /// Refuses on an empty or stopped deck (nothing worth repeating)
+    /// and before any callback has run, the same two guards `arm_ghost`
+    /// checks for its own latch: there is no device rate yet to turn a
+    /// seconds value into a ring length.
+    pub fn set_deck_freeze(&self, deck: DeckId, secs: Option<f64>) {
+        let mut s = self.state.lock().unwrap();
+        let index = deck.index();
+        let d = &mut s.decks[index];
+        match secs {
+            Some(secs) => {
+                if d.pcm.is_none() || !d.playing {
+                    return;
+                }
+                let device = f64::from_bits(self.device_rate_bits.load(Ordering::Acquire));
+                if !(device > 0.0) {
+                    return;
+                }
+                let Some(secs) = knob64(secs, 0.0, 60.0) else { return };
+                d.freeze.hold((secs * device) as usize, device as f32);
+            }
+            None => d.freeze.release(),
+        }
+        self.publish_deck(&s, index);
+    }
+
+    /// Whether this deck's FREEZE is sounding right now -- held, or
+    /// still crossfading out of one.
+    pub fn deck_frozen(&self, deck: DeckId) -> bool {
+        self.state.lock().unwrap().decks[deck.index()].freeze.held()
     }
 
     /// The reverse hold: the record runs backwards while it is held, and a
@@ -2789,6 +2832,10 @@ impl Mixer {
         // one, so it is silenced the same way any other record change
         // silences it.
         dst.echo.silence();
+        // Same reasoning, same fix, for the freeze: the destination's
+        // own hold state is not the source's to inherit, but a stale
+        // ring must not carry forward into the record that just landed.
+        dst.freeze.reset();
         let to_index = to.index();
         self.publish_deck(&s, to_index);
     }
@@ -3399,7 +3446,7 @@ impl Mixer {
                         stem_gain,
                         natural_step,
                     );
-                    let toned = d.echo.process(d.eq.process(frame, rate), rate);
+                    let toned = d.echo.process(d.freeze.process(d.eq.process(frame, rate), rate), rate);
                     let pre = [toned[0] * gain, toned[1] * gain];
                     deck_peaks[i] = deck_peaks[i].max(pre[0].abs()).max(pre[1].abs());
                     deck_out[i] = (pre[0] * side, pre[1] * side);
@@ -3669,7 +3716,7 @@ impl Mixer {
                     }
                     None => frame,
                 };
-                let toned = d.echo.process(d.eq.process(frame, rate), rate);
+                let toned = d.echo.process(d.freeze.process(d.eq.process(frame, rate), rate), rate);
                 let pre = [toned[0] * gain, toned[1] * gain];
                 deck_peaks[i] = deck_peaks[i].max(pre[0].abs()).max(pre[1].abs());
                 deck_out[i] = (pre[0] * side, pre[1] * side);
@@ -5710,6 +5757,127 @@ mod tests {
         let out = render_out(&mixer, rate, 100, 512);
         let (peak, _) = peak_near(&out, rate, 0.5, 24_000);
         assert!(peak.abs() < 0.05, "a stale tail bled through the clone: {peak}");
+    }
+
+    /// FREEZE repeats the SIGNAL; the playhead itself never stops.
+    #[test]
+    fn a_freeze_leaves_the_record_running_underneath() {
+        let mixer = spin_deck_a(16_384, 480_000);
+        mixer.set_deck_playing(DeckId::A, true);
+        spin_render(&mixer, 8);
+        mixer.set_deck_freeze(DeckId::A, Some(0.25));
+        assert!(mixer.deck_frozen(DeckId::A));
+        let before = mixer.deck_snapshot(DeckId::A).position_secs;
+        spin_render(&mixer, 40);
+        let advanced = mixer.deck_snapshot(DeckId::A).position_secs - before;
+        let expected = 40.0 * 512.0 / 48_000.0;
+        assert!(
+            (advanced - expected).abs() < 0.02,
+            "the record must keep running: advanced {advanced}, expected {expected}"
+        );
+        mixer.set_deck_freeze(DeckId::A, None);
+        spin_render(&mixer, 1); // past FREEZE_BLEND_SECS
+        assert!(!mixer.deck_frozen(DeckId::A));
+    }
+
+    /// The repeat is of the POST-FILTER signal, taken after the read
+    /// path but before gain and the fader -- so PFL and the master both
+    /// hear it, RAW does not, and the record itself is free to have run
+    /// on somewhere else entirely by the time it is heard again.
+    #[test]
+    fn a_freeze_repeats_the_post_eq_signal_and_the_phones_hear_it() {
+        let rate = 48_000.0;
+        let mixer = Mixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        mixer.install_deck(DeckId::A, split_pcm(16_384, -16_384, 480_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        spin_render(&mixer, 20); // build up real content to reach back into
+        mixer.seek_deck_seconds(DeckId::A, 4.95);
+        spin_render(&mixer, 5); // cross the split at 5.0 s by a small margin
+        mixer.set_deck_freeze(DeckId::A, Some(0.1));
+        assert!(mixer.deck_frozen(DeckId::A));
+        let out = render_out(&mixer, rate, 40, 512);
+        // The frozen lap reaches back across the split, so it carries
+        // both the +0.5 side and the -0.5 side, laps on laps.
+        assert!(out.iter().any(|&v| v > 0.3), "the lap's +0.5 side must still be there");
+        assert!(out.iter().any(|&v| v < -0.3), "the lap's -0.5 side must still be there");
+        let snap = mixer.deck_snapshot(DeckId::A);
+        assert!(snap.position_secs > 5.0, "the record itself ran on past the split: {}", snap.position_secs);
+
+        mixer.set_cue_armed(true);
+        mixer.set_deck_cue(DeckId::A, true);
+        mixer.set_cue_mode(CueMode::Pfl);
+        let mut pfl_state = CueReadState::default();
+        let mut pfl_has_positive = false;
+        // The phones consumer lags the writer by CUE_TARGET_FRAMES, so a
+        // single buffer is not enough to prove anything; drain several,
+        // the way the existing PFL/RAW test does.
+        for _ in 0..16 {
+            render(&mixer, rate, 512);
+            let pfl = consume_cue(&mixer, &mut pfl_state, rate, 512);
+            pfl_has_positive |= pfl.channel(0).iter().any(|&v| v > 0.3);
+        }
+        assert!(pfl_has_positive, "PFL must hear the frozen lap");
+
+        mixer.set_cue_mode(CueMode::Raw);
+        let mut raw_state = CueReadState::default();
+        // Drain what the ring still owes from PFL mode before trusting
+        // any of it to say what RAW actually carries now.
+        for _ in 0..16 {
+            render(&mixer, rate, 512);
+            consume_cue(&mixer, &mut raw_state, rate, 512);
+        }
+        let mut raw = Vec::new();
+        for _ in 0..16 {
+            render(&mixer, rate, 512);
+            raw.extend_from_slice(consume_cue(&mixer, &mut raw_state, rate, 512).channel(0));
+        }
+        assert!(raw.iter().all(|&v| v < -0.3), "RAW must hear the live -0.5, not the lap");
+    }
+
+    #[test]
+    fn a_freeze_on_a_stopped_or_empty_deck_does_nothing() {
+        let mixer = Mixer::new();
+        mixer.set_deck_freeze(DeckId::A, Some(0.5));
+        assert!(!mixer.deck_frozen(DeckId::A), "nothing loaded");
+        mixer.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 4.0));
+        mixer.set_deck_freeze(DeckId::A, Some(0.5));
+        assert!(!mixer.deck_frozen(DeckId::A), "loaded but not playing");
+        // No callback has ever run on this mixer: there is no device
+        // rate yet to turn a seconds value into a ring length.
+        let fresh = Mixer::new();
+        fresh.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 4.0));
+        fresh.set_deck_playing(DeckId::A, true);
+        fresh.set_deck_freeze(DeckId::A, Some(0.5));
+        assert!(!fresh.deck_frozen(DeckId::A), "no device rate latched yet");
+    }
+
+    /// A load over a playing deck, and an unload, both put a held
+    /// freeze away -- the swap on its own turn, the unload at once.
+    #[test]
+    fn a_load_and_an_unload_put_the_freeze_away() {
+        let rate = 48_000.0;
+        let mixer = Mixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        spin_render(&mixer, 20);
+        mixer.set_deck_freeze(DeckId::A, Some(0.1));
+        assert!(mixer.deck_frozen(DeckId::A));
+        mixer.install_deck_over(DeckId::A, const_pcm(8_192, 480_000, 48_000), true);
+        spin_render(&mixer, 8); // through the outgoing fade and the swap
+        assert!(!mixer.deck_frozen(DeckId::A), "the swap must have let it go");
+        let out = render_out(&mixer, rate, 4, 512);
+        let peak = out.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let expected = 8_192.0 / 32_768.0;
+        assert!((peak - expected).abs() < 0.02, "the new record must be heard, unfrozen: {peak} vs {expected}");
+
+        mixer.set_deck_freeze(DeckId::A, Some(0.1));
+        assert!(mixer.deck_frozen(DeckId::A));
+        mixer.clear_deck(DeckId::A);
+        assert!(!mixer.deck_frozen(DeckId::A), "an unload must have let it go");
     }
 
     /// The read path folds the playhead into an active span before every

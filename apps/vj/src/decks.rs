@@ -1620,6 +1620,12 @@ pub enum DeckCmd {
     /// what is sounding instead of returning to the ghost. ONE command,
     /// because either order of two would leave a buffer of wrong audio.
     RollPop { deck: DeckId, parent: Option<LoopSpan>, adopt: bool },
+    /// Momentary FREEZE: repeat the beat (or the armed sub-beat rung) the
+    /// deck just played, post-filter, while the record runs on
+    /// underneath. Seconds are at the DEVICE -- already divided by the
+    /// deck's rate -- so the mixer never has to ask the engine's rate
+    /// again to size the lap.
+    Freeze { deck: DeckId, secs: Option<f64> },
     Spin { deck: DeckId, motion: SpinMotion },
     /// Keep the key when the tempo changes (time stretch) or let it slide.
     SetKeylock { deck: DeckId, on: bool },
@@ -1724,6 +1730,10 @@ pub struct DeckEngine {
     /// The span each level of roll displaced, newest last. The mixer keeps
     /// the ghosts; this keeps what to put back when one is let go.
     roll_parents: [Vec<Option<LoopSpan>>; 2],
+    /// Which decks have a FREEZE held right now -- the engine's own
+    /// mirror of the mixer's latch, so a second press refuses and the
+    /// chip's lit state has something to read.
+    frozen: [bool; 2],
     /// The platter is under a MOTOR gesture. A hand has a release to clear
     /// its hold on; a brake or a wind-up has no event at all — it simply
     /// lands — so the engine keeps this bit and clears it when the mixer
@@ -1766,6 +1776,7 @@ impl Default for DeckEngine {
             last_requeued: None,
             ejected: Vec::new(),
             last_eject_ms: [None; 2],
+            frozen: [false; 2],
             spin_running: [false; 2],
             roll_parents: [Vec::new(), Vec::new()],
             auto_fade_hold: None,
@@ -2078,6 +2089,10 @@ impl DeckEngine {
         for stem in 0..STEM_COUNT {
             cmds.push(DeckCmd::SetStemGain { deck, stem, gain: state.stem_effective(stem) });
         }
+        // A frozen lap was measured against the OUTGOING record; the one
+        // that just landed gets none, the way a load leaves everything
+        // else here unbuilt rather than half-carried over.
+        cmds.extend(self.freeze_release(deck));
         cmds
     }
 
@@ -3134,6 +3149,7 @@ impl DeckEngine {
         self.hand_pin_over(deck);
         let mut cmds: Vec<DeckCmd> = retire.into_iter().collect();
         cmds.push(DeckCmd::UnloadTrack { deck });
+        cmds.extend(self.freeze_release(deck));
         cmds
     }
 
@@ -3181,6 +3197,54 @@ impl DeckEngine {
     /// How many rolls this deck is holding.
     pub fn rolls_held(&self, deck: DeckId) -> usize {
         self.roll_parents[deck.index()].len()
+    }
+
+    /// Press and hold FREEZE: refuses on an empty or paused deck, on a
+    /// second press while one is already held, and when the record has
+    /// not yet played far enough to reach back the lap's own length --
+    /// the gate that keeps a fresh load from replaying whatever the
+    /// PREVIOUS record left in the ring.
+    ///
+    /// The lap is one counted beat, or the armed loop rung when it is
+    /// shorter than a beat -- so the sub-beat ladder next to CUE is also
+    /// the glitch-size selector and needs no control of its own. A
+    /// splat owns its own clock (`mixer.rs`: rate, key lock and scratch
+    /// are all ignored while it runs), so the length is left in SOURCE
+    /// beats rather than divided by a rate the splat is not using.
+    pub fn freeze_press(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        if self.frozen[deck.index()] {
+            return Vec::new();
+        }
+        if !self.deck(deck).is_loaded() || !self.deck(deck).playing {
+            return Vec::new();
+        }
+        let beat = self.deck(deck).counted_beat_secs();
+        let len = match self.armed_secs(deck) {
+            Some(armed) if armed <= beat => armed,
+            _ => beat,
+        };
+        if self.deck(deck).position_secs < len {
+            return Vec::new();
+        }
+        let splat_active = self.splat(deck).is_some_and(|splat| splat.enabled);
+        let rate = if splat_active { 1.0 } else { self.deck(deck).rate.max(1e-6) };
+        self.frozen[deck.index()] = true;
+        vec![DeckCmd::Freeze { deck, secs: Some(len / rate) }]
+    }
+
+    /// Let FREEZE go. A press that was refused released nothing, so a
+    /// second release is a no-op rather than a stray command.
+    pub fn freeze_release(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        if !self.frozen[deck.index()] {
+            return Vec::new();
+        }
+        self.frozen[deck.index()] = false;
+        vec![DeckCmd::Freeze { deck, secs: None }]
+    }
+
+    /// Whether this deck has a FREEZE held right now.
+    pub fn frozen(&self, deck: DeckId) -> bool {
+        self.frozen[deck.index()]
     }
 
     /// The tracks the undo can reach, newest first. For the tests and for
@@ -3271,16 +3335,23 @@ impl DeckEngine {
     /// Swap deck contents AND invert the fader so the audible program is
     /// unchanged by the swap.
     pub fn swap(&mut self) -> Vec<DeckCmd> {
+        // A held freeze belongs to the VOICE (`SwapVoices` swaps the
+        // whole thing), but `frozen` here is the engine's own mirror,
+        // indexed by SLOT -- swapping the array along with it would
+        // leave the chip lit on the wrong side for as long as a finger
+        // is still down. Let go of both first, so there is nothing left
+        // to travel with the swap or disagree about afterwards.
+        let mut cmds = self.freeze_release(DeckId::A);
+        cmds.extend(self.freeze_release(DeckId::B));
         self.decks.swap(0, 1);
         self.last_loaded = self.last_loaded.map(DeckId::other);
         // The undo window belongs to the deck's CONTENTS, which is what a
         // swap moves. Left behind, it arms the undo on the wrong side.
         self.last_eject_ms.swap(0, 1);
         self.crossfader = 1.0 - self.crossfader;
-        vec![
-            DeckCmd::SwapVoices,
-            DeckCmd::SetCrossfader { position: self.crossfader },
-        ]
+        cmds.push(DeckCmd::SwapVoices);
+        cmds.push(DeckCmd::SetCrossfader { position: self.crossfader });
+        cmds
     }
 
     /// The same record on both decks, from the same sample.
@@ -5239,6 +5310,109 @@ mod tests {
         assert!(cmds.contains(&DeckCmd::SetLoopSpan { deck: DeckId::B, span: None , seek: LoopSeek::None }));
         assert!(cmds.contains(&DeckCmd::SetMute { deck: DeckId::B, muted: true }));
         assert!(cmds.contains(&DeckCmd::SetGain { deck: DeckId::B, gain: 0.5 }));
+    }
+
+    // -----------------------------------------------------------------
+    // FREEZE
+    // -----------------------------------------------------------------
+
+    fn splat_grid_fixture(bpm: f64) -> std::sync::Arc<SplatGrid> {
+        std::sync::Arc::new(SplatGrid {
+            bpm,
+            bar_secs: 60.0 / bpm * 4.0,
+            first_bar_secs: 0.0,
+            sections: Vec::new(),
+            cells: [[None; SPLAT_COLS]; crate::loop_splat::SPLAT_ROWS],
+            bars_per_col: [1; SPLAT_COLS],
+        })
+    }
+
+    #[test]
+    fn freeze_press_needs_a_loaded_playing_record_and_sizes_itself_on_the_heard_beat() {
+        let mut e = DeckEngine::new();
+        assert!(e.freeze_press(DeckId::A).is_empty(), "nothing loaded");
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0); // beat_secs = 0.5
+        assert!(e.freeze_press(DeckId::A).is_empty(), "loaded but paused");
+        e.deck_mut(DeckId::A).playing = true;
+        e.deck_mut(DeckId::A).position_secs = 10.0;
+        e.deck_mut(DeckId::A).rate = 1.25;
+        e.deck_mut(DeckId::A).loop_ticks = 0; // MAN: no armed rung
+        let cmds = e.freeze_press(DeckId::A);
+        assert_eq!(cmds, vec![DeckCmd::Freeze { deck: DeckId::A, secs: Some(0.4) }]); // 0.5 / 1.25
+        assert!(e.frozen(DeckId::A));
+        assert!(e.freeze_press(DeckId::A).is_empty(), "a second press while held does nothing");
+        e.freeze_release(DeckId::A);
+        assert!(!e.frozen(DeckId::A));
+        assert!(e.freeze_release(DeckId::A).is_empty(), "a second release does nothing");
+
+        // An eighth of a beat: the ladder below a beat is the glitch size.
+        e.deck_mut(DeckId::A).loop_ticks = 4; // 4 / 32
+        let cmds = e.freeze_press(DeckId::A);
+        assert_eq!(cmds, vec![DeckCmd::Freeze { deck: DeckId::A, secs: Some(0.05) }]); // (0.5 * 4/32) / 1.25
+        e.freeze_release(DeckId::A);
+
+        // Four beats armed is capped at one.
+        e.deck_mut(DeckId::A).loop_ticks = 128; // 4 beats
+        let cmds = e.freeze_press(DeckId::A);
+        assert_eq!(cmds, vec![DeckCmd::Freeze { deck: DeckId::A, secs: Some(0.4) }]);
+        e.freeze_release(DeckId::A);
+
+        // A splat owns its own clock -- rate is ignored while it runs.
+        e.deck_mut(DeckId::A).loop_ticks = 0;
+        e.splat_set(DeckId::A, splat_grid_fixture(120.0));
+        e.splat_enable(DeckId::A, true);
+        let cmds = e.freeze_press(DeckId::A);
+        assert_eq!(cmds, vec![DeckCmd::Freeze { deck: DeckId::A, secs: Some(0.5) }]);
+        e.freeze_release(DeckId::A);
+        e.splat_enable(DeckId::A, false);
+
+        // Not far enough along to reach back the lap's own length.
+        e.deck_mut(DeckId::A).position_secs = 0.1; // less than the 0.5 s beat
+        assert!(e.freeze_press(DeckId::A).is_empty(), "not far enough along");
+    }
+
+    #[test]
+    fn eject_and_install_release_a_held_freeze() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        e.deck_mut(DeckId::A).playing = true;
+        e.deck_mut(DeckId::A).position_secs = 10.0;
+        e.freeze_press(DeckId::A);
+        assert!(e.frozen(DeckId::A));
+        let cmds = e.eject(DeckId::A);
+        assert!(cmds.contains(&DeckCmd::Freeze { deck: DeckId::A, secs: None }));
+        assert!(!e.frozen(DeckId::A));
+
+        load_analysed(&mut e, DeckId::B, 2, 120.0, 0.0);
+        e.deck_mut(DeckId::B).playing = true;
+        e.deck_mut(DeckId::B).position_secs = 10.0;
+        e.freeze_press(DeckId::B);
+        assert!(e.frozen(DeckId::B));
+        // Paused for the click itself: a load over a playing deck is its
+        // own gated gesture (engine-core-c5) and not what this test is
+        // about; `track_ready` landing is.
+        e.deck_mut(DeckId::B).playing = false;
+        let (d, g) = load_gen(&e.click(item(3), DeckTarget::B));
+        let cmds = e.track_ready(d, g, 20.0);
+        assert!(cmds.contains(&DeckCmd::Freeze { deck: DeckId::B, secs: None }));
+        assert!(!e.frozen(DeckId::B));
+    }
+
+    /// A swap moves the whole VOICE (mixer.rs), but `frozen` here is the
+    /// engine's own per-SLOT mirror; without releasing both first, the
+    /// chip would light on the wrong side for as long as a finger is
+    /// still down.
+    #[test]
+    fn swap_releases_any_held_freeze_on_either_deck() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        e.deck_mut(DeckId::A).playing = true;
+        e.deck_mut(DeckId::A).position_secs = 10.0;
+        e.freeze_press(DeckId::A);
+        assert!(e.frozen(DeckId::A));
+        let cmds = e.swap();
+        assert!(cmds.contains(&DeckCmd::Freeze { deck: DeckId::A, secs: None }));
+        assert!(!e.frozen(DeckId::A) && !e.frozen(DeckId::B));
     }
 
     // -----------------------------------------------------------------

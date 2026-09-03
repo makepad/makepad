@@ -2201,13 +2201,15 @@ script_mod! {
                                     deck_a_filter := MusicKnob{min: 0.0 max: 1.0 default: 0.5 taper: Linear}
                                     // The slot the three bands spend on
                                     // kill and solo: the sweep has no
-                                    // bands to kill, so its row is free
-                                    // for resonance and the echo -- the
-                                    // way every band row already spends
-                                    // its own two halves.
+                                    // bands to kill, so its row carries
+                                    // resonance, the echo and freeze
+                                    // instead. Three now, not two, so
+                                    // each chip is a single letter, the
+                                    // way M and S already are.
                                     MSRow{
-                                        deck_a_resonance := MSButton{text: "RES"}
-                                        deck_a_echo := MSButton{text: "ECH"}
+                                        deck_a_resonance := MSButton{text: "R"}
+                                        deck_a_echo := MSButton{text: "E"}
+                                        deck_a_freeze := MSButton{text: "F"}
                                     }
                                 }
                             }
@@ -2711,13 +2713,15 @@ script_mod! {
                                     deck_b_filter := MusicKnob{min: 0.0 max: 1.0 default: 0.5 taper: Linear}
                                     // The slot the three bands spend on
                                     // kill and solo: the sweep has no
-                                    // bands to kill, so its row is free
-                                    // for resonance and the echo -- the
-                                    // way every band row already spends
-                                    // its own two halves.
+                                    // bands to kill, so its row carries
+                                    // resonance, the echo and freeze
+                                    // instead. Three now, not two, so
+                                    // each chip is a single letter, the
+                                    // way M and S already are.
                                     MSRow{
-                                        deck_b_resonance := MSButton{text: "RES"}
-                                        deck_b_echo := MSButton{text: "ECH"}
+                                        deck_b_resonance := MSButton{text: "R"}
+                                        deck_b_echo := MSButton{text: "E"}
+                                        deck_b_freeze := MSButton{text: "F"}
                                     }
                                 }
                                 KnobStack{
