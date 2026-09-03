@@ -152,8 +152,22 @@ fn bearer_auth_and_empty_data_plane() {
     assert_eq!(ok.status, 200);
     assert_eq!(ok.body, "[]");
     assert_eq!(request(endpoints.data, "GET", "/v1/values/x", None, "").status, 401);
+    // "x" is not a 64-hex sha256 digest; F2's value route rejects the shape
+    // before it ever asks the state thread whether the value exists.
     assert_eq!(
         request(endpoints.data, "GET", "/v1/values/x", Some(&endpoints.token), "").status,
+        400
+    );
+    let missing_digest = "0".repeat(64);
+    assert_eq!(
+        request(
+            endpoints.data,
+            "GET",
+            &format!("/v1/values/{missing_digest}"),
+            Some(&endpoints.token),
+            "",
+        )
+        .status,
         404
     );
     server.shutdown();

@@ -1,16 +1,17 @@
 use super::config::{FlowServerConfig, SharedConfig};
 use super::events::EventHub;
 use super::routes::{dispatch, Outcome, Plane, RouteCtx};
-use super::state::{spawn_state, StateHandle};
+use super::state::{spawn_state, RunRegistration, StateHandle};
 use super::util::{atomic_write, from_hex_16, log, random_16, random_32, random_u64, to_hex, write_secret_file};
 use super::watcher::spawn_watcher;
+use crate::engine;
 use makepad_bounded_http::{Conn, HeadError, Method, Resp};
 use std::fs::File;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const HEAD_DEADLINE_MS: u64 = 10_000;
 const KEEPALIVE_IDLE_MS: u64 = 30_000;
@@ -62,6 +63,8 @@ pub struct FlowServer {
     stop: Arc<AtomicBool>,
     acceptors: Vec<JoinHandle<()>>,
     watcher: Option<(mpsc::Sender<()>, JoinHandle<()>)>,
+    run_events: Option<(mpsc::Sender<()>, JoinHandle<()>)>,
+    janitor: Option<(mpsc::Sender<()>, JoinHandle<()>)>,
     state: Option<StateHandle>,
     state_join: Option<JoinHandle<()>>,
     events: Arc<EventHub>,
@@ -98,7 +101,12 @@ impl FlowServer {
         write_listen(&config, control_addr, data_addr)?;
 
         let config = Arc::new(config);
-        let (state, state_join) = spawn_state(config.clone(), events.clone(), epoch)?;
+        let origin = (to_hex(&server_id), epoch);
+        let (run_register_tx, run_register_rx) = mpsc::channel::<RunRegistration>();
+        let (state, state_join) =
+            spawn_state(config.clone(), events.clone(), epoch, origin, run_register_tx)?;
+        let run_events = spawn_run_events(run_register_rx, state.clone());
+        let janitor = spawn_janitor(&config, state.clone());
         let stop = Arc::new(AtomicBool::new(false));
         let route = RouteCtx {
             state: state.clone(),
@@ -111,6 +119,8 @@ impl FlowServer {
             Ok(watcher) => Some(watcher),
             Err(error) => {
                 drop(route);
+                stop_thread(janitor);
+                stop_thread(run_events);
                 drop(state);
                 let _ = state_join.join();
                 return Err(error);
@@ -142,6 +152,8 @@ impl FlowServer {
                         let _ = join.join();
                     }
                     drop(route);
+                    stop_thread(janitor);
+                    stop_thread(run_events);
                     drop(state);
                     let _ = state_join.join();
                     return Err(ServerError::io("spawn acceptor thread", error));
@@ -161,6 +173,8 @@ impl FlowServer {
             stop,
             acceptors,
             watcher,
+            run_events: Some(run_events),
+            janitor: Some(janitor),
             state: Some(state),
             state_join: Some(state_join),
             events,
@@ -179,6 +193,9 @@ impl FlowServer {
 
     fn shutdown_inner(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        if let Some(state) = &self.state {
+            cancel_and_join_runs(state);
+        }
         self.events.shutdown();
         if let Some((stop, join)) = self.watcher.take() {
             let _ = stop.send(());
@@ -187,12 +204,124 @@ impl FlowServer {
         for acceptor in self.acceptors.drain(..) {
             let _ = acceptor.join();
         }
+        if let Some(pair) = self.run_events.take() {
+            stop_thread(pair);
+        }
+        if let Some(pair) = self.janitor.take() {
+            stop_thread(pair);
+        }
         drop(self.state.take());
         if let Some(join) = self.state_join.take() {
             let _ = join.join();
             log(&self.config, "stopped");
         }
     }
+}
+
+/// Cancel every in-flight run and join its thread, bounded so a wedged
+/// executor cannot hang shutdown forever (§5.4/§14: "cancel every run
+/// (flag + join with a bound)").
+const RUN_JOIN_BOUND: Duration = Duration::from_secs(5);
+
+fn cancel_and_join_runs(state: &StateHandle) {
+    let Some(handles) = state.call(|state| state.take_all_run_handles()) else {
+        return;
+    };
+    for handle in &handles {
+        handle.cancel.store(true, Ordering::SeqCst);
+    }
+    let deadline = Instant::now() + RUN_JOIN_BOUND;
+    for handle in handles {
+        while !handle.join.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Past the bound the thread is left to finish on its own; dropping
+        // the (unjoined) JoinHandle just detaches it, no resource leak.
+    }
+}
+
+fn stop_thread(pair: (mpsc::Sender<()>, JoinHandle<()>)) {
+    let (stop, join) = pair;
+    let _ = stop.send(());
+    let _ = join.join();
+}
+
+fn spawn_run_events(
+    receiver: mpsc::Receiver<RunRegistration>,
+    state: StateHandle,
+) -> (mpsc::Sender<()>, JoinHandle<()>) {
+    let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let join = std::thread::Builder::new()
+        .name("flow-server-run-events".to_string())
+        .spawn(move || {
+            let mut active: Vec<RunRegistration> = Vec::new();
+            while matches!(stop_rx.recv_timeout(Duration::from_millis(20)), Err(mpsc::RecvTimeoutError::Timeout))
+            {
+                while let Ok(registration) = receiver.try_recv() {
+                    active.push(registration);
+                }
+                drain_run_events(&mut active, &state);
+            }
+            // Final pass: forward whatever already landed in a run's
+            // channel (an mpsc sender's buffered sends outlive a dropped
+            // sender) before this thread exits.
+            while let Ok(registration) = receiver.try_recv() {
+                active.push(registration);
+            }
+            let mut progress = true;
+            while progress {
+                progress = drain_run_events(&mut active, &state);
+            }
+        })
+        .expect("spawn flow run-events thread");
+    (stop_tx, join)
+}
+
+/// One poll pass over every registered run's event channel; forwards each
+/// event to the state thread via `StateHandle::call`, drops a registration
+/// once its run thread's sender disconnects. Returns whether any event was
+/// forwarded, so the caller can decide whether to keep draining.
+fn drain_run_events(active: &mut Vec<RunRegistration>, state: &StateHandle) -> bool {
+    let mut progressed = false;
+    active.retain_mut(|registration| loop {
+        match registration.receiver.try_recv() {
+            Ok(event) => {
+                progressed = true;
+                let run_id = registration.run_id.clone();
+                let instance = registration.instance.clone();
+                let flow = registration.flow.clone();
+                let _ = state.call(move |state| state.apply_run_event(run_id, instance, flow, event));
+            }
+            Err(mpsc::TryRecvError::Empty) => return true,
+            Err(mpsc::TryRecvError::Disconnected) => return false,
+        }
+    });
+    progressed
+}
+
+/// Janitor thread: a fast (100 ms) tick starts any due `trigger: @input`
+/// debounced run, a slow (`config.janitor_sweep_secs`, default 30 s) tick
+/// sweeps values/runs/instances (§5.2).
+fn spawn_janitor(config: &FlowServerConfig, state: StateHandle) -> (mpsc::Sender<()>, JoinHandle<()>) {
+    const FAST_TICK: Duration = Duration::from_millis(100);
+    let sweep_every = Duration::from_secs(config.janitor_sweep_secs);
+    let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let join = std::thread::Builder::new()
+        .name("flow-server-janitor".to_string())
+        .spawn(move || {
+            let mut since_sweep = Duration::ZERO;
+            while matches!(stop_rx.recv_timeout(FAST_TICK), Err(mpsc::RecvTimeoutError::Timeout)) {
+                let now_ms = engine::unix_ms();
+                let _ = state.call(move |state| state.run_debounced_inputs(now_ms));
+                since_sweep += FAST_TICK;
+                if since_sweep >= sweep_every {
+                    since_sweep = Duration::ZERO;
+                    let _ = state.call(|state| state.janitor_sweep());
+                }
+            }
+        })
+        .expect("spawn flow janitor thread");
+    (stop_tx, join)
 }
 
 impl Drop for FlowServer {

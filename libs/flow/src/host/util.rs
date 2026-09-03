@@ -117,6 +117,19 @@ pub(crate) fn from_hex_16(text: &str) -> Option<[u8; 16]> {
     Some(out)
 }
 
+/// A value's sha256 digest, lower-case hex, no `sha256:` prefix (the ETag
+/// carries that; the path segment and JSON `digest` field do not).
+pub(crate) fn from_hex_32(text: &str) -> Option<[u8; 32]> {
+    if text.len() != 64 || !text.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()) {
+        return None;
+    }
+    let mut out = [0; 32];
+    for (index, pair) in text.as_bytes().chunks_exact(2).enumerate() {
+        out[index] = (hex_digit(pair[0])? << 4) | hex_digit(pair[1])?;
+    }
+    Some(out)
+}
+
 fn hex_digit(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
