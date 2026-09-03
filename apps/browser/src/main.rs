@@ -374,6 +374,7 @@ impl App {
                     self.refresh_chrome(cx);
                 }
                 PortEvent::Cancel { .. } | PortEvent::ChatOpen { .. } => {}
+                PortEvent::Subscribe { .. } | PortEvent::Unsubscribe { .. } => {}
             }
         }
     }

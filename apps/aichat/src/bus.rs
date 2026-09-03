@@ -86,3 +86,55 @@ impl ServiceBus {
         self.hosts.is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use makepad_ai_services::engine::RegistryUp;
+
+    #[test]
+    fn hosted_subscriptions_and_messages_cross_the_adapter_unchanged() {
+        let registry = ServiceRegistry::new();
+        let mut bus = ServiceBus::default();
+        let endpoint = EndpointId("w4".into());
+        let manifest = ServiceManifest::new("flow", "Flow", "A flow.")
+            .with_topic(TopicDef::new("run", "Run events."));
+        let register = HostedUp {
+            from: Some(endpoint.clone()),
+            msg: ServiceUp::Register { manifest, port_tag: 4 },
+        };
+        assert!(bus.on_custom(&registry, &register.to_json()));
+        registry.pump();
+        let host = bus.hosts.get(&endpoint).unwrap();
+        let _registered = host.down.try_recv().unwrap();
+        assert!(registry.send(
+            &endpoint,
+            ServiceDown::Subscribe {
+                sub_id: "s1".into(),
+                topic: "run".into(),
+                filter: None,
+            },
+        ));
+        assert!(matches!(
+            host.down.try_recv().unwrap().msg,
+            ServiceDown::Subscribe { sub_id, topic, filter: None }
+                if sub_id == "s1" && topic == "run"
+        ));
+        let message = HostedUp {
+            from: Some(endpoint.clone()),
+            msg: ServiceUp::Message {
+                sub_id: "s1".into(),
+                topic: "run".into(),
+                text: "finished".into(),
+                data: None,
+                final_: true,
+            },
+        };
+        assert!(bus.on_custom(&registry, &message.to_json()));
+        assert!(matches!(
+            registry.pump().as_slice(),
+            [RegistryUp::Message { endpoint: from, sub_id, message }]
+                if from == &endpoint && sub_id == "s1" && message.final_
+        ));
+    }
+}

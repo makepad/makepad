@@ -102,6 +102,24 @@ script_mod! {
                     }
                 }
             }
+            EventRow := Row{
+                margin: Inset{left: 10 right: 10 top: 5 bottom: 5}
+                padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                draw_bg +: { color: theme.color_bg_container }
+                event_title := Line{
+                    draw_text +: {
+                        color: theme.color_text_hl
+                        text_style: theme.font_bold{font_size: 8.5}
+                    }
+                }
+                event_text := Line{}
+                event_meta := Line{
+                    draw_text +: {
+                        color: theme.color_text_meta
+                        text_style: theme.font_regular{font_size: 8.0}
+                    }
+                }
+            }
             AssistantRow := Row{
                 assistant_md := Markdown{
                     width: Fill
@@ -385,7 +403,9 @@ impl Widget for AiChatPanel {
                     EngineEvent::Confirm { .. } => changed = true,
                 }
             }
-            busy = engine.state().status.is_busy() || matches!(engine.state().status, Status::Loading { .. });
+            busy = engine.needs_pump()
+                || engine.state().status.is_busy()
+                || matches!(engine.state().status, Status::Loading { .. });
         }
         self.bus.relay_down(&self.registry);
         if changed {
@@ -419,6 +439,24 @@ impl Widget for AiChatPanel {
                     Entry::User { text } => {
                         let row = list.item(cx, index, id!(UserRow));
                         row.label(cx, ids!(user_text)).set_text(cx, text);
+                        row
+                    }
+                    Entry::Event(event) => {
+                        let row = list.item(cx, index, id!(EventRow));
+                        row.label(cx, ids!(event_title))
+                            .set_text(cx, &format!("→ {} · {}", event.service_label, event.topic));
+                        row.label(cx, ids!(event_text)).set_text(cx, &event.text);
+                        let mut meta = format!("sub_id: {}", event.sub_id);
+                        if event.dropped != 0 {
+                            meta.push_str(&format!(" · dropped: {}", event.dropped));
+                        }
+                        if event.final_ {
+                            meta.push_str(" · final");
+                        }
+                        if let Some(data) = &event.data {
+                            meta.push_str(&format!("\n{data}"));
+                        }
+                        row.label(cx, ids!(event_meta)).set_text(cx, &meta);
                         row
                     }
                     Entry::Assistant { text, streaming: false } => {

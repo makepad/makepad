@@ -1914,6 +1914,9 @@ impl App {
                 self.send_to_pane(frame);
             }
             ServiceDown::Cancel { call_id } => self.module_host.cancel(cx, client, &call_id),
+            // In-process module executors do not expose topics yet. Process
+            // clients receive these through `AiBus::on_custom` above.
+            ServiceDown::Subscribe { .. } | ServiceDown::Unsubscribe { .. } => {}
             // The pane state reaches instances through `broadcast_chat_open`.
             ServiceDown::ChatOpen { .. } | ServiceDown::Registered { .. } => {}
         }

@@ -1055,6 +1055,7 @@ impl App {
                 }
                 // Calls are synchronous, so there is no worker to cancel.
                 PortEvent::Cancel { .. } => {}
+                PortEvent::Subscribe { .. } | PortEvent::Unsubscribe { .. } => {}
                 PortEvent::ChatOpen { open } => {
                     if open && self.assistant_panel_open {
                         self.assistant_panel_open = false;
