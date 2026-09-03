@@ -222,9 +222,11 @@ Flow{picture, result}
 #[test]
 fn full_run_streams_the_design_pipeline_and_serves_the_picture() {
     let root = TempRoot::new("pipeline");
+    let chat = FakeChat::done("a moody paragraph");
+    let chat_requests = chat.requests.clone();
     let server = start(
         &root.0,
-        seams(FakeChat::done("a moody paragraph"), FakeGen::done(), FakeHttp::json(200, "{}")),
+        seams(chat, FakeGen::done(), FakeHttp::json(200, "{}")),
     );
     let endpoints = server.endpoints();
     put_flow(
@@ -268,6 +270,16 @@ fn full_run_streams_the_design_pipeline_and_serves_the_picture() {
     let events = poll_events_until(endpoints.control, &endpoints.token, "run", run_cursor, |event| {
         event_kind(event) == "run.finished" && event_str(event, "run_id") == Some(run_id.as_str())
     });
+    assert_eq!(
+        chat_requests.lock().unwrap().as_slice(),
+        &[(
+            "Rewrite the prompt as one vivid paragraph for an image model.\n             \
+             Keep the subject. Add light, lens, material, mood. No lists."
+                .to_string(),
+            "a lighthouse at dusk".to_string(),
+            String::new(),
+        )]
+    );
     let kinds: Vec<&str> = events.iter().map(event_kind).collect();
 
     // DESIGN.md §12's exact sequence, with the granularity the brief lists.
