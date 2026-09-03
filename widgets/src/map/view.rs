@@ -244,9 +244,8 @@ script_mod! {
         // (road/wall/roof/icon/prop/shadow/fill), that pinned the whole map
         // at display-rate GPU cost permanently, in 2D and 3D alike. A
         // Rust-pushed uniform carries the same value without tripping the
-        // static check; the existing `shiny_anim_timer` heartbeat (20 Hz,
-        // gated on the feature actually being visible) is what keeps it
-        // moving, so the map still idles when nothing needs to animate.
+        // static check; the interaction-gated `shiny_anim_timer` heartbeat
+        // advances it at 20 Hz, then leaves its last drawn value frozen.
         shiny_time: uniform(0.0)
         sun_dir: uniform(vec3(-0.379, -0.575, 0.724))
         sun_color: uniform(vec3(1.0, 0.98, 0.94))
@@ -2634,6 +2633,9 @@ const LABEL_REPLACE_MIN_SECONDS: f64 = 0.30;
 /// camera+fold transforms exactly — regenerating mid-gesture cost 5-20ms a
 /// beat and landed a frame stale, which read as labels trailing the map.
 const LABEL_SETTLE_SECONDS: f64 = 0.15;
+/// Keep water/foliage motion alive briefly after the last interaction or
+/// camera-animation step, then leave the last rendered phase frozen.
+const SHIMMER_SETTLE_SECS: f64 = 1.0;
 /// One shared time-lapse for ALL weather layers: the rain nowcast frame
 /// rate AND the wind-particle advection derive from it, so cloud drift and
 /// wind streaks move as one physical system (900x real time).
@@ -2798,6 +2800,8 @@ pub struct DrawRainOverlay {
 #[derive(Script, ScriptHook, Debug)]
 #[repr(C)]
 pub struct DrawMapVector {
+    #[rust(0.0)]
+    shiny_time: f32,
     #[rust(vec2(1.0, 1.0))]
     pub map_scale: Vec2f,
     #[rust(vec2(0.0, 0.0))]
@@ -2866,6 +2870,7 @@ impl DrawMapVector {
             &mut self.draw_super.draw_vars,
             cx.cx,
             &MapDrawUniforms {
+                shiny_time: self.shiny_time,
                 map_scale,
                 map_offset,
                 fade,
@@ -2955,6 +2960,8 @@ impl DrawMapVector {
 #[derive(Script, ScriptHook, Debug)]
 #[repr(C)]
 pub struct DrawMapRoad {
+    #[rust(0.0)]
+    shiny_time: f32,
     #[rust(ShinyConfig::default())]
     pub shiny: ShinyConfig,
     /// Mirrors of DrawMapVector's per-frame shadow / space-warp state; MapView
@@ -3012,6 +3019,7 @@ impl DrawMapRoad {
             &mut self.draw_vars,
             cx.cx,
             &MapDrawUniforms {
+                shiny_time: self.shiny_time,
                 map_scale,
                 map_offset,
                 fade,
@@ -3075,6 +3083,7 @@ macro_rules! draw_map_or_road {
 /// so the vector and the instanced-icon draws cannot drift apart.
 #[derive(Clone, Copy)]
 pub(crate) struct MapDrawUniforms {
+    pub shiny_time: f32,
     pub map_scale: Vec2f,
     pub map_offset: Vec2f,
     pub fade: f32,
@@ -3120,7 +3129,7 @@ fn stamp_map_uniforms(
     // DrawMapVector DSL above): never read the shader's own `draw_pass.time`
     // accessor from a DrawMap* pixel shader, or the platform's static
     // `uses_time` scan pins the whole map at full-pass GPU repaint forever.
-    draw_vars.set_uniform(cx, live_id!(shiny_time), &[cx.seconds_since_app_start() as f32]);
+    draw_vars.set_uniform(cx, live_id!(shiny_time), &[u.shiny_time]);
     draw_vars.set_uniform(cx, live_id!(tile_fade), &[u.fade]);
     draw_vars.set_uniform(cx, live_id!(map_scale), &[u.map_scale.x, u.map_scale.y]);
     draw_vars.set_uniform(cx, live_id!(map_offset), &[u.map_offset.x, u.map_offset.y]);
@@ -4073,13 +4082,15 @@ pub struct MapView {
     last_tap_count: u32,
     #[rust]
     pending_viewport_changed: bool,
-    /// shiny.md: gentle idle heartbeat so time-driven materials (water
-    /// flow, grass sway) animate without interaction. Only runs while an
-    /// animated material is on and the view is close enough to show it.
+    /// Interaction-gated heartbeat for water flow and foliage sway.
     #[rust]
     shiny_anim_timer: Timer,
     #[rust]
-    shiny_anim_on: bool,
+    shiny_last_activity: Option<f64>,
+    /// Last phase actually requested for drawing; left untouched when the
+    /// heartbeat stops so unrelated redraws cannot jump or reset it.
+    #[rust]
+    shiny_time: f32,
 }
 
 impl ScriptHook for MapView {
@@ -4155,21 +4166,17 @@ impl Widget for MapView {
             self.tick_wind();
             self.redraw(cx);
         }
-        // Animated shiny materials: keep a modest heartbeat while they can
-        // actually show (close zoom, feature on); stop it otherwise.
-        {
-            let shiny = &self.active_style().shiny;
-            let want = (shiny.water_fx || shiny.foliage_fx) && self.render_bucket() >= 14;
-            if want != self.shiny_anim_on {
-                self.shiny_anim_on = want;
-                cx.stop_timer(self.shiny_anim_timer);
-                if want {
-                    self.shiny_anim_timer = cx.start_interval(1.0 / 20.0);
-                }
-            }
-        }
         if self.shiny_anim_timer.is_event(event).is_some() {
-            self.redraw(cx);
+            let now = cx.seconds_since_app_start();
+            let settled = self
+                .shiny_last_activity
+                .is_none_or(|last| now - last >= SHIMMER_SETTLE_SECS);
+            if settled || !self.shimmer_can_animate() {
+                self.stop_shimmer_timer(cx);
+            } else {
+                self.shiny_time = now as f32;
+                self.redraw(cx);
+            }
         }
         if self.rain_timer.is_event(event).is_some() && !self.rain_frames.is_empty() {
             self.rain_frame_index = (self.rain_frame_index + 1) % self.rain_frames.len();
@@ -4208,6 +4215,7 @@ impl Widget for MapView {
         // dispatches them first).
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(fe) => {
+                self.note_shimmer_activity(cx);
                 let rotate_gesture = fe
                     .device
                     .mouse_button()
@@ -4228,6 +4236,7 @@ impl Widget for MapView {
                 }
             }
             Hit::FingerMove(fe) => {
+                self.note_shimmer_activity(cx);
                 if let Some((start_abs, start_rotation, start_tilt)) = self.rotate_drag {
                     let delta = fe.abs - start_abs;
                     self.rotation = (start_rotation - delta.x * 0.35).rem_euclid(360.0);
@@ -4265,12 +4274,14 @@ impl Widget for MapView {
                 }
             }
             Hit::FingerLongPress(lp) => {
+                self.note_shimmer_activity(cx);
                 // Long press cancels the pan gesture and reports map coords.
                 self.drag_start_abs = None;
                 let (lon, lat) = self.screen_to_lon_lat(lp.abs);
                 cx.widget_action(self.uid, MapViewAction::LongPressed { lon, lat, abs: lp.abs });
             }
             Hit::FingerUp(fe) => {
+                self.note_shimmer_activity(cx);
                 if self.rotate_drag.take().is_some() {
                     // Releasing near straight-above settles on EXACTLY 0:
                     // a 5-10 degree residual reads as "3D mode stuck on".
@@ -4328,6 +4339,7 @@ impl Widget for MapView {
                 };
                 self.fly = None;
                 self.zoom_with_anchor(cx, scroll, fs.abs);
+                self.note_shimmer_activity(cx);
             }
             _ => {}
         }
@@ -4417,6 +4429,7 @@ impl Widget for MapView {
                 (self.space_warp_t - step).max(warp_target)
             };
             self.space_warp_last_step = Some(now);
+            self.note_shimmer_activity(cx.cx);
             self.redraw(cx);
         } else {
             self.space_warp_last_step = None;
@@ -4519,6 +4532,9 @@ impl Widget for MapView {
         // track the surface) and the hillshade becomes the visible ground.
         let terrain_fill_lift = if self.render_bucket() >= 14 { 1.0f32 } else { 0.0 };
         // shiny.md gates + sun for the material dispatch, per active theme.
+        self.draw_map.shiny_time = self.shiny_time;
+        self.draw_road.shiny_time = self.shiny_time;
+        self.draw_face.shiny_time = self.shiny_time;
         self.draw_map.shiny = self.active_style().shiny;
         self.draw_fill.shiny = self.draw_map.shiny;
         self.draw_road.shiny = self.draw_map.shiny;
@@ -4789,6 +4805,7 @@ impl Widget for MapView {
                         .clamp(0.0, 1.0);
                     if pass == 0 {
                         let uniforms = MapDrawUniforms {
+                            shiny_time: self.shiny_time,
                             map_scale,
                             map_offset: screen_offset,
                             fade: 1.0,
@@ -4992,6 +5009,7 @@ impl Widget for MapView {
                     + chunk_call_depth_fix * chunk_extra_calls as f32;
                 if pass == 0 {
                     let uniforms = MapDrawUniforms {
+                        shiny_time: self.shiny_time,
                         map_scale,
                         map_offset: screen_offset,
                         fade: incoming_fade,
@@ -5121,6 +5139,7 @@ impl Widget for MapView {
                                 cx,
                                 roof.geometry_id(),
                                 &MapDrawUniforms {
+                                    shiny_time: self.shiny_time,
                                     map_scale,
                                     map_offset: screen_offset,
                                     fade: fade_alpha,
@@ -5156,6 +5175,7 @@ impl Widget for MapView {
                     // mesh records they replace.
                     if lod > 0.003 {
                         let prop_uniforms = MapDrawUniforms {
+                            shiny_time: self.shiny_time,
                             map_scale,
                             map_offset: screen_offset,
                             fade: fade_alpha,
@@ -5246,6 +5266,7 @@ impl Widget for MapView {
                                 template.geometry_id(),
                                 tree_instances,
                                 &MapDrawUniforms {
+                                    shiny_time: self.shiny_time,
                                     map_scale,
                                     map_offset: screen_offset,
                                     fade: fade_alpha,
@@ -5283,6 +5304,7 @@ impl Widget for MapView {
                             cx,
                             wall_instances,
                             &MapDrawUniforms {
+                                shiny_time: self.shiny_time,
                                 map_scale,
                                 map_offset: screen_offset,
                                 fade: fade_alpha,
@@ -5469,6 +5491,7 @@ impl Widget for MapView {
                         0.0
                     };
                     let mut uniforms = MapDrawUniforms {
+                        shiny_time: self.shiny_time,
                         map_scale,
                         map_offset: screen_offset,
                         fade: 1.0,
@@ -5984,6 +6007,32 @@ impl MapView {
         }
     }
 
+    fn shimmer_can_animate(&self) -> bool {
+        let shiny = &self.active_style().shiny;
+        (shiny.water_fx || shiny.foliage_fx) && self.render_bucket() >= 14
+    }
+
+    fn note_shimmer_activity(&mut self, cx: &mut Cx) {
+        if !self.shimmer_can_animate() {
+            self.stop_shimmer_timer(cx);
+            return;
+        }
+        let now = cx.seconds_since_app_start();
+        self.shiny_last_activity = Some(now);
+        self.shiny_time = now as f32;
+        if self.shiny_anim_timer.is_empty() {
+            self.shiny_anim_timer = cx.start_interval(1.0 / 20.0);
+        }
+    }
+
+    fn stop_shimmer_timer(&mut self, cx: &mut Cx) {
+        if !self.shiny_anim_timer.is_empty() {
+            cx.stop_timer(self.shiny_anim_timer);
+            self.shiny_anim_timer = Timer::empty();
+        }
+        self.shiny_last_activity = None;
+    }
+
     /// The Inception fold ON/OFF (the SETTING — remembers intent; the fold
     /// itself tweens in only while the camera is in a close 3D view and
     /// tweens back out when it leaves one).
@@ -5992,6 +6041,7 @@ impl MapView {
             return;
         }
         self.space_warp_want = on;
+        self.note_shimmer_activity(cx);
         // Restyle resident tiles both ways: turning ON re-uploads the
         // ground meshes chord-refined against the fold (insert_ready_tile),
         // turning OFF restores the pristine buffers so flat mode stays
@@ -6140,6 +6190,7 @@ impl MapView {
         self.draw_map.shadow_mask_on = 0.0;
         self.draw_map.shadow_mask_size = [rect.size.x as f32, rect.size.y as f32];
         let shadow_mask_size = self.draw_map.shadow_mask_size;
+        let shiny_time = self.shiny_time;
         let space_warp = self.draw_map.space_warp_u;
         let space_warp2 = self.draw_map.space_warp2_u;
         let sun_2d = self.draw_map.shiny.sun.dir_2d();
@@ -6185,6 +6236,7 @@ impl MapView {
             self.draw_map.shadow_dir = shadow_dir;
             let width_correction = stroke_width_correction(entry.bucket, view_zoom);
             let uniforms = |height_grow: f32, shadow_cast: f32| MapDrawUniforms {
+                shiny_time,
                 map_scale,
                 map_offset: screen_offset,
                 fade: 1.0,
@@ -9634,6 +9686,7 @@ impl MapView {
         self.fly = None;
         self.center_norm = lon_lat_to_normalized(lon, lat);
         self.wrap_and_clamp_center();
+        self.note_shimmer_activity(cx);
         self.sync_camera_fields();
         self.emit_viewport_changed(cx);
         self.redraw(cx);
@@ -9646,6 +9699,7 @@ impl MapView {
             return;
         }
         self.rotation = rotation;
+        self.note_shimmer_activity(cx);
         self.redraw(cx);
     }
 
@@ -9665,6 +9719,7 @@ impl MapView {
             return;
         }
         self.tilt = tilt;
+        self.note_shimmer_activity(cx);
         self.redraw(cx);
     }
 
@@ -10215,6 +10270,7 @@ impl MapView {
         self.zoom = zoom.clamp(min_zoom, max_zoom);
         self.last_zoom_change_frame = self.frame_counter;
         self.last_zoom_change_time = Some(cx.seconds_since_app_start());
+        self.note_shimmer_activity(cx);
         cx.stop_timer(self.zoom_settle_timer);
         self.zoom_settle_timer = cx.start_timeout(0.15);
         self.emit_viewport_changed(cx);
@@ -10247,6 +10303,7 @@ impl MapView {
             to_zoom,
             arc,
         });
+        self.note_shimmer_activity(cx);
         cx.stop_timer(self.fly_timer);
         self.fly_timer = cx.start_timeout(0.016);
         self.redraw(cx);
@@ -10268,6 +10325,7 @@ impl MapView {
         self.wrap_and_clamp_center();
         self.last_zoom_change_frame = self.frame_counter;
         self.last_zoom_change_time = Some(now);
+        self.note_shimmer_activity(cx);
         if t >= 1.0 {
             self.fly = None;
             self.center_norm = fly.to_center;
