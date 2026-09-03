@@ -5,5 +5,10 @@ disallowed-types = [
 
 disallowed-methods = [
     { path = "std::time::Instant::now", reason = "traps on wasm — use Cx::monotonic_now()/Cx::time_now() (platform clock) or gate the code #[cfg(not(target_arch = \"wasm32\"))]" },
+    { path = "std::thread::sleep", reason = "reads the std clock and blocks: panics on wasm workers — a worker blocks on a channel recv(); pacing uses Cx::monotonic_now() + a wake message; or gate #[cfg(not(target_arch = \"wasm32\"))]" },
+    { path = "std::sync::mpsc::Receiver::recv_timeout", reason = "reads the std clock: panics on wasm workers — use recv() on a worker, try_recv() on the UI thread, or gate #[cfg(not(target_arch = \"wasm32\"))]" },
+    { path = "std::sync::Condvar::wait_timeout", reason = "reads the std clock: panics on wasm workers — wait() or a channel, or gate #[cfg(not(target_arch = \"wasm32\"))]" },
+    { path = "std::sync::Condvar::wait_timeout_while", reason = "reads the std clock: panics on wasm workers — wait_while() or a channel, or gate #[cfg(not(target_arch = \"wasm32\"))]" },
+    { path = "std::thread::park_timeout", reason = "reads the std clock: panics on wasm workers — park() or a channel, or gate #[cfg(not(target_arch = \"wasm32\"))]" },
     { path = "std::time::SystemTime::now", reason = "traps on wasm — use Cx::monotonic_now()/Cx::time_now() (platform clock) or gate the code #[cfg(not(target_arch = \"wasm32\"))]" },
 ]
