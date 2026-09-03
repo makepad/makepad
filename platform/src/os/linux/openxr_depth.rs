@@ -4,7 +4,7 @@ use crate::{
         openxr::CxOpenXrFrame,
         vulkan::{CxVulkan, CxVulkanOpenXrSessionData},
     },
-    thread::SignalToUI,
+    thread::{SignalToUI, ThreadOptions, ThreadSpawner},
     xr_tsdf::{
         apply_preprocessed_depth_mesh, preprocess_depth_mesh, projected_height_refresh_budget,
         refresh_projected_height_field, score_depth_job_novelty,
@@ -17,7 +17,7 @@ use crate::{
     },
 };
 use std::{
-    sync::{Arc, Condvar, Mutex},
+    sync::{mpsc::{self, Receiver, Sender, TryRecvError}, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -26,39 +26,22 @@ const DEPTH_COOPERATIVE_STEP_INTERVAL_MILLIS: u64 = 8;
 const DEPTH_COOPERATIVE_IDLE_POLL_INTERVAL_MILLIS: u64 = 33;
 const DEPTH_TSDF_INPUT_THROTTLING_DISABLED: bool = true;
 
-#[derive(Default)]
-struct LatestDepthJobMailbox {
-    latest: Option<DepthMeshJob>,
-}
-
-type SharedLatestDepthJobMailbox = Arc<(Mutex<LatestDepthJobMailbox>, Condvar)>;
+static DEPTH_SENDER: OnceLock<Sender<DepthMeshJob>> = OnceLock::new();
 
 struct PendingDepthCandidate {
     job: DepthMeshJob,
     novelty: DepthFrameNovelty,
 }
 
-fn replace_latest_depth_job(mailbox: &SharedLatestDepthJobMailbox, job: DepthMeshJob) -> bool {
-    let (lock, condvar) = &**mailbox;
-    let mut state = lock.lock().unwrap_or_else(|err| err.into_inner());
-    let replaced = state.latest.replace(job).is_some();
-    condvar.notify_one();
-    replaced
-}
-
 fn take_latest_depth_job(
-    mailbox: &SharedLatestDepthJobMailbox,
+    mailbox: &Receiver<DepthMeshJob>,
     timeout: Duration,
 ) -> Option<DepthMeshJob> {
-    let (lock, condvar) = &**mailbox;
-    let mut state = lock.lock().unwrap_or_else(|err| err.into_inner());
-    if state.latest.is_none() && !timeout.is_zero() {
-        let (guard, _) = condvar
-            .wait_timeout(state, timeout)
-            .unwrap_or_else(|err| err.into_inner());
-        state = guard;
+    if timeout.is_zero() {
+        mailbox.try_recv().ok()
+    } else {
+        mailbox.recv_timeout(timeout).ok()
     }
-    state.latest.take()
 }
 
 fn pending_depth_candidate_should_replace(
@@ -100,7 +83,7 @@ fn enqueue_pending_depth_candidate(
 }
 
 pub(super) struct CxOpenXrDepthMeshPipeline {
-    mailbox: SharedLatestDepthJobMailbox,
+    mailbox: Sender<DepthMeshJob>,
     store: XrTsdfStore,
     next_generation: u64,
     last_reset_generation: u64,
@@ -108,14 +91,25 @@ pub(super) struct CxOpenXrDepthMeshPipeline {
 }
 
 impl CxOpenXrDepthMeshPipeline {
-    pub fn new() -> Self {
+    pub fn new(spawner: &ThreadSpawner) -> Self {
         let store = xr_tsdf_store();
-        let mailbox = Arc::new((Mutex::new(LatestDepthJobMailbox::default()), Condvar::new()));
-        std::thread::spawn({
-            let mailbox = mailbox.clone();
-            let store = store.clone();
-            move || depth_preprocess_tsdf_writer_worker(mailbox, store)
-        });
+        let mailbox = DEPTH_SENDER
+            .get_or_init(|| {
+                let (sender, receiver) = mpsc::channel();
+                let worker_store = store.clone();
+                match spawner.spawn_worker(
+                    ThreadOptions {
+                        name: Some("xr-tsdf-depth-writer".into()),
+                        ..Default::default()
+                    },
+                    move || depth_preprocess_tsdf_writer_worker(receiver, worker_store),
+                ) {
+                    Ok(handle) => handle.detach(),
+                    Err(error) => store.set_error(format!("depth worker unavailable: {error}")),
+                }
+                sender
+            })
+            .clone();
         Self {
             mailbox,
             store,
@@ -224,8 +218,10 @@ impl CxOpenXrDepthMeshPipeline {
             }
         };
 
-        if replace_latest_depth_job(&self.mailbox, job) {
-            self.store.record_drop();
+        if self.mailbox.send(job).is_err() {
+            let error = "OpenXR depth worker is unavailable".to_string();
+            self.store.set_error(error.clone());
+            return Err(error);
         }
         self.last_depth_readback_at = Some(now);
 
@@ -233,7 +229,7 @@ impl CxOpenXrDepthMeshPipeline {
     }
 }
 
-fn depth_preprocess_tsdf_writer_worker(mailbox: SharedLatestDepthJobMailbox, store: XrTsdfStore) {
+fn depth_preprocess_tsdf_writer_worker(mailbox: Receiver<DepthMeshJob>, store: XrTsdfStore) {
     let mut preprocess_state = DepthPreprocessWorkerState::default();
     let mut volume = DepthMeshVolume::new(store.voxel_size_meters());
     let mut next_height_map_slice_at = Instant::now();
@@ -271,22 +267,22 @@ fn depth_preprocess_tsdf_writer_worker(mailbox: SharedLatestDepthJobMailbox, sto
             Duration::from_millis(DEPTH_SURFACE_MESH_IDLE_WAIT_MILLIS),
         ) {
             loop {
-                if job.reset_generation != store.reset_generation() {
-                    break;
+                match mailbox.try_recv() {
+                    Ok(next_job) => {
+                        store.record_drop();
+                        job = next_job;
+                    }
+                    Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
                 }
-                if (job.voxel_size_meters - store.voxel_size_meters()).abs() > f32::EPSILON {
-                    break;
-                }
+            }
+            if job.reset_generation == store.reset_generation()
+                && (job.voxel_size_meters - store.voxel_size_meters()).abs() <= f32::EPSILON
+            {
                 let candidate = PendingDepthCandidate {
                     novelty: score_depth_job_novelty(&volume, &job),
                     job,
                 };
                 enqueue_pending_depth_candidate(&mut pending_depth_candidate, candidate, &store);
-                if let Some(next_job) = take_latest_depth_job(&mailbox, Duration::ZERO) {
-                    job = next_job;
-                    continue;
-                }
-                break;
             }
         }
 

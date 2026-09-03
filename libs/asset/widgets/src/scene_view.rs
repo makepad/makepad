@@ -24,7 +24,7 @@ use makepad_render::{
     PreviewLook, PreviewStage, Renderer, SceneDraws, StaticModel, TICK_DT,
 };
 use makepad_widgets::*;
-use std::sync::mpsc::{channel, Receiver, TryRecvError};
+use makepad_widgets::makepad_platform::thread::{Lane, TaskHandle};
 
 /// First-person clip planes for a walked level (world units; the classic
 /// importer's scale is Doom map units / 64, so 0.05 is about three map
@@ -120,7 +120,7 @@ pub struct SceneView {
     anchors: Vec<NavAnchor>,
     /// A parse + nav build in flight on the worker.
     #[rust]
-    parsing: Option<Receiver<Parsed>>,
+    parsing: Option<TaskHandle<Parsed>>,
     /// Parsed bytes waiting for a `Cx` to upload with.
     #[rust]
     pending: Option<Box<Parsed>>,
@@ -190,6 +190,9 @@ impl SceneView {
 
     /// Stop everything and forget the model.
     pub fn clear(&mut self, cx: &mut Cx) {
+        if let Some(parsing) = &self.parsing {
+            parsing.cancel();
+        }
         self.parsing = None;
         self.pending = None;
         self.statue = None;
@@ -234,6 +237,9 @@ impl SceneView {
     }
 
     fn start(&mut self, cx: &mut Cx, glb: Vec<u8>, texture_png: Option<Vec<u8>>, mode: SceneMode) {
+        if let Some(parsing) = &self.parsing {
+            parsing.cancel();
+        }
         self.mode = mode;
         self.statue = None;
         self.tour = None;
@@ -241,47 +247,44 @@ impl SceneView {
         self.status = "loading…".to_string();
         // Parsing, and above all the nav grid, run off the frame thread:
         // a real map is a capsule probe per cell and a wall probe per edge.
-        let (tx, rx) = channel();
         let cfg = config_for_world(self.bob_style, &self.anchors);
-        self.parsing = Some(rx);
-        std::thread::Builder::new()
-            .name("asset-widgets-scene".into())
-            .spawn(move || {
-                let parsed = match StaticModel::parse_glb(&glb) {
-                    Ok(model) => {
-                        let prep = match mode {
-                            // The grid is built with the SAME body that will
-                            // walk it — building for one set of legs and
-                            // walking with another is how a tour ends up
-                            // refusing steps it can make.
-                            SceneMode::World => Some(build_level(&model, &glb, &cfg)),
-                            SceneMode::Turntable => None,
-                        };
-                        Parsed { glb, texture_png, prep, error: None }
-                    }
-                    Err(e) => Parsed {
-                        glb: Vec::new(),
-                        texture_png: None,
-                        prep: None,
-                        error: Some(format!("mesh parse failed: {e}")),
-                    },
-                };
-                let _ = tx.send(parsed);
+        self.parsing = cx
+            .task_pool()
+            .submit(Lane::Heavy, move || match StaticModel::parse_glb(&glb) {
+                Ok(model) => {
+                    let prep = match mode {
+                        // The grid is built with the SAME body that will
+                        // walk it — building for one set of legs and
+                        // walking with another is how a tour ends up
+                        // refusing steps it can make.
+                        SceneMode::World => Some(build_level(&model, &glb, &cfg)),
+                        SceneMode::Turntable => None,
+                    };
+                    Parsed { glb, texture_png, prep, error: None }
+                }
+                Err(e) => Parsed {
+                    glb: Vec::new(),
+                    texture_png: None,
+                    prep: None,
+                    error: Some(format!("mesh parse failed: {e}")),
+                },
             })
             .ok();
+        if self.parsing.is_none() {
+            self.status = "mesh worker unavailable".to_string();
+        }
         self.next_frame = cx.new_next_frame();
         self.area.redraw(cx);
     }
 
     fn collect_parse(&mut self) {
-        let Some(rx) = self.parsing.as_ref() else { return };
-        match rx.try_recv() {
+        let Some(done) = self.parsing.as_mut().and_then(TaskHandle::try_take) else { return };
+        match done {
             Ok(parsed) => {
                 self.parsing = None;
                 self.pending = Some(Box::new(parsed));
             }
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => {
+            Err(_) => {
                 self.parsing = None;
                 self.status = "mesh load failed".to_string();
             }

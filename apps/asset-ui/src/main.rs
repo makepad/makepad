@@ -9979,7 +9979,7 @@ impl App {
         if !self.chat.is_linked() {
             if let Some(endpoints) = self.store.endpoints {
                 let cache = session_config_from_env().cache_parent.join("cache-chat");
-                self.chat.connect(endpoints, self.store.token.clone(), cache);
+                self.chat.connect(cx, endpoints, self.store.token.clone(), cache);
                 // The pane says "waiting for the asset server" until
                 // something redraws it, and the feed only marks itself
                 // dirty once a turn runs — so the line would sit there

@@ -1,22 +1,79 @@
 //! The conversation on screen: what the user said, what the model is saying
 //! back, which tools ran, and how fast the reply is arriving.
 //!
-//! The model is a process-global so the list widget can read it during draw
-//! without threading a scope through. It holds only PRESENTATION state —
-//! every real effect goes through the app's own tools, never from here.
+//! Presentation state is UI-thread local. The native feed sends immutable
+//! update messages over a channel; the UI drains them before drawing, so the
+//! draw path copies a snapshot without ever taking a cross-thread lock.
 
-pub static CHAT: std::sync::RwLock<ChatData> = std::sync::RwLock::new(ChatData {
-    messages: Vec::new(),
-    streaming_text: String::new(),
-    activity: String::new(),
-    activity_shown_at: None,
-    activity_clear_pending: false,
-    thinking_text: String::new(),
-    status: String::new(),
-    is_streaming: false,
-    last_delta: None,
-    rate: RateMeter::new(),
-});
+use std::cell::RefCell;
+use std::ops::{Deref, DerefMut};
+
+thread_local! {
+    static CHAT_DATA: RefCell<ChatData> = RefCell::new(ChatData::new());
+}
+
+pub struct ChatTranscript;
+
+pub static CHAT: ChatTranscript = ChatTranscript;
+
+#[derive(Debug)]
+pub struct ChatAccessError;
+
+pub struct ChatRead(ChatData);
+
+impl Deref for ChatRead {
+    type Target = ChatData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+pub struct ChatWrite(ChatData);
+
+impl Deref for ChatWrite {
+    type Target = ChatData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for ChatWrite {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for ChatWrite {
+    fn drop(&mut self) {
+        CHAT_DATA.with(|slot| *slot.borrow_mut() = self.0.clone());
+    }
+}
+
+impl ChatTranscript {
+    fn with_data<R>(&self, f: impl FnOnce(&ChatData) -> R) -> R {
+        CHAT_DATA.with(|slot| f(&slot.borrow()))
+    }
+
+    fn with_data_mut<R>(&self, f: impl FnOnce(&mut ChatData) -> R) -> R {
+        CHAT_DATA.with(|slot| f(&mut slot.borrow_mut()))
+    }
+
+    pub fn snapshot(&self) -> ChatData {
+        self.with_data(Clone::clone)
+    }
+
+    /// Compatibility-shaped lock-free read: this returns an owned snapshot.
+    pub fn read(&self) -> Result<ChatRead, ChatAccessError> {
+        Ok(ChatRead(self.snapshot()))
+    }
+
+    /// UI-local edit guard. Dropping it publishes the edited local snapshot.
+    pub fn write(&self) -> Result<ChatWrite, ChatAccessError> {
+        Ok(ChatWrite(self.snapshot()))
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum ChatRole {
@@ -53,6 +110,7 @@ impl ChatMessage {
     }
 }
 
+#[derive(Clone)]
 pub struct ChatData {
     pub messages: Vec<ChatMessage>,
     pub streaming_text: String,
@@ -74,6 +132,50 @@ pub struct ChatData {
     pub last_delta: Option<Instant>,
     /// How fast the reply on screen is arriving (see [`RateMeter`]).
     pub rate: RateMeter,
+}
+
+pub(crate) enum TranscriptUpdate {
+    Push(ChatRole, String),
+    BeginStream,
+    NoteDelta {
+        bytes: usize,
+        gen_tokens: Option<u32>,
+        lanes: Option<(u32, u32)>,
+        think: Option<u32>,
+        visible: Option<u32>,
+    },
+    SetStreamText(String),
+    PushTool { id: String, title: String, detail: String },
+    FinishTool { id: String, title: String, detail_suffix: String },
+    SetThinkingText(String),
+    SetActivity(String),
+    SetStatus(String),
+    EndStream,
+    Clear,
+}
+
+impl TranscriptUpdate {
+    pub(crate) fn apply(self) {
+        match self {
+            Self::Push(role, text) => ChatData::push(role, text),
+            Self::BeginStream => ChatData::begin_stream(),
+            Self::NoteDelta { bytes, gen_tokens, lanes, think, visible } => {
+                ChatData::note_delta(bytes, gen_tokens, lanes, think, visible)
+            }
+            Self::SetStreamText(text) => ChatData::set_stream_text(&text),
+            Self::PushTool { id, title, detail } => ChatData::push_tool(&id, title, detail),
+            Self::FinishTool { id, title, detail_suffix } => {
+                ChatData::finish_tool(&id, title, &detail_suffix)
+            }
+            Self::SetThinkingText(text) => ChatData::set_thinking_text(&text),
+            Self::SetActivity(text) => ChatData::set_activity(&text),
+            Self::SetStatus(text) => ChatData::set_status(text),
+            Self::EndStream => {
+                ChatData::end_stream();
+            }
+            Self::Clear => ChatData::clear(),
+        }
+    }
 }
 
 // ------------------------------------------------------------------- rate
@@ -142,6 +244,7 @@ pub const ACTIVITY_MIN_SHOWN: Duration = Duration::from_millis(700);
 /// The clock starts at the FIRST delta and every rate is a difference
 /// between two samples, so time spent waiting for the first token never
 /// enters the number.
+#[derive(Clone)]
 pub struct RateMeter {
     /// `(arrival, cumulative tokens)`, trimmed to [`RATE_WINDOW`].
     points: Vec<(Instant, f64)>,
@@ -297,29 +400,44 @@ impl RateMeter {
 }
 
 impl ChatData {
-    pub fn push(role: ChatRole, text: impl Into<String>) {
-        if let Ok(mut data) = CHAT.write() {
-            data.messages.push(ChatMessage::plain(role, text.into()));
+    const fn new() -> Self {
+        Self {
+            messages: Vec::new(),
+            streaming_text: String::new(),
+            activity: String::new(),
+            activity_shown_at: None,
+            activity_clear_pending: false,
+            thinking_text: String::new(),
+            status: String::new(),
+            is_streaming: false,
+            last_delta: None,
+            rate: RateMeter::new(),
         }
+    }
+
+    pub fn push(role: ChatRole, text: impl Into<String>) {
+        CHAT.with_data_mut(|data| {
+            data.messages.push(ChatMessage::plain(role, text.into()));
+        });
     }
 
     pub fn begin_stream() {
-        if let Ok(mut data) = CHAT.write() {
+        CHAT.with_data_mut(|data| {
             data.streaming_text.clear();
             data.is_streaming = true;
             data.rate.reset();
-        }
+        });
     }
 
     pub fn push_delta(text: &str) {
-        if let Ok(mut data) = CHAT.write() {
+        CHAT.with_data_mut(|data| {
             data.streaming_text.push_str(text);
             let now = Instant::now();
             // This lane (a device-local agent) hands us text, never a token
             // count, so the rate is an estimate and says so.
             data.rate.record(now, text.len(), None, None, None, None);
             data.last_delta = Some(now);
-        }
+        });
     }
 
     /// One streaming delta as it arrived from the chat service: `bytes` of
@@ -334,28 +452,28 @@ impl ChatData {
         think: Option<u32>,
         visible: Option<u32>,
     ) {
-        if let Ok(mut data) = CHAT.write() {
+        CHAT.with_data_mut(|data| {
             data.rate.record(Instant::now(), bytes, gen_tokens, lanes, think, visible);
-        }
+        });
     }
 
     /// Replace the streaming bubble wholesale. The broker session re-derives
     /// the VISIBLE text after every delta (thinking and tool lines are
     /// stripped), so the shown prefix is not append-only.
     pub fn set_stream_text(text: &str) {
-        if let Ok(mut data) = CHAT.write() {
+        CHAT.with_data_mut(|data| {
             if data.streaming_text != text {
                 data.streaming_text.clear();
                 data.streaming_text.push_str(text);
                 data.last_delta = Some(Instant::now());
             }
-        }
+        });
     }
 
     /// A tool call started: land any visible text said before it as an
     /// assistant message, then add the running chip.
     pub fn push_tool(id: &str, title: impl Into<String>, detail: impl Into<String>) {
-        if let Ok(mut data) = CHAT.write() {
+        CHAT.with_data_mut(|data| {
             let said = std::mem::take(&mut data.streaming_text);
             if !said.trim().is_empty() {
                 let meta = data.rate.final_label();
@@ -374,12 +492,12 @@ impl ChatData {
                 expanded: false,
                 meta: None,
             });
-        }
+        });
     }
 
     /// The result arrived: complete the chip in place (matched by call id).
     pub fn finish_tool(id: &str, title: impl Into<String>, detail_suffix: &str) {
-        if let Ok(mut data) = CHAT.write() {
+        CHAT.with_data_mut(|data| {
             if let Some(msg) = data
                 .messages
                 .iter_mut()
@@ -391,57 +509,59 @@ impl ChatData {
                     detail.push_str(detail_suffix);
                 }
             }
-        }
+        });
     }
 
     /// Toggle one tool chip open/closed (list index).
     pub fn toggle_tool(index: usize) {
-        if let Ok(mut data) = CHAT.write() {
+        CHAT.with_data_mut(|data| {
             if let Some(msg) = data.messages.get_mut(index) {
                 if msg.role == ChatRole::Tool {
                     msg.expanded = !msg.expanded;
                 }
             }
-        }
+        });
     }
 
     /// Land the streamed reply as a message. Returns the number of items the
     /// list should scroll to.
     pub fn end_stream() -> usize {
-        let Ok(mut data) = CHAT.write() else { return 0 };
-        let text = std::mem::take(&mut data.streaming_text);
-        if !text.trim().is_empty() {
-            let meta = data.rate.final_label();
-            let mut msg = ChatMessage::plain(ChatRole::Assistant, text);
-            msg.meta = meta;
-            data.messages.push(msg);
-        }
-        data.rate.reset();
-        data.is_streaming = false;
-        data.activity.clear();
-        data.activity_shown_at = None;
-        data.activity_clear_pending = false;
-        data.thinking_text.clear();
-        data.messages.len()
+        CHAT.with_data_mut(|data| {
+            let text = std::mem::take(&mut data.streaming_text);
+            if !text.trim().is_empty() {
+                let meta = data.rate.final_label();
+                let mut msg = ChatMessage::plain(ChatRole::Assistant, text);
+                msg.meta = meta;
+                data.messages.push(msg);
+            }
+            data.rate.reset();
+            data.is_streaming = false;
+            data.activity.clear();
+            data.activity_shown_at = None;
+            data.activity_clear_pending = false;
+            data.thinking_text.clear();
+            data.messages.len()
+        })
     }
 
     /// The one-line readout for the status area while a reply streams:
     /// `78 tok/s`, plus lane contention when the box runs more than one
     /// lane. `None` when nothing is arriving.
     pub fn live_rate_label() -> Option<String> {
-        let data = CHAT.read().ok()?;
-        data.is_streaming
-            .then(|| data.rate.live_label(Instant::now()))
-            .flatten()
+        CHAT.with_data(|data| {
+            data.is_streaming
+                .then(|| data.rate.live_label(Instant::now()))
+                .flatten()
+        })
     }
 
     /// The live reasoning tail, for the porthole under the think dots.
     pub fn set_thinking_text(text: &str) {
-        if let Ok(mut data) = CHAT.write() {
+        CHAT.with_data_mut(|data| {
             if data.thinking_text != text {
                 data.thinking_text = text.to_string();
             }
-        }
+        });
     }
 
     /// Minimum time a just-shown activity stays on screen. Clears inside
@@ -449,7 +569,7 @@ impl ChatData {
     /// the "thinking" chip never flashes in and out within a fraction of a
     /// second — the flicker reads as a glitch, not a status.
     pub fn set_activity(text: &str) {
-        if let Ok(mut data) = CHAT.write() {
+        CHAT.with_data_mut(|data| {
             let now = Instant::now();
             if text.is_empty() {
                 // A clear only lands once the current status had its beat.
@@ -472,38 +592,35 @@ impl ChatData {
                 }
                 data.activity_clear_pending = false;
             }
-        }
+        });
     }
 
     pub fn activity() -> String {
-        CHAT.read().map(|d| d.activity.clone()).unwrap_or_default()
+        CHAT.with_data(|data| data.activity.clone())
     }
 
     pub fn set_status(text: impl Into<String>) {
-        if let Ok(mut data) = CHAT.write() {
+        CHAT.with_data_mut(|data| {
             data.status = text.into();
-        }
+        });
     }
 
     pub fn status() -> String {
-        CHAT.read().map(|d| d.status.clone()).unwrap_or_default()
+        CHAT.with_data(|data| data.status.clone())
     }
 
     pub fn is_streaming() -> bool {
-        CHAT.read().map(|d| d.is_streaming).unwrap_or(false)
+        CHAT.with_data(|data| data.is_streaming)
     }
 
     pub fn item_count() -> usize {
-        match CHAT.read() {
-            Ok(data) => data.messages.len() + data.is_streaming as usize,
-            Err(_) => 0,
-        }
+        CHAT.with_data(|data| data.messages.len() + data.is_streaming as usize)
     }
 
     /// Wipe the conversation (the Clear control). The session itself is
     /// retired by the feed; this is only what is on screen.
     pub fn clear() {
-        if let Ok(mut data) = CHAT.write() {
+        CHAT.with_data_mut(|data| {
             data.messages.clear();
             data.streaming_text.clear();
             data.activity.clear();
@@ -513,7 +630,7 @@ impl ChatData {
             data.is_streaming = false;
             data.last_delta = None;
             data.rate.reset();
-        }
+        });
     }
 }
 

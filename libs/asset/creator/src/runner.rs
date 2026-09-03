@@ -192,7 +192,10 @@ pub fn generate_bytes(
                 );
             }
         }
+        #[cfg(not(target_arch = "wasm32"))]
         std::thread::sleep(Duration::from_millis(500));
+        #[cfg(target_arch = "wasm32")]
+        std::hint::spin_loop();
     };
 
     if kind.catalog().is_none() {

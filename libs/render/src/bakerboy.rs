@@ -149,6 +149,7 @@
 
 use crate::ao_atlas::{project, Chart, GUTTER, TEXEL_SUBSAMPLES, TEXEL_SUB_OFFSETS};
 use makepad_draw::makepad_math::Vec3f;
+use makepad_draw::makepad_platform::thread::{Lane, TaskPool};
 
 /// Everything `BakerBoyConfig` carries that this port honours, plus the two
 /// knobs the task parameterises (direction count, depth resolution).
@@ -728,6 +729,7 @@ pub(crate) fn bake_all_charts(
     indices: &[u32],
     min: Vec3f,
     max: Vec3f,
+    pool: Option<&TaskPool>,
 ) -> Vec<Vec<u8>> {
     let params = BakerBoyParams::from_env();
     let points = collect_texel_points(charts, atlas_size, positions, normals, indices);
@@ -746,41 +748,41 @@ pub(crate) fn bake_all_charts(
     // Directions are dealt round-robin to a fixed number of workers and the
     // partial sums reduced in worker order, so the float addition order — and
     // with it the bake — is reproducible.
-    let threads = std::thread::available_parallelism()
-        .map_or(8, |n| n.get())
+    let threads = pool
+        .map_or(1, |pool| pool.heavy_workers().saturating_add(1))
         .min(params.sample_count.max(1));
     let res = params.depth_res;
     let point_count = points.len();
-    let partials: Vec<Vec<f32>> = std::thread::scope(|scope| {
-        let mut handles = Vec::with_capacity(threads);
-        for worker in 0..threads {
-            let dirs = &dirs;
-            let points = &points;
-            let params = &params;
-            handles.push(scope.spawn(move || {
-                let mut occ = vec![0.0f32; point_count];
-                let mut depth = vec![1.0f32; res * res];
-                let mut k = worker;
-                while k < dirs.len() {
-                    let d = dirs[k];
-                    let cam = ShadowCam::fit(min, max, d);
-                    rasterise_depth(&mut depth, res, &cam, positions, indices);
-                    let bias_z = params.depth_bias / (cam.far - cam.near);
-                    for (i, pt) in points.iter().enumerate() {
-                        let (u, v, z) = cam.project(pt.p);
-                        // `worldPos - lightDir * bias`: the offset is parallel
-                        // to the view direction, so only the compare depth
-                        // moves — by exactly bias/(far-near).
-                        let vis = sample_shadow_pcf(&depth, res, u, v, z - bias_z);
-                        occ[i] += vis * (-pt.n.dot(d)).max(0.0);
-                    }
-                    k += threads;
-                }
-                occ
-            }));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let work = |worker: usize| {
+        let mut occ = vec![0.0f32; point_count];
+        let mut depth = vec![1.0f32; res * res];
+        let mut k = worker;
+        while k < dirs.len() {
+            let d = dirs[k];
+            let cam = ShadowCam::fit(min, max, d);
+            rasterise_depth(&mut depth, res, &cam, positions, indices);
+            let bias_z = params.depth_bias / (cam.far - cam.near);
+            for (i, pt) in points.iter().enumerate() {
+                let (u, v, z) = cam.project(pt.p);
+                // `worldPos - lightDir * bias`: the offset is parallel
+                // to the view direction, so only the compare depth moves.
+                let vis = sample_shadow_pcf(&depth, res, u, v, z - bias_z);
+                occ[i] += vis * (-pt.n.dot(d)).max(0.0);
+            }
+            k += threads;
         }
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    });
+        let _ = tx.send((worker, occ));
+    };
+    match pool {
+        Some(pool) => pool.fan_out(Lane::Heavy, threads, work),
+        None => (0..threads).for_each(work),
+    }
+    drop(tx);
+    let mut partials = vec![Vec::new(); threads];
+    for (worker, occ) in rx {
+        partials[worker] = occ;
+    }
 
     let mut occ_sum = vec![0.0f32; point_count];
     for occ in &partials {

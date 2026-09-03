@@ -3,18 +3,17 @@
 //! A web client cannot listen for LAN UDP beacons. Operator-provided HTTP
 //! bases remain visible, while discovery itself resolves to an empty roster.
 
-use std::sync::{Mutex, OnceLock};
+use makepad_platform::thread::ThreadSpawner;
+use std::cell::RefCell;
 use std::time::Duration;
 
 pub const DEFAULT_FLEET: &str = "default";
 
-static BASES: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
-
-fn bases() -> &'static Mutex<Vec<String>> {
-    BASES.get_or_init(|| Mutex::new(Vec::new()))
+thread_local! {
+    static BASES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
-pub fn start_listening() {}
+pub fn start_listening(_spawner: ThreadSpawner) {}
 
 pub fn normalize_fleet(name: &str) -> String {
     let trimmed = name.trim();
@@ -36,13 +35,15 @@ pub fn resolve_wanted_fleet(configured: &str) -> String {
 pub fn set_wanted_fleet(_name: impl AsRef<str>) {}
 
 pub fn seed_bases(items: impl IntoIterator<Item = String>) {
-    let mut slot = bases().lock().unwrap();
-    for item in items {
-        let item = item.trim().trim_end_matches('/').to_string();
-        if !item.is_empty() && !slot.iter().any(|base| base == &item) {
-            slot.push(item);
+    BASES.with(|bases| {
+        let mut slot = bases.borrow_mut();
+        for item in items {
+            let item = item.trim().trim_end_matches('/').to_string();
+            if !item.is_empty() && !slot.iter().any(|base| base == &item) {
+                slot.push(item);
+            }
         }
-    }
+    });
 }
 
 pub fn live_bases_within(_grace: Duration) -> Vec<String> {
@@ -50,5 +51,5 @@ pub fn live_bases_within(_grace: Duration) -> Vec<String> {
 }
 
 pub fn live_bases() -> Vec<String> {
-    bases().lock().unwrap().clone()
+    BASES.with(|bases| bases.borrow().clone())
 }

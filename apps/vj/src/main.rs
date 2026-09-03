@@ -14991,7 +14991,7 @@ p2 {}
                     .cache_parent
                     .join("cache-chat");
                 if let Some(endpoints) = up.endpoints {
-                    self.chat.connect(endpoints, up.token.clone(), cache);
+                    self.chat.connect(cx, endpoints, up.token.clone(), cache);
                 }
                 // The pane says "waiting for the asset server" until
                 // something redraws it, and the feed only marks itself

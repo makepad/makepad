@@ -14,7 +14,7 @@
 //! only thing the app touches is [`ChatFeed`]'s channel and the transcript
 //! global in [`crate::transcript`].
 
-use crate::transcript::{ChatData, ChatRole};
+use crate::transcript::{ChatData, ChatRole, TranscriptUpdate};
 use makepad_asset_chat::context::ClientProfile;
 use makepad_asset_creator::tools::CreatorTools;
 use makepad_asset_chat::session::{Session, SessionId, ToolExecutor};
@@ -30,13 +30,14 @@ use makepad_asset_client::dto::{ChatProviderKind, ChatToolOutcomeDto};
 use makepad_asset_client::json::Value;
 use makepad_asset_client::{ApiEndpoints, ChatAttachment};
 use makepad_widgets::log;
+use makepad_widgets::makepad_platform::thread::{
+    CancellationToken, ThreadOptions, ThreadSpawner, ToUIReceiver, ToUISender,
+};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
 
 /// What the app can ask the worker to do. Everything else it learns from
 /// the transcript.
@@ -125,22 +126,115 @@ impl ClientTools for NoClientTools {
 
 pub struct ChatFeed {
     tx: Sender<Cmd>,
+    updates: ToUIReceiver<TranscriptUpdate>,
     dirty: Arc<AtomicBool>,
     connected: Arc<AtomicBool>,
+    wait: CancellationToken,
+}
+
+#[derive(Clone)]
+struct TranscriptSink {
+    tx: ToUISender<TranscriptUpdate>,
+    dirty: Arc<AtomicBool>,
+}
+
+impl TranscriptSink {
+    fn send(&self, update: TranscriptUpdate) {
+        if self.tx.send(update).is_ok() {
+            self.dirty.store(true, Ordering::Release);
+        }
+    }
+
+    fn push(&self, role: ChatRole, text: impl Into<String>) {
+        self.send(TranscriptUpdate::Push(role, text.into()));
+    }
+
+    fn begin_stream(&self) {
+        self.send(TranscriptUpdate::BeginStream);
+    }
+
+    fn note_delta(
+        &self,
+        bytes: usize,
+        gen_tokens: Option<u32>,
+        lanes: Option<(u32, u32)>,
+        think: Option<u32>,
+        visible: Option<u32>,
+    ) {
+        self.send(TranscriptUpdate::NoteDelta { bytes, gen_tokens, lanes, think, visible });
+    }
+
+    fn set_stream_text(&self, text: impl Into<String>) {
+        self.send(TranscriptUpdate::SetStreamText(text.into()));
+    }
+
+    fn push_tool(&self, id: impl Into<String>, title: impl Into<String>, detail: impl Into<String>) {
+        self.send(TranscriptUpdate::PushTool {
+            id: id.into(),
+            title: title.into(),
+            detail: detail.into(),
+        });
+    }
+
+    fn finish_tool(
+        &self,
+        id: impl Into<String>,
+        title: impl Into<String>,
+        detail_suffix: impl Into<String>,
+    ) {
+        self.send(TranscriptUpdate::FinishTool {
+            id: id.into(),
+            title: title.into(),
+            detail_suffix: detail_suffix.into(),
+        });
+    }
+
+    fn set_thinking_text(&self, text: impl Into<String>) {
+        self.send(TranscriptUpdate::SetThinkingText(text.into()));
+    }
+
+    fn set_activity(&self, text: impl Into<String>) {
+        self.send(TranscriptUpdate::SetActivity(text.into()));
+    }
+
+    fn set_status(&self, text: impl Into<String>) {
+        self.send(TranscriptUpdate::SetStatus(text.into()));
+    }
+
+    fn end_stream(&self) {
+        self.send(TranscriptUpdate::EndStream);
+    }
+
+    fn clear(&self) {
+        self.send(TranscriptUpdate::Clear);
+    }
 }
 
 impl ChatFeed {
-    pub fn start(cfg: FeedConfig, tools: Box<dyn ClientTools>) -> ChatFeed {
+    pub fn start(
+        cfg: FeedConfig,
+        tools: Box<dyn ClientTools>,
+        spawner: ThreadSpawner,
+    ) -> ChatFeed {
+        makepad_asset_chat::fleet_discovery::start_listening(spawner.clone());
         let (tx, rx) = mpsc::channel();
+        let updates = ToUIReceiver::default();
         let dirty = Arc::new(AtomicBool::new(false));
         let connected = Arc::new(AtomicBool::new(false));
-        let worker_dirty = dirty.clone();
         let worker_connected = connected.clone();
-        thread::Builder::new()
-            .name("asset-chat-feed".into())
-            .spawn(move || worker(cfg, tools, rx, worker_dirty, worker_connected))
-            .ok();
-        ChatFeed { tx, dirty, connected }
+        let transcript = TranscriptSink { tx: updates.sender(), dirty: dirty.clone() };
+        let wait = CancellationToken::new();
+        let worker_wait = wait.clone();
+        if let Ok(handle) = spawner.spawn_worker(
+            ThreadOptions { name: Some("asset-chat-feed".into()), ..Default::default() },
+            move || worker(cfg, tools, rx, transcript, worker_connected, worker_wait),
+        ) {
+            handle.detach();
+        } else {
+            ChatData::push(ChatRole::System, "The chat worker is unavailable on this target");
+            dirty.store(true, Ordering::Release);
+        }
+        ChatFeed { tx, updates, dirty, connected, wait }
     }
 
     /// Send the user's turn.
@@ -177,12 +271,19 @@ impl ChatFeed {
 
     /// Has anything changed since the host last drew?
     pub fn take_dirty(&self) -> bool {
-        self.dirty.swap(false, Ordering::Relaxed)
+        let was_dirty = self.dirty.swap(false, Ordering::AcqRel);
+        let mut changed = false;
+        while let Ok(update) = self.updates.try_recv() {
+            update.apply();
+            changed = true;
+        }
+        changed | was_dirty
     }
 }
 
 impl Drop for ChatFeed {
     fn drop(&mut self) {
+        self.wait.cancel();
         let _ = self.tx.send(Cmd::Shutdown);
     }
 }
@@ -296,8 +397,9 @@ fn worker(
     cfg: FeedConfig,
     mut tools: Box<dyn ClientTools>,
     rx: Receiver<Cmd>,
-    dirty: Arc<AtomicBool>,
+    transcript: TranscriptSink,
     connected: Arc<AtomicBool>,
+    wait: CancellationToken,
 ) {
     let profile =
         ClientProfile::from_slug(&cfg.client).unwrap_or(ClientProfile::General);
@@ -328,36 +430,32 @@ fn worker(
                     &attachments,
                     &rx,
                     &mut queued,
-                    &dirty,
+                    &transcript,
                     &connected,
+                    &wait,
                 ) {
                     TurnEnd::Done => {}
                     TurnEnd::Failed(error) => {
-                        ChatData::end_stream();
-                        ChatData::set_activity("");
-                        ChatData::push(ChatRole::System, error);
+                        transcript.end_stream();
+                        transcript.set_activity("");
+                        transcript.push(ChatRole::System, error);
                     }
                     TurnEnd::Cleared => {
                         retire(&mut session, &mut exec);
-                        ChatData::clear();
+                        transcript.clear();
                     }
                 }
-                dirty.store(true, Ordering::Relaxed);
             }
             Cmd::Cancel => {
-                if ChatData::is_streaming() {
-                    if let Some(session) = &session {
-                        session.cancel_flag().cancel();
-                    }
-                    ChatData::end_stream();
-                    ChatData::set_activity("");
-                    dirty.store(true, Ordering::Relaxed);
+                if let Some(session) = &session {
+                    session.cancel_flag().cancel();
+                    transcript.end_stream();
+                    transcript.set_activity("");
                 }
             }
             Cmd::Clear => {
                 retire(&mut session, &mut exec);
-                ChatData::clear();
-                dirty.store(true, Ordering::Relaxed);
+                transcript.clear();
             }
             Cmd::Shutdown => break,
         }
@@ -385,19 +483,20 @@ fn run_turn(
     attachments: &[ChatAttachment],
     rx: &Receiver<Cmd>,
     queued: &mut VecDeque<(String, Vec<ChatAttachment>)>,
-    dirty: &AtomicBool,
+    transcript: &TranscriptSink,
     connected: &AtomicBool,
+    wait: &CancellationToken,
 ) -> TurnEnd {
     if session.is_none() {
-        ChatData::set_activity(&format!("probing the {} provider…", cfg.provider_label));
+        transcript.set_activity(format!("probing the {} provider…", cfg.provider_label));
         let mut provider = match &cfg.provider_factory {
             Some(factory) => factory(),
             None => make_provider(cfg.provider),
         };
         match provider.availability() {
             ProviderAvailability::Available { model, .. } => {
-                ChatData::set_status(format!("{} ready · {model}", cfg.provider_label));
-                ChatData::set_activity(&format!("{} ready · {model}", cfg.provider_label));
+                transcript.set_status(format!("{} ready · {model}", cfg.provider_label));
+                transcript.set_activity(format!("{} ready · {model}", cfg.provider_label));
             }
             ProviderAvailability::Unavailable { reason } => {
                 connected.store(false, Ordering::Relaxed);
@@ -405,7 +504,7 @@ fn run_turn(
                     "The {} provider is unavailable: {reason}",
                     cfg.provider_label
                 );
-                ChatData::set_status(&line);
+                transcript.set_status(line.clone());
                 return TurnEnd::Failed(line);
             }
         }
@@ -415,7 +514,7 @@ fn run_turn(
         tools.session_opened();
     }
     let live = session.as_mut().expect("just ensured");
-    ChatData::set_activity("sending…");
+    transcript.set_activity("sending…");
     let bindings: Vec<AttachmentBinding> = attachments
         .iter()
         .map(|a| AttachmentBinding { revision: a.revision, role: a.role.clone() })
@@ -426,11 +525,10 @@ fn run_turn(
         connected.store(false, Ordering::Relaxed);
         return TurnEnd::Failed(error);
     }
-    ChatData::begin_stream();
+    transcript.begin_stream();
     view.raw.clear();
     view.call_names.clear();
-    ChatData::set_activity("thinking…");
-    dirty.store(true, Ordering::Relaxed);
+    transcript.set_activity("thinking…");
     let mut cleared = false;
     loop {
         // Commands are serviced INSIDE the turn: Escape has to land while
@@ -439,12 +537,12 @@ fn run_turn(
             match rx.try_recv() {
                 Ok(Cmd::Cancel) => {
                     live.cancel_flag().cancel();
-                    ChatData::set_activity("stopping…");
+                    transcript.set_activity("stopping…");
                 }
                 Ok(Cmd::Clear) => {
                     live.cancel_flag().cancel();
                     cleared = true;
-                    ChatData::set_activity("clearing…");
+                    transcript.set_activity("clearing…");
                 }
                 Ok(Cmd::Send { text, attachments }) => queued.push_back((text, attachments)),
                 Ok(Cmd::Shutdown) | Err(TryRecvError::Disconnected) => {
@@ -458,14 +556,12 @@ fn run_turn(
         let session_id = live.id().clone();
         for event in live.drain_events() {
             if let Some(end) =
-                handle_event(live, exec, &session_id, view, tools, event.body)
+                handle_event(live, exec, &session_id, view, tools, transcript, event.body)
             {
-                dirty.store(true, Ordering::Relaxed);
                 return if cleared { TurnEnd::Cleared } else { end };
             }
         }
-        dirty.store(true, Ordering::Relaxed);
-        thread::sleep(Duration::from_millis(40));
+        let _ = wait.wait_until(makepad_widgets::Cx::monotonic_now() + 0.040);
     }
 }
 
@@ -476,11 +572,12 @@ fn handle_event(
     _id: &SessionId,
     view: &mut TurnView,
     tools: &mut dyn ClientTools,
+    transcript: &TranscriptSink,
     body: ChatEventBody,
 ) -> Option<TurnEnd> {
     match body {
         ChatEventBody::Delta { text, serving } => {
-            ChatData::note_delta(
+            transcript.note_delta(
                 text.len(),
                 serving.map(|s| s.gen_tokens),
                 serving.and_then(|s| Some((s.lanes_active?, s.slots_total?))),
@@ -488,26 +585,26 @@ fn handle_event(
                 serving.and_then(|s| s.visible_tokens),
             );
             view.raw.push_str(&text);
-            ChatData::set_thinking_text(&toolcall::split_thinking(&view.raw).thinking);
+            transcript.set_thinking_text(toolcall::split_thinking(&view.raw).thinking);
             let visible = toolcall::strip_marker(&view.raw);
             if visible.trim().is_empty() {
                 match serving.and_then(|s| s.think_tokens) {
-                    Some(n) if n > 0 => ChatData::set_activity(&format!("thinking · {n} tok")),
-                    _ => ChatData::set_activity("thinking…"),
+                    Some(n) if n > 0 => transcript.set_activity(format!("thinking · {n} tok")),
+                    _ => transcript.set_activity("thinking…"),
                 }
             } else {
-                ChatData::set_activity("");
-                ChatData::set_stream_text(&visible);
+                transcript.set_activity("");
+                transcript.set_stream_text(visible);
             }
             None
         }
         ChatEventBody::ToolCall { id: call_id, name, args } => {
             view.call_names.insert(call_id.clone(), name.clone());
-            ChatData::set_stream_text(&toolcall::strip_marker(&view.raw));
+            transcript.set_stream_text(toolcall::strip_marker(&view.raw));
             view.raw.clear();
             let detail = format!("args: {}\n", args.to_json());
-            ChatData::push_tool(&call_id, tools.call_title(&name, &args), detail);
-            ChatData::set_activity(&format!("running {name}…"));
+            transcript.push_tool(call_id.clone(), tools.call_title(&name, &args), detail);
+            transcript.set_activity(format!("running {name}…"));
             // The session executes its own tools inside pump(); the calls
             // its profile parks on this app land here — execute and answer
             // by function call, no wire in between.
@@ -524,34 +621,34 @@ fn handle_event(
             None
         }
         ChatEventBody::ToolProgress { note, .. } => {
-            ChatData::set_activity(&note);
+            transcript.set_activity(note);
             None
         }
         ChatEventBody::ToolResult { id: call_id, outcome } => {
             let name = view.call_names.remove(&call_id).unwrap_or_else(|| "tool".into());
             let dto = outcome_dto(&outcome);
             let (title, detail) = tools.outcome_summary(&name, &dto);
-            ChatData::finish_tool(&call_id, title, &detail);
-            ChatData::set_activity("thinking about the result…");
+            transcript.finish_tool(call_id, title, detail);
+            transcript.set_activity("thinking about the result…");
             None
         }
         ChatEventBody::Done => {
-            ChatData::set_stream_text(&toolcall::strip_marker(&view.raw));
+            transcript.set_stream_text(toolcall::strip_marker(&view.raw));
             view.raw.clear();
-            ChatData::end_stream();
-            ChatData::set_activity("");
+            transcript.end_stream();
+            transcript.set_activity("");
             Some(TurnEnd::Done)
         }
         ChatEventBody::Cancelled => {
             view.raw.clear();
-            ChatData::end_stream();
-            ChatData::set_activity("");
+            transcript.end_stream();
+            transcript.set_activity("");
             Some(TurnEnd::Done)
         }
         ChatEventBody::Error { message, .. } => {
             view.raw.clear();
-            ChatData::end_stream();
-            ChatData::set_activity("");
+            transcript.end_stream();
+            transcript.set_activity("");
             Some(TurnEnd::Failed(message))
         }
     }
