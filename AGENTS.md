@@ -48,6 +48,44 @@
   taking one.
 - When adding a new example crate, update both the Cargo workspace and
   `makepad.splash`.
+- **Zero locking on the UI thread, one mechanism everywhere.** The UI
+  thread never takes a `Mutex`/`RwLock`/`Condvar` that another thread can
+  hold, and never blocks on a channel. UI → workers/audio is commands over
+  a channel (bounded, non-blocking send; a full queue is reported and
+  retried next frame). Workers/audio → UI is snapshots over atomics, a
+  triple buffer, or a channel read with `try_recv`. Large payloads (PCM,
+  stems, grids, images) travel as `Arc` through the channel; a replaced
+  payload is handed back so the UI thread does the drop, never a realtime
+  thread. A realtime callback (audio) owns its state, never takes a lock
+  the UI can hold, never allocates on the hot path. This is ONE code path
+  for native and wasm — no `cfg` fork where desktop keeps shared mutexes.
+  On wasm both the browser UI thread and the AudioWorklet thread abort on
+  `Atomics.wait`, and a spinning fallback against a busy audio callback is
+  a 100 % CPU feedback loop that kills audio and frame rate together (DJ
+  web, 2026-09-03). `lock_from_ui` is only acceptable on state provably
+  touched by the UI thread alone.
+- **Standard operating flow — who does what.** The main session (Fable)
+  designs, briefs, manages and reviews; it does not write the code itself
+  except one-line fixes. **Codex writes the code**: every implementation lane
+  is a Codex lane with a precise brief (observations, files, rules, the
+  verification commands) launched through `local/tools/delegate` /
+  `local/agent_state/webdemos/tasks/queue.sh` and landed through
+  `local/tools/integrate`. **Grok does the tests and the token-heavy work**:
+  test suites, audits, surveys, log reading, conflict resolution passes,
+  reviews of large diffs (`delegate grok` / `research-grok` / `review-grok`).
+  A Fable subagent is the exception, only for a design-level change the
+  other two cannot carry (a new platform mechanism), and it stops as soon as
+  the API is fixed so Codex can do the conversions. Keep at most six lanes
+  per provider; land everything through the integrator; the user tries the
+  result — no routine captures.
+- **No temporary threads — use the pool.** Never spawn a thread for one
+  job (`std::thread::spawn` is unsupported on wasm anyway; the platform
+  spawner works everywhere). Background work goes to the platform thread
+  pool (`cx.thread_spawner()` / the pool `TaskHandle` API) or to a
+  long-lived worker created once at start-up and fed over a channel. On
+  the web a Web Worker takes hundreds of milliseconds to come up, so a
+  per-job thread is a stall; on desktop it is still churn. One mechanism
+  on both targets.
 
 ## Standalone Launch
 1. `cargo build --release -p <package>` from this checkout.
@@ -191,7 +229,7 @@ repo-root `tweaker.md`; implementation: `widgets/src/tweaker.rs`). Off it
 costs nothing. On, the person (or you) points at the UI: pointer events over
 the window body are swallowed before widget dispatch — **clicking a Button in
 tweak mode outlines it and never fires it** — and the window grows a property
-sidebar next to the (compressed) app UI. F12 toggles it in-app; every edit,
+sidebar next to the (compressed) app UI. Shift+F10 toggles it in-app; every edit,
 theirs or yours, lands in one shared diff log.
 
 | Route | Answer | Notes |
