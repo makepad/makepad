@@ -22,7 +22,7 @@ mod values;
 mod viewer;
 mod wire_route;
 
-use canvas::{CanvasEdit, FlowCanvas, FlowCanvasAction, NodeStatus};
+use canvas::{CanvasEdit, FlowCanvas, FlowCanvasAction, NodeStatus, Selection};
 use faces::{model_choices, BridgeCall, FaceBridgeCall, FaceHost, ModelChoice};
 use makepad_flow::client::{
     ClientError, FlowClient, FlowSubscriber, FlowSubscriberConfig, SessionConfig,
@@ -209,7 +209,7 @@ script_mod! {
                                 {id: @undo label: "Undo" shortcut: "Cmd+Z"}
                                 {id: @redo label: "Redo" shortcut: "Shift+Cmd+Z"}
                                 {sep: true}
-                                {id: @delete_node label: "Delete node" shortcut: "Cmd+Backspace"}
+                                {id: @delete_selection label: "Delete" shortcut: "Cmd+Backspace"}
                                 {id: @select_all label: "Select all" shortcut: "Cmd+A"}
                                 {id: @duplicate label: "Duplicate node" shortcut: "Cmd+D"}
                             ]}
@@ -807,7 +807,7 @@ pub struct App {
     #[rust]
     last_error: Option<String>,
     #[rust]
-    menu_state: (bool, bool, bool, bool, bool),
+    menu_state: (bool, bool, bool, bool, bool, bool),
     #[rust]
     menu_state_initialized: bool,
     /// Splitter positions are widget state; these two slots only remember a
@@ -1880,11 +1880,15 @@ impl App {
     }
 
     fn refresh_inspector(&mut self, cx: &mut Cx) {
-        let selected = self
+        let selection = self
             .ui
             .widget(cx, ids!(canvas))
             .borrow::<FlowCanvas>()
-            .and_then(|canvas| canvas.selected().map(str::to_string));
+            .and_then(|canvas| canvas.selection().cloned());
+        let selected = selection
+            .as_ref()
+            .and_then(Selection::node)
+            .map(str::to_string);
         let outputs = selected
             .as_ref()
             .and_then(|node| self.outputs.get(node).cloned())
@@ -1911,15 +1915,30 @@ impl App {
             .map(|definition| definition.source.clone());
         if let Some(mut inspector) = self.ui.widget(cx, ids!(inspector)).borrow_mut::<Inspector>() {
             inspector.set_models(cx, models);
-            inspector.show_node(
-                cx,
-                graph.as_ref(),
-                &self.catalog,
-                selected.as_deref(),
-                &outputs,
-                &loaded,
-                source.as_deref(),
-            );
+            match selection.as_ref() {
+                Some(Selection::Edge {
+                    from_node,
+                    from_port,
+                    to_node,
+                    to_port,
+                }) => inspector.show_edge(
+                    cx,
+                    graph.as_ref(),
+                    from_node,
+                    from_port,
+                    to_node,
+                    to_port,
+                ),
+                _ => inspector.show_node(
+                    cx,
+                    graph.as_ref(),
+                    &self.catalog,
+                    selected.as_deref(),
+                    &outputs,
+                    &loaded,
+                    source.as_deref(),
+                ),
+            }
         }
         if let Some(client) = self.client() {
             for (_, value) in &outputs {
@@ -2095,11 +2114,23 @@ impl App {
 
     fn update_menu_state(&mut self, cx: &mut Cx) {
         let running = self.run_is_active();
-        let has_selected = self.selected_node.is_some();
+        let has_selected_node = self.selected_node.is_some();
+        let has_selection = self
+            .ui
+            .widget(cx, ids!(canvas))
+            .borrow::<FlowCanvas>()
+            .is_some_and(|canvas| canvas.selection().is_some());
         let can_undo = self.revisions.len() >= 2;
         let can_redo = !self.redo.is_empty();
         let has_instance = self.instance.is_some();
-        let next = (running, has_selected, can_undo, can_redo, has_instance);
+        let next = (
+            running,
+            has_selected_node,
+            has_selection,
+            can_undo,
+            can_redo,
+            has_instance,
+        );
         if self.menu_state_initialized && next == self.menu_state {
             return;
         }
@@ -2108,10 +2139,10 @@ impl App {
         let menu = self.ui.menu_bar(cx, ids!(menu_bar));
         menu.set_enabled(cx, live_id!(cancel), running);
         menu.set_enabled(cx, live_id!(clear_outputs), has_instance);
-        menu.set_enabled(cx, live_id!(delete_node), has_selected);
-        menu.set_enabled(cx, live_id!(duplicate), has_selected);
-        menu.set_enabled(cx, live_id!(flip_card), has_selected);
-        menu.set_enabled(cx, live_id!(run_to_node), has_selected);
+        menu.set_enabled(cx, live_id!(delete_selection), has_selection);
+        menu.set_enabled(cx, live_id!(duplicate), has_selected_node);
+        menu.set_enabled(cx, live_id!(flip_card), has_selected_node);
+        menu.set_enabled(cx, live_id!(run_to_node), has_selected_node);
         menu.set_enabled(cx, live_id!(undo), can_undo);
         menu.set_enabled(cx, live_id!(redo), can_redo);
         menu.set_enabled(cx, live_id!(revert), can_undo);
@@ -3010,14 +3041,27 @@ impl App {
             id if id == live_id!(redo) => self.redo(),
             id if id == live_id!(delete_flow) => self.delete_flow(cx),
             id if id == live_id!(quit) => cx.quit(),
-            id if id == live_id!(delete_node) => {
-                if let Some(node) = self.selected_node.clone() {
-                    self.apply_edit(cx, CanvasEdit::Delete { node });
+            id if id == live_id!(delete_selection) => {
+                let selection = self
+                    .ui
+                    .widget(cx, ids!(canvas))
+                    .borrow::<FlowCanvas>()
+                    .and_then(|canvas| canvas.selection().cloned());
+                let edit = match selection {
+                    Some(Selection::Node(node)) => Some(CanvasEdit::Delete { node }),
+                    Some(Selection::Edge {
+                        to_node, to_port, ..
+                    }) => Some(CanvasEdit::Disconnect { to_node, to_port }),
+                    None => None,
+                };
+                if let Some(edit) = edit {
                     if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
                         canvas.select(cx, None);
                     }
                     self.selected_node = None;
+                    self.apply_edit(cx, edit);
                     self.refresh_inspector(cx);
+                    self.update_menu_state(cx);
                 }
             }
             id if id == live_id!(select_all) => {
@@ -3329,15 +3373,18 @@ impl MatchEvent for App {
         for action in canvas_actions {
             match action {
                 FlowCanvasAction::None => {}
-                FlowCanvasAction::Select(node) => {
-                    self.selected_node = node.clone();
-                    if let Some(node) = node.as_deref() {
+                FlowCanvasAction::Select(selection) => {
+                    self.selected_node = selection
+                        .as_ref()
+                        .and_then(Selection::node)
+                        .map(str::to_string);
+                    if let Some(node) = self.selected_node.clone() {
                         if self.source_mode {
-                            self.jump_to_node(cx, node);
+                            self.jump_to_node(cx, &node);
                         }
                     }
                     self.refresh_inspector(cx);
-                    if node.is_some() {
+                    if self.selected_node.is_some() {
                         self.refresh_models(true);
                     }
                     self.update_menu_state(cx);

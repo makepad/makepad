@@ -53,6 +53,7 @@ const CARD_HEADER_H: f64 = 14.0;
 const PORT_ROW_H: f64 = 24.0;
 const PORT_R: f64 = 11.0;
 const PORT_HIT_R: f64 = 16.0;
+const WIRE_HIT_PX: f64 = 6.0;
 const CARD_PAD: f64 = 14.0;
 const PROGRESS_H: f64 = 4.0;
 const DRAG_THRESHOLD: f64 = 3.0;
@@ -449,11 +450,31 @@ pub enum CanvasEdit {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Selection {
+    Node(String),
+    Edge {
+        from_node: String,
+        from_port: String,
+        to_node: String,
+        to_port: String,
+    },
+}
+
+impl Selection {
+    pub fn node(&self) -> Option<&str> {
+        match self {
+            Self::Node(node) => Some(node),
+            Self::Edge { .. } => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub enum FlowCanvasAction {
     #[default]
     None,
-    Select(Option<String>),
+    Select(Option<Selection>),
     Edit(CanvasEdit),
     /// A wire was dropped on empty canvas: open the palette filtered to
     /// types with an input of this type; `at` is the world position.
@@ -608,12 +629,29 @@ struct PortHit {
 }
 
 /// One edge resolved to indices at `set_graph` time.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct EdgeIndex {
     from: usize,
     from_port: usize,
     to: usize,
     to_port: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CanvasHit {
+    Card(usize),
+    Wire(usize),
+    Empty,
+}
+
+fn prioritize_canvas_hit(card: Option<usize>, wire: Option<usize>) -> CanvasHit {
+    if let Some(card) = card {
+        CanvasHit::Card(card)
+    } else if let Some(wire) = wire {
+        CanvasHit::Wire(wire)
+    } else {
+        CanvasHit::Empty
+    }
 }
 
 struct CachedWire {
@@ -812,7 +850,9 @@ pub struct FlowCanvas {
     #[rust]
     hover: Option<usize>,
     #[rust]
-    selected: Option<String>,
+    hover_wire: Option<usize>,
+    #[rust]
+    selected: Option<Selection>,
     #[rust]
     highlight: Option<String>,
     #[rust]
@@ -1064,8 +1104,9 @@ impl FlowCanvas {
             self.next_frame = cx.new_next_frame();
         }
         self.hover = None;
+        self.hover_wire = None;
         if let Some(selected) = self.selected.clone() {
-            if !self.has_node(&selected) {
+            if !self.has_selection(&selected) {
                 self.selected = None;
                 cx.widget_action(self.uid, FlowCanvasAction::Select(None));
             }
@@ -1088,14 +1129,18 @@ impl FlowCanvas {
     }
 
     pub fn selected(&self) -> Option<&str> {
-        self.selected.as_deref()
+        self.selected.as_ref().and_then(Selection::node)
+    }
+
+    pub fn selection(&self) -> Option<&Selection> {
+        self.selected.as_ref()
     }
 
     pub fn select(&mut self, cx: &mut Cx, node: Option<String>) {
         if let Some(node) = node.as_deref() {
             self.raise_node(node);
         }
-        self.selected = node;
+        self.selected = node.map(Selection::Node);
         self.redraw(cx);
     }
 
@@ -1109,10 +1154,11 @@ impl FlowCanvas {
                 .and_then(|graph| graph.nodes.get(index))
                 .map(|node| node.id.clone())
         });
-        if node.is_some() && self.selected != node {
+        let selection = node.clone().map(Selection::Node);
+        if node.is_some() && self.selected != selection {
             self.raise_node(node.as_deref().unwrap());
-            self.selected = node.clone();
-            cx.widget_action(self.uid, FlowCanvasAction::Select(node));
+            self.selected = selection.clone();
+            cx.widget_action(self.uid, FlowCanvasAction::Select(selection));
             self.redraw(cx);
         }
     }
@@ -1318,6 +1364,25 @@ impl FlowCanvas {
             .is_some_and(|graph| graph.nodes.iter().any(|node| node.id == id))
     }
 
+    fn has_selection(&self, selection: &Selection) -> bool {
+        match selection {
+            Selection::Node(node) => self.has_node(node),
+            Selection::Edge {
+                from_node,
+                from_port,
+                to_node,
+                to_port,
+            } => self.graph.as_ref().is_some_and(|graph| {
+                graph.edges.iter().any(|edge| {
+                    edge.from_node == *from_node
+                        && edge.from_port == *from_port
+                        && edge.to_node == *to_node
+                        && edge.to_port == *to_port
+                })
+            }),
+        }
+    }
+
     // -- geometry (local units) -----------------------------------------------
 
     /// The node's world position, with a live drag applied.
@@ -1507,6 +1572,43 @@ impl FlowCanvas {
         })
     }
 
+    fn wire_index_at(&self, abs: DVec2) -> Option<usize> {
+        let local = self.camera.screen_to_local(abs);
+        let point = Self::route_point(local);
+        let threshold = WIRE_HIT_PX / self.camera.scale.max(0.01);
+        self.wire_cache
+            .iter()
+            .enumerate()
+            .filter_map(|(index, cached)| {
+                let distance = cached.as_ref()?.route.distance_to_point(point);
+                (distance <= threshold).then_some((index, distance))
+            })
+            .min_by(|left, right| {
+                left.1
+                    .partial_cmp(&right.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| left.0.cmp(&right.0))
+            })
+            .map(|(index, _)| index)
+    }
+
+    fn edge_selection(&self, graph: &Graph, index: usize) -> Option<Selection> {
+        let edge = *self.edges.get(index)?;
+        Some(Selection::Edge {
+            from_node: graph.nodes.get(edge.from)?.id.clone(),
+            from_port: graph.nodes.get(edge.from)?.outputs.get(edge.from_port)?.name.clone(),
+            to_node: graph.nodes.get(edge.to)?.id.clone(),
+            to_port: graph.nodes.get(edge.to)?.inputs.get(edge.to_port)?.port.clone(),
+        })
+    }
+
+    fn selected_edge_index(&self, graph: &Graph) -> Option<usize> {
+        let selection = self.selected.as_ref()?;
+        self.edges.iter().enumerate().find_map(|(index, _)| {
+            (self.edge_selection(graph, index).as_ref() == Some(selection)).then_some(index)
+        })
+    }
+
     fn port_color(&self, ty: PortType) -> Vec4f {
         match ty {
             PortType::Text => self.color_port_text,
@@ -1643,7 +1745,7 @@ impl FlowCanvas {
         source_side: PortSide,
         to: Point,
         target_side: PortSide,
-        card_rects: &[Rect],
+        obstacles: &[Obstacle],
         offset: f64,
     ) -> u64 {
         let mut hash = DefaultHasher::new();
@@ -1656,8 +1758,13 @@ impl FlowCanvas {
         for value in [from.x, from.y, to.x, to.y, offset] {
             value.to_bits().hash(&mut hash);
         }
-        for rect in card_rects {
-            for value in [rect.pos.x, rect.pos.y, rect.size.x, rect.size.y] {
+        for obstacle in obstacles {
+            for value in [
+                obstacle.min.x,
+                obstacle.min.y,
+                obstacle.max.x,
+                obstacle.max.y,
+            ] {
                 value.to_bits().hash(&mut hash);
             }
         }
@@ -1672,6 +1779,13 @@ impl FlowCanvas {
         let card_rects: Vec<Rect> = (0..graph.nodes.len())
             .map(|index| self.card_rect(graph, index))
             .collect();
+        let all_obstacles: Vec<Obstacle> = card_rects
+            .iter()
+            .map(|rect| {
+                Obstacle::from_xywh(rect.pos.x, rect.pos.y, rect.size.x, rect.size.y)
+                    .inflate(CARD_CLEARANCE)
+            })
+            .collect();
         for index in 0..self.edges.len() {
             let edge = self.edges[index];
             let from = Self::route_point(self.port_local(graph, edge.from, edge.from_port, true));
@@ -1679,34 +1793,38 @@ impl FlowCanvas {
             let source_side = self.port_side(graph, edge.from, true);
             let target_side = self.port_side(graph, edge.to, false);
             let offset = self.parallel_offsets.get(index).copied().unwrap_or(0.0);
+            let style = RouteStyle::default();
+            let obstacles = wire_route::obstacles_in_corridor(
+                from,
+                to,
+                &all_obstacles,
+                style.port_stub + style.corner_radius * 2.0 + offset.abs(),
+            );
             let key = Self::route_cache_key(
                 edge,
                 from,
                 source_side,
                 to,
                 target_side,
-                &card_rects,
+                &obstacles,
                 offset,
             );
             if self.wire_cache.get(index).and_then(Option::as_ref).is_some_and(|cached| cached.key == key)
             {
                 continue;
             }
-            let obstacles: Vec<Obstacle> = card_rects
-                .iter()
-                .map(|rect| {
-                    Obstacle::from_xywh(rect.pos.x, rect.pos.y, rect.size.x, rect.size.y)
-                        .inflate(CARD_CLEARANCE)
-                })
-                .collect();
-            let route = wire_route::route_wire(
+            let previous = self.wire_cache[index]
+                .as_ref()
+                .map(|cached| &cached.route);
+            let route = wire_route::route_wire_sticky(
                 from,
                 source_side,
                 to,
                 target_side,
                 &obstacles,
-                RouteStyle::default(),
+                style,
                 offset,
+                previous,
             );
             self.wire_cache[index] = Some(CachedWire { key, route });
         }
@@ -2013,6 +2131,7 @@ impl FlowCanvas {
         let dragging_wire = matches!(self.drag, Some(Drag::Wire { .. }));
         let time = self.time;
         self.ensure_wire_routes(graph);
+        let selected_wire = self.selected_edge_index(graph);
         self.draw_vec.begin();
         // Wires, under the cards.
         for (index, edge) in self.edges.iter().copied().enumerate() {
@@ -2021,6 +2140,8 @@ impl FlowCanvas {
             let node = &graph.nodes[edge.from].id;
             let streaming = self.streaming.contains(node);
             let carrying = self.carrying.contains(node);
+            let selected = selected_wire == Some(index);
+            let hovered = self.hover_wire == Some(index);
             let Some(route) = self.wire_cache[index].as_ref().map(|cached| &cached.route) else {
                 continue;
             };
@@ -2029,10 +2150,17 @@ impl FlowCanvas {
                 Self::draw_route(&mut self.draw_vec, route);
                 self.draw_vec.stroke(10.0);
             }
+            if selected {
+                Self::set_color(&mut self.draw_vec, self.accent_color, 0.22);
+                Self::draw_route(&mut self.draw_vec, route);
+                self.draw_vec.stroke(13.0);
+            }
             Self::set_color(
                 &mut self.draw_vec,
                 color,
-                if dragging_wire {
+                if selected || hovered {
+                    1.0
+                } else if dragging_wire {
                     0.35
                 } else if carrying {
                     1.0
@@ -2041,7 +2169,13 @@ impl FlowCanvas {
                 },
             );
             Self::draw_route(&mut self.draw_vec, route);
-            self.draw_vec.stroke(3.0);
+            self.draw_vec.stroke(if selected {
+                5.0
+            } else if hovered {
+                3.75
+            } else {
+                3.0
+            });
             if carrying && !dragging_wire {
                 Self::set_color(&mut self.draw_vec, color, 0.75);
                 Self::draw_route(&mut self.draw_vec, route);
@@ -2091,7 +2225,9 @@ impl FlowCanvas {
                 Self::set_color(
                     &mut self.draw_vec,
                     color,
-                    if dragging_wire {
+                    if selected || hovered {
+                        1.0
+                    } else if dragging_wire {
                         0.35
                     } else {
                         0.8 + pulse_brightness * 0.2
@@ -2127,7 +2263,7 @@ impl FlowCanvas {
         self.draw_card.shadow_radius = (12.0 / self.camera.scale.max(0.01)) as f32;
         self.draw_card.shadow_offset = vec2(0.0, 0.0);
         let hover = self.hover;
-        let selected = self.selected.as_deref();
+        let selected = self.selected.as_ref().and_then(Selection::node);
         for index in indices.iter().copied() {
             let node = &graph.nodes[index];
             let rect = self.card_rect(graph, index);
@@ -2384,6 +2520,9 @@ impl FlowCanvas {
             Some(Drag::Wire { target, .. }) => *target,
             _ => None,
         };
+        let selected_edge = self
+            .selected_edge_index(graph)
+            .and_then(|index| self.edges.get(index).copied());
         let time = self.time;
         self.draw_over.begin();
         for index in indices.iter().copied() {
@@ -2443,6 +2582,12 @@ impl FlowCanvas {
                 let ok = !compatible_active || self.compatible.contains(&(index, port));
                 let hot = wire_target == Some((index, port));
                 let radius = if hot { PORT_R + 3.0 } else { PORT_R } as f32;
+                if selected_edge.is_some_and(|edge| edge.to == index && edge.to_port == port) {
+                    Self::set_color(&mut self.draw_over, self.accent_color, 1.0);
+                    self.draw_over
+                        .circle(p.x as f32, p.y as f32, (PORT_R + 4.0) as f32);
+                    self.draw_over.stroke(2.0);
+                }
                 Self::set_color(&mut self.draw_over, self.card_color, 1.0);
                 self.draw_over.circle(p.x as f32, p.y as f32, radius);
                 self.draw_over.fill();
@@ -2453,6 +2598,12 @@ impl FlowCanvas {
             }
             for (port, output) in node.outputs.iter().enumerate() {
                 let p = self.port_local(graph, index, port, true);
+                if selected_edge.is_some_and(|edge| edge.from == index && edge.from_port == port) {
+                    Self::set_color(&mut self.draw_over, self.accent_color, 1.0);
+                    self.draw_over
+                        .circle(p.x as f32, p.y as f32, (PORT_R + 4.0) as f32);
+                    self.draw_over.stroke(2.0);
+                }
                 Self::set_color(&mut self.draw_over, self.card_color, 1.0);
                 self.draw_over.circle(p.x as f32, p.y as f32, PORT_R as f32);
                 self.draw_over.fill();
@@ -2662,6 +2813,13 @@ mod tests {
         assert_eq!(order, vec!["a", "c", "b"]);
         raise_to_front(&mut order, "b");
         assert_eq!(order, vec!["a", "c", "b"]);
+    }
+
+    #[test]
+    fn card_hit_wins_over_wire_hit() {
+        assert_eq!(prioritize_canvas_hit(Some(3), Some(7)), CanvasHit::Card(3));
+        assert_eq!(prioritize_canvas_hit(None, Some(7)), CanvasHit::Wire(7));
+        assert_eq!(prioritize_canvas_hit(None, None), CanvasHit::Empty);
     }
 
     #[test]
@@ -3034,13 +3192,24 @@ impl Widget for FlowCanvas {
                 self.area.redraw(cx);
             }
             if self.drag.is_none() {
-                let hover = if self.camera.view.contains(e.abs) && !over_chrome {
-                    self.node_index_at(e.abs)
+                let hit = if self.camera.view.contains(e.abs) && !over_chrome {
+                    prioritize_canvas_hit(self.node_index_at(e.abs), self.wire_index_at(e.abs))
                 } else {
-                    None
+                    CanvasHit::Empty
                 };
-                if hover != self.hover {
+                let (hover, hover_wire) = match hit {
+                    CanvasHit::Card(index) => (Some(index), None),
+                    CanvasHit::Wire(index) => (None, Some(index)),
+                    CanvasHit::Empty => (None, None),
+                };
+                cx.set_cursor(if hover_wire.is_some() {
+                    MouseCursor::Hand
+                } else {
+                    MouseCursor::Default
+                });
+                if hover != self.hover || hover_wire != self.hover_wire {
                     self.hover = hover;
+                    self.hover_wire = hover_wire;
                     self.area.redraw(cx);
                 }
             }
@@ -3129,9 +3298,10 @@ impl Widget for FlowCanvas {
                     let id = graph.nodes[index].id.clone();
                     let size = self.node_size(graph, index);
                     self.raise_node(&id);
-                    if self.selected.as_deref() != Some(id.as_str()) {
-                        self.selected = Some(id.clone());
-                        cx.widget_action(self.uid, FlowCanvasAction::Select(Some(id)));
+                    let selection = Selection::Node(id.clone());
+                    if self.selected.as_ref() != Some(&selection) {
+                        self.selected = Some(selection.clone());
+                        cx.widget_action(self.uid, FlowCanvasAction::Select(Some(selection)));
                     }
                     self.drag = Some(Drag::Resize {
                         index,
@@ -3145,9 +3315,10 @@ impl Widget for FlowCanvas {
                     let id = node.id.clone();
                     let origin = node.at.unwrap_or(graph_edit::FIRST_AT);
                     self.raise_node(&id);
-                    if self.selected.as_deref() != Some(id.as_str()) {
-                        self.selected = Some(id.clone());
-                        cx.widget_action(self.uid, FlowCanvasAction::Select(Some(id)));
+                    let selection = Selection::Node(id.clone());
+                    if self.selected.as_ref() != Some(&selection) {
+                        self.selected = Some(selection.clone());
+                        cx.widget_action(self.uid, FlowCanvasAction::Select(Some(selection)));
                     }
                     self.drag = Some(Drag::Node {
                         index,
@@ -3155,6 +3326,20 @@ impl Widget for FlowCanvas {
                         origin,
                         moved: false,
                     });
+                } else if let Some(index) = self.wire_index_at(fd.abs) {
+                    if let Some(selection) = self
+                        .graph
+                        .as_ref()
+                        .and_then(|graph| self.edge_selection(graph, index))
+                    {
+                        if self.selected.as_ref() != Some(&selection) {
+                            self.selected = Some(selection.clone());
+                            cx.widget_action(self.uid, FlowCanvasAction::Select(Some(selection)));
+                        }
+                        self.hover = None;
+                        self.hover_wire = Some(index);
+                        cx.set_cursor(MouseCursor::Hand);
+                    }
                 } else {
                     self.drag = Some(Drag::Pan {
                         start: fd.abs,
@@ -3254,7 +3439,11 @@ impl Widget for FlowCanvas {
                 self.area.redraw(cx);
             }
             Hit::FingerUp(fu) => {
-                cx.set_cursor(MouseCursor::Default);
+                cx.set_cursor(if self.hover_wire.is_some() {
+                    MouseCursor::Hand
+                } else {
+                    MouseCursor::Default
+                });
                 match self.drag.take() {
                     Some(Drag::Pan { start, .. }) => {
                         if (fu.abs - start).length() <= DRAG_THRESHOLD && self.selected.is_some() {
@@ -3303,11 +3492,14 @@ impl Widget for FlowCanvas {
             }
             Hit::KeyDown(ke) => match ke.key_code {
                 KeyCode::Delete | KeyCode::Backspace => {
-                    if let Some(node) = self.selected.take() {
-                        cx.widget_action(
-                            self.uid,
-                            FlowCanvasAction::Edit(CanvasEdit::Delete { node }),
-                        );
+                    if let Some(selection) = self.selected.take() {
+                        let edit = match selection {
+                            Selection::Node(node) => CanvasEdit::Delete { node },
+                            Selection::Edge {
+                                to_node, to_port, ..
+                            } => CanvasEdit::Disconnect { to_node, to_port },
+                        };
+                        cx.widget_action(self.uid, FlowCanvasAction::Edit(edit));
                         cx.widget_action(self.uid, FlowCanvasAction::Select(None));
                         self.area.redraw(cx);
                     }
