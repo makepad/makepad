@@ -111,7 +111,7 @@ fn write_node(
             }
             out.push_str("]\n");
             out.push_str("    run: ");
-            out.push_str(node.fn_src.as_deref().unwrap_or("|in| { in }").trim());
+            out.push_str(node.fn_src.as_deref().unwrap_or("|i| { i }").trim());
             out.push('\n');
         }
         "Http" => {

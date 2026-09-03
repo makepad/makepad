@@ -1,4 +1,7 @@
+pub mod engine;
 pub mod graph;
+pub mod instance;
+pub mod values;
 pub mod wire;
 
 #[cfg(all(feature = "client", not(target_arch = "wasm32")))]
@@ -9,6 +12,9 @@ pub mod embed;
 #[cfg(all(feature = "host", not(target_arch = "wasm32")))]
 pub mod host;
 
+pub use engine::*;
+pub use instance::*;
+pub use values::*;
 pub use wire::*;
 
 pub const PRELUDE: &str = include_str!("prelude.splash");

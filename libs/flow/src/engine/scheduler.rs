@@ -1,0 +1,621 @@
+use super::executors::ask::AskExecutor;
+use super::executors::chat::ChatExecutor;
+use super::executors::func::FuncExecutor;
+use super::executors::gen::{unsupported_params, GenExecutor};
+use super::executors::http::HttpExecutor;
+use super::executors::input::InputExecutor;
+use super::executors::output::OutputExecutor;
+use super::executors::{Executor, Poll};
+use super::{HttpLogEntry, NetPolicy, RunEvent, RunInput, Seams};
+use crate::graph::FlowVm;
+use crate::{Literal, Node, NodeInputValue, NodeState, RunState, Value};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+enum ActiveExecutor {
+    Input(InputExecutor),
+    Output(OutputExecutor),
+    Chat(ChatExecutor),
+    Gen(GenExecutor),
+    Func(FuncExecutor),
+    Http(HttpExecutor),
+    Ask(AskExecutor),
+}
+
+impl ActiveExecutor {
+    fn poll(&mut self) -> Poll {
+        match self {
+            Self::Input(value) => value.poll(),
+            Self::Output(value) => value.poll(),
+            Self::Chat(value) => value.poll(),
+            Self::Gen(value) => value.poll(),
+            Self::Func(value) => value.poll(),
+            Self::Http(value) => value.poll(),
+            Self::Ask(value) => value.poll(),
+        }
+    }
+
+    fn cancel(&mut self) {
+        match self {
+            Self::Input(value) => value.cancel(),
+            Self::Output(value) => value.cancel(),
+            Self::Chat(value) => value.cancel(),
+            Self::Gen(value) => value.cancel(),
+            Self::Func(value) => value.cancel(),
+            Self::Http(value) => value.cancel(),
+            Self::Ask(value) => value.cancel(),
+        }
+    }
+
+    fn answer(&mut self, node: &str, value: Value) -> Result<bool, String> {
+        match self {
+            Self::Ask(ask) => ask.answer(node, value),
+            _ => Ok(false),
+        }
+    }
+}
+
+pub(crate) fn run(
+    input: RunInput,
+    vm: &mut FlowVm,
+    seams: Seams,
+    policy: NetPolicy,
+    events: Sender<RunEvent>,
+    answers: Receiver<(String, Value)>,
+    cancel: Arc<AtomicBool>,
+) {
+    let started = Instant::now();
+    let graph = &input.graph;
+    let http_log = Arc::new(Mutex::new(Vec::<HttpLogEntry>::new()));
+    if let Some(invalid) = input.outputs.as_ref().and_then(|outputs| {
+        outputs.iter().find(|output| {
+            !graph
+                .nodes
+                .iter()
+                .any(|node| node.id == **output && node.kind == "output")
+        })
+    }) {
+        finish(
+            &events,
+            RunState::Failed,
+            started,
+            graph,
+            &HashMap::new(),
+            input.outputs.as_deref(),
+            &http_log,
+            vec![format!("requested Output node `{invalid}` is not declared")],
+        );
+        return;
+    }
+    let selected = selected_nodes(graph, input.outputs.as_deref());
+    let mut states: HashMap<String, NodeState> = graph
+        .nodes
+        .iter()
+        .map(|node| {
+            (
+                node.id.clone(),
+                if selected.contains(&node.id) {
+                    NodeState::Pending
+                } else {
+                    NodeState::Skipped
+                },
+            )
+        })
+        .collect();
+    let mut values: HashMap<(String, String), Value> = HashMap::new();
+    let mut active: HashMap<String, ActiveExecutor> = HashMap::new();
+    let warnings: Vec<_> = graph
+        .nodes
+        .iter()
+        .filter(|node| selected.contains(&node.id) && node.kind == "gen")
+        .flat_map(unsupported_params)
+        .collect();
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            for (node, executor) in &mut active {
+                executor.cancel();
+                states.insert(node.clone(), NodeState::Cancelled);
+            }
+            finish(
+                &events,
+                RunState::Cancelled,
+                started,
+                graph,
+                &values,
+                input.outputs.as_deref(),
+                &http_log,
+                warnings,
+            );
+            return;
+        }
+
+        propagate_upstream(graph, &selected, &mut states, &values, &events);
+
+        let ready: Vec<String> = graph
+            .nodes
+            .iter()
+            .filter(|node| {
+                selected.contains(&node.id)
+                    && states.get(&node.id) == Some(&NodeState::Pending)
+                    && is_ready(node, &values)
+            })
+            .map(|node| node.id.clone())
+            .collect();
+        for node_id in ready {
+            let node = graph.nodes.iter().find(|node| node.id == node_id).unwrap();
+            states.insert(node_id.clone(), NodeState::Ready);
+            let resolved = match resolve_inputs(node, &input.inputs, &values) {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    fail_node(
+                        &node_id,
+                        error,
+                        graph,
+                        &mut states,
+                        &mut values,
+                        &events,
+                    );
+                    continue;
+                }
+            };
+            match start_executor(node, &resolved, vm, &seams, &input.origin, &policy, &http_log) {
+                Ok((executor, waiting)) => {
+                    if waiting {
+                        states.insert(node_id.clone(), NodeState::Waiting);
+                        let output = node.outputs.first().unwrap();
+                        let _ = events.send(RunEvent::NodeWaiting {
+                            node: node_id.clone(),
+                            question: string_param(node, "question"),
+                            ty: output.ty,
+                            options: literal_array_param(node, "options"),
+                        });
+                    } else {
+                        states.insert(node_id.clone(), NodeState::Running);
+                        if !matches!(node.kind.as_str(), "input" | "output" | "fn") {
+                            let _ = events.send(RunEvent::NodeStarted {
+                                node: node_id.clone(),
+                            });
+                        }
+                    }
+                    active.insert(node_id, executor);
+                }
+                Err(error) => fail_node(
+                    &node_id,
+                    error,
+                    graph,
+                    &mut states,
+                    &mut values,
+                    &events,
+                ),
+            }
+        }
+
+        let mut rejected_answers = Vec::new();
+        for (node, value) in answers.try_iter() {
+            let answer = active
+                .get_mut(&node)
+                .map(|executor| executor.answer(&node, value));
+            match answer {
+                Some(Ok(true)) => {
+                    let _ = events.send(RunEvent::NodeAnswered {
+                        node,
+                        by: "caller".to_string(),
+                    });
+                }
+                Some(Err(error)) => {
+                    fail_node(
+                        &node,
+                        error,
+                        graph,
+                        &mut states,
+                        &mut values,
+                        &events,
+                    );
+                    rejected_answers.push(node);
+                }
+                _ => {}
+            }
+        }
+        for node in rejected_answers {
+            active.remove(&node);
+        }
+
+        let active_ids: Vec<_> = active.keys().cloned().collect();
+        let mut completed = Vec::new();
+        for node_id in active_ids {
+            let poll = active.get_mut(&node_id).unwrap().poll();
+            match poll {
+                Poll::Pending => {}
+                Poll::Progress { permille, stage } => {
+                    let _ = events.send(RunEvent::NodeProgress {
+                        node: node_id,
+                        permille,
+                        stage,
+                    });
+                }
+                Poll::Delta { port, text } => {
+                    let _ = events.send(RunEvent::NodeDelta {
+                        node: node_id,
+                        port,
+                        text,
+                    });
+                }
+                Poll::Done(outputs) => {
+                    let node = graph.nodes.iter().find(|node| node.id == node_id).unwrap();
+                    for (port, value) in &outputs {
+                        values.insert((node_id.clone(), port.clone()), value.clone());
+                    }
+                    states.insert(node_id.clone(), NodeState::Done);
+                    if node.kind != "output" {
+                        let _ = events.send(RunEvent::NodeDone {
+                            node: node_id.clone(),
+                            outputs,
+                        });
+                    }
+                    completed.push(node_id);
+                }
+                Poll::Failed(error) => {
+                    fail_node(
+                        &node_id,
+                        error,
+                        graph,
+                        &mut states,
+                        &mut values,
+                        &events,
+                    );
+                    completed.push(node_id);
+                }
+            }
+        }
+        for node in completed {
+            active.remove(&node);
+        }
+
+        propagate_upstream(graph, &selected, &mut states, &values, &events);
+        let finished = selected.iter().all(|node| {
+            matches!(
+                states.get(node),
+                Some(
+                    NodeState::Done
+                        | NodeState::Failed
+                        | NodeState::Skipped
+                        | NodeState::Cancelled
+                )
+            )
+        });
+        if finished && active.is_empty() {
+            let state = if states.values().any(|state| *state == NodeState::Failed) {
+                RunState::Failed
+            } else {
+                RunState::Done
+            };
+            finish(
+                &events,
+                state,
+                started,
+                graph,
+                &values,
+                input.outputs.as_deref(),
+                &http_log,
+                warnings,
+            );
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn start_executor(
+    node: &Node,
+    inputs: &[(String, Value)],
+    vm: &mut FlowVm,
+    seams: &Seams,
+    origin: &(String, u64),
+    policy: &NetPolicy,
+    http_log: &Arc<Mutex<Vec<HttpLogEntry>>>,
+) -> Result<(ActiveExecutor, bool), String> {
+    match node.kind.as_str() {
+        "input" => {
+            let mut executor = InputExecutor::default();
+            executor.start(node, inputs)?;
+            Ok((ActiveExecutor::Input(executor), false))
+        }
+        "output" => {
+            let mut executor = OutputExecutor::default();
+            executor.start(node, inputs)?;
+            Ok((ActiveExecutor::Output(executor), false))
+        }
+        "chat" => {
+            let mut executor = ChatExecutor::new(seams.chat.clone());
+            executor.start(node, inputs)?;
+            Ok((ActiveExecutor::Chat(executor), false))
+        }
+        "gen" => {
+            let mut executor = GenExecutor::new(seams.gen.clone(), origin.clone());
+            executor.start(node, inputs)?;
+            Ok((ActiveExecutor::Gen(executor), false))
+        }
+        "fn" => {
+            let mut executor = FuncExecutor::default();
+            executor.start_with_vm(vm, node, inputs);
+            Ok((ActiveExecutor::Func(executor), false))
+        }
+        "http" => {
+            let mut executor = HttpExecutor::new(
+                seams.http.clone(),
+                policy.clone(),
+                http_log.clone(),
+            );
+            executor.start(node, inputs)?;
+            Ok((ActiveExecutor::Http(executor), false))
+        }
+        "ask" => {
+            let mut executor = AskExecutor::default();
+            executor.start(node, inputs)?;
+            Ok((ActiveExecutor::Ask(executor), true))
+        }
+        kind => Err(format!("node `{}` has unknown executor `{kind}`", node.id)),
+    }
+}
+
+fn is_ready(node: &Node, values: &HashMap<(String, String), Value>) -> bool {
+    node.inputs.iter().all(|input| match &input.value {
+        NodeInputValue::Literal(_) => true,
+        NodeInputValue::Edge(edge) => values.contains_key(&(
+            edge.from_node.clone(),
+            edge.from_port.clone(),
+        )),
+    })
+}
+
+fn resolve_inputs(
+    node: &Node,
+    instance_inputs: &std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, Value>,
+    >,
+    values: &HashMap<(String, String), Value>,
+) -> Result<Vec<(String, Value)>, String> {
+    let mut resolved = Vec::new();
+    for input in &node.inputs {
+        let override_value = instance_inputs
+            .get(&node.id)
+            .and_then(|ports| ports.get(&input.port));
+        let value = if let Some(value) = override_value {
+            Some(value.clone())
+        } else {
+            match &input.value {
+                NodeInputValue::Literal(Literal::Null) => None,
+                NodeInputValue::Literal(literal) => {
+                    Some(Value::from_literal(input.ty, literal).map_err(|error| {
+                        format!("node `{}` input `{}`: {error}", node.id, input.port)
+                    })?)
+                }
+                NodeInputValue::Edge(edge) => Some(
+                    values
+                        .get(&(edge.from_node.clone(), edge.from_port.clone()))
+                        .cloned()
+                        .ok_or_else(|| format!("upstream value for `{}` is missing", input.port))?,
+                ),
+            }
+        };
+        if let Some(value) = value {
+            if value.ty != input.ty {
+                return Err(format!(
+                    "node `{}` input `{}` expected {}, got {}",
+                    node.id,
+                    input.port,
+                    input.ty.as_str(),
+                    value.ty.as_str()
+                ));
+            }
+            resolved.push((input.port.clone(), value));
+        }
+    }
+    if node.kind == "input" {
+        if let Some(ports) = instance_inputs.get(&node.id) {
+            for (port, value) in ports {
+                let expected = node
+                    .outputs
+                    .iter()
+                    .find_map(|output| (output.name == *port).then_some(output.ty))
+                    .ok_or_else(|| {
+                        format!("Input node `{}` has no output port `{port}`", node.id)
+                    })?;
+                if value.ty != expected {
+                    return Err(format!(
+                        "Input node `{}` expected {}, got {}",
+                        node.id,
+                        expected.as_str(),
+                        value.ty.as_str()
+                    ));
+                }
+                resolved.push((port.clone(), value.clone()));
+            }
+        }
+    }
+    Ok(resolved)
+}
+
+fn fail_node(
+    node_id: &str,
+    error: String,
+    graph: &crate::Graph,
+    states: &mut HashMap<String, NodeState>,
+    values: &mut HashMap<(String, String), Value>,
+    events: &Sender<RunEvent>,
+) {
+    let node = graph.nodes.iter().find(|node| node.id == node_id).unwrap();
+    if node.on_fail == "skip" {
+        for (port, value) in fallback_outputs(node) {
+            values.insert((node_id.to_string(), port), value);
+        }
+        states.insert(node_id.to_string(), NodeState::Skipped);
+        let _ = events.send(RunEvent::NodeSkipped {
+            node: node_id.to_string(),
+            reason: error,
+        });
+    } else {
+        states.insert(node_id.to_string(), NodeState::Failed);
+        let _ = events.send(RunEvent::NodeFailed {
+            node: node_id.to_string(),
+            error,
+        });
+    }
+}
+
+fn fallback_outputs(node: &Node) -> Vec<(String, Value)> {
+    let mut out = Vec::new();
+    for port in &node.outputs {
+        let candidate = if matches!(node.kind.as_str(), "input" | "ask") {
+            param(node, "default")
+        } else {
+            param(node, &port.name).or_else(|| {
+                node.inputs.iter().find_map(|input| {
+                    (input.port == port.name).then_some(match &input.value {
+                        NodeInputValue::Literal(value) => Some(value),
+                        NodeInputValue::Edge(_) => None,
+                    })?
+                })
+            })
+        };
+        if let Some(literal) = candidate {
+            if !matches!(literal, Literal::Null) {
+                if let Ok(value) = Value::from_literal(port.ty, literal) {
+                    out.push((port.name.clone(), value));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn propagate_upstream(
+    graph: &crate::Graph,
+    selected: &HashSet<String>,
+    states: &mut HashMap<String, NodeState>,
+    values: &HashMap<(String, String), Value>,
+    events: &Sender<RunEvent>,
+) {
+    loop {
+        let blocked: Vec<_> = graph
+            .nodes
+            .iter()
+            .filter(|node| {
+                selected.contains(&node.id)
+                    && states.get(&node.id) == Some(&NodeState::Pending)
+                    && node.inputs.iter().any(|input| match &input.value {
+                        NodeInputValue::Literal(_) => false,
+                        NodeInputValue::Edge(edge) => {
+                            !values.contains_key(&(edge.from_node.clone(), edge.from_port.clone()))
+                                && matches!(
+                                    states.get(&edge.from_node),
+                                    Some(
+                                        NodeState::Failed
+                                            | NodeState::Skipped
+                                            | NodeState::Cancelled
+                                    )
+                                )
+                        }
+                    })
+            })
+            .map(|node| node.id.clone())
+            .collect();
+        if blocked.is_empty() {
+            break;
+        }
+        for node in blocked {
+            states.insert(node.clone(), NodeState::Skipped);
+            let _ = events.send(RunEvent::NodeSkipped {
+                node,
+                reason: "upstream".to_string(),
+            });
+        }
+    }
+}
+
+fn selected_nodes(graph: &crate::Graph, outputs: Option<&[String]>) -> HashSet<String> {
+    let requested: Vec<String> = outputs
+        .map(|outputs| outputs.to_vec())
+        .unwrap_or_else(|| {
+            graph
+                .nodes
+                .iter()
+                .filter(|node| node.kind == "output")
+                .map(|node| node.id.clone())
+                .collect()
+        });
+    let mut selected: HashSet<String> = requested.into_iter().collect();
+    loop {
+        let before = selected.len();
+        for edge in &graph.edges {
+            if selected.contains(&edge.to_node) {
+                selected.insert(edge.from_node.clone());
+            }
+        }
+        if selected.len() == before {
+            return selected;
+        }
+    }
+}
+
+fn finish(
+    events: &Sender<RunEvent>,
+    state: RunState,
+    started: Instant,
+    graph: &crate::Graph,
+    values: &HashMap<(String, String), Value>,
+    requested: Option<&[String]>,
+    http_log: &Arc<Mutex<Vec<HttpLogEntry>>>,
+    warnings: Vec<String>,
+) {
+    let output_ids: Vec<String> = requested
+        .map(|values| values.to_vec())
+        .unwrap_or_else(|| {
+            graph
+                .nodes
+                .iter()
+                .filter(|node| node.kind == "output")
+                .map(|node| node.id.clone())
+                .collect()
+        });
+    let outputs = output_ids
+        .into_iter()
+        .filter_map(|node| {
+            values
+                .get(&(node.clone(), "value".to_string()))
+                .cloned()
+                .map(|value| (node, value))
+        })
+        .collect();
+    let _ = events.send(RunEvent::RunFinished {
+        state,
+        secs: started.elapsed().as_secs_f64(),
+        outputs,
+        http_log: http_log.lock().unwrap().clone(),
+        warnings,
+    });
+}
+
+fn param<'a>(node: &'a Node, name: &str) -> Option<&'a Literal> {
+    node.params
+        .iter()
+        .find_map(|(key, value)| (key == name).then_some(value))
+}
+
+fn string_param(node: &Node, name: &str) -> String {
+    match param(node, name) {
+        Some(Literal::Str(value) | Literal::Id(value)) => value.clone(),
+        _ => String::new(),
+    }
+}
+
+fn literal_array_param(node: &Node, name: &str) -> Vec<Literal> {
+    match param(node, name) {
+        Some(Literal::Arr(values)) => values.clone(),
+        _ => Vec::new(),
+    }
+}
