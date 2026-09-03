@@ -44,9 +44,12 @@ use makepad_wm_api::{WmEvent, WmRequest};
 use preview::PreviewCache;
 use run_view::{MpRunView, MpRunViewAction};
 use makepad_widgets::makepad_micro_serde::*;
-use shell::bar::{BarData, BarModule, ShellBarAction};
+use shell::bar::{BarData, BarModule, ShellBar, ShellBarAction};
 use shell::menu::{MenuSkin, ShellMenu, ShellMenuAction};
-use shell::panels::ShellPanelAction;
+use shell::notifications::ShellNotifications;
+use shell::osd::ShellOsd;
+use shell::panels::{ShellPanel, ShellPanelAction};
+use shell::ShellTokens;
 use ai_bus::{AiBus, Route};
 use apps::{AppRegistry, Hosting};
 use makepad_ai_services::wire::{ServiceCall, ServiceDown, ToolResult};
@@ -2302,23 +2305,113 @@ impl App {
     // Theme / background
     // --------------------------------------------------------------
 
+    /// Push the active theme into every live piece of chrome: the shell
+    /// surfaces' tokens, the desk's geometry, material and palette, and
+    /// the colours the DSL baked in at evaluation time. Startup and every
+    /// live switch end here.
+    fn apply_theme_to_chrome(
+        &mut self,
+        cx: &mut Cx,
+        tokens: ShellTokens,
+        palette: theme::PaletteColors,
+    ) {
+        {
+            let state = self.state_mut();
+            state.desk = tokens.desk;
+            state.material = tokens.material;
+            // gaps_in sits on each side of a window, so two tiles are
+            // twice it apart.
+            state.gap = tokens.desk.gaps_in * 2.0;
+            state.gaps_out = tokens.desk.gaps_out;
+            state.palette = palette;
+        }
+        if let Some(mut w) = self.ui.widget(cx, ids!(shell_bar)).borrow_mut::<ShellBar>() {
+            w.set_tokens(cx, tokens);
+        }
+        if let Some(mut w) = self.ui.widget(cx, ids!(shell_menu)).borrow_mut::<ShellMenu>() {
+            w.set_tokens(cx, tokens);
+        }
+        if let Some(mut w) = self.ui.widget(cx, ids!(shell_panel)).borrow_mut::<ShellPanel>() {
+            w.set_tokens(cx, tokens);
+        }
+        if let Some(mut w) = self.ui.widget(cx, ids!(shell_notes)).borrow_mut::<ShellNotifications>() {
+            w.set_tokens(cx, tokens);
+        }
+        if let Some(mut w) = self.ui.widget(cx, ids!(shell_osd)).borrow_mut::<ShellOsd>() {
+            w.set_tokens(cx, tokens);
+        }
+        if let Some(mut w) = self
+            .ui
+            .widget(cx, ids!(shell_gallery_host))
+            .borrow_mut::<shell::gallery::ShellGalleryHost>()
+        {
+            w.set_tokens(cx, tokens);
+        }
+        if let Some(mut w) = self.ui.widget(cx, ids!(shell_ai_pane)).borrow_mut::<ShellAiPane>() {
+            w.set_theme_colors(palette.background, palette.accent);
+        }
+        // The colours the DSL read off mod.wm_theme when it was evaluated.
+        // Under glass the bar's own strip is transparent: the material
+        // paints it, and this fill must not sit on top of the wallpaper.
+        let bar_strip = if tokens.material.is_glass() {
+            Vec4f::default()
+        } else {
+            palette.background
+        };
+        let mut bar = self.ui.widget(cx, ids!(bar));
+        script_apply_eval!(cx, bar, {
+            draw_bg +: { color: #(bar_strip) }
+        });
+        let top = palette.darker_background;
+        let bottom = palette.background;
+        let mut bg_fill = self.ui.widget(cx, ids!(bg_fill));
+        script_apply_eval!(cx, bg_fill, {
+            draw_bg +: { color_top: #(top) color_bottom: #(bottom) }
+        });
+        self.redraw_all(cx);
+    }
+
     fn set_theme(&mut self, cx: &mut Cx, name: &str) {
-        let state = self.state_mut();
-        state.theme_name = name.to_string();
         let source = theme::load_theme_source(name);
-        if let Some(palette) = theme::scan_term_palette(&source) {
-            state.term_env = palette.env_value();
+        {
+            let state = self.state_mut();
+            state.theme_name = name.to_string();
+            if let Some(palette) = theme::scan_term_palette(&source) {
+                state.term_env = palette.env_value();
+            }
+            if let Some(rgb) = theme::scan_color(&source, "accent") {
+                state.accent = rgb;
+            }
+            state.borders = desk::BorderTheme::from_theme_source(&source);
         }
-        if let Some(rgb) = theme::scan_color(&source, "accent") {
-            state.accent = rgb;
-        }
-        state.borders = desk::BorderTheme::from_theme_source(&source);
         // Children style themselves from the same file; the choice outlives
         // this run (a state file natively, the desk's storage on the web).
         host::set_child_env("MAKEPAD_WM_THEME_SPLASH", theme::theme_splash_path(name).as_os_str());
         host::persist_theme_choice(cx, name);
-        // Chrome DSL colors refresh fully on restart; borders, terminal
-        // palette and backgrounds apply immediately.
+        // The live part: the theme goes back into the VM, the token type
+        // default is rebuilt from it (shell/tokens.rs), and every surface
+        // is handed the result. A running child keeps its look until it
+        // is relaunched.
+        let tokens = cx.with_vm(|vm| {
+            theme::eval_into(vm, &source);
+            // The mapping runs under an error sink like the theme blocks
+            // do: a theme that ships its own `shell:` block but omits a
+            // key would otherwise fail silently, one field at a time.
+            let prev = vm.bx.captured_errors.replace(Vec::new());
+            let value = shell::tokens::script_mod(vm);
+            let errors = vm.take_errors();
+            vm.bx.captured_errors = prev;
+            for e in &errors {
+                log!("wm theme: tokens: {}", e);
+            }
+            if value.is_err() {
+                log!("wm theme: tokens: {:?}", value);
+            }
+            ShellTokens::script_new_with_default(vm)
+        });
+        let palette = theme::scan_palette(&source);
+        self.apply_theme_to_chrome(cx, tokens, palette);
+        self.background_index = 0;
         self.apply_background(cx, 0);
         self.update_bar(cx);
         self.redraw_all(cx);
@@ -2359,6 +2452,9 @@ impl App {
         let name = self.state_mut().theme_name.clone();
         let backgrounds = theme::theme_backgrounds(&name);
         if backgrounds.is_empty() {
+            // No picture: the pushed gradient shows, not the last theme's.
+            self.ui.widget(cx, ids!(bg_image)).set_visible(cx, false);
+            self.redraw_all(cx);
             return;
         }
         let path = &backgrounds[index % backgrounds.len()];
@@ -2494,10 +2590,12 @@ impl App {
             let slug = name.replace(' ', "-");
             self.close_shell_menu(cx);
             match theme::import_omarchy_theme(&slug) {
-                Ok(msg) => log!("wm: {}", msg),
+                Ok(msg) => {
+                    log!("wm: {}", msg);
+                    self.set_theme(cx, &slug);
+                }
                 Err(err) => log!("wm: import failed: {}", err),
             }
-            self.set_theme(cx, &slug);
             return;
         }
         if let Some(name) = target.strip_prefix("style.theme.") {
@@ -3568,12 +3666,16 @@ impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         // CLI: --import-theme <name> pulls an omarchy theme and converts
         // it to splash before the desktop appears.
+        let mut imported = false;
         let mut args = std::env::args();
         while let Some(arg) = args.next() {
             if arg == "--import-theme" {
                 if let Some(name) = args.next() {
                     match theme::import_omarchy_theme(&name) {
-                        Ok(msg) => log!("wm: {}", msg),
+                        Ok(msg) => {
+                            log!("wm: {}", msg);
+                            imported = true;
+                        }
                         Err(err) => log!("wm: import failed: {}", err),
                     }
                 }
@@ -3605,6 +3707,7 @@ impl MatchEvent for App {
         }
         self.hub = hub;
 
+        let palette = theme::scan_palette(&source);
         self.state = Some(WmState {
             layout: crate::layout::WmLayout::new(),
             clients: std::collections::HashMap::new(),
@@ -3615,7 +3718,7 @@ impl MatchEvent for App {
             borders,
             desk: shell::DeskTokens::default(),
             material: shell::MaterialTokens::default(),
-            palette: theme::scan_palette(&source),
+            palette,
             // gaps_in 5 sits on each side of a window, so two tiles are
             // 10 apart — the same as gaps_out to the desk edge.
             gap: desk::TILE_GAP,
@@ -3624,6 +3727,17 @@ impl MatchEvent for App {
             drop_hint: None,
             pane_sliding: false,
         });
+        // The theme's tokens, read off the type default the DSL filled in
+        // (shell/tokens.rs), into the desk state and every surface — the
+        // path a live switch takes too, so the two can never disagree. An
+        // import this run landed AFTER script_mod evaluated the theme: that
+        // is a real switch, re-evaluated, pushed and persisted.
+        if imported {
+            self.set_theme(cx, &theme_name);
+        } else {
+            let tokens = cx.with_vm(|vm| ShellTokens::script_new_with_default(vm));
+            self.apply_theme_to_chrome(cx, tokens, palette);
+        }
         self.next_id = 1;
         // The hosting registry: the linked modules, the person's overrides
         // in ~/.makepad/wm/apps.splash, a dev run's `--module <id>` flags.

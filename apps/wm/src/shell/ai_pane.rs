@@ -176,6 +176,12 @@ impl ShellAiPane {
         }
     }
 
+    /// A live theme switch: the card and its right edge.
+    pub fn set_theme_colors(&mut self, card: Vec4f, edge: Vec4f) {
+        self.draw_card.color = card;
+        self.draw_edge.color = edge;
+    }
+
     pub fn client(&self) -> Option<ClientId> {
         self.client
     }
