@@ -28942,6 +28942,11 @@ impl MatchEvent for App {
             };
             self.run_deck_cmds(cx, cmds);
             self.sync_deck_controls(cx);
+            // A swap moves the whole per-deck state array, echo feedback
+            // included, so the SFX page's slider -- the only place that
+            // value is ever shown -- would otherwise keep displaying
+            // whichever deck used to sit in that slot.
+            self.sync_sfx_fx_ui(cx);
         }
 
         // ---- sfx settings strip ----
