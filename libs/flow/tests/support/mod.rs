@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 #[derive(Clone)]
 pub struct FakeChat {
     pub starts: Arc<Mutex<Vec<(Instant, String)>>>,
-    pub requests: Arc<Mutex<Vec<(String, String, String)>>>,
+    pub requests: Arc<Mutex<Vec<(String, String, String, Option<u32>, Option<bool>)>>>,
     pub response: String,
     pub pending: bool,
     pub cancelled: Arc<AtomicBool>,
@@ -45,6 +45,8 @@ impl ChatSeam for FakeChat {
         system: &str,
         prompt: &str,
         model: &str,
+        max_tokens: Option<u32>,
+        thinking: Option<bool>,
     ) -> Result<Box<dyn ChatTurn>, String> {
         self.starts
             .lock()
@@ -54,6 +56,8 @@ impl ChatSeam for FakeChat {
             system.to_string(),
             prompt.to_string(),
             model.to_string(),
+            max_tokens,
+            thinking,
         ));
         Ok(Box::new(FakeTurn {
             response: self.response.clone(),

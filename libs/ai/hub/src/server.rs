@@ -835,7 +835,7 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
     };
     // Lenient: unknown fields are allowed so params can grow without
     // breaking older services.
-    let request = match GenerateRequestJson::deserialize_json_lenient(text) {
+    let mut request = match GenerateRequestJson::deserialize_json_lenient(text) {
         Ok(request) => request,
         Err(e) => return error_json(400, format!("bad generate request: {e:?}")),
     };
@@ -843,6 +843,9 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
         Some(spec) => spec,
         None => return error_json(404, format!("unknown model: {}", request.model)),
     };
+    if spec.backend == "llm" {
+        crate::llm_backend::apply_chat_thinking_control(&mut request);
+    }
     let gpu = shared.gpu.get();
     if let Err(reason) = model_availability(spec, &gpu, shared.residency.reserve_mb) {
         return error_json(503, format!("model {} is unavailable: {reason}", spec.id));

@@ -14,7 +14,7 @@
 //! - `/models` entries for chat models carry `"domain": "chat"` and the
 //!   existing `available` / `unavailable_reason` fields.
 //! - `POST /generate` accepts `{"model", "domain": "chat", "chat_system",
-//!   "chat_messages": [{"role", "text"}...], "max_tokens"}`. `prompt` is
+//!   "chat_messages": [{"role", "text"}...], "max_tokens"?, "thinking"?}`. `prompt` is
 //!   also set (last user text) for forward compatibility.
 //! - `GET /job/<id>` gains `"partial_text"`: the assistant text so far, a
 //!   monotonically growing prefix of the final text. The final text is the
@@ -222,7 +222,11 @@ pub struct FleetQwenChatProvider<T: FleetTransport> {
     /// Exact fleet model requested by the caller. `None` keeps the normal
     /// provider preference order.
     preferred_model: Option<String>,
-    max_tokens: u32,
+    /// `None` leaves the field off the wire so the serving node chooses its
+    /// own default. A positive value is forwarded without alteration.
+    max_tokens: Option<u32>,
+    /// `None` preserves the serving model's default thinking mode.
+    thinking: Option<bool>,
     /// Every turn gets a fresh sample, including an empty-completion retry.
     sample_seed: u64,
     active: Option<ActiveJob>,
@@ -286,7 +290,8 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
             // level-building turn mid-source (2048, then 3072 on 2026-08-27,
             // dog-shop interior). Boxes serving an older build clamp this to
             // their fixed ceiling, which is merely what they did before.
-            max_tokens: u32::MAX,
+            max_tokens: Some(u32::MAX),
+            thinking: None,
             sample_seed: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
@@ -302,6 +307,16 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
     /// Restrict election to one advertised fleet model id.
     pub fn with_preferred_model(mut self, model: Option<String>) -> Self {
         self.preferred_model = model.map(|model| model.trim().to_string()).filter(|model| !model.is_empty());
+        self
+    }
+
+    pub fn with_max_tokens(mut self, max_tokens: Option<u32>) -> Self {
+        self.max_tokens = max_tokens.filter(|tokens| *tokens > 0);
+        self
+    }
+
+    pub fn with_thinking(mut self, thinking: Option<bool>) -> Self {
+        self.thinking = thinking;
         self
     }
 
@@ -554,7 +569,8 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
         }
         tap_turn_input(input);
         let (base, model, text_fallback) = self.probe()?;
-        let open_think = crate::protocol::model_uses_open_think(&model);
+        let open_think = self.thinking != Some(false)
+            && crate::protocol::model_uses_open_think(&model);
         // The WIRE transcript is append-only, mirroring the lane's KV: turns
         // already sent are reused byte-for-byte (raw assistant replies
         // included — the node's own tokens), and only the tail the session
@@ -630,7 +646,7 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
         let domain = if text_fallback { "text" } else { "chat" };
         let seed = self.sample_seed & i64::MAX as u64;
         self.sample_seed = self.sample_seed.wrapping_add(1);
-        let body = json::obj(vec![
+        let mut fields = vec![
             ("model", json::s(model)),
             ("domain", json::s(domain)),
             ("seed", Value::Int(seed as i64)),
@@ -638,8 +654,14 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
             ("chat_system", json::s(input.system.clone())),
             ("chat_session", json::s(self.conversation.clone())),
             ("chat_messages", Value::Arr(messages)),
-            ("max_tokens", Value::Int(self.max_tokens as i64)),
-        ]);
+        ];
+        if let Some(max_tokens) = self.max_tokens {
+            fields.push(("max_tokens", Value::Int(max_tokens as i64)));
+        }
+        if let Some(thinking) = self.thinking {
+            fields.push(("thinking", Value::Bool(thinking)));
+        }
+        let body = json::obj(fields);
         // Connect-refused/timeout means the TCP session never opened, so no
         // job exists server-side — the ONE retriable POST failure class on
         // this flaky LAN (anything after connect could have created the job
@@ -1174,6 +1196,36 @@ mod wire_transcript_tests {
             transport.generates.borrow()[0].get("model").and_then(Value::as_str),
             Some("qwen3.6-27b")
         );
+    }
+
+    #[test]
+    fn generation_options_are_additive_and_token_caps_are_exact() {
+        let omitted = Scripted::default();
+        let mut provider = FleetQwenChatProvider::new(
+            omitted.clone(),
+            vec!["http://n1:1".into()],
+        )
+        .with_max_tokens(None)
+        .with_thinking(Some(false));
+        provider
+            .begin_turn(&TurnInput::new("SYS", vec![user("hello")]))
+            .unwrap();
+        let body = &omitted.generates.borrow()[0];
+        assert!(body.get("max_tokens").is_none());
+        assert_eq!(body.get("thinking").and_then(Value::as_bool), Some(false));
+
+        let capped = Scripted::default();
+        let mut provider = FleetQwenChatProvider::new(
+            capped.clone(),
+            vec!["http://n1:1".into()],
+        )
+        .with_max_tokens(Some(73));
+        provider
+            .begin_turn(&TurnInput::new("SYS", vec![user("hello")]))
+            .unwrap();
+        let body = &capped.generates.borrow()[0];
+        assert_eq!(body.get("max_tokens").and_then(Value::as_u64), Some(73));
+        assert!(body.get("thinking").is_none());
     }
 
     /// The wire mirror echoes the RAW reply and carries a stable

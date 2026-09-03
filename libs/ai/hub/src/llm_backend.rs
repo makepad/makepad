@@ -323,6 +323,32 @@ pub fn system_prompt_for(target_domain: &str, prompts_dir: Option<&Path>) -> Str
 // Prompt assembly (pure, unit-tested)
 // ---------------------------------------------------------------------------
 
+/// Apply the optional Qwen thinking control before the generic request parser
+/// renders ChatML. The wire field is additive: absent and `true` leave every
+/// existing prompt byte unchanged, while `false` adds Qwen's `/no_think`
+/// convention to the system message.
+pub(crate) fn apply_chat_thinking_control(
+    request: &mut crate::protocol::GenerateRequestJson,
+) {
+    if request.thinking != Some(false)
+        || !(request.domain.as_deref() == Some("chat")
+            || request
+                .chat_messages
+                .as_ref()
+                .is_some_and(|messages| !messages.is_empty()))
+    {
+        return;
+    }
+    let system = request.chat_system.get_or_insert_with(String::new);
+    if system.trim_end().ends_with("/no_think") {
+        return;
+    }
+    if !system.is_empty() && !system.ends_with('\n') {
+        system.push('\n');
+    }
+    system.push_str("/no_think");
+}
+
 /// One expansion request handed to the generator: a full chat-template prompt
 /// plus sampling settings. The seed differs per variant.
 #[derive(Clone, Debug)]
@@ -2815,6 +2841,34 @@ mod tests {
         );
         assert!(expand.ends_with("<|im_start|>assistant\n<think>\n"));
         assert!(expand.contains("Intent: a pretty elf"));
+    }
+
+    #[test]
+    fn chat_thinking_false_reaches_qwens_template_and_none_is_unchanged() {
+        let request = GenerateRequestJson {
+            model: "qwen3.8-27b".to_string(),
+            domain: Some("chat".to_string()),
+            chat_system: Some("Answer directly.".to_string()),
+            chat_messages: Some(vec![crate::protocol::ChatMessageJson {
+                role: "user".to_string(),
+                text: "hello".to_string(),
+            }]),
+            ..GenerateRequestJson::default()
+        };
+        let original = GenerateParams::from_request(&request).unwrap().prompt;
+
+        let mut defaulted = request.clone();
+        apply_chat_thinking_control(&mut defaulted);
+        assert_eq!(GenerateParams::from_request(&defaulted).unwrap().prompt, original);
+
+        let mut no_think = request;
+        no_think.thinking = Some(false);
+        apply_chat_thinking_control(&mut no_think);
+        let prompt = GenerateParams::from_request(&no_think).unwrap().prompt;
+        assert!(
+            prompt.contains("<|im_start|>system\nAnswer directly.\n/no_think<|im_end|>"),
+            "{prompt:?}"
+        );
     }
 
     #[test]

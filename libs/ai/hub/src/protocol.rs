@@ -510,6 +510,9 @@ pub struct GenerateRequestJson {
     /// even if `domain` was omitted, so today's FleetQwen text-fallback
     /// body is enough to take the chat path.
     pub chat_messages: Option<Vec<ChatMessageJson>>,
+    /// Conversational reasoning control. Absent preserves the model/node
+    /// default; `false` asks Qwen to answer without a generated think phase.
+    pub thinking: Option<bool>,
 
     // -- speech domain (kokoro + indextts backends) --
     /// Text to speak. (`prompt` is accepted as a fallback when empty.)

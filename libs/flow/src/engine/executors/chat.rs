@@ -1,5 +1,5 @@
-use super::{string_param, Executor, Poll};
-use crate::{Node, Value};
+use super::{param, string_param, Executor, Poll};
+use crate::{Literal, Node, Value};
 use std::collections::VecDeque;
 #[cfg(feature = "hub-chat")]
 use std::path::PathBuf;
@@ -11,6 +11,8 @@ pub trait ChatSeam: Send + Sync {
         system: &str,
         prompt: &str,
         model: &str,
+        max_tokens: Option<u32>,
+        thinking: Option<bool>,
     ) -> Result<Box<dyn ChatTurn>, String>;
 }
 
@@ -75,6 +77,8 @@ impl Executor for ChatExecutor {
             &string_param(node, "system"),
             prompt,
             &string_param(node, "model"),
+            positive_u32_param(node, "max_tokens"),
+            Some(false),
         )?);
         Ok(())
     }
@@ -129,6 +133,17 @@ impl Executor for ChatExecutor {
     }
 }
 
+fn positive_u32_param(node: &Node, name: &str) -> Option<u32> {
+    match param(node, name) {
+        Some(Literal::Num(value))
+            if value.is_finite() && *value > 0.0 && *value <= u32::MAX as f64 =>
+        {
+            Some(*value as u32)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(feature = "hub-chat")]
 pub struct HubChat {
     pub model_path: PathBuf,
@@ -152,6 +167,8 @@ impl ChatSeam for HubChat {
         system: &str,
         prompt: &str,
         model: &str,
+        max_tokens: Option<u32>,
+        thinking: Option<bool>,
     ) -> Result<Box<dyn ChatTurn>, String> {
         use makepad_ai_hub::hub_chat::{HubChatConfig, HubChatSession};
         use makepad_ai_hub::local_llm::LocalLlmConfig;
@@ -163,6 +180,8 @@ impl ChatSeam for HubChat {
         let session = HubChatSession::start(HubChatConfig {
             llm: LocalLlmConfig::new(path),
             preferred_model,
+            max_tokens,
+            thinking,
             system_prompt: system.to_string(),
             tools: Vec::new(),
             wake: None,
@@ -279,6 +298,8 @@ impl ChatSeam for HubChat {
         _system: &str,
         _prompt: &str,
         _model: &str,
+        _max_tokens: Option<u32>,
+        _thinking: Option<bool>,
     ) -> Result<Box<dyn ChatTurn>, String> {
         Err("makepad-flow was built without hub-chat".to_string())
     }
