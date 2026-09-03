@@ -126,6 +126,66 @@ impl WireRoute {
         }
     }
 
+    pub fn is_loop(&self) -> bool {
+        self.length > self.from.distance(self.to) * 1.8
+    }
+
+    /// Number of proper crossings with another cable. Shared cable endpoints
+    /// and collinear runs are not crossings; repeated sampled hits at the same
+    /// geometric intersection are collapsed.
+    pub fn crossings_with(&self, other: &Self) -> usize {
+        let mut intersections = Vec::new();
+        for left in self.samples.windows(2) {
+            for right in other.samples.windows(2) {
+                let Some(point) = segment_intersection(left[0], left[1], right[0], right[1]) else {
+                    continue;
+                };
+                if [self.from, self.to, other.from, other.to]
+                    .iter()
+                    .any(|endpoint| endpoint.distance(point) < 1e-4)
+                {
+                    continue;
+                }
+                if !intersections
+                    .iter()
+                    .any(|old: &Point| old.distance(point) < 0.25)
+                {
+                    intersections.push(point);
+                }
+            }
+        }
+        intersections.len()
+    }
+
+    pub fn intersects_segment(&self, from: Point, to: Point) -> bool {
+        self.samples
+            .windows(2)
+            .any(|pair| segment_intersection(pair[0], pair[1], from, to).is_some())
+    }
+
+    /// Arc-length midpoint and its unit tangent in source-to-target order.
+    pub fn midpoint_tangent(&self) -> (Point, Point) {
+        let point = self.point_at_distance(self.length * 0.5);
+        if self.samples.len() < 2 || self.length <= f64::EPSILON {
+            return (point, Point::new(1.0, 0.0));
+        }
+        let upper = self
+            .cumulative
+            .partition_point(|value| *value < self.length * 0.5)
+            .clamp(1, self.samples.len() - 1);
+        for radius in 0..self.samples.len() {
+            let lower = upper.saturating_sub(1 + radius);
+            let upper = (upper + radius).min(self.samples.len() - 1);
+            let dx = self.samples[upper].x - self.samples[lower].x;
+            let dy = self.samples[upper].y - self.samples[lower].y;
+            let length = (dx * dx + dy * dy).sqrt();
+            if length > f64::EPSILON {
+                return (point, Point::new(dx / length, dy / length));
+            }
+        }
+        (point, Point::new(1.0, 0.0))
+    }
+
     #[cfg(test)]
     pub fn point_at(&self, fraction: f64) -> Point {
         self.point_at_distance(self.length * fraction.clamp(0.0, 1.0))
@@ -507,6 +567,30 @@ fn path_length(points: &[Point]) -> f64 {
     points.windows(2).map(|pair| pair[0].distance(pair[1])).sum()
 }
 
+fn segment_intersection(a: Point, b: Point, c: Point, d: Point) -> Option<Point> {
+    let epsilon = 1e-8;
+    if a.x.max(b.x) + epsilon < c.x.min(d.x)
+        || c.x.max(d.x) + epsilon < a.x.min(b.x)
+        || a.y.max(b.y) + epsilon < c.y.min(d.y)
+        || c.y.max(d.y) + epsilon < a.y.min(b.y)
+    {
+        return None;
+    }
+    let ab = Point::new(b.x - a.x, b.y - a.y);
+    let cd = Point::new(d.x - c.x, d.y - c.y);
+    let denominator = ab.x * cd.y - ab.y * cd.x;
+    if denominator.abs() < 1e-8 {
+        return None;
+    }
+    let ac = Point::new(c.x - a.x, c.y - a.y);
+    let t = (ac.x * cd.y - ac.y * cd.x) / denominator;
+    let u = (ac.x * ab.y - ac.y * ab.x) / denominator;
+    if t < -epsilon || t > 1.0 + epsilon || u < -epsilon || u > 1.0 + epsilon {
+        return None;
+    }
+    Some(Point::new(a.x + ab.x * t, a.y + ab.y * t))
+}
+
 #[cfg(test)]
 fn segment_clear(a: Point, b: Point, obstacles: &[Obstacle]) -> bool {
     segment_clear_except(a, b, obstacles, None)
@@ -617,7 +701,6 @@ fn move_toward(from: Point, to: Point, distance: f64) -> Point {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     fn route(from: Point, to: Point, obstacles: &[Obstacle]) -> WireRoute {
         route_wire(
             from,
@@ -888,5 +971,76 @@ mod tests {
         );
         assert_ne!(one.point_at(0.5), two.point_at(0.5));
         assert!((one.point_at(0.5).y - two.point_at(0.5).y).abs() >= style.cable_spacing - 0.1);
+    }
+
+    #[test]
+    fn crossing_count_finds_one_known_intersection() {
+        let down = build_route(
+            Point::new(0.0, 0.0),
+            Point::new(100.0, 100.0),
+            RouteKind::Orthogonal {
+                points: vec![Point::new(0.0, 0.0), Point::new(100.0, 100.0)],
+                radius: 0.0,
+            },
+            vec![Point::new(0.0, 0.0), Point::new(100.0, 100.0)],
+        );
+        let up = build_route(
+            Point::new(0.0, 100.0),
+            Point::new(100.0, 0.0),
+            RouteKind::Orthogonal {
+                points: vec![Point::new(0.0, 100.0), Point::new(100.0, 0.0)],
+                radius: 0.0,
+            },
+            vec![Point::new(0.0, 100.0), Point::new(100.0, 0.0)],
+        );
+        assert_eq!(down.crossings_with(&up), 1);
+    }
+
+    #[test]
+    fn loop_detection_uses_straight_distance_ratio() {
+        let looped = build_route(
+            Point::new(0.0, 0.0),
+            Point::new(100.0, 0.0),
+            RouteKind::Orthogonal {
+                points: vec![
+                    Point::new(0.0, 0.0),
+                    Point::new(0.0, 100.0),
+                    Point::new(100.0, 100.0),
+                    Point::new(100.0, 0.0),
+                ],
+                radius: 0.0,
+            },
+            vec![
+                Point::new(0.0, 0.0),
+                Point::new(0.0, 100.0),
+                Point::new(100.0, 100.0),
+                Point::new(100.0, 0.0),
+            ],
+        );
+        assert!(looped.is_loop());
+        assert!(!route(Point::new(0.0, 0.0), Point::new(100.0, 0.0), &[]).is_loop());
+    }
+
+    #[test]
+    fn midpoint_tangent_orients_straight_and_s_routes() {
+        let straight = route(Point::new(0.0, 0.0), Point::new(100.0, 0.0), &[]);
+        let (_, tangent) = straight.midpoint_tangent();
+        assert!(tangent.x > 0.99 && tangent.y.abs() < 0.01);
+
+        let from = Point::new(0.0, 0.0);
+        let control_1 = Point::new(100.0, 0.0);
+        let control_2 = Point::new(0.0, 100.0);
+        let to = Point::new(100.0, 100.0);
+        let samples = (0..=64)
+            .map(|step| cubic_point(from, control_1, control_2, to, step as f64 / 64.0))
+            .collect();
+        let s_route = build_route(
+            from,
+            to,
+            RouteKind::Cubic { control_1, control_2 },
+            samples,
+        );
+        let (_, tangent) = s_route.midpoint_tangent();
+        assert!(tangent.x.abs() < 0.05 && tangent.y > 0.99, "{tangent:?}");
     }
 }
