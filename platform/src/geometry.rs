@@ -58,6 +58,9 @@ pub struct CxGeometryPool(
     /// are never freed by a script VM being torn down; VMs get non-owning handles
     /// via [`Geometry::new_borrowed`].
     pub(crate) HashMap<LiveId, Geometry>,
+    /// Draw calls skipped because their geometry id was stale (see
+    /// [`CxGeometryPool::skip_stale`]); reported with a power-of-ten backoff.
+    pub(crate) u64,
 );
 
 impl CxGeometryPool {
@@ -78,6 +81,41 @@ impl Cx {
         let id = geometry.geometry_id();
         self.geometries.1.insert(key, geometry);
         id
+    }
+}
+
+impl CxGeometryPool {
+    /// True (and counted) when `id` no longer names the geometry it was issued
+    /// for: its slot was reclaimed and now holds a different mesh. A stale id
+    /// must never be drawn — drawing the slot's current mesh with the caller's
+    /// instance count is a runaway triangle count (a label quad's instances
+    /// times a building mesh's index buffer), which is how a pan took the web
+    /// map to 1 fps. Reported at the 1st, 10th, 100th… occurrence, never per
+    /// frame.
+    pub(crate) fn skip_stale(&mut self, id: GeometryId) -> bool {
+        let live = self.0.pool.get(id.0).map_or(false, |d| d.generation == id.1);
+        if live {
+            return false;
+        }
+        self.2 += 1;
+        let n = self.2;
+        let power_of_ten = {
+            let mut m = n;
+            while m % 10 == 0 {
+                m /= 10;
+            }
+            m == 1
+        };
+        if power_of_ten {
+            error!(
+                "draw call skipped: stale geometry id {} (slot generation {}, id generation {}); {} skipped so far",
+                id.0,
+                self.0.pool.get(id.0).map_or(0, |d| d.generation),
+                id.1,
+                n
+            );
+        }
+        true
     }
 }
 
