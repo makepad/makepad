@@ -8751,7 +8751,7 @@ fn project_way_points_with_nodes(
 /// the ancestor shift (0 = exact zoom) and the quadrant offsets that map the
 /// ancestor's local space into this tile's.
 pub struct OverlayTileData {
-    pub raw: Vec<u8>,
+    pub raw: std::sync::Arc<[u8]>,
     pub shift: u32,
     pub quadrant_x: u32,
     pub quadrant_y: u32,
@@ -8781,6 +8781,7 @@ pub fn build_local_tile_from_archive_bytes(
     detail: Option<std::sync::Arc<[u8]>>,
     detail_mbtiles_path: Option<&Path>,
     bridge_dz_mbtiles_path: Option<&Path>,
+    mut overlay_tiles: Vec<OverlayTileData>,
     overlay_paths: &[String],
     theme: &CompiledMapTheme,
     render_zoom: u32,
@@ -8788,7 +8789,6 @@ pub fn build_local_tile_from_archive_bytes(
     want_fringe: bool,
     build_road_core: bool,
 ) -> Result<Option<LoadedLocalTile>, String> {
-    let mut overlay_tiles = Vec::new();
     for path in overlay_paths.iter().filter(|path| !path.is_empty()) {
         let (file, filter) = match path.split_once('?') {
             Some((file, "fast")) => (file, 1_u8),
@@ -8810,7 +8810,7 @@ pub fn build_local_tile_from_archive_bytes(
         let tms_row = (1_i64 << fetch_z) - 1 - fetch_y;
         if let Ok(Some(raw)) = reader.get_tile_decoded(fetch_z as i64, fetch_x, tms_row) {
             overlay_tiles.push(OverlayTileData {
-                raw,
+                raw: raw.into(),
                 shift,
                 quadrant_x: tile_key.x as u32 - ((fetch_x as u32) << shift),
                 quadrant_y: tile_key.y as u32 - ((fetch_y as u32) << shift),
@@ -9024,7 +9024,7 @@ pub fn load_local_tile_batch(
             let tms_row = (1_i64 << fetch_z) - 1 - fetch_y;
             if let Ok(Some(raw)) = reader.get_tile_decoded(fetch_z as i64, fetch_x, tms_row) {
                 out.push(OverlayTileData {
-                    raw,
+                    raw: raw.into(),
                     shift,
                     quadrant_x: (tile_key.x as u32) - ((fetch_x as u32) << shift),
                     quadrant_y: (tile_key.y as u32) - ((fetch_y as u32) << shift),
@@ -9440,6 +9440,7 @@ mod local_archive_regression_tests {
                 detail,
                 None,
                 None,
+                Vec::new(),
                 &overlay_paths,
                 &CompiledMapTheme::default(),
                 0,
@@ -14119,7 +14120,7 @@ mod bridge_probe_tests {
             .unwrap()
             .expect("z9 ancestor ocean tile missing");
         let overlay = OverlayTileData {
-            raw: araw,
+            raw: araw.into(),
             shift,
             quadrant_x: vx - (fx << shift),
             quadrant_y: vy - (fy << shift),
@@ -14571,7 +14572,7 @@ mod bridge_probe_tests {
             .unwrap();
         let key = TileKey { z: z as u32, x: x as i32, y: y as i32 };
         let overlay_tiles = vec![OverlayTileData {
-            raw: ov,
+            raw: ov.into(),
             shift: 0,
             quadrant_x: 0,
             quadrant_y: 0,

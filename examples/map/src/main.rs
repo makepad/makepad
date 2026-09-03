@@ -1163,24 +1163,30 @@ impl App {
         self.set_status(cx, &format!("Routing to {}…", name));
     }
 
-    /// Rebuild the overlay path list from the app-tracked layer states.
+    /// Rebuild the overlay source list from the app-tracked layer states.
     fn apply_overlay_selection(&mut self, cx: &mut Cx) {
-        const LAYER_PATHS: [&str; 7] = [
-            "local/overlays/nl-chargers.mbtiles?fast",
-            "local/overlays/nl-transit.mbtiles",
-            "local/overlays/nl-nature.mbtiles",
-            "local/overlays/nl-wijkbuurt.mbtiles",
-            "local/overlays/nl-buildings-age.mbtiles",
-            "local/overlays/nl-demographics.mbtiles",
-            "local/overlays/nl-chargers.mbtiles?slow",
+        const LAYERS: [(&str, &str, Option<&str>); 7] = [
+            ("chargers", "local/overlays/nl-chargers.mbtiles", Some("fast")),
+            ("transit", "local/overlays/nl-transit.mbtiles", None),
+            ("nature", "local/overlays/nl-nature.mbtiles", None),
+            ("districts", "local/overlays/nl-wijkbuurt.mbtiles", None),
+            ("buildings_age", "local/overlays/nl-buildings-age.mbtiles", None),
+            ("demographics", "local/overlays/nl-demographics.mbtiles", None),
+            ("chargers", "local/overlays/nl-chargers.mbtiles", Some("slow")),
         ];
-        let paths: Vec<&str> = LAYER_PATHS
+        let overlays = LAYERS
             .iter()
             .zip(self.layer_states.iter())
             .filter(|(_, on)| **on)
-            .map(|(path, _)| *path)
+            .map(|((name, path, option), _)| {
+                OverlaySource::with_option(
+                    *name,
+                    TileSourceConfig::local_archive(*path),
+                    *option,
+                )
+            })
             .collect();
-        self.map(cx).set_overlay_paths(cx, &paths.join(";"));
+        self.map(cx).set_overlays(cx, overlays);
     }
 
     fn apply_route(&mut self, cx: &mut Cx, route: Route) {

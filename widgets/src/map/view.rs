@@ -58,21 +58,75 @@ pub enum TileSourceConfig {
     LocalArchive {
         mbtiles_path: String,
         detail_mbtiles_path: String,
-        overlay_mbtiles_paths: String,
         bridge_dz_path: String,
     },
     HttpArchive {
         root_url: String,
         detail_root_url: String,
-        overlay_mbtiles_paths: String,
         bridge_dz_path: String,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OverlaySource {
+    pub name: String,
+    pub source: TileSourceConfig,
+}
+
+impl OverlaySource {
+    pub fn new(name: impl Into<String>, source: TileSourceConfig) -> Self {
+        Self {
+            name: name.into(),
+            source,
+        }
+    }
+
+    pub fn with_option(
+        name: impl Into<String>,
+        mut source: TileSourceConfig,
+        option: Option<&str>,
+    ) -> Self {
+        if let Some(option) = option {
+            match &mut source {
+                TileSourceConfig::LocalArchive { mbtiles_path, .. } => {
+                    mbtiles_path.push('?');
+                    mbtiles_path.push_str(option);
+                }
+                TileSourceConfig::HttpArchive { root_url, .. } => {
+                    root_url.push('?');
+                    root_url.push_str(option);
+                }
+            }
+        }
+        Self::new(name, source)
+    }
 }
 
 fn is_mkmap_path_shape(path: &str) -> bool {
     let path = Path::new(path);
     path.extension().is_some_and(|extension| extension == "mkmap")
         || path.file_name().is_some_and(|name| name == "root.mkidx")
+}
+
+fn split_overlay_option(source: &str) -> (&str, u8) {
+    match source.rsplit_once('?') {
+        Some((source, "fast")) => (source, 1),
+        Some((source, "slow")) => (source, 2),
+        _ => (source, 0),
+    }
+}
+
+fn overlay_fetch_key(key: TileKey, zoom_range: (u32, u32)) -> Option<TileKey> {
+    let (min_zoom, max_zoom) = zoom_range;
+    if key.z < min_zoom {
+        return None;
+    }
+    let shift = key.z.saturating_sub(max_zoom);
+    Some(TileKey {
+        z: key.z - shift,
+        x: key.x >> shift,
+        y: key.y >> shift,
+    })
 }
 
 fn want_fringe_for_tilt(tilt: f64, currently_baked: bool) -> bool {
@@ -121,6 +175,15 @@ fn needs_separate_detail_archive(config: &TileSourceConfig) -> bool {
 }
 
 impl TileSourceConfig {
+    pub fn local_archive(path: impl Into<String>) -> Self {
+        let path = path.into();
+        Self::LocalArchive {
+            detail_mbtiles_path: path.clone(),
+            mbtiles_path: path,
+            bridge_dz_path: String::new(),
+        }
+    }
+
     /// Hosted `.mkmap` archive constructor: base and detail from one root, no
     /// sidecars. Keeping variant construction in the map crate lets callers stay
     /// stable as HTTP sidecar fields come and go.
@@ -129,7 +192,6 @@ impl TileSourceConfig {
         Self::HttpArchive {
             detail_root_url: root_url.clone(),
             root_url,
-            overlay_mbtiles_paths: String::new(),
             bridge_dz_path: String::new(),
         }
     }
@@ -142,6 +204,23 @@ struct ArchiveTileParts {
     detail: Option<Result<Option<Arc<[u8]>>, String>>,
     detail_required: bool,
     reuse_base_as_detail: bool,
+    overlays: Vec<ArchiveOverlayPart>,
+}
+
+#[derive(Debug)]
+struct ArchiveOverlayPart {
+    archive_index: usize,
+    name: String,
+    filter: u8,
+    fetch_key: Option<TileKey>,
+    result: Option<Result<Option<Arc<[u8]>>, String>>,
+}
+
+struct ActiveOverlayArchive {
+    name: String,
+    filter: u8,
+    archive: Option<MapTileArchive>,
+    local_mbtiles_path: Option<String>,
 }
 
 #[derive(Debug)]
@@ -3797,11 +3876,13 @@ pub struct MapView {
     /// can point its MapView at its own tile archive.
     #[live]
     mbtiles_path: String,
-    /// Semicolon-separated list of geodata overlay mbtiles (layers.md
-    /// track: chargers, transit, nature, districts…). Set at runtime via
-    /// set_overlay_paths; tiles rebuild on change.
-    #[live]
-    overlay_mbtiles_paths: String,
+    /// Geodata overlays share the base archive plane. Hosted/local `.mkmap`
+    /// sources use `MapTileArchive`; only native `.mbtiles` development
+    /// overrides take the legacy worker-side reader path.
+    #[rust]
+    overlays: Vec<OverlaySource>,
+    #[rust]
+    overlay_archives: Vec<ActiveOverlayArchive>,
     /// Optional all-tag detail archive (pbf-detail output) composed over the
     /// base for micro-POI symbols: trees, benches, bins, artwork…
     #[live]
@@ -6023,7 +6104,6 @@ impl MapView {
             .unwrap_or_else(|| TileSourceConfig::LocalArchive {
                 mbtiles_path: self.active_mbtiles_path().to_string(),
                 detail_mbtiles_path: self.detail_mbtiles_path.clone(),
-                overlay_mbtiles_paths: self.overlay_mbtiles_paths.clone(),
                 bridge_dz_path: self.bridge_dz_mbtiles_path.clone(),
             });
         self.install_archive_source(cx, config);
@@ -6034,6 +6114,44 @@ impl MapView {
             self.archive_worker_pool = Some(new_archive_worker_pool(cx));
         }
         self.archive_worker_pool.as_ref().unwrap().clone()
+    }
+
+    fn install_overlay_sources(&mut self, cx: &mut Cx) {
+        let workers = self.ensure_archive_worker_pool(cx);
+        self.overlay_archives = self
+            .overlays
+            .iter()
+            .map(|overlay| {
+                let (archive, local_mbtiles_path, filter) = match &overlay.source {
+                    TileSourceConfig::LocalArchive { mbtiles_path, .. } => {
+                        let (path, filter) = split_overlay_option(mbtiles_path);
+                        if is_mkmap_path_shape(path) {
+                            (
+                                Some(MapTileArchive::file(path, workers.clone())),
+                                None,
+                                filter,
+                            )
+                        } else {
+                            (None, Some(path.to_string()), filter)
+                        }
+                    }
+                    TileSourceConfig::HttpArchive { root_url, .. } => {
+                        let (root_url, filter) = split_overlay_option(root_url);
+                        (
+                            Some(MapTileArchive::http(root_url, workers.clone())),
+                            None,
+                            filter,
+                        )
+                    }
+                };
+                ActiveOverlayArchive {
+                    name: overlay.name.clone(),
+                    filter,
+                    archive,
+                    local_mbtiles_path,
+                }
+            })
+            .collect();
     }
 
     fn install_archive_source(&mut self, cx: &mut Cx, config: TileSourceConfig) {
@@ -6050,13 +6168,11 @@ impl MapView {
             TileSourceConfig::LocalArchive {
                 mbtiles_path,
                 detail_mbtiles_path,
-                overlay_mbtiles_paths,
                 bridge_dz_path,
                 ..
             } => {
                 self.mbtiles_path = mbtiles_path.clone();
                 self.detail_mbtiles_path = detail_mbtiles_path.clone();
-                self.overlay_mbtiles_paths = overlay_mbtiles_paths.clone();
                 self.bridge_dz_mbtiles_path = bridge_dz_path.clone();
                 self.base_archive = is_mkmap_path_shape(mbtiles_path)
                     .then(|| MapTileArchive::file(mbtiles_path, workers.clone()));
@@ -6068,12 +6184,10 @@ impl MapView {
             TileSourceConfig::HttpArchive {
                 root_url,
                 detail_root_url,
-                overlay_mbtiles_paths,
                 bridge_dz_path,
             } => {
                 self.mbtiles_path.clear();
                 self.detail_mbtiles_path = detail_root_url.clone();
-                self.overlay_mbtiles_paths = overlay_mbtiles_paths.clone();
                 self.bridge_dz_mbtiles_path = bridge_dz_path.clone();
                 self.base_archive = Some(MapTileArchive::http(root_url, workers.clone()));
                 self.detail_archive = needs_separate_detail_archive(&config)
@@ -6106,6 +6220,16 @@ impl MapView {
             .as_mut()
             .map(|archive| archive.drain(cx, event))
             .unwrap_or_default();
+        let overlay_results = self
+            .overlay_archives
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, overlay)| {
+                let archive = overlay.archive.as_mut()?;
+                let tiles = archive.drain(cx, event);
+                Some((index, archive.zoom_range(), tiles))
+            })
+            .collect::<Vec<_>>();
 
         if let Some(range) = self.base_archive.as_ref().and_then(MapTileArchive::zoom_range) {
             if self.local_source_zoom_range != Some(range) {
@@ -6138,12 +6262,62 @@ impl MapView {
                 });
             }
         }
+        let mut follow_up = vec![HashSet::<TileKey>::new(); self.overlay_archives.len()];
+        for (archive_index, zoom_range, tiles) in overlay_results {
+            for tile in tiles {
+                if tile.generation != self.archive_generation {
+                    continue;
+                }
+                for (logical_key, parts) in self.archive_pending_tiles.iter_mut() {
+                    for overlay in parts.overlays.iter_mut().filter(|overlay| {
+                        overlay.archive_index == archive_index
+                            && overlay.fetch_key == Some(tile.key)
+                            && overlay.result.is_none()
+                    }) {
+                        let desired =
+                            zoom_range.map(|range| overlay_fetch_key(*logical_key, range));
+                        match desired {
+                            Some(None) => {
+                                overlay.fetch_key = None;
+                                overlay.result = Some(Ok(None));
+                            }
+                            Some(Some(desired)) if desired != tile.key => {
+                                overlay.fetch_key = Some(desired);
+                                follow_up[archive_index].insert(desired);
+                            }
+                            Some(Some(_)) | None => {
+                                overlay.result = Some(match tile.result.clone() {
+                                    TileBytesResult::Bytes(bytes) => Ok(Some(bytes)),
+                                    TileBytesResult::Missing => Ok(None),
+                                    TileBytesResult::Error(error) => Err(error),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (archive_index, keys) in follow_up.into_iter().enumerate() {
+            let Some(archive) = self
+                .overlay_archives
+                .get_mut(archive_index)
+                .and_then(|overlay| overlay.archive.as_mut())
+            else {
+                continue;
+            };
+            for key in keys {
+                archive.request_tile(cx, key, self.archive_generation, u64::MAX);
+            }
+            archive.flush(cx);
+        }
 
         let ready: Vec<TileKey> = self
             .archive_pending_tiles
             .iter()
             .filter(|(_, parts)| {
-                parts.base.is_some() && (!parts.detail_required || parts.detail.is_some())
+                parts.base.is_some()
+                    && (!parts.detail_required || parts.detail.is_some())
+                    && parts.overlays.iter().all(|overlay| overlay.result.is_some())
             })
             .map(|(key, _)| *key)
             .collect();
@@ -6167,7 +6341,38 @@ impl MapView {
             } else {
                 parts.detail.and_then(Result::ok).flatten()
             };
-            self.dispatch_archive_tile_build(cx, key, base, detail);
+            let mut overlays = Vec::new();
+            let mut overlay_error = None;
+            for overlay in parts.overlays {
+                let result = overlay.result.unwrap();
+                match result {
+                    Ok(Some(raw)) => {
+                        let fetch_key = overlay.fetch_key.unwrap();
+                        let shift = key.z.saturating_sub(fetch_key.z);
+                        overlays.push(OverlayTileData {
+                            raw,
+                            shift,
+                            quadrant_x: key.x as u32 - ((fetch_key.x as u32) << shift),
+                            quadrant_y: key.y as u32 - ((fetch_key.y as u32) << shift),
+                            filter: overlay.filter,
+                            has_chargers: overlay.name == "chargers",
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        overlay_error = Some(error);
+                        break;
+                    }
+                }
+            }
+            if let Some(error) = overlay_error {
+                self.local_requested_tiles.remove(&key);
+                self.mark_tile_failed(key, &error);
+                self.update_status_text();
+                self.redraw(cx);
+                continue;
+            }
+            self.dispatch_archive_tile_build(cx, key, base, detail, overlays);
         }
     }
 
@@ -6177,6 +6382,7 @@ impl MapView {
         key: TileKey,
         base: Option<Arc<[u8]>>,
         detail: Option<Arc<[u8]>>,
+        overlays: Vec<OverlayTileData>,
     ) {
         let sender = self.tile_worker_rx.sender();
         let style_epoch = self.style_epoch;
@@ -6191,28 +6397,33 @@ impl MapView {
                 && entry.road_core_cached
                 && entry.baked_fringe == want_fringe
         });
-        let (detail_path, bridge_dz_path, overlay_paths) = match self.tile_source_config.as_ref() {
+        let (detail_path, bridge_dz_path) = match self.tile_source_config.as_ref() {
             Some(TileSourceConfig::LocalArchive {
                 detail_mbtiles_path,
                 bridge_dz_path,
-                overlay_mbtiles_paths,
                 ..
-            }) => (detail_mbtiles_path, bridge_dz_path, overlay_mbtiles_paths),
+            }) => (detail_mbtiles_path, bridge_dz_path),
             Some(TileSourceConfig::HttpArchive {
                 detail_root_url,
                 bridge_dz_path,
-                overlay_mbtiles_paths,
                 ..
-            }) => (detail_root_url, bridge_dz_path, overlay_mbtiles_paths),
-            None => (&self.detail_mbtiles_path, &self.bridge_dz_mbtiles_path, &self.overlay_mbtiles_paths),
+            }) => (detail_root_url, bridge_dz_path),
+            None => (&self.detail_mbtiles_path, &self.bridge_dz_mbtiles_path),
         };
         let detail_path = (!detail_path.is_empty() && !is_mkmap_path_shape(detail_path))
             .then_some(detail_path.clone());
         let bridge_dz_path = (!bridge_dz_path.is_empty()).then_some(bridge_dz_path.clone());
-        let overlay_paths = overlay_paths
-            .split(';')
-            .filter(|path| !path.trim().is_empty())
-            .map(|path| path.trim().to_string())
+        let overlay_paths = self
+            .overlay_archives
+            .iter()
+            .filter_map(|overlay| {
+                let path = overlay.local_mbtiles_path.as_ref()?;
+                Some(match overlay.filter {
+                    1 => format!("{path}?fast"),
+                    2 => format!("{path}?slow"),
+                    _ => path.clone(),
+                })
+            })
             .collect::<Vec<_>>();
         if let Err(error) = self.submit_tile_job(cx, key, move || {
             let result = build_local_tile_from_archive_bytes(
@@ -6221,6 +6432,7 @@ impl MapView {
                 detail,
                 detail_path.as_deref().map(Path::new),
                 bridge_dz_path.as_deref().map(Path::new),
+                overlays,
                 &overlay_paths,
                 &theme_style,
                 bucket,
@@ -6256,12 +6468,37 @@ impl MapView {
     }
 
     fn cancel_archive_tile(&mut self, cx: &mut Cx, key: TileKey) {
-        self.archive_pending_tiles.remove(&key);
+        let overlays = self
+            .archive_pending_tiles
+            .remove(&key)
+            .map(|parts| parts.overlays)
+            .unwrap_or_default();
         if let Some(archive) = self.base_archive.as_mut() {
             archive.cancel_tile(cx, key);
         }
         if let Some(archive) = self.detail_archive.as_mut() {
             archive.cancel_tile(cx, key);
+        }
+        for overlay in overlays {
+            let Some(fetch_key) = overlay.fetch_key else {
+                continue;
+            };
+            let still_needed = self.archive_pending_tiles.values().any(|parts| {
+                parts.overlays.iter().any(|candidate| {
+                    candidate.archive_index == overlay.archive_index
+                        && candidate.fetch_key == Some(fetch_key)
+                        && candidate.result.is_none()
+                })
+            });
+            if !still_needed {
+                if let Some(archive) = self
+                    .overlay_archives
+                    .get_mut(overlay.archive_index)
+                    .and_then(|overlay| overlay.archive.as_mut())
+                {
+                    archive.cancel_tile(cx, fetch_key);
+                }
+            }
         }
     }
 
@@ -6275,10 +6512,16 @@ impl MapView {
             let detail_path = self.detail_mbtiles_path.clone();
             let bridge_dz_path = self.bridge_dz_mbtiles_path.clone();
             let overlay_paths = self
-                .overlay_mbtiles_paths
-                .split(';')
-                .filter(|path| !path.trim().is_empty())
-                .map(|path| path.trim().to_string())
+                .overlay_archives
+                .iter()
+                .filter_map(|overlay| {
+                    let path = overlay.local_mbtiles_path.as_ref()?;
+                    Some(match overlay.filter {
+                        1 => format!("{path}?fast"),
+                        2 => format!("{path}?slow"),
+                        _ => path.clone(),
+                    })
+                })
                 .collect::<Vec<_>>();
             let buildings_3d = self.buildings_3d && self.tilt > 0.0;
             let want_fringe = self.baked_fringe_mode;
@@ -6388,11 +6631,38 @@ impl MapView {
         if let Some(archive) = self.detail_archive.as_mut() {
             archive.reprioritize_tiles(&priorities);
         }
+        let mut overlay_priorities =
+            vec![HashMap::<TileKey, u64>::new(); self.overlay_archives.len()];
+        for (logical_key, parts) in &self.archive_pending_tiles {
+            let priority = priorities.get(logical_key).copied().unwrap_or(u64::MAX);
+            for overlay in &parts.overlays {
+                if let Some(fetch_key) = overlay.fetch_key {
+                    overlay_priorities[overlay.archive_index]
+                        .entry(fetch_key)
+                        .and_modify(|current| *current = (*current).min(priority))
+                        .or_insert(priority);
+                }
+            }
+        }
+        for (overlay, priorities) in self
+            .overlay_archives
+            .iter_mut()
+            .zip(overlay_priorities.iter())
+        {
+            if let Some(archive) = overlay.archive.as_mut() {
+                archive.reprioritize_tiles(priorities);
+            }
+        }
         if let Some(archive) = self.base_archive.as_mut() {
             archive.flush(cx);
         }
         if let Some(archive) = self.detail_archive.as_mut() {
             archive.flush(cx);
+        }
+        for overlay in &mut self.overlay_archives {
+            if let Some(archive) = overlay.archive.as_mut() {
+                archive.flush(cx);
+            }
         }
         let dropped = self
             .tile_queue
@@ -6553,6 +6823,29 @@ impl MapView {
         let generation = self.archive_generation;
         for key in missing {
             let priority = priorities.get(&key).copied().unwrap_or(u64::MAX);
+            let mut overlays = Vec::new();
+            for (archive_index, overlay) in self.overlay_archives.iter_mut().enumerate() {
+                let Some(archive) = overlay.archive.as_mut() else {
+                    continue;
+                };
+                let (fetch_key, result) = match archive.zoom_range() {
+                    Some(range) => match overlay_fetch_key(key, range) {
+                        Some(fetch_key) => (Some(fetch_key), None),
+                        None => (None, Some(Ok(None))),
+                    },
+                    None => (Some(key), None),
+                };
+                if let Some(fetch_key) = fetch_key {
+                    archive.request_tile(cx, fetch_key, generation, priority);
+                }
+                overlays.push(ArchiveOverlayPart {
+                    archive_index,
+                    name: overlay.name.clone(),
+                    filter: overlay.filter,
+                    fetch_key,
+                    result,
+                });
+            }
             self.archive_pending_tiles.insert(
                 key,
                 ArchiveTileParts {
@@ -6561,6 +6854,7 @@ impl MapView {
                     detail: None,
                     detail_required,
                     reuse_base_as_detail: reuse_base_as_detail && key.z >= 14,
+                    overlays,
                 },
             );
             if let Some(archive) = self.base_archive.as_mut() {
@@ -6577,6 +6871,11 @@ impl MapView {
         }
         if let Some(archive) = self.detail_archive.as_mut() {
             archive.flush(cx);
+        }
+        for overlay in &mut self.overlay_archives {
+            if let Some(archive) = overlay.archive.as_mut() {
+                archive.flush(cx);
+            }
         }
         self.sync_archive_request_watchdog(cx);
     }
@@ -8833,7 +9132,6 @@ impl MapView {
             TileSourceConfig::LocalArchive {
                 mbtiles_path: base.to_string(),
                 detail_mbtiles_path: detail.to_string(),
-                overlay_mbtiles_paths: self.overlay_mbtiles_paths.clone(),
                 bridge_dz_path: bridge_dz.to_string(),
             },
         );
@@ -8841,23 +9139,13 @@ impl MapView {
 
     /// Swap the active geodata overlays; stale tiles keep rendering while
     /// rebuilt ones stream in with the new layer set.
-    pub fn set_overlay_paths(&mut self, cx: &mut Cx, paths: &str) {
-        if self.overlay_mbtiles_paths == paths {
+    pub fn set_overlays(&mut self, cx: &mut Cx, overlays: Vec<OverlaySource>) {
+        if self.overlays == overlays {
             return;
         }
-        self.overlay_mbtiles_paths = paths.to_string();
-        if let Some(config) = self.tile_source_config.as_mut() {
-            match config {
-                TileSourceConfig::LocalArchive {
-                    overlay_mbtiles_paths,
-                    ..
-                }
-                | TileSourceConfig::HttpArchive {
-                    overlay_mbtiles_paths,
-                    ..
-                } => *overlay_mbtiles_paths = paths.to_string(),
-            }
-        }
+        self.overlays = overlays;
+        self.install_overlay_sources(cx);
+        self.archive_pending_tiles.clear();
         self.restyle_tiles_keep_stale(cx);
     }
 
@@ -9563,9 +9851,9 @@ impl MapViewRef {
         None
     }
 
-    pub fn set_overlay_paths(&self, cx: &mut Cx, paths: &str) {
+    pub fn set_overlays(&self, cx: &mut Cx, overlays: Vec<OverlaySource>) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.set_overlay_paths(cx, paths);
+            inner.set_overlays(cx, overlays);
         }
     }
 
@@ -9992,6 +10280,66 @@ mod tests {
     }
 
     #[test]
+    fn map_overlay_archive_fetches_its_maxzoom_ancestor() {
+        let key = TileKey {
+            z: 17,
+            x: 65_793,
+            y: 43_117,
+        };
+        assert_eq!(overlay_fetch_key(key, (7, 14)), Some(TileKey {
+            z: 14,
+            x: key.x >> 3,
+            y: key.y >> 3,
+        }));
+        assert_eq!(overlay_fetch_key(key, (18, 20)), None);
+    }
+
+    #[test]
+    fn map_view_dispatches_hosted_overlays_through_archive_reader() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        map.zoom = 1.0;
+        map.set_source_config(
+            &mut cx,
+            TileSourceConfig::http_archive("https://tiles.invalid/world.mkmap"),
+        );
+        map.set_overlays(
+            &mut cx,
+            vec![
+                OverlaySource::with_option(
+                    "chargers",
+                    TileSourceConfig::http_archive("https://tiles.invalid/chargers.mkmap"),
+                    Some("fast"),
+                ),
+                OverlaySource::new(
+                    "nature",
+                    TileSourceConfig::local_archive("local/overlays/nature.mbtiles"),
+                ),
+            ],
+        );
+        let key = TileKey { z: 1, x: 0, y: 0 };
+        map.visible_tiles = vec![key];
+        map.request_visible_tiles_from_local_source(&mut cx);
+
+        assert_eq!(map.overlay_archives.len(), 2);
+        assert_eq!(map.overlay_archives[0].name, "chargers");
+        assert_eq!(map.overlay_archives[0].filter, 1);
+        assert_eq!(
+            map.overlay_archives[0]
+                .archive
+                .as_ref()
+                .unwrap()
+                .waiter_count(),
+            1
+        );
+        assert_eq!(
+            map.overlay_archives[1].local_mbtiles_path.as_deref(),
+            Some("local/overlays/nature.mbtiles")
+        );
+        assert_eq!(map.archive_pending_tiles[&key].overlays.len(), 1);
+    }
+
+    #[test]
     fn malformed_zoom_state_cannot_invert_request_clamping() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let mut map = test_map(&mut cx);
@@ -10013,7 +10361,6 @@ mod tests {
             TileSourceConfig::LocalArchive {
                 mbtiles_path: path.to_string_lossy().into_owned(),
                 detail_mbtiles_path: String::new(),
-                overlay_mbtiles_paths: String::new(),
                 bridge_dz_path: String::new(),
             },
         );
@@ -10058,7 +10405,6 @@ mod tests {
             TileSourceConfig::LocalArchive {
                 mbtiles_path: path.to_string_lossy().into_owned(),
                 detail_mbtiles_path: String::new(),
-                overlay_mbtiles_paths: String::new(),
                 bridge_dz_path: String::new(),
             },
         );
@@ -10122,7 +10468,6 @@ mod tests {
             TileSourceConfig::LocalArchive {
                 mbtiles_path: path.to_string_lossy().into_owned(),
                 detail_mbtiles_path: String::new(),
-                overlay_mbtiles_paths: String::new(),
                 bridge_dz_path: String::new(),
             },
         );

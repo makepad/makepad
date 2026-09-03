@@ -6,23 +6,9 @@
 //! the MapView after each tool run and feeds worker results as they arrive.
 
 use makepad_widgets::*;
+use crate::overlays::{OverlaySelection, OVERLAY_LAYERS};
 use std::path::PathBuf;
 use std::sync::mpsc;
-
-/// Always-on ocean sidecars (sea from coastline-derived polygons; low serves
-/// open ocean via ancestor overzoom, high carries exact coastal tiles).
-pub const OCEAN_LOW_MBTILES: &str = "ocean-low.mbtiles";
-pub const OCEAN_HIGH_MBTILES: &str = "ocean-high.mbtiles";
-
-/// name → overlay mbtiles path (order = fixed toggle slots).
-pub const OVERLAY_LAYERS: [(&str, &str); 6] = [
-    ("chargers", "local/overlays/nl-chargers.mbtiles?fast"),
-    ("transit", "local/overlays/nl-transit.mbtiles"),
-    ("nature", "local/overlays/nl-nature.mbtiles"),
-    ("districts", "local/overlays/nl-wijkbuurt.mbtiles"),
-    ("buildings_age", "local/overlays/nl-buildings-age.mbtiles"),
-    ("demographics", "local/overlays/nl-demographics.mbtiles"),
-];
 
 pub struct WindUpdate {
     pub nx: usize,
@@ -48,7 +34,7 @@ pub struct TerrainUpdate {
 
 pub struct LayerState {
     pub maps_root: PathBuf,
-    pub overlay_on: [bool; OVERLAY_LAYERS.len()],
+    pub overlays: OverlaySelection,
     pub rain: bool,
     pub wind: bool,
     pub terrain: bool,
@@ -69,7 +55,7 @@ impl Default for LayerState {
     fn default() -> Self {
         Self {
             maps_root: PathBuf::new(),
-            overlay_on: [false; OVERLAY_LAYERS.len()],
+            overlays: OverlaySelection::default(),
             rain: false,
             wind: false,
             terrain: false,
@@ -111,19 +97,13 @@ impl LayerState {
                 Ok("tiltshift")
             }
             _ => {
-                for (i, (layer_name, _)) in OVERLAY_LAYERS.iter().enumerate() {
-                    if *layer_name == key
-                        || (key == "wijkbuurt" && *layer_name == "districts")
-                        || (key == "buildings-age" && *layer_name == "buildings_age")
-                    {
-                        self.overlay_on[i] = on;
-                        return Ok(layer_name);
-                    }
+                if let Some(layer_name) = self.overlays.set_named(&key, on) {
+                    return Ok(layer_name);
                 }
                 self.dirty = false;
                 Err(format!(
                     "unknown layer '{name}' — available: rain, wind, terrain, {}",
-                    OVERLAY_LAYERS.map(|(n, _)| n).join(", ")
+                    OVERLAY_LAYERS.map(|layer| layer.name).join(", ")
                 ))
             }
         }
@@ -141,35 +121,8 @@ impl LayerState {
         Ok(theme)
     }
 
-    pub fn overlay_paths(&self) -> String {
-        // Ocean sidecars are always on: sea polygons are base data (the
-        // pbf-base schema has no coastline stage), not a toggleable layer.
-        let paths = [
-            self.maps_root.join(OCEAN_LOW_MBTILES),
-            self.maps_root.join(OCEAN_HIGH_MBTILES),
-        ];
-        let mut paths = paths
-            .into_iter()
-            .filter(|path| path.is_file())
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        paths.extend(
-            OVERLAY_LAYERS
-                .iter()
-                .zip(self.overlay_on.iter())
-                .filter(|(_, on)| **on)
-                .map(|((_, path), _)| (*path).to_string()),
-        );
-        paths.join(";")
-    }
-
     pub fn summary(&self) -> String {
-        let mut on: Vec<&str> = OVERLAY_LAYERS
-            .iter()
-            .zip(self.overlay_on.iter())
-            .filter(|(_, o)| **o)
-            .map(|((n, _), _)| *n)
-            .collect();
+        let mut on = self.overlays.enabled_names();
         if self.rain {
             on.push("rain");
         }
