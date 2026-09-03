@@ -103,10 +103,15 @@ const CACHE_MAGIC: &[u8; 8] = b"VJWAVE\0\0";
 /// second application can reach a coarser rung the first was too far
 /// from -- so a change to the ladder is a version bump, which is exactly
 /// what this number is for.
+/// Version 12 says whether the grid and key were read off the separated
+/// stems rather than the mix. A version 11 sidecar was measured on the
+/// mix, and there is no way to tell from the bytes, so it is re-analysed
+/// like every other bump.
+///
 /// Version 11 carries the record's measured loudness. A version 10
 /// sidecar has none, and there is no way to derive one without the
 /// samples, so it is re-analysed like every other bump.
-const CACHE_VERSION: u32 = 11;
+const CACHE_VERSION: u32 = 12;
 /// Longest local file the music explorer will lift into memory.
 pub const MAX_LOCAL_TRACK_FRAMES: usize = 48_000 * 60 * 15;
 
@@ -661,6 +666,16 @@ pub struct TrackAnalysis {
     /// when there was nothing to measure -- which is not "quiet" and must
     /// never be turned into a gain.
     pub loudness_lufs: Option<f64>,
+    /// The grid and key were read off the SEPARATED stems: the pulse from
+    /// the drums alone, where nothing is masking the kick, and the chroma
+    /// from everything but the drums, where nothing broadband is voting
+    /// for every pitch class at once.
+    ///
+    /// Kept so the work is done once. It is also the reason a stem answer
+    /// is never overwritten by a mix answer: the mix pass runs on every
+    /// load, and without this it would undo the better measurement every
+    /// time the record came back.
+    pub from_stems: bool,
 }
 
 impl TrackAnalysis {
@@ -2108,6 +2123,57 @@ fn snap_tempo(grid: TrackGrid, span_secs: f64) -> TrackGrid {
 }
 
 /// Full analysis of one decoded track.
+/// A grid and a key read off the separated stems.
+///
+/// Only the two products separation can improve, and neither of the two
+/// it cannot: the waveform tiles are of the MIX, which is what the
+/// operator sees, and the loudness is of the mix, which is what the room
+/// hears.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StemReading {
+    pub grid: TrackGrid,
+    pub key: Option<KeyEstimate>,
+}
+
+/// Re-read the pulse and the chroma from separated lanes.
+///
+/// The pulse comes off the DRUMS alone, where nothing is masking the
+/// kick; the chroma off everything BUT the drums, where a broadband hit
+/// is not voting for every pitch class at once. Both are the same
+/// estimators the mix goes through -- this changes what they are shown,
+/// not how they think.
+///
+/// `None` when either lane is missing: half a reading is not a reading.
+pub fn stem_reading(
+    drums: &TrackPcm,
+    rest: &TrackPcm,
+    span_secs: f64,
+) -> Option<StemReading> {
+    if drums.frames.is_empty() || rest.frames.is_empty() {
+        return None;
+    }
+    let envelopes = build_envelopes(drums);
+    let grid = snap_tempo(estimate_grid(&envelopes, None), span_secs);
+    if !grid.has_grid() {
+        return None;
+    }
+    Some(StemReading {
+        grid,
+        key: crate::track_key::estimate_key(&rest.frames, rest.sample_rate),
+    })
+}
+
+/// Whether a stem reading is worth taking over the mix's.
+///
+/// The pulse is: separation is the point, and a grid measured where
+/// nothing masks the kick is the better measurement -- unless it is
+/// LESS sure of itself, which happens on a record the separator could
+/// make nothing of. The key is taken only when the mix had none or the
+/// stem reading is at least as sure, for the same reason.
+pub fn stem_reading_wins(mix: &TrackGrid, stems: &TrackGrid) -> bool {
+    stems.has_grid() && (!mix.has_grid() || stems.confidence >= mix.confidence * 0.9)
+}
+
 /// Where one analysis spent its time, in milliseconds.
 ///
 /// Deliberately NOT part of the result and never written to the sidecar:
@@ -2207,6 +2273,7 @@ pub fn analyze_timed(pcm: &TrackPcm) -> (TrackAnalysis, AnalysisTiming) {
             }
         }),
         loudness_lufs,
+        from_stems: false,
     };
     (analysis, timing)
 }
@@ -2370,6 +2437,7 @@ pub fn encode_analysis(analysis: &TrackAnalysis) -> Vec<u8> {
         }
         None => out.extend_from_slice(&[0u8; 9]),
     }
+    out.push(u8::from(analysis.from_stems));
     out
 }
 
@@ -2461,11 +2529,13 @@ pub fn decode_analysis(bytes: &[u8]) -> Result<TrackAnalysis, String> {
             _ => return Err("wave cache loudness flag out of range".into()),
         }
     };
+    let from_stems = take(1)?[0] != 0;
     #[cfg(test)]
     let _ = refined_by_beats;
     Ok(TrackAnalysis {
         sound,
         loudness_lufs,
+        from_stems,
         duration_secs,
         sample_rate,
         #[cfg(not(test))]
@@ -2688,6 +2758,101 @@ fn gcd_u32(mut left: u32, mut right: u32) -> u32 {
 // ---------------------------------------------------------------------------
 // worker pool
 // ---------------------------------------------------------------------------
+
+/// A second look at a record whose stems have arrived: the two products
+/// separation can improve, and nothing else.
+///
+/// Its own pool rather than a second kind of job on the analysis one,
+/// because the two must not queue behind each other -- a deck waiting to
+/// be loaded must never wait for a refinement of a record that is
+/// already playing.
+pub struct StemGridJob {
+    pub deck: DeckId,
+    pub gen: u64,
+    pub key: AnalysisKey,
+    pub drums: Arc<TrackPcm>,
+    pub rest: Arc<TrackPcm>,
+    pub span_secs: f64,
+}
+
+pub struct StemGridDone {
+    pub deck: DeckId,
+    pub gen: u64,
+    pub key: AnalysisKey,
+    pub reading: StemReading,
+}
+
+/// One worker, one job at a time: a refinement is never urgent, and two
+/// of them at once would take cores off the separation that feeds them.
+pub struct StemGridPool {
+    tx: Sender<StemGridJob>,
+    rx: Receiver<StemGridDone>,
+    busy: Option<(DeckId, u64)>,
+}
+
+impl Default for StemGridPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StemGridPool {
+    pub fn new() -> StemGridPool {
+        let (tx, jobs) = channel::<StemGridJob>();
+        let (done_tx, rx) = channel::<StemGridDone>();
+        let _ = std::thread::Builder::new()
+            .name("vj-stem-grid".into())
+            .spawn(move || {
+                while let Ok(job) = jobs.recv() {
+                    let started = std::time::Instant::now();
+                    let Some(reading) = stem_reading(&job.drums, &job.rest, job.span_secs)
+                    else {
+                        continue;
+                    };
+                    makepad_widgets::log!(
+                        "stems: grid {:.2} bpm conf {:.2}, key {}, {} ms",
+                        reading.grid.bpm,
+                        reading.grid.confidence,
+                        reading.key.map_or("none".to_string(), |key| key.camelot()),
+                        started.elapsed().as_millis(),
+                    );
+                    if done_tx
+                        .send(StemGridDone {
+                            deck: job.deck,
+                            gen: job.gen,
+                            key: job.key,
+                            reading,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+        StemGridPool { tx, rx, busy: None }
+    }
+
+    /// Ask for one, unless this deck's generation is already in flight.
+    pub fn submit(&mut self, job: StemGridJob) -> bool {
+        if self.busy == Some((job.deck, job.gen)) {
+            return false;
+        }
+        let key = (job.deck, job.gen);
+        if self.tx.send(job).is_err() {
+            return false;
+        }
+        self.busy = Some(key);
+        true
+    }
+
+    pub fn poll(&mut self) -> Option<StemGridDone> {
+        let done = self.rx.try_recv().ok()?;
+        if self.busy == Some((done.deck, done.gen)) {
+            self.busy = None;
+        }
+        Some(done)
+    }
+}
 
 pub struct AnalysisJob {
     /// The deck waiting on this, when one is. `None` is the preprocessing
@@ -3419,6 +3584,57 @@ mod tests {
         analysis.loudness_lufs = Some(f64::NAN);
         let back = decode_analysis(&encode_analysis(&analysis)).expect("a round trip");
         assert_eq!(back.loudness_lufs, None, "a level that is not a number is none");
+    }
+
+    /// A grid read off a drums lane is the same estimator shown a
+    /// cleaner signal: on a click track with a mixed-in pad, the drums
+    /// alone still find the tempo.
+    #[test]
+    fn a_grid_can_be_read_off_the_drums_alone() {
+        let drums = click_track(48_000, 128.0, 12.0, 0.25);
+        // The "rest": a steady A minor triad, which is what the chroma
+        // pass is being handed while the drums keep the pulse.
+        let rate = 48_000;
+        let mut rest = Vec::with_capacity(rate * 12);
+        for n in 0..(rate * 12) {
+            let t = n as f64 / rate as f64;
+            let mut value = 0.0;
+            for hz in [220.0, 261.63, 329.63] {
+                value += (2.0 * std::f64::consts::PI * hz * t).sin();
+            }
+            let sample = (value / 3.0 * 8000.0) as i16;
+            rest.push([sample, sample]);
+        }
+        let rest = TrackPcm { frames: rest, sample_rate: rate as u32 };
+        let reading = stem_reading(&drums, &rest, 12.0).expect("a reading");
+        assert!((reading.grid.bpm - 128.0).abs() < 0.5, "{}", reading.grid.bpm);
+        let key = reading.key.expect("a key");
+        assert_eq!(key.camelot(), "8A", "A minor off the pitched lanes");
+
+        // Half a reading is not a reading.
+        let empty = TrackPcm { frames: Vec::new(), sample_rate: 48_000 };
+        assert!(stem_reading(&drums, &empty, 12.0).is_none());
+        assert!(stem_reading(&empty, &rest, 12.0).is_none());
+    }
+
+    /// Separation is the point, so its answer is preferred -- but never
+    /// when it is markedly less sure of itself than the mix's.
+    #[test]
+    fn a_stem_reading_gives_way_when_it_is_less_sure() {
+        let grid = |confidence: f32| TrackGrid {
+            bpm: 128.0,
+            beat_secs: 60.0 / 128.0,
+            first_beat_secs: 0.0,
+            downbeat_phase: 0,
+            confidence,
+        };
+        assert!(stem_reading_wins(&grid(0.6), &grid(0.6)));
+        assert!(stem_reading_wins(&grid(0.6), &grid(0.55)), "a hair under still wins");
+        assert!(!stem_reading_wins(&grid(0.8), &grid(0.3)), "but not a shrug");
+        // A mix with no grid at all takes anything measured.
+        assert!(stem_reading_wins(&TrackGrid::default(), &grid(0.2)));
+        // And a stem reading that is not a grid is never taken.
+        assert!(!stem_reading_wins(&grid(0.6), &TrackGrid::default()));
     }
 
     #[test]

@@ -207,7 +207,8 @@ use crate::console::{ClipLatch, Console, ConsoleView};
 use crate::preprocess::{Group as PrepGroup, Pass as PrepPass, PreprocessSettings, PASSES};
 use crate::track_tags::TrackTags;
 use crate::wave_analysis::{
-    AnalysisJob, AnalysisKey, AnalysisPool, TrackAnalysis, TrackGrid, TrackSummary,
+    AnalysisJob, AnalysisKey, AnalysisPool, StemGridJob, StemGridPool, TrackAnalysis,
+    TrackGrid, TrackSummary,
 };
 use crate::loop_scan::LoopScanPool;
 use crate::loop_scan::ScanSettings;
@@ -3279,6 +3280,48 @@ fn splat_stem_levels(
             Some([sample[0] as f32 * scale, sample[1] as f32 * scale])
         },
     )
+}
+
+/// One separated lane, or a sum of several, as one run of samples.
+///
+/// `None` unless every chunk of every lane asked for is present: an
+/// analysis of half a record measured against the whole record's length
+/// would be a different record.
+/// The drums lane, and the three that are not it, in the deck's own lane
+/// order (vocals, drums, bass, other).
+const STEM_DRUMS: usize = 1;
+const STEM_NOT_DRUMS: [usize; 3] = [0, 2, 3];
+
+fn stem_lanes_pcm(
+    stems: &TrackStems,
+    lanes: &[usize],
+    frames: usize,
+    sample_rate: u32,
+) -> Option<Arc<TrackPcm>> {
+    if lanes.is_empty() || frames == 0 {
+        return None;
+    }
+    for lane in lanes {
+        if !stem_span_ready(stems, *lane, 0, frames) {
+            return None;
+        }
+    }
+    let mut out = vec![[0i16; 2]; frames];
+    for lane in lanes {
+        for (chunk, block) in stems.lanes[*lane].iter().enumerate() {
+            let Some(block) = block else { continue };
+            let base = chunk * stems.chunk_frames;
+            for (offset, frame) in block.iter().enumerate() {
+                let Some(slot) = out.get_mut(base + offset) else { break };
+                // Saturating, because four lanes summed back together can
+                // reach past what one of them can hold -- and a wrap
+                // would be a click the estimator would read as an onset.
+                slot[0] = slot[0].saturating_add(frame[0]);
+                slot[1] = slot[1].saturating_add(frame[1]);
+            }
+        }
+    }
+    Some(Arc::new(TrackPcm { frames: out, sample_rate }))
 }
 
 fn stem_span_ready(stems: &TrackStems, stem: usize, start: usize, end: usize) -> bool {
@@ -6876,6 +6919,10 @@ pub struct App {
     /// Separated audio as it streams in, per deck.
     #[rust]
     deck_stems: [Option<Arc<TrackStems>>; 2],
+    /// The second look at a record whose stems have arrived: the pulse
+    /// from the drums alone and the chroma from everything else.
+    #[rust]
+    stem_grid: StemGridPool,
     /// Per-zoom-column stem energy, and the pyramid built from it.
     #[rust]
     deck_stem_tiles: [Vec<[u8; 4]>; 2],
@@ -14206,6 +14253,7 @@ p2 {}
     // ---- polling ------------------------------------------------------------
 
     fn pump(&mut self, cx: &mut Cx) {
+        self.pump_stem_grid(cx);
         // Audio health first, so a dropout heard in the room shows up here
         // with a cause attached: contended = a UI-thread lock hold silenced
         // a whole callback; render high-water = the render itself is the
@@ -21663,6 +21711,100 @@ p2 {}
         self.prefetch.release(finished, Instant::now());
     }
 
+    /// Ask for the stem-derived grid and key, once the separation has
+    /// produced every chunk of every lane it needs.
+    ///
+    /// Refused on a record whose answer already came off the stems, so
+    /// the work is done once however many times the record is loaded.
+    fn submit_stem_grid(&mut self, deck: DeckId, gen: u64) {
+        let index = deck.index();
+        let (Some(stems), Some((pcm, _)), Some(analysis)) = (
+            self.deck_stems[index].clone(),
+            self.deck_tracks[index].clone(),
+            self.deck_analysis[index].clone(),
+        ) else {
+            return;
+        };
+        if analysis.from_stems {
+            return;
+        }
+        // Derived exactly as the load and the flip derive it, so the
+        // refinement is filed against the same record rather than under a
+        // second name.
+        let Some(item) = self.decks.deck(deck).item() else { return };
+        let key = match self.local_by_asset.get(&item.asset) {
+            Some(path) => AnalysisKey::from_path(path),
+            None => AnalysisKey::from_blob(item.media_blob),
+        };
+        let frames = pcm.frames.len();
+        let rate = pcm.sample_rate;
+        // Drums for the pulse; everything else, summed, for the chroma.
+        let Some(drums) = stem_lanes_pcm(&stems, &[STEM_DRUMS], frames, rate) else { return };
+        let Some(rest) = stem_lanes_pcm(&stems, &STEM_NOT_DRUMS, frames, rate) else { return };
+        self.stem_grid.submit(StemGridJob {
+            deck,
+            gen,
+            key,
+            drums,
+            rest,
+            span_secs: pcm.seconds(),
+        });
+    }
+
+    /// Take a stem-derived reading, when it is worth taking.
+    fn pump_stem_grid(&mut self, cx: &mut Cx) {
+        while let Some(done) = self.stem_grid.poll() {
+            let index = done.deck.index();
+            if self.decks.deck(done.deck).load_gen != done.gen {
+                continue;
+            }
+            let Some(analysis) = self.deck_analysis[index].clone() else { continue };
+            if !crate::wave_analysis::stem_reading_wins(&analysis.grid, &done.reading.grid) {
+                makepad_widgets::log!(
+                    "stems: kept the mix grid; the stem reading was less sure ({:.2} vs {:.2})",
+                    done.reading.grid.confidence,
+                    analysis.grid.confidence,
+                );
+                continue;
+            }
+            let mut refined = (*analysis).clone();
+            refined.grid = done.reading.grid;
+            // The key only when the stems found one: a separator that made
+            // nothing of a record must not erase what the mix knew.
+            if done.reading.key.is_some() {
+                refined.key = done.reading.key;
+            }
+            refined.from_stems = true;
+            // The tempo map was fitted against the mix's line and
+            // describes a record that is no longer being published.
+            refined.tempo_map = crate::wave_analysis::TempoMap::default();
+            let refined = Arc::new(refined);
+            let stored = refined.clone();
+            let store_key = done.key.clone();
+            std::thread::spawn(move || {
+                crate::wave_analysis::store_analysis(&store_key, &stored)
+            });
+            self.deck_analysis[index] = Some(refined.clone());
+            self.track_summaries.insert(
+                done.key,
+                Some(TrackSummary {
+                    duration_secs: refined.duration_secs,
+                    grid: refined.grid,
+                    key: refined.key,
+                }),
+            );
+            let cmds = self.decks.grid_ready(
+                done.deck,
+                done.gen,
+                refined.grid,
+                refined.sound,
+                None,
+            );
+            self.run_deck_cmds(cx, cmds);
+            self.republish_grid(cx, done.deck, refined.grid);
+        }
+    }
+
     fn submit_splat_refinement(&mut self, deck: DeckId, gen: u64) {
         let index = deck.index();
         if self.deck_splat_refining[index] == Some(gen) {
@@ -21913,6 +22055,7 @@ p2 {}
                     if self.deck_stem_coverage[deck.index()]
                         .is_some_and(|(_, complete)| complete)
                     {
+                        self.submit_stem_grid(deck, gen);
                         self.submit_splat_refinement(deck, gen);
                     }
                 }
@@ -21938,6 +22081,7 @@ p2 {}
                         self.arm_stems_write_back(deck, &digest, model_frames);
                     }
                     if complete {
+                        self.submit_stem_grid(deck, gen);
                         self.submit_splat_refinement(deck, gen);
                     }
                     // Words already in hand for this digest — the other deck

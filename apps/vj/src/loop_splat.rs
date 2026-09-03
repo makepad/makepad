@@ -438,6 +438,7 @@ mod tests {
         TrackAnalysis {
             sound: None,
             loudness_lufs: None,
+            from_stems: false,
             duration_secs,
             sample_rate: 48_000,
             grid: TrackGrid {

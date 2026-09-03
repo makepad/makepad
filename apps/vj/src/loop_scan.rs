@@ -901,6 +901,7 @@ mod tests {
         TrackAnalysis {
             sound: None,
             loudness_lufs: None,
+            from_stems: false,
             duration_secs: beats as f64 * 0.5,
             sample_rate: 22050,
             grid: TrackGrid {
