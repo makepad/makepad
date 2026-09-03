@@ -11,6 +11,7 @@ use crate::{
     provisioner::MapProvisioner,
     side_panel::{PanelAction, PanelController},
     ChatEntry, ChatState, EntryKind, AMSTERDAM_CENTER,
+    ThemePreference,
 };
 use makepad_map_nav::{
     geo::LonLat,
@@ -121,6 +122,8 @@ pub struct App {
     #[rust]
     started: bool,
     #[rust]
+    theme_preference: ThemePreference,
+    #[rust]
     provisioner: MapProvisioner,
     #[rust]
     assistant: AssistantService,
@@ -173,8 +176,8 @@ impl App {
             return;
         }
         self.started = true;
+        self.theme_preference.start(cx);
         self.layers.tilt_shift = true;
-        self.layers.theme = theme_for_hour(local_hour_now());
         let map = self.ui.map_view(cx, ids!(map));
         self.provisioner.ensure_source(cx, &map);
         self.api = NavApi::new(self.provisioner.api_url());
@@ -485,10 +488,12 @@ impl MatchEvent for App {
         }
         if let Some(on) = self.ui.check_box(cx, ids!(theme_night)).changed(actions) {
             self.layers.theme = if on { 1 } else { 0 };
+            self.theme_preference.save(cx, self.layers.theme);
             self.apply_layers(cx);
         }
         if let Some(on) = self.ui.check_box(cx, ids!(theme_circuit)).changed(actions) {
             self.layers.theme = if on { 2 } else { 0 };
+            self.theme_preference.save(cx, self.layers.theme);
             self.apply_layers(cx);
         }
         let map = self.ui.map_view(cx, ids!(map));
@@ -508,6 +513,10 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.ensure_started(cx);
+        if let Some(theme) = self.theme_preference.restored(event) {
+            self.layers.theme = theme;
+            self.apply_layers(cx);
+        }
         let map = self.ui.map_view(cx, ids!(map));
         self.terrain_layer.handle_event(cx, event, &map);
         self.provisioner.handle_event();
@@ -555,26 +564,5 @@ impl AppMain for App {
         let tilt = self.ui.map_view(cx, ids!(map)).tilt() as f32;
         self.chat.tilt_strength = ((tilt - 5.0) / 50.0).clamp(0.0, 1.0);
         self.ui.handle_event(cx, event, &mut Scope::with_data(&mut self.chat));
-    }
-}
-
-fn local_hour_now() -> u32 {
-    ((Cx::time_now() as i64).rem_euclid(86_400) / 3_600) as u32
-}
-
-fn theme_for_hour(hour: u32) -> u32 {
-    if hour >= 19 || hour < 7 { 1 } else { 0 }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn civil_twilight_theme_matches_native_boundaries() {
-        assert_eq!(theme_for_hour(6), 1);
-        assert_eq!(theme_for_hour(7), 0);
-        assert_eq!(theme_for_hour(18), 0);
-        assert_eq!(theme_for_hour(19), 1);
     }
 }
