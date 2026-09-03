@@ -378,6 +378,7 @@ impl CxOpenXrSession {
         system_id: XrSystemId,
         instance: XrInstance,
         vulkan: &mut CxVulkan,
+        spawner: &crate::thread::ThreadSpawner,
         options: CxOpenXrOptions,
     ) -> Result<CxOpenXrSession, String> {
         let mut graphics_requirements = XrGraphicsRequirementsVulkanKHR::default();
@@ -489,7 +490,7 @@ impl CxOpenXrSession {
                 _color_images: color_images,
                 _depth_images: depth_images,
                 render_targets,
-                depth_mesh_pipeline: CxOpenXrDepthMeshPipeline::new(),
+                depth_mesh_pipeline: CxOpenXrDepthMeshPipeline::new(spawner),
                 retired_projection_layers: Vec::new(),
             }),
             color_swap_chain,

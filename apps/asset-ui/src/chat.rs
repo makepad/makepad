@@ -30,6 +30,7 @@ use makepad_chat_ui::{ChatFeed, ClientTools, FeedConfig};
 use makepad_asset_client::dto::ChatToolOutcomeDto;
 use makepad_asset_client::json::{self, Value};
 use makepad_asset_client::{ApiEndpoints, ChatAttachment};
+use makepad_widgets::Cx;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -493,7 +494,13 @@ impl ChatBridge {
 
     /// The store session is up: open the chat on its broker. The session
     /// itself is created lazily, on the first turn.
-    pub fn connect(&mut self, endpoints: ApiEndpoints, token: Option<String>, cache: PathBuf) {
+    pub fn connect(
+        &mut self,
+        cx: &Cx,
+        endpoints: ApiEndpoints,
+        token: Option<String>,
+        cache: PathBuf,
+    ) {
         let tools = AppTools {
             defaults: self.defaults.clone(),
             fleet: self.fleet.clone(),
@@ -503,6 +510,7 @@ impl ChatBridge {
         self.feed = Some(ChatFeed::start(
             FeedConfig::new(endpoints, token, cache, "gen", "gen"),
             Box::new(tools),
+            cx.thread_spawner(),
         ));
     }
 

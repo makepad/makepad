@@ -35,7 +35,11 @@
 //! comparison bakes, and this pipeline reproduces those bakes rather than
 //! unifying them.
 
-use makepad_draw::{makepad_math::*, Cx};
+use makepad_draw::{
+    makepad_math::*,
+    makepad_platform::thread::{Lane, TaskPool},
+    Cx,
+};
 
 /// Texels per world unit of triangle edge. Kenney props are authored around
 /// 1 unit = 1 metre, so this is roughly "a sample every 3cm". A pack atlas
@@ -456,7 +460,21 @@ pub fn bake_into(
     min: Vec3f,
     max: Vec3f,
 ) -> BakedAo {
-    bake_into_authored(atlas, positions, normals, None, indices, min, max)
+    bake_into_authored_inner(atlas, positions, normals, None, indices, min, max, None)
+}
+
+/// Pool-aware offline bake. Call this from a runtime worker; the nested
+/// chart and sample batches borrow the runtime pool through `fan_out`.
+pub fn bake_into_with_pool(
+    pool: &TaskPool,
+    atlas: &mut AoAtlas,
+    positions: &mut Vec<Vec3f>,
+    normals: &mut Vec<Vec3f>,
+    indices: &mut Vec<u32>,
+    min: Vec3f,
+    max: Vec3f,
+) -> BakedAo {
+    bake_into_authored_inner(atlas, positions, normals, None, indices, min, max, Some(pool))
 }
 
 /// [`bake_into`] with the AUTHORED vertex normals passed alongside the
@@ -473,6 +491,34 @@ pub fn bake_into_authored(
     indices: &mut Vec<u32>,
     min: Vec3f,
     max: Vec3f,
+) -> BakedAo {
+    bake_into_authored_inner(atlas, positions, normals, authored, indices, min, max, None)
+}
+
+pub fn bake_into_authored_with_pool(
+    pool: &TaskPool,
+    atlas: &mut AoAtlas,
+    positions: &mut Vec<Vec3f>,
+    normals: &mut Vec<Vec3f>,
+    authored: Option<&[Vec3f]>,
+    indices: &mut Vec<u32>,
+    min: Vec3f,
+    max: Vec3f,
+) -> BakedAo {
+    bake_into_authored_inner(
+        atlas, positions, normals, authored, indices, min, max, Some(pool),
+    )
+}
+
+fn bake_into_authored_inner(
+    atlas: &mut AoAtlas,
+    positions: &mut Vec<Vec3f>,
+    normals: &mut Vec<Vec3f>,
+    authored: Option<&[Vec3f]>,
+    indices: &mut Vec<u32>,
+    min: Vec3f,
+    max: Vec3f,
+    pool: Option<&TaskPool>,
 ) -> BakedAo {
     // GROWTH INVALIDATES EVERY UV ALREADY HANDED OUT.
     //
@@ -867,42 +913,26 @@ pub fn bake_into_authored(
             let charts_ref = &charts;
             let sampler = &sampler;
             let (occ_pos, occ_idx) = (&occ_pos, &occ_idx);
-            let cursor = std::sync::atomic::AtomicUsize::new(0);
-            let threads = std::thread::available_parallelism()
-                .map_or(8, |n| n.get())
-                .min(charts.len().max(1));
             let mut out: Vec<Vec<u8>> = vec![Vec::new(); charts.len()];
-            std::thread::scope(|scope| {
-                let mut handles = Vec::with_capacity(threads);
-                for _ in 0..threads {
-                    handles.push(scope.spawn(|| {
-                        let mut mine: Vec<(usize, Vec<u8>)> = Vec::new();
-                        loop {
-                            let ci = cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            if ci >= charts_ref.len() {
-                                break;
-                            }
-                            mine.push((
-                                ci,
-                                crate::aobaker_port::bake_aobaker_chart(
-                                    &charts_ref[ci], sampler, occ_pos, occ_idx, pos, nrm, idx,
-                                    &params,
-                                ),
-                            ));
-                        }
-                        mine
-                    }));
-                }
-                for h in handles {
-                    for (ci, bytes) in h.join().unwrap_or_default() {
-                        out[ci] = bytes;
-                    }
-                }
-            });
+            let (tx, rx) = std::sync::mpsc::channel();
+            let work = |ci: usize| {
+                let bytes = crate::aobaker_port::bake_aobaker_chart(
+                    &charts_ref[ci], sampler, occ_pos, occ_idx, pos, nrm, idx, &params,
+                );
+                let _ = tx.send((ci, bytes));
+            };
+            match pool {
+                Some(pool) => pool.fan_out(Lane::Heavy, charts.len(), work),
+                None => (0..charts.len()).for_each(work),
+            }
+            drop(tx);
+            for (ci, bytes) in rx {
+                out[ci] = bytes;
+            }
             out
         }
         AoBakerKind::BakerBoy => crate::bakerboy::bake_all_charts(
-            &charts, atlas.size, positions, normals, indices, min, max,
+            &charts, atlas.size, positions, normals, indices, min, max, pool,
         ),
         AoBakerKind::Lightmapper => Vec::new(),
     };
@@ -1015,8 +1045,8 @@ pub fn bake_into_authored(
                 .unwrap_or(2),
             ..crate::ao_lightmapper::LightmapParams::atlas()
         };
-        let bake = crate::ao_lightmapper::bake_ao(
-            &out_pos, Some(&lm_nrm), &ao_uv, &out_idx, sz, sz, &params,
+        let bake = crate::ao_lightmapper::bake_ao_inner(
+            &out_pos, Some(&lm_nrm), &ao_uv, &out_idx, sz, sz, &params, pool,
         );
         let mut data = bake.data;
         #[cfg(test)]

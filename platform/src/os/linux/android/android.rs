@@ -262,10 +262,12 @@ impl Cx {
             }
         }
 
+        let spawner = self.thread_spawner();
         let mut vulkan = self.os.vulkan.take();
         let result = self.os.openxr.create_session(
             self.os.display.as_ref().unwrap(),
             vulkan.as_mut(),
+            &spawner,
             self.current_android_xr_options(),
             &self.os_type,
         );

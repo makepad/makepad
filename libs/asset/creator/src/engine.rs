@@ -271,7 +271,10 @@ pub fn run(
         let run_state = derive_state(&states);
         match run_state {
             RunState::Running | RunState::Pending => {
+                #[cfg(not(target_arch = "wasm32"))]
                 std::thread::sleep(config.poll_interval);
+                #[cfg(target_arch = "wasm32")]
+                std::hint::spin_loop();
             }
             terminal => {
                 let _ = events.send(RunEvent::RunFinished { state: terminal });
