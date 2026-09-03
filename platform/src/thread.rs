@@ -210,8 +210,21 @@ impl CancellationToken {
 
     /// Park a worker until cancellation or a `Cx::monotonic_now()` deadline.
     // The std condvar deadline clock is unavailable in wasm workers.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn wait_until(&self, deadline: f64) -> WaitOutcome {
+        #[cfg(target_arch = "wasm32")]
+        {
+            while !self.is_cancelled() {
+                let remaining = deadline - Cx::monotonic_now();
+                if remaining <= 0.0 {
+                    return WaitOutcome::DeadlineReached;
+                }
+                unsafe { js_worker_wait((remaining.min(0.01) * 1_000.0).ceil()) };
+            }
+            return WaitOutcome::Cancelled;
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
         if self.is_cancelled() {
             return WaitOutcome::Cancelled;
         }
@@ -238,7 +251,14 @@ impl CancellationToken {
                 };
             }
         }
+        }
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "env")]
+extern "C" {
+    fn js_worker_wait(timeout_ms: f64);
 }
 
 struct TaskState<T> {
@@ -1386,6 +1406,9 @@ impl Drop for FanOutParent<'_> {
             handle.cancel();
         }
         while self.shared.running.load(Ordering::SeqCst) != 0 {
+            #[cfg(target_arch = "wasm32")]
+            std::thread::yield_now();
+            #[cfg(not(target_arch = "wasm32"))]
             std::thread::park_timeout(Duration::from_millis(1));
         }
     }

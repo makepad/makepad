@@ -29,7 +29,8 @@ use crate::host;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-use makepad_widgets::makepad_platform::thread::SignalToUI;
+use makepad_widgets::makepad_platform::thread::{CancellationToken, Lane, SignalToUI, TaskPool};
+use makepad_widgets::Cx;
 
 use crate::hub::ClientId;
 
@@ -583,6 +584,7 @@ pub struct ClientSlot {
     pub app: String,
     pub title: String,
     pub child: Option<Child>,
+    task_pool: Option<TaskPool>,
     pub sender: Option<Sender<Vec<u8>>>,
     pub socket: Option<u64>,
     /// The child's main window id in the studio protocol (0 until
@@ -640,6 +642,7 @@ impl ClientSlot {
             app: app.to_string(),
             title: title.to_string(),
             child: None,
+            task_pool: None,
             sender: None,
             socket: None,
             window_id: 0,
@@ -708,20 +711,61 @@ mod signal {
 /// still alive; the escalation runs off-thread so a UI-thread caller never
 /// blocks on it. Windows keeps the plain `Child::kill()` this replaced.
 #[cfg(unix)]
-pub fn kill_child_group(child: &mut Child, grace: std::time::Duration) {
+pub fn kill_child_group(child: &mut Child, grace: std::time::Duration, pool: &TaskPool) {
     let pid = child.id() as i32;
     signal::kill_group(pid, signal::SIGTERM);
-    std::thread::spawn(move || {
-        std::thread::sleep(grace);
+    let wait = CancellationToken::new();
+    let submitted = pool.submit(Lane::Heavy, move || {
+        let _ = wait.wait_until(Cx::monotonic_now() + grace.as_secs_f64());
         if signal::alive(pid) {
             signal::kill_group(pid, signal::SIGKILL);
         }
     });
+    match submitted {
+        Ok(task) => task.detach(),
+        Err(_) if signal::alive(pid) => signal::kill_group(pid, signal::SIGKILL),
+        Err(_) => {}
+    }
 }
 
 #[cfg(not(unix))]
-pub fn kill_child_group(child: &mut Child, _grace: std::time::Duration) {
+pub fn kill_child_group(child: &mut Child, _grace: std::time::Duration, _pool: &TaskPool) {
     let _ = child.kill();
+}
+
+/// Final slot teardown owns the child from here on. Signal and reap it wholly
+/// on a heavy pool worker; dropping a slot on the UI thread never waits for a
+/// process or decoder wrapper to exit.
+fn reap_child_group(mut child: Child, grace: std::time::Duration, pool: &TaskPool) {
+    #[cfg(unix)]
+    let pid = {
+        let pid = child.id() as i32;
+        signal::kill_group(pid, signal::SIGTERM);
+        pid
+    };
+    match pool.reserve(Lane::Heavy) {
+        Ok(slot) => slot
+            .submit(move || {
+                #[cfg(unix)]
+                {
+                    let wait = CancellationToken::new();
+                    let _ = wait.wait_until(Cx::monotonic_now() + grace.as_secs_f64());
+                    if signal::alive(pid) {
+                        signal::kill_group(pid, signal::SIGKILL);
+                    }
+                }
+                #[cfg(not(unix))]
+                let _ = child.kill();
+                let _ = child.wait();
+            })
+            .detach(),
+        Err(_) => {
+            #[cfg(unix)]
+            signal::kill_group(pid, signal::SIGKILL);
+            #[cfg(not(unix))]
+            let _ = child.kill();
+        }
+    }
 }
 
 impl ClientSlot {
@@ -777,12 +821,13 @@ pub fn strip_ansi(s: &str) -> String {
 
 /// Read a child stream line by line into the log file and the UI channel.
 fn pump<R: std::io::Read + Send + 'static>(
+    pool: &TaskPool,
     client: ClientId,
     stream: R,
     mut log: Option<std::fs::File>,
     lines: Sender<ClientLine>,
 ) {
-    std::thread::spawn(move || {
+    let submitted = pool.submit(Lane::Heavy, move || {
         use std::io::{BufRead, BufReader, Write};
         let reader = BufReader::new(stream);
         for line in reader.lines() {
@@ -800,6 +845,10 @@ fn pump<R: std::io::Read + Send + 'static>(
             SignalToUI::set_ui_signal();
         }
     });
+    match submitted {
+        Ok(task) => task.detach(),
+        Err(error) => makepad_widgets::log!("wm: could not queue client output pump: {error}"),
+    }
 }
 
 /// The command line a launch runs, split out so the release-only law is
@@ -838,6 +887,7 @@ pub fn launch_argv(
 
 /// Spawn an app as a hub client.
 pub fn spawn_client(
+    pool: &TaskPool,
     app: &AppDef,
     id: ClientId,
     hub_port: u16,
@@ -911,16 +961,17 @@ pub fn spawn_client(
     let log_path = host::homeless_root().join(format!("wm-client-{}.log", id));
     let log = std::fs::File::create(&log_path).ok();
     if let Some(out) = child.stdout.take() {
-        pump(id, out, log.as_ref().and_then(|f| f.try_clone().ok()), lines.clone());
+        pump(pool, id, out, log.as_ref().and_then(|f| f.try_clone().ok()), lines.clone());
     }
     if let Some(err) = child.stderr.take() {
-        pump(id, err, log, lines);
+        pump(pool, id, err, log, lines);
     }
     Ok(ClientSlot {
         id,
         app: app.id.to_string(),
         title: String::new(),
         child: Some(child),
+        task_pool: Some(pool.clone()),
         sender: None,
         socket: None,
         window_id: 0,
@@ -1343,7 +1394,8 @@ mod tests {
         let pid = child.id() as i32;
         let pgid = unsafe { getpgid(pid) };
         assert_eq!(pgid, pid, "the child should lead its own new group");
-        kill_child_group(&mut child, std::time::Duration::from_millis(50));
+        let pool = Cx::new(Box::new(|_, _| {})).task_pool();
+        kill_child_group(&mut child, std::time::Duration::from_millis(50), &pool);
         let _ = child.wait();
     }
 
@@ -1377,16 +1429,16 @@ mod tests {
         assert_ne!(grandchild_pid, child.id() as i32);
         assert_eq!(unsafe { kill(grandchild_pid, 0) }, 0, "grandchild not up yet");
 
-        kill_child_group(&mut child, std::time::Duration::from_millis(50));
+        let pool = Cx::new(Box::new(|_, _| {})).task_pool();
+        kill_child_group(&mut child, std::time::Duration::from_millis(50), &pool);
         // Past the SIGTERM->SIGKILL escalation: nothing in the group is
         // still standing, wrapper or grandchild.
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        let _ = child.wait();
         assert_eq!(
             unsafe { kill(grandchild_pid, 0) },
             -1,
             "the grandchild the wrapper orphaned should be gone too"
         );
-        let _ = child.wait();
     }
 }
 
@@ -1402,8 +1454,11 @@ impl Drop for ClientSlot {
             );
         }
         if let Some(mut child) = self.child.take() {
-            kill_child_group(&mut child, GROUP_KILL_GRACE);
-            let _ = child.wait();
+            if let Some(pool) = &self.task_pool {
+                reap_child_group(child, GROUP_KILL_GRACE, pool);
+            } else {
+                let _ = child.kill();
+            }
         }
     }
 }

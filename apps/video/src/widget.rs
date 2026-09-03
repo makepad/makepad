@@ -278,7 +278,7 @@ impl MpVideoView {
         self.error = None;
         self.pending_scrub = None;
         self.path = Some(path.to_path_buf());
-        match VideoPlayer::new(&path.to_string_lossy()) {
+        match VideoPlayer::new(&path.to_string_lossy(), cx.task_pool()) {
             Ok(player) => {
                 self.player = Some(player);
                 crate::player::set_volume(self.volume);

@@ -2,22 +2,18 @@
 //! grid is nothing but hardware decodes, ranked by how much screen each one
 //! would paint.
 //!
-//! There is no coordinator thread. The widget pushes wants straight onto a
-//! shared priority queue; a handful of workers pop the biggest first, decode
-//! on VideoToolbox, and send the result back over a [`ToUISender`] (which
+//! There is no per-view decode pool. Each requested decode is a heavy job on
+//! the runtime pool and sends its result back over a [`ToUISender`] (which
 //! raises the UI signal, so the widget drains on `Event::Signal`). A pan
 //! that leaves work behind calls [`StoreHandle::wants`] with the whole
-//! current truth: queued decodes not named are dropped, the rest take their
-//! fresh weights.
+//! current truth, cancelling queued decodes that are no longer visible.
 
 use crate::library::{display_frame, ItemId, Library};
 use crate::tape::{full_frame, read_frame, FullFrame, Planes};
 use makepad_widgets::makepad_platform::thread::{
-    ThreadOptions, ThreadSpawner, ToUIReceiver, ToUISender,
+    CancellationToken, Lane, TaskHandle, TaskPool, ToUIReceiver, ToUISender,
 };
 use std::collections::HashMap;
-use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
 
 pub enum StoreEvent {
     /// A sealed shard's page at one level, hardware decoded from tape.
@@ -31,168 +27,121 @@ pub enum StoreEvent {
     FullFailed { item: ItemId },
 }
 
+#[derive(Clone, Copy)]
 enum Work {
     DecodePage { shard: i64, level: usize },
     DecodeFull { item: ItemId, px: u32 },
 }
 
-struct QueueState {
-    /// (priority, work): the pool serves the biggest first, newest on a tie.
-    immediate: Vec<(u64, Work)>,
-    closed: bool,
-}
-
-struct WorkQueue {
-    state: Mutex<QueueState>,
-    cv: Condvar,
-}
-
-impl WorkQueue {
-    fn new() -> WorkQueue {
-        WorkQueue { state: Mutex::new(QueueState { immediate: Vec::new(), closed: false }), cv: Condvar::new() }
-    }
-
-    fn push(&self, work: Work, priority: u64) {
-        self.state.lock().unwrap().immediate.push((priority, work));
-        self.cv.notify_one();
-    }
-
-    fn pop(&self) -> Option<Work> {
-        let mut s = self.state.lock().unwrap();
-        loop {
-            if s.closed {
-                return None;
-            }
-            // A linear scan: the queue holds at most a screenful of asks
-            // between two wants messages, and a decode costs six orders of
-            // magnitude more than walking it.
-            let mut best: Option<(usize, u64)> = None;
-            for (i, (pri, _)) in s.immediate.iter().enumerate() {
-                if best.map_or(true, |(_, bp)| *pri >= bp) {
-                    best = Some((i, *pri));
-                }
-            }
-            if let Some((i, _)) = best {
-                return Some(s.immediate.swap_remove(i).1);
-            }
-            s = self.cv.wait_timeout(s, Duration::from_millis(100)).unwrap().0;
-        }
-    }
-
-    /// Make the queue match what is on screen right now: queued decodes not
-    /// in the want maps are dropped, the rest take their fresh weights.
-    /// Returns what was dropped so the caller can strike its own claims.
-    fn retarget(
-        &self,
-        pages: &HashMap<(i64, usize), u64>,
-        fulls: &HashMap<ItemId, u64>,
-    ) -> (Vec<(i64, usize)>, Vec<ItemId>) {
-        let mut s = self.state.lock().unwrap();
-        let mut dropped_pages = Vec::new();
-        let mut dropped_fulls = Vec::new();
-        s.immediate.retain_mut(|(pri, w)| match w {
-            Work::DecodePage { shard, level } => match pages.get(&(*shard, *level)) {
-                Some(p) => {
-                    *pri = *p;
-                    true
-                }
-                None => {
-                    dropped_pages.push((*shard, *level));
-                    false
-                }
-            },
-            Work::DecodeFull { item, .. } => match fulls.get(item) {
-                Some(p) => {
-                    *pri = *p;
-                    true
-                }
-                None => {
-                    dropped_fulls.push(*item);
-                    false
-                }
-            },
-        });
-        (dropped_pages, dropped_fulls)
-    }
-
-    fn close(&self) {
-        let mut s = self.state.lock().unwrap();
-        s.closed = true;
-        s.immediate.clear();
-        drop(s);
-        self.cv.notify_all();
-    }
+struct Pending {
+    work: Work,
+    cancel: CancellationToken,
+    task: TaskHandle<()>,
 }
 
 pub struct StoreHandle {
-    queue: Arc<WorkQueue>,
+    pool: TaskPool,
+    pending: Vec<Pending>,
     pub events: ToUIReceiver<StoreEvent>,
     pub library: Library,
 }
 
 impl StoreHandle {
-    pub fn need_page(&self, shard: i64, level: usize, priority: u64) {
-        self.queue.push(Work::DecodePage { shard, level }, priority);
+    pub fn need_page(&mut self, shard: i64, level: usize, _priority: u64) -> bool {
+        self.submit(Work::DecodePage { shard, level })
     }
 
-    pub fn need_full(&self, item: ItemId, px: u32, priority: u64) {
-        self.queue.push(Work::DecodeFull { item, px }, priority);
+    pub fn need_full(&mut self, item: ItemId, px: u32, _priority: u64) -> bool {
+        self.submit(Work::DecodeFull { item, px })
+    }
+
+    fn submit(&mut self, work: Work) -> bool {
+        let cancel = CancellationToken::new();
+        let job_cancel = cancel.clone();
+        let library = self.library.clone();
+        let events: ToUISender<StoreEvent> = self.events.sender();
+        let Ok(task) = self.pool.submit(Lane::Heavy, move || {
+            if job_cancel.is_cancelled() {
+                return;
+            }
+            let event = decode(&library, work);
+            if !job_cancel.is_cancelled() {
+                let _ = events.send(event);
+            }
+        }) else {
+            return false;
+        };
+        self.pending.push(Pending { work, cancel, task });
+        true
+    }
+
+    pub fn reap_finished(&mut self) {
+        self.pending.retain_mut(|pending| pending.task.try_take().is_none());
     }
 
     /// The whole current want: everything queued and not named here is
     /// dropped. Returns (pages, fulls) that were dropped, so the caller can
     /// strike its "already asked" marks for exactly those.
     pub fn wants(
-        &self,
+        &mut self,
         pages: &HashMap<(i64, usize), u64>,
         fulls: &HashMap<ItemId, u64>,
     ) -> (Vec<(i64, usize)>, Vec<ItemId>) {
-        self.queue.retarget(pages, fulls)
+        let mut dropped_pages = Vec::new();
+        let mut dropped_fulls = Vec::new();
+        self.pending.retain_mut(|pending| {
+            if pending.task.try_take().is_some() {
+                return false;
+            }
+            let wanted = match pending.work {
+                Work::DecodePage { shard, level } => pages.contains_key(&(shard, level)),
+                Work::DecodeFull { item, .. } => fulls.contains_key(&item),
+            };
+            if !wanted {
+                pending.cancel.cancel();
+                pending.task.cancel();
+                match pending.work {
+                    Work::DecodePage { shard, level } => dropped_pages.push((shard, level)),
+                    Work::DecodeFull { item, .. } => dropped_fulls.push(item),
+                }
+            }
+            wanted
+        });
+        (dropped_pages, dropped_fulls)
     }
 
-    /// A read-only store has nothing to flush: closing the queue is the
-    /// whole shutdown, and the workers exit on their next pop.
-    pub fn shutdown(&self) {
-        self.queue.close();
-    }
-}
-
-/// Bring up the decode pool over a baked library.
-pub fn spawn(library: Library, spawner: &ThreadSpawner) -> StoreHandle {
-    let queue = Arc::new(WorkQueue::new());
-    let events = ToUIReceiver::default();
-    let workers = spawner.worker_count(2, 8).get();
-    for i in 0..workers {
-        let queue = queue.clone();
-        let events: ToUISender<StoreEvent> = events.sender();
-        let library = library.clone();
-        if let Ok(handle) = spawner.spawn_worker(
-            ThreadOptions { name: Some(format!("tiles-decode-{i}").into()), ..Default::default() },
-            move || worker(library, queue, events),
-        ) {
-            handle.detach();
+    pub fn shutdown(&mut self) {
+        for pending in self.pending.drain(..) {
+            pending.cancel.cancel();
+            pending.task.cancel();
         }
     }
-    StoreHandle { queue, events, library }
 }
 
-fn worker(library: Library, queue: Arc<WorkQueue>, events: ToUISender<StoreEvent>) {
-    while let Some(work) = queue.pop() {
-        let event = match work {
-            Work::DecodePage { shard, level } => match read_frame(&library.tape_path(shard, level)) {
-                Ok(planes) => StoreEvent::Page { shard, level, planes },
-                Err(_) => StoreEvent::PageFailed { shard, level },
-            },
-            Work::DecodeFull { item, px } => match display_frame(&library, item, px) {
-                Ok((planes, finest)) => {
-                    let got = planes.width.max(planes.height);
-                    StoreEvent::Full { item, px: got, finest, frame: full_frame(&planes) }
-                }
-                Err(_) => StoreEvent::FullFailed { item },
-            },
-        };
-        if events.send(event).is_err() {
-            break;
+impl Drop for StoreHandle {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+/// Attach a baked library to the runtime decode pool.
+pub fn spawn(library: Library, pool: TaskPool) -> StoreHandle {
+    let events = ToUIReceiver::default();
+    StoreHandle { pool, pending: Vec::new(), events, library }
+}
+
+fn decode(library: &Library, work: Work) -> StoreEvent {
+    match work {
+        Work::DecodePage { shard, level } => match read_frame(&library.tape_path(shard, level)) {
+            Ok(planes) => StoreEvent::Page { shard, level, planes },
+            Err(_) => StoreEvent::PageFailed { shard, level },
+        },
+        Work::DecodeFull { item, px } => match display_frame(library, item, px) {
+            Ok((planes, finest)) => {
+                let got = planes.width.max(planes.height);
+                StoreEvent::Full { item, px: got, finest, frame: full_frame(&planes) }
+            }
+            Err(_) => StoreEvent::FullFailed { item },
         }
     }
 }

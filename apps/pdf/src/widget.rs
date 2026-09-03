@@ -15,11 +15,11 @@
 //! horizontal panning once the zoom is wider than the window, the thumbnail
 //! strip, and the status the chrome reads.
 
-use crate::loader::{file_name, spawn_load, PdfLoadMsg};
+use crate::loader::{file_name, spawn_load, PdfLoadEvent, PdfLoadMsg};
 use crate::thumbs::{
     MpPdfThumbsAction, MpPdfThumbsRef, MpPdfThumbsWidgetExt, STRIP_WIDTH,
 };
-use makepad_widgets::makepad_platform::thread::ToUIReceiver;
+use makepad_widgets::makepad_platform::thread::{CancellationToken, TaskHandle, ToUIReceiver};
 use makepad_widgets::*;
 use std::path::{Path, PathBuf};
 
@@ -120,6 +120,12 @@ pub struct MpPdfView {
     #[rust]
     loader: ToUIReceiver<PdfLoadMsg>,
     #[rust]
+    loader_task: Option<TaskHandle<()>>,
+    #[rust]
+    loader_cancel: CancellationToken,
+    #[rust]
+    loader_generation: u64,
+    #[rust]
     path: Option<PathBuf>,
     /// Page boxes in PDF points, one per parsed page: the layout maths runs
     /// off these rather than walking back into the widget tree.
@@ -217,6 +223,8 @@ impl MpPdfView {
     /// Open `path`. Reading and parsing happen on a worker thread; pages
     /// appear as they arrive.
     pub fn open(&mut self, cx: &mut Cx, path: &Path) {
+        self.cancel_load();
+        self.loader_generation = self.loader_generation.wrapping_add(1);
         self.path = Some(path.to_path_buf());
         self.sizes.clear();
         self.page_count = 0;
@@ -225,10 +233,18 @@ impl MpPdfView {
         self.scroll_x = 0.0;
         self.document(cx).begin_load(cx, 0);
         self.thumb_strip(cx).set_pages(cx, Vec::new());
-        // A fresh receiver drops the old sender's channel, which is how a
-        // still-running parse of the previous document learns to stop.
         self.loader = ToUIReceiver::default();
-        spawn_load(path.to_path_buf(), self.loader.sender());
+        self.loader_cancel = CancellationToken::new();
+        match spawn_load(
+            &cx.task_pool(),
+            path.to_path_buf(),
+            self.loader.sender(),
+            self.loader_generation,
+            self.loader_cancel.clone(),
+        ) {
+            Ok(task) => self.loader_task = Some(task),
+            Err(error) => self.error = Some(format!("could not queue PDF load: {error}")),
+        }
         self.list(cx).set_first_id_and_scroll(0, 0.0);
         cx.redraw_all();
     }
@@ -239,6 +255,8 @@ impl MpPdfView {
     /// loader's sender, which is how a parse still running for the old file
     /// learns to stop.
     pub fn unload(&mut self, cx: &mut Cx) {
+        self.cancel_load();
+        self.loader_generation = self.loader_generation.wrapping_add(1);
         self.loader = ToUIReceiver::default();
         self.path = None;
         self.sizes.clear();
@@ -397,13 +415,23 @@ impl MpPdfView {
 
     // ---- loading ----
 
+    fn cancel_load(&mut self) {
+        self.loader_cancel.cancel();
+        if let Some(task) = self.loader_task.take() {
+            task.cancel();
+        }
+    }
+
     fn drain_loader(&mut self, cx: &mut Cx) {
         loop {
             let Ok(message) = self.loader.try_recv() else {
                 break;
             };
-            match message {
-                PdfLoadMsg::Opened {
+            if message.generation != self.loader_generation {
+                continue;
+            }
+            match message.event {
+                PdfLoadEvent::Opened {
                     page_count,
                     open_ms,
                 } => {
@@ -416,7 +444,7 @@ impl MpPdfView {
                         open_ms
                     );
                 }
-                PdfLoadMsg::Pages { pages } => {
+                PdfLoadEvent::Pages { pages } => {
                     for page in &pages {
                         self.sizes.push(page.size());
                     }
@@ -429,7 +457,7 @@ impl MpPdfView {
                         }
                     }
                 }
-                PdfLoadMsg::Done { total_ms } => {
+                PdfLoadEvent::Done { total_ms } => {
                     log!(
                         "pdf: {} parsed, {} pages in {} ms",
                         self.name(),
@@ -437,12 +465,22 @@ impl MpPdfView {
                         total_ms
                     );
                 }
-                PdfLoadMsg::Failed { message } => {
+                PdfLoadEvent::Failed { message } => {
                     log!("pdf: {}", message);
                     self.error = Some(message);
                 }
             }
             cx.redraw_all();
+        }
+        if self.loader_task.as_ref().is_some_and(TaskHandle::is_finished) {
+            let mut task = self.loader_task.take().unwrap();
+            if let Some(Err(error)) = task.try_take() {
+                if !matches!(error, makepad_widgets::makepad_platform::thread::TaskError::Cancelled)
+                {
+                    self.error = Some(format!("PDF load failed: {error}"));
+                    cx.redraw_all();
+                }
+            }
         }
     }
 

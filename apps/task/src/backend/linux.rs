@@ -19,8 +19,8 @@
 #![allow(dead_code)]
 
 use super::{cpu_pct_from_ticks, MemInfo, NetInfo, ProcInfo, ProcState, Snapshot, SystemBackend, CPU_STATES};
+use makepad_widgets::Cx;
 use std::collections::HashMap;
-use std::time::Instant;
 
 /// `/proc/<pid>/stat` fields a process manager needs.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -190,7 +190,7 @@ pub struct LinuxBackend {
     previous_cores: Vec<[u64; CPU_STATES]>,
     previous_cpu_ticks: HashMap<u32, u64>,
     previous_net: Option<(u64, u64)>,
-    last_sample: Option<Instant>,
+    last_sample: Option<f64>,
     user_names: HashMap<u32, String>,
     cmdlines: HashMap<u32, String>,
     page_size: u64,
@@ -290,8 +290,8 @@ impl SystemBackend for LinuxBackend {
     }
 
     fn sample(&mut self) -> Snapshot {
-        let now = Instant::now();
-        let seconds = self.last_sample.map(|then| now.duration_since(then).as_secs_f64()).unwrap_or(0.0);
+        let now = Cx::monotonic_now();
+        let seconds = self.last_sample.map(|then| (now - then).max(0.0)).unwrap_or(0.0);
         self.last_sample = Some(now);
 
         let cpu_cores = self.sample_cores();
