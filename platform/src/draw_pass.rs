@@ -490,8 +490,11 @@ pub struct DrawPassUniforms {
     pub dpi_dilate: f32,
     #[live]
     pub time: f32,
+    /// App-controlled clock shared by every map draw in this pass. This is
+    /// deliberately separate from `time`: reading that field makes the
+    /// shader's static `uses_time` scan repaint the pass at display rate.
     #[live]
-    pub pad2: f32,
+    pub shiny_time: f32,
 }
 
 impl DrawPassUniforms {

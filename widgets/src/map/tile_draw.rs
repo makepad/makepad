@@ -249,7 +249,6 @@ pub(crate) struct TileFrame {
     pub shadow_sun: [f32; 2],
     pub space_warp: [f32; 4],
     pub space_warp2: [f32; 4],
-    pub shiny_time: f32,
     pub shiny: ShinyConfig,
 }
 
@@ -390,7 +389,6 @@ fn call_uniforms(
 ) -> MapDrawUniforms {
     let mask_pass = phase == TilePhase::Shadow;
     MapDrawUniforms {
-        shiny_time: frame.shiny_time,
         map_scale: view.map_scale,
         map_offset: view.screen_offset,
         fade: match fade {
