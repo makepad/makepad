@@ -1337,7 +1337,10 @@ export class WasmWebBrowser extends WasmBridge {
             if (!this.wasm._has_thread_support) {
                 throw new Error("wasm threading support is unavailable");
             }
-            const thread_info = this.alloc_thread_stack(args.context_ptr);
+            // alloc_thread_stack(request_id, context_ptr, stack_size): the audio thread has no
+            // spawn request, and its context pointer is the wasm audio access — passing it as
+            // the request id left the worklet reading its audio state from address zero.
+            const thread_info = this.alloc_thread_stack(0, args.context_ptr);
             if (!thread_info) {
                 throw new Error("thread stack allocation prerequisites are unavailable");
             }
