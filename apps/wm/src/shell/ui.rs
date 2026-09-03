@@ -12,14 +12,18 @@
 //! `shell/` draws through it, so they share one look exactly like the
 //! original shares `Ui/`.
 //!
-//! Two things every port here keeps from the source:
+//! Two things the FLAT material keeps from the source:
 //!  * hard square corners (`Style.cornerRadius` is 0), and
 //!  * flat fills plus a 1px border — no bevels, no glows, no gradients
 //!    except the hyprland border gradient a theme may name.
+//!
+//! A theme's material (`mod.wm_theme.material`) may replace both with
+//! rounded corners and Liquid Glass; see `begin_surface`.
 
 use makepad_widgets::*;
+use makepad_widgets::gauss_view::{request_window_gauss, GaussBlurSnapshot, GAUSS_VIEW_LEVELS};
 
-use super::{alpha, ControlTokens, CtrlState, ShellTokens, SurfaceTokens};
+use super::{alpha, ControlTokens, CtrlState, MaterialTokens, ShellTokens, SurfaceTokens};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -46,18 +50,268 @@ script_mod! {
         border_color_end: #ffffff
         border_angle: 0.0
         border_width: 1.0
+        corner_radius: 0.0
         pixel: fn() {
             let p = self.pos * self.rect_size
-            let d = min(min(p.x, p.y), min(self.rect_size.x - p.x, self.rect_size.y - p.y))
-            let cov = clamp((self.border_width - d) * 3.0 + 0.5, 0.0, 1.0)
             let rad = self.border_angle * 0.017453292
             let dir = vec2(cos(rad), sin(rad))
             let half = self.rect_size * 0.5
             let extent = max(abs(dir.x) * half.x + abs(dir.y) * half.y, 0.001)
             let t = clamp(0.5 + dot(p - half, dir) / (2.0 * extent), 0.0, 1.0)
             let bc = mix(self.border_color, self.border_color_end, t)
-            let c = mix(self.color, bc, cov * self.border_color.w)
-            return vec4(c.rgb * c.w, c.w)
+            if self.corner_radius < 0.5 {
+                // The omarchy ring: hard square, measured off the quad edges.
+                let d = min(min(p.x, p.y), min(self.rect_size.x - p.x, self.rect_size.y - p.y))
+                let cov = clamp((self.border_width - d) * 3.0 + 0.5, 0.0, 1.0)
+                let c = mix(self.color, bc, cov * self.border_color.w)
+                return vec4(c.rgb * c.w, c.w)
+            }
+            // A rounded card (a theme's material asked for it): the fill,
+            // then the ring stroked just inside the box.
+            let sdf = Sdf2d.viewport(p)
+            let bw = self.border_width
+            sdf.box(bw, bw, self.rect_size.x - bw * 2.0, self.rect_size.y - bw * 2.0, max(0.5, self.corner_radius - bw * 0.5))
+            sdf.fill_keep(self.color)
+            if self.border_width > 0.0 {
+                sdf.stroke(bc, bw)
+            }
+            return sdf.result
+        }
+    }
+
+    // Liquid Glass: `AppleGlassRoundedView`'s material (widgets/src/
+    // gauss_view.rs) on an immediate-mode quad. The pyramid textures and
+    // the material-wide uniforms are bound by `ShellDraw::bind_gauss`; the
+    // per-surface values (tint, border, radius, shadow) are the Rust
+    // struct's instance fields, set per draw. No press ripple: nothing
+    // here animates, and nothing reads draw_pass.time.
+    set_type_default() do #(DrawShellGlass::script_shader(vm)) {
+        ..mod.draw.DrawQuad
+        tint_color: #f8fbff0f
+        border_color: #ffffff8c
+        border_width: 1.0
+        corner_radius: 6.0
+        shadow_color: #00000070
+        shadow_radius: 0.0
+        shadow_offset_y: 0.0
+        fallback_color: #334156
+        specular_strength: 0.22
+        noise_strength: 0.004
+
+        scene_texture: texture_2d(float)
+        mip0_texture: texture_2d(float)
+        mip1_texture: texture_2d(float)
+        mip2_texture: texture_2d(float)
+        mip3_texture: texture_2d(float)
+        mip4_texture: texture_2d(float)
+        mip5_texture: texture_2d(float)
+        has_gauss: uniform(0.0)
+        source_size: uniform(vec2(1.0, 1.0))
+        source_y_flip: uniform(0.0)
+        blur_level: uniform(5.2)
+        lensing_effect: uniform(0.94)
+        lensing_strength: uniform(28.0)
+        lensing_width: uniform(20.0)
+        diffraction_strength: uniform(4.4)
+
+        rect_size2: varying(vec2(0.0))
+        rect_size3: varying(vec2(0.0))
+        rect_pos2: varying(vec2(0.0))
+        rect_shift: varying(vec2(0.0))
+        sdf_rect_pos: varying(vec2(0.0))
+        sdf_rect_size: varying(vec2(0.0))
+
+        vertex: fn() {
+            let shadow_offset = vec2(0.0, self.shadow_offset_y)
+            let min_offset = min(shadow_offset, vec2(0.0, 0.0))
+            self.rect_size2 = self.rect_size + 2.0 * vec2(self.shadow_radius)
+            self.rect_size3 = self.rect_size2 + abs(shadow_offset)
+            self.rect_pos2 = self.rect_pos - vec2(self.shadow_radius) + min_offset
+            self.sdf_rect_size = self.rect_size2 - vec2(self.shadow_radius * 2.0 + self.border_width * 2.0)
+            self.sdf_rect_pos = -min_offset + vec2(self.border_width + self.shadow_radius)
+            self.rect_shift = -min_offset
+            return self.clip_and_transform_vertex(self.rect_pos2, self.rect_size3)
+        }
+
+        bicubic_h: fn(uv: vec2, size: vec2) -> vec4 {
+            let tc = uv * size - 0.5
+            let f = fract(tc)
+            let tc0 = floor(tc)
+            let f2 = f * f
+            let f3 = f2 * f
+            let omf = 1.0 - f
+            let w1 = (f3 * 3.0 - f2 * 6.0 + 4.0) / 6.0
+            let g0 = omf * omf * omf / 6.0 + w1
+            let h0 = clamp((tc0 - 0.5 + w1 / g0) / size, vec2(0.0, 0.0), vec2(1.0, 1.0))
+            let h1 = clamp((tc0 + 1.5 + (f3 / 6.0) / (1.0 - g0)) / size, vec2(0.0, 0.0), vec2(1.0, 1.0))
+            return vec4(h0.x, h0.y, h1.x, h1.y)
+        }
+
+        bicubic_g0: fn(uv: vec2, size: vec2) -> vec2 {
+            let f = fract(uv * size - 0.5)
+            let f2 = f * f
+            let omf = 1.0 - f
+            return omf * omf * omf / 6.0 + (f2 * f * 3.0 - f2 * 6.0 + 4.0) / 6.0
+        }
+
+        sample_level: fn(level: float, uv: vec2) -> vec4 {
+            let source_uv = vec2(uv.x, mix(uv.y, 1.0 - uv.y, self.source_y_flip))
+            let safe_uv = clamp(source_uv, vec2(0.0, 0.0), vec2(1.0, 1.0))
+            if level < 0.5 {
+                return self.scene_texture.sample_as_bgra(safe_uv)
+            }
+            if level < 1.5 {
+                let size = max(self.mip0_texture.size(), vec2(1.0, 1.0))
+                let h = self.bicubic_h(safe_uv, size)
+                let g0 = self.bicubic_g0(safe_uv, size)
+                let g1 = 1.0 - g0
+                return self.mip0_texture.sample_as_bgra(vec2(h.x, h.y)) * (g0.x * g0.y)
+                    + self.mip0_texture.sample_as_bgra(vec2(h.z, h.y)) * (g1.x * g0.y)
+                    + self.mip0_texture.sample_as_bgra(vec2(h.x, h.w)) * (g0.x * g1.y)
+                    + self.mip0_texture.sample_as_bgra(vec2(h.z, h.w)) * (g1.x * g1.y)
+            }
+            if level < 2.5 {
+                let size = max(self.mip1_texture.size(), vec2(1.0, 1.0))
+                let h = self.bicubic_h(safe_uv, size)
+                let g0 = self.bicubic_g0(safe_uv, size)
+                let g1 = 1.0 - g0
+                return self.mip1_texture.sample_as_bgra(vec2(h.x, h.y)) * (g0.x * g0.y)
+                    + self.mip1_texture.sample_as_bgra(vec2(h.z, h.y)) * (g1.x * g0.y)
+                    + self.mip1_texture.sample_as_bgra(vec2(h.x, h.w)) * (g0.x * g1.y)
+                    + self.mip1_texture.sample_as_bgra(vec2(h.z, h.w)) * (g1.x * g1.y)
+            }
+            if level < 3.5 {
+                let size = max(self.mip2_texture.size(), vec2(1.0, 1.0))
+                let h = self.bicubic_h(safe_uv, size)
+                let g0 = self.bicubic_g0(safe_uv, size)
+                let g1 = 1.0 - g0
+                return self.mip2_texture.sample_as_bgra(vec2(h.x, h.y)) * (g0.x * g0.y)
+                    + self.mip2_texture.sample_as_bgra(vec2(h.z, h.y)) * (g1.x * g0.y)
+                    + self.mip2_texture.sample_as_bgra(vec2(h.x, h.w)) * (g0.x * g1.y)
+                    + self.mip2_texture.sample_as_bgra(vec2(h.z, h.w)) * (g1.x * g1.y)
+            }
+            if level < 4.5 {
+                let size = max(self.mip3_texture.size(), vec2(1.0, 1.0))
+                let h = self.bicubic_h(safe_uv, size)
+                let g0 = self.bicubic_g0(safe_uv, size)
+                let g1 = 1.0 - g0
+                return self.mip3_texture.sample_as_bgra(vec2(h.x, h.y)) * (g0.x * g0.y)
+                    + self.mip3_texture.sample_as_bgra(vec2(h.z, h.y)) * (g1.x * g0.y)
+                    + self.mip3_texture.sample_as_bgra(vec2(h.x, h.w)) * (g0.x * g1.y)
+                    + self.mip3_texture.sample_as_bgra(vec2(h.z, h.w)) * (g1.x * g1.y)
+            }
+            if level < 5.5 {
+                let size = max(self.mip4_texture.size(), vec2(1.0, 1.0))
+                let h = self.bicubic_h(safe_uv, size)
+                let g0 = self.bicubic_g0(safe_uv, size)
+                let g1 = 1.0 - g0
+                return self.mip4_texture.sample_as_bgra(vec2(h.x, h.y)) * (g0.x * g0.y)
+                    + self.mip4_texture.sample_as_bgra(vec2(h.z, h.y)) * (g1.x * g0.y)
+                    + self.mip4_texture.sample_as_bgra(vec2(h.x, h.w)) * (g0.x * g1.y)
+                    + self.mip4_texture.sample_as_bgra(vec2(h.z, h.w)) * (g1.x * g1.y)
+            }
+            let size = max(self.mip5_texture.size(), vec2(1.0, 1.0))
+            let h = self.bicubic_h(safe_uv, size)
+            let g0 = self.bicubic_g0(safe_uv, size)
+            let g1 = 1.0 - g0
+            return self.mip5_texture.sample_as_bgra(vec2(h.x, h.y)) * (g0.x * g0.y)
+                + self.mip5_texture.sample_as_bgra(vec2(h.z, h.y)) * (g1.x * g0.y)
+                + self.mip5_texture.sample_as_bgra(vec2(h.x, h.w)) * (g0.x * g1.y)
+                + self.mip5_texture.sample_as_bgra(vec2(h.z, h.w)) * (g1.x * g1.y)
+        }
+
+        sample_blur: fn(level: float, uv: vec2) -> vec4 {
+            let safe_level = clamp(level, 0.0, 6.0)
+            if safe_level >= 5.999 {
+                return self.sample_level(6.0, uv)
+            }
+            let base_level = floor(safe_level)
+            let t = safe_level - base_level
+            let l1 = base_level
+            let l2 = min(base_level + 1.0, 6.0)
+            let blend = t * t * (3.0 - 2.0 * t)
+            let c1 = self.sample_level(l1, uv)
+            let c2 = self.sample_level(l2, uv)
+            return c1.mix(c2, blend)
+        }
+
+        sample_gauss: fn(uv: vec2) -> vec4 {
+            return self.sample_blur(self.blur_level, uv)
+        }
+
+        rounded_edge_normal: fn(shape: float) -> vec2 {
+            let gradient = vec2(dFdx(shape), dFdy(shape))
+            if length(gradient) > 0.00001 {
+                return normalize(gradient)
+            }
+            return vec2(0.0, 1.0)
+        }
+
+        eff_lensing_width: fn() -> float {
+            let cap = max(min(self.sdf_rect_size.x, self.sdf_rect_size.y) * 0.35, 1.0)
+            return min(max(self.lensing_width, 1.0), cap)
+        }
+
+        eff_lensing_scale: fn() -> float {
+            return self.eff_lensing_width() / max(self.lensing_width, 1.0)
+        }
+
+        rounded_edge_lens: fn(shape: float) -> float {
+            let edge = clamp(1.0 - abs(shape) / self.eff_lensing_width(), 0.0, 1.0)
+            return pow(edge, 1.45) * clamp(self.lensing_effect, 0.0, 1.0)
+        }
+
+        pixel: fn() {
+            let sdf = Sdf2d.viewport(self.pos * self.rect_size3)
+            sdf.box(
+                self.sdf_rect_pos.x
+                self.sdf_rect_pos.y
+                self.sdf_rect_size.x
+                self.sdf_rect_size.y
+                max(1.0, self.corner_radius)
+            )
+            if self.shadow_radius > 0.0 && sdf.shape > -1.0 {
+                let m = self.shadow_radius
+                let o = vec2(0.0, self.shadow_offset_y) + self.rect_shift
+                let v = GaussShadow.rounded_box_shadow(
+                    vec2(m) + o
+                    self.rect_size2 + o
+                    self.pos * (self.rect_size3 + vec2(m))
+                    self.shadow_radius * 0.5
+                    self.corner_radius * 2.0
+                )
+                sdf.clear(vec4(self.shadow_color.rgb, self.shadow_color.w * v))
+            }
+
+            let screen_pos = self.rect_pos2 + self.pos * self.rect_size3
+            let src = max(self.source_size, vec2(1.0, 1.0))
+            let uv = screen_pos / src
+            let lens = self.rounded_edge_lens(sdf.shape)
+            let normal = self.rounded_edge_normal(sdf.shape)
+            let base_offset = normal * (lens * self.lensing_strength * self.eff_lensing_scale()) / src
+            let color_offset = normal * (lens * self.diffraction_strength) / src
+            let uv_g = clamp(uv + base_offset, vec2(0.0, 0.0), vec2(1.0, 1.0))
+            let uv_r = clamp(uv_g + color_offset, vec2(0.0, 0.0), vec2(1.0, 1.0))
+            let uv_b = clamp(uv_g - color_offset, vec2(0.0, 0.0), vec2(1.0, 1.0))
+            let sample_r = self.sample_gauss(uv_r)
+            let sample_g = self.sample_gauss(uv_g)
+            let sample_b = self.sample_gauss(uv_b)
+            let refracted = vec4(sample_r.r, sample_g.g, sample_b.b, 1.0)
+            let fallback = vec4(self.fallback_color.rgb, 1.0)
+            let base = fallback.mix(refracted, self.has_gauss)
+
+            let material = base.rgb.mix(self.tint_color.rgb, self.tint_color.w)
+            let edge_uv = abs(self.pos * 2.0 - 1.0)
+            let edge_gradient = clamp((edge_uv.x + edge_uv.y) * 0.5, 0.0, 1.0)
+            let sparkle = lens * self.diffraction_strength * 0.004
+            let highlight = self.specular_strength * (0.45 * edge_gradient + 0.55 * lens + 0.30 * (1.0 - self.pos.y))
+            // Static de-banding grain, hashed from screen position only.
+            let noise = (Math.random_2d(screen_pos) - 0.5) * self.noise_strength
+            sdf.fill_keep(vec4(material + highlight + sparkle + noise, 1.0))
+            if self.border_width > 0.0 {
+                sdf.stroke(self.border_color, self.border_width)
+            }
+            return sdf.result
         }
     }
 
@@ -72,6 +326,7 @@ script_mod! {
     set_type_default() do #(ShellDraw::script_component(vm)) {
         fill +: {}
         chrome +: {}
+        glass +: {}
         text +: {
             text_style: TextStyle{
                 font_family: FontFamily{
@@ -176,6 +431,41 @@ pub struct DrawShellChrome {
     pub border_angle: f32,
     #[live(1.0)]
     pub border_width: f32,
+    /// Sdf2d half-radius; 0 keeps the hard square ring bit for bit.
+    #[live(0.0)]
+    pub corner_radius: f32,
+}
+
+/// The glass card. Instance fields are per draw (`ShellDraw::glass_rect`
+/// fills them from the material); the pyramid textures and material-wide
+/// uniforms are bound once per surface (`ShellDraw::bind_gauss`). Colours
+/// carry their alpha in `w`.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawShellGlass {
+    #[deref]
+    draw_super: DrawQuad,
+    #[live]
+    pub tint_color: Vec4f,
+    #[live]
+    pub border_color: Vec4f,
+    #[live(1.0)]
+    pub border_width: f32,
+    /// Sdf2d half-radius.
+    #[live(6.0)]
+    pub corner_radius: f32,
+    #[live]
+    pub shadow_color: Vec4f,
+    #[live(0.0)]
+    pub shadow_radius: f32,
+    #[live(0.0)]
+    pub shadow_offset_y: f32,
+    #[live]
+    pub fallback_color: Vec4f,
+    #[live(0.22)]
+    pub specular_strength: f32,
+    #[live(0.004)]
+    pub noise_strength: f32,
 }
 
 /// Our own SVGs on `DrawVector` — omarchy draws Nerd-Font glyphs, we draw
@@ -377,11 +667,31 @@ pub struct ShellDraw {
     #[live]
     pub chrome: DrawShellChrome,
     #[live]
+    pub glass: DrawShellGlass,
+    #[live]
     pub text: DrawText,
     #[live]
     pub text_bold: DrawText,
     #[live]
     pub icons: ShellIcons,
+    /// The material the surface being drawn paints with — `begin_surface`.
+    #[rust]
+    pub material: MaterialTokens,
+    /// The overlay draw list a glass surface is hoisted into — created on
+    /// the first glass draw, reused on every one after.
+    #[rust]
+    overlay: Option<DrawList2d>,
+    /// Between `begin_surface` and `end_surface`: the surface was hoisted
+    /// into `overlay`.
+    #[rust]
+    hoisted: bool,
+    /// The frame `overlay` was last begun in — a surface hoists once per
+    /// frame (see `begin_surface`).
+    #[rust]
+    hoist_redraw_id: u64,
+    /// The double-hoist warning fires once per kit.
+    #[rust]
+    hoist_warned: bool,
 }
 
 /// Makepad sizes text in POINTS; the QML scale is in pixels.
@@ -584,6 +894,127 @@ impl ShellDraw {
 
     // ---------------------------------------------------------- surfaces
 
+    /// Start drawing one surface. Under glass this hoists everything drawn
+    /// until `end_surface` into the kit's own overlay draw list — the
+    /// pyramid snapshot is only handed out while an overlay is drawing,
+    /// and overlays stay out of the capture, so glass never refracts
+    /// itself — and binds the snapshot to the glass shader. Under flat it
+    /// only records the material. Overlay lists composite in DRAW order —
+    /// each `begin_overlay_reuse` stamps this frame's order — so the call
+    /// must happen every frame, open or closed, to keep the surface in
+    /// tree order. A surface may be hoisted once per frame: a second hoist
+    /// would clear the same list under entries the ancestor still aligns.
+    pub fn begin_surface(&mut self, cx: &mut Cx2d, tokens: &ShellTokens) {
+        debug_assert!(!self.hoisted, "begin_surface without end_surface");
+        self.material = tokens.material;
+        self.hoisted = false;
+        if !self.material.is_glass() {
+            return;
+        }
+        if !cx.is_drawing_overlay() {
+            let redraw_id = cx.redraw_id();
+            if self.hoist_redraw_id == redraw_id {
+                if !self.hoist_warned {
+                    log!("ShellDraw: surface hoisted twice in one frame; the second hoist is skipped and that draw is flat");
+                    self.hoist_warned = true;
+                }
+                // `material` is a copy of the tokens' (taken above), so the
+                // un-hoisted body draws flat without touching the tokens.
+                self.material.glass = 0.0;
+                return;
+            }
+            self.hoist_redraw_id = redraw_id;
+            if self.overlay.is_none() {
+                self.overlay = Some(DrawList2d::new(cx));
+            }
+            self.overlay.as_mut().unwrap().begin_overlay_reuse(cx);
+            self.hoisted = true;
+        }
+        let snapshot = request_window_gauss(cx);
+        self.bind_gauss(cx, snapshot);
+    }
+
+    /// Close what `begin_surface` opened: ends the kit's overlay list when
+    /// this draw was hoisted; a no-op under flat.
+    pub fn end_surface(&mut self, cx: &mut Cx2d) {
+        if self.hoisted {
+            if let Some(list) = self.overlay.as_mut() {
+                list.end(cx);
+            }
+            self.hoisted = false;
+        }
+    }
+
+    /// The pyramid textures and the material-wide uniforms onto the glass
+    /// shader (mirrors `GaussRoundedView::bind_snapshot`).
+    fn bind_gauss(&mut self, cx: &mut Cx2d, snapshot: Option<GaussBlurSnapshot>) {
+        let m = self.material;
+        let draw = &mut self.glass.draw_vars;
+        match snapshot {
+            Some(s) => {
+                draw.set_texture(0, &s.scene_texture);
+                for slot in 1..=GAUSS_VIEW_LEVELS {
+                    match s.mip_textures.get(slot - 1) {
+                        Some(t) => draw.set_texture(slot, t),
+                        None => draw.empty_texture(slot),
+                    }
+                }
+                draw.set_uniform(
+                    cx,
+                    live_id!(source_size),
+                    &[s.source_size.x as f32, s.source_size.y as f32],
+                );
+                draw.set_uniform(cx, live_id!(source_y_flip), &[s.source_y_flip]);
+                draw.set_uniform(cx, live_id!(has_gauss), &[1.0]);
+            }
+            None => {
+                for slot in 0..=GAUSS_VIEW_LEVELS {
+                    draw.empty_texture(slot);
+                }
+                draw.set_uniform(cx, live_id!(source_size), &[1.0, 1.0]);
+                draw.set_uniform(cx, live_id!(source_y_flip), &[0.0]);
+                draw.set_uniform(cx, live_id!(has_gauss), &[0.0]);
+            }
+        }
+        draw.set_uniform(cx, live_id!(blur_level), &[m.blur_level as f32]);
+        draw.set_uniform(cx, live_id!(lensing_effect), &[m.lensing_effect as f32]);
+        draw.set_uniform(cx, live_id!(lensing_strength), &[m.lensing_strength as f32]);
+        draw.set_uniform(cx, live_id!(lensing_width), &[m.lensing_width as f32]);
+        draw.set_uniform(
+            cx,
+            live_id!(diffraction_strength),
+            &[m.diffraction_strength as f32],
+        );
+    }
+
+    /// One glass quad: the material at `radius` (visual px), with or
+    /// without its drop shadow.
+    fn glass_rect(&mut self, cx: &mut Cx2d, r: Rect, radius: f64, shadow: bool) {
+        if r.size.x <= 0.0 || r.size.y <= 0.0 {
+            return;
+        }
+        let m = self.material;
+        let g = &mut self.glass;
+        g.tint_color = alpha(m.tint_color, m.tint_alpha);
+        g.border_color = alpha(m.border_color, m.border_alpha);
+        g.border_width = m.border_width as f32;
+        g.corner_radius = (radius * 0.5) as f32;
+        g.shadow_color = alpha(m.shadow_color, if shadow { m.shadow_alpha } else { 0.0 });
+        g.shadow_radius = if shadow { m.shadow_radius as f32 } else { 0.0 };
+        g.shadow_offset_y = if shadow { m.shadow_offset_y as f32 } else { 0.0 };
+        g.fallback_color = m.fallback_color;
+        g.specular_strength = m.specular_strength;
+        g.noise_strength = m.noise_strength;
+        g.draw_abs(cx, r);
+    }
+
+    /// The bar's strip under glass: the material, near-square (the shader
+    /// floors the half-radius at 1px), no shadow. The flat bar paints its
+    /// own fill (see `ShellBar::draw_bar_inner`).
+    pub fn glass_strip(&mut self, cx: &mut Cx2d, r: Rect) {
+        self.glass_rect(cx, r, 0.0, false);
+    }
+
     /// A flat fill.
     pub fn solid(&mut self, cx: &mut Cx2d, r: Rect, color: Vec4f) {
         if color.w <= 0.0 || r.size.x <= 0.0 || r.size.y <= 0.0 {
@@ -594,7 +1025,9 @@ impl ShellDraw {
     }
 
     /// `BorderSurface`: fill + ring. `border_end`/`angle` let a theme's
-    /// hyprland gradient through.
+    /// hyprland gradient through; `radius` (visual px) rounds it, 0 being
+    /// the omarchy square.
+    #[allow(clippy::too_many_arguments)]
     pub fn bordered(
         &mut self,
         cx: &mut Cx2d,
@@ -604,6 +1037,7 @@ impl ShellDraw {
         border_end: Vec4f,
         angle: f32,
         width: f64,
+        radius: f64,
     ) {
         if r.size.x <= 0.0 || r.size.y <= 0.0 {
             return;
@@ -621,11 +1055,20 @@ impl ShellDraw {
         };
         self.chrome.border_angle = angle;
         self.chrome.border_width = width as f32;
+        self.chrome.corner_radius = (radius * 0.5) as f32;
         self.chrome.draw_abs(cx, r);
     }
 
     /// A themed card: `[popups]` / `[menu]` / `[notifications]` chrome.
+    /// Flat: the token fill and ring, rounded by the material's corner
+    /// radius. Glass: the material, refracting what lies beneath — the
+    /// token's own colours are the flat look's.
     pub fn card(&mut self, cx: &mut Cx2d, r: Rect, s: &SurfaceTokens) {
+        let radius = self.material.corner_radius;
+        if self.material.is_glass() {
+            self.glass_rect(cx, r, radius, true);
+            return;
+        }
         self.bordered(
             cx,
             r,
@@ -634,13 +1077,15 @@ impl ShellDraw {
             s.border_stop(),
             s.border_angle,
             s.border_width,
+            radius,
         );
     }
 
     /// A control face in one of the shared states (`Style.controlFill` +
-    /// `Border.controlSpec`).
+    /// `Border.controlSpec`), rounded by the material's control radius.
     pub fn control(&mut self, cx: &mut Cx2d, r: Rect, c: &ControlTokens, state: CtrlState) {
         let border = c.border(state);
+        let radius = self.material.control_radius;
         self.bordered(
             cx,
             r,
@@ -649,6 +1094,7 @@ impl ShellDraw {
             border,
             0.0,
             c.border_width(state),
+            radius,
         );
     }
 
@@ -860,6 +1306,7 @@ impl ShellDraw {
             background,
             0.0,
             2.0,
+            0.0,
         );
     }
 

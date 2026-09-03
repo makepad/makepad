@@ -365,6 +365,12 @@ impl ShellPanel {
         self.redraw(cx);
     }
 
+    /// A live theme switch: new tokens, redraw.
+    pub fn set_tokens(&mut self, cx: &mut Cx, tokens: ShellTokens) {
+        self.tokens = tokens;
+        self.redraw(cx);
+    }
+
     /// The card rect: under the bar, centered on the module, `gapsOut` off
     /// the bar edge, clamped into the screen by the same margin.
     fn card_rect(&self, screen: Rect, kind: PanelKind, height: f64) -> Rect {
@@ -470,7 +476,16 @@ impl ShellPanel {
         );
     }
 
+    /// Draw the whole surface into `screen`. Under glass it draws in its
+    /// own overlay list, claimed every frame, open or not.
     pub fn draw_surface(&mut self, cx: &mut Cx2d, screen: Rect) {
+        let tokens = self.tokens;
+        self.d.begin_surface(cx, &tokens);
+        self.draw_surface_inner(cx, screen);
+        self.d.end_surface(cx);
+    }
+
+    fn draw_surface_inner(&mut self, cx: &mut Cx2d, screen: Rect) {
         self.screen = screen;
         let Some(kind) = self.open else {
             self.card = Rect::default();

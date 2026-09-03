@@ -510,6 +510,12 @@ impl ShellBar {
         self.redraw(cx);
     }
 
+    /// A live theme switch: new tokens, redraw.
+    pub fn set_tokens(&mut self, cx: &mut Cx, tokens: ShellTokens) {
+        self.tokens = tokens;
+        self.redraw(cx);
+    }
+
     fn icon_slot(&self) -> f64 {
         self.tokens.bar.icon_slot
     }
@@ -563,9 +569,16 @@ impl ShellBar {
         v
     }
 
-    /// Draw the bar into `r`. Returns nothing; hit rects are recorded for
-    /// the next event pass.
+    /// Draw the bar into `r`. Hit rects are recorded for the next event
+    /// pass. Under glass the whole bar draws in its own overlay list.
     pub fn draw_bar(&mut self, cx: &mut Cx2d, r: Rect) {
+        let tokens = self.tokens;
+        self.d.begin_surface(cx, &tokens);
+        self.draw_bar_inner(cx, r);
+        self.d.end_surface(cx);
+    }
+
+    fn draw_bar_inner(&mut self, cx: &mut Cx2d, r: Rect) {
         let tok = self.tokens;
         let fg = tok.bar.text;
         let accent = tok.bar.active;
@@ -574,9 +587,18 @@ impl ShellBar {
         self.hits.clear();
         self.screen = r;
 
-        // The strip itself: `Color.bar.background`, no border.
-        self.draw_bg.color = alpha(tok.bar.background, tok.bar.background_alpha);
+        // The strip itself: `Color.bar.background`, no border. Under glass
+        // the material paints it and the fill stays as an invisible redraw
+        // anchor (it is the widget's `#[redraw]` area).
+        self.draw_bg.color = if tok.material.is_glass() {
+            Vec4f::default()
+        } else {
+            alpha(tok.bar.background, tok.bar.background_alpha)
+        };
         self.draw_bg.draw_abs(cx, r);
+        if tok.material.is_glass() {
+            self.d.glass_strip(cx, r);
+        }
 
         // ---- left: menu, workspaces
         let mut x = r.pos.x + self.pad_left.max(EDGE_MARGIN);

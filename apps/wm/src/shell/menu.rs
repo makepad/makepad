@@ -868,6 +868,12 @@ impl ShellMenu {
         self.redraw(cx);
     }
 
+    /// A live theme switch: new tokens, redraw.
+    pub fn set_tokens(&mut self, cx: &mut Cx, tokens: ShellTokens) {
+        self.tokens = tokens;
+        self.redraw(cx);
+    }
+
     fn row_height(&self) -> f64 {
         if self.model.rows.iter().any(|r| !r.detail.is_empty()) {
             ROW_HEIGHT_DETAIL
@@ -932,8 +938,17 @@ impl ShellMenu {
         (rect(x, y, CARD_WIDTH, height), visible)
     }
 
-    /// Draw the whole surface into `screen` (scrim included).
+    /// Draw the whole surface into `screen`. Under glass it draws in its
+    /// own overlay list, claimed every frame, open or not.
     pub fn draw_surface(&mut self, cx: &mut Cx2d, screen: Rect) {
+        let tokens = self.tokens;
+        self.d.begin_surface(cx, &tokens);
+        self.draw_surface_inner(cx, screen);
+        self.d.end_surface(cx);
+    }
+
+    /// The body, scrim included.
+    fn draw_surface_inner(&mut self, cx: &mut Cx2d, screen: Rect) {
         self.screen = screen;
         if !self.model.open {
             self.card = Rect::default();
