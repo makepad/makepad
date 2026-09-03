@@ -1259,6 +1259,18 @@ fn extract_node(
             &loc,
         ));
     }
+    let flip = deep_value(vm, obj, "flip")
+        .and_then(|value| value.as_bool())
+        .ok_or_else(|| {
+            field_error(
+                source,
+                span,
+                "flip",
+                file_name,
+                "flip must be a bool",
+                &loc,
+            )
+        })?;
     let fn_src = if type_name == "Fn" {
         let run = deep_value(vm, obj, "run").unwrap_or(NIL);
         let is_fn = run
@@ -1331,6 +1343,7 @@ fn extract_node(
         outputs,
         at: at_value,
         size: size_value,
+        flip,
         loc,
         fn_src,
         face_src,
@@ -1411,7 +1424,7 @@ fn generic_gen_params(
     input_names: &HashSet<String>,
 ) -> Result<Vec<(String, Literal)>, EvalError> {
     let reserved: HashSet<&str> = [
-        "kind", "type_name", "domain", "ports", "at", "size", "ui", "on_fail", "label", "out",
+        "kind", "type_name", "domain", "ports", "at", "size", "flip", "ui", "on_fail", "label", "out",
     ]
     .into_iter()
     .collect();

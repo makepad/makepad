@@ -2643,6 +2643,7 @@ mod tests {
             }],
             at: None,
             size: None,
+            flip: false,
             loc: Loc { line: 2, col: 1 },
             fn_src: None,
             face_src: None,

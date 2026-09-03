@@ -253,6 +253,7 @@ pub fn node_from_catalog(id: String, catalog: &NodeTypeCatalog, at: (f64, f64)) 
         outputs,
         at: Some(at),
         size: None,
+        flip: false,
         loc: Default::default(),
         fn_src: (catalog.type_name == "Fn").then(|| "|i| { {text: i.text} }".to_string()),
         face_src: None,
@@ -283,6 +284,14 @@ pub fn resize_node(graph: &Graph, id: &str, size: (f64, f64)) -> Graph {
     let mut next = graph.clone();
     if let Some(node) = next.nodes.iter_mut().find(|node| node.id == id) {
         node.size = Some(size);
+    }
+    next
+}
+
+pub fn flip_node(graph: &Graph, id: &str, flip: bool) -> Graph {
+    let mut next = graph.clone();
+    if let Some(node) = next.nodes.iter_mut().find(|node| node.id == id) {
+        node.flip = flip;
     }
     next
 }

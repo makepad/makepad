@@ -32,6 +32,26 @@ fn design_fixture_evaluates() {
 }
 
 #[test]
+fn node_facing_round_trips_without_emitting_the_default() {
+    let source = r#"use mod.flow.*
+let left_to_right = Input{at: vec2(10, 20)}
+let right_to_left = Output{at: vec2(30, 40) size: vec2(300, 180) flip: true}
+Flow{left_to_right, right_to_left}
+"#;
+    let graph = evaluate(source, "facing.splash").unwrap();
+    assert!(!graph.nodes[0].flip);
+    assert!(graph.nodes[1].flip);
+    let written = write(&graph);
+    assert_eq!(written.matches("    flip: true\n").count(), 1);
+    assert!(written.find("    size: vec2(300, 180)\n").unwrap()
+        < written.find("    flip: true\n").unwrap());
+    let reparsed = evaluate(&written, "facing-written.splash").unwrap();
+    assert_eq!(reparsed.nodes[0].flip, graph.nodes[0].flip);
+    assert_eq!(reparsed.nodes[1].flip, graph.nodes[1].flip);
+    assert_eq!(write(&reparsed), written);
+}
+
+#[test]
 fn errors_have_locations() {
     let cases = [
         (
