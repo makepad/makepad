@@ -8,7 +8,7 @@
 //! is posted as a [`FaceBridgeCall`] action and the app acts on it on the
 //! next event dispatch.
 
-use crate::canvas::Camera;
+use crate::canvas::{declared_output_type, Camera, PortIcon};
 use crate::values::ValueCache;
 use makepad_code_editor::code_view::CodeView;
 use makepad_flow::{
@@ -59,6 +59,14 @@ script_mod! {
         }
     }
 
+    let EmptyIcon = Icon{
+        visible: false
+        icon_walk: Walk{width: 26 height: Fit}
+        draw_icon +: {
+            color: #x3a3a40
+        }
+    }
+
     let EmptyWell = RoundedView{
         width: Fill
         height: 150
@@ -69,12 +77,27 @@ script_mod! {
             color: #x151517
             border_radius: 16.0
         }
-        Icon{
-            icon_walk: Walk{width: 26 height: Fit}
-            draw_icon +: {
-                color: #x3a3a40
-                svg: crate_resource("self:resources/icons/image.svg")
-            }
+        icon_text := EmptyIcon{
+            draw_icon +: {svg: crate_resource("self:resources/icons/text.svg")}
+        }
+        icon_image := EmptyIcon{
+            visible: true
+            draw_icon +: {svg: crate_resource("self:resources/icons/image.svg")}
+        }
+        icon_audio := EmptyIcon{
+            draw_icon +: {svg: crate_resource("self:resources/icons/audio.svg")}
+        }
+        icon_video := EmptyIcon{
+            draw_icon +: {svg: crate_resource("self:resources/icons/video.svg")}
+        }
+        icon_mesh := EmptyIcon{
+            draw_icon +: {svg: crate_resource("self:resources/icons/mesh.svg")}
+        }
+        icon_json := EmptyIcon{
+            draw_icon +: {svg: crate_resource("self:resources/icons/json.svg")}
+        }
+        icon_bytes := EmptyIcon{
+            draw_icon +: {svg: crate_resource("self:resources/icons/bytes.svg")}
         }
         note := Label{
             width: Fit
@@ -173,6 +196,35 @@ pub struct ValueImage {
     loaded: bool,
 }
 
+fn empty_note(ty: PortType) -> &'static str {
+    match ty {
+        PortType::Image => "no picture yet",
+        PortType::Video => "no clip yet",
+        PortType::Audio => "no audio yet",
+        PortType::Mesh => "no mesh yet",
+        PortType::Text | PortType::Json | PortType::List | PortType::Bytes => "no value yet",
+    }
+}
+
+fn set_empty_type(view: &mut View, cx: &mut Cx, ty: PortType) {
+    let icon = PortIcon::for_type(ty);
+    for (id, visible) in [
+        (live_id!(icon_text), icon == PortIcon::Text),
+        (live_id!(icon_image), icon == PortIcon::Image),
+        (live_id!(icon_audio), icon == PortIcon::Audio),
+        (live_id!(icon_video), icon == PortIcon::Video),
+        (live_id!(icon_mesh), icon == PortIcon::Mesh),
+        (live_id!(icon_json), icon == PortIcon::Json),
+        (live_id!(icon_bytes), icon == PortIcon::Bytes),
+    ] {
+        view.widget(cx, &[live_id!(empty), id])
+            .set_visible(cx, visible);
+    }
+    view.label(cx, ids!(empty.note))
+        .set_text(cx, empty_note(ty));
+    view.redraw(cx);
+}
+
 impl Widget for ValueImage {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.view.draw_walk(cx, scope, walk)
@@ -183,6 +235,10 @@ impl Widget for ValueImage {
 }
 
 impl ValueImage {
+    fn set_empty_type(&mut self, cx: &mut Cx, ty: PortType) {
+        set_empty_type(&mut self.view, cx, ty);
+    }
+
     pub fn set_value(&mut self, cx: &mut Cx, value: &ValueBytes) {
         let image = self.view.image(cx, ids!(image));
         let loaded = if value.content_type.contains("jpeg") || value.content_type.contains("jpg") {
@@ -278,6 +334,10 @@ impl Widget for ValueView {
 }
 
 impl ValueView {
+    fn set_empty_type(&mut self, cx: &mut Cx, ty: PortType) {
+        set_empty_type(&mut self.view, cx, ty);
+    }
+
     pub fn set_image(&mut self, cx: &mut Cx, value: &ValueBytes) {
         let image = self.view.image(cx, ids!(image));
         let loaded = if value.content_type.contains("jpeg") || value.content_type.contains("jpg") {
@@ -1058,6 +1118,34 @@ impl FaceHost {
         let _ = parent;
         if let Some(node) = graph.nodes.iter().find(|node| node.id == node_id) {
             self.fill_params_for(cx, &mounted, node);
+        }
+        for show in &mounted.shows {
+            let Some(ty) = graph
+                .nodes
+                .iter()
+                .find(|node| node.id == show.node)
+                .and_then(|node| {
+                    declared_output_type(node).or_else(|| {
+                        node.outputs
+                            .iter()
+                            .find(|port| port.name == show.port)
+                            .map(|port| port.ty)
+                            .or_else(|| {
+                                node.inputs
+                                    .iter()
+                                    .find(|input| input.port == show.port)
+                                    .map(|input| input.ty)
+                            })
+                    })
+                })
+            else {
+                continue;
+            };
+            if let Some(mut image) = show.widget.borrow_mut::<ValueImage>() {
+                image.set_empty_type(cx, ty);
+            } else if let Some(mut view) = show.widget.borrow_mut::<ValueView>() {
+                view.set_empty_type(cx, ty);
+            }
         }
         mounted
     }
