@@ -1,6 +1,7 @@
 use super::geometry::TileKey;
 use crate::makepad_draw::*;
 use makepad_mbtile_reader::{mkmap_tile_id, BlobRef, MkmapLeaf, MkmapRoot};
+use makepad_platform::archive_cache::ArchiveCacheStore;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -446,6 +447,7 @@ struct CachedHttpRange {
 /// HTTP `.mkmap` source using one whole-root GET and strict shard ranges.
 pub struct HttpRangeByteSource {
     root_url: String,
+    disk_cache: Option<ArchiveCacheStore>,
     requests: HashMap<LiveId, HttpNetworkRead>,
     queued: Vec<PendingHttpRead>,
     ready: VecDeque<ReadCompletion>,
@@ -454,12 +456,25 @@ pub struct HttpRangeByteSource {
     range_cache_bytes: usize,
     cache_clock: u64,
     priority_dirty: bool,
+    disk_range_count: u64,
+    fetched_range_count: u64,
+    fetched_range_bytes: u64,
 }
 
 impl HttpRangeByteSource {
     pub fn new(root_url: impl Into<String>) -> Self {
+        let root_url = root_url.into().trim_end_matches('/').to_string();
+        let disk_cache = ArchiveCacheStore::open_for_url(&root_url);
+        Self::new_with_disk_cache(root_url, disk_cache)
+    }
+
+    fn new_with_disk_cache(
+        root_url: impl Into<String>,
+        disk_cache: Option<ArchiveCacheStore>,
+    ) -> Self {
         Self {
             root_url: root_url.into().trim_end_matches('/').to_string(),
+            disk_cache,
             requests: HashMap::new(),
             queued: Vec::new(),
             ready: VecDeque::new(),
@@ -468,6 +483,9 @@ impl HttpRangeByteSource {
             range_cache_bytes: 0,
             cache_clock: 0,
             priority_dirty: false,
+            disk_range_count: 0,
+            fetched_range_count: 0,
+            fetched_range_bytes: 0,
         }
     }
 
@@ -613,6 +631,9 @@ impl HttpRangeByteSource {
     ) -> Vec<ReadCompletion> {
         match pending.kind {
             HttpReadKind::Root => {
+                if let Some(cache) = self.disk_cache.as_mut() {
+                    let _ = cache.write_root(&bytes);
+                }
                 self.root_cache = Some(bytes.clone());
                 pending
                     .waiters
@@ -625,6 +646,13 @@ impl HttpRangeByteSource {
             }
             HttpReadKind::Range { shard, offset, len } => {
                 let fetched = HttpRangeKey { shard, offset, len };
+                if let Some(cache) = self.disk_cache.as_mut() {
+                    let _ = cache.write_range(shard, offset, &bytes);
+                }
+                self.fetched_range_count = self.fetched_range_count.saturating_add(1);
+                self.fetched_range_bytes = self
+                    .fetched_range_bytes
+                    .saturating_add(bytes.len() as u64);
                 self.cache_range(fetched, bytes.clone());
                 pending
                     .waiters
@@ -755,6 +783,21 @@ impl ByteSource for HttpRangeByteSource {
             cx.redraw_all();
             return;
         }
+        if let Some(bytes) = self
+            .disk_cache
+            .as_mut()
+            .and_then(ArchiveCacheStore::read_root)
+            .filter(|bytes| (112..=MAX_ROOT_BYTES).contains(&bytes.len()))
+        {
+            let bytes: Arc<[u8]> = Arc::from(bytes);
+            self.root_cache = Some(bytes.clone());
+            self.ready.push_back(ReadCompletion {
+                token,
+                result: Ok(bytes),
+            });
+            cx.redraw_all();
+            return;
+        }
         if let Some(request) = self
             .requests
             .values_mut()
@@ -797,6 +840,21 @@ impl ByteSource for HttpRangeByteSource {
     ) {
         let requested = HttpRangeKey { shard, offset, len };
         if let Some(bytes) = self.cached_range(requested) {
+            self.ready.push_back(ReadCompletion {
+                token,
+                result: Ok(bytes),
+            });
+            cx.redraw_all();
+            return;
+        }
+        if let Some(bytes) = self
+            .disk_cache
+            .as_mut()
+            .and_then(|cache| cache.read_range(shard, offset, len))
+        {
+            let bytes: Arc<[u8]> = Arc::from(bytes);
+            self.disk_range_count = self.disk_range_count.saturating_add(1);
+            self.cache_range(requested, bytes.clone());
             self.ready.push_back(ReadCompletion {
                 token,
                 result: Ok(bytes),
@@ -927,6 +985,20 @@ impl ByteSource for HttpRangeByteSource {
             }
         }
         self.ready.retain(|completion| completion.token != token);
+    }
+}
+
+impl Drop for HttpRangeByteSource {
+    fn drop(&mut self) {
+        let ranges = self
+            .disk_range_count
+            .saturating_add(self.fetched_range_count);
+        log!(
+            "tiles: {ranges} ranges, {} from disk cache, {} fetched, {:.1} MiB",
+            self.disk_range_count,
+            self.fetched_range_count,
+            self.fetched_range_bytes as f64 / (1024.0 * 1024.0),
+        );
     }
 }
 
@@ -1807,6 +1879,29 @@ impl MapTileArchive {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+    use std::time::{Duration, SystemTime};
+
+    struct TestCacheDir(PathBuf);
+
+    impl TestCacheDir {
+        fn new(name: &str) -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(1);
+            let unique = NEXT.fetch_add(1, AtomicOrdering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "makepad-archive-cache-{name}-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestCacheDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[derive(Clone, Copy, Debug)]
     enum MockRequest {
@@ -1976,7 +2071,10 @@ mod tests {
 
     fn retry_http_range(first: HttpResponse, second: HttpResponse) -> ReadCompletion {
         let mut cx = Cx::new(Box::new(|_, _| {}));
-        let mut source = HttpRangeByteSource::new("https://tiles.invalid/world.mkmap");
+        let mut source = HttpRangeByteSource::new_with_disk_cache(
+            "https://tiles.invalid/world.mkmap",
+            None,
+        );
         let token = next_archive_task_token();
         source.request_range(&mut cx, 0, 10, 4, token, 0, None);
         source.flush(&mut cx);
@@ -2022,7 +2120,10 @@ mod tests {
         }
 
         let mut cx = Cx::new(Box::new(|_, _| {}));
-        let mut source = HttpRangeByteSource::new("https://tiles.invalid/world.mkmap");
+        let mut source = HttpRangeByteSource::new_with_disk_cache(
+            "https://tiles.invalid/world.mkmap",
+            None,
+        );
         let first = next_archive_task_token();
         let second = next_archive_task_token();
         source.request_range(&mut cx, 0, 10, 4, first, 0, None);
@@ -2088,7 +2189,10 @@ mod tests {
     #[test]
     fn root_truncation_retries_then_reports_second_attempt() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
-        let mut source = HttpRangeByteSource::new("https://tiles.invalid/world.mkmap");
+        let mut source = HttpRangeByteSource::new_with_disk_cache(
+            "https://tiles.invalid/world.mkmap",
+            None,
+        );
         let token = next_archive_task_token();
         source.request_root(&mut cx, token);
         let first_id = *source.requests.keys().next().unwrap();
@@ -2136,9 +2240,90 @@ mod tests {
     }
 
     #[test]
+    fn archive_disk_cache_write_read_round_trip_uses_documented_layout() {
+        let directory = TestCacheDir::new("round-trip");
+        let url = "https://tiles.invalid/round-trip.mkmap";
+        let mut cache = ArchiveCacheStore::open_at(&directory.0, url, 1024 * 1024).unwrap();
+        cache.write_root(b"whole root").unwrap();
+        cache.write_range(7, 100, b"01234567").unwrap();
+
+        assert_eq!(cache.read_root().as_deref(), Some(b"whole root".as_slice()));
+        assert_eq!(cache.read_range(7, 102, 4).as_deref(), Some(b"2345".as_slice()));
+        assert!(cache.archive_dir().join("root.mkidx").is_file());
+        assert!(cache.archive_dir().join("007/100-8.bin").is_file());
+    }
+
+    #[test]
+    fn archive_disk_cache_lru_sweeps_to_budget_by_file_mtime() {
+        let directory = TestCacheDir::new("lru");
+        let url = "https://tiles.invalid/lru.mkmap";
+        let mut cache = ArchiveCacheStore::open_at(&directory.0, url, 1024 * 1024).unwrap();
+        cache.write_range(0, 0, b"old!").unwrap();
+        cache.write_range(0, 4, b"new!").unwrap();
+        let old = cache.archive_dir().join("000/0-4.bin");
+        let new = cache.archive_dir().join("000/4-4.bin");
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(10))
+            .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&new)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(20))
+            .unwrap();
+        let one_entry_budget = std::fs::metadata(&new).unwrap().len();
+        drop(cache);
+
+        let mut cache = ArchiveCacheStore::open_at(&directory.0, url, one_entry_budget).unwrap();
+        assert_eq!(cache.read_range(0, 0, 4), None);
+        assert_eq!(cache.read_range(0, 4, 4).as_deref(), Some(b"new!".as_slice()));
+    }
+
+    #[test]
+    fn archive_disk_cache_corrupt_entry_is_ignored_and_refetched() {
+        let directory = TestCacheDir::new("corrupt");
+        let url = "https://tiles.invalid/corrupt.mkmap";
+        let mut cache = ArchiveCacheStore::open_at(&directory.0, url, 1024 * 1024).unwrap();
+        cache.write_range(2, 10, b"bad!").unwrap();
+        let path = cache.archive_dir().join("002/10-4.bin");
+        let mut encoded = std::fs::read(&path).unwrap();
+        *encoded.last_mut().unwrap() ^= 0xff;
+        std::fs::write(&path, encoded).unwrap();
+        drop(cache);
+
+        let cache = ArchiveCacheStore::open_at(&directory.0, url, 1024 * 1024).unwrap();
+        let mut source = HttpRangeByteSource::new_with_disk_cache(url, Some(cache));
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let token = next_archive_task_token();
+        source.request_range(&mut cx, 2, 10, 4, token, 0, None);
+        source.flush(&mut cx);
+        assert_eq!(source.requests.len(), 1, "corrupt cache must fall through to HTTP");
+        let request_id = *source.requests.keys().next().unwrap();
+        let done = source.poll(
+            &mut cx,
+            &Event::NetworkResponses(vec![NetworkResponse::HttpResponse {
+                request_id,
+                response: response(206, Some("bytes 10-13/100"), b"good"),
+            }]),
+        );
+        assert_eq!(done[0].result.as_ref().unwrap().as_ref(), b"good");
+        assert_eq!(source.fetched_range_count, 1);
+        assert_eq!(
+            source.disk_cache.as_mut().unwrap().read_range(2, 10, 4).as_deref(),
+            Some(b"good".as_slice())
+        );
+    }
+
+    #[test]
     fn http_range_cache_serves_second_settle_pass_without_fetching_again() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
-        let mut source = HttpRangeByteSource::new("https://tiles.invalid/world.mkmap");
+        let mut source = HttpRangeByteSource::new_with_disk_cache(
+            "https://tiles.invalid/world.mkmap",
+            None,
+        );
         let key = TileKey { z: 3, x: 2, y: 1 };
         let first = next_archive_task_token();
         source.request_range(&mut cx, 7, 100, 4, first, 0, Some(key));
@@ -2166,7 +2351,10 @@ mod tests {
     #[test]
     fn http_queue_drops_obsolete_range_but_keeps_dispatched_download() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
-        let mut source = HttpRangeByteSource::new("https://tiles.invalid/world.mkmap");
+        let mut source = HttpRangeByteSource::new_with_disk_cache(
+            "https://tiles.invalid/world.mkmap",
+            None,
+        );
         let active = next_archive_task_token();
         let obsolete = next_archive_task_token();
         source.request_range(&mut cx, 0, 0, 4, active, 0, None);
@@ -2504,7 +2692,10 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let workers = new_archive_worker_pool(&mut cx);
         let mut archive = TileArchive::new(
-            HttpRangeByteSource::new("https://tiles.invalid/world.mkmap"),
+            HttpRangeByteSource::new_with_disk_cache(
+                "https://tiles.invalid/world.mkmap",
+                None,
+            ),
             workers,
         );
         archive.request_tile(&mut cx, key, 1);

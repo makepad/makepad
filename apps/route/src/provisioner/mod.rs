@@ -1,4 +1,3 @@
-#[cfg(any(feature = "demo", test))]
 pub(crate) mod demo;
 #[cfg(feature = "native")]
 mod native;
