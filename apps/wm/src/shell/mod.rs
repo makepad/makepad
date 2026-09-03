@@ -434,15 +434,15 @@ pub struct MaterialTokens {
     pub diffraction_strength: f64,
     #[live]
     pub tint_color: Vec4f,
-    #[live(0.06)]
+    #[live(0.40)]
     pub tint_alpha: f32,
     #[live]
     pub border_color: Vec4f,
-    #[live(0.55)]
+    #[live(0.40)]
     pub border_alpha: f32,
     #[live(1.0)]
     pub border_width: f64,
-    #[live(0.22)]
+    #[live(0.14)]
     pub specular_strength: f32,
     #[live(0.004)]
     pub noise_strength: f32,
@@ -478,12 +478,12 @@ impl Default for MaterialTokens {
             lensing_strength: 28.0,
             lensing_width: 20.0,
             diffraction_strength: 4.4,
-            tint_color: rgb(0xf8, 0xfb, 0xff),
-            tint_alpha: 0.06,
+            tint_color: rgb(0x00, 0x00, 0x00),
+            tint_alpha: 0.40,
             border_color: rgb(0xff, 0xff, 0xff),
-            border_alpha: 0.55,
+            border_alpha: 0.40,
             border_width: 1.0,
-            specular_strength: 0.22,
+            specular_strength: 0.14,
             noise_strength: 0.004,
             shadow_color: rgb(0x00, 0x00, 0x00),
             shadow_alpha: 0.44,

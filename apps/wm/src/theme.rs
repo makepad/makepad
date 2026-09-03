@@ -922,12 +922,12 @@ mod.wm_theme = {
         lensing_strength: 28.0
         lensing_width: 20.0
         diffraction_strength: 4.4
-        tint_color: #f8fbff
-        tint_alpha: 0.06
+        tint_color: #0b1220
+        tint_alpha: 0.52
         border_color: #ffffff
-        border_alpha: 0.55
+        border_alpha: 0.38
         border_width: 1.0
-        specular_strength: 0.22
+        specular_strength: 0.12
         noise_strength: 0.004
         shadow_color: #000000
         shadow_alpha: 0.44
@@ -1169,17 +1169,17 @@ pub fn material_splash_block(source: &str) -> String {
             ("lensing_strength", "28.0"),
             ("lensing_width", "20.0"),
             ("diffraction_strength", "4.4"),
-            ("tint_alpha", "0.06"),
-            ("border_alpha", "0.55"),
+            ("tint_alpha", "0.40"),
+            ("border_alpha", "0.40"),
             ("border_width", "1.0"),
-            ("specular_strength", "0.22"),
+            ("specular_strength", "0.14"),
             ("noise_strength", "0.004"),
             ("shadow_alpha", "0.44"),
             ("shadow_radius", "13.0"),
             ("shadow_offset_y", "5.0"),
         ],
         &[
-            ("tint_color", "#f8fbff"),
+            ("tint_color", "#000000"),
             ("border_color", "#ffffff"),
             ("shadow_color", "#000000"),
             ("fallback_color", "#334156"),
@@ -1803,7 +1803,7 @@ bright_magenta = "#bb9af7"
         assert!(block.starts_with("mod.wm_theme.material = {\n"));
         assert!(block.contains("    glass: 0.0\n"));
         assert!(block.contains("    corner_radius: 0.0\n"));
-        assert!(block.contains("    tint_color: #f8fbff\n"));
+        assert!(block.contains("    tint_color: #000000\n"));
         assert!(block.contains("    fallback_color: #334156\n"));
         assert!(block.ends_with("}\n"));
         // A theme that names only some keys gets the rest from the defaults,
