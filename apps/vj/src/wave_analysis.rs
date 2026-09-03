@@ -2101,11 +2101,52 @@ fn snap_tempo(grid: TrackGrid, span_secs: f64) -> TrackGrid {
 }
 
 /// Full analysis of one decoded track.
+/// Where one analysis spent its time, in milliseconds.
+///
+/// Deliberately NOT part of the result and never written to the sidecar:
+/// it is about this RUN, and a cached load would otherwise report times
+/// it never spent. Five stages rather than a total, because the total
+/// alone cannot answer the question anyone actually asks -- a track that
+/// took four seconds took them somewhere, and knowing where is the
+/// difference between a slow machine and a pathological file.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AnalysisTiming {
+    /// The three-band envelopes, and the sound scan riding them.
+    pub envelopes: u64,
+    /// The live detector run over the whole file for its second opinion.
+    pub prior: u64,
+    /// The comb search, the fit, the tempo pull and the tempo map.
+    pub grid: u64,
+    /// The texture pyramid the waveform is drawn from.
+    pub tiles: u64,
+    /// The chroma pass, which reads the samples again.
+    pub key: u64,
+}
+
+impl AnalysisTiming {
+    pub fn total(&self) -> u64 {
+        self.envelopes + self.prior + self.grid + self.tiles + self.key
+    }
+}
+
 pub fn analyze(pcm: &TrackPcm) -> TrackAnalysis {
+    analyze_timed(pcm).0
+}
+
+/// The same analysis, saying where its time went.
+pub fn analyze_timed(pcm: &TrackPcm) -> (TrackAnalysis, AnalysisTiming) {
+    let mut timing = AnalysisTiming::default();
+    let mut clock = std::time::Instant::now();
+    let mut lap = |timing: &mut u64, clock: &mut std::time::Instant| {
+        *timing = clock.elapsed().as_millis() as u64;
+        *clock = std::time::Instant::now();
+    };
     let envelopes = build_envelopes(pcm);
+    lap(&mut timing.envelopes, &mut clock);
     // Reuse the streaming detector over the whole file for an independent
     // BPM opinion; it only ever breaks an octave tie in the offline pass.
     let prior = streaming_prior(pcm);
+    lap(&mut timing.prior, &mut clock);
     // Pulled onto a musical tempo before anything downstream reads it:
     // the tempo map is fitted against this period, and a map built on the
     // unpulled one would describe a different record. Here rather than
@@ -2123,7 +2164,9 @@ pub fn analyze(pcm: &TrackPcm) -> TrackAnalysis {
     } else {
         TempoMap::default()
     };
+    lap(&mut timing.grid, &mut clock);
     let tiles = build_tiles(&envelopes, pcm);
+    lap(&mut timing.tiles, &mut clock);
     // The phrase map: the same change points the grid estimator consumes,
     // published in seconds instead of being thrown away with the hops.
     let hop_secs = envelopes.hop as f64 / envelopes.sample_rate;
@@ -2134,7 +2177,8 @@ pub fn analyze(pcm: &TrackPcm) -> TrackAnalysis {
     // The key runs off the SAMPLES, not off the envelopes above: pitch class
     // is the one thing a three-band energy envelope has already thrown away.
     let key = crate::track_key::estimate_key(&pcm.frames, pcm.sample_rate);
-    TrackAnalysis {
+    lap(&mut timing.key, &mut clock);
+    let analysis = TrackAnalysis {
         duration_secs: pcm.seconds(),
         sample_rate: pcm.sample_rate,
         grid,
@@ -2151,7 +2195,8 @@ pub fn analyze(pcm: &TrackPcm) -> TrackAnalysis {
                 last_secs: last as f64 / rate,
             }
         }),
-    }
+    };
+    (analysis, timing)
 }
 
 /// Run the live detector across the file and take its final BPM, if it ever
@@ -2666,7 +2711,24 @@ impl AnalysisPool {
                     let dir = cache_dir();
                     let (mut analysis, cached) = match load_cached(&dir, &job.key) {
                         Some(hit) => (hit, true),
-                        None => (analyze(&job.pcm), false),
+                        None => {
+                            let (analysis, timing) = analyze_timed(&job.pcm);
+                            // Where the time went, per stage. A track that
+                            // took four seconds took them somewhere, and
+                            // the total alone cannot say whether that is a
+                            // slow machine or one pathological file.
+                            makepad_widgets::log!(
+                                "analysis: {:.0}s of audio in {} ms                                  (envelopes {}, prior {}, grid {}, tiles {}, key {})",
+                                analysis.duration_secs,
+                                timing.total(),
+                                timing.envelopes,
+                                timing.prior,
+                                timing.grid,
+                                timing.tiles,
+                                timing.key,
+                            );
+                            (analysis, false)
+                        }
                     };
                     let mut straight_from_cache = cached;
                     let mut should_store = !cached;
@@ -3304,6 +3366,23 @@ mod tests {
         assert_eq!(grid.hinged_at(at, 120.0), grid);
         assert_eq!(grid.hinged_at(at, f64::NAN), grid);
         assert_eq!(grid.hinged_at(at, 0.0), grid);
+    }
+
+    /// The stages add up to the whole, and each one is really measured.
+    #[test]
+    fn an_analysis_says_where_its_time_went() {
+        let pcm = click_track(44_100, 128.0, 12.0, 0.41);
+        let (analysis, timing) = analyze_timed(&pcm);
+        assert!(analysis.grid.has_grid(), "and it still analysed the track");
+        // Every stage is a real number of milliseconds or a zero, and the
+        // total is exactly their sum -- no stage is left out of it.
+        let sum = timing.envelopes + timing.prior + timing.grid + timing.tiles + timing.key;
+        assert_eq!(timing.total(), sum);
+        // The two that read every sample cannot both be free.
+        assert!(
+            timing.envelopes + timing.key + timing.prior > 0,
+            "twelve seconds of audio measured as no time at all: {timing:?}"
+        );
     }
 
     #[test]
