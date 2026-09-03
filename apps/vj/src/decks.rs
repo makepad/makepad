@@ -1247,6 +1247,12 @@ pub struct DeckState {
     /// channel strip like the filter beside it, so a swap carries it and
     /// a load leaves it, for the same reasons.
     pub resonance: usize,
+    /// Which echo rung is on; 0 is off, otherwise an index into
+    /// [`crate::music_dsp::ECHO_RUNGS`] plus one. Part of the channel
+    /// strip, like resonance beside it.
+    pub echo_rung: usize,
+    /// Whether the echo's repeats land on the other channel.
+    pub echo_pingpong: bool,
     /// Per-stem gains, in [`crate::music_dsp::StemKind`] order.
     pub stem_gain: [f32; STEM_COUNT],
     pub stem_kill: [bool; STEM_COUNT],
@@ -1312,6 +1318,8 @@ impl Default for DeckState {
             eq_solo: [false; 3],
             filter: 0.5,
             resonance: 0,
+            echo_rung: 0,
+            echo_pingpong: false,
             stem_gain: [1.0; STEM_COUNT],
             stem_kill: [false; STEM_COUNT],
             stem_solo: [false; STEM_COUNT],
@@ -1329,6 +1337,15 @@ impl DeckState {
     pub fn resonance_lift(&self) -> f32 {
         let rungs = crate::music_dsp::DeckEq::RESONANCE_RUNGS;
         rungs[self.resonance.min(rungs.len() - 1)]
+    }
+
+    /// The fraction the mixer's echo is sent for this deck's rung, or
+    /// none for off.
+    pub fn echo_fraction(&self) -> Option<(u32, u32)> {
+        (self.echo_rung > 0)
+            .then(|| crate::music_dsp::ECHO_RUNGS.get(self.echo_rung - 1))
+            .flatten()
+            .copied()
     }
 
     pub fn effective_gain(&self, normalise: bool) -> f32 {
@@ -1614,6 +1631,10 @@ pub enum DeckCmd {
     SetFilter { deck: DeckId, position: f32 },
     /// How hard the sweep rings, as the lift the mixer applies.
     SetResonance { deck: DeckId, lift: f32 },
+    /// The echo's rung, or none for off.
+    SetEcho { deck: DeckId, fraction: Option<(u32, u32)> },
+    /// Whether the echo's repeats cross channels.
+    SetEchoPingpong { deck: DeckId, on: bool },
     /// One stem lane's gain, 0 = muted.
     SetStemGain { deck: DeckId, stem: usize, gain: f32 },
     SplatSet { deck: DeckId, grid: Arc<SplatGrid> },
@@ -2048,6 +2069,8 @@ impl DeckEngine {
             DeckCmd::SetKeyShift { deck, semitones: state.key_shift },
             DeckCmd::SetFilter { deck, position: state.filter },
             DeckCmd::SetResonance { deck, lift: state.resonance_lift() },
+            DeckCmd::SetEcho { deck, fraction: state.echo_fraction() },
+            DeckCmd::SetEchoPingpong { deck, on: state.echo_pingpong },
         ];
         for band in 0..3 {
             cmds.push(DeckCmd::SetEqBand { deck, band, gain: state.eq_effective(band) });
@@ -4795,6 +4818,22 @@ impl DeckEngine {
         let state = self.deck_mut(deck);
         state.resonance = (state.resonance + 1) % rungs;
         vec![DeckCmd::SetResonance { deck, lift: state.resonance_lift() }]
+    }
+
+    /// Step the echo to its next rung, round and round: off, whole beat,
+    /// half, quarter, off.
+    pub fn cycle_echo(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        let rungs = crate::music_dsp::ECHO_RUNGS.len() + 1; // + off
+        let state = self.deck_mut(deck);
+        state.echo_rung = (state.echo_rung + 1) % rungs;
+        vec![DeckCmd::SetEcho { deck, fraction: state.echo_fraction() }]
+    }
+
+    /// Whether the echo's repeats land on the other channel.
+    pub fn toggle_echo_pingpong(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.echo_pingpong = !state.echo_pingpong;
+        vec![DeckCmd::SetEchoPingpong { deck, on: state.echo_pingpong }]
     }
 
     /// Stem knob. Inert until the separated stems are loaded — the deck is

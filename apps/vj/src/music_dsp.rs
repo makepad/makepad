@@ -1536,6 +1536,270 @@ fn log_sweep(from: f32, to: f32, t: f32) -> f32 {
     from * (to / from).powf(t.clamp(0.0, 1.0))
 }
 
+/// A soft clip: the (3,2) Pade form of tanh, exact enough for a feedback
+/// path and cheaper than the real thing. Reaches exactly 1.0 at x = 3 and
+/// would climb past it beyond that, so the input is clamped there first.
+/// NaN clamps to nothing, so it is turned into silence explicitly; an
+/// infinity clamps to 3 like any other large input and saturates the
+/// same way.
+#[inline]
+fn pade_tanh(x: f32) -> f32 {
+    if x.is_nan() {
+        return 0.0;
+    }
+    let x = x.clamp(-3.0, 3.0);
+    x * (27.0 + x * x) / (27.0 + 9.0 * x * x)
+}
+
+/// The fractions the echo chip cycles through: whole, half, quarter beat.
+pub const ECHO_RUNGS: [(u32, u32); 3] = [(1, 1), (1, 2), (1, 4)];
+
+/// Frames the delay line holds — a power of two so the write index is a
+/// mask. At 48 kHz this is 5.46 seconds, a whole beat down to about
+/// 11 BPM; at 192 kHz, 1.37 seconds, down to about 44 BPM. Below that a
+/// requested delay is clamped short rather than refused.
+const ECHO_MAX_FRAMES: usize = 1 << 18;
+const ECHO_MASK: usize = ECHO_MAX_FRAMES - 1;
+
+/// How long a retune takes to hand over, in frames — fixed like the
+/// filter's handover, so the answer does not change with the device's
+/// block size.
+const ECHO_HANDOVER_FRAMES: u32 = 256;
+
+const ECHO_FEEDBACK_MAX: f32 = 0.95;
+/// Below a 16-bit step: past here the tail is inaudible.
+const ECHO_QUIET: f32 = 1e-5;
+const ECHO_SEND: f32 = 0.5;
+const ECHO_FEEDBACK: f32 = 0.55;
+
+/// One deck's beat-quantised echo: a stereo delay line whose tap follows
+/// the record's own tempo.
+///
+/// The line is never bulk-cleared on the audio thread. Instead every
+/// frame actually written is counted (`written`), and a tap older than
+/// `silence_mark` reads as silence regardless of what is still sitting in
+/// memory from before -- the same effect as zeroing the span, at the cost
+/// of one comparison instead of a memset. `reset`, called only from the
+/// caller thread, does zero the line, as a cheap belt beside that braces.
+pub struct DeckEcho {
+    line: Box<[[f32; 2]]>,
+    write: usize,
+    written: u64,
+    silence_mark: u64,
+    /// The tap in use, in frames.
+    delay: u32,
+    delay_prev: u32,
+    /// A retune that arrived while a handover was already running; taken
+    /// up the instant that one finishes.
+    pending: Option<u32>,
+    handover: u32,
+    /// The rung the operator asked for, or none: off.
+    fraction: Option<(u32, u32)>,
+    send: ParamRamp,
+    feedback: ParamRamp,
+    /// 0 = repeats land on their own channel, 1 = the other one.
+    pingpong: ParamRamp,
+    tail_peak: f32,
+    period_left: u32,
+    /// Nothing to do here: the send is at zero and the tail has decayed
+    /// away. `process` uses this to skip the line entirely.
+    quiet: bool,
+}
+
+impl DeckEcho {
+    pub fn new() -> DeckEcho {
+        DeckEcho {
+            line: vec![[0.0f32; 2]; ECHO_MAX_FRAMES].into_boxed_slice(),
+            write: 0,
+            written: 0,
+            silence_mark: 0,
+            delay: 1,
+            delay_prev: 1,
+            pending: None,
+            handover: 0,
+            fraction: None,
+            send: ParamRamp::at(0.0),
+            feedback: ParamRamp::at(ECHO_FEEDBACK),
+            pingpong: ParamRamp::at(0.0),
+            tail_peak: 0.0,
+            period_left: 0,
+            quiet: true,
+        }
+    }
+
+    /// Empty the line and every cursor; the knobs (feedback, ping-pong)
+    /// stand, the way the EQ's own gains survive its `reset`. Off the
+    /// audio thread only -- a fresh record, a cleared deck.
+    pub fn reset(&mut self) {
+        self.line.fill([0.0, 0.0]);
+        self.write = 0;
+        self.written = 0;
+        self.silence_mark = 0;
+        self.delay = 1;
+        self.delay_prev = 1;
+        self.pending = None;
+        self.handover = 0;
+        self.fraction = None;
+        self.send.jump(0.0);
+        self.tail_peak = 0.0;
+        self.period_left = 0;
+        self.quiet = true;
+    }
+
+    /// The rung to echo at, or none for off. Off rings the tail out over
+    /// the same crossfade the filter uses rather than cutting it.
+    pub fn set_fraction(&mut self, fraction: Option<(u32, u32)>) {
+        self.fraction = fraction;
+        match fraction {
+            Some(_) => {
+                self.send.slew(ECHO_SEND, EQ_ENGAGE_SECS);
+                // A fresh engagement is never quiet, even if the last one
+                // ended that way: `quiet` otherwise stays stale-true from
+                // construction (or from the last time the tail actually
+                // rang out) and, the moment THIS engagement is switched
+                // off and its send ramps back down to zero, the bypass
+                // would trigger on that stale flag before this tail has
+                // rung out at all.
+                self.quiet = false;
+            }
+            None => self.send.slew(0.0, EQ_ENGAGE_SECS),
+        }
+    }
+
+    pub fn set_feedback(&mut self, feedback: f32) {
+        if let Some(feedback) = knob(feedback, 0.0, ECHO_FEEDBACK_MAX) {
+            self.feedback.slew(feedback, EQ_ENGAGE_SECS);
+        }
+    }
+
+    /// A routing switch written as a blend, like the filter's handover:
+    /// mid-crossfade both channels carry a share of each repeat rather
+    /// than the line's content jumping side at a sample boundary.
+    pub fn set_pingpong(&mut self, on: bool) {
+        self.pingpong.slew(if on { 1.0 } else { 0.0 }, EQ_ENGAGE_SECS);
+    }
+
+    /// Whether the operator has asked for the echo, regardless of whether
+    /// its tail has actually rung out yet.
+    pub fn engaged(&self) -> bool {
+        self.fraction.is_some()
+    }
+
+    #[cfg(test)]
+    fn delay(&self) -> u32 {
+        self.delay
+    }
+
+    #[cfg(test)]
+    fn pending(&self) -> Option<u32> {
+        self.pending
+    }
+
+    #[cfg(test)]
+    fn handover(&self) -> u32 {
+        self.handover
+    }
+
+    /// Retune the tap to `beat_frames` (device frames per beat, at the
+    /// tempo the room hears) times the rung in force. Called once per
+    /// device buffer, never per frame. A retune that lands while a
+    /// handover is already running waits for it rather than restarting
+    /// it at whatever weight it had reached.
+    pub fn prepare_block(&mut self, beat_frames: f64) {
+        let Some((num, den)) = self.fraction else { return };
+        if !beat_frames.is_finite() || beat_frames <= 0.0 || den == 0 {
+            return;
+        }
+        let target = (beat_frames * num as f64 / den as f64).round();
+        if !target.is_finite() {
+            return;
+        }
+        let target = target.clamp(1.0, (ECHO_MAX_FRAMES - 1) as f64) as u32;
+        if target == self.delay || self.pending == Some(target) {
+            return;
+        }
+        if self.handover == 0 {
+            self.delay_prev = self.delay;
+            self.delay = target;
+            self.handover = ECHO_HANDOVER_FRAMES;
+            self.period_left = self.delay;
+        } else {
+            self.pending = Some(target);
+        }
+    }
+
+    #[inline]
+    fn tap_at(&self, delay: u32) -> [f32; 2] {
+        let delay = delay.max(1) as u64;
+        if self.written < delay || self.written - delay < self.silence_mark {
+            return [0.0, 0.0];
+        }
+        let idx = (self.write + ECHO_MAX_FRAMES - (delay as usize).min(ECHO_MAX_FRAMES))
+            & ECHO_MASK;
+        self.line[idx]
+    }
+
+    /// Process one stereo frame.
+    #[inline]
+    pub fn process(&mut self, frame: [f32; 2], device_rate: f32) -> [f32; 2] {
+        let send = self.send.tick(device_rate);
+        let feedback = self.feedback.tick(device_rate);
+        let pingpong = self.pingpong.tick(device_rate);
+        if self.quiet && send == 0.0 && self.send.target() == 0.0 {
+            // Nothing engaged and nothing ringing: the line is not
+            // touched at all, and the frame is the input exactly.
+            return frame;
+        }
+        let mut tap = self.tap_at(self.delay);
+        if self.handover > 0 {
+            let tap_prev = self.tap_at(self.delay_prev);
+            let blend = 1.0 - self.handover as f32 / ECHO_HANDOVER_FRAMES as f32;
+            tap = crate::dsp_math::lerp_frame(tap_prev, tap, blend);
+            self.handover -= 1;
+            if self.handover == 0 {
+                if let Some(pending) = self.pending.take() {
+                    self.delay_prev = self.delay;
+                    self.delay = pending;
+                    self.handover = ECHO_HANDOVER_FRAMES;
+                    self.period_left = self.delay;
+                }
+            }
+        }
+        let out = [frame[0] + tap[0], frame[1] + tap[1]];
+        let fb = [pade_tanh(tap[0] * feedback), pade_tanh(tap[1] * feedback)];
+        let written = [
+            frame[0] * send + crate::dsp_math::lerp(fb[0], fb[1], pingpong),
+            frame[1] * send + crate::dsp_math::lerp(fb[1], fb[0], pingpong),
+        ];
+        self.line[self.write] = written;
+        self.write = (self.write + 1) & ECHO_MASK;
+        self.written += 1;
+        // Drain bookkeeping, once a beat: settle the line to silence
+        // (by moving the mark, never by clearing memory here) once the
+        // send has been at zero and the tail has actually decayed away.
+        //
+        // Watches what is WRITTEN, not what is read back: a tap lags its
+        // write by a whole delay, so a window that judged by the tap
+        // would still be reporting last beat's silence while THIS
+        // beat's write carries a fresh feedback tail that has not been
+        // read back yet -- and would be declared quiet just before the
+        // read that needed it.
+        self.tail_peak = self.tail_peak.max(written[0].abs()).max(written[1].abs());
+        if self.period_left == 0 {
+            self.period_left = self.delay.max(1);
+        }
+        self.period_left -= 1;
+        if self.period_left == 0 {
+            if send == 0.0 && self.send.target() == 0.0 && self.tail_peak < ECHO_QUIET {
+                self.quiet = true;
+                self.silence_mark = self.written;
+            }
+            self.tail_peak = 0.0;
+        }
+        out
+    }
+}
+
 // ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
@@ -1589,6 +1853,234 @@ static COUNTING_ALLOCATOR: alloc_probe::CountingAllocator = alloc_probe::Countin
 
 #[cfg(test)]
 mod tests {
+    use std::f32::consts::PI;
+
+    /// Settle every ramp `DeckEcho` carries -- send, feedback, ping-pong
+    /// -- and any handover a `prepare_block` just armed, before a test
+    /// measures anything against silence.
+    const SETTLE_FRAMES: usize = 2_000;
+
+    fn settled_echo(rate: f32, fraction: (u32, u32), feedback: f32, beat_frames: f64) -> DeckEcho {
+        let mut echo = DeckEcho::new();
+        echo.set_fraction(Some(fraction));
+        echo.set_feedback(feedback);
+        echo.prepare_block(beat_frames);
+        for _ in 0..SETTLE_FRAMES {
+            echo.process([0.0, 0.0], rate);
+        }
+        echo
+    }
+
+    /// Odd, bounded by 1, flat through the origin, and close to the real
+    /// thing near it -- everything the feedback clamp actually needs.
+    #[test]
+    fn the_soft_clip_is_odd_bounded_and_flat_at_the_origin() {
+        assert_eq!(pade_tanh(0.0), 0.0);
+        for x in [0.3f32, 1.0, 2.5, 7.0] {
+            assert!((pade_tanh(-x) + pade_tanh(x)).abs() < 1e-6, "odd at {x}");
+        }
+        let mut i = -400;
+        while i <= 400 {
+            let x = i as f32 * 0.25;
+            assert!(pade_tanh(x).abs() <= 1.0, "over 1 at {x}");
+            i += 1;
+        }
+        assert!((pade_tanh(0.1) - 0.1f32.tanh()).abs() < 1e-4);
+        assert!((pade_tanh(1.0) - 1.0f32.tanh()).abs() < 2e-2);
+        assert_eq!(pade_tanh(3.0), 1.0);
+        assert_eq!(pade_tanh(50.0), 1.0);
+        let mut last = pade_tanh(-4.0);
+        let mut i = -399;
+        while i <= 400 {
+            let x = i as f32 * 0.01;
+            let v = pade_tanh(x);
+            assert!(v >= last - 1e-7, "not monotone at {x}: {v} < {last}");
+            last = v;
+            i += 1;
+        }
+        assert_eq!(pade_tanh(f32::NAN), 0.0);
+        assert_eq!(pade_tanh(f32::INFINITY), 1.0, "saturates like any large input");
+    }
+
+    /// Off, a fresh unit is exactly its input -- the whole line untouched.
+    #[test]
+    fn an_echo_that_was_never_engaged_is_bit_transparent() {
+        let rate = 48_000.0f32;
+        let mut echo = DeckEcho::new();
+        echo.prepare_block(24_000.0);
+        let mut phase = 0.0f32;
+        for _ in 0..4_000 {
+            phase += 2.0 * PI * 37.0 / rate;
+            let x = phase.sin() * 0.6;
+            assert_eq!(echo.process([x, -x], rate), [x, -x]);
+        }
+    }
+
+    /// A half beat later, the sent input comes back once; with feedback
+    /// on, it comes back a second time, softened by the clamp.
+    #[test]
+    fn a_half_beat_echo_repeats_the_input_that_much_later() {
+        let rate = 48_000.0f32;
+        let mut dry = settled_echo(rate, (1, 2), 0.0, 24_000.0);
+        assert_eq!(dry.delay(), 12_000);
+        let mut out = vec![dry.process([1.0, 1.0], rate)[0]];
+        for _ in 1..40_000 {
+            out.push(dry.process([0.0, 0.0], rate)[0]);
+        }
+        assert_eq!(out[0], 1.0, "the dry input passes through untouched");
+        assert!((out[12_000] - ECHO_SEND).abs() < 1e-6, "{}", out[12_000]);
+        for (index, &value) in out.iter().enumerate() {
+            if index == 0 || index == 12_000 {
+                continue;
+            }
+            assert!(value.abs() < 1e-6, "unexpected sound at {index}: {value}");
+        }
+
+        let mut wet = settled_echo(rate, (1, 2), 0.5, 24_000.0);
+        let mut out = vec![wet.process([1.0, 1.0], rate)[0]];
+        for _ in 1..30_000 {
+            out.push(wet.process([0.0, 0.0], rate)[0]);
+        }
+        let expect = pade_tanh(ECHO_SEND * 0.5);
+        assert!((out[24_000] - expect).abs() < 1e-6, "{} vs {expect}", out[24_000]);
+    }
+
+    /// A retune crossfades over ECHO_HANDOVER_FRAMES rather than jumping,
+    /// and the tap really does move once it lands.
+    #[test]
+    fn a_delay_change_hands_over_instead_of_jumping() {
+        let rate = 48_000.0f32;
+        let mut echo = settled_echo(rate, (1, 1), 0.5, 24_000.0);
+        assert_eq!(echo.delay(), 24_000);
+        let mut phase = 0.0f32;
+        let mut out = Vec::with_capacity(12_000);
+        let mut render = |echo: &mut DeckEcho, frames: usize, out: &mut Vec<f32>, phase: &mut f32| {
+            for _ in 0..frames {
+                *phase += 2.0 * PI * 37.0 / rate;
+                out.push(echo.process([phase.sin() * 0.5, phase.sin() * 0.5], rate)[0]);
+            }
+        };
+        render(&mut echo, 8_000, &mut out, &mut phase);
+        let settled = out.len();
+        // A jump that shares no whole number of the tone's cycles with
+        // the old delay, so a hard switch would show up as a step.
+        echo.prepare_block(18_500.0);
+        render(&mut echo, 4_096, &mut out, &mut phase);
+        let worst = out[settled - 1..]
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(worst < 0.02, "a retune stepped by {worst}");
+        render(&mut echo, ECHO_HANDOVER_FRAMES as usize, &mut out, &mut phase);
+        assert_eq!(echo.delay(), 18_500, "and the handover actually lands on the new tap");
+    }
+
+    /// A second retune landing while the first is still crossfading is
+    /// parked, not raced: the running handover finishes on its own target
+    /// before the parked one gets its turn.
+    #[test]
+    fn a_retune_that_arrives_mid_handover_waits_its_turn() {
+        let rate = 48_000.0f32;
+        let mut echo = DeckEcho::new();
+        echo.set_fraction(Some((1, 1)));
+        echo.prepare_block(24_000.0);
+        assert_eq!(echo.delay(), 24_000, "the first target lands at once, nothing was running");
+        for _ in 0..50 {
+            echo.process([0.0, 0.0], rate);
+        }
+        echo.prepare_block(19_200.0);
+        assert_eq!(echo.delay(), 24_000, "a running handover finishes first");
+        assert_eq!(echo.pending(), Some(19_200));
+        for _ in 0..(ECHO_HANDOVER_FRAMES - 50) {
+            echo.process([0.0, 0.0], rate);
+        }
+        assert_eq!(echo.pending(), None, "the parked target has been taken up");
+        assert_eq!(echo.delay(), 19_200);
+        assert!(echo.handover() > 0, "and hands over in its own turn rather than jumping");
+        for _ in 0..ECHO_HANDOVER_FRAMES {
+            echo.process([0.0, 0.0], rate);
+        }
+        assert_eq!(echo.handover(), 0);
+        assert_eq!(echo.delay(), 19_200);
+    }
+
+    /// Cranked past any sane setting, the feedback clamp keeps the line
+    /// bounded rather than climbing without end.
+    #[test]
+    fn cranked_feedback_saturates_instead_of_running_away() {
+        let rate = 48_000.0f32;
+        let mut echo = DeckEcho::new();
+        echo.set_fraction(Some((1, 1)));
+        echo.set_feedback(4.0);
+        echo.prepare_block(3_000.0);
+        for _ in 0..SETTLE_FRAMES {
+            echo.process([0.0, 0.0], rate);
+        }
+        let mut out = Vec::with_capacity(480_000);
+        for i in 0..480_000usize {
+            let x = if i % 3_000 == 0 { 1.0 } else { 0.0 };
+            out.push(echo.process([x, x], rate)[0]);
+        }
+        assert!(out.iter().all(|v| v.is_finite() && v.abs() < 3.0), "unbounded output");
+        let rms = |span: &[f32]| (span.iter().map(|v| v * v).sum::<f32>() / span.len() as f32).sqrt();
+        let last = rms(&out[out.len() - 48_000..]);
+        let before = rms(&out[out.len() - 96_000..out.len() - 48_000]);
+        assert!(last <= before + 1e-6, "{last} grew past {before}");
+    }
+
+    /// Each repeat lands on the OTHER channel from the one before it, a
+    /// hand-traced three-repeat chain from a left-only impulse.
+    #[test]
+    fn ping_pong_lands_each_repeat_on_the_other_side() {
+        let rate = 48_000.0f32;
+        let mut echo = DeckEcho::new();
+        echo.set_fraction(Some((1, 1)));
+        echo.set_feedback(0.5);
+        echo.set_pingpong(true);
+        echo.prepare_block(6_000.0);
+        for _ in 0..SETTLE_FRAMES {
+            echo.process([0.0, 0.0], rate);
+        }
+        let mut out_l = vec![echo.process([1.0, 0.0], rate)[0]];
+        let mut out_r = vec![0.0f32];
+        for _ in 1..19_000 {
+            let frame = echo.process([0.0, 0.0], rate);
+            out_l.push(frame[0]);
+            out_r.push(frame[1]);
+        }
+        assert!(out_r[6_000].abs() < 1e-6, "{}", out_r[6_000]);
+        assert!(out_l[6_000] > 0.4, "the first repeat is the sent input, on its own side");
+        assert!(out_r[12_000] > 0.1, "the second crossed");
+        assert!(out_l[12_000].abs() < 1e-6, "{}", out_l[12_000]);
+        assert!(out_l[18_000] > 0.02, "the third crossed back");
+        assert!(out_r[18_000].abs() < 1e-6, "{}", out_r[18_000]);
+    }
+
+    /// Switching off does not cut the tail; it rings out, and only once
+    /// it has genuinely decayed does the unit go back to a bit-exact
+    /// bypass.
+    #[test]
+    fn switching_the_echo_off_lets_the_tail_ring_out_then_goes_transparent() {
+        let rate = 48_000.0f32;
+        let mut echo = settled_echo(rate, (1, 1), 0.5, 6_000.0);
+        let mut out = vec![echo.process([1.0, 1.0], rate)[0]];
+        for i in 1..400_000usize {
+            if i == 100 {
+                echo.set_fraction(None);
+            }
+            out.push(echo.process([0.0, 0.0], rate)[0]);
+        }
+        assert!(!echo.engaged(), "the operator's ask flips at once");
+        assert!(out[6_000] > 0.4, "the tail still arrives after the switch: {}", out[6_000]);
+        assert!(out[12_000] > 0.1, "{}", out[12_000]);
+        let tail = &out[out.len() - 1_000..];
+        assert!(tail.iter().all(|&v| v == 0.0), "silent, once the tail has actually decayed");
+        for i in 0..1_000 {
+            let x = (i as f32 * 0.037).sin() * 0.5;
+            assert_eq!(echo.process([x, -x], rate), [x, -x], "a bit-exact bypass, not merely quiet");
+        }
+    }
+
     /// The resonance a sweep is allowed, and where it is taken away:
     /// at both ends of hearing, whichever side of the sweep put the
     /// corner there.
@@ -2713,27 +3205,39 @@ mod tests {
         let mut eq = DeckEq::new(48_000.0);
         eq.set_band(0, 0.4);
         eq.set_filter(0.3);
+        let mut echo = DeckEcho::new();
+        echo.set_fraction(Some((1, 2)));
+        echo.set_feedback(0.4);
         let mut reader = RateReader::default();
         let mut scratch = ScratchRamp::default();
         // Warm the chain up so nothing lazily initializes inside the probe.
         eq.prepare_block();
+        echo.prepare_block(24_000.0);
         for _ in 0..8_000 {
             let mut pull = || stretcher.next(&source, true);
             if let Some(frame) = reader.read(0.9188, &mut pull) {
-                eq.process(frame, 48_000.0);
+                echo.process(eq.process(frame, 48_000.0), 48_000.0);
             }
             scratch.tick(48_000.0, 1.0, 0.0);
         }
 
         let before = alloc_probe::count();
-        for _ in 0..48_000 {
+        // A retune every 512 frames, so the probe exercises the handover
+        // and the parked-retune path too, not only the settled one.
+        let mut beat = 24_000.0f64;
+        for i in 0..48_000 {
+            if i % 512 == 0 {
+                beat = if beat > 20_000.0 { 15_000.0 } else { 24_000.0 };
+                echo.prepare_block(beat);
+            }
             let mut pull = || stretcher.next(&source, true);
             if let Some(frame) = reader.read(0.9188, &mut pull) {
-                eq.process(frame, 48_000.0);
+                echo.process(eq.process(frame, 48_000.0), 48_000.0);
             }
             scratch.tick(48_000.0, 1.0, 0.0);
         }
         eq.prepare_block();
+        echo.prepare_block(beat);
         let after = alloc_probe::count();
         assert_eq!(
             after, before,

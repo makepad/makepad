@@ -24,8 +24,14 @@ use crate::decks::{DeckId, SpinMotion};
 use crate::mixer::fixtures::{const_pcm, render, split_pcm, tone_pcm};
 use crate::mixer::{Mixer, TrackPcm};
 use crate::mixer_golden_refs::reference;
+use crate::wave_analysis::TrackGrid;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+/// A steady 120 BPM grid, for a scenario that needs a beat to echo on.
+fn grid_120() -> TrackGrid {
+    TrackGrid { bpm: 120.0, beat_secs: 0.5, first_beat_secs: 0.0, downbeat_phase: 0, confidence: 0.9 }
+}
 
 /// One window of the summary: the RMS and the peak of the left channel,
 /// then of the right, in 16-bit steps.
@@ -272,6 +278,22 @@ fn golden_eq_kill_and_filter() {
     assert_golden("eq_kill_and_filter", &left, &right);
 }
 
+/// A tone whose period shares no whole number of cycles with the delay
+/// (333 Hz against a half beat at 120 BPM), so the reference actually
+/// carries the echo rather than a phase-aligned coincidence of it.
+#[test]
+fn golden_echo_half_beat() {
+    let mixer = deck_a(tone_pcm(333.0, 48_000, 3.0));
+    mixer.set_deck_keylock(DeckId::A, false);
+    mixer.set_deck_grid(DeckId::A, Some(grid_120()));
+    mixer.set_deck_echo(DeckId::A, Some((1, 2)));
+    mixer.set_deck_echo_feedback(DeckId::A, 0.5);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let (left, right) = capture(&mixer, CAPTURE, |_| {});
+    assert_golden("echo_half_beat", &left, &right);
+}
+
 #[test]
 fn golden_crossfader_centre() {
     let mixer = deck_a(tone_pcm(440.0, 48_000, 3.0));
@@ -474,6 +496,81 @@ fn a_filter_jump_is_click_free() {
         _ => {}
     });
     assert!(worst < CLICK, "a filter jump must not step, biggest step {worst}");
+}
+
+#[test]
+fn engaging_and_releasing_the_echo_are_click_free() {
+    let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
+    mixer.set_deck_keylock(DeckId::A, false);
+    mixer.set_deck_grid(DeckId::A, Some(grid_120()));
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| match index {
+        8 => mixer.set_deck_echo(DeckId::A, Some((1, 2))),
+        24 => mixer.set_deck_echo(DeckId::A, None),
+        _ => {}
+    });
+    assert!(worst < CLICK, "engaging or releasing the echo must ramp, biggest step {worst}");
+}
+
+#[test]
+fn a_retune_under_a_tempo_move_is_click_free() {
+    // 37 Hz, not 40: its period shares no whole number of cycles with
+    // the delay below, so a hard jump between the old tap and the new
+    // one would actually show up as a phase step -- a round multiple
+    // would read the same phase either side and hide it, the same trap
+    // the unit-level handover test avoids for the same reason.
+    let mixer = deck_a(tone_pcm(37.0, 48_000, 10.0));
+    mixer.set_deck_keylock(DeckId::A, false);
+    mixer.set_deck_grid(DeckId::A, Some(grid_120()));
+    // A quarter beat, not a half: by the time the retune below fires
+    // (settle plus eight buffers in) enough has been written that the
+    // OLD tap already carries real content, so a hard switch away from
+    // it would actually be heard rather than jumping between two reads
+    // that both still land before anything was ever written.
+    mixer.set_deck_echo(DeckId::A, Some((1, 4)));
+    mixer.set_deck_echo_feedback(DeckId::A, 0.7);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| {
+        if index == 8 {
+            mixer.set_deck_rate(DeckId::A, 1.08);
+        }
+    });
+    assert!(worst < CLICK, "a retune under a tempo move must hand over, biggest step {worst}");
+}
+
+/// A tone on the left channel only, silence on the right: ping-pong's
+/// crossing writes a DIFFERENT value to each channel, which a signal
+/// panned dead centre (equal on both) cannot show at all -- the two
+/// feedback terms it would blend are identical either way.
+fn panned_tone_pcm(frequency: f64, rate: u32, seconds: f64) -> Arc<TrackPcm> {
+    let len = (rate as f64 * seconds) as usize;
+    let frames = (0..len)
+        .map(|index| {
+            let value =
+                (2.0 * std::f64::consts::PI * frequency * index as f64 / rate as f64).sin();
+            [(value * 12_000.0) as i16, 0i16]
+        })
+        .collect();
+    Arc::new(TrackPcm { frames, sample_rate: rate })
+}
+
+#[test]
+fn switching_ping_pong_is_click_free() {
+    let mixer = deck_a(panned_tone_pcm(40.0, 48_000, 10.0));
+    mixer.set_deck_keylock(DeckId::A, false);
+    mixer.set_deck_grid(DeckId::A, Some(grid_120()));
+    mixer.set_deck_echo(DeckId::A, Some((1, 4)));
+    mixer.set_deck_echo_feedback(DeckId::A, 0.5);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| match index {
+        8 => mixer.set_deck_echo_pingpong(DeckId::A, true),
+        24 => mixer.set_deck_echo_pingpong(DeckId::A, false),
+        _ => {}
+    });
+    assert!(worst < CLICK, "a ping-pong switch must blend, biggest step {worst}");
 }
 
 /// The ordinary gesture: a sweep dragged from one side of the knob to the

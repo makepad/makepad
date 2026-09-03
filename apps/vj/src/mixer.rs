@@ -27,7 +27,8 @@ use crate::loop_splat::{
 use crate::wave_analysis::{DeckClock, TrackGrid};
 use crate::music_dsp::{
     audible, knob, knob64,
-    DeckEq, FrameSource, MotorEnd, ParamRamp, RateReader, ScratchRamp, Stretcher, STEM_COUNT,
+    DeckEcho, DeckEq, FrameSource, MotorEnd, ParamRamp, RateReader, ScratchRamp, Stretcher,
+    STEM_COUNT,
     STRETCH_BYPASS_EPSILON, STRETCH_RATIO_MAX, STRETCH_RATIO_MIN, WSOLA_WINDOW,
     BRAKE_SECS, CENSOR_FLIP_SECS, CENSOR_RATE, CENSOR_RETURN_SECS, SOFT_START_SECS,
     SPINBACK_FALL_SECS, SPINBACK_PEAK, SPINBACK_THROW_SECS,
@@ -962,6 +963,9 @@ struct DeckVoice {
     stretch: Box<Stretcher>,
     reader: RateReader,
     eq: DeckEq,
+    /// The beat-quantised repeat. Retuned once per buffer from `clock`,
+    /// beside the filter's own coefficient rebuild.
+    echo: DeckEcho,
     stem_gain: [ParamRamp; STEM_COUNT],
     /// The autopilot's blend overlay on the stem lanes: multiplies the
     /// operator's gains, never moves them. 1.0 = hands off.
@@ -1000,6 +1004,7 @@ impl DeckVoice {
             stretch: Box::new(Stretcher::new()),
             reader: RateReader::default(),
             eq: DeckEq::new(48_000.0),
+            echo: DeckEcho::new(),
             stem_gain: [ParamRamp::at(1.0); STEM_COUNT],
             blend_stem: [ParamRamp::at(1.0); STEM_COUNT],
         }
@@ -1054,6 +1059,7 @@ impl DeckVoice {
         self.playing = load.play;
         self.seek_frames(0.0);
         self.eq.reset();
+        self.echo.reset();
         self.reset_blend();
         if load.play {
             self.transport.slew(1.0, LOAD_SWAP_SECS);
@@ -2099,6 +2105,7 @@ impl Mixer {
                 d.transport = Ramp::at(0.0);
                 d.seek_frames(0.0);
                 d.eq.reset();
+                d.echo.reset();
                 d.reset_blend();
             } else {
                 d.pending = Some(PendingLoad { pcm, play: keep_playing, grid: None });
@@ -2146,6 +2153,7 @@ impl Mixer {
         // With no pcm the clamp parks the playhead at zero; this also
         // clears `ended`, so a later install re-arms end reporting.
         d.seek_frames(0.0);
+        d.echo.reset();
         d.reset_blend();
         self.publish_deck(&s, deck.index());
         drop(s);
@@ -2399,6 +2407,29 @@ impl Mixer {
     pub fn set_deck_resonance(&self, deck: DeckId, lift: f32) {
         let mut s = self.state.lock().unwrap();
         s.decks[deck.index()].eq.set_resonance(lift);
+    }
+
+    /// The echo's rung: whole, half or quarter beat, or none for off. A
+    /// bad fraction (either side zero) is refused rather than let through
+    /// to divide by it.
+    pub fn set_deck_echo(&self, deck: DeckId, fraction: Option<(u32, u32)>) {
+        if fraction.is_some_and(|(num, den)| num == 0 || den == 0) {
+            return;
+        }
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].echo.set_fraction(fraction);
+    }
+
+    /// How much of a repeat feeds the next one.
+    pub fn set_deck_echo_feedback(&self, deck: DeckId, feedback: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].echo.set_feedback(feedback);
+    }
+
+    /// Whether a repeat lands on the other channel from the one before it.
+    pub fn set_deck_echo_pingpong(&self, deck: DeckId, on: bool) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].echo.set_pingpong(on);
     }
 
     /// The reverse hold: the record runs backwards while it is held, and a
@@ -3199,6 +3230,15 @@ impl Mixer {
                 _ => pos_secs + travel_secs,
             };
             voice.clock = DeckClock::at(voice.grid.as_ref(), predicted_secs, platter, 0.0);
+            // The echo's tap, retuned from the same clock, once per
+            // buffer: a beat's length in OUTPUT seconds is already what
+            // `beat_len` reports, so device frames is a single multiply.
+            // Ungridded or stopped, it falls back to the counted beat --
+            // the same default a loop or a jump takes with no grid to
+            // rule on.
+            let beat_secs =
+                voice.clock.beat_len().unwrap_or(60.0 / crate::decks::COUNTED_BPM);
+            voice.echo.prepare_block(beat_secs * rate as f64);
             // The ghost moves here, once per buffer, and not in the frame
             // loop below: its rate is latched so a buffer is one multiply,
             // and the read path has four early exits (no pcm, empty pcm,
@@ -3353,7 +3393,7 @@ impl Mixer {
                         stem_gain,
                         natural_step,
                     );
-                    let toned = d.eq.process(frame, rate);
+                    let toned = d.echo.process(d.eq.process(frame, rate), rate);
                     let pre = [toned[0] * gain, toned[1] * gain];
                     deck_peaks[i] = deck_peaks[i].max(pre[0].abs()).max(pre[1].abs());
                     deck_out[i] = (pre[0] * side, pre[1] * side);
@@ -3623,7 +3663,7 @@ impl Mixer {
                     }
                     None => frame,
                 };
-                let toned = d.eq.process(frame, rate);
+                let toned = d.echo.process(d.eq.process(frame, rate), rate);
                 let pre = [toned[0] * gain, toned[1] * gain];
                 deck_peaks[i] = deck_peaks[i].max(pre[0].abs()).max(pre[1].abs());
                 deck_out[i] = (pre[0] * side, pre[1] * side);
@@ -3824,6 +3864,18 @@ pub(crate) mod fixtures {
         let mut all = vec![[a, a]; frames];
         for frame in all.iter_mut().skip(half) {
             *frame = [b, b];
+        }
+        Arc::new(TrackPcm { frames: all, sample_rate: rate })
+    }
+
+    /// Silent, except one full-scale frame at `at_secs`: a mark to time a
+    /// delay against.
+    pub(crate) fn click_pcm(at_secs: f64, rate: u32, seconds: f64) -> Arc<TrackPcm> {
+        let len = (rate as f64 * seconds) as usize;
+        let at = (at_secs * rate as f64).round() as usize;
+        let mut all = vec![[0i16, 0i16]; len];
+        if at < len {
+            all[at] = [i16::MAX, i16::MAX];
         }
         Arc::new(TrackPcm { frames: all, sample_rate: rate })
     }
@@ -5457,6 +5509,136 @@ mod tests {
         let held = mixer.deck_snapshot(DeckId::A);
         assert_eq!(held.position_secs, before, "the splat still owns the master, hand or no hand");
         assert_eq!(held.clock.beat_frac_end, grid.phase_at(held.position_secs));
+    }
+
+    /// The largest sample in a window around `around_secs`, and how far
+    /// from the window's centre it landed.
+    fn peak_near(out: &[f32], rate: f64, around_secs: f64, half_window: usize) -> (f32, i64) {
+        let centre = (around_secs * rate).round() as i64;
+        let lo = (centre - half_window as i64).max(0) as usize;
+        let hi = ((centre + half_window as i64) as usize).min(out.len());
+        let mut best = (0.0f32, centre);
+        for (index, &value) in out[lo..hi].iter().enumerate() {
+            if value.abs() > best.0.abs() {
+                best = (value, lo as i64 + index as i64);
+            }
+        }
+        (best.0, best.1 - centre)
+    }
+
+    fn render_out(mixer: &Mixer, rate: f64, buffers: usize, block: usize) -> Vec<f32> {
+        let mut out = Vec::with_capacity(buffers * block);
+        for _ in 0..buffers {
+            out.extend_from_slice(render(mixer, rate, block).channel(0));
+        }
+        out
+    }
+
+    /// A half-beat echo repeats the click that much later, at the tempo
+    /// the room actually hears -- the tempo fader included.
+    #[test]
+    fn an_echo_repeats_the_deck_half_a_beat_later_at_the_heard_tempo() {
+        let rate = 48_000.0;
+        let mixer = Mixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        mixer.install_deck(DeckId::A, click_pcm(1.0, 48_000, 6.0));
+        mixer.set_deck_keylock(DeckId::A, false);
+        mixer.set_deck_grid(DeckId::A, Some(clock_grid(120.0))); // 0.5 s/beat
+        mixer.set_deck_echo(DeckId::A, Some((1, 2)));
+        mixer.set_deck_playing(DeckId::A, true);
+        let out = render_out(&mixer, rate, 188, 512); // ~2 s
+        // 0.25 s = 12 000 frames after the click at 1.0 s = frame 48 000.
+        let (peak, offset) = peak_near(&out, rate, 1.25, 4);
+        assert!(peak > 0.3, "{peak}");
+        for index in 48_020..59_980 {
+            assert!(out[index].abs() < 0.05, "sound before the repeat at {index}: {}", out[index]);
+        }
+        assert!(offset.abs() <= 4, "{offset}");
+
+        let mixer = Mixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        mixer.install_deck(DeckId::A, click_pcm(1.0, 48_000, 6.0));
+        mixer.set_deck_keylock(DeckId::A, false);
+        mixer.set_deck_grid(DeckId::A, Some(clock_grid(120.0)));
+        mixer.set_deck_rate(DeckId::A, 1.25);
+        mixer.set_deck_echo(DeckId::A, Some((1, 2)));
+        mixer.set_deck_playing(DeckId::A, true);
+        let out = render_out(&mixer, rate, 150, 512); // ~1.6 s
+        // A resampled read (rate != 1) interpolates a one-frame impulse
+        // across its neighbours, so neither the click's own peak nor its
+        // exact arrival time is the untouched 0.8 s a plain division
+        // predicts -- the rate ramp settling on its way to 1.25 pushes it
+        // a little further out. Find where the click ACTUALLY landed
+        // first, then look for the echo the fixed delay away from THAT.
+        let (click_peak, click_at) = peak_near(&out, rate, 0.8, 1_000);
+        assert!(click_peak.abs() > 0.15, "{click_peak}");
+        let click_secs = 0.8 + click_at as f64 / rate;
+        // beat_frames(0.5, 1.25, 48_000) / 2 = 9 600, in device frames --
+        // the same domain the click's own position was just measured in.
+        let (peak, offset) = peak_near(&out, rate, click_secs + 9_600.0 / rate, 4);
+        assert!(peak.abs() > 0.15, "{peak}");
+        assert!(offset.abs() <= 4, "{offset}");
+    }
+
+    /// With no grid at all, the echo still has a beat to sit on: the
+    /// counted one, the same fallback a loop takes.
+    #[test]
+    fn a_deck_without_a_grid_echoes_at_the_counted_beat() {
+        let rate = 48_000.0;
+        let mixer = Mixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        mixer.install_deck(DeckId::A, click_pcm(1.0, 48_000, 6.0));
+        mixer.set_deck_keylock(DeckId::A, false);
+        mixer.set_deck_echo(DeckId::A, Some((1, 2)));
+        mixer.set_deck_playing(DeckId::A, true);
+        let out = render_out(&mixer, rate, 375, 512); // ~4 s
+        // 60 / COUNTED_BPM = 1 s a beat; half of that is 24 000 frames.
+        let (peak, offset) = peak_near(&out, rate, 1.0 + 24_000.0 / rate, 4);
+        assert!(peak > 0.3, "{peak}");
+        assert!(offset.abs() <= 4, "{offset}");
+    }
+
+    /// PFL hears the echo along with everything else on the strip; RAW,
+    /// which taps ahead of the tone chain, does not.
+    #[test]
+    fn the_pfl_tap_hears_the_echo_and_the_raw_tap_does_not() {
+        let rate = 48_000.0;
+        let cue_energy = |mode: CueMode| -> f64 {
+            let mixer = Mixer::new();
+            mixer.set_master(1.0);
+            mixer.set_crossfader(0.0);
+            mixer.install_deck(DeckId::A, click_pcm(0.2, 48_000, 3.0));
+            mixer.set_deck_keylock(DeckId::A, false);
+            mixer.set_deck_grid(DeckId::A, Some(clock_grid(120.0)));
+            // A quarter beat and a hot feedback: many repeats inside a
+            // short render, so their sum comfortably outweighs the one
+            // dry click both taps carry.
+            mixer.set_deck_echo(DeckId::A, Some((1, 4)));
+            mixer.set_deck_echo_feedback(DeckId::A, 0.9);
+            mixer.set_deck_playing(DeckId::A, true);
+            mixer.set_cue_armed(true);
+            mixer.set_deck_cue(DeckId::A, true);
+            mixer.set_cue_mode(mode);
+            let mut state = CueReadState::default();
+            let mut sum = 0.0f64;
+            // Integrated over the whole span the way the existing PFL/RAW
+            // test does, so a lagged consumer cannot misalign a narrow
+            // window against it.
+            for _ in 0..200 {
+                render(&mixer, rate, 512);
+                let out = consume_cue(&mixer, &mut state, rate, 512);
+                for v in out.channel(0) {
+                    sum += (*v as f64) * (*v as f64);
+                }
+            }
+            sum
+        };
+        let pfl = cue_energy(CueMode::Pfl);
+        let raw = cue_energy(CueMode::Raw);
+        assert!(pfl > raw * 1.8, "PFL must hear the repeats RAW skips: pfl={pfl} raw={raw}");
     }
 
     /// The read path folds the playhead into an active span before every

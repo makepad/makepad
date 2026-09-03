@@ -3415,6 +3415,7 @@ struct DeckRefs {
     phase_flip: ButtonRef,
     mute: ButtonRef,
     resonance: ButtonRef,
+    echo: ButtonRef,
     sync: ButtonRef,
     slip: ButtonRef,
     keylock: ButtonRef,
@@ -3472,6 +3473,7 @@ impl DeckRefs {
             phase_flip: ui.button(cx, ids.phase_flip),
             mute: ui.button(cx, ids.mute),
             resonance: ui.button(cx, ids.resonance),
+            echo: ui.button(cx, ids.echo),
             sync: ui.button(cx, ids.sync),
             slip: ui.button(cx, ids.slip),
             keylock: ui.button(cx, ids.keylock),
@@ -3586,6 +3588,8 @@ struct MusicDeckIds {
     mute: &'static [LiveId],
     /// The RES chip under the sweep knob: how hard the filter rings.
     resonance: &'static [LiveId],
+    /// The ECHO chip beside it: the beat-quantised repeat.
+    echo: &'static [LiveId],
     sync: &'static [LiveId],
     slip: &'static [LiveId],
     keylock: &'static [LiveId],
@@ -3645,6 +3649,7 @@ impl MusicDeckIds {
                 phase_flip: ids!(deck_a_phase_flip),
                 mute: ids!(deck_a_mute),
                 resonance: ids!(deck_a_resonance),
+                echo: ids!(deck_a_echo),
                 sync: ids!(deck_a_sync),
                 slip: ids!(deck_a_slip),
                 keylock: ids!(deck_a_keylock),
@@ -3732,6 +3737,7 @@ impl MusicDeckIds {
                 phase_flip: ids!(deck_b_phase_flip),
                 mute: ids!(deck_b_mute),
                 resonance: ids!(deck_b_resonance),
+                echo: ids!(deck_b_echo),
                 sync: ids!(deck_b_sync),
                 slip: ids!(deck_b_slip),
                 keylock: ids!(deck_b_keylock),
@@ -13961,6 +13967,10 @@ p2 {}
                 DeckCmd::SetResonance { deck, lift } => {
                     self.mixer.set_deck_resonance(deck, lift)
                 }
+                DeckCmd::SetEcho { deck, fraction } => self.mixer.set_deck_echo(deck, fraction),
+                DeckCmd::SetEchoPingpong { deck, on } => {
+                    self.mixer.set_deck_echo_pingpong(deck, on)
+                }
                 DeckCmd::SetStemGain { deck, stem, gain } => {
                     self.mixer.set_deck_stem_gain(deck, stem, gain)
                 }
@@ -22971,6 +22981,8 @@ p2 {}
             let bend = state.bend;
             let synced = state.synced;
             let resonance = state.resonance;
+            let echo_rung = state.echo_rung;
+            let echo_pingpong = state.echo_pingpong;
             let loaded = state.is_loaded();
             // What a fresh press of the retire button would do. Read off
             // the ENGINE's own mirror, which is the one `eject_press`
@@ -23227,6 +23239,24 @@ p2 {}
             let word = if resonance >= 2 { "RES+" } else { "RES" };
             if refs.resonance.text() != word {
                 refs.resonance.set_text(cx, word);
+            }
+            self.paint_lit(cx, ids.echo, echo_rung > 0);
+            // Three characters, the width RES and its own resting word
+            // already prove fits the halved slot ("ECHO" at four does
+            // not). ASCII only, like the key readout's own avoidance of
+            // a fraction glyph; "P" prefixes the word while ping-pong is
+            // on, "E" otherwise.
+            let word = match (echo_rung, echo_pingpong) {
+                (0, _) => "ECH",
+                (1, false) => "E1",
+                (1, true) => "P1",
+                (2, false) => "E/2",
+                (2, true) => "P/2",
+                (_, false) => "E/4",
+                (_, true) => "P/4",
+            };
+            if refs.echo.text() != word {
+                refs.echo.set_text(cx, word);
             }
             for (band, solo) in ids.eq_solos.iter().enumerate() {
                 self.paint_lit(cx, solo, eq_solo[band]);
@@ -25924,6 +25954,14 @@ p2 {}
             }
             if refs.resonance.clicked(actions) {
                 let cmds = self.decks.cycle_resonance(deck);
+                self.run_deck_cmds(cx, cmds);
+            }
+            if let Some(modifiers) = refs.echo.clicked_modifiers(actions) {
+                let cmds = if modifiers.shift {
+                    self.decks.toggle_echo_pingpong(deck)
+                } else {
+                    self.decks.cycle_echo(deck)
+                };
                 self.run_deck_cmds(cx, cmds);
             }
             for (band, solo) in refs.eq_solos.iter().enumerate() {

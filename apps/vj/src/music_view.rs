@@ -2202,12 +2202,12 @@ script_mod! {
                                     // The slot the three bands spend on
                                     // kill and solo: the sweep has no
                                     // bands to kill, so its row is free
-                                    // for how hard it rings. Three rungs,
-                                    // because a resonance that has to be
-                                    // dialled in is one nobody uses
-                                    // mid-mix.
+                                    // for resonance and the echo -- the
+                                    // way every band row already spends
+                                    // its own two halves.
                                     MSRow{
                                         deck_a_resonance := MSButton{text: "RES"}
+                                        deck_a_echo := MSButton{text: "ECH"}
                                     }
                                 }
                             }
@@ -2712,12 +2712,12 @@ script_mod! {
                                     // The slot the three bands spend on
                                     // kill and solo: the sweep has no
                                     // bands to kill, so its row is free
-                                    // for how hard it rings. Three rungs,
-                                    // because a resonance that has to be
-                                    // dialled in is one nobody uses
-                                    // mid-mix.
+                                    // for resonance and the echo -- the
+                                    // way every band row already spends
+                                    // its own two halves.
                                     MSRow{
                                         deck_b_resonance := MSButton{text: "RES"}
+                                        deck_b_echo := MSButton{text: "ECH"}
                                     }
                                 }
                                 KnobStack{
