@@ -26,11 +26,14 @@
 
 use crate::faces::FaceHost;
 use crate::graph_edit::{self, GraphIndex, NODE_WIDTH};
+use crate::wire_route::{self, Obstacle, Point, RouteKind, RouteStyle, WireRoute};
 use makepad_flow::{Graph, Literal, Node, NodeInputValue, PortType};
 use makepad_widgets::makepad_draw::DrawSvg;
 use makepad_widgets::widget_tree::CxWidgetExt;
 use makepad_widgets::*;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 
 /// Local-space offset of the world origin: keeps every local coordinate
 /// positive inside the root turtle's `(0, 0)..ROOT_SIZE` clip.
@@ -552,6 +555,18 @@ struct EdgeIndex {
     to_port: usize,
 }
 
+struct CachedWire {
+    key: u64,
+    route: WireRoute,
+}
+
+struct WirePulse {
+    node: String,
+    /// Filled from the canvas's one animation clock on the next frame. This
+    /// avoids comparing a newly arrived event with a clock that was idle.
+    started: Option<f64>,
+}
+
 #[derive(Script, WidgetRegister, WidgetRef, WidgetSet)]
 pub struct FlowCanvas {
     #[uid]
@@ -712,6 +727,14 @@ pub struct FlowCanvas {
     heights: Vec<f64>,
     #[rust]
     edges: Vec<EdgeIndex>,
+    /// Geometry is retained until an endpoint card, another card, or the
+    /// graph changes. Drawing and animation only consume this cache.
+    #[rust]
+    wire_cache: Vec<Option<CachedWire>>,
+    #[rust]
+    wire_cache_dirty: bool,
+    #[rust]
+    parallel_offsets: Vec<f64>,
     #[rust]
     drag: Option<Drag>,
     #[rust]
@@ -724,6 +747,10 @@ pub struct FlowCanvas {
     pub statuses: HashMap<String, NodeStatus>,
     #[rust]
     pub streaming: HashSet<String>,
+    #[rust]
+    carrying: HashSet<String>,
+    #[rust]
+    pulses: Vec<WirePulse>,
     /// A face that failed to evaluate, by node id, shown in that card only.
     #[rust]
     face_errors: HashMap<String, String>,
@@ -866,6 +893,24 @@ impl FlowCanvas {
                 self.z_order.push(node.id.clone());
             }
         }
+        let mut totals = HashMap::<(usize, usize), usize>::new();
+        for edge in &edges {
+            *totals.entry((edge.from, edge.to)).or_default() += 1;
+        }
+        let mut seen = HashMap::<(usize, usize), usize>::new();
+        let spacing = RouteStyle::default().cable_spacing;
+        self.parallel_offsets = edges
+            .iter()
+            .map(|edge| {
+                let pair = (edge.from, edge.to);
+                let position = seen.entry(pair).or_default();
+                let offset = (*position as f64 - (totals[&pair] as f64 - 1.0) * 0.5) * spacing;
+                *position += 1;
+                offset
+            })
+            .collect();
+        self.wire_cache = std::iter::repeat_with(|| None).take(edges.len()).collect();
+        self.wire_cache_dirty = true;
         self.heights = heights;
         self.edges = edges;
         self.card_draw_lists = card_draw_lists;
@@ -954,6 +999,32 @@ impl FlowCanvas {
     pub fn clear_run(&mut self, cx: &mut Cx) {
         self.statuses.clear();
         self.streaming.clear();
+        self.carrying.clear();
+        self.pulses.clear();
+        self.redraw(cx);
+    }
+
+    /// Start one value pulse on every outgoing cable. Pulses share the
+    /// canvas clock and are bounded so a very chatty stream cannot grow an
+    /// unbounded animation queue.
+    pub fn pulse(&mut self, cx: &mut Cx, node: &str, carrying: bool) {
+        if carrying {
+            self.carrying.insert(node.to_string());
+        }
+        let clock_was_live = self.animating();
+        let too_soon = self.pulses.iter().rev().find(|pulse| pulse.node == node).is_some_and(
+            |pulse| pulse.started.is_none() || self.time - pulse.started.unwrap_or(self.time) < 0.08,
+        );
+        if !too_soon {
+            self.pulses.push(WirePulse {
+                node: node.to_string(),
+                started: clock_was_live.then_some(self.time),
+            });
+            if self.pulses.len() > 64 {
+                self.pulses.remove(0);
+            }
+        }
+        self.next_frame = cx.new_next_frame();
         self.redraw(cx);
     }
 
@@ -1263,32 +1334,149 @@ impl FlowCanvas {
         v.set_color(c.x, c.y, c.z, c.w * alpha as f32);
     }
 
-    fn wire_ctrl(from: DVec2, to: DVec2) -> f64 {
-        ((to.x - from.x).abs() * 0.5).max(48.0)
+    fn route_point(point: DVec2) -> Point {
+        Point::new(point.x, point.y)
     }
 
-    fn bezier(v: &mut DrawVector, from: DVec2, to: DVec2) {
-        let dx = Self::wire_ctrl(from, to);
-        v.move_to(from.x as f32, from.y as f32);
-        v.bezier_to(
-            (from.x + dx) as f32,
-            from.y as f32,
-            (to.x - dx) as f32,
-            to.y as f32,
-            to.x as f32,
-            to.y as f32,
+    fn draw_route(v: &mut DrawVector, route: &WireRoute) {
+        v.move_to(route.from.x as f32, route.from.y as f32);
+        match &route.kind {
+            RouteKind::Cubic { control_1, control_2 } => v.bezier_to(
+                control_1.x as f32,
+                control_1.y as f32,
+                control_2.x as f32,
+                control_2.y as f32,
+                route.to.x as f32,
+                route.to.y as f32,
+            ),
+            RouteKind::Orthogonal { points, radius } => {
+                for index in 1..points.len() - 1 {
+                    let before = points[index - 1];
+                    let corner = points[index];
+                    let after = points[index + 1];
+                    let in_len = ((before.x - corner.x).powi(2) + (before.y - corner.y).powi(2)).sqrt();
+                    let out_len = ((after.x - corner.x).powi(2) + (after.y - corner.y).powi(2)).sqrt();
+                    let r = radius.min(in_len * 0.5).min(out_len * 0.5);
+                    let entry = Point::new(
+                        corner.x + (before.x - corner.x) * r / in_len,
+                        corner.y + (before.y - corner.y) * r / in_len,
+                    );
+                    let exit = Point::new(
+                        corner.x + (after.x - corner.x) * r / out_len,
+                        corner.y + (after.y - corner.y) * r / out_len,
+                    );
+                    v.line_to(entry.x as f32, entry.y as f32);
+                    v.quad_to(corner.x as f32, corner.y as f32, exit.x as f32, exit.y as f32);
+                }
+                v.line_to(route.to.x as f32, route.to.y as f32);
+            }
+        }
+    }
+
+    fn draw_points(v: &mut DrawVector, points: &[Point]) {
+        let Some(first) = points.first() else {
+            return;
+        };
+        v.move_to(first.x as f32, first.y as f32);
+        for point in &points[1..] {
+            v.line_to(point.x as f32, point.y as f32);
+        }
+    }
+
+    fn draw_route_slice(v: &mut DrawVector, route: &WireRoute, start: f64, end: f64) {
+        if start >= 0.0 && end <= route.length() {
+            Self::draw_points(v, &route.slice(start, end));
+            return;
+        }
+        if start < 0.0 {
+            Self::draw_points(v, &route.slice(0.0, end));
+            Self::draw_points(v, &route.slice(route.length() + start, route.length()));
+        } else {
+            Self::draw_points(v, &route.slice(start, route.length()));
+            Self::draw_points(v, &route.slice(0.0, end - route.length()));
+        }
+    }
+
+    fn draw_clamped_route_slice(v: &mut DrawVector, route: &WireRoute, start: f64, end: f64) {
+        Self::draw_points(
+            v,
+            &route.slice(start.max(0.0), end.min(route.length())),
         );
     }
 
-    fn bezier_point(from: DVec2, to: DVec2, t: f64) -> DVec2 {
-        let dx = Self::wire_ctrl(from, to);
-        let c1 = dvec2(from.x + dx, from.y);
-        let c2 = dvec2(to.x - dx, to.y);
-        let u = 1.0 - t;
-        dvec2(
-            u * u * u * from.x + 3.0 * u * u * t * c1.x + 3.0 * u * t * t * c2.x + t * t * t * to.x,
-            u * u * u * from.y + 3.0 * u * u * t * c1.y + 3.0 * u * t * t * c2.y + t * t * t * to.y,
-        )
+    fn route_cache_key(
+        edge: EdgeIndex,
+        from: Point,
+        to: Point,
+        card_rects: &[Rect],
+        offset: f64,
+    ) -> u64 {
+        let mut hash = DefaultHasher::new();
+        edge.from.hash(&mut hash);
+        edge.from_port.hash(&mut hash);
+        edge.to.hash(&mut hash);
+        edge.to_port.hash(&mut hash);
+        for value in [from.x, from.y, to.x, to.y, offset] {
+            value.to_bits().hash(&mut hash);
+        }
+        for rect in card_rects {
+            for value in [rect.pos.x, rect.pos.y, rect.size.x, rect.size.y] {
+                value.to_bits().hash(&mut hash);
+            }
+        }
+        hash.finish()
+    }
+
+    fn ensure_wire_routes(&mut self, graph: &Graph) {
+        const CARD_CLEARANCE: f64 = 12.0;
+        if !self.wire_cache_dirty && self.wire_cache.iter().all(Option::is_some) {
+            return;
+        }
+        let card_rects: Vec<Rect> = (0..graph.nodes.len())
+            .map(|index| self.card_rect(graph, index))
+            .collect();
+        for index in 0..self.edges.len() {
+            let edge = self.edges[index];
+            let from = Self::route_point(self.port_local(graph, edge.from, edge.from_port, true));
+            let to = Self::route_point(self.port_local(graph, edge.to, edge.to_port, false));
+            let offset = self.parallel_offsets.get(index).copied().unwrap_or(0.0);
+            let key = Self::route_cache_key(edge, from, to, &card_rects, offset);
+            if self.wire_cache.get(index).and_then(Option::as_ref).is_some_and(|cached| cached.key == key)
+            {
+                continue;
+            }
+            let obstacles: Vec<Obstacle> = card_rects
+                .iter()
+                .enumerate()
+                .filter(|(card, _)| *card != edge.from && *card != edge.to)
+                .map(|(_, rect)| {
+                    Obstacle::from_xywh(rect.pos.x, rect.pos.y, rect.size.x, rect.size.y)
+                        .inflate(CARD_CLEARANCE)
+                })
+                .collect();
+            let route = wire_route::route_wire(from, to, &obstacles, RouteStyle::default(), offset);
+            self.wire_cache[index] = Some(CachedWire { key, route });
+        }
+        self.wire_cache_dirty = false;
+    }
+
+    fn preview_route(&self, graph: &Graph, from_index: usize, from_port: usize, to: DVec2) -> WireRoute {
+        const CARD_CLEARANCE: f64 = 12.0;
+        let from = Self::route_point(self.port_local(graph, from_index, from_port, true));
+        let to = Self::route_point(to);
+        let target = match &self.drag {
+            Some(Drag::Wire { target, .. }) => target.map(|(node, _)| node),
+            _ => None,
+        };
+        let obstacles: Vec<Obstacle> = (0..graph.nodes.len())
+            .filter(|index| *index != from_index && Some(*index) != target)
+            .map(|index| {
+                let rect = self.card_rect(graph, index);
+                Obstacle::from_xywh(rect.pos.x, rect.pos.y, rect.size.x, rect.size.y)
+                    .inflate(CARD_CLEARANCE)
+            })
+            .collect();
+        wire_route::route_wire(from, to, &obstacles, RouteStyle::default(), 0.0)
     }
 
     fn text_width(&self, cx: &mut Cx2d, draw: &DrawText, text: &str) -> f64 {
@@ -1315,30 +1503,69 @@ impl FlowCanvas {
     fn draw_wires(&mut self, cx: &mut Cx2d, graph: &Graph) {
         let dragging_wire = matches!(self.drag, Some(Drag::Wire { .. }));
         let time = self.time;
+        self.ensure_wire_routes(graph);
         self.draw_vec.begin();
         // Wires, under the cards.
-        for edge in self.edges.iter().copied() {
-            let a = self.port_local(graph, edge.from, edge.from_port, true);
-            let b = self.port_local(graph, edge.to, edge.to_port, false);
+        for (index, edge) in self.edges.iter().copied().enumerate() {
             let ty = graph.nodes[edge.from].outputs[edge.from_port].ty;
             let color = self.port_color(ty);
-            let streaming = self.streaming.contains(&graph.nodes[edge.from].id);
+            let node = &graph.nodes[edge.from].id;
+            let streaming = self.streaming.contains(node);
+            let carrying = self.carrying.contains(node);
+            let Some(route) = self.wire_cache[index].as_ref().map(|cached| &cached.route) else {
+                continue;
+            };
             if streaming {
                 Self::set_color(&mut self.draw_vec, color, 0.22);
-                Self::bezier(&mut self.draw_vec, a, b);
+                Self::draw_route(&mut self.draw_vec, route);
                 self.draw_vec.stroke(10.0);
             }
-            Self::set_color(&mut self.draw_vec, color, if dragging_wire { 0.35 } else { 0.95 });
-            Self::bezier(&mut self.draw_vec, a, b);
+            Self::set_color(
+                &mut self.draw_vec,
+                color,
+                if dragging_wire {
+                    0.35
+                } else if carrying {
+                    1.0
+                } else {
+                    0.95
+                },
+            );
+            Self::draw_route(&mut self.draw_vec, route);
             self.draw_vec.stroke(3.0);
+            if carrying && !dragging_wire {
+                Self::set_color(&mut self.draw_vec, color, 0.75);
+                Self::draw_route(&mut self.draw_vec, route);
+                self.draw_vec.stroke(1.25);
+            }
             if streaming {
+                let spacing = (route.length() / 3.0).max(32.0);
                 for k in 0..3 {
-                    let t = (time * 0.55 + k as f64 / 3.0).fract();
-                    let p = Self::bezier_point(a, b, t);
-                    self.draw_vec.set_color(1.0, 1.0, 1.0, 0.85);
-                    self.draw_vec.circle(p.x as f32, p.y as f32, 3.5);
-                    self.draw_vec.fill();
+                    let start = (time * 48.0 + k as f64 * spacing) % route.length().max(1.0);
+                    Self::set_color(&mut self.draw_vec, color, 0.9);
+                    Self::draw_route_slice(&mut self.draw_vec, route, start, start + 18.0);
+                    self.draw_vec.stroke(4.5);
                 }
+            }
+            for pulse in self.pulses.iter().filter(|pulse| pulse.node == *node) {
+                let elapsed = pulse.started.map_or(0.0, |started| (time - started).max(0.0));
+                let centre = wire_route::pulse_progress(elapsed) * route.length();
+                Self::set_color(&mut self.draw_vec, color, 0.20);
+                Self::draw_clamped_route_slice(
+                    &mut self.draw_vec,
+                    route,
+                    centre - 24.0,
+                    centre + 24.0,
+                );
+                self.draw_vec.stroke(13.0);
+                Self::set_color(&mut self.draw_vec, color, 1.0);
+                Self::draw_clamped_route_slice(
+                    &mut self.draw_vec,
+                    route,
+                    centre - 20.0,
+                    centre + 20.0,
+                );
+                self.draw_vec.stroke(5.0);
             }
         }
         // The wire being dragged.
@@ -1350,11 +1577,11 @@ impl FlowCanvas {
             ..
         }) = self.drag
         {
-            let a = self.port_local(graph, from, from_port, true);
             let b = self.camera.screen_to_local(pos);
             let color = self.port_color(ty);
+            let route = self.preview_route(graph, from, from_port, b);
             Self::set_color(&mut self.draw_vec, color, 1.0);
-            Self::bezier(&mut self.draw_vec, a, b);
+            Self::draw_route(&mut self.draw_vec, &route);
             self.draw_vec.stroke(3.0);
         }
         self.draw_vec.end(cx);
@@ -1791,6 +2018,7 @@ impl FlowCanvas {
 
     fn animating(&self) -> bool {
         !self.streaming.is_empty()
+            || !self.pulses.is_empty()
             || self.statuses.values().any(|status| {
                 matches!(status.state.as_str(), "running" | "waiting" | "queued")
                     || (status.shown - status.target_fraction()).abs() > 1e-3
@@ -1939,6 +2167,7 @@ impl Widget for FlowCanvas {
         self.draw_list = Some(draw_list);
         if heights_changed {
             // Wires, ports and outlines were drawn against last frame's heights.
+            self.wire_cache_dirty = true;
             self.area.redraw(cx);
         }
         if self.fit_pending > 0 && !heights_changed {
@@ -1984,6 +2213,13 @@ impl Widget for FlowCanvas {
                 let target = status.target_fraction();
                 status.shown = ease(status.shown, target, dt);
             }
+            for pulse in &mut self.pulses {
+                if pulse.started.is_none() {
+                    pulse.started = Some(nf.time);
+                }
+            }
+            self.pulses
+                .retain(|pulse| nf.time - pulse.started.unwrap_or(nf.time) <= 0.6);
             if self.animating() {
                 self.next_frame = cx.new_next_frame();
             }
@@ -2156,6 +2392,7 @@ impl Widget for FlowCanvas {
                             origin,
                             moved,
                         });
+                        self.wire_cache_dirty = true;
                     }
                     Some(Drag::Resize {
                         index,
@@ -2181,6 +2418,7 @@ impl Widget for FlowCanvas {
                                 (origin.1 + delta.y).max(min_height),
                             ),
                         });
+                        self.wire_cache_dirty = true;
                     }
                     Some(Drag::Wire {
                         from,

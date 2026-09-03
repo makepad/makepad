@@ -325,6 +325,18 @@ impl FlowClient {
         decode(&body, "run row")
     }
 
+    pub fn runs(&self, instance: Option<&str>) -> ClientResult<Vec<RunRowDto>> {
+        let target = match instance {
+            Some(instance) => format!(
+                "/v1/runs?instance={}",
+                route_id(instance, "instance")?
+            ),
+            None => "/v1/runs".to_string(),
+        };
+        let body = self.call(Method::Get, &target, None, true, None)?;
+        decode(&body, "run list")
+    }
+
     pub fn run_json(&self, id: &str) -> ClientResult<Value> {
         let target = format!("/v1/runs/{}", route_id(id, "run")?);
         self.call_json(Method::Get, &target, None)
@@ -332,6 +344,12 @@ impl FlowClient {
 
     pub fn cancel_run(&self, id: &str) -> ClientResult<()> {
         let target = format!("/v1/runs/{}/cancel", route_id(id, "run")?);
+        let _ = self.call(Method::Post, &target, None, true, None)?;
+        Ok(())
+    }
+
+    pub fn clear_instance(&self, id: &str) -> ClientResult<()> {
+        let target = format!("/v1/instances/{}/clear", route_id(id, "instance")?);
         let _ = self.call(Method::Post, &target, None, true, None)?;
         Ok(())
     }

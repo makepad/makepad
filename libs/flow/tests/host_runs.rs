@@ -670,6 +670,119 @@ fn delete_instance_and_cancel_route_both_cancel_the_run() {
     server.shutdown();
 }
 
+#[test]
+fn clear_instance_forgets_generated_state_but_keeps_inputs_and_refuses_live_runs() {
+    let root = TempRoot::new("clear-instance");
+    let server = start(
+        &root.0,
+        seams(
+            FakeChat { pending: true, ..FakeChat::done("unused") },
+            FakeGen::done(),
+            FakeHttp::json(200, "{}"),
+        ),
+    );
+    let endpoints = server.endpoints();
+    put_flow(endpoints.control, &endpoints.token, "echo", ECHO_FLOW);
+    put_flow(endpoints.control, &endpoints.token, "stalled-clear", STALLED_FLOW);
+
+    let create = request(
+        endpoints.control,
+        "POST",
+        "/v1/flows/echo/instances",
+        Some(&endpoints.token),
+        &CreateInstanceRequest {
+            inputs: Some(one_input("prompt", "text", text_input("keep me"))),
+            ..CreateInstanceRequest::default()
+        }
+        .serialize_json(),
+    );
+    let instance = CreateInstanceResponse::deserialize_json(&create.body).unwrap().instance;
+    let run_cursor = cursor(endpoints.control, &endpoints.token, "run");
+    let started = request(
+        endpoints.control,
+        "POST",
+        &format!("/v1/instances/{instance}/runs"),
+        Some(&endpoints.token),
+        &CreateRunRequest::default().serialize_json(),
+    );
+    let run_id = CreateRunResponse::deserialize_json(&started.body).unwrap().run_id;
+    poll_events_until(endpoints.control, &endpoints.token, "run", run_cursor, |event| {
+        event_kind(event) == "run.finished" && event_str(event, "run_id") == Some(run_id.as_str())
+    });
+    let before = request(
+        endpoints.control,
+        "GET",
+        &format!("/v1/instances/{instance}"),
+        Some(&endpoints.token),
+        "",
+    );
+    assert!(!InstanceRow::deserialize_json(&before.body).unwrap().outputs.is_empty());
+
+    let instance_cursor = cursor(endpoints.control, &endpoints.token, "instance");
+    let clear = request(
+        endpoints.control,
+        "POST",
+        &format!("/v1/instances/{instance}/clear"),
+        Some(&endpoints.token),
+        "",
+    );
+    assert_eq!(clear.status, 200, "{}", clear.body);
+    let after = request(
+        endpoints.control,
+        "GET",
+        &format!("/v1/instances/{instance}"),
+        Some(&endpoints.token),
+        "",
+    );
+    let after = InstanceRow::deserialize_json(&after.body).unwrap();
+    assert_eq!(after.input_text("prompt", "text").as_deref(), Some("keep me"));
+    assert!(after.outputs.is_empty());
+    assert_eq!(after.state, "idle");
+    let forgotten = request(
+        endpoints.control,
+        "GET",
+        &format!("/v1/runs/{run_id}"),
+        Some(&endpoints.token),
+        "",
+    );
+    assert_eq!(forgotten.status, 404, "{}", forgotten.body);
+    let events = poll_events_until(
+        endpoints.control,
+        &endpoints.token,
+        "instance",
+        instance_cursor,
+        |event| event_kind(event) == "instance.cleared",
+    );
+    assert_eq!(event_str(events.last().unwrap(), "instance"), Some(instance.as_str()));
+
+    let create_live = request(
+        endpoints.control,
+        "POST",
+        "/v1/flows/stalled-clear/instances",
+        Some(&endpoints.token),
+        &CreateInstanceRequest::default().serialize_json(),
+    );
+    let live = CreateInstanceResponse::deserialize_json(&create_live.body).unwrap().instance;
+    let started_live = request(
+        endpoints.control,
+        "POST",
+        &format!("/v1/instances/{live}/runs"),
+        Some(&endpoints.token),
+        &CreateRunRequest::default().serialize_json(),
+    );
+    assert_eq!(started_live.status, 202, "{}", started_live.body);
+    let busy = request(
+        endpoints.control,
+        "POST",
+        &format!("/v1/instances/{live}/clear"),
+        Some(&endpoints.token),
+        "",
+    );
+    assert_eq!(busy.status, 409, "{}", busy.body);
+
+    server.shutdown();
+}
+
 // ---------------------------------------------------------------------------
 // 6. values: PUT bytes -> digest -> usable as an image input; TTL expiry
 // ---------------------------------------------------------------------------
