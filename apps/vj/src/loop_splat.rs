@@ -437,6 +437,7 @@ mod tests {
     fn analysis(duration_secs: f64, changes_secs: Vec<f64>, confidence: f32) -> TrackAnalysis {
         TrackAnalysis {
             sound: None,
+            loudness_lufs: None,
             duration_secs,
             sample_rate: 48_000,
             grid: TrackGrid {

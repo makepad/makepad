@@ -5984,6 +5984,11 @@ fn env_millis(name: &str, fallback: Duration, min: u64, max: u64) -> Duration {
 /// This is the COLUMN rather than a parallel enum of sortable things: the
 /// operator can now add and reorder columns, and a second list of what is
 /// sortable would only be somewhere for the two to disagree.
+/// Where the level match aims. The streaming-loudness neighbourhood,
+/// which is where mastered dance music already sits -- a bedroom bounce
+/// that comes in under it is what the match is for.
+const LOUDNESS_TARGET_LUFS: f64 = -14.0;
+
 type MusicSort = Option<Column>;
 /// The library row's chips and the words they wear when there is room. Below
 /// `LIBRARY_NARROW_WIDTH` they keep only their icons.
@@ -21051,6 +21056,16 @@ p2 {}
                     done.analysis.duration_secs,
                 ),
             );
+            // The measured loudness replaces the rough level match the
+            // decode made: same job, done properly. It arrives with the
+            // analysis, which for any record played before is the moment
+            // it lands, because it comes off the sidecar with everything
+            // else.
+            if let Some(lufs) = done.analysis.loudness_lufs {
+                let gain = crate::loudness::gain_for_target(lufs, LOUDNESS_TARGET_LUFS);
+                let cmds = self.decks.set_norm_gain(deck, gain);
+                self.run_deck_cmds(cx, cmds);
+            }
             self.deck_analysis[index] = Some(done.analysis);
             self.say_key_against_the_room(cx, deck);
             if self.deck_stem_coverage[index].is_some_and(|(_, complete)| complete) {

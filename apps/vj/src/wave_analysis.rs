@@ -103,7 +103,10 @@ const CACHE_MAGIC: &[u8; 8] = b"VJWAVE\0\0";
 /// second application can reach a coarser rung the first was too far
 /// from -- so a change to the ladder is a version bump, which is exactly
 /// what this number is for.
-const CACHE_VERSION: u32 = 10;
+/// Version 11 carries the record's measured loudness. A version 10
+/// sidecar has none, and there is no way to derive one without the
+/// samples, so it is re-analysed like every other bump.
+const CACHE_VERSION: u32 = 11;
 /// Longest local file the music explorer will lift into memory.
 pub const MAX_LOCAL_TRACK_FRAMES: usize = 48_000 * 60 * 15;
 
@@ -654,6 +657,10 @@ pub struct TrackAnalysis {
     /// uses: the round-trip test has to set it and read it back, which a
     /// test-invisible field cannot do.
     pub sound: Option<SoundSpan>,
+    /// How loud this record is, in LUFS, by the broadcast rule. `None`
+    /// when there was nothing to measure -- which is not "quiet" and must
+    /// never be turned into a gain.
+    pub loudness_lufs: Option<f64>,
 }
 
 impl TrackAnalysis {
@@ -2121,11 +2128,13 @@ pub struct AnalysisTiming {
     pub tiles: u64,
     /// The chroma pass, which reads the samples again.
     pub key: u64,
+    /// The loudness pass, which reads them a third time.
+    pub loudness: u64,
 }
 
 impl AnalysisTiming {
     pub fn total(&self) -> u64 {
-        self.envelopes + self.prior + self.grid + self.tiles + self.key
+        self.envelopes + self.prior + self.grid + self.tiles + self.key + self.loudness
     }
 }
 
@@ -2178,6 +2187,8 @@ pub fn analyze_timed(pcm: &TrackPcm) -> (TrackAnalysis, AnalysisTiming) {
     // is the one thing a three-band energy envelope has already thrown away.
     let key = crate::track_key::estimate_key(&pcm.frames, pcm.sample_rate);
     lap(&mut timing.key, &mut clock);
+    let loudness_lufs = crate::loudness::integrated_lufs(&pcm.frames, pcm.sample_rate);
+    lap(&mut timing.loudness, &mut clock);
     let analysis = TrackAnalysis {
         duration_secs: pcm.seconds(),
         sample_rate: pcm.sample_rate,
@@ -2195,6 +2206,7 @@ pub fn analyze_timed(pcm: &TrackPcm) -> (TrackAnalysis, AnalysisTiming) {
                 last_secs: last as f64 / rate,
             }
         }),
+        loudness_lufs,
     };
     (analysis, timing)
 }
@@ -2348,6 +2360,16 @@ pub fn encode_analysis(analysis: &TrackAnalysis) -> Vec<u8> {
         }
         None => out.extend_from_slice(&[0u8; 17]),
     }
+    // Behind the sound span, for the same reason it is behind everything
+    // else: the summary header's offsets are hand-indexed, and a field
+    // added in front of them would move every one.
+    match analysis.loudness_lufs {
+        Some(lufs) => {
+            out.push(1);
+            out.extend_from_slice(&lufs.to_le_bytes());
+        }
+        None => out.extend_from_slice(&[0u8; 9]),
+    }
     out
 }
 
@@ -2430,10 +2452,20 @@ pub fn decode_analysis(bytes: &[u8]) -> Result<TrackAnalysis, String> {
             _ => return Err("wave cache sound flag out of range".into()),
         }
     };
+    let loudness_lufs = {
+        let field = take(9)?;
+        match field[0] {
+            0 => None,
+            1 => Some(f64::from_le_bytes(field[1..9].try_into().unwrap()))
+                .filter(|lufs: &f64| lufs.is_finite()),
+            _ => return Err("wave cache loudness flag out of range".into()),
+        }
+    };
     #[cfg(test)]
     let _ = refined_by_beats;
     Ok(TrackAnalysis {
         sound,
+        loudness_lufs,
         duration_secs,
         sample_rate,
         #[cfg(not(test))]
@@ -2718,7 +2750,7 @@ impl AnalysisPool {
                             // the total alone cannot say whether that is a
                             // slow machine or one pathological file.
                             makepad_widgets::log!(
-                                "analysis: {:.0}s of audio in {} ms                                  (envelopes {}, prior {}, grid {}, tiles {}, key {})",
+                                "analysis: {:.0}s of audio in {} ms                                  (envelopes {}, prior {}, grid {}, tiles {}, key {}, loudness {})",
                                 analysis.duration_secs,
                                 timing.total(),
                                 timing.envelopes,
@@ -2726,6 +2758,7 @@ impl AnalysisPool {
                                 timing.grid,
                                 timing.tiles,
                                 timing.key,
+                                timing.loudness,
                             );
                             (analysis, false)
                         }
@@ -3369,6 +3402,25 @@ mod tests {
     }
 
     /// The stages add up to the whole, and each one is really measured.
+    /// The loudness rides the sidecar, so a record played before is
+    /// level-matched the moment it lands rather than after a re-measure.
+    #[test]
+    fn the_measured_loudness_survives_the_cache() {
+        let pcm = click_track(48_000, 128.0, 8.0, 0.0);
+        let mut analysis = analyze(&pcm);
+        analysis.loudness_lufs = Some(-17.25);
+        let back = decode_analysis(&encode_analysis(&analysis)).expect("a round trip");
+        assert_eq!(back.loudness_lufs, Some(-17.25));
+        // And a record with nothing to measure comes back with nothing.
+        analysis.loudness_lufs = None;
+        let back = decode_analysis(&encode_analysis(&analysis)).expect("a round trip");
+        assert_eq!(back.loudness_lufs, None);
+        // A stored number that cannot mean a level is refused, not used.
+        analysis.loudness_lufs = Some(f64::NAN);
+        let back = decode_analysis(&encode_analysis(&analysis)).expect("a round trip");
+        assert_eq!(back.loudness_lufs, None, "a level that is not a number is none");
+    }
+
     #[test]
     fn an_analysis_says_where_its_time_went() {
         let pcm = click_track(44_100, 128.0, 12.0, 0.41);
@@ -3376,7 +3428,12 @@ mod tests {
         assert!(analysis.grid.has_grid(), "and it still analysed the track");
         // Every stage is a real number of milliseconds or a zero, and the
         // total is exactly their sum -- no stage is left out of it.
-        let sum = timing.envelopes + timing.prior + timing.grid + timing.tiles + timing.key;
+        let sum = timing.envelopes
+            + timing.prior
+            + timing.grid
+            + timing.tiles
+            + timing.key
+            + timing.loudness;
         assert_eq!(timing.total(), sum);
         // The two that read every sample cannot both be free.
         assert!(
