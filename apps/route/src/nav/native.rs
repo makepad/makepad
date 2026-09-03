@@ -65,8 +65,9 @@ pub fn nav_basename(maps_root: &Path) -> Option<String> {
     None
 }
 
-pub fn start_nav_load(sender: ToUISender<NavLoad>, basename: String) {
-    std::thread::spawn(move || {
+pub fn start_nav_load(pool: TaskPool, sender: ToUISender<NavLoad>, basename: String) {
+    let rejected_sender = sender.clone();
+    match pool.submit(Lane::Heavy, move || {
         let maps_root = Path::new(&basename)
             .parent()
             .unwrap_or_else(|| Path::new("."))
@@ -128,7 +129,14 @@ pub fn start_nav_load(sender: ToUISender<NavLoad>, basename: String) {
             }),
             stats,
         });
-    });
+    }) {
+        Ok(handle) => handle.detach(),
+        Err(error) => {
+            let _ = rejected_sender.send(NavLoad::Failed {
+                error: format!("navigation load task rejected: {error}"),
+            });
+        }
+    }
 }
 
 impl NavData {
@@ -256,8 +264,17 @@ fn build_hires_now(
 /// (numeric weather_now sampling) and reprojected display frames to the UI.
 /// Also syncs the raw volumes of both radars and composites them into the
 /// hi-res "now" image.
-pub fn start_radar_worker(sender: ToUISender<RadarData>) {
-    std::thread::spawn(move || {
+pub fn start_radar_worker(
+    spawner: ThreadSpawner,
+    pool: TaskPool,
+    sender: ToUISender<RadarData>,
+) {
+    let spawned = spawner.spawn_worker(
+        ThreadOptions {
+            name: Some("route-rain-radar".into()),
+            ..Default::default()
+        },
+        move || {
         let sync = RadarSync::new(RadarConfig::new(RADAR_CACHE_DIR));
         let (herwijnen_config, den_helder_config) = RadarConfig::volume_pair(RADAR_CACHE_DIR);
         let volume_syncs = (
@@ -273,6 +290,7 @@ pub fn start_radar_worker(sender: ToUISender<RadarData>) {
         // Latest decoded forecast package, re-sent when the hi-res image
         // refreshes on its own 5-min cadence.
         let mut current: Option<RadarData> = None;
+        let pacing = CancellationToken::new();
         loop {
             let state = match sync.sync() {
                 Ok(state) => state,
@@ -287,20 +305,19 @@ pub fn start_radar_worker(sender: ToUISender<RadarData>) {
                             let stamp = filename_stamp(&frame.filename);
                             // Reproject all frames in parallel (same as
                             // examples/map — serial is a multi-second stall).
-                            let display_frames: Vec<Vec<u32>> = std::thread::scope(|scope| {
-                                let handles: Vec<_> = frames
-                                    .iter()
-                                    .map(|frame| {
-                                        let projection = &projection;
-                                        scope.spawn(move || {
-                                            makepad_geodata::radar_raster::rgba_to_bgra_texels(
-                                                &projection.frame_to_rgba(frame),
-                                            )
-                                        })
-                                    })
-                                    .collect();
-                                handles.into_iter().map(|h| h.join().unwrap()).collect()
+                            let display_frames = (0..frames.len())
+                                .map(|_| std::sync::OnceLock::new())
+                                .collect::<Vec<_>>();
+                            pool.fan_out(Lane::Heavy, frames.len(), |index| {
+                                let rgba = projection.frame_to_rgba(&frames[index]);
+                                let _ = display_frames[index].set(
+                                    makepad_geodata::radar_raster::rgba_to_bgra_texels(&rgba),
+                                );
                             });
+                            let display_frames = display_frames
+                                .into_iter()
+                                .map(|frame| frame.into_inner().unwrap_or_default())
+                                .collect::<Vec<_>>();
                             let now_hires = current.as_ref().and_then(|c| c.now_hires.clone());
                             current = Some(RadarData {
                                 frames,
@@ -349,9 +366,13 @@ pub fn start_radar_worker(sender: ToUISender<RadarData>) {
                     });
                 }
             }
-            std::thread::sleep(std::time::Duration::from_secs(60));
+            let _ = pacing.wait_until(Cx::monotonic_now() + 60.0);
         }
     });
+    match spawned {
+        Ok(handle) => handle.detach(),
+        Err(error) => log!("rain radar worker unavailable: {error}"),
+    }
 }
 
 // --- RAD_NL25 grid sampling -------------------------------------------------

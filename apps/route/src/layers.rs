@@ -192,10 +192,16 @@ impl LayerState {
 }
 
 /// GFS wind worker: 30 min disk-gated NOMADS polls, cached GRIB2 on disk.
-pub fn start_wind_worker(sender: ToUISender<WindUpdate>) {
-    std::thread::spawn(move || {
+pub fn start_wind_worker(spawner: ThreadSpawner, sender: ToUISender<WindUpdate>) {
+    let spawned = spawner.spawn_worker(
+        ThreadOptions {
+            name: Some("route-wind".into()),
+            ..Default::default()
+        },
+        move || {
         use makepad_geodata::wind::{WindSync, WIND_EAST, WIND_NORTH, WIND_SOUTH, WIND_WEST};
         let sync = WindSync::new("local/overlays/wind");
+        let pacing = CancellationToken::new();
         loop {
             let field = sync.sync().ok().flatten().or_else(|| sync.cached());
             if let Some(field) = field {
@@ -207,19 +213,29 @@ pub fn start_wind_worker(sender: ToUISender<WindUpdate>) {
                     bbox: (WIND_WEST, WIND_SOUTH, WIND_EAST, WIND_NORTH),
                 });
             }
-            std::thread::sleep(std::time::Duration::from_secs(300));
+            let _ = pacing.wait_until(Cx::monotonic_now() + 300.0);
         }
     });
+    match spawned {
+        Ok(handle) => handle.detach(),
+        Err(error) => log!("wind worker unavailable: {error}"),
+    }
 }
 
 /// Terrain worker: hillshade renders for requested view bboxes from the
 /// local terrarium mbtiles, with landcover drape (shared with examples/map).
 pub fn start_terrain_worker(
+    spawner: ThreadSpawner,
     sender: ToUISender<TerrainUpdate>,
     maps_root: PathBuf,
 ) -> mpsc::Sender<TerrainRequest> {
     let (tx, rx) = mpsc::channel::<TerrainRequest>();
-    std::thread::spawn(move || {
+    let spawned = spawner.spawn_worker(
+        ThreadOptions {
+            name: Some("route-terrain".into()),
+            ..Default::default()
+        },
+        move || {
         use makepad_geodata::terrain_shade::TerrainShader;
         let Ok(mut shader) =
             TerrainShader::open(std::path::Path::new("local/overlays/nl-terrain.mbtiles"))
@@ -276,6 +292,10 @@ pub fn start_terrain_worker(
             });
         }
     });
+    match spawned {
+        Ok(handle) => handle.detach(),
+        Err(error) => log!("terrain worker unavailable: {error}"),
+    }
     tx
 }
 

@@ -229,7 +229,7 @@ impl TestMapBuild {
         }
         self.fraction = 0.0;
         if self.paths.pbf.is_file() {
-            self.start_bake();
+            self.start_bake(cx);
             return;
         }
         self.stage = Stage::Fetching { loaded: 0, total: testmap::AMSTERDAM_PBF_APPROX_BYTES };
@@ -282,7 +282,12 @@ impl TestMapBuild {
         true
     }
 
-    pub fn handle_http_response(&mut self, request_id: LiveId, response: &HttpResponse) -> bool {
+    pub fn handle_http_response(
+        &mut self,
+        cx: &mut Cx,
+        request_id: LiveId,
+        response: &HttpResponse,
+    ) -> bool {
         if !self.owns_request(request_id) {
             return false;
         }
@@ -314,7 +319,7 @@ impl TestMapBuild {
             return true;
         }
         self.push_log(format!("extract saved: {:.0} MB", body.len() as f64 / 1.0e6));
-        self.start_bake();
+        self.start_bake(cx);
         true
     }
 
@@ -366,7 +371,7 @@ impl TestMapBuild {
         changed
     }
 
-    fn start_bake(&mut self) {
+    fn start_bake(&mut self, cx: &mut Cx) {
         self.stage = Stage::Baking;
         self.headline = "Baking tiles".to_string();
         let sender = Mutex::new(self.rx.sender());
@@ -384,7 +389,8 @@ impl TestMapBuild {
         let mut options = BakeOptions::amsterdam();
         options.paths = self.paths.clone();
         let done = self.rx.sender();
-        std::thread::spawn(move || {
+        let rejected = done.clone();
+        match cx.task_pool().submit(Lane::Heavy, move || {
             // NoFetch: the extract is on disk before this thread starts —
             // downloading is the window's job, where progress comes free.
             //
@@ -401,7 +407,14 @@ impl TestMapBuild {
                 Ok(stats) => BakeMsg::Done { skipped: stats.skipped_tiles },
                 Err(error) => BakeMsg::Failed(error),
             });
-        });
+        }) {
+            Ok(handle) => handle.detach(),
+            Err(error) => {
+                let _ = rejected.send(BakeMsg::Failed(format!(
+                    "test-map bake task rejected: {error}"
+                )));
+            }
+        }
     }
 
     fn fail(&mut self, error: String) {
