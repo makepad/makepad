@@ -3961,6 +3961,22 @@ script_mod! {
                         prep_cols_queue := MusicChipButton{height: 20 text: "SET LIST"}
                         prep_cols_note := MusicLabel{width: Fill text: ""}
                     }
+                    // How the KEY column is written. A reading habit, not
+                    // three different facts: the estimate and the wheel
+                    // underneath are the same whichever is lit, and the
+                    // column's ORDER never changes with it.
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        MusicLabel{width: Fit text: "KEY AS"}
+                        prep_key_wheel := MusicChipButton{height: 20 text: "8A"}
+                        prep_key_open := MusicChipButton{height: 20 text: "1m"}
+                        prep_key_names := MusicChipButton{height: 20 text: "Am"}
+                        MusicLabel{width: Fill text: ""}
+                    }
                     View{
                         width: Fill
                         height: Fit
@@ -6111,6 +6127,10 @@ pub enum TrackKey {
     Local(PathBuf),
 }
 
+/// The seat a row with no key takes: past every real one, so unjudged
+/// tracks gather at one end whichever way the column runs.
+pub const NO_KEY_ORDER: u8 = u8::MAX;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct TrackRowEntry {
     pub key: TrackKey,
@@ -6127,6 +6147,10 @@ pub struct TrackRowEntry {
     /// Pre-formatted so the list stays a pure view.
     pub bpm: String,
     pub musical_key: String,
+    /// Where that key sits on the wheel, so the column can be ordered
+    /// musically without the list having to know what the text means.
+    /// [`NO_KEY_ORDER`] for a track nothing has judged.
+    pub key_order: u8,
     pub duration: String,
     pub tags: String,
     /// The store holds this track's four separated stems.
@@ -6151,6 +6175,7 @@ impl TrackRowEntry {
             bitrate: String::new(),
             bpm: String::new(),
             musical_key: String::new(),
+            key_order: NO_KEY_ORDER,
             duration: String::new(),
             tags: String::new(),
             stem: false,
@@ -7255,6 +7280,7 @@ mod tests {
             bitrate: "320k".into(),
             bpm: "123.0".into(),
             musical_key: "8A".into(),
+            key_order: 14,
             duration: "3:16".into(),
             tags: "Tags".into(),
             stem: true,

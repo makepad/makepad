@@ -120,6 +120,43 @@ impl KeyEstimate {
         format!("{number}{letter}")
     }
 
+    /// Where this key sits on the wheel, for putting a list in an order
+    /// a DJ can read down: neighbours on the wheel are neighbours in the
+    /// list, and a key sits beside its relative.
+    ///
+    /// Sorting the printed label instead puts 10A before 2A, which is
+    /// alphabetical order and is no order at all.
+    pub fn wheel_order(&self) -> u8 {
+        let tonic = (self.tonic % 12) as u32;
+        let root = if self.minor { (tonic + 3) % 12 } else { tonic };
+        let number = ((root * 7) % 12 + 7) % 12 + 1;
+        // The mode is the tie-break, so a key and its relative sit
+        // together rather than in two separate runs -- minor first, which
+        // is the order the wheel is always printed in.
+        ((number - 1) * 2 + u32::from(!self.minor)) as u8
+    }
+
+    /// The name in whichever notation the operator reads.
+    pub fn label(&self, notation: KeyNotation) -> String {
+        match notation {
+            KeyNotation::Wheel => self.camelot(),
+            KeyNotation::Open => self.open_key(),
+            KeyNotation::Traditional => self.name(),
+        }
+    }
+
+    /// The other numbered wheel: the same twelve positions, turned so that
+    /// the natural minor is 1, with `m` and `d` for the two rings.
+    pub fn open_key(&self) -> String {
+        let camelot = self.camelot();
+        let number: i32 = camelot
+            .trim_end_matches(['A', 'B'])
+            .parse()
+            .unwrap_or(1);
+        let letter = if self.minor { "m" } else { "d" };
+        format!("{}{letter}", (number - 8).rem_euclid(12) + 1)
+    }
+
     /// Traditional name, e.g. "Am" / "C".
     pub fn name(&self) -> String {
         let tonic = (self.tonic % 12) as usize;
@@ -127,6 +164,41 @@ impl KeyEstimate {
             format!("{}m", MINOR_NAMES[tonic])
         } else {
             MAJOR_NAMES[tonic].to_string()
+        }
+    }
+}
+
+/// How a key is written on screen.
+///
+/// One formatter, because the notation is a reading habit and not three
+/// different facts: whichever is chosen, it is the same estimate and the
+/// same wheel underneath, and the sort never changes with it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum KeyNotation {
+    /// The numbered wheel with the major ring lettered B, C major at 8.
+    #[default]
+    Wheel,
+    /// The other numbered wheel: minor ring `m`, major ring `d`, turned so
+    /// A minor is 1.
+    Open,
+    /// The names themselves: "Am", "C".
+    Traditional,
+}
+
+impl KeyNotation {
+    pub fn index(self) -> usize {
+        match self {
+            KeyNotation::Wheel => 0,
+            KeyNotation::Open => 1,
+            KeyNotation::Traditional => 2,
+        }
+    }
+
+    pub fn from_index(index: usize) -> KeyNotation {
+        match index {
+            1 => KeyNotation::Open,
+            2 => KeyNotation::Traditional,
+            _ => KeyNotation::Wheel,
         }
     }
 }
@@ -995,6 +1067,48 @@ fn pearson(left: &[f64; 12], right: &[f64; 12]) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    /// Three notations, one wheel underneath.
+    #[test]
+    fn a_key_is_written_three_ways_and_means_the_same_thing() {
+        let a_minor = key(9, true);
+        let c_major = key(0, false);
+        assert_eq!(a_minor.camelot(), "8A");
+        assert_eq!(c_major.camelot(), "8B");
+        // The other wheel is turned so the natural minor is one.
+        assert_eq!(a_minor.open_key(), "1m");
+        assert_eq!(c_major.open_key(), "1d");
+        assert_eq!(key(4, true).camelot(), "9A", "E minor is a step round");
+        assert_eq!(key(4, true).open_key(), "2m");
+        assert_eq!(key(2, true).camelot(), "7A", "D minor the other way");
+        assert_eq!(key(2, true).open_key(), "12m");
+        assert_eq!(a_minor.name(), "Am");
+        assert_eq!(c_major.name(), "C");
+        // And one formatter answers for all three.
+        assert_eq!(a_minor.label(KeyNotation::Wheel), "8A");
+        assert_eq!(a_minor.label(KeyNotation::Open), "1m");
+        assert_eq!(a_minor.label(KeyNotation::Traditional), "Am");
+    }
+
+    /// The order a list is read down is the wheel's, not the alphabet's.
+    #[test]
+    fn keys_sort_around_the_wheel_with_relatives_together() {
+        let mut keys = vec![
+            key(2, true),   // 7A
+            key(9, true),   // 8A
+            key(0, false),  // 8B
+            key(4, true),   // 9A
+            key(11, true),  // 10A
+            key(10, true),  // 3A
+        ];
+        keys.sort_by_key(|k| k.wheel_order());
+        let round: Vec<String> = keys.iter().map(|k| k.camelot()).collect();
+        assert_eq!(round, ["3A", "7A", "8A", "8B", "9A", "10A"]);
+        // Which is exactly what sorting the printed label does NOT give.
+        let mut text: Vec<String> = round.clone();
+        text.sort();
+        assert_ne!(text, round, "10A before 2A is no order at all");
+    }
+
     use super::*;
 
     fn key(tonic: u8, minor: bool) -> KeyEstimate {

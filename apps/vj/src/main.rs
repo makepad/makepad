@@ -24,6 +24,7 @@ use makepad_widgets::makepad_platform::file_dialogs::{FileDialog, FileDialogActi
 use crate::import_ui::ImportPanel;
 use crate::local_store::LocalStore;
 use crate::music_import_ui::MusicImporter;
+use crate::track_key::KeyNotation;
 
 /// The third list tab: the loops page that stands in for the explorer and
 /// the queue together.
@@ -6947,6 +6948,10 @@ pub struct App {
     /// explorer wears, but it does want tempo and key.
     #[rust(ColumnLayout::explorer_default())]
     explorer_columns: ColumnLayout,
+    /// How the KEY column is written. A reading habit, so it rides the
+    /// same dialog and the same file the columns do.
+    #[rust]
+    key_notation: KeyNotation,
     #[rust(ColumnLayout::queue_default())]
     queue_columns: ColumnLayout,
     /// The columns dialog is editing the SET LIST's layout rather than the
@@ -18627,6 +18632,10 @@ p2 {}
             false => "",
         };
         self.ui.label(cx, ids!(prep_cols_note)).set_text(cx, note);
+        let notation = self.key_notation;
+        self.paint_lit(cx, ids!(prep_key_wheel), notation == KeyNotation::Wheel);
+        self.paint_lit(cx, ids!(prep_key_open), notation == KeyNotation::Open);
+        self.paint_lit(cx, ids!(prep_key_names), notation == KeyNotation::Traditional);
         for (slot, (show, label, _, _)) in Self::PREP_COL_ROWS.iter().enumerate() {
             let Some(column) = layout.order().get(slot).copied() else { continue };
             self.ui
@@ -18643,6 +18652,18 @@ p2 {}
     }
 
     fn handle_columns_modal(&mut self, cx: &mut Cx, actions: &Actions) {
+        for (id, notation) in [
+            (ids!(prep_key_wheel), KeyNotation::Wheel),
+            (ids!(prep_key_open), KeyNotation::Open),
+            (ids!(prep_key_names), KeyNotation::Traditional),
+        ] {
+            if self.ui.button(cx, id).clicked(actions) && self.key_notation != notation {
+                self.key_notation = notation;
+                self.save_preprocess_settings();
+                self.sync_columns_panel(cx);
+                self.refresh_music_rows(cx);
+            }
+        }
         if self.ui.button(cx, ids!(prep_columns_open)).clicked(actions) {
             self.sync_columns_panel(cx);
             self.ui.modal(cx, ids!(prep_columns_modal)).open(cx);
@@ -18986,10 +19007,11 @@ p2 {}
         // lines: they are the same dialog, and two files would be two things
         // to keep in step for no gain.
         let body = format!(
-            "{}explorer_columns {}\nqueue_columns {}\n{}",
+            "{}explorer_columns {}\nqueue_columns {}\nkey_notation {}\n{}",
             self.prep.to_text(),
             self.explorer_columns.to_text(),
             self.queue_columns.to_text(),
+            self.key_notation.index(),
             self.console.to_text(),
         );
         let _ = crate::durable::write_file(&path, body);
@@ -19005,6 +19027,10 @@ p2 {}
                     continue;
                 };
                 match key {
+                    "key_notation" => {
+                        self.key_notation =
+                            KeyNotation::from_index(value.trim().parse().unwrap_or(0))
+                    }
                     "explorer_columns" => {
                         self.explorer_columns = ColumnLayout::from_text(value)
                     }
@@ -23384,7 +23410,7 @@ p2 {}
             .into_iter()
             .map(|(index, asset, title)| {
                 let key = TrackKey::Asset(asset);
-                let (bpm, musical_key, duration) = self.row_analysis_cells(&key);
+                let (bpm, musical_key, key_order, duration) = self.row_analysis_cells(&key);
                 let (artist, album, genre, year, bitrate) = self.row_metadata(&key);
                 let side = self
                     .music_model_tile(asset)
@@ -23400,6 +23426,7 @@ p2 {}
                     bitrate,
                     bpm,
                     musical_key,
+                    key_order,
                     duration,
                     tags: String::new(),
                     stem: side.is_some_and(|side| side.stems.is_some()),
@@ -23558,20 +23585,31 @@ p2 {}
 
     /// The two analysed columns as the cells want them: blank when nothing
     /// has judged this track, rather than a zero that reads as a fact.
-    fn row_analysis_cells(&mut self, key: &TrackKey) -> (String, String, String) {
+    fn row_analysis_cells(
+        &mut self,
+        key: &TrackKey,
+    ) -> (String, String, u8, String) {
         let Some(summary) = self.row_summary(key) else {
-            return (String::new(), String::new(), String::new());
+            return (
+                String::new(),
+                String::new(),
+                crate::music_view::NO_KEY_ORDER,
+                String::new(),
+            );
         };
         let bpm = match summary.grid.has_grid() {
             true => format!("{:.1}", summary.grid.bpm),
             false => String::new(),
         };
-        let musical_key = summary.key.map(|key| key.camelot()).unwrap_or_default();
+        let musical_key =
+            summary.key.map(|key| key.label(self.key_notation)).unwrap_or_default();
+        let key_order =
+            summary.key.map_or(crate::music_view::NO_KEY_ORDER, |key| key.wheel_order());
         let duration = match summary.duration_secs > 0.0 {
             true => format_duration(summary.duration_secs),
             false => String::new(),
         };
-        (bpm, musical_key, duration)
+        (bpm, musical_key, key_order, duration)
     }
 
     /// The explorer's rows: the store's music catalog, or local files —
@@ -23584,7 +23622,7 @@ p2 {}
                 .map(|path| {
                     let key = TrackKey::Local(path.clone());
                     let (badge, live) = self.deck_badge(&key);
-                    let (bpm, musical_key, duration) = self.row_analysis_cells(&key);
+                    let (bpm, musical_key, key_order, duration) = self.row_analysis_cells(&key);
                     let (artist, album, genre, year, bitrate) = self.row_metadata(&key);
                     // The file's own title tag beats its filename — the
                     // filename is a naming convention, the tag is what the
@@ -23603,6 +23641,7 @@ p2 {}
                         bitrate,
                         bpm,
                         musical_key,
+                        key_order,
                         duration,
                         tags: path
                             .parent()
@@ -23641,7 +23680,8 @@ p2 {}
                 // to be holding it, which meant a record that had been
                 // analysed a hundred times still showed blank columns the
                 // moment it was unloaded.
-                let (mut bpm, musical_key, mut duration) = self.row_analysis_cells(&key);
+                let (mut bpm, musical_key, key_order, mut duration) =
+                    self.row_analysis_cells(&key);
                 // A deck that is holding this track knows its length before
                 // the analysis lands, and has the live grid if the operator
                 // has nudged it off the analysed one.
@@ -23668,6 +23708,7 @@ p2 {}
                     bitrate,
                     bpm,
                     musical_key,
+                    key_order,
                     duration,
                     tags: alias.unwrap_or_default(),
                     stem,
@@ -23745,7 +23786,10 @@ p2 {}
             Some(Column::Bpm) => {
                 rows.sort_by(|a, b| number(number_cell(&a.bpm), number_cell(&b.bpm)))
             }
-            Some(Column::Key) => rows.sort_by(|a, b| text(&a.musical_key, &b.musical_key)),
+            // Around the wheel rather than down the alphabet: sorting the
+            // printed label puts 10A before 2A, and a key away from its
+            // relative. A row with no key sorts last either way.
+            Some(Column::Key) => rows.sort_by(|a, b| a.key_order.cmp(&b.key_order)),
             Some(Column::Time) => rows.sort_by(|a, b| {
                 number(Self::row_seconds(&a.duration), Self::row_seconds(&b.duration))
             }),
