@@ -487,6 +487,12 @@ impl CxFingers {
         self.captures.iter().find(|v| v.area == area).is_some()
     }
 
+    /// Whether `digit_id` is held by an area other than `area`, so a
+    /// capture-overload hit can tell a press a child already owns.
+    pub fn is_digit_captured_elsewhere(&self, digit_id: DigitId, area: Area) -> bool {
+        self.captures.iter().any(|v| v.digit_id == digit_id && v.area != area)
+    }
+
     /// The area that captured the touch with the given uid, if any.
     /// Lets a raw `Event::LongPress` handler check which widget owns the press.
     pub fn touch_capture_area(&self, uid: u64) -> Option<Area> {
