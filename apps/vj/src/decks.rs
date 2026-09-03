@@ -736,6 +736,19 @@ pub struct SplatUiState {
     pub last: SplatSnapshot,
 }
 
+/// A saved loop and the NUMBER the operator addresses it by.
+///
+/// The number is data, not a position in a list: deleting one frees its
+/// number and leaves every other mark where it was, instead of moving all
+/// of them onto a different pad. The number lives here rather than on
+/// `LoopSpan`, because that type is also the running span, the memory and
+/// every scanner finding, and none of those has a number.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LoopSlot {
+    pub slot: u16,
+    pub span: LoopSpan,
+}
+
 impl LoopSpan {
     pub fn len_secs(&self) -> f64 {
         self.end_secs - self.start_secs
@@ -781,7 +794,10 @@ pub struct DeckState {
     pub loop_memory: Option<LoopSpan>,
     /// Saved loops — the blue markers. Positions on THIS track, so a
     /// fresh install clears them with the span.
-    pub loop_slots: Vec<LoopSpan>,
+    /// Ascending by number, numbers unique and every one below the cap.
+    /// Every mutator below is responsible for that; the loader is the one
+    /// funnel a file comes in through, and it enforces it.
+    pub loop_slots: Vec<LoopSlot>,
     /// Scanner-found loops — the yellow markers on the strip's bottom
     /// edge. Positions on THIS track; a fresh install clears them.
     pub found_loops: Vec<LoopSpan>,
@@ -1750,11 +1766,12 @@ impl DeckEngine {
         // A resized loop that IS a saved marker carries the marker along:
         // the blue chip keeps aiming at the same IN, and its stored
         // duration follows what the ear now hears.
-        if let Some(slot) = state.loop_slots.iter_mut().find(|slot| {
-            (slot.start_secs - span.start_secs).abs() < 1e-6
-                && (slot.end_secs - span.end_secs).abs() < 1e-6
+        // The resize keeps the loop on its own NUMBER: only the span moves.
+        if let Some(entry) = state.loop_slots.iter_mut().find(|entry| {
+            (entry.span.start_secs - span.start_secs).abs() < 1e-6
+                && (entry.span.end_secs - span.end_secs).abs() < 1e-6
         }) {
-            *slot = resized;
+            entry.span = resized;
         }
         self.engage_loop(deck, resized, false)
     }
@@ -1842,11 +1859,12 @@ impl DeckEngine {
             return Vec::new();
         };
         let state = self.deck_mut(deck);
-        if let Some(slot) = state.loop_slots.iter_mut().find(|slot| {
-            (slot.start_secs - span.start_secs).abs() < 1e-6
-                && (slot.end_secs - span.end_secs).abs() < 1e-6
+        // The resize keeps the loop on its own NUMBER: only the span moves.
+        if let Some(entry) = state.loop_slots.iter_mut().find(|entry| {
+            (entry.span.start_secs - span.start_secs).abs() < 1e-6
+                && (entry.span.end_secs - span.end_secs).abs() < 1e-6
         }) {
-            *slot = resized;
+            entry.span = resized;
         }
         self.engage_loop(deck, resized, false)
     }
@@ -1868,10 +1886,17 @@ impl DeckEngine {
     pub fn restore_marks(
         &mut self,
         deck: DeckId,
-        mut slots: Vec<LoopSpan>,
+        mut slots: Vec<LoopSlot>,
         bookmark: Option<f64>,
     ) {
-        slots.truncate(LOOP_SLOT_CAP);
+        // The one funnel a marks file comes in through, so the invariant is
+        // enforced here: numbers inside the cap, unique, ascending. A
+        // truncate was right only while the number WAS the position — with
+        // numbers as data it would leave a taken number reachable and let a
+        // later save hand out a duplicate.
+        slots.retain(|entry| entry.slot < LOOP_SLOT_CAP as u16);
+        slots.sort_by_key(|entry| entry.slot);
+        slots.dedup_by_key(|entry| entry.slot);
         let state = self.deck_mut(deck);
         state.loop_slots = slots;
         state.bookmark = bookmark;
@@ -1911,27 +1936,96 @@ impl DeckEngine {
             (a.start_secs - span.start_secs).abs() < 1e-6
                 && (a.end_secs - span.end_secs).abs() < 1e-6
         };
-        if state.loop_slots.iter().any(same) || state.loop_slots.len() >= LOOP_SLOT_CAP {
+        if state.loop_slots.iter().any(|entry| same(&entry.span)) {
             return false;
         }
-        state.loop_slots.push(span);
+        // The lowest free NUMBER, so a save after a delete reclaims the
+        // number that was freed rather than landing at the end. A full row
+        // has no free number, which is the cap check for nothing.
+        let Some(slot) = (0..LOOP_SLOT_CAP as u16)
+            .find(|number| !state.loop_slots.iter().any(|entry| entry.slot == *number))
+        else {
+            return false;
+        };
+        let at = state.loop_slots.partition_point(|entry| entry.slot < slot);
+        state.loop_slots.insert(at, LoopSlot { slot, span });
         true
     }
 
     /// Dragging a blue marker off its spot: forget that saved loop. The
     /// running span is untouched — this deletes the memory, not the sound.
-    pub fn delete_loop_slot(&mut self, deck: DeckId, index: usize) {
-        let state = self.deck_mut(deck);
-        if index < state.loop_slots.len() {
-            state.loop_slots.remove(index);
+    pub fn delete_loop_slot(&mut self, deck: DeckId, slot: u16) {
+        self.deck_mut(deck).loop_slots.retain(|entry| entry.slot != slot);
+    }
+
+    /// Exchange what two numbers hold. A filing gesture: nothing about the
+    /// running loop, the memory or the playhead moves, and a number that
+    /// is empty simply takes the loop that was dragged onto it.
+    pub fn swap_loop_slots(&mut self, deck: DeckId, a: u16, b: u16) -> bool {
+        if a == b || a >= LOOP_SLOT_CAP as u16 || b >= LOOP_SLOT_CAP as u16 {
+            return false;
         }
+        let slots = &mut self.deck_mut(deck).loop_slots;
+        let at_a = slots.iter().position(|entry| entry.slot == a);
+        let at_b = slots.iter().position(|entry| entry.slot == b);
+        match (at_a, at_b) {
+            (Some(x), Some(y)) => {
+                let span = slots[x].span;
+                slots[x].span = slots[y].span;
+                slots[y].span = span;
+                true
+            }
+            (Some(x), None) => {
+                slots[x].slot = b;
+                slots.sort_by_key(|entry| entry.slot);
+                true
+            }
+            (None, Some(y)) => {
+                slots[y].slot = a;
+                slots.sort_by_key(|entry| entry.slot);
+                true
+            }
+            (None, None) => false,
+        }
+    }
+
+    /// Put the row in playing order. `pack` closes the gaps and renumbers
+    /// from zero; without it the numbers the row already holds stay exactly
+    /// where they are and only which loop sits on which changes.
+    ///
+    /// Returns whether anything moved, so an already-sorted row costs no
+    /// file write.
+    pub fn sort_loop_slots(&mut self, deck: DeckId, pack: bool) -> bool {
+        let slots = &mut self.deck_mut(deck).loop_slots;
+        let before = slots.clone();
+        let mut spans: Vec<LoopSpan> = slots.iter().map(|entry| entry.span).collect();
+        // `total_cmp`, because a value that got past the loaders must not
+        // be able to panic a comparator.
+        spans.sort_by(|a, b| a.start_secs.total_cmp(&b.start_secs));
+        let numbers: Vec<u16> = if pack {
+            (0..spans.len() as u16).collect()
+        } else {
+            slots.iter().map(|entry| entry.slot).collect()
+        };
+        *slots = numbers
+            .into_iter()
+            .zip(spans)
+            .map(|(slot, span)| LoopSlot { slot, span })
+            .collect();
+        *slots != before
     }
 
     /// The blue marker click: go into that loop again, running loop or
     /// not — and if that loop IS the one running, the second click exits
     /// it, the same gesture as the RELOOP/EXIT button.
-    pub fn recall_loop(&mut self, deck: DeckId, index: usize) -> Vec<DeckCmd> {
-        let Some(span) = self.deck(deck).loop_slots.get(index).copied() else {
+    pub fn recall_loop(&mut self, deck: DeckId, slot: u16) -> Vec<DeckCmd> {
+        let Some(span) = self
+            .deck(deck)
+            .loop_slots
+            .iter()
+            .find(|entry| entry.slot == slot)
+            .map(|entry| entry.span)
+        else {
             return Vec::new();
         };
         if span.len_secs() < 1e-9 {
@@ -4216,7 +4310,7 @@ mod tests {
         // The chip click saves it — same gesture as a loop's green chip.
         assert!(e.save_loop(DeckId::A), "the green bookmark chip click");
         let slot = e.deck(DeckId::A).loop_slots[0];
-        assert!((slot.start_secs - 10.2).abs() < 1e-9 && slot.len_secs() < 1e-9);
+        assert!((slot.span.start_secs - 10.2).abs() < 1e-9 && slot.span.len_secs() < 1e-9);
         // Clicking the saved bookmark is a plain exact jump.
         e.observe(DeckId::A, 50.0, true);
         let cmds = e.recall_loop(DeckId::A, 0);
@@ -4273,7 +4367,7 @@ mod tests {
         e.set_loop_beats(DeckId::A, 16);
         let span = e.deck(DeckId::A).loop_span.expect("still looping");
         assert!((span.len_secs() - 8.0).abs() < 1e-9);
-        assert!((e.deck(DeckId::A).loop_slots[0].len_secs() - 8.0).abs() < 1e-9);
+        assert!((e.deck(DeckId::A).loop_slots[0].span.len_secs() - 8.0).abs() < 1e-9);
         // Pick the infinity count: collapse to a bookmark; pick 8: the out
         // point returns at the picked length.
         e.set_loop_beats(DeckId::A, LOOP_BEATS_INF);
@@ -4304,7 +4398,10 @@ mod tests {
         assert_eq!(e.deck(DeckId::A).bookmark, Some(42.0));
         // A snapshot longer than the row still respects the cap.
         let many = (0..20)
-            .map(|i| LoopSpan { start_secs: i as f64, end_secs: i as f64 })
+            .map(|i| LoopSlot {
+                slot: i as u16,
+                span: LoopSpan { start_secs: i as f64, end_secs: i as f64 },
+            })
             .collect();
         e.restore_marks(DeckId::A, many, None);
         assert_eq!(e.deck(DeckId::A).loop_slots.len(), LOOP_SLOT_CAP);
@@ -4322,8 +4419,8 @@ mod tests {
         // Halve the running loop: the marker's stored span follows.
         e.loop_halve(DeckId::A);
         let slot = e.deck(DeckId::A).loop_slots[0];
-        assert!((slot.start_secs - 10.0).abs() < 1e-9, "the IN holds");
-        assert!((slot.len_secs() - 1.0).abs() < 1e-9, "the duration followed");
+        assert!((slot.span.start_secs - 10.0).abs() < 1e-9, "the IN holds");
+        assert!((slot.span.len_secs() - 1.0).abs() < 1e-9, "the duration followed");
         // A resize of an UNSAVED loop touches no markers.
         e.delete_loop_slot(DeckId::A, 0);
         e.loop_double(DeckId::A);
@@ -6261,6 +6358,118 @@ mod tests {
         assert!(!engine.deck(DeckId::A).playing);
     }
 
+
+    // ---- a slot number is data, not a position --------------------------
+
+    fn save_at(e: &mut DeckEngine, at: f64, len: f64) {
+        e.observe(DeckId::A, at, true);
+        e.engage_loop(DeckId::A, LoopSpan { start_secs: at, end_secs: at + len }, false);
+        assert!(e.save_loop(DeckId::A));
+    }
+
+    fn numbers(e: &DeckEngine) -> Vec<(u16, f64)> {
+        e.deck(DeckId::A)
+            .loop_slots
+            .iter()
+            .map(|entry| (entry.slot, entry.span.start_secs))
+            .collect()
+    }
+
+    #[test]
+    fn deleting_a_loop_frees_its_number_and_moves_nothing_else() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        for at in [10.0, 20.0, 30.0] {
+            save_at(&mut e, at, 2.0);
+        }
+        assert_eq!(numbers(&e), vec![(0, 10.0), (1, 20.0), (2, 30.0)]);
+
+        e.delete_loop_slot(DeckId::A, 1);
+        // The pad that held 20 is empty. The one that held 30 still does.
+        assert_eq!(numbers(&e), vec![(0, 10.0), (2, 30.0)]);
+        // And the next save reclaims the freed number rather than landing
+        // at the end.
+        save_at(&mut e, 40.0, 2.0);
+        assert_eq!(numbers(&e), vec![(0, 10.0), (1, 40.0), (2, 30.0)]);
+    }
+
+    #[test]
+    fn a_recall_addresses_the_number_and_not_the_position() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        for at in [10.0, 20.0, 30.0] {
+            save_at(&mut e, at, 2.0);
+        }
+        e.delete_loop_slot(DeckId::A, 0);
+        e.toggle_loop(DeckId::A);
+        e.observe(DeckId::A, 50.0, true);
+        // Slot 2 is the SECOND entry in the list now. Asking for 2 gets 30.
+        e.recall_loop(DeckId::A, 2);
+        let span = e.deck(DeckId::A).loop_span.expect("engaged");
+        assert!((span.start_secs - 30.0).abs() < 1e-9, "at {}", span.start_secs);
+        // And the number that was freed answers to nobody.
+        assert!(e.recall_loop(DeckId::A, 0).is_empty());
+    }
+
+    #[test]
+    fn two_loops_can_trade_numbers_without_the_music_moving() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        for at in [10.0, 20.0] {
+            save_at(&mut e, at, 2.0);
+        }
+        let running = e.deck(DeckId::A).loop_span;
+        assert!(e.swap_loop_slots(DeckId::A, 0, 1));
+        assert_eq!(numbers(&e), vec![(0, 20.0), (1, 10.0)]);
+        assert_eq!(e.deck(DeckId::A).loop_span, running, "a swap is filing, not sound");
+        // Onto an EMPTY number it is a move.
+        assert!(e.swap_loop_slots(DeckId::A, 0, 5));
+        assert_eq!(numbers(&e), vec![(1, 10.0), (5, 20.0)]);
+        // Nothing on either side, or the same number twice, moves nothing.
+        assert!(!e.swap_loop_slots(DeckId::A, 2, 3));
+        assert!(!e.swap_loop_slots(DeckId::A, 1, 1));
+    }
+
+    #[test]
+    fn sorting_puts_the_row_in_playing_order_and_can_keep_the_gaps() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        for at in [30.0, 10.0, 20.0] {
+            save_at(&mut e, at, 2.0);
+        }
+        e.delete_loop_slot(DeckId::A, 1);
+        assert_eq!(numbers(&e), vec![(0, 30.0), (2, 20.0)]);
+        save_at(&mut e, 5.0, 2.0);
+        assert_eq!(numbers(&e), vec![(0, 30.0), (1, 5.0), (2, 20.0)]);
+
+        // Without packing, the numbers the row holds stay exactly where
+        // they are and only what sits on them changes.
+        assert!(e.sort_loop_slots(DeckId::A, false));
+        assert_eq!(numbers(&e), vec![(0, 5.0), (1, 20.0), (2, 30.0)]);
+        // An already-sorted row costs nothing.
+        assert!(!e.sort_loop_slots(DeckId::A, false));
+
+        // Packing closes the gaps.
+        e.delete_loop_slot(DeckId::A, 1);
+        assert_eq!(numbers(&e), vec![(0, 5.0), (2, 30.0)]);
+        assert!(e.sort_loop_slots(DeckId::A, true));
+        assert_eq!(numbers(&e), vec![(0, 5.0), (1, 30.0)]);
+    }
+
+    #[test]
+    fn a_marks_file_with_gaps_comes_back_with_its_gaps() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        let slots = vec![
+            LoopSlot { slot: 5, span: LoopSpan { start_secs: 10.0, end_secs: 12.0 } },
+            LoopSlot { slot: 0, span: LoopSpan { start_secs: 40.0, end_secs: 42.0 } },
+            // Out of range and a duplicate: both refused at the door.
+            LoopSlot { slot: 99, span: LoopSpan { start_secs: 1.0, end_secs: 2.0 } },
+            LoopSlot { slot: 5, span: LoopSpan { start_secs: 3.0, end_secs: 4.0 } },
+        ];
+        e.restore_marks(DeckId::A, slots, None);
+        assert_eq!(numbers(&e), vec![(0, 40.0), (5, 10.0)]);
+    }
     // ---- the mark lands where the record starts -------------------------
 
     #[test]

@@ -3323,7 +3323,7 @@ fn copy_loop_mono(
 #[derive(Clone)]
 struct ScanModalSnapshot {
     deck: DeckId,
-    slots: Vec<crate::decks::LoopSpan>,
+    slots: Vec<crate::decks::LoopSlot>,
     bookmark: Option<f64>,
     found: Vec<crate::decks::LoopSpan>,
     scores: Vec<f32>,
@@ -11048,9 +11048,19 @@ p2 {}
         // re-analysis while looking exactly like a placement.
         record.set_cue(state.cue_placed.then_some(state.cue_secs));
         record.set_bookmark(state.bookmark);
-        let spans: Vec<(f64, f64)> =
-            state.loop_slots.iter().map(|slot| (slot.start_secs, slot.end_secs)).collect();
-        record.set_loops(&spans);
+        // Per slot, with its NUMBER, rather than renumbering the row from
+        // zero: the gaps an operator left are theirs, and the file has
+        // always been able to carry them.
+        for entry in &state.loop_slots {
+            record.put(crate::marks::Mark {
+                kind: crate::marks::MarkKind::Loop,
+                start_secs: entry.span.start_secs,
+                len_secs: entry.span.len_secs().max(0.0),
+                slot: entry.slot,
+                label: String::new(),
+                colour: 0,
+            });
+        }
         let _ = crate::durable::write_file(&path, record.to_text());
     }
 
@@ -16082,12 +16092,18 @@ p2 {}
                             // where the operator left it, not at the top.
                             if let Some(item) = self.decks.deck(deck).item().cloned() {
                                 let record = Self::load_marks(&item);
-                                let slots: Vec<crate::decks::LoopSpan> = record
-                                    .loops()
+                                // With their numbers. `of_kind` hands them
+                                // back in ascending order already, and the
+                                // engine owns the cap and the dedupe.
+                                let slots: Vec<crate::decks::LoopSlot> = record
+                                    .of_kind(crate::marks::MarkKind::Loop)
                                     .into_iter()
-                                    .map(|(start, end)| crate::decks::LoopSpan {
-                                        start_secs: start,
-                                        end_secs: end,
+                                    .map(|mark| crate::decks::LoopSlot {
+                                        slot: mark.slot,
+                                        span: crate::decks::LoopSpan {
+                                            start_secs: mark.start_secs,
+                                            end_secs: mark.end_secs(),
+                                        },
                                     })
                                     .collect();
                                 if !slots.is_empty() || record.bookmark().is_some() {
@@ -22228,10 +22244,10 @@ p2 {}
                 DeckLoad::Empty | DeckLoad::Loading { .. } => false,
             };
             let loop_on = state.loop_on();
-            let loop_slots: Vec<(f64, f64)> = state
+            let loop_slots: Vec<(u16, f64, f64)> = state
                 .loop_slots
                 .iter()
-                .map(|slot| (slot.start_secs, slot.end_secs))
+                .map(|entry| (entry.slot, entry.span.start_secs, entry.span.end_secs))
                 .collect();
             let found_loops: Vec<(f64, f64)> = state
                 .found_loops
@@ -25294,6 +25310,16 @@ p2 {}
             self.save_loop_marks(deck);
             self.ui.redraw(cx);
         }
+        // Both are undoable through the dialog that already owns undo: the
+        // snapshot CANCEL restores carries the numbers now.
+        for (button, pack) in [(ids!(scan_sort_loops), false), (ids!(scan_pack_loops), true)] {
+            if self.ui.button(cx, button).clicked(actions) {
+                if self.decks.sort_loop_slots(deck, pack) {
+                    self.save_loop_marks(deck);
+                }
+                self.ui.redraw(cx);
+            }
+        }
         if self.ui.button(cx, ids!(scan_remove_ai)).clicked(actions) {
             self.decks.install_found_loops(deck, Vec::new());
             self.deck_found_scores[deck.index()].clear();
@@ -26051,12 +26077,18 @@ p2 {}
                     OverviewEvent::SaveLoop => {
                         self.decks.save_loop(deck);
                     }
-                    OverviewEvent::RecallLoop { index } => {
-                        let cmds = self.decks.recall_loop(deck, index);
+                    OverviewEvent::RecallLoop { slot } => {
+                        let cmds = self.decks.recall_loop(deck, slot);
                         self.run_deck_cmds(cx, cmds);
                     }
-                    OverviewEvent::DeleteLoop { index } => {
-                        self.decks.delete_loop_slot(deck, index);
+                    OverviewEvent::DeleteLoop { slot } => {
+                        self.decks.delete_loop_slot(deck, slot);
+                        self.save_loop_marks(deck);
+                    }
+                    OverviewEvent::SwapLoop { from, onto } => {
+                        if self.decks.swap_loop_slots(deck, from, onto) {
+                            self.save_loop_marks(deck);
+                        }
                     }
                     OverviewEvent::SetCue { secs } => {
                         self.decks.set_cue(deck, secs);

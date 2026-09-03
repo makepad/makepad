@@ -93,7 +93,11 @@ pub enum MarkerHit {
     /// The green marker: keep the running loop as a blue one.
     Save,
     /// A blue marker: go into that saved loop again.
-    Recall(usize),
+    /// The saved loop's own NUMBER, not its position in the strip's list:
+    /// a swap or a delete moves the positions and the number stays with
+    /// the loop. `Found` beside it keeps an index, because a scanner
+    /// finding has no identity to keep.
+    Recall(u16),
     /// The red marker: drag to move where CUE lands.
     Cue,
     /// A yellow marker on the BOTTOM edge: a scanner-found loop.
@@ -104,7 +108,7 @@ pub enum MarkerHit {
 /// overlap — recalling a saved loop is the deliberate act; saving it again
 /// would be a no-op anyway. Nearest within `tol` takes it.
 fn marker_hit(
-    saved: &[(f64, f64)],
+    saved: &[(u16, f64, f64)],
     running_in: Option<f64>,
     cue_secs: f64,
     secs: f64,
@@ -112,12 +116,11 @@ fn marker_hit(
 ) -> Option<MarkerHit> {
     let nearest_saved = saved
         .iter()
-        .enumerate()
-        .map(|(index, span)| (index, (span.0 - secs).abs()))
+        .map(|entry| (entry.0, (entry.1 - secs).abs()))
         .filter(|(_, distance)| *distance <= tol)
         .min_by(|a, b| a.1.total_cmp(&b.1));
-    if let Some((index, _)) = nearest_saved {
-        return Some(MarkerHit::Recall(index));
+    if let Some((slot, _)) = nearest_saved {
+        return Some(MarkerHit::Recall(slot));
     }
     match running_in {
         Some(start) if (start - secs).abs() <= tol => Some(MarkerHit::Save),
@@ -4152,6 +4155,21 @@ script_mod! {
                         scan_remove_user := MusicButton{width: 146 height: 22 text: "REMOVE USER LOOPS"}
                         scan_remove_ai := MusicButton{width: 146 height: 22 text: "REMOVE AI LOOPS"}
                     }
+                    // Filing, not sound. SORT puts the row in playing order
+                    // on the numbers it already holds -- the gaps stay where
+                    // they are; PACK closes them and renumbers from the
+                    // first pad. A sibling row rather than the one above:
+                    // 146 and 146 with the gap between them already fill
+                    // the dialog's three hundred points exactly.
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        scan_sort_loops := MusicButton{width: 146 height: 22 text: "SORT BY TIME"}
+                        scan_pack_loops := MusicButton{width: 146 height: 22 text: "PACK NUMBERS"}
+                    }
                     // SCAN NOW sits alone on the left: it is the one button
                     // here that DOES something and leaves the dialog open,
                     // where CANCEL and OK are the two ways out and belong
@@ -5207,9 +5225,13 @@ pub enum OverviewEvent {
     /// The green marker was clicked: keep the running loop as a blue one.
     SaveLoop,
     /// A blue marker was clicked: go into that saved loop again.
-    RecallLoop { index: usize },
+    RecallLoop { slot: u16 },
     /// A blue marker was dragged off its spot: forget that saved loop.
-    DeleteLoop { index: usize },
+    DeleteLoop { slot: u16 },
+    /// One saved loop dragged onto another: exchange what the two numbers
+    /// hold. The gesture costs no screen room — it refines the drag that
+    /// already deletes when it lands on nothing.
+    SwapLoop { from: u16, onto: u16 },
     /// The red marker was dragged: CUE now sends the deck here.
     SetCue { secs: f64 },
     /// Click or drag: seek to this fraction of the track.
@@ -5274,7 +5296,7 @@ pub struct VjWaveOverview {
     loop_span: Option<(f64, f64)>,
     /// Saved loops — the blue chips. `(start, end)` in source seconds.
     #[rust]
-    loop_slots: Vec<(f64, f64)>,
+    loop_slots: Vec<(u16, f64, f64)>,
     /// Scanner-found loops — the yellow chips on the bottom edge.
     #[rust]
     found_loops: Vec<(f64, f64)>,
@@ -5414,7 +5436,7 @@ impl VjWaveOverview {
     }
 
     /// The saved-loop chips, diffed like the span push.
-    pub fn set_loop_slots(&mut self, cx: &mut Cx, slots: &[(f64, f64)]) {
+    pub fn set_loop_slots(&mut self, cx: &mut Cx, slots: &[(u16, f64, f64)]) {
         if self.loop_slots.as_slice() == slots {
             return;
         }
@@ -5591,11 +5613,19 @@ impl Widget for VjWaveOverview {
                     (Some(OverviewDrag::Marker { hit, origin, at }), _, _) => {
                         let travelled = (at - origin).length();
                         match hit {
-                            MarkerHit::Recall(index) if travelled >= MARKER_DELETE_PX => {
-                                self.events.push(OverviewEvent::DeleteLoop { index });
+                            MarkerHit::Recall(slot) if travelled >= MARKER_DELETE_PX => {
+                                // Dropped ON another saved loop, this is a
+                                // swap; dropped anywhere else it is the
+                                // delete it always was.
+                                match self.marker_under(self.area.rect(cx), at) {
+                                    Some(MarkerHit::Recall(onto)) if onto != slot => self
+                                        .events
+                                        .push(OverviewEvent::SwapLoop { from: slot, onto }),
+                                    _ => self.events.push(OverviewEvent::DeleteLoop { slot }),
+                                }
                             }
-                            MarkerHit::Recall(index) => {
-                                self.events.push(OverviewEvent::RecallLoop { index });
+                            MarkerHit::Recall(slot) => {
+                                self.events.push(OverviewEvent::RecallLoop { slot });
                             }
                             MarkerHit::Found(index) if travelled >= MARKER_DELETE_PX => {
                                 self.events.push(OverviewEvent::DeleteFound { index });
@@ -5769,9 +5799,11 @@ impl Widget for VjWaveOverview {
             // bookmark is a zero-length span and the cue is a point —
             // neither has a span to show, and neither draws a line.
             let hovered_span = match self.hover_marker {
-                Some(MarkerHit::Recall(index)) => {
-                    self.loop_slots.get(index).copied().map(|span| (span, 1u8))
-                }
+                Some(MarkerHit::Recall(slot)) => self
+                    .loop_slots
+                    .iter()
+                    .find(|entry| entry.0 == slot)
+                    .map(|entry| ((entry.1, entry.2), 1u8)),
                 Some(MarkerHit::Save) => self.loop_span.map(|span| (span, 0u8)),
                 Some(MarkerHit::Found(index)) => {
                     self.found_loops.get(index).copied().map(|span| (span, 2u8))
@@ -5821,15 +5853,18 @@ impl Widget for VjWaveOverview {
             if let Some((MarkerHit::Cue, _, at)) = held {
                 self.draw_marker_cue_ghost.draw_abs(cx, chip_sized(at.x, false));
             }
-            for (index, slot) in self.loop_slots.iter().copied().enumerate() {
+            for entry in self.loop_slots.iter().copied() {
                 if let Some((MarkerHit::Recall(dragged), origin, at)) = held {
-                    if dragged == index && (at - origin).length() >= MARKER_DELETE_PX {
-                        // Dead where it stood: release will delete it.
+                    if dragged == entry.0 && (at - origin).length() >= MARKER_DELETE_PX {
+                        // Dead where it stood: release will delete it, or
+                        // put it on whatever number it landed on.
                         continue;
                     }
                 }
-                self.draw_marker_saved
-                    .draw_abs(cx, chip_sized(centre_of(slot.0), grown(MarkerHit::Recall(index))));
+                self.draw_marker_saved.draw_abs(
+                    cx,
+                    chip_sized(centre_of(entry.1), grown(MarkerHit::Recall(entry.0))),
+                );
             }
             // Found loops ride the BOTTOM edge, mirrored: same behaviours
             // as the blue row — hover grows, a drag past the threshold
@@ -5851,7 +5886,7 @@ impl Widget for VjWaveOverview {
                     .draw_abs(cx, chip_bottom(centre_of(span.0), grown(MarkerHit::Found(index))));
             }
             if let Some((start, _)) = self.loop_span {
-                let saved = self.loop_slots.iter().any(|slot| (slot.0 - start).abs() < 1e-6);
+                let saved = self.loop_slots.iter().any(|entry| (entry.1 - start).abs() < 1e-6);
                 if !saved {
                     self.draw_marker_live
                         .draw_abs(cx, chip_sized(centre_of(start), grown(MarkerHit::Save)));
@@ -7408,7 +7443,7 @@ mod tests {
 
     #[test]
     fn marker_clicks_resolve_nearest_and_blue_beats_green_beats_red() {
-        let saved = [(10.0, 12.0), (30.0, 31.0)];
+        let saved = [(0u16, 10.0, 12.0), (1u16, 30.0, 31.0)];
         // Near a blue marker: recall it, nearest one on a tie of tolerance.
         assert_eq!(marker_hit(&saved, None, 0.0, 10.2, 0.35), Some(MarkerHit::Recall(0)));
         assert_eq!(marker_hit(&saved, None, 0.0, 29.8, 0.35), Some(MarkerHit::Recall(1)));
