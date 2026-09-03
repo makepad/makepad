@@ -1416,6 +1416,15 @@ pub enum DeckCmd {
     },
 }
 
+/// The unit a fresh deck starts on. NOT zero: the off row withholds the
+/// phase landing as well as the rounding, and a tab that shipped with it
+/// off would tempo-match two decks and never put them in step.
+///
+/// One beat, so the rounding it does impose is the smallest musical
+/// amount there is -- and it is what turns a press on the overview strip
+/// into a previewed landing rather than a live scrub.
+pub const SNAP_DEFAULT_BEATS: u32 = 1;
+
 pub struct DeckEngine {
     decks: [DeckState; 2],
     next_gen: DeckGen,
@@ -1500,7 +1509,7 @@ impl Default for DeckEngine {
             auto_sync: true,
             over_playing: OverPlaying::default(),
             load_reset: LoadReset::default(),
-            snap_beats: [0; 2],
+            snap_beats: [SNAP_DEFAULT_BEATS; 2],
             queue: Vec::new(),
             auto_load_queue: true,
             repeat: false,
@@ -2257,6 +2266,14 @@ impl DeckEngine {
         let state = self.deck_mut(deck);
         state.loop_slots = slots;
         state.bookmark = bookmark;
+    }
+
+    /// A cue read back off disk. Deliberately not `set_cue`: a mark a
+    /// hand placed is exact, and the unit that happens to be on when the
+    /// track is loaded again has no business rounding it -- which would
+    /// destroy precisely the hair a nudge exists to put there.
+    pub fn restore_cue(&mut self, deck: DeckId, secs: f64) {
+        self.place_cue(deck, secs);
     }
 
     /// Dragging the red marker: move where CUE sends the deck. Under a
@@ -3244,7 +3261,7 @@ impl DeckEngine {
     }
 
     fn sync_to(&mut self, leader: DeckId, follower: DeckId) -> Vec<DeckCmd> {
-        self.sync_to_with(leader, follower, None, SyncVerb::Lock)
+        self.sync_to_with(leader, follower, None, SyncVerb::Lock, true)
     }
 
     /// SYNC asking for one of its four meanings rather than the latch.
@@ -3260,7 +3277,7 @@ impl DeckEngine {
         if verb.latches() {
             self.deck_mut(follower).auto_opt_out = false;
         }
-        self.sync_to_with(leader, follower, None, verb)
+        self.sync_to_with(leader, follower, None, verb, true)
     }
 
     fn sync_to_with(
@@ -3269,6 +3286,7 @@ impl DeckEngine {
         follower: DeckId,
         quantize: Option<SyncQuantize>,
         verb: SyncVerb,
+        asked: bool,
     ) -> Vec<DeckCmd> {
         let (Some(lead), Some(follow)) = (
             self.deck(leader).sync_view(),
@@ -3300,8 +3318,14 @@ impl DeckEngine {
         // with a playhead that is not moving. The play() re-lock lands the
         // phase when the leader actually runs.
         let leader_playing = self.deck(leader).playing;
-        // Read before the follower is borrowed mutably below.
+        // Both read before the follower is borrowed mutably below.
         let leader_held = self.deck(leader).scratching;
+        // A press lands whatever the unit says: the off row withholds the
+        // landings NOBODY asked for, and the operator's finger is not one
+        // of those. Deliberately not folded into the early return above --
+        // returning there would drop the tempo match too, which is the
+        // opposite of what the off row means.
+        let land = asked || self.phase_landing_allowed(follower);
         let lookahead = self.land_lookahead_secs;
         let mut cmds = Vec::new();
         let state = self.deck_mut(follower);
@@ -3340,7 +3364,7 @@ impl DeckEngine {
         // A held leader has no phase worth landing on — the same guard the
         // servo takes, at event time. The tempo match above still runs:
         // the leader's `rate` is the fader's and stays true throughout.
-        if !state.scratching && !leader_held && leader_playing && state.playing {
+        if land && !state.scratching && !leader_held && leader_playing && state.playing {
             if let Some(secs) = plan.seek_secs {
                 // Land where the lock is true when the seek ARRIVES: both
                 // decks keep moving while the command crosses to the audio
@@ -3350,7 +3374,7 @@ impl DeckEngine {
                 state.position_secs = secs;
                 cmds.push(DeckCmd::SeekSeconds { deck: follower, secs });
             }
-        } else if !state.scratching && !state.playing {
+        } else if land && !state.scratching && !state.playing {
             // A stopped follower can be placed freely — no lookahead: it is
             // not moving, so the landing cannot go stale.
             if let Some(secs) = plan.seek_secs {
@@ -3389,7 +3413,7 @@ impl DeckEngine {
         if state.sync_view().is_none() {
             return Vec::new();
         }
-        self.sync_to_with(leader, follower, quantize, SyncVerb::Lock)
+        self.sync_to_with(leader, follower, quantize, SyncVerb::Lock, false)
     }
 
     // ---- external sync (the room is the leader) -----------------------------
@@ -3583,6 +3607,11 @@ impl DeckEngine {
             (!done).then_some(reland)
         });
         let lookahead = self.land_lookahead_secs;
+        // Never asked: this is the per-pump servo, and the off row means
+        // its landing is withheld. The rate trim above stays live, so a
+        // deck with the unit off still runs with the room -- it just is
+        // never jumped.
+        let land = self.phase_landing_allowed(deck);
         let mut cmds = Vec::new();
         let state = self.deck_mut(deck);
         if let Some(reland) = walked {
@@ -3594,7 +3623,7 @@ impl DeckEngine {
             state.pitch = (follow.rate - 1.0).clamp(-0.5, 0.5);
             cmds.push(DeckCmd::SetRate { deck, rate: follow.rate });
         }
-        if let (Some(secs), None) = (follow.reseek_secs, state.reland) {
+        if let (true, Some(secs), None) = (land, follow.reseek_secs, state.reland) {
             let secs = secs + follow.rate * lookahead;
             state.position_secs = secs;
             cmds.push(DeckCmd::SeekSeconds { deck, secs });
@@ -4121,6 +4150,18 @@ impl DeckEngine {
         sync_plan(&lead, &follow, SyncQuantize::Beat)
             .and_then(|plan| plan.seek_secs)
             .unwrap_or(own)
+    }
+
+    /// Whether the engine may put this deck's playhead somewhere nobody
+    /// asked for.
+    ///
+    /// QUANT's off row is the hand claiming the playhead. The tempo match
+    /// and the bounded rate trim stay -- the decks still run together --
+    /// and only the LANDING is withheld, which is the manual beatmatch and
+    /// is why this is not a second spelling of SYNC off. A landing someone
+    /// PRESSED for is not covered: see `sync_to_with`'s `asked`.
+    pub fn phase_landing_allowed(&self, deck: DeckId) -> bool {
+        self.snap_beats(deck) > 0
     }
 
     /// Step the playhead a whole number of beats, forward or back — the
@@ -5059,7 +5100,7 @@ mod tests {
     fn snap_off_seeks_exactly_where_asked() {
         let mut e = DeckEngine::new();
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
-        assert_eq!(e.snap_beats(DeckId::A), 0, "off is the default");
+        e.set_snap_beats(DeckId::A, 0);
         e.observe(DeckId::A, 10.2, true);
         let cmds = e.seek_secs_snapped(DeckId::A, 63.37);
         assert_eq!(seek_of(&cmds, DeckId::A), Some(63.37));
@@ -5171,6 +5212,7 @@ mod tests {
     fn a_move_that_runs_off_the_track_is_ignored() {
         let mut e = DeckEngine::new();
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0); // 300 s
+        e.set_snap_beats(DeckId::A, 0); // exact: the refusal is under test
         e.deck_mut(DeckId::A).loop_span =
             Some(LoopSpan { start_secs: 10.0, end_secs: 14.0 });
         e.observe(DeckId::A, 50.0, true);
@@ -5230,6 +5272,7 @@ mod tests {
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0); // 0.5 s a beat, 300 s
         assert_eq!(e.deck(DeckId::A).cue_secs, 0.0, "CUE starts at the top");
         // QUANT off: the marker lands exactly where dropped, clamped.
+        e.set_snap_beats(DeckId::A, 0);
         e.set_cue(DeckId::A, 10.3);
         assert!((e.deck(DeckId::A).cue_secs - 10.3).abs() < 1e-9);
         e.set_cue(DeckId::A, 10_000.0);
@@ -5411,12 +5454,92 @@ mod tests {
         assert!(e.deck(DeckId::A).loop_slots.is_empty());
     }
 
+    /// The off row is the hand claiming the playhead: the tempo match and
+    /// the rate trim stay, so the decks still run together, and only the
+    /// LANDING is withheld. That is the manual beatmatch, and it is why
+    /// this is not a second spelling of SYNC off.
+    #[test]
+    fn quant_off_withholds_the_landing_but_never_the_tempo_match() {
+        let rig = |unit: u32| {
+            let mut e = DeckEngine::new();
+            load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+            load_analysed(&mut e, DeckId::B, 2, 120.0, 0.19);
+            e.set_snap_beats(DeckId::B, unit);
+            e.play_pause(DeckId::A);
+            e.observe(DeckId::A, 30.0, true);
+            e.play_pause(DeckId::B);
+            e.observe(DeckId::B, 30.0, true);
+            e.apply_auto_sync();
+            assert_eq!(e.sync_master(), Some(DeckId::A));
+            // The tempo is matched whatever the unit says.
+            let matched = e.deck(DeckId::B).rate;
+            assert!((matched - 128.0 / 120.0).abs() < 1e-9, "rate {matched}");
+            // Now knock the follower out of phase under the lock.
+            e.observe(DeckId::B, e.deck(DeckId::B).position_secs + 0.17, true);
+            let cmds = e.apply_auto_sync();
+            (e, cmds)
+        };
+        let (off, cmds) = rig(0);
+        assert!(seek_of(&cmds, DeckId::B).is_none(), "never moved: {cmds:?}");
+        // The engine's own mirror stays where the deck is, or the next
+        // observation would fight it.
+        let at = off.deck(DeckId::B).position_secs;
+        assert!(seek_of(&cmds, DeckId::B).is_none() && at > 30.0, "at {at}");
+
+        let (_, cmds) = rig(1);
+        assert!(seek_of(&cmds, DeckId::B).is_some(), "with a unit it lands: {cmds:?}");
+    }
+
+    /// A landing someone PRESSED for is not a landing nobody asked for.
+    #[test]
+    fn a_pressed_sync_lands_a_quant_off_deck_because_someone_asked() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
+        load_analysed(&mut e, DeckId::B, 2, 120.0, 0.19);
+        e.play_pause(DeckId::A);
+        e.play_pause(DeckId::B);
+        e.observe(DeckId::A, 30.0, true);
+        e.observe(DeckId::B, 30.0, true);
+        e.set_snap_beats(DeckId::B, 0);
+        // The standing lock declines, on a rig where nothing has landed yet.
+        let cmds = e.apply_auto_sync();
+        assert!(seek_of(&cmds, DeckId::B).is_none(), "{cmds:?}");
+        assert!(phase_gap(&e) > 1e-3, "still out of phase");
+
+        // The button lands it anyway.
+        let cmds = e.sync(DeckId::B, true);
+        assert!(seek_of(&cmds, DeckId::B).is_some(), "a press lands: {cmds:?}");
+    }
+
+    /// The off row now withholds the phase landing, so a tab that shipped
+    /// with it off would tempo-match two decks and never put them in step.
+    #[test]
+    fn a_fresh_deck_starts_on_a_unit_rather_than_off() {
+        let e = DeckEngine::new();
+        assert_eq!(e.snap_beats(DeckId::A), SNAP_DEFAULT_BEATS);
+        assert_eq!(e.snap_beats(DeckId::B), SNAP_DEFAULT_BEATS);
+        assert!(SNAP_DEFAULT_BEATS > 0, "or auto sync never lands");
+    }
+
+    /// A mark read back off disk is a HAND'S placement, and the unit that
+    /// happens to be on now has no business rounding it.
+    #[test]
+    fn a_restored_cue_is_never_rounded_by_the_unit() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0); // beats every 0.5 s
+        e.set_snap_beats(DeckId::A, 4);
+        e.restore_cue(DeckId::A, 30.19);
+        assert!((e.deck(DeckId::A).cue_secs - 30.19).abs() < 1e-9, "exact");
+        // And the placement is remembered, so the analysis cannot overwrite it.
+        assert!(e.deck(DeckId::A).cue_placed);
+    }
+
     #[test]
     fn each_deck_owns_its_own_snap_unit() {
         let mut e = DeckEngine::new();
         e.set_snap_beats(DeckId::A, 8);
         assert_eq!(e.snap_beats(DeckId::A), 8);
-        assert_eq!(e.snap_beats(DeckId::B), 0, "and only its own");
+        assert_eq!(e.snap_beats(DeckId::B), SNAP_DEFAULT_BEATS, "and only its own");
         // There is no per-deck unit to disagree with it.
         e.set_snap_beats(DeckId::B, 4);
         assert_eq!(e.snap_beats(DeckId::A), 8, "still A's");

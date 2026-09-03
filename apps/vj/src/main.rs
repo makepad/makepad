@@ -16222,7 +16222,10 @@ p2 {}
                                 if let Some(cue) =
                                     record.cue().filter(|secs| *secs > 0.0)
                                 {
-                                    self.decks.set_cue(deck, cue);
+                                    // Exact: a mark a hand placed is not
+                                    // the unit's to round on the way back
+                                    // in.
+                                    self.decks.restore_cue(deck, cue);
                                     let cmds = self.decks.seek_secs(deck, cue);
                                     self.run_deck_cmds(cx, cmds);
                                 }
