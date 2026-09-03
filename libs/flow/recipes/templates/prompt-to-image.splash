@@ -16,20 +16,20 @@ let add_style = Fn{
     out: [@text]
     run: |i| { {text: i.text + ", " + i.style + " style"} }
     at: vec2(680, 120)
-}
-
-let image = Image{
-    prompt: add_style.text()
-    width: 1024  height: 1024  steps: 8
-    at: vec2(1000, 120)
-    ui: ImageFace{
-        /* the AI added a style picker; its value feeds the Fn above */
+    ui: FnFace{
+        /* the style picker lives on the node whose input it sets */
         style := DropDown{
             width: Fill height: 26
             labels: ["photo", "anime", "oil paint"]
             bind := "add_style.style"
         }
     }
+}
+
+let image = Image{
+    prompt: add_style.text()
+    width: 1024  height: 1024  steps: 8
+    at: vec2(1000, 120)
 }
 
 /** The finished picture. */
