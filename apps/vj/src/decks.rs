@@ -450,6 +450,33 @@ pub enum ScratchMotion {
     Release,
 }
 
+/// The band a hand-corrected tempo has to land in.
+///
+/// Wider than the analyser's own fence, deliberately: the detector has to
+/// choose one octave and guesses conservatively, while a hand correcting
+/// it has heard the record. Narrow enough that a mis-click cannot publish
+/// a grid nothing downstream can rule with.
+pub const EDIT_BPM_MIN: f64 = 40.0;
+pub const EDIT_BPM_MAX: f64 = 300.0;
+
+/// A correction a hand makes to a measured grid.
+///
+/// Three, because the analyser has three ways of being wrong and they are
+/// independent: the rulings can be in the wrong PLACE, the wrong ruling
+/// can be the ONE, and the whole thing can be at the wrong octave.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GridEdit {
+    /// Move every ruling so the nearest one lands on the playhead. The
+    /// tempo is untouched.
+    Adjust,
+    /// Make the ruling nearest the playhead the first beat of the bar.
+    /// Nothing moves; only which one is counted as the one.
+    Downbeat,
+    /// Multiply the tempo, hinged on the playhead so the beat being
+    /// listened to stays where it is.
+    Scale(f64),
+}
+
 /// What a press of SYNC is asking for.
 ///
 /// All four have always been in the arithmetic -- a plan carries a rate
@@ -1077,6 +1104,10 @@ pub struct DeckState {
     /// Where this record's intro and outro are: four edges, the outer two
     /// from the sound scan and the inner two from the loudness envelope.
     pub shape: Option<crate::track_shape::TrackShape>,
+    /// Whether a hand has corrected this record's grid. Same law as the
+    /// mark and the shape beside it: the analysis lands after the marks
+    /// file does, and it may only fill a grid nobody has placed.
+    pub grid_placed: bool,
     /// Whether a HAND put them there. Same pair, same reason, as the mark
     /// beside it: the analysis lands after the marks file does, and it may
     /// only fill a shape nobody has placed.
@@ -1220,6 +1251,7 @@ impl Default for DeckState {
             cue_placed: false,
             shape: None,
             shape_placed: false,
+            grid_placed: false,
             bookmark: None,
             muted: false,
             gain: 1.0,
@@ -1564,6 +1596,7 @@ pub enum DeckCmd {
         bookmark: Option<f64>,
         slots: Vec<LoopSlot>,
         shape: Option<crate::track_shape::TrackShape>,
+        grid: Option<TrackGrid>,
     },
 }
 
@@ -1917,6 +1950,7 @@ impl DeckEngine {
         state.cue_placed = false;
         state.shape = None;
         state.shape_placed = false;
+        state.grid_placed = false;
         state.bookmark = None;
         // A rate the LOCK worked out matched this deck to the one on the
         // other side. That match described a pair of tracks and one of them
@@ -2399,6 +2433,7 @@ impl DeckEngine {
             bookmark: state.bookmark,
             slots: state.loop_slots.clone(),
             shape: state.shape_placed.then_some(state.shape).flatten(),
+            grid: state.grid_placed.then_some(state.grid).flatten(),
         })
     }
 
@@ -3012,6 +3047,7 @@ impl DeckEngine {
         state.playing = false;
         state.duration_secs = 0.0;
         state.grid = None;
+        state.grid_placed = false;
         state.tempo_map = None;
         state.splat = None;
         state.position_secs = 0.0;
@@ -3271,8 +3307,10 @@ impl DeckEngine {
             if state.load_gen != gen || !matches!(state.load, DeckLoad::Loaded { .. }) {
                 return cmds;
             }
-            state.grid = Some(grid);
-            state.tempo_map = tempo_map.filter(|map| !map.is_empty());
+            if !state.grid_placed {
+                state.grid = Some(grid);
+                state.tempo_map = tempo_map.filter(|map| !map.is_empty());
+            }
             if let Some(first) = sound
                 .map(|span| span.first_secs)
                 .filter(|first| *first > 0.0 && !state.cue_placed)
@@ -4332,6 +4370,79 @@ impl DeckEngine {
             return self.move_loop(deck, span.start_secs + step);
         }
         self.seek_secs(deck, state.position_secs + step)
+    }
+
+    /// Correct this record's grid by hand.
+    ///
+    /// Returns the new grid and the commands the correction earns, exactly
+    /// as the half-beat flip beside it does: the caller re-publishes the
+    /// grid wherever else it lives and writes it down with the marks.
+    /// `None` when there is nothing to correct or the correction would
+    /// leave a tempo nothing downstream can use.
+    pub fn edit_grid(
+        &mut self,
+        deck: DeckId,
+        edit: GridEdit,
+    ) -> Option<(TrackGrid, Vec<DeckCmd>)> {
+        let state = self.deck(deck);
+        let old = state.true_grid()?;
+        let at = state.position_secs;
+        let grid = match edit {
+            GridEdit::Adjust => {
+                // Every ruling moves by the same hair, so the tempo and the
+                // bar are untouched and only the anchor changes.
+                let beat = old.beat_at(at).round();
+                let mut first = at - beat * old.beat_secs;
+                let mut phase = old.downbeat_phase as i64;
+                let steps = (first / old.beat_secs).floor();
+                first -= steps * old.beat_secs;
+                phase -= steps as i64;
+                TrackGrid {
+                    first_beat_secs: first,
+                    downbeat_phase: phase.rem_euclid(4) as u32,
+                    ..old
+                }
+            }
+            GridEdit::Downbeat => {
+                // `is_downbeat` adds the phase to the beat number, so the
+                // phase that makes THIS beat the one is its negative.
+                let beat = old.beat_at(at).round() as i64;
+                TrackGrid { downbeat_phase: (-beat).rem_euclid(4) as u32, ..old }
+            }
+            GridEdit::Scale(ratio) => {
+                if !ratio.is_finite() || ratio <= 0.0 {
+                    return None;
+                }
+                old.hinged_at(at, old.bpm * ratio)
+            }
+        };
+        if !grid.has_grid() || !(EDIT_BPM_MIN..=EDIT_BPM_MAX).contains(&grid.bpm) {
+            return None;
+        }
+        let state = self.deck_mut(deck);
+        state.grid = Some(grid);
+        state.grid_placed = true;
+        // A corrected grid is a different record as far as the fitted
+        // moving tempo is concerned: it was fitted against the line that
+        // has just been replaced.
+        state.tempo_map = None;
+        let cmds = if self.deck(deck).synced || self.auto_sync {
+            self.apply_auto_sync_with(Some(SyncQuantize::Beat))
+        } else {
+            Vec::new()
+        };
+        Some((grid, cmds))
+    }
+
+    /// A grid a hand corrected on this record before.
+    pub fn restore_grid(&mut self, deck: DeckId, grid: TrackGrid) {
+        if !grid.has_grid() {
+            return;
+        }
+        let state = self.deck_mut(deck);
+        state.grid = Some(grid);
+        state.grid_placed = true;
+        state.tempo_map = None;
     }
 
     /// Flip the deck's grid half a beat. The analyser's known failure mode
@@ -6123,6 +6234,78 @@ mod tests {
         e.deck_mut(DeckId::B).phase_offset_beats = 0.25;
         e.eject(DeckId::B);
         assert_eq!(e.deck(DeckId::B).phase_offset_beats, 0.0);
+    }
+
+    /// The analyser rules a grid; a hand corrects it. The nearest ruling
+    /// moves ONTO the playhead and every other ruling comes with it.
+    #[test]
+    fn a_grid_can_be_pulled_onto_the_playhead() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0); // rulings on the half second
+        e.observe(DeckId::A, 30.08, true); // 80 ms late
+        let (grid, _) = e.edit_grid(DeckId::A, GridEdit::Adjust).expect("an edit");
+        assert!((grid.bpm - 120.0).abs() < 1e-9, "the tempo is not touched");
+        assert!(
+            (grid.beat_at(30.08).fract()).abs() < 1e-9,
+            "the playhead is on a ruling: {}",
+            grid.beat_at(30.08)
+        );
+        assert!(e.deck(DeckId::A).grid_placed, "a hand put it there");
+    }
+
+    /// Which ruling is the ONE is a separate question from where the
+    /// rulings are.
+    #[test]
+    fn the_beat_under_the_playhead_can_be_made_the_one() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        // Beat 61 (30.5 s) is the third of its bar; make it the first.
+        e.observe(DeckId::A, 30.5, true);
+        let before = e.deck(DeckId::A).grid.unwrap();
+        assert!(!before.is_downbeat(61));
+        let (grid, _) = e.edit_grid(DeckId::A, GridEdit::Downbeat).expect("an edit");
+        assert!(grid.is_downbeat(61), "beat 61 is the one now");
+        assert!((grid.first_beat_secs - before.first_beat_secs).abs() < 1e-9, "nothing moved");
+        assert!((grid.bpm - before.bpm).abs() < 1e-9);
+    }
+
+    /// The analyser's other known failure is the octave. Scaling hinges on
+    /// the playhead, so the beat the operator is listening to stays put.
+    #[test]
+    fn a_grid_can_be_doubled_halved_and_pulled_by_a_third() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        e.observe(DeckId::A, 30.0, true);
+        let (grid, _) = e.edit_grid(DeckId::A, GridEdit::Scale(2.0)).expect("an edit");
+        assert!((grid.bpm - 240.0).abs() < 1e-9);
+        assert!(grid.beat_at(30.0).fract().abs() < 1e-9, "hinged where the record is");
+
+        let (grid, _) = e.edit_grid(DeckId::A, GridEdit::Scale(0.5)).expect("an edit");
+        assert!((grid.bpm - 120.0).abs() < 1e-9, "and back");
+
+        let (grid, _) = e.edit_grid(DeckId::A, GridEdit::Scale(2.0 / 3.0)).expect("an edit");
+        assert!((grid.bpm - 80.0).abs() < 1e-9);
+
+        // A tempo that would leave the plausible band is refused rather
+        // than published: nothing downstream can use it.
+        assert!(e.edit_grid(DeckId::A, GridEdit::Scale(0.125)).is_none());
+    }
+
+    /// A hand's grid is not the analysis's to overwrite -- the same law
+    /// the cue and the shape beside it follow.
+    #[test]
+    fn an_edited_grid_survives_the_analysis_landing_late() {
+        let mut e = DeckEngine::new();
+        load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
+        e.observe(DeckId::A, 30.0, true);
+        e.edit_grid(DeckId::A, GridEdit::Scale(2.0));
+        let gen = e.deck(DeckId::A).load_gen;
+        e.grid_ready(DeckId::A, gen, grid(120.0, 0.0), None, None);
+        assert!((e.deck(DeckId::A).grid.unwrap().bpm - 240.0).abs() < 1e-9, "kept");
+
+        // And a record leaving the deck takes the placement with it.
+        e.eject(DeckId::A);
+        assert!(!e.deck(DeckId::A).grid_placed);
     }
 
     #[test]

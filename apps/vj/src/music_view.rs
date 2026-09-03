@@ -3422,6 +3422,22 @@ script_mod! {
                         splat_deck_b := MusicButton{width: 26 height: 22 text: "B"}
                         splat_on := MusicButton{width: 36 height: 22 text: "ON"}
                         View{width: Fill height: Fit}
+                        // Correcting the grid of the deck named to the
+                        // left. Here rather than in the deck head because
+                        // the head has no width left and this page already
+                        // says which deck it is about: ONE makes the beat
+                        // under the playhead the first of the bar, HERE
+                        // pulls the nearest ruling onto the playhead, and
+                        // the four ratios are the octave and the two
+                        // musical thirds the detector confuses.
+                        MusicLabel{text: "GRID"}
+                        grid_one := MusicButton{width: 34 height: 22 text: "1"}
+                        grid_here := MusicButton{width: 44 height: 22 text: "here"}
+                        grid_double := MusicButton{width: 34 height: 22 text: "×2"}
+                        grid_halve := MusicButton{width: 34 height: 22 text: "÷2"}
+                        grid_two_thirds := MusicButton{width: 38 height: 22 text: "×⅔"}
+                        grid_three_quarters := MusicButton{width: 38 height: 22 text: "×¾"}
+                        View{width: Fill height: Fit}
                         splat_score := MusicButton{width: 52 height: 22 text: "score"}
                     }
                     loop_splat := mod.widgets.VjLoopSplat{}

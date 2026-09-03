@@ -30,6 +30,11 @@ pub enum MarkKind {
     /// The ends of the track the analysis found sound between.
     Intro,
     Outro,
+    /// A grid a hand corrected: `start` is the first beat, `len` is how
+    /// long a beat is, and `slot` is that beat's seat in the bar. A grid
+    /// IS a mark by this file's own shape -- a point, with a length, at a
+    /// bar position -- so it needs no second format.
+    Grid,
 }
 
 impl MarkKind {
@@ -42,6 +47,7 @@ impl MarkKind {
             MarkKind::Jump => "jump",
             MarkKind::Intro => "intro",
             MarkKind::Outro => "outro",
+            MarkKind::Grid => "grid",
         }
     }
 
@@ -54,6 +60,7 @@ impl MarkKind {
             "jump" => MarkKind::Jump,
             "intro" => MarkKind::Intro,
             "outro" => MarkKind::Outro,
+            "grid" => MarkKind::Grid,
             _ => return None,
         })
     }
@@ -131,6 +138,28 @@ impl MarkRecord {
 
     pub fn set_cue(&mut self, secs: Option<f64>) {
         self.set_point(MarkKind::Cue, secs);
+    }
+
+    /// The corrected grid, if a hand left one: tempo, first beat, bar seat.
+    pub fn grid(&self) -> Option<(f64, f64, u32)> {
+        self.of_kind(MarkKind::Grid)
+            .next()
+            .filter(|mark| mark.len_secs > 1e-4 && mark.start_secs >= 0.0)
+            .map(|mark| (60.0 / mark.len_secs, mark.start_secs, mark.slot as u32 % 4))
+    }
+
+    pub fn set_grid(&mut self, grid: Option<(f64, f64, u32)>) {
+        match grid {
+            Some((bpm, first_beat_secs, phase)) if bpm > 1.0 => self.put(Mark {
+                kind: MarkKind::Grid,
+                start_secs: first_beat_secs,
+                len_secs: 60.0 / bpm,
+                slot: (phase % 4) as u16,
+                label: String::new(),
+                colour: 0,
+            }),
+            _ => self.clear_kind(MarkKind::Grid),
+        }
     }
 
     pub fn bookmark(&self) -> Option<f64> {
@@ -284,6 +313,40 @@ impl MarkRecord {
 
 #[cfg(test)]
 mod tests {
+    /// A corrected grid rides the marks file as what it is: a beat, how
+    /// long a beat is, and that beat's seat in the bar.
+    #[test]
+    fn a_corrected_grid_survives_the_round_trip() {
+        let mut record = MarkRecord::default();
+        record.set_cue(Some(12.5));
+        record.set_grid(Some((128.0, 0.1875, 2)));
+        let back = MarkRecord::from_text(&record.to_text());
+        let (bpm, first, phase) = back.grid().expect("a grid");
+        assert!((bpm - 128.0).abs() < 1e-9, "{bpm}");
+        assert!((first - 0.1875).abs() < 1e-9);
+        assert_eq!(phase, 2);
+        assert_eq!(back.cue(), Some(12.5), "and everything beside it");
+
+        // Cleared, it leaves nothing behind.
+        let mut record = record;
+        record.set_grid(None);
+        assert!(MarkRecord::from_text(&record.to_text()).grid().is_none());
+    }
+
+    /// A file written before grids were a thing still reads, and one
+    /// written now still reads on a build that has never heard of them.
+    #[test]
+    fn a_grid_line_is_stepped_over_by_a_reader_that_does_not_know_it() {
+        let mut written = MarkRecord::default();
+        written.set_cue(Some(12.5));
+        written.set_grid(Some((128.0, 0.1875, 2)));
+        // A kind from a build newer than this reader, in the middle.
+        let text = written.to_text().replace("grid ", "wibble ");
+        let record = MarkRecord::from_text(&text);
+        assert_eq!(record.cue(), Some(12.5), "the lines it knows still land");
+        assert!(record.grid().is_none(), "and the one it does not is stepped over");
+    }
+
     use super::*;
 
     fn full() -> MarkRecord {

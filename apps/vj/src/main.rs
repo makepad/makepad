@@ -11110,6 +11110,7 @@ p2 {}
             state.bookmark,
             &state.loop_slots,
             state.shape_placed.then_some(state.shape).flatten(),
+            state.grid_placed.then_some(state.grid).flatten(),
         );
     }
 
@@ -11123,11 +11124,19 @@ p2 {}
         bookmark: Option<f64>,
         slots: &[crate::decks::LoopSlot],
         shape: Option<crate::track_shape::TrackShape>,
+        grid: Option<crate::wave_analysis::TrackGrid>,
     ) {
         let path = Self::loop_marks_path(item);
         let mut record = crate::marks::MarkRecord::default();
         record.set_cue(cue_secs);
         record.set_bookmark(bookmark);
+        // A grid a HAND corrected. The detector's own is derived and lives
+        // in the analysis cache; writing it here would freeze a
+        // measurement against every later re-analysis while looking
+        // exactly like a decision.
+        record.set_grid(
+            grid.map(|grid| (grid.bpm, grid.first_beat_secs, grid.downbeat_phase)),
+        );
         // The record's shape, when a HAND placed it. The detector's own
         // answer is derived and would come back looking like a decision.
         if let Some(shape) = shape {
@@ -13825,8 +13834,8 @@ p2 {}
                     self.deck_splat_refining[b] = None;
                     self.sync_deck_controls(cx);
                 }
-                DeckCmd::RetireMarks { item, cue_secs, bookmark, slots, shape } => {
-                    Self::write_marks(&item, cue_secs, bookmark, &slots, shape);
+                DeckCmd::RetireMarks { item, cue_secs, bookmark, slots, shape, grid } => {
+                    Self::write_marks(&item, cue_secs, bookmark, &slots, shape, grid);
                 }
                 DeckCmd::UnloadTrack { deck } => {
                     // The mirror of InstallTrack's clear block: the engine
@@ -13944,6 +13953,48 @@ p2 {}
             let analysis = flipped.clone();
             std::thread::spawn(move || crate::wave_analysis::store_analysis(&key, &analysis));
         }
+        self.push_deck_wave(cx, deck);
+        self.refresh_splat_surface(cx);
+    }
+
+    /// Correct one deck's grid by hand and re-publish it everywhere it
+    /// lives.
+    ///
+    /// Everything the flip beside it does, minus one: the corrected grid
+    /// is NOT written into the analysis sidecar. That cache is derived and
+    /// is thrown away whenever a detector changes; a hand's correction
+    /// goes beside the marks, where operator work lives and where it
+    /// outranks whatever the analysis says next time.
+    fn apply_grid_edit(&mut self, cx: &mut Cx, deck: DeckId, edit: crate::decks::GridEdit) {
+        let Some((grid, cmds)) = self.decks.edit_grid(deck, edit) else { return };
+        self.run_deck_cmds(cx, cmds);
+        self.save_loop_marks(deck);
+        let index = deck.index();
+        let Some(analysis) = self.deck_analysis[index].as_ref() else {
+            self.push_deck_wave(cx, deck);
+            return;
+        };
+        let mut edited = (**analysis).clone();
+        edited.grid = grid;
+        // The fitted moving tempo was fitted against the line that has
+        // just been replaced, so it describes a record that no longer
+        // exists.
+        edited.tempo_map = crate::wave_analysis::TempoMap::default();
+        let edited = Arc::new(edited);
+        self.deck_analysis[index] = Some(edited.clone());
+        let gen = self.decks.deck(deck).load_gen;
+        if let Some(splat) = build_splat(&edited, None) {
+            let cmds = self.decks.splat_set(deck, Arc::new(splat));
+            self.run_deck_cmds(cx, cmds);
+        }
+        let shape = crate::track_shape::track_shape(
+            &edited.tiles.overview,
+            edited.duration_secs,
+            &edited.grid,
+            edited.sound,
+        );
+        self.autopilot.shape_ready(gen, shape);
+        self.decks.shape_ready(deck, gen, shape);
         self.push_deck_wave(cx, deck);
         self.refresh_splat_surface(cx);
     }
@@ -16263,6 +16314,21 @@ p2 {}
                                             outro_start_secs: outro.start_secs,
                                             outro_end_secs: outro.end_secs(),
                                             detected: true,
+                                        },
+                                    );
+                                }
+                                // A grid a hand corrected on this record
+                                // before, likewise: it outranks the
+                                // analysis when that lands.
+                                if let Some((bpm, first, phase)) = record.grid() {
+                                    self.decks.restore_grid(
+                                        deck,
+                                        crate::wave_analysis::TrackGrid {
+                                            bpm,
+                                            beat_secs: 60.0 / bpm,
+                                            first_beat_secs: first,
+                                            downbeat_phase: phase,
+                                            confidence: 1.0,
                                         },
                                     );
                                 }
@@ -27263,6 +27329,24 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(splat_score)).clicked(actions) {
             self.handle_splat_action(cx, LoopSplatAction::ToggleScore);
+        }
+        // The grid row acts on the deck this page is showing, which the
+        // two buttons at its left end name.
+        {
+            use crate::decks::GridEdit;
+            let deck = self.splat_focus;
+            for (id, edit) in [
+                (ids!(grid_one), GridEdit::Downbeat),
+                (ids!(grid_here), GridEdit::Adjust),
+                (ids!(grid_double), GridEdit::Scale(2.0)),
+                (ids!(grid_halve), GridEdit::Scale(0.5)),
+                (ids!(grid_two_thirds), GridEdit::Scale(2.0 / 3.0)),
+                (ids!(grid_three_quarters), GridEdit::Scale(0.75)),
+            ] {
+                if self.ui.button(cx, id).clicked(actions) {
+                    self.apply_grid_edit(cx, deck, edit);
+                }
+            }
         }
         self.handle_splitter(cx, actions);
         let (sfx_down, sfx_up) = self.grid_hits(cx, actions, ids!(sfx_grid));
