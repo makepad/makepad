@@ -7,7 +7,7 @@ use crate::{
     assistant::{AssistantController, AssistantService},
     clock,
     nav_api::{ApiOperation, NavApi, NavApiEvent, RadarManifest, RouteRequestContext},
-    overlays::{self, OverlaySelection},
+    overlays::{self, OverlaySelection, TerrainLayer},
     provisioner::MapProvisioner,
     side_panel::{PanelAction, PanelController},
     ChatEntry, ChatState, EntryKind, AMSTERDAM_CENTER,
@@ -132,6 +132,8 @@ pub struct App {
     chat: ChatState,
     #[rust]
     layers: DemoLayers,
+    #[rust]
+    terrain_layer: TerrainLayer,
     #[rust]
     layers_panel_open: bool,
     #[rust]
@@ -286,6 +288,8 @@ impl App {
         let map = self.ui.map_view(cx, ids!(map));
         map.set_overlays(cx, self.provisioner.overlay_sources(&self.layers.overlays));
         map.set_theme(cx, self.layers.theme);
+        self.terrain_layer
+            .set_enabled(cx, &map, self.layers.terrain, None);
     }
 
     fn set_rain(&mut self, cx: &mut Cx, on: bool) {
@@ -467,9 +471,7 @@ impl MatchEvent for App {
         }
         if let Some(on) = self.ui.check_box(cx, ids!(layer_terrain)).changed(actions) {
             self.layers.terrain = on;
-            if !on {
-                self.ui.map_view(cx, ids!(map)).set_terrain_overlay(cx, TerrainOverlayData::default());
-            }
+            self.apply_layers(cx);
         }
         if let Some(on) = self.ui.check_box(cx, ids!(tilt_check)).changed(actions) {
             self.layers.tilt_shift = on;
@@ -489,6 +491,10 @@ impl MatchEvent for App {
             self.layers.theme = if on { 2 } else { 0 };
             self.apply_layers(cx);
         }
+        let map = self.ui.map_view(cx, ids!(map));
+        if map.viewport_changed(actions).is_some() && self.layers.terrain {
+            self.terrain_layer.request(cx, &map);
+        }
     }
 }
 
@@ -502,6 +508,8 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.ensure_started(cx);
+        let map = self.ui.map_view(cx, ids!(map));
+        self.terrain_layer.handle_event(cx, event, &map);
         self.provisioner.handle_event();
         if self.layers.rain && self.radar_timer.is_event(event).is_some() {
             self.api.radar_manifest(cx);
