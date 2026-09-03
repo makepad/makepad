@@ -1,6 +1,7 @@
 //#![cfg_attr(all(unix), feature(unix_socket_ancillary_data))]
 pub mod gl_render_bridge;
 pub mod home;
+pub mod archive_cache;
 pub mod os;
 
 #[cfg(any(

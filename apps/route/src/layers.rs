@@ -144,10 +144,15 @@ impl LayerState {
     pub fn overlay_paths(&self) -> String {
         // Ocean sidecars are always on: sea polygons are base data (the
         // pbf-base schema has no coastline stage), not a toggleable layer.
-        let mut paths = vec![
-            self.maps_root.join(OCEAN_LOW_MBTILES).to_string_lossy().into_owned(),
-            self.maps_root.join(OCEAN_HIGH_MBTILES).to_string_lossy().into_owned(),
+        let paths = [
+            self.maps_root.join(OCEAN_LOW_MBTILES),
+            self.maps_root.join(OCEAN_HIGH_MBTILES),
         ];
+        let mut paths = paths
+            .into_iter()
+            .filter(|path| path.is_file())
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
         paths.extend(
             OVERLAY_LAYERS
                 .iter()
