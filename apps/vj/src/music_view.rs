@@ -3677,6 +3677,41 @@ script_mod! {
                         align: Align{x: 0.0, y: 0.5}
                         prep_progress := MusicLabel{width: Fill text: ""}
                     }
+                    // What a fresh load clears. Off is what the tab has
+                    // always done: the channel strip an operator has set
+                    // stands across a load, because the tone and the trim
+                    // describe the ROOM rather than the record. They are
+                    // separable because they answer to different hands.
+                    //
+                    // Here rather than on the deck: this is how somebody
+                    // likes to work, set once and left, not a control
+                    // reached for during a set.
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        MusicLabel{width: 110 text: "A LOAD CLEARS"}
+                        reset_speed := CheckBox{width: 86 text: "tempo"}
+                        reset_key := CheckBox{width: 86 text: "key"}
+                        reset_eq := CheckBox{width: 86 text: "EQ"}
+                        MusicLabel{width: Fill text: ""}
+                    }
+                    // Three and three: the dialog is four hundred points
+                    // wide and six words do not fit on one line of it.
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        MusicLabel{width: 110 text: ""}
+                        reset_filter := CheckBox{width: 86 text: "filter"}
+                        reset_gain := CheckBox{width: 86 text: "trim"}
+                        reset_stems := CheckBox{width: 86 text: "lanes"}
+                        MusicLabel{width: Fill text: ""}
+                    }
                     View{
                         width: Fill
                         height: Fit

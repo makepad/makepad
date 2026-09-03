@@ -179,7 +179,7 @@ use crate::arc::Curve;
 use crate::set_history::SetHistory;
 use crate::blend::MixBrain;
 use crate::decks::{
-    DeckCmd, DeckEngine, DeckId, DeckLoad, DeckTarget, EjectPress, OverPlaying, ScratchMotion, SyncMode,
+    DeckCmd, DeckEngine, DeckId, DeckLoad, DeckTarget, EjectPress, LoadReset, OverPlaying, ScratchMotion, SyncMode,
     SyncView, TrackItem, TrackSideChannels,
 };
 use crate::console_scale::TabStage;
@@ -18342,6 +18342,12 @@ p2 {}
     /// Every setting onto its control. Called at boot and after anything
     /// that changes the settings from outside the dialog.
     fn sync_preprocess_panel(&mut self, cx: &mut Cx) {
+        let reset = self.decks.load_reset;
+        for (path, field) in Self::RESET_BOXES {
+            let mut copy = reset;
+            let on = *field(&mut copy);
+            self.ui.check_box(cx, path).set_active(cx, on, Animate::No);
+        }
         for (index, pass) in PASSES.iter().enumerate() {
             let scope = self.prep.scope(*pass);
             let (explorer, queue) = Self::PREP_BOXES[index];
@@ -18418,6 +18424,17 @@ p2 {}
         self.sync_preprocess_panel(cx);
     }
 
+    /// The six switches of the load-reset policy, each with the field it
+    /// owns. One list rather than six copies of the same three lines.
+    const RESET_BOXES: [(&'static [LiveId], fn(&mut LoadReset) -> &mut bool); 6] = [
+        (ids!(reset_speed), |r| &mut r.speed),
+        (ids!(reset_key), |r| &mut r.key),
+        (ids!(reset_eq), |r| &mut r.eq),
+        (ids!(reset_filter), |r| &mut r.filter),
+        (ids!(reset_gain), |r| &mut r.gain),
+        (ids!(reset_stems), |r| &mut r.stems),
+    ];
+
     fn handle_preprocess_modal(&mut self, cx: &mut Cx, actions: &Actions) {
         if self.ui.button(cx, ids!(music_prep_cfg)).clicked(actions) {
             self.sync_preprocess_panel(cx);
@@ -18425,6 +18442,20 @@ p2 {}
         }
         if self.ui.button(cx, ids!(prep_close)).clicked(actions) {
             self.ui.modal(cx, ids!(prep_modal)).close(cx);
+        }
+        // What a fresh load clears. The engine has held this policy since
+        // it stopped being hard-coded; this is the hand that sets it.
+        let mut reset = self.decks.load_reset;
+        let mut reset_changed = false;
+        for (path, field) in Self::RESET_BOXES {
+            if let Some(on) = self.ui.check_box(cx, path).changed(actions) {
+                *field(&mut reset) = on;
+                reset_changed = true;
+            }
+        }
+        if reset_changed {
+            self.decks.set_load_reset(reset);
+            self.save_autopilot_settings();
         }
         let mut changed = false;
         for (index, pass) in PASSES.iter().enumerate() {
@@ -19354,6 +19385,13 @@ p2 {}
         store.set_bool("auto.phrase_snap", self.autopilot.phrase_snap);
         store.set_bool("queue.repeat", self.decks.repeat);
         store.set_bool("queue.shuffle", self.decks.shuffle);
+        let reset = self.decks.load_reset;
+        store.set_bool("load_clears.speed", reset.speed);
+        store.set_bool("load_clears.key", reset.key);
+        store.set_bool("load_clears.eq", reset.eq);
+        store.set_bool("load_clears.filter", reset.filter);
+        store.set_bool("load_clears.gain", reset.gain);
+        store.set_bool("load_clears.stems", reset.stems);
         store.set_usize(
             "deck.over_playing",
             match self.decks.over_playing {
@@ -19404,6 +19442,14 @@ p2 {}
         self.autopilot.phrase_snap = store.bool("auto.phrase_snap", true);
         self.decks.repeat = store.bool("queue.repeat", false);
         self.decks.shuffle = store.bool("queue.shuffle", false);
+        self.decks.load_reset = LoadReset {
+            speed: store.bool("load_clears.speed", false),
+            key: store.bool("load_clears.key", false),
+            eq: store.bool("load_clears.eq", false),
+            filter: store.bool("load_clears.filter", false),
+            gain: store.bool("load_clears.gain", false),
+            stems: store.bool("load_clears.stems", false),
+        };
         self.decks.over_playing = match store.usize("deck.over_playing", 0) {
             1 => OverPlaying::Stop,
             2 => OverPlaying::Keep,
