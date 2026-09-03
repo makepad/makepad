@@ -281,7 +281,7 @@ impl DrawVars {
                 }
 
                 if any_updated {
-                    draw_call.uniforms_dirty = true;
+                    draw_call.mark_uniforms_dirty();
                     cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
                     self.area.redraw(cx);
                 }
@@ -481,7 +481,7 @@ impl DrawVars {
                     for i in 0..slots {
                         draw_call.dyn_uniforms[input.offset + i] = value[i];
                     }
-                    draw_call.uniforms_dirty = true;
+                    draw_call.mark_uniforms_dirty();
                     cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
                 }
             }
@@ -521,7 +521,7 @@ impl DrawVars {
             return false;
         }
         draw_call.dyn_uniforms[offset..offset + slots].copy_from_slice(&value[..slots]);
-        draw_call.uniforms_dirty = true;
+        draw_call.mark_uniforms_dirty();
         if let Some(pass_id) = draw_list.draw_pass_id {
             cx.passes[pass_id].paint_dirty = true;
         }
@@ -554,7 +554,7 @@ impl DrawVars {
         draw_call.dyn_uniforms = self.dyn_uniforms;
         draw_call.texture_slots = self.texture_slots.clone();
         draw_call.uniform_buffer_slots = self.uniform_buffer_slots.clone();
-        draw_call.uniforms_dirty = true;
+        draw_call.mark_uniforms_dirty();
         if let Some(pass_id) = draw_list.draw_pass_id {
             cx.passes[pass_id].paint_dirty = true;
         }
@@ -590,7 +590,7 @@ impl DrawVars {
             draw_call.dyn_uniforms = self.dyn_uniforms;
             draw_call.texture_slots = self.texture_slots.clone();
             draw_call.uniform_buffer_slots = self.uniform_buffer_slots.clone();
-            draw_call.uniforms_dirty = true;
+            draw_call.mark_uniforms_dirty();
             touched = true;
         }
         if touched {
@@ -627,7 +627,7 @@ impl DrawVars {
             for i in 0..slots {
                 draw_call.dyn_uniforms[offset + i] = value[i];
             }
-            draw_call.uniforms_dirty = true;
+            draw_call.mark_uniforms_dirty();
             touched = true;
         }
         if touched {

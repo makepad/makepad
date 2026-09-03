@@ -543,6 +543,8 @@ pub struct CxDrawPass {
     pub view_shift: Vec2d,
     pub view_scale: Vec2d,
     pub pass_uniforms: DrawPassUniforms,
+    /// Bumped whenever the pass uniform block is rewritten.
+    pub pass_uniforms_gen: u64,
     pub zbias_step: f32,
     /// Set while the exploded z-layer view is up on this pass; `None` is
     /// ordinary flat 2D and leaves `camera_view` the identity it always was.
@@ -561,6 +563,7 @@ impl Default for CxDrawPass {
             zbias_step: 0.001,
             sploded: None,
             pass_uniforms: DrawPassUniforms::default(),
+            pass_uniforms_gen: 0,
             color_textures: Vec::new(),
             depth_texture: None,
             dpi_factor: None,
@@ -591,14 +594,21 @@ pub enum CxDrawPassParent {
 }
 
 impl CxDrawPass {
+    #[inline]
+    pub fn mark_pass_uniforms_dirty(&mut self) {
+        self.pass_uniforms_gen = self.pass_uniforms_gen.wrapping_add(1);
+    }
+
     pub fn set_time(&mut self, time: f32) {
         self.pass_uniforms.time = time;
+        self.mark_pass_uniforms_dirty();
     }
 
     pub fn set_dpi_factor(&mut self, dpi_factor: f64) {
         let dpi_dilate = (2. - dpi_factor).max(0.).min(1.);
         self.pass_uniforms.dpi_factor = dpi_factor as f32;
         self.pass_uniforms.dpi_dilate = dpi_dilate as f32;
+        self.mark_pass_uniforms_dirty();
     }
 
     pub fn set_ortho_matrix(&mut self, offset: Vec2d, size: Vec2d) {
@@ -632,6 +642,7 @@ impl CxDrawPass {
         self.pass_uniforms.depth_view_r = zero;
         self.pass_uniforms.camera_inv = Mat4f::identity();
         self.pass_uniforms.camera_inv_r = Mat4f::identity();
+        self.mark_pass_uniforms_dirty();
     }
 }
 
