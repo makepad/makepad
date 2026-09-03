@@ -239,6 +239,16 @@ mod model_tests {
             (PathBuf::new(), Some("qwen3.8-27b".to_string()))
         );
 
+        // A weights-relative file deliberately wins over an identically
+        // spelled fleet id; callers can select the fleet id by removing or
+        // renaming the colliding local file.
+        let collision = weights.join("qwen3.8-27b");
+        std::fs::write(&collision, b"fixture").unwrap();
+        assert_eq!(
+            resolve_model("qwen3.8-27b", std::path::Path::new(""), &weights),
+            (collision, None)
+        );
+
         std::fs::remove_dir_all(root).unwrap();
     }
 }

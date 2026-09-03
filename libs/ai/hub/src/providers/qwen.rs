@@ -20,6 +20,9 @@
 //!   monotonically growing prefix of the final text. The final text is the
 //!   terminal `partial_text` — no separate artifact fetch is required for
 //!   chat.
+//! - The `/generate` response optionally carries `"think_open"`, saying
+//!   whether the node's generation prefill opened a think block. Older nodes
+//!   omit it, in which case the client retains its model-id inference.
 //!
 //! Until a fleet node implements this, `availability()` honestly reports
 //! `Unavailable` with the per-node reasons — which is exactly what the UI
@@ -208,9 +211,10 @@ impl FleetPickCache {
         (probed == base).then_some(*lanes)
     }
 
-    /// Take the stale pick for the scan's last-resort fallback.
-    fn take_stale(&self) -> Option<(String, String, bool)> {
-        let pick = self.lock().pick.take()?;
+    /// Inspect the stale pick for the scan's last-resort fallback. A caller
+    /// looking for another model must not remove the shared last-good pick.
+    fn stale(&self) -> Option<(String, String, bool)> {
+        let pick = self.lock().pick.clone()?;
         Some((pick.base, pick.model, pick.text_fallback))
     }
 }
@@ -304,7 +308,8 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         }
     }
 
-    /// Restrict election to one advertised fleet model id.
+    /// Prefer one exact advertised fleet model id, falling back to normal
+    /// election when no node advertises it.
     pub fn with_preferred_model(mut self, model: Option<String>) -> Self {
         self.preferred_model = model.map(|model| model.trim().to_string()).filter(|model| !model.is_empty());
         self
@@ -361,32 +366,28 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         // home queues the turn behind whatever those lanes are doing —
         // measured tonight as one runaway think-loop starving every other
         // conversation on the box.
-        let mut full_home: Option<(String, String, bool)> = None;
-        let mut laneless: Option<(String, String, bool)> = None;
+        let mut preferred = PickLadder::default();
+        let mut fallback = PickLadder::default();
         for base in order {
             if self.picks.is_dead(&base) {
                 reasons.push(format!("{base}: skipped (recently unreachable)"));
                 continue;
             }
-            match self.probe_one(&base, &mut reasons) {
-                Some((model, text_fallback, HomeTier::FreeLane)) => {
-                    self.picks.remember(base.clone(), model.clone(), text_fallback);
-                    return Ok((base, model, text_fallback));
-                }
-                Some((model, text_fallback, HomeTier::FullLanes)) => {
-                    if full_home.is_none() {
-                        full_home = Some((base, model, text_fallback));
+            if let Some(hit) = self.probe_one(&base, &mut reasons) {
+                if let Some((model, text_fallback)) = hit.preferred {
+                    let pick = (base.clone(), model, text_fallback);
+                    if hit.tier == HomeTier::FreeLane {
+                        self.picks.remember(pick.0.clone(), pick.1.clone(), pick.2);
+                        return Ok(pick);
                     }
+                    preferred.offer(pick, hit.tier);
                 }
-                Some((model, text_fallback, HomeTier::NoLanes)) => {
-                    if laneless.is_none() {
-                        laneless = Some((base, model, text_fallback));
-                    }
+                if let Some((model, text_fallback)) = hit.fallback {
+                    fallback.offer((base, model, text_fallback), hit.tier);
                 }
-                None => {}
             }
         }
-        if let Some((base, model, text_fallback)) = full_home.or(laneless) {
+        if let Some((base, model, text_fallback)) = preferred.best().or_else(|| fallback.best()) {
             self.picks.remember(base.clone(), model.clone(), text_fallback);
             return Ok((base, model, text_fallback));
         }
@@ -397,17 +398,12 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         // POST decide (it has its own connect handling). Without this the
         // FINAL round of a long successful turn died at the re-probe and
         // the user saw an error after their level had already built.
-        if let Some((base, model, text_fallback)) = self.picks.take_stale() {
-            if self.preferred_model.as_deref().is_none_or(|wanted| wanted == model) {
-                self.picks.remember(base.clone(), model.clone(), text_fallback);
-                return Ok((base, model, text_fallback));
-            }
+        if let Some((base, model, text_fallback)) = self.picks.stale() {
+            self.picks.remember(base.clone(), model.clone(), text_fallback);
+            return Ok((base, model, text_fallback));
         }
         Err(if reasons.is_empty() {
-            match &self.preferred_model {
-                Some(model) => format!("no fleet node advertises requested model {model}"),
-                None => "no fleet node advertises a chat or Qwen text model".to_string(),
-            }
+            "no fleet node advertises a chat or Qwen text model".to_string()
         } else {
             reasons.join("; ")
         })
@@ -425,7 +421,7 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
 
     /// The third element of a hit places this box on the scan's ladder
     /// (see `probe`).
-    fn probe_one(&mut self, base: &str, reasons: &mut Vec<String>) -> Option<(String, bool, HomeTier)> {
+    fn probe_one(&mut self, base: &str, reasons: &mut Vec<String>) -> Option<NodePicks> {
         let health = match self.get_json_retry(&format!("{base}/health")) {
             Ok(v) => v,
             Err(e) => {
@@ -464,6 +460,8 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         if !has_chat {
             reasons.push(format!("{base}: no chat capability (will try text models)"));
         }
+        let mut preferred_chat: Option<String> = None;
+        let mut preferred_text: Option<String> = None;
         let mut chat_id: Option<String> = None;
         let mut text_id: Option<String> = None;
         for row in rows {
@@ -482,12 +480,11 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
             if let Some(wanted) = &self.preferred_model {
                 if id == wanted {
                     if domain == "chat" {
-                        chat_id = Some(id.to_string());
+                        preferred_chat = Some(id.to_string());
                     } else if domain == "text" {
-                        text_id = Some(id.to_string());
+                        preferred_text = Some(id.to_string());
                     }
                 }
-                continue;
             }
             if domain == "chat" {
                 if better_pick(chat_id.as_deref(), id, row) {
@@ -499,13 +496,45 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
                 }
             }
         }
-        if let Some(model) = chat_id {
-            return Some((model, false, tier));
+        let preferred = preferred_chat
+            .map(|model| (model, false))
+            .or_else(|| preferred_text.map(|model| (model, true)));
+        let fallback = chat_id
+            .map(|model| (model, false))
+            .or_else(|| text_id.map(|model| (model, true)));
+        (preferred.is_some() || fallback.is_some()).then_some(NodePicks {
+            preferred,
+            fallback,
+            tier,
+        })
+    }
+}
+
+struct NodePicks {
+    preferred: Option<(String, bool)>,
+    fallback: Option<(String, bool)>,
+    tier: HomeTier,
+}
+
+#[derive(Default)]
+struct PickLadder {
+    free: Option<(String, String, bool)>,
+    full: Option<(String, String, bool)>,
+    laneless: Option<(String, String, bool)>,
+}
+
+impl PickLadder {
+    fn offer(&mut self, pick: (String, String, bool), tier: HomeTier) {
+        match tier {
+            HomeTier::FreeLane if self.free.is_none() => self.free = Some(pick),
+            HomeTier::FullLanes if self.full.is_none() => self.full = Some(pick),
+            HomeTier::NoLanes if self.laneless.is_none() => self.laneless = Some(pick),
+            _ => {}
         }
-        if let Some(model) = text_id {
-            return Some((model, true, tier));
-        }
-        None
+    }
+
+    fn best(self) -> Option<(String, String, bool)> {
+        self.free.or(self.full).or(self.laneless)
     }
 }
 
@@ -569,7 +598,9 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
         }
         tap_turn_input(input);
         let (base, model, text_fallback) = self.probe()?;
-        let open_think = self.thinking != Some(false)
+        // Older nodes do not advertise the prefill shape, so retain the
+        // historical model/request inference only as a compatibility fallback.
+        let inferred_open_think = self.thinking != Some(false)
             && crate::protocol::model_uses_open_think(&model);
         // The WIRE transcript is append-only, mirroring the lane's KV: turns
         // already sent are reused byte-for-byte (raw assistant replies
@@ -695,6 +726,10 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
             .and_then(Value::as_str)
             .ok_or_else(|| "generate response missing job_id".to_string())?
             .to_string();
+        let open_think = resp
+            .get("think_open")
+            .and_then(Value::as_bool)
+            .unwrap_or(inferred_open_think);
         self.active = Some(ActiveJob {
             base,
             job,
@@ -815,7 +850,7 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
         let partial = status.get("partial_text").and_then(Value::as_str).unwrap_or("");
         if !active.think_opened
             && active.delivered == 0
-            && (active.open_think || active.think_tokens.is_some_and(|n| n > 0))
+            && active.open_think
             && !partial.starts_with("<think>")
         {
             // First tokens of a reasoning turn, template-opened: give the
@@ -1096,6 +1131,8 @@ mod wire_transcript_tests {
     struct Scripted {
         generates: Rc<RefCell<Vec<Value>>>,
         replies: Rc<RefCell<VecDeque<String>>>,
+        polls: Rc<RefCell<VecDeque<Value>>>,
+        think_open: Rc<RefCell<Option<bool>>>,
     }
 
     impl FleetTransport for Scripted {
@@ -1103,7 +1140,11 @@ mod wire_transcript_tests {
             assert!(url.ends_with("/generate"), "{url}");
             self.generates.borrow_mut().push(body.clone());
             let n = self.generates.borrow().len();
-            Ok(json::obj(vec![("job_id", json::s(format!("j{n}")))]))
+            let mut fields = vec![("job_id", json::s(format!("j{n}")))];
+            if let Some(think_open) = *self.think_open.borrow() {
+                fields.push(("think_open", Value::Bool(think_open)));
+            }
+            Ok(json::obj(fields))
         }
         fn get_json(&mut self, url: &str) -> Result<Value, String> {
             if url.ends_with("/health") {
@@ -1130,6 +1171,9 @@ mod wire_transcript_tests {
                         ]),
                     ]),
                 )]));
+            }
+            if let Some(status) = self.polls.borrow_mut().pop_front() {
+                return Ok(status);
             }
             // A job poll: pop the scripted raw reply.
             let raw = self
@@ -1196,6 +1240,81 @@ mod wire_transcript_tests {
             transport.generates.borrow()[0].get("model").and_then(Value::as_str),
             Some("qwen3.6-27b")
         );
+    }
+
+    #[test]
+    fn a_missing_preferred_model_falls_back_to_the_default_qwen() {
+        let transport = Scripted::default();
+        let mut provider = FleetQwenChatProvider::new(transport, vec!["http://n1:1".into()])
+            .with_preferred_model(Some("qwen-does-not-exist".into()));
+        assert!(matches!(
+            provider.availability(),
+            ProviderAvailability::Available { model, .. } if model == "qwen3.8-27b"
+        ));
+    }
+
+    #[test]
+    fn authoritative_closed_think_keeps_tagless_short_answers() {
+        for answer in ["x", "7", "✅"] {
+            let transport = Scripted::default();
+            *transport.think_open.borrow_mut() = Some(false);
+            transport.replies.borrow_mut().push_back(answer.to_string());
+            let mut provider = FleetQwenChatProvider::new(
+                transport,
+                vec!["http://n1:1".into()],
+            );
+            provider
+                .begin_turn(&TurnInput::new("SYS", vec![user("hello")]))
+                .unwrap();
+            let events = provider.poll();
+            assert!(events.iter().any(
+                |event| matches!(event, ProviderEvent::Delta(text) if text == answer)
+            ));
+            assert!(events.iter().any(
+                |event| matches!(event, ProviderEvent::Done { text } if text == answer)
+            ));
+        }
+    }
+
+    #[test]
+    fn tagless_visible_text_streams_incrementally_when_think_is_closed() {
+        let transport = Scripted::default();
+        *transport.think_open.borrow_mut() = Some(false);
+        transport.polls.borrow_mut().extend([
+            json::obj(vec![
+                ("state", json::s("running")),
+                ("partial_text", json::s("✅")),
+                (
+                    "serving",
+                    json::obj(vec![("think_tokens", Value::Int(1))]),
+                ),
+            ]),
+            json::obj(vec![
+                ("state", json::s("done")),
+                ("partial_text", json::s("✅7")),
+            ]),
+        ]);
+        let mut provider = FleetQwenChatProvider::new(
+            transport,
+            vec!["http://n1:1".into()],
+        );
+        provider
+            .begin_turn(&TurnInput::new("SYS", vec![user("hello")]))
+            .unwrap();
+        let first = provider.poll();
+        assert!(first
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::Delta(text) if text == "✅")));
+        assert!(first
+            .iter()
+            .all(|event| !matches!(event, ProviderEvent::Delta(text) if text.contains("<think>"))));
+        let second = provider.poll();
+        assert!(second.iter().any(
+            |event| matches!(event, ProviderEvent::Delta(text) if text == "7")
+        ));
+        assert!(second.iter().any(
+            |event| matches!(event, ProviderEvent::Done { text } if text == "✅7")
+        ));
     }
 
     #[test]

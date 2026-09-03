@@ -632,6 +632,9 @@ pub struct NamedInputJson {
 pub struct GenerateResponseJson {
     pub job_id: Option<String>,
     pub error: Option<String>,
+    /// Whether the accepted chat job's generation prompt ends inside an open
+    /// think block. Absent on older services and on non-chat jobs.
+    pub think_open: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
