@@ -233,6 +233,21 @@ script_mod! {
         shiny_gates: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         // x=dynamic_sun (reserved), y=shadow_alpha, z/w unused.
         shiny_gates2: uniform(vec4(0.0, 0.22, 0.0, 0.0))
+        // Water/foliage shimmer clock, stamped from Rust each draw
+        // (`stamp_map_uniforms`) as elapsed seconds. NEVER read
+        // `draw_pass.time` here: the platform statically flags any shader
+        // whose compiled source contains that accessor as `uses_time`,
+        // which forces a full-pass GPU repaint on EVERY frame forever —
+        // for as long as ANY draw call using this shader is on screen —
+        // regardless of whether the water/foliage gates above are even on.
+        // Since this pixel function is inherited by every DrawMap* variant
+        // (road/wall/roof/icon/prop/shadow/fill), that pinned the whole map
+        // at display-rate GPU cost permanently, in 2D and 3D alike. A
+        // Rust-pushed uniform carries the same value without tripping the
+        // static check; the existing `shiny_anim_timer` heartbeat (20 Hz,
+        // gated on the feature actually being visible) is what keeps it
+        // moving, so the map still idles when nothing needs to animate.
+        shiny_time: uniform(0.0)
         sun_dir: uniform(vec3(-0.379, -0.575, 0.724))
         sun_color: uniform(vec3(1.0, 0.98, 0.94))
         sun_sky: uniform(vec3(0.55, 0.62, 0.72))
@@ -358,7 +373,7 @@ script_mod! {
                 }
                 let k = self.shiny_gates2.z
                 let uv = vec2(self.v_param1, self.v_param2) * k
-                let t = self.draw_pass.time
+                let t = self.shiny_time
                 let ct = clamp(self.tilt_params.x, 0.0, 1.0)
                 let st = sqrt(max(1.0 - ct * ct, 0.0))
                 let closeness = clamp(1.6 - k, 0.0, 1.0)
@@ -509,7 +524,7 @@ script_mod! {
                 }
                 let k = self.shiny_gates2.z
                 let uv = vec2(self.v_param1, self.v_param2) * k
-                let t = self.draw_pass.time
+                let t = self.shiny_time
                 // Broad meadow tone patches (static).
                 let patch = self.mat_noise(uv * 0.023) * 0.65 + self.mat_noise(uv * 0.11) * 0.35
                 var f = 0.93 + 0.11 * patch
@@ -3101,6 +3116,11 @@ fn stamp_map_uniforms(
     terrain_tex: &Texture,
     shadow_mask: Option<&Texture>,
 ) {
+    // Rust-pushed shimmer clock (see the `shiny_time` uniform comment in the
+    // DrawMapVector DSL above): never read the shader's own `draw_pass.time`
+    // accessor from a DrawMap* pixel shader, or the platform's static
+    // `uses_time` scan pins the whole map at full-pass GPU repaint forever.
+    draw_vars.set_uniform(cx, live_id!(shiny_time), &[cx.seconds_since_app_start() as f32]);
     draw_vars.set_uniform(cx, live_id!(tile_fade), &[u.fade]);
     draw_vars.set_uniform(cx, live_id!(map_scale), &[u.map_scale.x, u.map_scale.y]);
     draw_vars.set_uniform(cx, live_id!(map_offset), &[u.map_offset.x, u.map_offset.y]);
