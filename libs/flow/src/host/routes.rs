@@ -2,7 +2,6 @@ use super::config::SharedConfig;
 use super::events::{EventCursor, EventHub};
 use super::state::{
     CreateInstanceOutcome, SetInputsOutcome, SourceResult, StartRunOutcome, StateHandle,
-    MAX_SOURCE_BYTES,
 };
 use super::util::log;
 use crate::{
@@ -21,6 +20,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const BODY_DEADLINE_MS: u64 = 30_000;
+const MAX_CONTROL_BODY_BYTES: u64 = 1024 * 1024;
 const EVENT_MAX_WAIT_MS: u64 = 30_000;
 const EVENT_MAX_BATCH: usize = 256;
 /// `PUT /v1/values` body cap: media only, generously above any test asset,
@@ -328,9 +328,6 @@ fn put_source(conn: &mut Conn, head: &mut Head, ctx: &RouteCtx, name: &str) -> O
         Ok(request) => request,
         Err(outcome) => return outcome,
     };
-    if request.source.len() as u64 > MAX_SOURCE_BYTES {
-        return Outcome::Resp(message(413, "source too large").closing());
-    }
     put_source_value(ctx, name.to_string(), request.source)
 }
 
@@ -369,9 +366,6 @@ fn put_graph(conn: &mut Conn, head: &mut Head, ctx: &RouteCtx, name: &str) -> Ou
     let config = ctx.config.clone();
     call(&ctx.state, move |state| {
         let source = graph::write(&request.graph);
-        if source.len() as u64 > MAX_SOURCE_BYTES {
-            return message(413, "source too large").closing();
-        }
         match state.put_source(name, source) {
             Ok(result) => mutation_result(result),
             Err(error) => {
@@ -510,7 +504,7 @@ fn decimal_query(text: Option<&str>, default: u64, max: u64) -> Option<u64> {
 }
 
 fn read_json<T: DeJson>(conn: &mut Conn, head: &mut Head) -> Result<T, Outcome> {
-    let bytes = match conn.read_body_full(head, MAX_SOURCE_BYTES, BODY_DEADLINE_MS) {
+    let bytes = match conn.read_body_full(head, MAX_CONTROL_BODY_BYTES, BODY_DEADLINE_MS) {
         Ok(bytes) => bytes,
         Err(BodyError::Timeout) => {
             return Err(Outcome::Resp(message(408, "body timeout").closing()))
