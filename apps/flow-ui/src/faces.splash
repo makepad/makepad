@@ -1,0 +1,225 @@
+use mod.prelude.widgets.*
+use mod.widgets.*
+// The face prelude (DESIGN.md §3). Evaluated in the instance's isolate after
+// the core + recipe preludes, so `mod.flow.ui.*` become REAL widget
+// prototypes and every node type's default `ui` is re-pointed at them.
+//
+// How a face talks to the flow, read by the host from each widget's own
+// object. They are written with `:=` (a typed widget refuses an unknown
+// `name:` property, but keeps `name :=` entries beside its children):
+//   bind := @self           an input widget's value → this node's port on the instance
+//   bind := node.port()     → that node's port on the instance (PUT inputs)
+//   show := @self           a display widget receives this node's first output
+//   show := node.port()     → that port's value on node.done / node.delta
+//   param := @name          a display widget shows the graph param `name`
+//   param_bind := @name     an input widget edits the graph param `name` (a graph PUT)
+// Handlers see `flow` (flow.input / flow.inputs / flow.value / flow.state /
+// flow.run / flow.cancel / flow.param) and the face hooks `on_value` and
+// `on_state` on the face object; every bridge call is queued to the next frame.
+
+let Face = View{
+    width: Fill
+    height: Fit
+    flow: Down
+    spacing: theme.space_2
+    padding: theme.mspace_1
+}
+
+mod.flow.ui.NodeFace = Face{}
+
+mod.flow.ui.InputFace = Face{
+    value := TextInput{
+        width: Fill
+        height: 84
+        is_multiline: true
+        empty_text: "Type the input value"
+        bind := @self
+    }
+}
+
+mod.flow.ui.TextFace = mod.flow.ui.InputFace{}
+
+mod.flow.ui.OutputFace = Face{
+    value := mod.flow.ui.ValueView{
+        width: Fill
+        height: Fit
+        show := @self
+    }
+}
+
+mod.flow.ui.LlmFace = Face{
+    system := Label{
+        width: Fill
+        height: Fit
+        text: ""
+        param := @system
+        draw_text +: {
+            color: theme.color_text_meta
+            text_style: theme.font_regular{font_size: 8.5}
+        }
+    }
+    out := Markdown{
+        width: Fill
+        height: Fit
+        body: ""
+        show := @self
+    }
+}
+
+mod.flow.ui.FnFace = Face{
+    code := CodeView{
+        editor +: {
+            width: Fill
+            height: Fit
+        }
+        param := @run
+    }
+    out := mod.flow.ui.ValueText{
+        width: Fill
+        height: Fit
+        show := @self
+    }
+}
+
+mod.flow.ui.HttpFace = Face{
+    url := Label{
+        width: Fill
+        height: Fit
+        text: ""
+        param := @url
+    }
+    status := Label{
+        width: Fill
+        height: Fit
+        text: ""
+        show := @meta
+        draw_text +: {color: theme.color_text_meta}
+    }
+    out := mod.flow.ui.ValueView{
+        width: Fill
+        height: Fit
+        show := @self
+    }
+}
+
+mod.flow.ui.AskFace = Face{
+    question := Label{
+        width: Fill
+        height: Fit
+        text: ""
+        param := @question
+    }
+    choice := DropDown{
+        width: Fill
+        height: Fit
+        param := @options
+        bind := @self
+    }
+    answer := TextInput{
+        width: Fill
+        height: 32
+        empty_text: "Answer"
+        bind := @self
+    }
+}
+
+mod.flow.ui.ImageFace = Face{
+    preview := mod.flow.ui.ValueImage{
+        width: Fill
+        height: 180
+        show := @self
+    }
+    width := Slider{
+        width: Fill
+        height: Fit
+        text: "width"
+        min: 256
+        max: 2048
+        step: 64
+        precision: 0
+        param_bind := @width
+    }
+    height := Slider{
+        width: Fill
+        height: Fit
+        text: "height"
+        min: 256
+        max: 2048
+        step: 64
+        precision: 0
+        param_bind := @height
+    }
+    steps := Slider{
+        width: Fill
+        height: Fit
+        text: "steps"
+        min: 1
+        max: 50
+        step: 1
+        precision: 0
+        param_bind := @steps
+    }
+    seed := Slider{
+        width: Fill
+        height: Fit
+        text: "seed"
+        min: 0
+        max: 100000
+        step: 1
+        precision: 0
+        param_bind := @seed
+    }
+    model := mod.flow.ui.ModelPicker{
+        param_bind := @model
+    }
+}
+
+mod.flow.ui.UpscaleFace = Face{
+    preview := mod.flow.ui.ValueImage{
+        width: Fill
+        height: 180
+        show := @self
+    }
+}
+
+mod.flow.ui.GenFace = Face{
+    domain := Label{
+        width: Fill
+        height: Fit
+        text: ""
+        param := @domain
+        draw_text +: {color: theme.color_text_meta}
+    }
+    out := mod.flow.ui.ValueView{
+        width: Fill
+        height: Fit
+        show := @self
+    }
+}
+
+// The node types keep the objects the core prelude gave them; only their
+// default faces are re-pointed at the real widgets.
+mod.flow.Node.ui = nil
+mod.flow.Input.ui = mod.flow.ui.InputFace
+mod.flow.Text.ui = mod.flow.ui.TextFace
+mod.flow.Output.ui = mod.flow.ui.OutputFace
+mod.flow.Llm.ui = mod.flow.ui.LlmFace
+mod.flow.Fn.ui = mod.flow.ui.FnFace
+mod.flow.Http.ui = mod.flow.ui.HttpFace
+mod.flow.Ask.ui = mod.flow.ui.AskFace
+mod.flow.Gen.ui = mod.flow.ui.GenFace
+mod.flow.Image.ui = mod.flow.ui.ImageFace
+mod.flow.Upscale.ui = mod.flow.ui.UpscaleFace
+
+mod.flow.ImageFace = mod.flow.ui.ImageFace
+mod.flow.InputFace = mod.flow.ui.InputFace
+mod.flow.TextFace = mod.flow.ui.TextFace
+mod.flow.OutputFace = mod.flow.ui.OutputFace
+mod.flow.LlmFace = mod.flow.ui.LlmFace
+mod.flow.FnFace = mod.flow.ui.FnFace
+mod.flow.HttpFace = mod.flow.ui.HttpFace
+mod.flow.AskFace = mod.flow.ui.AskFace
+mod.flow.GenFace = mod.flow.ui.GenFace
+mod.flow.UpscaleFace = mod.flow.ui.UpscaleFace
+
+nil

@@ -8,7 +8,7 @@ use makepad_ai_services::{
 };
 use makepad_flow::client::{ClientError, FlowClient};
 use makepad_flow::{
-    FlowDefinition, FlowSummary, Graph, Node, NodeInputValue, ToolEntry, ToolSchema,
+    FlowDefinition, FlowSummary, Graph, Node, NodeInputValue, PortType, ToolEntry, ToolSchema,
     AUTHORING_BRIEF,
 };
 use makepad_strict_json::Value as Json;
@@ -658,7 +658,7 @@ fn run_flows_call(
                 Err(error) => client_error_result(&call.call_id, error),
             }
         }
-        "instances" => match call_client(client, |client| client.instances(None, false)) {
+        "instances" => match call_client(client, |client| client.instances_json(None, false)) {
             Ok(rows) => ToolResult::ok(
                 &call.call_id,
                 render_instances(&rows),
@@ -672,7 +672,7 @@ fn run_flows_call(
                 Ok(id) => id,
                 Err(result) => return result,
             };
-            match call_client(client, |client| client.instance(&id)) {
+            match call_client(client, |client| client.instance_json(&id)) {
                 Ok(instance) => ToolResult::ok(
                     &call.call_id,
                     render_instance(&instance),
@@ -688,7 +688,7 @@ fn run_flows_call(
                 Ok(id) => id,
                 Err(result) => return result,
             };
-            match call_client(client, |client| client.stop_instance(&id)) {
+            match call_client(client, |client| client.delete_instance(&id)) {
                 Ok(()) => ToolResult::ok(
                     &call.call_id,
                     format!("stopped instance {id}"),
@@ -698,7 +698,7 @@ fn run_flows_call(
             }
         }
         "send" | "answer" => put_one_input(client, call),
-        "waiting" => match call_client(client, |client| client.instances(None, true)) {
+        "waiting" => match call_client(client, |client| client.instances_json(None, true)) {
             Ok(rows) => ToolResult::ok(
                 &call.call_id,
                 render_waiting(&rows),
@@ -727,7 +727,7 @@ fn run_flows_call(
                 Ok(run_id) => run_id,
                 Err(result) => return result,
             };
-            match call_client(client, |client| client.run(&run_id)) {
+            match call_client(client, |client| client.run_json(&run_id)) {
                 Ok(run) => ToolResult::ok(
                     &call.call_id,
                     render_run_row(&run),
@@ -756,7 +756,7 @@ fn run_flows_call(
                 Ok(id) => id,
                 Err(result) => return result,
             };
-            match call_client(client, |client| client.instance(&id)) {
+            match call_client(client, |client| client.instance_json(&id)) {
                 Ok(instance) => output_result(client, &call.call_id, &id, instance),
                 Err(error) => client_error_result(&call.call_id, error),
             }
@@ -799,7 +799,7 @@ fn run_definition_call(
     epoch: u64,
 ) -> ToolResult {
     if call.tool == "status" {
-        return match call_client(client, |client| client.instances(Some(flow_name), false)) {
+        return match call_client(client, |client| client.instances_json(Some(flow_name), false)) {
             Ok(rows) => ToolResult::ok(
                 &call.call_id,
                 render_instances(&rows),
@@ -823,7 +823,7 @@ fn run_definition_call(
                 "outputs needs `instance` before this service has run",
             );
         };
-        return match call_client(client, |client| client.instance(&instance)) {
+        return match call_client(client, |client| client.instance_json(&instance)) {
             Ok(value) => output_result(client, &call.call_id, &instance, value),
             Err(error) => client_error_result(&call.call_id, error),
         };
@@ -846,7 +846,7 @@ fn run_definition_call(
         .or_else(|| instances.lock().ok()?.get(service_id).cloned())
         .or_else(|| {
             let created = call_client(client, |client| {
-                client.create_instance(flow_name, &Json::Obj(Vec::new()))
+                client.create_instance_json(flow_name, &Json::Obj(Vec::new()))
             })
             .ok()?;
             json_string_field(&created, &["instance", "id"])
@@ -862,7 +862,9 @@ fn run_definition_call(
         Err(message) => return ToolResult::refused(&call.call_id, message),
     };
     if !matches!(&inputs, Json::Obj(fields) if fields.is_empty()) {
-        if let Err(error) = call_client(client, |client| client.put_inputs(&instance, &inputs)) {
+        if let Err(error) =
+            call_client(client, |client| client.put_inputs_json(&instance, "chat", &inputs))
+        {
             return client_error_result(&call.call_id, error);
         }
     }
@@ -892,10 +894,14 @@ fn start_instance(client: &ClientHandle, call: &ServiceCall) -> ToolResult {
         request.push(("label".into(), label.clone()));
     }
     if let Some(inputs) = field(&fields, "inputs") {
-        request.push(("inputs".into(), inputs.clone()));
+        let inputs = match normalize_inputs_for_flow(client, &name, inputs) {
+            Ok(inputs) => inputs,
+            Err(error) => return client_error_result(&call.call_id, error),
+        };
+        request.push(("inputs".into(), inputs));
     }
     match call_client(client, |client| {
-        client.create_instance(&name, &Json::Obj(request))
+        client.create_instance_json(&name, &Json::Obj(request))
     }) {
         Ok(instance) => {
             let id = json_string_field(&instance, &["instance", "id"])
@@ -909,6 +915,45 @@ fn start_instance(client: &ClientHandle, call: &ServiceCall) -> ToolResult {
         }
         Err(error) => client_error_result(&call.call_id, error),
     }
+}
+
+fn normalize_inputs_for_flow(
+    client: &ClientHandle,
+    flow_name: &str,
+    inputs: &Json,
+) -> Result<Json, ClientError> {
+    let definition = call_client(client, |client| client.flow(flow_name))?;
+    let graph = definition.graph.ok_or_else(|| {
+        ClientError::Protocol(format!("flow `{flow_name}` has no evaluated graph"))
+    })?;
+    let Json::Obj(nodes) = inputs else {
+        return Err(ClientError::Protocol("instance inputs must be an object".into()));
+    };
+    let mut normalized = Vec::with_capacity(nodes.len());
+    for (node_id, value) in nodes {
+        let node = graph
+            .nodes
+            .iter()
+            .find(|node| node.id == *node_id)
+            .ok_or_else(|| ClientError::Protocol(format!("flow has no node `{node_id}`")))?;
+        let Json::Obj(ports) = value else {
+            return Err(ClientError::Protocol(format!(
+                "inputs for `{node_id}` must be an object"
+            )));
+        };
+        let mut normalized_ports = Vec::with_capacity(ports.len());
+        for (port_name, value) in ports {
+            let ty = instance_port_type(node, port_name).ok_or_else(|| {
+                    ClientError::Protocol(format!(
+                        "node `{node_id}` has no port `{port_name}`"
+                    ))
+                })?;
+            let value = wire_input_value(ty, value.clone()).map_err(ClientError::Protocol)?;
+            normalized_ports.push((port_name.clone(), value));
+        }
+        normalized.push((node_id.clone(), Json::Obj(normalized_ports)));
+    }
+    Ok(Json::Obj(normalized))
 }
 
 fn put_one_input(client: &ClientHandle, call: &ServiceCall) -> ToolResult {
@@ -927,18 +972,20 @@ fn put_one_input(client: &ClientHandle, call: &ServiceCall) -> ToolResult {
     let Some(value) = field(&fields, "value").cloned() else {
         return refused_missing(call, "value");
     };
-    let port = match string_field(&fields, "port") {
-        Some(port) if call.tool == "send" => port.to_string(),
-        _ => match default_node_port(client, &id, &node) {
-            Ok(port) => port,
-            Err(error) => return client_error_result(&call.call_id, error),
-        },
+    let requested_port = string_field(&fields, "port").filter(|_| call.tool == "send");
+    let (port, ty) = match instance_value_port(client, &id, &node, requested_port) {
+        Ok(port) => port,
+        Err(error) => return client_error_result(&call.call_id, error),
+    };
+    let value = match wire_input_value(ty, value) {
+        Ok(value) => value,
+        Err(message) => return ToolResult::refused(&call.call_id, message),
     };
     let body = Json::Obj(vec![(
         node.clone(),
         Json::Obj(vec![(port.clone(), value)]),
     )]);
-    match call_client(client, |client| client.put_inputs(&id, &body)) {
+    match call_client(client, |client| client.put_inputs_json(&id, "chat", &body)) {
         Ok(response) => ToolResult::ok(
             &call.call_id,
             format!("set {id} {node}.{port}"),
@@ -952,12 +999,13 @@ fn put_one_input(client: &ClientHandle, call: &ServiceCall) -> ToolResult {
     }
 }
 
-fn default_node_port(
+fn instance_value_port(
     client: &ClientHandle,
     instance_id: &str,
     node_id: &str,
-) -> Result<String, ClientError> {
-    let instance = call_client(client, |client| client.instance(instance_id))?;
+    requested_port: Option<&str>,
+) -> Result<(String, PortType), ClientError> {
+    let instance = call_client(client, |client| client.instance_json(instance_id))?;
     let flow = json_string_field(&instance, &["flow"]).ok_or_else(|| {
         ClientError::Protocol("instance detail has no flow name".to_string())
     })?;
@@ -967,13 +1015,19 @@ fn default_node_port(
         .as_ref()
         .and_then(|graph| graph.nodes.iter().find(|node| node.id == node_id))
         .ok_or_else(|| ClientError::Protocol(format!("flow has no node `{node_id}`")))?;
+    if let Some(port_name) = requested_port {
+        let ty = instance_port_type(node, port_name).ok_or_else(|| {
+                ClientError::Protocol(format!("node `{node_id}` has no port `{port_name}`"))
+            })?;
+        return Ok((port_name.to_string(), ty));
+    }
     if node.outputs.len() != 1 {
         return Err(ClientError::Protocol(format!(
             "node `{node_id}` has {} output value ports; specify `port`",
             node.outputs.len()
         )));
     }
-    Ok(node.outputs[0].name.clone())
+    Ok((node.outputs[0].name.clone(), node.outputs[0].ty))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -988,7 +1042,7 @@ fn start_and_wait(
     service: &str,
 ) -> ToolResult {
     let started = match call_client(client, |client| {
-        client.start_run(instance, outputs.as_deref())
+        client.start_run_json(instance, outputs.as_deref())
     }) {
         Ok(started) => started,
         Err(error) => return client_error_result(&call.call_id, error),
@@ -1026,7 +1080,7 @@ fn wait_for_run(
             let _ = call_client(client, |client| client.cancel_run(run_id));
             return ToolResult::cancelled(call_id);
         }
-        let row = match call_client(client, |client| client.run(run_id)) {
+        let row = match call_client(client, |client| client.run_json(run_id)) {
             Ok(row) => row,
             Err(error) => return client_error_result(call_id, error),
         };
@@ -1310,22 +1364,66 @@ fn args_to_inputs(
             .find(|node| &node.id == input_id)
             .ok_or_else(|| format!("tool input node `{input_id}` is missing"))?;
         let port = single_output_port(node)?;
+        let value = wire_input_value(port.ty, value.clone())?;
         inputs.push((
             input_id.clone(),
-            Json::Obj(vec![(port.to_string(), value.clone())]),
+            Json::Obj(vec![(port.name.clone(), value)]),
         ));
     }
     Ok(Json::Obj(inputs))
 }
 
-fn single_output_port(node: &Node) -> Result<&str, String> {
+fn single_output_port(node: &Node) -> Result<&makepad_flow::Port, String> {
     match node.outputs.as_slice() {
-        [port] => Ok(&port.name),
+        [port] => Ok(port),
         ports => Err(format!(
             "input node `{}` has {} output ports",
             node.id,
             ports.len()
         )),
+    }
+}
+
+fn wire_input_value(ty: PortType, value: Json) -> Result<Json, String> {
+    if value.get("type").and_then(Json::as_str).is_some()
+        && (value.get("text").is_some()
+            || value.get("json").is_some()
+            || value.get("digest").is_some())
+    {
+        return Ok(value);
+    }
+    let ty_name = ty.as_str().to_string();
+    let payload = match ty {
+        PortType::Text => (
+            "text".to_string(),
+            Json::Str(value.as_str().map(str::to_string).unwrap_or_else(|| value.to_json())),
+        ),
+        PortType::Json | PortType::List => ("json".to_string(), value),
+        PortType::Image
+        | PortType::Audio
+        | PortType::Video
+        | PortType::Mesh
+        | PortType::Bytes => {
+            let digest = value
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| value.get("digest").and_then(Json::as_str).map(str::to_string))
+                .ok_or_else(|| format!("{} input requires a value digest", ty.as_str()))?;
+            ("digest".to_string(), Json::Str(digest))
+        }
+    };
+    Ok(Json::Obj(vec![("type".into(), Json::Str(ty_name)), payload]))
+}
+
+fn instance_port_type(node: &Node, port_name: &str) -> Option<PortType> {
+    if node.kind == "input" || node.kind == "ask" {
+        node.outputs
+            .iter()
+            .find_map(|port| (port.name == port_name).then_some(port.ty))
+    } else {
+        node.inputs
+            .iter()
+            .find_map(|port| (port.port == port_name).then_some(port.ty))
     }
 }
 
@@ -1739,6 +1837,11 @@ fn json_string_field(value: &Json, names: &[&str]) -> Option<String> {
             {
                 return Some(value.to_string());
             }
+            if let [(variant, Json::Arr(fields))] = nested {
+                if fields.is_empty() {
+                    return Some(variant.to_ascii_lowercase());
+                }
+            }
         }
     }
     if let Some(nested) = field(fields, "instance").and_then(object_fields) {
@@ -1919,6 +2022,7 @@ mod tests {
                 nodes: vec!["prompt".into()],
             }],
             flow_ui_src: None,
+            warnings: Vec::new(),
         }
     }
 
@@ -2023,7 +2127,13 @@ mod tests {
             mapped,
             Json::Obj(vec![(
                 "prompt".into(),
-                Json::Obj(vec![("text".into(), Json::Str("a cat".into()))]),
+                Json::Obj(vec![(
+                    "text".into(),
+                    Json::Obj(vec![
+                        ("type".into(), Json::Str("text".into())),
+                        ("text".into(), Json::Str("a cat".into())),
+                    ]),
+                )]),
             )])
         );
     }
