@@ -1,5 +1,6 @@
 use super::config::{FlowServerConfig, SharedConfig};
 use super::events::EventHub;
+use super::models::FleetSnapshot;
 use super::util::{atomic_write, log};
 use super::ServerError;
 use crate::engine::{self, HttpLogEntry, NetPolicy, RunEvent, RunHandle, RunId, RunInput, Seams};
@@ -7,7 +8,8 @@ use crate::instance::{InputEffect, Instance, InstanceId, Owner, RunDecision};
 use crate::values::{Value, ValueStore};
 use crate::{
     graph, EvalError, Graph, InputValueDto, InstanceRow, NodeRowDto, NodeState, NodeTypeCatalog,
-    PortType, PortValueRef, RunEventPayload, RunRowDto, RunState, ToolSchema, ValueRef, WaitingDto,
+    ModelsResponse, PortType, PortValueRef, RunEventPayload, RunRowDto, RunState, ToolSchema,
+    ValueRef, WaitingDto,
 };
 use makepad_micro_serde::{DeJson, JsonValue, SerJson};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -93,6 +95,7 @@ pub struct FlowState {
     pub events: Arc<EventHub>,
     pub epoch: u64,
     pub(crate) catalog: Vec<NodeTypeCatalog>,
+    pub(crate) fleet: FleetSnapshot,
     pub instances: BTreeMap<InstanceId, Instance>,
     pub runs: BTreeMap<RunId, RunRow>,
     pub values: ValueStore,
@@ -153,6 +156,14 @@ pub(crate) struct SourceResult {
 }
 
 impl FlowState {
+    pub(crate) fn models_response(&mut self, domain: Option<&str>) -> ModelsResponse {
+        self.fleet.response(&self.config.fleet_hint, domain)
+    }
+
+    pub(crate) fn catalog_with_models(&mut self) -> Vec<NodeTypeCatalog> {
+        self.fleet.catalog(&self.config.fleet_hint, &self.catalog)
+    }
+
     fn build(
         config: &SharedConfig,
         events: Arc<EventHub>,
@@ -169,6 +180,7 @@ impl FlowState {
             events,
             epoch,
             catalog,
+            fleet: FleetSnapshot::default(),
             instances: BTreeMap::new(),
             runs: BTreeMap::new(),
             values,

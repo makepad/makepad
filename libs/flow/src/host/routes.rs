@@ -93,13 +93,24 @@ pub(crate) fn dispatch(
                 return call(&ctx.state, |_| message(405, "method not allowed"));
             }
             call(&ctx.state, |state| {
+                let types = state.catalog_with_models();
                 json(
                     200,
                     &NodesResponse {
-                        types: state.catalog.clone(),
+                        types,
                         brief: crate::AUTHORING_BRIEF.to_string(),
                     },
                 )
+            })
+        }
+        [v1, models] if v1 == "v1" && models == "models" => {
+            if head.method != Method::Get {
+                return call(&ctx.state, |_| message(405, "method not allowed"));
+            }
+            let domain = head.query_get("domain").map(str::to_string);
+            call(&ctx.state, move |state| {
+                let response = state.models_response(domain.as_deref());
+                json(200, &response)
             })
         }
         [v1, templates] if v1 == "v1" && templates == "templates" => {

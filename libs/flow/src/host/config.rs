@@ -28,6 +28,10 @@ pub struct FlowServerConfig {
     pub revision_ring: usize,
     pub watch_interval_ms: u64,
     pub discovery: Option<DiscoveryConfig>,
+    /// Hub base URLs consulted before LAN and machine discovery. This is
+    /// useful on beacon-less networks and makes the fleet seam deterministic
+    /// in tests.
+    pub fleet_hint: Vec<String>,
     pub log: Box<dyn Fn(&str) + Send + Sync>,
     /// A specific local LLM to pin the `chat` executor's `HubChat` seam to
     /// (§5.4); `None` lets the hub elect / falls back to
@@ -66,6 +70,7 @@ impl FlowServerConfig {
             revision_ring: 32,
             watch_interval_ms: 250,
             discovery: None,
+            fleet_hint: Vec::new(),
             log: Box::new(|line| eprintln!("[flow-server] {line}")),
             chat_model: None,
             net: NetPolicy::default(),
@@ -142,4 +147,3 @@ impl FlowServerConfig {
 }
 
 pub(crate) type SharedConfig = Arc<FlowServerConfig>;
-
