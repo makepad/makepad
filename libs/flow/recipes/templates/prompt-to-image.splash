@@ -13,7 +13,7 @@ let expand = Llm{
 let styled = Fn{
     in: { text: expand.text()  style: "photo" }
     out: [@text]
-    run: |in| { {text: in.text + ", " + in.style + " style"} }
+    run: |i| { {text: i.text + ", " + i.style + " style"} }
     at: vec2(680, 120)
 }
 

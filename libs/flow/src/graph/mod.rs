@@ -5,6 +5,8 @@ use std::collections::{HashMap, HashSet};
 const INSTRUCTION_LIMIT: usize = 5_000_000;
 const HEAP_LIMIT: usize = 64 * 1024 * 1024;
 const PRELUDE_FILE: &str = "<makepad-flow-prelude>";
+const RECIPE_PRELUDE_FILE: &str = "<makepad-flow-recipe-prelude>";
+const RECIPE_PRELUDE: &str = include_str!("../../recipes/prelude_recipes.splash");
 
 #[derive(Clone)]
 struct TypeSpec {
@@ -253,6 +255,15 @@ pub fn evaluate(source: &str, file_name: &str) -> Result<Graph, EvalError> {
             let prelude_errors = vm.take_errors();
             if !prelude_errors.is_empty() {
                 return Err(error_from_vm(&prelude_errors[0], PRELUDE_FILE));
+            }
+            vm.bx.captured_errors = Some(Vec::new());
+            vm.eval(make_mod(RECIPE_PRELUDE_FILE, RECIPE_PRELUDE));
+            let recipe_errors = vm.take_errors();
+            if !recipe_errors.is_empty() {
+                return Err(error_from_vm(
+                    &recipe_errors[0],
+                    RECIPE_PRELUDE_FILE,
+                ));
             }
             vm.bx.captured_errors = Some(Vec::new());
             let eval_source = source_for_eval(source);
