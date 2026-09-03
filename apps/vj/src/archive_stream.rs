@@ -26,8 +26,9 @@ use makepad_widgets::makepad_platform::video_file::{
 };
 use makepad_widgets::makepad_platform::thread::{ThreadOptions, ThreadSpawner};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 use crate::clock::Instant;
 use std::time::Duration;
@@ -234,20 +235,24 @@ fn fetch_loop(
                 Err(TryRecvError::Disconnected) => return,
             }
         }
-        // A window fetched but not yet accepted by a full channel.
+        // A window fetched but not yet accepted by a full channel: block
+        // on the send instead of polling (a worker thread may block on a
+        // channel). A stale send during a superseding seek is harmless —
+        // the window's `gen` makes the decode+present loop skip it.
         if let Some(w) = parked.take() {
-            match windows.try_send(w) {
-                Ok(()) => {}
-                Err(TrySendError::Full(w)) => {
-                    parked = Some(w);
-                    thread::sleep(Duration::from_millis(5));
-                    continue;
-                }
-                Err(TrySendError::Disconnected(_)) => return,
+            if windows.send(w).is_err() {
+                return;
             }
         }
         let Some((gen, offset)) = cursor else {
-            thread::sleep(Duration::from_millis(10));
+            // Idle: block for the next command instead of polling.
+            match cmds.recv() {
+                Ok(FetchCmd::Start { gen, offset }) => {
+                    cursor = Some((gen, offset));
+                    parked = None;
+                }
+                Err(_) => return,
+            }
             continue;
         };
         if offset >= size {
@@ -411,6 +416,10 @@ fn stream_main(
             // Parked is parked, not buffering — the flag must not stick
             // from the fetch wait that ran just before the pause.
             shared.buffering.store(false, Ordering::Release);
+            // Native-only: everything past `VideoStreamDecoder::new` above
+            // is unreachable on wasm32 (that decoder is stubbed to Windows
+            // and macOS only, so this loop never runs there).
+            #[cfg(not(target_arch = "wasm32"))]
             thread::sleep(Duration::from_millis(20));
             origin += Duration::from_millis(20);
         }
@@ -465,6 +474,8 @@ fn stream_main(
                     if !reorder.is_empty() && reorder.len() > REORDER_DEPTH {
                         present(&mut reorder, REORDER_DEPTH, format, &shared, &mut origin, &mut base_100ns, &mut show_one, &mut bgra);
                     } else {
+                        // Native-only: see the pause-park comment above.
+                        #[cfg(not(target_arch = "wasm32"))]
                         thread::sleep(Duration::from_millis(4));
                         origin += Duration::from_millis(4);
                     }
@@ -547,6 +558,9 @@ fn present(
                     if remaining.is_zero() || shared.stop.load(Ordering::Acquire) {
                         break;
                     }
+                    // Native-only: `present` is only ever called from the
+                    // decode loop above, which never runs on wasm32.
+                    #[cfg(not(target_arch = "wasm32"))]
                     thread::sleep(remaining.min(Duration::from_millis(4)));
                 }
             }

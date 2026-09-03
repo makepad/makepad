@@ -945,6 +945,10 @@ fn decode_loop(
                 Instant::now() >= preroll_deadline,
             );
             shared.preroll_status.store(status as u8, Ordering::Release);
+            // Native-only: `decode_loop` returns at the top on wasm32
+            // (`VideoFileDecoder::open` is a Windows / macOS / Linux stub
+            // there and always fails), so nothing below that point runs.
+            #[cfg(not(target_arch = "wasm32"))]
             std::thread::sleep(Duration::from_millis(8));
             continue;
         }
@@ -987,6 +991,8 @@ fn decode_loop(
             }
         }
         if shared.frames.lock().unwrap().len() >= RING_FRAMES {
+            // Native-only: see the preroll wait above.
+            #[cfg(not(target_arch = "wasm32"))]
             std::thread::sleep(Duration::from_millis(4));
             continue;
         }
@@ -1234,6 +1240,8 @@ fn decode_loop(
                         return;
                     }
                     if mixer.slot_buffered_secs(slot) > AUDIO_AHEAD_SECS {
+                        // Native-only: see the preroll wait above.
+                        #[cfg(not(target_arch = "wasm32"))]
                         std::thread::sleep(Duration::from_millis(20));
                         continue;
                     }
@@ -1269,6 +1277,8 @@ fn decode_loop(
                         shared.end_of_stream.store(false, Ordering::Release);
                         break;
                     }
+                    // Native-only: see the preroll wait above.
+                    #[cfg(not(target_arch = "wasm32"))]
                     std::thread::sleep(Duration::from_millis(20));
                 }
                 match VideoFileDecoder::open(&path) {
@@ -1567,7 +1577,14 @@ fn park_while_resident(shared: &Arc<SlotShared>, has_audio: bool) {
         if shared.repeat_cache.lock().unwrap().frames.is_none() {
             return;
         }
+        // Native-only: called only from `decode_loop`, which returns
+        // before this point on wasm32 (`VideoFileDecoder` is a Windows /
+        // macOS / Linux stub there, so `VideoFileDecoder::open` always
+        // fails first).
+        #[cfg(not(target_arch = "wasm32"))]
         std::thread::sleep(Duration::from_millis(8));
+        #[cfg(target_arch = "wasm32")]
+        return;
     }
 }
 
@@ -1607,16 +1624,22 @@ fn seek_bounce_playback(
             || (has_audio && !shared.muted.load(Ordering::Acquire))
     }
     /// Pause-aware ring backpressure; true = exit requested.
+    // Native-only: `seek_bounce_playback` (and this nested `wait_ring`) is
+    // only ever called from `decode_loop`, which returns before this point
+    // on wasm32 (`VideoFileDecoder::open` is a Windows / macOS / Linux
+    // stub there and always fails).
     fn wait_ring(shared: &SlotShared, has_audio: bool, epoch0: u64) -> bool {
         loop {
             if must_exit(shared, has_audio, epoch0) {
                 return true;
             }
             if shared.paused.load(Ordering::Acquire) {
+                #[cfg(not(target_arch = "wasm32"))]
                 std::thread::sleep(Duration::from_millis(8));
                 continue;
             }
             if shared.frames.lock().unwrap().len() >= RING_FRAMES {
+                #[cfg(not(target_arch = "wasm32"))]
                 std::thread::sleep(Duration::from_millis(4));
                 continue;
             }
@@ -1727,6 +1750,8 @@ fn seek_bounce_playback(
             }
             scratching = scratch_on;
             if shared.paused.load(Ordering::Acquire) && !scratching {
+                // Native-only: see the comment on `wait_ring` above.
+                #[cfg(not(target_arch = "wasm32"))]
                 std::thread::sleep(Duration::from_millis(8));
                 continue;
             }
@@ -1797,11 +1822,15 @@ fn seek_bounce_playback(
                     // Ping-pong: the leg ends when the last resident
                     // frame has been served; a pinned scratch just holds.
                     if scratching {
+                        // Native-only: see the comment on `wait_ring` above.
+                        #[cfg(not(target_arch = "wasm32"))]
                         std::thread::sleep(Duration::from_millis(4));
                         continue;
                     }
                     break;
                 } else {
+                    // Native-only: see the comment on `wait_ring` above.
+                    #[cfg(not(target_arch = "wasm32"))]
                     std::thread::sleep(Duration::from_millis(2));
                     continue;
                 }
@@ -1884,6 +1913,8 @@ fn seek_bounce_playback(
                 }
             } else {
                 // Ring full, window decoded, resident still serving.
+                // Native-only: see the comment on `wait_ring` above.
+                #[cfg(not(target_arch = "wasm32"))]
                 std::thread::sleep(Duration::from_millis(2));
             }
         }
@@ -3941,18 +3972,26 @@ impl ThumbQueue {
             if self.closed.load(Ordering::Acquire) {
                 return None;
             }
-            // The timeout also closes the tiny notify/check race during
-            // teardown; workers otherwise sleep without polling.
+            // `close` takes this same lock around its store + notify (see
+            // below), so there is no notify/check race to guard with a
+            // timeout: every waiter here either observes `closed` already
+            // true above, or is woken by the notify that follows it.
             state = self
                 .cv
-                .wait_timeout(state, Duration::from_secs(1))
-                .unwrap_or_else(|error| error.into_inner())
-                .0;
+                .wait(state)
+                .unwrap_or_else(|error| error.into_inner());
         }
     }
 
     fn close(&self) {
+        // Set `closed` under the same lock `pop` holds while it checks the
+        // flag and waits, so a `close` racing a waiter can never land
+        // between that check and the wait: either it lands before (the
+        // waiter's next check sees `closed`) or after (the waiter is
+        // already parked on the condvar and this notify wakes it).
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         self.closed.store(true, Ordering::Release);
+        drop(state);
         self.cv.notify_all();
     }
 

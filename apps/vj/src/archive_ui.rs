@@ -38,15 +38,16 @@ use makepad_asset_data::{
 };
 use makepad_asset_importer::thumbs;
 use makepad_asset_importer::videothumb::probe_video;
-use makepad_widgets::makepad_platform::thread::{Lane, TaskPool, ThreadOptions, ThreadSpawner};
+use makepad_widgets::makepad_platform::thread::{
+    CancellationToken, Lane, TaskPool, ThreadOptions, ThreadSpawner,
+};
 use makepad_widgets::makepad_platform::video_file::{nv12, VideoFileDecoder};
-use makepad_widgets::{ImageBuffer, Texture};
+use makepad_widgets::{Cx, ImageBuffer, Texture};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
-use std::thread;
 use crate::clock::Instant;
 use std::time::Duration;
 
@@ -1198,6 +1199,14 @@ pub struct SwatchPlayer {
 
 /// How long the thread waits at the frontier / for the header.
 const FRONTIER_WAIT: Duration = Duration::from_millis(250);
+
+/// Pace a download-frontier retry. A plain sleep reads the std clock and
+/// panics on a wasm worker; `wait_until` paces off `Cx::monotonic_now()`
+/// instead.
+fn wait_frontier() {
+    let wait = CancellationToken::new();
+    let _ = wait.wait_until(Cx::monotonic_now() + FRONTIER_WAIT.as_secs_f64());
+}
 /// Bytes that must be on disk before the first open is even tried: the
 /// header of a streamable mp4 fits, and a decoder is not asked to sniff
 /// an empty file every quarter second.
@@ -1298,7 +1307,10 @@ fn swatch_loop(source: SwatchSource, shared: Arc<SwatchShared>) {
             if shared.stop.load(Ordering::Acquire) {
                 return;
             }
-            thread::sleep(Duration::from_millis(20));
+            // A plain sleep reads the std clock and panics on a wasm
+            // worker; `wait_until` paces off `Cx::monotonic_now()`.
+            let wait = CancellationToken::new();
+            let _ = wait.wait_until(Cx::monotonic_now() + 0.020);
             origin += Duration::from_millis(20);
         }
         let seek = shared.seek_100ns.swap(-1, Ordering::AcqRel);
@@ -1324,7 +1336,7 @@ fn swatch_loop(source: SwatchSource, shared: Arc<SwatchShared>) {
                 return;
             };
             if source.growing() && file_len(&path) < MIN_OPEN_BYTES {
-                thread::sleep(FRONTIER_WAIT);
+                wait_frontier();
                 continue;
             }
             match VideoFileDecoder::open(&path) {
@@ -1347,7 +1359,7 @@ fn swatch_loop(source: SwatchSource, shared: Arc<SwatchShared>) {
                         // up only if the whole file arrived and still will
                         // not open — that is handled on the next pass,
                         // when `growing()` turns false.
-                        thread::sleep(FRONTIER_WAIT);
+                        wait_frontier();
                         continue;
                     }
                     *shared.failure.lock().unwrap() = Some(e.to_string());
@@ -1381,7 +1393,13 @@ fn swatch_loop(source: SwatchSource, shared: Arc<SwatchShared>) {
                     if remaining.is_zero() || shared.stop.load(Ordering::Acquire) {
                         break;
                     }
-                    thread::sleep(remaining.min(Duration::from_millis(4)));
+                    // A plain sleep reads the std clock and panics on a
+                    // wasm worker; `wait_until` paces off
+                    // `Cx::monotonic_now()` instead.
+                    let wait = CancellationToken::new();
+                    let _ = wait.wait_until(
+                        Cx::monotonic_now() + remaining.min(Duration::from_millis(4)).as_secs_f64(),
+                    );
                 }
                 if shared.stop.load(Ordering::Acquire) {
                     return;
@@ -1400,7 +1418,7 @@ fn swatch_loop(source: SwatchSource, shared: Arc<SwatchShared>) {
                 // moves (a stalled download) is not a hang here — the
                 // panel's own download failure ends the swatch.
                 decoder = None;
-                thread::sleep(FRONTIER_WAIT);
+                wait_frontier();
                 // The clock restarts at the resume point.
                 base_100ns = -1;
             }

@@ -24,7 +24,7 @@ use makepad_widgets::makepad_platform::file_dialogs::{
     FileDialog, FileDialogAction, VirtualFile,
 };
 use makepad_widgets::makepad_platform::thread::{
-    Lane, TaskPool, ThreadOptions, ThreadSpawner, ToUIReceiver, ToUISender,
+    CancellationToken, Lane, TaskPool, ThreadOptions, ThreadSpawner, ToUIReceiver, ToUISender,
 };
 use crate::import_ui::ImportPanel;
 use crate::local_store::LocalStore;
@@ -5373,7 +5373,13 @@ impl SyncWorker {
                     // The handle is gone: nobody will read another one.
                     return;
                 }
-                std::thread::sleep(Duration::from_millis(10));
+                // A plain sleep reads the std clock and panics on a wasm
+                // worker; `wait_until` paces off `Cx::monotonic_now()`
+                // instead of the ring's own arrival (there is no channel
+                // to block on — the capture ring is filled by the audio
+                // callback, not a message).
+                let tick = CancellationToken::new();
+                let _ = tick.wait_until(Cx::monotonic_now() + 0.010);
             }
         }) {
             Ok(handle) => handle.detach(),

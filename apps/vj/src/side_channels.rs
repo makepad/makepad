@@ -35,7 +35,10 @@ use crate::stems::{
 };
 use makepad_ai_stems::{CacheHeader, StemCache, SAMPLE_RATE as STEMS_RATE};
 use makepad_asset_data::AssetId;
-use makepad_widgets::makepad_platform::thread::{Lane, TaskPool, ThreadOptions, ThreadSpawner};
+use makepad_widgets::makepad_platform::thread::{
+    CancellationToken, Lane, TaskPool, ThreadOptions, ThreadSpawner,
+};
+use makepad_widgets::Cx;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
@@ -450,7 +453,11 @@ impl WriteBackPool {
         let options = ThreadOptions { name: Some("vj-write-back".into()), ..Default::default() };
         match spawner.spawn_worker(options, move || {
                 while let Ok(job) = jobs.recv() {
-                    std::thread::sleep(WRITE_BACK_DELAY);
+                    // A plain sleep reads the std clock and panics on a
+                    // wasm worker; `wait_until` paces off
+                    // `Cx::monotonic_now()` instead.
+                    let wait = CancellationToken::new();
+                    let _ = wait.wait_until(Cx::monotonic_now() + WRITE_BACK_DELAY.as_secs_f64());
                     let message = match encode_from_cache(&root, &job) {
                         Ok(oggs) => WriteBackMsg::Encoded { asset: job.asset, oggs },
                         Err(reason) => WriteBackMsg::Skipped { asset: job.asset, reason },
