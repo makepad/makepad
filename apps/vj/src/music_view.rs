@@ -3041,11 +3041,6 @@ script_mod! {
                                 // slash, and the dead width it used to carry pushed the
                                 // load target away from it for nothing.
                                 music_count := MusicLabel{width: Fit text: ""}
-                                // Hides on a narrow console: the dropdown beside
-                                // it collapses to its icon there, and a word
-                                // introducing a wordless control is the first
-                                // thing that should go.
-                                music_load_label := MusicLabel{text: "load"}
                                 // Each target wears a mark, so a narrow console
                                 // can drop the words and still be read: the
                                 // decks are A and B on every other surface here,
@@ -3064,6 +3059,26 @@ script_mod! {
                                         crate_resource("self:resources/icons/off.svg")
                                         crate_resource("self:resources/icons/mix.svg")
                                     ]
+                                }
+                                // What a pick may take over, read straight on
+                                // from where it goes: the two are one thought,
+                                // and in this order they are one sentence. The
+                                // word
+                                // "load" used to stand here introducing a
+                                // wordless control, which was the emptiest
+                                // thing on the line.
+                                //
+                                // The room comes from `music_search`, whose
+                                // Fill yields down to 96 points before anything
+                                // else in this row gives an inch — the same
+                                // slack the FILTER chip and the count spend.
+                                // Three short words rather than marks, because
+                                // no icon says "refuse" without being learned,
+                                // and this is the one control here whose
+                                // default changes what a click does.
+                                deck_over_playing := DropDown{
+                                    height: 22
+                                    labels: ["Refuse" "Stop" "Play in"]
                                 }
                                 // Latched, the deck a picked track lands on starts as
                                 // soon as its decode finishes — "select and it plays".

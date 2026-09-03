@@ -64,6 +64,24 @@ pub enum DeckTarget {
     Mix,
 }
 
+/// What a load does when the deck it is aimed at is already playing.
+///
+/// Refuse is the default, and it is the only one of the three that is a
+/// safety rather than a taste: a track the room is dancing to is the one
+/// thing on this console that must not change because a finger landed on a
+/// list. The other two are for operators who mean it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum OverPlaying {
+    /// Nothing loads and the deck is left alone.
+    #[default]
+    Refuse,
+    /// The load happens; the deck ends up stopped at the new track's top.
+    Stop,
+    /// The deck never stops — the new track comes in where the old one
+    /// went out.
+    Keep,
+}
+
 /// Analysis the STORE already holds for a track, as blob references off its
 /// manifest: four Ogg Vorbis stems in `FileRole::STEMS` order (drums, bass,
 /// vocals, other) and the word-aligned lyrics JSON.
@@ -986,8 +1004,15 @@ impl DeckState {
 pub enum DeckCmd {
     /// Fetch + decode the track for `deck` under `gen` (stale results drop).
     LoadTrack { deck: DeckId, gen: DeckGen, item: TrackItem },
-    /// Install the decoded track on the mixer deck voice, paused at zero.
-    InstallTrack { deck: DeckId },
+    /// Install the decoded track on the mixer deck voice at zero.
+    /// `keep_playing` asks the mixer to bring the deck straight back up on
+    /// the new track instead of leaving it stopped.
+    InstallTrack { deck: DeckId, keep_playing: bool },
+    /// A report, not a command: the pick landed on a deck the policy
+    /// protects and nothing was loaded. It has to be said out loud,
+    /// because a click that does nothing is indistinguishable from a click
+    /// that missed.
+    LoadRefused { deck: DeckId },
     SetPlaying { deck: DeckId, playing: bool },
     SeekFraction { deck: DeckId, fraction: f64 },
     /// The deck's loop span in source seconds, or `None` to run free.
@@ -1046,6 +1071,9 @@ pub struct DeckEngine {
     last_loaded: Option<DeckId>,
     /// Hold the non-leading deck to the leader's grid without being asked.
     pub auto_sync: bool,
+    /// What a load does to a deck that is already playing. See
+    /// `OverPlaying`; the host owns this the way it owns `auto_sync`.
+    pub over_playing: OverPlaying,
     /// What a fresh load puts back to nothing. Off by default; see
     /// `LoadReset`.
     pub load_reset: LoadReset,
@@ -1103,6 +1131,7 @@ impl Default for DeckEngine {
             curve: FadeCurve::EqualPower,
             last_loaded: None,
             auto_sync: true,
+            over_playing: OverPlaying::default(),
             load_reset: LoadReset::default(),
             snap_beats: 0,
             queue: Vec::new(),
@@ -1250,6 +1279,31 @@ impl DeckEngine {
         self.last_loaded
     }
 
+    /// Which deck a routing choice resolves to, or None when the choice is
+    /// to load nothing at all.
+    pub fn target_deck(&self, target: DeckTarget) -> Option<DeckId> {
+        match target {
+            DeckTarget::Off => None,
+            DeckTarget::A => Some(DeckId::A),
+            DeckTarget::B => Some(DeckId::B),
+            DeckTarget::Auto | DeckTarget::Mix => Some(self.auto_target()),
+        }
+    }
+
+    /// The deck a load would be refused on, under the standing policy.
+    ///
+    /// `auto_target` already steers Auto away from the single playing deck
+    /// and `free_deck` already keeps the queue pump off one, so this only
+    /// ever bites on an explicit A or B, a drop, a preview verdict, or Auto
+    /// with BOTH decks running.
+    pub fn load_refused(&self, target: DeckTarget) -> Option<DeckId> {
+        if self.over_playing != OverPlaying::Refuse {
+            return None;
+        }
+        let deck = self.target_deck(target)?;
+        self.deck(deck).playing.then_some(deck)
+    }
+
     /// Route a tile click. The chosen deck starts loading latest-wins; the
     /// other deck is untouched.
     pub fn click(&mut self, item: TrackItem, target: DeckTarget) -> Vec<DeckCmd> {
@@ -1258,11 +1312,15 @@ impl DeckEngine {
         if target == DeckTarget::Off {
             return Vec::new();
         }
-        let deck = match target {
-            DeckTarget::A => DeckId::A,
-            DeckTarget::B => DeckId::B,
-            DeckTarget::Auto | DeckTarget::Off | DeckTarget::Mix => self.auto_target(),
+        let Some(deck) = self.target_deck(target) else {
+            return Vec::new();
         };
+        // BEFORE the generation moves and before `last_loaded` does: a
+        // refusal must spend nothing, or the next accepted load skips a
+        // generation and the autoplay latch arms a deck nobody picked.
+        if self.load_refused(target).is_some() {
+            return vec![DeckCmd::LoadRefused { deck }];
+        }
         self.next_gen += 1;
         let gen = self.next_gen;
         self.last_loaded = Some(deck);
@@ -1292,6 +1350,7 @@ impl DeckEngine {
     /// Decode finished for `(deck, gen)`. Stale generations are dropped.
     pub fn track_ready(&mut self, deck: DeckId, gen: DeckGen, duration_secs: f64) -> Vec<DeckCmd> {
         let normalise = self.normalise;
+        let over_playing = self.over_playing;
         let state = self.deck_mut(deck);
         let DeckLoad::Loading { gen: want, item } = state.load.clone() else {
             return Vec::new();
@@ -1300,7 +1359,12 @@ impl DeckEngine {
             return Vec::new();
         }
         state.load = DeckLoad::Loaded { item };
-        state.playing = false;
+        // A stopped deck has nothing to carry on, so Keep only means
+        // anything when this deck was actually running when the bytes
+        // landed. Everything else installs stopped, which is the honest
+        // default for a load nobody promised would run on.
+        let keep_playing = state.playing && over_playing == OverPlaying::Keep;
+        state.playing = keep_playing;
         state.duration_secs = duration_secs;
         state.position_secs = 0.0;
         state.splat = None;
@@ -1356,7 +1420,7 @@ impl DeckEngine {
         // Fresh installs inherit the whole standing channel-strip intent:
         // transport, tone, stems and the rate the pitch slider is sitting at.
         let mut cmds = vec![
-            DeckCmd::InstallTrack { deck },
+            DeckCmd::InstallTrack { deck, keep_playing },
             DeckCmd::SetLoopSpan { deck, span: None },
             DeckCmd::SetMute { deck, muted: state.muted },
             DeckCmd::SetGain { deck, gain: state.effective_gain(normalise) },
@@ -3220,6 +3284,11 @@ impl DeckEngine {
         if index >= self.queue.len() || target == DeckTarget::Off {
             return Vec::new();
         }
+        // A refusal is the second way to load nothing, and it is under the
+        // same law: the row stays in the queue.
+        if let Some(deck) = self.load_refused(target) {
+            return vec![DeckCmd::LoadRefused { deck }];
+        }
         let item = self.queue.remove(index);
         self.click(item, target)
     }
@@ -3391,13 +3460,14 @@ mod tests {
         let cmds = e.click(item(2), DeckTarget::B);
         assert!(cmds.iter().all(|c| !matches!(
             c,
-            DeckCmd::SetPlaying { deck: DeckId::A, .. } | DeckCmd::InstallTrack { deck: DeckId::A }
+            DeckCmd::SetPlaying { deck: DeckId::A, .. }
+                            | DeckCmd::InstallTrack { deck: DeckId::A, .. }
         )));
         assert!(e.deck(DeckId::A).playing);
         let (db, gb) = load_gen(&cmds);
         assert_eq!(db, DeckId::B);
         let cmds = e.track_ready(db, gb, 45.0);
-        assert!(cmds.contains(&DeckCmd::InstallTrack { deck: DeckId::B }));
+        assert!(cmds.contains(&DeckCmd::InstallTrack { deck: DeckId::B, keep_playing: false }));
         assert!(e.deck(DeckId::A).playing, "live deck must keep playing");
         assert!(!e.deck(DeckId::B).playing, "fresh load installs paused");
     }
@@ -3413,7 +3483,7 @@ mod tests {
         assert!(matches!(e.deck(DeckId::A).load, DeckLoad::Loading { .. }));
         // The winner installs.
         let cmds = e.track_ready(DeckId::A, g2, 40.0);
-        assert!(cmds.contains(&DeckCmd::InstallTrack { deck: DeckId::A }));
+        assert!(cmds.contains(&DeckCmd::InstallTrack { deck: DeckId::A, keep_playing: false }));
         match &e.deck(DeckId::A).load {
             DeckLoad::Loaded { item } => assert_eq!(item.title, "track 2"),
             other => panic!("unexpected {other:?}"),
@@ -4052,6 +4122,9 @@ mod tests {
     #[test]
     fn saved_loops_die_with_the_track_and_respect_the_cap() {
         let mut e = DeckEngine::new();
+        // Loading over a running deck: the default policy would refuse it,
+        // and what this test is about is what a load DOES.
+        e.over_playing = OverPlaying::Stop;
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
         e.deck_mut(DeckId::A).loop_beats = 1;
         for i in 0..(LOOP_SLOT_CAP + 2) {
@@ -4410,6 +4483,9 @@ mod tests {
         // A deck with a load in flight cannot lead. Left holding the pin,
         // its new grid arrives and the LIVE deck gets pulled onto it.
         let mut e = DeckEngine::new();
+        // Loading over a running deck: the default policy would refuse it,
+        // and what this test is about is what a load DOES.
+        e.over_playing = OverPlaying::Stop;
         load_analysed(&mut e, DeckId::A, 1, 128.0, 0.0);
         load_analysed(&mut e, DeckId::B, 2, 124.0, 0.0);
         e.deck_mut(DeckId::A).playing = true;
@@ -5825,6 +5901,88 @@ mod tests {
         assert!(matches!(engine.deck(DeckId::A).load, DeckLoad::Loading { .. }));
     }
 
+
+    // ---- a load aimed at a deck that is already playing ------------------
+
+    #[test]
+    fn a_load_aimed_at_a_playing_deck_is_refused_by_default() {
+        let mut engine = DeckEngine::new();
+        load_analysed(&mut engine, DeckId::A, 1, 128.0, 0.0);
+        engine.play_pause(DeckId::A);
+        engine.observe(DeckId::A, 30.0, true);
+        let gen_before = engine.deck(DeckId::A).load_gen;
+
+        assert_eq!(
+            engine.click(item(2), DeckTarget::A),
+            vec![DeckCmd::LoadRefused { deck: DeckId::A }],
+        );
+        assert_eq!(engine.deck(DeckId::A).title(), Some("track 1"));
+        assert!(engine.deck(DeckId::A).playing);
+        assert_eq!(engine.deck(DeckId::A).load_gen, gen_before);
+        // The refusal spent no generation, so the next accepted load takes
+        // the very next one — nothing downstream skips a beat.
+        let (_, gen) = load_gen(&engine.click(item(3), DeckTarget::B));
+        assert_eq!(gen, gen_before + 1);
+        // And last_loaded still names the deck the last ACCEPTED load hit.
+        assert_eq!(engine.last_loaded(), Some(DeckId::B));
+    }
+
+    #[test]
+    fn a_refused_load_leaves_the_queue_row_where_it_was() {
+        let mut engine = DeckEngine::new();
+        load_analysed(&mut engine, DeckId::A, 1, 128.0, 0.0);
+        engine.play_pause(DeckId::A);
+        engine.observe(DeckId::A, 30.0, true);
+        engine.auto_load_queue = false;
+        engine.enqueue(item(2));
+        assert_eq!(
+            engine.load_queued(0, DeckTarget::A),
+            vec![DeckCmd::LoadRefused { deck: DeckId::A }],
+        );
+        // The guard fired before the remove — the same law OFF already keeps.
+        assert_eq!(engine.queue().len(), 1);
+    }
+
+    #[test]
+    fn under_stop_a_load_over_a_playing_deck_installs_it_stopped() {
+        let mut engine = DeckEngine::new();
+        engine.over_playing = OverPlaying::Stop;
+        load_analysed(&mut engine, DeckId::A, 1, 128.0, 0.0);
+        engine.play_pause(DeckId::A);
+        engine.observe(DeckId::A, 30.0, true);
+        let (deck, gen) = load_gen(&engine.click(item(2), DeckTarget::A));
+        let cmds = engine.track_ready(deck, gen, 300.0);
+        assert!(cmds.contains(&DeckCmd::InstallTrack { deck: DeckId::A, keep_playing: false }));
+        assert!(!engine.deck(DeckId::A).playing);
+    }
+
+    #[test]
+    fn under_keep_a_load_over_a_playing_deck_installs_it_running() {
+        let mut engine = DeckEngine::new();
+        engine.over_playing = OverPlaying::Keep;
+        load_analysed(&mut engine, DeckId::A, 1, 128.0, 0.0);
+        engine.play_pause(DeckId::A);
+        engine.observe(DeckId::A, 30.0, true);
+        let (deck, gen) = load_gen(&engine.click(item(2), DeckTarget::A));
+        let cmds = engine.track_ready(deck, gen, 300.0);
+        assert!(cmds.contains(&DeckCmd::InstallTrack { deck: DeckId::A, keep_playing: true }));
+        assert!(engine.deck(DeckId::A).playing);
+        // The deck never stopped, so nothing has to start it again.
+        assert!(!cmds.iter().any(|c| matches!(c, DeckCmd::SetPlaying { .. })));
+    }
+
+    #[test]
+    fn a_load_accepted_while_the_deck_was_idle_still_installs_when_it_lands_late() {
+        // The gate is at the GESTURE, not at the landing: a load nobody
+        // promised would run on installs stopped, whatever happened while
+        // the bytes were in flight.
+        let mut engine = DeckEngine::new();
+        let (deck, gen) = load_gen(&engine.click(item(1), DeckTarget::A));
+        engine.play_pause(DeckId::A);
+        let cmds = engine.track_ready(deck, gen, 300.0);
+        assert!(cmds.contains(&DeckCmd::InstallTrack { deck: DeckId::A, keep_playing: false }));
+        assert!(!engine.deck(DeckId::A).playing);
+    }
     // ---- the operator's eject, and the press that takes it back ---------
 
     #[test]
@@ -6157,6 +6315,9 @@ mod tests {
     #[test]
     fn found_loops_install_capped_recall_like_blues_and_die_with_the_track() {
         let mut e = DeckEngine::new();
+        // Loading over a running deck: the default policy would refuse it,
+        // and what this test is about is what a load DOES.
+        e.over_playing = OverPlaying::Stop;
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0); // 300 s
         let spans: Vec<LoopSpan> = (0..20)
             .map(|i| LoopSpan { start_secs: i as f64 * 10.0, end_secs: i as f64 * 10.0 + 8.0 })

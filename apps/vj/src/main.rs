@@ -179,7 +179,7 @@ use crate::arc::Curve;
 use crate::set_history::SetHistory;
 use crate::blend::MixBrain;
 use crate::decks::{
-    DeckCmd, DeckEngine, DeckId, DeckLoad, DeckTarget, EjectPress, ScratchMotion, SyncMode,
+    DeckCmd, DeckEngine, DeckId, DeckLoad, DeckTarget, EjectPress, OverPlaying, ScratchMotion, SyncMode,
     SyncView, TrackItem, TrackSideChannels,
 };
 use crate::console_scale::TabStage;
@@ -13512,7 +13512,18 @@ p2 {}
                     // instead of a third of the track's duration on the GPU.
                     self.begin_side_channel_fetch(deck, gen, &item);
                 }
-                DeckCmd::InstallTrack { deck } => {
+                DeckCmd::LoadRefused { deck } => {
+                    // A click that does nothing is indistinguishable from a
+                    // click that missed, so the refusal is said out loud —
+                    // on the status line directly under the row the gesture
+                    // happened on.
+                    let name = if deck == DeckId::A { "A" } else { "B" };
+                    self.set_music_import_status(
+                        cx,
+                        &format!("deck {name} is playing — nothing was loaded"),
+                    );
+                }
+                DeckCmd::InstallTrack { deck, keep_playing } => {
                     let key = self
                         .deck_incoming
                         .keys()
@@ -13520,7 +13531,7 @@ p2 {}
                         .copied();
                     if let Some(key) = key {
                         if let Some((pcm, peaks)) = self.deck_incoming.remove(&key) {
-                            self.mixer.install_deck(deck, pcm.clone());
+                            self.mixer.install_deck_over(deck, pcm.clone(), keep_playing);
                             self.deck_tracks[deck.index()] = Some((pcm.clone(), peaks));
                             // The waveform and the beat grid come from a
                             // worker: never the UI thread, never the audio
@@ -13565,7 +13576,10 @@ p2 {}
                             // Until the new track's coverage report names its
                             // digest, this deck matches no cached transcript.
                             self.deck_track_digest[deck.index()] = None;
-                            self.mixer.clear_deck_stems(deck);
+                            // NOT clear_deck_stems: the install has already
+                            // dropped the lanes on the cut path, and on the
+                            // ramped one this would strip the OUTGOING
+                            // track's lanes half way through its fade.
                             self.submit_analysis(deck, pcm.clone());
                             // Fetch or compute, decided when the track was
                             // clicked: a deck whose side-channel fetch is
@@ -13994,6 +14008,12 @@ p2 {}
         self.pump_catalog_runtime(cx);
         self.pump_media_lanes(cx);
         self.pump_decodes(cx);
+        // The thread that frees what a load-over-playing swap took off the
+        // deck. Load-bearing: until it runs, the next swap on that deck
+        // waits a buffer rather than freeing a decoded track on the audio
+        // callback. Once a frame is far more often than a load happens, and
+        // it costs a lock this pump is already taking.
+        self.mixer.reap_retired();
         for deck in self.mixer.drain_ended_decks() {
             let cmds = self.decks.track_ended(deck);
             self.run_deck_cmds(cx, cmds);
@@ -15476,6 +15496,13 @@ p2 {}
             return;
         }
         if let Some(deck) = self.decks.last_loaded() {
+            // Both callers fire unconditionally after the command vector
+            // has been spent, and a REFUSED pick leaves `last_loaded`
+            // pointing at the previous deck. Without this, a refusal would
+            // arm autoplay on a deck it never touched and start it.
+            if !matches!(self.decks.deck(deck).load, DeckLoad::Loading { .. }) {
+                return;
+            }
             self.autoplay_pending[deck.index()] = true;
             self.mix_pending[deck.index()] = mix;
         }
@@ -15752,8 +15779,8 @@ p2 {}
                 // plainly meant to follow it. Collected here so the borrow
                 // of `paths` ends before the `&mut self` calls below.
                 let rest: Vec<PathBuf> = playable.cloned().collect();
-                // Loading over a playing deck is what clicking a row does,
-                // and a drop is the same gesture with a different hand.
+                // A drop is a click with a different hand, and it meets
+                // the same load-over-playing policy the row click does.
                 if let Some(item) = self.local_track_item(&first) {
                     self.deck_hands_on();
                     let cmds = self.decks.click(item, target);
@@ -19327,6 +19354,14 @@ p2 {}
         store.set_bool("auto.phrase_snap", self.autopilot.phrase_snap);
         store.set_bool("queue.repeat", self.decks.repeat);
         store.set_bool("queue.shuffle", self.decks.shuffle);
+        store.set_usize(
+            "deck.over_playing",
+            match self.decks.over_playing {
+                OverPlaying::Refuse => 0,
+                OverPlaying::Stop => 1,
+                OverPlaying::Keep => 2,
+            },
+        );
         store.set_bool("auto.pick", self.auto_pick);
         store.set_bool("auto.pick_exit", self.autopilot.pick_exit);
         store.set_bool("auto.pick_route", self.autopilot.pick_route);
@@ -19369,6 +19404,11 @@ p2 {}
         self.autopilot.phrase_snap = store.bool("auto.phrase_snap", true);
         self.decks.repeat = store.bool("queue.repeat", false);
         self.decks.shuffle = store.bool("queue.shuffle", false);
+        self.decks.over_playing = match store.usize("deck.over_playing", 0) {
+            1 => OverPlaying::Stop,
+            2 => OverPlaying::Keep,
+            _ => OverPlaying::Refuse,
+        };
         // Each of these defaults to what the tab did before it existed, so
         // a settings file written before any of them reads as the old
         // behaviour rather than as a surprise.
@@ -19392,6 +19432,12 @@ p2 {}
             MixBrain::Stems => 2,
         };
         self.ui.drop_down(cx, ids!(auto_brain)).set_selected_item(cx, brain);
+        let over = match self.decks.over_playing {
+            OverPlaying::Refuse => 0,
+            OverPlaying::Stop => 1,
+            OverPlaying::Keep => 2,
+        };
+        self.ui.drop_down(cx, ids!(deck_over_playing)).set_selected_item(cx, over);
         let body = self.autopilot.style() == AutoStyle::Body;
         self.ui
             .check_box(cx, ids!(auto_style))
@@ -22651,7 +22697,6 @@ p2 {}
         // a label introducing a wordless control is the emptiest thing on
         // the line.
         self.ui.drop_down(cx, ids!(deck_target)).set_icon_only(cx, narrow);
-        self.ui.label(cx, ids!(music_load_label)).set_visible(cx, !narrow);
         // The FILTER chip rides this row now, so it gives up its word with
         // the rest of it: one chip still spelling FILTER beside four round
         // keys is the only thing left claiming room the row has run out of.
@@ -27148,6 +27193,14 @@ impl MatchEvent for App {
             // while it is starting them.
             let lit = self.music_autoplay || self.deck_target == DeckTarget::Mix;
             self.paint_lit(cx, ids!(music_autoplay), lit);
+        }
+        if let Some(index) = self.ui.drop_down(cx, ids!(deck_over_playing)).selected(actions) {
+            self.decks.over_playing = match index {
+                1 => OverPlaying::Stop,
+                2 => OverPlaying::Keep,
+                _ => OverPlaying::Refuse,
+            };
+            self.save_autopilot_settings();
         }
         self.handle_deck_controls(cx, actions);
         if let Some(v) = self.ui.slider(cx, ids!(xfader)).slided(actions) {

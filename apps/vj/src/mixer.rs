@@ -52,6 +52,11 @@ const STEM_SEAM_SECS: f32 = 0.12;
 /// Autopilot blend moves: fast enough to read as a cut on the bar, slow
 /// enough never to click.
 const BLEND_SECS: f32 = 0.08;
+/// How long the outgoing track takes to leave when a load lands on a deck
+/// that is already playing. Deliberately longer than the transport's own
+/// slew: this is a record being lifted off under the room, and anything
+/// much shorter reads as a dropout rather than a hand-over.
+const LOAD_SWAP_SECS: f32 = 0.040;
 /// Cap on queued video-slot audio, frames (~2s at 48k): a stalled consumer
 /// can never grow a queue without bound.
 const MAX_SLOT_QUEUE_FRAMES: usize = 96_000;
@@ -767,6 +772,27 @@ struct SeekFade {
     total: f64,
 }
 
+/// A track waiting for the deck it is aimed at to fall silent.
+///
+/// The swap cannot happen on the caller thread while the deck is audible:
+/// the outgoing track would end mid-sample. So the incoming one waits here
+/// while the transport ramps down, and the callback spends it at the TOP of
+/// a buffer once the ramp has landed.
+struct PendingLoad {
+    pcm: Arc<TrackPcm>,
+    /// Whether the deck comes straight back up on the new track.
+    play: bool,
+}
+
+/// What a swap took off a deck, kept alive until a caller thread can drop
+/// it. Every one of these owns heap the audio thread must never free.
+#[derive(Default)]
+struct RetiredTrack {
+    pcm: Option<Arc<TrackPcm>>,
+    stems: Option<Arc<TrackStems>>,
+    splat: Option<SplatState>,
+}
+
 struct DeckVoice {
     pcm: Option<Arc<TrackPcm>>,
     stems: Option<Arc<TrackStems>>,
@@ -802,6 +828,10 @@ struct DeckVoice {
     /// keeps reading, so without this a pause would eat the few
     /// milliseconds it sounded and every pause would walk the track on.
     pause_at: Option<f64>,
+    /// A load waiting out this deck's fade. See `PendingLoad`.
+    pending: Option<PendingLoad>,
+    /// What the last swap took off, waiting for a thread that may free it.
+    retired: RetiredTrack,
     ended: bool,
     /// Tempo multiplier from the tempo slider / sync.
     rate: ParamRamp,
@@ -839,6 +869,8 @@ impl DeckVoice {
             stem_seam: Ramp::at(0.0),
             slip: None,
             pause_at: None,
+            pending: None,
+            retired: RetiredTrack::default(),
             ended: false,
             rate: ParamRamp::at(1.0),
             key_ratio: ParamRamp::at(1.0),
@@ -862,6 +894,47 @@ impl DeckVoice {
 
     fn frame_count(&self) -> usize {
         self.pcm.as_ref().map(|pcm| pcm.frames.len()).unwrap_or(0)
+    }
+
+    /// The callback's half of a load over a playing deck: put the waiting
+    /// track on once the outgoing one has finished leaving.
+    ///
+    /// Every call here is already proven callback-safe — `seek_frames` runs
+    /// from the callback on every loop wrap — and nothing is FREED: what
+    /// comes off the deck moves into `retired` for a caller thread to drop.
+    fn spend_pending_load(&mut self) {
+        if self.transport.current > 0.0 || self.pending.is_none() {
+            return;
+        }
+        // The caller thread empties this slot; if it has not yet, the swap
+        // waits a buffer rather than freeing a decoded track here.
+        if self.retired.pcm.is_some() {
+            return;
+        }
+        let Some(load) = self.pending.take() else { return };
+        self.retired.pcm = self.pcm.replace(load.pcm);
+        self.retired.stems = self.stems.take();
+        self.retired.splat = self.splat.take();
+        self.stem_seam = Ramp::at(0.0);
+        // A pause position measured against the OUTGOING track would undo
+        // the seek below and walk the new one on; a blend armed against the
+        // old track would index the new one's samples.
+        self.pause_at = None;
+        self.seek_fade = None;
+        self.slip = None;
+        self.loop_span = None;
+        self.ended = false;
+        self.playing = load.play;
+        self.seek_frames(0.0);
+        self.eq.reset();
+        self.reset_blend();
+        if load.play {
+            self.transport.slew(1.0, LOAD_SWAP_SECS);
+        }
+    }
+
+    fn take_retired(&mut self) -> RetiredTrack {
+        std::mem::take(&mut self.retired)
     }
 
     /// Move the playhead and drop every bit of streaming state that was
@@ -1850,18 +1923,56 @@ impl Mixer {
     /// Install a decoded track, paused at zero. Any stems from a previous
     /// track go with it; the tone chain is reset but its settings stand.
     pub fn install_deck(&self, deck: DeckId, pcm: Arc<TrackPcm>) {
-        let mut s = self.state.lock().unwrap();
-        let d = &mut s.decks[deck.index()];
-        d.pcm = Some(pcm);
-        d.stems = None;
-        d.splat = None;
-        d.playing = false;
-        // A fresh track has nothing to fade out of: cut, do not ramp.
-        d.transport = Ramp::at(0.0);
-        d.seek_frames(0.0);
-        d.eq.reset();
-        d.reset_blend();
-        self.publish_deck(&s, deck.index());
+        self.install_deck_over(deck, pcm, false);
+    }
+
+    /// The same install, told whether the deck may carry on playing.
+    ///
+    /// On a SILENT deck this is the cut it always was: a fresh track has
+    /// nothing to fade out of, and every existing call site takes this
+    /// branch. On an AUDIBLE one the track cannot be swapped here at all —
+    /// the outgoing one would end mid-sample — so it is parked, the
+    /// transport is slewed down, and the callback spends the park at the
+    /// top of a buffer once the fade has landed.
+    pub fn install_deck_over(&self, deck: DeckId, pcm: Arc<TrackPcm>, keep_playing: bool) {
+        // What comes off the deck is freed HERE, after the lock: the last
+        // swap's leavings and any load that never got its turn. Taking both
+        // is also what guarantees the callback's hand-back slot is empty,
+        // and it is latest-wins for two loads inside one fade.
+        let retired = {
+            let mut s = self.state.lock().unwrap();
+            let d = &mut s.decks[deck.index()];
+            let retired = (d.take_retired(), d.pending.take());
+            if d.transport.current <= 0.0 {
+                d.pcm = Some(pcm);
+                d.stems = None;
+                d.splat = None;
+                d.playing = false;
+                d.pause_at = None;
+                d.stem_seam = Ramp::at(0.0);
+                // A fresh track has nothing to fade out of: cut, not ramp.
+                d.transport = Ramp::at(0.0);
+                d.seek_frames(0.0);
+                d.eq.reset();
+                d.reset_blend();
+            } else {
+                d.pending = Some(PendingLoad { pcm, play: keep_playing });
+                // The give-back belongs to the track that is leaving, and
+                // that track is about to be gone.
+                d.pause_at = None;
+                // The flag is the operator's intent and it can be answered
+                // now; the render guard keeps a deck reading and fading for
+                // as long as its transport is above zero, so a Stop load
+                // leaves exactly the way a pause does. Setting it here also
+                // keeps the engine's own mirror, which is re-read from this
+                // snapshot every pump, from undoing the policy.
+                d.playing = keep_playing;
+                d.transport.slew(0.0, LOAD_SWAP_SECS);
+            }
+            self.publish_deck(&s, deck.index());
+            retired
+        };
+        drop(retired);
     }
 
     /// Drop the deck's track entirely: the voice renders silence until the
@@ -1869,6 +1980,9 @@ impl Mixer {
     pub fn clear_deck(&self, deck: DeckId) {
         let mut s = self.state.lock().unwrap();
         let d = &mut s.decks[deck.index()];
+        // An unload during a fade must not let a parked load resurrect a
+        // track on an emptied deck. Both go out with the lock, below.
+        let retired = (d.take_retired(), d.pending.take());
         d.pcm = None;
         d.stems = None;
         d.splat = None;
@@ -1879,6 +1993,8 @@ impl Mixer {
         d.seek_frames(0.0);
         d.reset_blend();
         self.publish_deck(&s, deck.index());
+        drop(s);
+        drop(retired);
     }
 
     /// Attach separated stems to the track already on the deck. They must be
@@ -1910,6 +2026,15 @@ impl Mixer {
     pub fn set_deck_playing(&self, deck: DeckId, playing: bool) {
         let mut s = self.state.lock().unwrap();
         let d = &mut s.decks[deck.index()];
+        // PLAY pressed during a load's fade must not slew the transport
+        // back up on the track that is leaving. It re-aims the load, which
+        // is what the operator meant by it.
+        if let Some(pending) = d.pending.as_mut() {
+            pending.play = playing;
+            d.playing = playing;
+            self.publish_deck(&s, deck.index());
+            return;
+        }
         if playing {
             // Playing from the end restarts.
             if d.playhead_frames() >= d.frame_count() as f64
@@ -2336,6 +2461,20 @@ impl Mixer {
         std::mem::take(&mut self.state.lock().unwrap().ended_decks)
     }
 
+    /// Free whatever a swap took off the decks.
+    ///
+    /// The other half of the callback's contract: the callback moves a
+    /// finished track out of the voice, and this is the thread that drops
+    /// it. Load-bearing — until it runs, the next swap on that deck waits
+    /// rather than freeing a decoded track on the audio thread.
+    pub fn reap_retired(&self) {
+        let retired = {
+            let mut s = self.state.lock().unwrap();
+            [s.decks[0].take_retired(), s.decks[1].take_retired()]
+        };
+        drop(retired);
+    }
+
     // ---- sfx voices ---------------------------------------------------------
 
     pub fn start_voice(&self, alloc: VoiceAlloc, pcm: Arc<TrackPcm>) {
@@ -2617,6 +2756,15 @@ impl Mixer {
             }
         }
 
+        // A load parked on a deck that was playing takes over HERE, before
+        // the clone below and never inside the frame loop: the loop reads
+        // one reference per deck for the whole buffer, so a swap inside it
+        // would render the retired track at the incoming track's gain. The
+        // cost is that the swap lands on the first buffer boundary after
+        // the fade — a hand-over, not a seam.
+        for voice in s.decks.iter_mut() {
+            voice.spend_pending_load();
+        }
         // Deck sources are lifted out of the frame loop: one reference count
         // per buffer instead of one per sample, and the borrow checker can
         // then see that the voice state and its PCM are disjoint.
@@ -3247,6 +3395,161 @@ mod tests {
 
 
 
+
+    // ---- a load that lands on a deck that is already playing ------------
+
+    #[test]
+    fn a_load_onto_a_silent_deck_is_still_a_cut() {
+        // Why every existing golden is untouched: on a deck at rest the
+        // install happens on this thread, this instant, exactly as before.
+        let mixer = Mixer::new();
+        mixer.install_deck(DeckId::A, const_pcm(8_000, 480_000, 48_000));
+        assert!((mixer.deck_snapshot(DeckId::A).duration_secs - 10.0).abs() < 1e-6);
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 4_096);
+        mixer.set_deck_playing(DeckId::A, false);
+        // Past the pause fade the deck is silent again, so it cuts again.
+        render(&mixer, 48_000.0, 4_096);
+        mixer.install_deck(DeckId::A, const_pcm(8_000, 240_000, 48_000));
+        assert!((mixer.deck_snapshot(DeckId::A).duration_secs - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_load_over_a_playing_deck_waits_for_its_fade_before_the_swap() {
+        let mixer = Mixer::new();
+        mixer.set_master(1.0);
+        mixer.install_deck(DeckId::A, const_pcm(8_000, 480_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 4_096);
+
+        mixer.install_deck_over(DeckId::A, const_pcm(4_000, 192_000, 48_000), false);
+        // Nothing has moved yet: the outgoing track is still what the room
+        // is hearing, and it is still what the snapshot reports.
+        assert!((mixer.deck_snapshot(DeckId::A).duration_secs - 10.0).abs() < 1e-6);
+        render(&mixer, 48_000.0, 512);
+        assert!((mixer.deck_snapshot(DeckId::A).duration_secs - 10.0).abs() < 1e-6);
+
+        // Past the fade plus a buffer, the swap has landed.
+        for _ in 0..8 {
+            render(&mixer, 48_000.0, 512);
+        }
+        let snap = mixer.deck_snapshot(DeckId::A);
+        assert!((snap.duration_secs - 4.0).abs() < 1e-6, "the new track is on");
+        assert!(snap.position_secs.abs() < 1e-6, "at its top");
+        assert!(!snap.playing, "and stopped, because the policy said so");
+    }
+
+    #[test]
+    fn a_load_over_a_playing_deck_hands_the_old_track_back_off_the_callback() {
+        let mixer = Mixer::new();
+        mixer.set_master(1.0);
+        let outgoing = const_pcm(8_000, 480_000, 48_000);
+        mixer.install_deck(DeckId::A, outgoing.clone());
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 4_096);
+
+        mixer.install_deck_over(DeckId::A, const_pcm(4_000, 192_000, 48_000), false);
+        for _ in 0..8 {
+            render(&mixer, 48_000.0, 512);
+        }
+        // The callback moved the finished track out of the voice; it did
+        // NOT free it. Freeing a decoded track is an unbounded free and the
+        // audio thread does not do those.
+        assert_eq!(Arc::strong_count(&outgoing), 2, "the mixer is still holding it");
+        mixer.reap_retired();
+        assert_eq!(Arc::strong_count(&outgoing), 1, "and this is the thread that drops it");
+    }
+
+    #[test]
+    fn a_load_that_keeps_the_deck_running_comes_back_up_on_the_new_track() {
+        let mixer = Mixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 4_096);
+
+        mixer.install_deck_over(DeckId::A, const_pcm(8_192, 480_000, 48_000), true);
+        for _ in 0..8 {
+            render(&mixer, 48_000.0, 512);
+        }
+        let snap = mixer.deck_snapshot(DeckId::A);
+        assert!(snap.playing, "the deck never stopped");
+        let before = snap.position_secs;
+        // Let the transport climb back to unity, then read the level.
+        for _ in 0..8 {
+            render(&mixer, 48_000.0, 512);
+        }
+        assert!(mixer.deck_snapshot(DeckId::A).position_secs > before, "and it is running");
+        let block = render(&mixer, 48_000.0, 512);
+        let level = block.channel(0)[511].abs();
+        let want = 8_192.0 / 32_768.0;
+        assert!((level - want).abs() < 0.01, "the SECOND track's level, got {level}");
+    }
+
+    #[test]
+    fn a_second_load_inside_the_fade_takes_the_later_track() {
+        let mixer = Mixer::new();
+        mixer.set_master(1.0);
+        let first = const_pcm(8_000, 480_000, 48_000);
+        mixer.install_deck(DeckId::A, first.clone());
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 4_096);
+
+        let never = const_pcm(4_000, 192_000, 48_000);
+        mixer.install_deck_over(DeckId::A, never.clone(), false);
+        render(&mixer, 48_000.0, 512);
+        mixer.install_deck_over(DeckId::A, const_pcm(2_000, 96_000, 48_000), false);
+        // The second call took the first parked load with it, on this
+        // thread, before the callback ever saw it.
+        assert_eq!(Arc::strong_count(&never), 1, "the load that never got its turn");
+        for _ in 0..8 {
+            render(&mixer, 48_000.0, 512);
+        }
+        assert!((mixer.deck_snapshot(DeckId::A).duration_secs - 2.0).abs() < 1e-6);
+        assert_eq!(Arc::strong_count(&first), 2, "the original is waiting to be reaped");
+        mixer.reap_retired();
+        assert_eq!(Arc::strong_count(&first), 1);
+    }
+
+    #[test]
+    fn an_unload_during_the_fade_cancels_the_parked_load() {
+        let mixer = Mixer::new();
+        mixer.set_master(1.0);
+        mixer.install_deck(DeckId::A, const_pcm(8_000, 480_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 4_096);
+
+        let parked = const_pcm(4_000, 192_000, 48_000);
+        mixer.install_deck_over(DeckId::A, parked.clone(), true);
+        mixer.clear_deck(DeckId::A);
+        assert_eq!(Arc::strong_count(&parked), 1, "the parked load went with the unload");
+        for _ in 0..8 {
+            render(&mixer, 48_000.0, 512);
+        }
+        // Nothing resurrects on an emptied deck.
+        assert!(mixer.deck_snapshot(DeckId::A).duration_secs.abs() < 1e-9);
+    }
+
+    #[test]
+    fn play_pressed_during_the_fade_re_aims_the_load_rather_than_the_old_track() {
+        let mixer = Mixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 4_096);
+
+        // Aimed to stop, then the operator changes their mind mid-fade.
+        mixer.install_deck_over(DeckId::A, const_pcm(8_192, 480_000, 48_000), false);
+        mixer.set_deck_playing(DeckId::A, true);
+        for _ in 0..16 {
+            render(&mixer, 48_000.0, 512);
+        }
+        let snap = mixer.deck_snapshot(DeckId::A);
+        assert!(snap.playing, "the deck came up on the new track");
+        assert!((snap.duration_secs - 10.0).abs() < 1e-6);
+    }
     #[test]
     fn score_preview_enters_program_before_master_and_stops_at_end() {
         let Some(bank) = local_drum_bank() else { return };

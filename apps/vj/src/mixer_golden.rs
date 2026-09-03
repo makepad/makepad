@@ -295,6 +295,22 @@ fn golden_gain_and_clamp() {
     assert_golden("gain_and_clamp", &left, &right);
 }
 
+/// The whole load-over-playing gesture, pinned window by window: the
+/// outgoing track leaving, the silent gap while the swap waits for a
+/// buffer boundary, and the new track coming up in its place.
+#[test]
+fn golden_load_over_playing() {
+    let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let (left, right) = capture(&mixer, CAPTURE, |index| {
+        if index == 16 {
+            mixer.install_deck_over(DeckId::A, const_pcm(8_192, 480_000, 48_000), true);
+        }
+    });
+    assert_golden("load_over_playing", &left, &right);
+}
+
 // ---------------------------------------------------------------------------
 // clicks
 // ---------------------------------------------------------------------------
@@ -337,6 +353,22 @@ fn play_and_pause_are_click_free() {
         _ => {}
     });
     assert!(worst < CLICK, "play and pause must ramp, biggest step {worst}");
+}
+
+/// The test this whole load-over-playing path exists for. Against a plain
+/// install -- which cuts the transport to zero on whatever sample the
+/// decode landed on -- this fails outright.
+#[test]
+fn a_load_over_a_playing_deck_is_click_free() {
+    let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| {
+        if index == 8 {
+            mixer.install_deck_over(DeckId::A, const_pcm(8_000, 480_000, 48_000), true);
+        }
+    });
+    assert!(worst < CLICK, "a load over a playing deck must hand over, biggest step {worst}");
 }
 
 #[test]
