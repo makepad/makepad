@@ -15124,7 +15124,6 @@ p2 {}
     fn pump_catalog_runtime(&mut self, cx: &mut Cx) {
         let has_up = self.up.is_some();
         if self.catalog_pump_up_seen != Some(has_up) {
-            log!("catalog runtime pump: up={}", if has_up { "Some" } else { "None" });
             self.catalog_pump_up_seen = Some(has_up);
         }
         let (mut events, static_ready) = match self.up.as_mut() {
@@ -15139,7 +15138,6 @@ p2 {}
             None => return,
         };
         if static_ready {
-            log!("catalog runtime: take_ready_event=true");
             log!("static catalog: ready — refreshing browse models");
             for surface in SURFACES {
                 let cmds = self.model(surface).refresh();
