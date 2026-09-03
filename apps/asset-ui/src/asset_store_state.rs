@@ -56,6 +56,9 @@ use makepad_asset_client::{
 use makepad_asset_data::{AssetId, AssetRevisionId};
 pub use makepad_asset_data::AssetKind;
 use makepad_widgets::log;
+use makepad_widgets::makepad_platform::thread::{
+    Lane, TaskHandle, TaskPool, ThreadOptions, ThreadSpawner,
+};
 use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -360,6 +363,8 @@ pub struct SearchResults {
 /// happens through `start`/`poll`/`submit_search`/`select` only.
 #[derive(Default)]
 pub struct AssetStore {
+    pool: Option<TaskPool>,
+    spawner: Option<ThreadSpawner>,
     /// Continuous ai-content-library → catalog publisher. Declared BEFORE
     /// `embedded` so it is joined while the server it publishes into is
     /// still alive.
@@ -397,7 +402,7 @@ pub struct AssetStore {
     /// boxes directly (the store advertises nothing any more — generation
     /// is client-driven, aicore §9).
     pub profiles: Remote<Vec<JobProfileDto>>,
-    profiles_rx: Option<std::sync::mpsc::Receiver<Vec<JobProfileDto>>>,
+    profiles_task: Option<TaskHandle<Vec<JobProfileDto>>>,
     /// Committed catalog events, newest first, capped.
     pub events: VecDeque<CatalogEventDto>,
     /// The event feed delivered its initial cursor and is following commits.
@@ -480,7 +485,7 @@ pub struct AssetStore {
     succession_note: Option<String>,
     /// The previous session is being torn down off-thread. Flips when its
     /// cache roots are free for the next session to open.
-    releasing: Option<Arc<AtomicBool>>,
+    releasing: Option<TaskHandle<()>>,
     /// What to connect to once `releasing` flips.
     pending_session: Option<PendingSession>,
 }
@@ -498,11 +503,13 @@ impl AssetStore {
     /// the client finds it through the same discovery/health path any LAN
     /// peer would. Set the env var to skip embed and talk to a standalone
     /// server instead.
-    pub fn start(&mut self, library_dir: PathBuf) {
+    pub fn start(&mut self, library_dir: PathBuf, pool: TaskPool, spawner: ThreadSpawner) {
         if self.connector.is_some() || self.server.is_some() {
             return;
         }
         self.library_dir = library_dir;
+        self.pool = Some(pool);
+        self.spawner = Some(spawner);
         self.server_root = default_asset_server_root();
         self.beacon = beacon_from_env();
         self.embed = embed_policy_from_env();
@@ -655,17 +662,15 @@ impl AssetStore {
             }
         }
         // Fleet-built generation profiles landing from their worker thread.
-        if let Some(rx) = &self.profiles_rx {
-            match rx.try_recv() {
+        if let Some(result) = self.profiles_task.as_mut().and_then(TaskHandle::try_take) {
+            self.profiles_task = None;
+            match result {
                 Ok(profiles) => {
-                    self.profiles_rx = None;
                     self.profiles = Remote::Ready(profiles);
                     changed = true;
                 }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.profiles_rx = None;
-                    self.profiles = Remote::Failed("fleet probe thread died".to_string());
+                Err(error) => {
+                    self.profiles = Remote::Failed(format!("fleet profile job failed: {error}"));
                     changed = true;
                 }
             }
@@ -806,13 +811,23 @@ impl AssetStore {
     /// Start the embedded server's background loops and become the host.
     fn begin_hosting(&mut self, server: makepad_asset_store::AssetServer, token: &str) {
         if self.host_loops == HostLoops::Run {
-            self.publish =
-                start_publish_loop(&server, token, self.library_dir.clone());
+            let Some(spawner) = self.spawner.as_ref() else {
+                log!("asset store: host workers unavailable (thread runtime not configured)");
+                self.role = ServerRole::Host;
+                self.embedded = Some(server);
+                return;
+            };
+            self.publish = start_publish_loop(
+                spawner,
+                &server,
+                token,
+                self.library_dir.clone(),
+            );
             // LIVECODING: observed origin directories, catalogued in place.
             // Only the HOST runs this — reference admission is loopback
             // privilege, so an attached client never observes for somebody
             // else's store.
-            self.observe = start_observe_loop(&server, token);
+            self.observe = start_observe_loop(spawner, &server, token);
         }
         self.role = ServerRole::Host;
         self.embedded = Some(server);
@@ -856,39 +871,39 @@ impl AssetStore {
         self.search_continuation = false;
         self.next_cursor = None;
         self.detail_req = None;
-        self.profiles_rx = None;
+        self.profiles_task = None;
         self.probe_req = None;
         self.gc_req = None;
         self.gc_cancel_req = None;
         self.retire_reqs.clear();
-        let released = Arc::new(AtomicBool::new(false));
-        self.releasing = Some(released.clone());
-        let Some(handles) = self.handles.take() else {
-            released.store(true, Ordering::Release);
+        let Some(pool) = &self.pool else {
+            log!("asset store: session release refused (runtime pool unavailable)");
             return;
         };
-        let done = released.clone();
-        let spawned = std::thread::Builder::new()
-            .name("asset-ui-session-release".to_string())
-            .spawn(move || {
-                handles.shutdown();
-                done.store(true, Ordering::Release);
-            });
-        if let Err(error) = spawned {
-            // The closure (and the session inside it) was dropped, which
-            // already joined the runtimes right here. Nothing is left to
-            // wait for, so never leave the swap parked on a thread that
-            // does not exist.
-            log!("asset store: session release thread refused ({error}); released inline");
-            released.store(true, Ordering::Release);
-        }
+        let slot = match pool.reserve(Lane::Heavy) {
+            Ok(slot) => slot,
+            Err(error) => {
+                log!("asset store: session release delayed ({error})");
+                return;
+            }
+        };
+        let Some(handles) = self.handles.take() else {
+            self.releasing = None;
+            return;
+        };
+        self.releasing = Some(slot.submit(move || handles.shutdown()));
     }
 
     /// Open the decided session once the previous one has let go.
     fn finish_swap(&mut self) -> bool {
-        if let Some(released) = &self.releasing {
-            if !released.load(Ordering::Acquire) {
-                return false;
+        if self.releasing.is_none() && self.handles.is_some() {
+            self.begin_release();
+            return false;
+        }
+        if let Some(releasing) = &mut self.releasing {
+            let Some(result) = releasing.try_take() else { return false };
+            if let Err(error) = result {
+                log!("asset store: session release failed: {error}");
             }
         }
         self.releasing = None;
@@ -1150,18 +1165,20 @@ impl AssetStore {
     /// they can execute right now. Runs on its own thread — LAN probes must
     /// never stall a frame — and lands through `profiles_rx` in [`Self::poll`].
     fn submit_profiles(&mut self) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.profiles_rx = Some(rx);
         self.profiles = Remote::Loading;
-        let _ = std::thread::Builder::new()
-            .name("asset-ui-profiles".to_string())
-            .spawn(move || {
+        let Some(pool) = &self.pool else {
+            self.profiles = Remote::Failed("runtime task pool unavailable".into());
+            return;
+        };
+        match pool.submit(Lane::Light, move || {
                 let snapshots = makepad_asset_creator::runner::fleet_snapshots();
-                let profiles = makepad_asset_importer::gen_profiles::build_profiles(
-                    &snapshots, "gen",
-                );
-                let _ = tx.send(profiles);
-            });
+                makepad_asset_importer::gen_profiles::build_profiles(&snapshots, "gen")
+            }) {
+            Ok(handle) => self.profiles_task = Some(handle),
+            Err(error) => {
+                self.profiles = Remote::Failed(format!("fleet profile job refused: {error}"));
+            }
+        }
     }
 
     fn on_catalog_event(&mut self, event: ClientEvent) -> bool {
@@ -1673,21 +1690,17 @@ fn start_embedded_asset_server_at(
     Ok((server, token))
 }
 
-/// Stop flag for the single in-process publish loop. A `static` (not an
-/// `Arc`) because `watch::run` borrows it for the thread's whole life and
-/// there is at most one loop per process.
-static PUBLISH_STOP: AtomicBool = AtomicBool::new(false);
-
 /// Owns the publisher thread; dropping the store stops and joins it.
 struct PublishLoop {
-    join: Option<std::thread::JoinHandle<()>>,
+    stop: Arc<AtomicBool>,
+    task: Option<TaskHandle<()>>,
 }
 
 impl Drop for PublishLoop {
     fn drop(&mut self) {
-        PUBLISH_STOP.store(true, Ordering::Release);
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
+        self.stop.store(true, Ordering::Release);
+        if let Some(task) = self.task.take() {
+            task.detach();
         }
     }
 }
@@ -1697,6 +1710,7 @@ impl Drop for PublishLoop {
 /// slow or refused connection can never stall the UI, and every failure is
 /// a log line — never a panic.
 fn start_publish_loop(
+    spawner: &ThreadSpawner,
     server: &makepad_asset_store::AssetServer,
     token: &str,
     library_dir: PathBuf,
@@ -1705,10 +1719,14 @@ fn start_publish_loop(
     let server_id = server.server_id();
     let token = token.to_string();
     let cache = asset_ui_home().join("publish-cache");
-    PUBLISH_STOP.store(false, Ordering::Release);
-    let join = std::thread::Builder::new()
-        .name("asset-ui-publish".to_string())
-        .spawn(move || {
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker_stop = stop.clone();
+    let task = spawner.spawn_worker(
+        ThreadOptions {
+            name: Some("asset-ui-publish".into()),
+            ..Default::default()
+        },
+        move || {
             let mut config = makepad_asset_client::ClientConfig::new(cache);
             config.token = Some(token);
             let mut client = match makepad_asset_client::AssetClient::connect(
@@ -1736,12 +1754,13 @@ fn start_publish_loop(
                 // Log publications, failures and retries; out-of-scope rows
                 // (the pack-import bulk) stay silent by design.
                 true,
-                &PUBLISH_STOP,
+                &worker_stop,
             );
             log!("publish loop: stopped");
-        });
-    match join {
-        Ok(join) => Some(PublishLoop { join: Some(join) }),
+        },
+    );
+    match task {
+        Ok(task) => Some(PublishLoop { stop, task: Some(task) }),
         Err(error) => {
             log!("publish loop: could not spawn: {error}");
             None
@@ -1749,19 +1768,17 @@ fn start_publish_loop(
     }
 }
 
-/// Stop flag for the single in-process observe loop.
-static OBSERVE_STOP: AtomicBool = AtomicBool::new(false);
-
 /// Owns the observer thread; dropping the store stops and joins it.
 struct ObserveLoop {
-    join: Option<std::thread::JoinHandle<()>>,
+    stop: Arc<AtomicBool>,
+    task: Option<TaskHandle<()>>,
 }
 
 impl Drop for ObserveLoop {
     fn drop(&mut self) {
-        OBSERVE_STOP.store(true, Ordering::Release);
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
+        self.stop.store(true, Ordering::Release);
+        if let Some(task) = self.task.take() {
+            task.detach();
         }
     }
 }
@@ -1789,6 +1806,7 @@ fn observe_origins() -> Vec<PathBuf> {
 /// Observe effect-document origins into the server this process hosts.
 /// Connect + watch happen on the thread; every failure is a log line.
 fn start_observe_loop(
+    spawner: &ThreadSpawner,
     server: &makepad_asset_store::AssetServer,
     token: &str,
 ) -> Option<ObserveLoop> {
@@ -1797,10 +1815,14 @@ fn start_observe_loop(
     let token = token.to_string();
     let cache = asset_ui_home().join("observe-cache");
     let origins = observe_origins();
-    OBSERVE_STOP.store(false, Ordering::Release);
-    let join = std::thread::Builder::new()
-        .name("asset-ui-observe".to_string())
-        .spawn(move || {
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker_stop = stop.clone();
+    let task = spawner.spawn_worker(
+        ThreadOptions {
+            name: Some("asset-ui-observe".into()),
+            ..Default::default()
+        },
+        move || {
             let mut config = makepad_asset_client::ClientConfig::new(cache);
             config.token = Some(token);
             let mut client = match makepad_asset_client::AssetClient::connect(
@@ -1817,12 +1839,13 @@ fn start_observe_loop(
             makepad_asset_store::observe::run(
                 &mut client,
                 &makepad_asset_store::observe::ObserveConfig::vjfx(origins),
-                &OBSERVE_STOP,
+                &worker_stop,
             );
             log!("observe loop: stopped");
-        });
-    match join {
-        Ok(join) => Some(ObserveLoop { join: Some(join) }),
+        },
+    );
+    match task {
+        Ok(task) => Some(ObserveLoop { stop, task: Some(task) }),
         Err(error) => {
             log!("observe loop: could not spawn: {error}");
             None
@@ -2079,6 +2102,12 @@ mod tests {
             kind: None,
             title: title.into(),
             creator: String::new(),
+            artist: String::new(),
+            artist_url: String::new(),
+            album: String::new(),
+            source_url: String::new(),
+            license: String::new(),
+            license_url: String::new(),
             snippet: String::new(),
             score: 0,
             live: true,
@@ -2369,6 +2398,14 @@ mod tests {
         (server, token)
     }
 
+    fn ensure_test_runtime(store: &mut AssetStore) {
+        if store.pool.is_none() {
+            let cx = makepad_widgets::Cx::new(Box::new(|_, _| {}));
+            store.pool = Some(cx.task_pool());
+            store.spawner = Some(cx.thread_spawner());
+        }
+    }
+
     /// Publish one minimal real asset directly (the synchronous
     /// `AssetClient`, not through `AssetStore` — publishing is the import
     /// pipeline's job, already covered elsewhere; this test starts from
@@ -2413,6 +2450,7 @@ mod tests {
     /// `AssetStore::poll()` loop (no discovery — explicit endpoints), and
     /// wait for the initial auto-search `poll()` fires on connect to land.
     fn connect_store_to(store: &mut AssetStore, server: &makepad_asset_store::AssetServer, token: &str) {
+        ensure_test_runtime(store);
         let config = SessionConfig {
             endpoints: Some(ApiEndpoints { control: server.control_addr(), data: server.data_addr() }),
             server_id: Some(server.server_id()),
@@ -2449,6 +2487,7 @@ mod tests {
         secs: u64,
         ready: F,
     ) {
+        ensure_test_runtime(store);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
         loop {
             store.poll();
