@@ -23,6 +23,7 @@ use makepad_widgets::value_input::{ValueInput, ValueInputAction};
 use makepad_widgets::makepad_platform::file_dialogs::{
     FileDialog, FileDialogAction, VirtualFile,
 };
+use makepad_widgets::makepad_platform::thread::{ThreadSpawner, ToUIReceiver, ToUISender};
 use crate::import_ui::ImportPanel;
 use crate::local_store::LocalStore;
 use crate::music_import_ui::{MusicImporter, PreparedMusicImport};
@@ -2884,18 +2885,20 @@ struct SplatRefineDone {
 }
 
 struct SplatRefineWorker {
-    tx: std::sync::mpsc::Sender<SplatRefineDone>,
-    rx: std::sync::mpsc::Receiver<SplatRefineDone>,
+    tx: ToUISender<SplatRefineDone>,
+    rx: ToUIReceiver<SplatRefineDone>,
 }
 
 impl SplatRefineWorker {
     fn new() -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let rx = ToUIReceiver::default();
+        let tx = rx.sender();
         Self { tx, rx }
     }
 
     fn submit(
         &self,
+        spawner: ThreadSpawner,
         deck: DeckId,
         gen: u64,
         stems: Arc<TrackStems>,
@@ -2903,18 +2906,86 @@ impl SplatRefineWorker {
         analysis: Arc<TrackAnalysis>,
     ) -> bool {
         let tx = self.tx.clone();
-        std::thread::Builder::new()
-            .name("loop-splat-refine".to_string())
-            .spawn(move || {
+        match spawner.spawn(move || {
                 let levels = Arc::new(splat_stem_levels(&stems, &pcm, &analysis));
                 let grid = build_splat(&analysis, Some(&levels)).map(Arc::new);
                 let _ = tx.send(SplatRefineDone { deck, gen, grid });
-            })
-            .is_ok()
+            }) {
+            Ok(handle) => {
+                handle.detach();
+                true
+            }
+            Err(error) => {
+                log!("loop-splat refine worker unavailable: {error}");
+                false
+            }
+        }
     }
 
     fn poll(&self) -> Vec<SplatRefineDone> {
-        self.rx.try_iter().collect()
+        let mut done = Vec::new();
+        while let Ok(item) = self.rx.try_recv() {
+            done.push(item);
+        }
+        done
+    }
+}
+
+#[cfg(test)]
+mod splat_refine_tests {
+    use super::*;
+    use crate::wave_analysis::{TempoMap, WaveTiles};
+
+    #[test]
+    fn splat_refine_result_arrives_over_the_ui_channel() {
+        let cx = Cx::new(Box::new(|_, _| {}));
+        let worker = SplatRefineWorker::new();
+        let frame_count = 66;
+        let pcm = Arc::new(TrackPcm {
+            frames: vec![[0; 2]; frame_count],
+            sample_rate: 8,
+        });
+        let mut stems = TrackStems::new(frame_count, 1);
+        for lane in &mut stems.lanes {
+            lane[0] = Some(Arc::new(vec![[1_000; 2]; frame_count]));
+        }
+        let analysis = Arc::new(TrackAnalysis {
+            duration_secs: 8.25,
+            sample_rate: 8,
+            grid: TrackGrid {
+                bpm: 120.0,
+                beat_secs: 0.5,
+                first_beat_secs: 0.25,
+                downbeat_phase: 0,
+                confidence: 0.9,
+            },
+            tempo_map: TempoMap::default(),
+            tiles: WaveTiles::default(),
+            changes_secs: Vec::new(),
+        });
+
+        assert!(worker.submit(
+            cx.thread_spawner(),
+            DeckId::B,
+            17,
+            Arc::new(stems),
+            pcm,
+            analysis,
+        ));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let done = loop {
+            if let Some(done) = worker.poll().into_iter().next() {
+                break done;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "refine worker did not publish its channel result"
+            );
+            std::thread::yield_now();
+        };
+        assert_eq!(done.deck, DeckId::B);
+        assert_eq!(done.gen, 17);
+        assert!(done.grid.is_some());
     }
 }
 
@@ -14265,7 +14336,7 @@ p2 {}
             let cmds = self.decks.splat_set(deck, Arc::new(splat));
             self.run_deck_cmds(cx, cmds);
             if self.deck_stem_coverage[index].is_some_and(|(_, complete)| complete) {
-                self.submit_splat_refinement(deck, gen);
+                self.submit_splat_refinement(cx, deck, gen);
             }
         }
         let shape = crate::track_shape::track_shape(
@@ -20659,10 +20730,8 @@ p2 {}
         self.autopilot.shape_ready(gen, shape);
         self.autopilot.changes_ready(gen, analysis.changes_secs.clone());
         self.deck_analysis[index] = Some(analysis);
-        if derive_splat
-            && self.deck_stem_coverage[index].is_some_and(|(_, complete)| complete)
-        {
-            self.submit_splat_refinement(deck, gen);
+        if self.deck_stem_coverage[index].is_some_and(|(_, complete)| complete) {
+            self.submit_splat_refinement(cx, deck, gen);
         }
         match self.scan_pending[index].take() {
             Some((pending_gen, config)) if pending_gen == gen => {
@@ -21654,8 +21723,7 @@ p2 {}
         self.prefetch.release(finished, Instant::now());
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    fn submit_splat_refinement(&mut self, deck: DeckId, gen: u64) {
+    fn submit_splat_refinement(&mut self, cx: &Cx, deck: DeckId, gen: u64) {
         let index = deck.index();
         if self.deck_splat_refining[index] == Some(gen) {
             return;
@@ -21665,15 +21733,13 @@ p2 {}
             self.deck_tracks[index].clone(),
             self.deck_analysis[index].clone(),
         ) {
-            if self.splat_refine.submit(deck, gen, stems, pcm, analysis) {
+            if self
+                .splat_refine
+                .submit(cx.thread_spawner(), deck, gen, stems, pcm, analysis)
+            {
                 self.deck_splat_refining[index] = Some(gen);
             }
         }
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn submit_splat_refinement(&mut self, _deck: DeckId, _gen: u64) {
-        // Static web sessions only consume the prebuilt DjLoopSplat role.
     }
 
     fn pump_stems(&mut self, cx: &mut Cx) {
@@ -21747,7 +21813,7 @@ p2 {}
                     if self.deck_stem_coverage[deck.index()]
                         .is_some_and(|(_, complete)| complete)
                     {
-                        self.submit_splat_refinement(deck, gen);
+                        self.submit_splat_refinement(cx, deck, gen);
                     }
                 }
                 StemsMsg::Coverage { deck, gen, digest, model_frames, complete } => {
@@ -21772,7 +21838,7 @@ p2 {}
                         self.arm_stems_write_back(deck, &digest, model_frames);
                     }
                     if complete {
-                        self.submit_splat_refinement(deck, gen);
+                        self.submit_splat_refinement(cx, deck, gen);
                     }
                     // Words already in hand for this digest — the other deck
                     // played it, or an earlier load did. Hang them now: the
@@ -22378,7 +22444,7 @@ p2 {}
                     self.run_deck_cmds(cx, cmds);
                     let gen = self.decks.deck(deck).load_gen;
                     if self.deck_stem_coverage[index].is_some_and(|(_, complete)| complete) {
-                        self.submit_splat_refinement(deck, gen);
+                        self.submit_splat_refinement(cx, deck, gen);
                     }
                 }
             }
@@ -22430,6 +22496,12 @@ p2 {}
             return None;
         }
         if cols == 0 {
+            if self.deck_analysis[index].is_some() {
+                return Some((
+                    "no loop grid: beat grid too irregular".to_string(),
+                    Some(0.0),
+                ));
+            }
             #[cfg(target_arch = "wasm32")]
             {
                 let gen = self.decks.deck(deck).load_gen;
@@ -22439,19 +22511,8 @@ p2 {}
                 ) {
                     return Some(("beat-grid cache not available for this track".to_string(), Some(0.0)));
                 }
-                if self.deck_analysis[index].is_some()
-                    && matches!(
-                        self.deck_demo_splat[index],
-                        DemoCacheValue::Unavailable { gen: unavailable } if unavailable == gen
-                    )
-                {
-                    return Some(("loop-slice cache not available for this track".to_string(), Some(0.0)));
-                }
             }
-            return Some(match self.deck_analysis[index] {
-                None => ("analysing the beat grid…".to_string(), None),
-                Some(_) => ("no steady beat found — this track cannot be split into loops".to_string(), Some(0.0)),
-            });
+            return Some(("analysing the beat grid…".to_string(), None));
         }
         let complete = self.deck_stem_coverage[index].is_some_and(|(_, complete)| complete);
         if complete && self.deck_stems[index].is_some() {
