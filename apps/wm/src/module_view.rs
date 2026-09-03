@@ -153,6 +153,14 @@ impl TileHost for MpModuleView {
     fn set_fade(&mut self, fade: f32) {
         self.fade = fade;
     }
+
+    fn set_corner_radius(&mut self, _radius: f32) {
+        // The root draws itself; there is nothing to clip.
+    }
+
+    fn set_ground(&mut self, color: Vec4f) {
+        self.draw_bg.color = color;
+    }
 }
 
 impl Widget for MpModuleView {

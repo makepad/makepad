@@ -19,6 +19,8 @@ use crate::module_view::MpModuleView;
 use crate::run_view::{MpRunView, MpRunViewAction};
 use crate::tile::TileHost;
 use crate::theme;
+use crate::shell::{DeskTokens, MaterialTokens};
+use crate::theme::PaletteColors;
 
 #[allow(unused_imports)]
 use crate::layout;
@@ -130,13 +132,14 @@ fn lerp_color(a: Vec4f, b: Vec4f, t: f64) -> Vec4f {
 /// of the dpi factor, in logical px). The ring then falls on whole device
 /// pixels — 2px is 2px on all four edges — and the child, inset by a whole
 /// border, exactly fills the interior instead of flooring a pixel short of
-/// it and leaving a sliver.
-fn snap_to_device(r: Rect, dpi: f64) -> Rect {
+/// it and leaving a sliver. `border` is the ring's thickness: a tile never
+/// shrinks below two of them and one device pixel.
+fn snap_to_device(r: Rect, dpi: f64, border: f64) -> Rect {
     let x0 = (r.pos.x / dpi).round() * dpi;
     let y0 = (r.pos.y / dpi).round() * dpi;
     let x1 = ((r.pos.x + r.size.x) / dpi).round() * dpi;
     let y1 = ((r.pos.y + r.size.y) / dpi).round() * dpi;
-    let min = BORDER_SIZE * 2.0 + dpi;
+    let min = border * 2.0 + dpi;
     Rect {
         pos: dvec2(x0, y0),
         size: dvec2((x1 - x0).max(min), (y1 - y0).max(min)),
@@ -189,6 +192,18 @@ fn wash_alpha(glass: f32, arrival: f32) -> f32 {
         return 0.0;
     }
     (glass * (1.0 - arrival) / denom).clamp(0.0, 1.0)
+}
+
+/// The rounded frame's numbers for one tile: the ring's Sdf2d half-radius,
+/// the child's (concentric, inset by the border), and whether the material
+/// casts the shadow — gated on the same threshold the shader's square
+/// branch uses (a half-radius under 0.5 is square), so the two never
+/// disagree.
+fn tile_frame(desk: &DeskTokens, material: &MaterialTokens) -> (f32, f32, bool) {
+    let ring_half = (desk.corner_radius * 0.5) as f32;
+    let child_half = ((desk.corner_radius - desk.border_size).max(0.0) * 0.5) as f32;
+    let shadow = material.is_glass() && ring_half >= 0.5;
+    (ring_half, child_half, shadow)
 }
 
 /// Split a tile's interior into (tab strip, child). A grouped leaf gives
@@ -341,6 +356,14 @@ pub struct WmState {
     /// The theme accent — menu highlights, not the window border.
     pub accent: Vec4f,
     pub borders: BorderTheme,
+    /// `mod.wm_theme.desk` — gaps, tile border, tile radius (`gap` and
+    /// `gaps_out` below are kept in step with it by the theme push).
+    pub desk: DeskTokens,
+    /// `mod.wm_theme.material` — the tile frame's shadow under glass.
+    pub material: MaterialTokens,
+    /// The palette colours the desk paints: the tile wash, the tab strip,
+    /// a module tile's ground.
+    pub palette: PaletteColors,
     /// The gap the layout splits with: tile to tile (2 * gaps_in).
     pub gap: f64,
     /// The gap from the desk edge to the outermost tiles (gaps_out).
@@ -393,9 +416,11 @@ script_mod! {
     // own defaults stay plain literals — a theme writing `45` instead of
     // `45.0` would otherwise type the instance as an int and the shader
     // would not compile.
-    /** The tile focus border: a hard square ring carrying the two-stop
-     * gradient (Hyprland's axis convention), fed per tile from BorderTheme
-     * and animated with focus. */
+    /** The tile focus border: a ring carrying the two-stop gradient
+     * (Hyprland's axis convention), fed per tile from BorderTheme and
+     * animated with focus. Square and hard at radius 0 (the omarchy look,
+     * bit for bit); rounded, with the material's soft shadow outside it,
+     * when the theme's desk tokens say so. */
     set_type_default() do #(DrawTileBorder::script_shader(vm)) {
         ..mod.draw.DrawQuad
         /** gradient start color */
@@ -406,15 +431,33 @@ script_mod! {
         angle: 0.0
         /** ring thickness in pixels 1..8 step 0.5 */
         border_size: 2.0
-        // A hard square ring, measured straight off the quad edges. NOT an
-        // Sdf2d box + stroke: with radius 0 that box has no interior
-        // distance (it saturates at 0), so the stroke floods the whole
-        // tile — which only showed wherever the child did not cover it.
+        /** Sdf2d half-radius; 0 = the hard square ring */
+        corner_radius: 0.0
+        shadow_color: #00000000
+        shadow_radius: 0.0
+        shadow_offset_y: 0.0
+
+        rect_size2: varying(vec2(0.0))
+        rect_size3: varying(vec2(0.0))
+        rect_shift: varying(vec2(0.0))
+
+        // The quad grows by the shadow (nothing at radius 0: every
+        // varying then equals the plain rect).
+        vertex: fn() {
+            let off = vec2(0.0, self.shadow_offset_y)
+            let min_offset = min(off, vec2(0.0, 0.0))
+            self.rect_size2 = self.rect_size + 2.0 * vec2(self.shadow_radius)
+            self.rect_size3 = self.rect_size2 + abs(off)
+            let rect_pos2 = self.rect_pos - vec2(self.shadow_radius) + min_offset
+            self.rect_shift = -min_offset
+            return self.clip_and_transform_vertex(rect_pos2, self.rect_size3)
+        }
+
         pixel: fn() {
-            let p = self.pos * self.rect_size
+            // `p` is in the ORIGINAL tile's space, whatever the quad grew by.
+            let origin = vec2(self.shadow_radius) + self.rect_shift
+            let p = self.pos * self.rect_size3 - origin
             let bs = self.border_size
-            let d = min(min(p.x, p.y), min(self.rect_size.x - p.x, self.rect_size.y - p.y))
-            let cov = clamp((bs - d) * /**edge sharpness 1..8 step 0.5*/ 3.0 + 0.5, 0.0, 1.0)
             // Hyprland's gradient axis: degrees clockwise in screen space,
             // 0 = left→right, 90 = top→bottom (45 runs down-right).
             let rad = self.angle * 0.017453292
@@ -423,8 +466,45 @@ script_mod! {
             let extent = max(abs(dir.x) * half.x + abs(dir.y) * half.y, 0.001)
             let t = clamp(0.5 + dot(p - half, dir) / (2.0 * extent), 0.0, 1.0)
             let c = mix(self.color, self.color_end, t)
+            if self.corner_radius < 0.5 {
+                // A hard square ring, measured straight off the quad edges.
+                // NOT an Sdf2d box + stroke: with radius 0 that box has no
+                // interior distance (it saturates at 0), so the stroke
+                // floods the whole tile.
+                let d = min(min(p.x, p.y), min(self.rect_size.x - p.x, self.rect_size.y - p.y))
+                let cov = clamp((bs - d) * /**edge sharpness 1..8 step 0.5*/ 3.0 + 0.5, 0.0, 1.0)
+                let a = c.w * cov
+                return vec4(c.rgb * a, a)
+            }
+            let sdf = Sdf2d.viewport(self.pos * self.rect_size3)
+            // The box's radius keeps the ring concentric with the child's clip.
+            sdf.box(origin.x + bs * 0.5, origin.y + bs * 0.5, self.rect_size.x - bs, self.rect_size.y - bs, max(1.0, self.corner_radius - bs * 0.25))
+            // The Gaussian only where it can show: `outside` is identically
+            // 0 over the interior.
+            if self.shadow_radius > 0.0 && sdf.shape > 0.0 {
+                // The shadow lies OUTSIDE the tile only: a translucent
+                // window must not darken over its own shadow.
+                let outside = clamp(sdf.shape, 0.0, 1.0)
+                let m = self.shadow_radius
+                let o = vec2(0.0, self.shadow_offset_y) + self.rect_shift
+                let v = GaussShadow.rounded_box_shadow(
+                    vec2(m) + o
+                    self.rect_size2 + o
+                    self.pos * (self.rect_size3 + vec2(m))
+                    self.shadow_radius * 0.5
+                    self.corner_radius * 2.0
+                )
+                sdf.clear(vec4(self.shadow_color.rgb, self.shadow_color.w * v * outside))
+            }
+            // The box is inset by bs/2, so |shape| < bs/2 is the ring from
+            // the tile edge to bs inside.
+            // The ring from the SDF distance with the square branch's own
+            // sharpness (a stroke's AA ramp lies inside its band and never
+            // fills a 1px half-width), composited over the shadow already
+            // in `sdf.result`.
+            let cov = clamp((bs * 0.5 - abs(sdf.shape)) * 3.0 + 0.5, 0.0, 1.0)
             let a = c.w * cov
-            return vec4(c.rgb * a, a)
+            return vec4(c.rgb * a, a) + sdf.result * (1.0 - a)
         }
     }
 
@@ -434,8 +514,16 @@ script_mod! {
         ..mod.draw.DrawQuad
         color: mod.wm_theme.background
         alpha: 0.88
+        radius: 0.0
         pixel: fn() {
-            return vec4(self.color.rgb * self.alpha, self.alpha)
+            if self.radius < 0.5 {
+                return vec4(self.color.rgb * self.alpha, self.alpha)
+            }
+            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+            sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, self.radius)
+            // The child's clip ramp, so the two edge rows match.
+            let a = self.alpha * clamp(0.5 - sdf.shape, 0.0, 1.0)
+            return vec4(self.color.rgb * a, a)
         }
     }
 
@@ -525,6 +613,14 @@ struct DrawTileBorder {
     angle: f32,
     #[live(2.0)]
     border_size: f32,
+    #[live(0.0)]
+    corner_radius: f32,
+    #[live]
+    shadow_color: Vec4f,
+    #[live(0.0)]
+    shadow_radius: f32,
+    #[live(0.0)]
+    shadow_offset_y: f32,
 }
 
 #[derive(Script, ScriptHook)]
@@ -536,6 +632,8 @@ struct DrawTilePanel {
     color: Vec4f,
     #[live(0.55)]
     alpha: f32,
+    #[live(0.0)]
+    radius: f32,
 }
 
 #[derive(Script, ScriptHook)]
@@ -812,6 +910,14 @@ pub struct WmDesk {
     /// The theme accent, for that hint.
     #[rust]
     accent: Vec4f,
+    /// The theme's desk tokens, material and palette, copied off the
+    /// state every frame (a live switch changes them).
+    #[rust]
+    desk_tokens: DeskTokens,
+    #[rust]
+    material: MaterialTokens,
+    #[rust]
+    palette: PaletteColors,
     #[rust]
     area: Area,
     #[rust]
@@ -989,9 +1095,12 @@ impl WmDesk {
         // The ring's edges land on device pixels, so a 2px border is
         // exactly 2px on every side whatever the tween left behind.
         let dpi = cx.current_dpi_factor().max(1.0);
-        draw_rect = snap_to_device(draw_rect, dpi);
+        let desk = self.desk_tokens;
+        let material = self.material;
+        let inset = desk.border_size;
+        let (ring_half, child_half, shadow) = tile_frame(&desk, &material);
+        draw_rect = snap_to_device(draw_rect, dpi, inset);
 
-        let inset = BORDER_SIZE;
         let inner = snap_child_rect(
             Rect {
                 pos: draw_rect.pos + dvec2(inset, inset),
@@ -1022,6 +1131,7 @@ impl WmDesk {
         let glass = if focus > 0.5 { 0.88 } else { 0.84 };
         let wash = wash_alpha(glass, if has_frame { arrival } else { 0.0 });
         if wash > 0.004 {
+            self.draw_panel.radius = child_half;
             self.draw_panel.alpha = wash * fade as f32;
             self.draw_panel.draw_abs(cx, inner);
         }
@@ -1040,7 +1150,18 @@ impl WmDesk {
         self.draw_border.color = fade_color(ring_start, fade);
         self.draw_border.color_end = fade_color(ring_end, fade);
         self.draw_border.angle = borders.angle;
-        self.draw_border.border_size = BORDER_SIZE as f32;
+        self.draw_border.border_size = inset as f32;
+        self.draw_border.corner_radius = ring_half;
+        // The shadow is the glass material's; the flat look casts none.
+        self.draw_border.shadow_color = fade_color(
+            Vec4f {
+                w: if shadow { material.shadow_alpha } else { 0.0 },
+                ..material.shadow_color
+            },
+            fade,
+        );
+        self.draw_border.shadow_radius = if shadow { material.shadow_radius as f32 } else { 0.0 };
+        self.draw_border.shadow_offset_y = if shadow { material.shadow_offset_y as f32 } else { 0.0 };
         self.draw_border.draw_abs(cx, draw_rect);
 
         // A grouped leaf gives the top of its interior to the tab strip;
@@ -1060,7 +1181,7 @@ impl WmDesk {
 
         // The child is configured at the SETTLED size (resize-sync), snapped
         // the same way so its swapchain matches the rect it will be drawn at.
-        let settled = snap_to_device(Self::lrect_to_rect(target), dpi);
+        let settled = snap_to_device(Self::lrect_to_rect(target), dpi, inset);
         let settled_inner = snap_child_rect(
             Rect {
                 pos: settled.pos + dvec2(inset, inset),
@@ -1080,11 +1201,14 @@ impl WmDesk {
         // Hyprland stretches the frozen snapshot into the shrinking box —
         // no crop (that experiment read odd; git has it).
         let _ = (closing, unscaled_rect);
+        let ground = self.palette.background;
         if let Some(item) = self.item(cx, client) {
             with_tile_host(&item, |view| {
                 view.set_target_size(Some(settled_child.size));
                 view.set_close_crop(None);
                 view.set_fade(fade as f32);
+                view.set_corner_radius(child_half);
+                view.set_ground(ground);
             });
             item.draw_walk_all(cx, scope, Walk::abs_rect(child_rect));
         }
@@ -1262,6 +1386,15 @@ impl Widget for WmDesk {
         let focused = state.layout.focused_client();
         self.accent = state.accent;
         self.hint = state.drop_hint;
+        self.desk_tokens = state.desk;
+        self.material = state.material;
+        self.palette = state.palette;
+        // The DSL baked these at evaluation time; a live switch changes
+        // them, so they follow the state every frame.
+        self.draw_panel.color = state.palette.background;
+        self.tab_strip_color = state.palette.darker_background;
+        self.tab_fg_active = state.palette.background;
+        self.tab_fg_inactive = state.palette.foreground;
         let borders = state.borders;
         let dragging = state.dragging.clone();
         let pane_sliding = state.pane_sliding;
@@ -1385,6 +1518,7 @@ impl Widget for WmDesk {
         }
         // Then the scrim and the previews floating over it.
         if !previews.is_empty() {
+            self.draw_panel.radius = 0.0;
             self.draw_panel.alpha = 0.5;
             self.draw_panel.draw_abs(cx, rect);
             for client in &previews {
@@ -1788,6 +1922,7 @@ mod tests {
                 size: dvec2(684.5, 853.1),
             },
             2.0,
+            BORDER_SIZE,
         );
         assert_eq!(r.pos, dvec2(10.0, 36.0));
         assert_eq!(r.pos + r.size, dvec2(694.0, 890.0));
@@ -1828,6 +1963,40 @@ mod tests {
         assert_eq!(TILE_GAP, 10.0);
         assert_eq!(GAPS_OUT, 10.0);
         assert_eq!(BORDER_SIZE, 2.0);
+        // The desk tokens' defaults are these same numbers, so a theme that
+        // names none draws exactly this.
+        let d = DeskTokens::default();
+        assert_eq!(d.gaps_in * 2.0, TILE_GAP);
+        assert_eq!(d.gaps_out, GAPS_OUT);
+        assert_eq!(d.border_size, BORDER_SIZE);
+        assert_eq!(d.corner_radius, 0.0);
+    }
+
+    #[test]
+    fn tile_frame_numbers() {
+        let glass = MaterialTokens {
+            glass: 1.0,
+            ..MaterialTokens::default()
+        };
+        let flat = MaterialTokens::default();
+        let rounded = DeskTokens {
+            corner_radius: 12.0,
+            ..DeskTokens::default()
+        };
+        // The makeos numbers: a 12px tile radius over a 2px ring is a
+        // half-radius of 6 for the ring and 5 for the child inside it.
+        assert_eq!(tile_frame(&rounded, &glass), (6.0, 5.0, true));
+        // The flat material casts no shadow whatever the radius.
+        assert_eq!(tile_frame(&rounded, &flat), (6.0, 5.0, false));
+        // A radius the shader draws square (half-radius under 0.5) casts
+        // none either, and the child stays square.
+        let hair = DeskTokens {
+            corner_radius: 0.5,
+            ..DeskTokens::default()
+        };
+        assert_eq!(tile_frame(&hair, &glass), (0.25, 0.0, false));
+        // The omarchy default: square, nothing cast, even under glass.
+        assert_eq!(tile_frame(&DeskTokens::default(), &glass), (0.0, 0.0, false));
     }
 
     #[test]

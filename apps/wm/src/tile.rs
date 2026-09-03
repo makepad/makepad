@@ -38,4 +38,13 @@ pub trait TileHost {
     fn set_close_crop(&mut self, crop: Option<(Vec2d, Vec2d)>);
     /// The popin fade the desk drives during open/close (1 = solid).
     fn set_fade(&mut self, fade: f32);
+    /// The corner radius the window's content is clipped to under the
+    /// active material (an Sdf2d half-radius, so half the visual pixels);
+    /// 0 is square. A module root draws itself and cannot be clipped: a
+    /// no-op there.
+    fn set_corner_radius(&mut self, radius: f32);
+    /// The ground a tile paints under its window — the theme's background.
+    /// A process tile composites its frame straight over the wallpaper and
+    /// ignores it; a module tile fills with it.
+    fn set_ground(&mut self, color: Vec4f);
 }

@@ -67,15 +67,22 @@ script_mod! {
                 return vec4(c.rgb * c.w, c.w)
             }
             // A rounded card (a theme's material asked for it): the fill,
-            // then the ring stroked just inside the box.
+            // then the ring at the quad edge. The box is inset by bw/2, so
+            // |shape| < bw/2 is the ring from the quad edge to bw inside.
             let sdf = Sdf2d.viewport(p)
             let bw = self.border_width
-            sdf.box(bw, bw, self.rect_size.x - bw * 2.0, self.rect_size.y - bw * 2.0, max(0.5, self.corner_radius - bw * 0.5))
+            sdf.box(bw * 0.5, bw * 0.5, self.rect_size.x - bw, self.rect_size.y - bw, max(0.5, self.corner_radius - bw * 0.25))
             sdf.fill_keep(self.color)
-            if self.border_width > 0.0 {
-                sdf.stroke(bc, bw)
+            if self.border_width <= 0.0 {
+                return sdf.result
             }
-            return sdf.result
+            // The ring from the SDF distance with the square branch's own
+            // sharpness (a stroke's AA ramp lies inside its band and never
+            // fills a 1px half-width), composited over the fill already in
+            // `sdf.result`.
+            let cov = clamp((bw * 0.5 - abs(sdf.shape)) * 3.0 + 0.5, 0.0, 1.0)
+            let a = bc.w * cov
+            return vec4(bc.rgb * a, a) + sdf.result * (1.0 - a)
         }
     }
 

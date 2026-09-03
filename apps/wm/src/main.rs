@@ -3613,6 +3613,9 @@ impl MatchEvent for App {
             term_env,
             accent,
             borders,
+            desk: shell::DeskTokens::default(),
+            material: shell::MaterialTokens::default(),
+            palette: theme::scan_palette(&source),
             // gaps_in 5 sits on each side of a window, so two tiles are
             // 10 apart — the same as gaps_out to the desk edge.
             gap: desk::TILE_GAP,
