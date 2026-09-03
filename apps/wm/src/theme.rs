@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use makepad_widgets::makepad_script::{ScriptVmBase, ScriptVmHost};
 use makepad_widgets::{log, ScriptMod, ScriptVm, Vec4f};
 
 pub const DEFAULT_THEME: &str = "tokyo-night";
@@ -551,8 +552,10 @@ pub fn installed_themes() -> Vec<String> {
 
 /// The theme's splash source (bundled default when nothing is installed).
 pub fn load_theme_source(name: &str) -> String {
-    std::fs::read_to_string(theme_splash_path(name))
-        .unwrap_or_else(|_| BUNDLED_TOKYO_NIGHT_SPLASH.to_string())
+    std::fs::read_to_string(theme_splash_path(name)).unwrap_or_else(|_| {
+        log!("wm theme: no theme.splash for '{}'; using the bundled default", name);
+        BUNDLED_TOKYO_NIGHT_SPLASH.to_string()
+    })
 }
 
 /// The pictures in `dir`, sorted by lowercased name: rasters the async
@@ -1257,11 +1260,13 @@ fn eval_block(vm: &mut ScriptVm, name: &str, code: &str) -> bool {
 /// itself evaluated; a source with no statements did not.
 pub fn eval_into(vm: &mut ScriptVm, source: &str) -> bool {
     let body = eval_body(source);
-    if body.trim() == "true" {
-        log!("wm theme: no statements in the theme file; using the bundled default");
-    }
     let ok = body.trim() != "true" && eval_block(vm, "wm_theme", &body);
     if !ok {
+        if body.trim() == "true" {
+            log!("wm theme: no statements in the theme file; using the bundled default");
+        } else {
+            log!("wm theme: the theme did not evaluate; using the bundled default");
+        }
         eval_block(vm, "wm_theme_fallback", &eval_body(BUNDLED_TOKYO_NIGHT_SPLASH));
     }
     let effective = if ok { source } else { BUNDLED_TOKYO_NIGHT_SPLASH };
@@ -1283,6 +1288,25 @@ pub fn eval_into(vm: &mut ScriptVm, source: &str) -> bool {
         );
     }
     ok
+}
+
+/// Whether `source` evaluates: the answer `eval_into` gives for it, found
+/// on a bare VM of its own so the app's is left alone. Startup scans the
+/// file after `AppMain::script_mod` evaluated it and needs to know which
+/// text the VM took — the file, or the bundled default.
+pub fn evaluates(source: &str) -> bool {
+    let body = eval_body(source);
+    if body.trim() == "true" {
+        return false;
+    }
+    // Built the way `platform/script/tests` build one; it lives for this
+    // check alone.
+    let mut host = ScriptVmHost::new(0i32, ());
+    let mut vm = ScriptVm {
+        host: &mut host,
+        bx: Box::new(ScriptVmBase::new()),
+    };
+    eval_block(&mut vm, "wm_theme_check", &body)
 }
 
 /// `mod.wm_theme.shell = { ... }`, resolved from the theme's own palette
@@ -1486,7 +1510,7 @@ pub fn shell_splash_block(source: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use makepad_widgets::makepad_script::{ScriptValue, ScriptVmBase, ScriptVmHost};
+    use makepad_widgets::makepad_script::ScriptValue;
 
     /// A bare VM, built the way `platform/script/tests` build one.
     fn test_vm() -> ScriptVm<'static> {
@@ -1920,6 +1944,14 @@ bright_magenta = "#bb9af7"
         assert!(eval_into(&mut vm, &red));
         assert_eq!(vm.bx.code.bodies.borrow().len(), bodies);
         assert_eq!(hex(read(&mut vm, "mod.wm_theme.accent")), "#ff0000");
+    }
+
+    #[test]
+    fn evaluates_reports_whether_a_theme_evaluates() {
+        assert!(evaluates(BUNDLED_TOKYO_NIGHT_SPLASH));
+        assert!(evaluates(BUNDLED_MAKEOS_SPLASH));
+        assert!(!evaluates("mod.wm_theme = {\n    accent: nothing_here.foo\n}\n"));
+        assert!(!evaluates(""));
     }
 
     #[test]

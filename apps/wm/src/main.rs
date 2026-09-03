@@ -2372,28 +2372,13 @@ impl App {
     }
 
     fn set_theme(&mut self, cx: &mut Cx, name: &str) {
-        let source = theme::load_theme_source(name);
-        {
-            let state = self.state_mut();
-            state.theme_name = name.to_string();
-            if let Some(palette) = theme::scan_term_palette(&source) {
-                state.term_env = palette.env_value();
-            }
-            if let Some(rgb) = theme::scan_color(&source, "accent") {
-                state.accent = rgb;
-            }
-            state.borders = desk::BorderTheme::from_theme_source(&source);
-        }
-        // Children style themselves from the same file; the choice outlives
-        // this run (a state file natively, the desk's storage on the web).
-        host::set_child_env("MAKEPAD_WM_THEME_SPLASH", theme::theme_splash_path(name).as_os_str());
-        host::persist_theme_choice(cx, name);
+        let file_source = theme::load_theme_source(name);
         // The live part: the theme goes back into the VM, the token type
         // default is rebuilt from it (shell/tokens.rs), and every surface
         // is handed the result. A running child keeps its look until it
         // is relaunched.
-        let tokens = cx.with_vm(|vm| {
-            theme::eval_into(vm, &source);
+        let (tokens, ok) = cx.with_vm(|vm| {
+            let ok = theme::eval_into(vm, &file_source);
             // The mapping runs under an error sink like the theme blocks
             // do: a theme that ships its own `shell:` block but omits a
             // key would otherwise fail silently, one field at a time.
@@ -2407,9 +2392,27 @@ impl App {
             if value.is_err() {
                 log!("wm theme: tokens: {:?}", value);
             }
-            ShellTokens::script_new_with_default(vm)
+            (ShellTokens::script_new_with_default(vm), ok)
         });
-        let palette = theme::scan_palette(&source);
+        // The scanners read the same text the VM accepted: the file, or the
+        // bundled default when the file did not evaluate.
+        let source: &str = if ok { &file_source } else { theme::BUNDLED_TOKYO_NIGHT_SPLASH };
+        {
+            let state = self.state_mut();
+            state.theme_name = name.to_string();
+            if let Some(palette) = theme::scan_term_palette(source) {
+                state.term_env = palette.env_value();
+            }
+            if let Some(rgb) = theme::scan_color(source, "accent") {
+                state.accent = rgb;
+            }
+            state.borders = desk::BorderTheme::from_theme_source(source);
+        }
+        // Children style themselves from the same file; the choice outlives
+        // this run (a state file natively, the desk's storage on the web).
+        host::set_child_env("MAKEPAD_WM_THEME_SPLASH", theme::theme_splash_path(name).as_os_str());
+        host::persist_theme_choice(cx, name);
+        let palette = theme::scan_palette(source);
         self.apply_theme_to_chrome(cx, tokens, palette);
         self.background_index = 0;
         self.apply_background(cx, 0);
@@ -3686,17 +3689,24 @@ impl MatchEvent for App {
         // Children inherit the theme file path so every Makepad app styles
         // itself from the same theme.splash.
         host::set_child_env("MAKEPAD_WM_THEME_SPLASH", theme::theme_splash_path(&theme_name).as_os_str());
-        let source = theme::load_theme_source(&theme_name);
-        let term_env = theme::scan_term_palette(&source)
+        // The scanners read the same text the VM took in `script_mod`: the
+        // file, or the bundled default when the file does not evaluate.
+        let file_source = theme::load_theme_source(&theme_name);
+        let source: &str = if theme::evaluates(&file_source) {
+            &file_source
+        } else {
+            theme::BUNDLED_TOKYO_NIGHT_SPLASH
+        };
+        let term_env = theme::scan_term_palette(source)
             .map(|p| p.env_value())
             .unwrap_or_default();
-        let accent = theme::scan_color(&source, "accent").unwrap_or(Vec4f {
+        let accent = theme::scan_color(source, "accent").unwrap_or(Vec4f {
             x: 0.48,
             y: 0.63,
             z: 0.97,
             w: 1.0,
         });
-        let borders = desk::BorderTheme::from_theme_source(&source);
+        let borders = desk::BorderTheme::from_theme_source(source);
 
         // The client hub is the PROCESS host's: a build without processes
         // (the web) never binds one and hosts its linked modules instead.
@@ -3707,7 +3717,7 @@ impl MatchEvent for App {
         }
         self.hub = hub;
 
-        let palette = theme::scan_palette(&source);
+        let palette = theme::scan_palette(source);
         self.state = Some(WmState {
             layout: crate::layout::WmLayout::new(),
             clients: std::collections::HashMap::new(),
