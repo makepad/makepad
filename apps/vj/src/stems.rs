@@ -38,10 +38,12 @@ use crate::mixer::{encode_stem_sample, TrackPcm};
 use makepad_ai_stems::{CacheHeader, Demixer, StemCache, StemSet, StemsModel, StereoBuf, CHUNK_STEP};
 pub(crate) use makepad_ai_stems::SAMPLE_RATE as STEMS_RATE;
 use makepad_asset_data::Sha256;
-use makepad_widgets::makepad_platform::thread::{ThreadOptions, ThreadSpawner};
+use makepad_widgets::makepad_platform::thread::{CancellationToken, ThreadOptions, ThreadSpawner};
+use makepad_widgets::Cx;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -203,9 +205,11 @@ pub const PREFETCH_GEN: u64 = u64::MAX;
 /// a set is playing over the top of this work.
 const PREFETCH_SPAN_BREATH_MS: u64 = 40;
 
-/// How long the worker waits on the deck inbox before it will look at the
-/// background one. Short enough that a queued track starts warming almost
-/// at once; long enough that an idle worker is not spinning.
+/// How long a background job just pulled off the queue waits out a recent
+/// burst of deck traffic before it is allowed to start. Only paid when a
+/// deck job landed within this window — an otherwise-idle worker starts
+/// background work at once, with no periodic wake-up either way (the
+/// worker blocks on the shared inbox's `recv()` while nothing is pending).
 const DECK_INBOX_WAIT_MS: u64 = 100;
 
 /// One published chunk of separated audio, in track frames.
@@ -831,9 +835,14 @@ fn run_demixer(
         // Background work leaves headroom on purpose. The separator and the
         // renderer want the same GPU, and a set is running: a short breath
         // between spans is the difference between a queued track warming up
-        // unnoticed and one that makes the console stutter.
+        // unnoticed and one that makes the console stutter. A plain sleep
+        // reads the std clock and panics on a wasm worker; `wait_until`
+        // paces off `Cx::monotonic_now()` instead.
         if prefetch {
-            std::thread::sleep(Duration::from_millis(PREFETCH_SPAN_BREATH_MS));
+            let breath = CancellationToken::new();
+            let _ = breath.wait_until(
+                Cx::monotonic_now() + PREFETCH_SPAN_BREATH_MS as f64 / 1_000.0,
+            );
         }
     }
     let _ = out.send(StemsMsg::Done { deck: job.deck, gen: job.gen });
@@ -1003,17 +1012,52 @@ fn prune_cache(root: &Path, budget_bytes: u64, pinned: &[Option<String>; 2]) {
     }
 }
 
+/// One job on the worker's single inbox, tagged by lane. A deck job is
+/// latest-wins and always runs first; a background one is only started
+/// once the deck side has been quiet for a moment (`DECK_INBOX_WAIT_MS`).
+/// One channel means the worker can block on a plain `recv()` — no
+/// periodic poll of a second channel to notice a deck job.
+enum QueueJob {
+    Deck((StemsJob, SeparationBackend)),
+    Background((StemsJob, SeparationBackend)),
+}
+
+/// The deck-lane handle onto the shared inbox: tags every send `Deck` so
+/// call sites read exactly as they did with two separate channels.
+#[derive(Clone)]
+struct DeckSender(Sender<QueueJob>);
+
+impl DeckSender {
+    fn send(&self, item: (StemsJob, SeparationBackend)) -> Result<(), ()> {
+        self.0.send(QueueJob::Deck(item)).map_err(|_| ())
+    }
+}
+
+/// The background-lane handle onto the shared inbox: tags every send
+/// `Background`. Kept as its own type (not just a clone of `DeckSender`)
+/// so a deck send and a background send can never be confused at a call
+/// site.
+#[derive(Clone)]
+struct BackgroundSender(Sender<QueueJob>);
+
+impl BackgroundSender {
+    fn send(&self, item: (StemsJob, SeparationBackend)) -> Result<(), ()> {
+        self.0.send(QueueJob::Background(item)).map_err(|_| ())
+    }
+}
+
 /// One separation thread. The model is thread-affine and expensive to load,
 /// so it lives here and nowhere else.
 pub struct StemsPool {
-    tx: Sender<(StemsJob, SeparationBackend)>,
-    jobs: Option<Receiver<(StemsJob, SeparationBackend)>>,
-    /// The BACKGROUND inbox. Kept apart from `tx` so the two lanes cannot
-    /// spoil each other: deck jobs are latest-wins and would otherwise
-    /// discard a queued track's work, and a queued track must never sit in
-    /// front of the deck the operator is about to play.
-    prefetch_tx: Sender<(StemsJob, SeparationBackend)>,
-    prefetch_jobs: Option<Receiver<(StemsJob, SeparationBackend)>>,
+    tx: DeckSender,
+    /// The BACKGROUND lane. A distinct handle onto the SAME channel as
+    /// `tx` (see [`QueueJob`]) so the two lanes cannot spoil each other —
+    /// deck jobs are latest-wins and would otherwise discard a queued
+    /// track's work, and a queued track must never sit in front of the
+    /// deck the operator is about to play — while the worker still has
+    /// only one inbox to block on.
+    prefetch_tx: BackgroundSender,
+    jobs: Option<Receiver<QueueJob>>,
     /// Raised the instant a deck job is posted and lowered when the worker
     /// takes one. A background run reads it at every span boundary and
     /// lets go. Racing it costs at most one needless yield.
@@ -1046,15 +1090,15 @@ impl StemsPool {
     /// sight, and that is only provable if the checkpoint can be pointed
     /// somewhere it certainly is not.
     pub fn with_paths(root: PathBuf, checkpoint: PathBuf, budget_bytes: u64) -> StemsPool {
-        let (tx, jobs) = channel::<(StemsJob, SeparationBackend)>();
-        let (prefetch_tx, prefetch_jobs) = channel::<(StemsJob, SeparationBackend)>();
+        let (raw_tx, jobs) = channel::<QueueJob>();
+        let tx = DeckSender(raw_tx.clone());
+        let prefetch_tx = BackgroundSender(raw_tx);
         let (out, rx) = channel::<StemsMsg>();
         let deck_waiting = Arc::new(AtomicBool::new(false));
         StemsPool {
             tx,
-            jobs: Some(jobs),
             prefetch_tx,
-            prefetch_jobs: Some(prefetch_jobs),
+            jobs: Some(jobs),
             deck_waiting,
             out,
             rx,
@@ -1066,7 +1110,6 @@ impl StemsPool {
 
     pub fn start(&mut self, spawner: ThreadSpawner) {
         let Some(jobs) = self.jobs.take() else { return };
-        let Some(prefetch_jobs) = self.prefetch_jobs.take() else { return };
         let out = self.out.clone();
         let root = self.root.clone();
         let checkpoint = self.checkpoint.clone();
@@ -1074,34 +1117,92 @@ impl StemsPool {
         let waiting = self.deck_waiting.clone();
         let options = ThreadOptions { name: Some("vj-stems".into()), ..Default::default() };
         match spawner.spawn_worker(options, move || {
+                // Drains whatever is already sitting in `jobs` without
+                // blocking: every background arrival joins `pending_bg`,
+                // and the deck side collapses to the newest one seen
+                // (latest-wins — an older skip request is dead weight the
+                // moment a newer one lands). `Err` means both senders were
+                // dropped, i.e. the pool itself was dropped.
+                fn drain_latest_deck(
+                    jobs: &Receiver<QueueJob>,
+                    pending_bg: &mut VecDeque<(StemsJob, SeparationBackend)>,
+                    mut deck_item: Option<(StemsJob, SeparationBackend)>,
+                ) -> Result<Option<(StemsJob, SeparationBackend)>, ()> {
+                    loop {
+                        match jobs.try_recv() {
+                            Ok(QueueJob::Deck(item)) => deck_item = Some(item),
+                            Ok(QueueJob::Background(item)) => pending_bg.push_back(item),
+                            Err(TryRecvError::Empty) => return Ok(deck_item),
+                            Err(TryRecvError::Disconnected) => return Err(()),
+                        }
+                    }
+                }
+
                 let mut model: Option<StemsModel> = None;
                 // The track most recently opened per deck: whatever is on a
                 // deck is pinned against the budget, so a set in progress is
                 // never evicted out from under the needle.
                 let mut pinned: [Option<String>; 2] = [None, None];
-                loop {
-                    // THE DECK INBOX IS SERVED FIRST, ALWAYS. Only when it
-                    // has stayed empty for a moment does the background one
-                    // get a look, and then for exactly one track.
-                    let (job, backend) = match jobs.recv_timeout(Duration::from_millis(DECK_INBOX_WAIT_MS)) {
-                        Ok(job) => {
-                            waiting.store(false, Ordering::SeqCst);
-                            // Latest-wins: only the newest request per deck
-                            // matters. A background job is never in this
-                            // channel, so nothing here can discard one.
-                            let mut job = job;
-                            while let Ok(newer) = jobs.try_recv() {
-                                job = newer;
+                // Background jobs pulled off the shared inbox but not yet
+                // run — FIFO, so a burst of queued tracks warms in the
+                // order it arrived.
+                let mut pending_bg: VecDeque<(StemsJob, SeparationBackend)> = VecDeque::new();
+                // When the last deck job was taken. `None` (or stale)
+                // means the worker has no reason to think more deck
+                // traffic is imminent, so a queued background job starts
+                // at once with no settle wait.
+                let mut last_deck_at: Option<crate::clock::Instant> = None;
+                'work: loop {
+                    // THE DECK INBOX IS SERVED FIRST, ALWAYS. With nothing
+                    // queued locally the worker blocks on the one shared
+                    // channel — zero idle wake-ups. Once a background job
+                    // is sitting in `pending_bg`, it only starts after a
+                    // recent burst of deck traffic (if any) has had one
+                    // settle window to finish arriving.
+                    let (job, backend) = if pending_bg.is_empty() {
+                        let first = match jobs.recv() {
+                            Ok(QueueJob::Deck(item)) => Some(item),
+                            Ok(QueueJob::Background(item)) => {
+                                pending_bg.push_back(item);
+                                continue;
                             }
-                            job
+                            Err(_) => break,
+                        };
+                        // Collapse any further-queued deck jobs to the
+                        // newest before starting work on one.
+                        match drain_latest_deck(&jobs, &mut pending_bg, first) {
+                            Ok(Some(item)) => {
+                                last_deck_at = Some(crate::clock::Instant::now());
+                                waiting.store(false, Ordering::SeqCst);
+                                item
+                            }
+                            Ok(None) => unreachable!("drain started from a deck item"),
+                            Err(()) => break,
                         }
-                        Err(RecvTimeoutError::Timeout) => match prefetch_jobs.try_recv() {
-                            Ok(job) => job,
-                            Err(TryRecvError::Empty) => continue,
-                            // Both inboxes gone means the pool was dropped.
-                            Err(TryRecvError::Disconnected) => break,
-                        },
-                        Err(RecvTimeoutError::Disconnected) => break,
+                    } else {
+                        if last_deck_at
+                            .is_some_and(|at| at.elapsed() < Duration::from_millis(DECK_INBOX_WAIT_MS))
+                        {
+                            let quiet = CancellationToken::new();
+                            let _ = quiet.wait_until(
+                                Cx::monotonic_now() + DECK_INBOX_WAIT_MS as f64 / 1_000.0,
+                            );
+                        }
+                        // One drain, deck jobs first: whatever landed
+                        // during (or before) the settle wait pre-empts the
+                        // background job about to run.
+                        let deck_item = match drain_latest_deck(&jobs, &mut pending_bg, None) {
+                            Ok(item) => item,
+                            Err(()) => break 'work,
+                        };
+                        match deck_item {
+                            Some(item) => {
+                                last_deck_at = Some(crate::clock::Instant::now());
+                                waiting.store(false, Ordering::SeqCst);
+                                item
+                            }
+                            None => pending_bg.pop_front().expect("pending_bg checked non-empty above"),
+                        }
                     };
                     let prefetching = job.gen == PREFETCH_GEN;
                     // A deck job never yields; only a background one does.
