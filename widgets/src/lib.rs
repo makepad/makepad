@@ -221,7 +221,7 @@ pub use crate::{
         WidgetSet, WidgetSetIterator, WidgetUid,
     },
     widget_async::{
-        set_widget_async_trace, CxSplashVmExt, CxWidgetToScriptCallExt, ScriptAsyncCalls,
+        set_splash_theme, set_widget_async_trace, CxSplashVmExt, CxWidgetToScriptCallExt, ScriptAsyncCalls, SplashTheme,
         ScriptAsyncId, ScriptAsyncResult, SplashVmId, MAIN_SPLASH_VM_ID,
     },
     widget_match_event::WidgetMatchEvent,
