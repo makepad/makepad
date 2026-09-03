@@ -49,6 +49,9 @@ impl DrawListExt for DrawList {
                 if let Some(sub_list_id) =
                     cx.draw_lists[draw_list_id].draw_items[draw_item_id].sub_list()
                 {
+                    if cx.draw_lists.is_id_freed(sub_list_id) {
+                        continue;
+                    }
                     set_view_transform_recur(sub_list_id, cx, mat);
                 }
             }

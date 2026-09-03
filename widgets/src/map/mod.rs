@@ -6,6 +6,7 @@ pub(crate) mod label;
 pub mod overlay;
 pub mod style;
 pub mod tile;
+pub(crate) mod tile_draw;
 pub mod view;
 
 pub use overlay::{MapMarker, MapPuck, MapRouteOverlay};

@@ -182,6 +182,12 @@ impl Cx {
                 .kind
                 .sub_list()
             {
+                // A retained sub-list its owner dropped between the parent's
+                // last record and this paint: the slot may already hold
+                // another widget's list. Nothing to draw here.
+                if self.draw_lists.is_id_freed(sub_list_id) {
+                    continue;
+                }
                 let child_resets_zbias = self.draw_lists[sub_list_id].reset_zbias;
                 let mut own_zbias = 0.0f32;
                 let child_zbias = if child_resets_zbias {
@@ -192,14 +198,23 @@ impl Cx {
                 // An overlay list carries a depth floor: this is what makes it
                 // composite above body content that uses `draw_depth`.
                 self.draw_lists[sub_list_id].raise_zbias_to_floor(child_zbias);
-                self.render_view(
-                    draw_pass_id,
-                    sub_list_id,
-                    child_zbias,
-                    zbias_step,
-                    encoder,
-                    metal_cx,
-                );
+                // A retained list is one unit of paint order: its calls all
+                // take the counter at entry, it advances by the layers the
+                // list reported. See `CxDrawList::zbias_hold`.
+                if let Some(steps) = self.draw_lists[sub_list_id].zbias_hold {
+                    let mut held = *child_zbias;
+                    self.render_view(draw_pass_id, sub_list_id, &mut held, 0.0, encoder, metal_cx);
+                    *child_zbias += steps as f32 * zbias_step;
+                } else {
+                    self.render_view(
+                        draw_pass_id,
+                        sub_list_id,
+                        child_zbias,
+                        zbias_step,
+                        encoder,
+                        metal_cx,
+                    );
+                }
             } else {
                 let draw_list = &mut self.draw_lists[draw_list_id];
                 let draw_item = &mut draw_list.draw_items[draw_item_id];
@@ -2238,6 +2253,11 @@ impl Cx {
         let mut enc = VecUploadEncoder::new(command_buffer);
         let mut stack: Vec<DrawListId> = vec![draw_list_id];
         while let Some(list_id) = stack.pop() {
+            // A retained sub-list its owner dropped since the parent last
+            // recorded: not part of this pass (see `render_view`).
+            if self.draw_lists.is_id_freed(list_id) {
+                continue;
+            }
             let draw_list = &self.draw_lists[list_id];
             for order_index in 0..draw_list.draw_item_order_len() {
                 let Some(item_id) = draw_list.draw_item_id_at_order_index(order_index) else {

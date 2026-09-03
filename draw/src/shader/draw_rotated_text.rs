@@ -274,6 +274,19 @@ impl DrawRotatedText {
         }
     }
 
+    /// Re-present a glyph batch recorded into the retained draw list `list`
+    /// on an earlier frame: this frame's pass/view uniforms and the camera
+    /// values staged since (`set_camera_delta`, `set_pan_delta`,
+    /// `set_space_warp`) go onto every glyph call in the list; the glyph
+    /// instances themselves stay resident. `false` when the list holds no
+    /// call of this shader.
+    pub fn refresh_glyph_batch(&mut self, cx: &mut Cx2d, list: DrawListId) -> bool {
+        self.draw_super.update_draw_vars(cx);
+        self.draw_super
+            .draw_vars
+            .update_uniforms_on_draw_list(cx, list)
+    }
+
     /// Draw a single glyph at an arbitrary position with rotation.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_glyph_at(

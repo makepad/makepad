@@ -5452,6 +5452,12 @@ impl CxVulkan {
                 .kind
                 .sub_list()
             {
+                // A retained sub-list its owner dropped between the parent's
+                // last record and this paint: the slot may already hold
+                // another widget's list. Nothing to draw here.
+                if cx.draw_lists.is_id_freed(sub_list_id) {
+                    continue;
+                }
                 let child_resets_zbias = cx.draw_lists[sub_list_id].reset_zbias;
                 let mut own_zbias = 0.0f32;
                 let child_zbias = if child_resets_zbias {
@@ -5462,16 +5468,34 @@ impl CxVulkan {
                 // An overlay list carries a depth floor: this is what makes it
                 // composite above body content that uses `draw_depth`.
                 cx.draw_lists[sub_list_id].raise_zbias_to_floor(child_zbias);
-                self.record_draw_list(
-                    cx,
-                    draw_pass_id,
-                    sub_list_id,
-                    render_pass_key,
-                    child_zbias,
-                    zbias_step,
-                    draw_stats,
-                    xr_depth_view,
-                )?;
+                // A retained list is one unit of paint order: its calls all
+                // take the counter at entry, it advances by the layers the
+                // list reported. See `CxDrawList::zbias_hold`.
+                if let Some(steps) = cx.draw_lists[sub_list_id].zbias_hold {
+                    let mut held = *child_zbias;
+                    self.record_draw_list(
+                        cx,
+                        draw_pass_id,
+                        sub_list_id,
+                        render_pass_key,
+                        &mut held,
+                        0.0,
+                        draw_stats,
+                        xr_depth_view,
+                    )?;
+                    *child_zbias += steps as f32 * zbias_step;
+                } else {
+                    self.record_draw_list(
+                        cx,
+                        draw_pass_id,
+                        sub_list_id,
+                        render_pass_key,
+                        child_zbias,
+                        zbias_step,
+                        draw_stats,
+                        xr_depth_view,
+                    )?;
+                }
                 continue;
             }
 
