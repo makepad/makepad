@@ -403,17 +403,6 @@ script_mod! {
                                     height: 16
                                 }
                                 Label{
-                                    text: "Tiles"
-                                    draw_text +: {
-                                        color: #x223038
-                                        text_style: theme.font_regular{font_size: 9}
-                                    }
-                                }
-                                tile_source := DropDown{
-                                    width: 300
-                                    labels: ["makepad.nl (cached locally)" "local archive"]
-                                }
-                                Label{
                                     text: "Maps folder (next launch)"
                                     draw_text +: {
                                         color: #x223038
@@ -970,22 +959,11 @@ impl App {
             .text_input(cx, ids!(maps_root_input))
             .set_text(cx, &maps_root.to_string_lossy());
         self.layers.set_maps_root(maps_root.clone());
-        let local_archive = MapProvisioner::local_archive_path(&maps_root);
-        self.ui.drop_down(cx, ids!(tile_source)).set_labels(
-            cx,
-            vec![
-                "makepad.nl (cached locally)".to_string(),
-                format!("local archive {}", local_archive.display()),
-            ],
-        );
         // Applies the theme above (chrome + map + checkboxes) and reflects
         // the rest of the LayerState defaults (e.g. tilt-shift on) in the
         // layers popover.
         self.apply_layers(cx);
         self.adopt_map_source(cx, &maps_root);
-        self.ui
-            .drop_down(cx, ids!(tile_source))
-            .set_selected_item(cx, self.testmap.active_choice().index());
         nav_data::start_radar_worker(
             cx.thread_spawner(),
             cx.task_pool(),
@@ -2229,30 +2207,6 @@ impl MatchEvent for App {
                 Err(error) => self.set_status(cx, &format!("maps folder: {error}")),
             }
         }
-        if let Some(index) = self.ui.drop_down(cx, ids!(tile_source)).selected(actions) {
-            let choice = provisioner::TileSourceChoice::from_index(index);
-            let map = self.ui.map_view(cx, ids!(map));
-            let maps_root = self.layers.maps_root.clone();
-            match self.testmap.select_source(cx, &map, &maps_root, choice) {
-                Ok(()) => {
-                    self.apply_layers(cx);
-                    self.set_status(
-                        cx,
-                        if choice == provisioner::TileSourceChoice::Hosted {
-                            "tiles: makepad.nl (cached locally)"
-                        } else {
-                            "tiles: local archive"
-                        },
-                    );
-                }
-                Err(error) => {
-                    self.ui
-                        .drop_down(cx, ids!(tile_source))
-                        .set_selected_item(cx, self.testmap.active_choice().index());
-                    self.set_status(cx, &error);
-                }
-            }
-        }
         if self.ui.button(cx, ids!(assistant_button)).clicked(actions) {
             self.assistant_panel_open = !self.assistant_panel_open;
             self.ui
@@ -2576,7 +2530,6 @@ mod ui_parity_tests {
             ids!(layer_wind),
             ids!(theme_night),
             ids!(theme_circuit),
-            ids!(tile_source),
             ids!(assistant_panel),
             ids!(assistant_button),
             ids!(transcript_list),
