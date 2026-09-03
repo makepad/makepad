@@ -1438,7 +1438,7 @@ pub struct DeckEngine {
     pub load_reset: LoadReset,
     /// QUANT's unit in beats, 0 = off. One global value: snapping is a
     /// property of how the operator is working, not of a deck.
-    pub snap_beats: u32,
+    snap_beats: [u32; 2],
     /// Tracks queued for the next free deck, in play order.
     queue: Vec<TrackItem>,
     /// Fill an idle deck from the queue as soon as one frees up.
@@ -1500,7 +1500,7 @@ impl Default for DeckEngine {
             auto_sync: true,
             over_playing: OverPlaying::default(),
             load_reset: LoadReset::default(),
-            snap_beats: 0,
+            snap_beats: [0; 2],
             queue: Vec::new(),
             auto_load_queue: true,
             repeat: false,
@@ -2118,7 +2118,7 @@ impl DeckEngine {
     /// by whole units and it stays the same musical object.
     pub fn move_loop(&mut self, deck: DeckId, start_secs: f64) -> Vec<DeckCmd> {
         let Some(span) = self.deck(deck).loop_span else { return Vec::new() };
-        let unit = self.snap_beats;
+        let unit = self.snap_beats(deck);
         let start = match self.deck(deck).true_grid() {
             Some(grid) => grid.snap_translate(start_secs, span.start_secs, unit),
             None => start_secs,
@@ -2264,7 +2264,7 @@ impl DeckEngine {
     /// phase — the same law as dragging the loop band — and exact with
     /// QUANT off. Nothing sounds until the CUE button is pressed.
     pub fn set_cue(&mut self, deck: DeckId, secs: f64) {
-        let unit = self.snap_beats;
+        let unit = self.snap_beats(deck);
         let state = self.deck(deck);
         let target = match state.true_grid() {
             Some(grid) => grid.snap_translate(secs, state.cue_secs, unit),
@@ -2354,7 +2354,7 @@ impl DeckEngine {
         secs: f64,
         snap: bool,
     ) -> bool {
-        let unit = self.snap_beats;
+        let unit = self.snap_beats(deck);
         let state = self.deck(deck);
         let Some(shape) = state.shape else { return false };
         let duration = state.duration_secs;
@@ -2387,7 +2387,7 @@ impl DeckEngine {
         if !secs.is_finite() {
             return Vec::new();
         }
-        let unit = self.snap_beats;
+        let unit = self.snap_beats(deck);
         let anchor = if out { span.start_secs } else { span.end_secs };
         let target = match self.deck(deck).true_grid() {
             Some(grid) => grid.snap_translate(secs, anchor, unit),
@@ -2418,7 +2418,7 @@ impl DeckEngine {
         if slot >= LOOP_SLOT_CAP as u16 || !self.deck(deck).is_loaded() {
             return false;
         }
-        let unit = self.snap_beats;
+        let unit = self.snap_beats(deck);
         let state = self.deck(deck);
         let at = match state.true_grid() {
             Some(grid) if unit != 0 => {
@@ -3610,8 +3610,14 @@ impl DeckEngine {
         self.load_reset = policy;
     }
 
-    pub fn set_snap_beats(&mut self, beats: u32) {
-        self.snap_beats = beats;
+    /// No commands: a new unit changes nothing until the next gesture, so
+    /// there is nothing to send now.
+    pub fn set_snap_beats(&mut self, deck: DeckId, beats: u32) {
+        self.snap_beats[deck.index()] = beats;
+    }
+
+    pub fn snap_beats(&self, deck: DeckId) -> u32 {
+        self.snap_beats[deck.index()]
     }
 
     pub fn set_auto_sync(&mut self, on: bool) -> Vec<DeckCmd> {
@@ -4146,7 +4152,7 @@ impl DeckEngine {
     /// engaging a loop, every sync correction — seeks a target that must
     /// not be displaced.
     pub fn seek_secs_snapped(&mut self, deck: DeckId, secs: f64) -> Vec<DeckCmd> {
-        let unit = self.snap_beats;
+        let unit = self.snap_beats(deck);
         let snapped = match self.deck(deck).true_grid() {
             Some(grid) => grid.snap_translate(secs, self.snap_reference(deck), unit),
             None => secs,
@@ -5038,7 +5044,7 @@ mod tests {
     fn a_snapped_seek_keeps_the_playheads_offset_into_the_unit() {
         let mut e = DeckEngine::new();
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0); // 0.5 s a beat, 300 s
-        e.set_snap_beats(4);
+        e.set_snap_beats(DeckId::A, 4);
         // Playhead 0.2 s into a beat.
         e.observe(DeckId::A, 10.2, true);
         let cmds = e.seek_secs_snapped(DeckId::A, 63.37);
@@ -5053,7 +5059,7 @@ mod tests {
     fn snap_off_seeks_exactly_where_asked() {
         let mut e = DeckEngine::new();
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
-        assert_eq!(e.snap_beats, 0, "off is the default");
+        assert_eq!(e.snap_beats(DeckId::A), 0, "off is the default");
         e.observe(DeckId::A, 10.2, true);
         let cmds = e.seek_secs_snapped(DeckId::A, 63.37);
         assert_eq!(seek_of(&cmds, DeckId::A), Some(63.37));
@@ -5063,7 +5069,7 @@ mod tests {
     fn a_snapped_seek_without_a_grid_is_exact() {
         let mut e = DeckEngine::new();
         load_unanalysed(&mut e, DeckId::A, 1);
-        e.set_snap_beats(4);
+        e.set_snap_beats(DeckId::A, 4);
         e.observe(DeckId::A, 10.2, true);
         let cmds = e.seek_secs_snapped(DeckId::A, 63.37);
         assert_eq!(seek_of(&cmds, DeckId::A), Some(63.37));
@@ -5073,7 +5079,7 @@ mod tests {
     fn a_snapped_seek_still_clamps_and_mirrors_like_a_plain_one() {
         let mut e = DeckEngine::new();
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0); // 300 s long
-        e.set_snap_beats(4);
+        e.set_snap_beats(DeckId::A, 4);
         e.observe(DeckId::A, 10.2, true);
         e.seek_secs_snapped(DeckId::A, 10_000.0);
         let position = e.deck(DeckId::A).position_secs;
@@ -5088,7 +5094,7 @@ mod tests {
         assert!(e.auto_sync, "auto sync is the default this exists for");
         e.observe(DeckId::A, 32.0, true); // playing, so A leads
         e.observe(DeckId::B, 10.2, false); // parked follower, out of A's phase
-        e.set_snap_beats(4);
+        e.set_snap_beats(DeckId::B, 4);
         let cmds = e.seek_secs_snapped(DeckId::B, 63.0);
         let seeks: Vec<f64> = cmds
             .iter()
@@ -5113,7 +5119,7 @@ mod tests {
     fn a_dragged_loop_moves_by_whole_units_against_its_own_phase() {
         let mut e = DeckEngine::new();
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
-        e.set_snap_beats(4);
+        e.set_snap_beats(DeckId::A, 4);
         e.deck_mut(DeckId::A).loop_span =
             Some(LoopSpan { start_secs: 10.2, end_secs: 12.2 });
         e.observe(DeckId::A, 50.0, true); // outside the span
@@ -5230,7 +5236,7 @@ mod tests {
         assert!((e.deck(DeckId::A).cue_secs - 300.0).abs() < 1e-9);
         // QUANT on: whole units against the cue's own phase, the loop-drag law.
         e.set_cue(DeckId::A, 10.3);
-        e.set_snap_beats(4);
+        e.set_snap_beats(DeckId::A, 4);
         e.set_cue(DeckId::A, 20.0);
         let moved = e.deck(DeckId::A).cue_secs - 10.3;
         let steps = moved / 2.0; // 4 beats at 120 BPM
@@ -5406,13 +5412,17 @@ mod tests {
     }
 
     #[test]
-    fn the_snap_unit_is_one_global_shared_by_both_decks() {
+    fn each_deck_owns_its_own_snap_unit() {
         let mut e = DeckEngine::new();
-        e.set_snap_beats(8);
-        assert_eq!(e.snap_beats, 8);
+        e.set_snap_beats(DeckId::A, 8);
+        assert_eq!(e.snap_beats(DeckId::A), 8);
+        assert_eq!(e.snap_beats(DeckId::B), 0, "and only its own");
         // There is no per-deck unit to disagree with it.
-        e.set_snap_beats(0);
-        assert_eq!(e.snap_beats, 0);
+        e.set_snap_beats(DeckId::B, 4);
+        assert_eq!(e.snap_beats(DeckId::A), 8, "still A's");
+        e.set_snap_beats(DeckId::A, 0);
+        assert_eq!(e.snap_beats(DeckId::A), 0);
+        assert_eq!(e.snap_beats(DeckId::B), 4);
     }
 
     #[test]
@@ -6530,7 +6540,7 @@ mod tests {
         engine.observe(DeckId::A, 10.0, true);
         engine.observe(DeckId::B, 10.0, true);
         engine.apply_auto_sync();
-        engine.set_snap_beats(4);
+        engine.set_snap_beats(DeckId::B, 4);
 
         engine.scratch(DeckId::A, ScratchMotion::Grab);
         engine.observe(DeckId::A, 10.37, true);
@@ -7746,7 +7756,7 @@ mod tests {
     fn a_dragged_edge_snaps_against_its_own_anchor() {
         let mut e = DeckEngine::new();
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0); // half a second a beat
-        e.set_snap_beats(1);
+        e.set_snap_beats(DeckId::A, 1);
         e.observe(DeckId::A, 10.2, true);
         e.engage_loop(DeckId::A, LoopSpan { start_secs: 10.2, end_secs: 12.2 }, false);
         // A whole number of units from the IN, not from the track's grid:
@@ -7787,13 +7797,13 @@ mod tests {
     fn a_press_under_quant_lands_on_the_grid_rather_than_beside_it() {
         let mut e = DeckEngine::new();
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0); // beats every 0.5 s
-        e.set_snap_beats(1);
+        e.set_snap_beats(DeckId::A, 1);
         e.observe(DeckId::A, 30.19, true);
         e.set_slot(DeckId::A, 0, SlotKind::Cue);
         let at = e.deck(DeckId::A).loop_slots[0].span.start_secs;
         assert!((at - 30.0).abs() < 1e-9, "on the beat, at {at}");
         // With QUANT off it lands exactly where the record is.
-        e.set_snap_beats(0);
+        e.set_snap_beats(DeckId::A, 0);
         e.observe(DeckId::A, 40.19, true);
         e.set_slot(DeckId::A, 1, SlotKind::Cue);
         assert!((e.deck(DeckId::A).loop_slots[1].span.start_secs - 40.19).abs() < 1e-9);
@@ -7972,7 +7982,7 @@ mod tests {
         let mut e = DeckEngine::new();
         load_analysed(&mut e, DeckId::A, 1, 120.0, 0.0);
         // QUANT on a whole beat: a placement would round a 10 ms step off.
-        e.set_snap_beats(4);
+        e.set_snap_beats(DeckId::A, 4);
         e.set_cue(DeckId::A, 12.0);
         let before = e.deck(DeckId::A).cue_secs;
         e.nudge_mark(DeckId::A, NudgeTarget::Cue, -0.010);

@@ -3499,6 +3499,8 @@ struct MusicDeckIds {
     stem_state: &'static [LiveId],
     range: &'static [LiveId],
     loop_len: &'static [LiveId],
+    /// This deck's QUANT chip: the unit is the deck's, not the console's.
+    snap: &'static [LiveId],
     play: &'static [LiveId],
     /// The deck's own retire button. NOT `deck_a_eject`: that id belongs
     /// to the video console's ×, and a duplicated id resolves to whichever
@@ -3558,6 +3560,7 @@ impl MusicDeckIds {
                 stem_state: ids!(deck_a_stem_state),
                 range: ids!(deck_a_range),
                 loop_len: ids!(deck_a_loop_len),
+                snap: ids!(music_snap_a),
                 play: ids!(deck_a_play),
                 retire: ids!(deck_a_retire),
                 cue: ids!(deck_a_cue),
@@ -3642,6 +3645,7 @@ impl MusicDeckIds {
                 stem_state: ids!(deck_b_stem_state),
                 range: ids!(deck_b_range),
                 loop_len: ids!(deck_b_loop_len),
+                snap: ids!(music_snap_b),
                 play: ids!(deck_b_play),
                 retire: ids!(deck_b_retire),
                 cue: ids!(deck_b_cue),
@@ -22458,6 +22462,14 @@ p2 {}
                 &refs.time,
                 &format!("{} / {}", format_time(position), format_time(duration)),
             );
+            // This deck's QUANT chip mirrors the engine every pass
+            // (set_value diffs, so an unchanged unit costs nothing).
+            // Without a push it would read the widget's own default of 1
+            // while the engine sat at off.
+            let chip = self.ui.widget(cx, ids.snap);
+            if let Some(mut drop) = chip.borrow_mut::<views::VjBeatsDrop>() {
+                drop.set_value(cx, self.decks.snap_beats(deck));
+            }
             let count = self.ui.widget(cx, ids.loop_len);
             if let Some(mut drop) = count.borrow_mut::<views::VjBeatsDrop>() {
                 drop.set_value(cx, loop_beats);
@@ -22628,19 +22640,12 @@ p2 {}
                 strip.set_cue_marker(cx, cue_secs);
                 strip.set_sound(cx, sound);
                 strip.set_shape(cx, shape);
-                strip.set_snap_grid(cx, grid, self.decks.snap_beats);
+                strip.set_snap_grid(cx, grid, self.decks.snap_beats(deck));
             };
             self.music_refs.decks[index] = refs;
         }
         self.refresh_splat_surface(cx);
         self.paint_lit(cx, ids!(auto_sync), self.decks.auto_sync);
-        // The QUANT chip mirrors the engine every pass (set_value diffs, so
-        // an unchanged unit costs nothing). Without a push it would read
-        // the widget's own default of 1 while the engine sat at off.
-        let chip = self.ui.widget(cx, ids!(music_snap));
-        if let Some(mut drop) = chip.borrow_mut::<views::VjBeatsDrop>() {
-            drop.set_value(cx, self.decks.snap_beats);
-        }
         self.paint_lit(cx, ids!(auto_dj), self.autopilot.on());
         self.paint_lit(cx, ids!(auto_vocal), self.autopilot.vocal_guard);
         self.paint_lit(cx, ids!(auto_phrase), self.autopilot.phrase_snap);
@@ -25064,6 +25069,29 @@ p2 {}
                     self.run_deck_cmds(cx, cmds);
                 }
             }
+            {
+                // THIS DECK'S QUANT — the number is the unit an overview
+                // jump moves in (1 … 16 beats, — off). The list is the
+                // value authority, and the setter emits nothing: a new
+                // unit changes nothing until the next gesture.
+                let uid = self
+                    .ui
+                    .widget(cx, MusicDeckIds::for_deck(deck).snap)
+                    .widget_uid();
+                let mut picked = None;
+                for action in actions.iter() {
+                    if let Some(wa) = action.as_widget_action() {
+                        if wa.widget_uid == uid {
+                            if let views::VjBeatsDropAction::Picked(n) = wa.cast() {
+                                picked = Some(n);
+                            }
+                        }
+                    }
+                }
+                if let Some(n) = picked {
+                    self.decks.set_snap_beats(deck, n);
+                }
+            }
             if refs.mute.clicked(actions) {
                 let cmds = self.decks.toggle_mute(deck);
                 self.run_deck_cmds(cx, cmds);
@@ -25228,24 +25256,6 @@ p2 {}
             let on = !self.decks.auto_sync;
             let cmds = self.decks.set_auto_sync(on);
             self.run_deck_cmds(cx, cmds);
-        }
-        // THE QUANT DROPDOWN — the number is the unit an overview jump
-        // moves in (1 … 16 beats, — off). The list is the value authority.
-        {
-            let uid = self.ui.widget(cx, ids!(music_snap)).widget_uid();
-            let mut picked = None;
-            for action in actions.iter() {
-                if let Some(wa) = action.as_widget_action() {
-                    if wa.widget_uid == uid {
-                        if let views::VjBeatsDropAction::Picked(n) = wa.cast() {
-                            picked = Some(n);
-                        }
-                    }
-                }
-            }
-            if let Some(n) = picked {
-                self.decks.set_snap_beats(n);
-            }
         }
         if self.music_refs.auto_dj.clicked(actions) {
             let on = !self.autopilot.on();

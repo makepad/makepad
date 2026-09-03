@@ -1825,15 +1825,28 @@ script_mod! {
             // placement rounding, which this deliberately is not. It sits
             // at the console's center line, between the two decks it
             // gates equally.
+            //
+            // One word over two chips: the left is deck A's and the right
+            // is deck B's, matching the heads either side. A unit belongs
+            // to a deck rather than to the console because the two decks
+            // are rarely doing the same job -- one is playing and wants
+            // its jumps on the bar, the other is being cued by hand.
             View{
                 width: Fit
                 height: Fit
-                flow: Right
-                spacing: 4
+                flow: Down
+                spacing: 2
                 margin: Inset{left: 10, right: 10}
                 align: Align{x: 0.5, y: 0.5}
-                MusicLabel{width: 40 text: "QUANT"}
-                music_snap := VjBeatsDrop{width: 34}
+                MusicLabel{text: "QUANT"}
+                View{
+                    width: Fit
+                    height: Fit
+                    flow: Right
+                    spacing: 4
+                    music_snap_a := VjBeatsDrop{width: 34}
+                    music_snap_b := VjBeatsDrop{width: 34}
+                }
             }
             deck_b_head := RoundedView{
                 width: Fill
