@@ -10,12 +10,25 @@ const MAX_ZOOM: f64 = 16.0;
 const FIT_MARGIN: f64 = 24.0;
 const ZOOM_STEP: f64 = 1.1;
 const DRAG_THRESHOLD: f64 = 4.0;
+const CLOSE_BUTTON_SIZE: f64 = 28.0;
+const CLOSE_BUTTON_MARGIN: f64 = 16.0;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
 
     mod.widgets.ImageViewerBase = #(ImageViewer::register_widget(vm))
+
+    let ViewerFade = CachedView{
+        draw_bg +: {
+            viewer_opacity: uniform(1.0)
+            pixel: fn() {
+                return self.image.sample(self.pos * self.scale + self.shift)
+                    * self.viewer_opacity
+            }
+        }
+    }
+
     mod.widgets.ImageViewer = set_type_default() do mod.widgets.ImageViewerBase{
         width: Fill
         height: Fill
@@ -74,56 +87,89 @@ script_mod! {
             flow: Down
             align: Align{y: 1.0}
             padding: Inset{left: 18 right: 18 bottom: 16}
-            bar := RoundedShadowView{
+            bar := ViewerFade{
                 width: Fill
                 height: 42
-                flow: Right
-                align: Align{y: 0.5}
-                spacing: theme.space_2
-                padding: Inset{left: 12 right: 10 top: 6 bottom: 6}
-                show_bg: true
-                draw_bg +: {
-                    color: #x17191eef
-                    border_color: #xffffff18
-                    border_size: 1.0
-                    border_radius: 10.0
-                    shadow_color: #x00000088
-                    shadow_radius: 14.0
-                }
-                title := Label{
-                    width: Fit
-                    height: Fit
-                    draw_text +: {
-                        color: theme.flow_text
-                        text_style: theme.font_bold{font_size: 9.5}
-                    }
-                }
-                size := Label{
-                    width: Fit
-                    height: Fit
-                    draw_text +: {
-                        color: theme.flow_text_muted
-                        text_style: theme.font_regular{font_size: 8.5}
-                    }
-                }
-                zoom := Label{
+                flow: Overlay
+                bar_surface := RoundedShadowView{
                     width: Fill
-                    height: Fit
-                    draw_text +: {
-                        color: theme.flow_text_muted
-                        text_style: theme.font_regular{font_size: 8.5}
+                    height: Fill
+                    flow: Right
+                    align: Align{y: 0.5}
+                    spacing: theme.space_2
+                    padding: Inset{left: 12 right: 10 top: 6 bottom: 6}
+                    show_bg: true
+                    draw_bg +: {
+                        color: #x17191eef
+                        border_color: #xffffff18
+                        border_size: 1.0
+                        border_radius: 10.0
+                        shadow_color: #x00000088
+                        shadow_radius: 14.0
                     }
+                    title := Label{
+                        width: Fit
+                        height: Fit
+                        draw_text +: {
+                            color: theme.flow_text
+                            text_style: theme.font_bold{font_size: 9.5}
+                        }
+                    }
+                    size := Label{
+                        width: Fit
+                        height: Fit
+                        draw_text +: {
+                            color: theme.flow_text_muted
+                            text_style: theme.font_regular{font_size: 8.5}
+                        }
+                    }
+                    zoom := Label{
+                        width: Fill
+                        height: Fit
+                        draw_text +: {
+                            color: theme.flow_text_muted
+                            text_style: theme.font_regular{font_size: 8.5}
+                        }
+                    }
+                    previous := ButtonFlatter{text: "←"}
+                    next := ButtonFlatter{text: "→"}
+                    fit := ButtonFlat{text: "Fit"}
+                    fit_width := ButtonFlat{text: "Fit width"}
+                    actual := ButtonFlat{text: "1:1 px"}
+                    double := ButtonFlat{text: "2:1"}
+                    pixels := ButtonFlat{text: "Pixels: auto"}
+                    save := Button{text: "Save…"}
+                    copy := ButtonFlat{text: "Copy digest"}
+                    close := ButtonFlatter{text: "×"}
                 }
-                previous := ButtonFlatter{text: "←"}
-                next := ButtonFlatter{text: "→"}
-                fit := ButtonFlat{text: "Fit"}
-                fit_width := ButtonFlat{text: "Fit width"}
-                actual := ButtonFlat{text: "1:1 px"}
-                double := ButtonFlat{text: "2:1"}
-                pixels := ButtonFlat{text: "Pixels: auto"}
-                save := Button{text: "Save…"}
-                copy := ButtonFlat{text: "Copy digest"}
-                close := ButtonFlatter{text: "×"}
+            }
+        }
+        top_close := ViewerFade{
+            width: 28
+            height: 28
+            margin: Inset{left: 16 top: 16}
+            flow: Overlay
+            top_close_button := ButtonFlatIcon{
+                width: Fill
+                height: Fill
+                margin: 0
+                padding: 0
+                icon_walk: Walk{width: 12 height: 12}
+                draw_bg +: {
+                    color: theme.flow_surface_translucent
+                    color_hover: theme.flow_surface_hover
+                    color_down: theme.flow_surface_raised
+                    color_focus: theme.flow_surface_hover
+                    border_color: theme.flow_edge
+                    border_color_hover: theme.flow_edge_soft
+                    border_color_down: theme.flow_edge_soft
+                    border_color_focus: theme.flow_edge_soft
+                    border_radius: 14.0
+                }
+                draw_icon +: {
+                    color: theme.flow_text
+                    svg: crate_resource("self:resources/icons/close.svg")
+                }
             }
         }
     }
@@ -194,11 +240,15 @@ pub struct ImageViewer {
     #[rust]
     picture_rect: Option<Rect>,
     #[rust]
+    close_button_rect: Option<Rect>,
+    #[rust]
     shown_percent: Option<i64>,
     #[rust]
     fit_mode: bool,
     #[rust]
     snap_to_fit: bool,
+    #[rust]
+    closing: bool,
 }
 
 /// Layout-points-per-image-pixel scale which contains the image inside the
@@ -225,6 +275,13 @@ fn fit_width_scale(viewport: Vec2d, image: Vec2d, margin: f64) -> f64 {
 
 fn center_offset(viewport: Vec2d, image: Vec2d, scale: f64) -> Vec2d {
     (viewport - image * scale) * 0.5
+}
+
+fn close_button_rect(stage: Rect) -> Rect {
+    Rect {
+        pos: stage.pos + dvec2(CLOSE_BUTTON_MARGIN, CLOSE_BUTTON_MARGIN),
+        size: dvec2(CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE),
+    }
 }
 
 /// The image is centred on an axis while it is smaller than the viewport. On
@@ -276,7 +333,7 @@ fn ease(current: f64, target: f64, dt: f64) -> f64 {
 
 impl ImageViewer {
     pub fn is_open(&self) -> bool {
-        self.item.is_some()
+        self.item.is_some() && !self.closing
     }
 
     #[cfg(test)]
@@ -316,13 +373,16 @@ impl ImageViewer {
         self.target_pan = Vec2d::default();
         self.opacity = 0.18;
         self.picture_rect = None;
+        self.close_button_rect = None;
         self.shown_percent = None;
         self.fit_mode = true;
         self.snap_to_fit = true;
+        self.closing = false;
         self.view.set_visible(cx, true);
         self.view
             .view(cx, ids!(picture))
             .set_visible(cx, false);
+        self.sync_control_opacity(cx);
         cx.set_key_focus(self.view.area());
         self.next_frame = cx.new_next_frame();
         self.redraw(cx);
@@ -330,9 +390,19 @@ impl ImageViewer {
     }
 
     pub fn close(&mut self, cx: &mut Cx) {
-        self.item = None;
+        if self.item.is_none() || self.closing {
+            return;
+        }
+        self.closing = true;
         self.drag = None;
         self.pinch = None;
+        self.next_frame = cx.new_next_frame();
+        self.redraw(cx);
+    }
+
+    fn finish_close(&mut self, cx: &mut Cx) {
+        self.item = None;
+        self.closing = false;
         self.view.set_visible(cx, false);
         self.redraw(cx);
     }
@@ -357,12 +427,39 @@ impl ImageViewer {
         self.target_zoom / self.dpi_factor.max(1e-6)
     }
 
+    fn sync_control_opacity(&self, cx: &mut Cx) {
+        let opacity = [self.opacity as f32];
+        self.view
+            .view(cx, ids!(bar))
+            .set_uniform(cx, id!(viewer_opacity), &opacity);
+        self.view
+            .view(cx, ids!(top_close))
+            .set_uniform(cx, id!(viewer_opacity), &opacity);
+    }
+
     fn sync_picture(&mut self, cx: &mut Cx) {
         if self.item.is_none() {
             return;
         }
         self.refresh_dpi_factor(cx);
         let stage = self.stage_rect(cx);
+        let close_rect = close_button_rect(stage);
+        if stage.size.x > 0.0
+            && stage.size.y > 0.0
+            && self.close_button_rect != Some(close_rect)
+        {
+            self.view.view(cx, ids!(top_close)).set_walk(
+                cx,
+                Walk {
+                    abs_pos: Some(close_rect.pos),
+                    width: Size::Fixed(close_rect.size.x),
+                    height: Size::Fixed(close_rect.size.y),
+                    ..Walk::default()
+                },
+            );
+            self.close_button_rect = Some(close_rect);
+        }
+        self.sync_control_opacity(cx);
         if stage.size.x <= 0.0 || stage.size.y <= 0.0 {
             self.view
                 .view(cx, ids!(picture))
@@ -549,6 +646,13 @@ impl ImageViewer {
         if self.view.button(cx, ids!(close)).clicked(actions) {
             out.push(ImageViewerAction::Close);
         }
+        if self
+            .view
+            .button(cx, ids!(top_close_button))
+            .clicked(actions)
+        {
+            out.push(ImageViewerAction::Close);
+        }
         if self.view.button(cx, ids!(save)).clicked(actions) {
             out.push(ImageViewerAction::Save);
         }
@@ -599,9 +703,11 @@ impl Widget for ImageViewer {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        self.view.handle_event(cx, event, scope);
         if self.item.is_none() {
             return;
+        }
+        if !self.closing {
+            self.view.handle_event(cx, event, scope);
         }
         if let Some(nf) = self.next_frame.is_event(event) {
             let dt = (nf.time - self.last_time).clamp(0.0, 0.1);
@@ -609,15 +715,23 @@ impl Widget for ImageViewer {
             self.zoom = ease(self.zoom, self.target_zoom, dt);
             self.pan.x = ease(self.pan.x, self.target_pan.x, dt);
             self.pan.y = ease(self.pan.y, self.target_pan.y, dt);
-            self.opacity = ease(self.opacity, 1.0, dt);
+            self.opacity = ease(self.opacity, if self.closing { 0.0 } else { 1.0 }, dt);
             self.sync_picture(cx);
+            if self.closing && self.opacity == 0.0 {
+                self.finish_close(cx);
+                return;
+            }
             if (self.zoom - self.target_zoom).abs() > 1e-4
                 || (self.pan - self.target_pan).length() > 0.05
-                || self.opacity < 0.999
+                || (!self.closing && self.opacity < 0.999)
+                || (self.closing && self.opacity > 0.0)
             {
                 self.next_frame = cx.new_next_frame();
             }
             self.redraw(cx);
+        }
+        if self.closing {
+            return;
         }
         if let Event::TouchUpdate(event) = event {
             self.handle_touch(cx, event);
@@ -648,7 +762,8 @@ impl Widget for ImageViewer {
                 cx.set_key_focus(self.view.area());
                 let picture = self.view.view(cx, ids!(picture)).area().rect(cx);
                 let bar = self.view.view(cx, ids!(bar)).area().rect(cx);
-                if bar.contains(event.abs) {
+                let top_close = self.view.view(cx, ids!(top_close)).area().rect(cx);
+                if bar.contains(event.abs) || top_close.contains(event.abs) {
                     return;
                 }
                 if picture.contains(event.abs) && event.tap_count >= 2 {
@@ -749,6 +864,31 @@ mod tests {
     fn centre_offset_centres_both_smaller_and_larger_axes() {
         let offset = center_offset(dvec2(1000.0, 800.0), dvec2(1200.0, 200.0), 1.0);
         assert!((offset - dvec2(-100.0, 300.0)).length() < 1e-9);
+    }
+
+    #[test]
+    fn close_button_stays_at_stage_top_left_across_picture_transforms() {
+        let stage = Rect {
+            pos: dvec2(37.0, 59.0),
+            size: dvec2(1000.0, 800.0),
+        };
+        let expected = Rect {
+            pos: dvec2(53.0, 75.0),
+            size: dvec2(28.0, 28.0),
+        };
+
+        for (zoom, pan) in [
+            (0.25, dvec2(0.0, 0.0)),
+            (1.0, dvec2(120.0, -80.0)),
+            (8.0, dvec2(-900.0, 650.0)),
+        ] {
+            let image = dvec2(1600.0, 1200.0);
+            let _picture = Rect {
+                pos: stage.pos + center_offset(stage.size, image, zoom) + pan,
+                size: image * zoom,
+            };
+            assert_eq!(close_button_rect(stage), expected);
+        }
     }
 
     #[test]
