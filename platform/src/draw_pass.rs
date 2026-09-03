@@ -524,6 +524,21 @@ pub struct CxDrawPass {
     /// blurs the world in realtime instead of holding the last rebuild —
     /// while texture caches, which exist to NOT re-render, stay untouched.
     pub live_with_parent: bool,
+    /// The draw list that last declared this pass a dependency through
+    /// `make_child_pass`, with that list's redraw id at the time. The parent
+    /// link above outlives the frame that made it, but the pass's output is
+    /// only consumed while the list that attached it still stands: once that
+    /// list is recorded again without re-attaching — the window stopped
+    /// capturing the gauss scene, the map stopped baking its shadow mask —
+    /// the pass is orphaned and must not be painted (see
+    /// `Cx::pass_attachment_is_stale`). `None` for a pass parented by a window
+    /// or by hand (`set_pass_parent`, a hand-built chain); those never go
+    /// stale.
+    pub attached_by: Option<(DrawListId, u64)>,
+    /// Set by `Cx::repaint_pass`: the caller asked for this pass by name, so
+    /// it paints once even while orphaned (a thumbnail sheet re-executed for
+    /// a texture readback). Cleared when the repaint order is computed.
+    pub repaint_requested: bool,
     pub pass_rect: Option<CxDrawPassRect>,
     pub view_shift: Vec2d,
     pub view_scale: Vec2d,
@@ -558,6 +573,8 @@ impl Default for CxDrawPass {
             parent: CxDrawPassParent::None,
             paint_dirty: false,
             live_with_parent: false,
+            attached_by: None,
+            repaint_requested: false,
             pass_rect: None,
             os: CxOsPass::default(),
             gpu_time_query: None,

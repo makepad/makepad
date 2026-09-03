@@ -135,12 +135,28 @@ impl Cx {
     pub(crate) fn compute_pass_repaint_order(&mut self, passes_todo: &mut Vec<DrawPassId>) {
         passes_todo.clear();
 
+        // An orphaned child pass — attached by a draw list that has since
+        // been recorded without it (`Cx::pass_attachment_is_stale`) — is not
+        // painted, is neither a source nor a sink of dirtiness below, and has
+        // its flag cleared so an idle app does not keep requesting frames on
+        // its behalf. The one exception is an explicit `repaint_pass`, which
+        // paints it this once.
+        for draw_pass_id in self.passes.id_iter() {
+            let requested = std::mem::take(&mut self.passes[draw_pass_id].repaint_requested);
+            if !requested && self.pass_attachment_is_stale(draw_pass_id) {
+                self.passes[draw_pass_id].paint_dirty = false;
+            }
+        }
+
         // we need this because we don't mark the entire deptree of passes dirty every small paint
         loop {
             // loop untill we don't propagate anymore
             let mut altered = false;
             for draw_pass_id in self.passes.id_iter() {
-                if self.demo_time_repaint && self.pass_live_for_time_repaint(draw_pass_id) {
+                if self.demo_time_repaint
+                    && self.pass_live_for_time_repaint(draw_pass_id)
+                    && !self.pass_attachment_is_stale(draw_pass_id)
+                {
                     self.passes[draw_pass_id].paint_dirty = true;
                 }
                 if self.passes[draw_pass_id].paint_dirty {
@@ -161,7 +177,10 @@ impl Cx {
             // The gauss chain rides this — realtime glass — while texture
             // caches, which exist to NOT re-render, never opt in.
             for draw_pass_id in self.passes.id_iter() {
-                if self.passes[draw_pass_id].live_with_parent && !self.passes[draw_pass_id].paint_dirty {
+                if self.passes[draw_pass_id].live_with_parent
+                    && !self.passes[draw_pass_id].paint_dirty
+                    && !self.pass_attachment_is_stale(draw_pass_id)
+                {
                     if let CxDrawPassParent::DrawPass(parent_pass_id) = self.passes[draw_pass_id].parent {
                         if self.passes[parent_pass_id].paint_dirty {
                             self.passes[draw_pass_id].paint_dirty = true;
@@ -1284,7 +1303,59 @@ impl Cx {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{draw_list::DrawList, draw_pass::DrawPass};
     use std::{cell::Cell, rc::Rc};
+
+    #[test]
+    fn orphaned_child_pass_is_not_repainted_until_reattached() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let parent = DrawPass::new(&mut cx);
+        let child = DrawPass::new(&mut cx);
+        let list = DrawList::new(&mut cx);
+        let (parent_id, child_id) = (parent.draw_pass_id(), child.draw_pass_id());
+        let mut todo = Vec::new();
+
+        // Recorded at redraw 1, attaching the child: painted, and its
+        // liveness rides on the parent.
+        cx.draw_lists[list.id()].clear_draw_items(1);
+        cx.attach_child_pass(child_id, parent_id, Some(list.id()));
+        cx.passes[child_id].live_with_parent = true;
+        cx.passes[parent_id].paint_dirty = true;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(todo.contains(&child_id));
+        assert!(todo.contains(&parent_id));
+
+        // Recorded again at redraw 2 without the child: orphaned. Neither the
+        // parent's repaint nor a direct dirty flag paints it, and the flag is
+        // cleared so nothing keeps the frame loop awake for it.
+        cx.draw_lists[list.id()].clear_draw_items(2);
+        cx.passes[parent_id].paint_dirty = true;
+        cx.passes[child_id].paint_dirty = true;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(!todo.contains(&child_id));
+        assert!(todo.contains(&parent_id));
+        assert!(!cx.passes[child_id].paint_dirty);
+
+        // An explicit request paints an orphan this once.
+        cx.repaint_pass(child_id);
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(todo.contains(&child_id));
+        cx.passes[child_id].paint_dirty = true;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(!todo.contains(&child_id));
+
+        // Re-attached by the current recording: live again.
+        cx.attach_child_pass(child_id, parent_id, Some(list.id()));
+        cx.passes[child_id].paint_dirty = true;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(todo.contains(&child_id));
+
+        // A freed attaching list orphans too.
+        drop(list);
+        cx.passes[child_id].paint_dirty = true;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(!todo.contains(&child_id));
+    }
 
     #[test]
     fn platform_monotonic_time_moves_forward() {
