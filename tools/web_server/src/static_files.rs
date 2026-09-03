@@ -315,6 +315,17 @@ impl StaticHandler {
         };
         let original_metadata = match original.metadata() {
             Ok(metadata) if metadata.is_file() => metadata,
+            Ok(metadata) if metadata.is_dir() && !request_path.ends_with('/') => {
+                // `/score` names a directory: send the browser to `/score/`
+                // so the relative asset URLs inside its index resolve.
+                let query = headers
+                    .path
+                    .find('?')
+                    .map(|at| &headers.path[at..])
+                    .unwrap_or("");
+                send_response(sender, redirect(&format!("{request_path}/{query}")));
+                return;
+            }
             Ok(_) => {
                 send_response(sender, static_error(404, "not found"));
                 return;
@@ -1174,6 +1185,17 @@ fn range_error(
             if public { PUBLIC_ASSET_HEADERS } else { "" }
         ),
         b"range not satisfiable".to_vec(),
+    )
+}
+
+/// A permanent redirect to `location` (a directory path gaining its slash).
+fn redirect(location: &str) -> HttpServerResponse {
+    response(
+        301,
+        Some("text/plain; charset=utf-8"),
+        "public, max-age=3600",
+        &format!("Location: {location}\r\n"),
+        b"moved".to_vec(),
     )
 }
 
