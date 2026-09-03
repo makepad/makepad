@@ -26,7 +26,7 @@
 
 use crate::faces::FaceHost;
 use crate::graph_edit::{self, NODE_WIDTH};
-use makepad_flow::{Graph, Node, NodeInputValue, PortType};
+use makepad_flow::{Graph, Literal, Node, NodeInputValue, PortType};
 use makepad_widgets::makepad_draw::DrawSvg;
 use makepad_widgets::widget_tree::CxWidgetExt;
 use makepad_widgets::*;
@@ -53,6 +53,62 @@ const GRID_CELL: f64 = 24.0;
 /// spacing doubles ("hops up a level").
 const GRID_MIN_PX: f64 = 14.0;
 const FIT_MARGIN: f64 = 32.0;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PortIcon {
+    Text,
+    Image,
+    Audio,
+    Video,
+    Mesh,
+    Json,
+    Bytes,
+}
+
+impl PortIcon {
+    pub(crate) fn for_type(ty: PortType) -> Self {
+        match ty {
+            PortType::Text => Self::Text,
+            PortType::Image => Self::Image,
+            PortType::Audio => Self::Audio,
+            PortType::Video => Self::Video,
+            PortType::Mesh => Self::Mesh,
+            PortType::Json | PortType::List => Self::Json,
+            PortType::Bytes => Self::Bytes,
+        }
+    }
+
+    #[cfg(test)]
+    fn path(self) -> &'static str {
+        match self {
+            Self::Text => "resources/icons/text.svg",
+            Self::Image => "resources/icons/image.svg",
+            Self::Audio => "resources/icons/audio.svg",
+            Self::Video => "resources/icons/video.svg",
+            Self::Mesh => "resources/icons/mesh.svg",
+            Self::Json => "resources/icons/json.svg",
+            Self::Bytes => "resources/icons/bytes.svg",
+        }
+    }
+}
+
+pub(crate) fn declared_output_type(node: &Node) -> Option<PortType> {
+    if node.type_name != "Output" {
+        return None;
+    }
+    node.params
+        .iter()
+        .find_map(|(name, value)| {
+            if name != "type" {
+                return None;
+            }
+            match value {
+                Literal::Id(name) | Literal::Str(name) => PortType::from_str(name),
+                _ => None,
+            }
+        })
+        .or_else(|| node.inputs.first().map(|input| input.ty))
+}
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -129,7 +185,6 @@ script_mod! {
         icon_video: KindIcon{ color: #xffd8e6 svg: crate_resource("self:resources/icons/video.svg") }
         icon_mesh: KindIcon{ color: #xd8f2d8 svg: crate_resource("self:resources/icons/mesh.svg") }
         icon_json: KindIcon{ color: #xfff2c8 svg: crate_resource("self:resources/icons/json.svg") }
-        icon_list: KindIcon{ color: #xeef2d0 svg: crate_resource("self:resources/icons/list.svg") }
         icon_bytes: KindIcon{ color: #xd0d0d0 svg: crate_resource("self:resources/icons/bytes.svg") }
 
         icon_check: KindIcon{ color: #x4cc46a svg: crate_resource("self:resources/icons/check.svg") }
@@ -406,8 +461,6 @@ pub struct FlowCanvas {
     icon_mesh: DrawSvg,
     #[live]
     icon_json: DrawSvg,
-    #[live]
-    icon_list: DrawSvg,
     #[live]
     icon_bytes: DrawSvg,
     #[live]
@@ -732,10 +785,20 @@ impl FlowCanvas {
 
     fn full_bleed(node: &Node) -> bool {
         match node.kind.as_str() {
-            "output" => node.inputs.first().is_some_and(|input| input.ty == PortType::Image),
+            "output" => declared_output_type(node)
+                .or_else(|| node.inputs.first().map(|input| input.ty))
+                == Some(PortType::Image),
             "input" => node.outputs.first().is_some_and(|port| port.ty == PortType::Image),
             "gen" => node.outputs.first().is_some_and(|port| port.ty == PortType::Image),
             _ => false,
+        }
+    }
+
+    fn input_type(node: &Node, port: usize) -> PortType {
+        if port == 0 {
+            declared_output_type(node).unwrap_or(node.inputs[port].ty)
+        } else {
+            node.inputs[port].ty
         }
     }
 
@@ -1011,15 +1074,14 @@ impl FlowCanvas {
     }
 
     fn port_icon(&mut self, ty: PortType) -> &mut DrawSvg {
-        match ty {
-            PortType::Text => &mut self.icon_text,
-            PortType::Image => &mut self.icon_image,
-            PortType::Audio => &mut self.icon_audio,
-            PortType::Video => &mut self.icon_video,
-            PortType::Mesh => &mut self.icon_mesh,
-            PortType::Json => &mut self.icon_json,
-            PortType::List => &mut self.icon_list,
-            PortType::Bytes => &mut self.icon_bytes,
+        match PortIcon::for_type(ty) {
+            PortIcon::Text => &mut self.icon_text,
+            PortIcon::Image => &mut self.icon_image,
+            PortIcon::Audio => &mut self.icon_audio,
+            PortIcon::Video => &mut self.icon_video,
+            PortIcon::Mesh => &mut self.icon_mesh,
+            PortIcon::Json => &mut self.icon_json,
+            PortIcon::Bytes => &mut self.icon_bytes,
         }
     }
 
@@ -1036,7 +1098,11 @@ impl FlowCanvas {
                 pos: dvec2(r.pos.x + 2.0, label_y + 5.0),
                 size: dvec2(15.0, 15.0),
             };
-            self.kind_icon(&node.kind).draw_abs(cx, icon_rect);
+            if let Some(ty) = declared_output_type(node) {
+                self.port_icon(ty).draw_abs(cx, icon_rect);
+            } else {
+                self.kind_icon(&node.kind).draw_abs(cx, icon_rect);
+            }
             let id_w = self.text_width(cx, &self.draw_title, &node.id);
             self.draw_title
                 .draw_abs(cx, dvec2(r.pos.x + 23.0, label_y + 6.0), &node.id);
@@ -1235,7 +1301,7 @@ impl FlowCanvas {
                 }
             }
             // Ports: a dark disc with a ring in the port-type colour.
-            for (port, input) in node.inputs.iter().enumerate() {
+            for port in 0..node.inputs.len() {
                 let p = self.port_local(graph, index, port, false);
                 let ok = !compatible_active || self.compatible.contains(&(index, port));
                 let hot = wire_target == Some((index, port));
@@ -1243,7 +1309,7 @@ impl FlowCanvas {
                 Self::set_color(&mut self.draw_over, self.card_color, 1.0);
                 self.draw_over.circle(p.x as f32, p.y as f32, radius);
                 self.draw_over.fill();
-                let color = Self::port_color(input.ty);
+                let color = Self::port_color(Self::input_type(node, port));
                 Self::set_color(&mut self.draw_over, color, if ok { 1.0 } else { 0.25 });
                 self.draw_over.circle(p.x as f32, p.y as f32, radius - 1.0);
                 self.draw_over.stroke(if hot { 3.0 } else { 2.0 });
@@ -1263,13 +1329,13 @@ impl FlowCanvas {
         // The port-type icons inside the discs.
         for index in 0..graph.nodes.len() {
             let node = &graph.nodes[index];
-            for (port, input) in node.inputs.iter().enumerate() {
+            for port in 0..node.inputs.len() {
                 let p = self.port_local(graph, index, port, false);
                 let rect = Rect {
                     pos: p - dvec2(5.5, 5.5),
                     size: dvec2(11.0, 11.0),
                 };
-                self.port_icon(input.ty).draw_abs(cx, rect);
+                self.port_icon(Self::input_type(node, port)).draw_abs(cx, rect);
             }
             for (port, output) in node.outputs.iter().enumerate() {
                 let p = self.port_local(graph, index, port, true);
@@ -1333,6 +1399,35 @@ impl FlowCanvas {
             })
             || (self.camera.pan - self.target_pan).length() > 0.05
             || (self.camera.scale - self.target_scale).abs() > 1e-4
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_port_type_icon_exists() {
+        let types = [
+            PortType::Text,
+            PortType::Image,
+            PortType::Audio,
+            PortType::Video,
+            PortType::Mesh,
+            PortType::Json,
+            PortType::List,
+            PortType::Bytes,
+        ];
+        for ty in types {
+            let path = PortIcon::for_type(ty).path();
+            assert!(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join(path)
+                    .is_file(),
+                "missing icon for {}: {path}",
+                ty.as_str()
+            );
+        }
     }
 }
 
