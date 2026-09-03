@@ -5275,6 +5275,18 @@ fn resolve_clock_source(
     }
 }
 
+/// Whether the house clock should still be disciplined from this source.
+///
+/// A deck whose record is under a hand or a motor is reporting where the
+/// FINGER is, not where the music is, and correcting the room's oscillator
+/// from it would drag the whole room across the gesture. The clock coasts
+/// instead -- it keeps the grid it had, which for the length of a scratch
+/// is exactly right. Only a deck source can be held this way: the room's
+/// own detector and the operator's taps are unaffected.
+fn clock_follows_source(source: ClockSource, leader_platter_held: bool) -> bool {
+    !(source == ClockSource::Deck && leader_platter_held)
+}
+
 /// Where a raw estimate says the beat is, in the clock's own terms.
 ///
 /// `bar_aware` sources (a deck's analysed grid, an operator tap) can vouch
@@ -11361,6 +11373,13 @@ p2 {}
         match self.beat_source(snap) {
             Some((beat, bar_aware, source)) => {
                 self.clock_confidence = beat.confidence;
+                // The source is recorded first either way, so the ladder
+                // readout does not flicker for the length of a gesture.
+                if !clock_follows_source(source, self.decks.leader_platter_held()) {
+                    self.clock_source = source;
+                    self.beat_clock.coast(secs);
+                    return;
+                }
                 if let Some(target) = beat_target(&beat, now, bar_aware) {
                     self.clock_source = source;
                     self.beat_clock.discipline(secs, target);
@@ -22094,6 +22113,7 @@ p2 {}
             // A motor gesture has no release event to clear itself on, so
             // the mixer's word is what ends it.
             self.decks.observe_spin(deck, snapshot.scratching);
+            self.decks.observe_platter(deck, snapshot.platter_rate);
             self.decks.observe_splat(deck, snapshot.splat);
         }
     }
@@ -22307,6 +22327,9 @@ p2 {}
                 snapshot.playing,
                 snapshot.scratching,
             );
+            // Off THIS frame's snapshot, beside the flag that decides
+            // whether to show it: the engine's mirror is a pump behind.
+            let platter_rate = snapshot.platter_rate;
             self.deck_splat_snapshot_seen[index] = snapshot.splat.is_some();
             self.decks.observe_splat(deck, snapshot.splat);
             let state = self.decks.deck(deck);
@@ -22399,7 +22422,16 @@ p2 {}
             let refs = std::mem::take(&mut self.music_refs.decks[index]);
             self.set_label(cx, base, &refs.title, &title);
             self.set_label(cx, base + 1, &refs.artist, &artist);
-            self.set_label(cx, base + 2, &refs.bpm, &format_bpm(grid, rate + bend));
+            // While a gesture owns the record the tempo readout says what
+            // the record is DOING, minus sign and all — the one place in
+            // the tab that can say it is running backwards. The readout
+            // already leans with a held bend; this is the same idea
+            // carried to its end.
+            let shown_rate = match scratching {
+                true => platter_rate,
+                false => rate + bend,
+            };
+            self.set_label(cx, base + 2, &refs.bpm, &format_bpm(grid, shown_rate));
             self.set_label(
                 cx,
                 base + 3,
@@ -29485,6 +29517,22 @@ mod sync_tests {
         // The operator outranks every one of them.
         assert_eq!(resolve_clock_source(true, true, true, true), Operator);
         assert_eq!(resolve_clock_source(false, false, false, false), None);
+    }
+
+    /// A record under a hand is reporting where the finger is. The room's
+    /// clock keeps the grid it had rather than being dragged across the
+    /// gesture — and only a DECK source can be held that way.
+    #[test]
+    fn the_room_clock_keeps_its_grid_while_the_leading_record_is_under_a_hand() {
+        use ClockSource::*;
+        assert!(!clock_follows_source(Deck, true), "a held deck is not a clock");
+        assert!(clock_follows_source(Deck, false));
+        // The room, the detector and the operator are the operator's own
+        // and are not silenced by a hand on a deck.
+        for source in [Detector, External, Operator, None] {
+            assert!(clock_follows_source(source, true), "{source:?} still leads");
+            assert!(clock_follows_source(source, false));
+        }
     }
 
     #[test]

@@ -1029,6 +1029,17 @@ pub struct DeckState {
     pub position_secs: f64,
     /// Playback rate multiplier; 1.0 = the track's own tempo.
     pub rate: f64,
+    /// What the PLATTER is doing, as a multiple of the track's own tempo:
+    /// the rate above normally, the scratch ramp's own settled output
+    /// while a hand or a motor owns the record, negative under a reverse
+    /// hold and zero at the bottom of a brake.
+    ///
+    /// The third tempo, and the one rule that keeps the three apart: this
+    /// is a READOUT and never a command. `rate` is what the fader and the
+    /// lock asked for and is what every sync decision is made against;
+    /// this is only what the record happens to be turning at while a
+    /// gesture owns it, which is nobody else's tempo to match.
+    pub platter_rate: f64,
     /// Whether the rate above was worked out by SYNC rather than put there
     /// by hand.
     ///
@@ -1127,6 +1138,7 @@ impl Default for DeckState {
             splat: None,
             position_secs: 0.0,
             rate: 1.0,
+            platter_rate: 1.0,
             rate_from_lock: false,
             bend: 0.0,
             pitch: 0.0,
@@ -1232,7 +1244,26 @@ impl DeckState {
         self.true_grid().map(|grid| grid.effective_bpm(self.rate))
     }
 
+    /// The tempo the record is turning at THIS instant, gesture and all.
+    ///
+    /// Third of three, and the three are three named accessors on one
+    /// type: the grid's own `bpm` is the base, [`effective_bpm`] is that
+    /// scaled by the fader and the lock, and this is what the platter is
+    /// actually doing. Can be negative under a reverse hold and zero at
+    /// the bottom of a brake, which is why it is a readout and not a
+    /// number anything is asked to match.
+    ///
+    /// [`effective_bpm`]: Self::effective_bpm
+    pub fn live_bpm(&self) -> Option<f64> {
+        self.true_grid().map(|grid| grid.effective_bpm(self.platter_rate))
+    }
+
     /// A view for the sync arithmetic.
+    ///
+    /// Carries the RATE-SCALED tempo and never the platter's. A hand on a
+    /// record is not a tempo the other deck should be asked to match, and
+    /// this is the line that keeps the published instantaneous number from
+    /// quietly becoming a rate command.
     pub fn sync_view(&self) -> Option<SyncView> {
         let grid = self.true_grid()?;
         Some(SyncView {
@@ -3076,6 +3107,16 @@ impl DeckEngine {
         state.playing = playing;
     }
 
+    /// What the mixer says the platter is turning at. A plain readout,
+    /// like the splat's: no state machine, no clamp, and no sentinel --
+    /// zero and negative numbers are legal readings from a brake and a
+    /// reverse hold. Only a number that is not one is refused.
+    pub fn observe_platter(&mut self, deck: DeckId, rate: f64) {
+        if rate.is_finite() {
+            self.deck_mut(deck).platter_rate = rate;
+        }
+    }
+
     // ---- tempo, sync, scratch ----------------------------------------------
 
     /// The deck the other one should follow. A pinned master stands first:
@@ -3222,6 +3263,8 @@ impl DeckEngine {
         // with a playhead that is not moving. The play() re-lock lands the
         // phase when the leader actually runs.
         let leader_playing = self.deck(leader).playing;
+        // Read before the follower is borrowed mutably below.
+        let leader_held = self.deck(leader).scratching;
         let lookahead = self.land_lookahead_secs;
         let mut cmds = Vec::new();
         let state = self.deck_mut(follower);
@@ -3257,7 +3300,10 @@ impl DeckEngine {
             return cmds;
         }
         // A hand on the record owns the playhead; the phase lock waits.
-        if !state.scratching && leader_playing && state.playing {
+        // A held leader has no phase worth landing on — the same guard the
+        // servo takes, at event time. The tempo match above still runs:
+        // the leader's `rate` is the fader's and stays true throughout.
+        if !state.scratching && !leader_held && leader_playing && state.playing {
             if let Some(secs) = plan.seek_secs {
                 // Land where the lock is true when the seek ARRIVES: both
                 // decks keep moving while the command crosses to the audio
@@ -3424,12 +3470,33 @@ impl DeckEngine {
     /// analysed grid is never exactly the record, so without a held
     /// correction two "synced" decks walk apart and the next event snaps
     /// them back with an audible jump.
+    /// Whether the deck the group is following has a hand or a motor on
+    /// its record.
+    ///
+    /// Asked on `sync_leader`, which is what the room clock reads, and so
+    /// deliberately NOT the same question the servo gates on: that one
+    /// takes `sync_master_valid`, and with no pin standing the two
+    /// disagree. Inside the engine the deck is already in hand and is
+    /// tested directly; this exists for the host.
+    pub fn leader_platter_held(&self) -> bool {
+        self.sync_leader().is_some_and(|deck| self.deck(deck).scratching)
+    }
+
     pub fn hold_deck_sync(&mut self) -> Vec<DeckCmd> {
         self.refresh_sync_master();
         let Some(master) = self.sync_master_valid() else { return Vec::new() };
         // A paused master is a frozen phase — the followers free-run at the
         // matched tempo until it plays (or the pin hands over).
         if !self.deck(master).playing {
+            return Vec::new();
+        }
+        // And a record under a hand or a motor is a phase nobody should be
+        // corrected to: the same law, for a master that is still running.
+        // Without this the master's jerking playhead crosses the re-seek
+        // threshold on essentially every pump, and the deck the room is
+        // hearing gets a seek twenty times a second for the length of the
+        // gesture. The followers free-run at the matched tempo instead.
+        if self.deck(master).scratching {
             return Vec::new();
         }
         let Some(view) = self.deck(master).sync_view() else { return Vec::new() };
@@ -3912,6 +3979,15 @@ impl DeckEngine {
         }
         let Some(leader) = self.sync_leader() else { return own };
         if leader == deck {
+            return own;
+        }
+        // Mirrors the re-lock exactly, and must: this anchors the snap on
+        // the phase the re-lock is ABOUT to impose, so a reason the
+        // re-lock declines is a reason not to anchor on it. With the
+        // leader's record under a hand that phase will never be imposed,
+        // and anchoring on it would land an overview click up to a beat
+        // from where the operator aimed.
+        if self.deck(leader).scratching {
             return own;
         }
         let state = self.deck(deck);
@@ -6254,6 +6330,105 @@ mod tests {
         let cmds = engine.scratch(DeckId::B, ScratchMotion::Release);
         assert!(!engine.deck(DeckId::B).scratching);
         assert!(seek_of(&cmds, DeckId::B).is_some(), "release must re-lock: {cmds:?}");
+    }
+
+    /// A hand on the LEADER's record is not a phase anybody should be
+    /// corrected to. Every follower path already steps aside when the
+    /// scratched deck is the one being moved; this is the other side.
+    #[test]
+    fn a_hand_on_the_leaders_record_freezes_the_follower_servo() {
+        let mut engine = DeckEngine::new();
+        load_analysed(&mut engine, DeckId::A, 1, 120.0, 0.0);
+        load_analysed(&mut engine, DeckId::B, 2, 120.0, 0.0);
+        engine.play_pause(DeckId::A);
+        engine.play_pause(DeckId::B);
+        engine.observe(DeckId::A, 10.0, true);
+        engine.observe(DeckId::B, 10.0, true);
+        engine.apply_auto_sync();
+        assert_eq!(engine.sync_master(), Some(DeckId::A));
+
+        engine.scratch(DeckId::A, ScratchMotion::Grab);
+        let held = engine.deck(DeckId::B).position_secs;
+        // The drag: the leader's playhead jerks about a third of a beat at
+        // a time, which crosses the re-seek threshold on every pump.
+        for (index, at) in [10.4, 10.2, 10.6, 10.1, 10.5].into_iter().enumerate() {
+            engine.observe(DeckId::A, at, true);
+            engine.observe(DeckId::B, 10.0 + 0.5 * index as f64, true);
+            let cmds = engine.hold_deck_sync();
+            assert!(cmds.is_empty(), "pump {index} corrected under a hand: {cmds:?}");
+        }
+        assert_eq!(engine.deck(DeckId::B).position_secs, held + 2.0, "only its own travel");
+    }
+
+    /// The sharpest case: a reverse hold leaves the deck PLAYING, so the
+    /// paused-master guard cannot catch it.
+    #[test]
+    fn a_reverse_hold_on_the_leader_does_not_seek_the_follower_every_pump() {
+        let mut engine = DeckEngine::new();
+        load_analysed(&mut engine, DeckId::A, 1, 120.0, 0.0);
+        load_analysed(&mut engine, DeckId::B, 2, 120.0, 0.0);
+        engine.play_pause(DeckId::A);
+        engine.play_pause(DeckId::B);
+        engine.observe(DeckId::A, 20.0, true);
+        engine.observe(DeckId::B, 20.0, true);
+        engine.apply_auto_sync();
+        assert_eq!(engine.sync_master(), Some(DeckId::A));
+
+        engine.censor(DeckId::A, true);
+        assert!(engine.deck(DeckId::A).playing, "a censor keeps the deck running");
+        for step in 0..5 {
+            // The leader walks BACKWARDS a THIRD of a beat at a time --
+            // whole beats would leave the phase exactly where it was and
+            // prove nothing.
+            engine.observe(DeckId::A, 20.0 - (1.0 / 6.0) * (step + 1) as f64, true);
+            let before = engine.deck(DeckId::B).position_secs;
+            let cmds = engine.hold_deck_sync();
+            assert!(cmds.is_empty(), "step {step}: {cmds:?}");
+            assert_eq!(engine.deck(DeckId::B).position_secs, before);
+        }
+    }
+
+    /// The third tempo is published and stays a readout: the arithmetic is
+    /// made against the fader's rate and never against the platter's.
+    #[test]
+    fn the_platter_tempo_is_published_and_never_reaches_the_sync_view() {
+        let mut engine = DeckEngine::new();
+        load_analysed(&mut engine, DeckId::A, 1, 120.0, 0.0);
+        engine.observe_platter(DeckId::A, -1.6);
+        assert_eq!(engine.deck(DeckId::A).live_bpm(), Some(-192.0));
+        assert_eq!(engine.deck(DeckId::A).rate, 1.0, "the fader is untouched");
+        assert_eq!(engine.deck(DeckId::A).sync_view().unwrap().rate, 1.0);
+        assert_eq!(engine.deck(DeckId::A).effective_bpm(), Some(120.0));
+        // And a number that is not one is refused rather than stored.
+        engine.observe_platter(DeckId::A, f64::NAN);
+        assert_eq!(engine.deck(DeckId::A).live_bpm(), Some(-192.0));
+    }
+
+    /// QUANT anchors a snap on the phase the re-lock is ABOUT to impose.
+    /// With the leader held, that phase will not be imposed, so the
+    /// snapped landing is the operator's own — on the deck's own grid.
+    #[test]
+    fn quant_does_not_anchor_a_snap_on_a_scratched_leaders_phase() {
+        let mut engine = DeckEngine::new();
+        load_analysed(&mut engine, DeckId::A, 1, 120.0, 0.0);
+        load_analysed(&mut engine, DeckId::B, 2, 120.0, 0.13);
+        engine.play_pause(DeckId::A);
+        engine.play_pause(DeckId::B);
+        engine.observe(DeckId::A, 10.0, true);
+        engine.observe(DeckId::B, 10.0, true);
+        engine.apply_auto_sync();
+        engine.set_snap_beats(4);
+
+        engine.scratch(DeckId::A, ScratchMotion::Grab);
+        engine.observe(DeckId::A, 10.37, true);
+        let own = engine.deck(DeckId::B).grid.unwrap();
+        let want = own.snap_translate(30.2, engine.deck(DeckId::B).position_secs, 4);
+        engine.seek_secs_snapped(DeckId::B, 30.2);
+        assert!(
+            (engine.deck(DeckId::B).position_secs - want).abs() < 1e-9,
+            "landed {} not {want}",
+            engine.deck(DeckId::B).position_secs
+        );
     }
 
     /// Phase difference between the decks, in beats of the follower's grid.

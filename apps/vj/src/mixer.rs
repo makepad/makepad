@@ -519,6 +519,13 @@ pub struct DeckSnapshot {
     pub duration_secs: f64,
     pub playing: bool,
     pub scratching: bool,
+    /// What the platter is turning at, as a multiple of the track's own
+    /// tempo: the deck's rate normally, the scratch ramp's own settled
+    /// output while a hand or a motor owns the record -- negative under a
+    /// reverse hold, zero at the bottom of a brake. A deck with no track
+    /// publishes 0.0, which is also what `Default` gives before the first
+    /// buffer: nothing is turning either way.
+    pub platter_rate: f64,
     pub splat: Option<SplatSnapshot>,
 }
 
@@ -1656,6 +1663,13 @@ impl Mixer {
                 duration_secs: pcm.seconds(),
                 playing: d.playing,
                 scratching: d.scratch.active(),
+                // The ramp's own settled output, not the finger's raw
+                // velocity: the scratch is a closed loop and this is the
+                // number the render actually read the record at.
+                platter_rate: match d.scratch.active() {
+                    true => d.scratch.rate() as f64,
+                    false => d.rate.current() as f64,
+                },
                 splat: d.splat.as_ref().map(SplatState::snapshot),
             },
         };
@@ -3812,6 +3826,33 @@ mod tests {
         mixer.set_crossfader(0.0);
         mixer.install_deck(DeckId::A, const_pcm(value, frames, 48_000));
         mixer
+    }
+
+    /// The published third tempo: what the record is turning at, through
+    /// every gesture that can own it.
+    #[test]
+    fn the_deck_snapshot_reports_what_the_platter_is_turning_at() {
+        let mixer = spin_deck_a(16_384, 480_000);
+        mixer.set_deck_playing(DeckId::A, true);
+        spin_render(&mixer, 8);
+        let running = mixer.deck_snapshot(DeckId::A).platter_rate;
+        assert!((running - 1.0).abs() < 1e-6, "the deck's own rate: {running}");
+
+        // A hand on the record brakes it toward a stop.
+        mixer.scratch_deck(DeckId::A, ScratchMotion::Grab);
+        spin_render(&mixer, 8);
+        let held = mixer.deck_snapshot(DeckId::A);
+        assert!(held.scratching, "the ramp owns the rate");
+        assert!(held.platter_rate < running, "slowing: {}", held.platter_rate);
+        assert!(held.platter_rate >= 0.0, "and not through zero");
+
+        // A hand outranks a motor, so let go before asking for one.
+        mixer.scratch_deck(DeckId::A, ScratchMotion::Release);
+        spin_render(&mixer, 64);
+        mixer.set_deck_censor(DeckId::A, true);
+        spin_render(&mixer, 64);
+        let reversed = mixer.deck_snapshot(DeckId::A).platter_rate;
+        assert!(reversed < 0.0, "a reverse hold turns the record back: {reversed}");
     }
 
     #[test]
