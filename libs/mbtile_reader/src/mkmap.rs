@@ -40,7 +40,9 @@ const VERSION: u32 = 2;
 const HEADER_LEN: usize = 112;
 const ROOT_RECORD_LEN: usize = 36;
 const MAX_METADATA_BYTES: usize = 16 * 1024 * 1024;
-const MAX_LEAF_BYTES: usize = 64 * 1024 * 1024;
+// A root record lists every tile of one shard; the densest world shards carry over five
+// million tiles, whose decoded refs pass 64 MiB (the repack died on record 185 at that cap).
+const MAX_LEAF_BYTES: usize = 512 * 1024 * 1024;
 const MAX_TILE_BYTES: usize = 64 * 1024 * 1024;
 
 // --- Hilbert tile ids (identical to the writer) ---
