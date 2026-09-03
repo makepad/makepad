@@ -7,6 +7,23 @@
 
 use std::cmp::Ordering;
 
+/// The card edge occupied by a port. For a target this is the side the
+/// cable approaches from; for a source it is the side the cable leaves.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum PortSide {
+    Left,
+    Right,
+}
+
+impl PortSide {
+    fn sign(self) -> f64 {
+        match self {
+            Self::Left => -1.0,
+            Self::Right => 1.0,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Point {
     pub x: f64,
@@ -148,13 +165,21 @@ impl WireRoute {
     }
 }
 
-pub fn cubic_controls(from: Point, to: Point) -> (Point, Point) {
+pub fn directional_cubic_controls(
+    from: Point,
+    source_side: PortSide,
+    to: Point,
+    target_side: PortSide,
+) -> (Point, Point) {
     let dx = ((to.x - from.x).abs() * 0.5).max(48.0);
-    (Point::new(from.x + dx, from.y), Point::new(to.x - dx, to.y))
+    (
+        Point::new(from.x + source_side.sign() * dx, from.y),
+        Point::new(to.x + target_side.sign() * dx, to.y),
+    )
 }
 
-fn cubic_route(from: Point, to: Point) -> WireRoute {
-    let (control_1, control_2) = cubic_controls(from, to);
+fn cubic_route(from: Point, source_side: PortSide, to: Point, target_side: PortSide) -> WireRoute {
+    let (control_1, control_2) = directional_cubic_controls(from, source_side, to, target_side);
     let samples = (0..=64)
         .map(|step| cubic_point(from, control_1, control_2, to, step as f64 / 64.0))
         .collect();
@@ -184,19 +209,21 @@ fn build_route(from: Point, to: Point, kind: RouteKind, samples: Vec<Point>) -> 
 /// cable (normally multiples of `RouteStyle::cable_spacing`).
 pub fn route_wire(
     from: Point,
+    source_side: PortSide,
     to: Point,
+    target_side: PortSide,
     obstacles: &[Obstacle],
     style: RouteStyle,
     corridor_offset: f64,
 ) -> WireRoute {
     let radius = style.corner_radius.max(16.0);
     let stub = style.port_stub.max(radius * 2.0).max(24.0);
-    let source_stub = Point::new(from.x + stub, from.y);
-    let target_stub = Point::new(to.x - stub, to.y);
-    let source_owner = endpoint_obstacle(from, obstacles, true);
-    let target_owner = endpoint_obstacle(to, obstacles, false);
+    let source_stub = Point::new(from.x + source_side.sign() * stub, from.y);
+    let target_stub = Point::new(to.x + target_side.sign() * stub, to.y);
+    let source_owner = endpoint_obstacle(from, obstacles, source_side);
+    let target_owner = endpoint_obstacle(to, obstacles, target_side);
 
-    let straight = cubic_route(from, to);
+    let straight = cubic_route(from, source_side, to, target_side);
     if route_samples_clear(
         &straight.samples,
         obstacles,
@@ -237,9 +264,9 @@ pub fn route_wire(
         }
     }
 
-    // Backward and vertically stacked connections leave the source on its
-    // right, drop on that clear track, cross on the shortest clear row, and
-    // approach the target from its left. Trying every obstacle boundary also
+    // Backward and vertically stacked connections first follow each port's
+    // requested side, cross on the shortest clear row, then approach the
+    // target from its requested side. Trying every obstacle boundary also
     // finds the useful row between two stacked cards instead of needlessly
     // going around the entire graph.
     for row in routing_rows(from, to, obstacles, radius, corridor_offset) {
@@ -290,7 +317,7 @@ pub fn pulse_progress(elapsed_seconds: f64) -> f64 {
     t * t * (3.0 - 2.0 * t)
 }
 
-fn endpoint_obstacle(point: Point, obstacles: &[Obstacle], exits_right: bool) -> Option<usize> {
+fn endpoint_obstacle(point: Point, obstacles: &[Obstacle], side: PortSide) -> Option<usize> {
     obstacles
         .iter()
         .enumerate()
@@ -301,10 +328,9 @@ fn endpoint_obstacle(point: Point, obstacles: &[Obstacle], exits_right: bool) ->
                 && point.y <= rect.max.y;
             contains.then_some((
                 index,
-                if exits_right {
-                    rect.max.x - point.x
-                } else {
-                    point.x - rect.min.x
+                match side {
+                    PortSide::Right => rect.max.x - point.x,
+                    PortSide::Left => point.x - rect.min.x,
                 },
             ))
         })
@@ -398,8 +424,12 @@ fn simplify(points: Vec<Point>) -> Vec<Point> {
         while out.len() >= 2 {
             let a = out[out.len() - 2];
             let b = out[out.len() - 1];
-            if (a.x - b.x).abs() < 1e-6 && (b.x - point.x).abs() < 1e-6
-                || (a.y - b.y).abs() < 1e-6 && (b.y - point.y).abs() < 1e-6
+            let straight_x = (a.x - b.x).abs() < 1e-6 && (b.x - point.x).abs() < 1e-6;
+            let straight_y = (a.y - b.y).abs() < 1e-6 && (b.y - point.y).abs() < 1e-6;
+            let same_direction = (b.x - a.x) * (point.x - b.x)
+                + (b.y - a.y) * (point.y - b.y)
+                >= 0.0;
+            if (straight_x || straight_y) && same_direction
             {
                 out.pop();
             } else {
@@ -637,7 +667,15 @@ mod tests {
     use super::*;
 
     fn route(from: Point, to: Point, obstacles: &[Obstacle]) -> WireRoute {
-        route_wire(from, to, obstacles, RouteStyle::default(), 0.0)
+        route_wire(
+            from,
+            PortSide::Right,
+            to,
+            PortSide::Left,
+            obstacles,
+            RouteStyle::default(),
+            0.0,
+        )
     }
 
     fn card(x: f64, y: f64, width: f64, height: f64) -> Obstacle {
@@ -652,8 +690,8 @@ mod tests {
         assert!(route_samples_clear(
             &route.samples,
             obstacles,
-            endpoint_obstacle(route.from, obstacles, true),
-            endpoint_obstacle(route.to, obstacles, false),
+            endpoint_obstacle(route.from, obstacles, PortSide::Right),
+            endpoint_obstacle(route.to, obstacles, PortSide::Left),
             route.from,
             source_stub,
             target_stub,
@@ -668,6 +706,66 @@ mod tests {
     fn straight_when_clear() {
         let route = route(Point::new(0.0, 20.0), Point::new(240.0, 80.0), &[]);
         assert!(route.is_straight_cubic());
+    }
+
+    #[test]
+    fn cubic_tangents_honour_all_four_facing_combinations() {
+        let from = Point::new(100.0, 20.0);
+        let to = Point::new(300.0, 80.0);
+        for (source_side, target_side) in [
+            (PortSide::Right, PortSide::Left),
+            (PortSide::Right, PortSide::Right),
+            (PortSide::Left, PortSide::Left),
+            (PortSide::Left, PortSide::Right),
+        ] {
+            let route = route_wire(
+                from,
+                source_side,
+                to,
+                target_side,
+                &[],
+                RouteStyle::default(),
+                0.0,
+            );
+            let RouteKind::Cubic { control_1, control_2 } = route.kind else {
+                panic!("clear route should use cubic");
+            };
+            assert_eq!((control_1.x - from.x).signum(), source_side.sign());
+            assert_eq!((control_2.x - to.x).signum(), target_side.sign());
+            assert_eq!(control_1.y, from.y);
+            assert_eq!(control_2.y, to.y);
+        }
+    }
+
+    #[test]
+    fn corridor_tangents_honour_all_four_facing_combinations() {
+        let from = Point::new(0.0, 20.0);
+        let to = Point::new(300.0, 80.0);
+        let obstacle = Obstacle::from_xywh(120.0, -100.0, 60.0, 300.0);
+        for (source_side, target_side) in [
+            (PortSide::Right, PortSide::Left),
+            (PortSide::Right, PortSide::Right),
+            (PortSide::Left, PortSide::Left),
+            (PortSide::Left, PortSide::Right),
+        ] {
+            let route = route_wire(
+                from,
+                source_side,
+                to,
+                target_side,
+                &[obstacle],
+                RouteStyle::default(),
+                0.0,
+            );
+            let RouteKind::Orthogonal { points, .. } = route.kind else {
+                panic!("blocking card should require a corridor");
+            };
+            assert_eq!((points[1].x - from.x).signum(), source_side.sign());
+            assert_eq!(
+                (points[points.len() - 2].x - to.x).signum(),
+                target_side.sign()
+            );
+        }
     }
 
     #[test]
@@ -771,8 +869,24 @@ mod tests {
     fn corridor_offset_spreads_parallel_cables() {
         let obstacle = Obstacle::from_xywh(90.0, -10.0, 60.0, 80.0);
         let style = RouteStyle::default();
-        let one = route_wire(Point::new(0.0, 20.0), Point::new(240.0, 20.0), &[obstacle], style, -4.0);
-        let two = route_wire(Point::new(0.0, 20.0), Point::new(240.0, 20.0), &[obstacle], style, 4.0);
+        let one = route_wire(
+            Point::new(0.0, 20.0),
+            PortSide::Right,
+            Point::new(240.0, 20.0),
+            PortSide::Left,
+            &[obstacle],
+            style,
+            -4.0,
+        );
+        let two = route_wire(
+            Point::new(0.0, 20.0),
+            PortSide::Right,
+            Point::new(240.0, 20.0),
+            PortSide::Left,
+            &[obstacle],
+            style,
+            4.0,
+        );
         assert_ne!(one.point_at(0.5), two.point_at(0.5));
         assert!((one.point_at(0.5).y - two.point_at(0.5).y).abs() >= style.cable_spacing - 0.1);
     }

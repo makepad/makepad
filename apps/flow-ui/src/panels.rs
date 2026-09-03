@@ -349,6 +349,10 @@ script_mod! {
                     }
                 }
                 type_doc := MetaText{}
+                facing_row := Row{
+                    facing_label := RowLabel{text: "FACING"}
+                    facing := Toggle{text: "Right-to-left"}
+                }
                 doc_label := RowLabel{width: Fill text: "NODE NOTE"}
                 node_doc := TextInput{
                     width: Fill
@@ -731,6 +735,9 @@ pub enum InspectorAction {
         node: String,
         src: String,
     },
+    FlipCard {
+        node: String,
+    },
     RenameNode {
         node: String,
         new_id: String,
@@ -769,6 +776,7 @@ enum Row {
         type_name: String,
         type_doc: String,
         node_doc: String,
+        flip: bool,
     },
     Empty(String),
     Section(String),
@@ -1193,6 +1201,7 @@ impl Inspector {
             type_name: node.type_name.clone(),
             type_doc: entry.map(|entry| entry.doc.clone()).unwrap_or_default(),
             node_doc: node.doc.clone().unwrap_or_default(),
+            flip: node.flip,
         });
         self.rows.push(Row::Section("SETTINGS".into()));
         for key in inspector_setting_names(&node.type_name, &node.params) {
@@ -1329,7 +1338,7 @@ impl Inspector {
                 continue;
             };
             match row {
-                Row::Head { id, node_doc, .. } => {
+                Row::Head { id, node_doc, flip, .. } => {
                     if let Some((new_id, _)) = item.text_input(cx, ids!(node_id)).returned(actions) {
                         let new_id = new_id.trim().to_string();
                         if !new_id.is_empty() && new_id != *id {
@@ -1346,6 +1355,11 @@ impl Inspector {
                                 node: node.clone(),
                                 doc,
                             });
+                        }
+                    }
+                    if let Some(value) = item.check_box(cx, ids!(facing)).changed(actions) {
+                        if value != *flip {
+                            out.push(InspectorAction::FlipCard { node: node.clone() });
                         }
                     }
                 }
@@ -1545,6 +1559,7 @@ impl Widget for Inspector {
                         type_name,
                         type_doc,
                         node_doc,
+                        flip,
                     } => {
                         let id_input = item.text_input(cx, ids!(node_id));
                         let changed = !existed || id_input.text() != *id;
@@ -1557,6 +1572,8 @@ impl Widget for Inspector {
                         }
                         item.label(cx, ids!(type_name)).set_text(cx, type_name);
                         item.label(cx, ids!(type_doc)).set_text(cx, type_doc);
+                        item.check_box(cx, ids!(facing))
+                            .set_active(cx, *flip, Animate::No);
                     }
                     Row::Empty(hint) => item.label(cx, ids!(hint)).set_text(cx, hint),
                     Row::Section(title) => item.label(cx, ids!(title)).set_text(cx, title),

@@ -264,6 +264,7 @@ pub struct Node {
     pub outputs: Vec<Port>,
     pub at: Option<(f64, f64)>,
     pub size: Option<(f64, f64)>,
+    pub flip: bool,
     pub loc: Loc,
     pub fn_src: Option<String>,
     pub face_src: Option<String>,
