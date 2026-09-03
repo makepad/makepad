@@ -8,30 +8,80 @@ use mod.widgets.*
 // object. They are written with `:=` (a typed widget refuses an unknown
 // `name:` property, but keeps `name :=` entries beside its children):
 //   bind := @self           an input widget's value → this node's port on the instance
-//   bind := node.port()     → that node's port on the instance (PUT inputs)
+//   bind := "node.port"     → that node's port on the instance (PUT inputs)
 //   show := @self           a display widget receives this node's first output
-//   show := node.port()     → that port's value on node.done / node.delta
+//   show := "node.port"     → that port's value on node.done / node.delta
 //   param := @name          a display widget shows the graph param `name`
 //   param_bind := @name     an input widget edits the graph param `name` (a graph PUT)
 // Handlers see `flow` (flow.input / flow.inputs / flow.value / flow.state /
 // flow.run / flow.cancel / flow.param) and the face hooks `on_value` and
 // `on_state` on the face object; every bridge call is queued to the next frame.
+//
+// The canvas pads a card's content (14 px) and draws the port strip above
+// it; a picture face (`ImageFace`, `OutputFace`) fills its card edge to edge.
 
 let Face = View{
     width: Fill
     height: Fit
     flow: Down
     spacing: theme.space_2
-    padding: theme.mspace_1
+}
+
+let Meta = Label{
+    width: Fill
+    height: Fit
+    text: ""
+    draw_text +: {
+        color: #x8a8a92
+        text_style: theme.font_regular{font_size: 9}
+    }
+}
+
+let Body = Label{
+    width: Fill
+    height: Fit
+    text: ""
+    draw_text +: {
+        color: #xd0d0d4
+        text_style: theme.font_regular{font_size: 9.5}
+    }
+}
+
+let FaceInput = TextInput{
+    width: Fill
+    height: 96
+    is_multiline: true
+    draw_text +: {
+        text_style: theme.font_regular{font_size: 10.5}
+    }
+}
+
+let Number = mod.widgets.FabValueInput{
+    width: Fill
+    height: 24
+    precision: 0
+    quantize: true
+}
+
+let Strip = View{
+    width: Fill
+    height: Fit
+    flow: Down
+    spacing: theme.space_2
+    padding: Inset{left: 14 right: 14 top: 10 bottom: 12}
+}
+
+let Row = View{
+    width: Fill
+    height: Fit
+    flow: Right
+    spacing: theme.space_2
 }
 
 mod.flow.ui.NodeFace = Face{}
 
 mod.flow.ui.InputFace = Face{
-    value := TextInput{
-        width: Fill
-        height: 84
-        is_multiline: true
+    value := FaceInput{
         empty_text: "Type the input value"
         bind := @self
     }
@@ -40,22 +90,34 @@ mod.flow.ui.InputFace = Face{
 mod.flow.ui.TextFace = mod.flow.ui.InputFace{}
 
 mod.flow.ui.OutputFace = Face{
+    spacing: 0
     value := mod.flow.ui.ValueView{
-        width: Fill
-        height: Fit
         show := @self
     }
 }
 
 mod.flow.ui.LlmFace = Face{
-    system := Label{
-        width: Fill
-        height: Fit
-        text: ""
-        param := @system
-        draw_text +: {
-            color: theme.color_text_meta
-            text_style: theme.font_regular{font_size: 8.5}
+    system := FoldHeader{
+        header: View{
+            width: Fill
+            height: Fit
+            flow: Right
+            align: Align{y: 0.5}
+            spacing: theme.space_1
+            FoldButton{}
+            Meta{width: Fit text: "system prompt"}
+        }
+        body: View{
+            width: Fill
+            height: Fit
+            flow: Down
+            padding: Inset{left: 18 top: 2 bottom: 6}
+            text := Meta{param := @system}
+        }
+        animator +: {
+            active +: {
+                default: @off
+            }
         }
     }
     out := Markdown{
@@ -75,43 +137,23 @@ mod.flow.ui.FnFace = Face{
         param := @run
     }
     out := mod.flow.ui.ValueText{
-        width: Fill
-        height: Fit
         show := @self
     }
 }
 
 mod.flow.ui.HttpFace = Face{
-    url := Label{
-        width: Fill
-        height: Fit
-        text: ""
-        param := @url
-    }
-    status := Label{
-        width: Fill
-        height: Fit
-        text: ""
-        show := @meta
-        draw_text +: {color: theme.color_text_meta}
-    }
+    url := Body{param := @url}
+    status := Meta{show := @meta}
     out := mod.flow.ui.ValueView{
-        width: Fill
-        height: Fit
         show := @self
     }
 }
 
 mod.flow.ui.AskFace = Face{
-    question := Label{
-        width: Fill
-        height: Fit
-        text: ""
-        param := @question
-    }
+    question := Body{param := @question}
     choice := DropDown{
         width: Fill
-        height: Fit
+        height: 26
         param := @options
         bind := @self
     }
@@ -124,76 +166,46 @@ mod.flow.ui.AskFace = Face{
 }
 
 mod.flow.ui.ImageFace = Face{
+    spacing: 0
     preview := mod.flow.ui.ValueImage{
-        width: Fill
-        height: 180
         show := @self
     }
-    width := Slider{
-        width: Fill
-        height: Fit
-        text: "width"
-        min: 256
-        max: 2048
-        step: 64
-        precision: 0
-        param_bind := @width
-    }
-    height := Slider{
-        width: Fill
-        height: Fit
-        text: "height"
-        min: 256
-        max: 2048
-        step: 64
-        precision: 0
-        param_bind := @height
-    }
-    steps := Slider{
-        width: Fill
-        height: Fit
-        text: "steps"
-        min: 1
-        max: 50
-        step: 1
-        precision: 0
-        param_bind := @steps
-    }
-    seed := Slider{
-        width: Fill
-        height: Fit
-        text: "seed"
-        min: 0
-        max: 100000
-        step: 1
-        precision: 0
-        param_bind := @seed
-    }
-    model := mod.flow.ui.ModelPicker{
-        param_bind := @model
+    params := Strip{
+        summary := Meta{param := @summary}
+        Row{
+            w_field := Number{label: "w" min: 256 max: 2048 step: 8 snap: 64 param_bind := @width}
+            h_field := Number{label: "h" min: 256 max: 2048 step: 8 snap: 64 param_bind := @height}
+        }
+        Row{
+            steps := Number{label: "steps" min: 1 max: 50 step: 0.25 snap: 1 param_bind := @steps}
+            seed := Number{label: "seed" min: 0 max: 999999 step: 1 snap: 1 param_bind := @seed}
+        }
+        model := mod.flow.ui.ModelPicker{
+            param_bind := @model
+        }
     }
 }
 
 mod.flow.ui.UpscaleFace = Face{
+    spacing: 0
     preview := mod.flow.ui.ValueImage{
-        width: Fill
-        height: 180
         show := @self
+    }
+    params := Strip{
+        summary := Meta{param := @summary}
+        model := mod.flow.ui.ModelPicker{
+            param_bind := @model
+        }
     }
 }
 
 mod.flow.ui.GenFace = Face{
-    domain := Label{
-        width: Fill
-        height: Fit
-        text: ""
-        param := @domain
-        draw_text +: {color: theme.color_text_meta}
-    }
+    domain := Meta{param := @domain}
     out := mod.flow.ui.ValueView{
-        width: Fill
-        height: Fit
         show := @self
+    }
+    model := mod.flow.ui.ModelPicker{
+        param_bind := @model
     }
 }
 
