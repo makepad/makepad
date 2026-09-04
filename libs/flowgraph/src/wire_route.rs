@@ -871,7 +871,7 @@ fn build_orthogonal_candidate(
     tie_x: f64,
 ) -> Option<WireRoute> {
     let points = simplify(points);
-    if !valid_orthogonal(&points, radius) {
+    if !valid_orthogonal(&points) {
         return None;
     }
     let samples = rounded_samples(&points, radius);
@@ -1117,10 +1117,7 @@ fn simplify(points: Vec<Point>) -> Vec<Point> {
     out
 }
 
-fn valid_orthogonal(
-    points: &[Point],
-    radius: f64,
-) -> bool {
+fn valid_orthogonal(points: &[Point]) -> bool {
     if points.len() < 2
         || points.windows(2).any(|pair| {
             (pair[0].x - pair[1].x).abs() > 1e-6 && (pair[0].y - pair[1].y).abs() > 1e-6
@@ -1135,7 +1132,12 @@ fn valid_orthogonal(
             // to the owning card's 6 px route clearance.
             NARROW_CLEARANCE
         } else {
-            radius * 2.0
+            // rounded_samples clamps each fillet to half of either adjacent
+            // segment. A short interior run is safe; requiring two full radii
+            // rejects direct routes between nearly level ports and sends the
+            // wire around a card instead. The rendered samples still undergo
+            // both tier and endpoint-clearance collision checks.
+            0.0
         };
         if length + 1e-6 < required {
             return false;
@@ -1199,7 +1201,24 @@ fn route_samples_clear_with_exemptions(
     })
 }
 
+/// A route this much longer than another candidate is a trip around a card,
+/// not a cleaner line: the shorter one wins whatever its bend count.
+const DETOUR_RATIO: f64 = 1.35;
+const DETOUR_SLACK: f64 = 24.0;
+
+fn is_detour_of(route: &WireRoute, other: &WireRoute) -> bool {
+    route.length() > other.length() * DETOUR_RATIO + DETOUR_SLACK
+}
+
 fn compare_routes(left: &WireRoute, right: &WireRoute) -> Ordering {
+    // Fewest bends first — the clear S-curve wins — but only among routes of
+    // comparable length. Bends-first alone let a two-bend row that circled a
+    // whole card beat a short four-bend dogleg beside it.
+    match (is_detour_of(left, right), is_detour_of(right, left)) {
+        (true, false) => return Ordering::Greater,
+        (false, true) => return Ordering::Less,
+        _ => {}
+    }
     left.bends()
         .cmp(&right.bends())
         .then_with(|| left.length().partial_cmp(&right.length()).unwrap_or(Ordering::Equal))
@@ -1366,6 +1385,50 @@ fn move_toward(from: Point, to: Point, distance: f64) -> Point {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn polyline(points: Vec<Point>) -> WireRoute {
+        build_route(
+            points[0],
+            points[points.len() - 1],
+            RouteKind::Orthogonal {
+                points: points.clone(),
+                radius: 0.0,
+            },
+            points,
+            RouteChoice::CorridorX,
+            0.0,
+        )
+    }
+
+    #[test]
+    fn fewer_bends_win_only_while_the_route_is_not_a_detour() {
+        // Two bends that circle a card: 800 units. Four bends beside it: 260.
+        let around = polyline(vec![
+            Point::new(0.0, 0.0),
+            Point::new(0.0, -200.0),
+            Point::new(400.0, -200.0),
+            Point::new(400.0, 0.0),
+        ]);
+        let dogleg = polyline(vec![
+            Point::new(0.0, 0.0),
+            Point::new(50.0, 0.0),
+            Point::new(50.0, 20.0),
+            Point::new(150.0, 20.0),
+            Point::new(150.0, 0.0),
+            Point::new(200.0, 0.0),
+        ]);
+        assert_eq!(compare_routes(&dogleg, &around), Ordering::Less);
+        assert_eq!(compare_routes(&around, &dogleg), Ordering::Greater);
+        // A clean two-bend line of comparable length still beats the dogleg.
+        let clean = polyline(vec![
+            Point::new(0.0, 0.0),
+            Point::new(100.0, 0.0),
+            Point::new(100.0, 60.0),
+            Point::new(200.0, 60.0),
+        ]);
+        assert_eq!(compare_routes(&clean, &dogleg), Ordering::Less);
+    }
+
     fn route(from: Point, to: Point, obstacles: &[Obstacle]) -> WireRoute {
         route_wire(
             from,
