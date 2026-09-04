@@ -857,9 +857,9 @@ mod tests {
         let g = set_param(&g, &a, "type", Literal::Id("image".into()));
         assert_eq!(g.nodes[0].outputs[0].name, "image");
         assert_eq!(g.nodes[0].outputs[0].ty, PortType::Image);
-        let g = set_param(&g, &a, "default", Literal::Str("x".into()));
+        let g = set_param(&g, &a, "value", Literal::Str("x".into()));
         assert!(matches!(
-            g.nodes[0].params.iter().find(|(n, _)| n == "default").unwrap().1,
+            g.nodes[0].params.iter().find(|(n, _)| n == "value").unwrap().1,
             Literal::Str(ref t) if t == "x"
         ));
     }

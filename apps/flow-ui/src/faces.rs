@@ -1606,6 +1606,43 @@ pub struct FaceHost {
     event_order: Vec<String>,
     paused_stream_scrolls: HashSet<WidgetUid>,
     pending_stream_scrolls: HashSet<WidgetUid>,
+    /// A mounted run is a snapshot view. Design faces are the only editable
+    /// faces; this flag is applied as a separate pass after every mount.
+    locked: bool,
+}
+
+fn set_subtree_locked(cx: &mut Cx, root: &WidgetRef, locked: bool) {
+    // Text stays readable: a locked run's inputs are what the run used, so
+    // its fields go read-only, while controls (buttons, pickers, sliders)
+    // are disabled.
+    if root.borrow::<TextInput>().is_some() {
+        root.as_text_input().set_is_read_only(cx, locked);
+    } else {
+        root.set_disabled(cx, locked);
+    }
+    let mut children = Vec::new();
+    root.children(&mut |_, child| children.push(child));
+    for child in children {
+        set_subtree_locked(cx, &child, locked);
+    }
+}
+
+fn is_face_input_event(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::MouseDown(_)
+            | Event::MouseMove(_)
+            | Event::MouseUp(_)
+            | Event::LongPress(_)
+            | Event::TouchUpdate(_)
+            | Event::KeyDown(_)
+            | Event::KeyUp(_)
+            | Event::TextInput(_)
+            | Event::TextRangeReplace(_)
+            | Event::TextCut(_)
+            | Event::ImeAction(_)
+            | Event::SelectionHandleDrag(_)
+    )
 }
 
 fn is_text_scroll(
@@ -1890,6 +1927,7 @@ impl FaceHost {
             event_order: graph.nodes.iter().map(|node| node.id.clone()).collect(),
             paused_stream_scrolls: HashSet::new(),
             pending_stream_scrolls: HashSet::new(),
+            locked: false,
         };
         let instance_name = instance.to_string();
         let nodes_for_bridge = node_objects.clone();
@@ -2300,6 +2338,9 @@ impl FaceHost {
     /// through the inverse camera first, and a hit they claim is written
     /// back to the original event so the canvas does not claim it too.
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope, camera: Option<&Camera>) {
+        if self.locked && is_face_input_event(event) {
+            return;
+        }
         self.set_popup_anchor_transform(cx, camera.map(Camera::popup_anchor_transform));
         let mut roots: Vec<WidgetRef> = self
             .event_order
@@ -2360,6 +2401,17 @@ impl FaceHost {
             self.event_order.clear();
             self.event_order.extend_from_slice(order);
         }
+    }
+
+    /// Make every interactive descendant read-only/inert without changing the
+    /// mounted face structure. Widget disabled states provide the quiet dimmed
+    /// treatment; the event gate above also covers custom scrub controls.
+    pub fn set_locked(&mut self, cx: &mut Cx, locked: bool) {
+        self.locked = locked;
+        for face in self.faces.values().chain(self.flow_face.iter()) {
+            set_subtree_locked(cx, &face.root, locked);
+        }
+        self.staged_asks.clear();
     }
 
     /// Keyboard events have no position to remap. Once a widget in a node
@@ -2516,13 +2568,13 @@ impl FaceHost {
                 }
             }
         }
-        // An input's declared default fills its textbox until the instance
+        // An input's design value fills its textbox until a run instance
         // carries a value of its own.
         for bind in &face.binds {
             if bind.node != node.id || bind.widget.borrow::<TextInput>().is_none() {
                 continue;
             }
-            let text = param_text(node, "default");
+            let text = param_text(node, "value");
             if text.is_empty() {
                 continue;
             }
@@ -2617,6 +2669,9 @@ impl FaceHost {
 
     /// Widget changes on `bind` widgets → `(node, port, text)`.
     pub fn bind_changes(&mut self, cx: &Cx, actions: &Actions) -> Vec<(String, String, String)> {
+        if self.locked {
+            return Vec::new();
+        }
         let mut out = Vec::new();
         for face in self.faces.values().chain(self.flow_face.iter()) {
             for bind in &face.binds {
@@ -2694,6 +2749,9 @@ impl FaceHost {
         cx: &mut Cx,
         actions: &Actions,
     ) -> Vec<(String, String, Literal)> {
+        if self.locked {
+            return Vec::new();
+        }
         let mut out = Vec::new();
         for (node, face) in &self.faces {
             for (widget, key) in &face.param_binds {
@@ -2767,6 +2825,9 @@ impl FaceHost {
 
     /// A ModelPicker's dropdown changed → `(node, key, model id)`.
     pub fn model_changes(&self, cx: &mut Cx, actions: &Actions) -> Vec<(String, String, Literal)> {
+        if self.locked {
+            return Vec::new();
+        }
         let mut out = Vec::new();
         for (node, face) in &self.faces {
             for (widget, key) in &face.param_binds {

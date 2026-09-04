@@ -19,7 +19,7 @@ pub fn tool_schema(graph: &Graph) -> ToolSchema {
                 }
             }
             if let Some(default) = node.params.iter().find_map(|(name, value)| {
-                (name == "default" && !matches!(value, Literal::Null)).then_some(value)
+                (name == "value" && !matches!(value, Literal::Null)).then_some(value)
             }) {
                 if let Json::Obj(fields) = &mut schema {
                     fields.push(("default".to_string(), literal_json(default)));

@@ -7,8 +7,8 @@ use mod.widgets.*
 // How a face talks to the flow, read by the host from each widget's own
 // object. They are written with `:=` (a typed widget refuses an unknown
 // `name:` property, but keeps `name :=` entries beside its children):
-//   bind := @self           an input widget's value → this node's port on the instance
-//   bind := "node.port"     → that node's port on the instance (PUT inputs)
+//   bind := @self           design: Input.value graph param; run: locked snapshot input
+//   bind := "node.port"     design graph setting (run faces are inert)
 //   show := @self           a display widget receives this node's first output
 //   show := "node.port"     → that port's value on node.done / node.delta
 //   param := @name          a display widget shows the graph param `name`
