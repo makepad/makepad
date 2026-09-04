@@ -12,17 +12,15 @@ mod services;
 use crate::services::{BridgeContext, FlowServices, FlowUiAction};
 pub use makepad_widgets;
 
-mod canvas;
 mod faces;
 mod graph_edit;
+mod graph_view;
 mod panels;
 mod testpattern;
 mod theme;
 mod values;
 mod viewer;
-mod wire_route;
 
-use canvas::{CanvasEdit, FlowCanvas, FlowCanvasAction, NodeStatus, Selection};
 use faces::{model_choices, BridgeCall, FaceBridgeCall, FaceHost, ModelChoice};
 use makepad_flow::client::{
     ClientError, FlowClient, FlowSubscriber, FlowSubscriberConfig, SessionConfig,
@@ -40,6 +38,9 @@ use makepad_flow::{
 use makepad_widgets::makepad_draw::text::selection::Cursor;
 use makepad_widgets::makepad_platform::thread::SignalToUI;
 use makepad_widgets::*;
+use makepad_flowgraph::{
+    CanvasEdit, FlowCanvas, FlowCanvasAction, NodeFacesScope, NodeStatus, Selection, FIRST_AT,
+};
 use panels::{
     AppView, FlowList, Inspector, InspectorAction, Palette, PaletteAction, RunBar, RunningAction,
     RunningList, TemplatePicker,
@@ -110,6 +111,68 @@ The flow server runs embedded in this window unless another one already serves t
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
+
+    let FlowCanvas = mod.widgets.FlowCanvas{
+        draw_bg +: {
+            color_a: theme.flow_grid_a
+            color_b: theme.flow_grid_b
+        }
+        draw_card +: {shadow_color: theme.flow_shadow}
+        draw_title +: {color: theme.flow_text}
+        draw_meta +: {color: theme.flow_text_muted}
+        draw_port +: {color: theme.flow_text_port}
+        draw_chip +: {color: theme.flow_text_chip}
+        draw_error +: {color: theme.flow_error}
+        card_color: theme.flow_surface
+        card_color_hover: theme.flow_surface_hover
+        card_edge_color: theme.flow_edge
+        accent_color: theme.flow_accent
+        highlight_color: theme.flow_highlight
+        color_input: theme.flow_input
+        color_output: theme.flow_success
+        color_chat: theme.flow_chat
+        color_gen: theme.flow_generation
+        color_fn: theme.flow_function
+        color_http: theme.flow_http
+        color_ask: theme.flow_waiting
+        color_flow: theme.flow_text_port
+        color_port_text: theme.flow_port_text
+        color_port_image: theme.flow_port_image
+        color_port_audio: theme.flow_port_audio
+        color_port_video: theme.flow_port_video
+        color_port_mesh: theme.flow_port_mesh
+        color_port_json: theme.flow_port_json
+        color_port_list: theme.flow_port_list
+        color_port_bytes: theme.flow_port_bytes
+        color_state_running: theme.flow_state_running
+        color_state_done: theme.flow_success
+        color_state_failed: theme.flow_error
+        color_state_waiting: theme.flow_waiting
+        color_state_inactive: theme.flow_text_muted
+        color_state_idle: theme.flow_state_idle
+        color_port_label_connected: theme.flow_text_port_connected
+        color_port_label_open: theme.flow_text_port_open
+
+        styles +: {
+            FlowNodeStyle{kind: "input" color: theme.flow_input icon: crate_resource("self:resources/icons/input.svg")}
+            FlowNodeStyle{kind: "output" color: theme.flow_success icon: crate_resource("self:resources/icons/output.svg")}
+            FlowNodeStyle{kind: "chat" color: theme.flow_chat icon: crate_resource("self:resources/icons/chat.svg")}
+            FlowNodeStyle{kind: "gen" color: theme.flow_generation icon: crate_resource("self:resources/icons/gen.svg")}
+            FlowNodeStyle{kind: "fn" color: theme.flow_function icon: crate_resource("self:resources/icons/fn.svg")}
+            FlowNodeStyle{kind: "http" color: theme.flow_http icon: crate_resource("self:resources/icons/http.svg")}
+            FlowNodeStyle{kind: "ask" color: theme.flow_waiting icon: crate_resource("self:resources/icons/ask.svg")}
+            FlowNodeStyle{kind: "flow" color: theme.flow_text_port icon: crate_resource("self:resources/icons/flow.svg")}
+
+            FlowPortStyle{kind: "text" color: theme.flow_port_text icon: crate_resource("self:resources/icons/text.svg")}
+            FlowPortStyle{kind: "image" color: theme.flow_port_image icon: crate_resource("self:resources/icons/image.svg")}
+            FlowPortStyle{kind: "audio" color: theme.flow_port_audio icon: crate_resource("self:resources/icons/audio.svg")}
+            FlowPortStyle{kind: "video" color: theme.flow_port_video icon: crate_resource("self:resources/icons/video.svg")}
+            FlowPortStyle{kind: "mesh" color: theme.flow_port_mesh icon: crate_resource("self:resources/icons/mesh.svg")}
+            FlowPortStyle{kind: "json" color: theme.flow_port_json icon: crate_resource("self:resources/icons/json.svg")}
+            FlowPortStyle{kind: "list" color: theme.flow_port_list icon: crate_resource("self:resources/icons/json.svg")}
+            FlowPortStyle{kind: "bytes" color: theme.flow_port_bytes icon: crate_resource("self:resources/icons/bytes.svg")}
+        }
+    }
 
     let SectionTitle = Label{
         width: Fill
@@ -1332,7 +1395,7 @@ impl App {
         let Some(entry) = self.catalog.iter().find(|entry| entry.type_name == node.type_name) else {
             return;
         };
-        let at = node.at.unwrap_or(graph_edit::FIRST_AT);
+        let at = node.at.unwrap_or(FIRST_AT);
         let (mut next, id) = graph_edit::add_node(&graph, entry, (at.0 + 40.0, at.1 + 60.0));
         if let Some(copy) = next.nodes.iter_mut().find(|n| n.id == id) {
             copy.params = node.params.clone();
@@ -1866,7 +1929,13 @@ impl App {
     fn show_graph(&mut self, cx: &mut Cx) {
         let graph = self.current_graph();
         if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
-            canvas.set_graph(cx, graph.clone());
+            canvas.set_compatible_ports(
+                graph
+                    .as_ref()
+                    .map(graph_view::compatibility_of)
+                    .unwrap_or_default(),
+            );
+            canvas.set_graph(cx, graph.as_ref().map(graph_view::view_of));
         }
         if let Some(mut app_view) = self.ui.widget(cx, ids!(app_view)).borrow_mut::<AppView>() {
             app_view.set_graph(cx, graph.clone());
@@ -3396,6 +3465,9 @@ impl MatchEvent for App {
                     from_port,
                     ty,
                 } => {
+                    let Some(ty) = graph_edit::port_type_from_name(&ty) else {
+                        continue;
+                    };
                     let compatible: Vec<NodeTypeCatalog> =
                         graph_edit::types_with_compatible_input(&self.catalog, ty)
                             .into_iter()
@@ -4040,9 +4112,9 @@ impl AppMain for App {
         makepad_widgets::script_mod(vm);
         makepad_code_editor::script_mod(vm);
         makepad_aichat::script_mod(vm);
+        makepad_flowgraph::script_mod(vm);
         theme::script_mod(vm);
         faces::register_host_widgets(vm);
-        canvas::script_mod(vm);
         panels::script_mod(vm);
         viewer::script_mod(vm);
         self::script_mod(vm)
@@ -4130,7 +4202,8 @@ impl AppMain for App {
         if !(face_owns_key_focus && is_focus_routed_input(event)) {
             match self.faces.as_mut() {
                 Some(faces) => {
-                    let mut scope = Scope::with_data(faces);
+                    let mut faces = NodeFacesScope::new(faces);
+                    let mut scope = Scope::with_data(&mut faces);
                     self.ui.handle_event(cx, event, &mut scope);
                 }
                 None => self.ui.handle_event(cx, event, &mut Scope::empty()),
@@ -4248,7 +4321,7 @@ fn planned_nodes_for(graph: Option<&Graph>, outputs: Option<&[String]>) -> Vec<S
         },
         |outputs| outputs.to_vec(),
     );
-    let index = graph_edit::GraphIndex::new(&graph);
+    let index = graph_edit::graph_index(&graph);
     let mut planned = HashSet::new();
     for node in requested {
         planned.insert(node.clone());

@@ -6,99 +6,22 @@ use makepad_flow::{
     Edge, EdgeRef, Graph, Literal, Node, NodeInput, NodeInputValue, NodeTypeCatalog, Port,
     PortType,
 };
+use makepad_flowgraph::{GraphIndex, FIRST_AT, NODE_WIDTH};
 use makepad_widgets::makepad_micro_serde::JsonValue;
 use std::collections::{HashMap, HashSet};
 
 /// Canvas geometry shared by auto-placement and the canvas itself.
-pub const NODE_WIDTH: f64 = 300.0;
 pub const COLUMN_GAP: f64 = 60.0;
 pub const ROW_GAP: f64 = 260.0;
-pub const FIRST_AT: (f64, f64) = (40.0, 120.0);
 
-/// Node lookup and reverse adjacency, rebuilt once when a graph changes.
-/// A wire drag walks the source's ancestors once and then scans candidate
-/// ports, instead of rebuilding adjacency for every candidate.
-#[derive(Default)]
-pub struct GraphIndex {
-    nodes: HashMap<String, usize>,
-    upstream: Vec<Vec<usize>>,
-}
-
-impl GraphIndex {
-    pub fn new(graph: &Graph) -> Self {
-        let nodes: HashMap<String, usize> = graph
-            .nodes
+pub fn graph_index(graph: &Graph) -> GraphIndex {
+    GraphIndex::from_parts(
+        graph.nodes.iter().map(|node| node.id.as_str()),
+        graph
+            .edges
             .iter()
-            .enumerate()
-            .map(|(index, node)| (node.id.clone(), index))
-            .collect();
-        let mut upstream = vec![Vec::new(); graph.nodes.len()];
-        for edge in &graph.edges {
-            let (Some(from), Some(to)) = (nodes.get(&edge.from_node), nodes.get(&edge.to_node)) else {
-                continue;
-            };
-            upstream[*to].push(*from);
-        }
-        Self { nodes, upstream }
-    }
-
-    pub fn node(&self, id: &str) -> Option<usize> {
-        self.nodes.get(id).copied()
-    }
-
-    fn ancestors(&self, node: usize) -> HashSet<usize> {
-        let mut seen = HashSet::new();
-        let mut stack = vec![node];
-        while let Some(node) = stack.pop() {
-            if !seen.insert(node) {
-                continue;
-            }
-            stack.extend(self.upstream[node].iter().copied());
-        }
-        seen
-    }
-
-    pub fn ancestor_indices(&self, node: &str) -> HashSet<usize> {
-        self.node(node)
-            .map(|node| self.ancestors(node))
-            .unwrap_or_default()
-    }
-
-    pub fn compatible_inputs(
-        &self,
-        graph: &Graph,
-        from_node: &str,
-        from_port: &str,
-    ) -> Vec<(usize, usize)> {
-        let Some(from) = self.node(from_node) else {
-            return Vec::new();
-        };
-        let Some(ty) = graph.nodes[from]
-            .outputs
-            .iter()
-            .find(|output| output.name == from_port)
-            .map(|output| output.ty)
-        else {
-            return Vec::new();
-        };
-        let ancestors = self.ancestors(from);
-        let mut out = Vec::new();
-        for (node_index, node) in graph.nodes.iter().enumerate() {
-            if node_index == from || ancestors.contains(&node_index) {
-                continue;
-            }
-            for (port_index, input) in node.inputs.iter().enumerate() {
-                let flexible = node.type_name == "Fn"
-                    || (node.type_name == "Http"
-                        && (input.port == "body" || input.port == "headers"))
-                    || (node.type_name == "Output" && input.port == "value");
-                if flexible || input.ty == ty {
-                    out.push((node_index, port_index));
-                }
-            }
-        }
-        out
-    }
+            .map(|edge| (edge.from_node.as_str(), edge.to_node.as_str())),
+    )
 }
 
 /// A fresh id `<type>_<n>`, lower-cased, that no node in the graph uses.
@@ -361,7 +284,7 @@ pub fn output_port_type(graph: &Graph, node_id: &str, port: &str) -> Option<Port
 /// depends on `to` (or they are the same node).
 #[cfg(test)]
 pub fn would_cycle(graph: &Graph, from: &str, to: &str) -> bool {
-    let index = GraphIndex::new(graph);
+    let index = graph_index(graph);
     let (Some(from), Some(to)) = (index.node(from), index.node(to)) else {
         return from == to;
     };
@@ -372,17 +295,35 @@ pub fn would_cycle(graph: &Graph, from: &str, to: &str) -> bool {
 /// same node, no cycle. `Fn` inputs are flexible (any type re-types the
 /// port) and `Http.body`/`Http.headers` accept anything as well.
 pub fn compatible_inputs(graph: &Graph, from_node: &str, from_port: &str) -> Vec<(String, String)> {
-    let index = GraphIndex::new(graph);
-    index
-        .compatible_inputs(graph, from_node, from_port)
-        .into_iter()
-        .map(|(node, port)| {
-            (
-                graph.nodes[node].id.clone(),
-                graph.nodes[node].inputs[port].port.clone(),
-            )
-        })
-        .collect()
+    let index = graph_index(graph);
+    let Some(from) = index.node(from_node) else {
+        return Vec::new();
+    };
+    let Some(ty) = graph.nodes[from]
+        .outputs
+        .iter()
+        .find(|output| output.name == from_port)
+        .map(|output| output.ty)
+    else {
+        return Vec::new();
+    };
+    let ancestors = index.ancestors(from);
+    let mut out = Vec::new();
+    for (node_index, node) in graph.nodes.iter().enumerate() {
+        if node_index == from || ancestors.contains(&node_index) {
+            continue;
+        }
+        for input in &node.inputs {
+            let flexible = node.type_name == "Fn"
+                || (node.type_name == "Http"
+                    && (input.port == "body" || input.port == "headers"))
+                || (node.type_name == "Output" && input.port == "value");
+            if flexible || input.ty == ty {
+                out.push((node.id.clone(), input.port.clone()));
+            }
+        }
+    }
+    out
 }
 
 /// Connect an output to an input. Fails with a reason when the types do
@@ -969,11 +910,10 @@ mod tests {
             });
             graph.nodes.push(node);
         }
-        let index = GraphIndex::new(&graph);
-        assert_eq!(index.nodes.len(), graph.nodes.len());
-        assert_eq!(index.upstream.iter().map(Vec::len).sum::<usize>(), graph.edges.len());
+        let index = graph_index(&graph);
+        assert_eq!(index.ancestor_indices("n511").len(), graph.nodes.len());
         assert_eq!(
-            index.compatible_inputs(&graph, "n0", "text").len(),
+            compatible_inputs(&graph, "n0", "text").len(),
             graph.nodes.len() - 1
         );
     }

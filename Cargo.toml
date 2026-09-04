@@ -20,6 +20,7 @@ workspace.members = [
     "apps/asset-server",
     "apps/flow-server",
     "apps/flow-ui",
+    "libs/flowgraph",
     "apps/ai-hub",
     "apps/vj",
     "apps/mixer",

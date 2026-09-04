@@ -8,7 +8,7 @@
 //! is posted as a [`FaceBridgeCall`] action and the app acts on it on the
 //! next event dispatch.
 
-use crate::canvas::{declared_output_type, Camera, PortIcon};
+use crate::graph_view::{declared_output_type, PortIcon};
 use crate::values::ValueCache;
 use makepad_code_editor::code_view::CodeView;
 use makepad_flow::{
@@ -22,6 +22,7 @@ use makepad_widgets::makepad_script::*;
 use makepad_widgets::widget_async::{enter_isolate, leave_isolate, CxSplashVmExt, SplashVmId};
 use makepad_widgets::widget_tree::CxWidgetExt;
 use makepad_widgets::*;
+use makepad_flowgraph::{Camera, NodeFaces};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
@@ -2950,6 +2951,24 @@ impl FaceHost {
     }
 }
 
+impl NodeFaces for FaceHost {
+    fn draw_face(&mut self, cx: &mut Cx2d, node: &str, walk: Walk, card_sized: bool) {
+        FaceHost::draw_face(self, cx, node, walk, card_sized);
+    }
+
+    fn set_z_order(&mut self, order: &[String]) {
+        FaceHost::set_z_order(self, order);
+    }
+
+    fn set_popup_anchor_transform(
+        &mut self,
+        cx: &mut Cx,
+        transform: Option<PopupAnchorTransform>,
+    ) {
+        FaceHost::set_popup_anchor_transform(self, cx, transform);
+    }
+}
+
 fn current_bound_value(cx: &Cx, widget: &WidgetRef) -> Option<String> {
     if widget.borrow::<TextInput>().is_some() {
         Some(widget.as_text_input().text())
@@ -3581,8 +3600,8 @@ Flow{llm function http ask output}
             };
             let screen = dvec2(140.0, 215.0);
             let expected = dvec2(
-                crate::canvas::LOCAL_ORIGIN + 100.0 / scale,
-                crate::canvas::LOCAL_ORIGIN + 200.0 / scale,
+                makepad_flowgraph::LOCAL_ORIGIN + 100.0 / scale,
+                makepad_flowgraph::LOCAL_ORIGIN + 200.0 / scale,
             );
             let click = Event::MouseDown(MouseDownEvent {
                 abs: screen,
@@ -3628,7 +3647,7 @@ Flow{llm function http ask output}
             if let Event::TweakRay(mapped) = &mapped {
                 mapped
                     .hit_rect
-                    .set(Some(rect(crate::canvas::LOCAL_ORIGIN + 10.0, crate::canvas::LOCAL_ORIGIN + 20.0, 30.0, 40.0)));
+                    .set(Some(rect(makepad_flowgraph::LOCAL_ORIGIN + 10.0, makepad_flowgraph::LOCAL_ORIGIN + 20.0, 30.0, 40.0)));
             }
             sync_handled(&original, &mapped, &camera);
             let Event::TweakRay(original) = original else { unreachable!() };
