@@ -15,7 +15,7 @@ const REFUSAL: &str = "backend error: insufficient VRAM for flux2-dev: need 3174
 #[derive(Clone)]
 struct RoutedGen {
     nodes: Vec<(String, bool)>,
-    picks: Arc<Mutex<Vec<(String, Vec<String>)>>>,
+    picks: Arc<Mutex<Vec<(String, Option<u32>, Option<u32>, Option<u32>, Vec<String>)>>>,
 }
 
 impl RoutedGen {
@@ -44,16 +44,22 @@ impl GenSeam for RoutedGen {
         Err("retry test requires model-aware routing".to_string())
     }
 
-    fn pick_for(
+    fn pick_for_request(
         &self,
         _domain: &str,
-        model: &str,
+        request: &GenerateRequestJson,
         excluded: &[String],
     ) -> Result<GenPick, String> {
         self.picks
             .lock()
             .unwrap()
-            .push((model.to_string(), excluded.to_vec()));
+            .push((
+                request.model.clone(),
+                request.width,
+                request.height,
+                request.steps,
+                excluded.to_vec(),
+            ));
         let (base_url, refuses) = self
             .nodes
             .iter()
@@ -62,7 +68,7 @@ impl GenSeam for RoutedGen {
         Ok(GenPick {
             provider: Box::new(RoutedProvider { refuses: *refuses }),
             base_url: base_url.clone(),
-            model: model.to_string(),
+            model: request.model.clone(),
             model_state: Some("ready".to_string()),
         })
     }
@@ -131,7 +137,7 @@ impl ContentProvider for RoutedProvider {
 
 fn image_node() -> makepad_flow::Node {
     evaluate(
-        "use mod.flow.*\nlet image = Image{model: \"flux2-dev\" prompt: \"x\"}\nFlow{image}\n",
+        "use mod.flow.*\nlet image = Image{model: \"flux2-dev\" prompt: \"x\" width: 1536 height: 1536 steps: 12}\nFlow{image}\n",
         "retry.splash",
     )
     .unwrap()
@@ -153,13 +159,14 @@ fn admission_refusal_retries_on_the_second_provider_and_finishes() {
     };
     assert_eq!(
         stage,
-        "retrying on http://10.0.0.165 (10.0.0.217 refused: insufficient VRAM)"
+        "retrying on 10.0.0.165 (10.0.0.217 refused: insufficient VRAM)"
     );
     assert!(matches!(executor.poll(), Poll::Done(_)));
     let picks = picks.lock().unwrap();
     assert_eq!(picks.len(), 2);
     assert_eq!(picks[0].0, "flux2-dev");
-    assert_eq!(picks[1].1, ["http://10.0.0.217"]);
+    assert_eq!((picks[0].1, picks[0].2, picks[0].3), (Some(1536), Some(1536), Some(12)));
+    assert_eq!(picks[1].4, ["http://10.0.0.217"]);
 }
 
 #[test]

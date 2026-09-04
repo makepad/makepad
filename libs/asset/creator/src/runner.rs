@@ -26,7 +26,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Rough job cost for the ETA rank, in "units a 4090 does per 30s".
+/// Rough job cost for compatibility callers that use the original fleet ETA
+/// API instead of supplying a translated request.
 pub fn stage_cost(domain: &str) -> f64 {
     match domain {
         "text" => 0.2,
@@ -49,20 +50,36 @@ pub fn fleet_snapshots() -> Vec<fleet::BoxSnapshot> {
     snapshots
 }
 
-/// ETA-ranked node pick for one domain.
-pub fn pick_node(domain: &str) -> Result<LocalService, AssetAiError> {
+/// ETA-ranked node and model pick for one translated request.
+pub fn pick_node_for_request(
+    domain: &str,
+    request: &GenerateRequestJson,
+) -> Result<(LocalService, String), AssetAiError> {
     let snapshots = fleet_snapshots();
     if snapshots.is_empty() {
         return Err(AssetAiError::Unavailable(
             "no GPU nodes on the LAN".to_string(),
         ));
     }
-    let cost = stage_cost(domain);
-    let (index, _model, _eta) = fleet::pick_for_domain_eta(&snapshots, domain, cost)
-        .ok_or_else(|| {
-            AssetAiError::Unavailable(format!("no node serves the {domain} domain right now"))
-        })?;
-    Ok(LocalService::new(&snapshots[index].base_url))
+    let (index, model) = if request.model.is_empty() {
+        fleet::pick_for_domain_eta_request(&snapshots, domain, request)
+            .map(|(index, model, _)| (index, model))
+    } else {
+        fleet::pick_for_model_eta(&snapshots, &request.model, request)
+            .map(|(index, _)| (index, request.model.clone()))
+    }
+    .ok_or_else(|| {
+        AssetAiError::Unavailable(fleet::unroutable_request_error(
+            &snapshots, domain, request,
+        ))
+    })?;
+    Ok((LocalService::new(&snapshots[index].base_url), model))
+}
+
+/// Compatibility entry point for provider traits that only expose a stage's
+/// domain and cannot yet pass its translated generation request.
+pub fn pick_node(domain: &str) -> Result<LocalService, AssetAiError> {
+    pick_node_for_request(domain, &GenerateRequestJson::default()).map(|(service, _)| service)
 }
 
 /// [`crate::engine::ProviderPick`] over the live fleet.
@@ -161,11 +178,15 @@ pub fn generate_bytes(
     cancel: &Arc<AtomicBool>,
     progress: &mut dyn FnMut(&str, u16),
 ) -> Result<GeneratedBytes, String> {
-    let (kind, request, wire) = translate(kind_name, body, seed_fallback)?;
+    let (kind, request, mut wire) = translate(kind_name, body, seed_fallback)?;
     let domain = kind.domain;
     let parsed_domain =
         domain_of(domain).ok_or_else(|| format!("unroutable domain {domain}"))?;
-    let service = pick_node(domain).map_err(|e| e.to_string())?;
+    let (service, picked_model) =
+        pick_node_for_request(domain, &wire).map_err(|e| e.to_string())?;
+    if wire.model.is_empty() {
+        wire.model = picked_model;
+    }
     let node = service.base_url().to_string();
     let remote = service
         .request(parsed_domain, &wire)
