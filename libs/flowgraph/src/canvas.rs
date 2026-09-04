@@ -28,7 +28,9 @@ use crate::model::{
     CanvasStyles, CompatiblePorts, GraphView as Graph, NodeFacesScope, NodeStyle,
     NodeView as Node, PortStyle, FIRST_AT, NODE_WIDTH,
 };
-use crate::wire_route::{self, Obstacle, Point, PortSide, RouteKind, RouteStyle, WireRoute};
+use crate::wire_route::{
+    self, Obstacle, Point, PortSide, RouteKind, RouteStyle, WireMode, WireRoute,
+};
 use makepad_widgets::fab_controls::FabValueInput;
 use makepad_widgets::makepad_draw::DrawSvg;
 use makepad_widgets::makepad_platform::event::TouchState;
@@ -809,6 +811,8 @@ pub struct FlowCanvas {
     #[rust]
     wire_cache_dirty: bool,
     #[rust]
+    wire_mode: WireMode,
+    #[rust]
     parallel_offsets: Vec<f64>,
     #[rust]
     drag: Option<Drag>,
@@ -939,6 +943,25 @@ fn routing_cost(subjects: &[usize], routes: &[WireRoute]) -> f64 {
 
 impl FlowCanvas {
     // -- the app's view of the canvas ------------------------------------------
+
+    pub fn wire_mode(&self) -> WireMode {
+        self.wire_mode
+    }
+
+    pub fn set_wire_mode(&mut self, cx: &mut Cx, mode: WireMode) {
+        if self.wire_mode == mode {
+            return;
+        }
+        self.wire_mode = mode;
+        self.wire_cache.iter_mut().for_each(|cached| *cached = None);
+        self.wire_cache_dirty = true;
+        self.auto_flip_pending = mode == WireMode::Routed && self.graph.is_some();
+        if self.auto_flip_pending {
+            self.auto_flip_settle_until = self.time + AUTO_FLIP_SETTLE_SECONDS;
+            self.next_frame = cx.new_next_frame();
+        }
+        self.redraw(cx);
+    }
 
     pub fn set_node_styles(&mut self, cx: &mut Cx, styles: HashMap<String, NodeStyle>) {
         cx.with_vm(|vm| self.styles.set_nodes(vm, styles));
@@ -1850,12 +1873,16 @@ impl FlowCanvas {
             let target_side = self.port_side(graph, edge.to, false);
             let offset = self.parallel_offsets.get(index).copied().unwrap_or(0.0);
             let style = RouteStyle::default();
-            let obstacles = wire_route::obstacles_in_corridor(
-                from,
-                to,
-                &all_obstacles,
-                style.port_stub + style.corner_radius * 2.0 + offset.abs(),
-            );
+            let obstacles = if self.wire_mode == WireMode::Routed {
+                wire_route::obstacles_in_corridor(
+                    from,
+                    to,
+                    &all_obstacles,
+                    style.port_stub + style.corner_radius * 2.0 + offset.abs(),
+                )
+            } else {
+                Vec::new()
+            };
             let key = Self::route_cache_key(
                 edge,
                 from,
@@ -1872,7 +1899,8 @@ impl FlowCanvas {
             let previous = self.wire_cache[index]
                 .as_ref()
                 .map(|cached| &cached.route);
-            let route = wire_route::route_wire_sticky(
+            let route = wire_route::route_wire_sticky_in_mode(
+                self.wire_mode,
                 from,
                 source_side,
                 to,
@@ -2057,6 +2085,10 @@ impl FlowCanvas {
     /// Evaluate settled geometry in bounded whole-graph passes. A pass uses
     /// one route snapshot so cards cannot observe a half-applied result.
     fn maybe_auto_flip(&mut self, cx: &mut Cx, graph: &mut Graph) {
+        if self.wire_mode == WireMode::Bezier {
+            self.auto_flip_pending = false;
+            return;
+        }
         if !self.auto_flip_pending
             || self.time < self.auto_flip_settle_until
             || self.drag.is_some()
@@ -2144,14 +2176,19 @@ impl FlowCanvas {
                 )
             },
         );
-        let obstacles: Vec<Obstacle> = (0..graph.nodes.len())
-            .map(|index| {
-                let rect = self.card_rect(graph, index);
-                Obstacle::from_xywh(rect.pos.x, rect.pos.y, rect.size.x, rect.size.y)
-                    .inflate(CARD_CLEARANCE)
-            })
-            .collect();
-        wire_route::route_wire(
+        let obstacles: Vec<Obstacle> = if self.wire_mode == WireMode::Routed {
+            (0..graph.nodes.len())
+                .map(|index| {
+                    let rect = self.card_rect(graph, index);
+                    Obstacle::from_xywh(rect.pos.x, rect.pos.y, rect.size.x, rect.size.y)
+                        .inflate(CARD_CLEARANCE)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        wire_route::route_wire_in_mode(
+            self.wire_mode,
             from,
             source_side,
             to,
@@ -2909,7 +2946,7 @@ mod tests {
     }
 
     #[test]
-    fn crossed_expand_geometry_scores_an_unflip() {
+    fn routed_expand_geometry_respects_auto_flip_hysteresis() {
         let style = RouteStyle::default();
         let obstacles = [
             Obstacle::from_xywh(590.0, 110.0, 440.0, 230.0).inflate(12.0),
@@ -2963,7 +3000,7 @@ mod tests {
         assert!(current[0].crossings_with(&current[1]) > 0);
         assert_eq!(unflipped[0].crossings_with(&unflipped[1]), 0);
         assert!(
-            should_auto_flip(current_cost, unflipped_cost, 2, false),
+            !should_auto_flip(current_cost, unflipped_cost, 2, false),
             "current={current_cost} unflipped={unflipped_cost}"
         );
     }
