@@ -71,9 +71,8 @@ const MEDIA_INPUT_ROUTES: &[(&str, &[(&str, MediaDestination)])] = &[
 pub trait GenSeam: Send + Sync {
     fn pick(&self, domain: &str) -> Result<Box<dyn ContentProvider>, String>;
 
-    /// Model-aware, retry-capable routing. Existing single-provider seams
-    /// keep their old implementation and naturally report no alternate once
-    /// that provider has been excluded.
+    /// Model-aware, retry-capable routing retained for existing seam
+    /// implementations.
     fn pick_for(
         &self,
         domain: &str,
@@ -90,6 +89,18 @@ pub trait GenSeam: Send + Sync {
             model_state: None,
         })
     }
+
+    /// Request-aware, retry-capable routing. Existing model-aware seams
+    /// receive the request's model through [`GenSeam::pick_for`], while seams
+    /// that need dimensions or steps can override this additive entry point.
+    fn pick_for_request(
+        &self,
+        domain: &str,
+        request: &GenerateRequestJson,
+        excluded: &[String],
+    ) -> Result<GenPick, String> {
+        self.pick_for(domain, &request.model, excluded)
+    }
 }
 
 /// One routed provider plus the facts the executor needs to make retries
@@ -105,13 +116,27 @@ pub struct FleetGen;
 
 impl GenSeam for FleetGen {
     fn pick(&self, domain: &str) -> Result<Box<dyn ContentProvider>, String> {
-        Ok(self.pick_for(domain, "", &[])?.provider)
+        Ok(self
+            .pick_for_request(domain, &GenerateRequestJson::default(), &[])?.provider)
     }
 
     fn pick_for(
         &self,
         domain: &str,
-        requested_model: &str,
+        model: &str,
+        excluded: &[String],
+    ) -> Result<GenPick, String> {
+        let request = GenerateRequestJson {
+            model: model.to_string(),
+            ..Default::default()
+        };
+        self.pick_for_request(domain, &request, excluded)
+    }
+
+    fn pick_for_request(
+        &self,
+        domain: &str,
+        request: &GenerateRequestJson,
         excluded: &[String],
     ) -> Result<GenPick, String> {
         Domain::parse(domain).ok_or_else(|| format!("unknown generation domain `{domain}`"))?;
@@ -126,18 +151,14 @@ impl GenSeam for FleetGen {
             snapshot.models = service.list_models().unwrap_or_default();
             snapshots.push(snapshot);
         }
-        let cost = match domain {
-            "text" => 0.2,
-            "video" => 6.0,
-            _ => 1.0,
-        };
-        let (index, model) = if requested_model.is_empty() {
-            fleet::pick_for_domain_eta(&snapshots, domain, cost)
+        let (index, model) = if request.model.is_empty() {
+            fleet::pick_for_domain_eta_request(&snapshots, domain, request)
                 .map(|(index, model, _)| (index, model))
-                .ok_or_else(|| format!("no admitted node serves the {domain} domain right now"))?
+                .ok_or_else(|| fleet::unroutable_request_error(&snapshots, domain, request))?
         } else {
-            pick_requested_model_eta(&snapshots, requested_model, cost)
-                .ok_or_else(|| unroutable_model_error(&snapshots, requested_model))?
+            fleet::pick_for_model_eta(&snapshots, &request.model, request)
+                .map(|(index, _)| (index, request.model.clone()))
+                .ok_or_else(|| fleet::unroutable_request_error(&snapshots, domain, request))?
         };
         let model_state = snapshots[index]
             .models
@@ -152,106 +173,6 @@ impl GenSeam for FleetGen {
             model_state,
         })
     }
-}
-
-/// Why no node can take the named model right now, one reason per node
-/// that advertises it: the role that bars it, the card that is too small
-/// (with the numbers), or the memory it is waiting for. A picker that only
-/// said "no admitted node" left the user guessing which box refused and why.
-fn unroutable_model_error(snapshots: &[fleet::BoxSnapshot], model_id: &str) -> String {
-    let mut reasons = Vec::new();
-    for snapshot in snapshots {
-        let Some(model) = snapshot.models.iter().find(|model| model.id == model_id) else {
-            continue;
-        };
-        let host = display_node(&snapshot.base_url);
-        if !fleet::role_allows(&snapshot.base_url, &model.domain) {
-            reasons.push(format!("{host}: its role excludes {}", model.domain));
-            continue;
-        }
-        match fleet::vram_admission_for_model(snapshot, model) {
-            fleet::VramAdmission::Incompatible {
-                required_total_mb,
-                total_mb,
-            } => reasons.push(format!(
-                "{host}: too small (needs {required_total_mb} MB, {total_mb} MB usable)"
-            )),
-            fleet::VramAdmission::Waiting {
-                required_free_mb,
-                free_mb,
-            } => reasons.push(format!(
-                "{host}: waiting for VRAM (needs {required_free_mb} MB free, has {free_mb} MB)"
-            )),
-            fleet::VramAdmission::Admitted => {
-                if model.state == makepad_ai_hub::protocol::MODEL_STATE_TOO_SMALL {
-                    reasons.push(format!("{host}: too small for it"));
-                } else if !model.available {
-                    reasons.push(format!("{host}: not serving it ({})", model.state));
-                } else {
-                    reasons.push(format!("{host}: not picked"));
-                }
-            }
-        }
-    }
-    if reasons.is_empty() {
-        format!("no node advertises model `{model_id}` right now")
-    } else {
-        format!(
-            "no node can take model `{model_id}` right now: {}",
-            reasons.join(", ")
-        )
-    }
-}
-
-fn pick_requested_model_eta(
-    snapshots: &[fleet::BoxSnapshot],
-    model_id: &str,
-    job_cost_units: f64,
-) -> Option<(usize, String)> {
-    let mut best: Option<(u32, u64, usize)> = None;
-    for (index, snapshot) in snapshots.iter().enumerate() {
-        // Use the fleet's authoritative exact-model availability + admission
-        // contract, then retain its affinity as the primary readiness rank.
-        let Some((_, affinity)) = fleet::pick_box_admitted_scored(
-            std::slice::from_ref(snapshot),
-            model_id,
-        ) else {
-            continue;
-        };
-        let Some(model) = snapshot.models.iter().find(|model| model.id == model_id) else {
-            continue;
-        };
-        if model.state == makepad_ai_hub::protocol::MODEL_STATE_TOO_SMALL {
-            continue;
-        }
-        let (acquire_ms, load_ms) =
-            fleet::readiness_to_acquire_load_ms(affinity, model.progress_total, false);
-        let lanes_active = snapshot
-            .health
-            .as_ref()
-            .and_then(|health| health.lanes.as_ref())
-            .map(|lanes| lanes.lanes_active)
-            .unwrap_or(0);
-        let eta_ms = fleet::estimate_eta_ms(&fleet::EtaInputs {
-            acquire_ms,
-            load_ms,
-            queue_jobs: snapshot.jobs_pending(),
-            mean_job_ms: fleet::ETA_FIRST_CUT_MEAN_JOB_MS,
-            job_cost_units,
-            throughput: fleet::gpu_throughput_of(snapshot),
-            lanes_active,
-            lane_efficiency: fleet::ETA_FIRST_CUT_LANE_EFFICIENCY,
-        });
-        let better = best.is_none_or(|(best_affinity, best_eta, best_index)| {
-            affinity > best_affinity
-                || (affinity == best_affinity
-                    && (eta_ms < best_eta || (eta_ms == best_eta && index < best_index)))
-        });
-        if better {
-            best = Some((affinity, eta_ms, index));
-        }
-    }
-    best.map(|(_, _, index)| (index, model_id.to_string()))
 }
 
 pub struct FixedGen(pub String);
@@ -270,7 +191,10 @@ impl GenSeam for FixedGen {
     ) -> Result<GenPick, String> {
         Domain::parse(domain).ok_or_else(|| format!("unknown generation domain `{domain}`"))?;
         if excluded.iter().any(|url| url == &self.0) {
-            return Err(format!("fixed generation node {} was excluded", self.0));
+            return Err(format!(
+                "fixed generation node {} was excluded",
+                fleet::node_label(&self.0)
+            ));
         }
         Ok(GenPick {
             provider: Box::new(LocalService::new(&self.0)),
@@ -384,7 +308,7 @@ impl GenExecutor {
                 .collect();
             let picked = match self
                 .seam
-                .pick_for(domain.as_str(), &request.model, &excluded)
+                .pick_for_request(domain.as_str(), request, &excluded)
             {
                 Ok(picked) => picked,
                 Err(error) if !self.refusals.is_empty() => {
@@ -406,13 +330,16 @@ impl GenExecutor {
                             .map(|(url, error)| {
                                 format!(
                                     "{} refused: {}",
-                                    display_node(url),
+                                    fleet::node_label(url),
                                     admission_refusal_summary(error)
                                 )
                             })
                             .collect::<Vec<_>>()
                             .join("; ");
-                        format!("retrying on {} ({refused})", picked.base_url)
+                        format!(
+                            "retrying on {} ({refused})",
+                            fleet::node_label(&picked.base_url)
+                        )
                     });
                     let absent_stage = picked
                         .model_state
@@ -423,7 +350,8 @@ impl GenExecutor {
                         .map(|_| {
                             format!(
                                 "acquiring {} on {} (model absent; download required)",
-                                picked.model, picked.base_url
+                                picked.model,
+                                fleet::node_label(&picked.base_url)
                             )
                         });
                     self.pending_stage = match (retry_stage, absent_stage) {
@@ -480,7 +408,7 @@ impl GenExecutor {
             .refusals
             .iter()
             .map(|(url, error)| {
-                format!("{}: {}", display_node(url), admission_refusal_summary(error))
+                format!("{}: {}", fleet::node_label(url), admission_refusal_summary(error))
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -498,16 +426,6 @@ fn admission_refusal_summary(error: &str) -> &str {
     } else {
         error
     }
-}
-
-fn display_node(base_url: &str) -> &str {
-    base_url
-        .strip_prefix("http://")
-        .or_else(|| base_url.strip_prefix("https://"))
-        .unwrap_or(base_url)
-        .split(':')
-        .next()
-        .unwrap_or(base_url)
 }
 
 impl Executor for GenExecutor {
