@@ -505,6 +505,21 @@ fn golden_plate_reverb_tail() {
     assert_golden("plate_reverb_tail", &left, &right);
 }
 
+/// A tone above the cutoff, so the reference actually carries the
+/// ladder's own character (a resonant peak near the cutoff, a rolled
+/// off fundamental) rather than passing the tone through unchanged.
+#[test]
+fn golden_moog_ladder_lowpass() {
+    let mixer = deck_a(tone_pcm(2_000.0, 48_000, 3.0));
+    mixer.set_deck_moog_ladder(DeckId::A, true);
+    mixer.set_deck_moog_ladder_cutoff(DeckId::A, 800.0);
+    mixer.set_deck_moog_ladder_resonance(DeckId::A, 0.6);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let (left, right) = capture(&mixer, CAPTURE, |_| {});
+    assert_golden("moog_ladder_lowpass", &left, &right);
+}
+
 // ---------------------------------------------------------------------------
 // clicks
 // ---------------------------------------------------------------------------
@@ -909,6 +924,51 @@ fn a_plate_reverb_size_change_while_engaged_is_click_free() {
         }
     });
     assert!(worst < CLICK, "a size change must ramp, biggest step {worst}");
+}
+
+#[test]
+fn engaging_and_releasing_the_moog_ladder_are_click_free() {
+    let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
+    mixer.set_deck_moog_ladder_cutoff(DeckId::A, 800.0);
+    mixer.set_deck_moog_ladder_resonance(DeckId::A, 0.8);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| match index {
+        8 => mixer.set_deck_moog_ladder(DeckId::A, true),
+        24 => mixer.set_deck_moog_ladder(DeckId::A, false),
+        _ => {}
+    });
+    assert!(worst < CLICK, "engaging or releasing the moog ladder must ramp, biggest step {worst}");
+}
+
+#[test]
+fn a_moog_ladder_cutoff_change_while_engaged_is_click_free() {
+    let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
+    mixer.set_deck_moog_ladder(DeckId::A, true);
+    mixer.set_deck_moog_ladder_resonance(DeckId::A, 0.8);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| {
+        if index == 8 {
+            mixer.set_deck_moog_ladder_cutoff(DeckId::A, 8_000.0);
+        }
+    });
+    assert!(worst < CLICK, "a cutoff change must ramp, biggest step {worst}");
+}
+
+#[test]
+fn a_moog_ladder_resonance_change_while_engaged_is_click_free() {
+    let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
+    mixer.set_deck_moog_ladder(DeckId::A, true);
+    mixer.set_deck_moog_ladder_cutoff(DeckId::A, 800.0);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| {
+        if index == 8 {
+            mixer.set_deck_moog_ladder_resonance(DeckId::A, 1.0);
+        }
+    });
+    assert!(worst < CLICK, "a resonance change must ramp, biggest step {worst}");
 }
 
 #[test]
