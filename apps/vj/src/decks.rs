@@ -1311,6 +1311,13 @@ pub struct DeckState {
     pub plate_reverb_on: bool,
     /// How long the reverb tank's tail rings.
     pub plate_reverb_size: f32,
+    /// Whether the Moog ladder is on. Same channel-strip treatment as
+    /// the plate reverb beside it.
+    pub moog_ladder_on: bool,
+    /// Where the ladder starts rolling off, in Hz.
+    pub moog_ladder_cutoff: f32,
+    /// How much of the last stage feeds back into the first.
+    pub moog_ladder_resonance: f32,
     /// Per-stem gains, in [`crate::music_dsp::StemKind`] order.
     pub stem_gain: [f32; STEM_COUNT],
     pub stem_kill: [bool; STEM_COUNT],
@@ -1400,6 +1407,9 @@ impl Default for DeckState {
             stereo_width_amount: crate::music_dsp::STEREO_WIDTH_DEFAULT,
             plate_reverb_on: false,
             plate_reverb_size: crate::music_dsp::PLATE_REVERB_SIZE_DEFAULT,
+            moog_ladder_on: false,
+            moog_ladder_cutoff: crate::music_dsp::MOOG_LADDER_CUTOFF_DEFAULT,
+            moog_ladder_resonance: crate::music_dsp::MOOG_LADDER_RESONANCE_DEFAULT,
             stem_gain: [1.0; STEM_COUNT],
             stem_kill: [false; STEM_COUNT],
             stem_solo: [false; STEM_COUNT],
@@ -1767,6 +1777,12 @@ pub enum DeckCmd {
     SetPlateReverb { deck: DeckId, on: bool },
     /// How long the reverb tank's tail rings.
     SetPlateReverbSize { deck: DeckId, size: f32 },
+    /// The Moog ladder's on/off switch.
+    SetMoogLadder { deck: DeckId, on: bool },
+    /// Where the ladder starts rolling off, in Hz.
+    SetMoogLadderCutoff { deck: DeckId, hz: f32 },
+    /// How much of the last stage feeds back into the first.
+    SetMoogLadderResonance { deck: DeckId, resonance: f32 },
     /// One stem lane's gain, 0 = muted.
     SetStemGain { deck: DeckId, stem: usize, gain: f32 },
     SplatSet { deck: DeckId, grid: Arc<SplatGrid> },
@@ -2230,6 +2246,9 @@ impl DeckEngine {
             DeckCmd::SetStereoWidthAmount { deck, amount: state.stereo_width_amount },
             DeckCmd::SetPlateReverb { deck, on: state.plate_reverb_on },
             DeckCmd::SetPlateReverbSize { deck, size: state.plate_reverb_size },
+            DeckCmd::SetMoogLadder { deck, on: state.moog_ladder_on },
+            DeckCmd::SetMoogLadderCutoff { deck, hz: state.moog_ladder_cutoff },
+            DeckCmd::SetMoogLadderResonance { deck, resonance: state.moog_ladder_resonance },
         ];
         for band in 0..3 {
             cmds.push(DeckCmd::SetEqBand { deck, band, gain: state.eq_effective(band) });
@@ -5305,6 +5324,41 @@ impl DeckEngine {
         vec![DeckCmd::SetPlateReverbSize { deck, size: state.plate_reverb_size }]
     }
 
+    /// The Moog ladder's on/off switch.
+    pub fn toggle_moog_ladder(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.moog_ladder_on = !state.moog_ladder_on;
+        vec![DeckCmd::SetMoogLadder { deck, on: state.moog_ladder_on }]
+    }
+
+    /// Set the Moog ladder's on/off switch to an explicit value, rather
+    /// than flipping whatever it already was -- what a MIX-linked
+    /// broadcast needs, the same reason [`Self::set_flanger`] exists.
+    pub fn set_moog_ladder(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
+        self.deck_mut(deck).moog_ladder_on = on;
+        vec![DeckCmd::SetMoogLadder { deck, on }]
+    }
+
+    /// Where the ladder starts rolling off, in Hz.
+    pub fn set_moog_ladder_cutoff(&mut self, deck: DeckId, hz: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.moog_ladder_cutoff = hz.clamp(
+            crate::music_dsp::MOOG_LADDER_CUTOFF_MIN,
+            crate::music_dsp::MOOG_LADDER_CUTOFF_MAX,
+        );
+        vec![DeckCmd::SetMoogLadderCutoff { deck, hz: state.moog_ladder_cutoff }]
+    }
+
+    /// How much of the last stage feeds back into the first.
+    pub fn set_moog_ladder_resonance(&mut self, deck: DeckId, resonance: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.moog_ladder_resonance = resonance.clamp(
+            crate::music_dsp::MOOG_LADDER_RESONANCE_MIN,
+            crate::music_dsp::MOOG_LADDER_RESONANCE_MAX,
+        );
+        vec![DeckCmd::SetMoogLadderResonance { deck, resonance: state.moog_ladder_resonance }]
+    }
+
     /// Stem knob. Inert until the separated stems are loaded — the deck is
     /// playing the full mix and there is nothing to turn down.
     pub fn set_stem(&mut self, deck: DeckId, stem: usize, gain: f32) -> Vec<DeckCmd> {
@@ -6137,6 +6191,68 @@ mod tests {
         let cmds = e.track_ready(d, g, 20.0);
         assert!(cmds.contains(&DeckCmd::SetPlateReverb { deck: DeckId::B, on: true }));
         assert!(cmds.contains(&DeckCmd::SetPlateReverbSize { deck: DeckId::B, size: 0.7 }));
+    }
+
+    #[test]
+    fn moog_ladder_cutoff_and_resonance_clamp_to_their_documented_ranges() {
+        let mut e = DeckEngine::new();
+        assert_eq!(
+            e.set_moog_ladder_cutoff(DeckId::A, 50_000.0),
+            vec![DeckCmd::SetMoogLadderCutoff {
+                deck: DeckId::A,
+                hz: crate::music_dsp::MOOG_LADDER_CUTOFF_MAX
+            }]
+        );
+        assert_eq!(
+            e.set_moog_ladder_cutoff(DeckId::A, -1.0),
+            vec![DeckCmd::SetMoogLadderCutoff {
+                deck: DeckId::A,
+                hz: crate::music_dsp::MOOG_LADDER_CUTOFF_MIN
+            }]
+        );
+        assert_eq!(
+            e.set_moog_ladder_resonance(DeckId::A, 5.0),
+            vec![DeckCmd::SetMoogLadderResonance {
+                deck: DeckId::A,
+                resonance: crate::music_dsp::MOOG_LADDER_RESONANCE_MAX
+            }]
+        );
+        assert_eq!(
+            e.set_moog_ladder_resonance(DeckId::A, -5.0),
+            vec![DeckCmd::SetMoogLadderResonance {
+                deck: DeckId::A,
+                resonance: crate::music_dsp::MOOG_LADDER_RESONANCE_MIN
+            }]
+        );
+    }
+
+    #[test]
+    fn toggle_moog_ladder_flips_and_set_moog_ladder_lands_on_an_explicit_side() {
+        let mut e = DeckEngine::new();
+        assert!(!e.deck(DeckId::A).moog_ladder_on);
+        assert_eq!(
+            e.toggle_moog_ladder(DeckId::A),
+            vec![DeckCmd::SetMoogLadder { deck: DeckId::A, on: true }]
+        );
+        assert!(e.deck(DeckId::A).moog_ladder_on);
+        assert_eq!(
+            e.set_moog_ladder(DeckId::B, true),
+            vec![DeckCmd::SetMoogLadder { deck: DeckId::B, on: true }]
+        );
+        assert!(e.deck(DeckId::B).moog_ladder_on);
+    }
+
+    #[test]
+    fn a_load_carries_the_operators_moog_ladder_settings() {
+        let mut e = DeckEngine::new();
+        e.toggle_moog_ladder(DeckId::B);
+        e.set_moog_ladder_cutoff(DeckId::B, 3_000.0);
+        e.set_moog_ladder_resonance(DeckId::B, 0.6);
+        let (d, g) = load_gen(&e.click(item(3), DeckTarget::B));
+        let cmds = e.track_ready(d, g, 20.0);
+        assert!(cmds.contains(&DeckCmd::SetMoogLadder { deck: DeckId::B, on: true }));
+        assert!(cmds.contains(&DeckCmd::SetMoogLadderCutoff { deck: DeckId::B, hz: 3_000.0 }));
+        assert!(cmds.contains(&DeckCmd::SetMoogLadderResonance { deck: DeckId::B, resonance: 0.6 }));
     }
 
     // -----------------------------------------------------------------

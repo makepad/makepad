@@ -2593,6 +2593,28 @@ script_mod! {
                                         default: 0.5
                                     }
                                 }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    sfx_fx_moog_ladder := PillButton{width: 70 text: "LADDER"}
+                                    sfx_fx_moog_ladder_cutoff := Slider{
+                                        width: 170
+                                        text: "ladder cutoff"
+                                        min: 60.0
+                                        max: 12000.0
+                                        default: 1200.0
+                                    }
+                                    sfx_fx_moog_ladder_resonance := Slider{
+                                        width: 170
+                                        text: "ladder resonance"
+                                        min: 0.0
+                                        max: 1.0
+                                        default: 0.3
+                                    }
+                                }
                             }
 
                             // ============ MESH ============
@@ -14191,6 +14213,13 @@ p2 {}
                 DeckCmd::SetPlateReverbSize { deck, size } => {
                     self.mixer.set_deck_plate_reverb_size(deck, size)
                 }
+                DeckCmd::SetMoogLadder { deck, on } => self.mixer.set_deck_moog_ladder(deck, on),
+                DeckCmd::SetMoogLadderCutoff { deck, hz } => {
+                    self.mixer.set_deck_moog_ladder_cutoff(deck, hz)
+                }
+                DeckCmd::SetMoogLadderResonance { deck, resonance } => {
+                    self.mixer.set_deck_moog_ladder_resonance(deck, resonance)
+                }
                 DeckCmd::SetStemGain { deck, stem, gain } => {
                     self.mixer.set_deck_stem_gain(deck, stem, gain)
                 }
@@ -14357,6 +14386,11 @@ p2 {}
             (deck.stereo_width_on, deck.stereo_width_amount as f64);
         let (plate_reverb_on, plate_reverb_size) =
             (deck.plate_reverb_on, deck.plate_reverb_size as f64);
+        let (moog_ladder_on, moog_ladder_cutoff, moog_ladder_resonance) = (
+            deck.moog_ladder_on,
+            deck.moog_ladder_cutoff as f64,
+            deck.moog_ladder_resonance as f64,
+        );
         self.ui.slider(cx, ids!(sfx_fx_feedback)).set_value(cx, feedback);
         self.paint_chip(cx, ids!(sfx_fx_flanger), flanger_on, None);
         self.ui.slider(cx, ids!(sfx_fx_flanger_rate)).set_value(cx, flanger_rate);
@@ -14375,6 +14409,9 @@ p2 {}
         self.ui.slider(cx, ids!(sfx_fx_stereo_width_amount)).set_value(cx, stereo_width_amount);
         self.paint_chip(cx, ids!(sfx_fx_plate_reverb), plate_reverb_on, None);
         self.ui.slider(cx, ids!(sfx_fx_plate_reverb_size)).set_value(cx, plate_reverb_size);
+        self.paint_chip(cx, ids!(sfx_fx_moog_ladder), moog_ladder_on, None);
+        self.ui.slider(cx, ids!(sfx_fx_moog_ladder_cutoff)).set_value(cx, moog_ladder_cutoff);
+        self.ui.slider(cx, ids!(sfx_fx_moog_ladder_resonance)).set_value(cx, moog_ladder_resonance);
     }
 
     /// Push a deck's tone/stem knob positions back onto the surface, so the
@@ -29425,6 +29462,44 @@ impl MatchEvent for App {
                 FxTarget::Mix => {
                     let mut cmds = self.decks.set_plate_reverb_size(DeckId::A, v as f32);
                     cmds.extend(self.decks.set_plate_reverb_size(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        if self.ui.button(cx, ids!(sfx_fx_moog_ladder)).clicked(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.toggle_moog_ladder(DeckId::A),
+                FxTarget::B => self.decks.toggle_moog_ladder(DeckId::B),
+                FxTarget::Mix => {
+                    let on = !self.decks.deck(DeckId::A).moog_ladder_on;
+                    let mut cmds = self.decks.set_moog_ladder(DeckId::A, on);
+                    cmds.extend(self.decks.set_moog_ladder(DeckId::B, on));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+            self.sync_sfx_fx_ui(cx);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_moog_ladder_cutoff)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_moog_ladder_cutoff(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_moog_ladder_cutoff(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_moog_ladder_cutoff(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_moog_ladder_cutoff(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_moog_ladder_resonance)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_moog_ladder_resonance(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_moog_ladder_resonance(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_moog_ladder_resonance(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_moog_ladder_resonance(DeckId::B, v as f32));
                     cmds
                 }
             };

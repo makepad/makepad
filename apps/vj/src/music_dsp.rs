@@ -3125,6 +3125,130 @@ impl PlateReverb {
     }
 }
 
+pub(crate) const MOOG_LADDER_CUTOFF_MIN: f32 = 60.0;
+pub(crate) const MOOG_LADDER_CUTOFF_MAX: f32 = 12_000.0;
+pub(crate) const MOOG_LADDER_CUTOFF_DEFAULT: f32 = 1_200.0;
+pub(crate) const MOOG_LADDER_RESONANCE_MIN: f32 = 0.0;
+pub(crate) const MOOG_LADDER_RESONANCE_MAX: f32 = 1.0;
+pub(crate) const MOOG_LADDER_RESONANCE_DEFAULT: f32 = 0.3;
+/// The classic ladder's feedback coefficient at full resonance --
+/// public-domain textbook territory (Stilson and Smith's 1996 analysis
+/// of the Moog transistor ladder), where self-oscillation begins near
+/// 4.0. Fed through [`pade_tanh`] the way the real transistor ladder's
+/// own saturation bounds it, so a value at or even past this point
+/// stays finite rather than diverging.
+const MOOG_LADDER_RESONANCE_K: f32 = 4.0;
+
+/// One channel's four cascaded one-pole lowpass stages plus the
+/// resonance feedback from the last stage back to the first. The
+/// textbook simplified digital ladder model: only the feedback path is
+/// saturated (not every stage), which is enough to keep the loop
+/// bounded at any resonance without the extra per-stage nonlinearity's
+/// aliasing cost.
+#[derive(Default)]
+struct MoogLadderChannel {
+    y: [f32; 4],
+}
+
+impl MoogLadderChannel {
+    #[inline]
+    fn process(&mut self, x: f32, g: f32, k: f32) -> f32 {
+        let mut v = x - pade_tanh(self.y[3]) * k;
+        for stage in &mut self.y {
+            *stage += g * (v - *stage);
+            v = *stage;
+        }
+        self.y[3]
+    }
+
+    fn reset(&mut self) {
+        self.y = [0.0; 4];
+    }
+}
+
+/// One deck's Moog-style resonant lowpass: a swept cutoff with a
+/// resonance knob that can push the ladder into self-oscillation at its
+/// top end, the character the real analog filter is known for.
+///
+/// Filter memory only, a few floats per channel -- no line, no tail
+/// that would ring on after a record change -- so this gets `reset()`
+/// at the four lifecycle sites, the same shape [`DeckEq::reset`] and
+/// [`Phaser::reset`] already settled on, not the "no hook" treatment
+/// the LFO-only effects get.
+pub struct MoogLadder {
+    channels: [MoogLadderChannel; 2],
+    wet: ParamRamp,
+    cutoff: ParamRamp,
+    resonance: ParamRamp,
+}
+
+impl MoogLadder {
+    pub fn new() -> MoogLadder {
+        MoogLadder {
+            channels: Default::default(),
+            wet: ParamRamp::at(0.0),
+            cutoff: ParamRamp::at(MOOG_LADDER_CUTOFF_DEFAULT),
+            resonance: ParamRamp::at(MOOG_LADDER_RESONANCE_DEFAULT),
+        }
+    }
+
+    /// The on/off switch.
+    pub fn set_wet(&mut self, wet: f32) {
+        if let Some(wet) = knob(wet, 0.0, 1.0) {
+            self.wet.slew(wet, EQ_ENGAGE_SECS);
+        }
+    }
+
+    /// Where the ladder starts rolling off, in Hz.
+    pub fn set_cutoff(&mut self, hz: f32) {
+        if let Some(hz) = knob(hz, MOOG_LADDER_CUTOFF_MIN, MOOG_LADDER_CUTOFF_MAX) {
+            self.cutoff.slew(hz, EQ_ENGAGE_SECS);
+        }
+    }
+
+    /// How much of the last stage feeds back into the first; 1.0 can
+    /// self-oscillate.
+    pub fn set_resonance(&mut self, resonance: f32) {
+        if let Some(resonance) = knob(resonance, MOOG_LADDER_RESONANCE_MIN, MOOG_LADDER_RESONANCE_MAX) {
+            self.resonance.slew(resonance, EQ_ENGAGE_SECS);
+        }
+    }
+
+    pub fn engaged(&self) -> bool {
+        self.wet.target() > 0.0
+    }
+
+    pub fn reset(&mut self) {
+        self.channels = Default::default();
+    }
+
+    /// Process one stereo frame.
+    #[inline]
+    pub fn process(&mut self, frame: [f32; 2], device_rate: f32) -> [f32; 2] {
+        let wet = self.wet.tick(device_rate);
+        if wet <= 0.0 {
+            // No line, no tail: off is exactly the input.
+            return frame;
+        }
+        let cutoff = self.cutoff.tick(device_rate);
+        let resonance = self.resonance.tick(device_rate);
+        // The standard one-pole coefficient from a cutoff in Hz; a
+        // continuous function of a continuously-ramped `cutoff`, so
+        // this needs no crossfaded handover the way a discontinuous
+        // parameter (the bitcrusher's bit depth) does.
+        let g = 1.0 - (-2.0 * PI * cutoff / device_rate.max(1.0)).exp();
+        let k = resonance * MOOG_LADDER_RESONANCE_K;
+        let filtered = [
+            self.channels[0].process(frame[0], g, k),
+            self.channels[1].process(frame[1], g, k),
+        ];
+        [
+            frame[0] + (filtered[0] - frame[0]) * wet,
+            frame[1] + (filtered[1] - frame[1]) * wet,
+        ]
+    }
+}
+
 // ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
@@ -6048,5 +6172,116 @@ mod tests {
         }
         pr.set_sample_rate(44_100.0);
         assert!(pr.quiet, "a rebuilt tank starts with nothing to ring");
+    }
+
+    /// Off, a fresh unit is exactly its input.
+    #[test]
+    fn a_moog_ladder_that_was_never_engaged_is_bit_transparent() {
+        let rate = 48_000.0f32;
+        let mut ml = MoogLadder::new();
+        let mut phase = 0.0f32;
+        for _ in 0..4_000 {
+            phase += 2.0 * PI * 233.0 / rate;
+            let x = phase.sin() * 0.6;
+            assert_eq!(ml.process([x, -x], rate), [x, -x]);
+        }
+    }
+
+    /// The defining property of a lowpass: with a low cutoff and no
+    /// resonance to boost anything back up, a high tone comes out
+    /// heavily attenuated relative to what went in.
+    #[test]
+    fn a_low_cutoff_attenuates_a_high_tone() {
+        let rate = 48_000.0f32;
+        let mut ml = MoogLadder::new();
+        ml.set_wet(1.0);
+        ml.set_cutoff(200.0);
+        ml.set_resonance(0.0);
+        for _ in 0..SETTLE_FRAMES {
+            ml.process([0.0, 0.0], rate);
+        }
+        let mut phase = 0.0f32;
+        let (mut in_energy, mut out_energy) = (0.0f64, 0.0f64);
+        for _ in 0..4_000 {
+            phase += 2.0 * PI * 8_000.0 / rate;
+            let x = phase.sin() * 0.7;
+            let out = ml.process([x, x], rate);
+            in_energy += (x as f64) * (x as f64);
+            out_energy += (out[0] as f64) * (out[0] as f64);
+        }
+        assert!(
+            out_energy < in_energy * 0.05,
+            "an 8kHz tone through a 200Hz lowpass barely attenuated: in {in_energy} out {out_energy}"
+        );
+    }
+
+    /// Bounded and finite even at the edge of self-oscillation: the
+    /// property the feedback path's `pade_tanh` saturation exists to
+    /// guarantee, the same way the real transistor ladder's own
+    /// saturation keeps IT from diverging.
+    #[test]
+    fn moog_ladder_stays_bounded_at_the_harshest_settings() {
+        let rate = 48_000.0f32;
+        let mut ml = MoogLadder::new();
+        ml.set_wet(1.0);
+        ml.set_cutoff(MOOG_LADDER_CUTOFF_MAX);
+        ml.set_resonance(MOOG_LADDER_RESONANCE_MAX);
+        for _ in 0..SETTLE_FRAMES {
+            ml.process([0.0, 0.0], rate);
+        }
+        let mut phase = 0.0f32;
+        for _ in 0..48_000usize {
+            phase += 2.0 * PI * 233.0 / rate;
+            let x = phase.sin() * 0.9;
+            let out = ml.process([x, x], rate);
+            assert!(out[0].is_finite() && out[0].abs() < 8.0, "unbounded: {out:?}");
+            assert!(out[1].is_finite() && out[1].abs() < 8.0, "unbounded: {out:?}");
+        }
+    }
+
+    /// Filter memory only, no line: disengage completes exactly the
+    /// ramp's own duration after `set_wet(0.0)`.
+    #[test]
+    fn switching_the_moog_ladder_off_returns_to_bit_exact_bypass_after_its_ramp() {
+        let rate = 48_000.0f32;
+        let mut ml = MoogLadder::new();
+        ml.set_wet(1.0);
+        for _ in 0..SETTLE_FRAMES {
+            ml.process([0.5, 0.5], rate);
+        }
+        ml.set_wet(0.0);
+        for _ in 0..1_000 {
+            ml.process([0.5, 0.5], rate);
+        }
+        assert!(!ml.engaged());
+        for i in 0..1_000 {
+            let x = (i as f32 * 0.037).sin() * 0.5;
+            assert_eq!(
+                ml.process([x, -x], rate),
+                [x, -x],
+                "a bit-exact bypass, not merely quiet"
+            );
+        }
+    }
+
+    #[test]
+    fn moog_ladder_setters_clamp_to_their_documented_ranges() {
+        let mut ml = MoogLadder::new();
+        ml.set_wet(f32::NAN);
+        assert_eq!(ml.wet.target(), 0.0, "a bad value moves nothing");
+        ml.set_wet(5.0);
+        assert_eq!(ml.wet.target(), 1.0);
+        ml.set_wet(-5.0);
+        assert_eq!(ml.wet.target(), 0.0);
+        ml.set_cutoff(f32::INFINITY);
+        assert_eq!(ml.cutoff.target(), MOOG_LADDER_CUTOFF_DEFAULT, "unmoved by a bad value");
+        ml.set_cutoff(50_000.0);
+        assert_eq!(ml.cutoff.target(), MOOG_LADDER_CUTOFF_MAX);
+        ml.set_cutoff(-1.0);
+        assert_eq!(ml.cutoff.target(), MOOG_LADDER_CUTOFF_MIN);
+        ml.set_resonance(5.0);
+        assert_eq!(ml.resonance.target(), MOOG_LADDER_RESONANCE_MAX);
+        ml.set_resonance(-5.0);
+        assert_eq!(ml.resonance.target(), MOOG_LADDER_RESONANCE_MIN);
     }
 }

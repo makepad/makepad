@@ -28,7 +28,7 @@ use crate::wave_analysis::{DeckClock, TrackGrid};
 use crate::music_dsp::{
     audible, knob, knob64,
     Autopan, Bitcrusher, DeckEcho, DeckEq, Distortion, Flanger, FrameSource, Freeze, MotorEnd,
-    ParamRamp, Phaser, PlateReverb, RateReader, ScratchRamp, StereoWidth, Tremolo,
+    MoogLadder, ParamRamp, Phaser, PlateReverb, RateReader, ScratchRamp, StereoWidth, Tremolo,
     Stretcher, STEM_COUNT,
     STRETCH_BYPASS_EPSILON, STRETCH_RATIO_MAX, STRETCH_RATIO_MIN, WSOLA_WINDOW,
     BRAKE_SECS, CENSOR_FLIP_SECS, CENSOR_RATE, CENSOR_RETURN_SECS, SOFT_START_SECS,
@@ -903,6 +903,7 @@ enum EffectKind {
     Autopan(Autopan),
     StereoWidth(StereoWidth),
     PlateReverb(PlateReverb),
+    MoogLadder(MoogLadder),
 }
 
 impl EffectKind {
@@ -920,15 +921,16 @@ impl EffectKind {
             EffectKind::Autopan(autopan) => autopan.process(frame, device_rate),
             EffectKind::StereoWidth(stereo_width) => stereo_width.process(frame, device_rate),
             EffectKind::PlateReverb(plate_reverb) => plate_reverb.process(frame, device_rate),
+            EffectKind::MoogLadder(moog_ladder) => moog_ladder.process(frame, device_rate),
         }
     }
 }
 
-const DECK_CHAIN_SLOTS: usize = 11;
+const DECK_CHAIN_SLOTS: usize = 12;
 
 /// A deck's pre-fader tone chain: a fixed list of slots, walked in order.
 /// Not a `Vec` -- sized once, at compile time, never resized. Today's
-/// eleven slots are the whole roster and are permanently populated by
+/// twelve slots are the whole roster and are permanently populated by
 /// construction; a slot that can stand empty, or be reassigned, is a
 /// separate decision for whenever growing the roster again asks for one.
 struct DeckChain {
@@ -950,6 +952,7 @@ impl DeckChain {
                 EffectKind::Autopan(Autopan::new()),
                 EffectKind::StereoWidth(StereoWidth::new()),
                 EffectKind::PlateReverb(PlateReverb::new(sample_rate)),
+                EffectKind::MoogLadder(MoogLadder::new()),
             ],
         }
     }
@@ -1030,6 +1033,12 @@ impl DeckChain {
     fn plate_reverb_mut(&mut self) -> &mut PlateReverb {
         match &mut self.slots[10] {
             EffectKind::PlateReverb(plate_reverb) => plate_reverb,
+            _ => unreachable!(),
+        }
+    }
+    fn moog_ladder_mut(&mut self) -> &mut MoogLadder {
+        match &mut self.slots[11] {
+            EffectKind::MoogLadder(moog_ladder) => moog_ladder,
             _ => unreachable!(),
         }
     }
@@ -1216,6 +1225,7 @@ impl DeckVoice {
         self.chain.bitcrusher_mut().silence();
         self.chain.phaser_mut().reset();
         self.chain.plate_reverb_mut().silence();
+        self.chain.moog_ladder_mut().reset();
         // No call for the tremolo, the distortion, the autopan or the
         // stereo width here or at the other three record-change sites,
         // on purpose: none of them holds audio content, only an LFO
@@ -1225,7 +1235,9 @@ impl DeckVoice {
         // already engaged (say under a MIX target spanning both decks)
         // when a load lands on just one of them. The plate reverb's
         // tank DOES hold audio content, so it gets the same silence()
-        // call the echo, the flanger and the bitcrusher get.
+        // call the echo, the flanger and the bitcrusher get; the Moog
+        // ladder's own filter memory is small and fixed-size, so it
+        // gets reset() instead, the EQ and phaser's shape.
         self.reset_blend();
         if load.play {
             self.transport.slew(1.0, LOAD_SWAP_SECS);
@@ -2277,6 +2289,7 @@ impl Mixer {
                 d.chain.bitcrusher_mut().silence();
                 d.chain.phaser_mut().reset();
                 d.chain.plate_reverb_mut().silence();
+                d.chain.moog_ladder_mut().reset();
                 d.reset_blend();
             } else {
                 d.pending = Some(PendingLoad { pcm, play: keep_playing, grid: None });
@@ -2330,6 +2343,7 @@ impl Mixer {
         d.chain.bitcrusher_mut().silence();
         d.chain.phaser_mut().reset();
         d.chain.plate_reverb_mut().silence();
+        d.chain.moog_ladder_mut().reset();
         d.reset_blend();
         self.publish_deck(&s, deck.index());
         drop(s);
@@ -2736,6 +2750,24 @@ impl Mixer {
         s.decks[deck.index()].chain.plate_reverb_mut().set_size(size);
     }
 
+    /// The Moog ladder's on/off switch.
+    pub fn set_deck_moog_ladder(&self, deck: DeckId, on: bool) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.moog_ladder_mut().set_wet(if on { 1.0 } else { 0.0 });
+    }
+
+    /// Where the ladder starts rolling off, in Hz.
+    pub fn set_deck_moog_ladder_cutoff(&self, deck: DeckId, hz: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.moog_ladder_mut().set_cutoff(hz);
+    }
+
+    /// How much of the last stage feeds back into the first.
+    pub fn set_deck_moog_ladder_resonance(&self, deck: DeckId, resonance: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.moog_ladder_mut().set_resonance(resonance);
+    }
+
     /// Momentary FREEZE: while held, the deck repeats a beat-sized
     /// capture of what it just played, post-filter, while the record
     /// itself keeps running underneath. `secs` is at the DEVICE --
@@ -3137,6 +3169,7 @@ impl Mixer {
         dst.chain.bitcrusher_mut().silence();
         dst.chain.phaser_mut().reset();
         dst.chain.plate_reverb_mut().silence();
+        dst.chain.moog_ladder_mut().reset();
         let to_index = to.index();
         self.publish_deck(&s, to_index);
     }
