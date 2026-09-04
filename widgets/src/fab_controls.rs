@@ -920,6 +920,10 @@ pub struct FabValueInput {
     walk: Walk,
     #[layout]
     layout: Layout,
+    /// A host can swap the field for another control in the same slot.
+    #[live(true)]
+    #[visible]
+    visible: bool,
 
     #[live]
     label: String,
@@ -1172,6 +1176,9 @@ impl FabValueInput {
 
 impl Widget for FabValueInput {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
         // The fill claims "this range means something": only bounded fields
         // paint one.
         self.draw_bg.fill = if self.show_fill && self.max > self.min {
