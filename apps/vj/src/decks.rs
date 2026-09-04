@@ -1287,6 +1287,14 @@ pub struct DeckState {
     pub distortion_on: bool,
     /// The distortion's pre-gain into the soft clip.
     pub distortion_drive: f32,
+    /// Whether the phaser is on. Same channel-strip treatment as the
+    /// distortion beside it.
+    pub phaser_on: bool,
+    /// The phaser LFO's sweep speed, in Hz.
+    pub phaser_rate: f32,
+    /// How much of the phaser's own output feeds back into its first
+    /// stage.
+    pub phaser_feedback: f32,
     /// Per-stem gains, in [`crate::music_dsp::StemKind`] order.
     pub stem_gain: [f32; STEM_COUNT],
     pub stem_kill: [bool; STEM_COUNT],
@@ -1367,6 +1375,9 @@ impl Default for DeckState {
             tremolo_depth: crate::music_dsp::TREMOLO_DEPTH_DEFAULT,
             distortion_on: false,
             distortion_drive: crate::music_dsp::DISTORTION_DRIVE_DEFAULT,
+            phaser_on: false,
+            phaser_rate: crate::music_dsp::PHASER_RATE_DEFAULT,
+            phaser_feedback: crate::music_dsp::PHASER_FEEDBACK_DEFAULT,
             stem_gain: [1.0; STEM_COUNT],
             stem_kill: [false; STEM_COUNT],
             stem_solo: [false; STEM_COUNT],
@@ -1714,6 +1725,13 @@ pub enum DeckCmd {
     SetDistortion { deck: DeckId, on: bool },
     /// The distortion's pre-gain into the soft clip.
     SetDistortionDrive { deck: DeckId, drive: f32 },
+    /// The phaser's on/off switch.
+    SetPhaser { deck: DeckId, on: bool },
+    /// The phaser LFO's sweep speed, in Hz.
+    SetPhaserRate { deck: DeckId, hz: f32 },
+    /// How much of the phaser's own output feeds back into its first
+    /// stage.
+    SetPhaserFeedback { deck: DeckId, feedback: f32 },
     /// One stem lane's gain, 0 = muted.
     SetStemGain { deck: DeckId, stem: usize, gain: f32 },
     SplatSet { deck: DeckId, grid: Arc<SplatGrid> },
@@ -2168,6 +2186,9 @@ impl DeckEngine {
             DeckCmd::SetTremoloDepth { deck, depth: state.tremolo_depth },
             DeckCmd::SetDistortion { deck, on: state.distortion_on },
             DeckCmd::SetDistortionDrive { deck, drive: state.distortion_drive },
+            DeckCmd::SetPhaser { deck, on: state.phaser_on },
+            DeckCmd::SetPhaserRate { deck, hz: state.phaser_rate },
+            DeckCmd::SetPhaserFeedback { deck, feedback: state.phaser_feedback },
         ];
         for band in 0..3 {
             cmds.push(DeckCmd::SetEqBand { deck, band, gain: state.eq_effective(band) });
@@ -5137,6 +5158,38 @@ impl DeckEngine {
         vec![DeckCmd::SetDistortionDrive { deck, drive: state.distortion_drive }]
     }
 
+    /// The phaser's on/off switch.
+    pub fn toggle_phaser(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.phaser_on = !state.phaser_on;
+        vec![DeckCmd::SetPhaser { deck, on: state.phaser_on }]
+    }
+
+    /// Set the phaser's on/off switch to an explicit value, rather than
+    /// flipping whatever it already was -- what a MIX-linked broadcast
+    /// needs, the same reason [`Self::set_flanger`] exists.
+    pub fn set_phaser(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
+        self.deck_mut(deck).phaser_on = on;
+        vec![DeckCmd::SetPhaser { deck, on }]
+    }
+
+    /// The phaser LFO's sweep speed, in Hz.
+    pub fn set_phaser_rate(&mut self, deck: DeckId, hz: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.phaser_rate =
+            hz.clamp(crate::music_dsp::PHASER_RATE_MIN, crate::music_dsp::PHASER_RATE_MAX);
+        vec![DeckCmd::SetPhaserRate { deck, hz: state.phaser_rate }]
+    }
+
+    /// How much of the phaser's own output feeds back into its first
+    /// stage.
+    pub fn set_phaser_feedback(&mut self, deck: DeckId, feedback: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.phaser_feedback =
+            feedback.clamp(0.0, crate::music_dsp::PHASER_FEEDBACK_MAX);
+        vec![DeckCmd::SetPhaserFeedback { deck, feedback: state.phaser_feedback }]
+    }
+
     /// Stem knob. Inert until the separated stems are loaded — the deck is
     /// playing the full mix and there is nothing to turn down.
     pub fn set_stem(&mut self, deck: DeckId, stem: usize, gain: f32) -> Vec<DeckCmd> {
@@ -5786,6 +5839,57 @@ mod tests {
         let cmds = e.track_ready(d, g, 20.0);
         assert!(cmds.contains(&DeckCmd::SetDistortion { deck: DeckId::B, on: true }));
         assert!(cmds.contains(&DeckCmd::SetDistortionDrive { deck: DeckId::B, drive: 10.0 }));
+    }
+
+    #[test]
+    fn phaser_rate_and_feedback_clamp_to_their_documented_ranges() {
+        let mut e = DeckEngine::new();
+        assert_eq!(
+            e.set_phaser_rate(DeckId::A, 1_000.0),
+            vec![DeckCmd::SetPhaserRate { deck: DeckId::A, hz: crate::music_dsp::PHASER_RATE_MAX }]
+        );
+        assert_eq!(
+            e.set_phaser_rate(DeckId::A, -1.0),
+            vec![DeckCmd::SetPhaserRate { deck: DeckId::A, hz: crate::music_dsp::PHASER_RATE_MIN }]
+        );
+        assert_eq!(
+            e.set_phaser_feedback(DeckId::A, 5.0),
+            vec![DeckCmd::SetPhaserFeedback {
+                deck: DeckId::A,
+                feedback: crate::music_dsp::PHASER_FEEDBACK_MAX,
+            }]
+        );
+        assert_eq!(
+            e.set_phaser_feedback(DeckId::A, -5.0),
+            vec![DeckCmd::SetPhaserFeedback { deck: DeckId::A, feedback: 0.0 }]
+        );
+    }
+
+    #[test]
+    fn toggle_phaser_flips_and_set_phaser_lands_on_an_explicit_side() {
+        let mut e = DeckEngine::new();
+        assert!(!e.deck(DeckId::A).phaser_on);
+        assert_eq!(
+            e.toggle_phaser(DeckId::A),
+            vec![DeckCmd::SetPhaser { deck: DeckId::A, on: true }]
+        );
+        assert!(e.deck(DeckId::A).phaser_on);
+        assert_eq!(
+            e.set_phaser(DeckId::B, true),
+            vec![DeckCmd::SetPhaser { deck: DeckId::B, on: true }]
+        );
+        assert!(e.deck(DeckId::B).phaser_on);
+    }
+
+    #[test]
+    fn a_load_carries_the_operators_phaser_settings() {
+        let mut e = DeckEngine::new();
+        e.toggle_phaser(DeckId::B);
+        e.set_phaser_rate(DeckId::B, 1.5);
+        let (d, g) = load_gen(&e.click(item(3), DeckTarget::B));
+        let cmds = e.track_ready(d, g, 20.0);
+        assert!(cmds.contains(&DeckCmd::SetPhaser { deck: DeckId::B, on: true }));
+        assert!(cmds.contains(&DeckCmd::SetPhaserRate { deck: DeckId::B, hz: 1.5 }));
     }
 
     // -----------------------------------------------------------------

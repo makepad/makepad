@@ -28,7 +28,7 @@ use crate::wave_analysis::{DeckClock, TrackGrid};
 use crate::music_dsp::{
     audible, knob, knob64,
     Bitcrusher, DeckEcho, DeckEq, Distortion, Flanger, FrameSource, Freeze, MotorEnd, ParamRamp,
-    RateReader, ScratchRamp, Tremolo,
+    Phaser, RateReader, ScratchRamp, Tremolo,
     Stretcher, STEM_COUNT,
     STRETCH_BYPASS_EPSILON, STRETCH_RATIO_MAX, STRETCH_RATIO_MIN, WSOLA_WINDOW,
     BRAKE_SECS, CENSOR_FLIP_SECS, CENSOR_RATE, CENSOR_RETURN_SECS, SOFT_START_SECS,
@@ -899,6 +899,7 @@ enum EffectKind {
     Bitcrusher(Bitcrusher),
     Tremolo(Tremolo),
     Distortion(Distortion),
+    Phaser(Phaser),
 }
 
 impl EffectKind {
@@ -912,15 +913,16 @@ impl EffectKind {
             EffectKind::Bitcrusher(bitcrusher) => bitcrusher.process(frame, device_rate),
             EffectKind::Tremolo(tremolo) => tremolo.process(frame, device_rate),
             EffectKind::Distortion(distortion) => distortion.process(frame, device_rate),
+            EffectKind::Phaser(phaser) => phaser.process(frame, device_rate),
         }
     }
 }
 
-const DECK_CHAIN_SLOTS: usize = 7;
+const DECK_CHAIN_SLOTS: usize = 8;
 
 /// A deck's pre-fader tone chain: a fixed list of slots, walked in order.
 /// Not a `Vec` -- sized once, at compile time, never resized. Today's
-/// seven slots are the whole roster and are permanently populated by
+/// eight slots are the whole roster and are permanently populated by
 /// construction; a slot that can stand empty, or be reassigned, is a
 /// separate decision for whenever growing the roster again asks for one.
 struct DeckChain {
@@ -938,6 +940,7 @@ impl DeckChain {
                 EffectKind::Bitcrusher(Bitcrusher::new()),
                 EffectKind::Tremolo(Tremolo::new()),
                 EffectKind::Distortion(Distortion::new()),
+                EffectKind::Phaser(Phaser::new()),
             ],
         }
     }
@@ -994,6 +997,12 @@ impl DeckChain {
     fn distortion_mut(&mut self) -> &mut Distortion {
         match &mut self.slots[6] {
             EffectKind::Distortion(distortion) => distortion,
+            _ => unreachable!(),
+        }
+    }
+    fn phaser_mut(&mut self) -> &mut Phaser {
+        match &mut self.slots[7] {
+            EffectKind::Phaser(phaser) => phaser,
             _ => unreachable!(),
         }
     }
@@ -1178,6 +1187,7 @@ impl DeckVoice {
         self.chain.freeze_mut().reset();
         self.chain.flanger_mut().silence();
         self.chain.bitcrusher_mut().silence();
+        self.chain.phaser_mut().reset();
         // No call for the tremolo here or at the other three record-
         // change sites, on purpose: its only state is an LFO phase, not
         // audio content, so there is nothing from the old record for a
@@ -2234,6 +2244,7 @@ impl Mixer {
                 d.chain.freeze_mut().reset();
                 d.chain.flanger_mut().silence();
                 d.chain.bitcrusher_mut().silence();
+                d.chain.phaser_mut().reset();
                 d.reset_blend();
             } else {
                 d.pending = Some(PendingLoad { pcm, play: keep_playing, grid: None });
@@ -2285,6 +2296,7 @@ impl Mixer {
         d.chain.freeze_mut().reset();
         d.chain.flanger_mut().silence();
         d.chain.bitcrusher_mut().silence();
+        d.chain.phaser_mut().reset();
         d.reset_blend();
         self.publish_deck(&s, deck.index());
         drop(s);
@@ -2633,6 +2645,25 @@ impl Mixer {
     pub fn set_deck_distortion_drive(&self, deck: DeckId, drive: f32) {
         let mut s = self.state.lock().unwrap();
         s.decks[deck.index()].chain.distortion_mut().set_drive(drive);
+    }
+
+    /// The phaser's on/off switch.
+    pub fn set_deck_phaser(&self, deck: DeckId, on: bool) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.phaser_mut().set_wet(if on { 1.0 } else { 0.0 });
+    }
+
+    /// The phaser LFO's sweep speed, in Hz.
+    pub fn set_deck_phaser_rate(&self, deck: DeckId, hz: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.phaser_mut().set_rate(hz);
+    }
+
+    /// How much of the phaser's own output feeds back into its first
+    /// stage.
+    pub fn set_deck_phaser_feedback(&self, deck: DeckId, feedback: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.phaser_mut().set_feedback(feedback);
     }
 
     /// Momentary FREEZE: while held, the deck repeats a beat-sized
@@ -3034,6 +3065,7 @@ impl Mixer {
         dst.chain.freeze_mut().reset();
         dst.chain.flanger_mut().silence();
         dst.chain.bitcrusher_mut().silence();
+        dst.chain.phaser_mut().reset();
         let to_index = to.index();
         self.publish_deck(&s, to_index);
     }

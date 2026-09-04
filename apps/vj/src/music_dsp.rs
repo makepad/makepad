@@ -2545,6 +2545,163 @@ impl Distortion {
     }
 }
 
+/// Four allpass stages, the classic count (two sweeping notches) small
+/// pedals of this shape have used for decades -- a deliberate, tasteful
+/// middle ground, not a tunable roster size.
+const PHASER_STAGES: usize = 4;
+/// The corner frequency's sweep range, in Hz -- the classic phaser
+/// range: low enough to sweep through the low-mids, high enough to
+/// reach into the presence range without leaving the notches feeling
+/// disconnected from the material.
+const PHASER_CORNER_LOW_HZ: f32 = 200.0;
+const PHASER_CORNER_HIGH_HZ: f32 = 2_000.0;
+pub(crate) const PHASER_RATE_MIN: f32 = 0.05;
+pub(crate) const PHASER_RATE_MAX: f32 = 5.0;
+pub(crate) const PHASER_RATE_DEFAULT: f32 = 0.5;
+pub(crate) const PHASER_FEEDBACK_MAX: f32 = 0.9;
+pub(crate) const PHASER_FEEDBACK_DEFAULT: f32 = 0.3;
+
+/// One first-order allpass stage's state -- two floats per channel, the
+/// tiny, fixed-size kind of filter memory [`DeckEq`]'s own biquads carry,
+/// not a buffer.
+#[derive(Clone, Copy, Default)]
+struct AllpassStage {
+    x_prev: [f32; 2],
+    y_prev: [f32; 2],
+}
+
+impl AllpassStage {
+    /// One sample through one first-order allpass, corner coefficient
+    /// `a` from the standard bilinear-transform form:
+    /// `y = -a*x + x_prev + a*y_prev`. Unity gain at every frequency;
+    /// only the PHASE the signal comes out with moves, which is what
+    /// summing several of these against the dry signal turns into
+    /// sweeping notches.
+    #[inline]
+    fn process(&mut self, x: f32, a: f32, channel: usize) -> f32 {
+        let y = -a * x + self.x_prev[channel] + a * self.y_prev[channel];
+        self.x_prev[channel] = x;
+        self.y_prev[channel] = y;
+        y
+    }
+}
+
+/// One deck's phaser: [`PHASER_STAGES`] cascaded allpass filters sharing
+/// one LFO-swept corner frequency, summed with the dry signal to fold
+/// unity-gain phase shifts into sweeping notches, with an optional
+/// feedback tap back into the first stage for a more resonant character.
+///
+/// Filter memory only -- the same small, fixed-size kind [`DeckEq`]'s
+/// biquads already carry, not a delay line -- so `reset` clears it
+/// directly rather than moving a bookkeeping mark, the same reason
+/// `DeckEq::reset` does.
+pub struct Phaser {
+    stages: [AllpassStage; PHASER_STAGES],
+    /// The chain's own last output, fed back into the first stage's
+    /// input next frame when `feedback` is above zero.
+    last_output: [f32; 2],
+    phase: f32,
+    wet: ParamRamp,
+    rate: ParamRamp,
+    feedback: ParamRamp,
+}
+
+impl Phaser {
+    pub fn new() -> Phaser {
+        Phaser {
+            stages: [AllpassStage::default(); PHASER_STAGES],
+            last_output: [0.0, 0.0],
+            phase: 0.0,
+            wet: ParamRamp::at(0.0),
+            rate: ParamRamp::at(PHASER_RATE_DEFAULT),
+            feedback: ParamRamp::at(PHASER_FEEDBACK_DEFAULT),
+        }
+    }
+
+    /// Clears the allpass stages' and the feedback tap's memory
+    /// directly -- a handful of floats, not a buffer, so there is
+    /// nothing here a real-time bulk clear would be unsafe to touch,
+    /// the same reason `DeckEq::reset` is shaped this way.
+    pub fn reset(&mut self) {
+        self.stages = [AllpassStage::default(); PHASER_STAGES];
+        self.last_output = [0.0, 0.0];
+    }
+
+    /// The on/off switch.
+    pub fn set_wet(&mut self, wet: f32) {
+        if let Some(wet) = knob(wet, 0.0, 1.0) {
+            self.wet.slew(wet, EQ_ENGAGE_SECS);
+        }
+    }
+
+    /// The LFO's sweep speed, in Hz.
+    pub fn set_rate(&mut self, hz: f32) {
+        if let Some(hz) = knob(hz, PHASER_RATE_MIN, PHASER_RATE_MAX) {
+            self.rate.slew(hz, EQ_ENGAGE_SECS);
+        }
+    }
+
+    /// How much of the chain's own output feeds back into the first
+    /// stage, saturated through [`pade_tanh`] like every other
+    /// regeneration path in this file, so cranking it saturates instead
+    /// of runs away.
+    pub fn set_feedback(&mut self, feedback: f32) {
+        if let Some(feedback) = knob(feedback, 0.0, PHASER_FEEDBACK_MAX) {
+            self.feedback.slew(feedback, EQ_ENGAGE_SECS);
+        }
+    }
+
+    pub fn engaged(&self) -> bool {
+        self.wet.target() > 0.0
+    }
+
+    /// Process one stereo frame.
+    #[inline]
+    pub fn process(&mut self, frame: [f32; 2], device_rate: f32) -> [f32; 2] {
+        let wet = self.wet.tick(device_rate);
+        if wet <= 0.0 {
+            // No line, no ring: the frozen filter memory below is not
+            // touched again until re-engaged, exactly how DeckEq's own
+            // biquad state behaves while bypassed.
+            return frame;
+        }
+        let rate_hz = self.rate.tick(device_rate);
+        let feedback = self.feedback.tick(device_rate);
+
+        self.phase += std::f32::consts::TAU * rate_hz / device_rate.max(1.0);
+        if self.phase >= std::f32::consts::TAU {
+            self.phase -= std::f32::consts::TAU;
+        }
+        let lfo01 = 0.5 * (1.0 + self.phase.sin());
+        let corner = PHASER_CORNER_LOW_HZ + (PHASER_CORNER_HIGH_HZ - PHASER_CORNER_LOW_HZ) * lfo01;
+        let t = (PI * corner / device_rate.max(1.0)).tan();
+        let a = ((t - 1.0) / (t + 1.0)).clamp(-0.999, 0.999);
+
+        let mut allpassed = [0.0f32; 2];
+        for channel in 0..2 {
+            let fb = pade_tanh(self.last_output[channel] * feedback);
+            let mut sample = frame[channel] + fb;
+            for stage in &mut self.stages {
+                sample = stage.process(sample, a, channel);
+            }
+            allpassed[channel] = sample;
+        }
+        self.last_output = allpassed;
+        // The classic phaser mix: equal parts dry and allpassed, which
+        // is what turns a filter that is unity gain at every frequency
+        // into sweeping notches -- the frequencies where the two land
+        // out of phase cancel. `wet` blends THIS whole notched signal
+        // in and out, on top of that fixed internal mix.
+        let notched =
+            [(frame[0] + allpassed[0]) * 0.5, (frame[1] + allpassed[1]) * 0.5];
+
+        [
+            frame[0] + (notched[0] - frame[0]) * wet,
+            frame[1] + (notched[1] - frame[1]) * wet,
+        ]
+    }
+}
+
 // ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
@@ -4889,5 +5046,142 @@ mod tests {
         assert_eq!(dist.drive.target(), DISTORTION_DRIVE_MAX);
         dist.set_drive(-1.0);
         assert_eq!(dist.drive.target(), DISTORTION_DRIVE_MIN);
+    }
+
+    /// The property a first-order allpass is built to have: unity gain
+    /// at every frequency, only phase moves. If the coefficient formula
+    /// were wrong this would show up as a gain drift, not just a wrong
+    /// phase -- exactly the mistake that would otherwise slip past
+    /// every other test here, which only look at the FULL phaser
+    /// (dry + allpassed), where an allpass gain error would just read
+    /// as "a different notch shape" rather than a clear failure.
+    #[test]
+    fn a_single_allpass_stage_has_unity_gain() {
+        let rate = 48_000.0f32;
+        let corner = 800.0f32;
+        let t = (PI * corner / rate).tan();
+        let a = (t - 1.0) / (t + 1.0);
+        let mut stage = AllpassStage::default();
+        let mut phase = 0.0f32;
+        // Past the filter's own settling transient before measuring.
+        for _ in 0..2_000 {
+            phase += 2.0 * PI * 440.0 / rate;
+            stage.process(phase.sin(), a, 0);
+        }
+        let mut in_energy = 0.0f64;
+        let mut out_energy = 0.0f64;
+        for _ in 0..4_000 {
+            phase += 2.0 * PI * 440.0 / rate;
+            let x = phase.sin();
+            let y = stage.process(x, a, 0);
+            in_energy += (x as f64) * (x as f64);
+            out_energy += (y as f64) * (y as f64);
+        }
+        let ratio = (out_energy / in_energy).sqrt();
+        assert!((ratio - 1.0).abs() < 0.01, "allpass gain drifted from unity: {ratio}");
+    }
+
+    /// Off, a fresh unit is exactly its input.
+    #[test]
+    fn a_phaser_that_was_never_engaged_is_bit_transparent() {
+        let rate = 48_000.0f32;
+        let mut ph = Phaser::new();
+        let mut phase = 0.0f32;
+        for _ in 0..4_000 {
+            phase += 2.0 * PI * 37.0 / rate;
+            let x = phase.sin() * 0.6;
+            assert_eq!(ph.process([x, -x], rate), [x, -x]);
+        }
+    }
+
+    /// Cranked feedback saturates through the shared soft clip rather
+    /// than diverging, the same property every other regeneration path
+    /// in this file is held to.
+    #[test]
+    fn phaser_stays_bounded_at_the_harshest_feedback() {
+        let rate = 48_000.0f32;
+        let mut ph = Phaser::new();
+        ph.set_wet(1.0);
+        ph.set_feedback(PHASER_FEEDBACK_MAX);
+        ph.set_rate(PHASER_RATE_MAX);
+        for _ in 0..SETTLE_FRAMES {
+            ph.process([0.0, 0.0], rate);
+        }
+        let mut phase = 0.0f32;
+        for _ in 0..48_000usize {
+            phase += 2.0 * PI * 233.0 / rate;
+            let x = phase.sin() * 0.9;
+            let out = ph.process([x, x], rate);
+            assert!(out[0].is_finite() && out[0].abs() < 8.0, "unbounded: {out:?}");
+            assert!(out[1].is_finite() && out[1].abs() < 8.0, "unbounded: {out:?}");
+        }
+    }
+
+    /// No ring-out tracking, the same simple bypass `DeckEq` itself
+    /// uses despite carrying persistent filter state: disengage
+    /// completes exactly the ramp's own duration after `set_wet(0.0)`.
+    #[test]
+    fn switching_the_phaser_off_returns_to_bit_exact_bypass_after_its_ramp() {
+        let rate = 48_000.0f32;
+        let mut ph = Phaser::new();
+        ph.set_wet(1.0);
+        for _ in 0..SETTLE_FRAMES {
+            ph.process([0.5, 0.5], rate);
+        }
+        ph.set_wet(0.0);
+        for _ in 0..1_000 {
+            ph.process([0.5, 0.5], rate);
+        }
+        assert!(!ph.engaged());
+        for i in 0..1_000 {
+            let x = (i as f32 * 0.037).sin() * 0.5;
+            assert_eq!(
+                ph.process([x, -x], rate),
+                [x, -x],
+                "a bit-exact bypass, not merely quiet"
+            );
+        }
+    }
+
+    /// `reset`, unlike the echo's or the flanger's `silence`, clears the
+    /// filter memory directly -- a handful of floats, not a buffer, the
+    /// same reason `DeckEq::reset` is shaped this way.
+    #[test]
+    fn phaser_reset_clears_its_filter_memory() {
+        let rate = 48_000.0f32;
+        let mut ph = Phaser::new();
+        ph.set_wet(1.0);
+        ph.set_feedback(0.3);
+        for _ in 0..SETTLE_FRAMES {
+            ph.process([0.6, -0.6], rate);
+        }
+        assert_ne!(ph.stages[0].x_prev, [0.0, 0.0], "real filter memory is there to clear");
+        ph.reset();
+        for stage in &ph.stages {
+            assert_eq!(stage.x_prev, [0.0, 0.0]);
+            assert_eq!(stage.y_prev, [0.0, 0.0]);
+        }
+        assert_eq!(ph.last_output, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn phaser_setters_clamp_to_their_documented_ranges() {
+        let mut ph = Phaser::new();
+        ph.set_wet(f32::NAN);
+        assert_eq!(ph.wet.target(), 0.0, "a bad value moves nothing");
+        ph.set_wet(5.0);
+        assert_eq!(ph.wet.target(), 1.0);
+        ph.set_wet(-5.0);
+        assert_eq!(ph.wet.target(), 0.0);
+        ph.set_rate(f32::INFINITY);
+        assert_eq!(ph.rate.target(), PHASER_RATE_DEFAULT, "unmoved by a bad value");
+        ph.set_rate(1_000.0);
+        assert_eq!(ph.rate.target(), PHASER_RATE_MAX);
+        ph.set_rate(-1.0);
+        assert_eq!(ph.rate.target(), PHASER_RATE_MIN);
+        ph.set_feedback(5.0);
+        assert_eq!(ph.feedback.target(), PHASER_FEEDBACK_MAX);
+        ph.set_feedback(-5.0);
+        assert_eq!(ph.feedback.target(), 0.0);
     }
 }

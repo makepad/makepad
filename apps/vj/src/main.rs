@@ -2526,6 +2526,21 @@ script_mod! {
                                         default: 4.0
                                     }
                                 }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    sfx_fx_phaser := PillButton{width: 70 text: "PHASER"}
+                                    sfx_fx_phaser_rate := Slider{
+                                        width: 170
+                                        text: "phaser rate"
+                                        min: 0.05
+                                        max: 5.0
+                                        default: 0.5
+                                    }
+                                }
                             }
 
                             // ============ MESH ============
@@ -14107,6 +14122,11 @@ p2 {}
                 DeckCmd::SetDistortionDrive { deck, drive } => {
                     self.mixer.set_deck_distortion_drive(deck, drive)
                 }
+                DeckCmd::SetPhaser { deck, on } => self.mixer.set_deck_phaser(deck, on),
+                DeckCmd::SetPhaserRate { deck, hz } => self.mixer.set_deck_phaser_rate(deck, hz),
+                DeckCmd::SetPhaserFeedback { deck, feedback } => {
+                    self.mixer.set_deck_phaser_feedback(deck, feedback)
+                }
                 DeckCmd::SetStemGain { deck, stem, gain } => {
                     self.mixer.set_deck_stem_gain(deck, stem, gain)
                 }
@@ -14266,6 +14286,7 @@ p2 {}
             deck.distortion_on,
             deck.distortion_drive as f64,
         );
+        let (phaser_on, phaser_rate) = (deck.phaser_on, deck.phaser_rate as f64);
         self.ui.slider(cx, ids!(sfx_fx_feedback)).set_value(cx, feedback);
         self.paint_chip(cx, ids!(sfx_fx_flanger), flanger_on, None);
         self.ui.slider(cx, ids!(sfx_fx_flanger_rate)).set_value(cx, flanger_rate);
@@ -14275,6 +14296,8 @@ p2 {}
         self.ui.slider(cx, ids!(sfx_fx_tremolo_rate)).set_value(cx, tremolo_rate);
         self.paint_chip(cx, ids!(sfx_fx_distortion), distortion_on, None);
         self.ui.slider(cx, ids!(sfx_fx_distortion_drive)).set_value(cx, distortion_drive);
+        self.paint_chip(cx, ids!(sfx_fx_phaser), phaser_on, None);
+        self.ui.slider(cx, ids!(sfx_fx_phaser_rate)).set_value(cx, phaser_rate);
     }
 
     /// Push a deck's tone/stem knob positions back onto the surface, so the
@@ -29209,6 +29232,32 @@ impl MatchEvent for App {
                 FxTarget::Mix => {
                     let mut cmds = self.decks.set_distortion_drive(DeckId::A, v as f32);
                     cmds.extend(self.decks.set_distortion_drive(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        if self.ui.button(cx, ids!(sfx_fx_phaser)).clicked(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.toggle_phaser(DeckId::A),
+                FxTarget::B => self.decks.toggle_phaser(DeckId::B),
+                FxTarget::Mix => {
+                    let on = !self.decks.deck(DeckId::A).phaser_on;
+                    let mut cmds = self.decks.set_phaser(DeckId::A, on);
+                    cmds.extend(self.decks.set_phaser(DeckId::B, on));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+            self.sync_sfx_fx_ui(cx);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_phaser_rate)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_phaser_rate(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_phaser_rate(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_phaser_rate(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_phaser_rate(DeckId::B, v as f32));
                     cmds
                 }
             };

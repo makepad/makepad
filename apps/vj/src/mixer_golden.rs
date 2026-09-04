@@ -439,6 +439,23 @@ fn golden_distortion_drive() {
     assert_golden("distortion_drive", &left, &right);
 }
 
+/// 317 Hz, not a round number: the phaser's sweeping notches comb-filter
+/// the tone the same way the flanger's swept delay does, so a frequency
+/// that shares no tidy relationship with the sweep is what makes the
+/// reference actually carry that motion rather than a phase-aligned
+/// coincidence of it.
+#[test]
+fn golden_phaser_sweep() {
+    let mixer = deck_a(tone_pcm(317.0, 48_000, 3.0));
+    mixer.set_deck_phaser(DeckId::A, true);
+    mixer.set_deck_phaser_rate(DeckId::A, 0.8);
+    mixer.set_deck_phaser_feedback(DeckId::A, 0.5);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let (left, right) = capture(&mixer, CAPTURE, |_| {});
+    assert_golden("phaser_sweep", &left, &right);
+}
+
 // ---------------------------------------------------------------------------
 // clicks
 // ---------------------------------------------------------------------------
@@ -747,6 +764,33 @@ fn a_distortion_drive_change_while_engaged_is_click_free() {
         }
     });
     assert!(worst < CLICK, "a drive change must ramp, biggest step {worst}");
+}
+
+#[test]
+fn engaging_and_releasing_the_phaser_are_click_free() {
+    let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| match index {
+        8 => mixer.set_deck_phaser(DeckId::A, true),
+        24 => mixer.set_deck_phaser(DeckId::A, false),
+        _ => {}
+    });
+    assert!(worst < CLICK, "engaging or releasing the phaser must ramp, biggest step {worst}");
+}
+
+#[test]
+fn a_phaser_feedback_change_while_engaged_is_click_free() {
+    let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
+    mixer.set_deck_phaser(DeckId::A, true);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| {
+        if index == 8 {
+            mixer.set_deck_phaser_feedback(DeckId::A, 0.8);
+        }
+    });
+    assert!(worst < CLICK, "a feedback change must ramp, biggest step {worst}");
 }
 
 #[test]
