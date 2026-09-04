@@ -1780,22 +1780,25 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                     }
                 }
             }
-            // Wayland axis values use motion-event coordinates: positive
-            // vertical = downward on screen = content slides down = viewport
-            // moves UP. Makepad's internal convention is positive = viewport
-            // moves DOWN (matching X11 button mapping and macOS after its
-            // negation of scrollingDeltaY). Negate to align conventions,
-            // same as winit does for the same reason.
+            // Wayland axis values already match Makepad's convention: positive vertical =
+            // scroll down = viewport moves DOWN. The spec pins the sign in
+            // wl_pointer::axis_relative_direction, whose `identical` case is fingers moving
+            // down producing a "vertical_scroll down" axis event; libinput documents the
+            // same ("the positive direction being down or right"). So pass the values
+            // through untouched -- the compositor has already applied the user's
+            // natural-scrolling preference to the sign, and negating here would invert both
+            // settings. Toolkits that do negate (winit, SDL, Chromium) only do so because
+            // their own convention is inverted; GTK, which shares Makepad's, does not.
             wl_pointer::Event::Axis {
                 time: _,
                 axis,
                 value,
             } => match axis {
                 WEnum::Value(wl_pointer::Axis::VerticalScroll) => {
-                    state.scroll_accumulator.y -= value;
+                    state.scroll_accumulator.y += value;
                 }
                 WEnum::Value(wl_pointer::Axis::HorizontalScroll) => {
-                    state.scroll_accumulator.x -= value;
+                    state.scroll_accumulator.x += value;
                 }
                 _ => {}
             },
@@ -1870,28 +1873,35 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                 // frame's Scroll event goes out with `ScrollPhase::Ended`.
                 state.scroll_stopped = true;
             }
-            // Wheel detent counts, negated to match the Axis sign convention above.
+            // Wheel detent counts, carrying the same sign convention as the Axis event
+            // above: the spec states each expresses its direction in terms of the positive
+            // or negative direction of the same axis, never inverted relative to it.
             // AxisDiscrete is only sent by compositors below seat v8; v8+ compositors
             // send AxisValue120 instead (120 units per detent, fractional detents
             // allowed for high-resolution wheels), so the two never double-count.
             wl_pointer::Event::AxisDiscrete { axis, discrete } => match axis {
                 WEnum::Value(wl_pointer::Axis::VerticalScroll) => {
-                    state.scroll_detents.y -= discrete as f64;
+                    state.scroll_detents.y += discrete as f64;
                 }
                 WEnum::Value(wl_pointer::Axis::HorizontalScroll) => {
-                    state.scroll_detents.x -= discrete as f64;
+                    state.scroll_detents.x += discrete as f64;
                 }
                 _ => {}
             },
             wl_pointer::Event::AxisValue120 { axis, value120 } => match axis {
                 WEnum::Value(wl_pointer::Axis::VerticalScroll) => {
-                    state.scroll_detents.y -= value120 as f64 / 120.0;
+                    state.scroll_detents.y += value120 as f64 / 120.0;
                 }
                 WEnum::Value(wl_pointer::Axis::HorizontalScroll) => {
-                    state.scroll_detents.x -= value120 as f64 / 120.0;
+                    state.scroll_detents.x += value120 as f64 / 120.0;
                 }
                 _ => {}
             },
+            // Purely informational: the physical direction of the entity that caused the
+            // axis event. The axis value itself already reflects the user's natural-scrolling
+            // setting, so scrolling content must ignore this. It exists for widgets that
+            // should follow the physical wheel regardless of that setting -- the spec's
+            // example is a volume slider -- which Makepad has no plumbing for, so drop it.
             wl_pointer::Event::AxisRelativeDirection {
                 axis: _,
                 direction: _,
