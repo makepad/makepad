@@ -764,9 +764,18 @@ pub const DRAG_THRESHOLD: f64 = 3.0;
 /// Value change per pixel for the current mapping and modifiers.
 /// Bounded: the range across `width`, ×0.05 fine. Unbounded: one step per
 /// pixel — the drag is the coarse gesture, Shift (×0.1) the fine one.
+/// How many field-widths of travel a bounded scrub takes to cross its whole
+/// range.
+///
+/// One was the obvious mapping and the wrong one: the pointer moving with
+/// the value 1:1 across a 48-point field means the entire range passes under
+/// a thumb's width of movement, and nothing in between can be landed on.
+/// Four gives the hand somewhere to go.
+const DRAG_RANGE_TRAVEL: f64 = 4.0;
+
 pub fn drag_rate(p: &DragParams, width: f64, shift: bool) -> f64 {
     if p.bounded && p.has_range() {
-        let rate = p.range() / width.max(1.0);
+        let rate = p.range() / (width.max(1.0) * DRAG_RANGE_TRAVEL);
         if shift {
             rate * 0.05
         } else {
@@ -1213,7 +1222,18 @@ impl Widget for FabValueInput {
         // still opens the editor instantly (snappy); the second click
         // within the window converts that into end-edit + reset.
         if let Event::MouseDown(me) = event {
+            // ...but only in the MIDDLE. The stepper arrows exist to be
+            // clicked repeatedly, and two of those inside the double-click
+            // window were being read as the reset gesture — nudge a value up
+            // three times and it snapped back to its default on the way.
+            let face = self.draw_bg.area().rect(cx);
+            let on_middle = face.size.x > 0.0
+                && matches!(
+                    field_zone(me.abs.x - face.pos.x, face.size.x, face.size.y),
+                    FieldZone::Middle
+                );
             if me.button.is_primary()
+                && on_middle
                 && self.draw_bg.area().clipped_rect(cx).contains(me.abs)
             {
                 if me.time - self.last_press_time < 0.4 {
@@ -2332,16 +2352,23 @@ mod tests {
         }
     }
 
+    /// The range takes FOUR widths of travel, not one — see
+    /// [`DRAG_RANGE_TRAVEL`]. A field's own width is a thumb's movement, and
+    /// spending the whole range across it leaves nothing landable in
+    /// between.
     #[test]
-    fn a_bounded_field_sweeps_its_range_across_its_width() {
+    fn a_bounded_field_takes_four_widths_to_sweep_its_range() {
         let p = bounded(0.0, 24.0, false);
         let a = DragAnchor { x: 0.0, value: 12.0 };
+        // 200 wide, so 800 of travel is the full 24; 100 is an eighth of it.
         let (v, _) = drag_map(&p, a, 100.0, 200.0, false, false);
+        assert!((v - 15.0).abs() < 1e-9, "{v}");
+        let (v, _) = drag_map(&p, a, 800.0, 200.0, false, false);
         assert!((v - 24.0).abs() < 1e-9, "{v}");
         let (v, _) = drag_map(&p, a, 50.0, 200.0, false, false);
-        assert!((v - 18.0).abs() < 1e-9, "{v}");
+        assert!((v - 13.5).abs() < 1e-9, "{v}");
         let (v, _) = drag_map(&p, a, 50.0, 200.0, true, false);
-        assert!((v - 12.3).abs() < 1e-9, "{v}");
+        assert!((v - 12.075).abs() < 1e-9, "{v}");
     }
 
     #[test]
@@ -2362,15 +2389,18 @@ mod tests {
         assert!((v - 1.0).abs() < 1e-9);
         assert_eq!(a2.x, 300.0);
         assert_eq!(a2.value, 1.0);
+        // One pixel back off the limit moves by one pixel's worth: the whole
+        // range is 400 of travel here, so that is 1/400.
         let (v, _) = drag_map(&p, a2, 299.0, 100.0, false, false);
-        assert!((v - 0.99).abs() < 1e-9, "{v}");
+        assert!((v - 0.9975).abs() < 1e-9, "{v}");
     }
 
     #[test]
     fn cyclic_fields_wrap_at_their_ends() {
         let p = bounded(0.0, 24.0, true);
         let a = DragAnchor { x: 0.0, value: 23.0 };
-        let (v, _) = drag_map(&p, a, 100.0, 1200.0, false, false);
+        // 1200 wide is 4800 of travel for 24, so 400 pixels is 2.
+        let (v, _) = drag_map(&p, a, 400.0, 1200.0, false, false);
         assert!((v - 1.0).abs() < 1e-9, "{v}");
     }
 

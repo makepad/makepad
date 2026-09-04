@@ -121,7 +121,7 @@ impl Cx {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
         // Exploded z-layer view: z is the call's nesting depth, not paint order.
-        let sploded = self.passes[pass_id].sploded.is_some();
+        let sploded = self.passes[pass_id].sploded.is_some_and(|p| p.depth_layers);
 
         {
             let draw_list = &mut self.draw_lists[draw_list_id];

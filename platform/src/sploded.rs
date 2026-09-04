@@ -118,6 +118,42 @@ pub struct SplodedParams {
     /// z output scale, sized so the deepest layer stays inside the ortho
     /// clip range without touching `camera_projection`.
     pub z_scale: f32,
+    /// Does z come from the NESTING DEPTH rather than the paint order?
+    ///
+    /// True only for the explode, which is the whole point of that mode: one
+    /// plane per nesting level. A pass that merely carries a camera — a zoom,
+    /// a pan — must keep the ordinary paint-order z, and the backends used to
+    /// infer this from "the pass has params at all", which silently pushed a
+    /// zoomed-but-flat view's content to z = 1000 per level and clipped every
+    /// nested thing out of the ortho's range. The background survived and
+    /// nothing else did.
+    pub depth_layers: bool,
+    /// The LAYOUT point that lands at the middle of the pass. Ordinarily the
+    /// pass's own centre, which is what makes the transform a pure rotation
+    /// about the middle of the window; move it and the view pans, so a
+    /// widget anywhere can be brought to the middle of the screen.
+    pub focus: Vec2f,
+    /// The focus point's WORLD Z — the plane the centred widget draws on.
+    ///
+    /// The focus is a point in the stack, not a point on the window. A layer
+    /// away from the pivot plane is displaced across the screen by the yaw
+    /// and pitch, by `gain` pixels per z unit, so centring a widget on plane
+    /// 6 with only its x and y lands it wherever the rotation happens to
+    /// throw plane 6 — and the deeper the extrusion, the further out it
+    /// goes. Cancelling the point's OWN z instead puts it dead centre at any
+    /// spread, and makes the transform a rotation ABOUT that widget rather
+    /// than about the middle of the stack. `z_center` when nothing is
+    /// focused, which is the plain rotation about the window's middle.
+    pub focus_z: f32,
+    /// A screen-space slide applied after everything else.
+    ///
+    /// The focus lands at the middle of the PASS, and the middle of the pass
+    /// is not the middle of what can be seen: the design panel covers a band
+    /// down the right edge. Sliding the finished picture left by half that
+    /// band puts a centred widget in the middle of the app viewport, and does
+    /// it in screen pixels — so it stays exact whatever the zoom, the
+    /// extrusion or the rotation do to the scale.
+    pub pan: Vec2f,
 }
 
 impl SplodedParams {
@@ -144,19 +180,23 @@ impl SplodedParams {
         let (sb, cb) = (-self.pitch.sin(), self.pitch.cos());
         let f = self.fit;
         let g = self.gain;
-        // The stack fans out of the z = z_center plane, so `w = (z - zc) * g`.
-        let zc = self.z_center;
+        // The stack fans out of the FOCUS plane: `w = (z - focus_z) * g`, so
+        // the pivot of the whole picture is whatever is focused — the middle
+        // layer by default, the centred widget when one is.
 
         // u' = u*ca + v*sa*sb + w*sa*cb        (w = (z - zc) * g)
         // v' = v*cb            - w*sb
         let m00 = f * ca;
         let m01 = f * sa * sb;
         let m02 = f * g * sa * cb;
-        let m03 = cx - m00 * cx - m01 * cy - m02 * zc;
+        // The translation lands `focus` at the middle of the pass. With the
+        // focus AT the middle these are the plain about-the-centre terms.
+        let (fx, fy) = (self.focus.x, self.focus.y);
+        let m03 = cx - m00 * fx - m01 * fy - m02 * self.focus_z + self.pan.x;
         let m10 = 0.0;
         let m11 = f * cb;
         let m12 = -f * g * sb;
-        let m13 = cy - m11 * cy - m12 * zc;
+        let m13 = cy - m11 * fy - m12 * self.focus_z + self.pan.y;
         // row2: pure z pass-through — depth ordering identical to flat 2D.
         let m22 = self.z_scale;
 
@@ -192,7 +232,6 @@ impl SplodedParams {
         let (sb, cb) = (-self.pitch.sin(), self.pitch.cos());
         let f = self.fit;
         let g = self.gain;
-        let zc = self.z_center;
         let z = level * SPLODED_DEPTH_UNIT;
 
         // Same rows as `camera_view`, with z fixed so only x and y are unknown:
@@ -201,10 +240,11 @@ impl SplodedParams {
         let m00 = f * ca;
         let m01 = f * sa * sb;
         let m02 = f * g * sa * cb;
-        let m03 = cx - m00 * cx - m01 * cy - m02 * zc;
+        let (fx, fy) = (self.focus.x, self.focus.y);
+        let m03 = cx - m00 * fx - m01 * fy - m02 * self.focus_z + self.pan.x;
         let m11 = f * cb;
         let m12 = -f * g * sb;
-        let m13 = cy - m11 * cy - m12 * zc;
+        let m13 = cy - m11 * fy - m12 * self.focus_z + self.pan.y;
 
         // Row 1 has no x term, so y falls out directly and x follows.
         if m11.abs() < 1.0e-6 || m00.abs() < 1.0e-6 {
@@ -212,6 +252,34 @@ impl SplodedParams {
         }
         let y = (screen.y as f32 - (m12 * z + m13)) / m11;
         let x = (screen.x as f32 - m01 * y - (m02 * z + m03)) / m00;
+        dvec2(x as f64, y as f64)
+    }
+
+    /// The forward of [`unproject`](Self::unproject): where a layout point on
+    /// the plane at `level` lands on screen.
+    ///
+    /// The same two rows, read the easy way round. Anything that has to draw
+    /// FLAT chrome over an exploded app needs this — a rect on a plane is a
+    /// parallelogram on screen, and its four projected corners are where it
+    /// actually is.
+    pub fn project(&self, offset: Vec2d, size: Vec2d, layout: Vec2d, level: f32) -> Vec2d {
+        let cx = (offset.x + size.x * 0.5) as f32;
+        let cy = (offset.y + size.y * 0.5) as f32;
+        let (sa, ca) = (self.yaw.sin(), self.yaw.cos());
+        let (sb, cb) = (-self.pitch.sin(), self.pitch.cos());
+        let f = self.fit;
+        let g = self.gain;
+        let z = level * SPLODED_DEPTH_UNIT;
+        let m00 = f * ca;
+        let m01 = f * sa * sb;
+        let m02 = f * g * sa * cb;
+        let (fx, fy) = (self.focus.x, self.focus.y);
+        let m03 = cx - m00 * fx - m01 * fy - m02 * self.focus_z + self.pan.x;
+        let m11 = f * cb;
+        let m12 = -f * g * sb;
+        let m13 = cy - m11 * fy - m12 * self.focus_z + self.pan.y;
+        let x = m00 * layout.x as f32 + m01 * layout.y as f32 + m02 * z + m03;
+        let y = m11 * layout.y as f32 + m12 * z + m13;
         dvec2(x as f64, y as f64)
     }
 }
@@ -236,6 +304,10 @@ pub struct SplodedMark {
     pub rect: Rect,
     pub level: f32,
 }
+
+/// How far the view may be magnified by the Zoom control.
+pub const SPLODED_ZOOM_MIN: f32 = 1.0;
+pub const SPLODED_ZOOM_MAX: f32 = 4.0;
 
 /// Pixels of travel that turn a press into an orbit drag.
 const ORBIT_THRESHOLD: f64 = 3.0;
@@ -263,9 +335,35 @@ pub struct SplodedView {
     /// without a frame there is nothing to see or click — which is the whole
     /// point of the mode.
     hairlines: bool,
+    /// FOCUS: the layout point to bring to the middle of the screen, and how
+    /// much to magnify around it. Independent of `active` — an app can be
+    /// centred and zoomed while perfectly flat, which is what the design
+    /// overlay's Center / Zoom controls do. `None` and `1.0` are the
+    /// identity, and the identity is the byte-identical-rendering path.
+    focus: Option<Vec2d>,
+    /// The nesting level (plane) the focus point sits on, so the exploded
+    /// view can cancel its z as well as its x and y. Meaningless while
+    /// `focus` is `None`.
+    focus_level: f32,
+    zoom: f32,
     /// A region the mode never takes the pointer in — the tweaker's panel
     /// band. See `sploded_set_flat_band`.
     flat_band: Option<Rect>,
+    /// The same exemption, for chrome that MOVES: the design overlay's note
+    /// card and the like. See `sploded_set_flat_rects`.
+    flat_rects: Vec<Rect>,
+    /// Which coordinate space the CURRENT press belongs to: `Some(true)` for
+    /// a gesture that began on flat chrome, `Some(false)` for one that began
+    /// on the body, `None` between presses.
+    ///
+    /// A drag is one gesture in one space. Deciding per event lets a scrub
+    /// that starts on the panel and wanders over the body begin getting
+    /// un-projected halfway through — and when the field under the finger is
+    /// the zoom or the extrusion depth, the un-projection is a function of
+    /// the very value being dragged: the pointer appears to move because the
+    /// value moved, which moves the value again. The press decides for the
+    /// whole gesture; the release forgets.
+    press_flat: Option<bool>,
     /// The plane the last routed pointer event landed on (`sploded_route`),
     /// `None` when the ray missed the stack or the pointer sat in the flat
     /// band. The tweaker's pick reads this to select ON that plane.
@@ -273,6 +371,14 @@ pub struct SplodedView {
     /// The tweaker's hover and pinned outlines, drawn by the body pass owner.
     hover_mark: Option<SplodedMark>,
     pinned_mark: Option<SplodedMark>,
+    /// Does the design overlay hold a selection right now?
+    ///
+    /// Separate from `pinned_mark`, which is a DRAWING artifact: the mark is
+    /// None whenever the selected widget did not draw this frame, or the
+    /// overlay has not redrawn since the pick. Whether the arrows orbit must
+    /// not hinge on that — a selection sitting in a tab you cannot see is
+    /// still a selection, and still the thing the arrows should walk from.
+    has_selection: bool,
     /// The draw list the marks live in, so a mark change redraws only it.
     mark_list: Option<DrawListId>,
     /// Nesting depth per widget uid, stamped at the draw seam this frame.
@@ -332,10 +438,16 @@ impl Default for SplodedView {
             layers: 1.0,
             drag: None,
             hairlines: true,
+            focus: None,
+            focus_level: 0.0,
+            zoom: 1.0,
             flat_band: None,
+            press_flat: None,
+            flat_rects: Vec::new(),
             hit_level: None,
             hover_mark: None,
             pinned_mark: None,
+            has_selection: false,
             mark_list: None,
             depth_by_uid: std::collections::HashMap::new(),
         }
@@ -348,9 +460,52 @@ impl SplodedView {
     }
 
     /// Resolve the per-pass matrix inputs for a pass of this size.
+    /// Is anything transforming the view — the explode, a zoom, or a pan?
+    ///
+    /// The pass takes a matrix whenever this is true, and the pointer is
+    /// routed back through its inverse. All three are off in the ordinary
+    /// case, which is the byte-identical-rendering gate.
+    fn transformed(&self) -> bool {
+        self.active || self.focus.is_some() || (self.zoom - 1.0).abs() > 1.0e-4
+    }
+
+    /// Half the covered band, leftward — see [`SplodedParams::pan`]. Only
+    /// while something is focused: with no focus the view is the plain
+    /// rotation about the window's own middle, and sliding that would move an
+    /// app nobody asked to move.
+    fn view_pan(&self) -> Vec2f {
+        match self.flat_band {
+            Some(band) if self.focus.is_some() => vec2(-(band.size.x as f32) * 0.5, 0.0),
+            _ => vec2(0.0, 0.0),
+        }
+    }
+
     fn params(&self, size: Vec2d) -> SplodedParams {
         let w = (size.x as f32).max(1.0);
         let h = (size.y as f32).max(1.0);
+        let centre = vec2(w * 0.5, h * 0.5);
+        let focus = match self.focus {
+            Some(p) => vec2(p.x as f32, p.y as f32),
+            None => centre,
+        };
+        // FLAT: no explode geometry at all, so the matrix reduces to the zoom
+        // about the focus. Every z term drops out (gain 0), and z_scale stays
+        // 1 so depth ordering is the ordinary paint order.
+        if !self.active {
+            return SplodedParams {
+                yaw: 0.0,
+                pitch: 0.0,
+                gain: 0.0,
+                fit: self.zoom,
+                z_center: 0.0,
+                z_scale: 1.0,
+                depth_layers: false,
+                focus,
+                // No planes while flat, so nothing to cancel.
+                focus_z: 0.0,
+                pan: self.view_pan(),
+            };
+        }
         let layers = self.layers.max(1.0);
 
         // The stack's pre-rotation depth, in pixels, and the gain that gets
@@ -370,9 +525,20 @@ impl SplodedView {
             yaw: self.yaw,
             pitch: self.pitch,
             gain,
-            fit,
+            // Zoom multiplies the fit: the stack is scaled about the focus
+            // exactly as the flat view is.
+            fit: fit * self.zoom,
             z_center: z_span * 0.5,
             z_scale: Z_CLIP_BUDGET / (z_span + DRAW_DEPTH_HEADROOM),
+            depth_layers: true,
+            focus,
+            // Pivot on the focused widget's own plane; on the middle of the
+            // stack when nothing is focused, which is the plain orbit.
+            focus_z: match self.focus {
+                Some(_) => self.focus_level * SPLODED_DEPTH_UNIT,
+                None => z_span * 0.5,
+            },
+            pan: self.view_pan(),
         }
     }
 }
@@ -380,6 +546,43 @@ impl SplodedView {
 impl Cx {
     /// Is the exploded view up? Widgets may read this to hide chrome that
     /// makes no sense in the mode (the tweaker panel, for one).
+    /// Is the view transformed at all — exploded, zoomed or panned? The body
+    /// has to render through the scene pass whenever this is true, because
+    /// that pass is where the camera matrix lives.
+    pub fn sploded_transformed(&self) -> bool {
+        self.sploded.transformed()
+    }
+
+    /// Bring `center` (a layout point) to the middle of the screen and
+    /// magnify by `zoom`. `None` re-centres on the window itself; a zoom of
+    /// 1.0 is life size. Both together are the identity, which is the
+    /// untransformed path.
+    ///
+    /// Independent of the exploded view: an app can be centred and zoomed
+    /// flat, and when it IS exploded the zoom scales the stack about the same
+    /// point. One transform, so one inverse routes the pointer for both.
+    /// `level` is the plane the point draws on (its component nesting depth),
+    /// which the exploded view needs to cancel the rotation's depth
+    /// displacement — see [`SplodedParams::focus_z`]. Ignored while flat.
+    pub fn sploded_set_focus(&mut self, center: Option<Vec2d>, level: f32, zoom: f32) {
+        let zoom = zoom.clamp(SPLODED_ZOOM_MIN, SPLODED_ZOOM_MAX);
+        if self.sploded.focus == center
+            && (self.sploded.focus_level - level).abs() < 1.0e-4
+            && (self.sploded.zoom - zoom).abs() < 1.0e-4
+        {
+            return;
+        }
+        self.sploded.focus = center;
+        self.sploded.focus_level = level;
+        self.sploded.zoom = zoom;
+        self.sploded_sync();
+    }
+
+    /// What the focus is set to right now: (centre, plane, zoom).
+    pub fn sploded_focus(&self) -> (Option<Vec2d>, f32, f32) {
+        (self.sploded.focus, self.sploded.focus_level, self.sploded.zoom)
+    }
+
     pub fn sploded_active(&self) -> bool {
         self.sploded.active
     }
@@ -496,6 +699,19 @@ impl Cx {
         self.sploded.flat_band = band;
     }
 
+    /// The same exemption as `sploded_set_flat_band`, for overlay chrome that
+    /// is drawn FLAT on the window pass but does not sit in one fixed band —
+    /// the design overlay's note card, which the person drags where they like.
+    /// Without it those pixels are drawn in one place and clicked in another:
+    /// the mode re-addresses the pointer onto a plane, and a widget that never
+    /// went onto a plane is then unreachable.
+    ///
+    /// Pass the rects each time they are drawn, and an empty list when they
+    /// are gone.
+    pub fn sploded_set_flat_rects(&mut self, rects: Vec<Rect>) {
+        self.sploded.flat_rects = rects;
+    }
+
     /// Map a screen point back onto the plane at nesting level `level`, for a
     /// window of `size`. `None` while the mode is off, in which case the
     /// caller's ordinary 2D point is already correct.
@@ -504,8 +720,22 @@ impl Cx {
     /// this for each, and hit-test the widgets whose nesting depth equals that
     /// level against their normal `Area::rect()`s. First hit wins — clicking a
     /// covered parent's exposed frame selects the PARENT.
+    /// Where a layout point on the plane at `level` lands on screen. `None`
+    /// while the mode is off, in which case the layout point IS the screen
+    /// point. See [`SplodedParams::project`].
+    pub fn sploded_project(&self, size: Vec2d, layout: Vec2d, level: f32) -> Option<Vec2d> {
+        if !self.sploded.transformed() {
+            return None;
+        }
+        Some(
+            self.sploded
+                .params(size)
+                .project(dvec2(0.0, 0.0), size, layout, level),
+        )
+    }
+
     pub fn sploded_unproject(&self, size: Vec2d, screen: Vec2d, level: f32) -> Option<Vec2d> {
-        if !self.sploded.active {
+        if !self.sploded.transformed() {
             return None;
         }
         Some(
@@ -545,6 +775,12 @@ impl Cx {
         if let Some(list) = self.sploded.mark_list {
             self.redraw_list(list);
         }
+    }
+
+    /// The design overlay says whether it is holding a selection. Drives the
+    /// arrow keys: they orbit only when there is nothing to walk from.
+    pub fn sploded_set_selected(&mut self, selected: bool) {
+        self.sploded.has_selection = selected;
     }
 
     pub fn sploded_marks(&self) -> (Option<SplodedMark>, Option<SplodedMark>) {
@@ -663,12 +899,6 @@ impl Cx {
     /// mode off, not a pointer event, pointer in the flat band, or an orbit
     /// drag in progress (the intercept eats those).
     pub(crate) fn sploded_route(&mut self, event: &Event) -> Option<Event> {
-        if !self.sploded.active {
-            return None;
-        }
-        if self.sploded.drag.is_some_and(|d| d.orbiting) {
-            return None;
-        }
         let abs = match event {
             Event::MouseMove(e) => e.abs,
             Event::MouseDown(e) => e.abs,
@@ -676,7 +906,35 @@ impl Cx {
             Event::Scroll(e) => e.abs,
             _ => return None,
         };
-        if self.sploded_in_flat_band(abs) {
+        // One gesture, one space — see `press_flat`. Booked BEFORE the
+        // transform is consulted, because the gesture may be the thing that
+        // turns the transform on: a scrub of the zoom field presses at 1.00,
+        // which is the identity, and only becomes a transform on the second
+        // pixel of travel. A press unrecorded there is a press whose moves
+        // then get routed one at a time.
+        let flat = match event {
+            Event::MouseDown(_) => {
+                let flat = self.sploded_in_flat_band(abs);
+                self.sploded.press_flat = Some(flat);
+                flat
+            }
+            Event::MouseUp(_) => self
+                .sploded
+                .press_flat
+                .take()
+                .unwrap_or_else(|| self.sploded_in_flat_band(abs)),
+            _ => self
+                .sploded
+                .press_flat
+                .unwrap_or_else(|| self.sploded_in_flat_band(abs)),
+        };
+        if !self.sploded.transformed() {
+            return None;
+        }
+        if self.sploded.drag.is_some_and(|d| d.orbiting) {
+            return None;
+        }
+        if flat {
             self.sploded.hit_level = None;
             return None;
         }
@@ -707,10 +965,8 @@ impl Cx {
     }
 
     fn sploded_in_flat_band(&self, abs: Vec2d) -> bool {
-        self.sploded
-            .flat_band
-            .map(|b| b.contains(abs))
-            .unwrap_or(false)
+        self.sploded.flat_band.map(|b| b.contains(abs)).unwrap_or(false)
+            || self.sploded.flat_rects.iter().any(|r| r.contains(abs))
     }
 
     /// First stop for every event. Returns true when the event was consumed
@@ -748,19 +1004,25 @@ impl Cx {
                     KeyCode::Minus | KeyCode::NumpadSubtract => {
                         self.sploded_set_spread(self.sploded.spread - SPREAD_KEY_STEP);
                     }
-                    KeyCode::ArrowLeft => {
+                    // The arrows orbit only while NOTHING is selected. With a
+                    // selection standing they belong to the design overlay,
+                    // which walks the widget hierarchy with them (parent /
+                    // child / sibling) — one pair of keys, two jobs, split by
+                    // whether there is something to walk from. The overlay
+                    // hands that over through `sploded_set_selected`.
+                    KeyCode::ArrowLeft if !self.sploded.has_selection => {
                         self.sploded.yaw = (self.sploded.yaw - 0.06).max(-YAW_LIMIT);
                         self.sploded_sync();
                     }
-                    KeyCode::ArrowRight => {
+                    KeyCode::ArrowRight if !self.sploded.has_selection => {
                         self.sploded.yaw = (self.sploded.yaw + 0.06).min(YAW_LIMIT);
                         self.sploded_sync();
                     }
-                    KeyCode::ArrowUp => {
+                    KeyCode::ArrowUp if !self.sploded.has_selection => {
                         self.sploded.pitch = (self.sploded.pitch + 0.06).min(PITCH_LIMIT);
                         self.sploded_sync();
                     }
-                    KeyCode::ArrowDown => {
+                    KeyCode::ArrowDown if !self.sploded.has_selection => {
                         self.sploded.pitch = (self.sploded.pitch - 0.06).max(-PITCH_LIMIT);
                         self.sploded_sync();
                     }
@@ -875,7 +1137,7 @@ impl Cx {
     /// explode is a per-pass camera, and putting it on the window pass would
     /// tilt the tweaker's panel along with the app.
     pub fn sploded_params(&self, size: Vec2d) -> Option<SplodedParams> {
-        if !self.sploded.active {
+        if !self.sploded.transformed() {
             return None;
         }
         Some(self.sploded.params(size))
@@ -891,10 +1153,12 @@ impl Cx {
     /// backend walk ignores its running counter entirely (`resolve_zbias`), so
     /// there is nothing to open up and nothing to restore.
     fn sploded_sync(&mut self) {
-        if self.sploded.active {
+        if self.sploded.transformed() {
             // Measured by `enter_nesting_depth` during the last draw.
             self.sploded.layers = (self.nesting_depth_max as f32).max(1.0);
         } else {
+            // Nothing is transforming the view any more: the passes go back
+            // to the identity, which is the byte-identical render path.
             for draw_pass_id in self.passes.id_iter() {
                 self.passes[draw_pass_id].sploded = None;
             }
@@ -918,6 +1182,11 @@ mod tests {
     /// with a 10-level deep tree.
     fn probe() -> (SplodedParams, Vec2d, Vec2d) {
         let mut view = SplodedView::default();
+        // `params` answers with whatever transform is IN EFFECT, and with the
+        // mode off that is the flat one (a zoom about the focus, identity by
+        // default). These probes are about the explode geometry, so they have
+        // to say the mode is on.
+        view.active = true;
         view.layers = 10.0;
         let size = dvec2(1200.0, 800.0);
         (view.params(size), dvec2(0.0, 0.0), size)

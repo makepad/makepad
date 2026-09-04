@@ -1184,7 +1184,7 @@ impl Window {
         // The exploded view owns the body pass; it does not nest inside the
         // other two scene mechanisms.
         self.use_sploded =
-            cx.sploded_active() && !self.use_gauss_capture && !self.use_ssaa;
+            cx.sploded_transformed() && !self.use_gauss_capture && !self.use_ssaa;
 
         if self.use_sploded {
             self.sploded_stack.begin_scene(cx);
@@ -1627,7 +1627,14 @@ impl Widget for Window {
                     };
                     if visible {
                         if caption_rect.contains(dq.abs) {
-                            if buttons_rect.size != Vec2d::default()
+                            // The design overlay's panel is drawn OVER the
+                            // caption bar, top of the window down. Answering
+                            // Caption there hands the press to the OS as a
+                            // window drag and the panel never sees it — its
+                            // filter field could not be focused at all.
+                            if crate::tweaker::panel_owns_pointer(dq.abs) {
+                                dq.response.set(WindowDragQueryResponse::Client);
+                            } else if buttons_rect.size != Vec2d::default()
                                 && buttons_rect.contains(dq.abs)
                             {
                                 dq.response.set(WindowDragQueryResponse::Client);

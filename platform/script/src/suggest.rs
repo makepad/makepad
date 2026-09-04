@@ -39,6 +39,21 @@ pub fn levenshtein(a: &str, b: &str) -> usize {
     prev_row[b_len]
 }
 
+/// The first dozen characters of a string, for a one-line preview.
+///
+/// CHARACTERS, not bytes: slicing at a fixed byte index lands inside a
+/// multi-byte character the moment a value holds anything but ASCII (an em
+/// dash twelve bytes in was enough), and a panic while composing a
+/// "did you mean" suggestion aborts the process.
+fn brief_string(s: &str) -> String {
+    let mut out: String = s.chars().take(12).collect();
+    if out.chars().count() < s.chars().count() {
+        out.push_str("...");
+    }
+    out
+}
+
+
 /// Format a ScriptValue briefly for display in suggestions.
 /// Shows type and a short preview of the value, e.g.:
 /// - `#ff0000` for colors
@@ -86,24 +101,13 @@ pub fn format_value_brief(heap: &ScriptHeap, value: ScriptValue) -> String {
 
     // Handle inline strings
     if let Some(s) = value.as_inline_string(|s| s.to_string()) {
-        let truncated = if s.len() > 12 {
-            format!("{}...", &s[..12])
-        } else {
-            s
-        };
-        return format!("\"{}\"", truncated);
+        return format!("\"{}\"", brief_string(&s));
     }
 
     // Handle heap strings
     if let Some(s) = value.as_string() {
         if let Some(str_data) = &heap.strings[s] {
-            let s = &str_data.string.0;
-            let truncated = if s.len() > 12 {
-                format!("{}...", &s[..12])
-            } else {
-                s.to_string()
-            };
-            return format!("\"{}\"", truncated);
+            return format!("\"{}\"", brief_string(&str_data.string.0));
         }
         return "\"\"".to_string();
     }
