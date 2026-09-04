@@ -1243,7 +1243,10 @@ pub type ProgressSink<'a> = &'a mut dyn FnMut(&str, f64);
 /// and unwind with [`AssetAiError::Cancelled`] promptly — seconds, not
 /// end-of-job. A single in-flight kernel/forward is the granularity floor.
 #[derive(Clone, Debug, Default)]
-pub struct CancelToken(std::sync::Arc<std::sync::atomic::AtomicBool>);
+pub struct CancelToken {
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    activity: Option<(std::sync::Arc<crate::activity::ActivityGate>, u64)>,
+}
 
 impl CancelToken {
     pub fn new() -> Self {
@@ -1252,11 +1255,21 @@ impl CancelToken {
 
     /// Raise the flag (idempotent).
     pub fn cancel(&self) {
-        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(std::sync::atomic::Ordering::Relaxed)
+        if self.activity_interrupted() { self.cancel(); }
+        self.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn bind_activity(&mut self, gate: std::sync::Arc<crate::activity::ActivityGate>) {
+        let epoch = gate.epoch();
+        self.activity = Some((gate, epoch));
+    }
+
+    pub(crate) fn activity_interrupted(&self) -> bool {
+        self.activity.as_ref().is_some_and(|(gate, epoch)| !gate.allows_work() || gate.epoch() != *epoch)
     }
 
     /// `Err(AssetAiError::Cancelled)` once the flag is raised — the one-liner
@@ -1292,6 +1305,7 @@ impl<'a> BackendCtx<'a> {
     /// Downloads any registry files missing from the cache; returns their
     /// resolved local paths in registry order.
     pub fn ensure_files(&mut self) -> Result<Vec<PathBuf>, AssetAiError> {
+        crate::disk_space::check_model(self.spec, self.cache_dir)?;
         let mut paths = Vec::new();
         for file in &self.spec.files {
             self.cancel.check()?;

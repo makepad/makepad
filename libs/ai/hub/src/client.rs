@@ -19,12 +19,18 @@
 use crate::error::AssetAiError;
 use crate::http_client::{http_fetch, HttpClientRequest};
 use crate::protocol::{
-    ByeRequestJson, ByeResponseJson, GenerateRequestJson, GenerateResponseJson, HealthJson,
+    ByeRequestJson, ByeResponseJson, GenerateRequestJson, HealthJson,
     JobStatusJson, KeepaliveRequestJson, KeepaliveResponseJson, ModelInfoJson, ModelsJson,
 };
 use crate::registry::Domain;
 use makepad_micro_serde::{DeJson, SerJson};
 use std::sync::Mutex;
+
+#[path = "client_submission.rs"]
+mod submission;
+#[cfg(test)]
+#[path = "client_submission_tests.rs"]
+mod submission_tests;
 
 /// One artifact fetched from a provider.
 #[derive(Clone, Debug)]
@@ -47,6 +53,21 @@ pub trait ContentProvider {
         domain: Domain,
         request: &GenerateRequestJson,
     ) -> Result<String, AssetAiError>;
+
+    /// Worker-side submission with cancellable pre-admission waiting. The
+    /// default makes ONE request: untyped provider errors never justify replay.
+    /// Once accepted, always return the job id, even if cancellation arrived
+    /// during the POST, so the caller can relinquish that job immediately.
+    fn request_pending(
+        &self,
+        domain: Domain,
+        request: &GenerateRequestJson,
+        cancelled: &dyn Fn() -> bool,
+        _pending: &mut dyn FnMut(&str),
+    ) -> Result<String, AssetAiError> {
+        if cancelled() { return Err(AssetAiError::Cancelled); }
+        self.request(domain, request)
+    }
 
     /// Job progress: queued / running{stage, progress} / done{artifacts} /
     /// error.
@@ -148,6 +169,49 @@ impl LocalService {
         let body = response.read_body_to_vec(MAX_JSON_BODY)?;
         parse_json_body::<T>(status, &body, &url)
     }
+
+    fn request_pending_using(
+        &self,
+        domain: Domain,
+        request: &GenerateRequestJson,
+        cancelled: &dyn Fn() -> bool,
+        pending: &mut dyn FnMut(&str),
+        transport: &mut impl submission::Transport,
+    ) -> Result<String, AssetAiError> {
+        if cancelled() { return Err(AssetAiError::Cancelled); }
+        let mut request_with_model = None;
+        if request.model.is_empty() {
+            let models = self.list_models()?;
+            let chosen = models
+                .iter()
+                .find(|model| model.available && model.domain == domain.as_str())
+                .ok_or_else(|| {
+                    AssetAiError::Unavailable(format!(
+                        "no available {} model on {}",
+                        domain.as_str(),
+                        self.base_url
+                    ))
+                })?;
+            let mut owned = request.clone();
+            owned.model = chosen.id.clone();
+            request_with_model = Some(owned);
+        }
+        let request = request_with_model.as_ref().unwrap_or(request);
+        let url = format!("{}/generate", self.base_url);
+        let body = request.serialize_json();
+        let job_id = submission::submit(&url, &self.auth_headers, body.as_bytes(),
+            cancelled, &mut |note| pending(&submission::safe_note(note, request, &self.auth_headers)), transport)
+            .map_err(|error| match error {
+                AssetAiError::Cancelled => AssetAiError::Cancelled,
+                AssetAiError::Http(reason) => AssetAiError::Http(submission::safe_note(&reason, request, &self.auth_headers)),
+                AssetAiError::Unavailable(reason) if reason.starts_with("disk-space:") =>
+                    AssetAiError::Unavailable(submission::safe_note(&reason, request, &self.auth_headers)),
+                other => AssetAiError::Http(submission::safe_note(&other.to_string(), request, &self.auth_headers)),
+            })?;
+        *self.lease_origin.lock().unwrap_or_else(|e| e.into_inner()) = request
+            .origin_key.as_ref().map(|key| (key.clone(), request.origin_epoch.unwrap_or(0)));
+        Ok(job_id)
+    }
 }
 
 fn parse_json_body<T: DeJson>(status: u16, body: &[u8], url: &str) -> Result<T, AssetAiError> {
@@ -177,48 +241,15 @@ impl ContentProvider for LocalService {
         Ok(models.models)
     }
 
-    fn request(
-        &self,
-        domain: Domain,
-        request: &GenerateRequestJson,
+    fn request(&self, domain: Domain, request: &GenerateRequestJson) -> Result<String, AssetAiError> {
+        self.request_pending(domain, request, &|| false, &mut |_| {})
+    }
+
+    fn request_pending(
+        &self, domain: Domain, request: &GenerateRequestJson,
+        cancelled: &dyn Fn() -> bool, pending: &mut dyn FnMut(&str),
     ) -> Result<String, AssetAiError> {
-        let mut request_with_model = None;
-        if request.model.is_empty() {
-            let models = self.list_models()?;
-            let chosen = models
-                .iter()
-                .find(|model| model.available && model.domain == domain.as_str())
-                .ok_or_else(|| {
-                    AssetAiError::Unavailable(format!(
-                        "no available {} model on {}",
-                        domain.as_str(),
-                        self.base_url
-                    ))
-                })?;
-            let mut owned = request.clone();
-            owned.model = chosen.id.clone();
-            request_with_model = Some(owned);
-        }
-        let request = request_with_model.as_ref().unwrap_or(request);
-        let url = format!("{}/generate", self.base_url);
-        let body = request.serialize_json();
-        let response = http_fetch(&self.post_request(&url, "application/json", body.as_bytes()))?;
-        let status = response.status;
-        let bytes = response.read_body_to_vec(MAX_JSON_BODY)?;
-        let parsed: GenerateResponseJson = parse_json_body(status, &bytes, &url)?;
-        match parsed.job_id {
-            Some(job_id) => {
-                *self.lease_origin.lock().unwrap_or_else(|e| e.into_inner()) = request
-                    .origin_key
-                    .as_ref()
-                    .map(|key| (key.clone(), request.origin_epoch.unwrap_or(0)));
-                Ok(job_id)
-            }
-            None => Err(AssetAiError::Http(format!(
-                "{url}: {}",
-                parsed.error.unwrap_or_else(|| "no job id".to_string())
-            ))),
-        }
+        self.request_pending_using(domain, request, cancelled, pending, &mut submission::HttpTransport)
     }
 
     fn poll(&self, job_id: &str) -> Result<JobStatusJson, AssetAiError> {

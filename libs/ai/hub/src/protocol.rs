@@ -40,10 +40,10 @@ pub struct HealthJson {
     /// Unix ms when this service process started (restart observability for
     /// supervisors and coordinators).
     pub started_ms: Option<u64>,
-    /// Sorted domain names this build + machine can actually serve right now:
+    /// Sorted domain names provisioned by this build + machine:
     /// only domains with at least one model that is registry-available AND
-    /// backend-compiled AND machine-provisioned. The honest capability
-    /// snapshot — never lists a domain that would 503 at generate time.
+    /// backend-compiled AND machine-provisioned. Temporary machine-use
+    /// admission is reported separately in `activity`.
     pub capabilities: Option<Vec<String>>,
     /// VRAM admission safety reserve in MB (see the server residency policy);
     /// a heavy model loads only when fresh free VRAM >= estimate + reserve.
@@ -68,6 +68,27 @@ pub struct HealthJson {
     /// needs no flag day. Present only when an LLM is actually resident;
     /// a box that has not loaded one has no lanes to describe.
     pub lanes: Option<LanesJson>,
+    /// Machine-use admission policy. Missing on older services; model and
+    /// hardware capability remain separate from this temporary gate.
+    pub activity: Option<ActivityJson>,
+}
+
+/// Versioned, privacy-preserving machine activity snapshot. No session names,
+/// process names, input values, or foreground window details go on the wire.
+#[derive(Clone, Debug, Default, SerJson, DeJson)]
+pub struct ActivityJson {
+    pub version: u32,
+    pub enabled: bool,
+    /// `idle`, `busy`, `unknown`, `disabled`, or `unsupported`.
+    pub state: String,
+    pub reason: String,
+    pub idle_seconds: Option<u64>,
+    pub foreign_gpu_percent: Option<f64>,
+    pub admission_open: bool,
+    pub idle_threshold_seconds: u64,
+    pub quiet_seconds: u64,
+    pub gpu_threshold_percent: f64,
+    pub sample_age_ms: u64,
 }
 
 /// What a box advertises about its concurrent decode capacity.
@@ -128,7 +149,8 @@ pub struct ModelInfoJson {
     pub domain: String,
     pub backend: String,
     /// False for placeholder entries (flux1-dev, trellis-2) and for models
-    /// whose backend is not compiled into this build.
+    /// whose backend is not compiled into this build. A temporary machine-use
+    /// pause is false with a `local-use:` unavailable reason for legacy clients.
     pub available: bool,
     pub gated: bool,
     pub vram_gb: Option<f64>,
@@ -148,7 +170,7 @@ pub struct ModelInfoJson {
     pub revision: Option<String>,
     /// Present exactly when `available == false`: the explicit reason —
     /// backend not compiled into this build, python stack not provisioned on
-    /// this machine, or disabled in the registry — so schedulers and UIs
+    /// this machine, disabled in the registry, or a temporary local-use pause — so schedulers and UIs
     /// report *why* instead of guessing.
     pub unavailable_reason: Option<String>,
     /// Weight-license identity. Optional so older `/models` payloads still

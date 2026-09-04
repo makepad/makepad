@@ -9,6 +9,54 @@
 use crate::error::AssetAiError;
 use makepad_micro_serde::*;
 
+/// Admission is retryable only when the server definitively created no job.
+/// Missing fields are not null: a truncated/legacy error or transport failure
+/// may conceal an accepted session and must never trigger another POST.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RealtimeOpenResponse {
+    Accepted { job_id: String, ws_path: String },
+    Unavailable { reason: String },
+    Failed { reason: String },
+}
+
+pub fn classify_realtime_open_response(status: u16, body: &[u8]) -> RealtimeOpenResponse {
+    use makepad_strict_json::Value;
+    let failed = || RealtimeOpenResponse::Failed {
+        reason: format!("realtime open: http {status} {}", String::from_utf8_lossy(body).chars().take(200).collect::<String>()),
+    };
+    // Unlike optional typed fields, strict JSON preserves explicit nulls,
+    // rejects duplicate keys, invalid UTF-8 and trailing/truncated data.
+    let Ok(root @ Value::Obj(_)) = makepad_strict_json::parse(body) else { return failed() };
+    let error = root.get("error");
+    if status == 200 && matches!(error, None | Some(Value::Null)) {
+        if let (Some(Value::Str(job_id)), Some(Value::Str(ws_path))) = (root.get("job_id"), root.get("ws_path")) {
+            if !job_id.is_empty() && ws_path == &format!("/realtime/{job_id}") {
+                return RealtimeOpenResponse::Accepted { job_id: job_id.clone(), ws_path: ws_path.clone() };
+            }
+        }
+    }
+    if matches!(status, 409 | 429 | 503)
+        && matches!(root.get("job_id"), Some(Value::Null))
+        && matches!(root.get("ws_path"), Some(Value::Null))
+    {
+        if let Some(Value::Str(reason)) = error {
+            // These are admission reasons, not arbitrary model/backend errors.
+            let local_use = reason.strip_prefix("model unavailable: local-use:")
+                .or_else(|| reason.strip_prefix("local-use:"))
+                .is_some_and(|s| !s.trim().is_empty());
+            let queue_full = reason.strip_prefix("queue full: ")
+                .and_then(|s| s.strip_suffix(" jobs already queued on this node"))
+                .is_some_and(|n| n.parse::<usize>().is_ok());
+            if local_use || queue_full || matches!(reason.as_str(),
+                "busy: a job is already queued or running" | "temporarily unavailable" | "model unavailable: temporarily unavailable")
+            {
+                return RealtimeOpenResponse::Unavailable { reason: reason.clone() };
+            }
+        }
+    }
+    failed()
+}
+
 // ---------------------------------------------------------------------------
 // Binary frame header (both directions)
 // ---------------------------------------------------------------------------
@@ -353,6 +401,51 @@ pub fn encode_stopped_message(reason: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn realtime_admission_requires_explicit_no_job_temporary_refusal() {
+        let body = br#"{"job_id":null,"ws_path":null,"error":"model unavailable: local-use: quiet-hysteresis"}"#;
+        for status in [409, 429, 503] {
+            assert!(matches!(classify_realtime_open_response(status, body), RealtimeOpenResponse::Unavailable { .. }));
+        }
+        for status in [200, 400, 404, 500] {
+            assert!(matches!(classify_realtime_open_response(status, body), RealtimeOpenResponse::Failed { .. }));
+        }
+        for reason in ["busy: a job is already queued or running", "queue full: 3 jobs already queued on this node", "temporarily unavailable"] {
+            let body = format!(r#"{{"job_id":null,"ws_path":null,"error":"{reason}"}}"#);
+            assert!(matches!(classify_realtime_open_response(409, body.as_bytes()), RealtimeOpenResponse::Unavailable { .. }));
+        }
+    }
+
+    #[test]
+    fn realtime_admission_never_retries_accepted_ambiguous_or_malformed_responses() {
+        for body in [
+            "", "null", "{}", "{", "not json",
+            r#"{"error":"model unavailable: local-use: busy"}"#,
+            r#"{"job_id":null,"error":"model unavailable: local-use: busy"}"#,
+            r#"{"ws_path":null,"error":"model unavailable: local-use: busy"}"#,
+            r#"{"job_id":"job-1","ws_path":null,"error":"local-use: busy"}"#,
+            r#"{"job_id":null,"ws_path":"/realtime/job-1","error":"local-use: busy"}"#,
+            r#"{"job_id":0,"ws_path":null,"error":"local-use: busy"}"#,
+            r#"{"job_id":"","ws_path":"","error":"local-use: busy"}"#,
+            r#"{"job_id":null,"ws_path":null,"error":"local-use: busy"} garbage"#,
+            r#"{"job_id":"job-1","job_id":null,"ws_path":null,"error":"local-use: busy"}"#,
+            r#"{"job_id":null,"ws_path":null,"error":"bad request: local-use: busy"}"#,
+            r#"{"job_id":null,"ws_path":null,"error":"model unavailable: backend not compiled"}"#,
+            r#"{"job_id":null,"ws_path":null,"error":"unknown model: flux"}"#,
+            r#"{"job_id":null,"ws_path":null,"error":"model unavailable: local-use:"}"#,
+        ] {
+            assert!(matches!(classify_realtime_open_response(409, body.as_bytes()), RealtimeOpenResponse::Failed { .. }), "{body}");
+        }
+        assert!(matches!(classify_realtime_open_response(503, b"\xff"), RealtimeOpenResponse::Failed { .. }));
+        let accepted = br#"{"job_id":"job-1","ws_path":"/realtime/job-1"}"#;
+        assert_eq!(classify_realtime_open_response(200, accepted), RealtimeOpenResponse::Accepted {
+            job_id: "job-1".into(), ws_path: "/realtime/job-1".into(),
+        });
+        assert!(matches!(classify_realtime_open_response(409, accepted), RealtimeOpenResponse::Failed { .. }));
+        let accepted_error = br#"{"job_id":"job-1","ws_path":"/realtime/job-1","error":"local-use: busy"}"#;
+        assert!(matches!(classify_realtime_open_response(200, accepted_error), RealtimeOpenResponse::Failed { .. }));
+    }
 
     #[test]
     fn frame_round_trip_raw() {
