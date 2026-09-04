@@ -5438,7 +5438,7 @@ impl CxVulkan {
     ) -> Result<(), String> {
         let draw_order_len = cx.draw_lists[draw_list_id].draw_item_order_len();
         // Exploded z-layer view: z is the call's nesting depth, not paint order.
-        let sploded = cx.passes[draw_pass_id].sploded.is_some();
+        let sploded = cx.passes[draw_pass_id].sploded.is_some_and(|p| p.depth_layers);
         for order_index in 0..draw_order_len {
             let Some(draw_item_id) =
                 cx.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)

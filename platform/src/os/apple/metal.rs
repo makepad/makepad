@@ -154,7 +154,7 @@ impl Cx {
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
         // Exploded z-layer view: z comes from the call's nesting depth instead
         // of the paint-order counter. See `crate::sploded`.
-        let sploded = self.passes[draw_pass_id].sploded.is_some();
+        let sploded = self.passes[draw_pass_id].sploded.is_some_and(|p| p.depth_layers);
         let debug_dump_count = self.draw_lists[draw_list_id].debug_dump_count;
         let debug_dump = debug_dump_count > 0;
         if self.draw_lists[draw_list_id].debug_dump {
