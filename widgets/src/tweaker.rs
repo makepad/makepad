@@ -32,7 +32,8 @@
 //!
 //! Its three buttons are — close (far left, where a window's close control
 //! lives) and, at the right, Send and Pin — labelled, because an icon alone
-//! is a guess about what a button does to what you just wrote. Sending
+//! is a guess about what a button does to what you just wrote. Enter and
+//! Shift+Enter make a new line (a note is prose), and Tab pins. Sending
 //! (`Ctrl+Enter` or ✦) does not push anything — the bridge is a server — it
 //! raises the note's `sent` count, which `/tweak/state` reports as
 //! `"ask": N` and the log ring carries as `TWEAK ask #N`. A polling agent
@@ -42,6 +43,19 @@
 //! Pinning writes the note to `.makepad-notes.txt` beside the running app —
 //! plain tab-separated text — so it survives the process and is readable
 //! without it.
+//!
+//! Typing `@` into a note arms a widget pick: the hover turns amber and the
+//! next click writes that widget's reference into the note, leaving the
+//! selection alone. A pinned note also marks its widget with a small amber
+//! pin, which opens it.
+//!
+//! References are readable paths ([`readable_paths`]): the widget's name
+//! where it has one, its type where it does not, `_1`/`_2` only where
+//! siblings collide, and the head every path in the app shares dropped, so
+//! they start where the app does — `dock.tOverview.View.View.Label_1`. That
+//! is what the footer copies and what a note is keyed by. An `@` writes the
+//! same thing, or the shorter relative form when there is one: `./Label_2`
+//! for a sibling, `../Button` one container out.
 //!
 //! And with a selection standing, the arrow keys walk the live tree the way
 //! a scene editor does: parent, first child, previous/next sibling. With
@@ -63,9 +77,12 @@
 
 use crate::{
     check_box::{CheckBox, CheckBoxAction},
-    fab_controls::{format_hex, parse_hex, rgb_to_hsv, FabColorPick, FabColorPickAction, FabValueInput, FabValueInputAction},
+    fab_controls::{format_hex, parse_hex, rgb_to_hsv, FabColorPick, FabColorPickAction, FabValueInput, FabValueInputAction, FabValueInputWidgetRefExt},
     makepad_draw::makepad_platform::sploded::{SPLODED_SPREAD_DEFAULT, SPLODED_SPREAD_MAX, SPLODED_SPREAD_MIN},
+    dock::DockWidgetRefExt,
     file_tree::{FileTree, FileTreeAction},
+    fold_header::FoldHeaderWidgetRefExt,
+    page_flip::PageFlipWidgetRefExt,
     label::Label,
     makepad_derive_widget::*,
     makepad_draw::*,
@@ -122,6 +139,10 @@ pub struct TweakPick {
 #[derive(Clone, Copy, PartialEq)]
 enum PickStyle {
     Hover,
+    /// Hovering while a note's `@` is waiting for a widget: amber, and
+    /// heavier than the ordinary hover, because this click does something
+    /// different — it writes a name into the note instead of selecting.
+    Mention,
     Pinned,
     /// Pinned while a value is actively moving: hairline stipple only.
     PinnedQuiet,
@@ -153,7 +174,15 @@ pub struct TweakDiffEntry {
 #[derive(Clone, Debug)]
 pub struct TweakNote {
     pub path: String,
+    /// The NOTE: what this widget is about, written for whoever reads it
+    /// next — you, tomorrow, or an agent looking for standing context. It is
+    /// never cleared by sending; only you empty it.
     pub text: String,
+    /// The PROMPT: one instruction, on its way out. Sending or queueing
+    /// empties it, because a message you have sent is not a message you
+    /// still have. In memory only — a note is worth keeping across runs, a
+    /// half-typed instruction is not.
+    pub prompt: String,
     pub dx: f64,
     pub dy: f64,
     pub w: f64,
@@ -162,6 +191,13 @@ pub struct TweakNote {
     /// (`.makepad-notes.txt` beside the running app) and read back at the
     /// first note of the next session.
     pub pinned: bool,
+    /// Everything ever sent or queued from this note, oldest first. Sending
+    /// CLEARS the field — the note is a message box, not a document — so the
+    /// history is where a message goes to stay recallable, with Up.
+    pub history: Vec<String>,
+    /// How far back through `history` Up has walked. `history.len()` is the
+    /// empty draft the person is typing now.
+    pub history_at: usize,
     /// Bumped every time the human sends the note to the AI (the sparkle
     /// button / Ctrl+Enter). `/tweak/state` reports the note as `ask` while
     /// this is above the count the AI last acknowledged, so a polling agent
@@ -175,10 +211,31 @@ const NOTE_H: f64 = 96.0;
 /// The card never shrinks below this — the button row needs the width.
 const NOTE_MIN_W: f64 = 140.0;
 const NOTE_MIN_H: f64 = 56.0;
-/// The header strip: drag handle plus the four icon buttons.
-const NOTE_HEADER_H: f64 = 16.0;
 /// The bottom-right resize grip, in points.
 const NOTE_GRIP: f64 = 14.0;
+/// How long the card's border says "that went" after a send or a queue.
+const NOTE_FLASH_LINGER: f64 = 0.55;
+
+/// What the card's border is confirming right now.
+#[derive(Clone, Copy, PartialEq, Default)]
+enum NoteFlash {
+    #[default]
+    None,
+    Queued,
+    Sent,
+}
+
+/// How much one wheel notch changes the magnification.
+const ZOOM_WHEEL_STEP: f32 = 0.15;
+
+/// How much one wheel notch opens or closes the exploded stack.
+const SPREAD_WHEEL_STEP: f32 = 0.04;
+
+/// The pin badge's clickable square, in points.
+const BADGE_SIZE: f64 = 13.0;
+/// How often the badge targets are re-resolved (a whole-tree walk).
+const BADGE_REFRESH: f64 = 0.5;
+
 /// How far the card has to be from its widget's outline before the leader
 /// line is drawn at all. Under this the two read as one object already.
 const NOTE_LEADER_MIN_GAP: f64 = 30.0;
@@ -192,11 +249,14 @@ impl TweakNote {
         Self {
             path,
             text: String::new(),
+            prompt: String::new(),
             dx: 8.0,
             dy: -(NOTE_H + 12.0),
             w: NOTE_W,
             h: NOTE_H,
             pinned: false,
+            history: Vec::new(),
+            history_at: 0,
             sent: 0,
         }
     }
@@ -211,6 +271,65 @@ impl TweakNote {
 // without the app running.
 
 const NOTE_STORE: &str = ".makepad-notes.txt";
+/// Custom names live beside the notes and outlive the process the same way:
+/// a name typed into the Props tab is a request the AI carries out in the
+/// source, and it must still be there when the AI gets to it — including
+/// after a rebuild, which is exactly when a rename lands.
+const NAME_STORE: &str = ".makepad-names.txt";
+
+/// A name the person gave a widget. `from` is what the tree calls it today
+/// (empty for an anonymous widget), `to` what they want it called.
+#[derive(Clone, Debug)]
+pub struct TweakRename {
+    pub reference: String,
+    pub from: String,
+    pub to: String,
+}
+
+/// Read the requested names back.
+fn name_store_load() -> Vec<TweakRename> {
+    let Ok(body) = std::fs::read_to_string(NAME_STORE) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in body.lines() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        let cols: Vec<&str> = line.split('\t').collect();
+        if cols.len() < 3 {
+            continue;
+        }
+        out.push(TweakRename {
+            reference: cols[0].to_string(),
+            from: note_store_unescape(cols[1]),
+            to: note_store_unescape(cols[2]),
+        });
+    }
+    out
+}
+
+fn name_store_save(renames: &[TweakRename]) {
+    if renames.is_empty() {
+        let _ = std::fs::remove_file(NAME_STORE);
+        return;
+    }
+    let mut out = String::from(
+        "# makepad widget names — typed in the F12 Props tab, one per line\n\
+         # reference\tcurrent name\twanted name\n",
+    );
+    for rename in renames {
+        out.push_str(&format!(
+            "{}\t{}\t{}\n",
+            rename.reference,
+            note_store_escape(&rename.from),
+            note_store_escape(&rename.to)
+        ));
+    }
+    if let Err(error) = std::fs::write(NAME_STORE, out) {
+        log!("TWEAK name store write failed: {error}");
+    }
+}
 
 fn note_store_escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -245,6 +364,138 @@ fn note_store_unescape(text: &str) -> String {
     out
 }
 
+/// Put a mentioned widget's path into the note text, right after the `@`
+/// that armed the pick. With no `@` (the arming character was deleted mid
+/// pick) it is appended, so a click is never silently lost.
+fn insert_mention(text: &str, path: &str) -> String {
+    match text.rfind('@') {
+        Some(at) => {
+            let mut out = String::with_capacity(text.len() + path.len());
+            out.push_str(&text[..=at]);
+            out.push_str(path);
+            out.push_str(&text[at + 1..]);
+            out
+        }
+        None => {
+            let mut out = text.to_string();
+            if !out.is_empty() && !out.ends_with(char::is_whitespace) {
+                out.push(' ');
+            }
+            out.push('@');
+            out.push_str(path);
+            out
+        }
+    }
+}
+
+/// `target` written relative to the noted widget, in URL notation — the one
+/// notation the whole scheme uses:
+///
+/// * `/dock/tOverview/View/Label_1` is absolute, from the root,
+/// * `./child` is inside the widget the note is on,
+/// * `../Label_2` is a SIBLING (up to the parent, then down), and
+/// * `../../Button` is one level further out.
+///
+/// This is what the person sees in the card, because `../Label_2` says "the
+/// one next to this", which no absolute path can say however short it is.
+/// What leaves the app — the clipboard, `/tweak/state` — is always absolute:
+/// a reference read somewhere else has no "here" to be relative to.
+///
+/// `None` when the two share no root, or when the target is a bare ancestor
+/// (`../` alone names it but says nothing about WHAT it is).
+fn relative_path(base: &str, target: &str) -> Option<String> {
+    let split = |p: &str| -> Vec<String> {
+        p.split('/').filter(|s| !s.is_empty()).map(str::to_string).collect()
+    };
+    let base = split(base);
+    let target = split(target);
+    let shared = base
+        .iter()
+        .zip(target.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    if shared == 0 {
+        return None; // different trees: relative would be a lie
+    }
+    let down = target[shared..].join("/");
+    if down.is_empty() {
+        return None;
+    }
+    let ups = base.len() - shared;
+    let mut out = if ups == 0 {
+        "./".to_string()
+    } else {
+        "../".repeat(ups)
+    };
+    out.push_str(&down);
+    Some(out)
+}
+
+/// The absolute path a mention names. `./` and `../` are read against the
+/// noted widget (see [`relative_path`]); anything else is already absolute.
+fn absolute_mention(base: &str, mention: &str) -> String {
+    if !mention.starts_with("./") && !mention.starts_with("../") {
+        // Already absolute — give it the leading slash if it was written
+        // without one.
+        return if mention.starts_with('/') {
+            mention.to_string()
+        } else {
+            format!("/{mention}")
+        };
+    }
+    let mut rest = mention;
+    let mut ups = 0;
+    while let Some(tail) = rest.strip_prefix("../") {
+        ups += 1;
+        rest = tail;
+    }
+    let rest = rest.strip_prefix("./").unwrap_or(rest);
+    let base: Vec<&str> = base.split('/').filter(|s| !s.is_empty()).collect();
+    let keep = base.len().saturating_sub(ups);
+    let mut out: Vec<&str> = base[..keep].to_vec();
+    if !rest.is_empty() {
+        out.extend(rest.split('/').filter(|s| !s.is_empty()));
+    }
+    format!("/{}", out.join("/"))
+}
+
+/// Every widget a note points at: each `@` in its text followed by a run of
+/// path characters, resolved to absolute against the note's own widget.
+/// Derived rather than stored, so it survives a hand-edited note store and
+/// can never drift from what the text actually says.
+fn note_mentions(base: &str, text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'@' {
+            i += 1;
+            continue;
+        }
+        let start = i + 1;
+        let mut end = start;
+        while end < bytes.len()
+            && (bytes[end].is_ascii_alphanumeric()
+                || matches!(bytes[end], b'.' | b'_' | b'-' | b'/'))
+        {
+            end += 1;
+        }
+        // A trailing dot is sentence punctuation, and a trailing slash names
+        // nothing further — neither is part of the reference.
+        while end > start && matches!(bytes[end - 1], b'.' | b'/') {
+            end -= 1;
+        }
+        if end > start {
+            let path = absolute_mention(base, &text[start..end]);
+            if !out.contains(&path) {
+                out.push(path);
+            }
+        }
+        i = end.max(start);
+    }
+    out
+}
+
 /// Read the pinned notes back. Anything malformed is skipped rather than
 /// fatal: the file is meant to be hand-editable.
 fn note_store_load() -> Vec<TweakNote> {
@@ -268,7 +519,10 @@ fn note_store_load() -> Vec<TweakNote> {
             w: num(3, NOTE_W).max(NOTE_MIN_W),
             h: num(4, NOTE_H).max(NOTE_MIN_H),
             text: note_store_unescape(cols[5]),
+            prompt: String::new(),
             pinned: true,
+            history: Vec::new(),
+            history_at: 0,
             sent: 0,
         });
     }
@@ -343,6 +597,25 @@ struct TweakSession {
     /// The pinned selection (click pins; remote applies re-pin by path).
     pinned: Option<TweakPick>,
     hover: Option<TweakPick>,
+    /// The card is showing the NOTE rather than the prompt. Stored inverted
+    /// so the derived default is prompt mode — writing an instruction is what
+    /// the card is opened for, and leaving a note for yourself is the
+    /// deliberate step aside.
+    note_mode: bool,
+    /// The "isolated" toggle is OFF: an "all" edit reaches the whole app
+    /// even while a branch is isolated. Stored inverted so the derived
+    /// default is the confined one — with the rest of the app covered,
+    /// editing it unseen is the surprising answer, not the safe one.
+    scope_unconfined: bool,
+    /// The widget isolation is locked onto (0 = not isolating), mirrored
+    /// from the panel so the apply path can confine a fan-out to it.
+    isolate_uid: u64,
+    /// The selection is LOCKED: the overlay has handed the mouse back to the
+    /// app. Nothing on the canvas hovers or picks, so buttons, sliders and
+    /// tabs work under the pointer as they always would, and what is
+    /// selected stays selected for the panel to keep editing. False — the
+    /// overlay picking — is the ordinary state.
+    selection_locked: bool,
     /// Live pointer position (window abs), for hover-revealed handles.
     pointer_abs: Vec2d,
     diff: Vec<TweakDiffEntry>,
@@ -410,6 +683,20 @@ struct TweakSession {
     hold_up: bool,
     /// Sidebar width in points (0 = use the default).
     sidebar_width: f64,
+    /// The panel band and the note card, in window coordinates, as of the
+    /// last draw — the chrome that OWNS the pointer where it sits. Read by
+    /// [`panel_owns_pointer`] from outside the widget.
+    ///
+    /// Two fields, not one list: the card is published by the overlay draw
+    /// and the band by the sidebar draw, which runs after it in the same
+    /// frame. Sharing a list meant whichever wrote second erased the other,
+    /// and it was always the card that lost — so a note dragged up against
+    /// the top of the window went back to being unclickable.
+    chrome_band: Option<Rect>,
+    /// The chrome that FLOATS over the app: the note card and the extrusion
+    /// readout. Published by the overlay draw, which is why it cannot share
+    /// a slot with the band — the sidebar draws after it.
+    chrome_float: Vec<Rect>,
     /// The on-canvas selection outline hides until this time: an edit was
     /// applied within the last beat, so the widget must be seen exactly as
     /// it renders. Extended by every apply (sidebar or remote).
@@ -423,6 +710,29 @@ struct TweakSession {
     /// Vibecode prompts sent this session: (sel path, layer, prompt).
     /// Surfaced in /tweak/state as the agent's work queue.
     vibes: Vec<(String, String, String, String)>,
+    /// A press in the EXPLODED view whose pick is waiting for the release:
+    /// the position it went down at, or `None` when no press is held. A
+    /// release further than [`CLIMB_SLOP`] from it was an orbit, and an
+    /// orbit selects nothing.
+    press_pick: Option<Vec2d>,
+    /// Where the last pick clicked. A second click within [`CLIMB_SLOP`] of
+    /// it is the same click repeated, which is what climbs; anywhere else is
+    /// a new pick.
+    climb_anchor: Option<Vec2d>,
+    /// Names the person asked for on the identity row. Reported in
+    /// `/tweak/state` for the AI to carry out in the source — the running app
+    /// cannot rename its own widgets without lying about them — and kept in
+    /// [`NAME_STORE`] so the ask survives until it is done.
+    renames: Vec<TweakRename>,
+    /// The name store has been read back: once per process.
+    renames_loaded: bool,
+    /// Messages written and queued but not yet sent: (note key, text). They
+    /// wake nobody until a Ctrl+Enter releases the batch.
+    outbox: Vec<(String, String)>,
+    /// A note is mid-@mention: an `@` was just typed into the open card, so
+    /// the next click in the app names a widget INTO the note instead of
+    /// changing the selection. The hover outline turns amber to say so.
+    mention: bool,
     /// Note cards, keyed by widget path (one per widget).
     notes: Vec<TweakNote>,
     /// The pinned notes have been read back from the store: once per process,
@@ -462,6 +772,23 @@ impl TweakSession {
             }
         }
     }
+
+    /// Pull the requested names in, once per process.
+    fn load_renames(&mut self) {
+        if self.renames_loaded {
+            return;
+        }
+        self.renames_loaded = true;
+        let stored = name_store_load();
+        if !stored.is_empty() {
+            log!("TWEAK name store: {} wanted name(s) from {NAME_STORE}", stored.len());
+        }
+        for rename in stored {
+            if !self.renames.iter().any(|r| r.reference == rename.reference) {
+                self.renames.push(rename);
+            }
+        }
+    }
 }
 
 /// The pinned selection's outline rect: the widget, held off by
@@ -475,6 +802,11 @@ fn selection_ring(rect: Rect) -> Rect {
         ),
     }
 }
+
+/// How far a second click may land from the first and still count as the
+/// same click — the gesture that climbs to the parent. A hand does not put
+/// the pointer back on the same pixel.
+const CLIMB_SLOP: f64 = 3.0;
 
 const DEFAULT_SIDEBAR_WIDTH: f64 = 280.0;
 const SPLITTER_WIDTH: f64 = 5.0;
@@ -513,7 +845,14 @@ pub fn set_tweak_on(cx: &mut Cx, on: bool) {
                 cx.sploded_toggle();
             }
             cx.sploded_set_marks(None, None);
+            cx.sploded_set_selected(false);
+            {
+                let mut s = session().lock().unwrap();
+                s.chrome_band = None;
+                s.chrome_float.clear();
+            }
             cx.sploded_set_flat_band(None);
+            cx.sploded_set_flat_rects(Vec::new());
         }
         log!("TWEAK mode {}", if on { "on" } else { "off" });
         cx.redraw_all();
@@ -625,6 +964,63 @@ fn is_navigation_pick(cx: &mut Cx, uid: WidgetUid) -> bool {
         cur = cx.widget_tree().parent_of(u);
     }
     false
+}
+
+/// Bring a widget into view: open whatever is holding it shut.
+///
+/// A tree row can name something on a dock tab that is not selected, inside a
+/// fold that is closed, on a page that is not showing — in which case
+/// selecting it outlines nothing and the panel fills with a widget the person
+/// cannot see. So walk the ancestors and ask each container that hides its
+/// children to show the branch the target is on: the Dock selects the tab,
+/// the FoldHeader opens, the PageFlip flips.
+///
+/// Top-down, because opening an outer container is what makes the inner ones
+/// exist to be opened.
+fn reveal_widget(cx: &mut Cx, uid: u64) {
+    // The chain from the target up, each step remembering which child it came
+    // through — that child IS the tab / page to switch to.
+    let mut chain: Vec<(WidgetUid, LiveId)> = Vec::new();
+    let mut cur = WidgetUid(uid);
+    for _ in 0..64 {
+        let Some(parent) = cx.widget_tree().parent_of(cur) else { break };
+        let Some(name) = cx.widget_tree().name_of(cur) else { break };
+        chain.push((parent, name));
+        cur = parent;
+    }
+    let mut opened = 0;
+    for (parent, child) in chain.into_iter().rev() {
+        let widget = cx.widget_tree().widget(parent);
+        if widget.is_empty() {
+            continue;
+        }
+        let ty = widget
+            .widget_type_id()
+            .and_then(|type_id| widget_type_names(cx).get(&type_id).copied())
+            .map(live_id_token)
+            .unwrap_or_default();
+        match ty.as_str() {
+            "Dock" => {
+                widget.as_dock().select_tab(cx, child);
+                opened += 1;
+            }
+            "FoldHeader" => {
+                let fold = widget.as_fold_header();
+                if !fold.is_open(cx) {
+                    fold.set_is_open(cx, true, Animate::No);
+                    opened += 1;
+                }
+            }
+            "PageFlip" => {
+                widget.as_page_flip().set_active_page(cx, child);
+                opened += 1;
+            }
+            _ => {}
+        }
+    }
+    if opened > 0 {
+        cx.redraw_all();
+    }
 }
 
 fn is_design_transparent(widget: &WidgetRef) -> bool {
@@ -910,6 +1306,110 @@ fn ancestor_pick(
 /// Called by `Window::handle_event` in place of ordinary dispatch. Returns
 /// `true` when the event was swallowed (the window must NOT hand it to its
 /// view children). Off: one atomic load (plus an F12 check on key events).
+/// Commit a pick: climb if this is a repeat click on the same spot, pin what
+/// was resolved, and take the caret off the panel.
+///
+/// Split out of the press handler because in the exploded view the press is
+/// not yet a click — it may be the first pixel of an orbit — so the commit
+/// waits for a release that never travelled.
+fn commit_pick(
+    cx: &mut Cx,
+    tweaker: &WidgetRef,
+    abs: Vec2d,
+    window_id: usize,
+    pick: Option<TweakPick>,
+) {
+            // CLICK-TO-CLIMB: clicking the SAME SPOT again walks the pin
+            // UP one ancestor per click — the only way a container fully
+            // covered by its children (the pane that draws the rounded
+            // background) can ever be reached. At the top the climb wraps
+            // back to the deepest pick.
+            //
+            // "Same spot" is the whole rule, and it used to be missing:
+            // the climb fired for any click whose deepest widget was a
+            // DESCENDANT of the pin, so once a container was selected,
+            // clicking one of its children walked upward instead of
+            // selecting the child. The hover outline said one thing and
+            // the click did another, which is what made picking feel
+            // broken. A click anywhere new now always selects what is
+            // under it; only a repeat click climbs.
+            let same_spot = session()
+                .lock()
+                .unwrap()
+                .climb_anchor
+                .is_some_and(|anchor| {
+                    (anchor.x - abs.x).abs() <= CLIMB_SLOP
+                        && (anchor.y - abs.y).abs() <= CLIMB_SLOP
+                });
+            let pick = {
+                let pinned = session().lock().unwrap().pinned.clone();
+                match (pick, pinned) {
+                    (Some(deep), Some(pin))
+                        if same_spot
+                            && pin.window_id == window_id
+                            && pin.rect.contains(abs)
+                            && (deep.uid == pin.uid
+                                || is_ancestor_of(cx, pin.uid, deep.uid)) =>
+                    {
+                        Some(
+                            ancestor_pick(cx, &pin, abs, window_id)
+                                .unwrap_or(deep),
+                        )
+                    }
+                    (deep, _) => deep,
+                }
+            };
+            session().lock().unwrap().climb_anchor = Some(abs);
+            let mut s = session().lock().unwrap();
+            match &pick {
+                Some(pick) => {
+                    log!(
+                        "TWEAK pick {} ({}) rect {:.0},{:.0} {:.0}x{:.0}{}",
+                        pick.path,
+                        pick.ty,
+                        pick.rect.pos.x,
+                        pick.rect.pos.y,
+                        pick.rect.size.x,
+                        pick.rect.size.y,
+                        match &pick.band {
+                            Some(band) => format!(" band {band}"),
+                            None => String::new(),
+                        }
+                    );
+                    s.pinned = Some(pick.clone());
+                }
+                None => {
+                    s.pinned = None;
+                }
+            }
+            drop(s);
+            // A pick in the body takes the caret off whatever panel
+            // field held it. The keys that act on a SELECTION — the
+            // hierarchy arrows, Cmd+Z — are only ever ours when nothing
+            // is being typed into, and a click on the app is the moment
+            // the typing ended.
+            cx.set_key_focus(Area::Empty);
+            sidebar_refresh(cx, tweaker);
+            redraw_tweaker(cx, tweaker);
+}
+
+/// Does the design overlay's own chrome sit under `abs`?
+///
+/// The caption bar spans the whole window and the panel is drawn OVER it, so
+/// the window's `WindowDragQuery` would answer "title bar" for the top of the
+/// panel — and a press there starts an OS window drag instead of reaching the
+/// app. Nothing in that strip can be clicked, which is the filter field, the
+/// note button and the extrusion scrub. The window asks this first and
+/// answers Client where the overlay is.
+pub fn panel_owns_pointer(abs: Vec2d) -> bool {
+    if !tweak_is_on() {
+        return false;
+    }
+    let s = session().lock().unwrap();
+    s.chrome_band.is_some_and(|r| r.contains(abs))
+        || s.chrome_float.iter().any(|r| r.contains(abs))
+}
+
 pub fn window_intercept(
     cx: &mut Cx,
     event: &Event,
@@ -998,6 +1498,27 @@ pub fn window_intercept(
     // app scrolls, and the overlay re-reads live rects each frame so the
     // outlines follow the content.
     if kind == PointerKind::Scroll {
+        // ISOLATED: the wheel magnifies instead of scrolling. There is one
+        // thing on screen and the rest is covered, so scrolling the app under
+        // it is not what the wheel is for any more.
+        let isolated = tweaker
+            .borrow::<Tweaker>()
+            .is_some_and(|tw| tw.tree_isolate && tw.isolate_uid != 0);
+        if isolated {
+            if let Event::Scroll(e) = event {
+                let step = if e.scroll.y > 0.0 { -ZOOM_WHEEL_STEP } else { ZOOM_WHEEL_STEP };
+                if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                    tw.view_zoom = (tw.view_zoom.max(1.0) + step).clamp(1.0, 4.0);
+                }
+                let zoom = tweaker.borrow::<Tweaker>().map(|tw| tw.view_zoom).unwrap_or(1.0);
+                let _ = zoom;
+                if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                    tw.view_focus_pending = true;
+                }
+                redraw_tweaker(cx, &tweaker);
+                return true;
+            }
+        }
         let in_band = tweaker
             .borrow::<Tweaker>()
             .map(|tw| tw.band.size.x > 0.0 && tw.band.contains(abs))
@@ -1006,7 +1527,47 @@ pub fn window_intercept(
             tweaker.handle_event(cx, event, &mut Scope::empty());
             return true;
         }
+        // EXPLODED, nothing isolated: the wheel opens and closes the stack.
+        // The extrusion is the one thing the eye is adjusting in that mode,
+        // and it is the only control for it that does not mean crossing the
+        // window to the panel's scrub field.
+        if cx.sploded_active() {
+            if let Event::Scroll(e) = event {
+                let step = if e.scroll.y > 0.0 {
+                    -SPREAD_WHEEL_STEP
+                } else {
+                    SPREAD_WHEEL_STEP
+                };
+                let spread = cx.sploded_spread() + step;
+                cx.sploded_set_spread(spread);
+                redraw_tweaker(cx, &tweaker);
+                return true;
+            }
+        }
         return false;
+    }
+
+    // A pin badge is a mark on the canvas that opens its note. It is checked
+    // before anything else picks, because it sits ON the widget it belongs to
+    // and a click there means the note, not the widget. With the selection
+    // locked it stops answering: opening a badge re-selects its widget, which
+    // is the one thing the lock forbids, and a mark that ate a button press
+    // would undo the point of handing the mouse back.
+    if kind == PointerKind::Down && !session().lock().unwrap().selection_locked {
+        let hit = tweaker.borrow::<Tweaker>().and_then(|tw| {
+            tw.badge_rects
+                .iter()
+                .find(|(rect, _)| rect.contains(abs))
+                .map(|(_, uid)| *uid)
+        });
+        if let Some(uid) = hit {
+            if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                tw.badge_open = Some(uid);
+            }
+            session().lock().unwrap().down_consumed = true;
+            redraw_tweaker(cx, &tweaker);
+            return true;
+        }
     }
 
     // The note card lives on the CANVAS but belongs to the tweaker: input
@@ -1019,17 +1580,40 @@ pub fn window_intercept(
             .borrow::<Tweaker>()
             .map(|tw| (tw.note_rect, tw.note_drag.is_some() || tw.note_resize.is_some()))
             .unwrap_or((None, false));
-        let note_hit = note_rect
-            .map(|rect| match event {
+        // A SCRUB leaves the control it started on within a few pixels, and
+        // from then on the moves have to keep reaching it — otherwise the
+        // value follows the pointer for three pixels and then stops dead,
+        // which is the extrusion field becoming un-draggable the moment it
+        // left the panel. The press claims the pointer; the release frees it.
+        let spread_drag = tweaker.borrow::<Tweaker>().map(|tw| tw.spread_drag).unwrap_or(false);
+        // The extrusion readout is the same kind of thing: the tweaker's own
+        // chrome sitting on the canvas, and a press in it is a scrub, never
+        // a pick.
+        let spread_rect = tweaker.borrow::<Tweaker>().and_then(|tw| tw.spread_rect);
+        let hits = |rect: Option<Rect>| {
+            rect.map(|rect| match event {
                 Event::MouseDown(e) => rect.contains(e.abs),
                 Event::MouseMove(e) => rect.contains(e.abs),
                 Event::MouseUp(e) => rect.contains(e.abs),
                 _ => false,
             })
-            .unwrap_or(false);
-        if note_hit || note_gesture {
+            .unwrap_or(false)
+        };
+        let on_spread = hits(spread_rect);
+        if kind == PointerKind::Down && on_spread {
+            if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                tw.spread_drag = true;
+            }
+        }
+        if kind == PointerKind::Up && spread_drag {
+            if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                tw.spread_drag = false;
+            }
+        }
+        let note_hit = hits(note_rect) || on_spread;
+        if note_hit || note_gesture || spread_drag {
             if kind == PointerKind::Down {
-                log!("TWEAK press {:.0},{:.0} on the note card: not a pick", abs.x, abs.y);
+                log!("TWEAK press {:.0},{:.0} on the tweaker's chrome: not a pick", abs.x, abs.y);
             }
             if kind == PointerKind::Move {
                 // Whatever was outlined under the card stops being: the
@@ -1157,9 +1741,31 @@ pub fn window_intercept(
     };
     let annotate = session().lock().unwrap().annotate || alt_held;
 
+    // SELECT OFF: the overlay hands the mouse back to the app.
+    //
+    // Everything above this line is the overlay's OWN surfaces — the panel
+    // band, the splitter, the note card, its popovers — and they keep working
+    // because they are not the app. Everything below is picking: hover
+    // outlines, the click that selects, the direct-manipulation handles. All
+    // of it stands down, so a button under the pointer is just a button, and
+    // the selection stays exactly where it was for the panel to keep editing.
+    // Annotate is its own mode and is exempt: sketching over a live app is
+    // precisely what it is for.
+    if !annotate && session().lock().unwrap().selection_locked {
+        if kind == PointerKind::Move {
+            let stale = session().lock().unwrap().hover.take().is_some();
+            if stale {
+                redraw_tweaker(cx, &tweaker);
+            }
+        }
+        return false;
+    }
+
     // Direct manipulation first: the corner handles of a radius-carrying
-    // selection own their presses before picking does.
-    if !annotate {
+    // selection own their presses before picking does — unless the view is
+    // centred or zoomed, in which case the handles are not drawn and must
+    // not swallow presses at the layout corners they no longer sit on.
+    if !annotate && !cx.sploded_transformed() {
         match kind {
             PointerKind::Down => {
                 let pinned = session().lock().unwrap().pinned.clone();
@@ -1254,6 +1860,7 @@ pub fn window_intercept(
             // (the panel never sees these moves).
             if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
                 tw.doc_tip_hover(cx, abs);
+                tw.scope_tip_hover(cx, abs);
                 tw.states_hover(cx, abs);
                 tw.pulse_hover(cx, abs);
             }
@@ -1282,6 +1889,37 @@ pub fn window_intercept(
             }
         }
         PointerKind::Down => {
+            // MIDDLE CLICK: in and out of the exploded view. The mode is a
+            // way of LOOKING at the app, and reaching for a key or crossing
+            // to the panel to get into it interrupts the looking. Only over
+            // the body — a middle click in the panel band never reaches here
+            // — and only while the overlay is up, so an ordinary app keeps
+            // whatever it does with the wheel button.
+            if let Event::MouseDown(e) = event {
+                if e.button.is_middle() {
+                    cx.sploded_toggle();
+                    session().lock().unwrap().down_consumed = true;
+                    redraw_tweaker(cx, &tweaker);
+                    return true;
+                }
+                // RIGHT CLICK: say something about this one. It selects the
+                // widget and opens its note in a single gesture, which is
+                // the whole point — writing a note used to mean a click to
+                // select and then a key to open. Never a toggle: a right
+                // click means "the note for THAT", so a card already open on
+                // another widget moves rather than closing.
+                if e.button.is_secondary() {
+                    let pick = resolve_pick(cx, &body, abs, window_id.id());
+                    if let Some(pick) = pick {
+                        if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                            tw.badge_open = Some(pick.uid);
+                        }
+                    }
+                    session().lock().unwrap().down_consumed = true;
+                    redraw_tweaker(cx, &tweaker);
+                    return true;
+                }
+            }
             {
                 session().lock().unwrap().down_consumed = true;
             }
@@ -1321,59 +1959,90 @@ pub fn window_intercept(
                 session().lock().unwrap().live_stroke = Some(stroke);
             } else {
                 let pick = resolve_pick(cx, &body, abs, window_id.id());
-                // CLICK-TO-CLIMB: clicking inside the pinned widget again
-                // walks the pin UP one ancestor per click — the only way a
-                // container fully covered by its children (the pane that
-                // draws the rounded background) can ever be reached. At the
-                // top the climb wraps back to the deepest pick.
-                let pick = {
-                    let pinned = session().lock().unwrap().pinned.clone();
-                    match (pick, pinned) {
-                        (Some(deep), Some(pin))
-                            if pin.window_id == window_id.id()
-                                && pin.rect.contains(abs)
-                                && (deep.uid == pin.uid
-                                    || is_ancestor_of(cx, pin.uid, deep.uid)) =>
-                        {
-                            Some(
-                                ancestor_pick(cx, &pin, abs, window_id.id())
-                                    .unwrap_or(deep),
-                            )
-                        }
-                        (deep, _) => deep,
-                    }
-                };
-                let mut s = session().lock().unwrap();
-                match &pick {
-                    Some(pick) => {
-                        log!(
-                            "TWEAK pick {} ({}) rect {:.0},{:.0} {:.0}x{:.0}{}",
-                            pick.path,
-                            pick.ty,
-                            pick.rect.pos.x,
-                            pick.rect.pos.y,
-                            pick.rect.size.x,
-                            pick.rect.size.y,
-                            match &pick.band {
-                                Some(band) => format!(" band {band}"),
-                                None => String::new(),
+                // @MENTION: an `@` in the open note armed a reference. This
+                // click names a widget INTO the note text and leaves the
+                // selection alone — the note still belongs to the widget it
+                // was opened on; the mention is what it points AT.
+                if session().lock().unwrap().mention {
+                    session().lock().unwrap().mention = false;
+                    let note_ui = tweaker
+                        .borrow::<Tweaker>()
+                        .filter(|tw| tw.note_open)
+                        .and_then(|tw| tw.note_ui.clone());
+                    match (note_ui, &pick) {
+                        (Some(ui), Some(pick)) => {
+                            // The reference is the mentioned widget's INDEXED
+                            // path — the only form that names one widget —
+                            // written relative to the note's own widget when
+                            // the absolute form is too long for the card. Both
+                            // resolve to the same thing; the short one is just
+                            // readable.
+                            // The base is the note the field is SHOWING, not
+                            // whatever happens to be pinned: those can differ
+                            // for a frame, and writing one note's text into
+                            // another's is how a note gets lost.
+                            let base = tweaker
+                                .borrow::<Tweaker>()
+                                .map(|tw| tw.note_key_shown.clone())
+                                .unwrap_or_default();
+                            if base.is_empty() {
+                                return true;
                             }
-                        );
-                        s.pinned = Some(pick.clone());
+                            // Two ways to say it: the widget's own reference,
+                            // and its position relative to the noted widget.
+                            // Take whichever is shorter — the relative form
+                            // usually wins for anything nearby, and it says
+                            // MORE while it does: `./Label_2` is "the one
+                            // next to this".
+                            let target = indexed_path(cx, pick.uid);
+                            let reference = relative_path(&base, &target)
+                                .into_iter()
+                                .chain(std::iter::once(target.clone()))
+                                .min_by_key(|form| form.len())
+                                .unwrap_or_else(|| target.clone());
+                            let field = ui.child(live_id!(note_text));
+                            let text = insert_mention(&field.text(), &reference);
+                            field.set_text(cx, &text);
+                            log!("TWEAK @mention {reference} -> {target} ({})", pick.ty);
+                            let notes = {
+                                let mut s = session().lock().unwrap();
+                                let note_mode = s.note_mode;
+                                if let Some(note) =
+                                    s.notes.iter_mut().find(|n| n.path == base)
+                                {
+                                    // Into whichever side is on screen: a
+                                    // mention typed into a prompt is part of
+                                    // the instruction, not of the note.
+                                    if note_mode {
+                                        note.text = text;
+                                    } else {
+                                        note.prompt = text;
+                                    }
+                                }
+                                s.notes.clone()
+                            };
+                            note_store_save(&notes);
+                            // The caret goes back into the note: the mention
+                            // is part of a sentence still being written.
+                            if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                                tw.note_focus_pending = true;
+                            }
+                        }
+                        _ => log!("TWEAK @mention: nothing under the click"),
                     }
-                    None => {
-                        s.pinned = None;
-                    }
+                    session().lock().unwrap().down_consumed = true;
+                    redraw_tweaker(cx, &tweaker);
+                    return true;
                 }
-                drop(s);
-                // A pick in the body takes the caret off whatever panel
-                // field held it. The keys that act on a SELECTION — the
-                // hierarchy arrows, Cmd+Z — are only ever ours when nothing
-                // is being typed into, and a click on the app is the moment
-                // the typing ended.
-                cx.set_key_focus(Area::Empty);
-                sidebar_refresh(cx, &tweaker);
-                redraw_tweaker(cx, &tweaker);
+                // In the exploded view a press is not yet a click: it may
+                // be the first pixel of an ORBIT, and an orbit is a change of
+                // viewpoint, not of selection. Hold the pick for the release
+                // and take it only if the pointer stayed where it was put.
+                if cx.sploded_active() {
+                    session().lock().unwrap().press_pick = Some(abs);
+                } else {
+                    commit_pick(cx, &tweaker, abs, window_id.id(), pick.clone());
+                }
                 // Navigation stays reachable: the press flows on to the
                 // tab / fold / dropdown as well, and so will its release.
                 if let Some(pick) = &pick {
@@ -1402,6 +2071,21 @@ pub fn window_intercept(
                 return true;
             }
             s.down_consumed = false;
+            // The held press: a release that has not travelled is a click,
+            // and only now is it safe to say so.
+            if let Some(down) = s.press_pick.take() {
+                let still = (down.x - abs.x).abs() <= CLIMB_SLOP
+                    && (down.y - abs.y).abs() <= CLIMB_SLOP;
+                if still {
+                    drop(s);
+                    let pick = resolve_pick(cx, &body, down, window_id.id());
+                    commit_pick(cx, &tweaker, down, window_id.id(), pick);
+                    return true;
+                }
+                // Travelled: it was an orbit. The guard is still held and
+                // must stay that way — re-locking it here deadlocks the
+                // session mutex against itself, which hangs the app.
+            }
             if let Some(mut stroke) = s.live_stroke.take() {
                 stroke.points.push((abs.x, abs.y));
                 // Tag the widgets the stroke touches: resolve its endpoints
@@ -2817,37 +3501,45 @@ fn hex_of(c: u32) -> String {
 const THEME_ROWS: u64 = u64::MAX;
 
 /// Selected state by fill, never by brackets in the label.
+///
+/// ALL FIVE fills, not just the resting one. A Button's face is
+/// `color`/`color_hover`/`color_down`/`color_focus` mixed by the animator,
+/// and it takes key focus on click — so setting `color` alone left every
+/// toggle you had just clicked painting the theme's focus grey instead of
+/// its own state, indefinitely. The state was correct and invisible: the
+/// last button touched always looked the same whichever way it was set,
+/// which is what made the whole row unreadable. The gradient end stops go
+/// flat (negative alpha) for the same reason — the theme gives the hover and
+/// focus states a second stop, and a two-tone face reads as a third state
+/// that does not exist.
 fn set_button_fill(cx: &mut Cx, btn: WidgetRef, selected: bool) {
     let mut btn = btn;
-    let color: Vec4f = if selected { vec4(0.31, 0.34, 0.44, 1.0) } else { vec4(0.20, 0.20, 0.21, 1.0) };
-    script_apply_eval!(cx, btn, { draw_bg +: { color: #(color) } });
-}
-
-/// The selection's path for people: anonymous segments (`-`, list
-/// indices) read as the widget's type, joined with ›.
-fn display_path(cx: &Cx, uid: u64) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    let mut cur = Some(WidgetUid(uid));
-    while let Some(u) = cur {
-        let (name, parent, ty) = {
-            let tree = cx.widget_tree();
-            let name = tree.name_of(u).map(live_id_token).unwrap_or_else(|| "-".to_string());
-            let ty = tree.widget(u).widget_type_id();
-            (name, tree.parent_of(u), ty)
-        };
-        let anon = name == "-" || name.chars().all(|c| c.is_ascii_digit());
-        let label = if anon {
-            ty.and_then(|t| widget_type_names(cx).get(&t).copied())
-                .map(live_id_token)
-                .unwrap_or(name)
-        } else {
-            name
-        };
-        parts.push(label);
-        cur = parent;
-    }
-    parts.reverse();
-    parts.join(" \u{203a} ")
+    let (base, hover, down): (Vec4f, Vec4f, Vec4f) = if selected {
+        (
+            vec4(0.23, 0.45, 0.83, 1.0),
+            vec4(0.31, 0.54, 0.92, 1.0),
+            vec4(0.17, 0.35, 0.67, 1.0),
+        )
+    } else {
+        (
+            vec4(0.17, 0.17, 0.18, 1.0),
+            vec4(0.27, 0.27, 0.29, 1.0),
+            vec4(0.12, 0.12, 0.13, 1.0),
+        )
+    };
+    let flat: Vec4f = vec4(-1.0, -1.0, -1.0, -1.0);
+    script_apply_eval!(cx, btn, {
+        draw_bg +: {
+            color: #(base)
+            color_hover: #(hover)
+            color_down: #(down)
+            color_focus: #(base)
+            color_2: #(flat)
+            color_2_hover: #(flat)
+            color_2_down: #(flat)
+            color_2_focus: #(flat)
+        }
+    });
 }
 
 /// Keep the leaf visible: `…` then the last `keep` chars.
@@ -3178,11 +3870,183 @@ fn cascade_levels(cx: &mut Cx, widget: &WidgetRef) -> Vec<CascadeLevel> {
     })
 }
 
+/// Every widget's path, in names a person can read.
+///
+/// `WidgetTree::path_to` renders an unnamed node as `-` and a list item as a
+/// bare index, so a real path came out as `-0.main_window.body.dock.-.-.3` —
+/// the same string for every unnamed sibling, and no help to anyone reading
+/// it. Here each segment is, in order of preference:
+///
+/// * the node's own name (`dock`, `tOverview`, `press_demo`), or
+/// * its TYPE when it has no name of its own (`View`, `Label`), and
+/// * `.1`, `.2`… appended when siblings would otherwise collide — four
+///   unnamed Labels under one View become `Label.1`..`Label.4`. The slash is
+///   the hierarchy; a dot is only which one of several.
+///
+/// The head is dropped, because it is on every path in the app and therefore
+/// tells nobody anything: the tree root (which has neither a name nor a
+/// reliably-registered type), any single-child chain under it, and the
+/// `Window`'s own `body` container. What is left starts at the first thing
+/// the app itself put on screen — `dock.tOverview.View.View.Label_1`.
+///
+/// Built from `flat_tree`, whose depth-first order and depth column give both
+/// the parent chain and the sibling order. That is a whole-tree walk, so this
+/// is for CLICKS (copy, @mention, a selection change) — never for hover.
+fn readable_paths(cx: &Cx) -> Vec<(u64, String)> {
+    let rows = cx.widget_tree().flat_tree(cx);
+    let n = rows.len();
+    // The parent of each row, read straight off the depth-first order.
+    let mut parent: Vec<Option<usize>> = vec![None; n];
+    let mut stack: Vec<usize> = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        stack.truncate(row.depth as usize);
+        parent[i] = stack.last().copied();
+        stack.push(i);
+    }
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, p) in parent.iter().enumerate() {
+        if let Some(p) = p {
+            children[*p].push(i);
+        }
+    }
+    let mut segment: Vec<String> = rows
+        .iter()
+        .map(|row| readable_segment(&row.name, &row.ty))
+        .collect();
+    // Siblings that want the same segment get numbered, in child order.
+    let roots: Vec<usize> = (0..n).filter(|i| parent[*i].is_none()).collect();
+    let sibling_groups = children
+        .iter()
+        .cloned()
+        .chain(std::iter::once(roots.clone()))
+        .filter(|group| group.len() > 1);
+    for group in sibling_groups {
+        let clashing: Vec<usize> = group
+            .iter()
+            .copied()
+            .filter(|i| group.iter().filter(|j| segment[**j] == segment[*i]).count() > 1)
+            .collect();
+        let mut ordinal: HashMap<String, usize> = HashMap::new();
+        for i in clashing {
+            let base = segment[i].clone();
+            let next = ordinal.entry(base.clone()).or_insert(0);
+            *next += 1;
+            segment[i] = format!("{base}.{next}");
+        }
+    }
+    // How many leading segments are the shared, meaningless head: the root
+    // itself, then any node that is the only way down, then the Window's
+    // `body`. Never so many that a path runs out.
+    let mut skip = 1usize; // the root
+    if roots.len() == 1 {
+        let mut cur = roots[0];
+        while children[cur].len() == 1 {
+            let next = children[cur][0];
+            if children[next].is_empty() {
+                break; // the chain ends here: this node IS the path
+            }
+            cur = next;
+            skip += 1;
+        }
+        // The Window's content container. It is named by the framework, it
+        // wraps everything an app draws, and it is on every path.
+        for child in children[cur].iter() {
+            if segment[*child] == "body" && !children[*child].is_empty() {
+                skip += 1;
+                break;
+            }
+        }
+    }
+    let mut full: Vec<String> = Vec::with_capacity(n);
+    for i in 0..n {
+        let depth = rows[i].depth as usize;
+        let path = match parent[i] {
+            Some(_) if depth <= skip => format!("/{}", segment[i]),
+            Some(p) => format!("{}/{}", full[p], segment[i]),
+            None => format!("/{}", segment[i]),
+        };
+        full.push(path);
+    }
+    rows.iter().map(|row| row.uid).zip(full).collect()
+}
+
+/// The name the widget tree calls a widget, or empty when it has none worth
+/// the word: `-` for anonymous, and a bare index for a list item.
+fn tree_name_of(cx: &Cx, uid: u64) -> String {
+    cx.widget_tree()
+        .name_of(WidgetUid(uid))
+        .map(live_id_token)
+        .filter(|name| name != "-" && !name.bytes().all(|b| b.is_ascii_digit()))
+        .unwrap_or_default()
+}
+
+/// One path segment, as a person would say it: the node's name, else its
+/// type, else a last-resort placeholder. A name that is only digits (a list
+/// item's index) is no name at all, so those take the type too.
+fn readable_segment(name: &str, ty: &str) -> String {
+    let named =
+        !name.is_empty() && name != "-" && !name.bytes().all(|b| b.is_ascii_digit());
+    if named {
+        return name.to_string();
+    }
+    if !ty.is_empty() && ty != "-" {
+        return ty.to_string();
+    }
+    "Widget".to_string()
+}
+
+/// One widget's readable path. See [`readable_paths`].
+fn indexed_path(cx: &Cx, uid: u64) -> String {
+    readable_paths(cx)
+        .into_iter()
+        .find(|(u, _)| *u == uid)
+        .map(|(_, path)| path)
+        .unwrap_or_else(|| format!("uid:{uid}"))
+}
+
+/// The widget a path names. An exact match wins; otherwise anything whose
+/// path ENDS with it, which is what makes a shortened, hand-written or
+/// previously-stored tail still resolve.
+fn resolve_indexed(cx: &Cx, path: &str) -> Option<WidgetUid> {
+    let path = path.trim();
+    if path.is_empty() || path == "/" {
+        return None;
+    }
+    // A reference written or pasted without its leading slash still means
+    // the same thing. Dots are NOT separators here — `Label.2` is one
+    // segment, the second Label — so nothing else is normalised.
+    let wanted = format!("/{}", path.trim_start_matches('/'));
+    let paths = readable_paths(cx);
+    if let Some((uid, _)) = paths.iter().find(|(_, full)| **full == wanted) {
+        return Some(WidgetUid(*uid));
+    }
+    paths
+        .iter()
+        .find(|(_, full)| full.ends_with(&wanted))
+        .map(|(uid, _)| WidgetUid(*uid))
+}
+
+/// Is this segment an anonymous node's numbered stand-in (`-`, `-2`)? Those
+/// are positions, not names, so the loose finder must not turn them into ids.
+fn is_anonymous_segment(segment: &str) -> bool {
+    segment == "-"
+        || (segment.starts_with('-') && segment.len() > 1 && segment[1..].bytes().all(|b| b.is_ascii_digit()))
+}
+
 fn resolve_widget_by_path(cx: &Cx, path: &str) -> Result<WidgetRef, String> {
     let tree = cx.widget_tree();
+    // An indexed path names one widget and nothing else: take it as written
+    // before falling back to the waypoint search below, which drops the
+    // anonymous segments and can only land on the nearest named ancestor.
+    if let Some(uid) = resolve_indexed(cx, path) {
+        let found = tree.widget(uid);
+        if !found.is_empty() {
+            return Ok(found);
+        }
+    }
     let ids: Vec<LiveId> = path
-        .split('.')
-        .filter(|segment| !segment.is_empty() && *segment != "-")
+        .split(['.', '/'])
+        .filter(|segment| !segment.is_empty() && !is_anonymous_segment(segment))
         .map(LiveId::from_str)
         .collect();
     if ids.is_empty() {
@@ -3235,7 +4099,12 @@ fn type_origin(cx: &mut Cx, widget: &WidgetRef) -> String {
 
 /// Every other live widget of the same widget type — "every Button in the
 /// system".
-fn type_siblings(cx: &mut Cx, widget: &WidgetRef) -> Vec<WidgetRef> {
+///
+/// `confine` narrows that to one subtree (0 = the whole app). Isolation is
+/// what sets it: with one branch on screen and the rest covered, "all
+/// Buttons" plainly means the ones you can see, and an edit that also
+/// reached the app you deliberately hid would be a surprise.
+fn type_siblings(cx: &mut Cx, widget: &WidgetRef, confine: u64) -> Vec<WidgetRef> {
     let Some(ty) = widget.widget_type_id() else {
         return Vec::new();
     };
@@ -3258,6 +4127,9 @@ fn type_siblings(cx: &mut Cx, widget: &WidgetRef) -> Vec<WidgetRef> {
             .iter()
             .any(|id| *id == live_id!(tweaker));
         if in_tweaker {
+            continue;
+        }
+        if confine != 0 && row.uid != confine && !is_ancestor_of(cx, confine, row.uid) {
             continue;
         }
         out.push(other);
@@ -3519,15 +4391,37 @@ pub fn apply_splash_chunk(
     // names: "this" = template siblings only (a tab is every tab) and the
     // instance's own site; "all" = every live widget of the TYPE and the
     // type's definition site.
-    let scope_all = session().lock().unwrap().scope_all;
-    let scope_name = if scope_all { "all" } else { "this" };
-    let origin_site = if scope_all {
+    let (scope_all, isolate) = {
+        let s = session().lock().unwrap();
+        (s.scope_all, if s.scope_unconfined { 0 } else { s.isolate_uid })
+    };
+    // "all" confined to the isolated branch is a different promise from
+    // "all" across the app, and it must not be recorded as the same thing:
+    // the type's DEFINITION is the wrong place to write a change that was
+    // deliberately kept to one branch, so the ledger names the branch's own
+    // site and says which scope it was.
+    let confined = scope_all && isolate != 0;
+    let scope_name = if confined {
+        "all in isolation"
+    } else if scope_all {
+        "all"
+    } else {
+        "this"
+    };
+    let origin_site = if confined {
+        let root = cx.widget_tree().widget(WidgetUid(isolate));
+        if root.is_empty() {
+            type_origin(cx, widget)
+        } else {
+            source_origin(cx, &root)
+        }
+    } else if scope_all {
         type_origin(cx, widget)
     } else {
         source_origin(cx, widget)
     };
     let fan_out = if scope_all {
-        type_siblings(cx, widget)
+        type_siblings(cx, widget, isolate)
     } else {
         template_siblings(cx, widget)
     };
@@ -3902,6 +4796,12 @@ pub fn tweak_callback(
             if let Some(pick) = &pinned {
                 out.push_str(",\"sel\":");
                 out.push_str(&pick_json(pick));
+                // "ref" is the EXACT reference: the indexed path, where every
+                // anonymous node carries its position. `path` renders those
+                // as a bare `-`, so a run of unnamed containers reads the same
+                // for all of them; `ref` is the one to quote and to feed back
+                // to /tweak/apply, and it is what a note is keyed by.
+                out.push_str(&format!(",\"ref\":{}", json_str(&indexed_path(cx, pick.uid))));
                 // Resolve by UID first: paths with anonymous numeric
                 // segments (a list item's `demos.1` Slider) do not
                 // round-trip through the path finder, but the uid is
@@ -3987,6 +4887,48 @@ pub fn tweak_callback(
                     out.push(']');
                 }
             }
+            {
+                // Written and waiting, on purpose: NOT requests. An agent
+                // sees them so it knows something is being composed, and
+                // acts only when they arrive as asks.
+                let outbox = session().lock().unwrap().outbox.clone();
+                if !outbox.is_empty() {
+                    out.push_str(",\"queued\":[");
+                    for (i, (path, text)) in outbox.iter().enumerate() {
+                        if i > 0 {
+                            out.push(',');
+                        }
+                        out.push_str(&format!(
+                            "{{\"path\":{},\"text\":{}}}",
+                            json_str(path),
+                            json_str(text)
+                        ));
+                    }
+                    out.push(']');
+                }
+            }
+            {
+                let renames = {
+                    let mut s = session().lock().unwrap();
+                    s.load_renames();
+                    s.renames.clone()
+                };
+                if !renames.is_empty() {
+                    out.push_str(",\"renames\":[");
+                    for (i, rename) in renames.iter().enumerate() {
+                        if i > 0 {
+                            out.push(',');
+                        }
+                        out.push_str(&format!(
+                            "{{\"ref\":{},\"from\":{},\"to\":{}}}",
+                            json_str(&rename.reference),
+                            json_str(&rename.from),
+                            json_str(&rename.to)
+                        ));
+                    }
+                    out.push(']');
+                }
+            }
             if let Some(pick) = &hover {
                 out.push_str(",\"hover\":");
                 out.push_str(&pick_json(pick));
@@ -4005,10 +4947,24 @@ pub fn tweak_callback(
                         if i > 0 {
                             out.push(',');
                         }
+                        let mentions = note_mentions(&note.path, &note.text);
+                        let mentions = if mentions.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                ",\"mentions\":[{}]",
+                                mentions
+                                    .iter()
+                                    .map(|m| json_str(m))
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            )
+                        };
                         out.push_str(&format!(
-                            "{{\"path\":{},\"text\":{}{}{}}}",
+                            "{{\"path\":{},\"text\":{}{}{}{}}}",
                             json_str(&note.path),
                             json_str(&note.text),
+                            mentions,
                             // "ask": the human pressed Ctrl+Enter / the
                             // sparkle on this note — act on it, do not just
                             // read it. The count rises with every send.
@@ -4834,6 +5790,9 @@ enum VisKind {
     Size,
     /// The measured rect, as one full-width line above the size controls.
     Measured,
+    /// The selection's identity at the very top: its name, editable, and its
+    /// type. Everything below is what it LOOKS like; this is what it IS.
+    Identity,
     /// Four-sided box editor (mini rectangle, drag-to-scrub legs).
     BoxInset(BoxKind),
     /// spacing + flow on one row.
@@ -4856,6 +5815,20 @@ enum VisKind {
     InputsHeader(usize),
     /// One level of the selection's cascade (index into Tweaker::cascade).
     CascadeLevel(usize),
+}
+
+impl VisKind {
+    /// Same composite row? Only the kinds `composite_of` names ever reach
+    /// this, so the box editors compare their side and the rest their tag.
+    fn same_row(&self, other: &VisKind) -> bool {
+        match (self, other) {
+            (VisKind::Size, VisKind::Size)
+            | (VisKind::FlowSpacing, VisKind::FlowSpacing)
+            | (VisKind::AlignGrid, VisKind::AlignGrid) => true,
+            (VisKind::BoxInset(a), VisKind::BoxInset(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -4973,9 +5946,25 @@ pub struct Tweaker {
     /// The exploded-view toggle button beside the filter.
     #[rust]
     sploded_uid: u64,
+    /// The select toggle: lit while the overlay is picking, dark while the
+    /// selection is locked and the mouse belongs to the app.
+    #[rust]
+    select_uid: u64,
     /// The exploded view's level-separation scrub field (visible only
     /// while the mode is up).
     spread_uid: u64,
+    /// The extrusion readout, floating in the app's own top-right corner
+    /// rather than in the panel: it belongs to the picture it is changing,
+    /// and the eye is on the stack, not on the sidebar, while it moves.
+    #[rust]
+    spread_ui: Option<WidgetRef>,
+    /// Where it drew, so the pointer knows it is chrome and not canvas.
+    #[rust]
+    spread_rect: Option<Rect>,
+    /// A scrub of that field is in progress: the pointer belongs to it until
+    /// the button comes up, wherever it travels.
+    #[rust]
+    spread_drag: bool,
     /// The panel's note button: the same note as the Insert key, for
     /// keyboards without one.
     note_uid: u64,
@@ -4984,6 +5973,10 @@ pub struct Tweaker {
     scope_this_uid: u64,
     #[rust]
     scope_all_uid: u64,
+    /// The "isolated" modifier beside them: confine an `all` fan-out to the
+    /// isolated branch.
+    #[rust]
+    scope_isolated_uid: u64,
     /// The Shader tab's editor and the live-code loop: every change arms a
     /// short debounce; at settle the fn text is applied through the ledger
     /// (one entry per settle, like a scrub gesture). A compile error keeps
@@ -5013,6 +6006,17 @@ pub struct Tweaker {
     shader_doc_full: String,
     #[rust]
     doc_tip_shown: bool,
+    /// Which scope button the tooltip is up for (0 = none, 1 = this, 2 = all).
+    #[rust]
+    scope_tip_shown: u8,
+    /// The tooltip's measured size. It sits ABOVE the buttons because the
+    /// footer is pinned to the bottom of the panel and anything below the
+    /// row would be off the window; and it is pulled left to stay inside the
+    /// window, because a scope button near the panel's right edge would
+    /// otherwise push it off the side. Measured after the first show; the
+    /// fallback is only ever used for one frame.
+    #[rust(dvec2(246.0, 46.0))]
+    scope_tip_size: Vec2d,
     #[rust]
     fn_external_seen: u64,
     /// The shown layer's script-defined fns: (name, file:line, source).
@@ -5123,6 +6127,34 @@ pub struct Tweaker {
     /// Child indices per tree row.
     #[rust]
     tree_children: Vec<Vec<usize>>,
+    /// Isolate: the Tree tab lists ONLY the selection and what is inside it.
+    /// A whole app's widget tree is thousands of rows; when the question is
+    /// about one pane, the rest is noise to scroll past.
+    #[rust]
+    tree_isolate: bool,
+    /// WHICH widget isolation is locked to. Captured when the toggle goes on
+    /// and held until it goes off — selecting a child inside an isolated
+    /// subtree must not re-isolate onto the child, or every click would
+    /// narrow the view and you could never look at the thing you opened.
+    #[rust]
+    isolate_uid: u64,
+    /// The Isolate toggle's own uid.
+    #[rust]
+    tree_isolate_uid: u64,
+    /// Center: hold the isolated widget in the middle of the screen.
+    #[rust]
+    view_center: bool,
+    #[rust]
+    view_center_uid: u64,
+    /// Magnification, 1..4. The wheel drives it too while isolated.
+    #[rust]
+    view_zoom: f32,
+    /// The wheel moved the zoom mid-dispatch; push it onto the view at the
+    /// next event, where a `&mut Cx` is to hand.
+    #[rust]
+    view_focus_pending: bool,
+    #[rust]
+    view_zoom_uid: u64,
     /// Open the readable default levels once per tree refresh.
     #[rust]
     tree_open_defaults_pending: bool,
@@ -5150,11 +6182,46 @@ pub struct Tweaker {
     note_grip_rect: Option<Rect>,
     #[rust]
     note_text_uid: u64,
+    /// The identity row's name field.
+    #[rust]
+    identity_uid: u64,
     /// The footer's copy receipt is shown until this time: a click on the
     /// path line put it on the clipboard, and that has to be visible.
     #[rust]
     footer_copied_until: f64,
-    /// The card's three icon buttons.
+    /// How many `@`s the note text held at the last change: one more means
+    /// a mention was just armed, one fewer means it was taken back.
+    #[rust]
+    note_at_count: usize,
+    /// Pinned notes' badge widgets: (uid, note key), refreshed on a slow
+    /// timer rather than every frame — resolving a note path walks the whole
+    /// widget tree, and the rects are read live off the uids anyway.
+    #[rust]
+    badge_targets: Vec<(u64, String)>,
+    /// When `badge_targets` was last resolved.
+    #[rust]
+    badges_at: f64,
+    /// Where the badges landed this frame, for hit-testing the click that
+    /// opens one.
+    #[rust]
+    badge_rects: Vec<(Rect, u64)>,
+    /// The pin badge itself: one Icon, drawn once per badge.
+    #[rust]
+    badge_ui: Option<WidgetRef>,
+    /// A badge click, consumed by the tweaker's event loop.
+    #[rust]
+    badge_open: Option<u64>,
+    /// The selection's indexed path, cached by uid. Computing it walks the
+    /// whole widget tree, so it happens when the selection CHANGES, not on
+    /// every frame that reads it.
+    #[rust]
+    sel_ref: (u64, String),
+    /// The card's four icon buttons.
+    #[rust]
+    note_queue_uid: u64,
+    /// The prompt/note checkbox on the card's strip.
+    #[rust]
+    note_mode_uid: u64,
     #[rust]
     note_send_uid: u64,
     #[rust]
@@ -5164,10 +6231,24 @@ pub struct Tweaker {
     /// The chrome colours currently applied: (focused, pinned). Reapplying
     /// them every frame would fight the shader cache for nothing.
     #[rust]
-    note_focus_style: Option<(bool, bool)>,
+    note_focus_style: Option<(bool, bool, usize)>,
+    /// The flash confirming a send or a queue is up until this time.
+    #[rust]
+    note_flash_until: f64,
+    #[rust]
+    note_flash_kind: NoteFlash,
+    /// The field must be emptied at the next draw: a message went out.
+    #[rust]
+    note_clear_field: bool,
     /// Put the caret in the card the frame after it opens.
     #[rust]
     note_focus_pending: bool,
+    /// Which note the card's field is actually SHOWING. The card follows the
+    /// selection, so the note being saved to and the text on screen can drift
+    /// apart for a frame — and a save in that window would write one note's
+    /// text over another's. Nothing is written unless these agree.
+    #[rust]
+    note_key_shown: String,
     /// Seed the card's TextInput once per open (never clobber typing).
     #[rust]
     note_seed_pending: bool,
@@ -5381,27 +6462,37 @@ impl Tweaker {
                     height: 24
                     flow: Right
                     align: Align{x: 0.0 y: 0.5}
-                    padding: Inset{left: 8 right: 6 top: 0 bottom: 0}
-                    spacing: 6
+                    // Tight on the right: every point between the swatch and
+                    // the panel edge is a point the NAME does not get, and
+                    // the name is the thing that was being truncated.
+                    padding: Inset{left: 8 right: 2 top: 0 bottom: 0}
+                    spacing: 4
                     name := FabLabelDim {
                         width: Fill
                         text: ""
                         max_lines: 1
                         text_overflow: TextOverflow.Ellipsis
                     }
+                    // Sized to the value column, not to the value: the
+                    // widest thing that has to fit anywhere in it is a
+                    // `#00000000`, and every point past that is a point
+                    // stolen from the name, which is what gets truncated.
                     value := FabValueInput {
-                        width: 150
+                        width: 106
                         height: 18
                     }
-                    origin := FabLabelSmall { width: 12 margin: Inset{left: 2 top: 2 right: 0 bottom: 0} text: "" }
+                    origin := FabLabelSmall { width: 8 margin: Inset{left: 0 top: 2 right: 0 bottom: 0} text: "" }
                 }
                 let BoolRowT = View {
                     width: Fill
                     height: 24
                     flow: Right
                     align: Align{x: 0.0 y: 0.5}
-                    padding: Inset{left: 8 right: 6 top: 0 bottom: 0}
-                    spacing: 6
+                    // Tight on the right: every point between the swatch and
+                    // the panel edge is a point the NAME does not get, and
+                    // the name is the thing that was being truncated.
+                    padding: Inset{left: 8 right: 2 top: 0 bottom: 0}
+                    spacing: 4
                     name := FabLabelDim {
                         width: Fill
                         text: ""
@@ -5413,15 +6504,18 @@ impl Tweaker {
                         height: Fit
                         text: ""
                     }
-                    origin := FabLabelSmall { width: 12 margin: Inset{left: 2 top: 2 right: 0 bottom: 0} text: "" }
+                    origin := FabLabelSmall { width: 8 margin: Inset{left: 0 top: 2 right: 0 bottom: 0} text: "" }
                 }
                 let TextRowT = View {
                     width: Fill
                     height: 24
                     flow: Right
                     align: Align{x: 0.0 y: 0.5}
-                    padding: Inset{left: 8 right: 6 top: 0 bottom: 0}
-                    spacing: 6
+                    // Tight on the right: every point between the swatch and
+                    // the panel edge is a point the NAME does not get, and
+                    // the name is the thing that was being truncated.
+                    padding: Inset{left: 8 right: 2 top: 0 bottom: 0}
+                    spacing: 4
                     name := FabLabelDim {
                         width: Fill
                         text: ""
@@ -5429,7 +6523,7 @@ impl Tweaker {
                         text_overflow: TextOverflow.Ellipsis
                     }
                     value := TextInput {
-                        width: 150
+                        width: 106
                         height: 18
                         empty_text: ""
                         draw_bg +: {
@@ -5444,7 +6538,7 @@ impl Tweaker {
                             }
                         }
                     }
-                    origin := FabLabelSmall { width: 12 margin: Inset{left: 2 top: 2 right: 0 bottom: 0} text: "" }
+                    origin := FabLabelSmall { width: 8 margin: Inset{left: 0 top: 2 right: 0 bottom: 0} text: "" }
                 }
                 let InfoRowT = FabPropRow {
                     value := FabLabelSmall {
@@ -5522,6 +6616,40 @@ impl Tweaker {
                 // says what the layout actually gave. Its own full-width line
                 // at the top of the Layout section, above the controls it
                 // reports on, so the numbers are not squeezed into a column.
+                // The selection's identity: a name you can change and the
+                // type you cannot. The name is a TextInput because renaming
+                // an anonymous widget is the commonest thing to want to say
+                // about it; the type is a label because it is a fact.
+                let IdentityRowT = View {
+                    width: Fill
+                    height: Fit
+                    flow: Right
+                    spacing: 6
+                    align: Align{x: 0.0 y: 0.5}
+                    padding: Inset{left: 8 right: 8 top: 3 bottom: 5}
+                    name_field := TextInput {
+                        // 70 / 30 against the type beside it: a name is
+                        // usually short, and a type that gets ellipsised is
+                        // no use at all.
+                        width: Fill{weight: 70.0}
+                        height: 20
+                        empty_text: "unnamed \u{2014} type a name"
+                        draw_bg +: {
+                            color: #x1d1d1d
+                            border_radius: 2.0
+                        }
+                        draw_text +: {
+                            color: #xe6e6e6
+                            text_style +: { font_size: 8.5 }
+                        }
+                    }
+                    type_label := FabLabelDim {
+                        width: Fill{weight: 30.0}
+                        text: ""
+                        max_lines: 1
+                        text_overflow: TextOverflow.Ellipsis
+                    }
+                }
                 let MeasuredRowT = View {
                     width: Fill
                     height: Fit
@@ -5636,16 +6764,22 @@ impl Tweaker {
                     height: 24
                     flow: Right
                     align: Align{x: 0.0 y: 0.5}
-                    padding: Inset{left: 8 right: 6 top: 0 bottom: 0}
-                    spacing: 6
+                    // Tight on the right: every point between the swatch and
+                    // the panel edge is a point the NAME does not get, and
+                    // the name is the thing that was being truncated.
+                    padding: Inset{left: 8 right: 2 top: 0 bottom: 0}
+                    spacing: 4
                     name := FabLabelDim {
                         width: Fill
                         text: ""
                         max_lines: 1
                         text_overflow: TextOverflow.Ellipsis
                     }
+                    // 80 + spacing + the swatch is exactly the 106 the number
+                    // rows use, so both columns end on the same edge — and 80
+                    // is what `#00000000` actually needs.
                     value := TextInput {
-                        width: 110
+                        width: 80
                         height: 18
                         empty_text: "#rrggbbaa"
                         draw_bg +: {
@@ -5661,13 +6795,13 @@ impl Tweaker {
                         }
                     }
                     swatch := FabColorPick {
-                        width: 28
+                        width: 22
                         height: 16
                     }
                     tname_wrap := View { width: Fit height: Fit visible: false
                         tname := Button { width: Fit height: 16 padding: Inset{left: 4 right: 4 top: 1 bottom: 1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                     }
-                    origin := FabLabelSmall { width: 12 margin: Inset{left: 2 top: 2 right: 0 bottom: 0} text: "" }
+                    origin := FabLabelSmall { width: 8 margin: Inset{left: 0 top: 2 right: 0 bottom: 0} text: "" }
                 }
                 let VecRowT = View {
                     width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
@@ -5730,6 +6864,18 @@ impl Tweaker {
                         spacing: 4
                         align: Align{x: 0.0 y: 0.5}
                         search := FabSearch {}
+                        select := Button {
+                            width: 28
+                            height: 24
+                            padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
+                            margin: Inset{left: 0 right: 4 top: 0 bottom: 0}
+                            text: ""
+                            icon_walk: Walk{width: 13 height: Fit}
+                            draw_icon +: {
+                                color: #xd8d8d8
+                                svg: crate_resource("self:resources/icons/icon_select.svg")
+                            }
+                        }
                         sploded := Button {
                             width: 28
                             height: 24
@@ -5748,16 +6894,6 @@ impl Tweaker {
                             padding: Inset{left: 6 right: 6 top: 3 bottom: 3}
                             margin: Inset{left: 0 right: 4 top: 0 bottom: 0}
                             text: "note"
-                        }
-                        spread_wrap := View {
-                            width: Fit
-                            height: Fit
-                            visible: false
-                            spread := FabValueInput {
-                                width: 44
-                                height: 18
-                                margin: Inset{left: 0 right: 4 top: 0 bottom: 0}
-                            }
                         }
                     }
                     tab_row := View {
@@ -5840,6 +6976,7 @@ impl Tweaker {
                             InfoRow := InfoRowT {}
                             SizeRow := SizeRowT {}
                             MeasuredRow := MeasuredRowT {}
+                            IdentityRow := IdentityRowT {}
                             BoxRow := BoxRowT {}
                             FlowRow := FlowRowT {}
                             AlignRow := AlignRowT {}
@@ -5926,6 +7063,39 @@ impl Tweaker {
                         width: Fill
                         height: Fill
                         flow: Down
+                        tree_head := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            padding: Inset{left: 8 right: 8 top: 3 bottom: 3}
+                            isolate := Button {
+                                width: Fit
+                                height: 18
+                                padding: Inset{left: 8 right: 8 top: 1 bottom: 1}
+                                text: "Isolate"
+                                draw_text +: { text_style +: { font_size: 8.0 } }
+                            }
+                            center := Button {
+                                width: Fit
+                                height: 18
+                                padding: Inset{left: 8 right: 8 top: 1 bottom: 1}
+                                text: "Center"
+                                draw_text +: { text_style +: { font_size: 8.0 } }
+                            }
+                            zoom_label := FabLabelSmall { width: Fit text: "zoom" }
+                            // 1.00 is life size and the floor: below it the
+                            // view would shrink the app away from the very
+                            // detail Zoom exists to bring closer.
+                            zoom := FabValueInput { width: 44 height: 18 min: 1.0 max: 4.0 }
+                            isolate_hint := FabLabelSmall {
+                                width: Fill
+                                text: ""
+                                max_lines: 1
+                                text_overflow: TextOverflow.Ellipsis
+                            }
+                        }
                         tree := FileTree {}
                     }
                     props_wrap := View {
@@ -5951,6 +7121,7 @@ impl Tweaker {
                         CascadeRow := CascadeRowT {}
                         SizeRow := SizeRowT {}
                         MeasuredRow := MeasuredRowT {}
+                        IdentityRow := IdentityRowT {}
                         BoxRow := BoxRowT {}
                         FlowRow := FlowRowT {}
                         AlignRow := AlignRowT {}
@@ -5987,9 +7158,34 @@ impl Tweaker {
                                 scope_label := FabLabelSmall { width: Fit text: "scope" }
                                 scope_this := Button { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "this" draw_text +: { text_style +: { font_size: 8.0 } } }
                                 scope_all := Button { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "all" draw_text +: { text_style +: { font_size: 8.0 } } }
+                                scope_isolated := Button { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "isolated" draw_text +: { text_style +: { font_size: 8.0 } } }
                             }
-                            scope_doc := FabLabelSmall { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
                             scope_origin := FabLabelSmall { width: Fill text: "" }
+                            // What the buttons MEAN belongs on the buttons,
+                            // not on a permanent line under them: it is read
+                            // once and then it is just a line taking up the
+                            // footer for the rest of the session.
+                            scope_tip := Tooltip {
+                                width: 0
+                                height: 0
+                                clip_x: false
+                                clip_y: false
+                                content := RoundedView {
+                                    width: Fit
+                                    height: Fit
+                                    padding: Inset{left: 8 right: 8 top: 6 bottom: 6}
+                                    draw_bg +: {
+                                        color: #x2a2a2a
+                                        border_size: 1.0
+                                        border_color: #x555555
+                                        radius: 3.
+                                    }
+                                    tooltip_label := FabLabelSmall {
+                                        width: 230
+                                        text: ""
+                                    }
+                                }
+                            }
                         }
                         title_label := FabLabelDim { width: Fill text: "tweak" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
                         // The path line is wrapped so the CLICK has a rect
@@ -6021,12 +7217,56 @@ impl Tweaker {
             .child(live_id!(tree))
             .widget_uid()
             .0;
+        let tree_head = sidebar.child(live_id!(tree_wrap)).child(live_id!(tree_head));
+        self.tree_isolate_uid = tree_head.child(live_id!(isolate)).widget_uid().0;
+        self.view_center_uid = tree_head.child(live_id!(center)).widget_uid().0;
+        self.view_zoom_uid = tree_head.child(live_id!(zoom)).widget_uid().0;
         self.shader_list_uid = sidebar
             .child(live_id!(shader_col))
             .child(live_id!(shader_rows))
             .widget_uid()
             .0;
         self.sidebar = Some(sidebar);
+    }
+
+    /// The floating extrusion readout: a label and a scrub field, parked in
+    /// the app's top-right while the exploded view is up.
+    fn ensure_spread_ui(&mut self, cx: &mut Cx) {
+        if self.spread_ui.is_some() {
+            return;
+        }
+        let ui = cx.with_vm(|vm| {
+            let value = script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                // No plate of its own: the readout sits ON the app, and a
+                // panel-coloured slab in the corner would read as another
+                // piece of sidebar that had come loose. The field keeps its
+                // own background — that one is telling you it can be typed
+                // in and dragged.
+                View {
+                    width: 116
+                    height: Fit
+                    flow: Right
+                    spacing: 5
+                    align: Align{x: 0.0 y: 0.5}
+                    padding: Inset{left: 8 right: 6 top: 4 bottom: 4}
+                    caption := FabLabelSmall { width: Fit text: "extrude" }
+                    value := FabValueInput { width: 48 height: 18 }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        self.spread_uid = ui.child(live_id!(value)).widget_uid().0;
+        if let Some(mut field) = ui.child(live_id!(value)).borrow_mut::<FabValueInput>() {
+            field.set_hint(
+                Some(SPLODED_SPREAD_MIN as f64),
+                Some(SPLODED_SPREAD_MAX as f64),
+                Some(0.01),
+            );
+        }
+        cx.widget_tree_insert_child(self.uid, live_id!(spread_hud), ui.clone());
+        self.spread_ui = Some(ui);
     }
 
     fn ensure_note_ui(&mut self, cx: &mut Cx) {
@@ -6114,6 +7354,36 @@ impl Tweaker {
                             width: Fill
                             height: Fill
                         }
+                        // The card is two things behind one strip: a NOTE
+                        // for yourself, and a PROMPT on its way to the agent.
+                        // The checkbox says which one the field is showing,
+                        // and the buttons beside it change with it — Send
+                        // and Queue belong to the prompt, Pin to the note.
+                        prompt_mode := CheckBox {
+                            width: Fit
+                            height: Fit
+                            padding: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                            margin: Inset{left: 0 right: 6 top: 0 bottom: 0}
+                            // The label rides its own walk, and the default
+                            // leaves it sitting below the box on a 15-point
+                            // strip. Centre it against the mark instead.
+                            align: Align{x: 0.0 y: 0.5}
+                            label_walk +: {
+                                margin: Inset{left: 14 right: 0 top: 0 bottom: 0}
+                            }
+                            text: "prompt"
+                            draw_text +: {
+                                color: #xc8c8d4
+                                text_style +: { font_size: 7.5 }
+                            }
+                        }
+                        queue := NoteBtnLabelled {
+                            text: "Queue"
+                            draw_icon +: {
+                                color: #xc8c8d4
+                                svg: crate_resource("self:resources/icons/note_queue.svg")
+                            }
+                        }
                         send := NoteBtnLabelled {
                             text: "Send"
                             draw_icon +: {
@@ -6132,7 +7402,12 @@ impl Tweaker {
                     note_text := TextInput {
                         width: Fill
                         height: Fill
-                        empty_text: "note on this item \u{2014} Ctrl+Enter sends it to the AI"
+                        // A note is prose: Enter and Shift+Enter both make a
+                        // new line. Ctrl+Enter sends it (TextInput submits on
+                        // the primary modifier, and our own arm claims it
+                        // first regardless).
+                        is_multiline: true
+                        empty_text: ""
                         draw_bg +: {
                             color: #x22222aff
                         }
@@ -6145,6 +7420,8 @@ impl Tweaker {
             });
             WidgetRef::script_from_value(vm, value)
         });
+        self.note_mode_uid = ui.child(live_id!(head)).child(live_id!(prompt_mode)).widget_uid().0;
+        self.note_queue_uid = ui.child(live_id!(head)).child(live_id!(queue)).widget_uid().0;
         self.note_send_uid = ui.child(live_id!(head)).child(live_id!(send)).widget_uid().0;
         self.note_pin_uid = ui.child(live_id!(head)).child(live_id!(pin)).widget_uid().0;
         self.note_shut_uid = ui.child(live_id!(head)).child(live_id!(shut)).widget_uid().0;
@@ -6156,10 +7433,11 @@ impl Tweaker {
     /// piece of card chrome that is script-side. Opacity lives on the
     /// backdrop instead (see `draw_note_backdrop`).
     fn note_style(&mut self, cx: &mut Cx2d, focused: bool, pinned: bool) {
-        if self.note_focus_style == Some((focused, pinned)) {
+        let queued = session().lock().unwrap().outbox.len();
+        if self.note_focus_style == Some((focused, pinned, queued)) {
             return;
         }
-        self.note_focus_style = Some((focused, pinned));
+        self.note_focus_style = Some((focused, pinned, queued));
         let Some(ui) = self.note_ui.clone() else { return };
         let pin_color: Vec4f = if pinned {
             vec4(1.0, 0.78, 0.29, 1.0)
@@ -6168,22 +7446,164 @@ impl Tweaker {
         };
         let mut pin_ref = ui.child(live_id!(head)).child(live_id!(pin));
         script_apply_eval!(cx, pin_ref, { draw_icon +: { color: #(pin_color) } });
+        // The Queue button carries the count, because a queue you cannot see
+        // is a queue you forget to send — and its icon lights up when THIS
+        // note is one of the queued ones.
+        let queue = ui.child(live_id!(head)).child(live_id!(queue));
+        queue.set_text(
+            cx,
+            &if queued > 0 { format!("Queue {queued}") } else { "Queue".to_string() },
+        );
+        let mine = !self.note_key_shown.is_empty()
+            && session()
+                .lock()
+                .unwrap()
+                .outbox
+                .iter()
+                .any(|(path, _)| *path == self.note_key_shown);
+        let queue_color: Vec4f = if mine {
+            vec4(1.0, 0.78, 0.29, 1.0)
+        } else {
+            vec4(0.784, 0.784, 0.831, 1.0)
+        };
+        let mut queue_ref = queue.clone();
+        script_apply_eval!(cx, queue_ref, { draw_icon +: { color: #(queue_color) } });
+    }
+
+    /// Record a rename the person asked for: `/tweak/state` reports it as a
+    /// `rename` alongside the selection, and the log ring carries it, so the
+    /// AI can do it in the source where it belongs.
+    fn request_rename(&mut self, cx: &mut Cx, to: &str) {
+        let Some(sel) = session().lock().unwrap().pinned.clone() else { return };
+        let reference = self.sel_ref(cx, sel.uid);
+        let from = tree_name_of(cx, sel.uid);
+        let renames = {
+            let mut s = session().lock().unwrap();
+            s.load_renames();
+            s.renames.retain(|r| r.reference != reference);
+            if !to.is_empty() && to != from {
+                s.renames.push(TweakRename {
+                    reference: reference.clone(),
+                    from: from.clone(),
+                    to: to.to_string(),
+                });
+                s.vibe_status = format!("wants to be called `{to}` \u{2014} the AI renames it");
+            }
+            s.renames.clone()
+        };
+        name_store_save(&renames);
+        if to.is_empty() || to == from {
+            log!("TWEAK rename request dropped for {reference}");
+        } else {
+            log!("TWEAK rename request {reference} ({}) -> {to}", sel.ty);
+        }
+        self.redraw_sidebar(cx);
+    }
+
+    /// Push Center / Zoom down onto the view transform.
+    fn apply_view_focus(&mut self, cx: &mut Cx) {
+        let zoom = self.view_zoom.max(1.0);
+        let (center, level) = match self.focus_point(cx) {
+            Some((point, level)) => (Some(point), level),
+            None => (None, 0.0),
+        };
+        cx.sploded_set_focus(center, level, zoom);
+    }
+
+    /// The layout point the view holds in the middle of the screen, or
+    /// `None` when Centre is off (the window centres on itself).
+    ///
+    /// Centre acts on WHAT IS SELECTED. Isolation, when it is locked onto a
+    /// widget, is the stronger statement of "this is the subject" and wins;
+    /// otherwise it is the pin, so Centre works on its own without having to
+    /// isolate first.
+    ///
+    /// "The middle of the screen" is the middle of what is left of it — the
+    /// panel band covers the right edge — but that correction belongs in
+    /// screen pixels, not here: see `SplodedParams::pan`.
+    /// The plane is part of the answer: in the exploded view the rotation
+    /// displaces a layer across the screen in proportion to its depth, so
+    /// centring needs to know WHICH sheet the widget is on, not just where
+    /// it sits on that sheet.
+    fn focus_point(&self, cx: &Cx) -> Option<(Vec2d, f32)> {
+        if !self.view_center {
+            return None;
+        }
+        let uid = if self.tree_isolate && self.isolate_uid != 0 {
+            self.isolate_uid
+        } else {
+            session().lock().unwrap().pinned.as_ref()?.uid
+        };
+        let widget = cx.widget_tree().widget(WidgetUid(uid));
+        if widget.is_empty() {
+            return None;
+        }
+        let rect = widget.area().clipped_rect_union(cx);
+        if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+            return None;
+        }
+        let level = cx.sploded_depth_of(uid).unwrap_or(0) as f32;
+        Some((
+            dvec2(
+                rect.pos.x + rect.size.x * 0.5,
+                rect.pos.y + rect.size.y * 0.5,
+            ),
+            level,
+        ))
+    }
+
+    /// A pin badge was clicked: make its widget the selection and put its
+    /// note on screen, open and focused. Unlike the hotkey this never
+    /// toggles — clicking a pin means "show me that note".
+    fn open_badged_note(&mut self, cx: &mut Cx, uid: u64) {
+        let widget = cx.widget_tree().widget(WidgetUid(uid));
+        if widget.is_empty() {
+            return;
+        }
+        let rect = widget.area().clipped_rect_union(cx);
+        let center = dvec2(rect.pos.x + rect.size.x * 0.5, rect.pos.y + rect.size.y * 0.5);
+        let window_id = self.my_window.unwrap_or(0);
+        let Some(pick) = pick_of_widget(cx, &widget, center, window_id) else {
+            return;
+        };
+        let path = self.sel_ref(cx, uid);
+        log!("TWEAK note on {path}");
+        {
+            let mut s = session().lock().unwrap();
+            s.pinned = Some(pick);
+            // The badge callers always have a note already; the right click
+            // may be the first thing ever said about this widget, so make
+            // one — without it the card had nothing to show and simply did
+            // not appear.
+            s.load_notes();
+            if !s.notes.iter().any(|n| n.path == path) {
+                s.notes.push(TweakNote::new(path));
+            }
+        }
+        cx.set_key_focus(Area::Empty);
+        self.note_open = true;
+        self.note_seed_pending = true;
+        self.note_focus_pending = true;
+        self.rows_uid = 0;
+        self.redraw_sidebar(cx);
+        self.redraw_overlay(cx);
     }
 
     /// Open or close the note card on the item we are IN — the pinned
     /// selection, else the widget under the hover (which becomes the
     /// selection, so the card has something to ride with).
     fn toggle_note(&mut self, cx: &mut Cx) {
-        let sel_path = {
+        let sel_uid = {
             let mut s = session().lock().unwrap();
             if s.pinned.is_none() {
                 if let Some(hover) = s.hover.clone() {
                     s.pinned = Some(hover);
                 }
             }
-            s.pinned.as_ref().map(|p| p.path.clone())
+            s.pinned.as_ref().map(|p| p.uid)
         };
-        let Some(path) = sel_path else { return };
+        let Some(uid) = sel_uid else { return };
+        let path = self.sel_ref(cx, uid);
         self.note_open = !self.note_open;
         if self.note_open {
             let mut s = session().lock().unwrap();
@@ -6198,30 +7618,89 @@ impl Tweaker {
             self.note_rect = None;
             self.note_grip_rect = None;
             self.note_focus_style = None;
+            self.note_key_shown.clear();
+            let mut s = session().lock().unwrap();
+            s.notes
+                .retain(|n| n.pinned || !n.text.trim().is_empty() || !n.prompt.trim().is_empty());
         }
         self.redraw_overlay(cx);
     }
 
-    /// The open card's note, by the current selection's path.
-    fn note_path(&self) -> Option<String> {
+    /// Is something being TYPED into? The keys that act on a selection — the
+    /// hierarchy arrows, Cmd+Z — belong to the caret whenever there is one,
+    /// and to the selection whenever there is not. Asking the panel's own
+    /// fields directly is what lets the arrows keep working while the TREE
+    /// has focus: a tree row is a selection, not a text cursor, so walking
+    /// the hierarchy from it is exactly what the arrows should do.
+    fn focus_is_text(&self, cx: &Cx) -> bool {
+        if cx.key_focus() == Area::Empty {
+            return false;
+        }
+        let mut fields: Vec<Area> = Vec::new();
+        if let Some(sidebar) = self.sidebar.as_ref() {
+            fields.push(sidebar.child(live_id!(filter_row)).child(live_id!(search)).area());
+            fields.push(sidebar.child(live_id!(shader_col)).child(live_id!(prompt)).area());
+        }
+        if let Some(note) = self.note_ui.as_ref() {
+            fields.push(note.child(live_id!(note_text)).area());
+        }
+        // The property rows' own inputs come and go with the selection, so
+        // ask the live ones rather than keeping a list.
+        for row in self.visible.iter() {
+            fields.push(row.item.child(live_id!(value)).area());
+            fields.push(row.item.child(live_id!(name_field)).area());
+        }
+        fields.iter().any(|area| !area.is_empty() && cx.has_key_focus(*area))
+    }
+
+    /// The selection's exact reference: its indexed path. This is what a note
+    /// is keyed by, what the footer copies and what an @mention writes — a
+    /// bare `path` renders every unnamed widget as `-` and would key three
+    /// different containers to one note.
+    fn sel_ref(&mut self, cx: &Cx, uid: u64) -> String {
+        if self.sel_ref.0 != uid || self.sel_ref.1.is_empty() {
+            self.sel_ref = (uid, indexed_path(cx, uid));
+        }
+        self.sel_ref.1.clone()
+    }
+
+    /// The open card's note key, by the current selection.
+    fn note_path(&mut self, cx: &Cx) -> Option<String> {
         if !self.note_open {
             return None;
         }
-        session().lock().unwrap().pinned.as_ref().map(|p| p.path.clone())
+        let uid = session().lock().unwrap().pinned.as_ref().map(|p| p.uid)?;
+        Some(self.sel_ref(cx, uid))
     }
 
     /// Take the card's live text into the session (the TextInput only
     /// reports on commit, and a send must carry what is on screen).
+    /// What the field is showing right now: the note's path, tagged with the
+    /// side of the card it is on. The tag is what makes a flip of the
+    /// checkbox reseed, and what stops a prompt being written into a note.
+    fn note_field_key(&mut self, cx: &mut Cx) -> Option<String> {
+        let path = self.note_path(cx)?;
+        let note_mode = session().lock().unwrap().note_mode;
+        Some(format!("{}{}", if note_mode { "n:" } else { "p:" }, path))
+    }
+
     fn note_sync_text(&mut self, cx: &mut Cx) {
-        let (Some(path), Some(ui)) = (self.note_path(), self.note_ui.clone()) else {
+        let (Some(path), Some(ui)) = (self.note_path(cx), self.note_ui.clone()) else {
             return;
         };
+        if self.note_field_key(cx).as_deref() != Some(self.note_key_shown.as_str()) {
+            return; // the field is still showing another note: not ours to save
+        }
         let text = ui.child(live_id!(note_text)).text();
+        let note_mode = session().lock().unwrap().note_mode;
         let mut s = session().lock().unwrap();
         if let Some(note) = s.notes.iter_mut().find(|n| n.path == path) {
-            if note.text != text {
-                note.text = text;
-                if note.pinned {
+            let slot = if note_mode { &mut note.text } else { &mut note.prompt };
+            if *slot != text {
+                *slot = text;
+                // Only the NOTE is worth writing to disk; a prompt is on its
+                // way out of the process, not into it.
+                if note_mode && note.pinned {
                     let notes = s.notes.clone();
                     drop(s);
                     note_store_save(&notes);
@@ -6238,40 +7717,143 @@ impl Tweaker {
     /// ring. A polling agent reads either one and acts.
     fn note_send(&mut self, cx: &mut Cx) {
         self.note_sync_text(cx);
-        let Some(path) = self.note_path() else { return };
-        let sent = {
+        let Some(path) = self.note_path(cx) else { return };
+        // The draft joins the queue, then the whole queue goes out at once.
+        // That is the point of queueing: write against four widgets in the
+        // order they occur to you, then release the lot as one batch of
+        // instructions instead of four interruptions.
+        self.note_take_draft(&path);
+        let sent: Vec<(String, String)> = {
             let mut s = session().lock().unwrap();
-            let Some(note) = s.notes.iter_mut().find(|n| n.path == path) else {
-                return;
-            };
-            if note.text.trim().is_empty() {
-                None
-            } else {
-                note.sent += 1;
-                Some((note.sent, note.text.clone()))
-            }
+            std::mem::take(&mut s.outbox)
         };
-        match sent {
-            Some((seq, text)) => {
-                log!("TWEAK ask #{seq} {path}: {text}");
-                session().lock().unwrap().vibe_status =
-                    format!("note sent to the AI \u{00b7} ask #{seq}");
+        if sent.is_empty() {
+            session().lock().unwrap().vibe_status =
+                "nothing to send: the note is empty".to_string();
+        } else {
+            for (note_path, text) in &sent {
+                let seq = {
+                    let mut s = session().lock().unwrap();
+                    match s.notes.iter_mut().find(|n| n.path == *note_path) {
+                        Some(note) => {
+                            note.sent += 1;
+                            note.sent
+                        }
+                        None => 0,
+                    }
+                };
+                log!("TWEAK ask #{seq} {note_path}: {text}");
             }
-            None => {
-                session().lock().unwrap().vibe_status =
-                    "nothing to send: the note is empty".to_string();
-            }
+            session().lock().unwrap().vibe_status = if sent.len() == 1 {
+                "sent to the AI".to_string()
+            } else {
+                format!("{} messages sent to the AI", sent.len())
+            };
+            self.note_flash(cx, NoteFlash::Sent);
         }
         self.note_focus_pending = true;
         self.redraw_sidebar(cx);
         self.redraw_overlay(cx);
     }
 
+    /// Alt+Enter: put this message in the queue and wake nobody. It goes out
+    /// with the next Ctrl+Enter — deliberately NOT logged as an ask, because
+    /// an ask is what an agent watching the log acts on.
+    fn note_queue(&mut self, cx: &mut Cx) {
+        self.note_sync_text(cx);
+        let Some(path) = self.note_path(cx) else { return };
+        if !self.note_take_draft(&path) {
+            session().lock().unwrap().vibe_status =
+                "nothing to queue: the note is empty".to_string();
+            return;
+        }
+        let count = session().lock().unwrap().outbox.len();
+        log!("TWEAK note queued {path} \u{00b7} {count} waiting");
+        session().lock().unwrap().vibe_status = match count {
+            1 => "1 message queued \u{00b7} Ctrl+Enter sends the queue".to_string(),
+            n => format!("{n} messages queued \u{00b7} Ctrl+Enter sends the queue"),
+        };
+        self.note_flash(cx, NoteFlash::Queued);
+        self.note_focus_pending = true;
+        self.redraw_sidebar(cx);
+        self.redraw_overlay(cx);
+    }
+
+    /// Take what is written into the outbox and EMPTY the field, the way a
+    /// message box empties when you press send. The text is not lost: it goes
+    /// into the note's history, where Up brings it back.
+    ///
+    /// Returns false when there was nothing written.
+    fn note_take_draft(&mut self, path: &str) -> bool {
+        let text = {
+            let mut s = session().lock().unwrap();
+            let Some(note) = s.notes.iter_mut().find(|n| n.path == path) else {
+                return false;
+            };
+            // The PROMPT, always — and it always empties. The note beside it
+            // is never touched by a send: that is the whole point of the two
+            // being separate things.
+            let text = note.prompt.trim().to_string();
+            if text.is_empty() {
+                return false;
+            }
+            note.history.push(text.clone());
+            note.history_at = note.history.len();
+            note.prompt.clear();
+            text
+        };
+        session().lock().unwrap().outbox.push((path.to_string(), text));
+        self.note_clear_field = true;
+        true
+    }
+
+    /// Up / Down in an EMPTY field walks the note's history, the way a shell
+    /// prompt does — so a message just sent is one keypress from being sent
+    /// again, or edited and sent again. Only while the field is empty, or Up
+    /// would be fighting the caret in a note being written.
+    fn note_recall(&mut self, cx: &mut Cx, back: bool) {
+        if session().lock().unwrap().note_mode {
+            return;
+        }
+        let Some(path) = self.note_path(cx) else { return };
+        let text = {
+            let mut s = session().lock().unwrap();
+            let Some(note) = s.notes.iter_mut().find(|n| n.path == path) else {
+                return;
+            };
+            if note.history.is_empty() {
+                return;
+            }
+            if back {
+                note.history_at = note.history_at.saturating_sub(1);
+            } else if note.history_at < note.history.len() {
+                note.history_at += 1;
+            }
+            // The history is a history of things SENT, so Up recalls into
+            // the prompt. A note has no history: it just stays written.
+            note.prompt = note.history.get(note.history_at).cloned().unwrap_or_default();
+            note.prompt.clone()
+        };
+        if let Some(ui) = self.note_ui.clone() {
+            ui.child(live_id!(note_text)).set_text(cx, &text);
+        }
+        self.redraw_overlay(cx);
+    }
+
+    /// Say that it went: the card's border flashes for a beat. Sending is
+    /// instant, so there is nothing to load — but a message box that empties
+    /// with no other sign is a message box you are not sure you pressed.
+    fn note_flash(&mut self, cx: &mut Cx, kind: NoteFlash) {
+        self.note_flash_kind = kind;
+        self.note_flash_until = cx.seconds_since_app_start() + NOTE_FLASH_LINGER;
+        self.next_frame = cx.new_next_frame();
+    }
+
     /// The pin: keep this note across runs. Pinning writes the store at
     /// once, so the text survives even a crash.
     fn note_pin_toggle(&mut self, cx: &mut Cx) {
         self.note_sync_text(cx);
-        let Some(path) = self.note_path() else { return };
+        let Some(path) = self.note_path(cx) else { return };
         let (pinned, notes) = {
             let mut s = session().lock().unwrap();
             let Some(note) = s.notes.iter_mut().find(|n| n.path == path) else {
@@ -6293,10 +7875,20 @@ impl Tweaker {
     /// The close: put the card away, keeping the text.
     fn note_close(&mut self, cx: &mut Cx) {
         self.note_sync_text(cx);
+        // A card opened and closed without a word written in it is not a
+        // note. Dropping the empties keeps /tweak/state a list of things the
+        // person actually said, rather than everywhere they pressed Insert.
+        {
+            let mut s = session().lock().unwrap();
+            s.notes
+                .retain(|n| n.pinned || !n.text.trim().is_empty() || !n.prompt.trim().is_empty());
+        }
         self.note_open = false;
         self.note_rect = None;
         self.note_grip_rect = None;
         self.note_focus_style = None;
+        self.note_key_shown.clear();
+        session().lock().unwrap().mention = false;
         // Nothing is being typed into any more, so the arrows go back to
         // walking the hierarchy.
         cx.set_key_focus(Area::Empty);
@@ -6355,14 +7947,37 @@ impl Tweaker {
         if widget.is_empty() {
             return;
         }
+        // Walking into a widget on an unselected tab or inside a closed fold
+        // has to OPEN it first, exactly as clicking its tree row does —
+        // otherwise the arrows stop at the edge of whatever happens to be
+        // showing, which is not the hierarchy.
+        reveal_widget(cx, uid);
         let center = {
             let rect = widget.area().clipped_rect_union(cx);
             dvec2(rect.pos.x + rect.size.x * 0.5, rect.pos.y + rect.size.y * 0.5)
         };
-        let Some(pick) = pick_of_widget(cx, &widget, center, sel.window_id) else {
-            log!("TWEAK walk {dir:?}: {} is not on screen", rows[target].name);
-            return;
-        };
+        // A widget revealed a moment ago has not been drawn yet, so it has no
+        // rect to pick from. Pin it anyway with what is known: the overlay
+        // re-reads live rects every frame and the outline lands as soon as it
+        // draws.
+        let pick = pick_of_widget(cx, &widget, center, sel.window_id).unwrap_or_else(|| {
+            let path = cx
+                .widget_tree()
+                .path_to(WidgetUid(uid))
+                .iter()
+                .map(|id| live_id_token(*id))
+                .collect::<Vec<_>>()
+                .join(".");
+            TweakPick {
+                uid,
+                path,
+                ty: rows[target].ty.clone(),
+                rect: Rect::default(),
+                window_id: sel.window_id,
+                band: None,
+                level: 0,
+            }
+        });
         log!("TWEAK walk {dir:?} \u{2192} {} ({})", pick.path, pick.ty);
         session().lock().unwrap().pinned = Some(pick);
         // The card follows the selection: a new path means a new note.
@@ -6741,6 +8356,37 @@ impl Tweaker {
         )
     }
 
+    /// The words a LAYOUT composite answers to in the filter box.
+    ///
+    /// The composite's label is what a person sees and types — "size",
+    /// "margin", "align" — and not one of them is a property name. Without
+    /// this the filter can only reach the raw `width` / `margin.left` rows
+    /// the composite replaced, so typing the name of a row plainly on screen
+    /// makes it vanish.
+    fn composite_terms(kind: &VisKind) -> &'static str {
+        match kind {
+            VisKind::Measured => "measured size width height pixels device",
+            VisKind::Size => "size width height fit fill",
+            VisKind::BoxInset(BoxKind::Margin) => "margin",
+            VisKind::BoxInset(BoxKind::Padding) => "padding",
+            VisKind::FlowSpacing => "spacing flow",
+            VisKind::AlignGrid => "align alignment",
+            _ => "",
+        }
+    }
+
+    /// Which composite, if any, has swallowed `prop`.
+    fn composite_of(prop: &str) -> Option<VisKind> {
+        match prop.split('.').next().unwrap_or("") {
+            "width" | "height" => Some(VisKind::Size),
+            "margin" => Some(VisKind::BoxInset(BoxKind::Margin)),
+            "padding" => Some(VisKind::BoxInset(BoxKind::Padding)),
+            "spacing" | "flow" => Some(VisKind::FlowSpacing),
+            "align" => Some(VisKind::AlignGrid),
+            _ => None,
+        }
+    }
+
     /// The curated STYLE row set: colors and the handful of numbers a
     /// designer actually reaches for; the long tail folds behind
     /// "show all (N)".
@@ -6790,6 +8436,12 @@ impl Tweaker {
     fn build_visible(&self) -> Vec<VisKind> {
         let filtering = !self.filter.is_empty();
         let mut out = Vec::new();
+        // WHAT IT IS, before what it looks like: the selection's own name —
+        // editable, because "this one needs a name" is the commonest thing
+        // to want to say about an anonymous widget — and its type.
+        if !filtering && self.panel_tab != PanelTab::Theme && self.rows_uid != 0 {
+            out.push(VisKind::Identity);
+        }
         // SHADER CONSTANTS: the annotated literals inside the draw layers'
         // fn bodies — "actual values IN shader code" — each with its doc
         // line. Absent when the widget's shaders carry none. (Annotated
@@ -6834,7 +8486,14 @@ impl Tweaker {
                 .map(|(index, _)| index)
                 .collect();
             let theme = self.panel_tab == PanelTab::Theme;
-            let composites: Vec<VisKind> = if section == SectionKind::Layout && !filtering && !theme {
+            let composites: Vec<VisKind> = if section == SectionKind::Layout && !theme {
+                // A filter NARROWS the panel; it does not dismantle its
+                // grammar. A composite survives filtering when the words it
+                // answers to match — so "size" finds the size row rather
+                // than emptying the section.
+                let wanted = |kind: &VisKind| {
+                    !filtering || Self::composite_terms(kind).contains(self.filter.as_str())
+                };
                 let mut list = Vec::new();
                 // The measurement first, then the controls that produced
                 // it: read what it IS, then change what it asks for.
@@ -6854,6 +8513,7 @@ impl Tweaker {
                 if self.row_index("align.x").is_some() {
                     list.push(VisKind::AlignGrid);
                 }
+                list.retain(|kind| wanted(kind));
                 list
             } else {
                 Vec::new()
@@ -6889,12 +8549,20 @@ impl Tweaker {
                 let in_tail = match section {
                     _ if theme => false,
                     SectionKind::Layout => {
-                        !filtering && Self::layout_composited(&row.prop)
+                        // Folded away exactly when the composite that owns
+                        // it is on screen — filtering included, or a filter
+                        // that keeps the size row would print width and
+                        // height a second time underneath it.
+                        Self::composite_of(&row.prop)
+                            .is_some_and(|kind| composites.iter().any(|c| c.same_row(&kind)))
                             || (!expanded && !Self::layout_composited(&row.prop))
                     }
                     SectionKind::Style => !expanded && !Self::style_curated(row),
                     _ => false,
                 };
+                if filtering && in_tail {
+                    continue;
+                }
                 if !filtering && in_tail && forced < force_show {
                     forced += 1;
                 } else if !filtering && in_tail {
@@ -6938,6 +8606,13 @@ impl Tweaker {
             size: dvec2(width, pass_size.y),
         };
         self.band = band;
+        // The window's hit-test needs this from outside the widget — see
+        // `panel_owns_pointer`. The note card joins it in the overlay draw.
+        {
+            let mut sess = session().lock().unwrap();
+            sess.chrome_band = Some(band);
+            sess.isolate_uid = if self.tree_isolate { self.isolate_uid } else { 0 };
+        }
         // The panel is flat chrome over the exploded view: pointer events
         // inside the band flow through in plain window coordinates.
         cx.sploded_set_flat_band(Some(band));
@@ -6992,7 +8667,14 @@ impl Tweaker {
                     self.next_frame = cx.new_next_frame();
                     "path copied to the clipboard".to_string()
                 } else {
-                    tail_ellipsis(&display_path(cx, sel.uid), 48)
+                    // The footer shows the REFERENCE itself, not a prettier
+                    // rendering of it: this line is what the click copies,
+                    // and two spellings of one thing is how a person ends up
+                    // pasting something the tools do not accept. Only the
+                    // head is clipped, so the tail — the part that says which
+                    // widget — always survives.
+                    let reference = self.sel_ref(cx, sel.uid);
+                    tail_ellipsis(&reference, 48)
                 };
                 sidebar
                     .child(live_id!(ident_footer))
@@ -7006,13 +8688,34 @@ impl Tweaker {
                     row.child(live_id!(scope_line)).child(live_id!(scope_all)).set_text(cx, &format!("all {}s", sel.ty));
                     set_button_fill(cx, row.child(live_id!(scope_line)).child(live_id!(scope_this)), !all);
                     set_button_fill(cx, row.child(live_id!(scope_line)).child(live_id!(scope_all)), all);
-                    row.child(live_id!(scope_doc)).set_text(
-                        cx,
-                        &format!("this: only this instance \u{00b7} all {}s: every {} in the app (edits the type's definition)", sel.ty, sel.ty),
-                    );
+                    // The modifier: confine an `all` fan-out to the isolated
+                    // branch. Lit when it is ON and there is an isolation for
+                    // it to be on ABOUT; the label greys when there is not,
+                    // so a dark button is never ambiguous between "off" and
+                    // "nothing here to act on".
+                    let isolating = self.tree_isolate && self.isolate_uid != 0;
+                    let on = !session().lock().unwrap().scope_unconfined;
+                    let confined = isolating && on;
+                    {
+                        let btn = row.child(live_id!(scope_line)).child(live_id!(scope_isolated));
+                        set_button_fill(cx, btn.clone(), confined);
+                        let mut btn = btn;
+                        let color: Vec4f = if isolating && all {
+                            vec4(0.92, 0.92, 0.94, 1.0)
+                        } else {
+                            vec4(0.42, 0.42, 0.45, 1.0)
+                        };
+                        script_apply_eval!(cx, btn, { draw_text +: { color: #(color) } });
+                    }
                     let widget = cx.widget_tree().widget(WidgetUid(sel.uid));
+                    // Same three-way answer the apply itself gives: a
+                    // confined "all" does not touch the type's definition,
+                    // so the footer must not promise that it does.
+                    let root = cx.widget_tree().widget(WidgetUid(self.isolate_uid));
                     let origin = if widget.is_empty() {
                         String::new()
+                    } else if all && confined && !root.is_empty() {
+                        source_origin(cx, &root)
                     } else if all {
                         type_origin(cx, &widget)
                     } else {
@@ -7035,11 +8738,25 @@ impl Tweaker {
             .child(live_id!(input))
             .widget_uid()
             .0;
-        self.sploded_uid = sidebar
-            .child(live_id!(filter_row))
-            .child(live_id!(sploded))
-            .widget_uid()
-            .0;
+        {
+            // The two that were never lit: the exploded-view toggle and the
+            // note. Both are modes you can be IN, and a mode you cannot see
+            // yourself in is the same complaint as the scope row's.
+            let sploded = sidebar.child(live_id!(filter_row)).child(live_id!(sploded));
+            self.sploded_uid = sploded.widget_uid().0;
+            let armed = cx.sploded_will_be_active();
+            set_button_fill(cx, sploded, armed);
+        }
+        {
+            let select = sidebar.child(live_id!(filter_row)).child(live_id!(select));
+            self.select_uid = select.widget_uid().0;
+            let picking = !session().lock().unwrap().selection_locked;
+            set_button_fill(cx, select, picking);
+        }
+        {
+            let note = sidebar.child(live_id!(filter_row)).child(live_id!(note));
+            set_button_fill(cx, note, self.note_open);
+        }
         self.note_uid = sidebar
             .child(live_id!(filter_row))
             .child(live_id!(note))
@@ -7047,20 +8764,7 @@ impl Tweaker {
             .0;
         self.scope_this_uid = sidebar.child(live_id!(ident_footer)).child(live_id!(scope_row)).child(live_id!(scope_line)).child(live_id!(scope_this)).widget_uid().0;
         self.scope_all_uid = sidebar.child(live_id!(ident_footer)).child(live_id!(scope_row)).child(live_id!(scope_line)).child(live_id!(scope_all)).widget_uid().0;
-        let spread_wrap = sidebar.child(live_id!(filter_row)).child(live_id!(spread_wrap));
-        let spread = spread_wrap.child(live_id!(spread));
-        self.spread_uid = spread.widget_uid().0;
-        if let Some(mut field) = spread.borrow_mut::<FabValueInput>() {
-            field.set_hint(
-                Some(SPLODED_SPREAD_MIN as f64),
-                Some(SPLODED_SPREAD_MAX as f64),
-                Some(0.01),
-            );
-            let spread_now = cx.sploded_spread() as f64;
-            field.set_value(cx, spread_now);
-        }
-        let spread_on = cx.sploded_will_be_active();
-        spread_wrap.set_visible(cx, spread_on);
+        self.scope_isolated_uid = sidebar.child(live_id!(ident_footer)).child(live_id!(scope_row)).child(live_id!(scope_line)).child(live_id!(scope_isolated)).widget_uid().0;
         if self.focus_search_pending {
             let input = sidebar
                 .child(live_id!(filter_row))
@@ -7083,6 +8787,28 @@ impl Tweaker {
             sidebar
                 .child(live_id!(tree_wrap))
                 .set_visible(cx, tab == PanelTab::Tree);
+            if tab == PanelTab::Tree {
+                // The toggle shows its state by fill, like the scope buttons,
+                // and says what it is isolating — a tree cut down to one
+                // subtree must announce that it is cut down.
+                let head = sidebar.child(live_id!(tree_wrap)).child(live_id!(tree_head));
+                set_button_fill(cx, head.child(live_id!(isolate)), self.tree_isolate);
+                set_button_fill(cx, head.child(live_id!(center)), self.view_center);
+                let zoom_field = head.child(live_id!(zoom));
+                if zoom_field.area() == Area::Empty || !cx.has_key_focus(zoom_field.area()) {
+                    // A FabValueInput holds a number, not a string: set_text
+                    // leaves its own value at zero and the field reads 0.00.
+                    zoom_field
+                        .as_fab_value_input()
+                        .set_value(cx, self.view_zoom.max(1.0) as f64);
+                }
+                let hint = match (self.tree_isolate, sel.as_ref()) {
+                    (true, Some(sel)) => format!("{} and what is inside it", sel.ty),
+                    (true, None) => "select something to isolate".to_string(),
+                    (false, _) => String::new(),
+                };
+                head.child(live_id!(isolate_hint)).set_text(cx, &hint);
+            }
             let tab_row = sidebar.child(live_id!(tab_row));
             let tabs = [
                 (live_id!(tab_props), PanelTab::Props, "Props"),
@@ -7380,6 +9106,8 @@ impl Tweaker {
                     rows: &[crate::widget_tree::FlatTreeRow],
                     children: &[Vec<usize>],
                     keep: Option<&Vec<bool>>,
+                    locked: u64,
+                    pinned: &[u64],
                     index: usize,
                 ) {
                     if let Some(keep) = keep {
@@ -7388,11 +9116,26 @@ impl Tweaker {
                         }
                     }
                     let row = &rows[index];
-                    let label = format!("{} \u{00b7} {}", row.name, row.ty);
+                    // The row isolation is LOCKED to wears a mark, so it stays
+                    // obvious which one the view is held on even after the
+                    // selection has moved to a child inside it.
+                    // A widget carrying a PINNED note wears the same mark
+                    // here as it does on the canvas: the tree is the other
+                    // way of finding what has already been said about what.
+                    let mark = if pinned.contains(&row.uid) {
+                        "\u{1f4cc} "
+                    } else {
+                        ""
+                    };
+                    let label = if row.uid == locked {
+                        format!("\u{25c9} {mark}{} \u{00b7} {}", row.name, row.ty)
+                    } else {
+                        format!("{mark}{} \u{00b7} {}", row.name, row.ty)
+                    };
                     if row.has_children {
                         if tree.begin_folder(cx, LiveId(row.uid), &label).is_ok() {
                             for &child in &children[index] {
-                                emit(tree, cx, rows, children, keep, child);
+                                emit(tree, cx, rows, children, keep, locked, pinned, child);
                             }
                             tree.end_folder();
                         }
@@ -7400,16 +9143,60 @@ impl Tweaker {
                         tree.file(cx, LiveId(row.uid), &label);
                     }
                 }
-                for index in 0..self.tree_rows.len() {
-                    if self.tree_parents[index].is_none() {
+                // The pin marks come from the same place the canvas badges
+                // do, refreshed on the same throttle — but the tree shows
+                // them whether or not a note card happens to be open.
+                self.refresh_badges(cx);
+                let pinned_uids: Vec<u64> =
+                    self.badge_targets.iter().map(|(uid, _)| *uid).collect();
+                // Isolate: one root — the selection — instead of the app's.
+                // With nothing selected there is nothing to isolate, so the
+                // whole tree stands.
+                let isolate_root = if self.tree_isolate && self.isolate_uid != 0 {
+                    self.tree_rows
+                        .iter()
+                        .position(|row| row.uid == self.isolate_uid)
+                } else {
+                    None
+                };
+                match isolate_root {
+                    Some(root) => {
+                        // The isolated root has to be open or the subtree it
+                        // was opened for is exactly what stays hidden.
+                        if self.tree_rows[root].has_children {
+                            tree.set_folder_is_open(
+                                cx,
+                                LiveId(self.tree_rows[root].uid),
+                                true,
+                                Animate::No,
+                            );
+                        }
                         emit(
                             &mut tree,
                             cx,
                             &self.tree_rows,
                             &self.tree_children,
                             keep.as_ref(),
-                            index,
+                            self.isolate_uid,
+                            &pinned_uids,
+                            root,
                         );
+                    }
+                    None => {
+                        for index in 0..self.tree_rows.len() {
+                            if self.tree_parents[index].is_none() {
+                                emit(
+                                    &mut tree,
+                                    cx,
+                                    &self.tree_rows,
+                                    &self.tree_children,
+                                    keep.as_ref(),
+                                    self.isolate_uid,
+                                    &pinned_uids,
+                                    index,
+                                );
+                            }
+                        }
                     }
                 }
                 if let Some(tries) = self.tree_scroll_tries {
@@ -7458,6 +9245,7 @@ impl Tweaker {
                     VisKind::Material(_) => live_id!(MaterialRow),
                     VisKind::Size => live_id!(SizeRow),
                     VisKind::Measured => live_id!(MeasuredRow),
+                    VisKind::Identity => live_id!(IdentityRow),
                     VisKind::BoxInset(_) => live_id!(BoxRow),
                     VisKind::FlowSpacing => live_id!(FlowRow),
                     VisKind::AlignGrid => live_id!(AlignRow),
@@ -7560,6 +9348,41 @@ impl Tweaker {
                                 }
                             }
                         }
+                    }
+                    VisKind::Identity => {
+                        let sel = session().lock().unwrap().pinned.clone();
+                        let (name, wanted, ty) = match sel {
+                            Some(sel) => {
+                                let reference = self.sel_ref(cx, sel.uid);
+                                let wanted = {
+                                    let mut s = session().lock().unwrap();
+                                    s.load_renames();
+                                    s.renames
+                                        .iter()
+                                        .find(|r| r.reference == reference)
+                                        .map(|r| r.to.clone())
+                                };
+                                (tree_name_of(cx, sel.uid), wanted, sel.ty)
+                            }
+                            None => (String::new(), None, String::new()),
+                        };
+                        let field = item.child(live_id!(name_field));
+                        self.identity_uid = field.widget_uid().0;
+                        // A name that has been asked for but not yet carried
+                        // out shows in amber: it is what the person wants the
+                        // widget called, not what it is called.
+                        let mut field_ref = field.clone();
+                        let color: Vec4f = if wanted.is_some() {
+                            vec4(1.0, 0.78, 0.29, 1.0)
+                        } else {
+                            vec4(0.902, 0.902, 0.902, 1.0)
+                        };
+                        script_apply_eval!(cx, field_ref, { draw_text +: { color: #(color) } });
+                        // Never while it is being typed in.
+                        if field.area() == Area::Empty || !cx.has_key_focus(field.area()) {
+                            field.set_text(cx, wanted.as_deref().unwrap_or(&name));
+                        }
+                        item.child(live_id!(type_label)).set_text(cx, &ty);
                     }
                     VisKind::Measured => {
                         // Straight off the selection: what the layout gave,
@@ -8263,6 +10086,126 @@ impl Tweaker {
         }
     }
 
+    /// The scope buttons explain themselves under the pointer.
+    ///
+    /// Which one is under it decides what is said: the two scopes differ in
+    /// who else takes the edit AND in which file it lands in, and a single
+    /// line covering both was the reason the old standing text had to be
+    /// truncated to fit.
+    fn scope_tip_hover(&mut self, cx: &mut Cx, abs: Vec2d) {
+        let Some(sidebar) = self.sidebar.as_ref() else { return };
+        let row = sidebar
+            .child(live_id!(ident_footer))
+            .child(live_id!(scope_row));
+        let line = row.child(live_id!(scope_line));
+        let over = if !tweak_is_on() {
+            0
+        } else {
+            let hit = |id: WidgetRef| {
+                let rect = id.area().clipped_rect(cx);
+                rect.size.x > 0.0 && rect.contains(abs)
+            };
+            if hit(line.child(live_id!(scope_this))) {
+                1
+            } else if hit(line.child(live_id!(scope_all))) {
+                2
+            } else if hit(line.child(live_id!(scope_isolated))) {
+                3
+            } else {
+                0
+            }
+        };
+        if over == self.scope_tip_shown {
+            return;
+        }
+        self.scope_tip_shown = over;
+        let tip = row.child(live_id!(scope_tip));
+        // Measure what is on screen before hiding it, so the next show can
+        // place itself against a real height instead of the fallback.
+        let measured = tip.child(live_id!(content)).area().clipped_rect(cx);
+        if measured.size.y > 0.0 {
+            self.scope_tip_size = measured.size;
+        }
+        let ty = session()
+            .lock()
+            .unwrap()
+            .pinned
+            .as_ref()
+            .map(|p| p.ty.clone())
+            .unwrap_or_else(|| "widget".to_string());
+        let isolating = self.tree_isolate && self.isolate_uid != 0;
+        let confined = isolating && !session().lock().unwrap().scope_unconfined;
+        // The band's right edge IS the window's: it is laid out from the
+        // pass width every sidebar draw.
+        let window_x = self.band.pos.x + self.band.size.x;
+        let size = self.scope_tip_size;
+        let place = |rect: Rect| {
+            dvec2(
+                rect.pos.x.min(window_x - size.x - 6.0).max(4.0),
+                rect.pos.y - size.y - 4.0,
+            )
+        };
+        let Some(mut tip) = tip.borrow_mut::<Tooltip>() else { return };
+        match over {
+            1 => {
+                let rect = line.child(live_id!(scope_this)).area().clipped_rect(cx);
+                tip.show_with_options(
+                    cx,
+                    place(rect),
+                    "this: this instance, and anything built from the same \
+                     template as it (one tab is every tab). The edit is \
+                     recorded against the instance's own site.",
+                );
+            }
+            2 if confined => {
+                let rect = line.child(live_id!(scope_all)).area().clipped_rect(cx);
+                tip.show_with_options(
+                    cx,
+                    place(rect),
+                    &format!(
+                        "all {ty}s, held to the isolated branch: every {ty} \
+                         inside it and none outside. Recorded against that \
+                         branch, not the {ty} type."
+                    ),
+                );
+            }
+            2 => {
+                let rect = line.child(live_id!(scope_all)).area().clipped_rect(cx);
+                tip.show_with_options(
+                    cx,
+                    place(rect),
+                    &format!(
+                        "all {ty}s: every {ty} in the app. The edit is \
+                         recorded against the type's own definition, so it \
+                         is the type that changes."
+                    ),
+                );
+            }
+            3 => {
+                let rect = line.child(live_id!(scope_isolated)).area().clipped_rect(cx);
+                tip.show_with_options(
+                    cx,
+                    place(rect),
+                    if !isolating {
+                        "isolated: holds an \"all\" edit to the isolated \
+                         branch. Nothing is isolated at the moment, so it \
+                         changes nothing until something is."
+                    } else if confined {
+                        "isolated is ON: an \"all\" edit stays inside the \
+                         isolated branch, and is recorded against that \
+                         branch rather than the type. Turn it off to reach \
+                         the whole app."
+                    } else {
+                        "isolated is OFF: an \"all\" edit reaches every one \
+                         in the app, including the part the isolation is \
+                         covering."
+                    },
+                );
+            }
+            _ => tip.hide(cx),
+        }
+    }
+
     /// Live code: apply the editor's text as it stands; a compile error
     /// puts the last good text back (the app never shows a blank widget)
     /// and says why under the editor.
@@ -8585,15 +10528,59 @@ impl Tweaker {
             let Some(widget_action) = action.as_widget_action() else {
                 continue;
             };
+            // The extrusion readout, likewise: it acts on the VIEW, not on a
+            // widget, and the exploded view is usually entered with nothing
+            // selected at all. Handled in the second loop it went nowhere —
+            // that one returns early when there is no selection, so the
+            // number moved under the finger and the stack never opened.
+            if self.spread_uid != 0 && widget_action.widget_uid.0 == self.spread_uid {
+                match widget_action.cast::<FabValueInputAction>() {
+                    FabValueInputAction::Changed(v) | FabValueInputAction::Ended(v) => {
+                        cx.sploded_set_spread(v as f32);
+                    }
+                    FabValueInputAction::Reset => {
+                        cx.sploded_set_spread(SPLODED_SPREAD_DEFAULT);
+                        if let Some(ui) = self.spread_ui.as_ref() {
+                            let field = ui.child(live_id!(value));
+                            if let Some(mut field) = field.borrow_mut::<FabValueInput>() {
+                                field.set_value(cx, SPLODED_SPREAD_DEFAULT as f64);
+                            };
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
             if self.note_text_uid != 0 && widget_action.widget_uid.0 == self.note_text_uid {
                 if let TextInputAction::Changed(text) = widget_action.cast::<TextInputAction>() {
-                    let sel = session().lock().unwrap().pinned.clone();
-                    if let Some(sel) = sel {
+                    // A fresh `@` arms a widget pick: the next click in the
+                    // app names something INTO the note. Counted rather than
+                    // matched at the end, so an `@` typed mid-sentence arms
+                    // it too, and deleting one disarms.
+                    let ats = text.matches('@').count();
+                    if ats > self.note_at_count {
+                        session().lock().unwrap().mention = true;
+                        log!("TWEAK @mention armed: click the widget to name it");
+                        self.redraw_overlay(cx);
+                    } else if ats < self.note_at_count {
+                        session().lock().unwrap().mention = false;
+                        self.redraw_overlay(cx);
+                    }
+                    self.note_at_count = ats;
+                    let showing = self.note_field_key(cx).as_deref()
+                        == Some(self.note_key_shown.as_str());
+                    let path = self.note_path(cx).filter(|_| showing);
+                    if let Some(path) = path {
+                        let note_mode = session().lock().unwrap().note_mode;
                         let mut s = session().lock().unwrap();
                         let mut pinned = false;
-                        if let Some(note) = s.notes.iter_mut().find(|n| n.path == sel.path) {
-                            note.text = text.clone();
-                            pinned = note.pinned;
+                        if let Some(note) = s.notes.iter_mut().find(|n| n.path == path) {
+                            if note_mode {
+                                note.text = text.clone();
+                                pinned = note.pinned;
+                            } else {
+                                note.prompt = text.clone();
+                            }
                         }
                         if pinned {
                             let notes = s.notes.clone();
@@ -8601,6 +10588,17 @@ impl Tweaker {
                             note_store_save(&notes);
                         }
                     }
+                }
+            }
+            // The identity row's name field: a rename is a REQUEST, not a
+            // live edit. The name is a LiveId the source assigned and every
+            // `ids!(…)` lookup depends on, so renaming it under the running
+            // app would break the app and leave the source lying. The AI does
+            // the rename properly; this records what was asked for.
+            if self.identity_uid != 0 && widget_action.widget_uid.0 == self.identity_uid {
+                if let TextInputAction::Returned(text, _) = widget_action.cast::<TextInputAction>()
+                {
+                    self.request_rename(cx, text.trim());
                 }
             }
             if self.vibe_prompt_uid != 0
@@ -8672,6 +10670,11 @@ impl Tweaker {
                         // Tree node click: pin that widget, exactly like a
                         // body pick (drives 2D outline AND the 3D view).
                         let target = id.0;
+                        // ...and put it ON SCREEN first. Selecting something
+                        // behind an unselected tab or a closed fold outlines
+                        // nothing and fills the panel with a widget nobody
+                        // can see.
+                        reveal_widget(cx, target);
                         let widget = cx.widget_tree().widget(WidgetUid(target));
                         if !widget.is_empty() {
                             let rect = widget.area().clipped_rect_union(cx);
@@ -8732,6 +10735,25 @@ impl Tweaker {
                     _ => {}
                 }
             }
+            if self.select_uid != 0 && widget_action.widget_uid.0 == self.select_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    let locked = {
+                        let mut s = session().lock().unwrap();
+                        s.selection_locked = !s.selection_locked;
+                        // Nothing is under the pointer as far as the overlay
+                        // is concerned any more; a stale hover outline would
+                        // sit there until something else redrew it away.
+                        s.hover = None;
+                        s.selection_locked
+                    };
+                    log!(
+                        "TWEAK select {}",
+                        if locked { "off - selection locked, mouse to the app" } else { "on" }
+                    );
+                    self.redraw_sidebar(cx);
+                    self.redraw_overlay(cx);
+                }
+            }
             if self.sploded_uid != 0 && widget_action.widget_uid.0 == self.sploded_uid {
                 if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
                     // The 2.5D exploded z-layer view. Inspection-only while
@@ -8740,15 +10762,6 @@ impl Tweaker {
                     // The toggle is deferred to the next event; read the
                     // state it WILL have, not the one it still has.
                     self.sploded_armed = cx.sploded_will_be_active();
-                    if let Some(sidebar) = self.sidebar.as_ref() {
-                        let spread_wrap = sidebar.child(live_id!(filter_row)).child(live_id!(spread_wrap));
-                        let spread = spread_wrap.child(live_id!(spread));
-                        let spread_now = cx.sploded_spread() as f64;
-                        if let Some(mut field) = spread.borrow_mut::<FabValueInput>() {
-                            field.set_value(cx, spread_now);
-                        };
-                        spread_wrap.set_visible(cx, self.sploded_armed);
-                    }
                     log!("TWEAK sploded view {}", if self.sploded_armed { "ON" } else { "off" });
                 }
             }
@@ -8806,6 +10819,20 @@ impl Tweaker {
                 self.live_timer = cx.start_timeout(0.2);
                 continue;
             }
+            if action_uid != 0 && action_uid == self.scope_isolated_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    let confined = {
+                        let mut s = session().lock().unwrap();
+                        s.scope_unconfined = !s.scope_unconfined;
+                        !s.scope_unconfined
+                    };
+                    log!(
+                        "TWEAK scope isolated {}",
+                        if confined { "on: all stays inside the isolated branch" } else { "off: all reaches the whole app" }
+                    );
+                    self.redraw_sidebar(cx);
+                }
+            }
             if action_uid != 0 && (action_uid == self.scope_this_uid || action_uid == self.scope_all_uid) {
                 if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
                     let all = action_uid == self.scope_all_uid;
@@ -8838,6 +10865,47 @@ impl Tweaker {
                 }
                 continue;
             }
+            if self.view_center_uid != 0 && action_uid == self.view_center_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    self.view_center = !self.view_center;
+                    self.apply_view_focus(cx);
+                    self.redraw_sidebar(cx);
+                }
+                continue;
+            }
+            if self.view_zoom_uid != 0 && action_uid == self.view_zoom_uid {
+                if let FabValueInputAction::Changed(v) =
+                    widget_action.cast::<FabValueInputAction>()
+                {
+                    self.view_zoom = (v as f32).clamp(1.0, 4.0);
+                    self.apply_view_focus(cx);
+                }
+                continue;
+            }
+            if self.tree_isolate_uid != 0 && action_uid == self.tree_isolate_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    if self.tree_isolate {
+                        self.tree_isolate = false;
+                        self.isolate_uid = 0;
+                        log!("TWEAK tree isolate off");
+                    } else if self.rows_uid != 0 && self.rows_uid != THEME_ROWS {
+                        // Lock onto what is selected NOW, and stay there.
+                        self.tree_isolate = true;
+                        self.isolate_uid = self.rows_uid;
+                        log!("TWEAK tree isolate on \u{2192} uid {}", self.isolate_uid);
+                    } else {
+                        session().lock().unwrap().vibe_status =
+                            "select something to isolate".to_string();
+                    }
+                    // The tree is rebuilt from a different root, so the
+                    // reveal has to run again for the new shape.
+                    self.tree_scrolled_uid = 0;
+                    self.apply_view_focus(cx);
+                    self.redraw_sidebar(cx);
+                    self.redraw_overlay(cx);
+                }
+                continue;
+            }
             if self.note_uid != 0 && action_uid == self.note_uid {
                 if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
                     self.note_request = true;
@@ -8845,8 +10913,26 @@ impl Tweaker {
                 }
                 continue;
             }
-            // The note card's own three buttons.
+            // The note card's own strip.
             if self.note_open && action_uid != 0 {
+                if action_uid == self.note_mode_uid {
+                    if let CheckBoxAction::Change(on) = widget_action.cast::<CheckBoxAction>() {
+                        // Whatever is in the box belongs to the side it was
+                        // typed on: save it before the field is reseeded from
+                        // the other one.
+                        self.note_sync_text(cx);
+                        session().lock().unwrap().note_mode = !on;
+                        self.note_focus_pending = true;
+                        self.redraw_overlay(cx);
+                    }
+                    continue;
+                }
+                if action_uid == self.note_queue_uid {
+                    if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                        self.note_queue(cx);
+                    }
+                    continue;
+                }
                 if action_uid == self.note_send_uid {
                     if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
                         self.note_send(cx);
@@ -8870,27 +10956,6 @@ impl Tweaker {
                 if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
                     self.shader_src_open = !self.shader_src_open;
                     self.redraw_sidebar(cx);
-                }
-                continue;
-            }
-            if self.spread_uid != 0 && action_uid == self.spread_uid {
-                match widget_action.cast::<FabValueInputAction>() {
-                    FabValueInputAction::Changed(v) | FabValueInputAction::Ended(v) => {
-                        cx.sploded_set_spread(v as f32);
-                    }
-                    FabValueInputAction::Reset => {
-                        cx.sploded_set_spread(SPLODED_SPREAD_DEFAULT);
-                        if let Some(sidebar) = self.sidebar.as_ref() {
-                            let spread = sidebar
-                                .child(live_id!(filter_row))
-                                .child(live_id!(spread_wrap))
-                                .child(live_id!(spread));
-                            if let Some(mut field) = spread.borrow_mut::<FabValueInput>() {
-                                field.set_value(cx, SPLODED_SPREAD_DEFAULT as f64);
-                            };
-                        }
-                    }
-                    _ => {}
                 }
                 continue;
             }
@@ -9323,6 +11388,99 @@ impl Tweaker {
         }
     }
 
+    /// Where a layout rect lands ON SCREEN once the view transform has had
+    /// its say.
+    ///
+    /// The overlay draws on the WINDOW pass, which carries no camera; the app
+    /// draws through the scene pass, which does. So the moment the view is
+    /// centred or zoomed, a widget's layout rect and the pixels it covers are
+    /// two different places, and an outline drawn at the layout rect sits
+    /// where the widget used to be. Projecting by hand puts it back on its
+    /// widget. Flat transforms are a scale about a point, so a rect stays a
+    /// rect and two corners are enough. Identity when nothing is transforming.
+    fn screen_rect(&self, cx: &Cx2d, rect: Rect) -> Rect {
+        // The explode has its own route — marks handed to the pass owner,
+        // drawn on the widget's own plane — so this is the flat transform's
+        // business only.
+        if rect.size.x <= 0.0 || !cx.sploded_transformed() || cx.sploded_active() {
+            return rect;
+        }
+        let pass = cx.current_pass_size();
+        let Some(tl) = cx.sploded_project(pass, rect.pos, 0.0) else {
+            return rect;
+        };
+        let br = cx
+            .sploded_project(pass, rect.pos + rect.size, 0.0)
+            .unwrap_or(rect.pos + rect.size);
+        Rect { pos: tl, size: br - tl }
+    }
+
+    /// Where a widget's rect lands on screen in the EXPLODED view: on its
+    /// own plane, not at its layout coordinates.
+    ///
+    /// The outlines go into the body pass as marks and are drawn there, but
+    /// the note card is flat chrome on the window pass and stays where the
+    /// layout puts it. So the leader line is the one thing that has to cross
+    /// between the two, and aiming it at the layout rect pointed it at bare
+    /// canvas — the widget having moved a plane's worth away. A rect on a
+    /// tilted plane is a parallelogram; its bounding box is close enough to
+    /// aim a line at, and the line stops at the edge either way.
+    fn plane_quad(&self, cx: &mut Cx2d, pick: &TweakPick) -> Option<[Vec2d; 4]> {
+        if !cx.sploded_active() || pick.rect.size.x <= 0.0 {
+            return None;
+        }
+        let level = cx.sploded_depth_of(pick.uid).unwrap_or(pick.level) as f32;
+        let pass = cx.current_pass_size();
+        let r = pick.rect;
+        Some(
+            [
+                r.pos,
+                dvec2(r.pos.x + r.size.x, r.pos.y),
+                dvec2(r.pos.x + r.size.x, r.pos.y + r.size.y),
+                dvec2(r.pos.x, r.pos.y + r.size.y),
+            ]
+            .map(|p| cx.sploded_project(pass, p, level).unwrap_or(p)),
+        )
+    }
+
+    /// The axis-aligned box around four points.
+    fn quad_bounds(quad: &[Vec2d; 4]) -> Rect {
+        let min_x = quad.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+        let max_x = quad.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+        let min_y = quad.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
+        let max_y = quad.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
+        Rect {
+            pos: dvec2(min_x, min_y),
+            size: dvec2(max_x - min_x, max_y - min_y),
+        }
+    }
+
+    /// Where the segment `from` -> `to` first crosses the quad's outline.
+    ///
+    /// The bounding box is what picks the direction, and for a tilted plane
+    /// its corners are nowhere near the drawn edge — a line that stopped at
+    /// the box would stop in mid-air beside the outline. Walking on to the
+    /// real edge is what makes it touch.
+    fn quad_edge_hit(quad: &[Vec2d; 4], from: Vec2d, to: Vec2d) -> Option<Vec2d> {
+        let d = to - from;
+        let mut best: Option<f64> = None;
+        for i in 0..4 {
+            let (p, q) = (quad[i], quad[(i + 1) % 4]);
+            let e = q - p;
+            let denom = d.x * e.y - d.y * e.x;
+            if denom.abs() < 1.0e-9 {
+                continue;
+            }
+            let w = p - from;
+            let t = (w.x * e.y - w.y * e.x) / denom;
+            let u = (w.x * d.y - w.y * d.x) / denom;
+            if (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u) {
+                best = Some(best.map_or(t, |b: f64| b.min(t)));
+            }
+        }
+        best.map(|t| from + d * t)
+    }
+
     /// Clip a rect to the app viewport; None when nothing remains visible.
     fn clip_to_viewport(&self, cx: &Cx2d, rect: Rect) -> Option<Rect> {
         let max_x = self.overlay_max_x(cx.current_pass_size());
@@ -9370,6 +11528,12 @@ impl Tweaker {
                 self.draw_outline.border_color = vec4(0.19, 0.78, 1.0, 1.0);
                 self.draw_outline.fill_color = vec4(0.0, 0.0, 0.0, 0.0);
                 self.draw_outline.border_size = 1.0;
+                self.draw_outline.dash = 0.0;
+            }
+            PickStyle::Mention => {
+                self.draw_outline.border_color = vec4(1.0, 0.78, 0.13, 1.0);
+                self.draw_outline.fill_color = vec4(1.0, 0.78, 0.13, 0.07);
+                self.draw_outline.border_size = 2.0;
                 self.draw_outline.dash = 0.0;
             }
             PickStyle::PinnedQuiet => {
@@ -9493,8 +11657,9 @@ impl Tweaker {
     /// so it is a reference anything can act on, not just read.
     fn copy_footer_path(&mut self, cx: &mut Cx) {
         let Some(sel) = session().lock().unwrap().pinned.clone() else { return };
-        cx.copy_to_clipboard(&sel.path);
-        log!("TWEAK copied the selection path: {}", sel.path);
+        let path = self.sel_ref(cx, sel.uid);
+        cx.copy_to_clipboard(&path);
+        log!("TWEAK copied the selection path: {path}");
         // Say so where the path was: a clipboard write is invisible
         // otherwise, and a click that shows nothing reads as a dead click.
         // `draw_sidebar` puts the path back when the beat is up.
@@ -9549,10 +11714,25 @@ impl Tweaker {
     /// outline, and only appears once they are more than
     /// [`NOTE_LEADER_MIN_GAP`] apart — a card sitting against its own widget
     /// needs no line to say so.
-    fn draw_note_leader(&mut self, cx: &mut Cx2d, card: Rect, target: Rect) {
-        let Some((from, to, gap)) = Self::closest_points(card, target) else {
+    fn draw_note_leader(
+        &mut self,
+        cx: &mut Cx2d,
+        card: Rect,
+        target: Rect,
+        quad: Option<[Vec2d; 4]>,
+    ) {
+        let Some((from, mut to, mut gap)) = Self::closest_points(card, target) else {
             return; // the card is over its own widget: nothing to join
         };
+        // Exploded: the outline is a parallelogram on its plane, so carry on
+        // past the bounding box to the edge that is actually drawn.
+        if let Some(quad) = quad {
+            let centre = (quad[0] + quad[1] + quad[2] + quad[3]) * 0.25;
+            if let Some(hit) = Self::quad_edge_hit(&quad, from, centre) {
+                to = hit;
+                gap = ((to.x - from.x).powi(2) + (to.y - from.y).powi(2)).sqrt();
+            }
+        }
         // Close enough to read as one thing already: a stub of line between
         // a card and the widget it is touching is clutter, not information.
         if gap <= NOTE_LEADER_MIN_GAP {
@@ -9599,8 +11779,18 @@ impl Tweaker {
         let Some(card) = self.clip_to_viewport(cx, card) else { return };
         self.draw_outline.dpi = cx.current_dpi_factor().max(1.0) as f32;
         self.draw_outline.dash = 0.0;
-        self.draw_outline.border_size = 1.0;
-        self.draw_outline.border_color = if focused {
+        self.draw_outline.border_size =
+            if cx.seconds_since_app_start() < self.note_flash_until { 2.0 } else { 1.0 };
+        let now = cx.seconds_since_app_start();
+        self.draw_outline.border_color = if now < self.note_flash_until {
+            // A beat of colour saying the message left: amber into the queue,
+            // green out to the AI.
+            self.next_frame = cx.new_next_frame();
+            match self.note_flash_kind {
+                NoteFlash::Queued => vec4(1.0, 0.78, 0.29, 1.0),
+                _ => vec4(0.35, 0.90, 0.45, 1.0),
+            }
+        } else if focused {
             vec4(0.19, 0.78, 1.0, 1.0)
         } else {
             vec4(0.19, 0.78, 1.0, 0.55)
@@ -9611,6 +11801,184 @@ impl Tweaker {
             vec4(0.145, 0.145, 0.180, 0.93)
         };
         self.draw_outline.draw_abs(cx, card);
+    }
+
+    /// ISOLATE, in the app itself: everything outside the isolated widget is
+    /// covered, so the one thing being worked on stands alone.
+    ///
+    /// The hole is a QUAD, not a rect, because in the exploded view a widget
+    /// sits on a tilted plane and its rect projects to a parallelogram — the
+    /// flat four-band cover that works in 2D would blank the very thing it is
+    /// meant to reveal. Scanline strips take the general shape for both: one
+    /// strip per couple of points, each clipped to where the quad actually is
+    /// at that height.
+    ///
+    /// Nothing is hidden, moved or re-laid-out: the widget renders exactly
+    /// where and how it normally does, which is the only way what you see is
+    /// what you are judging. Input is untouched too — you can still click
+    /// your way out.
+    fn draw_isolate_scrim(&mut self, cx: &mut Cx2d, hole: [Vec2d; 4]) {
+        /// Scanline height. Small enough that a tilted edge reads as a line
+        /// rather than a staircase, large enough not to flood the draw list.
+        const STRIP: f64 = 2.0;
+        let size = cx.current_pass_size();
+        let max_x = self.overlay_max_x(size);
+        let top = hole.iter().map(|p| p.y).fold(f64::INFINITY, f64::min).max(0.0);
+        let bottom = hole
+            .iter()
+            .map(|p| p.y)
+            .fold(f64::NEG_INFINITY, f64::max)
+            .min(size.y);
+        self.draw_outline.dpi = cx.current_dpi_factor().max(1.0) as f32;
+        self.draw_outline.dash = 0.0;
+        self.draw_outline.border_size = 0.0;
+        self.draw_outline.border_color = vec4(0.0, 0.0, 0.0, 0.0);
+        // Opaque, not a dim: a scrim that lets a few percent through shows a
+        // seam wherever it meets different content behind it, which reads as
+        // a rendering bug rather than as "the rest is out of the way".
+        self.draw_outline.fill_color = vec4(0.09, 0.09, 0.10, 1.0);
+        let mut band = |this: &mut Self, cx: &mut Cx2d, x: f64, y: f64, w: f64, h: f64| {
+            if w > 0.0 && h > 0.0 {
+                this.draw_outline
+                    .draw_abs(cx, Rect { pos: dvec2(x, y), size: dvec2(w, h) });
+            }
+        };
+        band(self, cx, 0.0, 0.0, max_x, top);
+        band(self, cx, 0.0, bottom, max_x, size.y - bottom);
+        let mut y = top;
+        while y < bottom {
+            let h = STRIP.min(bottom - y);
+            match Self::quad_span_at(&hole, y + h * 0.5) {
+                Some((left, right)) => {
+                    band(self, cx, 0.0, y, left.min(max_x), h);
+                    band(self, cx, right.max(0.0), y, max_x - right, h);
+                }
+                None => band(self, cx, 0.0, y, max_x, h),
+            }
+            y += h;
+        }
+    }
+
+    /// Where a convex quad spans horizontally at height `y` — the two points
+    /// its edges cross that line. `None` when the line misses it entirely.
+    fn quad_span_at(quad: &[Vec2d; 4], y: f64) -> Option<(f64, f64)> {
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for i in 0..4 {
+            let (a, b) = (quad[i], quad[(i + 1) % 4]);
+            if (a.y - y) * (b.y - y) > 0.0 || (a.y - b.y).abs() < 1.0e-9 {
+                continue;
+            }
+            let t = (y - a.y) / (b.y - a.y);
+            let x = a.x + (b.x - a.x) * t;
+            lo = lo.min(x);
+            hi = hi.max(x);
+        }
+        (hi >= lo).then_some((lo, hi))
+    }
+
+    /// The pin badge: a small amber pin on every widget that carries a PINNED
+    /// note, so a note written last week announces itself instead of waiting
+    /// to be stumbled on. Not a button — a mark you can click.
+    fn ensure_badge_ui(&mut self, cx: &mut Cx) {
+        if self.badge_ui.is_some() {
+            return;
+        }
+        let ui = cx.with_vm(|vm| {
+            let value = script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                Icon {
+                    width: Fit
+                    height: Fit
+                    icon_walk: Walk{width: 11 height: Fit}
+                    draw_icon +: {
+                        color: #xffc74a
+                        svg: crate_resource("self:resources/icons/note_pin.svg")
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        self.badge_ui = Some(ui);
+    }
+
+    /// Re-resolve which widgets carry a pinned note. Walks the whole tree, so
+    /// it runs on a timer, not per frame; the badges themselves ride the live
+    /// rects of the uids it finds.
+    fn refresh_badges(&mut self, cx: &mut Cx2d) {
+        let now = cx.seconds_since_app_start();
+        if now < self.badges_at + BADGE_REFRESH {
+            return;
+        }
+        self.badges_at = now;
+        let keys: Vec<String> = {
+            let mut s = session().lock().unwrap();
+            s.load_notes();
+            // PINNED is the whole test. Requiring text as well meant a note
+            // pinned with TAB before anything was typed into it — which is
+            // the ordinary order of doing it — wore no badge at all, so the
+            // pins simply never appeared.
+            s.notes
+                .iter()
+                .filter(|n| n.pinned)
+                .map(|n| n.path.clone())
+                .collect()
+        };
+        self.badge_targets.clear();
+        if keys.is_empty() {
+            return;
+        }
+        for (uid, path) in readable_paths(cx) {
+            if keys.iter().any(|key| *key == path) {
+                self.badge_targets.push((uid, path));
+            }
+        }
+    }
+
+    /// Draw a pin on each badged widget and remember where it landed.
+    fn draw_badges(&mut self, cx: &mut Cx2d, scope: &mut Scope, window_id: Option<usize>) {
+        self.badge_rects.clear();
+        if self.badge_targets.is_empty() {
+            return;
+        }
+        self.ensure_badge_ui(cx);
+        let ui = self.badge_ui.as_ref().unwrap().clone();
+        let max_x = self.overlay_max_x(cx.current_pass_size());
+        let targets = self.badge_targets.clone();
+        for (uid, _) in targets {
+            let widget = cx.widget_tree().widget(WidgetUid(uid));
+            if widget.is_empty() {
+                continue;
+            }
+            let rect = live_rect(cx, &widget);
+            if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+                continue; // not drawn this frame
+            }
+            let _ = window_id;
+            // Top-right, just outside the selection ring, so it never sits on
+            // the widget's own pixels.
+            let badge = |r: Rect| {
+                dvec2(
+                    (r.pos.x + r.size.x - 4.0).min(max_x - BADGE_SIZE - 1.0),
+                    (r.pos.y - BADGE_SIZE + 2.0).max(0.0),
+                )
+            };
+            // Drawn where the widget IS on screen, remembered where it is in
+            // LAYOUT: the badge is painted on the window pass but clicked
+            // with a pointer the view transform has already un-projected.
+            let pos = badge(self.screen_rect(cx, rect));
+            if pos.x < 0.0 {
+                continue;
+            }
+            let mut walk = Walk::fit();
+            walk.abs_pos = Some(pos);
+            let _ = ui.draw_walk(cx, scope, walk);
+            self.badge_rects.push((
+                Rect { pos: badge(rect), size: dvec2(BADGE_SIZE, BADGE_SIZE) },
+                uid,
+            ));
+        }
     }
 
     /// The card's bottom-right resize grip: three stacked ticks, the usual
@@ -9750,6 +12118,7 @@ impl Widget for Tweaker {
         }
         if let Event::MouseMove(e) = event {
             self.doc_tip_hover(cx, e.abs);
+            self.scope_tip_hover(cx, e.abs);
             self.states_hover(cx, e.abs);
             self.pulse_hover(cx, e.abs);
         }
@@ -9908,6 +12277,7 @@ impl Widget for Tweaker {
                             }
                             VisKind::Size
                             | VisKind::Measured
+                            | VisKind::Identity
                             | VisKind::BoxInset(_)
                             | VisKind::FlowSpacing
                             | VisKind::AlignGrid => {}
@@ -10020,6 +12390,16 @@ impl Widget for Tweaker {
                 self.note_request = false;
                 self.toggle_note(cx);
             }
+            _ if self.view_focus_pending && tweak_is_on() => {
+                self.view_focus_pending = false;
+                self.apply_view_focus(cx);
+                self.redraw_sidebar(cx);
+            }
+            // A pin badge was clicked: select its widget and open its note.
+            _ if self.badge_open.is_some() && tweak_is_on() => {
+                let uid = self.badge_open.take().unwrap();
+                self.open_badged_note(cx, uid);
+            }
             // Ctrl+Enter in the note card: send it to the AI. The card's
             // TextInput would otherwise take Return, so this arm runs first
             // (the match precedes `note_ui.handle_event` below).
@@ -10031,11 +12411,63 @@ impl Widget for Tweaker {
             {
                 self.note_send(cx);
             }
-            // Escape puts the card away (the text stays on the note).
+            // Up / Down in an EMPTY note walks its history, the way a shell
+            // prompt does. Only while empty: in a note being written those
+            // keys belong to the caret.
+            Event::KeyDown(ke)
+                if self.note_open
+                    && tweak_is_on()
+                    && matches!(ke.key_code, KeyCode::ArrowUp | KeyCode::ArrowDown)
+                    && !ke.modifiers.any()
+                    && self.note_ui.as_ref().is_some_and(|ui| {
+                        let field = ui.child(live_id!(note_text));
+                        cx.has_key_focus(field.area()) && field.text().is_empty()
+                    }) =>
+            {
+                self.note_recall(cx, ke.key_code == KeyCode::ArrowUp);
+            }
+            // Alt+Enter queues instead of sending: write against several
+            // widgets first, then release the batch with one Ctrl+Enter.
+            // Claimed here, before the field, which would otherwise take
+            // Alt+Enter as a newline.
+            Event::KeyDown(ke)
+                if self.note_open
+                    && tweak_is_on()
+                    && matches!(ke.key_code, KeyCode::ReturnKey | KeyCode::NumpadEnter)
+                    && ke.modifiers.alt
+                    && !ke.modifiers.control
+                    && !ke.modifiers.logo =>
+            {
+                self.note_queue(cx);
+            }
+            // TAB pins or unpins the note being written. It is only ours
+            // while the caret is IN the card — everywhere else Tab is still
+            // focus traversal — and the caret is put back afterwards, so a
+            // focus move the same keypress caused is undone.
+            Event::KeyDown(ke)
+                if self.note_open
+                    && tweak_is_on()
+                    && ke.key_code == KeyCode::Tab
+                    && !ke.modifiers.any()
+                    && self
+                        .note_ui
+                        .as_ref()
+                        .is_some_and(|ui| cx.has_key_focus(ui.child(live_id!(note_text)).area())) =>
+            {
+                self.note_pin_toggle(cx);
+            }
+            // Escape calls off an armed @mention first — the card is still
+            // being written in — and only closes the card once there is no
+            // pick outstanding.
             Event::KeyDown(ke)
                 if self.note_open && tweak_is_on() && ke.key_code == KeyCode::Escape =>
             {
-                self.note_close(cx);
+                if session().lock().unwrap().mention {
+                    session().lock().unwrap().mention = false;
+                    self.redraw_overlay(cx);
+                } else {
+                    self.note_close(cx);
+                }
             }
             // The arrows walk the hierarchy while something is selected —
             // parent / first child / previous / next sibling, the scene
@@ -10052,7 +12484,7 @@ impl Widget for Tweaker {
                             | KeyCode::ArrowLeft
                             | KeyCode::ArrowRight
                     )
-                    && cx.key_focus() == Area::Empty
+                    && !self.focus_is_text(cx)
                     && session().lock().unwrap().pinned.is_some() =>
             {
                 self.walk_selection(cx, ke.key_code);
@@ -10226,6 +12658,12 @@ impl Widget for Tweaker {
                 sidebar.handle_event(cx, event, scope);
             }
         }
+        // The floating extrusion readout takes its own input, whether or not
+        // a note card happens to be open — it was nested inside the note's
+        // block, so the field only answered while a note was up.
+        if let Some(ui) = self.spread_ui.clone() {
+            ui.handle_event(cx, event, scope);
+        }
         if self.note_open {
             // The resize corner sits ON the text field's bottom-right corner
             // — the field runs to the card's edge rather than giving up a
@@ -10259,18 +12697,19 @@ impl Widget for Tweaker {
                 }
                 Event::MouseMove(e) => {
                     let sel = session().lock().unwrap().pinned.clone();
-                    if let (Some((start, size)), Some(sel)) = (self.note_resize, sel.clone()) {
+                    let key = self.note_path(cx);
+                    if let (Some((start, size)), Some(key)) = (self.note_resize, key.clone()) {
                         let mut s = session().lock().unwrap();
-                        if let Some(note) = s.notes.iter_mut().find(|n| n.path == sel.path) {
+                        if let Some(note) = s.notes.iter_mut().find(|n| n.path == key) {
                             note.w = (size.x + e.abs.x - start.x).max(NOTE_MIN_W);
                             note.h = (size.y + e.abs.y - start.y).max(NOTE_MIN_H);
                         }
                         drop(s);
                         cx.set_cursor(MouseCursor::NwseResize);
                         self.redraw_overlay(cx);
-                    } else if let (Some(grab), Some(sel)) = (self.note_drag, sel) {
+                    } else if let (Some(grab), Some(key), Some(sel)) = (self.note_drag, key, sel) {
                         let mut s = session().lock().unwrap();
-                        if let Some(note) = s.notes.iter_mut().find(|n| n.path == sel.path) {
+                        if let Some(note) = s.notes.iter_mut().find(|n| n.path == key) {
                             note.dx = e.abs.x - grab.x - sel.rect.pos.x;
                             note.dy = e.abs.y - grab.y - sel.rect.pos.y;
                         }
@@ -10308,6 +12747,9 @@ impl Widget for Tweaker {
             // Opening the panel lands the caret in the filter.
             self.focus_search_pending = true;
         }
+        if self.view_zoom < 1.0 {
+            self.view_zoom = 1.0;
+        }
         self.was_on = on;
         let window_id = cx.get_current_window_id().map(|id| id.id());
         self.my_window = window_id;
@@ -10322,6 +12764,11 @@ impl Widget for Tweaker {
             // slot and its last items), so skipping them here left the
             // panel, the outlines and the note card painted after F12.
             // Begin and end them empty so nothing of the mode remains.
+            // The design surface is going away, so the app must go back to
+            // life size and its own centre with it.
+            if cx.sploded_focus() != (None, 0.0, 1.0) {
+                cx.sploded_set_focus(None, 0.0, 1.0);
+            }
             for list in [self.overlay_list.as_mut(), self.sidebar_list.as_mut()]
                 .into_iter()
                 .flatten()
@@ -10414,6 +12861,32 @@ impl Widget for Tweaker {
             }
             pick
         });
+        // Centre TRACKS. The subject moves — the selection changes, a list
+        // scrolls, the window resizes — and a centre computed once at the
+        // click would hold the middle of the screen on wherever the widget
+        // happened to be then. Recompute against the live rects and hand it
+        // to the next frame; applying it here would redraw from inside a
+        // draw.
+        if self.view_center {
+            let want = self.focus_point(cx);
+            let (have, have_level, _) = cx.sploded_focus();
+            let moved = match (want, have) {
+                (Some((a, level)), Some(b)) => {
+                    (a.x - b.x).abs() > 0.5
+                        || (a.y - b.y).abs() > 0.5
+                        || (level - have_level).abs() > 1.0e-4
+                }
+                (a, b) => a.is_some() != b.is_some(),
+            };
+            if moved {
+                self.view_focus_pending = true;
+                self.next_frame = cx.new_next_frame();
+            }
+        }
+        // Whether the arrows orbit the exploded view or walk the hierarchy
+        // turns on this, so it is reported every frame and independently of
+        // whether the selection happens to be drawing.
+        cx.sploded_set_selected(pinned.is_some());
         // Exploded view: the outlines belong on their widgets' planes inside
         // the body pass, not flat on the window pass — hand them to the
         // pass owner as marks and draw nothing here.
@@ -10431,10 +12904,45 @@ impl Widget for Tweaker {
             let pinned_mark = pinned.as_ref().and_then(|p| mark(cx, p));
             cx.sploded_set_marks(hover_mark, pinned_mark);
         }
+        // Isolate covers the app around the selection, under every mark the
+        // overlay draws — the marks belong on top of the isolated widget, not
+        // under the cover.
+        if self.tree_isolate && self.isolate_uid != 0 {
+            let widget = cx.widget_tree().widget(WidgetUid(self.isolate_uid));
+            let rect = if widget.is_empty() { Rect::default() } else { live_rect(cx, &widget) };
+            if rect.size.x > 0.0 && rect.size.y > 0.0 {
+                let corners = [
+                    rect.pos,
+                    dvec2(rect.pos.x + rect.size.x, rect.pos.y),
+                    dvec2(rect.pos.x + rect.size.x, rect.pos.y + rect.size.y),
+                    dvec2(rect.pos.x, rect.pos.y + rect.size.y),
+                ];
+                // Exploded: the widget is on a plane, so the hole is where
+                // that plane puts it, not where the flat layout does.
+                let level = cx.sploded_depth_of(self.isolate_uid).unwrap_or(0) as f32;
+                let pass = cx.current_pass_size();
+                let hole = corners
+                    .map(|p| cx.sploded_project(pass, p, level).unwrap_or(p));
+                self.draw_isolate_scrim(cx, hole);
+            }
+        }
         // NOT an early return: the overlay list and its root turtle were
         // begun above and are ended below — leaving them open let the
         // window's deferred Fill walk resolve against this turtle instead
         // of its own (an index-out-of-bounds in `resolve_fill`).
+        // Everything below draws flat on the window pass, so from here the
+        // rects are SCREEN rects: the outline, the handles hanging off it,
+        // the note card that rides the selection and its leader line all
+        // follow the widget through a centre or a zoom instead of staying
+        // behind at the layout coordinates.
+        let pinned = pinned.map(|mut pick| {
+            pick.rect = self.screen_rect(cx, pick.rect);
+            pick
+        });
+        let hover = hover.map(|mut pick| {
+            pick.rect = self.screen_rect(cx, pick.rect);
+            pick
+        });
         let flat_outlines = !cx.sploded_active();
         if flat_outlines {
         if let Some(pick) = &pinned {
@@ -10450,7 +12958,11 @@ impl Widget for Tweaker {
                 // selection's corners they read as chrome and hide the very
                 // pixels being judged. They appear when the pointer comes
                 // within reach of a corner and vanish with it.
-                if self.radius_prop.is_some() {
+                // ...and they stand down while the view is centred or
+                // zoomed: the handle is grabbed in layout coordinates and
+                // painted in screen ones, so under a transform it would
+                // answer to a place it is not.
+                if self.radius_prop.is_some() && !cx.sploded_transformed() {
                     let pointer = session().lock().unwrap().pointer_abs;
                     let near = Self::radius_handle_centers(pick.rect).iter().any(|c| {
                         let dx = pointer.x - c.x;
@@ -10463,11 +12975,16 @@ impl Widget for Tweaker {
                 }
             }
         }
-        if !quiet {
+        let mention = session().lock().unwrap().mention;
+        if !quiet || mention {
             if let Some(pick) = &hover {
                 let same = pinned.as_ref().is_some_and(|p| p.uid == pick.uid);
-                if Some(pick.window_id) == window_id && !same {
-                    self.draw_pick(cx, pick, PickStyle::Hover);
+                // An armed mention outlines whatever is under the pointer,
+                // the current selection included: naming the widget the note
+                // is already on is a legitimate thing to want.
+                if Some(pick.window_id) == window_id && (!same || mention) {
+                    let style = if mention { PickStyle::Mention } else { PickStyle::Hover };
+                    self.draw_pick(cx, pick, style);
                 }
             }
         }
@@ -10482,6 +12999,49 @@ impl Widget for Tweaker {
                 self.draw_stroke_points(cx, &stroke.points);
             }
         }
+        // Pin badges: every widget carrying a PINNED note wears one, so old
+        // notes announce themselves. Drawn before the card, which may cover
+        // one of them.
+        // Note mode: while a card is open, every widget carrying a pinned
+        // note wears a pin, so the others announce themselves and can be
+        // opened with a click. Outside note mode they would be chrome on the
+        // canvas answering a question nobody asked.
+        if flat_outlines && self.note_open {
+            self.refresh_badges(cx);
+            self.draw_badges(cx, scope, window_id);
+        } else {
+            self.badge_rects.clear();
+        }
+
+        // The extrusion readout, top-right of the APP — not the panel. It
+        // is the one control the eye needs while it is on the stack, and
+        // crossing the window to a sidebar field to reach it meant looking
+        // away from the thing being adjusted.
+        self.spread_rect = None;
+        if cx.sploded_will_be_active() {
+            self.ensure_spread_ui(cx);
+            let ui = self.spread_ui.as_ref().unwrap().clone();
+            {
+                let field = ui.child(live_id!(value));
+                let live = cx.sploded_spread() as f64;
+                if field.area() == Area::Empty || !cx.has_key_focus(field.area()) {
+                    if let Some(mut field) = field.borrow_mut::<FabValueInput>() {
+                        field.set_value(cx, live);
+                    }
+                }
+            }
+            const HUD_W: f64 = 116.0;
+            let max_x = self.overlay_max_x(cx.current_pass_size());
+            let mut walk = Walk::fit();
+            walk.abs_pos = Some(dvec2((max_x - HUD_W - 8.0).max(0.0), 8.0));
+            walk.width = Size::Fixed(HUD_W);
+            let _ = ui.draw_walk(cx, scope, walk);
+            let rect = ui.area().rect(cx);
+            if rect.size.x > 0.0 {
+                self.spread_rect = Some(rect);
+            }
+        }
+
         // The note card rides the SELECTION's live rect, joined to it by a
         // leader line in the selection's own colour so a card dragged clear
         // of its widget still says what it is about.
@@ -10489,18 +13049,58 @@ impl Widget for Tweaker {
         self.note_grip_rect = None;
         if self.note_open {
             if let Some(pick) = &pinned {
+                let key = self.sel_ref(cx, pick.uid);
                 let note = {
                     let s = session().lock().unwrap();
-                    s.notes.iter().find(|n| n.path == pick.path).cloned()
+                    s.notes.iter().find(|n| n.path == key).cloned()
                 };
                 if let Some(note) = note {
                     self.ensure_note_ui(cx);
                     let ui = self.note_ui.as_ref().unwrap().clone();
                     let field = ui.child(live_id!(note_text));
                     self.note_text_uid = field.widget_uid().0;
-                    if self.note_seed_pending {
-                        field.set_text(cx, &note.text);
+                    // The strip: what the field is showing, and the buttons
+                    // that belong to it.
+                    let note_mode = session().lock().unwrap().note_mode;
+                    {
+                        let head = ui.child(live_id!(head));
+                        if let Some(mut check) =
+                            head.child(live_id!(prompt_mode)).borrow_mut::<CheckBox>()
+                        {
+                            check.set_active(cx, !note_mode, Animate::No);
+                        }
+                        head.child(live_id!(queue)).set_visible(cx, !note_mode);
+                        head.child(live_id!(send)).set_visible(cx, !note_mode);
+                        head.child(live_id!(pin)).set_visible(cx, note_mode);
+                        if let Some(mut input) = field.borrow_mut::<crate::TextInput>() {
+                            let hint = if note_mode {
+                                "a note about this item, for whoever reads it next \u{2014} it stays until you clear it \u{00b7} TAB pins it to disk \u{00b7} @ names another widget"
+                            } else {
+                                "tell the agent about this item \u{2014} Ctrl+Enter sends \u{00b7} Alt+Enter queues \u{00b7} Up recalls what you sent \u{00b7} @ names another widget"
+                            };
+                            if input.empty_text() != hint {
+                                input.set_empty_text(cx, hint.to_string());
+                            }
+                        }
+                    }
+                    // The mode is part of the key: flipping the checkbox has
+                    // to reseed, or the note would be shown with the prompt's
+                    // text still in the box.
+                    let key = format!("{}{}", if note_mode { "n:" } else { "p:" }, key);
+                    let shown = if note_mode { &note.text } else { &note.prompt };
+                    if self.note_clear_field {
+                        // The message went out; the box empties behind it.
+                        self.note_clear_field = false;
+                        field.set_text(cx, "");
+                        self.note_key_shown = key.clone();
+                        self.note_at_count = 0;
+                    } else if self.note_seed_pending || self.note_key_shown != key {
+                        field.set_text(cx, shown);
                         self.note_seed_pending = false;
+                        self.note_key_shown = key.clone();
+                        // A note read back from the store can already hold
+                        // mentions; those must not read as freshly typed.
+                        self.note_at_count = shown.matches('@').count();
                     }
                     // Opaque while it is being typed in, translucent when
                     // it is not: a note must be readable over whatever it
@@ -10515,7 +13115,11 @@ impl Widget for Tweaker {
                     // The leader FIRST: under the card, so it tucks beneath
                     // the edge instead of crossing it.
                     if pick.rect.size.x > 0.0 {
-                        self.draw_note_leader(cx, card, selection_ring(pick.rect));
+                        let quad = self.plane_quad(cx, pick);
+                        let target = quad
+                            .map(|q| Self::quad_bounds(&q))
+                            .unwrap_or(pick.rect);
+                        self.draw_note_leader(cx, card, selection_ring(target), quad);
                     }
                     self.draw_note_backdrop(cx, card, focused);
                     let mut walk = Walk::fit();
@@ -10538,6 +13142,18 @@ impl Widget for Tweaker {
                 }
             }
         }
+
+        // The note card is drawn FLAT on the window pass, so in the exploded
+        // view the mode must not re-address the pointer over it: the card
+        // would be painted in one place and clicked in another. Same
+        // exemption the panel band has, but this one moves.
+        let floating: Vec<Rect> = self
+            .note_rect
+            .into_iter()
+            .chain(self.spread_rect)
+            .collect();
+        cx.sploded_set_flat_rects(floating.clone());
+        session().lock().unwrap().chrome_float = floating;
 
         cx.end_pass_sized_turtle();
         self.overlay_list.as_mut().unwrap().end(cx);
@@ -10567,46 +13183,115 @@ mod tests {
     }
 
     #[test]
-    fn a_measured_length_reads_at_a_glance() {
-        // `fmt_f64` keeps four decimals, which is how a Fill width arrives:
-        // the readout has to fit the panel, so one decimal, none if round.
-        assert_eq!(fmt_measure(82.0), "82");
-        assert_eq!(fmt_measure(420.7333), "420.7");
-        assert_eq!(fmt_measure(420.96), "421");
-        assert_eq!(fmt_measure(0.0), "0");
+    fn a_mention_lands_after_the_at_that_armed_it() {
+        assert_eq!(insert_mention("look at @", "/a/b/c"), "look at @/a/b/c");
+        // Typed on mid-sentence: the name goes where the @ is, not at the end.
+        assert_eq!(insert_mention("@ is too wide", "./b"), "@./b is too wide");
+        // The last @ wins — an earlier mention is left alone.
+        assert_eq!(insert_mention("@/x/y and @", "../w"), "@/x/y and @../w");
+        // The arming @ was deleted mid-pick: append rather than lose the click.
+        assert_eq!(insert_mention("align these", "/a/b"), "align these @/a/b");
+        assert_eq!(insert_mention("", "/a/b"), "@/a/b");
     }
 
     #[test]
-    fn the_leader_runs_between_the_two_closest_points() {
-        let card = rect(0.0, 0.0, 100.0, 50.0);
-        // Straight below: both ends square on the facing edges, and the pair
-        // shares the x span's middle so the line is vertical.
-        let (from, to, gap) = Tweaker::closest_points(card, rect(20.0, 90.0, 60.0, 30.0)).unwrap();
-        assert_eq!((from.y, to.y), (50.0, 90.0));
-        assert_eq!(from.x, to.x);
-        assert!((gap - 40.0).abs() < 1e-9, "{gap}");
-        // Diagonally away: the two facing CORNERS, and the gap is the real
-        // distance between the rects, not centre to centre.
-        let (from, to, gap) = Tweaker::closest_points(card, rect(130.0, 90.0, 40.0, 40.0)).unwrap();
-        assert_eq!((from.x, from.y), (100.0, 50.0));
-        assert_eq!((to.x, to.y), (130.0, 90.0));
-        assert!((gap - 50.0).abs() < 1e-9, "{gap}");
-        // Card to the right of its widget: the pair flips to the near edges.
-        let (from, to, _) = Tweaker::closest_points(card, rect(-80.0, 10.0, 40.0, 20.0)).unwrap();
-        assert_eq!((from.x, to.x), (0.0, -40.0));
-        // Overlapping: no gap, no line.
-        assert!(Tweaker::closest_points(card, rect(50.0, 25.0, 80.0, 80.0)).is_none());
+    fn a_path_segment_says_what_the_widget_is() {
+        // A real name wins.
+        assert_eq!(readable_segment("main_window", "Window"), "main_window");
+        // No name: the type is what a person would call it.
+        assert_eq!(readable_segment("-", "View"), "View");
+        // A list item's index is not a name either — the type reads better.
+        assert_eq!(readable_segment("3", "Label"), "Label");
+        // Neither: something has to be said.
+        assert_eq!(readable_segment("-", "-"), "Widget");
     }
 
     #[test]
-    fn a_card_against_its_widget_draws_no_leader() {
-        // The rule the drawing enforces: under NOTE_LEADER_MIN_GAP the card
-        // and the widget already read as one thing.
-        let card = rect(0.0, 0.0, 100.0, 50.0);
-        let near = Tweaker::closest_points(card, rect(0.0, 60.0, 100.0, 20.0)).unwrap().2;
-        let far = Tweaker::closest_points(card, rect(0.0, 140.0, 100.0, 20.0)).unwrap().2;
-        assert!(near <= NOTE_LEADER_MIN_GAP, "{near} should be too close to draw");
-        assert!(far > NOTE_LEADER_MIN_GAP, "{far} should draw");
+    fn an_anonymous_segment_is_a_position_not_a_name() {
+        // Legacy `-` / `-2` stand-ins can still arrive from a hand-written
+        // path or an older note store; the loose finder must drop them
+        // rather than hash them into ids.
+        assert!(is_anonymous_segment("-"));
+        assert!(is_anonymous_segment("-0"));
+        assert!(is_anonymous_segment("-12"));
+        assert!(!is_anonymous_segment("-a"));
+        assert!(!is_anonymous_segment("main_window"));
+        // `Label.2` is a NAME with an ordinal, not a position stand-in: the
+        // slash is the hierarchy, the dot is only which one of several.
+        assert!(!is_anonymous_segment("Label.2"));
+    }
+
+    #[test]
+    fn mentions_are_read_back_out_of_the_note_text() {
+        let base = "/root/a/b";
+        assert_eq!(
+            note_mentions(base, "match @/a/b/c to @/d/e, please"),
+            vec!["/a/b/c".to_string(), "/d/e".to_string()]
+        );
+        // A sentence-ending dot is punctuation, not part of the reference.
+        assert_eq!(note_mentions(base, "like @/a/b."), vec!["/a/b".to_string()]);
+        // The same widget twice is one reference.
+        assert_eq!(
+            note_mentions(base, "@/a/b and @/a/b"),
+            vec!["/a/b".to_string()]
+        );
+        // A bare @ (armed, never picked) names nothing.
+        assert!(note_mentions(base, "waiting on @").is_empty());
+        assert!(note_mentions(base, "no mentions here").is_empty());
+        // What the card SHOWS is relative; what comes back out is absolute,
+        // because a reference read elsewhere has no "here" to be relative to.
+        assert_eq!(
+            note_mentions(base, "inside @./x"),
+            vec!["/root/a/b/x".to_string()]
+        );
+        assert_eq!(
+            note_mentions(base, "next to @../c"),
+            vec!["/root/a/c".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_relative_mention_reads_like_a_url() {
+        // One notation for the whole scheme: `/` is the hierarchy, `./` the
+        // noted widget, `../` its parent.
+        let base = "/dock/tab/View.1/View.2/Label.1";
+        // Inside the noted widget.
+        assert_eq!(
+            relative_path(base, "/dock/tab/View.1/View.2/Label.1/child").as_deref(),
+            Some("./child")
+        );
+        // A sibling: up to the parent, then down.
+        assert_eq!(
+            relative_path(base, "/dock/tab/View.1/View.2/Label.3").as_deref(),
+            Some("../Label.3")
+        );
+        // One level further out.
+        assert_eq!(
+            relative_path(base, "/dock/tab/View.1/Button").as_deref(),
+            Some("../../Button")
+        );
+        // An ancestor gets no relative form: `../` alone names it but says
+        // nothing about WHAT it is.
+        assert!(relative_path(base, "/dock/tab/View.1/View.2").is_none());
+        // Nothing in common: there is no honest relative form.
+        assert!(relative_path("/a/b", "/x/y").is_none());
+    }
+
+    #[test]
+    fn a_relative_mention_round_trips_to_the_same_widget() {
+        let base = "/dock/tab/View.1/View.2/Label.1";
+        for target in [
+            "/dock/tab/View.1/View.2/Label.1/child",
+            "/dock/tab/View.1/View.2/Label.3",
+            "/dock/tab/View.1/Button",
+            "/dock/other/Label.1",
+        ] {
+            let rel = relative_path(base, target).expect("shares a root");
+            assert_eq!(absolute_mention(base, &rel), target, "{rel} did not round-trip");
+        }
+        // An absolute reference is left as it is, leading slash or not.
+        assert_eq!(absolute_mention("/a/b", "/x/y/z"), "/x/y/z");
+        assert_eq!(absolute_mention("/a/b", "x/y/z"), "/x/y/z");
     }
 
     #[test]

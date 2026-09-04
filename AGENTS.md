@@ -158,9 +158,10 @@ for agent work is the **tweaker** — the F12 design panel. It is a two-way
 channel: the human points at the running UI, and you read what they pointed at.
 
 **Selection.** F12 (or `GET /tweak?on=1`) turns it on. Hovering outlines a
-widget, clicking pins it; clicking again inside the same widget climbs to its
-parent, so a container hidden under its children is still reachable. The
-pinned selection wears a dashed ring and four corner brackets.
+widget, clicking pins it — always the widget the outline was showing. Clicking
+the SAME SPOT again climbs to the parent, one level per click, so a container
+hidden under its children is still reachable; a click anywhere else is a fresh
+pick. The pinned selection wears a dashed ring and four corner brackets.
 
 **You already know what is selected — always.** `GET /tweak/state` reports the
 pinned widget as `sel` (`path`, `ty`, rect) together with every editable
@@ -173,7 +174,32 @@ The panel's footer carries the selection's identity: its type and property
 count, and under that the path, head-clipped to fit. **Clicking that path
 line copies the full path to the clipboard** — the same string `/tweak/apply`
 and `/snap` take — so a human can paste an unambiguous reference into a note,
-an issue or a prompt. A full-width line at the top of the Layout section
+an issue or a prompt. That reference is a READABLE path — each segment is
+the widget's own name where it has one and its type where it does not, with
+`.1`/`.2` only where siblings would otherwise collide, and the head every
+path in the app shares (the tree root, any single-child chain under it, and
+the `Window`'s `body`) dropped, so it starts at the first thing the app
+itself put on screen: `/dock/tOverview/View/View/Label.1` — URL notation,
+so `./` is the current widget's container and `../` one out.
+
+`sel.path` still carries the raw tree path (unnamed nodes as `-`, so a run of
+them reads the same for all of them); **`sel.ref` is the one to quote and to
+feed back to `/tweak/apply`**, and it is what a note is keyed by. A shortened
+tail resolves too — `/tweak/apply` takes anything a path ends with, as long
+as it names one widget.
+
+The Props tab opens with the selection's identity: its **name**, in an
+editable field, and its type. Committing a new name does NOT rename anything
+live — the name is a `LiveId` the source assigned and every `ids!(…)` lookup
+depends on, so renaming it under a running app would break the app and leave
+the source lying. It records a request instead: the field shows the wanted
+name in amber, `/tweak/state` reports every outstanding one as
+`renames: [{ref, from, to}]`, and they are kept in `.makepad-names.txt`
+beside the notes so they survive the rebuild a rename usually needs.
+**Carrying them out in the source is your job**, and the request stays until
+you do.
+
+A full-width line at the top of the Layout section
 shows what the layout actually produced —
 `measured 420.7 × 82.1 = 631 × 123 device px`, layout points first because
 that is the unit the size fields take — above the Fill/Fit/number controls
@@ -187,8 +213,10 @@ widget:
 | `Insert`, or `Ctrl+Shift+N` (`Cmd+Shift+N`), or the panel's `note` button | open / close the card on the selection (or, with nothing pinned, on the hovered widget) |
 | drag the header strip | move the card; a leader line in the selection colour joins its two closest points to the widget's outline, once they are more than 30pt apart |
 | drag the bottom-right grip | resize it |
+| type `@` | the hover turns **amber**: click any widget to name it into the note |
+| `Enter` / `Shift+Enter` | a new line — a note is prose |
 | `Ctrl+Enter` / the **Send** button | **send the note to you** |
-| the **Pin** button | pin the note to disk so it survives the run |
+| `Tab`, or the **Pin** button | pin the note to disk so it survives the run |
 | the — button (top left), or `Esc` | put the card away, keeping the text |
 
 The card is opaque and picking cannot reach through it: nothing behind a note
@@ -204,9 +232,42 @@ can be hovered or selected.
 - `"pinned": 1` — the note is stored in `.makepad-notes.txt` in the app's
   working directory and comes back next run. That file is plain tab-separated
   text (`path  dx  dy  w  h  text`) — readable and editable without the app.
+  A pinned note also puts a small amber pin on its widget while the overlay
+  is up; clicking that opens the note.
+- `"mentions": [...]` — every widget the note points at with `@`, resolved.
+  The card writes a mention relative to the noted widget when that is
+  shorter, read the way a path inside a file is read against that file's
+  directory: `@./Label.2` is a SIBLING, `@../Button` is one container out,
+  `@../../` two. `mentions` always carries the resolved form, so act on that.
 
 So the loop is: poll `/tweak/state`, act on any note whose `ask` count is new,
 and use `sel` for anything the human says in the console.
+
+**Arm a watcher whenever you launch an app the human is going to drive.** The
+bridge is a server inside the app — it cannot reach out and tell you anything,
+so without a watcher a sent note sits unread until they prompt you, which
+defeats the point of the card. Start a persistent `Monitor` polling `/log`
+and emitting one line per `TWEAK ask` / `TWEAK rename request`; each line
+becomes a notification, so they can instruct you from the note and you act
+without being asked twice:
+
+```python
+# poll the ring, emit one line per request, and say so if the app dies —
+# silence must never look like "nothing was asked"
+last = get("/log?n=1")["n"]
+while True:
+    page = get(f"/log?since={last}")     # the app is gone if this throws: stop
+    last = page["n"]
+    for line in page["l"]:
+        if "TWEAK ask" in line or "TWEAK rename request" in line:
+            print(line.split(" - ", 1)[-1], flush=True)
+    time.sleep(2)
+```
+
+The **Tree** tab lists the live widget hierarchy; clicking a row selects that
+widget and **reveals** it — the Dock selects the tab holding it, a closed
+FoldHeader opens, a PageFlip flips — so selecting something never leaves you
+inspecting a widget you cannot see.
 
 **Hierarchy walk.** With something selected the arrow keys walk the live tree
 the way a scene editor does — Up to the parent, Down to the first child,
