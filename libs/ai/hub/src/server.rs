@@ -292,7 +292,13 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
     // full hardware snapshot as request/discovery availability so an empty-
     // artifact backend with hard GPU requirements does not start as Ready on
     // unknown or incompatible hardware.
-    let startup_gpu = crate::gpu::query_gpu();
+    // A cold thread makes this a no-op; if startup is ever reached after an
+    // in-process service restart, do not publish an allocator-depressed VRAM
+    // ceiling inherited from the previous run.
+    let startup_trim = residency::trim_cached_pool_with(crate::gpu::query_gpu, || {
+        release_worker_thread_device_caches(&mut |_| {});
+    });
+    let startup_gpu = startup_trim.after_gpu;
     let startup_usable_mb = residency::usable_vram_mb(&startup_gpu);
     let mut models = HashMap::new();
     for spec in &config.registry.models {
@@ -1374,10 +1380,17 @@ fn release_orphaned_device_caches(
     if still_resident {
         return false;
     }
-    let before = residency::fresh_free_mb();
     let mut said: Vec<String> = Vec::new();
-    release_worker_thread_device_caches(&mut |line| said.push(line.to_string()));
-    let after = residency::fresh_free_mb();
+    let trimmed = residency::trim_cached_pool_with(crate::gpu::query_gpu, || {
+        release_worker_thread_device_caches(&mut |line| said.push(line.to_string()));
+    });
+    let before = trimmed.before_free_mb;
+    let after = trimmed.after_free_mb();
+    with_backends(shared, |backends| {
+        if !any_backend_resident(backends) {
+            shared.vram_usable.refresh_from_gpu(&trimmed.after_gpu);
+        }
+    });
     if let (Some(before), Some(after)) = (before, after) {
         // Only worth a log line when it actually recovered something. A quiet
         // box that was already clean should stay quiet.
@@ -1446,7 +1459,7 @@ fn idle_evict_sweep(shared: &Arc<ServiceShared>) {
             evict_resident(shared, backends, &model_id, &mut |_| {})
         });
         match result {
-            Ok(()) => {}
+            Ok(_) => {}
             Err(e) => eprintln!("residency: idle-evict {model_id} failed: {e}"),
         }
     }
@@ -2212,6 +2225,23 @@ fn refresh_usable_vram_if_idle(
     }
 }
 
+/// Release cached CUDA allocations on the worker that owns them, bracketed by
+/// uncached NVML samples. An empty-card ceiling is published only from the
+/// post-trim sample.
+fn trim_worker_thread_cached_pool(
+    shared: &Arc<ServiceShared>,
+    backends: &HashMap<String, Box<dyn ContentBackend>>,
+    progress: &mut dyn FnMut(&str),
+) -> residency::CachedPoolTrim {
+    let trimmed = residency::trim_cached_pool_with(crate::gpu::query_gpu, || {
+        release_worker_thread_device_caches(progress);
+    });
+    if !any_backend_resident(backends) {
+        shared.vram_usable.refresh_from_gpu(&trimmed.after_gpu);
+    }
+    trimmed
+}
+
 /// Unloads one resident and VERIFIES the freed VRAM became visible through
 /// fresh NVML reads before returning (serialized teardown — "do not assume
 /// VRAM magically unloads"). Model state goes Ready on success; an unload
@@ -2221,7 +2251,7 @@ fn evict_resident(
     backends: &mut HashMap<String, Box<dyn ContentBackend>>,
     model_id: &str,
     progress: &mut dyn FnMut(&str),
-) -> Result<(), AssetAiError> {
+) -> Result<Option<residency::CachedPoolTrim>, AssetAiError> {
     let est_mb = shared
         .registry
         .find(model_id)
@@ -2248,7 +2278,7 @@ fn evict_resident(
                 ))
             })?;
         }
-        None => return Ok(()),
+        None => return Ok(None),
     }
     set_model_state(shared, model_id, ModelTrack::Ready);
     // A backend's `unload()` can only reach what it owns. The device memory it
@@ -2259,9 +2289,8 @@ fn evict_resident(
     // invalidate, and re-uploading on the next miss is exactly what the cache
     // is designed for. This is the step whose absence left the card full while
     // the service reported it empty.
-    if !any_backend_resident(backends) {
-        release_worker_thread_device_caches(progress);
-    }
+    let pool_trim = (!any_backend_resident(backends))
+        .then(|| trim_worker_thread_cached_pool(shared, backends, progress));
     if let (Some(before), true) = (before, est_mb > 0) {
         // Expect at least a quarter of the estimate back (estimates are
         // peaks; steady-resident footprints are smaller), capped under the
@@ -2304,8 +2333,13 @@ fn evict_resident(
             );
         }
     }
-    refresh_usable_vram_if_idle(shared, backends);
-    Ok(())
+    // The driver may publish more of the release during the verification
+    // window above. This remains post-trim, so it is safe to raise the public
+    // empty-card ceiling to the final sample.
+    if pool_trim.is_some() {
+        refresh_usable_vram_if_idle(shared, backends);
+    }
+    Ok(pool_trim)
 }
 
 /// Releases device memory cached on THIS worker thread outside any
@@ -2317,7 +2351,8 @@ fn evict_resident(
 /// worker thread and is released by `FluxBackend::unload` instead. No-op on
 /// builds without a GPU pipeline surface.
 #[allow(unused_variables, unused_mut)]
-fn release_worker_thread_device_caches(progress: &mut dyn FnMut(&str)) {
+fn release_worker_thread_device_caches(progress: &mut dyn FnMut(&str)) -> usize {
+    let mut released_bytes = 0usize;
     #[cfg(any(
         feature = "flux",
         feature = "mesh",
@@ -2337,14 +2372,24 @@ fn release_worker_thread_device_caches(progress: &mut dyn FnMut(&str)) {
         feature = "upscale-native"
     ))]
     {
-        match makepad_ai_common::backend::gpu_weight_cache_evict_prefix("") {
+        match makepad_ai_common::backend::gpu_weight_cache_evict_prefix_if_loaded("") {
             Ok(count) => progress(&format!(
-                "vram-release: evicted {count} cached weight buffers + idle pool on the service worker thread"
+                "vram-release: evicted {count} cached weight buffers on the service worker thread"
             )),
             Err(error) => progress(&format!("vram-release: weight cache evict failed: {error}")),
         }
-        makepad_ai_common::backend::gpu_pool_clear();
+        match makepad_ai_common::backend::gpu_release_cached() {
+            Ok(bytes) => {
+                released_bytes = bytes;
+                progress(&format!(
+                    "vram-release: allocator released {} MB of cached pool on the service worker thread",
+                    bytes / (1024 * 1024)
+                ));
+            }
+            Err(error) => progress(&format!("vram-release: cached pool trim failed: {error}")),
+        }
     }
+    released_bytes
 }
 
 /// The admission gate run before a model loads: single-heavy default
@@ -2373,6 +2418,7 @@ fn admit_for_load(
         .get(&spec.id)
         .map(|backend| backend.is_resident())
         .unwrap_or(false);
+    let mut pool_trim = None;
 
     // A model switch always retires ordinary residents, including models
     // whose own estimate is zero. Pins survive this first pass and are only
@@ -2383,7 +2429,9 @@ fn admit_for_load(
     {
         cancel.check()?;
         progress(&format!("switching models: evicting {model_id}"));
-        evict_resident(shared, backends, &model_id, &mut progress)?;
+        if let Some(trimmed) = evict_resident(shared, backends, &model_id, &mut progress)? {
+            pool_trim = Some(trimmed);
+        }
     }
     if already_resident {
         return Ok(());
@@ -2406,7 +2454,9 @@ fn admit_for_load(
         progress(&format!(
             "queued-for-memory: need {need} MB, free {free} MB — evicting pinned {model_id}"
         ));
-        evict_resident(shared, backends, &model_id, &mut progress)?;
+        if let Some(trimmed) = evict_resident(shared, backends, &model_id, &mut progress)? {
+            pool_trim = Some(trimmed);
+        }
         free = residency::fresh_free_mb().unwrap_or(free);
         if free >= need {
             return Ok(());
@@ -2418,10 +2468,12 @@ fn admit_for_load(
     // hooks, idle pool blocks), then give the driver a bounded window to
     // publish the freed memory (WDDM bookkeeping trails the allocator), and
     // only then refuse — explicitly, never a silent fallback.
-    release_worker_thread_device_caches(&mut progress);
-    free = residency::fresh_free_mb().unwrap_or(free);
-    refresh_usable_vram_if_idle(shared, backends);
-    if free >= need {
+    let pool_trim = pool_trim.unwrap_or_else(|| {
+        trim_worker_thread_cached_pool(shared, backends, &mut progress)
+    });
+    let (post_trim_free, admitted) = residency::admission_after_trim(&pool_trim, free, need);
+    free = post_trim_free;
+    if admitted {
         return Ok(());
     }
     progress(&format!(
@@ -2435,9 +2487,12 @@ fn admit_for_load(
         }
         Some(seen) => {
             refresh_usable_vram_if_idle(shared, backends);
-            Err(AssetAiError::Backend(format!(
-                "insufficient VRAM for {}: need {need} MB (estimate {est_mb} MB + reserve {} MB), only {seen} MB free after evicting every resident — refusing to load (no CPU/other-node fallback)",
-                spec.id, shared.residency.reserve_mb
+            Err(AssetAiError::Backend(residency::insufficient_vram_message(
+                &spec.id,
+                est_mb,
+                shared.residency.reserve_mb,
+                seen,
+                pool_trim.released_mb_at(seen),
             )))
         }
     }
