@@ -96,10 +96,11 @@ pub struct FleetRoles {
     rules: Vec<(String, Vec<String>)>,
 }
 
-/// The ratified fleet end state: `.217` (RTX 5090) is the dedicated chat
-/// box — chat and the prompt expander live there, every other generative
-/// domain lives on the other nodes.
-const DEFAULT_FLEET_ROLES: &str = "10.0.0.165=chat,text";
+/// The ratified fleet end state: `.165` (RTX PRO 6000) carries chat, the
+/// prompt expander and image generation (user's order 2026-09-04: "let the
+/// rtx serve images too" — the 5090 cannot fit flux2-dev at the default
+/// reserve); every other generative domain lives on the other nodes.
+const DEFAULT_FLEET_ROLES: &str = "10.0.0.165=chat,text,image";
 
 /// Env var naming the roles; `off` disables the built-in list too.
 pub const FLEET_ROLES_ENV: &str = "MAKEPAD_FLEET_ROLES";
@@ -1190,7 +1191,8 @@ mod tests {
         let roles = FleetRoles::parse(DEFAULT_FLEET_ROLES);
         assert!(roles.allows("http://10.0.0.165:8123", "chat"));
         assert!(roles.allows("http://10.0.0.165:8123", "text"));
-        for domain in ["video", "image", "music", "mesh", "vision"] {
+        assert!(roles.allows("http://10.0.0.165:8123", "image"));
+        for domain in ["video", "music", "mesh", "vision"] {
             assert!(
                 !roles.allows("http://10.0.0.165:8123", domain),
                 "the dedicated chat box must not serve {domain}"
