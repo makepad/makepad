@@ -27,8 +27,8 @@ use crate::loop_splat::{
 use crate::wave_analysis::{DeckClock, TrackGrid};
 use crate::music_dsp::{
     audible, knob, knob64,
-    Bitcrusher, DeckEcho, DeckEq, Distortion, Flanger, FrameSource, Freeze, MotorEnd, ParamRamp,
-    Phaser, RateReader, ScratchRamp, Tremolo,
+    Autopan, Bitcrusher, DeckEcho, DeckEq, Distortion, Flanger, FrameSource, Freeze, MotorEnd,
+    ParamRamp, Phaser, RateReader, ScratchRamp, Tremolo,
     Stretcher, STEM_COUNT,
     STRETCH_BYPASS_EPSILON, STRETCH_RATIO_MAX, STRETCH_RATIO_MIN, WSOLA_WINDOW,
     BRAKE_SECS, CENSOR_FLIP_SECS, CENSOR_RATE, CENSOR_RETURN_SECS, SOFT_START_SECS,
@@ -900,6 +900,7 @@ enum EffectKind {
     Tremolo(Tremolo),
     Distortion(Distortion),
     Phaser(Phaser),
+    Autopan(Autopan),
 }
 
 impl EffectKind {
@@ -914,15 +915,16 @@ impl EffectKind {
             EffectKind::Tremolo(tremolo) => tremolo.process(frame, device_rate),
             EffectKind::Distortion(distortion) => distortion.process(frame, device_rate),
             EffectKind::Phaser(phaser) => phaser.process(frame, device_rate),
+            EffectKind::Autopan(autopan) => autopan.process(frame, device_rate),
         }
     }
 }
 
-const DECK_CHAIN_SLOTS: usize = 8;
+const DECK_CHAIN_SLOTS: usize = 9;
 
 /// A deck's pre-fader tone chain: a fixed list of slots, walked in order.
 /// Not a `Vec` -- sized once, at compile time, never resized. Today's
-/// eight slots are the whole roster and are permanently populated by
+/// nine slots are the whole roster and are permanently populated by
 /// construction; a slot that can stand empty, or be reassigned, is a
 /// separate decision for whenever growing the roster again asks for one.
 struct DeckChain {
@@ -941,6 +943,7 @@ impl DeckChain {
                 EffectKind::Tremolo(Tremolo::new()),
                 EffectKind::Distortion(Distortion::new()),
                 EffectKind::Phaser(Phaser::new()),
+                EffectKind::Autopan(Autopan::new()),
             ],
         }
     }
@@ -1003,6 +1006,12 @@ impl DeckChain {
     fn phaser_mut(&mut self) -> &mut Phaser {
         match &mut self.slots[7] {
             EffectKind::Phaser(phaser) => phaser,
+            _ => unreachable!(),
+        }
+    }
+    fn autopan_mut(&mut self) -> &mut Autopan {
+        match &mut self.slots[8] {
+            EffectKind::Autopan(autopan) => autopan,
             _ => unreachable!(),
         }
     }
@@ -2664,6 +2673,18 @@ impl Mixer {
     pub fn set_deck_phaser_feedback(&self, deck: DeckId, feedback: f32) {
         let mut s = self.state.lock().unwrap();
         s.decks[deck.index()].chain.phaser_mut().set_feedback(feedback);
+    }
+
+    /// The autopan's on/off switch.
+    pub fn set_deck_autopan(&self, deck: DeckId, on: bool) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.autopan_mut().set_wet(if on { 1.0 } else { 0.0 });
+    }
+
+    /// The autopan LFO's sweep speed, in Hz.
+    pub fn set_deck_autopan_rate(&self, deck: DeckId, hz: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.autopan_mut().set_rate(hz);
     }
 
     /// Momentary FREEZE: while held, the deck repeats a beat-sized

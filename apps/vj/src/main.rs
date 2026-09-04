@@ -2541,6 +2541,21 @@ script_mod! {
                                         default: 0.5
                                     }
                                 }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    sfx_fx_autopan := PillButton{width: 78 text: "AUTOPAN"}
+                                    sfx_fx_autopan_rate := Slider{
+                                        width: 170
+                                        text: "autopan rate"
+                                        min: 0.1
+                                        max: 20.0
+                                        default: 1.0
+                                    }
+                                }
                             }
 
                             // ============ MESH ============
@@ -14127,6 +14142,10 @@ p2 {}
                 DeckCmd::SetPhaserFeedback { deck, feedback } => {
                     self.mixer.set_deck_phaser_feedback(deck, feedback)
                 }
+                DeckCmd::SetAutopan { deck, on } => self.mixer.set_deck_autopan(deck, on),
+                DeckCmd::SetAutopanRate { deck, hz } => {
+                    self.mixer.set_deck_autopan_rate(deck, hz)
+                }
                 DeckCmd::SetStemGain { deck, stem, gain } => {
                     self.mixer.set_deck_stem_gain(deck, stem, gain)
                 }
@@ -14287,6 +14306,7 @@ p2 {}
             deck.distortion_drive as f64,
         );
         let (phaser_on, phaser_rate) = (deck.phaser_on, deck.phaser_rate as f64);
+        let (autopan_on, autopan_rate) = (deck.autopan_on, deck.autopan_rate as f64);
         self.ui.slider(cx, ids!(sfx_fx_feedback)).set_value(cx, feedback);
         self.paint_chip(cx, ids!(sfx_fx_flanger), flanger_on, None);
         self.ui.slider(cx, ids!(sfx_fx_flanger_rate)).set_value(cx, flanger_rate);
@@ -14298,6 +14318,8 @@ p2 {}
         self.ui.slider(cx, ids!(sfx_fx_distortion_drive)).set_value(cx, distortion_drive);
         self.paint_chip(cx, ids!(sfx_fx_phaser), phaser_on, None);
         self.ui.slider(cx, ids!(sfx_fx_phaser_rate)).set_value(cx, phaser_rate);
+        self.paint_chip(cx, ids!(sfx_fx_autopan), autopan_on, None);
+        self.ui.slider(cx, ids!(sfx_fx_autopan_rate)).set_value(cx, autopan_rate);
     }
 
     /// Push a deck's tone/stem knob positions back onto the surface, so the
@@ -29258,6 +29280,32 @@ impl MatchEvent for App {
                 FxTarget::Mix => {
                     let mut cmds = self.decks.set_phaser_rate(DeckId::A, v as f32);
                     cmds.extend(self.decks.set_phaser_rate(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        if self.ui.button(cx, ids!(sfx_fx_autopan)).clicked(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.toggle_autopan(DeckId::A),
+                FxTarget::B => self.decks.toggle_autopan(DeckId::B),
+                FxTarget::Mix => {
+                    let on = !self.decks.deck(DeckId::A).autopan_on;
+                    let mut cmds = self.decks.set_autopan(DeckId::A, on);
+                    cmds.extend(self.decks.set_autopan(DeckId::B, on));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+            self.sync_sfx_fx_ui(cx);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_autopan_rate)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_autopan_rate(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_autopan_rate(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_autopan_rate(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_autopan_rate(DeckId::B, v as f32));
                     cmds
                 }
             };

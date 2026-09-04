@@ -2702,6 +2702,97 @@ impl Phaser {
     }
 }
 
+pub(crate) const AUTOPAN_RATE_MIN: f32 = 0.1;
+pub(crate) const AUTOPAN_RATE_MAX: f32 = 20.0;
+pub(crate) const AUTOPAN_RATE_DEFAULT: f32 = 1.0;
+pub(crate) const AUTOPAN_DEPTH_DEFAULT: f32 = 1.0;
+
+/// One deck's autopan: a sine LFO sweeping the stereo position through
+/// an equal-power pan law, normalized so the LFO's own centre (pan = 0)
+/// is unity gain on both channels -- unlike the tremolo's reference
+/// gain, which sits at the TOP of its range (`gain = 1.0` at rest, only
+/// ever attenuating), a pan law's natural centre is -3 dB per channel,
+/// which would make `depth = 0` a real, audible cut rather than a true
+/// no-op. The `sqrt(2)` normalization below is what fixes that: at
+/// depth 0 the swing never leaves centre, and centre times the
+/// normalization is exactly 1.0.
+///
+/// No line, no filter history -- like [`Tremolo`], `phase` is an
+/// oscillator position, not audio content, so there is no lifecycle
+/// hook wired for this one anywhere either.
+pub struct Autopan {
+    phase: f32,
+    wet: ParamRamp,
+    rate: ParamRamp,
+    depth: ParamRamp,
+}
+
+impl Autopan {
+    pub fn new() -> Autopan {
+        Autopan {
+            phase: 0.0,
+            wet: ParamRamp::at(0.0),
+            rate: ParamRamp::at(AUTOPAN_RATE_DEFAULT),
+            depth: ParamRamp::at(AUTOPAN_DEPTH_DEFAULT),
+        }
+    }
+
+    /// The on/off switch.
+    pub fn set_wet(&mut self, wet: f32) {
+        if let Some(wet) = knob(wet, 0.0, 1.0) {
+            self.wet.slew(wet, EQ_ENGAGE_SECS);
+        }
+    }
+
+    /// The LFO's sweep speed, in Hz.
+    pub fn set_rate(&mut self, hz: f32) {
+        if let Some(hz) = knob(hz, AUTOPAN_RATE_MIN, AUTOPAN_RATE_MAX) {
+            self.rate.slew(hz, EQ_ENGAGE_SECS);
+        }
+    }
+
+    /// How far the pan swings from centre, 0..1. `cos`/`sin` are
+    /// continuous everywhere, so -- like the tremolo's depth -- this
+    /// needs no crossfaded handover the way the bitcrusher's bit depth
+    /// does; a plain ramp cannot step an output the pan law cannot step
+    /// either.
+    pub fn set_depth(&mut self, depth: f32) {
+        if let Some(depth) = knob(depth, 0.0, 1.0) {
+            self.depth.slew(depth, EQ_ENGAGE_SECS);
+        }
+    }
+
+    pub fn engaged(&self) -> bool {
+        self.wet.target() > 0.0
+    }
+
+    /// Process one stereo frame.
+    #[inline]
+    pub fn process(&mut self, frame: [f32; 2], device_rate: f32) -> [f32; 2] {
+        let wet = self.wet.tick(device_rate);
+        if wet == 0.0 && self.wet.target() == 0.0 {
+            // No line, no tail: off is exactly the input.
+            return frame;
+        }
+        let rate_hz = self.rate.tick(device_rate);
+        let depth = self.depth.tick(device_rate);
+
+        self.phase += std::f32::consts::TAU * rate_hz / device_rate.max(1.0);
+        if self.phase >= std::f32::consts::TAU {
+            self.phase -= std::f32::consts::TAU;
+        }
+        let pan = self.phase.sin() * depth;
+        let angle = (pan + 1.0) * std::f32::consts::FRAC_PI_4;
+        let norm = std::f32::consts::SQRT_2;
+        let panned = [frame[0] * angle.cos() * norm, frame[1] * angle.sin() * norm];
+
+        [
+            frame[0] + (panned[0] - frame[0]) * wet,
+            frame[1] + (panned[1] - frame[1]) * wet,
+        ]
+    }
+}
+
 // ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
@@ -5183,5 +5274,135 @@ mod tests {
         assert_eq!(ph.feedback.target(), PHASER_FEEDBACK_MAX);
         ph.set_feedback(-5.0);
         assert_eq!(ph.feedback.target(), 0.0);
+    }
+
+    /// Off, a fresh unit is exactly its input.
+    #[test]
+    fn an_autopan_that_was_never_engaged_is_bit_transparent() {
+        let rate = 48_000.0f32;
+        let mut ap = Autopan::new();
+        let mut phase = 0.0f32;
+        for _ in 0..4_000 {
+            phase += 2.0 * PI * 37.0 / rate;
+            let x = phase.sin() * 0.6;
+            assert_eq!(ap.process([x, -x], rate), [x, -x]);
+        }
+    }
+
+    /// The property the `sqrt(2)` normalization exists for: depth 0
+    /// must be a true no-op, not merely "not moving" -- unlike the
+    /// tremolo's rest gain (already 1.0 at the top of its range), a
+    /// pan law's natural centre is -3 dB per channel, and a design that
+    /// left that uncorrected would make `depth = 0` an audible, silent
+    /// bug: a constant attenuation with no motion to explain it.
+    #[test]
+    fn autopan_at_zero_depth_is_transparent_regardless_of_wet() {
+        let rate = 48_000.0f32;
+        let mut ap = Autopan::new();
+        ap.set_wet(1.0);
+        ap.set_depth(0.0);
+        for _ in 0..SETTLE_FRAMES {
+            ap.process([0.0, 0.0], rate);
+        }
+        let mut phase = 0.0f32;
+        for _ in 0..4_000 {
+            phase += 2.0 * PI * 37.0 / rate;
+            let x = phase.sin() * 0.6;
+            let out = ap.process([x, -x], rate);
+            assert!((out[0] - x).abs() < 1e-4, "{out:?} vs [{x}, {}]", -x);
+            assert!((out[1] + x).abs() < 1e-4, "{out:?} vs [{x}, {}]", -x);
+        }
+    }
+
+    /// The defining property of an equal-power pan law: identical
+    /// content on both channels keeps the same TOTAL power as the pan
+    /// sweeps between them -- it moves the sound, it does not change
+    /// how loud it is.
+    #[test]
+    fn an_engaged_autopan_preserves_total_power() {
+        let rate = 48_000.0f32;
+        let mut ap = Autopan::new();
+        ap.set_wet(1.0);
+        ap.set_depth(1.0);
+        ap.set_rate(3.0);
+        for _ in 0..SETTLE_FRAMES {
+            ap.process([0.0, 0.0], rate);
+        }
+        let x = 0.7f32;
+        let expected = 2.0 * x * x;
+        for _ in 0..48_000usize {
+            let out = ap.process([x, x], rate);
+            let power = out[0] * out[0] + out[1] * out[1];
+            assert!((power - expected).abs() < 1e-4, "power drifted: {power} vs {expected}");
+        }
+    }
+
+    /// No feedback path, but bounded and finite is worth locking in at
+    /// the harshest settings, the same property every other effect in
+    /// this file is held to.
+    #[test]
+    fn autopan_stays_bounded_at_the_harshest_settings() {
+        let rate = 48_000.0f32;
+        let mut ap = Autopan::new();
+        ap.set_wet(1.0);
+        ap.set_depth(1.0);
+        ap.set_rate(AUTOPAN_RATE_MAX);
+        for _ in 0..SETTLE_FRAMES {
+            ap.process([0.0, 0.0], rate);
+        }
+        let mut phase = 0.0f32;
+        for _ in 0..48_000usize {
+            phase += 2.0 * PI * 233.0 / rate;
+            let x = phase.sin() * 0.9;
+            let out = ap.process([x, x], rate);
+            assert!(out[0].is_finite() && out[0].abs() < 3.0, "unbounded: {out:?}");
+            assert!(out[1].is_finite() && out[1].abs() < 3.0, "unbounded: {out:?}");
+        }
+    }
+
+    /// No line, no history: disengage completes exactly the ramp's own
+    /// duration after `set_wet(0.0)`.
+    #[test]
+    fn switching_the_autopan_off_returns_to_bit_exact_bypass_after_its_ramp() {
+        let rate = 48_000.0f32;
+        let mut ap = Autopan::new();
+        ap.set_wet(1.0);
+        for _ in 0..SETTLE_FRAMES {
+            ap.process([0.5, 0.5], rate);
+        }
+        ap.set_wet(0.0);
+        for _ in 0..1_000 {
+            ap.process([0.5, 0.5], rate);
+        }
+        assert!(!ap.engaged());
+        for i in 0..1_000 {
+            let x = (i as f32 * 0.037).sin() * 0.5;
+            assert_eq!(
+                ap.process([x, -x], rate),
+                [x, -x],
+                "a bit-exact bypass, not merely quiet"
+            );
+        }
+    }
+
+    #[test]
+    fn autopan_setters_clamp_to_their_documented_ranges() {
+        let mut ap = Autopan::new();
+        ap.set_wet(f32::NAN);
+        assert_eq!(ap.wet.target(), 0.0, "a bad value moves nothing");
+        ap.set_wet(5.0);
+        assert_eq!(ap.wet.target(), 1.0);
+        ap.set_wet(-5.0);
+        assert_eq!(ap.wet.target(), 0.0);
+        ap.set_rate(f32::INFINITY);
+        assert_eq!(ap.rate.target(), AUTOPAN_RATE_DEFAULT, "unmoved by a bad value");
+        ap.set_rate(1_000.0);
+        assert_eq!(ap.rate.target(), AUTOPAN_RATE_MAX);
+        ap.set_rate(-1.0);
+        assert_eq!(ap.rate.target(), AUTOPAN_RATE_MIN);
+        ap.set_depth(2.0);
+        assert_eq!(ap.depth.target(), 1.0);
+        ap.set_depth(-1.0);
+        assert_eq!(ap.depth.target(), 0.0);
     }
 }

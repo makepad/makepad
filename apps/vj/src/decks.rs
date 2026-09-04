@@ -1295,6 +1295,11 @@ pub struct DeckState {
     /// How much of the phaser's own output feeds back into its first
     /// stage.
     pub phaser_feedback: f32,
+    /// Whether the autopan is on. Same channel-strip treatment as the
+    /// phaser beside it.
+    pub autopan_on: bool,
+    /// The autopan LFO's sweep speed, in Hz.
+    pub autopan_rate: f32,
     /// Per-stem gains, in [`crate::music_dsp::StemKind`] order.
     pub stem_gain: [f32; STEM_COUNT],
     pub stem_kill: [bool; STEM_COUNT],
@@ -1378,6 +1383,8 @@ impl Default for DeckState {
             phaser_on: false,
             phaser_rate: crate::music_dsp::PHASER_RATE_DEFAULT,
             phaser_feedback: crate::music_dsp::PHASER_FEEDBACK_DEFAULT,
+            autopan_on: false,
+            autopan_rate: crate::music_dsp::AUTOPAN_RATE_DEFAULT,
             stem_gain: [1.0; STEM_COUNT],
             stem_kill: [false; STEM_COUNT],
             stem_solo: [false; STEM_COUNT],
@@ -1732,6 +1739,10 @@ pub enum DeckCmd {
     /// How much of the phaser's own output feeds back into its first
     /// stage.
     SetPhaserFeedback { deck: DeckId, feedback: f32 },
+    /// The autopan's on/off switch.
+    SetAutopan { deck: DeckId, on: bool },
+    /// The autopan LFO's sweep speed, in Hz.
+    SetAutopanRate { deck: DeckId, hz: f32 },
     /// One stem lane's gain, 0 = muted.
     SetStemGain { deck: DeckId, stem: usize, gain: f32 },
     SplatSet { deck: DeckId, grid: Arc<SplatGrid> },
@@ -2189,6 +2200,8 @@ impl DeckEngine {
             DeckCmd::SetPhaser { deck, on: state.phaser_on },
             DeckCmd::SetPhaserRate { deck, hz: state.phaser_rate },
             DeckCmd::SetPhaserFeedback { deck, feedback: state.phaser_feedback },
+            DeckCmd::SetAutopan { deck, on: state.autopan_on },
+            DeckCmd::SetAutopanRate { deck, hz: state.autopan_rate },
         ];
         for band in 0..3 {
             cmds.push(DeckCmd::SetEqBand { deck, band, gain: state.eq_effective(band) });
@@ -5190,6 +5203,29 @@ impl DeckEngine {
         vec![DeckCmd::SetPhaserFeedback { deck, feedback: state.phaser_feedback }]
     }
 
+    /// The autopan's on/off switch.
+    pub fn toggle_autopan(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.autopan_on = !state.autopan_on;
+        vec![DeckCmd::SetAutopan { deck, on: state.autopan_on }]
+    }
+
+    /// Set the autopan's on/off switch to an explicit value, rather
+    /// than flipping whatever it already was -- what a MIX-linked
+    /// broadcast needs, the same reason [`Self::set_flanger`] exists.
+    pub fn set_autopan(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
+        self.deck_mut(deck).autopan_on = on;
+        vec![DeckCmd::SetAutopan { deck, on }]
+    }
+
+    /// The autopan LFO's sweep speed, in Hz.
+    pub fn set_autopan_rate(&mut self, deck: DeckId, hz: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.autopan_rate =
+            hz.clamp(crate::music_dsp::AUTOPAN_RATE_MIN, crate::music_dsp::AUTOPAN_RATE_MAX);
+        vec![DeckCmd::SetAutopanRate { deck, hz: state.autopan_rate }]
+    }
+
     /// Stem knob. Inert until the separated stems are loaded — the deck is
     /// playing the full mix and there is nothing to turn down.
     pub fn set_stem(&mut self, deck: DeckId, stem: usize, gain: f32) -> Vec<DeckCmd> {
@@ -5890,6 +5926,46 @@ mod tests {
         let cmds = e.track_ready(d, g, 20.0);
         assert!(cmds.contains(&DeckCmd::SetPhaser { deck: DeckId::B, on: true }));
         assert!(cmds.contains(&DeckCmd::SetPhaserRate { deck: DeckId::B, hz: 1.5 }));
+    }
+
+    #[test]
+    fn autopan_rate_clamps_to_its_documented_range() {
+        let mut e = DeckEngine::new();
+        assert_eq!(
+            e.set_autopan_rate(DeckId::A, 1_000.0),
+            vec![DeckCmd::SetAutopanRate { deck: DeckId::A, hz: crate::music_dsp::AUTOPAN_RATE_MAX }]
+        );
+        assert_eq!(
+            e.set_autopan_rate(DeckId::A, -1.0),
+            vec![DeckCmd::SetAutopanRate { deck: DeckId::A, hz: crate::music_dsp::AUTOPAN_RATE_MIN }]
+        );
+    }
+
+    #[test]
+    fn toggle_autopan_flips_and_set_autopan_lands_on_an_explicit_side() {
+        let mut e = DeckEngine::new();
+        assert!(!e.deck(DeckId::A).autopan_on);
+        assert_eq!(
+            e.toggle_autopan(DeckId::A),
+            vec![DeckCmd::SetAutopan { deck: DeckId::A, on: true }]
+        );
+        assert!(e.deck(DeckId::A).autopan_on);
+        assert_eq!(
+            e.set_autopan(DeckId::B, true),
+            vec![DeckCmd::SetAutopan { deck: DeckId::B, on: true }]
+        );
+        assert!(e.deck(DeckId::B).autopan_on);
+    }
+
+    #[test]
+    fn a_load_carries_the_operators_autopan_settings() {
+        let mut e = DeckEngine::new();
+        e.toggle_autopan(DeckId::B);
+        e.set_autopan_rate(DeckId::B, 6.0);
+        let (d, g) = load_gen(&e.click(item(3), DeckTarget::B));
+        let cmds = e.track_ready(d, g, 20.0);
+        assert!(cmds.contains(&DeckCmd::SetAutopan { deck: DeckId::B, on: true }));
+        assert!(cmds.contains(&DeckCmd::SetAutopanRate { deck: DeckId::B, hz: 6.0 }));
     }
 
     // -----------------------------------------------------------------

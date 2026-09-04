@@ -456,6 +456,21 @@ fn golden_phaser_sweep() {
     assert_golden("phaser_sweep", &left, &right);
 }
 
+/// A steady tone is enough here too: the autopan does not comb-filter
+/// or alias anything, it only redistributes the same content between
+/// channels, so the reference's left and right summaries diverging from
+/// each other window by window is exactly the sweep showing up.
+#[test]
+fn golden_autopan_sweep() {
+    let mixer = deck_a(tone_pcm(440.0, 48_000, 3.0));
+    mixer.set_deck_autopan(DeckId::A, true);
+    mixer.set_deck_autopan_rate(DeckId::A, 2.0);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let (left, right) = capture(&mixer, CAPTURE, |_| {});
+    assert_golden("autopan_sweep", &left, &right);
+}
+
 // ---------------------------------------------------------------------------
 // clicks
 // ---------------------------------------------------------------------------
@@ -791,6 +806,19 @@ fn a_phaser_feedback_change_while_engaged_is_click_free() {
         }
     });
     assert!(worst < CLICK, "a feedback change must ramp, biggest step {worst}");
+}
+
+#[test]
+fn engaging_and_releasing_the_autopan_are_click_free() {
+    let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| match index {
+        8 => mixer.set_deck_autopan(DeckId::A, true),
+        24 => mixer.set_deck_autopan(DeckId::A, false),
+        _ => {}
+    });
+    assert!(worst < CLICK, "engaging or releasing the autopan must ramp, biggest step {worst}");
 }
 
 #[test]
