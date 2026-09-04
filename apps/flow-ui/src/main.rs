@@ -3121,13 +3121,24 @@ impl App {
 
     fn clear_instance(&mut self, cx: &mut Cx) {
         if self.instance.is_none() {
+            self.clear_run_view(cx);
             return;
         }
         if self.run_is_active() {
             self.ui.modal(cx, ids!(clear_confirm)).open(cx);
         } else {
-            self.request_clear_instance(false);
+            self.leave_run_view(cx);
         }
+    }
+
+    /// Clear on a shown run: the canvas comes clean and returns to the
+    /// design, editable; the run keeps its queue row, just no longer chosen.
+    fn leave_run_view(&mut self, cx: &mut Cx) {
+        self.clear_run_view(cx);
+        if let Some(mut queue) = self.ui.widget(cx, ids!(running)).borrow_mut::<QueueList>() {
+            queue.deselect(cx);
+        }
+        self.attach_instance(cx, None, true);
     }
 
     fn request_clear_instance(&self, cancel_first: bool) {
@@ -3783,6 +3794,7 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(clear_confirm_btn)).clicked(actions) {
             self.ui.modal(cx, ids!(clear_confirm)).close(cx);
             self.request_clear_instance(true);
+            self.leave_run_view(cx);
         }
         if self.ui.button(cx, ids!(fit_btn)).clicked(actions) {
             self.with_canvas(cx, |cx, canvas| canvas.fit(cx));

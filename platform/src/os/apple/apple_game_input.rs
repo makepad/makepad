@@ -31,6 +31,8 @@ pub struct AppleGameInput {
     gc_gamepads: Vec<GameInputInfo>,
     gc_states: Vec<GameInputState>,
     #[cfg(target_os = "macos")]
+    haptics: Vec<Option<AppleControllerHaptics>>,
+    #[cfg(target_os = "macos")]
     raw_hid: AppleRawHidInput,
 }
 
@@ -42,6 +44,8 @@ impl AppleGameInput {
             states: Vec::new(),
             gc_gamepads: Vec::new(),
             gc_states: Vec::new(),
+            #[cfg(target_os = "macos")]
+            haptics: Vec::new(),
             #[cfg(target_os = "macos")]
             raw_hid: AppleRawHidInput::new(),
         }
@@ -156,6 +160,8 @@ impl AppleGameInput {
         self.controllers.push(ptr);
         self.gc_states
             .push(GameInputState::Gamepad(GamepadState::default()));
+        #[cfg(target_os = "macos")]
+        self.haptics.push(unsafe { AppleControllerHaptics::new(ptr) });
     }
 
     pub fn on_disconnected(&mut self, info: &GameInputInfo) {
@@ -164,6 +170,8 @@ impl AppleGameInput {
             self.gc_gamepads.remove(index);
             self.controllers.remove(index);
             self.gc_states.remove(index);
+            #[cfg(target_os = "macos")]
+            self.haptics.remove(index);
             unsafe {
                 let _: () = msg_send![ptr, release];
             }
@@ -272,6 +280,192 @@ impl AppleGameInput {
             }
         }
         self.refresh_combined_states();
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "GameController", kind = "framework")]
+unsafe extern "C" {
+    static GCHapticsLocalityDefault: ObjcId;
+    static GCHapticsLocalityLeftHandle: ObjcId;
+    static GCHapticsLocalityRightHandle: ObjcId;
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "CoreHaptics", kind = "framework")]
+unsafe extern "C" {
+    static CHHapticEventTypeHapticContinuous: ObjcId;
+    static CHHapticEventParameterIDHapticIntensity: ObjcId;
+    static CHHapticEventParameterIDHapticSharpness: ObjcId;
+}
+
+/// One platform-owned Core Haptics engine. Engines start asynchronously;
+/// the UI can keep polling/publishing without waiting for Bluetooth or the
+/// haptic server. Short retained players are reaped on the next sample.
+#[cfg(target_os = "macos")]
+struct AppleHapticChannel {
+    engine: ObjcId,
+    ready: Arc<AtomicBool>,
+    players: Vec<(ObjcId, std::time::Instant)>,
+}
+
+#[cfg(target_os = "macos")]
+impl AppleHapticChannel {
+    unsafe fn new(device_haptics: ObjcId, locality: ObjcId) -> Option<Self> {
+        let engine: ObjcId = msg_send![device_haptics, createEngineWithLocality: locality];
+        if engine == nil {
+            return None;
+        }
+        let _: ObjcId = msg_send![engine, retain];
+        let () = msg_send![engine, setPlaysHapticsOnly: YES];
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready_cb = Arc::clone(&ready);
+        let completion = objc_block!(move |error: ObjcId| {
+            ready_cb.store(error == nil, Ordering::Release);
+        });
+        let () = msg_send![engine, startWithCompletionHandler: &completion];
+        Some(Self { engine, ready, players: Vec::new() })
+    }
+
+    unsafe fn pulse(&mut self, intensity: f32, sharpness: f32, duration_s: f32) -> bool {
+        let now = std::time::Instant::now();
+        self.players.retain(|(player, until)| {
+            if *until > now {
+                true
+            } else {
+                let _: () = msg_send![*player, release];
+                false
+            }
+        });
+        if !self.ready.load(Ordering::Acquire) || intensity <= 0.001 {
+            return self.ready.load(Ordering::Acquire);
+        }
+
+        let intensity_param: ObjcId = msg_send![class!(CHHapticEventParameter), alloc];
+        let intensity_param: ObjcId = msg_send![
+            intensity_param,
+            initWithParameterID: CHHapticEventParameterIDHapticIntensity
+            value: intensity.clamp(0.0, 1.0)
+        ];
+        let sharpness_param: ObjcId = msg_send![class!(CHHapticEventParameter), alloc];
+        let sharpness_param: ObjcId = msg_send![
+            sharpness_param,
+            initWithParameterID: CHHapticEventParameterIDHapticSharpness
+            value: sharpness.clamp(0.0, 1.0)
+        ];
+        let parameters: ObjcId = msg_send![class!(NSMutableArray), arrayWithCapacity: 2usize];
+        let () = msg_send![parameters, addObject: intensity_param];
+        let () = msg_send![parameters, addObject: sharpness_param];
+
+        let event: ObjcId = msg_send![class!(CHHapticEvent), alloc];
+        let duration = duration_s.clamp(0.01, 0.25) as f64;
+        let event: ObjcId = msg_send![
+            event,
+            initWithEventType: CHHapticEventTypeHapticContinuous
+            parameters: parameters
+            relativeTime: 0.0f64
+            duration: duration
+        ];
+        let events: ObjcId = msg_send![class!(NSArray), arrayWithObject: event];
+        let empty: ObjcId = msg_send![class!(NSArray), array];
+        let mut error: ObjcId = nil;
+        let pattern: ObjcId = msg_send![class!(CHHapticPattern), alloc];
+        let pattern: ObjcId = msg_send![
+            pattern,
+            initWithEvents: events
+            parameters: empty
+            error: &mut error
+        ];
+        let mut ok = pattern != nil && error == nil;
+        let player: ObjcId = if ok {
+            msg_send![self.engine, createPlayerWithPattern: pattern error: &mut error]
+        } else {
+            nil
+        };
+        if player != nil && error == nil {
+            let _: ObjcId = msg_send![player, retain];
+            let started: BOOL = msg_send![player, startAtTime: 0.0f64 error: &mut error];
+            ok = started == YES && error == nil;
+            if ok {
+                self.players.push((player, now + std::time::Duration::from_secs_f64(duration + 0.05)));
+            } else {
+                let _: () = msg_send![player, release];
+            }
+        } else {
+            ok = false;
+        }
+        let _: () = msg_send![intensity_param, release];
+        let _: () = msg_send![sharpness_param, release];
+        let _: () = msg_send![event, release];
+        if pattern != nil {
+            let _: () = msg_send![pattern, release];
+        }
+        ok
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for AppleHapticChannel {
+    fn drop(&mut self) {
+        unsafe {
+            for (player, _) in self.players.drain(..) {
+                let mut error: ObjcId = nil;
+                let _: BOOL = msg_send![player, stopAtTime: 0.0f64 error: &mut error];
+                let _: () = msg_send![player, release];
+            }
+            let () = msg_send![self.engine, stopWithCompletionHandler: nil];
+            let _: () = msg_send![self.engine, release];
+        }
+    }
+}
+
+/// Per-controller left/right handle channels. A controller with only the
+/// default locality uses one channel and receives the stronger side.
+#[cfg(target_os = "macos")]
+struct AppleControllerHaptics {
+    left: AppleHapticChannel,
+    right: Option<AppleHapticChannel>,
+}
+
+#[cfg(target_os = "macos")]
+impl AppleControllerHaptics {
+    unsafe fn new(controller: ObjcId) -> Option<Self> {
+        let selector = Sel::register("haptics");
+        if !msg_send![controller, respondsToSelector: selector] {
+            return None;
+        }
+        let haptics: ObjcId = msg_send![controller, haptics];
+        if haptics == nil {
+            return None;
+        }
+        let supported: ObjcId = msg_send![haptics, supportedLocalities];
+        let has_left: BOOL = msg_send![supported, containsObject: GCHapticsLocalityLeftHandle];
+        let has_right: BOOL = msg_send![supported, containsObject: GCHapticsLocalityRightHandle];
+        if has_left == YES && has_right == YES {
+            Some(Self {
+                left: AppleHapticChannel::new(haptics, GCHapticsLocalityLeftHandle)?,
+                right: AppleHapticChannel::new(haptics, GCHapticsLocalityRightHandle),
+            })
+        } else {
+            Some(Self {
+                left: AppleHapticChannel::new(haptics, GCHapticsLocalityDefault)?,
+                right: None,
+            })
+        }
+    }
+
+    fn capabilities(&self) -> GamepadHapticCapabilities {
+        GamepadHapticCapabilities { handles: true, separate_handles: self.right.is_some() }
+    }
+
+    unsafe fn pulse(&mut self, pulse: GamepadHapticPulse) -> bool {
+        if let Some(right) = &mut self.right {
+            let left_ok = self.left.pulse(pulse.left, pulse.sharpness, pulse.duration_s);
+            let right_ok = right.pulse(pulse.right, pulse.sharpness, pulse.duration_s);
+            left_ok && right_ok
+        } else {
+            self.left.pulse(pulse.left.max(pulse.right), pulse.sharpness, pulse.duration_s)
+        }
     }
 }
 
@@ -820,6 +1014,7 @@ impl AppleRawHidInput {
         }
     }
 
+    #[allow(dead_code)]
     fn infos(&self) -> Vec<GameInputInfo> {
         self.snapshot().into_iter().map(|(info, _)| info).collect()
     }
@@ -1107,5 +1302,30 @@ impl CxGameInputApi for Cx {
             return game_input.raw_hid.output_handle(id);
         }
         None
+    }
+
+    fn gamepad_haptic_capabilities(&mut self, id: LiveId) -> GamepadHapticCapabilities {
+        #[cfg(target_os = "macos")]
+        if let Some(game_input) = &self.os.apple_game_input {
+            if let Some(index) = game_input.gc_gamepads.iter().position(|info| info.id == id) {
+                return game_input.haptics[index]
+                    .as_ref()
+                    .map(AppleControllerHaptics::capabilities)
+                    .unwrap_or_default();
+            }
+        }
+        Default::default()
+    }
+
+    fn gamepad_haptic_pulse(&mut self, id: LiveId, pulse: GamepadHapticPulse) -> bool {
+        #[cfg(target_os = "macos")]
+        if let Some(game_input) = &mut self.os.apple_game_input {
+            if let Some(index) = game_input.gc_gamepads.iter().position(|info| info.id == id) {
+                if let Some(haptics) = &mut game_input.haptics[index] {
+                    return unsafe { haptics.pulse(pulse) };
+                }
+            }
+        }
+        false
     }
 }
