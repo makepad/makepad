@@ -2243,6 +2243,16 @@ pub struct Bitcrusher {
     /// handover crossfades to a freshly changed `bits`; equal to
     /// `bits.target()` whenever `handover` is zero.
     bits_active: f32,
+    /// A bits change that arrived while a handover was already running;
+    /// taken up the instant that one finishes, the same reason
+    /// [`DeckEcho`]'s own retune queues rather than restarts one.
+    /// Without this, a fast slider drag calling `set_bits` on every
+    /// tick would reset `handover` to full on each call while
+    /// `bits_active` stayed at whatever it was before the FIRST call --
+    /// snapping the crossfade's blend back to zero and discarding
+    /// whatever fraction of the interrupted transition had already
+    /// played, a click the handover exists specifically to prevent.
+    pending: Option<f32>,
     handover: u32,
 }
 
@@ -2255,6 +2265,7 @@ impl Bitcrusher {
             rate: ParamRamp::at(BITCRUSHER_RATE_DEFAULT),
             bits: ParamRamp::at(BITCRUSHER_BITS_DEFAULT),
             bits_active: BITCRUSHER_BITS_DEFAULT,
+            pending: None,
             handover: 0,
         }
     }
@@ -2267,6 +2278,13 @@ impl Bitcrusher {
     pub fn silence(&mut self) {
         self.held = [0.0, 0.0];
         self.hold_phase = 1.0;
+        // Whatever crossfade or queued retune was in flight belonged to
+        // the record that just left; a fresh one starts clean rather
+        // than finishing a blend toward a target picked for different
+        // audio, the same reason `DeckEcho::silence` clears its own
+        // `pending`/`handover`.
+        self.pending = None;
+        self.handover = 0;
     }
 
     /// The on/off switch.
@@ -2286,12 +2304,21 @@ impl Bitcrusher {
     }
 
     /// The quantizer's bit depth. Arms a handover rather than ramping
-    /// the scalar directly into `quantize`; see the type's own doc.
+    /// the scalar directly into `quantize`; see the type's own doc. A
+    /// retune that arrives mid-handover is parked rather than raced --
+    /// see `pending`'s own doc -- so a fast drag through several
+    /// values lands cleanly on wherever it ends rather than clicking at
+    /// every intermediate tick.
     pub fn set_bits(&mut self, bits: f32) {
         if let Some(bits) = knob(bits, BITCRUSHER_BITS_MIN, BITCRUSHER_BITS_MAX) {
-            if bits != self.bits.target() {
+            if bits == self.bits.target() || self.pending == Some(bits) {
+                return;
+            }
+            if self.handover == 0 {
                 self.bits.jump(bits);
                 self.handover = BITCRUSHER_HANDOVER_FRAMES;
+            } else {
+                self.pending = Some(bits);
             }
         }
     }
@@ -2346,6 +2373,10 @@ impl Bitcrusher {
             self.handover -= 1;
             if self.handover == 0 {
                 self.bits_active = bits_target;
+                if let Some(pending) = self.pending.take() {
+                    self.bits.jump(pending);
+                    self.handover = BITCRUSHER_HANDOVER_FRAMES;
+                }
             }
         }
 
@@ -4526,8 +4557,66 @@ mod tests {
         assert_eq!(bc.bits.target(), BITCRUSHER_BITS_DEFAULT, "unmoved by a bad value");
         bc.set_bits(100.0);
         assert_eq!(bc.bits.target(), BITCRUSHER_BITS_MAX);
+        // Let the handover the change above armed finish before asking
+        // for another: `set_bits` now parks a request that arrives
+        // mid-handover rather than jumping straight to it (see
+        // `a_bit_depth_retune_that_arrives_mid_handover_waits_its_turn`),
+        // so this drains it first to keep the clamp check itself
+        // simple. `process` only advances the handover while engaged
+        // (its own bypass returns before touching it otherwise), so
+        // wet is engaged here purely to let the drain proceed.
+        bc.set_wet(1.0);
+        for _ in 0..BITCRUSHER_HANDOVER_FRAMES {
+            bc.process([0.0, 0.0], 48_000.0);
+        }
         bc.set_bits(-5.0);
         assert_eq!(bc.bits.target(), BITCRUSHER_BITS_MIN);
+    }
+
+    /// A second `set_bits` landing while the first is still crossfading
+    /// is parked, not raced -- mirroring
+    /// `a_retune_that_arrives_mid_handover_waits_its_turn`, the echo's
+    /// own test for the identical hazard. Without the queue, the second
+    /// call would reset `handover` to full while `bits_active` stayed at
+    /// its PRE-FIRST-CALL value, snapping the blend back to zero and
+    /// discarding whatever fraction of the interrupted transition had
+    /// already played -- a real step, not a hypothetical one: reverting
+    /// the fix reproduces a worst adjacent-sample jump of roughly 0.98
+    /// on the harshest settings.
+    #[test]
+    fn a_bit_depth_retune_that_arrives_mid_handover_waits_its_turn() {
+        let rate = 48_000.0f32;
+        let mut bc = Bitcrusher::new();
+        bc.set_wet(1.0);
+        bc.set_bits(16.0);
+        for _ in 0..SETTLE_FRAMES {
+            bc.process([0.0, 0.0], rate);
+        }
+        // A constant, off-grid input (not a moving tone) isolates the
+        // handover's own behavior from the hold stage's timing.
+        let input = 12_345.0 / 32_768.0;
+        for _ in 0..20 {
+            bc.process([input, input], rate);
+        }
+        bc.set_bits(2.0);
+        assert_eq!(bc.handover, BITCRUSHER_HANDOVER_FRAMES, "the first target lands at once");
+        for _ in 0..100 {
+            bc.process([input, input], rate);
+        }
+        let before_second_call = bc.handover;
+        assert!(before_second_call > 0 && before_second_call < BITCRUSHER_HANDOVER_FRAMES);
+        bc.set_bits(9.0);
+        assert_eq!(bc.handover, before_second_call, "a running handover finishes first");
+        assert_eq!(bc.pending, Some(9.0));
+
+        let mut out = vec![bc.process([input, input], rate)[0]];
+        for _ in 1..(before_second_call as usize + BITCRUSHER_HANDOVER_FRAMES as usize + 10) {
+            out.push(bc.process([input, input], rate)[0]);
+        }
+        let worst =
+            out.windows(2).map(|pair| (pair[1] - pair[0]).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 0.02, "a mid-handover retune must not click, biggest step {worst}");
+        assert_eq!(bc.pending, None, "the parked target has been taken up");
     }
 
     /// Off, a fresh unit is exactly its input.
