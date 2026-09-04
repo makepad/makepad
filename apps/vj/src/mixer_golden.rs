@@ -392,6 +392,23 @@ fn golden_flanger_sweep() {
     assert_golden("flanger_sweep", &left, &right);
 }
 
+/// 317 Hz against a 3 kHz crush rate: the hold captures roughly every
+/// 9.46 cycles of the tone, a non-integer relationship, so the held
+/// staircase actually carries the tone's own motion across windows
+/// rather than landing on the same phase every hold and reading as a
+/// steady, uninteresting DC-like step.
+#[test]
+fn golden_bitcrusher_crush() {
+    let mixer = deck_a(tone_pcm(317.0, 48_000, 3.0));
+    mixer.set_deck_bitcrusher(DeckId::A, true);
+    mixer.set_deck_bitcrusher_rate(DeckId::A, 3_000.0);
+    mixer.set_deck_bitcrusher_bits(DeckId::A, 5.0);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let (left, right) = capture(&mixer, CAPTURE, |_| {});
+    assert_golden("bitcrusher_crush", &left, &right);
+}
+
 // ---------------------------------------------------------------------------
 // clicks
 // ---------------------------------------------------------------------------
@@ -583,6 +600,63 @@ fn engaging_and_releasing_the_flanger_are_click_free() {
         _ => {}
     });
     assert!(worst < CLICK, "engaging or releasing the flanger must ramp, biggest step {worst}");
+}
+
+/// 12345, not 16384: half scale is exactly 64/128, a value the default
+/// 8-bit quantizer reproduces losslessly, which would make an engage or
+/// a bit-depth change invisible to this test regardless of whether the
+/// ramp/handover is implemented at all. 12345 lands off any few-bit
+/// quantization grid, so crushing it actually moves the signal.
+#[test]
+fn engaging_and_releasing_the_bitcrusher_are_click_free() {
+    let mixer = deck_a(const_pcm(12_345, 480_000, 48_000));
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| match index {
+        8 => mixer.set_deck_bitcrusher(DeckId::A, true),
+        24 => mixer.set_deck_bitcrusher(DeckId::A, false),
+        _ => {}
+    });
+    assert!(worst < CLICK, "engaging or releasing the bitcrusher must ramp, biggest step {worst}");
+}
+
+/// The test that actually exercises this effect's central lesson: a
+/// naive `.slew()` on `bits` alone would let a rounding-boundary
+/// crossing step the output by close to a full quantization step the
+/// instant the ramping scalar crosses it -- ramping the scalar into a
+/// rounding function does not bound what comes out of it. The two-
+/// stream handover in `Bitcrusher::set_bits` is what this pins.
+#[test]
+fn crushing_the_bit_depth_mid_stream_is_click_free() {
+    let mixer = deck_a(const_pcm(12_345, 480_000, 48_000));
+    mixer.set_deck_bitcrusher(DeckId::A, true);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| {
+        if index == 8 {
+            mixer.set_deck_bitcrusher_bits(DeckId::A, 2.0);
+        }
+    });
+    assert!(worst < CLICK, "a bit-depth change must hand over, biggest step {worst}");
+}
+
+/// The rate knob's counterpart: a hard step here only shifts the phase
+/// of the effect's own staircase (which hold gets captured when), never
+/// the amplitude mapping, so a plain ramp is expected to already be
+/// enough -- this test is the confirmation that expectation holds, not
+/// a search for a bug the way the bits test above is.
+#[test]
+fn changing_crush_rate_mid_stream_is_click_free() {
+    let mixer = deck_a(const_pcm(12_345, 480_000, 48_000));
+    mixer.set_deck_bitcrusher(DeckId::A, true);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| {
+        if index == 8 {
+            mixer.set_deck_bitcrusher_rate(DeckId::A, 1_000.0);
+        }
+    });
+    assert!(worst < CLICK, "a crush-rate change must ramp, biggest step {worst}");
 }
 
 #[test]

@@ -1268,6 +1268,13 @@ pub struct DeckState {
     pub flanger_depth: f32,
     /// How much of the flanger's delayed tap feeds back into its line.
     pub flanger_feedback: f32,
+    /// Whether the bitcrusher is on. Same channel-strip treatment as
+    /// the flanger beside it.
+    pub bitcrusher_on: bool,
+    /// How often the bitcrusher's hold captures a fresh sample, in Hz.
+    pub bitcrusher_rate: f32,
+    /// The bitcrusher's quantizer bit depth.
+    pub bitcrusher_bits: f32,
     /// Per-stem gains, in [`crate::music_dsp::StemKind`] order.
     pub stem_gain: [f32; STEM_COUNT],
     pub stem_kill: [bool; STEM_COUNT],
@@ -1340,6 +1347,9 @@ impl Default for DeckState {
             flanger_rate: crate::music_dsp::FLANGER_RATE_DEFAULT,
             flanger_depth: crate::music_dsp::FLANGER_DEPTH_DEFAULT,
             flanger_feedback: crate::music_dsp::FLANGER_FEEDBACK_DEFAULT,
+            bitcrusher_on: false,
+            bitcrusher_rate: crate::music_dsp::BITCRUSHER_RATE_DEFAULT,
+            bitcrusher_bits: crate::music_dsp::BITCRUSHER_BITS_DEFAULT,
             stem_gain: [1.0; STEM_COUNT],
             stem_kill: [false; STEM_COUNT],
             stem_solo: [false; STEM_COUNT],
@@ -1671,6 +1681,12 @@ pub enum DeckCmd {
     SetFlangerDepth { deck: DeckId, depth: f32 },
     /// How much of the flanger's delayed tap feeds back into its line.
     SetFlangerFeedback { deck: DeckId, feedback: f32 },
+    /// The bitcrusher's on/off switch.
+    SetBitcrusher { deck: DeckId, on: bool },
+    /// How often the bitcrusher's hold captures a fresh sample, in Hz.
+    SetBitcrusherRate { deck: DeckId, hz: f32 },
+    /// The bitcrusher's quantizer bit depth.
+    SetBitcrusherBits { deck: DeckId, bits: f32 },
     /// One stem lane's gain, 0 = muted.
     SetStemGain { deck: DeckId, stem: usize, gain: f32 },
     SplatSet { deck: DeckId, grid: Arc<SplatGrid> },
@@ -2117,6 +2133,9 @@ impl DeckEngine {
             DeckCmd::SetFlangerRate { deck, hz: state.flanger_rate },
             DeckCmd::SetFlangerDepth { deck, depth: state.flanger_depth },
             DeckCmd::SetFlangerFeedback { deck, feedback: state.flanger_feedback },
+            DeckCmd::SetBitcrusher { deck, on: state.bitcrusher_on },
+            DeckCmd::SetBitcrusherRate { deck, hz: state.bitcrusher_rate },
+            DeckCmd::SetBitcrusherBits { deck, bits: state.bitcrusher_bits },
         ];
         for band in 0..3 {
             cmds.push(DeckCmd::SetEqBand { deck, band, gain: state.eq_effective(band) });
@@ -4996,6 +5015,41 @@ impl DeckEngine {
         vec![DeckCmd::SetFlangerFeedback { deck, feedback: state.flanger_feedback }]
     }
 
+    /// The bitcrusher's on/off switch.
+    pub fn toggle_bitcrusher(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.bitcrusher_on = !state.bitcrusher_on;
+        vec![DeckCmd::SetBitcrusher { deck, on: state.bitcrusher_on }]
+    }
+
+    /// Set the bitcrusher's on/off switch to an explicit value, rather
+    /// than flipping whatever it already was -- what a MIX-linked
+    /// broadcast needs, the same reason [`Self::set_flanger`] exists.
+    pub fn set_bitcrusher(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
+        self.deck_mut(deck).bitcrusher_on = on;
+        vec![DeckCmd::SetBitcrusher { deck, on }]
+    }
+
+    /// How often the bitcrusher's hold captures a fresh sample, in Hz.
+    pub fn set_bitcrusher_rate(&mut self, deck: DeckId, hz: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.bitcrusher_rate = hz.clamp(
+            crate::music_dsp::BITCRUSHER_RATE_MIN,
+            crate::music_dsp::BITCRUSHER_RATE_MAX,
+        );
+        vec![DeckCmd::SetBitcrusherRate { deck, hz: state.bitcrusher_rate }]
+    }
+
+    /// The bitcrusher's quantizer bit depth.
+    pub fn set_bitcrusher_bits(&mut self, deck: DeckId, bits: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.bitcrusher_bits = bits.clamp(
+            crate::music_dsp::BITCRUSHER_BITS_MIN,
+            crate::music_dsp::BITCRUSHER_BITS_MAX,
+        );
+        vec![DeckCmd::SetBitcrusherBits { deck, bits: state.bitcrusher_bits }]
+    }
+
     /// Stem knob. Inert until the separated stems are loaded — the deck is
     /// playing the full mix and there is nothing to turn down.
     pub fn set_stem(&mut self, deck: DeckId, stem: usize, gain: f32) -> Vec<DeckCmd> {
@@ -5483,6 +5537,68 @@ mod tests {
         assert!(cmds.contains(&DeckCmd::SetFlangerRate { deck: DeckId::B, hz: 2.0 }));
         assert!(cmds.contains(&DeckCmd::SetFlangerDepth { deck: DeckId::B, depth: 0.9 }));
         assert!(cmds.contains(&DeckCmd::SetFlangerFeedback { deck: DeckId::B, feedback: 0.6 }));
+    }
+
+    #[test]
+    fn bitcrusher_rate_and_bits_clamp_to_their_documented_ranges() {
+        let mut e = DeckEngine::new();
+        assert_eq!(
+            e.set_bitcrusher_rate(DeckId::A, 100_000.0),
+            vec![DeckCmd::SetBitcrusherRate {
+                deck: DeckId::A,
+                hz: crate::music_dsp::BITCRUSHER_RATE_MAX,
+            }]
+        );
+        assert_eq!(
+            e.set_bitcrusher_rate(DeckId::A, -1.0),
+            vec![DeckCmd::SetBitcrusherRate {
+                deck: DeckId::A,
+                hz: crate::music_dsp::BITCRUSHER_RATE_MIN,
+            }]
+        );
+        assert_eq!(
+            e.set_bitcrusher_bits(DeckId::A, 100.0),
+            vec![DeckCmd::SetBitcrusherBits {
+                deck: DeckId::A,
+                bits: crate::music_dsp::BITCRUSHER_BITS_MAX,
+            }]
+        );
+        assert_eq!(
+            e.set_bitcrusher_bits(DeckId::A, -1.0),
+            vec![DeckCmd::SetBitcrusherBits {
+                deck: DeckId::A,
+                bits: crate::music_dsp::BITCRUSHER_BITS_MIN,
+            }]
+        );
+    }
+
+    #[test]
+    fn toggle_bitcrusher_flips_and_set_bitcrusher_lands_on_an_explicit_side() {
+        let mut e = DeckEngine::new();
+        assert!(!e.deck(DeckId::A).bitcrusher_on);
+        assert_eq!(
+            e.toggle_bitcrusher(DeckId::A),
+            vec![DeckCmd::SetBitcrusher { deck: DeckId::A, on: true }]
+        );
+        assert!(e.deck(DeckId::A).bitcrusher_on);
+        assert_eq!(
+            e.set_bitcrusher(DeckId::B, true),
+            vec![DeckCmd::SetBitcrusher { deck: DeckId::B, on: true }]
+        );
+        assert!(e.deck(DeckId::B).bitcrusher_on);
+    }
+
+    #[test]
+    fn a_load_carries_the_operators_bitcrusher_settings() {
+        let mut e = DeckEngine::new();
+        e.toggle_bitcrusher(DeckId::B);
+        e.set_bitcrusher_rate(DeckId::B, 2_000.0);
+        e.set_bitcrusher_bits(DeckId::B, 4.0);
+        let (d, g) = load_gen(&e.click(item(3), DeckTarget::B));
+        let cmds = e.track_ready(d, g, 20.0);
+        assert!(cmds.contains(&DeckCmd::SetBitcrusher { deck: DeckId::B, on: true }));
+        assert!(cmds.contains(&DeckCmd::SetBitcrusherRate { deck: DeckId::B, hz: 2_000.0 }));
+        assert!(cmds.contains(&DeckCmd::SetBitcrusherBits { deck: DeckId::B, bits: 4.0 }));
     }
 
     // -----------------------------------------------------------------

@@ -2481,6 +2481,21 @@ script_mod! {
                                         default: 0.25
                                     }
                                 }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    sfx_fx_bitcrusher := PillButton{width: 92 text: "BITCRUSH"}
+                                    sfx_fx_bitcrusher_bits := Slider{
+                                        width: 170
+                                        text: "bitcrusher bits"
+                                        min: 1.0
+                                        max: 16.0
+                                        default: 8.0
+                                    }
+                                }
                             }
 
                             // ============ MESH ============
@@ -14044,6 +14059,13 @@ p2 {}
                 DeckCmd::SetFlangerFeedback { deck, feedback } => {
                     self.mixer.set_deck_flanger_feedback(deck, feedback)
                 }
+                DeckCmd::SetBitcrusher { deck, on } => self.mixer.set_deck_bitcrusher(deck, on),
+                DeckCmd::SetBitcrusherRate { deck, hz } => {
+                    self.mixer.set_deck_bitcrusher_rate(deck, hz)
+                }
+                DeckCmd::SetBitcrusherBits { deck, bits } => {
+                    self.mixer.set_deck_bitcrusher_bits(deck, bits)
+                }
                 DeckCmd::SetStemGain { deck, stem, gain } => {
                     self.mixer.set_deck_stem_gain(deck, stem, gain)
                 }
@@ -14190,11 +14212,18 @@ p2 {}
         self.paint_chip(cx, ids!(sfx_fx_b), self.sfx_fx_target == FxTarget::B, None);
         self.paint_chip(cx, ids!(sfx_fx_mix), self.sfx_fx_target == FxTarget::Mix, None);
         let deck = self.decks.deck(self.sfx_fx_deck());
-        let (feedback, flanger_on, flanger_rate) =
-            (deck.echo_feedback as f64, deck.flanger_on, deck.flanger_rate as f64);
+        let (feedback, flanger_on, flanger_rate, bitcrusher_on, bitcrusher_bits) = (
+            deck.echo_feedback as f64,
+            deck.flanger_on,
+            deck.flanger_rate as f64,
+            deck.bitcrusher_on,
+            deck.bitcrusher_bits as f64,
+        );
         self.ui.slider(cx, ids!(sfx_fx_feedback)).set_value(cx, feedback);
         self.paint_chip(cx, ids!(sfx_fx_flanger), flanger_on, None);
         self.ui.slider(cx, ids!(sfx_fx_flanger_rate)).set_value(cx, flanger_rate);
+        self.paint_chip(cx, ids!(sfx_fx_bitcrusher), bitcrusher_on, None);
+        self.ui.slider(cx, ids!(sfx_fx_bitcrusher_bits)).set_value(cx, bitcrusher_bits);
     }
 
     /// Push a deck's tone/stem knob positions back onto the surface, so the
@@ -29051,6 +29080,32 @@ impl MatchEvent for App {
                 FxTarget::Mix => {
                     let mut cmds = self.decks.set_flanger_rate(DeckId::A, v as f32);
                     cmds.extend(self.decks.set_flanger_rate(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        if self.ui.button(cx, ids!(sfx_fx_bitcrusher)).clicked(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.toggle_bitcrusher(DeckId::A),
+                FxTarget::B => self.decks.toggle_bitcrusher(DeckId::B),
+                FxTarget::Mix => {
+                    let on = !self.decks.deck(DeckId::A).bitcrusher_on;
+                    let mut cmds = self.decks.set_bitcrusher(DeckId::A, on);
+                    cmds.extend(self.decks.set_bitcrusher(DeckId::B, on));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+            self.sync_sfx_fx_ui(cx);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_bitcrusher_bits)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_bitcrusher_bits(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_bitcrusher_bits(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_bitcrusher_bits(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_bitcrusher_bits(DeckId::B, v as f32));
                     cmds
                 }
             };

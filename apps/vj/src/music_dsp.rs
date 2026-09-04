@@ -2202,6 +2202,160 @@ impl Flanger {
     }
 }
 
+pub(crate) const BITCRUSHER_RATE_MIN: f32 = 500.0;
+pub(crate) const BITCRUSHER_RATE_MAX: f32 = 24_000.0;
+pub(crate) const BITCRUSHER_RATE_DEFAULT: f32 = 4_000.0;
+pub(crate) const BITCRUSHER_BITS_MIN: f32 = 1.0;
+pub(crate) const BITCRUSHER_BITS_MAX: f32 = 16.0;
+pub(crate) const BITCRUSHER_BITS_DEFAULT: f32 = 8.0;
+/// How long a bit-depth change takes to hand over, matching the filter's
+/// and the echo's own handover windows.
+const BITCRUSHER_HANDOVER_FRAMES: u32 = 256;
+
+/// One deck's bitcrusher: a sample-and-hold decimator feeding a
+/// bit-depth quantizer.
+///
+/// Two knobs, two different click hazards, two different fixes. `rate`
+/// only moves WHEN the next sample is captured -- a hard step there just
+/// shifts the phase of a staircase the effect already has, so a plain
+/// ramp is enough. `bits` moves WHAT a captured sample rounds to, and
+/// `round(x / step)` is not a continuous function of `step`: a smoothly
+/// ramped `step` can still make the rounded OUTPUT jump by a whole step
+/// the instant `x / step` crosses a half-integer boundary. Ramping the
+/// scalar into a rounding function does not bound what comes out of it,
+/// so `bits` gets the same two-stream crossfade `DeckEq`'s filter
+/// handover and `DeckEcho`'s delay retune already use: both the old and
+/// the new quantization of the SAME held sample are computed every
+/// frame during a handover, and only the blend between those two
+/// already-rounded streams is smoothed.
+pub struct Bitcrusher {
+    /// The last raw sample the hold captured. Two floats, not a line --
+    /// there is nothing here a bulk clear could be a real-time violation
+    /// to touch.
+    held: [f32; 2],
+    /// Fractional hold-period phase, 0..1, advanced like [`Flanger`]'s
+    /// own LFO phase but linearly rather than around a circle.
+    hold_phase: f32,
+    wet: ParamRamp,
+    rate: ParamRamp,
+    bits: ParamRamp,
+    /// The bit depth the OUTGOING quantization stream still uses while a
+    /// handover crossfades to a freshly changed `bits`; equal to
+    /// `bits.target()` whenever `handover` is zero.
+    bits_active: f32,
+    handover: u32,
+}
+
+impl Bitcrusher {
+    pub fn new() -> Bitcrusher {
+        Bitcrusher {
+            held: [0.0, 0.0],
+            hold_phase: 0.0,
+            wet: ParamRamp::at(0.0),
+            rate: ParamRamp::at(BITCRUSHER_RATE_DEFAULT),
+            bits: ParamRamp::at(BITCRUSHER_BITS_DEFAULT),
+            bits_active: BITCRUSHER_BITS_DEFAULT,
+            handover: 0,
+        }
+    }
+
+    /// Forces the very next frame to recapture rather than keep
+    /// reflecting whatever the hold last caught -- there is no buffer
+    /// here for a record change to leave stale, only these two floats,
+    /// so unlike [`DeckEcho::silence`] this is a plain, unconditional
+    /// reset rather than a bookkeeping-only move.
+    pub fn silence(&mut self) {
+        self.held = [0.0, 0.0];
+        self.hold_phase = 1.0;
+    }
+
+    /// The on/off switch.
+    pub fn set_wet(&mut self, wet: f32) {
+        if let Some(wet) = knob(wet, 0.0, 1.0) {
+            self.wet.slew(wet, EQ_ENGAGE_SECS);
+        }
+    }
+
+    /// How often the hold captures a fresh sample, in Hz. A hard change
+    /// here only shifts the phase of the effect's own staircase, so a
+    /// plain ramp -- not a handover -- is enough.
+    pub fn set_rate(&mut self, hz: f32) {
+        if let Some(hz) = knob(hz, BITCRUSHER_RATE_MIN, BITCRUSHER_RATE_MAX) {
+            self.rate.slew(hz, EQ_ENGAGE_SECS);
+        }
+    }
+
+    /// The quantizer's bit depth. Arms a handover rather than ramping
+    /// the scalar directly into `quantize`; see the type's own doc.
+    pub fn set_bits(&mut self, bits: f32) {
+        if let Some(bits) = knob(bits, BITCRUSHER_BITS_MIN, BITCRUSHER_BITS_MAX) {
+            if bits != self.bits.target() {
+                self.bits.jump(bits);
+                self.handover = BITCRUSHER_HANDOVER_FRAMES;
+            }
+        }
+    }
+
+    pub fn engaged(&self) -> bool {
+        self.wet.target() > 0.0
+    }
+
+    #[cfg(test)]
+    fn held(&self) -> [f32; 2] {
+        self.held
+    }
+
+    #[inline]
+    fn quantize(x: f32, bits: f32) -> f32 {
+        let levels = bits.exp2();
+        let step = 2.0 / levels;
+        (x / step).round() * step
+    }
+
+    /// Process one stereo frame.
+    #[inline]
+    pub fn process(&mut self, frame: [f32; 2], device_rate: f32) -> [f32; 2] {
+        let wet = self.wet.tick(device_rate);
+        if wet <= 0.0 {
+            // No feedback, nothing rings: the crossfade below already
+            // equals the input exactly once wet is at rest, so there is
+            // no tail left to protect the way the echo's or the
+            // flanger's bypass has to.
+            return frame;
+        }
+        let rate_hz = self.rate.tick(device_rate);
+
+        self.hold_phase += rate_hz / device_rate.max(1.0);
+        if self.hold_phase >= 1.0 {
+            self.hold_phase -= 1.0;
+            self.held = frame;
+        }
+
+        let bits_target = self.bits.target();
+        let mut crushed = [
+            Self::quantize(self.held[0], bits_target),
+            Self::quantize(self.held[1], bits_target),
+        ];
+        if self.handover > 0 {
+            let outgoing = [
+                Self::quantize(self.held[0], self.bits_active),
+                Self::quantize(self.held[1], self.bits_active),
+            ];
+            let blend = 1.0 - self.handover as f32 / BITCRUSHER_HANDOVER_FRAMES as f32;
+            crushed = crate::dsp_math::lerp_frame(outgoing, crushed, blend);
+            self.handover -= 1;
+            if self.handover == 0 {
+                self.bits_active = bits_target;
+            }
+        }
+
+        [
+            frame[0] + (crushed[0] - frame[0]) * wet,
+            frame[1] + (crushed[1] - frame[1]) * wet,
+        ]
+    }
+}
+
 // ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
@@ -4137,5 +4291,154 @@ mod tests {
         assert_eq!(flanger.depth.target(), 1.0);
         flanger.set_depth(-1.0);
         assert_eq!(flanger.depth.target(), 0.0);
+    }
+
+    /// Off, a fresh unit is exactly its input -- the whole hold untouched.
+    #[test]
+    fn a_bitcrusher_that_was_never_engaged_is_bit_transparent() {
+        let rate = 48_000.0f32;
+        let mut bc = Bitcrusher::new();
+        let mut phase = 0.0f32;
+        for _ in 0..4_000 {
+            phase += 2.0 * PI * 37.0 / rate;
+            let x = phase.sin() * 0.6;
+            assert_eq!(bc.process([x, -x], rate), [x, -x]);
+        }
+    }
+
+    /// The raw held sample only ever changes once a whole hold period
+    /// has passed -- the sample-and-hold stage's whole point. Reads
+    /// `held()` directly rather than `process()`'s output: the output
+    /// blend `frame + (crushed - frame) * wet` recomputes a difference
+    /// against a DIFFERENT `frame` every single sample (the input tone
+    /// never stops moving), and floating point does not guarantee that
+    /// round-trip lands back on the exact same bits as `crushed` itself
+    /// -- an exact-equality test on the blended output would be
+    /// checking rounding noise, not the hold's actual timing.
+    #[test]
+    fn bitcrusher_holds_within_one_period_of_its_rate() {
+        let rate = 48_000.0f32;
+        let mut bc = Bitcrusher::new();
+        bc.set_wet(1.0);
+        for _ in 0..SETTLE_FRAMES {
+            bc.process([0.0, 0.0], rate);
+        }
+        let period = (rate / BITCRUSHER_RATE_DEFAULT).round() as usize;
+        let mut phase = 0.0f32;
+        let mut held_track = Vec::with_capacity(1_200);
+        for _ in 0..1_200 {
+            phase += 2.0 * PI * 733.0 / rate;
+            bc.process([phase.sin() * 0.5, 0.0], rate);
+            held_track.push(bc.held()[0]);
+        }
+        let mut gaps = Vec::new();
+        let mut last_change = 0usize;
+        for i in 1..held_track.len() {
+            if held_track[i] != held_track[i - 1] {
+                gaps.push(i - last_change);
+                last_change = i;
+            }
+        }
+        assert!(!gaps.is_empty(), "the hold never captured a new value");
+        // The first gap may be partial (the settle loop above already
+        // left `hold_phase` at an unknown fraction); every gap after it
+        // is a full, steady-state period.
+        for gap in &gaps[1..] {
+            assert_eq!(*gap, period, "hold period drifted");
+        }
+    }
+
+    /// Every output sample lands on one of the `2^bits` levels the
+    /// quantizer promises, spanning the full [-1, 1] range.
+    #[test]
+    fn bitcrusher_quantizes_to_the_documented_level_count() {
+        let rate = 48_000.0f32;
+        let mut bc = Bitcrusher::new();
+        bc.set_wet(1.0);
+        bc.set_bits(3.0);
+        bc.set_rate(BITCRUSHER_RATE_MAX);
+        for _ in 0..SETTLE_FRAMES {
+            bc.process([0.0, 0.0], rate);
+        }
+        let step = 2.0f32 / 3.0f32.exp2();
+        for i in 0..2_000usize {
+            let x = -0.9 + 1.8 * (i as f32 / 2_000.0);
+            let out = bc.process([x, x], rate)[0];
+            let level = out / step;
+            assert!((level - level.round()).abs() < 1e-4, "{out} is not a multiple of {step}");
+        }
+    }
+
+    /// No feedback loop to run away, but the quantizer's own arithmetic
+    /// must stay finite and bounded at the harshest settings, including
+    /// on an over-scale input.
+    #[test]
+    fn bitcrusher_stays_bounded_at_the_harshest_settings() {
+        let rate = 48_000.0f32;
+        let mut bc = Bitcrusher::new();
+        bc.set_wet(1.0);
+        bc.set_bits(BITCRUSHER_BITS_MIN);
+        bc.set_rate(BITCRUSHER_RATE_MIN);
+        for _ in 0..SETTLE_FRAMES {
+            bc.process([0.0, 0.0], rate);
+        }
+        let mut phase = 0.0f32;
+        for _ in 0..48_000usize {
+            phase += 2.0 * PI * 233.0 / rate;
+            let x = phase.sin() * 1.5;
+            let out = bc.process([x, x], rate);
+            assert!(out[0].is_finite() && out[0].abs() < 3.0, "unbounded: {out:?}");
+            assert!(out[1].is_finite() && out[1].abs() < 3.0, "unbounded: {out:?}");
+        }
+    }
+
+    /// `silence`, unlike the echo's or the flanger's, protects nothing
+    /// but two floats -- there is no line here for a record change to
+    /// leave stale, so it is a plain, unconditional reset rather than a
+    /// bookkeeping-only move: the very next frame after it must reflect
+    /// whatever plays next, not the hold from the record before it.
+    #[test]
+    fn bitcrusher_silence_forces_a_fresh_capture() {
+        let rate = 48_000.0f32;
+        let mut bc = Bitcrusher::new();
+        bc.set_wet(1.0);
+        for _ in 0..SETTLE_FRAMES {
+            bc.process([0.0, 0.0], rate);
+        }
+        // A whole hold period, not one call, guarantees a capture lands
+        // regardless of where `hold_phase` happened to settle.
+        let period = (rate / BITCRUSHER_RATE_DEFAULT).round() as usize;
+        for _ in 0..period {
+            bc.process([0.8, -0.8], rate);
+        }
+        assert!(bc.held()[0].abs() > 0.1, "a real value is there to protect: {:?}", bc.held());
+        bc.silence();
+        bc.process([0.3, -0.3], rate);
+        let held = bc.held();
+        assert!((held[0] - 0.3).abs() < 1e-6, "must reflect the new content at once: {held:?}");
+        assert!((held[1] + 0.3).abs() < 1e-6, "must reflect the new content at once: {held:?}");
+    }
+
+    #[test]
+    fn bitcrusher_setters_clamp_to_their_documented_ranges() {
+        let mut bc = Bitcrusher::new();
+        bc.set_wet(f32::NAN);
+        assert_eq!(bc.wet.target(), 0.0, "a bad value moves nothing");
+        bc.set_wet(5.0);
+        assert_eq!(bc.wet.target(), 1.0);
+        bc.set_wet(-5.0);
+        assert_eq!(bc.wet.target(), 0.0);
+        bc.set_rate(f32::INFINITY);
+        assert_eq!(bc.rate.target(), BITCRUSHER_RATE_DEFAULT, "unmoved by a bad value");
+        bc.set_rate(100_000.0);
+        assert_eq!(bc.rate.target(), BITCRUSHER_RATE_MAX);
+        bc.set_rate(-1.0);
+        assert_eq!(bc.rate.target(), BITCRUSHER_RATE_MIN);
+        bc.set_bits(f32::NAN);
+        assert_eq!(bc.bits.target(), BITCRUSHER_BITS_DEFAULT, "unmoved by a bad value");
+        bc.set_bits(100.0);
+        assert_eq!(bc.bits.target(), BITCRUSHER_BITS_MAX);
+        bc.set_bits(-5.0);
+        assert_eq!(bc.bits.target(), BITCRUSHER_BITS_MIN);
     }
 }

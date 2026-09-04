@@ -27,7 +27,8 @@ use crate::loop_splat::{
 use crate::wave_analysis::{DeckClock, TrackGrid};
 use crate::music_dsp::{
     audible, knob, knob64,
-    DeckEcho, DeckEq, Flanger, FrameSource, Freeze, MotorEnd, ParamRamp, RateReader, ScratchRamp,
+    Bitcrusher, DeckEcho, DeckEq, Flanger, FrameSource, Freeze, MotorEnd, ParamRamp, RateReader,
+    ScratchRamp,
     Stretcher, STEM_COUNT,
     STRETCH_BYPASS_EPSILON, STRETCH_RATIO_MAX, STRETCH_RATIO_MIN, WSOLA_WINDOW,
     BRAKE_SECS, CENSOR_FLIP_SECS, CENSOR_RATE, CENSOR_RETURN_SECS, SOFT_START_SECS,
@@ -895,6 +896,7 @@ enum EffectKind {
     Freeze(Freeze),
     Echo(DeckEcho),
     Flanger(Flanger),
+    Bitcrusher(Bitcrusher),
 }
 
 impl EffectKind {
@@ -905,11 +907,12 @@ impl EffectKind {
             EffectKind::Freeze(freeze) => freeze.process(frame, device_rate),
             EffectKind::Echo(echo) => echo.process(frame, device_rate),
             EffectKind::Flanger(flanger) => flanger.process(frame, device_rate),
+            EffectKind::Bitcrusher(bitcrusher) => bitcrusher.process(frame, device_rate),
         }
     }
 }
 
-const DECK_CHAIN_SLOTS: usize = 4;
+const DECK_CHAIN_SLOTS: usize = 5;
 
 /// A deck's pre-fader tone chain: a fixed list of slots, walked in order.
 /// Not a `Vec` -- sized once, at compile time, never resized. Today's
@@ -928,6 +931,7 @@ impl DeckChain {
                 EffectKind::Freeze(Freeze::new()),
                 EffectKind::Echo(DeckEcho::new()),
                 EffectKind::Flanger(Flanger::new()),
+                EffectKind::Bitcrusher(Bitcrusher::new()),
             ],
         }
     }
@@ -966,6 +970,12 @@ impl DeckChain {
     fn flanger_mut(&mut self) -> &mut Flanger {
         match &mut self.slots[3] {
             EffectKind::Flanger(flanger) => flanger,
+            _ => unreachable!(),
+        }
+    }
+    fn bitcrusher_mut(&mut self) -> &mut Bitcrusher {
+        match &mut self.slots[4] {
+            EffectKind::Bitcrusher(bitcrusher) => bitcrusher,
             _ => unreachable!(),
         }
     }
@@ -1149,6 +1159,7 @@ impl DeckVoice {
         self.chain.echo_mut().silence();
         self.chain.freeze_mut().reset();
         self.chain.flanger_mut().silence();
+        self.chain.bitcrusher_mut().silence();
         self.reset_blend();
         if load.play {
             self.transport.slew(1.0, LOAD_SWAP_SECS);
@@ -2197,6 +2208,7 @@ impl Mixer {
                 d.chain.echo_mut().silence();
                 d.chain.freeze_mut().reset();
                 d.chain.flanger_mut().silence();
+                d.chain.bitcrusher_mut().silence();
                 d.reset_blend();
             } else {
                 d.pending = Some(PendingLoad { pcm, play: keep_playing, grid: None });
@@ -2247,6 +2259,7 @@ impl Mixer {
         d.chain.echo_mut().silence();
         d.chain.freeze_mut().reset();
         d.chain.flanger_mut().silence();
+        d.chain.bitcrusher_mut().silence();
         d.reset_blend();
         self.publish_deck(&s, deck.index());
         drop(s);
@@ -2547,6 +2560,24 @@ impl Mixer {
     pub fn set_deck_flanger_feedback(&self, deck: DeckId, feedback: f32) {
         let mut s = self.state.lock().unwrap();
         s.decks[deck.index()].chain.flanger_mut().set_feedback(feedback);
+    }
+
+    /// The bitcrusher's on/off switch.
+    pub fn set_deck_bitcrusher(&self, deck: DeckId, on: bool) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.bitcrusher_mut().set_wet(if on { 1.0 } else { 0.0 });
+    }
+
+    /// How often the bitcrusher's hold captures a fresh sample, in Hz.
+    pub fn set_deck_bitcrusher_rate(&self, deck: DeckId, hz: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.bitcrusher_mut().set_rate(hz);
+    }
+
+    /// The bitcrusher's quantizer bit depth.
+    pub fn set_deck_bitcrusher_bits(&self, deck: DeckId, bits: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.bitcrusher_mut().set_bits(bits);
     }
 
     /// Momentary FREEZE: while held, the deck repeats a beat-sized
@@ -2947,6 +2978,7 @@ impl Mixer {
         // ring must not carry forward into the record that just landed.
         dst.chain.freeze_mut().reset();
         dst.chain.flanger_mut().silence();
+        dst.chain.bitcrusher_mut().silence();
         let to_index = to.index();
         self.publish_deck(&s, to_index);
     }
