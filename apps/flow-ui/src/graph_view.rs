@@ -53,7 +53,9 @@ fn full_bleed(node: &Node) -> bool {
         "output" => declared_output_type(node)
             .or_else(|| node.inputs.first().map(|input| input.ty))
             == Some(PortType::Image),
-        "input" | "gen" => node
+        // A generator card shows its settings; the picture lives on the
+        // Output card it feeds (user, 2026-09-04).
+        "input" => node
             .outputs
             .first()
             .is_some_and(|port| port.ty == PortType::Image),

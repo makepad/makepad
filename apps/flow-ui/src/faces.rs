@@ -3502,12 +3502,14 @@ Flow{llm function http ask output}
             &catalog,
         );
         assert!(host.error.is_none(), "{:?}", host.error);
+        // The picture lives on the Output card (the generator card shows
+        // only its settings).
         let empty = host
             .faces
-            .get("image")
+            .get("picture")
             .unwrap()
             .root
-            .child(live_id!(preview))
+            .child(live_id!(value))
             .child(live_id!(empty));
         let mut widgets = Vec::new();
         cx.with_script_vm_id_trusted(host.vm_id, |vm| {
@@ -3539,13 +3541,13 @@ Flow{llm function http ask output}
             &graph,
             &catalog,
         );
-        let preview = host.faces["image"].root.child(live_id!(preview));
+        let preview = host.faces["picture"].root.child(live_id!(value));
         let empty = preview.child(live_id!(empty));
         let image = preview.child(live_id!(image));
         cx.with_vm(|vm| vm.bx.captured_errors = Some(Vec::new()));
 
         preview
-            .borrow_mut::<ValueImage>()
+            .borrow_mut::<ValueView>()
             .unwrap()
             .set_card_sized(&mut cx, true);
 
