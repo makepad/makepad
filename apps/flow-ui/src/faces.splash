@@ -96,6 +96,15 @@ mod.flow.ui.OutputFace = Face{
     }
 }
 
+mod.flow.ui.PublishFace = Face{
+    params := Strip{
+        title := TextInput{width: Fill height: 28 empty_text: "default title" param_bind := @title}
+        namespace := TextInput{width: Fill height: 28 param_bind := @namespace}
+        tags := TextInput{width: Fill height: 28 empty_text: "flow, tag" param_bind := @tags}
+    }
+    published := Meta{show := @self}
+}
+
 mod.flow.ui.LlmFace = Face{
     model := mod.flow.ui.ModelPicker{
         param_bind := @model
@@ -228,6 +237,7 @@ mod.flow.Node.ui = nil
 mod.flow.Input.ui = mod.flow.ui.InputFace
 mod.flow.Text.ui = mod.flow.ui.TextFace
 mod.flow.Output.ui = mod.flow.ui.OutputFace
+mod.flow.Publish.ui = mod.flow.ui.PublishFace
 mod.flow.Llm.ui = mod.flow.ui.LlmFace
 mod.flow.Fn.ui = mod.flow.ui.FnFace
 mod.flow.Http.ui = mod.flow.ui.HttpFace
@@ -240,6 +250,7 @@ mod.flow.ImageFace = mod.flow.ui.ImageFace
 mod.flow.InputFace = mod.flow.ui.InputFace
 mod.flow.TextFace = mod.flow.ui.TextFace
 mod.flow.OutputFace = mod.flow.ui.OutputFace
+mod.flow.PublishFace = mod.flow.ui.PublishFace
 mod.flow.LlmFace = mod.flow.ui.LlmFace
 mod.flow.FnFace = mod.flow.ui.FnFace
 mod.flow.HttpFace = mod.flow.ui.HttpFace

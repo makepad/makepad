@@ -5,6 +5,7 @@ pub mod gen;
 pub mod http;
 pub mod input;
 pub mod output;
+pub mod publish;
 
 use crate::{Node, Value};
 

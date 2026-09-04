@@ -10,8 +10,10 @@ use crate::{
     CreateRunRequest, CreateRunResponse, EvalErrorResponse, EventsResponse, FlowMutationResponse,
     FlowResponse, FlowSummary, HealthResponse, InstanceId, MessageResponse, NodesResponse,
     PortType, PutGraphRequest, PutSourceRequest, PutValueResponse, RevertRequest, RunId,
-    TemplateResponse, Value,
+    AssetsResponse, TemplateResponse, Value,
 };
+use crate::engine::executors::publish::{AssetListQuery, AssetWorkerHandle};
+use makepad_asset_data::AssetAlias;
 use makepad_bounded_http::{
     etag_matches, if_range_matches, parse_range, BodyError, Conn, Head, Method, RangeSpec, Resp,
 };
@@ -43,6 +45,7 @@ pub(crate) struct RouteCtx {
     pub server_id: [u8; 16],
     pub token: String,
     pub events: Arc<EventHub>,
+    pub assets: AssetWorkerHandle,
 }
 
 pub(crate) enum Outcome {
@@ -86,6 +89,50 @@ pub(crate) fn dispatch(
 
     let segments = head.segs.clone();
     match segments.as_slice() {
+        [v1, assets] if v1 == "v1" && assets == "assets" => {
+            if head.method != Method::Get {
+                return Outcome::Resp(message(405, "method not allowed"));
+            }
+            let q = head.query_get("q").unwrap_or("").replace('+', " ");
+            let namespace = match head.query_get("ns") {
+                Some("*") => None,
+                Some(value) if !value.is_empty() => Some(value.to_string()),
+                _ => Some("flows".to_string()),
+            };
+            let limit = match decimal_query(head.query_get("limit"), 50, 100) {
+                Some(value) if value > 0 => value as u32,
+                _ => return Outcome::Resp(message(400, "invalid asset limit")),
+            };
+            match ctx.assets.list(AssetListQuery { text: q, namespace, limit }) {
+                Ok(assets) => Outcome::Resp(json(200, &AssetsResponse { assets })),
+                Err(error) => Outcome::Resp(message(
+                    if error.contains("no asset server discovered") { 503 } else { 502 },
+                    &error,
+                )),
+            }
+        }
+        [v1, assets, thumb, tail @ ..]
+            if v1 == "v1" && assets == "assets" && thumb == "thumb" =>
+        {
+            if head.method != Method::Get {
+                return Outcome::Resp(message(405, "method not allowed"));
+            }
+            let alias_text = tail.join("/");
+            let alias = match AssetAlias::new(alias_text) {
+                Ok(alias) => alias,
+                Err(_) => return Outcome::Resp(message(400, "invalid asset alias")),
+            };
+            match ctx.assets.thumbnail(alias) {
+                Ok(thumbnail) => Outcome::Resp(
+                    Resp::bytes(200, &thumbnail.content_type, thumbnail.bytes)
+                        .with_header("Cache-Control", "private, max-age=300".to_string()),
+                ),
+                Err(error) => Outcome::Resp(message(
+                    if error.contains("not found") { 404 } else if error.contains("no asset server discovered") { 503 } else { 502 },
+                    &error,
+                )),
+            }
+        }
         [v1, health] if v1 == "v1" && health == "health" => {
             call(&ctx.state, |_| message(405, "method not allowed"))
         }

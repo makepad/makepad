@@ -56,6 +56,10 @@ pub const TEMPLATES: &[Template] = &[
         source: include_str!("../recipes/templates/prompt-to-image.splash"),
     },
     Template {
+        name: "prompt-to-library",
+        source: include_str!("../recipes/templates/prompt-to-library.splash"),
+    },
+    Template {
         name: "rig-and-motion",
         source: include_str!("../recipes/templates/rig-and-motion.splash"),
     },
@@ -102,11 +106,15 @@ pub fn template_summary(template: &Template) -> TemplateSummary {
     let outputs = graph
         .nodes
         .iter()
-        .filter(|node| node.kind == "output")
+        .filter(|node| matches!(node.kind.as_str(), "output" | "publish"))
         .filter_map(|node| {
-            node.inputs
-                .first()
-                .map(|port| (node.id.clone(), port.ty.as_str().to_string()))
+            if node.kind == "publish" {
+                Some((node.id.clone(), "json".to_string()))
+            } else {
+                node.inputs
+                    .first()
+                    .map(|port| (node.id.clone(), port.ty.as_str().to_string()))
+            }
         })
         .collect();
     TemplateSummary {

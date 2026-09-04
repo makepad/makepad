@@ -5,6 +5,7 @@ use super::executors::gen::{unsupported_params, GenExecutor, UsedProviders};
 use super::executors::http::HttpExecutor;
 use super::executors::input::InputExecutor;
 use super::executors::output::OutputExecutor;
+use super::executors::publish::{AssetWorkerHandle, PublishExecutor};
 use super::executors::{Executor, Poll};
 use super::{HttpLogEntry, NetPolicy, RunEvent, RunInput, Seams};
 use crate::graph::FlowVm;
@@ -23,6 +24,7 @@ enum ActiveExecutor {
     Func(FuncExecutor),
     Http(HttpExecutor),
     Ask(AskExecutor),
+    Publish(PublishExecutor),
 }
 
 impl ActiveExecutor {
@@ -35,6 +37,7 @@ impl ActiveExecutor {
             Self::Func(value) => value.poll(),
             Self::Http(value) => value.poll(),
             Self::Ask(value) => value.poll(),
+            Self::Publish(value) => value.poll(),
         }
     }
 
@@ -47,6 +50,7 @@ impl ActiveExecutor {
             Self::Func(value) => value.cancel(),
             Self::Http(value) => value.cancel(),
             Self::Ask(value) => value.cancel(),
+            Self::Publish(value) => value.cancel(),
         }
     }
 
@@ -66,6 +70,7 @@ pub(crate) fn run(
     events: Sender<RunEvent>,
     answers: Receiver<(String, Value)>,
     cancel: Arc<AtomicBool>,
+    assets: Option<AssetWorkerHandle>,
 ) {
     let started = Instant::now();
     let graph = &input.graph;
@@ -76,7 +81,9 @@ pub(crate) fn run(
             !graph
                 .nodes
                 .iter()
-                .any(|node| node.id == **output && node.kind == "output")
+                .any(|node| {
+                    node.id == **output && matches!(node.kind.as_str(), "output" | "publish")
+                })
         })
     }) {
         finish(
@@ -172,6 +179,9 @@ pub(crate) fn run(
                 &policy,
                 &http_log,
                 &used_providers,
+                assets.clone(),
+                &input,
+                default_publish_description(graph, &node.id, &values),
             ) {
                 Ok((executor, waiting)) => {
                     if waiting {
@@ -328,6 +338,9 @@ fn start_executor(
     policy: &NetPolicy,
     http_log: &Arc<Mutex<Vec<HttpLogEntry>>>,
     used_providers: &UsedProviders,
+    assets: Option<AssetWorkerHandle>,
+    run: &RunInput,
+    publish_description: String,
 ) -> Result<(ActiveExecutor, bool), String> {
     match node.kind.as_str() {
         "input" => {
@@ -372,6 +385,21 @@ fn start_executor(
             let mut executor = AskExecutor::default();
             executor.start(node, inputs)?;
             Ok((ActiveExecutor::Ask(executor), true))
+        }
+        "publish" => {
+            let flow = std::path::Path::new(&run.file_name)
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&run.file_name)
+                .to_string();
+            let mut executor = PublishExecutor::new(
+                assets,
+                flow,
+                run.instance.clone(),
+                publish_description,
+            );
+            executor.start(node, inputs)?;
+            Ok((ActiveExecutor::Publish(executor), false))
         }
         kind => Err(format!("node `{}` has unknown executor `{kind}`", node.id)),
     }
@@ -560,7 +588,7 @@ pub(crate) fn selected_nodes(graph: &crate::Graph, outputs: Option<&[String]>) -
             graph
                 .nodes
                 .iter()
-                .filter(|node| node.kind == "output")
+                .filter(|node| matches!(node.kind.as_str(), "output" | "publish"))
                 .map(|node| node.id.clone())
                 .collect()
         });
@@ -594,15 +622,21 @@ fn finish(
             graph
                 .nodes
                 .iter()
-                .filter(|node| node.kind == "output")
+                .filter(|node| matches!(node.kind.as_str(), "output" | "publish"))
                 .map(|node| node.id.clone())
                 .collect()
         });
     let outputs = output_ids
         .into_iter()
         .filter_map(|node| {
+            let port = graph
+                .nodes
+                .iter()
+                .find(|candidate| candidate.id == node)
+                .map(|candidate| if candidate.kind == "publish" { "asset" } else { "value" })
+                .unwrap_or("value");
             values
-                .get(&(node.clone(), "value".to_string()))
+                .get(&(node.clone(), port.to_string()))
                 .cloned()
                 .map(|value| (node, value))
         })
@@ -614,6 +648,40 @@ fn finish(
         http_log: http_log.lock().unwrap().clone(),
         warnings,
     });
+}
+
+fn default_publish_description(
+    graph: &crate::Graph,
+    publish_node: &str,
+    values: &HashMap<(String, String), Value>,
+) -> String {
+    let mut upstream = HashSet::from([publish_node.to_string()]);
+    loop {
+        let before = upstream.len();
+        for edge in &graph.edges {
+            if upstream.contains(&edge.to_node) {
+                upstream.insert(edge.from_node.clone());
+            }
+        }
+        if upstream.len() == before {
+            break;
+        }
+    }
+    graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == "input" && upstream.contains(&node.id))
+        .find_map(|node| {
+            node.outputs.iter().find_map(|port| {
+                (port.ty == crate::PortType::Text)
+                    .then(|| values.get(&(node.id.clone(), port.name.clone())))
+                    .flatten()
+                    .and_then(|value| value.as_text().ok())
+                    .filter(|text| !text.trim().is_empty())
+                    .map(str::to_string)
+            })
+        })
+        .unwrap_or_default()
 }
 
 fn param<'a>(node: &'a Node, name: &str) -> Option<&'a Literal> {

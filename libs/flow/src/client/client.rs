@@ -1,6 +1,6 @@
 use super::http::{HttpClient, Method};
 use crate::{
-    CreateFromTemplateRequest, CreateInstanceRequest, CreateInstanceResponse, CreateRunResponse,
+    AssetsResponse, CreateFromTemplateRequest, CreateInstanceRequest, CreateInstanceResponse, CreateRunResponse,
     EvalError, EventsPage, FlowDefinition, FlowSummary, Graph, Health, InstanceRow, NodesResponse,
     ModelsResponse, PutFlowResponse, RunRowDto, SetInputsResponse, TemplateResponse,
     TemplateSummary, ValueBytes,
@@ -175,6 +175,62 @@ impl FlowClient {
     pub fn flows(&self) -> ClientResult<Vec<FlowSummary>> {
         let body = self.call(Method::Get, "/v1/flows", None, true, None)?;
         decode(&body, "flow list")
+    }
+
+    pub fn assets(
+        &self,
+        query: &str,
+        namespace: Option<&str>,
+        limit: u32,
+    ) -> ClientResult<AssetsResponse> {
+        if limit == 0 || limit > 100 {
+            return Err(ClientError::Protocol("asset limit is out of range".into()));
+        }
+        let namespace = namespace.unwrap_or("*");
+        if namespace != "*"
+            && (namespace.is_empty()
+                || !namespace
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte)))
+        {
+            return Err(ClientError::Protocol("invalid asset namespace".into()));
+        }
+        let target = format!(
+            "/v1/assets?q={}&ns={namespace}&limit={limit}",
+            query_component(query)
+        );
+        let body = self.call(Method::Get, &target, None, true, None)?;
+        decode(&body, "asset list")
+    }
+
+    pub fn asset_thumbnail(&self, alias: &str) -> ClientResult<ValueBytes> {
+        if alias.is_empty()
+            || alias.len() > 128
+            || !alias
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"/_-".contains(&byte))
+        {
+            return Err(ClientError::Protocol("invalid asset alias".into()));
+        }
+        let target = format!("/v1/assets/thumb/{alias}");
+        let response = self.control.call(
+            Method::Get,
+            &target,
+            Some(self.token.as_str()),
+            None,
+            None,
+        )?;
+        match response.status {
+            200..=299 => Ok(ValueBytes {
+                digest: alias.to_string(),
+                content_type: response
+                    .content_type
+                    .unwrap_or_else(|| "application/octet-stream".to_string()),
+                bytes: response.body.into(),
+            }),
+            401 => Err(ClientError::Unauthorized),
+            status => Err(http_error(status, &response.body)),
+        }
     }
 
     pub fn flow(&self, name: &str) -> ClientResult<FlowDefinition> {
@@ -558,6 +614,20 @@ fn flow_name(name: &str) -> ClientResult<&str> {
         return Err(ClientError::Protocol("invalid flow name".into()));
     }
     Ok(name)
+}
+
+fn query_component(value: &str) -> String {
+    value
+        .chars()
+        .take(256)
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || "._-".contains(character) {
+                character
+            } else {
+                '+'
+            }
+        })
+        .collect()
 }
 
 fn model_domain(domain: &str) -> ClientResult<&str> {

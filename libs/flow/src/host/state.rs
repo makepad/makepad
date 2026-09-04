@@ -4,6 +4,7 @@ use super::models::FleetSnapshot;
 use super::util::{atomic_write, log};
 use super::ServerError;
 use crate::engine::{self, HttpLogEntry, NetPolicy, RunEvent, RunHandle, RunId, RunInput, Seams};
+use crate::engine::executors::publish::AssetWorkerHandle;
 use crate::instance::{InputEffect, Instance, InstanceId, Owner, RunDecision};
 use crate::values::{Value, ValueStore};
 use crate::{
@@ -103,6 +104,7 @@ pub struct FlowState {
     pub(crate) seams: Seams,
     pub(crate) net: NetPolicy,
     pub(crate) origin: (String, u64),
+    pub(crate) assets: AssetWorkerHandle,
     config: SharedConfig,
     root: PathBuf,
     revision_ring: usize,
@@ -171,6 +173,7 @@ impl FlowState {
         epoch: u64,
         origin: (String, u64),
         run_register_tx: mpsc::Sender<RunRegistration>,
+        assets: AssetWorkerHandle,
     ) -> Result<Self, ServerError> {
         let catalog = graph::prelude_catalog().map_err(ServerError::Prelude)?;
         let mut values = ValueStore::new(config.root.join("values"));
@@ -188,6 +191,7 @@ impl FlowState {
             seams: build_seams(config),
             net: config.net.clone(),
             origin,
+            assets,
             config: config.clone(),
             root: config.root.clone(),
             revision_ring: config.revision_ring,
@@ -824,7 +828,13 @@ impl FlowState {
             outputs,
             origin: self.origin.clone(),
         };
-        let handle = engine::spawn_run_with_policy(input, self.seams.clone(), tx, self.net.clone());
+        let handle = engine::spawn_run_with_policy_and_assets(
+            input,
+            self.seams.clone(),
+            tx,
+            self.net.clone(),
+            Some(self.assets.clone()),
+        );
         let now = engine::unix_ms();
         use std::collections::btree_map::Entry;
         match self.runs.entry(run_id.clone()) {
@@ -1391,6 +1401,7 @@ pub(crate) fn spawn_state(
     epoch: u64,
     origin: (String, u64),
     run_register_tx: mpsc::Sender<RunRegistration>,
+    assets: AssetWorkerHandle,
 ) -> Result<(StateHandle, std::thread::JoinHandle<()>), ServerError> {
     let (tx, rx) = mpsc::channel::<Task>();
     let (ready_tx, ready_rx) = mpsc::channel();
@@ -1405,6 +1416,7 @@ pub(crate) fn spawn_state(
                 epoch,
                 origin.clone(),
                 run_register_tx.clone(),
+                assets.clone(),
             ) {
                 Ok(state) => {
                     let _ = ready_tx.send(Ok(()));
@@ -1429,6 +1441,7 @@ pub(crate) fn spawn_state(
                         epoch,
                         origin.clone(),
                         run_register_tx.clone(),
+                        assets.clone(),
                     ) {
                         Ok(rebuilt) => state = rebuilt,
                         Err(error) => {
