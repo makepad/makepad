@@ -294,6 +294,8 @@ pub struct GpuLmSkin {
 /// A snapshot the renderer hands over on the settle path (the same moment
 /// the CPU bake used to be kicked).
 pub struct GpuBakeJob {
+    /// Layout identity; a completed atlas cannot bind to a newer model list.
+    pub world_revision: (u64, u64),
     pub scene: LmScene,
     /// Parallel to `scene.meshes`: each instance's GPU geometry.
     pub mesh_geometry: Vec<GeometryId>,
@@ -347,6 +349,7 @@ const LM_EXPOSURE_CEILING: f32 = 1.0;
 
 /// What the renderer stores when a scheduled layout is first realized.
 pub struct GpuLmDelivery {
+    pub world_revision: (u64, u64),
     pub atlas: Texture,
     pub top: (Texture, f32, f32),
     pub size: usize,
@@ -436,6 +439,8 @@ struct BakeState {
     /// All occluder boxes packed as one world-space triangle soup.
     box_geometry: Option<Geometry>,
     lights: Vec<LmLight>,
+    /// All regions of an amortized bake use the same sun snapshot.
+    sun_dir: Vec3f,
     ground: Option<GroundInfo>,
     /// Scene AABB (casters + ground) — bounds every sun camera's near plane
     /// and the cascades' z windows.
@@ -591,6 +596,9 @@ pub struct GpuLightmapBaker {
     csm_policy: CsmPolicy,
     /// A job scheduled by the renderer, realized on the next draw.
     pending: Option<GpuBakeJob>,
+    /// Keep the previous completed atlas visible until every new region is
+    /// encoded. Publishing on realization exposed an empty atlas each kick.
+    pending_delivery: Option<GpuLmDelivery>,
     state: Option<BakeState>,
     draws: Option<Box<LmDraws>>,
     pool: Vec<BakePass>,
@@ -658,6 +666,7 @@ impl Default for GpuLightmapBaker {
             mode: GpuLightmapMode::default(),
             csm_policy: CsmPolicy::default(),
             pending: None,
+            pending_delivery: None,
             state: None,
             draws: None,
             pool: Vec::new(),
@@ -683,6 +692,10 @@ impl Default for GpuLightmapBaker {
 /// `MAKEPAD_GPU_LM_BAKE_BUDGET` regions per frame, else the default. Read
 /// once per baker rather than per frame: this is a launch policy, and a
 /// bake that changed budget halfway through would report nonsense progress.
+fn take_completed_delivery<T>(delivery: &mut Option<T>, dirty: bool, remaining: usize) -> Option<T> {
+    if dirty || remaining != 0 { None } else { delivery.take() }
+}
+
 fn bake_budget_from_env() -> usize {
     std::env::var("MAKEPAD_GPU_LM_BAKE_BUDGET")
         .ok()
@@ -1157,6 +1170,7 @@ impl GpuLightmapBaker {
     /// geometry and bounds belonging to one particular realm.
     pub(crate) fn enter_realm(&mut self) {
         self.pending = None;
+        self.pending_delivery = None;
         self.state = None;
         self.dirty = false;
         // Regions of a realm that no longer exists must never be baked into
@@ -1318,6 +1332,7 @@ impl GpuLightmapBaker {
     /// CPU bake), create the persistent + scratch targets, pack the
     /// occluder boxes, upload the heightfield, dirty everything.
     fn realize(&mut self, cx: &mut Cx, job: GpuBakeJob) -> Option<GpuLmDelivery> {
+        self.pending_delivery = None;
         let (size, rects) = plan_atlas(&job.scene);
         let mesh_count = job.scene.meshes.len();
         let mut regions = Vec::new();
@@ -1497,6 +1512,7 @@ impl GpuLightmapBaker {
         };
         let mesh_rects = rects[..mesh_count].to_vec();
         let delivery = GpuLmDelivery {
+            world_revision: job.world_revision,
             atlas: tex.atlas.clone(),
             top: (
                 tex.top_a.clone(),
@@ -1516,6 +1532,7 @@ impl GpuLightmapBaker {
             region_mesh_count: mesh_count,
             box_geometry,
             lights: job.scene.lights.clone(),
+            sun_dir: job.scene.sun_dir,
             ground,
             scene_min,
             scene_max,
@@ -1564,8 +1581,8 @@ impl GpuLightmapBaker {
     /// per dirty kick (camera-blind, statics only, both modes), plus — in
     /// Realtime — the cascade depth pass every frame with every caster.
     /// The chain renders before the scene pass that samples it, so nothing
-    /// is ever sampled stale. Returns a delivery when a NEW layout was
-    /// realized (the renderer stores the atlas + remaps once).
+    /// is ever sampled half-written. Returns a new atlas and its matching
+    /// remaps only after every region has completed.
     pub fn run_frame(
         &mut self,
         cx: &mut CxDraw,
@@ -1580,9 +1597,16 @@ impl GpuLightmapBaker {
         if !self.ensure_draws(cx.cx) {
             return None;
         }
-        let mut delivery = None;
-        if let Some(job) = self.pending.take() {
-            delivery = self.realize(cx.cx, job);
+        // Sun updates may arrive faster than a large atlas finishes. Coalesce
+        // them, but finish the current job before starting the next; genuine
+        // geometry edits must still supersede an obsolete layout immediately.
+        let in_flight = self.dirty || !self.bake_queue.is_empty();
+        let can_start = self.pending.as_ref().is_some_and(|job| {
+            !in_flight || job.trigger != BakeTrigger::SunChange
+        });
+        if can_start {
+            let job = self.pending.take().unwrap();
+            self.pending_delivery = self.realize(cx.cx, job);
         }
         let realtime = self.mode == GpuLightmapMode::Realtime;
         // Deliberately BEFORE any `state` test: the cascade tier is the whole
@@ -1612,7 +1636,7 @@ impl GpuLightmapBaker {
                     self.bake_us = 0;
                     if !self.bake_queue.is_empty() {
                         log!(
-                            "gpu lightmap: baking {} regions, {} per frame — the world lights flat until it settles",
+                            "gpu lightmap: baking {} regions, {} per frame — retaining completed lighting until publication",
                             self.bake_total,
                             self.bake_budget
                         );
@@ -1650,7 +1674,7 @@ impl GpuLightmapBaker {
             )
         });
         if batch.is_empty() && csm.is_none() {
-            return delivery;
+            return take_completed_delivery(&mut self.pending_delivery, self.dirty, self.bake_queue.len());
         }
         // The ground region must be processed LAST within a batch (its sun
         // depth must survive until the top-plane passes).
@@ -1706,7 +1730,7 @@ impl GpuLightmapBaker {
                 self.rt_us = 0;
             }
         }
-        delivery
+        take_completed_delivery(&mut self.pending_delivery, self.dirty, self.bake_queue.len())
     }
 
     /// Encode one batch of dirty atlas regions (statics only, both modes) as
@@ -1714,8 +1738,9 @@ impl GpuLightmapBaker {
     /// Never called with an empty batch; the cascade pass is its own chain
     /// ([`Self::encode_cascades`]) because it must also serve frames — and
     /// whole worlds — where no atlas exists to batch.
-    fn encode_batch(&mut self, cx: &mut CxDraw, sun_dir: Vec3f, batch: &[usize]) -> usize {
+    fn encode_batch(&mut self, cx: &mut CxDraw, _sun_dir: Vec3f, batch: &[usize]) -> usize {
         let state = self.state.take().unwrap();
+        let sun_dir = state.sun_dir;
         let mut draws = self.draws.take().unwrap();
         let sun_up = sun_dir.y > 0.02;
         let inv_size = 1.0 / state.size as f32;
@@ -2847,6 +2872,16 @@ mod tests {
             baker.bake_budget,
         );
         assert!(baker.bake_progress().is_none());
+    }
+
+    #[test]
+    fn atlas_delivery_is_atomic_across_a_multiframe_bake() {
+        let mut delivery = Some("new atlas and matching remaps");
+        assert!(take_completed_delivery(&mut delivery, true, 0).is_none());
+        assert!(take_completed_delivery(&mut delivery, false, 133).is_none());
+        assert!(take_completed_delivery(&mut delivery, false, 13).is_none());
+        assert_eq!(take_completed_delivery(&mut delivery, false, 0), Some("new atlas and matching remaps"));
+        assert!(take_completed_delivery(&mut delivery, false, 0).is_none());
     }
 
     fn ground_region(min: Vec3f, max: Vec3f, px: usize) -> Region {

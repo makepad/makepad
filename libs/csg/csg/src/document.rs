@@ -1,8 +1,11 @@
 //! Bounded Splash model programs for the exact polygonal CAD engine.
 //!
-//! The script surface is the frozen verbs in `apps/sandbox/CSG_API_REVIEW.md`
-//! plus its one reviewed follow-up, `csg.implicit`. Calls only build immutable
-//! nodes; all geometry and validation remain in `libs/csg`.
+//! Calls build immutable solids and an optional declarative joint rig;
+//! geometry, binding and validation remain in `libs/csg` on the worker.
+
+#[path = "rig.rs"]
+mod rig;
+pub use rig::MeshedRig;
 
 use crate::{
     difference_all_with, dvec3, intersection_all_with, union_all_with, FinishParams, Solid, Vec3d,
@@ -159,6 +162,7 @@ pub struct CsgDocument {
     warnings: Vec<String>,
     budgets: CsgBudgets,
     deadline: Instant,
+    rig: rig::RigDraft,
 }
 impl CsgDocument {
     pub fn node_count(&self) -> usize { self.nodes.len() }
@@ -188,6 +192,8 @@ pub struct MeshedModel {
     pub parts: Vec<MeshedPart>,
     pub triangles: usize,
     pub warnings: Vec<String>,
+    /// None for legacy documents and streamed rigid partial previews.
+    pub rig: Option<MeshedRig>,
 }
 #[derive(Clone, Debug)]
 pub struct PartPreview { pub completed: usize, pub total: usize, pub model: MeshedModel }
@@ -202,6 +208,7 @@ struct EvalState {
     error: Option<String>,
     budgets: CsgBudgets,
     implicit: Vec<ImplicitSpec>,
+    rig: rig::RigDraft,
 }
 
 #[derive(Clone)]
@@ -746,6 +753,9 @@ pub fn evaluate_program(source: &str, budgets: CsgBudgets) -> Result<CsgDocument
         id if id == id!(mirror) => c_mirror(vm, &dispatch, args),
         id if id == id!(part) => c_part(vm, &dispatch, args),
         id if id == id!(anim) => c_anim(vm, &dispatch, args),
+        id if id == id!(joint) => rig::c_joint(vm, &dispatch, args),
+        id if id == id!(bind) => rig::c_bind(vm, &dispatch, args),
+        id if id == id!(clip) => rig::c_clip(vm, &dispatch, args),
         _ => dispatch.borrow_mut().fail(format!("unknown csg verb '{method}'")),
     });
     let handle = vm.bx.heap.new_handle(api_type, Box::new(CsgApiGc));
@@ -764,6 +774,10 @@ pub fn evaluate_program(source: &str, budgets: CsgBudgets) -> Result<CsgDocument
     let mut errors = vm.take_errors();
     vm.bx.captured_errors = Some(Vec::new());
     let mut implicit_error = None;
+    if errors.is_empty() && state.borrow().error.is_none() {
+        let validation = { let state = state.borrow(); state.rig.validate(&state.parts) };
+        if let Err(error) = validation { state.borrow_mut().fail(error.to_string()); }
+    }
     if errors.is_empty() && state.borrow().error.is_none() {
         let implicit = state.borrow().implicit.clone();
         for (pending, spec) in implicit.iter().enumerate() {
@@ -793,7 +807,7 @@ pub fn evaluate_program(source: &str, budgets: CsgBudgets) -> Result<CsgDocument
     if !errors.is_empty() { return Err(CsgError::Eval(errors.join("\n"))) }
     if state.parts.is_empty() { return Err(CsgError::Invalid("program declared no csg.part".into())) }
     if Instant::now() >= deadline { return Err(CsgError::Budget { what: "eval-time", found: 1, limit: 0 }) }
-    Ok(CsgDocument { nodes: state.nodes, parts: state.parts, warnings: state.warnings, budgets, deadline })
+    Ok(CsgDocument { nodes: state.nodes, parts: state.parts, warnings: state.warnings, budgets, deadline, rig: state.rig })
 }
 
 fn check_running(document: &CsgDocument) -> Result<(), CsgError> {
@@ -855,6 +869,8 @@ pub fn mesh_document(document: CsgDocument, mut preview: impl FnMut(PartPreview)
         model.parts.push(MeshedPart { name: part.name, pivot: [pivot[0] as f32, pivot[1] as f32, pivot[2] as f32], color: part.color, parent: part.parent, animation: part.animation, mesh });
         preview(PartPreview { completed: model.parts.len(), total, model: model.clone() });
     }
+    model.rig = rig::bind_document(&document, &model)?;
+    if model.rig.is_some() { check_running(&document)?; }
     Ok(model)
 }
 
