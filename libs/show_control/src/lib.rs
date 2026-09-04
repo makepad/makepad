@@ -99,7 +99,7 @@ pub struct ControllerState {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ControllerButtons {
-    pub preset: [bool; 13],
+    pub preset: [bool; SCENE_COUNT],
     pub write_preset: bool,
     pub power: bool,
 }
