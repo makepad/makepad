@@ -75,6 +75,8 @@ script_mod! {
                 align: Align{y: 0.5}
                 padding: Inset{left: 4 right: 4}
                 spacing: 8
+                cursor: MouseCursor.Hand
+                capture_overload: true
                 show_bg: true
                 draw_bg +: {color: theme.flow_surface border_radius: 6}
                 select := ButtonFlatter{
@@ -451,6 +453,23 @@ enum QueueItem {
     Run(QueueRun),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunRowHit {
+    Select,
+    Cancel,
+    Asset,
+}
+
+fn resolve_run_row_hit(cancel: bool, asset: bool, select: bool) -> Option<RunRowHit> {
+    if cancel {
+        Some(RunRowHit::Cancel)
+    } else if asset {
+        Some(RunRowHit::Asset)
+    } else {
+        select.then_some(RunRowHit::Select)
+    }
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct QueueList {
     #[deref]
@@ -552,34 +571,45 @@ impl QueueList {
                     }
                 }
                 QueueItem::Run(run) => {
-                    if item.button(cx, ids!(select)).clicked(actions) {
-                        self.model.select(&run.run_id);
-                        out.push(QueueAction::Select {
-                            run_id: run.run_id.clone(),
-                            instance: run.instance.clone(),
-                            flow: run.flow.clone(),
-                            revision: run.revision,
-                            state: run.state,
-                            planned_nodes: run.planned_nodes.clone(),
-                            started_ms: run.started_ms,
-                            finished_ms: run.finished_ms,
-                        });
-                    }
-                    if item.button(cx, ids!(cancel_run)).clicked(actions) {
-                        if run.batch.is_none() {
-                            self.model.hide_run(&run.run_id);
-                            self.sync_empty(cx);
+                    let row_clicked = item.as_view().finger_up(actions).is_some_and(|up| {
+                        up.is_primary_hit() && up.is_over && up.was_tap()
+                    });
+                    let hit = resolve_run_row_hit(
+                        item.button(cx, ids!(cancel_run)).clicked(actions),
+                        item.button(cx, ids!(asset)).clicked(actions),
+                        row_clicked,
+                    );
+                    match hit {
+                        Some(RunRowHit::Select) => {
+                            self.model.select(&run.run_id);
+                            out.push(QueueAction::Select {
+                                run_id: run.run_id.clone(),
+                                instance: run.instance.clone(),
+                                flow: run.flow.clone(),
+                                revision: run.revision,
+                                state: run.state,
+                                planned_nodes: run.planned_nodes.clone(),
+                                started_ms: run.started_ms,
+                                finished_ms: run.finished_ms,
+                            });
                         }
-                        out.push(QueueAction::CancelRun {
-                            run_id: run.run_id.clone(),
-                            instance: run.instance.clone(),
-                            batch: run.batch.is_some(),
-                        });
-                    }
-                    if item.button(cx, ids!(asset)).clicked(actions) {
-                        if let Some(asset) = run.asset.clone() {
-                            out.push(QueueAction::OpenAsset(asset));
+                        Some(RunRowHit::Cancel) => {
+                            if run.batch.is_none() {
+                                self.model.hide_run(&run.run_id);
+                                self.sync_empty(cx);
+                            }
+                            out.push(QueueAction::CancelRun {
+                                run_id: run.run_id.clone(),
+                                instance: run.instance.clone(),
+                                batch: run.batch.is_some(),
+                            });
                         }
+                        Some(RunRowHit::Asset) => {
+                            if let Some(asset) = run.asset.clone() {
+                                out.push(QueueAction::OpenAsset(asset));
+                            }
+                        }
+                        None => {}
                     }
                 }
             }
@@ -861,5 +891,21 @@ mod tests {
         assert!(model.run("run-1").is_none());
         assert!(model.run("run-2").is_some());
         assert_eq!(model.batches.len(), 1);
+    }
+
+    #[test]
+    fn run_row_children_take_precedence_over_selection() {
+        assert_eq!(
+            resolve_run_row_hit(true, false, true),
+            Some(RunRowHit::Cancel)
+        );
+        assert_eq!(
+            resolve_run_row_hit(false, true, true),
+            Some(RunRowHit::Asset)
+        );
+        assert_eq!(
+            resolve_run_row_hit(false, false, true),
+            Some(RunRowHit::Select)
+        );
     }
 }
