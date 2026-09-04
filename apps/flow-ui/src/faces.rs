@@ -2609,24 +2609,47 @@ impl FaceHost {
     /// through the inverse camera first, and a hit they claim is written
     /// back to the original event so the canvas does not claim it too.
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope, camera: Option<&Camera>) {
-        if self.locked && is_face_input_event(event) {
+        // A locked run keeps its inputs; its results stay alive: a click on a
+        // picture still opens the viewer, a clip still plays. Pointer events
+        // reach the display widgets only, keys reach nothing.
+        let locked_pointer = self.locked && is_face_input_event(event);
+        if locked_pointer
+            && !matches!(
+                event,
+                Event::MouseDown(_)
+                    | Event::MouseMove(_)
+                    | Event::MouseUp(_)
+                    | Event::TouchUpdate(_)
+                    | Event::LongPress(_)
+            )
+        {
             return;
         }
         self.set_popup_anchor_transform(cx, camera.map(Camera::popup_anchor_transform));
-        let mut roots: Vec<WidgetRef> = self
-            .event_order
-            .iter()
-            .rev()
-            .filter_map(|id| self.faces.get(id))
-            .map(|face| face.root.clone())
-            .filter(|root| !root.is_empty())
-            .collect();
-        roots.extend(
-            self.flow_face
+        let mut roots: Vec<WidgetRef> = if locked_pointer {
+            self.faces
+                .values()
+                .chain(self.flow_face.iter())
+                .flat_map(|face| face.shows.iter().map(|show| show.widget.clone()))
+                .filter(|widget| !widget.is_empty())
+                .collect()
+        } else {
+            self.event_order
                 .iter()
+                .rev()
+                .filter_map(|id| self.faces.get(id))
                 .map(|face| face.root.clone())
-                .filter(|root| !root.is_empty()),
-        );
+                .filter(|root| !root.is_empty())
+                .collect()
+        };
+        if !locked_pointer {
+            roots.extend(
+                self.flow_face
+                    .iter()
+                    .map(|face| face.root.clone())
+                    .filter(|root| !root.is_empty()),
+            );
+        }
         if roots.is_empty() {
             return;
         }
