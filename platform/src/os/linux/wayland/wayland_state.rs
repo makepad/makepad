@@ -4,7 +4,7 @@ use crate::{
     makepad_math::{dvec2, Vec2d},
     wayland::{wayland_type, xkb_sys},
     Area, DragEvent, DragItem, DragResponse, DropEvent, KeyEvent, KeyModifiers, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, TextClipboardEvent, TextInputEvent,
+    MouseCursor, MouseDownEvent, MouseMoveEvent, MouseUpEvent, TextClipboardEvent, TextInputEvent,
     WindowClosedEvent, WindowDragQueryEvent, WindowDragQueryResponse,
 };
 use std::{
@@ -21,7 +21,8 @@ use wayland_client::{
         wl_buffer, wl_callback, wl_compositor, wl_data_device, wl_data_device_manager,
         wl_data_offer, wl_data_source, wl_keyboard, wl_output,
         wl_pointer::{self, ButtonState},
-        wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface,
+        wl_region, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_subcompositor, wl_subsurface,
+        wl_surface,
     },
     Connection, Dispatch, Proxy, QueueHandle, WEnum,
 };
@@ -49,7 +50,10 @@ use wayland_protocols::{
 
 use crate::{
     cx_native::EventFlow,
-    event::{PopupDismissReason, PopupDismissedEvent, ScrollEvent, ScrollPhase, WindowGeom},
+    event::{
+        PopupDismissReason, PopupDismissedEvent, ScrollEvent, ScrollPhase, WindowGeom,
+        TAP_COUNT_DISTANCE, TAP_COUNT_TIME,
+    },
     select_timer::SelectTimers,
     wayland::wayland_app::WaylandApp,
     x11::xlib_event::XlibEvent,
@@ -61,6 +65,131 @@ use super::opengl_wayland::{WaylandPopupWindow, WaylandWindow};
 
 /// Reserved timer ID for keyboard repeat. Uses a high value to avoid conflicts with app timers.
 const KEY_REPEAT_TIMER_ID: u64 = u64::MAX - 1;
+
+fn is_caption_double_click(
+    previous: Option<(WindowId, Vec2d, u32)>,
+    window_id: WindowId,
+    pos: Vec2d,
+    time: u32,
+) -> bool {
+    previous.is_some_and(|(last_window_id, last_pos, last_time)| {
+        last_window_id == window_id
+            && time.wrapping_sub(last_time) <= (TAP_COUNT_TIME * 1000.0) as u32
+            && (pos - last_pos).length() < TAP_COUNT_DISTANCE
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CaptionPress {
+    window_id: WindowId,
+    pos: Vec2d,
+    time: u32,
+    serial: u32,
+    drag_started: bool,
+}
+
+impl CaptionPress {
+    fn start_drag_if_needed(&mut self, window_id: WindowId, pos: Vec2d) -> Option<(WindowId, u32)> {
+        if self.drag_started {
+            return None;
+        }
+        if self.window_id != window_id {
+            self.drag_started = true;
+            return None;
+        }
+        if (pos - self.pos).length() < TAP_COUNT_DISTANCE {
+            return None;
+        }
+        self.drag_started = true;
+        Some((self.window_id, self.serial))
+    }
+
+    fn completed_click(self, window_id: WindowId, pos: Vec2d) -> Option<(WindowId, Vec2d, u32)> {
+        (self.window_id == window_id
+            && !self.drag_started
+            && (pos - self.pos).length() < TAP_COUNT_DISTANCE)
+            .then_some((self.window_id, self.pos, self.time))
+    }
+}
+
+const RESIZE_EDGE_LEFT: u8 = 1 << 0;
+const RESIZE_EDGE_RIGHT: u8 = 1 << 1;
+const RESIZE_EDGE_TOP: u8 = 1 << 2;
+const RESIZE_EDGE_BOTTOM: u8 = 1 << 3;
+
+fn xdg_toplevel_edge_mask(states: &[u8], first_state: u32) -> u8 {
+    [
+        (first_state, RESIZE_EDGE_LEFT),
+        (first_state + 1, RESIZE_EDGE_RIGHT),
+        (first_state + 2, RESIZE_EDGE_TOP),
+        (first_state + 3, RESIZE_EDGE_BOTTOM),
+    ]
+    .into_iter()
+    .filter_map(|(state, edge)| WaylandState::xdg_toplevel_has_state(states, state).then_some(edge))
+    .fold(0, |mask, edge| mask | edge)
+}
+
+fn resize_edge_mask(edge: xdg_toplevel::ResizeEdge) -> u8 {
+    match edge {
+        xdg_toplevel::ResizeEdge::Top => RESIZE_EDGE_TOP,
+        xdg_toplevel::ResizeEdge::Bottom => RESIZE_EDGE_BOTTOM,
+        xdg_toplevel::ResizeEdge::Left => RESIZE_EDGE_LEFT,
+        xdg_toplevel::ResizeEdge::TopLeft => RESIZE_EDGE_TOP | RESIZE_EDGE_LEFT,
+        xdg_toplevel::ResizeEdge::BottomLeft => RESIZE_EDGE_BOTTOM | RESIZE_EDGE_LEFT,
+        xdg_toplevel::ResizeEdge::Right => RESIZE_EDGE_RIGHT,
+        xdg_toplevel::ResizeEdge::TopRight => RESIZE_EDGE_TOP | RESIZE_EDGE_RIGHT,
+        xdg_toplevel::ResizeEdge::BottomRight => RESIZE_EDGE_BOTTOM | RESIZE_EDGE_RIGHT,
+        _ => 0,
+    }
+}
+
+fn resize_edge_from_mask(mask: u8) -> Option<xdg_toplevel::ResizeEdge> {
+    use xdg_toplevel::ResizeEdge;
+    Some(
+        match (
+            mask & (RESIZE_EDGE_LEFT | RESIZE_EDGE_RIGHT),
+            mask & (RESIZE_EDGE_TOP | RESIZE_EDGE_BOTTOM),
+        ) {
+            (RESIZE_EDGE_LEFT, RESIZE_EDGE_TOP) => ResizeEdge::TopLeft,
+            (RESIZE_EDGE_LEFT, RESIZE_EDGE_BOTTOM) => ResizeEdge::BottomLeft,
+            (RESIZE_EDGE_RIGHT, RESIZE_EDGE_TOP) => ResizeEdge::TopRight,
+            (RESIZE_EDGE_RIGHT, RESIZE_EDGE_BOTTOM) => ResizeEdge::BottomRight,
+            (RESIZE_EDGE_LEFT, 0) => ResizeEdge::Left,
+            (RESIZE_EDGE_RIGHT, 0) => ResizeEdge::Right,
+            (0, RESIZE_EDGE_TOP) => ResizeEdge::Top,
+            (0, RESIZE_EDGE_BOTTOM) => ResizeEdge::Bottom,
+            _ => return None,
+        },
+    )
+}
+
+/// Narrows `edge` to the components the compositor still allows. A tiled window shares
+/// its inner borders with a neighbour and cannot resize them, but its outer ones stay
+/// free; dropping the whole corner in that case would cost the user a grab they still
+/// have, so a corner degrades to whichever of its two edges survives.
+pub(crate) fn available_resize_edge(
+    edge: xdg_toplevel::ResizeEdge,
+    unavailable: u8,
+) -> Option<xdg_toplevel::ResizeEdge> {
+    resize_edge_from_mask(resize_edge_mask(edge) & !unavailable)
+}
+
+pub(crate) fn resize_edge_cursor(
+    edge: xdg_toplevel::ResizeEdge,
+) -> wp_cursor_shape_device_v1::Shape {
+    use wp_cursor_shape_device_v1::Shape;
+    match edge {
+        xdg_toplevel::ResizeEdge::Top => Shape::NResize,
+        xdg_toplevel::ResizeEdge::Bottom => Shape::SResize,
+        xdg_toplevel::ResizeEdge::Left => Shape::WResize,
+        xdg_toplevel::ResizeEdge::Right => Shape::EResize,
+        xdg_toplevel::ResizeEdge::TopLeft => Shape::NwResize,
+        xdg_toplevel::ResizeEdge::TopRight => Shape::NeResize,
+        xdg_toplevel::ResizeEdge::BottomLeft => Shape::SwResize,
+        xdg_toplevel::ResizeEdge::BottomRight => Shape::SeResize,
+        _ => Shape::Default,
+    }
+}
 
 /// State for tracking keyboard key repeat.
 struct KeyRepeatState {
@@ -82,6 +211,7 @@ struct PendingClipboardRead {
 
 pub(crate) struct WaylandState {
     pub(crate) compositor: Option<wl_compositor::WlCompositor>,
+    pub(crate) subcompositor: Option<wl_subcompositor::WlSubcompositor>,
     pub(crate) wm_base: Option<xdg_wm_base::XdgWmBase>,
     pub(crate) seat: Option<wl_seat::WlSeat>,
     pub(crate) shm: Option<wl_shm::WlShm>,
@@ -101,12 +231,19 @@ pub(crate) struct WaylandState {
     pub(crate) pointer: Option<wl_pointer::WlPointer>,
     pub(crate) last_mouse_pos: Vec2d,
     pub(crate) pointer_serial: Option<u32>,
+    pub(crate) pointer_enter_serial: Option<u32>,
+    pub(crate) requested_cursor: MouseCursor,
     pub(crate) keyboard_serial: Option<u32>,
     pub(crate) decoration_manager: Option<zxdg_decoration_manager_v1::ZxdgDecorationManagerV1>,
     pub(crate) icon_manager: Option<xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1>,
     pub(crate) windows: Vec<WaylandWindow>,
     pub(crate) popups: Vec<WaylandPopupWindow>,
     pub(crate) pointer_window: Option<WindowId>,
+    /// Set while the pointer is over a window's shadow gutter rather than the window
+    /// itself, together with the edge a press there would resize. Kept apart from
+    /// [`Self::pointer_window`] because the gutter is outside the window: the app must
+    /// not see hover or clicks at coordinates that fall outside its own surface.
+    pub(crate) pointer_shadow: Option<(WindowId, xdg_toplevel::ResizeEdge)>,
     /// The latest un-dispatched pointer motion `(window_id, pos)`, coalesced across a whole
     /// `dispatch_pending` batch. A high-Hz mouse queues many `wl_pointer` motion+frame pairs between
     /// paints; dispatching each as a `MouseMove` runs a redundant hover hit-test across the whole
@@ -137,6 +274,9 @@ pub(crate) struct WaylandState {
         Option<zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1>,
     pub(crate) primary_selection_text: String,
     pub(crate) last_resize_edge: Option<xdg_toplevel::ResizeEdge>,
+    caption_press: Option<CaptionPress>,
+    last_caption_click: Option<(WindowId, Vec2d, u32)>,
+    consumed_pointer_buttons: MouseButton,
     event_callback: Option<Box<dyn FnMut(&mut WaylandState, XlibEvent)>>,
 
     pub(crate) scroll_accumulator: Vec2d,
@@ -170,6 +310,7 @@ impl WaylandState {
     pub fn new(event_callback: Box<dyn FnMut(&mut WaylandState, XlibEvent)>) -> Self {
         Self {
             compositor: None,
+            subcompositor: None,
             wm_base: None,
             seat: None,
             shm: None,
@@ -193,9 +334,12 @@ impl WaylandState {
             windows: Vec::new(),
             popups: Vec::new(),
             pointer_window: None,
+            pointer_shadow: None,
             pending_motion: None,
             keyboard_window: None,
             pointer_serial: None,
+            pointer_enter_serial: None,
+            requested_cursor: MouseCursor::Default,
             keyboard_serial: None,
             modifiers: KeyModifiers::default(),
             xkb_state: None,
@@ -211,6 +355,9 @@ impl WaylandState {
             primary_selection_text: String::new(),
             last_mouse_pos: dvec2(0., 0.),
             last_resize_edge: None,
+            caption_press: None,
+            last_caption_click: None,
+            consumed_pointer_buttons: MouseButton::empty(),
             timers: SelectTimers::new(),
             event_callback: Some(event_callback),
             scroll_accumulator: dvec2(0.0, 0.0),
@@ -255,6 +402,114 @@ impl WaylandState {
                     .map(|win| win.xdg_surface.clone())
             })
     }
+
+    fn clear_resize_edge(&mut self, force_cursor_update: bool) {
+        if self.last_resize_edge.take().is_some() || force_cursor_update {
+            if let (Some(cursor), Some(serial)) =
+                (self.cursor_shape.as_ref(), self.pointer_enter_serial)
+            {
+                cursor.set_shape(serial, self.requested_cursor.into());
+            }
+        }
+    }
+
+    fn update_resize_edge(
+        &mut self,
+        window_id: WindowId,
+        pos: Vec2d,
+        force_cursor_update: bool,
+    ) {
+        self.last_mouse_pos = pos;
+        let window_state = self
+            .windows
+            .iter()
+            .find(|window| window.window_id == window_id)
+            .filter(|window| {
+                window.uses_client_side_decorations
+                    && !window.is_maximized
+                    && !window.is_fullscreen
+                    // The gutter already owns the grabs, and hit-testing here as well would
+                    // charge every pointer motion near an edge for a whole-widget-tree
+                    // `WindowDragQuery` dispatch that cannot change the answer.
+                    && !window.csd_shadow_gutter_active()
+            })
+            .map(|window| {
+                (
+                    window.window_geom.inner_size,
+                    window.unavailable_resize_edges,
+                )
+            });
+        // The gutter outside the window is the primary way to resize, so these interior
+        // bands only need to cover the case where the shadow could not be created and
+        // there is no gutter to aim at. They stay narrow because every pixel they claim
+        // is a pixel the app's own widgets do not get.
+        let mut edge = window_state.and_then(|(size, unavailable)| {
+            let mut mask = 0;
+            if pos.x < 10.0 {
+                mask |= RESIZE_EDGE_LEFT;
+            } else if pos.x >= size.x - 10.0 {
+                mask |= RESIZE_EDGE_RIGHT;
+            }
+            if pos.y < 10.0 {
+                mask |= RESIZE_EDGE_TOP;
+            } else if pos.y >= size.y - 10.0 {
+                mask |= RESIZE_EDGE_BOTTOM;
+            }
+            // Away from a corner the band narrows to 5 px, so a single-axis hit outside
+            // that has to fall through to the app.
+            if mask.count_ones() == 1
+                && pos.x >= 5.0
+                && pos.x < size.x - 5.0
+                && pos.y >= 5.0
+                && pos.y < size.y - 5.0
+            {
+                return None;
+            }
+            resize_edge_from_mask(mask & !unavailable)
+        });
+        if edge.is_some() {
+            let response = Rc::new(Cell::new(WindowDragQueryResponse::NoAnswer));
+            self.do_callback(XlibEvent::WindowDragQuery(WindowDragQueryEvent {
+                window_id,
+                abs: pos,
+                response: response.clone(),
+            }));
+            if matches!(response.get(), WindowDragQueryResponse::Client) {
+                edge = None;
+            }
+        }
+        if let Some(resize_edge) = edge {
+            self.last_resize_edge = Some(resize_edge);
+            if let (Some(cursor), Some(serial)) =
+                (self.cursor_shape.as_ref(), self.pointer_enter_serial)
+            {
+                cursor.set_shape(serial, resize_edge_cursor(resize_edge));
+            }
+        } else {
+            self.clear_resize_edge(force_cursor_update);
+        }
+    }
+
+    /// Handles the pointer entering one of a window's shadow surfaces: the pointer is in
+    /// the gutter, outside the window proper, where the only gesture is a resize. Returns
+    /// false when `surface` belongs to no shadow, leaving the caller's normal path intact.
+    fn enter_shadow_gutter(&mut self, surface: &wl_surface::WlSurface) -> bool {
+        let surface_id = surface.id();
+        let Some((window_id, edge, shape)) = self.windows.iter().find_map(|window| {
+            window
+                .csd_shadow_resize_for_surface(&surface_id)
+                .map(|(edge, shape)| (window.window_id, edge, shape))
+        }) else {
+            return false;
+        };
+        self.pointer_shadow = Some((window_id, edge));
+        if let (Some(cursor), Some(serial)) =
+            (self.cursor_shape.as_ref(), self.pointer_enter_serial)
+        {
+            cursor.set_shape(serial, shape);
+        }
+        true
+    }
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
@@ -278,9 +533,19 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
                         wl_registry.bind::<wl_compositor::WlCompositor, _, _>(name, 1, qhandle, ());
                     state.compositor = Some(compositor);
                 }
+                "wl_subcompositor" => {
+                    let subcompositor = wl_registry
+                        .bind::<wl_subcompositor::WlSubcompositor, _, _>(name, 1, qhandle, ());
+                    state.subcompositor = Some(subcompositor);
+                }
                 "xdg_wm_base" => {
                     let wm_base =
-                        wl_registry.bind::<xdg_wm_base::XdgWmBase, _, _>(name, 1, qhandle, ());
+                        wl_registry.bind::<xdg_wm_base::XdgWmBase, _, _>(
+                            name,
+                            version.min(7),
+                            qhandle,
+                            (),
+                        );
                     state.wm_base = Some(wm_base);
                 }
                 "wl_seat" => {
@@ -453,7 +718,14 @@ impl Dispatch<xdg_toplevel::XdgToplevel, WindowId> for WaylandState {
                 height,
                 states,
             } => {
-                if let Some(window) = state.windows.iter().find(|win| win.window_id == *window_id) {
+                let mut geom_change = None;
+                let mut disable_client_resize = false;
+                let mut refresh_client_resize = false;
+                if let Some(window) = state
+                    .windows
+                    .iter_mut()
+                    .find(|win| win.window_id == *window_id)
+                {
                     let inner_size = if width > 0 && height > 0 {
                         dvec2(width as f64, height as f64)
                     } else {
@@ -463,13 +735,37 @@ impl Dispatch<xdg_toplevel::XdgToplevel, WindowId> for WaylandState {
                         WaylandState::xdg_toplevel_has_state(&states, 1 /* maximized */);
                     let is_fullscreen =
                         WaylandState::xdg_toplevel_has_state(&states, 2 /* fullscreen */);
-                    state.do_callback(XlibEvent::WindowGeomChange(WindowGeomChangeEvent {
+                    let is_active =
+                        WaylandState::xdg_toplevel_has_state(&states, 4 /* activated */);
+                    let tiled_edges = xdg_toplevel_edge_mask(&states, 5 /* tiled_left */);
+                    let constrained_edges =
+                        xdg_toplevel_edge_mask(&states, 10 /* constrained_left */);
+                    let unavailable_resize_edges = tiled_edges | constrained_edges;
+                    let resize_was_disabled = window.is_maximized || window.is_fullscreen;
+                    let resize_edges_changed =
+                        window.unavailable_resize_edges != unavailable_resize_edges;
+                    window.is_maximized = is_maximized;
+                    window.is_fullscreen = is_fullscreen;
+                    window.is_tiled = tiled_edges != 0;
+                    window.is_active = is_active;
+                    window.unavailable_resize_edges = unavailable_resize_edges;
+                    disable_client_resize = is_maximized || is_fullscreen;
+                    // A size change moves the right and bottom bands out from under a
+                    // stationary pointer. Without re-running the hit test the window keeps
+                    // a resize cursor it no longer has an edge for, and the next click is
+                    // swallowed starting a resize from nowhere.
+                    refresh_client_resize = resize_edges_changed
+                        || resize_was_disabled != disable_client_resize
+                        || window.window_geom.inner_size != inner_size;
+                    geom_change = Some(WindowGeomChangeEvent {
                         window_id: *window_id,
                         old_geom: window.window_geom.clone(),
                         new_geom: WindowGeom {
                             dpi_factor: window.window_geom.dpi_factor,
                             can_fullscreen: false,
                             xr_is_presenting: false,
+                            // Preserve the established Makepad API: on Wayland this
+                            // flag has always represented maximized or fullscreen.
                             is_fullscreen: is_fullscreen || is_maximized,
                             is_topmost: false,
                             position: dvec2(0., 0.),
@@ -477,7 +773,17 @@ impl Dispatch<xdg_toplevel::XdgToplevel, WindowId> for WaylandState {
                             outer_size: inner_size,
                             ..Default::default()
                         },
-                    }));
+                    });
+                }
+                if let Some(event) = geom_change {
+                    state.do_callback(XlibEvent::WindowGeomChange(event));
+                }
+                if state.pointer_window == Some(*window_id) {
+                    if disable_client_resize {
+                        state.clear_resize_edge(false);
+                    } else if refresh_client_resize {
+                        state.update_resize_edge(*window_id, state.last_mouse_pos, false);
+                    }
                 }
             }
             xdg_toplevel::Event::Close => {
@@ -488,6 +794,38 @@ impl Dispatch<xdg_toplevel::XdgToplevel, WindowId> for WaylandState {
                 }))
             }
             _ => {}
+        }
+    }
+}
+
+impl Dispatch<zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1, WindowId>
+    for WaylandState
+{
+    fn event(
+        state: &mut Self,
+        _decoration: &zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1,
+        event: zxdg_toplevel_decoration_v1::Event,
+        window_id: &WindowId,
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        let zxdg_toplevel_decoration_v1::Event::Configure { mode } = event else {
+            return;
+        };
+        let uses_client_side_decorations = match mode {
+            WEnum::Value(zxdg_toplevel_decoration_v1::Mode::ServerSide) => false,
+            WEnum::Value(zxdg_toplevel_decoration_v1::Mode::ClientSide)
+            | WEnum::Value(_)
+            | WEnum::Unknown(_) => true,
+        };
+        if let Some(window) = state
+            .windows
+            .iter_mut()
+            .find(|window| window.window_id == *window_id)
+        {
+            // Decoration state is double-buffered with xdg_surface state. Keep
+            // only the latest mode and apply it at the matching surface configure.
+            window.pending_client_side_decorations = Some(uses_client_side_decorations);
         }
     }
 }
@@ -502,19 +840,57 @@ impl Dispatch<xdg_surface::XdgSurface, WindowId> for WaylandState {
     ) {
         if let xdg_surface::Event::Configure { serial, .. } = event {
             xdg_surface.ack_configure(serial);
-            let mut first_configure_event = None;
+            let mut configure_event = None;
+            let mut clear_resize_edge = false;
+            let mut update_resize_edge = false;
+            // Proxy clones are cheap handles and let us initialize CSD shadow
+            // resources while mutably borrowing the matching window.
+            let compositor = state.compositor.clone();
+            let subcompositor = state.subcompositor.clone();
+            let shm = state.shm.clone();
+            let viewporter = state.viewporter.clone();
             if let Some(window) = state
                 .windows
                 .iter_mut()
                 .find(|win| win.window_id == *window_id)
             {
+                let decoration_changed =
+                    if let Some(uses_csd) = window.pending_client_side_decorations.take() {
+                        if uses_csd == window.uses_client_side_decorations {
+                            false
+                        } else {
+                            if uses_csd {
+                                if let Some(compositor) = compositor.as_ref() {
+                                    window.ensure_csd_shadow(
+                                        compositor,
+                                        subcompositor.as_ref(),
+                                        shm.as_ref(),
+                                        viewporter.as_ref(),
+                                        qhandle,
+                                    );
+                                }
+                            }
+                            clear_resize_edge = !uses_csd;
+                            update_resize_edge = uses_csd;
+                            window.uses_client_side_decorations = uses_csd;
+                            true
+                        }
+                    } else {
+                        false
+                    };
                 if !window.configured {
                     let mut old_geom = window.window_geom.clone();
                     old_geom.inner_size = dvec2(0., 0.);
                     old_geom.outer_size = dvec2(0., 0.);
-                    first_configure_event = Some(WindowGeomChangeEvent {
+                    configure_event = Some(WindowGeomChangeEvent {
                         window_id: *window_id,
                         old_geom,
+                        new_geom: window.window_geom.clone(),
+                    });
+                } else if decoration_changed {
+                    configure_event = Some(WindowGeomChangeEvent {
+                        window_id: *window_id,
+                        old_geom: window.window_geom.clone(),
                         new_geom: window.window_geom.clone(),
                     });
                 }
@@ -528,7 +904,7 @@ impl Dispatch<xdg_surface::XdgSurface, WindowId> for WaylandState {
                     let mut old_geom = window.window_geom.clone();
                     old_geom.inner_size = dvec2(0., 0.);
                     old_geom.outer_size = dvec2(0., 0.);
-                    first_configure_event = Some(WindowGeomChangeEvent {
+                    configure_event = Some(WindowGeomChangeEvent {
                         window_id: *window_id,
                         old_geom,
                         new_geom: window.window_geom.clone(),
@@ -536,8 +912,13 @@ impl Dispatch<xdg_surface::XdgSurface, WindowId> for WaylandState {
                 }
                 window.configured = true;
             }
-            if let Some(event) = first_configure_event {
+            if let Some(event) = configure_event {
                 state.do_callback(XlibEvent::WindowGeomChange(event));
+            }
+            if clear_resize_edge && state.pointer_window == Some(*window_id) {
+                state.clear_resize_edge(false);
+            } else if update_resize_edge && state.pointer_window == Some(*window_id) {
+                state.update_resize_edge(*window_id, state.last_mouse_pos, false);
             }
         }
     }
@@ -1125,12 +1506,26 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
             wl_pointer::Event::Enter {
                 serial,
                 surface,
-                surface_x: _,
-                surface_y: _,
+                surface_x,
+                surface_y,
             } => {
                 state.pointer_serial = Some(serial);
+                state.pointer_enter_serial = Some(serial);
                 state.flush_pending_clipboard_copy(qhandle, serial);
+                state.clear_resize_edge(true);
+                state.pointer_shadow = None;
+                state.pointer_window = None;
+                if state.enter_shadow_gutter(&surface) {
+                    return;
+                }
                 state.pointer_window = state.window_id_for_surface(&surface);
+                if let Some(window_id) = state.pointer_window {
+                    let pos = dvec2(surface_x as f64, surface_y as f64);
+                    state.last_mouse_pos = pos;
+                    // Deliver the enter position through the normal coalesced motion path so
+                    // stationary pointers establish hover state and the right app cursor.
+                    state.pending_motion = Some((window_id, pos));
+                }
             }
             wl_pointer::Event::Leave { serial, surface: _ } => {
                 // Dispatch any buffered motion before the pointer leaves, so the final hover
@@ -1139,93 +1534,40 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                 state.pointer_serial = Some(serial);
                 state.flush_pending_clipboard_copy(qhandle, serial);
                 state.pointer_window = None;
+                state.pointer_shadow = None;
+                state.pointer_enter_serial = None;
                 state.last_resize_edge = None;
+                state.caption_press = None;
+                state.last_caption_click = None;
             }
             wl_pointer::Event::Motion {
-                time,
+                time: _,
                 surface_x,
                 surface_y,
             } => {
                 if let Some(window_id) = state.pointer_window {
                     let pos = dvec2(surface_x as f64, surface_y as f64);
                     state.last_mouse_pos = pos;
-
-                    // Edge-resize detection (matches X11 backend thresholds)
-                    let window_size = state
-                        .windows
-                        .iter()
-                        .find(|w| w.window_id == window_id)
-                        .map(|w| w.window_geom.inner_size);
-                    if let Some(ws) = window_size {
-                        let edge = if pos.x < 10.0 && pos.y < 10.0 {
-                            Some((
-                                xdg_toplevel::ResizeEdge::TopLeft,
-                                wp_cursor_shape_device_v1::Shape::NwResize,
-                            ))
-                        } else if pos.x < 10.0 && pos.y >= ws.y - 10.0 {
-                            Some((
-                                xdg_toplevel::ResizeEdge::BottomLeft,
-                                wp_cursor_shape_device_v1::Shape::SwResize,
-                            ))
-                        } else if pos.x < 5.0 {
-                            Some((
-                                xdg_toplevel::ResizeEdge::Left,
-                                wp_cursor_shape_device_v1::Shape::WResize,
-                            ))
-                        } else if pos.x >= ws.x - 10.0 && pos.y < 10.0 {
-                            Some((
-                                xdg_toplevel::ResizeEdge::TopRight,
-                                wp_cursor_shape_device_v1::Shape::NeResize,
-                            ))
-                        } else if pos.x >= ws.x - 10.0 && pos.y >= ws.y - 10.0 {
-                            Some((
-                                xdg_toplevel::ResizeEdge::BottomRight,
-                                wp_cursor_shape_device_v1::Shape::SeResize,
-                            ))
-                        } else if pos.x >= ws.x - 5.0 {
-                            Some((
-                                xdg_toplevel::ResizeEdge::Right,
-                                wp_cursor_shape_device_v1::Shape::EResize,
-                            ))
-                        } else if pos.y < 5.0 {
-                            Some((
-                                xdg_toplevel::ResizeEdge::Top,
-                                wp_cursor_shape_device_v1::Shape::NResize,
-                            ))
-                        } else if pos.y >= ws.y - 5.0 {
-                            Some((
-                                xdg_toplevel::ResizeEdge::Bottom,
-                                wp_cursor_shape_device_v1::Shape::SResize,
-                            ))
-                        } else {
-                            None
-                        };
-                        if let Some((resize_edge, cursor_shape)) = edge {
-                            state.last_resize_edge = Some(resize_edge);
-                            if let (Some(cursor_dev), Some(serial)) =
-                                (state.cursor_shape.as_ref(), state.pointer_serial)
-                            {
-                                cursor_dev.set_shape(serial, cursor_shape);
-                            }
-                        } else {
-                            if state.last_resize_edge.is_some() {
-                                if let (Some(cursor_dev), Some(serial)) =
-                                    (state.cursor_shape.as_ref(), state.pointer_serial)
-                                {
-                                    cursor_dev.set_shape(
-                                        serial,
-                                        wp_cursor_shape_device_v1::Shape::Default,
-                                    );
-                                }
-                            }
-                            state.last_resize_edge = None;
+                    let drag_request = state
+                        .caption_press
+                        .as_mut()
+                        .and_then(|press| press.start_drag_if_needed(window_id, pos));
+                    if let Some((press_window, press_serial)) = drag_request {
+                        state.last_caption_click = None;
+                        if let (Some(seat), Some(window)) = (
+                            state.seat.as_ref(),
+                            state
+                                .windows
+                                .iter()
+                                .find(|window| window.window_id == press_window),
+                        ) {
+                            window.toplevel._move(seat, press_serial);
                         }
                     }
 
                     // Buffer this motion instead of dispatching immediately; the latest one is
                     // flushed as a single MouseMove once the whole event batch is drained (or before
-                    // an intervening button/leave). The edge-resize cursor above still updates per
-                    // motion so the resize cursor stays responsive. See `flush_pending_motion`.
+                    // an intervening button/leave). See `flush_pending_motion`.
                     state.pending_motion = Some((window_id, pos));
                 }
             }
@@ -1243,7 +1585,12 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                 // Outside-click popup dismissal: if press lands on a
                 // regular window while popups are open, fire dismiss.
                 if let WEnum::Value(ButtonState::Pressed) = key_state {
-                    if let Some(win_id) = state.pointer_window {
+                    // A press in the shadow gutter is as much "outside" as one on the
+                    // window, so it dismisses popups too.
+                    if let Some(win_id) = state.pointer_window.or(state
+                        .pointer_shadow
+                        .map(|(window_id, _)| window_id))
+                    {
                         if state.windows.iter().any(|w| w.window_id == win_id)
                             && !state.popups.is_empty()
                         {
@@ -1258,26 +1605,47 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                         }
                     }
                 }
+                // In the gutter the only gesture is a resize, and the app is not told about
+                // it: these coordinates are outside its surface, and the compositor takes
+                // the pointer grab for the duration of the drag.
+                if let Some((window_id, resize_edge)) = state.pointer_shadow {
+                    if let (WEnum::Value(ButtonState::Pressed), Some(MouseButton::PRIMARY)) =
+                        (key_state, wayland_type::from_mouse(button))
+                    {
+                        if let (Some(seat), Some(window)) = (
+                            state.seat.as_ref(),
+                            state.windows.iter().find(|win| win.window_id == window_id),
+                        ) {
+                            window.toplevel.resize(seat, serial, resize_edge);
+                        }
+                    }
+                    return;
+                }
                 if let Some(btn) = wayland_type::from_mouse(button) {
                     if let Some(window_id) = state.pointer_window {
                         match key_state {
                             WEnum::Value(ButtonState::Pressed) => {
-                                if btn == MouseButton::PRIMARY {
-                                    if state.windows.iter().any(|win| win.window_id == window_id) {
-                                        // Edge resize takes priority
-                                        if let Some(resize_edge) = state.last_resize_edge.take() {
-                                            if let (Some(seat), Some(window)) = (
-                                                state.seat.as_ref(),
-                                                state
-                                                    .windows
-                                                    .iter()
-                                                    .find(|win| win.window_id == window_id),
-                                            ) {
-                                                window.toplevel.resize(seat, serial, resize_edge);
-                                                return;
-                                            }
-                                        }
-
+                                // A surface can disappear before delivering a release. Do not let
+                                // that stale bit consume the next independent press/release pair.
+                                state.consumed_pointer_buttons.remove(btn);
+                                let previous_caption_click = if btn == MouseButton::PRIMARY {
+                                    state.last_caption_click.take()
+                                } else {
+                                    state.last_caption_click = None;
+                                    None
+                                };
+                                state.caption_press = None;
+                                if btn == MouseButton::PRIMARY
+                                    || btn == MouseButton::SECONDARY
+                                {
+                                    let uses_client_side_decorations = state
+                                        .windows
+                                        .iter()
+                                        .find(|win| win.window_id == window_id)
+                                        .is_some_and(|win| {
+                                            win.uses_client_side_decorations && !win.is_fullscreen
+                                        });
+                                    if uses_client_side_decorations {
                                         let response =
                                             Rc::new(Cell::new(WindowDragQueryResponse::NoAnswer));
                                         state.do_callback(XlibEvent::WindowDragQuery(
@@ -1287,10 +1655,41 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                                                 response: response.clone(),
                                             },
                                         ));
+                                        let response = response.get();
+                                        // The top resize zone overlaps the caption vertically, but
+                                        // caption buttons must keep their full-height click target.
+                                        if btn == MouseButton::PRIMARY
+                                            && !matches!(
+                                                response,
+                                                WindowDragQueryResponse::Client
+                                            )
+                                        {
+                                            if let Some(resize_edge) = state.last_resize_edge {
+                                                if let (Some(seat), Some(window)) = (
+                                                    state.seat.as_ref(),
+                                                    state
+                                                        .windows
+                                                        .iter()
+                                                        .find(|win| win.window_id == window_id),
+                                                ) {
+                                                    window
+                                                        .toplevel
+                                                        .resize(seat, serial, resize_edge);
+                                                    state.consumed_pointer_buttons.insert(btn);
+                                                    return;
+                                                }
+                                            }
+                                        }
                                         if matches!(
-                                            response.get(),
+                                            response,
                                             WindowDragQueryResponse::Caption
                                         ) {
+                                            let is_double_click = is_caption_double_click(
+                                                previous_caption_click,
+                                                window_id,
+                                                state.last_mouse_pos,
+                                                time,
+                                            );
                                             if let (Some(seat), Some(window)) = (
                                                 state.seat.as_ref(),
                                                 state
@@ -1298,7 +1697,33 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                                                     .iter()
                                                     .find(|win| win.window_id == window_id),
                                             ) {
-                                                window.toplevel._move(seat, serial);
+                                                if btn == MouseButton::SECONDARY {
+                                                    window.toplevel.show_window_menu(
+                                                        seat,
+                                                        serial,
+                                                        state.last_mouse_pos.x as i32,
+                                                        state.last_mouse_pos.y as i32,
+                                                    );
+                                                    state.consumed_pointer_buttons.insert(btn);
+                                                    return;
+                                                }
+                                                if is_double_click {
+                                                    if window.is_maximized {
+                                                        window.toplevel.unset_maximized();
+                                                    } else {
+                                                        window.toplevel.set_maximized();
+                                                    }
+                                                    state.consumed_pointer_buttons.insert(btn);
+                                                    return;
+                                                }
+                                                state.caption_press = Some(CaptionPress {
+                                                    window_id,
+                                                    pos: state.last_mouse_pos,
+                                                    time,
+                                                    serial,
+                                                    drag_started: false,
+                                                });
+                                                state.consumed_pointer_buttons.insert(btn);
                                                 return;
                                             }
                                         }
@@ -1314,6 +1739,20 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                                 }))
                             }
                             WEnum::Value(ButtonState::Released) => {
+                                let consumed = state.consumed_pointer_buttons.contains(btn);
+                                if consumed {
+                                    state.consumed_pointer_buttons.remove(btn);
+                                }
+                                if btn == MouseButton::PRIMARY {
+                                    if let Some(press) = state.caption_press.take() {
+                                        state.last_caption_click =
+                                            press.completed_click(window_id, state.last_mouse_pos);
+                                        return;
+                                    }
+                                }
+                                if consumed {
+                                    return;
+                                }
                                 state.do_callback(XlibEvent::MouseUp(MouseUpEvent {
                                     abs: state.last_mouse_pos,
                                     button: btn,
@@ -1502,8 +1941,10 @@ delegate_noop!(WaylandState: ignore wl_surface::WlSurface);
 delegate_noop!(WaylandState: ignore wp_cursor_shape_device_v1::WpCursorShapeDeviceV1);
 delegate_noop!(WaylandState: ignore wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
 delegate_noop!(WaylandState: ignore wl_compositor::WlCompositor);
+delegate_noop!(WaylandState: ignore wl_region::WlRegion);
+delegate_noop!(WaylandState: ignore wl_subcompositor::WlSubcompositor);
+delegate_noop!(WaylandState: ignore wl_subsurface::WlSubsurface);
 delegate_noop!(WaylandState: ignore zxdg_decoration_manager_v1::ZxdgDecorationManagerV1);
-delegate_noop!(WaylandState: ignore zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1);
 delegate_noop!(WaylandState: ignore xdg_toplevel_icon_v1::XdgToplevelIconV1);
 delegate_noop!(WaylandState: ignore wl_shm::WlShm);
 delegate_noop!(WaylandState: ignore wl_shm_pool::WlShmPool);
@@ -1766,6 +2207,7 @@ impl WaylandState {
         {
             return;
         }
+        self.update_resize_edge(window_id, pos, false);
         self.do_callback(XlibEvent::MouseMove(MouseMoveEvent {
                 lock_delta: Default::default(),
             abs: pos,
@@ -1859,5 +2301,149 @@ impl WaylandState {
     }
     pub fn time_now(&self) -> f64 {
         self.timers.time_now()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn encoded_states(states: &[u32]) -> Vec<u8> {
+        states
+            .iter()
+            .flat_map(|state| state.to_ne_bytes())
+            .collect()
+    }
+
+    #[test]
+    fn caption_double_click_requires_matching_window_time_and_position() {
+        let window = WindowId(2, 1);
+        let previous = Some((window, dvec2(10.0, 10.0), u32::MAX - 100));
+        assert!(is_caption_double_click(
+            previous,
+            window,
+            dvec2(12.0, 11.0),
+            50
+        ));
+        assert!(!is_caption_double_click(
+            previous,
+            WindowId(3, 1),
+            dvec2(12.0, 11.0),
+            50
+        ));
+        assert!(!is_caption_double_click(
+            previous,
+            window,
+            dvec2(20.0, 10.0),
+            50
+        ));
+        assert!(!is_caption_double_click(
+            previous,
+            window,
+            dvec2(12.0, 11.0),
+            600
+        ));
+    }
+
+    #[test]
+    fn caption_press_waits_for_drag_threshold_before_requesting_move() {
+        let window = WindowId(2, 1);
+        let mut press = CaptionPress {
+            window_id: window,
+            pos: dvec2(10.0, 10.0),
+            time: 100,
+            serial: 77,
+            drag_started: false,
+        };
+
+        assert_eq!(
+            press.start_drag_if_needed(window, dvec2(13.0, 13.0)),
+            None
+        );
+        assert!(!press.drag_started);
+        assert_eq!(
+            press.completed_click(window, dvec2(13.0, 13.0)),
+            Some((window, dvec2(10.0, 10.0), 100))
+        );
+    }
+
+    #[test]
+    fn caption_drag_requests_move_once_and_cannot_complete_as_click() {
+        let window = WindowId(2, 1);
+        let mut press = CaptionPress {
+            window_id: window,
+            pos: dvec2(10.0, 10.0),
+            time: 100,
+            serial: 77,
+            drag_started: false,
+        };
+
+        assert_eq!(
+            press.start_drag_if_needed(window, dvec2(15.0, 10.0)),
+            Some((window, 77))
+        );
+        assert!(press.drag_started);
+        assert_eq!(
+            press.start_drag_if_needed(window, dvec2(20.0, 10.0)),
+            None
+        );
+        assert_eq!(press.completed_click(window, dvec2(10.0, 10.0)), None);
+    }
+
+    #[test]
+    fn tiled_and_constrained_states_disable_only_their_resize_edges() {
+        let states = encoded_states(&[5, 7, 11, 13]);
+        let tiled = xdg_toplevel_edge_mask(&states, 5);
+        let constrained = xdg_toplevel_edge_mask(&states, 10);
+        assert_eq!(tiled, RESIZE_EDGE_LEFT | RESIZE_EDGE_TOP);
+        assert_eq!(constrained, RESIZE_EDGE_RIGHT | RESIZE_EDGE_BOTTOM);
+        // A corner whose edges are both free is kept whole.
+        assert_eq!(
+            available_resize_edge(xdg_toplevel::ResizeEdge::BottomRight, tiled),
+            Some(xdg_toplevel::ResizeEdge::BottomRight)
+        );
+        // A corner with one tiled edge degrades to the edge that is still free,
+        // rather than losing the grab entirely.
+        assert_eq!(
+            available_resize_edge(xdg_toplevel::ResizeEdge::TopLeft, constrained),
+            Some(xdg_toplevel::ResizeEdge::TopLeft)
+        );
+        assert_eq!(
+            available_resize_edge(xdg_toplevel::ResizeEdge::TopRight, tiled),
+            Some(xdg_toplevel::ResizeEdge::Right)
+        );
+        assert_eq!(
+            available_resize_edge(xdg_toplevel::ResizeEdge::BottomLeft, constrained),
+            Some(xdg_toplevel::ResizeEdge::Left)
+        );
+        // Both components gone means no grab at all.
+        assert_eq!(
+            available_resize_edge(xdg_toplevel::ResizeEdge::TopLeft, tiled),
+            None
+        );
+        assert_eq!(
+            available_resize_edge(xdg_toplevel::ResizeEdge::Top, tiled),
+            None
+        );
+    }
+
+    #[test]
+    fn resize_edge_cursor_matches_every_edge() {
+        use wp_cursor_shape_device_v1::Shape;
+        use xdg_toplevel::ResizeEdge;
+        for (edge, shape) in [
+            (ResizeEdge::Top, Shape::NResize),
+            (ResizeEdge::Bottom, Shape::SResize),
+            (ResizeEdge::Left, Shape::WResize),
+            (ResizeEdge::Right, Shape::EResize),
+            (ResizeEdge::TopLeft, Shape::NwResize),
+            (ResizeEdge::TopRight, Shape::NeResize),
+            (ResizeEdge::BottomLeft, Shape::SwResize),
+            (ResizeEdge::BottomRight, Shape::SeResize),
+        ] {
+            assert_eq!(resize_edge_cursor(edge), shape);
+            // Every edge must survive a round trip through the mask it degrades with.
+            assert_eq!(available_resize_edge(edge, 0), Some(edge));
+        }
     }
 }
