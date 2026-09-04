@@ -559,7 +559,15 @@ impl<C: Clone> BrowseModel<C> {
             .unwrap_or(0)
             .saturating_add(1);
         self.stamps.insert(asset, stamp);
-        self.place(asset);
+        // Always the pending column — even if a query-change re-sort is
+        // still latched. GENERATE is "what just came in", not another
+        // body append that waits on the next listing sort.
+        if !self.order.contains(&asset) && !self.pending.contains(&asset) {
+            self.pending.push(asset);
+            if self.pending.len() >= PENDING_COLUMN {
+                self.merge_pending();
+            }
+        }
         self.index.insert(asset, self.tiles.len());
         self.tiles.push(Tile {
             asset,
@@ -1702,6 +1710,33 @@ mod tests {
 
         // Tiles already resolving or resolved are left alone.
         assert!(m.resolve_visible_first(&[first_two[0]]).is_empty());
+    }
+
+    #[test]
+    fn ingest_published_lands_on_the_pending_column_without_a_listing() {
+        let mut m = BrowseModel::<u8>::new(AssetKind::Video, "");
+        let g = search_gen(&m.refresh());
+        m.page_arrived(g, 0, true, vec![hit(1)], 1, None);
+        assert_eq!(m.tiles().len(), 1);
+        let asset = AssetId::from_bytes([9; 16]);
+        let cmds = m.ingest_published(asset, "fresh clip".into(), AssetKind::Video);
+        assert!(!cmds.is_empty(), "the new tile must resolve");
+        assert!(m.tile(&asset).is_some());
+        assert_eq!(m.pending_len(), 1);
+        assert_eq!(m.display_order()[0], Some(asset), "newest clip leads");
+        let g = search_gen(&m.refresh());
+        m.page_arrived(g, 0, true, vec![hit(1)], 1, None);
+        assert!(m.tile(&asset).is_some(), "sticky survives a re-sort listing");
+    }
+
+    #[test]
+    fn ingest_published_on_the_effect_lane_is_counted_not_drawn() {
+        let mut m = BrowseModel::<u8>::new(AssetKind::VjEffect, "");
+        let asset = AssetId::from_bytes([7; 16]);
+        let cmds = m.ingest_published(asset, "clip".into(), AssetKind::Video);
+        assert!(cmds.is_empty());
+        assert!(m.tile(&asset).is_none());
+        assert_eq!(m.elsewhere(), 1);
     }
 }
 
