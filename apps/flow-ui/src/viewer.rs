@@ -14,6 +14,8 @@ const ZOOM_STEP: f64 = 1.1;
 const DRAG_THRESHOLD: f64 = 4.0;
 const CLOSE_BUTTON_SIZE: f64 = 28.0;
 const CLOSE_BUTTON_MARGIN: f64 = 16.0;
+const GALLERY_BUTTON_WIDTH: f64 = 44.0;
+const GALLERY_BUTTON_HEIGHT: f64 = 64.0;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -28,6 +30,24 @@ script_mod! {
                 return self.image.sample(self.pos * self.scale + self.shift)
                     * self.viewer_opacity
             }
+        }
+    }
+
+    let GalleryButton = ButtonFlat{
+        width: Fill
+        height: Fill
+        margin: 0
+        padding: 0
+        draw_bg +: {
+            color: #x17191eef
+            color_hover: theme.flow_surface_hover
+            color_down: theme.flow_surface_raised
+            border_color: theme.flow_edge
+            border_radius: 12.0
+        }
+        draw_text +: {
+            color: theme.flow_text
+            text_style: theme.font_regular{font_size: 28}
         }
     }
 
@@ -102,6 +122,23 @@ script_mod! {
                     height: Fill
                     visible: false
                 }
+                text_panel := View{
+                    width: Fill
+                    height: Fill
+                    visible: false
+                    padding: Inset{left: 64 right: 64 top: 56 bottom: 8}
+                    document := TextInput{
+                        width: Fill
+                        height: Fill
+                        is_multiline: true
+                        is_read_only: true
+                        empty_text: ""
+                        draw_text +: {
+                            color: theme.flow_text
+                            text_style: theme.font_code{font_size: 11}
+                        }
+                    }
+                }
                 splat := mod.widgets.SplatView{
                     width: Fill
                     height: Fill
@@ -117,7 +154,7 @@ script_mod! {
             padding: Inset{left: 18 right: 18 bottom: 16}
             bar := ViewerFade{
                 width: Fill
-                height: 42
+                height: 48
                 flow: Overlay
                 bar_surface := RoundedShadowView{
                     width: Fill
@@ -135,12 +172,20 @@ script_mod! {
                         shadow_color: #x00000088
                         shadow_radius: 14.0
                     }
+                    type_label := Label{
+                        width: Fit
+                        height: Fit
+                        draw_text +: {
+                            color: theme.flow_accent
+                            text_style: theme.font_bold{font_size: 8.5}
+                        }
+                    }
                     title := Label{
                         width: Fit
                         height: Fit
                         draw_text +: {
                             color: theme.flow_text
-                            text_style: theme.font_bold{font_size: 9.5}
+                            text_style: theme.font_bold{font_size: 10.0}
                         }
                     }
                     size := Label{
@@ -159,8 +204,8 @@ script_mod! {
                             text_style: theme.font_regular{font_size: 8.5}
                         }
                     }
-                    previous := ButtonFlatter{text: "←"}
-                    next := ButtonFlatter{text: "→"}
+                    previous := ButtonFlatter{text: "← Previous"}
+                    next := ButtonFlatter{text: "Next →"}
                     fit := ButtonFlat{text: "Fit"}
                     fit_width := ButtonFlat{text: "Fit width"}
                     actual := ButtonFlat{text: "1:1 px"}
@@ -171,6 +216,18 @@ script_mod! {
                     close := ButtonFlatter{text: "×"}
                 }
             }
+        }
+        previous_wrap := View{
+            width: 44
+            height: 64
+            flow: Overlay
+            previous_asset := GalleryButton{text: "‹"}
+        }
+        next_wrap := View{
+            width: 44
+            height: 64
+            flow: Overlay
+            next_asset := GalleryButton{text: "›"}
         }
         top_close := ViewerFade{
             width: 28
@@ -270,13 +327,17 @@ pub struct ImageViewer {
     #[rust]
     close_button_rect: Option<Rect>,
     #[rust]
+    gallery_stage_rect: Option<Rect>,
+    /// Video/audio controls are drawn by their media widgets at the bottom
+    /// of their own surface. Keep that band clear of the viewer toolbar.
+    #[rust]
+    media_rect: Option<Rect>,
+    #[rust]
     shown_percent: Option<i64>,
     #[rust]
     fit_mode: bool,
     #[rust]
     snap_to_fit: bool,
-    #[rust]
-    closing: bool,
     #[rust]
     media_kind: MediaKind,
 }
@@ -311,6 +372,18 @@ fn close_button_rect(stage: Rect) -> Rect {
     Rect {
         pos: stage.pos + dvec2(CLOSE_BUTTON_MARGIN, CLOSE_BUTTON_MARGIN),
         size: dvec2(CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE),
+    }
+}
+
+fn media_label(kind: MediaKind) -> &'static str {
+    match kind {
+        MediaKind::Image => "IMAGE",
+        MediaKind::Video => "VIDEO",
+        MediaKind::Audio => "AUDIO",
+        MediaKind::Mesh => "3D MESH",
+        MediaKind::Splat => "3D SPLAT",
+        MediaKind::Text => "TEXT",
+        MediaKind::Unknown => "MEDIA",
     }
 }
 
@@ -363,7 +436,7 @@ fn ease(current: f64, target: f64, dt: f64) -> f64 {
 
 impl ImageViewer {
     pub fn is_open(&self) -> bool {
-        self.item.is_some() && !self.closing
+        self.item.is_some()
     }
 
     #[cfg(test)]
@@ -405,12 +478,14 @@ impl ImageViewer {
                 .borrow_mut::<AudioPlayer>()
                 .ok_or_else(|| "audio viewer is unavailable".to_string())?
                 .load_bytes(cx, &item.bytes.bytes, &item.bytes.content_type)?,
-            MediaKind::Mesh => self
-                .view
-                .widget(cx, ids!(mesh))
-                .borrow_mut::<MeshView>()
-                .ok_or_else(|| "mesh viewer is unavailable".to_string())?
-                .load_bytes(cx, &item.bytes.bytes, &item.bytes.content_type)?,
+            MediaKind::Mesh => {
+                let target = self.view.widget(cx, ids!(mesh));
+                let mut mesh = target.borrow_mut::<MeshView>()
+                    .ok_or_else(|| "mesh viewer is unavailable".to_string())?;
+                mesh.set_dark_enabled(cx, true);
+                mesh.set_show_hud(cx, false);
+                mesh.load_bytes(cx, &item.bytes.bytes, &item.bytes.content_type)?;
+            },
             MediaKind::Splat => self
                 .view
                 .widget(cx, ids!(splat))
@@ -418,7 +493,16 @@ impl ImageViewer {
                 .ok_or_else(|| "splat viewer is unavailable".to_string())?
                 .load_bytes(cx, &item.bytes.bytes, &item.bytes.content_type)?,
             MediaKind::Text | MediaKind::Unknown => {
-                return Err(format!("no media viewer for {}", item.bytes.content_type));
+                let text = if kind == MediaKind::Text {
+                    let mut text: String = String::from_utf8_lossy(&item.bytes.bytes).chars().take(256 * 1024).collect();
+                    if item.bytes.bytes.len() > text.len() {
+                        text.push_str("\n\nPreview truncated. Save the file to read the complete content.");
+                    }
+                    text
+                } else {
+                    format!("{}\n{}\n\nSave this file to open it in a compatible application.", item.bytes.content_type, crate::faces::size_text(item.bytes.bytes.len()))
+                };
+                self.view.text_input(cx, ids!(document)).set_text(cx, &text);
             }
         }
         if kind != MediaKind::Image {
@@ -430,22 +514,38 @@ impl ImageViewer {
                 MediaKind::Audio => ids!(audio),
                 MediaKind::Mesh => ids!(mesh),
                 MediaKind::Splat => ids!(splat),
-                _ => ids!(picture),
+                MediaKind::Text | MediaKind::Unknown => ids!(text_panel),
+                MediaKind::Image => ids!(picture),
             };
             self.view.widget(cx, target).set_visible(cx, true);
         }
         self.view.label(cx, ids!(title)).set_text(
             cx,
-            &format!("{}.{}", item.node, item.port),
+            &if item.port.is_empty() { item.node.clone() } else { format!("{}.{}", item.node, item.port) },
         );
+        self.view
+            .label(cx, ids!(type_label))
+            .set_text(cx, media_label(kind));
         self.view.label(cx, ids!(size)).set_text(
             cx,
             &if kind == MediaKind::Image {
                 format!("{}×{}", self.image_size.x as usize, self.image_size.y as usize)
             } else {
-                format!("{} · {} bytes", item.bytes.content_type, item.bytes.bytes.len())
+                crate::faces::size_text(item.bytes.bytes.len())
             },
         );
+        self.view.label(cx, ids!(zoom)).set_text(
+            cx,
+            match kind {
+                MediaKind::Image => "100 %",
+                MediaKind::Video => "native transport · drag timeline",
+                MediaKind::Audio => "waveform transport · drag to scrub",
+                MediaKind::Mesh | MediaKind::Splat => "drag to orbit · scroll to zoom",
+                MediaKind::Text | MediaKind::Unknown => "",
+            },
+        );
+        self.view.widget(cx, ids!(save)).set_visible(cx, true);
+        self.view.widget(cx, ids!(copy)).set_visible(cx, true);
         self.item = Some(item);
         self.zoom = 1.0;
         self.target_zoom = 1.0;
@@ -455,10 +555,11 @@ impl ImageViewer {
         self.opacity = 0.18;
         self.picture_rect = None;
         self.close_button_rect = None;
+        self.gallery_stage_rect = None;
+        self.media_rect = None;
         self.shown_percent = None;
         self.fit_mode = true;
         self.snap_to_fit = true;
-        self.closing = false;
         self.view.set_visible(cx, true);
         self.view
             .view(cx, ids!(picture))
@@ -473,22 +574,34 @@ impl ImageViewer {
         Ok(())
     }
 
-    pub fn close(&mut self, cx: &mut Cx) {
-        if self.item.is_none() || self.closing {
-            return;
-        }
-        self.closing = true;
-        self.drag = None;
-        self.pinch = None;
-        self.next_frame = cx.new_next_frame();
-        self.redraw(cx);
+    pub fn show_status(&mut self, cx: &mut Cx, title: &str, message: &str) {
+        let _ = self.show(cx, ImageViewerItem {
+            node: title.to_string(),
+            port: String::new(),
+            bytes: ValueBytes {
+                digest: String::new(),
+                content_type: "text/plain".to_string(),
+                bytes: message.as_bytes().to_vec().into(),
+            },
+        });
+        self.view.label(cx, ids!(type_label)).set_text(cx, "");
+        self.view.label(cx, ids!(size)).set_text(cx, "");
+        self.view.widget(cx, ids!(save)).set_visible(cx, false);
+        self.view.widget(cx, ids!(copy)).set_visible(cx, false);
     }
 
-    fn finish_close(&mut self, cx: &mut Cx) {
-        self.clear_media(cx);
-        self.item = None;
-        self.closing = false;
+    pub fn close(&mut self, cx: &mut Cx) {
+        if self.item.is_none() {
+            return;
+        }
+        // Dismiss the whole overlay in this event. Fading only the image
+        // exposes its checkerboard while the modal is still on screen.
         self.view.set_visible(cx, false);
+        self.item = None;
+        self.drag = None;
+        self.pinch = None;
+        self.next_frame = NextFrame::default();
+        self.clear_media(cx);
         self.redraw(cx);
     }
 
@@ -528,6 +641,24 @@ impl ImageViewer {
         }
         self.refresh_dpi_factor(cx);
         let stage = self.stage_rect(cx);
+        if stage.size.x > 0.0
+            && stage.size.y > 0.0
+            && self.gallery_stage_rect != Some(stage)
+        {
+            let y = stage.pos.y + (stage.size.y - GALLERY_BUTTON_HEIGHT) * 0.5;
+            for (id, x) in [
+                (ids!(previous_wrap), stage.pos.x + CLOSE_BUTTON_MARGIN),
+                (ids!(next_wrap), stage.pos.x + stage.size.x - CLOSE_BUTTON_MARGIN - GALLERY_BUTTON_WIDTH),
+            ] {
+                self.view.view(cx, id).set_walk(cx, Walk {
+                    abs_pos: Some(dvec2(x, y)),
+                    width: Size::Fixed(GALLERY_BUTTON_WIDTH),
+                    height: Size::Fixed(GALLERY_BUTTON_HEIGHT),
+                    ..Walk::default()
+                });
+            }
+            self.gallery_stage_rect = Some(stage);
+        }
         let close_rect = close_button_rect(stage);
         if stage.size.x > 0.0
             && stage.size.y > 0.0
@@ -545,6 +676,26 @@ impl ImageViewer {
             self.close_button_rect = Some(close_rect);
         }
         self.sync_control_opacity(cx);
+        let media_safe_bottom = match self.media_kind {
+            MediaKind::Video | MediaKind::Audio | MediaKind::Text | MediaKind::Unknown => 76.0,
+            _ => 0.0,
+        };
+        let media_rect = Rect {
+            pos: stage.pos,
+            size: dvec2(stage.size.x, (stage.size.y - media_safe_bottom).max(1.0)),
+        };
+        if self.media_rect != Some(media_rect) {
+            self.view.view(cx, ids!(media_layer)).set_walk(
+                cx,
+                Walk {
+                    abs_pos: Some(media_rect.pos),
+                    width: Size::Fixed(media_rect.size.x.max(1.0)),
+                    height: Size::Fixed(media_rect.size.y),
+                    ..Walk::default()
+                },
+            );
+            self.media_rect = Some(media_rect);
+        }
         if self.media_kind != MediaKind::Image {
             self.view.view(cx, ids!(picture)).set_visible(cx, false);
             return;
@@ -693,6 +844,7 @@ impl ImageViewer {
 
     fn clear_media(&mut self, cx: &mut Cx) {
         self.view.widget(cx, ids!(media_layer)).set_visible(cx, false);
+        self.view.widget(cx, ids!(text_panel)).set_visible(cx, false);
         let video = self.view.widget(cx, ids!(video));
         video.set_visible(cx, false);
         if let Some(mut video) = video.borrow_mut::<VideoPlayer>() {
@@ -779,10 +931,14 @@ impl ImageViewer {
                 out.push(ImageViewerAction::CopyDigest(item.bytes.digest.clone()));
             }
         }
-        if self.view.button(cx, ids!(previous)).clicked(actions) {
+        if self.view.button(cx, ids!(previous)).clicked(actions)
+            || self.view.button(cx, ids!(previous_asset)).clicked(actions)
+        {
             out.push(ImageViewerAction::Step(-1));
         }
-        if self.view.button(cx, ids!(next)).clicked(actions) {
+        if self.view.button(cx, ids!(next)).clicked(actions)
+            || self.view.button(cx, ids!(next_asset)).clicked(actions)
+        {
             out.push(ImageViewerAction::Step(1));
         }
         if self.view.button(cx, ids!(fit)).clicked(actions) {
@@ -824,32 +980,22 @@ impl Widget for ImageViewer {
         if self.item.is_none() {
             return;
         }
-        if !self.closing {
-            self.view.handle_event(cx, event, scope);
-        }
+        self.view.handle_event(cx, event, scope);
         if let Some(nf) = self.next_frame.is_event(event) {
             let dt = (nf.time - self.last_time).clamp(0.0, 0.1);
             self.last_time = nf.time;
             self.zoom = ease(self.zoom, self.target_zoom, dt);
             self.pan.x = ease(self.pan.x, self.target_pan.x, dt);
             self.pan.y = ease(self.pan.y, self.target_pan.y, dt);
-            self.opacity = ease(self.opacity, if self.closing { 0.0 } else { 1.0 }, dt);
+            self.opacity = ease(self.opacity, 1.0, dt);
             self.sync_picture(cx);
-            if self.closing && self.opacity == 0.0 {
-                self.finish_close(cx);
-                return;
-            }
             if (self.zoom - self.target_zoom).abs() > 1e-4
                 || (self.pan - self.target_pan).length() > 0.05
-                || (!self.closing && self.opacity < 0.999)
-                || (self.closing && self.opacity > 0.0)
+                || self.opacity < 0.999
             {
                 self.next_frame = cx.new_next_frame();
             }
             self.redraw(cx);
-        }
-        if self.closing {
-            return;
         }
         if let Event::TouchUpdate(event) = event {
             self.handle_touch(cx, event);
@@ -862,10 +1008,10 @@ impl Widget for ImageViewer {
                 KeyCode::Key0 if self.media_kind == MediaKind::Image => self.fit(cx),
                 KeyCode::Key1 if self.media_kind == MediaKind::Image => self.actual(cx),
                 KeyCode::Key2 if self.media_kind == MediaKind::Image => self.double(cx),
-                KeyCode::ArrowLeft => {
+                KeyCode::ArrowLeft if cx.has_key_focus(self.view.area()) => {
                     cx.widget_action(self.view.widget_uid(), ImageViewerAction::Step(-1))
                 }
-                KeyCode::ArrowRight => {
+                KeyCode::ArrowRight if cx.has_key_focus(self.view.area()) => {
                     cx.widget_action(self.view.widget_uid(), ImageViewerAction::Step(1))
                 }
                 _ => {}
@@ -886,7 +1032,11 @@ impl Widget for ImageViewer {
                 let picture = self.view.view(cx, ids!(picture)).area().rect(cx);
                 let bar = self.view.view(cx, ids!(bar)).area().rect(cx);
                 let top_close = self.view.view(cx, ids!(top_close)).area().rect(cx);
-                if bar.contains(event.abs) || top_close.contains(event.abs) {
+                let previous = self.view.view(cx, ids!(previous_wrap)).area().rect(cx);
+                let next = self.view.view(cx, ids!(next_wrap)).area().rect(cx);
+                if bar.contains(event.abs) || top_close.contains(event.abs)
+                    || previous.contains(event.abs) || next.contains(event.abs)
+                {
                     return;
                 }
                 if picture.contains(event.abs) && event.tap_count >= 2 {
@@ -1178,5 +1328,119 @@ mod tests {
             assert_eq!(viewer.media_kind(), expected);
             assert!(viewer.view.widget(&mut cx, &[child]).visible());
         }
+    }
+
+    #[test]
+    fn json_asset_opens_in_the_read_only_document_surface() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let mut viewer = cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            crate::theme::script_mod(vm);
+            makepad_media_view::script_mod(vm);
+            super::script_mod(vm);
+            ImageViewer::script_new_with_default(vm)
+        });
+        let json = "{\"prompt\":\"a brass fox\",\"steps\":8}";
+        viewer
+            .show(
+                &mut cx,
+                ImageViewerItem {
+                    node: "asset_42".into(),
+                    port: "manifest".into(),
+                    bytes: ValueBytes {
+                        digest: "ast_json".into(),
+                        content_type: "application/json; charset=utf-8".into(),
+                        bytes: json.as_bytes().to_vec().into(),
+                    },
+                },
+            )
+            .unwrap();
+
+        assert_eq!(viewer.media_kind(), MediaKind::Text);
+        assert!(viewer.is_open());
+        assert!(viewer.view.widget(&mut cx, ids!(text_panel)).visible());
+        assert_eq!(viewer.view.text_input(&mut cx, ids!(document)).text(), json);
+        assert!(!viewer.view.widget(&mut cx, ids!(video)).visible());
+        assert!(!viewer.view.widget(&mut cx, ids!(audio)).visible());
+    }
+
+    #[test]
+    fn loading_status_uses_the_text_surface_and_hides_file_actions() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let mut viewer = cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            crate::theme::script_mod(vm);
+            makepad_media_view::script_mod(vm);
+            super::script_mod(vm);
+            ImageViewer::script_new_with_default(vm)
+        });
+        viewer.show_status(&mut cx, "Asset", "Loading original content…");
+
+        assert!(viewer.is_open());
+        assert!(viewer.view.widget(&mut cx, ids!(text_panel)).visible());
+        assert_eq!(
+            viewer.view.text_input(&mut cx, ids!(document)).text(),
+            "Loading original content…"
+        );
+        assert!(!viewer.view.widget(&mut cx, ids!(save)).visible());
+        assert!(!viewer.view.widget(&mut cx, ids!(copy)).visible());
+    }
+
+    #[test]
+    fn switching_from_audio_clears_the_previous_player() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let mut viewer = cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            crate::theme::script_mod(vm);
+            makepad_media_view::script_mod(vm);
+            super::script_mod(vm);
+            ImageViewer::script_new_with_default(vm)
+        });
+        viewer
+            .show(
+                &mut cx,
+                ImageViewerItem {
+                    node: "audio".into(),
+                    port: "value".into(),
+                    bytes: ValueBytes {
+                        digest: "audio".into(),
+                        content_type: "audio/wav".into(),
+                        bytes: tiny_wav().into(),
+                    },
+                },
+            )
+            .unwrap();
+        assert!(viewer.view.widget(&mut cx, ids!(audio)).visible());
+        assert!(viewer
+            .view
+            .widget(&mut cx, ids!(audio))
+            .borrow::<AudioPlayer>()
+            .is_some_and(|audio| audio.is_loaded()));
+
+        viewer
+            .show(
+                &mut cx,
+                ImageViewerItem {
+                    node: "manifest".into(),
+                    port: "value".into(),
+                    bytes: ValueBytes {
+                        digest: "text".into(),
+                        content_type: "text/plain".into(),
+                        bytes: b"ready".to_vec().into(),
+                    },
+                },
+            )
+            .unwrap();
+        assert_eq!(viewer.media_kind(), MediaKind::Text);
+        assert!(viewer.view.widget(&mut cx, ids!(text_panel)).visible());
+        assert!(!viewer.view.widget(&mut cx, ids!(audio)).visible());
+        assert!(viewer
+            .view
+            .widget(&mut cx, ids!(audio))
+            .borrow::<AudioPlayer>()
+            .is_some_and(|audio| !audio.is_loaded()));
     }
 }

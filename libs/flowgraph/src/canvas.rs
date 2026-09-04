@@ -123,6 +123,7 @@ fn is_interactive_face_type(type_id: TypeId) -> bool {
         || type_id == TypeId::of::<FoldHeader>()
         || type_id == TypeId::of::<FoldButton>()
         || type_id == TypeId::of::<Slider>()
+        || type_id == TypeId::of::<Video>()
         || type_id == TypeId::of::<CheckBox>()
         || type_id == TypeId::of::<RadioButton>()
 }

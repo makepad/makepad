@@ -4,6 +4,9 @@ use std::collections::VecDeque;
 #[cfg(feature = "hub-chat")]
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+#[cfg(feature = "hub-chat")]
+#[path = "chat_providers.rs"]
+mod chat_providers;
 
 pub trait ChatSeam: Send + Sync {
     fn start_turn(
@@ -24,6 +27,7 @@ pub trait ChatTurn {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChatEvent {
     Delta(String),
+    Progress { permille: u16, stage: String },
     Done { text: String },
     Failed(String),
 }
@@ -93,6 +97,9 @@ impl Executor for ChatExecutor {
         let events = turn.poll();
         for event in events {
             match event {
+                ChatEvent::Progress { permille, stage } => {
+                    self.queue.push_back(Poll::Progress { permille, stage });
+                }
                 ChatEvent::Delta(delta) => {
                     self.text.push_str(&delta);
                     self.pending_delta.push_str(&delta);
@@ -170,6 +177,11 @@ impl ChatSeam for HubChat {
         max_tokens: Option<u32>,
         thinking: Option<bool>,
     ) -> Result<Box<dyn ChatTurn>, String> {
+        if let Some(slug) = model.strip_prefix("provider:") {
+            let mut provider = chat_providers::ProviderAdapter::new(slug, max_tokens)?;
+            provider.begin(system, prompt)?;
+            return Ok(Box::new(ProviderChatTurn { provider: Box::new(provider) }));
+        }
         use makepad_ai_hub::hub_chat::{HubChatConfig, HubChatSession};
         use makepad_ai_hub::local_llm::LocalLlmConfig;
         let (path, preferred_model) = resolve_model(
@@ -192,6 +204,35 @@ impl ChatSeam for HubChat {
             text: String::new(),
         }))
     }
+}
+
+#[cfg(feature = "hub-chat")]
+struct ProviderChatTurn { provider: Box<dyn chat_providers::ProviderSession> }
+
+#[cfg(feature = "hub-chat")]
+impl ChatTurn for ProviderChatTurn {
+    fn poll(&mut self) -> Vec<ChatEvent> {
+        let mut out = Vec::new();
+        for event in self.provider.poll() {
+            let terminal = matches!(event, makepad_ai_hub::providers::provider::ProviderEvent::Done { .. } | makepad_ai_hub::providers::provider::ProviderEvent::Error(_) | makepad_ai_hub::providers::provider::ProviderEvent::FunctionCall { .. });
+            out.push(match event {
+                makepad_ai_hub::providers::provider::ProviderEvent::Delta(text) => ChatEvent::Delta(text),
+                makepad_ai_hub::providers::provider::ProviderEvent::Status { note, permille } => ChatEvent::Progress { permille, stage: note },
+                makepad_ai_hub::providers::provider::ProviderEvent::Done { text } => ChatEvent::Done { text },
+                makepad_ai_hub::providers::provider::ProviderEvent::Error(error) => ChatEvent::Failed(error),
+                makepad_ai_hub::providers::provider::ProviderEvent::FunctionCall { .. } => { self.provider.cancel(); ChatEvent::Failed("flow Llm nodes do not expose tools".into()) },
+                makepad_ai_hub::providers::provider::ProviderEvent::Serving(_) => ChatEvent::Progress { permille: 0, stage: "serving".into() },
+            });
+            if terminal { break; }
+        }
+        out
+    }
+    fn cancel(&mut self) { self.provider.cancel(); }
+}
+
+#[cfg(feature = "hub-chat")]
+impl Drop for ProviderChatTurn {
+    fn drop(&mut self) { self.provider.cancel(); }
 }
 
 #[cfg(feature = "hub-chat")]
@@ -277,7 +318,8 @@ impl ChatTurn for HubChatTurn {
                 HubEvent::ContextFull => {
                     out.push(ChatEvent::Failed("context full".to_string()))
                 }
-                HubEvent::Loading { .. } | HubEvent::Ready { .. } => {}
+                HubEvent::Loading { phase, fraction } => out.push(loading_progress(phase, fraction)),
+                HubEvent::Ready { .. } => {}
                 HubEvent::ToolCall { .. } => out.push(ChatEvent::Failed(
                     "flow Llm nodes do not expose tools".to_string(),
                 )),
@@ -288,6 +330,62 @@ impl ChatTurn for HubChatTurn {
 
     fn cancel(&mut self) {
         self.session.cancel();
+    }
+}
+
+#[cfg(feature = "hub-chat")]
+fn loading_progress(stage: String, fraction: f64) -> ChatEvent {
+    ChatEvent::Progress { stage, permille: (fraction.clamp(0.0, 1.0) * 1000.0) as u16 }
+}
+
+#[cfg(feature = "hub-chat")]
+pub fn provider_model_rows() -> Vec<crate::ModelInfoDto> {
+    chat_providers::PROVIDER_SLUGS
+        .into_iter()
+        .filter_map(|slug| {
+            let mut provider = chat_providers::ProviderAdapter::new(slug, None).ok()?;
+            let (available, state, note) = match provider.availability() {
+                makepad_ai_hub::chat_wire::ProviderAvailability::Available { model, detail } =>
+                    (true, format!("available:{model}"), Some(detail)),
+                makepad_ai_hub::chat_wire::ProviderAvailability::Unavailable { reason } =>
+                    (false, "unavailable".to_string(), Some(reason)),
+            };
+            Some(crate::ModelInfoDto { id: format!("provider:{slug}"), domain: "text".into(), backend: slug.into(), node: "flow-host".into(), available, gated: false, state, vram_gb: None, note })
+        })
+        .collect()
+}
+
+#[cfg(all(test, feature = "hub-chat"))]
+mod provider_turn_tests {
+    use super::*;
+    use makepad_ai_hub::chat_wire::ProviderAvailability;
+    use makepad_ai_hub::providers::provider::ProviderEvent;
+
+    struct Mock { events: Vec<ProviderEvent>, cancelled: bool, tools_enabled: Option<bool> }
+    impl chat_providers::ProviderSession for Mock {
+        fn begin(&mut self, _system: &str, _prompt: &str) -> Result<(), String> { self.tools_enabled = Some(false); Ok(()) }
+        fn poll(&mut self) -> Vec<ProviderEvent> { std::mem::take(&mut self.events) }
+        fn cancel(&mut self) { self.cancelled = true; }
+        fn availability(&mut self) -> ProviderAvailability { ProviderAvailability::Available { model: "mock".into(), detail: String::new() } }
+    }
+
+    #[test]
+    fn adapter_maps_events_and_stops_after_terminal_or_function_call() {
+        let mut turn = ProviderChatTurn { provider: Box::new(Mock { events: vec![ProviderEvent::Delta("a".into()), ProviderEvent::FunctionCall { call_id: "x".into(), name: "tool".into(), arguments: "{}".into() }, ProviderEvent::Delta("late".into())], cancelled: false, tools_enabled: None }) };
+        let events = turn.poll();
+        assert!(matches!(&events[..], [ChatEvent::Delta(a), ChatEvent::Failed(e)] if a == "a" && e.contains("do not expose")));
+        assert!(turn.provider.poll().is_empty());
+    }
+
+    #[test]
+    fn adapter_drop_cancels_provider() {
+        struct DropProbe(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl chat_providers::ProviderSession for DropProbe { fn begin(&mut self, _: &str, _: &str)->Result<(),String>{Ok(())} fn poll(&mut self)->Vec<ProviderEvent>{vec![]} fn cancel(&mut self){self.0.store(true,std::sync::atomic::Ordering::SeqCst)} fn availability(&mut self)->ProviderAvailability{ProviderAvailability::Unavailable{reason:String::new()}} }
+        let flag=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probe=flag.clone();
+        let turn=ProviderChatTurn{provider:Box::new(DropProbe(probe))};
+        drop(turn);
+        assert!(flag.load(std::sync::atomic::Ordering::SeqCst));
     }
 }
 
@@ -312,5 +410,59 @@ impl ChatSeam for HubChat {
         _thinking: Option<bool>,
     ) -> Result<Box<dyn ChatTurn>, String> {
         Err("makepad-flow was built without hub-chat".to_string())
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    struct UnusedSeam;
+    impl ChatSeam for UnusedSeam {
+        fn start_turn(&self, _: &str, _: &str, _: &str, _: Option<u32>, _: Option<bool>) -> Result<Box<dyn ChatTurn>, String> {
+            unreachable!()
+        }
+    }
+    struct ScriptedTurn(VecDeque<Vec<ChatEvent>>);
+    impl ChatTurn for ScriptedTurn {
+        fn poll(&mut self) -> Vec<ChatEvent> { self.0.pop_front().unwrap_or_default() }
+        fn cancel(&mut self) { self.0.clear(); }
+    }
+
+    #[test]
+    fn waiting_progress_then_output_is_forwarded_once() {
+        let mut executor = ChatExecutor::new(std::sync::Arc::new(UnusedSeam));
+        executor.turn = Some(Box::new(ScriptedTurn(VecDeque::from([
+            vec![ChatEvent::Progress { permille: 0, stage: "waiting for admission: http 409: busy".into() }],
+            vec![ChatEvent::Progress { permille: 250, stage: "loading model".into() }],
+            vec![ChatEvent::Delta("answer".into()), ChatEvent::Done { text: "answer".into() }],
+        ]))));
+        assert!(matches!(executor.poll(), Poll::Progress { permille: 0, stage } if stage.contains("waiting") && stage.contains("409")));
+        assert!(matches!(executor.poll(), Poll::Progress { permille: 250, stage } if stage == "loading model"));
+        assert!(matches!(executor.poll(), Poll::Delta { text, .. } if text == "answer"));
+        assert!(matches!(executor.poll(), Poll::Done(values) if values[0].1.as_text().unwrap() == "answer"));
+        assert!(matches!(executor.poll(), Poll::Pending));
+    }
+
+    #[test]
+    fn admission_error_reason_survives_progress_mapping() {
+        let mut executor = ChatExecutor::new(std::sync::Arc::new(UnusedSeam));
+        executor.turn = Some(Box::new(ScriptedTurn(VecDeque::from([vec![
+            ChatEvent::Progress { permille: 0, stage: "waiting for admission".into() },
+            ChatEvent::Failed("http 503: weights unavailable".into()),
+        ]]))));
+        assert!(matches!(executor.poll(), Poll::Progress { .. }));
+        assert!(matches!(executor.poll(), Poll::Failed(error) if error == "http 503: weights unavailable"));
+        assert!(matches!(executor.poll(), Poll::Pending));
+    }
+
+    #[cfg(feature = "hub-chat")]
+    #[test]
+    fn hub_loading_maps_to_bounded_flow_progress() {
+        for (fraction, expected) in [(0.0, 0), (0.25, 250), (2.0, 1000), (-1.0, 0), (f64::NAN, 0)] {
+            assert_eq!(loading_progress("queued".into(), fraction), ChatEvent::Progress {
+                permille: expected, stage: "queued".into(),
+            });
+        }
     }
 }

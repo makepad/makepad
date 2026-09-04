@@ -245,6 +245,17 @@ impl FakeHttp {
             calls: Arc::new(AtomicUsize::new(0)),
         }
     }
+
+    pub fn bytes(status: u16, content_type: &str, body: Vec<u8>) -> Self {
+        Self {
+            response: HttpResp {
+                status,
+                headers: vec![("content-type".to_string(), content_type.to_string())],
+                body,
+            },
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
 }
 
 impl HttpSeam for FakeHttp {

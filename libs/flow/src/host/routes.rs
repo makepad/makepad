@@ -11,10 +11,10 @@ use crate::{
     CreateBatchRequest, CreateRunRequest, CreateRunResponse, EvalErrorResponse, EventsResponse, FlowMutationResponse,
     FlowResponse, FlowSummary, HealthResponse, InstanceId, MessageResponse, NodesResponse,
     PortType, PutGraphRequest, PutSourceRequest, PutValueResponse, RevertRequest, RunId,
-    AssetsResponse, TemplateResponse, Value,
+    TemplateResponse, Value,
 };
 use crate::engine::executors::publish::{AssetListQuery, AssetWorkerHandle};
-use makepad_asset_data::AssetAlias;
+use makepad_asset_data::{AssetAlias, AssetId};
 use makepad_bounded_http::{
     etag_matches, if_range_matches, parse_range, BodyError, Conn, Head, Method, RangeSpec, Resp,
 };
@@ -91,26 +91,45 @@ pub(crate) fn dispatch(
     let segments = head.segs.clone();
     match segments.as_slice() {
         [v1, assets] if v1 == "v1" && assets == "assets" => {
-            if head.method != Method::Get {
+            let (q, namespace, limit, cursor) = if head.method == Method::Post {
+                let request: crate::AssetsRequest = match read_json(conn, head) {
+                    Ok(request) => request,
+                    Err(outcome) => return outcome,
+                };
+                if request.limit == 0 || request.limit > 100 || request.query.len() > 4096 {
+                    return Outcome::Resp(message(400, "invalid asset query"));
+                }
+                (request.query, request.namespace, request.limit, request.cursor)
+            } else if head.method == Method::Get {
+                let q = head.query_get("q").unwrap_or("").replace('+', " ");
+                let namespace = match head.query_get("ns") {
+                    Some("*") => None,
+                    Some(value) if !value.is_empty() => Some(value.to_string()),
+                    _ => Some("flows".to_string()),
+                };
+                let limit = match decimal_query(head.query_get("limit"), 50, 100) {
+                    Some(value) if value > 0 => value as u32,
+                    _ => return Outcome::Resp(message(400, "invalid asset limit")),
+                };
+                (q, namespace, limit, head.query_get("cursor").map(str::to_string))
+            } else {
                 return Outcome::Resp(message(405, "method not allowed"));
+            };
+            if cursor.as_ref().is_some_and(|cursor| cursor.len() > 8192) {
+                return Outcome::Resp(message(400, "invalid asset cursor"));
             }
-            let q = head.query_get("q").unwrap_or("").replace('+', " ");
-            let namespace = match head.query_get("ns") {
-                Some("*") => None,
-                Some(value) if !value.is_empty() => Some(value.to_string()),
-                _ => Some("flows".to_string()),
-            };
-            let limit = match decimal_query(head.query_get("limit"), 50, 100) {
-                Some(value) if value > 0 => value as u32,
-                _ => return Outcome::Resp(message(400, "invalid asset limit")),
-            };
-            match ctx.assets.list(AssetListQuery { text: q, namespace, limit }) {
-                Ok(assets) => Outcome::Resp(json(200, &AssetsResponse { assets })),
+            match ctx.assets.list_page(AssetListQuery { text: q, namespace, limit, cursor }) {
+                Ok(page) => Outcome::Resp(json(200, &page)),
                 Err(error) => Outcome::Resp(message(
-                    if error.contains("no asset server discovered") { 503 } else { 502 },
+                    if error.contains("invalid asset cursor") { 400 } else if error.contains("no asset server discovered") { 503 } else { 502 },
                     &error,
                 )),
             }
+        }
+        [v1, assets, thumb, id]
+            if v1 == "v1" && assets == "assets" && thumb == "thumbnail" =>
+        {
+            asset_content(head, ctx, id, true)
         }
         [v1, assets, thumb, tail @ ..]
             if v1 == "v1" && assets == "assets" && thumb == "thumb" =>
@@ -405,6 +424,21 @@ pub(crate) fn dispatch(
 fn data_dispatch(conn: &mut Conn, head: &mut Head, ctx: &RouteCtx) -> Outcome {
     let segments = head.segs.clone();
     match segments.as_slice() {
+        [v1, assets, thumbnail, id]
+            if v1 == "v1" && assets == "assets" && thumbnail == "thumbnail" =>
+        {
+            asset_content(head, ctx, id, true)
+        }
+        [v1, assets, id, content]
+            if v1 == "v1" && assets == "assets" && content == "content" =>
+        {
+            asset_content(head, ctx, id, false)
+        }
+        [v1, assets, id, preview]
+            if v1 == "v1" && assets == "assets" && preview == "preview" =>
+        {
+            asset_preview(head, ctx, id)
+        }
         [v1, values, digest] if v1 == "v1" && values == "values" => {
             if head.method != Method::Get {
                 return call(&ctx.state, |_| message(405, "method not allowed"));
@@ -418,6 +452,34 @@ fn data_dispatch(conn: &mut Conn, head: &mut Head, ctx: &RouteCtx) -> Outcome {
             put_value(conn, head, ctx)
         }
         _ => call(&ctx.state, |_| message(404, "not found")),
+    }
+}
+
+fn asset_content(head: &Head, ctx: &RouteCtx, id: &str, thumbnail: bool) -> Outcome {
+    if head.method != Method::Get { return Outcome::Resp(message(405, "method not allowed")); }
+    let id = match id.parse::<AssetId>() {
+        Ok(id) => id,
+        Err(_) => return Outcome::Resp(message(400, "invalid asset id")),
+    };
+    match ctx.assets.read_asset(id, thumbnail) {
+        Ok(value) => Outcome::Resp(Resp::bytes(200, &value.content_type, value.bytes)
+            .with_header("Cache-Control", "private, max-age=0".to_string())),
+        Err(error) => Outcome::Resp(message(
+            if error.contains("not found") {404} else if error.contains("no asset server discovered") {503} else {502}, &error)),
+    }
+}
+
+fn asset_preview(head: &Head, ctx: &RouteCtx, id: &str) -> Outcome {
+    if head.method != Method::Get { return Outcome::Resp(message(405, "method not allowed")); }
+    let id = match id.parse::<AssetId>() {
+        Ok(id) => id,
+        Err(_) => return Outcome::Resp(message(400, "invalid asset id")),
+    };
+    match ctx.assets.read_asset_preview(id) {
+        Ok(value) => Outcome::Resp(Resp::bytes(200, &value.content_type, value.bytes)
+            .with_header("Cache-Control", "private, max-age=60".to_string())),
+        Err(error) => Outcome::Resp(message(
+            if error.contains("not found") {404} else if error.contains("no asset server discovered") {503} else {502}, &error)),
     }
 }
 

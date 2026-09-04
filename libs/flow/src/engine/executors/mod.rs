@@ -1,4 +1,5 @@
 pub mod ask;
+pub mod archive;
 pub mod chat;
 pub mod func;
 pub mod gen;

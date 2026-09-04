@@ -385,9 +385,18 @@ pub struct FlowAsset {
     pub created_ms: u64,
 }
 
+#[derive(Clone, Debug, SerJson, DeJson)]
+pub struct AssetsRequest {
+    pub query: String,
+    pub namespace: Option<String>,
+    pub limit: u32,
+    pub cursor: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, SerJson, DeJson)]
 pub struct AssetsResponse {
     pub assets: Vec<FlowAsset>,
+    pub cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, SerJson, DeJson)]

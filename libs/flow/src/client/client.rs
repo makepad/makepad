@@ -190,6 +190,16 @@ impl FlowClient {
         namespace: Option<&str>,
         limit: u32,
     ) -> ClientResult<AssetsResponse> {
+        self.assets_page(query, namespace, limit, None)
+    }
+
+    pub fn assets_page(
+        &self,
+        query: &str,
+        namespace: Option<&str>,
+        limit: u32,
+        cursor: Option<&str>,
+    ) -> ClientResult<AssetsResponse> {
         if limit == 0 || limit > 100 {
             return Err(ClientError::Protocol("asset limit is out of range".into()));
         }
@@ -202,11 +212,14 @@ impl FlowClient {
         {
             return Err(ClientError::Protocol("invalid asset namespace".into()));
         }
-        let target = format!(
-            "/v1/assets?q={}&ns={namespace}&limit={limit}",
-            query_component(query)
-        );
-        let body = self.call(Method::Get, &target, None, true, None)?;
+        let request = crate::AssetsRequest {
+            query: query.to_string(),
+            namespace: (namespace != "*").then(|| namespace.to_string()),
+            limit,
+            cursor: cursor.map(str::to_string),
+        };
+        let encoded = request.serialize_json();
+        let body = self.call(Method::Post, "/v1/assets", Some(encoded.as_bytes()), true, None)?;
         decode(&body, "asset list")
     }
 
@@ -219,13 +232,18 @@ impl FlowClient {
         {
             return Err(ClientError::Protocol("invalid asset alias".into()));
         }
-        let target = format!("/v1/assets/thumb/{alias}");
-        let response = self.control.call(
+        let target = if alias.starts_with("ast_") {
+            format!("/v1/assets/thumbnail/{alias}")
+        } else {
+            format!("/v1/assets/thumb/{alias}")
+        };
+        let transport = if alias.starts_with("ast_") { &self.data } else { &self.control };
+        let response = transport.call(
             Method::Get,
             &target,
             Some(self.token.as_str()),
             None,
-            None,
+            Some(Duration::from_secs(65)),
         )?;
         match response.status {
             200..=299 => Ok(ValueBytes {
@@ -235,6 +253,43 @@ impl FlowClient {
                     .unwrap_or_else(|| "application/octet-stream".to_string()),
                 bytes: response.body.into(),
             }),
+            401 => Err(ClientError::Unauthorized),
+            status => Err(http_error(status, &response.body)),
+        }
+    }
+
+    pub fn asset_content(&self, id: &str) -> ClientResult<ValueBytes> {
+        let target = format!("/v1/assets/{}/content", route_id(id, "asset")?);
+        let response = self.data.call(Method::Get, &target, Some(self.token.as_str()), None, Some(Duration::from_secs(65)))?;
+        match response.status {
+            200..=299 => {
+                let bytes: std::sync::Arc<[u8]> = response.body.into();
+                Ok(ValueBytes {
+                    digest: crate::Value::media(crate::PortType::Bytes, "application/octet-stream", bytes.clone()).digest_hex(),
+                    content_type: response.content_type.unwrap_or_else(|| "application/octet-stream".to_string()),
+                    bytes,
+                })
+            },
+            401 => Err(ClientError::Unauthorized),
+            status => Err(http_error(status, &response.body)),
+        }
+    }
+
+    /// Fetch the bounded card preview for an asset. Data assets are capped by
+    /// the Flow host before their source blob is read; full viewer content is
+    /// still available through [`Self::asset_content`].
+    pub fn asset_preview(&self, id: &str) -> ClientResult<ValueBytes> {
+        let target = format!("/v1/assets/{}/preview", route_id(id, "asset")?);
+        let response = self.data.call(Method::Get, &target, Some(self.token.as_str()), None, Some(Duration::from_secs(65)))?;
+        match response.status {
+            200..=299 => {
+                let bytes: std::sync::Arc<[u8]> = response.body.into();
+                Ok(ValueBytes {
+                    digest: crate::Value::media(crate::PortType::Bytes, "application/octet-stream", bytes.clone()).digest_hex(),
+                    content_type: response.content_type.unwrap_or_else(|| "application/octet-stream".to_string()),
+                    bytes,
+                })
+            },
             401 => Err(ClientError::Unauthorized),
             status => Err(http_error(status, &response.body)),
         }
@@ -644,20 +699,6 @@ fn flow_name(name: &str) -> ClientResult<&str> {
         return Err(ClientError::Protocol("invalid flow name".into()));
     }
     Ok(name)
-}
-
-fn query_component(value: &str) -> String {
-    value
-        .chars()
-        .take(256)
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || "._-".contains(character) {
-                character
-            } else {
-                '+'
-            }
-        })
-        .collect()
 }
 
 fn model_domain(domain: &str) -> ClientResult<&str> {

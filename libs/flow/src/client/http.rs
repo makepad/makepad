@@ -172,6 +172,13 @@ impl HttpClient {
         head_budget: Duration,
         stale: &mut bool,
     ) -> ClientResult<(Response, bool)> {
+        // Probe a pooled socket before sending request bytes. macOS can
+        // reject socket options after the peer closes an idle connection.
+        // Reconnecting here is safe even for a mutating request.
+        if let Err(error) = stream.set_read_timeout(Some(self.limits.io.max(Duration::from_millis(1)))) {
+            *stale = true;
+            return Err(io_error("HTTP set read timeout", error));
+        }
         let mut request = Vec::with_capacity(256 + body.map_or(0, <[u8]>::len));
         write!(&mut request, "{} {} HTTP/1.1\r\n", method.as_str(), target)
             .map_err(|_| ClientError::Protocol("could not construct HTTP request".into()))?;
@@ -213,9 +220,10 @@ impl HttpClient {
             }
             let left = head_budget
                 .checked_sub(head_started.elapsed())
+                .filter(|left| !left.is_zero())
                 .ok_or_else(|| ClientError::Timeout("HTTP response head".into()))?;
             stream
-                .set_read_timeout(Some(left.min(self.limits.io)))
+                .set_read_timeout(Some(left.min(self.limits.io).max(Duration::from_millis(1))))
                 .map_err(|error| io_error("HTTP set head timeout", error))?;
             let mut chunk = [0u8; 4096];
             match stream.read(&mut chunk) {
@@ -258,9 +266,10 @@ impl HttpClient {
                 .limits
                 .body
                 .checked_sub(body_started.elapsed())
+                .filter(|left| !left.is_zero())
                 .ok_or_else(|| ClientError::Timeout("HTTP response body".into()))?;
             stream
-                .set_read_timeout(Some(left.min(self.limits.io)))
+                .set_read_timeout(Some(left.min(self.limits.io).max(Duration::from_millis(1))))
                 .map_err(|error| io_error("HTTP set body timeout", error))?;
             let remaining = parsed.content_length as usize - body_bytes.len();
             let mut chunk = [0u8; 16 * 1024];

@@ -14,3 +14,5 @@ makepad-media-view = { path = "../../libs/media_view" }
 makepad-aichat = { path = "../aichat" }
 makepad-ai-services = { path = "../../libs/ai/services" }
 makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false, features = ["llm"] }
+makepad-app-asset-server = { path = "../asset-server" }
+makepad-asset-client = { path = "../../libs/asset/client" }

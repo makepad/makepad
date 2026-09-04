@@ -17,6 +17,12 @@ makepad-strict-json = { path = "../strict_json" }
 makepad-ai-hub = { path = "../ai/hub", default-features = false, features = ["llm"] }
 makepad-asset-client = { path = "../asset/client" }
 makepad-asset-data = { path = "../asset/data" }
+makepad-audio-decode = { path = "../audio_decode" }
+makepad-mp4-index = { path = "../mp4_index" }
+makepad-video = { package = "makepad-platform-video", path = "../../platform/video" }
+makepad-gltf = { path = "../gltf" }
+makepad-zune-png = { path = "../zune/zune-png" }
+makepad-zune-jpeg = { path = "../zune/zune-jpeg" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 makepad-bounded-http = { path = "../bounded_http" }
