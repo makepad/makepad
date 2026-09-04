@@ -41,6 +41,7 @@ use makepad_widgets::*;
 use makepad_flowgraph::{
     CanvasEdit, FlowCanvas, FlowCanvasAction, NodeFacesScope, NodeStatus, Selection, FIRST_AT,
 };
+use makepad_flowgraph::wire_route::WireMode;
 use panels::{
     AppView, FlowList, Inspector, InspectorAction, Palette, PaletteAction, RunBar, RunningAction,
     RunningList, TemplatePicker,
@@ -57,6 +58,26 @@ app_main!(App);
 const FIRST_TEMPLATE: &str = "prompt-to-image";
 /// How often the hub's model lists are refreshed while a flow with generators is open.
 const MODELS_REFRESH_SECS: f64 = 10.0;
+
+fn set_wire_menu_checks(menus: &mut [MenuDef], mode: WireMode) {
+    for entry in menus.iter_mut().flat_map(|menu| &mut menu.items) {
+        if entry.id == live_id!(wires_routed) {
+            entry.label = if mode == WireMode::Routed {
+                "  ✓ Routed"
+            } else {
+                "    Routed"
+            }
+            .to_string();
+        } else if entry.id == live_id!(wires_bezier) {
+            entry.label = if mode == WireMode::Bezier {
+                "  ✓ Bezier"
+            } else {
+                "    Bezier"
+            }
+            .to_string();
+        }
+    }
+}
 
 fn is_focus_routed_input(event: &Event) -> bool {
     matches!(
@@ -289,6 +310,10 @@ script_mod! {
                                 {id: @zoom_out label: "Zoom out" shortcut: "Cmd+Minus"}
                                 {id: @zoom_fit label: "Fit" shortcut: "Home"}
                                 {id: @zoom_100 label: "100 %" shortcut: "Cmd+0"}
+                                {sep: true}
+                                {id: @wires_heading label: "Wires" enabled: false}
+                                {id: @wires_routed label: "  ✓ Routed"}
+                                {id: @wires_bezier label: "    Bezier"}
                             ]}
                             {label: "Run" items: [
                                 {id: @run label: "Run" shortcut: "Cmd+R"}
@@ -850,6 +875,8 @@ pub struct App {
     #[rust]
     left_hidden: bool,
     #[rust]
+    wire_mode: WireMode,
+    #[rust]
     preview_digest: Option<(String, String)>,
     #[rust]
     preview_bytes: Option<makepad_flow::ValueBytes>,
@@ -956,7 +983,24 @@ impl App {
             ..SessionConfig::default()
         }));
         self.update_connection(cx);
+        self.set_wire_mode(cx, self.wire_mode);
         self.set_modes(cx);
+    }
+
+    fn set_wire_mode(&mut self, cx: &mut Cx, mode: WireMode) {
+        self.wire_mode = mode;
+        if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
+            canvas.set_wire_mode(cx, mode);
+        }
+
+        let menu = self.ui.menu_bar(cx, ids!(menu_bar));
+        let Some(inner) = menu.borrow() else {
+            return;
+        };
+        let mut defs = inner.menus().to_vec();
+        drop(inner);
+        set_wire_menu_checks(&mut defs, mode);
+        menu.set_menus(cx, defs);
     }
 
     fn client(&self) -> Option<Arc<Mutex<FlowClient>>> {
@@ -3145,6 +3189,8 @@ impl App {
                 self.refresh_inspector(cx);
             }
             id if id == live_id!(duplicate) => self.duplicate_selected(cx),
+            id if id == live_id!(wires_routed) => self.set_wire_mode(cx, WireMode::Routed),
+            id if id == live_id!(wires_bezier) => self.set_wire_mode(cx, WireMode::Bezier),
             id if id == live_id!(view_canvas) => {
                 self.app_mode = false;
                 self.set_modes(cx);
@@ -4390,6 +4436,19 @@ mod layout_tests {
     use makepad_widgets::makepad_platform::event::{ScrollEvent, ScrollPhase};
     use std::cell::Cell;
 
+    fn menu_label(app: &App, cx: &Cx, id: LiveId) -> String {
+        let menu = app.ui.menu_bar(cx, ids!(menu_bar));
+        let inner = menu.borrow().unwrap();
+        inner
+            .menus()
+            .iter()
+            .flat_map(|menu| &menu.items)
+            .find(|entry| entry.id == id)
+            .unwrap()
+            .label
+            .clone()
+    }
+
     fn draw_canvas_and_viewer(
         cx: &mut Cx,
         app: &mut App,
@@ -4465,6 +4524,32 @@ mod layout_tests {
             .widget(&cx, ids!(preview_value))
             .borrow::<faces::ValueView>()
             .is_some());
+    }
+
+    #[test]
+    fn wire_menu_toggles_canvas_mode_and_checked_item() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let mut app = cx.with_vm(|vm| App::from_script_mod(vm, <App as AppMain>::script_mod));
+
+        assert_eq!(app.wire_mode, WireMode::Routed);
+        assert!(menu_label(&app, &cx, live_id!(wires_routed)).contains('✓'));
+        app.handle_menu(&mut cx, live_id!(wires_bezier));
+        assert_eq!(app.wire_mode, WireMode::Bezier);
+        assert!(menu_label(&app, &cx, live_id!(wires_bezier)).contains('✓'));
+        assert!(!menu_label(&app, &cx, live_id!(wires_routed)).contains('✓'));
+        assert_eq!(
+            app.ui
+                .widget(&cx, ids!(canvas))
+                .borrow::<FlowCanvas>()
+                .unwrap()
+                .wire_mode(),
+            WireMode::Bezier
+        );
+
+        app.handle_menu(&mut cx, live_id!(wires_routed));
+        assert_eq!(app.wire_mode, WireMode::Routed);
+        assert!(menu_label(&app, &cx, live_id!(wires_routed)).contains('✓'));
     }
 
     #[test]
