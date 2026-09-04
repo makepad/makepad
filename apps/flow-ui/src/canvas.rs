@@ -52,13 +52,21 @@ const LABEL_H: f64 = 26.0;
 const CARD_HEADER_H: f64 = 14.0;
 const PORT_ROW_H: f64 = 24.0;
 const PORT_R: f64 = 11.0;
-/// The label starts this far past the disc edge.
-const PORT_LABEL_GAP: f64 = 9.0;
+/// The disc is a slight oval along the flow axis (`PORT_RX` across,
+/// `PORT_R` tall) so the type icon reads centred beside the point.
+const PORT_RX: f64 = 13.0;
+/// The label starts this far past the oval's edge.
+const PORT_LABEL_GAP: f64 = 7.0;
 /// An output disc ends in a point on its cable side, an input disc has a
-/// matching dimple: the shape itself reads the flow direction.
-const PORT_TIP: f64 = 4.0;
-const PORT_DENT: f64 = 4.0;
-const PORT_NOTCH_HALF_ANGLE: f64 = 0.72;
+/// small notch the point would fit into: the shape reads the flow direction.
+const PORT_TIP: f64 = 4.5;
+const PORT_TIP_HALF_ANGLE: f64 = 0.72;
+const PORT_DENT: f64 = 3.0;
+const PORT_NOTCH_HALF_ANGLE: f64 = 0.40;
+/// The type icon shifts a little toward the point (outputs) or away from
+/// the notch (inputs) so it sits visually centred in the shape.
+const PORT_ICON_SHIFT_OUT: f64 = 1.5;
+const PORT_ICON_SHIFT_IN: f64 = -0.75;
 const PORT_HIT_R: f64 = 16.0;
 const WIRE_HIT_PX: f64 = 6.0;
 const CARD_PAD: f64 = 14.0;
@@ -1509,6 +1517,40 @@ impl FlowCanvas {
         dvec2(rect.pos.x + rect.size.x * side, y)
     }
 
+    /// Where a wire meets the port: the tip of an output's point, the apex
+    /// of an input's notch — never the disc centre, so a wire visibly leaves
+    /// the point along its axis.
+    fn wire_anchor_at_flip(
+        &self,
+        graph: &Graph,
+        index: usize,
+        port: usize,
+        output: bool,
+        flip: f64,
+    ) -> DVec2 {
+        let p = self.port_local_at_flip(graph, index, port, output, flip);
+        let direction = if Self::port_side_at_flip(true, flip) == PortSide::Right {
+            1.0
+        } else {
+            -1.0
+        };
+        let offset = if output {
+            direction * (PORT_RX + PORT_TIP)
+        } else {
+            -direction * (PORT_RX - PORT_DENT)
+        };
+        dvec2(p.x + offset, p.y)
+    }
+
+    fn wire_anchor(&self, graph: &Graph, index: usize, port: usize, output: bool) -> DVec2 {
+        let flip = self
+            .flip_positions
+            .get(index)
+            .copied()
+            .unwrap_or(if graph.nodes[index].flip { 1.0 } else { 0.0 });
+        self.wire_anchor_at_flip(graph, index, port, output, flip)
+    }
+
     fn port_local(&self, graph: &Graph, index: usize, port: usize, output: bool) -> DVec2 {
         let flip = self
             .flip_positions
@@ -1716,14 +1758,17 @@ impl FlowCanvas {
     }
 
     /// A port disc whose cable side carries the flow direction: an output
-    /// ends in a sharp `>` point, an input has a `>` dimple the point would
-    /// fit into. `direction` is the card's flow direction (+1 left-to-right).
-    fn shaped_port(v: &mut DrawVector, centre: Point, radius: f64, direction: f64, input: bool) {
+    /// ends in a sharp `>` point, an input has a small `>` notch the point
+    /// would fit into. `grow` widens the oval (hover, the selected halo);
+    /// `direction` is the card's flow direction (+1 left-to-right).
+    fn shaped_port(v: &mut DrawVector, centre: Point, grow: f64, direction: f64, input: bool) {
+        let rx = PORT_RX + grow;
+        let ry = PORT_R + grow;
         let cable_side = if input { -direction } else { direction };
-        let apex_r = if input {
-            radius - PORT_DENT
+        let (apex_r, half_angle) = if input {
+            (rx - PORT_DENT, PORT_NOTCH_HALF_ANGLE)
         } else {
-            radius + PORT_TIP
+            (rx + PORT_TIP, PORT_TIP_HALF_ANGLE)
         };
         let base = if cable_side < 0.0 {
             std::f64::consts::PI
@@ -1731,12 +1776,12 @@ impl FlowCanvas {
             0.0
         };
         let steps = 40;
-        let start = base + PORT_NOTCH_HALF_ANGLE;
-        let sweep = std::f64::consts::TAU - 2.0 * PORT_NOTCH_HALF_ANGLE;
+        let start = base + half_angle;
+        let sweep = std::f64::consts::TAU - 2.0 * half_angle;
         for step in 0..=steps {
             let angle = start + sweep * step as f64 / steps as f64;
-            let x = (centre.x + radius * angle.cos()) as f32;
-            let y = (centre.y + radius * angle.sin()) as f32;
+            let x = (centre.x + rx * angle.cos()) as f32;
+            let y = (centre.y + ry * angle.sin()) as f32;
             if step == 0 {
                 v.move_to(x, y);
             } else {
@@ -1827,8 +1872,8 @@ impl FlowCanvas {
             .collect();
         for index in 0..self.edges.len() {
             let edge = self.edges[index];
-            let from = Self::route_point(self.port_local(graph, edge.from, edge.from_port, true));
-            let to = Self::route_point(self.port_local(graph, edge.to, edge.to_port, false));
+            let from = Self::route_point(self.wire_anchor(graph, edge.from, edge.from_port, true));
+            let to = Self::route_point(self.wire_anchor(graph, edge.to, edge.to_port, false));
             let source_side = self.port_side(graph, edge.from, true);
             let target_side = self.port_side(graph, edge.to, false);
             let offset = self.parallel_offsets.get(index).copied().unwrap_or(0.0);
@@ -1892,14 +1937,14 @@ impl FlowCanvas {
             .map(|(edge_index, edge)| {
                 let from_flip = if facings[edge.from] { 1.0 } else { 0.0 };
                 let to_flip = if facings[edge.to] { 1.0 } else { 0.0 };
-                let from = Self::route_point(self.port_local_at_flip(
+                let from = Self::route_point(self.wire_anchor_at_flip(
                     graph,
                     edge.from,
                     edge.from_port,
                     true,
                     from_flip,
                 ));
-                let to = Self::route_point(self.port_local_at_flip(
+                let to = Self::route_point(self.wire_anchor_at_flip(
                     graph,
                     edge.to,
                     edge.to_port,
@@ -1932,7 +1977,7 @@ impl FlowCanvas {
             let side = Self::port_side_at_flip(output, flip);
             let direction = if side == PortSide::Right { 1.0 } else { -1.0 };
             for port in 0..count {
-                let from = Self::route_point(self.port_local_at_flip(
+                let from = Self::route_point(self.wire_anchor_at_flip(
                     graph,
                     node_index,
                     port,
@@ -2000,14 +2045,14 @@ impl FlowCanvas {
             }
             let from_flip = if candidate_facings[edge.from] { 1.0 } else { 0.0 };
             let to_flip = if candidate_facings[edge.to] { 1.0 } else { 0.0 };
-            let from = Self::route_point(self.port_local_at_flip(
+            let from = Self::route_point(self.wire_anchor_at_flip(
                 graph,
                 edge.from,
                 edge.from_port,
                 true,
                 from_flip,
             ));
-            let to = Self::route_point(self.port_local_at_flip(
+            let to = Self::route_point(self.wire_anchor_at_flip(
                 graph,
                 edge.to,
                 edge.to_port,
@@ -2116,13 +2161,13 @@ impl FlowCanvas {
         target: Option<(usize, usize)>,
     ) -> WireRoute {
         const CARD_CLEARANCE: f64 = 12.0;
-        let from = Self::route_point(self.port_local(graph, from_index, from_port, true));
+        let from = Self::route_point(self.wire_anchor(graph, from_index, from_port, true));
         let source_side = self.port_side(graph, from_index, true);
         let (to, target_side) = target.map_or(
             (Self::route_point(pointer), PortSide::Left),
             |(node, port)| {
                 (
-                    Self::route_point(self.port_local(graph, node, port, false)),
+                    Self::route_point(self.wire_anchor(graph, node, port, false)),
                     self.port_side(graph, node, false),
                 )
             },
@@ -2437,8 +2482,8 @@ impl FlowCanvas {
                     };
                     let w = self.text_width(cx, &self.draw_port, &input.port);
                     let x = match self.port_side(graph, index, false) {
-                        PortSide::Left => p.x + PORT_R + PORT_LABEL_GAP,
-                        PortSide::Right => p.x - PORT_R - PORT_LABEL_GAP - w,
+                        PortSide::Left => p.x + PORT_RX + PORT_LABEL_GAP,
+                        PortSide::Right => p.x - PORT_RX - PORT_LABEL_GAP - w,
                     };
                     self.draw_port.draw_abs(cx, dvec2(x, p.y - 6.0), &input.port);
                 }
@@ -2447,8 +2492,8 @@ impl FlowCanvas {
                     let w = self.text_width(cx, &self.draw_port, &output.name);
                     self.draw_port.color = self.color_port_label_connected;
                     let x = match self.port_side(graph, index, true) {
-                        PortSide::Left => p.x + PORT_R + PORT_LABEL_GAP,
-                        PortSide::Right => p.x - PORT_R - PORT_LABEL_GAP - w,
+                        PortSide::Left => p.x + PORT_RX + PORT_LABEL_GAP,
+                        PortSide::Right => p.x - PORT_RX - PORT_LABEL_GAP - w,
                     };
                     self.draw_port.draw_abs(cx, dvec2(x, p.y - 6.0), &output.name);
                 }
@@ -2627,18 +2672,18 @@ impl FlowCanvas {
                 let centre = Point::new(p.x, p.y);
                 let ok = !compatible_active || self.compatible.contains(&(index, port));
                 let hot = wire_target == Some((index, port));
-                let radius = if hot { PORT_R + 3.0 } else { PORT_R };
+                let grow = if hot { 3.0 } else { 0.0 };
                 if selected_edge.is_some_and(|edge| edge.to == index && edge.to_port == port) {
                     Self::set_color(&mut self.draw_over, self.accent_color, 1.0);
-                    Self::shaped_port(&mut self.draw_over, centre, PORT_R + 4.0, direction, true);
+                    Self::shaped_port(&mut self.draw_over, centre, 4.0, direction, true);
                     self.draw_over.stroke(2.0);
                 }
                 Self::set_color(&mut self.draw_over, self.card_color, 1.0);
-                Self::shaped_port(&mut self.draw_over, centre, radius, direction, true);
+                Self::shaped_port(&mut self.draw_over, centre, grow, direction, true);
                 self.draw_over.fill();
                 let color = self.port_color(Self::input_type(node, port));
                 Self::set_color(&mut self.draw_over, color, if ok { 1.0 } else { 0.25 });
-                Self::shaped_port(&mut self.draw_over, centre, radius - 1.0, direction, true);
+                Self::shaped_port(&mut self.draw_over, centre, grow - 1.0, direction, true);
                 self.draw_over.stroke(if hot { 3.0 } else { 2.0 });
             }
             for (port, output) in node.outputs.iter().enumerate() {
@@ -2646,15 +2691,15 @@ impl FlowCanvas {
                 let centre = Point::new(p.x, p.y);
                 if selected_edge.is_some_and(|edge| edge.from == index && edge.from_port == port) {
                     Self::set_color(&mut self.draw_over, self.accent_color, 1.0);
-                    Self::shaped_port(&mut self.draw_over, centre, PORT_R + 4.0, direction, false);
+                    Self::shaped_port(&mut self.draw_over, centre, 4.0, direction, false);
                     self.draw_over.stroke(2.0);
                 }
                 Self::set_color(&mut self.draw_over, self.card_color, 1.0);
-                Self::shaped_port(&mut self.draw_over, centre, PORT_R, direction, false);
+                Self::shaped_port(&mut self.draw_over, centre, 0.0, direction, false);
                 self.draw_over.fill();
                 let color = self.port_color(output.ty);
                 Self::set_color(&mut self.draw_over, color, 1.0);
-                Self::shaped_port(&mut self.draw_over, centre, PORT_R - 1.0, direction, false);
+                Self::shaped_port(&mut self.draw_over, centre, -1.0, direction, false);
                 self.draw_over.stroke(2.0);
             }
         }
@@ -2662,10 +2707,15 @@ impl FlowCanvas {
         // The port-type icons inside the discs.
         for index in indices.iter().copied() {
             let node = &graph.nodes[index];
+            let direction = if self.port_side(graph, index, true) == PortSide::Right {
+                1.0
+            } else {
+                -1.0
+            };
             for port in 0..node.inputs.len() {
                 let p = self.port_local(graph, index, port, false);
                 let rect = Rect {
-                    pos: p + dvec2(-4.75, -4.75),
+                    pos: p + dvec2(-direction * PORT_ICON_SHIFT_IN - 4.75, -4.75),
                     size: dvec2(9.5, 9.5),
                 };
                 self.port_icon(Self::input_type(node, port)).draw_abs(cx, rect);
@@ -2673,7 +2723,7 @@ impl FlowCanvas {
             for (port, output) in node.outputs.iter().enumerate() {
                 let p = self.port_local(graph, index, port, true);
                 let rect = Rect {
-                    pos: p + dvec2(-4.75, -4.75),
+                    pos: p + dvec2(direction * PORT_ICON_SHIFT_OUT - 4.75, -4.75),
                     size: dvec2(9.5, 9.5),
                 };
                 self.port_icon(output.ty).draw_abs(cx, rect);
