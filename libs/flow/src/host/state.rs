@@ -1,6 +1,7 @@
 use super::config::{FlowServerConfig, SharedConfig};
 use super::events::EventHub;
 use super::models::FleetSnapshot;
+use super::batches::BatchRecord;
 use super::util::{atomic_write, log};
 use super::ServerError;
 use crate::engine::{self, HttpLogEntry, NetPolicy, RunEvent, RunHandle, RunId, RunInput, Seams};
@@ -68,6 +69,8 @@ const MAX_DELTA_TEXT: usize = 16 * 1024;
 pub struct RunRow {
     pub instance: InstanceId,
     pub flow: String,
+    pub batch: Option<String>,
+    pub batch_index: Option<u64>,
     pub revision: u64,
     pub state: RunState,
     pub planned_nodes: Vec<String>,
@@ -100,6 +103,7 @@ pub struct FlowState {
     pub(crate) fleet: FleetSnapshot,
     pub instances: BTreeMap<InstanceId, Instance>,
     pub runs: BTreeMap<RunId, RunRow>,
+    pub(crate) batches: BTreeMap<String, BatchRecord>,
     pub values: ValueStore,
     pub(crate) seams: Seams,
     pub(crate) net: NetPolicy,
@@ -187,6 +191,7 @@ impl FlowState {
             fleet: FleetSnapshot::default(),
             instances: BTreeMap::new(),
             runs: BTreeMap::new(),
+            batches: BTreeMap::new(),
             values,
             seams: build_seams(config),
             net: config.net.clone(),
@@ -848,6 +853,8 @@ impl FlowState {
                 vacant.insert(RunRow {
                     instance: instance_id.clone(),
                     flow: flow.clone(),
+                    batch: None,
+                    batch_index: None,
                     revision,
                     state: RunState::Running,
                     planned_nodes,
@@ -1073,6 +1080,8 @@ impl FlowState {
                     RunRow {
                         instance: id.clone(),
                         flow,
+                        batch: None,
+                        batch_index: None,
                         revision: graph.revision,
                         state: RunState::Queued,
                         planned_nodes,
@@ -1141,6 +1150,18 @@ impl FlowState {
     pub(crate) fn janitor_sweep(&mut self) {
         let now_ms = engine::unix_ms();
         let now = SystemTime::now();
+        let batch_run_ids: HashSet<RunId> = self
+            .batches
+            .values()
+            .flat_map(|batch| &batch.runs)
+            .map(|run| RunId(run.run_id.clone()))
+            .collect();
+        let batch_instances: HashSet<InstanceId> = self
+            .batches
+            .values()
+            .flat_map(|batch| &batch.runs)
+            .map(|run| InstanceId(run.instance.clone()))
+            .collect();
 
         let mut live_digests: HashSet<[u8; 32]> = HashSet::new();
         for instance in self.instances.values() {
@@ -1165,9 +1186,11 @@ impl FlowState {
         }
         self.values.expire(now, &live_digests);
 
-        self.runs.retain(|_, row| {
-            row.finished_ms
-                .is_none_or(|finished| now_ms.saturating_sub(finished) < RUN_RETENTION_MS)
+        self.runs.retain(|run_id, row| {
+            batch_run_ids.contains(run_id)
+                || row
+                    .finished_ms
+                    .is_none_or(|finished| now_ms.saturating_sub(finished) < RUN_RETENTION_MS)
         });
 
         let ttl_ms = self.instance_ttl.as_millis() as u64;
@@ -1176,6 +1199,7 @@ impl FlowState {
             .iter()
             .filter(|(_, instance)| {
                 !matches!(instance.owner, Owner::Auto)
+                    && !batch_instances.contains(&instance.id)
                     && instance.waiting.is_none()
                     && instance.active.is_empty()
                     && now_ms.saturating_sub(instance.last_activity_ms) >= ttl_ms
@@ -1265,6 +1289,8 @@ fn run_row_dto(run_id: &RunId, row: &RunRow) -> RunRowDto {
         run_id: run_id.0.clone(),
         instance: row.instance.0.clone(),
         flow: row.flow.clone(),
+        batch: row.batch.clone(),
+        batch_index: row.batch_index,
         revision: row.revision,
         state: row.state,
         planned_nodes: row.planned_nodes.clone(),

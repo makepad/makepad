@@ -16,6 +16,7 @@ mod faces;
 mod graph_edit;
 mod graph_view;
 mod panels;
+mod queue;
 mod testpattern;
 mod theme;
 mod values;
@@ -30,10 +31,10 @@ use makepad_flow::embed::{default_root, resolve, EmbedPolicy, Resolved};
 use makepad_flow::engine::{FixedGen, HubChat, HubHttp, Seams};
 use makepad_flow::host::{FlowServer, FlowServerConfig};
 use makepad_flow::{
-    AssetsResponse, CreateInstanceRequest, CreateInstanceResponse, CreateRunResponse, Event as FlowEvent,
-    FlowDefinition, FlowSummary, Graph, InstanceRow, Literal, ModelsResponse, NodeTypeCatalog,
-    NodeState, NodesResponse, PortType, PutFlowResponse, RunRowDto, RunState, TemplateSummary,
-    ValueRef,
+    AssetsResponse, CreateBatchRequest, CreateBatchResponse, CreateInstanceRequest, CreateRunResponse,
+    Event as FlowEvent, FlowDefinition, FlowSummary,
+    Graph, InstanceRow, Literal, ModelsResponse, NodeTypeCatalog, NodeState, NodesResponse,
+    ParallelismResponse, PortType, PutFlowResponse, RunRowDto, RunState, TemplateSummary, ValueRef,
 };
 use makepad_widgets::makepad_draw::text::selection::Cursor;
 use makepad_widgets::makepad_platform::thread::SignalToUI;
@@ -43,9 +44,9 @@ use makepad_flowgraph::{
 };
 use makepad_flowgraph::wire_route::WireMode;
 use panels::{
-    AppView, FlowList, Inspector, InspectorAction, Palette, PaletteAction, RunBar, RunningAction,
-    RunningList, TemplatePicker,
+    AppView, FlowList, Inspector, InspectorAction, Palette, PaletteAction, RunBar, TemplatePicker,
 };
+use queue::{QueueAction, QueueList};
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -396,6 +397,11 @@ script_mod! {
                                 design_btn := ButtonFlat{text: "Design" visible: false}
                                 View{width: 10 height: 1}
                                 run_btn := Button{text: "▶ Run"}
+                                parallel := ComboBox{
+                                    width: 86
+                                    height: 28
+                                    labels: ["1", "max · 1"]
+                                }
                                 cancel_btn := ButtonFlat{text: "Cancel"}
                                 clear_btn := ButtonFlat{text: "Clear"}
                                 run_bar := RunBar{width: 220 height: 6 margin: Inset{left: 6 right: 6}}
@@ -441,8 +447,8 @@ script_mod! {
                                                     min_horizontal: 100.0
                                                     max_horizontal: 104.0
                                                     a: Panel{
-                                                        SectionTitle{text: "RUNNING"}
-                                                        running := RunningList{}
+                                                        SectionTitle{text: "QUEUE"}
+                                                        running := QueueList{}
                                                     }
                                                     b: Panel{
                                                         SectionTitle{text: "PALETTE"}
@@ -700,10 +706,19 @@ enum IoResult {
         domain: String,
         result: Result<ModelsResponse, ClientError>,
     },
-    InstanceCreated {
+    Parallelism {
         flow: String,
+        result: Result<ParallelismResponse, ClientError>,
+    },
+    BatchCreated {
+        flow: String,
+        planned_nodes: Vec<String>,
+        revision: u64,
+        result: Result<CreateBatchResponse, ClientError>,
+    },
+    QueueRows {
         generation: u64,
-        result: Result<CreateInstanceResponse, ClientError>,
+        result: Result<Vec<RunRowDto>, ClientError>,
     },
     InstanceRunStarted {
         flow: String,
@@ -759,6 +774,8 @@ struct IoMailbox {
     fetching_flows: bool,
     fetching_instances: bool,
     fetching_models: HashSet<String>,
+    fetching_parallelism: bool,
+    fetching_queue: bool,
 }
 
 impl IoMailbox {
@@ -806,6 +823,14 @@ pub struct App {
     models: HashMap<String, Vec<ModelChoice>>,
     #[rust]
     models_fetched_at: f64,
+    #[rust]
+    parallel_max: u64,
+    #[rust]
+    parallel_use_max: bool,
+    #[rust]
+    queue_generation: u64,
+    #[rust]
+    queue_refresh_after_stale: bool,
     #[rust]
     selected: Option<String>,
     #[rust]
@@ -856,6 +881,8 @@ pub struct App {
     input_flush_in_flight: bool,
     #[rust]
     deferred_run: Option<RunRequest>,
+    #[rust]
+    deferred_batch: bool,
     #[rust]
     deferred_flow_reload: bool,
     #[rust]
@@ -1187,6 +1214,7 @@ impl App {
                     self.io(|client| IoResult::Catalog(client.nodes_catalog()));
                     self.io(|client| IoResult::Templates(client.templates()));
                     self.refresh_instances();
+                    self.refresh_queue();
                 }
             }
         } else if self.connected_server.take().is_some() {
@@ -1262,6 +1290,32 @@ impl App {
         self.show_preview(cx, &bytes);
     }
 
+    fn refresh_queue(&mut self) {
+        if self.io.fetching_queue || self.client().is_none() {
+            return;
+        }
+        self.io.fetching_queue = true;
+        let generation = self.queue_generation;
+        self.io(move |client| IoResult::QueueRows {
+            generation,
+            result: client.runs(None),
+        });
+    }
+
+    fn refresh_parallelism(&mut self) {
+        if self.io.fetching_parallelism || self.client().is_none() {
+            return;
+        }
+        let Some(flow) = self.selected.clone() else {
+            return;
+        };
+        self.io.fetching_parallelism = true;
+        self.io(move |client| IoResult::Parallelism {
+            result: client.parallelism(&flow),
+            flow,
+        });
+    }
+
     /// The hub's models for every domain the open graph uses (the pickers
     /// in the faces and the inspector fill from them).
     fn refresh_models(&mut self, force: bool) {
@@ -1278,10 +1332,8 @@ impl App {
             .collect();
         domains.sort();
         domains.dedup();
-        if domains.is_empty() {
-            return;
-        }
         self.models_fetched_at = self.time;
+        self.refresh_parallelism();
         for domain in domains {
             if !self.io.fetching_models.insert(domain.clone()) {
                 continue;
@@ -1618,8 +1670,12 @@ impl App {
                             }
                             self.refresh_flows();
                             self.services.refresh_definitions();
+                            if std::mem::take(&mut self.deferred_batch) {
+                                self.queue_run(cx);
+                            }
                         }
                         Err(error) => {
+                            self.deferred_batch = false;
                             self.show_error(cx, &error);
                             if let Some(name) = self.selected.clone() {
                                 self.load_flow(name);
@@ -1673,25 +1729,95 @@ impl App {
                         }
                     }
                 }
-                IoResult::InstanceCreated {
-                    flow,
-                    generation,
-                    result,
-                } => {
-                    if self.selected.as_deref() != Some(&flow)
-                        || generation != self.attachment_generation
-                    {
+                IoResult::Parallelism { flow, result } => {
+                    self.io.fetching_parallelism = false;
+                    if self.selected.as_deref() != Some(flow.as_str()) {
+                        self.refresh_parallelism();
                         continue;
                     }
                     match result {
                         Ok(response) => {
-                            self.attach_instance(cx, Some(response.instance), true);
-                            self.fetch_instance();
-                            self.refresh_instances();
+                            self.parallel_max = response.max.max(1);
+                            let combo = self.ui.combo_box(cx, ids!(parallel));
+                            combo.set_labels(
+                                cx,
+                                vec!["1".to_string(), format!("max · {}", self.parallel_max)],
+                            );
+                            combo.set_selected_item(cx, usize::from(self.parallel_use_max));
                         }
-                        Err(error) => {
-                            self.set_error(cx, &format!("no instance: {error}"));
+                        Err(error) => log!("flow-ui: parallelism for {flow}: {error}"),
+                    }
+                }
+                IoResult::BatchCreated {
+                    flow,
+                    planned_nodes,
+                    revision,
+                    result,
+                } => match result {
+                    Ok(response) => {
+                        self.queue_generation = self.queue_generation.wrapping_add(1);
+                        self.queue_refresh_after_stale = true;
+                        let first = response.runs.first().cloned();
+                        if let Some(mut queue) =
+                            self.ui.widget(cx, ids!(running)).borrow_mut::<QueueList>()
+                        {
+                            queue.add_batch(
+                                cx,
+                                &flow,
+                                response,
+                                &planned_nodes,
+                                revision,
+                                wall_clock_ms(),
+                            );
                         }
+                        if self.selected.as_deref() == Some(flow.as_str()) {
+                            if let Some(first) = first {
+                                self.focus_instance(cx, first.instance, Some(flow));
+                                self.display_run(
+                                    cx,
+                                    RunInfo {
+                                        run_id: first.run_id.clone(),
+                                        state: "queued".into(),
+                                        started: self.time,
+                                        finished_secs: None,
+                                        revision: self
+                                            .definition
+                                            .as_ref()
+                                            .map_or(0, |definition| definition.revision),
+                                        planned_nodes,
+                                    },
+                                );
+                                if let Some(mut queue) =
+                                    self.ui.widget(cx, ids!(running)).borrow_mut::<QueueList>()
+                                {
+                                    queue.select(cx, &first.run_id);
+                                }
+                                self.fetch_run_snapshot();
+                            }
+                        }
+                        self.refresh_instances();
+                        self.refresh_queue();
+                    }
+                    Err(error) => self.show_error(cx, &error),
+                },
+                IoResult::QueueRows { generation, result } => {
+                    self.io.fetching_queue = false;
+                    if generation != self.queue_generation {
+                        if std::mem::take(&mut self.queue_refresh_after_stale) {
+                            self.refresh_queue();
+                        }
+                        continue;
+                    }
+                    self.queue_refresh_after_stale = false;
+                    match result {
+                        Ok(rows) => {
+                            if let Some(mut queue) =
+                                self.ui.widget(cx, ids!(running)).borrow_mut::<QueueList>()
+                            {
+                                queue.set_rows(cx, rows);
+                            }
+                        }
+                        Err(error) => log!("flow-ui: queue snapshot: {error}"),
                     }
                 }
                 IoResult::InstanceRunStarted {
@@ -1744,6 +1870,7 @@ impl App {
                             self.fetch_instance();
                             self.fetch_run_snapshot();
                             self.refresh_instances();
+                            self.refresh_queue();
                         }
                         Err(error) => {
                             merge_failed_input_journal(&mut self.pending_inputs, journal);
@@ -1765,12 +1892,18 @@ impl App {
                             }
                         }
                         self.instances = rows.clone();
-                        if let Some(mut list) =
-                            self.ui.widget(cx, ids!(running)).borrow_mut::<RunningList>()
+                        if let Some(mut queue) =
+                            self.ui.widget(cx, ids!(running)).borrow_mut::<QueueList>()
                         {
-                            list.set_rows(cx, rows, self.instance.clone());
+                            queue.set_labels(
+                                cx,
+                                rows.iter()
+                                    .filter_map(|row| {
+                                        row.label.clone().map(|label| (row.instance.clone(), label))
+                                    })
+                                    .collect(),
+                            );
                         }
-                        self.refresh_running_thumbnails(cx);
                         self.maybe_auto_open(cx);
                     }
                 }
@@ -2320,11 +2453,13 @@ impl App {
                 SubscriptionEvent::Ready => {
                     self.refresh_flows();
                     self.refresh_instances();
+                    self.refresh_queue();
                     self.fetch_instance();
                 }
                 SubscriptionEvent::ResyncRequired => {
                     self.refresh_flows();
                     self.refresh_instances();
+                    self.refresh_queue();
                     self.fetch_instance();
                     self.fetch_run_snapshot();
                 }
@@ -2340,6 +2475,19 @@ impl App {
     }
 
     fn handle_flow_event(&mut self, cx: &mut Cx, event: FlowEvent) {
+        if event.run_id.is_some() {
+            // A run the queue has not seen (a Play run, or one another client
+            // started) is fetched with its row rather than guessed at.
+            let known = self
+                .ui
+                .widget(cx, ids!(running))
+                .borrow_mut::<QueueList>()
+                .map(|mut queue| queue.apply_event(cx, &event, wall_clock_ms()))
+                .unwrap_or(true);
+            if !known {
+                self.refresh_queue();
+            }
+        }
         match event.kind.as_str() {
             "flow.changed" => {
                 self.refresh_flows();
@@ -2720,6 +2868,64 @@ impl App {
         }
     }
 
+    /// Run at the toolbar's parallelism: `1` is one design run (a numbered,
+    /// locked instance, as Play always was); `max · N` queues a batch of N
+    /// slices and the canvas follows the first.
+    fn queue_run(&mut self, cx: &mut Cx) {
+        if self.client().is_none() {
+            return;
+        }
+        let parallel = if self.parallel_use_max {
+            self.parallel_max.max(1)
+        } else {
+            1
+        };
+        if parallel == 1 {
+            self.start_run(None);
+            return;
+        }
+        if self.pending_graph {
+            self.deferred_batch = true;
+            return;
+        }
+        if !self.pending_params.is_empty() || !self.pending_auto_flips.is_empty() {
+            let Some(mut graph) = self.current_graph() else {
+                return;
+            };
+            for ((node, key), value) in std::mem::take(&mut self.pending_params) {
+                graph = graph_edit::set_param(&graph, &node, &key, value);
+            }
+            for (id, flip) in &self.pending_auto_flips {
+                if let Some(node) = graph.nodes.iter_mut().find(|node| node.id == *id) {
+                    node.flip = *flip;
+                }
+            }
+            self.deferred_batch = true;
+            self.put_graph(cx, graph);
+            return;
+        }
+        let Some(flow) = self.selected.clone() else {
+            return;
+        };
+        // Every slice reads the design values from the file; nothing is
+        // overridden per batch.
+        let request = CreateBatchRequest {
+            parallel,
+            inputs: None,
+        };
+        let planned_nodes = planned_nodes_for(self.current_graph().as_ref(), None);
+        let revision = self
+            .definition
+            .as_ref()
+            .map_or(0, |definition| definition.revision);
+        self.io(move |client| IoResult::BatchCreated {
+            result: client.create_batch(&flow, &request),
+            flow,
+            planned_nodes,
+            revision,
+        });
+    }
+
     fn start_run(&mut self, outputs: Option<Vec<String>>) {
         if !self.pending_params.is_empty()
             || self.pending_graph
@@ -2954,9 +3160,6 @@ impl App {
         // generated widget to its declared empty state; fill_inputs below
         // immediately restores the preserved instance inputs.
         self.remount_faces(cx);
-        if let Some(mut list) = self.ui.widget(cx, ids!(running)).borrow_mut::<RunningList>() {
-            list.set_rows(cx, self.instances.clone(), self.instance.clone());
-        }
         self.update_run_bar(cx);
         self.ui
             .label(cx, ids!(run_state))
@@ -3513,8 +3716,11 @@ impl MatchEvent for App {
         if self.ui.text_input(cx, ids!(source)).changed(actions).is_some() {
             self.unsaved = true;
         }
+        if let Some(selected) = self.ui.combo_box(cx, ids!(parallel)).changed(actions) {
+            self.parallel_use_max = selected == 1;
+        }
         if self.ui.button(cx, ids!(run_btn)).clicked(actions) {
-            self.start_run(None);
+            self.queue_run(cx);
         }
         if self.ui.button(cx, ids!(design_btn)).clicked(actions) {
             self.attach_instance(cx, None, true);
@@ -3830,66 +4036,105 @@ impl MatchEvent for App {
             }
         }
 
-        // Running.
+        // Queue.
         let running_actions = self
             .ui
             .widget(cx, ids!(running))
-            .borrow::<RunningList>()
-            .map(|list| list.actions(cx, actions))
+            .borrow_mut::<QueueList>()
+            .map(|mut list| list.actions(cx, actions))
             .unwrap_or_default();
         for action in running_actions {
             match action {
-                RunningAction::None => {}
-                RunningAction::Attach(id) => {
-                    let flow = self
-                        .instances
-                        .iter()
-                        .find(|row| row.instance == id)
-                        .map(|row| row.flow.clone());
-                    self.focus_instance(cx, id, flow);
+                QueueAction::Select {
+                    run_id,
+                    instance,
+                    flow,
+                    revision,
+                    state,
+                    planned_nodes,
+                    started_ms,
+                    finished_ms,
+                } => {
+                    self.focus_instance(cx, instance, Some(flow));
+                    let now_ms = wall_clock_ms();
+                    self.display_run(
+                        cx,
+                        RunInfo {
+                            run_id,
+                            state: run_state_name(state).into(),
+                            started: self.time
+                                - now_ms.saturating_sub(started_ms) as f64 / 1000.0,
+                            finished_secs: finished_ms
+                                .map(|finished| finished.saturating_sub(started_ms) as f64 / 1000.0),
+                            revision,
+                            planned_nodes,
+                        },
+                    );
+                    self.fetch_run_snapshot();
                 }
-                RunningAction::Stop(id) => {
-                    let target = id.clone();
-                    self.io(move |client| IoResult::Done(client.delete_instance(&target)));
-                    if self.instance.as_deref() == Some(id.as_str()) {
-                        self.attach_instance(cx, None, true);
+                QueueAction::CancelRun {
+                    run_id,
+                    instance,
+                    batch,
+                } => {
+                    if batch {
+                        self.io(move |client| IoResult::Done(client.cancel_run(&run_id)));
+                    } else {
+                        // A single run's x is Stop: the run goes, its instance
+                        // goes, and the canvas returns to the design.
+                        let target = instance.clone();
+                        self.io(move |client| {
+                            let _ = client.cancel_run(&run_id);
+                            IoResult::Done(client.delete_instance(&target))
+                        });
+                        if self.instance.as_deref() == Some(instance.as_str()) {
+                            self.attach_instance(cx, None, true);
+                        }
                     }
                 }
-                RunningAction::Duplicate(id) => {
-                    let flow = self
-                        .instances
-                        .iter()
-                        .find(|row| row.instance == id)
-                        .map(|row| row.flow.clone());
-                    if let Some(flow) = flow {
-                        let generation = self.attachment_generation;
+                QueueAction::CancelBatch(batch) => {
+                    self.io(move |client| {
+                        IoResult::Done(client.cancel_batch(&batch).map(|_| ()))
+                    });
+                }
+                QueueAction::ClearAll(plan) => {
+                    self.queue_generation = self.queue_generation.wrapping_add(1);
+                    self.queue_refresh_after_stale = false;
+                    for batch in plan.batches {
                         self.io(move |client| {
-                            let request = CreateInstanceRequest {
-                                label: Some("copy".to_string()),
-                                ..CreateInstanceRequest::default()
-                            };
-                            let result = client.create_instance(&flow, &request);
-                            IoResult::InstanceCreated {
-                                flow,
-                                generation,
-                                result,
-                            }
+                            IoResult::Done(client.clear_batch(&batch).map(|_| ()))
                         });
                     }
-                }
-                RunningAction::CopyId(id) => cx.copy_to_clipboard(&id),
-                RunningAction::OpenImage {
-                    instance,
-                    label,
-                    digest,
-                } => {
-                    self.preview_digest = Some((digest.clone(), format!("{instance}.{label}")));
-                    self.preview_bytes = None;
-                    if let Some(bytes) = self.values.get(&digest) {
-                        self.show_image_viewer(cx, &instance, &label, &bytes);
-                    } else if let Some(client) = self.client() {
-                        self.values.request(&digest, client);
+                    let mut detach = false;
+                    for (run_id, instance) in plan.singles {
+                        detach |= self.instance.as_deref() == Some(instance.as_str());
+                        self.io(move |client| {
+                            let _ = client.cancel_run(&run_id);
+                            IoResult::Done(client.delete_instance(&instance))
+                        });
                     }
+                    if detach {
+                        self.attach_instance(cx, None, true);
+                    }
+                    self.run = None;
+                    self.outputs.clear();
+                    if let Some(mut canvas) =
+                        self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>()
+                    {
+                        canvas.clear_run(cx);
+                    }
+                    if let Some(faces) = self.faces.as_mut() {
+                        faces.reset_run();
+                    }
+                    self.update_run_bar(cx);
+                }
+                QueueAction::OpenAsset(asset) => {
+                    if let Some(mut inspector) =
+                        self.ui.widget(cx, ids!(inspector)).borrow_mut::<Inspector>()
+                    {
+                        inspector.show_asset(cx, &asset);
+                    }
+                    self.refresh_assets(cx);
                 }
             }
         }
@@ -4068,30 +4313,6 @@ impl App {
         self.refresh_inspector(cx);
     }
 
-    fn refresh_running_thumbnails(&mut self, cx: &mut Cx) {
-        let pictures: Vec<String> = self
-            .instances
-            .iter()
-            .flat_map(|row| row.outputs.values())
-            .filter(|value| value.content_type.starts_with("image/"))
-            .map(|value| value.digest.clone())
-            .collect();
-        let client = self.client();
-        for digest in pictures {
-            if let Some(bytes) = self.values.get(&digest) {
-                if let Some(mut list) = self
-                    .ui
-                    .widget(cx, ids!(running))
-                    .borrow_mut::<RunningList>()
-                {
-                    list.set_thumbnail(cx, bytes);
-                }
-            } else if let Some(client) = client.as_ref() {
-                self.values.request(&digest, client.clone());
-            }
-        }
-    }
-
     fn step_image_viewer(&mut self, cx: &mut Cx, direction: i32) {
         let current_digest = self.preview_digest.as_ref().map(|(digest, _)| digest.as_str());
         let running_pictures = current_digest.and_then(|digest| {
@@ -4167,17 +4388,6 @@ impl App {
                 Ok(digest) => {
                     if let Some(faces) = self.faces.as_mut() {
                         faces.deliver_bytes(cx, &mut self.values, &digest);
-                    }
-                    if let Some(bytes) = self.values.get(&digest) {
-                        if bytes.content_type.starts_with("image/") {
-                            if let Some(mut list) = self
-                                .ui
-                                .widget(cx, ids!(running))
-                                .borrow_mut::<RunningList>()
-                            {
-                                list.set_thumbnail(cx, bytes);
-                            }
-                        }
                     }
                     if self
                         .preview_digest
@@ -4293,6 +4503,7 @@ impl AppMain for App {
         theme::script_mod(vm);
         faces::register_host_widgets(vm);
         panels::script_mod(vm);
+        queue::script_mod(vm);
         viewer::script_mod(vm);
         self::script_mod(vm)
     }
@@ -4303,6 +4514,12 @@ impl AppMain for App {
         }
         if let Event::NextFrame(nf) = event {
             self.time = nf.time;
+        }
+        if is_queue_shortcut(event, widget_tree_has_text_focus(&self.ui, cx)) {
+            self.queue_run(cx);
+            // Do not pass Enter to a focused field; its text remains exactly
+            // the settings that were submitted with this batch.
+            return;
         }
         // The full-window viewer is modal. Route user input directly to it
         // before selection, faces, the ordinary widget tree, and shortcuts.
@@ -4402,6 +4619,9 @@ impl AppMain for App {
             if self.run_is_active() {
                 self.update_run_bar(cx);
             }
+            if let Some(mut queue) = self.ui.widget(cx, ids!(running)).borrow_mut::<QueueList>() {
+                queue.set_now(cx, wall_clock_ms());
+            }
             self.refresh_models(false);
             let refresh_assets = self
                 .ui
@@ -4474,6 +4694,19 @@ fn fresh_run_instance_request(label: String) -> CreateInstanceRequest {
         label: Some(label),
         ..CreateInstanceRequest::default()
     }
+}
+
+fn is_queue_shortcut(event: &Event, _text_field_has_focus: bool) -> bool {
+    matches!(
+        event,
+        Event::KeyDown(key)
+            if !key.is_repeat
+                && matches!(key.key_code, KeyCode::ReturnKey | KeyCode::NumpadEnter)
+                && key.modifiers.control
+                && !key.modifiers.shift
+                && !key.modifiers.alt
+                && !key.modifiers.logo
+    )
 }
 
 fn widget_tree_has_text_focus(root: &WidgetRef, cx: &Cx) -> bool {
@@ -4577,6 +4810,13 @@ fn planned_nodes_for(graph: Option<&Graph>, outputs: Option<&[String]>) -> Vec<S
     let mut planned: Vec<String> = planned.into_iter().collect();
     planned.sort();
     planned
+}
+
+fn wall_clock_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn total_progress(
@@ -4702,7 +4942,7 @@ mod layout_tests {
         assert!(app
             .ui
             .widget(&cx, ids!(running))
-            .borrow::<RunningList>()
+            .borrow::<QueueList>()
             .is_some());
         assert!(app.ui.widget(&cx, ids!(palette)).borrow::<Palette>().is_some());
         assert!(app
@@ -4720,6 +4960,26 @@ mod layout_tests {
             .widget(&cx, ids!(preview_value))
             .borrow::<faces::ValueView>()
             .is_some());
+    }
+
+    #[test]
+    fn control_enter_reaches_queue_even_with_text_focus() {
+        let event = Event::KeyDown(KeyEvent {
+            key_code: KeyCode::ReturnKey,
+            modifiers: KeyModifiers {
+                control: true,
+                ..KeyModifiers::default()
+            },
+            ..KeyEvent::default()
+        });
+        assert!(is_queue_shortcut(&event, false));
+        assert!(is_queue_shortcut(&event, true));
+
+        let plain = Event::KeyDown(KeyEvent {
+            key_code: KeyCode::ReturnKey,
+            ..KeyEvent::default()
+        });
+        assert!(!is_queue_shortcut(&plain, true));
     }
 
     #[test]
@@ -5057,6 +5317,8 @@ mod layout_tests {
                 run_id: "run-a".into(),
                 instance: "instance-a".into(),
                 flow: "demo".into(),
+                batch: None,
+                batch_index: None,
                 revision: 7,
                 state: RunState::Failed,
                 planned_nodes: vec!["running".into(), "failed".into()],

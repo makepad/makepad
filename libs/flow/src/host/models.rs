@@ -177,6 +177,16 @@ impl FleetSnapshot {
                     .as_ref()
                     .and_then(|health| health.vram_usable_mb);
                 let vram_free_mb = result.health.as_ref().and_then(|health| health.vram_free_mb);
+                let lanes_model = result
+                    .health
+                    .as_ref()
+                    .and_then(|health| health.lanes.as_ref())
+                    .map(|lanes| lanes.model.clone());
+                let lanes = result
+                    .health
+                    .as_ref()
+                    .and_then(|health| health.lanes.as_ref())
+                    .map(|lanes| lanes.slots_total);
                 nodes.push(FleetNodeDto {
                     base_url: candidate.base_url.clone(),
                     fleet,
@@ -185,6 +195,8 @@ impl FleetSnapshot {
                     vram_total_mb,
                     vram_usable_mb,
                     vram_free_mb,
+                    lanes_model,
+                    lanes,
                 });
                 if let Some(rows) = result.models {
                     models.extend(
@@ -214,6 +226,12 @@ impl FleetSnapshot {
                     vram_free_mb: previous_nodes
                         .get(&candidate.base_url)
                         .and_then(|node| node.vram_free_mb),
+                    lanes_model: previous_nodes
+                        .get(&candidate.base_url)
+                        .and_then(|node| node.lanes_model.clone()),
+                    lanes: previous_nodes
+                        .get(&candidate.base_url)
+                        .and_then(|node| node.lanes),
                 });
                 if let Some(stale) = previous_models.get(&candidate.base_url) {
                     models.extend(stale.iter().cloned());

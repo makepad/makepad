@@ -1,4 +1,5 @@
 use super::config::SharedConfig;
+use super::batches::CreateBatchOutcome;
 use super::events::{EventCursor, EventHub};
 use super::state::{
     ClearInstanceOutcome, CreateInstanceOutcome, SetInputsOutcome, SourceResult, StartRunOutcome,
@@ -7,7 +8,7 @@ use super::state::{
 use super::util::log;
 use crate::{
     graph, CreateFromTemplateRequest, CreateInstanceRequest, CreateInstanceResponse,
-    CreateRunRequest, CreateRunResponse, EvalErrorResponse, EventsResponse, FlowMutationResponse,
+    CreateBatchRequest, CreateRunRequest, CreateRunResponse, EvalErrorResponse, EventsResponse, FlowMutationResponse,
     FlowResponse, FlowSummary, HealthResponse, InstanceId, MessageResponse, NodesResponse,
     PortType, PutGraphRequest, PutSourceRequest, PutValueResponse, RevertRequest, RunId,
     AssetsResponse, TemplateResponse, Value,
@@ -273,6 +274,48 @@ pub(crate) fn dispatch(
                 return call(&ctx.state, |_| message(405, "method not allowed"));
             }
             create_instance(conn, head, ctx, name)
+        }
+        [v1, flows, name, parallelism]
+            if v1 == "v1" && flows == "flows" && parallelism == "parallelism" =>
+        {
+            if !valid_name(name) {
+                return Outcome::Resp(message(400, "invalid flow name"));
+            }
+            if head.method != Method::Get {
+                return call(&ctx.state, |_| message(405, "method not allowed"));
+            }
+            parallelism_route(ctx, name)
+        }
+        [v1, flows, name, batches]
+            if v1 == "v1" && flows == "flows" && batches == "batches" =>
+        {
+            if !valid_name(name) {
+                return Outcome::Resp(message(400, "invalid flow name"));
+            }
+            if head.method != Method::Post {
+                return call(&ctx.state, |_| message(405, "method not allowed"));
+            }
+            create_batch(conn, head, ctx, name)
+        }
+        [v1, batches, id, cancel]
+            if v1 == "v1" && batches == "batches" && cancel == "cancel" =>
+        {
+            if !valid_id(id) {
+                return Outcome::Resp(message(400, "invalid batch id"));
+            }
+            if head.method != Method::Post {
+                return call(&ctx.state, |_| message(405, "method not allowed"));
+            }
+            cancel_batch_route(ctx, id)
+        }
+        [v1, batches, id] if v1 == "v1" && batches == "batches" => {
+            if !valid_id(id) {
+                return Outcome::Resp(message(400, "invalid batch id"));
+            }
+            if head.method != Method::Delete {
+                return call(&ctx.state, |_| message(405, "method not allowed"));
+            }
+            clear_batch_route(ctx, id)
         }
         [v1, instances] if v1 == "v1" && instances == "instances" => {
             if head.method != Method::Get {
@@ -668,6 +711,46 @@ fn create_instance(conn: &mut Conn, head: &mut Head, ctx: &RouteCtx, name: &str)
     })
 }
 
+fn parallelism_route(ctx: &RouteCtx, name: &str) -> Outcome {
+    let name = name.to_string();
+    call(&ctx.state, move |state| match state.parallelism(&name) {
+        Some(response) => json(200, &response),
+        None if state.definitions.contains_key(&name) => message(409, "flow has no valid graph"),
+        None => message(404, "flow not found"),
+    })
+}
+
+fn create_batch(conn: &mut Conn, head: &mut Head, ctx: &RouteCtx, name: &str) -> Outcome {
+    let request: CreateBatchRequest = match read_json(conn, head) {
+        Ok(request) => request,
+        Err(outcome) => return outcome,
+    };
+    let name = name.to_string();
+    call(&ctx.state, move |state| match state.create_batch(&name, request) {
+        CreateBatchOutcome::Created(response) => json(202, &response),
+        CreateBatchOutcome::FlowNotFound => message(404, "flow not found"),
+        CreateBatchOutcome::FlowInvalid => message(409, "flow has no valid graph"),
+        CreateBatchOutcome::InvalidParallel => message(422, "parallel must be between 1 and 256"),
+        CreateBatchOutcome::Error(error) => message(422, &error),
+    })
+}
+
+fn cancel_batch_route(ctx: &RouteCtx, id: &str) -> Outcome {
+    let id = id.to_string();
+    call(&ctx.state, move |state| match state.cancel_batch(&id) {
+        Some(runs) => json(200, &crate::BatchMutationResponse { runs }),
+        None => message(404, "batch not found"),
+    })
+}
+
+fn clear_batch_route(ctx: &RouteCtx, id: &str) -> Outcome {
+    let id = id.to_string();
+    call(&ctx.state, move |state| match state.clear_batch(&id) {
+        Some(runs) => json(200, &crate::BatchMutationResponse { runs }),
+        None => message(404, "batch not found"),
+    })
+}
+
 fn list_instances(head: &Head, ctx: &RouteCtx) -> Outcome {
     let flow = head.query_get("flow").map(str::to_string);
     let waiting_only = head.query_get("waiting") == Some("1");
@@ -769,7 +852,7 @@ fn get_run(ctx: &RouteCtx, id: &str) -> Outcome {
 fn cancel_run_route(ctx: &RouteCtx, id: &str) -> Outcome {
     let run_id = RunId(id.to_string());
     call(&ctx.state, move |state| {
-        if state.cancel_run(&run_id) {
+        if state.cancel_run_and_retire_batch_instance(&run_id) {
             Resp::empty(200)
         } else {
             message(404, "run not found")
