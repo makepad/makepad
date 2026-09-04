@@ -34,6 +34,13 @@ use crate::music_dsp::{
 };
 use crate::pads::{PadKey, VoiceAlloc, VoiceId};
 use crate::score_preview::{PreviewEvent, PreviewSequence};
+use crate::program_mix::{
+    MasterParam, MasterParams, MasterSnapshot, ProgramMix, StripId, StripSnapshot, STRIP_COUNT,
+};
+use crate::synth::{
+    IronfishParam, IronfishPatch, RackSnapshot, StepPattern, SynthClock, SynthEngines, SynthRack,
+    SynthTrack,
+};
 use makepad_drumkit::{DrumKit, SampleBank};
 use makepad_piano_model::{Piano, PianoEvent, TimedEvent as PianoTimedEvent};
 use makepad_widgets::makepad_platform::audio::AudioBuffer;
@@ -1552,6 +1559,8 @@ struct MixState {
     cue_mode: CueMode,
     preview: PreviewVoice,
     score_preview: ScorePreviewVoice,
+    synth: SynthRack,
+    program_mix: ProgramMix,
 }
 
 impl MixState {
@@ -1570,6 +1579,8 @@ impl MixState {
             cue_mode: CueMode::default(),
             preview: PreviewVoice::new(),
             score_preview: ScorePreviewVoice::new(48_000),
+            synth: SynthRack::new(48_000),
+            program_mix: ProgramMix::new(),
         }
     }
 }
@@ -1652,6 +1663,18 @@ pub enum MixCmd {
         events: Option<Vec<PianoTimedEvent>>,
     },
     ScorePreviewStop,
+    SetSynthClock(SynthClock),
+    SetSynthPlaying(bool),
+    SetSynthPattern { track: SynthTrack, pattern: StepPattern },
+    SetIronfishPatch(IronfishPatch),
+    SetIronfishParam { param: IronfishParam, value: f32 },
+    ReplaceSynthEngines(Box<SynthEngines>),
+    SetStripGain { strip: StripId, gain: f32 },
+    SetStripMuted { strip: StripId, muted: bool },
+    SetStripSoloed { strip: StripId, soloed: bool },
+    SetMasterDynamics(MasterParams),
+    SetMasterDynamicsParam { param: MasterParam, value: f32 },
+    SetMasterDynamicsBypass(bool),
 }
 
 /// A payload the audio thread no longer holds, handed back so the UI
@@ -1666,6 +1689,7 @@ pub enum Retired {
     Piano(Box<Piano>),
     Events(Vec<PianoTimedEvent>),
     Bank(Arc<SampleBank>),
+    SynthEngines(Box<SynthEngines>),
 }
 
 /// What the callback reports back, other than the snapshot.
@@ -1702,6 +1726,9 @@ pub struct MixSnapshot {
     pub preview_ended: bool,
     pub score_playing: bool,
     pub score_pos: u64,
+    pub synth: RackSnapshot,
+    pub strips: [StripSnapshot; STRIP_COUNT],
+    pub master_fx: MasterSnapshot,
     /// Callbacks rendered so far: how the UI tells a fresh snapshot from
     /// one published before the last command went in.
     pub serial: u64,
@@ -1822,6 +1849,8 @@ struct UiShadow {
     ended_voices: Vec<VoiceId>,
     score_rate: u32,
     score_event_capacity: usize,
+    synth_rate: u32,
+    drum_bank: Option<Arc<SampleBank>>,
     /// Snapshot serial the last drain saw, so events are not re-read.
     backlog_reported: bool,
 }
@@ -1917,6 +1946,8 @@ impl Mixer {
                 ended_voices: Vec::new(),
                 score_rate: 48_000,
                 score_event_capacity: 0,
+                synth_rate: 48_000,
+                drum_bank: None,
                 backlog_reported: false,
             })),
             engine: Arc::new(OnceSlot::new(engine)),
@@ -2678,6 +2709,91 @@ impl Mixer {
         ))
     }
 
+    // ---- clocked instrument rack + program mix ---------------------------
+
+    /// Keep the rack's modelled instruments on the physical device rate.
+    /// Construction happens here, on the UI thread; the callback only swaps
+    /// the completed box and returns the old one for UI-thread destruction.
+    pub fn ensure_synth_rate(&self, sample_rate: u32, patch: IronfishPatch) {
+        let sample_rate = sample_rate.clamp(8_000, 384_000);
+        let bank = self.ui.with(|ui| {
+            if ui.synth_rate == sample_rate {
+                return None;
+            }
+            ui.synth_rate = sample_rate;
+            Some(ui.drum_bank.clone())
+        });
+        if let Some(bank) = bank {
+            self.run_cmd(MixCmd::ReplaceSynthEngines(Box::new(SynthEngines::new(
+                sample_rate,
+                patch,
+                bank,
+            ))));
+        }
+    }
+
+    pub fn set_drum_bank(&self, bank: Arc<SampleBank>) {
+        self.ui.with(|ui| {
+            ui.drum_bank = Some(bank.clone());
+            Self::send_in(&self.shared, ui, MixCmd::SetDrumBank(bank));
+        });
+    }
+
+    pub fn set_synth_clock(&self, clock: SynthClock) {
+        self.run_cmd(MixCmd::SetSynthClock(clock));
+    }
+
+    pub fn set_synth_playing(&self, playing: bool) {
+        self.run_cmd(MixCmd::SetSynthPlaying(playing));
+    }
+
+    pub fn set_synth_pattern(&self, track: SynthTrack, pattern: StepPattern) {
+        self.run_cmd(MixCmd::SetSynthPattern { track, pattern });
+    }
+
+    pub fn set_ironfish_patch(&self, patch: IronfishPatch) {
+        self.run_cmd(MixCmd::SetIronfishPatch(patch));
+    }
+
+    pub fn set_ironfish_param(&self, param: IronfishParam, value: f32) {
+        self.run_cmd(MixCmd::SetIronfishParam { param, value });
+    }
+
+    pub fn set_strip_gain(&self, strip: StripId, gain: f32) {
+        self.run_cmd(MixCmd::SetStripGain { strip, gain });
+    }
+
+    pub fn set_strip_muted(&self, strip: StripId, muted: bool) {
+        self.run_cmd(MixCmd::SetStripMuted { strip, muted });
+    }
+
+    pub fn set_strip_soloed(&self, strip: StripId, soloed: bool) {
+        self.run_cmd(MixCmd::SetStripSoloed { strip, soloed });
+    }
+
+    pub fn set_master_dynamics(&self, params: MasterParams) {
+        self.run_cmd(MixCmd::SetMasterDynamics(params));
+    }
+
+    pub fn set_master_dynamics_param(&self, param: MasterParam, value: f32) {
+        self.run_cmd(MixCmd::SetMasterDynamicsParam { param, value });
+    }
+
+    pub fn set_master_dynamics_bypass(&self, bypass: bool) {
+        self.run_cmd(MixCmd::SetMasterDynamicsBypass(bypass));
+    }
+
+    pub fn synth_snapshot(&self) -> RackSnapshot {
+        self.snapshot().synth
+    }
+
+    pub fn program_mix_snapshot(
+        &self,
+    ) -> ([StripSnapshot; STRIP_COUNT], MasterSnapshot) {
+        let snapshot = self.snapshot();
+        (snapshot.strips, snapshot.master_fx)
+    }
+
     // ---- loop-score preview ------------------------------------------------
 
     /// Install and start a score preview. Instrument construction and event
@@ -3155,7 +3271,10 @@ impl MixEngine {
                 s.preview.ended = false;
             }
             MixCmd::SetDrumBank(bank) => {
-                if let Some(old) = s.score_preview.set_drum_bank(bank) {
+                if let Some(old) = s.score_preview.set_drum_bank(bank.clone()) {
+                    retire(shared, Retired::Bank(old));
+                }
+                if let Some(old) = s.synth.set_drum_bank(bank) {
                     retire(shared, Retired::Bank(old));
                 }
             }
@@ -3174,6 +3293,25 @@ impl MixEngine {
                 }
             }
             MixCmd::ScorePreviewStop => s.score_preview.stop(true),
+            MixCmd::SetSynthClock(clock) => s.synth.set_clock(clock),
+            MixCmd::SetSynthPlaying(playing) => s.synth.set_playing(playing),
+            MixCmd::SetSynthPattern { track, pattern } => s.synth.set_pattern(track, pattern),
+            MixCmd::SetIronfishPatch(patch) => s.synth.set_patch(patch),
+            MixCmd::SetIronfishParam { param, value } => s.synth.set_param(param, value),
+            MixCmd::ReplaceSynthEngines(engines) => {
+                let old = s.synth.replace_engines(engines);
+                retire(shared, Retired::SynthEngines(old));
+            }
+            MixCmd::SetStripGain { strip, gain } => s.program_mix.set_gain(strip, gain),
+            MixCmd::SetStripMuted { strip, muted } => s.program_mix.set_muted(strip, muted),
+            MixCmd::SetStripSoloed { strip, soloed } => s.program_mix.set_soloed(strip, soloed),
+            MixCmd::SetMasterDynamics(params) => s.program_mix.set_master_params(params),
+            MixCmd::SetMasterDynamicsParam { param, value } => {
+                s.program_mix.set_master_param(param, value)
+            }
+            MixCmd::SetMasterDynamicsBypass(bypass) => {
+                s.program_mix.set_master_bypass(bypass)
+            }
         }
     }
 
@@ -3199,6 +3337,9 @@ impl MixEngine {
             preview_ended: s.preview.ended,
             score_playing: s.score_preview.playing,
             score_pos: s.score_preview.pos,
+            synth: s.synth.snapshot(),
+            strips: s.program_mix.strip_snapshots(),
+            master_fx: s.program_mix.master_snapshot(),
             serial,
             ..MixSnapshot::default()
         };
@@ -3322,6 +3463,8 @@ impl MixEngine {
             voice.eq.prepare_block();
         }
         s.score_preview.render_block(frames, device_rate);
+        s.synth.render_block(buffer_start, frames, device_rate);
+        s.program_mix.begin_block();
 
         // The headphone cue bus. `buffer_start` keeps the ring's write
         // position on the device clock, so a buffer the device skipped
@@ -3768,11 +3911,25 @@ impl MixEngine {
             }
 
             let score = s.score_preview.scratch.get(frame).copied().unwrap_or([0.0; 2]);
+            let piano = s.synth.frame(SynthTrack::Piano, frame);
+            let ironfish = s.synth.frame(SynthTrack::Ironfish, frame);
+            let drums = s.synth.frame(SynthTrack::Drums, frame);
             let master = s.master.tick(rate);
-            let l = ((video.0 + deck_out[0].0 + deck_out[1].0 + sfx.0 + score[0]) * master)
-                .clamp(-CLAMP, CLAMP);
-            let r = ((video.1 + deck_out[0].1 + deck_out[1].1 + sfx.1 + score[1]) * master)
-                .clamp(-CLAMP, CLAMP);
+            let mixed = s.program_mix.process_frame(
+                [
+                    [video.0, video.1],
+                    [deck_out[0].0, deck_out[0].1],
+                    [deck_out[1].0, deck_out[1].1],
+                    [sfx.0 + score[0], sfx.1 + score[1]],
+                    piano,
+                    ironfish,
+                    drums,
+                ],
+                master,
+                rate,
+            );
+            let l = mixed[0].clamp(-CLAMP, CLAMP);
+            let r = mixed[1].clamp(-CLAMP, CLAMP);
             for channel in 0..channels {
                 output.channel_mut(channel)[frame] += if channel == 0 { l } else { r };
             }

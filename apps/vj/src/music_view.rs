@@ -224,7 +224,71 @@ script_mod! {
 
     set_type_default() do #(DrawSplatCell::script_shader(vm)){
         ..mod.draw.DrawQuad
+        tex_mix: texture_2d(float)
+        tex_stems: texture_2d(float)
         time: uniform(0.0)
+
+        mix_level_at: fn(column: float, base_row: float, level_cols: float, scale: float) -> vec4 {
+            let c = clamp(floor(column / scale), 0.0, max(level_cols - 1.0, 0.0))
+            let wrap = floor(c / self.tex_w)
+            let u = (c - wrap * self.tex_w + 0.5) / self.tex_w
+            let v = (base_row + wrap + 0.5) / self.tex_h
+            return self.tex_mix.sample_as_bgra(vec2(u, v))
+        }
+
+        mix_span: fn(column: float) -> vec4 {
+            let lo = self.mix_level_at(column, self.lo_row, self.lo_cols, self.lo_scale)
+            if self.lod_blend <= 0.0 {
+                if self.lo_scale <= 1.0 {
+                    let base = floor(column - 0.5)
+                    let f = column - 0.5 - base
+                    let a = self.mix_level_at(base, self.lo_row, self.lo_cols, 1.0)
+                    let b = self.mix_level_at(base + 1.0, self.lo_row, self.lo_cols, 1.0)
+                    return a * (1.0 - f) + b * f
+                }
+                return lo
+            }
+            let hi = self.mix_level_at(column, self.hi_row, self.hi_cols, self.hi_scale)
+            return lo * (1.0 - self.lod_blend) + hi * self.lod_blend
+        }
+
+        stem_level_at: fn(column: float, base_row: float, level_cols: float, scale: float) -> vec4 {
+            let c = clamp(floor(column / scale), 0.0, max(level_cols - 1.0, 0.0))
+            let wrap = floor(c / self.tex_w)
+            let u = (c - wrap * self.tex_w + 0.5) / self.tex_w
+            let v = (base_row + wrap + 0.5) / self.tex_h
+            return self.tex_stems.sample_as_bgra(vec2(u, v))
+        }
+
+        stem_span: fn(column: float) -> vec4 {
+            let lo = self.stem_level_at(column, self.lo_row, self.lo_cols, self.lo_scale)
+            if self.lod_blend <= 0.0 {
+                return lo
+            }
+            let hi = self.stem_level_at(column, self.hi_row, self.hi_cols, self.hi_scale)
+            return lo * (1.0 - self.lod_blend) + hi * self.lod_blend
+        }
+
+        playing_progress: fn(base: vec4) -> vec4 {
+            let playing = step(3.5, self.state)
+            let p = self.pos * self.rect_size
+            let w = self.rect_size.x
+            let h = self.rect_size.y
+            let x0 = clamp(self.part_x0 * w, 0.0, w)
+            let x1 = clamp(self.part_x1 * w, x0, w)
+            let y0 = clamp(self.part_y0 * h, 0.0, h)
+            let y1 = clamp(self.part_y1 * h, y0, h)
+            let inside_y = step(y0 + 2.0, p.y) * step(p.y, y1 - 2.0)
+            let play_x = x0 + 2.0
+                + clamp(self.phase, 0.0, 1.0) * max(x1 - x0 - 4.0, 0.0)
+            let played = step(x0 + 2.0, p.x) * step(p.x, play_x) * inside_y * playing
+            let filled = base.mix(vec4(1.0, 1.0, 1.0, 1.0), played * 0.18)
+            let distance = abs(p.x - play_x)
+            let edge = (1.0 - smoothstep(1.5, 2.0, distance)) * inside_y * playing
+            let line = (1.0 - smoothstep(0.75, 1.0, distance)) * inside_y * playing
+            let edged = filled.mix(vec4(0.0, 0.0, 0.0, 1.0), edge * 0.55)
+            return edged.mix(vec4(1.0, 1.0, 1.0, 1.0), line * 0.95)
+        }
 
         countdown: fn(base: vec4) -> vec4 {
             let armed = step(2.5, self.state) - step(3.5, self.state)
@@ -259,13 +323,49 @@ script_mod! {
                 sdf.stroke(vec4(rgb.x, rgb.y, rgb.z, 0.10), 1.0)
                 return sdf.result
             }
+
+            let is_mix = step(3.5, self.channel)
+            let wave_available = self.has_mix
+                * mix(self.has_stems, 1.0, is_mix)
+                * step(0.001, self.span_cols)
+            if wave_available < 0.5 {
+                // Analysis or stems are still pending: retain the flat state fill.
+                if self.state < 1.5 {
+                    sdf.stroke(vec4(rgb.x, rgb.y, rgb.z, 0.25), 1.0)
+                } else if self.state < 2.5 {
+                    sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.45))
+                    sdf.stroke(vec4(rgb.x, rgb.y, rgb.z, 0.68), 1.0)
+                } else {
+                    sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.05))
+                    sdf.stroke(vec4(rgb.x, rgb.y, rgb.z, 0.68), 1.0)
+                    sdf.box(
+                        part_x0 + 1.0,
+                        part_y0 + 1.0,
+                        max(part_x1 - part_x0 - 2.0, 1.0),
+                        max(part_y1 - part_y0 - 2.0, 1.0),
+                        1.0
+                    )
+                    if self.state < 3.5 {
+                        let pulse = 0.5 + 0.5 * sin(self.time * 12.5663706)
+                        sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.34 + pulse * 0.34))
+                        sdf.stroke(vec4(1.0, 1.0, 1.0, 0.45 + pulse * 0.5), 2.0)
+                    } else {
+                        sdf.fill(vec4(rgb.x * 0.82, rgb.y * 0.82, rgb.z * 0.82, 0.92))
+                        sdf.stroke(vec4(1.0, 1.0, 1.0, 0.95), 2.0)
+                    }
+                }
+                return self.countdown(self.playing_progress(sdf.result))
+            }
+
+            // Keep the pad quiet behind its waveform; state remains visible
+            // in the outline, queued pulse and playing progress.
             if self.state < 1.5 {
                 sdf.stroke(vec4(rgb.x, rgb.y, rgb.z, 0.25), 1.0)
             } else if self.state < 2.5 {
-                sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.45))
+                sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.07))
                 sdf.stroke(vec4(rgb.x, rgb.y, rgb.z, 0.68), 1.0)
             } else {
-                sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.05))
+                sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.03))
                 sdf.stroke(vec4(rgb.x, rgb.y, rgb.z, 0.68), 1.0)
                 sdf.box(
                     part_x0 + 1.0,
@@ -278,14 +378,67 @@ script_mod! {
                     // Up next: a pulsing white frame, and the bar countdown
                     // strip along the active slot's top edge.
                     let pulse = 0.5 + 0.5 * sin(self.time * 12.5663706)
-                    sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.34 + pulse * 0.34))
+                    sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.08))
                     sdf.stroke(vec4(1.0, 1.0, 1.0, 0.45 + pulse * 0.5), 2.0)
                 } else {
-                    sdf.fill(vec4(rgb.x * 0.82, rgb.y * 0.82, rgb.z * 0.82, 0.92))
+                    sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.10))
                     sdf.stroke(vec4(1.0, 1.0, 1.0, 0.95), 2.0)
                 }
             }
-            return self.countdown(sdf.result)
+
+            let inner_w = max(w - 8.0, 1.0)
+            let inner_x = clamp((p.x - 4.0) / inner_w, 0.0, 1.0)
+            let column = self.span_start + inner_x * self.span_cols
+            let tile = self.mix_span(column)
+            let stems = self.stem_span(column)
+            let present = max(stems.x + stems.y + stems.z + stems.w, 0.0001)
+            let c0 = 1.0 - step(0.5, self.channel)
+            let c1 = step(0.5, self.channel) - step(1.5, self.channel)
+            let c2 = step(1.5, self.channel) - step(2.5, self.channel)
+            let c3 = step(2.5, self.channel) - step(3.5, self.channel)
+            let stem_level = (stems.x * c0 + stems.y * c1 + stems.z * c2 + stems.w * c3) / present
+            let level = clamp(mix(tile.w * stem_level, tile.w, is_mix), 0.0, 1.0) * 0.80
+
+            let active = step(2.5, self.state)
+            let part_h = max(self.part_y1 - self.part_y0, 0.001)
+            let part_y = clamp((self.pos.y - self.part_y0) / part_h, 0.0, 1.0)
+            let display_y = mix(self.pos.y, part_y, active)
+            let display_h = mix(h, part_y1 - part_y0, active)
+            let inner_scale = max(display_h - 8.0, 1.0) / max(display_h, 1.0)
+            let y = abs(display_y - 0.5) * 2.0
+            let feather = 2.0 / max(h, 2.0)
+            let envelope = (1.0 - smoothstep(
+                level * inner_scale - feather,
+                level * inner_scale + feather,
+                y
+            )) * step(0.002, level)
+            let in_x = smoothstep(3.0, 4.0, p.x)
+                * (1.0 - smoothstep(w - 4.0, w - 3.0, p.x))
+            let part_mask = step(part_x0, p.x) * step(p.x, part_x1)
+                * step(part_y0, p.y) * step(p.y, part_y1)
+            let cover = envelope * in_x * mix(1.0, part_mask, active)
+
+            let pulse = 0.5 + 0.5 * sin(self.time * 12.5663706)
+            let part_w = max(self.part_x1 - self.part_x0, 0.001)
+            let part_x = clamp((self.pos.x - self.part_x0) / part_w, 0.0, 1.0)
+            let played = step(part_x, clamp(self.phase, 0.0, 1.0))
+            let silent = 1.0 - step(1.5, self.state)
+            let ready = step(1.5, self.state) - step(2.5, self.state)
+            let queued = step(2.5, self.state) - step(3.5, self.state)
+            let playing = step(3.5, self.state)
+            let alpha = (silent * 0.20
+                + ready * 0.35
+                + queued * (0.45 + pulse * 0.40)
+                + playing * (0.55 + played * 0.35))
+                * mix(1.0, 0.55, self.has_blocks)
+            let gain = 1.0 + playing * played * 0.12
+            let wave = vec4(
+                min(rgb.x * gain, 1.0),
+                min(rgb.y * gain, 1.0),
+                min(rgb.z * gain, 1.0),
+                alpha
+            )
+            return self.countdown(self.playing_progress(sdf.result.mix(wave, cover)))
         }
     }
 
