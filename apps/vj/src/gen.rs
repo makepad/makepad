@@ -2046,7 +2046,11 @@ impl GenModel {
                     row.node_state = GenNodeState::Finished;
                 }
                 GenJobState::Failed(
-                    status.outcome.clone().unwrap_or_else(|| "failed".to_string()),
+                    status.outcome.as_deref()
+                        .filter(|outcome| !outcome.trim().is_empty() && *outcome != "failed")
+                        .or_else(|| status.progress.as_ref().map(|(_, note)| note.as_str())
+                            .filter(|note| !note.trim().is_empty()))
+                        .unwrap_or("failed").to_string(),
                 )
             }
             JobStateDto::Cancelled => {
@@ -3276,6 +3280,29 @@ mod tests {
             result_asset: None,
             result_revision: None,
             stages: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn failed_job_displays_precise_progress_error_and_descriptive_outcome_fallback() {
+        for (outcome, note, expected) in [
+            (Some("failed"), Some("http://node:8765/generate: http 503: queue full"), "http://node:8765/generate: http 503: queue full"),
+            (None, Some("node: poll disconnected after acceptance"), "node: poll disconnected after acceptance"),
+            (Some("video encoder failed"), None, "video encoder failed"),
+            (Some("video encoder failed"), Some("denoising"), "video encoder failed"),
+            (Some("failed"), Some("  "), "failed"),
+        ] {
+            let mut model = ready_model();
+            model.set_prompt("clip".into());
+            let GenCmd::Enqueue { tag, .. } = model.generate(100)[0] else { panic!() };
+            model.queued_at(tag, job_id(9), Some(110));
+            let mut failed = status(job_id(9), JobStateDto::Failed);
+            failed.outcome = outcome.map(str::to_string);
+            failed.progress = note.map(|s| (0, s.to_string()));
+            model.status_arrived_at(&failed, 200);
+            let row = model.jobs().next().unwrap();
+            assert!(matches!(&row.state, GenJobState::Failed(reason) if reason == expected));
+            assert!(row.display(300).message.contains(expected));
         }
     }
 

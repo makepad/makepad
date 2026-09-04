@@ -827,7 +827,7 @@ fn spawn_job(
     jobs.lock().unwrap().insert(job.0, handle.clone());
     let endpoints = endpoints.clone();
     pool.submit(Lane::Heavy, move || {
-            job_thread(handle, endpoints, token, namespace, kind_name, body, tag)
+            job_thread(job, handle, endpoints, token, namespace, kind_name, body, tag)
         })
         .map(|handle| handle.detach())
         .map_err(|error| format!("could not queue the job: {error}"))?;
@@ -836,6 +836,7 @@ fn spawn_job(
 
 #[allow(clippy::too_many_arguments)]
 fn job_thread(
+    job: JobId,
     handle: Arc<JobHandle>,
     endpoints: ApiEndpoints,
     token: Option<String>,
@@ -847,7 +848,12 @@ fn job_thread(
     let target = PublishTarget { endpoints, token, namespace };
     let cancel = handle.cancel.clone();
     let progress_handle = handle.clone();
+    let mut node = "not reported".to_string();
     let mut progress = |note: &str, permille: u16| {
+        if let Some(endpoint) = note.strip_prefix("waiting for ").and_then(|s| s.split_once(" admission").map(|p| p.0))
+            .or_else(|| note.strip_prefix("job ").and_then(|s| s.split_once(" on ").map(|p| p.1))) {
+            node = endpoint.chars().take(160).collect();
+        }
         let mut view = progress_handle.view.lock().unwrap();
         if view.state == StageState::Pending {
             view.state = StageState::Running;
@@ -877,12 +883,34 @@ fn job_thread(
                 view.state = StageState::Cancelled;
                 view.outcome = Some("cancelled".to_string());
             } else {
+                makepad_widgets::log!("vj generation failed kind={} localjob={} node={} error={}",
+                    kind_name, job, node, bounded_job_error(&error, &body));
                 view.state = StageState::Failed;
                 view.outcome = Some("failed".to_string());
                 view.note = error;
             }
         }
     }
+}
+
+/// Only the error is logged, never the request document. Backends can echo
+/// input text, so remove request strings before bounding the one-line log.
+fn bounded_job_error(error: &str, body: &Value) -> String {
+    fn redact(out: &mut String, value: &Value) {
+        match value {
+            Value::Str(text) if !text.is_empty() => *out = out.replace(text, "[request value]"),
+            Value::Obj(fields) => for (key, value) in fields {
+                if !matches!(key.as_str(), "model" | "domain" | "kind") { redact(out, value); }
+            },
+            Value::Arr(items) => for value in items { redact(out, value); },
+            _ => {}
+        }
+    }
+    let mut safe = error.to_string();
+    redact(&mut safe, body);
+    let mut out: String = safe.chars().take(768).map(|c| if c.is_control() { ' ' } else { c }).collect();
+    if safe.chars().count() > 768 { out.push('…'); }
+    out
 }
 
 /// The registry key a handle was inserted under is not stored on it; jobs
@@ -1037,4 +1065,40 @@ fn terminal_result(view: &StageView) -> Option<JobResultDto> {
         recorded_ms: now_ms(),
         body,
     })
+}
+
+#[cfg(test)]
+mod job_error_tests {
+    use super::*;
+
+    #[test]
+    fn failed_dto_keeps_classification_and_original_error() {
+        let reason = "http://node:8765/generate: http 503: queue full";
+        let handle = Arc::new(JobHandle {
+            view: Mutex::new(JobView { namespace: "gen".into(), kind: "video.generate".into(),
+                created_ms: 1, state: StageState::Failed, note: reason.into(), permille: 0,
+                outcome: Some("failed".into()), published: None }),
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+        let dto = synthesize_job_status(JobId([7; 16]), &handle);
+        assert_eq!(dto.state, JobStateDto::Failed);
+        assert_eq!(dto.outcome.as_deref(), Some("failed"));
+        assert_eq!(dto.progress, Some((0, reason.into())));
+    }
+
+    #[test]
+    fn failure_log_redacts_nested_request_text_and_payloads_and_is_bounded() {
+        let body = makepad_asset_client::json::obj(vec![
+            ("prompt", makepad_asset_client::json::s("private prompt")),
+            ("inputs", Value::Arr(vec![makepad_asset_client::json::obj(vec![
+                ("data_b64", makepad_asset_client::json::s("cHJpdmF0ZSBwYXlsb2Fk")),
+            ])])),
+        ]);
+        let error = format!("http://node:8765: backend error: private prompt cHJpdmF0ZSBwYXlsb2Fk\n{}", "é".repeat(2000));
+        let safe = bounded_job_error(&error, &body);
+        assert!(safe.contains("http://node:8765: backend error:"));
+        assert!(!safe.contains("private prompt") && !safe.contains("cHJpdmF0"));
+        assert!(!safe.contains('\n'));
+        assert!(safe.chars().count() <= 769);
+    }
 }

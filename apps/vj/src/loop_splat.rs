@@ -288,6 +288,8 @@ impl StemLevels {
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct SplatSnapshot {
     pub active: bool,
+    /// Continuous source-time clock, independent of the visible cell wrap.
+    pub clock_secs: f64,
     pub playing: [Option<(u8, SplatPart)>; SPLAT_ROWS],
     pub queued: [Option<(u8, SplatPart)>; SPLAT_ROWS],
     pub bar_index: i64,
