@@ -74,6 +74,7 @@ fn search_titles(core: &AssetServerCore, text: &str) -> Vec<String> {
                 filters: SearchFilters::default(),
                 expand: false,
                 page_size: 50,
+                newest: false,
                 facets: 0,
             },
             &SearchViewer { principal: None, scope: ViewerScope::All },

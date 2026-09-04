@@ -46,6 +46,7 @@ fn q(text: &str) -> SearchQuery<'_> {
         filters: SearchFilters::default(),
         expand: true,
         page_size: 10,
+        newest: false,
         facets: 0,
     }
 }

@@ -95,11 +95,14 @@ impl ClientProfile {
         match self {
             ClientProfile::Game => matches!(
                 call,
-                C::WorldPlace { .. }
+                C::ContentGenerate { .. }
+                    | C::CharacterGenerate { .. }
+                    | C::WorldPlace { .. }
                     | C::WorldRemove { .. }
                     | C::WorldMove { .. }
                     | C::WorldList
                     | C::WorldGetSource
+                    | C::WorldApi { .. }
                     | C::WorldGetPlan
                     | C::WorldSetPlan { .. }
                     | C::WorldSetSource { .. }
@@ -218,7 +221,7 @@ mod tests {
         assert!(ClientProfile::Game.client_executes(&model_build));
         assert!(ClientProfile::Game.client_executes(&model_fetch));
         assert!(!ClientProfile::Game.client_executes(&generate));
-        assert!(!ClientProfile::Game.client_executes(&queued));
+        assert!(ClientProfile::Game.client_executes(&queued));
         assert!(ClientProfile::Gen.client_executes(&generate));
         assert!(ClientProfile::Gen.client_executes(&C::DefaultsGet));
         assert!(ClientProfile::Gen.client_executes(&C::FleetIntrospect { domain: None }));
@@ -263,7 +266,7 @@ mod tests {
             "- assets.query:",
             "- content.generate:",
             "SEARCH FIRST",
-            "Tell the player it is generating",
+            "returned final alias/revision",
             // the trained-template guidance the agentic surface gets
             "<parameter=",
         ] {

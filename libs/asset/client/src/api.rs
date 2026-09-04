@@ -128,6 +128,9 @@ pub struct CatalogQuery {
     pub creator: Option<String>,
     /// Only assets currently referenced by an alias head.
     pub live_only: bool,
+    /// Browse mode ordering: newest indexed assets first. Text searches keep
+    /// their score ordering regardless of this flag.
+    pub newest: bool,
     /// 1..=[`MAX_SEARCH_LIMIT`].
     pub page_size: u32,
     /// Ask the server to count the labels of this result set and return the
@@ -193,6 +196,9 @@ impl CatalogQuery {
         }
         if self.live_only {
             pairs.push(("live", Value::Bool(true)));
+        }
+        if self.newest {
+            pairs.push(("newest", Value::Bool(true)));
         }
         pairs.push(("limit", Value::Int(self.page_size as i64)));
         if self.facets > 0 {

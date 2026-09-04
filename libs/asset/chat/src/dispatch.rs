@@ -14,21 +14,6 @@ use makepad_asset_client::json::{self, Value};
 use makepad_asset_client::{Api, ApiEndpoints, CatalogQuery, HttpLimits};
 use makepad_asset_data::{AssetKind, AssetManifest, AssetRevisionId};
 
-fn call_prompt(call: &ContentToolCall) -> Option<&str> {
-    match call {
-        ContentToolCall::ImageGenerate { prompt, .. }
-        | ContentToolCall::VideoGenerate { prompt, .. }
-        | ContentToolCall::AudioGenerate { prompt, .. }
-        | ContentToolCall::SpeechGenerate { prompt, .. }
-        | ContentToolCall::MusicGenerate { prompt, .. }
-        | ContentToolCall::MeshGenerate { prompt, .. }
-        | ContentToolCall::WorldGenerate { prompt, .. }
-        | ContentToolCall::CharacterGenerate { prompt, .. }
-        | ContentToolCall::ContentGenerate { prompt, .. } => Some(prompt.as_str()),
-        _ => None,
-    }
-}
-
 pub struct AssetServerTools {
     api: Api,
     /// Namespace this gateway reads as its working project.
@@ -212,19 +197,8 @@ impl ToolExecutor for AssetServerTools {
             | ContentToolCall::MusicGenerate { .. }
             | ContentToolCall::MeshGenerate { .. }
             | ContentToolCall::WorldGenerate { .. }
-            | ContentToolCall::CharacterGenerate { .. } => ToolOutcome::Ok {
-                value: json::obj(vec![
-                    ("queued", Value::Bool(true)),
-                    ("tool", json::s(call.name())),
-                    ("prompt", json::s(call_prompt(call).unwrap_or("").to_string())),
-                    (
-                        "note",
-                        json::s(
-                            "fleet generate tools are executed by the AI Content app; \
-                             the Asset Server dispatcher only acknowledges the request",
-                        ),
-                    ),
-                ]),
+            | ContentToolCall::CharacterGenerate { .. } => ToolOutcome::Unavailable {
+                reason: "Generation needs an owned creator pipeline; the store dispatcher does not start jobs.".into(),
             },
             // Generation and transforms run in the creating app (aicore §9);
             // CreatorTools intercepts these before this executor ever sees
@@ -275,6 +249,7 @@ impl ToolExecutor for AssetServerTools {
             | ContentToolCall::WorldMove { .. }
             | ContentToolCall::WorldList
             | ContentToolCall::WorldGetSource
+            | ContentToolCall::WorldApi { .. }
             | ContentToolCall::WorldGetPlan
             | ContentToolCall::WorldSetPlan { .. }
             | ContentToolCall::WorldSetSource { .. }

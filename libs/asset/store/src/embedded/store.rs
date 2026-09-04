@@ -252,6 +252,7 @@ impl EmbeddedStore {
             filters: SearchFilters { namespace, live_only: true, ..SearchFilters::default() },
             page_size,
             expand: false,
+            newest: false,
             facets: 0,
         };
         self.search(&query, viewer, cursor)

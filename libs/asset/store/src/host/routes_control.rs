@@ -2387,6 +2387,7 @@ struct SearchParams {
     model: Option<String>,
     owner_me: bool,
     live_only: bool,
+    newest: bool,
     /// Literal words only: no synonym or plural expansion (`exact=1`).
     exact: bool,
     page_size: u32,
@@ -2448,6 +2449,7 @@ fn search_params_from_query(head: &Head, rc: &RouteCtx) -> RouteResult<SearchPar
             Some(_) => return Err(Fail::Http(400, "owner filter must be me")),
         },
         live_only: head.query_get("live").map(parse_flag).transpose()?.unwrap_or(false),
+        newest: head.query_get("newest").map(parse_flag).transpose()?.unwrap_or(false),
         exact: head.query_get("exact").map(parse_flag).transpose()?.unwrap_or(false),
         page_size,
         cursor: head.query_get("cursor").map(parse_cursor).transpose()?,
@@ -2501,6 +2503,10 @@ fn search_params_from_body(body: &Value, rc: &RouteCtx) -> RouteResult<SearchPar
             None => false,
             Some(v) => v.as_bool().ok_or(Fail::Http(400, "malformed flag"))?,
         },
+        newest: match body.get("newest") {
+            None => false,
+            Some(v) => v.as_bool().ok_or(Fail::Http(400, "malformed flag"))?,
+        },
         exact: match body.get("exact") {
             None => false,
             Some(v) => v.as_bool().ok_or(Fail::Http(400, "malformed flag"))?,
@@ -2541,6 +2547,7 @@ fn run_search(head: &Head, rc: &RouteCtx, params: SearchParams) -> RouteResult<O
             expand: !params.exact,
             page_size: params.page_size,
             facets: params.facets,
+            newest: params.newest,
         };
         // Read policy: every authenticated principal browses the whole
         // catalog; private annotation fields are still owner-only via the

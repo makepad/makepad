@@ -7,7 +7,7 @@ use makepad_asset_data::{
     Anchor, AssetAlias, AssetFile, AssetId, AssetKind, AssetManifest, AssetRevisionId,
     AssetRevisionRef, Axis, BlobId, Bounds, Capabilities, CoordinateSystem, DerivativePolicy,
     DeviceTier, FileRole, ImageDims, MediaType, Metrics, Pivot, Provenance, Redistribution,
-    Rights, ThumbnailMedia, ThumbnailMeta, ThumbnailView, Vec3,
+    Rights, SpawnRecipe, ThumbnailMedia, ThumbnailMeta, ThumbnailView, Vec3,
 };
 use std::path::PathBuf;
 
@@ -341,6 +341,7 @@ pub struct PublishBundle {
     pub coordinate_system: CoordinateSystem,
     pub anchors: Vec<Anchor>,
     pub capabilities: Capabilities,
+    pub spawn_recipe: Option<SpawnRecipe>,
     pub media_millis: u32,
     pub categories: Vec<String>,
     pub tags: Vec<String>,
@@ -393,6 +394,7 @@ impl PublishBundle {
                 loopable: matches!(kind, AssetKind::Audio | AssetKind::Video),
                 ..Capabilities::default()
             },
+            spawn_recipe: None,
             media_millis: 0,
             categories: Vec::new(),
             tags: Vec::new(),

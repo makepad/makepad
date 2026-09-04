@@ -402,7 +402,11 @@ impl StaticStore {
         matches.sort_by(|(a, sa), (b, sb)| {
             let alias_a = a.aliases.first().map(ToString::to_string).unwrap_or_default();
             let alias_b = b.aliases.first().map(ToString::to_string).unwrap_or_default();
-            if browse { alias_a.cmp(&alias_b).then(a.asset_id.cmp(&b.asset_id)) }
+            if browse && query.newest {
+                b.updated_ms.cmp(&a.updated_ms).then(a.asset_id.cmp(&b.asset_id))
+            } else if browse {
+                alias_a.cmp(&alias_b).then(a.asset_id.cmp(&b.asset_id))
+            }
             else { sb.cmp(sa).then(alias_a.cmp(&alias_b)).then(a.asset_id.cmp(&b.asset_id)) }
         });
         let facets = build_facets(&matches, query.facets);
@@ -1328,9 +1332,9 @@ fn snippet(title: &str, description: &str) -> String {
 
 fn query_fingerprint(query: &CatalogQuery) -> [u8; 32] {
     digest_text(&format!(
-        "q\0{}\0{:?}\0{:?}\0{:?}\0{:?}\0{:?}\0{:?}\0{}\0{}\0{}",
+        "q\0{}\0{:?}\0{:?}\0{:?}\0{:?}\0{:?}\0{:?}\0{}\0{}\0{}\0{}",
         query.text, query.namespace, query.kind, query.category, query.tag, query.exclude_tag,
-        query.creator, query.live_only, query.page_size, query.facets,
+        query.creator, query.live_only, query.newest, query.page_size, query.facets,
     ))
 }
 

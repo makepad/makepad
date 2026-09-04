@@ -276,7 +276,7 @@ mod tests {
     fn snapshot(url: &str, total_mb: u64, models: Vec<ModelInfoJson>) -> BoxSnapshot {
         BoxSnapshot {
             base_url: url.to_string(),
-            health: Some(HealthJson {
+            health: Some(HealthJson { activity: None,
                 service: "makepad-asset-ai".to_string(),
                 version: "test".to_string(),
                 gpu: None,

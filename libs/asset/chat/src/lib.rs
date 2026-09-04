@@ -52,6 +52,7 @@ pub mod cli {
 pub mod codex_cli {
     pub use makepad_ai_hub::providers::codex_cli::*;
 }
+pub mod authoring;
 pub mod context;
 pub mod dispatch;
 #[cfg(not(target_arch = "wasm32"))]
@@ -139,6 +140,7 @@ pub mod responses {
     pub use makepad_ai_hub::providers::responses::*;
 }
 pub mod session;
+pub mod sandbox_effect;
 pub mod toolcall;
 pub mod tools;
 pub mod transcript;

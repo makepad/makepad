@@ -69,6 +69,7 @@ pub struct CatalogQuery {
     pub exclude_tag: Option<String>,
     pub creator: Option<String>,
     pub live_only: bool,
+    pub newest: bool,
     pub page_size: u32,
     pub facets: u32,
 }
