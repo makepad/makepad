@@ -257,6 +257,20 @@ impl ScriptHook for View {
             self.optimize = ViewOptimize::DrawList;
         }
 
+        // A view cannot both paint its own background (`show_bg`) and be cached into a
+        // texture (`texture_caching`, or `optimize: Texture` directly): the two are
+        // mutually exclusive and would otherwise hit a hard `panic!` deep inside
+        // `draw_walk` on the first frame. Catch the conflict here, at apply/load time,
+        // with an actionable error and degrade gracefully — keep `show_bg`, drop the
+        // texture cache — so the live design still loads and the app keeps running.
+        if self.show_bg && self.optimize.is_texture() {
+            error!(
+                "View: `show_bg` and `texture_caching` are mutually exclusive; ignoring \
+                 `texture_caching` and keeping `show_bg`. Remove one of the two."
+            );
+            self.optimize = ViewOptimize::None;
+        }
+
         if self.optimize.needs_draw_list() && self.draw_list.is_none() {
             self.draw_list = Some(DrawList2d::script_new(vm));
         }
