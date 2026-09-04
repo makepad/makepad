@@ -638,6 +638,7 @@ struct SplatState {
     frames: Box<SplatFrames>,
     active: bool,
     master_frames: f64,
+    phase_fade: Option<SplatPhaseFade>,
     rows: [SplatRowVoice; SPLAT_ROWS],
     /// The cell the picture follows: the one launched last. The deck's
     /// reported playhead cycles inside it, so the waveform stays on the
@@ -653,6 +654,7 @@ impl SplatState {
             frames,
             active: false,
             master_frames,
+            phase_fade: None,
             rows: [SplatRowVoice::default(); SPLAT_ROWS],
             view: None,
         }
@@ -727,17 +729,18 @@ impl SplatState {
         Some((cell.start_frames + f64::from(part.num) * part_len, part_len.max(1.0)))
     }
 
-    fn queue_cell(&mut self, row: SplatRow, col: usize, part: SplatPart) {
+    fn queue_cell(&mut self, row: SplatRow, col: usize, part: SplatPart, sync_locked: bool) {
         if !self.active {
             return;
         }
         let Some((start_frames, len_frames)) = self.slot_frames(row, col, part) else { return };
-        // The first launch into a silent grid starts NOW, and the master
+        // The first FREE launch into a silent grid starts NOW, and the master
         // clock is re-seated on the cell so the grid's bars and the loop's
         // bars are the same bars from here: the click plays exactly the
         // segment it named, at once. Later launches join on the next bar,
-        // in phase with what is already running.
-        let at_frames = if self.idle() {
+        // in phase with what is already running. A synced grid preserves
+        // its clock even on the first launch and joins on its next bar.
+        let at_frames = if self.idle() && !sync_locked {
             self.master_frames = start_frames;
             start_frames
         } else {
@@ -777,7 +780,7 @@ impl SplatState {
                 Some((start_frames, len_frames))
                     if start_frames == old.start_frames && len_frames == old.len_frames => {}
                 Some(_) => {
-                    self.queue_cell(row, usize::from(old.col), old.part);
+                    self.queue_cell(row, usize::from(old.col), old.part, true);
                     if follows_view {
                         rebased_view = self.rows[row.index()].queued.and_then(|queued| queued.cell);
                     }
@@ -813,6 +816,7 @@ impl SplatState {
         };
         let mut snapshot = SplatSnapshot {
             active: self.active,
+            clock_secs: self.master_frames * self.grid.bar_secs / self.frames.bar_frames.max(1.0),
             bar_index: bar.floor() as i64,
             bar_phase: bar.rem_euclid(1.0) as f32,
             ..SplatSnapshot::default()
@@ -961,8 +965,19 @@ struct SeekFade {
     total: f64,
 }
 
+/// Fixed-size copy of the outgoing sample voices for a clock correction.
+/// Keeping their active fades avoids a splice when a correction crosses
+/// a queued launch or stop.
+struct SplatPhaseFade {
+    pos: f64,
+    left: f64,
+    total: f64,
+    rows: [SplatRowVoice; SPLAT_ROWS],
+}
+
 struct DeckVoice {
     pcm: Option<DeckPcm>,
+    sync_locked: bool,
     stems: Option<Arc<TrackStems>>,
     /// The stem swap-in blend: 0.0 when a table first lands on a track that
     /// had none, ramping to 1.0 over [`STEM_SWAP_SECS`]. See
@@ -1006,6 +1021,7 @@ impl DeckVoice {
     fn new() -> DeckVoice {
         DeckVoice {
             pcm: None,
+            sync_locked: false,
             stems: None,
             stem_blend: ParamRamp::at(1.0),
             splat: None,
@@ -1049,6 +1065,7 @@ impl DeckVoice {
         self.pos = frames.clamp(0.0, len);
         if let Some(splat) = self.splat.as_mut().filter(|splat| splat.active) {
             splat.master_frames = self.pos;
+            splat.phase_fade = None;
         }
         self.stretch.reset_to(self.pos);
         self.reader.reset();
@@ -1151,7 +1168,7 @@ fn render_splat_source(
             voice.cell = queued.cell;
             landed = true;
         }
-        let frame = if let Some(fade) = voice.fade {
+        let mut frame = if let Some(fade) = voice.fade {
             let phase = ((master - fade.start_frames) / fade.len_frames).clamp(0.0, 1.0) as f32;
             let outgoing = fade.outgoing.map_or([0.0, 0.0], |cell| {
                 splat_cell_frame(row, cell, master, pcm, stems, stem_gain)
@@ -1174,10 +1191,35 @@ fn render_splat_source(
                 splat_cell_frame(row, cell, master, pcm, stems, stem_gain)
             })
         };
+        if let Some(fade) = &splat.phase_fade {
+            let old_voice = fade.rows[row.index()];
+            let read = |cell| splat_cell_frame(row, cell, fade.pos, pcm, stems, stem_gain);
+            let old = if let Some(row_fade) = old_voice.fade {
+                let phase = ((fade.pos - row_fade.start_frames) / row_fade.len_frames)
+                    .clamp(0.0, 1.0) as f32;
+                let angle = phase * std::f32::consts::FRAC_PI_2;
+                let outgoing = row_fade.outgoing.map_or([0.0; 2], read);
+                let incoming = row_fade.incoming.map_or([0.0; 2], read);
+                std::array::from_fn(|i| outgoing[i] * angle.cos() + incoming[i] * angle.sin())
+            } else {
+                old_voice.cell.map_or([0.0; 2], read)
+            };
+            let old_gain = (fade.left / fade.total).clamp(0.0, 1.0) as f32;
+            for channel in 0..2 {
+                frame[channel] = old[channel] * old_gain + frame[channel] * (1.0 - old_gain);
+            }
+        }
         sum[0] += frame[0];
         sum[1] += frame[1];
     }
     splat.master_frames += source_step;
+    if let Some(fade) = &mut splat.phase_fade {
+        fade.pos += source_step;
+        fade.left -= source_step.abs();
+        if fade.left <= 0.0 {
+            splat.phase_fade = None;
+        }
+    }
     if landed {
         splat.revalidate_view();
     }
@@ -1631,6 +1673,7 @@ pub enum MixCmd {
     /// Move by `delta_secs` from the playhead AS IT IS when this lands.
     SeekRelative { deck: DeckId, delta_secs: f64 },
     SetRate { deck: DeckId, rate: f32 },
+    SetSyncLock { deck: DeckId, on: bool },
     SetKeyRatio { deck: DeckId, ratio: f32 },
     SetKeylock { deck: DeckId, on: bool },
     Scratch { deck: DeckId, motion: ScratchMotion },
@@ -1862,6 +1905,7 @@ struct DeckShadow {
     has_pcm: bool,
     streaming: bool,
     rate: f64,
+    sync_locked: bool,
 }
 
 /// The UI-side handle. `Clone`, cheap, and never blocks: every mutation is
@@ -2314,6 +2358,7 @@ impl Mixer {
                 has_pcm: true,
                 streaming: matches!(pcm, DeckPcm::Stream(_)),
                 rate: ui.deck[deck.index()].rate,
+                sync_locked: ui.deck[deck.index()].sync_locked,
             };
             Self::send_in(&self.shared, ui, MixCmd::InstallDeck { deck, pcm });
         });
@@ -2445,6 +2490,17 @@ impl Mixer {
         });
     }
 
+    /// A synced grid's first launch joins its running clock instead of
+    /// resetting it to the selected source cell.
+    pub fn set_deck_sync_lock(&self, deck: DeckId, on: bool) {
+        self.ui.with(|ui| {
+            if ui.deck[deck.index()].sync_locked != on {
+                ui.deck[deck.index()].sync_locked = on;
+                Self::send_in(&self.shared, ui, MixCmd::SetSyncLock { deck, on });
+            }
+        });
+    }
+
     /// The tempo last asked for.
     pub fn deck_rate(&self, deck: DeckId) -> f64 {
         self.ui.with(|ui| ui.deck[deck.index()].rate)
@@ -2560,8 +2616,18 @@ impl Mixer {
     /// the handle's own word (exact the moment a track installs); the
     /// rest is the callback's last snapshot.
     pub fn deck_snapshot(&self, deck: DeckId) -> DeckSnapshot {
-        let shadow = self.ui.with(|ui| ui.deck[deck.index()]);
-        let snap = self.snapshot().decks[deck.index()];
+        self.deck_snapshots()[deck.index()]
+    }
+
+    /// Both playheads from one callback. Separate reads can straddle an
+    /// audio buffer and manufacture a phase error between aligned decks.
+    pub fn deck_snapshots(&self) -> [DeckSnapshot; 2] {
+        let shadows = self.ui.with(|ui| ui.deck);
+        let snapshot = self.snapshot();
+        std::array::from_fn(|i| Self::deck_snapshot_from(shadows[i], snapshot.decks[i]))
+    }
+
+    fn deck_snapshot_from(shadow: DeckShadow, snap: DeckSnap) -> DeckSnapshot {
         if !shadow.has_pcm {
             return DeckSnapshot {
                 position_secs: 0.0,
@@ -2971,6 +3037,7 @@ impl MixEngine {
             }
             MixCmd::ClearDeck(deck) => {
                 let d = &mut s.decks[deck.index()];
+                d.sync_locked = false;
                 Self::retire_deck_media(shared, d);
                 d.playing = false;
                 // With no pcm the clamp parks the playhead at zero; this
@@ -3064,8 +3131,9 @@ impl MixEngine {
                 }
             }
             MixCmd::SplatLaunch { deck, row, col, part } => {
-                if let Some(splat) = s.decks[deck.index()].splat.as_mut() {
-                    splat.queue_cell(row, col as usize, part);
+                let voice = &mut s.decks[deck.index()];
+                if let Some(splat) = voice.splat.as_mut() {
+                    splat.queue_cell(row, col as usize, part, voice.sync_locked);
                 }
             }
             MixCmd::SplatStopRow { deck, row, timed } => {
@@ -3074,12 +3142,13 @@ impl MixEngine {
                 }
             }
             MixCmd::SplatLaunchScene { deck, col } => {
-                if let Some(splat) = s.decks[deck.index()].splat.as_mut() {
+                let voice = &mut s.decks[deck.index()];
+                if let Some(splat) = voice.splat.as_mut() {
                     for row in SplatRow::ALL {
                         if row == SplatRow::Mix {
                             continue;
                         }
-                        splat.queue_cell(row, col as usize, SplatPart::WHOLE);
+                        splat.queue_cell(row, col as usize, SplatPart::WHOLE, voice.sync_locked);
                     }
                 }
             }
@@ -3110,6 +3179,16 @@ impl MixEngine {
             MixCmd::SeekRelative { deck, delta_secs } => {
                 let d = &mut s.decks[deck.index()];
                 let Some(pcm) = d.pcm.as_ref() else { return };
+                if let Some(splat) = d.splat.as_mut().filter(|splat| splat.active) {
+                    let total = (SEEK_XFADE_SECS * pcm.sample_rate().max(1) as f64).max(1.0);
+                    splat.phase_fade = d.playing.then_some(SplatPhaseFade {
+                        pos: splat.master_frames, left: total, total, rows: splat.rows,
+                    });
+                    // This clock can run beyond the file and must not be
+                    // clamped or replaced by the cell's wrapped playhead.
+                    splat.master_frames += delta_secs * pcm.sample_rate().max(1) as f64;
+                    return;
+                }
                 let from = d.playhead_frames();
                 let frames = from + delta_secs * pcm.sample_rate().max(1) as f64;
                 d.seek_frames(frames);
@@ -3120,6 +3199,7 @@ impl MixEngine {
                 // the pitch.
                 s.decks[deck.index()].rate.slew(rate, SLEW_SECS * 4.0);
             }
+            MixCmd::SetSyncLock { deck, on } => s.decks[deck.index()].sync_locked = on,
             MixCmd::SetKeyRatio { deck, ratio } => {
                 // Same ramp as the tempo: a stepped semitone glides instead
                 // of clicking, and the stretcher sees a ratio that never
@@ -3563,9 +3643,9 @@ impl MixEngine {
                 // and a click means the same thing however far the decode
                 // is.
                 if let Some(splat) = d.splat.as_mut().filter(|splat| splat.active) {
-                    // Splat owns source time. Rate, key lock and scratch are
-                    // intentionally ignored; the shared master advances at
-                    // the track's natural rate and every row derives from it.
+                    // Every row derives from one source clock. Tempo acts
+                    // on that clock, so sync and pitch moves affect all rows
+                    // equally without moving their source spans.
                     if !d.playing {
                         continue;
                     }
@@ -3574,7 +3654,7 @@ impl MixEngine {
                         pcm,
                         deck_stems[i].as_deref(),
                         stem_gain,
-                        natural_step,
+                        natural_step * deck_rate as f64,
                     );
                     let toned = d.eq.process(frame, rate);
                     let pre = [toned[0] * gain, toned[1] * gain];
@@ -6003,6 +6083,85 @@ mod tests {
         let normal = mixer.deck_snapshot(DeckId::A);
         assert!((normal.position_secs - master).abs() <= 1.0 / rate as f64);
         assert!(normal.splat.is_some_and(|splat| !splat.active));
+    }
+
+    #[test]
+    fn splat_phase_correction_crossfades_the_old_voice_when_crossing_a_launch() {
+        let (mixer, rate) = splat_fixture(false);
+        let (reference, _) = splat_fixture(false);
+        for m in [&mixer, &reference] {
+            m.splat_launch(DeckId::A, SplatRow::Mix, 0, SplatPart::WHOLE);
+            render_count(m, rate, 1_950, 64);
+            m.splat_launch(DeckId::A, SplatRow::Mix, 3, SplatPart::WHOLE);
+        }
+        mixer.nudge_deck_seconds(DeckId::A, 0.2);
+        let corrected = render_count(&mixer, rate, 1, 1);
+        let uninterrupted = render_count(&reference, rate, 1, 1);
+        assert!((corrected[0] - uninterrupted[0]).abs() < 1e-7);
+        assert_eq!(mixer.deck_snapshot(DeckId::A).splat.unwrap().playing[SplatRow::Mix.index()],
+            Some((3, SplatPart::WHOLE)));
+    }
+
+    #[test]
+    fn a_song_and_sample_grid_keep_time_through_many_loop_wraps() {
+        let (mixer, rate) = splat_fixture(false);
+        mixer.set_deck_playing(DeckId::A, false);
+        mixer.set_deck_rate(DeckId::A, 128.0 / 120.0);
+        mixer.set_deck_sync_lock(DeckId::A, true);
+        mixer.install_deck(DeckId::B, const_pcm(4_000, rate as usize * 64, rate));
+        mixer.set_deck_keylock(DeckId::B, false);
+        render_count(&mixer, rate, 500, 64);
+        mixer.set_deck_playing(DeckId::A, true);
+        mixer.set_deck_playing(DeckId::B, true);
+        mixer.splat_launch(DeckId::A, SplatRow::Mix, 3, SplatPart::WHOLE);
+        for _ in 0..360 {
+            render_count(&mixer, rate, 100, 37);
+            let snapshots = mixer.deck_snapshots();
+            let loop_clock = snapshots[0].splat.unwrap().clock_secs;
+            let song_clock = snapshots[1].position_secs;
+            let error = loop_clock * 120.0 / 60.0 - song_clock * 128.0 / 60.0;
+            assert!(error.abs() < 1e-5, "song/sample drift: {error} beats");
+            assert!((6.0..8.0).contains(&snapshots[0].position_secs));
+        }
+    }
+
+    #[test]
+    fn splat_uses_the_matched_deck_rate_on_every_row() {
+        for streamed in [false, true] {
+            let (mixer, rate) = splat_fixture(streamed);
+            mixer.splat_launch(DeckId::A, SplatRow::Drums, 1, SplatPart::WHOLE);
+            mixer.splat_launch(DeckId::A, SplatRow::Bass, 2, SplatPart::WHOLE);
+            mixer.set_deck_rate(DeckId::A, 1.125);
+            render_count(&mixer, rate, 500, 64); // let the rate ramp settle
+            let before = mixer.deck_snapshot(DeckId::A).splat.unwrap().clock_secs;
+            render_count(&mixer, rate, 8_000, 127);
+            let after = mixer.deck_snapshot(DeckId::A).splat.unwrap();
+            assert!((after.clock_secs - before - 9.0).abs() < 1e-8, "{streamed}: {after:?}");
+            assert!((after.row_phase[SplatRow::Drums.index()] - after.row_phase[SplatRow::Bass.index()]).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn synced_first_splat_launch_waits_for_the_clock_and_preserves_its_source_span() {
+        let (mixer, rate) = splat_fixture(false);
+        mixer.set_deck_sync_lock(DeckId::A, true);
+        render_count(&mixer, rate, 300, 64);
+        mixer.splat_launch(DeckId::A, SplatRow::Mix, 3, SplatPart::WHOLE);
+        render_count(&mixer, rate, 1, 1);
+        let snap = mixer.deck_snapshot(DeckId::A).splat.unwrap();
+        assert!((snap.clock_secs - 0.301).abs() < 1e-9);
+        assert_eq!(snap.playing[SplatRow::Mix.index()], None);
+        assert_eq!(snap.queued[SplatRow::Mix.index()], Some((3, SplatPart::WHOLE)));
+        render_count(&mixer, rate, 1_700, 127);
+        assert_eq!(row_slot(&mixer, SplatRow::Mix), Some((6_000.0, 2_000.0)));
+        let before = mixer.deck_snapshot(DeckId::A).splat.unwrap().clock_secs;
+        mixer.nudge_deck_seconds(DeckId::A, 32.125);
+        mixer.sync();
+        let after = mixer.deck_snapshot(DeckId::A).splat.unwrap().clock_secs;
+        assert!((after - before - 32.125).abs() < 1e-9, "continuous clock is not clamped to file length");
+        assert_eq!(row_slot(&mixer, SplatRow::Mix), Some((6_000.0, 2_000.0)));
+        render_count(&mixer, rate, 500, 64);
+        assert!(mixer.state().decks[0].splat.as_ref().unwrap().phase_fade.is_none());
     }
 
     #[test]

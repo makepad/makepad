@@ -2303,16 +2303,18 @@ script_mod! {
                                                     light_scene_4 := ApcPad{text: "P5"}
                                                     light_scene_5 := ApcPad{text: "P6"}
                                                     light_scene_6 := ApcPad{text: "P7"}
+                                                    light_scene_7 := ApcPad{text: "P8"}
                                                 }
                                                 View{
                                                     width: Fill height: Fit flow: Right spacing: 4
-                                                    light_scene_7 := ApcPad{text: "P8"}
                                                     light_scene_8 := ApcPad{text: "P9"}
                                                     light_scene_9 := ApcPad{text: "P10"}
                                                     light_scene_10 := ApcPad{text: "P11"}
                                                     light_scene_11 := ApcPad{text: "P12"}
                                                     light_scene_12 := ApcPad{text: "P13"}
-                                                    View{width: Fill height: 1}
+                                                    light_scene_13 := ApcPad{text: "P14"}
+                                                    light_scene_14 := ApcPad{text: "P15"}
+                                                    light_scene_15 := ApcPad{text: "P16"}
                                                 }
                                             }
                                         }
@@ -12661,7 +12663,7 @@ p2 {}
             .set_active(cx, snap.buttons.write_preset, Animate::No);
         let scene = snap
             .last_scene
-            .map(|s| format!("P{s:02}"))
+            .map(|s| format!("P{}", s + 1))
             .unwrap_or_default();
         self.ui.label(cx, ids!(light_desk_status)).set_text(cx, &scene);
         let legend = match self.light_track {
@@ -13473,9 +13475,11 @@ p2 {}
     fn deck_beat(&self) -> Option<BeatInfo> {
         let deck = self.decks.sync_leader()?;
         let state = self.decks.deck(deck);
-        let grid = state.grid.filter(|grid| grid.has_grid())?;
-        let (position, _duration, playing) = self.mixer.deck_position(deck);
-        if !playing {
+        let grid = state.sync_view()?.grid;
+        let snapshot = self.mixer.deck_snapshot(deck);
+        let position = snapshot.splat.filter(|splat| splat.active)
+            .map_or(snapshot.position_secs, |splat| splat.clock_secs);
+        if !snapshot.playing || snapshot.scratching {
             return None;
         }
         let rate = state.rate.max(1e-6);
@@ -15093,9 +15097,8 @@ p2 {}
         self.video_model.event_touch(None);
     }
 
-    /// Queue a just-produced clip for the next complete VIDEO row. Generation
-    /// never changes the operator's current tab or lane; five clips commit as
-    /// one left-edge grid shift when VIDEO is visible again.
+    /// Show a just-produced clip in the reserved VIDEO column. Generation
+    /// keeps the current lane; every fifth arrival shifts the body one column.
     fn present_generated_video(&mut self, cx: &mut Cx, asset: AssetId, title: String) {
         let cmds = self
             .video_model
@@ -15477,10 +15480,22 @@ p2 {}
         self.refresh_ai_context();
     }
 
+    fn sync_mixer_deck_locks(&self) {
+        for deck in [DeckId::A, DeckId::B] {
+            let state = self.decks.deck(deck);
+            self.mixer.set_deck_sync_lock(
+                deck,
+                state.synced || state.ext_sync || self.decks.sync_master() == Some(deck),
+            );
+        }
+    }
+
     fn run_deck_cmds(&mut self, cx: &mut Cx, cmds: Vec<DeckCmd>) {
+        self.sync_mixer_deck_locks();
         for cmd in cmds {
             match cmd {
                 DeckCmd::LoadTrack { deck, gen, item } => {
+                    self.stems.invalidate(deck);
                     // A new load supersedes whatever the last one was still
                     // fetching: stale files landing later find no pending set
                     // and are dropped.
@@ -15742,6 +15757,7 @@ p2 {}
                     self.sync_deck_controls(cx);
                 }
                 DeckCmd::UnloadTrack { deck } => {
+                    self.stems.invalidate(deck);
                     // The mirror of InstallTrack's clear block: the engine
                     // says the deck is empty, so every host-side trace of
                     // the retired track goes with it.
@@ -15770,6 +15786,9 @@ p2 {}
                 }
             }
         }
+        // Swapping voices also swaps their callback flags; reconcile with
+        // the engine's final membership after the swap or an unload.
+        self.sync_mixer_deck_locks();
     }
 
     /// Mirror engine deck state into the toggle/slider widgets (after swap,
@@ -16203,11 +16222,13 @@ p2 {}
             }
             self.model_install = None;
             self.model_install_note.clear();
+            self.stems.cancel_prefetch();
             self.prefetch.release(false, Instant::now());
             for deck in [DeckId::A, DeckId::B] {
                 let index = deck.index();
                 self.decks
                     .set_stems_mode(deck, crate::decks::ProcessMode::Cached);
+                self.stems.cancel(deck);
                 self.mixer.clear_deck_stems(deck);
                 self.deck_stems[index] = None;
                 self.deck_stem_coverage[index] = None;
@@ -21833,8 +21854,10 @@ p2 {}
             // …and never SHORTER than what is actually on screen: an effect
             // lane draws its whole compiled-in library from the first frame,
             // long before the catalog has reported a total for it.
-            let hidden = self.video_model.tiles().len().saturating_sub(video_entries.len());
-            let listed = (self.video_model.total as usize).saturating_sub(hidden);
+            // Reserved cells occupy scroll space but are not catalog assets.
+            let reserved = video_entries.iter().filter(|entry| entry.placeholder).count();
+            let hidden = self.video_model.tiles().len().saturating_sub(video_entries.len() - reserved);
+            let listed = (self.video_model.total as usize).saturating_sub(hidden) + reserved;
             pads.set_total(cx, listed.max(video_entries.len()));
             pads.set_entries(cx, video_entries);
             pads.set_offset(cx, self.apc.bank);
@@ -22712,6 +22735,7 @@ p2 {}
         let pcm = pcm.clone();
         let Some(pending) = self.deck_side_channels[index].take() else { return };
         let Some(job) = pending.into_job(deck, gen, pcm) else { return };
+        self.stems.cancel(deck);
         self.deck_stem_status[index] = "stems: side-channel".to_string();
         self.deck_stem_busy[index] = Some(true);
         self.sidechan.submit(job);
@@ -22907,8 +22931,20 @@ p2 {}
         pcm: Arc<TrackPcm>,
         action: SeparationAction,
     ) {
+        // A native hub choice still gets a cache read when discovery is
+        // empty. A cold miss reports the fleet's reason; it never runs local.
+        let action = if action == SeparationAction::Unavailable
+            && cfg!(not(target_arch = "wasm32"))
+            && self.store_ai_available()
+            && self.stem_separation == StemSeparation::AiHub
+        {
+            SeparationAction::Hub
+        } else {
+            action
+        };
         match action {
             SeparationAction::Off => {
+                self.stems.cancel(deck);
                 log!("deck {deck:?}: stems: separation off");
                 self.deck_stem_status[deck.index()] = "stems: separation off".to_string();
                 self.deck_stem_busy[deck.index()] = None;
@@ -22917,6 +22953,7 @@ p2 {}
                 return;
             }
             SeparationAction::Unavailable => {
+                self.stems.cancel(deck);
                 log!("deck {deck:?}: stems: unavailable");
                 self.deck_stem_status[deck.index()] = "stems: unavailable".to_string();
                 self.deck_stem_busy[deck.index()] = Some(false);
@@ -22932,7 +22969,7 @@ p2 {}
         let source = self.local_by_asset.get(&item.asset).cloned();
         let (position, _duration, _playing) = self.mixer.deck_position(deck);
         self.deck_stem_status[deck.index()] = match action {
-            SeparationAction::Hub => "stems: queued on hub".to_string(),
+            SeparationAction::Hub => "stems: waiting locally".to_string(),
             SeparationAction::Local => "stems: queued locally".to_string(),
             _ => unreachable!(),
         };
@@ -23390,7 +23427,7 @@ p2 {}
         // Three sources, one vocabulary: hub/local separation and the fetched
         // side-channel publish the same chunks and status lines, so everything
         // below this point is blind to which one served the deck.
-        let mut messages = self.stems.poll();
+        let mut messages = Vec::new();
         for message in self.sidechan.poll() {
             match message {
                 SideChannelMsg::Stems(message) => messages.push(message),
@@ -23409,6 +23446,7 @@ p2 {}
                     }
                 }
                 SideChannelMsg::Fallback { deck, gen, reason } => {
+                    if self.decks.deck(deck).load_gen != gen { continue; }
                     log!("deck {deck:?}: side-channel unusable ({reason})");
                     self.set_web_status_error(format!("music side-channel decode: {reason}"));
                     self.deck_side_channels[deck.index()] = None;
@@ -23417,6 +23455,7 @@ p2 {}
                 }
             }
         }
+        messages.extend(self.stems.poll());
         for message in messages {
             match message {
                 StemsMsg::Status { deck, gen, text, working } => {
@@ -23955,8 +23994,9 @@ p2 {}
     /// Mirror the mixer's playheads into the engine, which is where every
     /// sync decision is made.
     fn observe_decks(&mut self) {
+        let snapshots = self.mixer.deck_snapshots();
         for deck in [DeckId::A, DeckId::B] {
-            let snapshot = self.mixer.deck_snapshot(deck);
+            let snapshot = snapshots[deck.index()];
             self.decks
                 .observe(deck, snapshot.position_secs, snapshot.playing);
             self.decks.observe_splat(deck, snapshot.splat);
@@ -26415,6 +26455,7 @@ p2 {}
             }
             if refs.stem_state_btn.clicked(actions) && self.store_ai_available() {
                 let mode = self.decks.deck(deck).stems_mode.next();
+                self.stems.cancel(deck);
                 self.decks.set_stems_mode(deck, mode);
                 let index = deck.index();
                 if mode.computes() {
@@ -26648,6 +26689,15 @@ p2 {}
             self.save_autopilot_settings();
         }
         if let Some(index) = self.ui.drop_down(cx, ids!(stem_separation)).selected(actions) {
+            self.stems.cancel_prefetch();
+            for deck in [DeckId::A, DeckId::B] {
+                self.stems.cancel(deck);
+                if self.deck_stem_busy[deck.index()] == Some(true) {
+                    self.deck_stem_busy[deck.index()] = Some(false);
+                    self.deck_stem_status[deck.index()] = "stems: separation setting changed".into();
+                    self.deck_load_progress[deck.index()].stems_unavailable(self.decks.deck(deck).load_gen);
+                }
+            }
             self.stem_separation = match index {
                 0 => StemSeparation::Off,
                 2 => StemSeparation::Local,
@@ -27632,7 +27682,7 @@ impl MatchEvent for App {
         livecode::start_worker(spawner.clone());
         self.analysis.start(spawner.clone());
         self.loop_scan.start(spawner.clone());
-        self.stems.start(spawner.clone());
+        self.stems.start(spawner.clone(), pool.clone());
         self.lyrics.start(spawner.clone());
         self.writeback.start(spawner.clone());
         self.ai_port = AiServicePort::open(cx, ai::manifest());
@@ -28899,7 +28949,7 @@ impl MatchEvent for App {
                 }
             }
         }
-        let scene_ids = [
+        let scene_ids: [_; makepad_show_control::SCENE_COUNT] = [
             ids!(light_scene_0),
             ids!(light_scene_1),
             ids!(light_scene_2),
@@ -28913,6 +28963,9 @@ impl MatchEvent for App {
             ids!(light_scene_10),
             ids!(light_scene_11),
             ids!(light_scene_12),
+            ids!(light_scene_13),
+            ids!(light_scene_14),
+            ids!(light_scene_15),
         ];
         for (index, id) in scene_ids.iter().enumerate() {
             if self.ui.button(cx, *id).clicked(actions) {

@@ -111,7 +111,9 @@ impl Default for TrackGrid {
 
 impl TrackGrid {
     pub fn has_grid(&self) -> bool {
-        self.bpm.is_finite() && self.bpm > 1.0 && self.beat_secs > 1e-4
+        self.bpm.is_finite() && self.bpm > 1.0
+            && self.beat_secs.is_finite() && self.beat_secs > 1e-4
+            && self.first_beat_secs.is_finite()
     }
 
     /// Beat number (may be negative before the first beat) at `secs`.

@@ -310,10 +310,10 @@ pub struct BrowseModel<C: Clone = PageCursor> {
     order: Vec<AssetId>,
     /// updated_ms per placed asset, for the newest-first ordering.
     stamps: HashMap<AssetId, u64>,
-    /// The PENDING head column: assets the generators published while the
-    /// operator was watching, filling one complete left-edge chunk offscreen.
-    /// It merges into `order` only when it fills, so the visible grid moves
-    /// one whole column at a time. Never longer than [`PENDING_COLUMN`] - 1.
+    /// The PENDING head column: assets published while the operator was
+    /// watching, visible in reserved left-edge cells on video-capable lanes.
+    /// It merges into `order` only when it fills, so the body moves one
+    /// whole column at a time. Never longer than [`PENDING_COLUMN`] - 1.
     pending: Vec<AssetId>,
     /// Clips this session generated: they must survive a listing that has
     /// not yet indexed them. A generator finishing used to wait on the
@@ -621,8 +621,7 @@ impl<C: Clone> BrowseModel<C> {
         self.resolve_queue.push_back(asset);
     }
 
-    /// Buffer a live publication until a complete pad column is ready.
-    /// Partial columns are deliberately absent from [`Self::display_order`]:
+    /// Fill the next reserved cell, folding into the body only when full:
     /// five arrivals produce one left-edge shift, never five smaller shifts.
     fn place_published(&mut self, asset: AssetId) {
         if self.order.contains(&asset) || self.pending.contains(&asset) {
@@ -644,12 +643,18 @@ impl<C: Clone> BrowseModel<C> {
         self.order = merged;
     }
 
-    /// Complete columns plus the body, in display order. The partial head
-    /// column stays offscreen until all five cells exist, so a generator can
-    /// only shift the grid one chunk at a time. The `Option` stays in the
-    /// signature for the callers' sake, but every displayed cell is `Some`.
+    /// Video-capable lanes always reserve a head column, even before the
+    /// first arrival. Pending clips fill it top-to-bottom without moving
+    /// the body; `None` cells are inert placeholders in the pad matrix.
+    /// Other lanes keep their ordinary leading content cells.
     pub fn display_order(&self) -> Vec<Option<AssetId>> {
-        self.order.iter().map(|asset| Some(*asset)).collect()
+        let mut cells = Vec::new();
+        if self.kinds.contains(&AssetKind::Video) {
+            cells.extend(self.pending.iter().copied().map(Some));
+            cells.resize(PENDING_COLUMN, None);
+        }
+        cells.extend(self.order.iter().copied().map(Some));
+        cells
     }
 
     /// How many freshly published tiles are waiting in the head column.
@@ -886,10 +891,7 @@ impl<C: Clone> BrowseModel<C> {
             self.order.push(asset);
             return;
         }
-        self.pending.push(asset);
-        if self.pending.len() >= PENDING_COLUMN {
-            self.merge_pending();
-        }
+        self.place_published(asset);
     }
 
     /// True for the server's "the index changed under your cursor" refusal.
@@ -1188,6 +1190,11 @@ mod tests {
         }
     }
 
+    /// Zero denotes an empty reserved cell in expected grid snapshots.
+    fn cells(seeds: &[u8]) -> Vec<Option<AssetId>> {
+        seeds.iter().map(|&seed| (seed != 0).then(|| hit(seed).asset)).collect()
+    }
+
     fn rev(seed: u8) -> AssetRevisionId {
         AssetRevisionId::from_bytes([seed; 32])
     }
@@ -1271,18 +1278,18 @@ mod tests {
     }
 
     /// The law the operator's hands depend on: a tile that is on screen
-    /// keeps its cell. Publishes fill a hidden head column; the body only
+    /// keeps its cell. Publishes fill a visible head column; the body only
     /// moves when that column is full (one shift per five arrivals instead
     /// of one per arrival) or on a re-sort.
     #[test]
     fn published_tiles_fill_a_head_column_without_moving_the_body() {
         let mut m: BrowseModel = BrowseModel::new(AssetKind::Video, "");
+        assert_eq!(m.display_order(), cells(&[0, 0, 0, 0, 0]));
         m.refresh();
         // Six settled tiles.
         m.page_arrived(1, 0, true, (1..=6).map(hit).collect(), 6, None);
         // Newest first: the strip leads with the freshest updated_ms.
-        let body: Vec<AssetId> = (1..=6).rev().map(|s| hit(s).asset).collect();
-        assert_eq!(m.display_order(), body.iter().map(|a| Some(*a)).collect::<Vec<_>>());
+        assert_eq!(m.display_order(), cells(&[0, 0, 0, 0, 0, 6, 5, 4, 3, 2, 1]));
 
         // A publish event re-lists with two new assets at the FRONT (what
         // a newest-first server returns).
@@ -1291,13 +1298,20 @@ mod tests {
         let listed: Vec<HitRow> = [7u8, 8].iter().chain(&[1, 2, 3, 4, 5, 6]).map(|s| hit(*s)).collect();
         m.page_arrived(gen, 0, true, listed, 8, None);
 
-        let shown = m.display_order();
         assert_eq!(m.pending_len(), 2);
         assert_eq!(
-            shown,
-            body.iter().map(|a| Some(*a)).collect::<Vec<_>>(),
-            "a partial new row stays offscreen and the old grid does not move"
+            m.display_order(),
+            cells(&[7, 8, 0, 0, 0, 6, 5, 4, 3, 2, 1]),
+            "the partial column is visible and the body keeps indices 5..11"
         );
+        // A repeated page and a direct event for a listed arrival do not
+        // consume another slot or change its position.
+        let gen = search_gen(&m.refresh_event());
+        m.page_arrived(gen, 0, true, [8, 7, 6].into_iter().map(hit).collect(), 8, None);
+        m.ingest_published(hit(7).asset, "clip 7".into(), AssetKind::Video);
+        m.event_alias(hit(7).asset, "flow/clip-7".into());
+        assert_eq!(m.pending_len(), 2);
+        assert_eq!(m.display_order(), cells(&[7, 8, 0, 0, 0, 6, 5, 4, 3, 2, 1]));
 
         // Three more publishes fill the column exactly; it folds into the
         // body and a fresh empty one opens.
@@ -1306,17 +1320,28 @@ mod tests {
         let listed: Vec<HitRow> = [9u8, 10, 11, 7, 8].iter().chain(&[1, 2, 3, 4, 5, 6]).map(|s| hit(*s)).collect();
         m.page_arrived(gen, 0, true, listed, 11, None);
         assert_eq!(m.pending_len(), 0, "a full column folds into the body");
-        let shown = m.display_order();
-        assert_eq!(shown.len(), 11, "no reserved column while none is open");
-        // The five that arrived while watching lead, in arrival order, and
-        // the original six are still in their original order behind them.
-        let head: Vec<AssetId> = shown[..5].iter().map(|a| a.unwrap()).collect();
-        assert_eq!(head.len(), 5);
-        assert_eq!(&shown[5..], &body.iter().map(|a| Some(*a)).collect::<Vec<_>>()[..]);
+        assert_eq!(
+            m.display_order(),
+            cells(&[0, 0, 0, 0, 0, 7, 8, 9, 10, 11, 6, 5, 4, 3, 2, 1]),
+            "the completed column moves together and the body moves to indices 10..16"
+        );
+        let before = m.display_order();
+        let gen = search_gen(&m.refresh_event());
+        m.page_arrived(gen, 0, true, [11, 10, 9, 8, 7].into_iter().map(hit).collect(), 11, None);
+        assert_eq!(m.display_order(), before, "a full group survives an event refresh");
+
+        let gen = search_gen(&m.refresh_event());
+        m.page_arrived(gen, 0, true, [12, 11, 10].into_iter().map(hit).collect(), 12, None);
+        assert_eq!(m.pending_len(), 1);
+        assert_eq!(
+            m.display_order(),
+            cells(&[12, 0, 0, 0, 0, 7, 8, 9, 10, 11, 6, 5, 4, 3, 2, 1]),
+            "arrival six fills top-left without another body shift"
+        );
     }
 
     /// A query change is a re-sort: the strip is rebuilt in the server's
-    /// order while an incomplete live-publish row remains buffered.
+    /// order when its first page replaces the visible partial column.
     #[test]
     fn a_query_change_resorts_and_retires_the_head_column() {
         let mut m: BrowseModel = BrowseModel::new(AssetKind::Video, "");
@@ -1330,18 +1355,19 @@ mod tests {
         // Typing in the filter re-sorts.
         let cmds = m.set_text("cats".into());
         let gen = search_gen(&cmds);
-        assert_eq!(m.pending_len(), 1, "the partial row remains buffered until the swap");
+        assert_eq!(m.pending_len(), 1, "the partial column stays visible until the swap");
+        assert_eq!(m.display_order(), cells(&[9, 0, 0, 0, 0, 3, 2, 1]));
         m.page_arrived(gen, 0, true, [3u8, 9, 1].iter().map(|s| hit(*s)).collect(), 3, None);
         assert_eq!(
             m.display_order(),
-            vec![Some(hit(9).asset), Some(hit(3).asset), Some(hit(1).asset)],
+            cells(&[0, 0, 0, 0, 0, 9, 3, 1]),
             "a re-sort orders newest-first by updated_ms"
         );
         // A tile the server dropped is gone after a re-sort...
         let cmds = m.refresh();
         let gen = search_gen(&cmds);
         m.page_arrived(gen, 0, true, [3u8, 1].iter().map(|s| hit(*s)).collect(), 2, None);
-        assert_eq!(m.display_order(), vec![Some(hit(3).asset), Some(hit(1).asset)]);
+        assert_eq!(m.display_order(), cells(&[0, 0, 0, 0, 0, 3, 1]));
     }
 
     /// A delete arriving on an EVENT refresh must not close the gap: the
@@ -1757,60 +1783,128 @@ mod tests {
     }
 
     #[test]
-    fn ingest_published_commits_exactly_one_complete_row_without_a_listing() {
+    fn ingest_published_shows_six_arrivals_and_shifts_only_on_the_fifth() {
         let mut m = BrowseModel::<u8>::new(AssetKind::Video, "");
         let g = search_gen(&m.refresh());
-        m.page_arrived(g, 0, true, vec![hit(1)], 1, None);
-        assert_eq!(m.tiles().len(), 1);
-        let old_grid = m.display_order();
-        let fresh: Vec<AssetId> = (9..14)
-            .map(|seed| AssetId::from_bytes([seed; 16]))
-            .collect();
-        for (i, asset) in fresh.iter().enumerate() {
-            let cmds = m.ingest_published(
-                *asset,
-                format!("fresh clip {i}"),
-                AssetKind::Video,
-            );
+        m.page_arrived(g, 0, true, (1..=6).map(hit).collect(), 6, None);
+        assert_eq!(m.display_order(), cells(&[0, 0, 0, 0, 0, 6, 5, 4, 3, 2, 1]));
+        let expected: &[&[u8]] = &[
+            &[9, 0, 0, 0, 0, 6, 5, 4, 3, 2, 1],
+            &[9, 10, 0, 0, 0, 6, 5, 4, 3, 2, 1],
+            &[9, 10, 11, 0, 0, 6, 5, 4, 3, 2, 1],
+            &[9, 10, 11, 12, 0, 6, 5, 4, 3, 2, 1],
+            &[0, 0, 0, 0, 0, 9, 10, 11, 12, 13, 6, 5, 4, 3, 2, 1],
+            &[14, 0, 0, 0, 0, 9, 10, 11, 12, 13, 6, 5, 4, 3, 2, 1],
+        ];
+        for (i, seed) in (9..=14).enumerate() {
+            let asset = hit(seed).asset;
+            let cmds = m.ingest_published(asset, format!("fresh clip {i}"), AssetKind::Video);
             assert!(!cmds.is_empty(), "the new tile must resolve");
-            assert!(m.tile(asset).is_some());
-            if i + 1 < PENDING_COLUMN {
-                assert_eq!(m.display_order(), old_grid, "partial rows stay offscreen");
-                assert_eq!(m.pending_len(), i + 1);
-            }
+            assert!(m.tile(&asset).is_some());
+            assert_eq!(m.display_order(), cells(expected[i]), "arrival {}", i + 1);
+            assert_eq!(m.pending_len(), (i + 1) % PENDING_COLUMN);
+
+            // Local completions and external publishes share this path.
+            // Even after resolution, duplicates and aliases only update
+            // the existing tile; they never count as another arrival.
+            m.detail_arrived(g, asset, Some(rev(seed)));
+            m.manifest_arrived(g, asset, rev(seed), Some(media(seed)), None, None);
+            m.event_alias(asset, format!("flow/clip-{seed}"));
+            m.ingest_published(asset, "duplicate publication".into(), AssetKind::Video);
+            m.event_alias(asset, format!("flow/clip-{seed}"));
+            m.ingest_published(asset, "duplicate completion".into(), AssetKind::Video);
+            assert_eq!(m.tile(&asset).unwrap().title, format!("clip-{seed}"));
+            assert_eq!(m.tile(&asset).unwrap().alias, Some(format!("flow/clip-{seed}")));
+            assert_eq!(m.display_order(), cells(expected[i]));
+            assert_eq!(m.pending_len(), (i + 1) % PENDING_COLUMN);
+            assert_eq!(m.tiles().len(), 7 + i);
+            assert_eq!(m.total, (7 + i) as u64);
         }
-        assert_eq!(m.pending_len(), 0);
-        let fresh_cells: Vec<Option<AssetId>> = fresh.iter().copied().map(Some).collect();
-        assert_eq!(&m.display_order()[..PENDING_COLUMN], &fresh_cells[..]);
+
+        // A re-sort whose page contains only part of the session's clips
+        // still restores both the full column and the sixth pending clip.
         let g = search_gen(&m.refresh());
-        m.page_arrived(g, 0, true, vec![hit(1)], 1, None);
+        m.page_arrived(g, 0, true, [13, 9, 14, 1].into_iter().map(hit).collect(), 12, None);
         assert_eq!(
-            &m.display_order()[..PENDING_COLUMN],
-            &fresh_cells[..],
-            "the committed row survives an alias-ordered first page"
+            m.display_order(),
+            cells(&[14, 0, 0, 0, 0, 9, 10, 11, 12, 13, 1]),
+            "session clips survive the re-sort in arrival order"
         );
     }
 
     #[test]
-    fn ingest_published_on_the_effect_lane_is_counted_not_drawn() {
-        let mut m = BrowseModel::<u8>::new(AssetKind::VjEffect, "");
-        let fresh: Vec<AssetId> = (20..25)
-            .map(|seed| AssetId::from_bytes([seed; 16]))
-            .collect();
-        for asset in &fresh {
-            let cmds = m.ingest_published(*asset, "flow clip".into(), AssetKind::Video);
-            assert!(cmds.is_empty());
-            assert!(m.tile(asset).is_none());
+    fn event_refresh_preserves_direct_arrivals_in_partial_and_full_columns() {
+        let mut m = BrowseModel::<u8>::new(AssetKind::Video, "");
+        let g = search_gen(&m.refresh());
+        m.page_arrived(g, 0, true, (1..=6).map(hit).collect(), 6, None);
+        for seed in 9..=14 {
+            m.ingest_published(hit(seed).asset, format!("clip {seed}"), AssetKind::Video);
+            let before = m.display_order();
+            let pending = m.pending_len();
+            let g = search_gen(&m.refresh_event());
+            // Newest-first page repeats all arrivals and omits older body
+            // pages. Neither the pending column nor those body cells move.
+            let hits = (9..=seed).rev().chain([6]).map(hit).collect();
+            m.page_arrived(g, 0, true, hits, u64::from(seed - 2), None);
+            assert_eq!(m.display_order(), before, "event refresh after clip {seed}");
+            assert_eq!(m.pending_len(), pending);
+            assert_eq!(m.tiles().len(), usize::from(seed - 2));
         }
-        assert_eq!(m.elsewhere(), PENDING_COLUMN as u32);
-        m.event_alias(fresh[0], "flow/night-drive".into());
+    }
+
+    #[test]
+    fn one_sticky_arrival_is_visible_after_switching_from_effects_to_video() {
+        let mut m = BrowseModel::<u8>::new(AssetKind::VjEffect, "");
+        assert!(m.display_order().is_empty());
+        let g = search_gen(&m.refresh());
+        m.page_arrived(g, 0, true, vec![hit(1)], 1, None);
+        assert_eq!(m.display_order(), cells(&[1]), "effects keep their leading cell");
+        let fresh = hit(20).asset;
+        for _ in 0..2 {
+            assert!(m.ingest_published(fresh, "flow clip".into(), AssetKind::Video).is_empty());
+            assert!(m.tile(&fresh).is_none());
+        }
+        assert_eq!(m.elsewhere(), 1, "duplicate out-of-lane events count once");
+        assert_eq!(m.display_order(), cells(&[1]));
+        m.event_alias(fresh, "flow/night-drive".into());
 
         let g = search_gen(&m.set_kinds(vec![AssetKind::Video]));
-        m.page_arrived(g, 0, true, Vec::new(), 0, None);
-        let fresh_cells: Vec<Option<AssetId>> = fresh.iter().copied().map(Some).collect();
-        assert_eq!(&m.display_order()[..PENDING_COLUMN], &fresh_cells[..]);
-        let flow_tile = m.tile(&fresh[0]).expect("the external clip is listed");
+        m.page_arrived(g, 0, true, vec![hit(2)], 1, None);
+        assert_eq!(m.elsewhere(), 0);
+        assert_eq!(m.display_order(), cells(&[20, 0, 0, 0, 0, 2]));
+        let flow_tile = m.tile(&fresh).expect("the external clip is listed");
         assert_eq!(flow_tile.title, "night-drive");
+
+        // Query filtering still replaces the body, while the session clip
+        // stays visible even when the server has not listed it yet.
+        let g = search_gen(&m.set_text("cats".into()));
+        m.page_arrived(g, 0, true, vec![hit(3)], 1, None);
+        assert_eq!(m.display_order(), cells(&[20, 0, 0, 0, 0, 3]));
+        let g = search_gen(&m.set_kinds(vec![AssetKind::VjEffect]));
+        m.page_arrived(g, 0, true, vec![hit(1)], 1, None);
+        assert_eq!(m.display_order(), cells(&[1]));
+        let g = search_gen(&m.set_kinds(vec![AssetKind::Video]));
+        m.page_arrived(g, 0, true, vec![hit(20), hit(2)], 2, None);
+        assert_eq!(m.display_order(), cells(&[20, 0, 0, 0, 0, 2]));
+    }
+
+    #[test]
+    fn only_video_capable_lanes_reserve_leading_cells() {
+        for kind in BrowseModel::<u8>::visual_kinds().into_iter().chain([AssetKind::Audio]) {
+            if kind == AssetKind::Video {
+                continue;
+            }
+            let mut m = BrowseModel::<u8>::new(kind, "");
+            assert!(m.display_order().is_empty(), "{kind:?}");
+            let g = search_gen(&m.refresh());
+            m.page_arrived(g, 0, true, vec![hit(1), hit(2)], 2, None);
+            assert_eq!(m.display_order(), cells(&[2, 1]), "{kind:?}");
+        }
+        let mut m = BrowseModel::<u8>::visual();
+        assert_eq!(m.display_order(), cells(&[0, 0, 0, 0, 0]));
+        let g = search_gen(&m.refresh());
+        m.page_arrived(g, 0, true, vec![hit(1)], 1, None);
+        assert_eq!(m.display_order(), cells(&[0, 0, 0, 0, 0, 1]));
     }
 }
 

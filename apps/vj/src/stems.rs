@@ -3,7 +3,8 @@
 //! A deck plays the mixed file until separated stems exist for the stretch
 //! of track under its playhead; from then on the four stem knobs are live.
 //! That is the whole contract, and it is what makes separation usable in a
-//! performance: nothing waits for a whole track to be demixed.
+//! performance. Local inference publishes spans; AIHub delivers a whole-track
+//! artifact, installed into the same chunk vocabulary only after it arrives.
 //!
 //! Three sources, in order:
 //!
@@ -38,14 +39,12 @@ use crate::mixer::{encode_stem_sample, TrackPcm};
 use makepad_ai_stems::{CacheHeader, Demixer, StemCache, StemSet, StemsModel, StereoBuf, CHUNK_STEP};
 pub(crate) use makepad_ai_stems::SAMPLE_RATE as STEMS_RATE;
 use makepad_asset_data::Sha256;
-use makepad_widgets::makepad_platform::thread::{CancellationToken, ThreadOptions, ThreadSpawner};
+use makepad_widgets::makepad_platform::thread::{CancellationToken, TaskPool, ThreadOptions, ThreadSpawner};
 use makepad_widgets::Cx;
-use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Where a missing set of stems may be computed. This is operator-owned
 /// state; capability discovery may make a choice unavailable, but never
@@ -204,13 +203,6 @@ pub const PREFETCH_GEN: u64 = u64::MAX;
 /// slack, not politeness: the separator and the renderer share a GPU, and
 /// a set is playing over the top of this work.
 const PREFETCH_SPAN_BREATH_MS: u64 = 40;
-
-/// How long a background job just pulled off the queue waits out a recent
-/// burst of deck traffic before it is allowed to start. Only paid when a
-/// deck job landed within this window — an otherwise-idle worker starts
-/// background work at once, with no periodic wake-up either way (the
-/// worker blocks on the shared inbox's `recv()` while nothing is pending).
-const DECK_INBOX_WAIT_MS: u64 = 100;
 
 /// One published chunk of separated audio, in track frames.
 pub struct StemChunk {
@@ -439,7 +431,7 @@ impl ChunkWriter {
     }
 
     /// Publish every whole chunk the pending buffers now cover.
-    fn drain(&mut self, deck: DeckId, gen: u64, out: &Sender<StemsMsg>) -> bool {
+    fn drain(&mut self, deck: DeckId, gen: u64, out: &dyn StemSink) -> bool {
         let ready = self.pending[0].len() / self.chunk_frames;
         for _ in 0..ready {
             let index = self.base / self.chunk_frames;
@@ -478,7 +470,7 @@ impl ChunkWriter {
     /// Publish the final short track chunk. Demixer spans normally carry
     /// enough overlap to fill it; a whole-track hub artifact is exact-length
     /// and therefore needs this explicit tail.
-    fn finish(&mut self, deck: DeckId, gen: u64, out: &Sender<StemsMsg>) -> bool {
+    fn finish(&mut self, deck: DeckId, gen: u64, out: &dyn StemSink) -> bool {
         if self.pending[0].is_empty() {
             return false;
         }
@@ -550,7 +542,7 @@ fn i16_frames(
         .collect()
 }
 
-fn run_sidecar(job: &StemsJob, lanes: [TrackPcm; 4], out: &Sender<StemsMsg>) {
+fn run_sidecar(job: &StemsJob, lanes: [TrackPcm; 4], out: &dyn StemSink) {
     let frames = job.pcm.frames.len();
     let rate = job.pcm.sample_rate.max(1);
     let size = chunk_frames(rate);
@@ -704,7 +696,7 @@ fn run_cached(
     cache: &mut StemCache,
     writer: &mut ChunkWriter,
     first_span: usize,
-    out: &Sender<StemsMsg>,
+    out: &dyn StemSink,
 ) -> Option<usize> {
     let track_rate = job.pcm.sample_rate.max(1) as f64;
     let model_rate = STEMS_RATE as f64;
@@ -752,7 +744,7 @@ fn run_demixer(
     cache: Option<&mut StemCache>,
     writer: &mut ChunkWriter,
     resume: usize,
-    out: &Sender<StemsMsg>,
+    out: &dyn StemSink,
     should_yield: &dyn Fn() -> bool,
 ) -> Result<(), String> {
     let track = to_stereo_buf(&job.pcm);
@@ -849,90 +841,20 @@ fn run_demixer(
     Ok(())
 }
 
-/// Send one whole-track separation to the discovered AI fleet and translate
-/// its transport artifact back into the deck's streaming chunk vocabulary.
-/// There is deliberately no local fallback anywhere in this path.
 #[cfg(not(target_arch = "wasm32"))]
-fn run_hub(job: &StemsJob, root: &Path, out: &Sender<StemsMsg>) -> Result<(), String> {
-    use makepad_ai_hub::client::ContentProvider;
-    use makepad_ai_hub::protocol::{
-        decode_stems_artifact, GenerateRequestJson, JOB_STATE_CANCELLED, JOB_STATE_DONE,
-        JOB_STATE_ERROR,
-    };
-    use makepad_ai_hub::registry::Domain;
-
-    let service = makepad_asset_creator::runner::pick_node("stems")
-        .map_err(|error| error.to_string())?;
-    let node = service.base_url().to_string();
-    if job.gen == PREFETCH_GEN {
-        makepad_widgets::log!("stems prefetch via hub {node}");
-    } else {
-        makepad_widgets::log!("deck {:?}: stems via hub {node}", job.deck);
-    }
-    let _ = out.send(StemsMsg::Status {
-        deck: job.deck,
-        gen: job.gen,
-        text: format!("stems: via hub {node}"),
-        working: true,
-    });
-
-    let track = to_stereo_buf(&job.pcm);
-    let wav = makepad_ai_hub::wav::encode_wav_pcm16_stereo(
-        &track.left,
-        &track.right,
-        STEMS_RATE,
-    );
-    let input_b64 = String::from_utf8(makepad_ai_hub::makepad_base64::base64_encode(
-        &wav,
-        &makepad_ai_hub::makepad_base64::BASE64_STANDARD,
-    ))
-    .map_err(|_| "hub WAV base64 was not utf-8".to_string())?;
-    let request = GenerateRequestJson {
-        model: makepad_ai_stems::MODEL_ID.to_string(),
-        input_b64: Some(input_b64),
-        input_content_type: Some("audio/wav".to_string()),
-        ..Default::default()
-    };
-    let remote = service
-        .request(Domain::Stems, &request)
-        .map_err(|error| error.to_string())?;
-    let artifact_ref = loop {
-        let status = service.poll(&remote).map_err(|error| error.to_string())?;
-        match status.state.as_str() {
-            JOB_STATE_DONE => break status
-                .artifacts
-                .first()
-                .cloned()
-                .ok_or_else(|| "hub stem job finished without an artifact".to_string())?,
-            JOB_STATE_ERROR => {
-                return Err(status.error.unwrap_or_else(|| "hub stem job failed".to_string()))
-            }
-            JOB_STATE_CANCELLED => return Err("hub stem job was cancelled".to_string()),
-            _ => {
-                let stage = status.stage.as_deref().unwrap_or("queued");
-                let _ = out.send(StemsMsg::Status {
-                    deck: job.deck,
-                    gen: job.gen,
-                    text: format!("stems: via hub · {stage}"),
-                    working: true,
-                });
-                std::thread::sleep(Duration::from_millis(500));
-            }
-        }
-    };
-    let fetched = service
-        .fetch_artifact(&artifact_ref.id)
-        .map_err(|error| format!("hub artifact: {error}"))?;
-    makepad_ai_hub::client::verify_artifact_bytes(&fetched.bytes, &artifact_ref)
-        .map_err(|error| error.to_string())?;
-    let artifact = decode_stems_artifact(&fetched.bytes)?;
-    if artifact.sample_rate != STEMS_RATE || artifact.frames != track.frames() {
+fn install_hub_artifact(
+    job: &StemsJob, root: &Path, digest: &str, bytes: &[u8],
+    out: &dyn StemSink, cancelled: &dyn Fn() -> bool,
+) -> Result<(), String> {
+    if cancelled() { return Ok(()); }
+    let artifact = makepad_ai_hub::protocol::decode_stems_artifact(bytes)?;
+    if artifact.sample_rate != STEMS_RATE || artifact.frames != model_frames(&job.pcm) {
         return Err(format!(
             "hub stems shape {} Hz/{} frames, expected {} Hz/{} frames",
             artifact.sample_rate,
             artifact.frames,
             STEMS_RATE,
-            track.frames()
+            model_frames(&job.pcm)
         ));
     }
     let [drums_l, drums_r, bass_l, bass_r, other_l, other_r, vocals_l, vocals_r] =
@@ -944,11 +866,11 @@ fn run_hub(job: &StemsJob, root: &Path, out: &Sender<StemsMsg>) -> Result<(), St
         StereoBuf { left: vocals_l, right: vocals_r },
     ];
 
-    let digest = track_digest(&job.pcm);
-    let frames = track.frames() as u64;
+    let frames = model_frames(&job.pcm) as u64;
     let mut cache = open_cache(root, &job.pcm, &digest);
     if let Some(cache) = cache.as_mut() {
         for span in 0..cache.span_count() {
+            if cancelled() { return Ok(()); }
             let start = span * CHUNK_STEP;
             let end = (start + CHUNK_STEP).min(artifact.frames);
             let block: StemSet = std::array::from_fn(|stem| StereoBuf {
@@ -962,15 +884,12 @@ fn run_hub(job: &StemsJob, root: &Path, out: &Sender<StemsMsg>) -> Result<(), St
     let _ = out.send(StemsMsg::Coverage {
         deck: job.deck,
         gen: job.gen,
-        digest: digest.clone(),
+        digest: digest.to_string(),
         model_frames: frames,
         complete,
     });
 
-    if job.gen == PREFETCH_GEN {
-        let _ = out.send(StemsMsg::PrefetchDone { digest, model_frames: frames, complete });
-        return Ok(());
-    }
+    if job.gen == PREFETCH_GEN || cancelled() { return Ok(()); }
     let track_rate = job.pcm.sample_rate.max(1) as f64;
     let model_rate = STEMS_RATE as f64;
     let mut writer = ChunkWriter::new(
@@ -990,6 +909,193 @@ fn run_hub(job: &StemsJob, root: &Path, out: &Sender<StemsMsg>) -> Result<(), St
     }
     let _ = out.send(StemsMsg::Done { deck: job.deck, gen: job.gen });
     Ok(())
+}
+
+// Local inference stays on the one once-started, thread-affine worker.
+fn run_local(
+    job: &StemsJob, root: &Path, checkpoint: &Path, digest: &String,
+    model: &mut Option<StemsModel>, out: &dyn StemSink, should_yield: &dyn Fn() -> bool,
+) {
+    let prefetching = job.gen == PREFETCH_GEN;
+    if let Some(source) = job.source.as_ref() {
+        if let Some(lanes) = load_sidecar(source) {
+            run_sidecar(job, lanes, out);
+            // The sidecar answers for the STEMS and nothing
+            // else. Coverage is the only place a track's
+            // digest is ever spoken, so leaving without one
+            // costs this deck the karaoke entirely — not
+            // just the bake, but a transcript already sitting
+            // in the cache, which the deck can no longer be
+            // matched to.
+            let frames = model_frames(&job.pcm) as u64;
+            let complete = cache_is_complete(root, digest, frames);
+            let _ = out.send(StemsMsg::Coverage {
+                deck: job.deck,
+                gen: job.gen,
+                complete,
+                digest: digest.clone(),
+                model_frames: frames,
+            });
+            if prefetching {
+                let _ = out.send(StemsMsg::PrefetchDone {
+                    digest: digest.clone(),
+                    model_frames: frames,
+                    complete,
+                });
+            }
+            return;
+        }
+    }
+    // Whatever a previous session separated is free. Serve it
+    // first, from the playhead forward: the knobs go live on
+    // a track that has been on a deck before without the
+    // model being loaded at all.
+    let frames = model_frames(&job.pcm) as u64;
+    let mut cache = open_cache(root, &job.pcm, &digest);
+    // Report coverage the moment the cache is open: a track
+    // separated in an earlier session is already complete
+    // here, and the karaoke bake can start on its own worker
+    // without waiting for playback to reach the end.
+    let coverage = |cache: &Option<StemCache>, out: &dyn StemSink| {
+        if let Some(cache) = cache.as_ref() {
+            let _ = out.send(StemsMsg::Coverage {
+                deck: job.deck,
+                gen: job.gen,
+                digest: digest.clone(),
+                model_frames: frames,
+                complete: cache.is_complete(),
+            });
+        }
+    };
+    coverage(&cache, out);
+    let track_rate = job.pcm.sample_rate.max(1);
+    let mut writer = ChunkWriter::new(
+        chunk_frames(track_rate),
+        chunk_count(job.pcm.frames.len(), track_rate),
+    );
+    // A playhead past the end must still separate the last
+    // span, not silently declare the track done.
+    let spans = model_frames(&job.pcm).div_ceil(CHUNK_STEP);
+    let first_span = ((job.start_secs.max(0.0) * STEMS_RATE as f64) as usize
+        / CHUNK_STEP)
+        .min(spans.saturating_sub(1));
+    let resume = match cache.as_mut() {
+        Some(cache) => run_cached(job, cache, &mut writer, first_span, out),
+        None => Some(first_span),
+    };
+    let Some(resume) = resume else {
+        writer.finish(job.deck, job.gen, out);
+        let _ = out.send(StemsMsg::Done { deck: job.deck, gen: job.gen });
+        coverage(&cache, out);
+        if prefetching {
+            let _ = out.send(StemsMsg::PrefetchDone {
+                digest: digest.clone(),
+                model_frames: frames,
+                complete: cache.as_ref().is_some_and(|c| c.is_complete()),
+            });
+        }
+        return;
+    };
+    if should_yield() {
+        if prefetching {
+            let _ = out.send(StemsMsg::PrefetchDone {
+                digest: digest.clone(), model_frames: frames, complete: false,
+            });
+        }
+        return;
+    }
+    if model.is_none() {
+        // Probed per job, never latched: the INSTALL MODELS
+        // flow can put the checkpoint on disk mid-session,
+        // and the next separation must pick it up. One stat
+        // per track load is free.
+        if !checkpoint.is_file() {
+            let _ = out.send(StemsMsg::Status {
+                deck: job.deck,
+                gen: job.gen,
+                text: "stems: model not installed".to_string(),
+                working: false,
+            });
+            if prefetching {
+                let _ = out.send(StemsMsg::PrefetchDone {
+                    digest: digest.clone(),
+                    model_frames: frames,
+                    complete: false,
+                });
+            }
+            return;
+        }
+        let _ = out.send(StemsMsg::Status {
+            deck: job.deck,
+            gen: job.gen,
+            text: "stems: loading model…".to_string(),
+            working: true,
+        });
+        match StemsModel::load(checkpoint) {
+            Ok(loaded) => *model = Some(loaded),
+            Err(error) => {
+                // NOT latched. The usual reason a load of a
+                // checkpoint that IS on disk fails is that the
+                // device had no room for it just then — the
+                // other models this app runs, or the game on
+                // the same GPU. Latching turned one bad moment
+                // into a session with no separation at all and
+                // no way back short of a restart; the next
+                // track simply tries again.
+                let _ = out.send(StemsMsg::Status {
+                    deck: job.deck,
+                    gen: job.gen,
+                    text: format!("stems: {error}"),
+                    working: false,
+                });
+                if prefetching {
+                    let _ = out.send(StemsMsg::PrefetchDone {
+                        digest: digest.clone(),
+                        model_frames: frames,
+                        complete: false,
+                    });
+                }
+                return;
+            }
+        }
+    }
+    let Some(loaded) = model.as_mut() else {
+        if prefetching {
+            let _ = out.send(StemsMsg::PrefetchDone {
+                digest: digest.clone(),
+                model_frames: frames,
+                complete: false,
+            });
+        }
+        return;
+    };
+    if let Err(error) = run_demixer(
+        job,
+        loaded,
+        cache.as_mut(),
+        &mut writer,
+        resume,
+        out,
+        should_yield,
+    ) {
+        let _ = out.send(StemsMsg::Status {
+            deck: job.deck,
+            gen: job.gen,
+            text: format!("stems: {error}"),
+            working: false,
+        });
+    }
+    // The separation is as complete as this run made it. A
+    // track covered end to end now has a whole VOCALS stem on
+    // disk, which is the karaoke bake's cue to run.
+    coverage(&cache, out);
+    if prefetching {
+        let _ = out.send(StemsMsg::PrefetchDone {
+            digest: digest.clone(),
+            model_frames: frames,
+            complete: cache.as_ref().is_some_and(|c| c.is_complete()),
+        });
+    }
 }
 
 /// Keep the cache root inside its budget, pinning whatever is on a deck.
@@ -1012,485 +1118,13 @@ fn prune_cache(root: &Path, budget_bytes: u64, pinned: &[Option<String>; 2]) {
     }
 }
 
-/// One job on the worker's single inbox, tagged by lane. A deck job is
-/// latest-wins and always runs first; a background one is only started
-/// once the deck side has been quiet for a moment (`DECK_INBOX_WAIT_MS`).
-/// One channel means the worker can block on a plain `recv()` — no
-/// periodic poll of a second channel to notice a deck job.
-enum QueueJob {
-    Deck((StemsJob, SeparationBackend)),
-    Background((StemsJob, SeparationBackend)),
-}
-
-/// The deck-lane handle onto the shared inbox: tags every send `Deck` so
-/// call sites read exactly as they did with two separate channels.
-#[derive(Clone)]
-struct DeckSender(Sender<QueueJob>);
-
-impl DeckSender {
-    fn send(&self, item: (StemsJob, SeparationBackend)) -> Result<(), ()> {
-        self.0.send(QueueJob::Deck(item)).map_err(|_| ())
-    }
-}
-
-/// The background-lane handle onto the shared inbox: tags every send
-/// `Background`. Kept as its own type (not just a clone of `DeckSender`)
-/// so a deck send and a background send can never be confused at a call
-/// site.
-#[derive(Clone)]
-struct BackgroundSender(Sender<QueueJob>);
-
-impl BackgroundSender {
-    fn send(&self, item: (StemsJob, SeparationBackend)) -> Result<(), ()> {
-        self.0.send(QueueJob::Background(item)).map_err(|_| ())
-    }
-}
-
-/// One separation thread. The model is thread-affine and expensive to load,
-/// so it lives here and nowhere else.
-pub struct StemsPool {
-    tx: DeckSender,
-    /// The BACKGROUND lane. A distinct handle onto the SAME channel as
-    /// `tx` (see [`QueueJob`]) so the two lanes cannot spoil each other —
-    /// deck jobs are latest-wins and would otherwise discard a queued
-    /// track's work, and a queued track must never sit in front of the
-    /// deck the operator is about to play — while the worker still has
-    /// only one inbox to block on.
-    prefetch_tx: BackgroundSender,
-    jobs: Option<Receiver<QueueJob>>,
-    /// Raised the instant a deck job is posted and lowered when the worker
-    /// takes one. A background run reads it at every span boundary and
-    /// lets go. Racing it costs at most one needless yield.
-    deck_waiting: Arc<AtomicBool>,
-    out: Sender<StemsMsg>,
-    rx: Receiver<StemsMsg>,
-    root: PathBuf,
-    checkpoint: PathBuf,
-    budget_bytes: u64,
-}
-
-impl Default for StemsPool {
-    fn default() -> Self {
-        StemsPool::new()
-    }
-}
-
-impl StemsPool {
-    pub fn new() -> StemsPool {
-        // Start listening before the first deck asks. Fleet beacons are
-        // periodic, so discovery begun only at submit time can miss a hub
-        // that was reachable throughout the load.
-        #[cfg(not(target_arch = "wasm32"))]
-        let _ = makepad_ai_hub::discovery::start_listener();
-        StemsPool::with_paths(cache_dir(), checkpoint_path(), cache_budget_bytes())
-    }
-
-    /// The pool with its two paths and its budget named, which is what the
-    /// tests drive: a warm cache must serve a track with no checkpoint in
-    /// sight, and that is only provable if the checkpoint can be pointed
-    /// somewhere it certainly is not.
-    pub fn with_paths(root: PathBuf, checkpoint: PathBuf, budget_bytes: u64) -> StemsPool {
-        let (raw_tx, jobs) = channel::<QueueJob>();
-        let tx = DeckSender(raw_tx.clone());
-        let prefetch_tx = BackgroundSender(raw_tx);
-        let (out, rx) = channel::<StemsMsg>();
-        let deck_waiting = Arc::new(AtomicBool::new(false));
-        StemsPool {
-            tx,
-            prefetch_tx,
-            jobs: Some(jobs),
-            deck_waiting,
-            out,
-            rx,
-            root,
-            checkpoint,
-            budget_bytes,
-        }
-    }
-
-    pub fn start(&mut self, spawner: ThreadSpawner) {
-        let Some(jobs) = self.jobs.take() else { return };
-        let out = self.out.clone();
-        let root = self.root.clone();
-        let checkpoint = self.checkpoint.clone();
-        let budget_bytes = self.budget_bytes;
-        let waiting = self.deck_waiting.clone();
-        let options = ThreadOptions { name: Some("vj-stems".into()), ..Default::default() };
-        match spawner.spawn_worker(options, move || {
-                // Drains whatever is already sitting in `jobs` without
-                // blocking: every background arrival joins `pending_bg`,
-                // and the deck side collapses to the newest one seen
-                // (latest-wins — an older skip request is dead weight the
-                // moment a newer one lands). `Err` means both senders were
-                // dropped, i.e. the pool itself was dropped.
-                fn drain_latest_deck(
-                    jobs: &Receiver<QueueJob>,
-                    pending_bg: &mut VecDeque<(StemsJob, SeparationBackend)>,
-                    mut deck_item: Option<(StemsJob, SeparationBackend)>,
-                ) -> Result<Option<(StemsJob, SeparationBackend)>, ()> {
-                    loop {
-                        match jobs.try_recv() {
-                            Ok(QueueJob::Deck(item)) => deck_item = Some(item),
-                            Ok(QueueJob::Background(item)) => pending_bg.push_back(item),
-                            Err(TryRecvError::Empty) => return Ok(deck_item),
-                            Err(TryRecvError::Disconnected) => return Err(()),
-                        }
-                    }
-                }
-
-                let mut model: Option<StemsModel> = None;
-                // The track most recently opened per deck: whatever is on a
-                // deck is pinned against the budget, so a set in progress is
-                // never evicted out from under the needle.
-                let mut pinned: [Option<String>; 2] = [None, None];
-                // Background jobs pulled off the shared inbox but not yet
-                // run — FIFO, so a burst of queued tracks warms in the
-                // order it arrived.
-                let mut pending_bg: VecDeque<(StemsJob, SeparationBackend)> = VecDeque::new();
-                // When the last deck job was taken. `None` (or stale)
-                // means the worker has no reason to think more deck
-                // traffic is imminent, so a queued background job starts
-                // at once with no settle wait.
-                let mut last_deck_at: Option<crate::clock::Instant> = None;
-                'work: loop {
-                    // THE DECK INBOX IS SERVED FIRST, ALWAYS. With nothing
-                    // queued locally the worker blocks on the one shared
-                    // channel — zero idle wake-ups. Once a background job
-                    // is sitting in `pending_bg`, it only starts after a
-                    // recent burst of deck traffic (if any) has had one
-                    // settle window to finish arriving.
-                    let (job, backend) = if pending_bg.is_empty() {
-                        let first = match jobs.recv() {
-                            Ok(QueueJob::Deck(item)) => Some(item),
-                            Ok(QueueJob::Background(item)) => {
-                                pending_bg.push_back(item);
-                                continue;
-                            }
-                            Err(_) => break,
-                        };
-                        // Collapse any further-queued deck jobs to the
-                        // newest before starting work on one.
-                        match drain_latest_deck(&jobs, &mut pending_bg, first) {
-                            Ok(Some(item)) => {
-                                last_deck_at = Some(crate::clock::Instant::now());
-                                waiting.store(false, Ordering::SeqCst);
-                                item
-                            }
-                            Ok(None) => unreachable!("drain started from a deck item"),
-                            Err(()) => break,
-                        }
-                    } else {
-                        if last_deck_at
-                            .is_some_and(|at| at.elapsed() < Duration::from_millis(DECK_INBOX_WAIT_MS))
-                        {
-                            let quiet = CancellationToken::new();
-                            let _ = quiet.wait_until(
-                                Cx::monotonic_now() + DECK_INBOX_WAIT_MS as f64 / 1_000.0,
-                            );
-                        }
-                        // One drain, deck jobs first: whatever landed
-                        // during (or before) the settle wait pre-empts the
-                        // background job about to run.
-                        let deck_item = match drain_latest_deck(&jobs, &mut pending_bg, None) {
-                            Ok(item) => item,
-                            Err(()) => break 'work,
-                        };
-                        match deck_item {
-                            Some(item) => {
-                                last_deck_at = Some(crate::clock::Instant::now());
-                                waiting.store(false, Ordering::SeqCst);
-                                item
-                            }
-                            None => pending_bg.pop_front().expect("pending_bg checked non-empty above"),
-                        }
-                    };
-                    let prefetching = job.gen == PREFETCH_GEN;
-                    // A deck job never yields; only a background one does.
-                    let should_yield = || prefetching && waiting.load(Ordering::SeqCst);
-                    if let Some(source) = job.source.as_ref() {
-                        if let Some(lanes) = load_sidecar(source) {
-                            run_sidecar(&job, lanes, &out);
-                            // The sidecar answers for the STEMS and nothing
-                            // else. Coverage is the only place a track's
-                            // digest is ever spoken, so leaving without one
-                            // costs this deck the karaoke entirely — not
-                            // just the bake, but a transcript already sitting
-                            // in the cache, which the deck can no longer be
-                            // matched to.
-                            let digest = track_digest(&job.pcm);
-                            let frames = model_frames(&job.pcm) as u64;
-                            let complete = cache_is_complete(&root, &digest, frames);
-                            let _ = out.send(StemsMsg::Coverage {
-                                deck: job.deck,
-                                gen: job.gen,
-                                complete,
-                                digest: digest.clone(),
-                                model_frames: frames,
-                            });
-                            if prefetching {
-                                let _ = out.send(StemsMsg::PrefetchDone {
-                                    digest,
-                                    model_frames: frames,
-                                    complete,
-                                });
-                            }
-                            continue;
-                        }
-                    }
-                    #[cfg(not(target_arch = "wasm32"))]
-                    if backend == SeparationBackend::Hub {
-                        if let Err(error) = run_hub(&job, &root, &out) {
-                            if job.gen == PREFETCH_GEN {
-                                makepad_widgets::log!("stems prefetch: hub unavailable ({error})");
-                                let _ = out.send(StemsMsg::PrefetchDone {
-                                    digest: track_digest(&job.pcm),
-                                    model_frames: model_frames(&job.pcm) as u64,
-                                    complete: false,
-                                });
-                            } else {
-                                makepad_widgets::log!(
-                                    "deck {:?}: stems: unavailable ({error})",
-                                    job.deck
-                                );
-                                let _ = out.send(StemsMsg::Status {
-                                    deck: job.deck,
-                                    gen: job.gen,
-                                    text: "stems: unavailable".to_string(),
-                                    working: false,
-                                });
-                            }
-                        }
-                        continue;
-                    }
-                    #[cfg(target_arch = "wasm32")]
-                    if backend == SeparationBackend::Hub {
-                        let _ = out.send(StemsMsg::Status {
-                            deck: job.deck,
-                            gen: job.gen,
-                            text: "stems: unavailable".to_string(),
-                            working: false,
-                        });
-                        continue;
-                    }
-                    // Whatever a previous session separated is free. Serve it
-                    // first, from the playhead forward: the knobs go live on
-                    // a track that has been on a deck before without the
-                    // model being loaded at all.
-                    let digest = track_digest(&job.pcm);
-                    let frames = model_frames(&job.pcm) as u64;
-                    let mut cache = open_cache(&root, &job.pcm, &digest);
-                    // A background track claims NO pin. The pins are what
-                    // stop the budget evicting a deck's stems out from under
-                    // the needle mid-set, and a prefetch carries deck A's id
-                    // only because the message shape demands one — letting it
-                    // write there would retire the very entry deck A is
-                    // playing from. Its own spans take their chances with the
-                    // budget, which is the right trade for work nobody is
-                    // waiting on.
-                    if cache.is_some() && !prefetching {
-                        pinned[job.deck.index()] = Some(digest.clone());
-                        prune_cache(&root, budget_bytes, &pinned);
-                    }
-                    // Report coverage the moment the cache is open: a track
-                    // separated in an earlier session is already complete
-                    // here, and the karaoke bake can start on its own worker
-                    // without waiting for playback to reach the end.
-                    let coverage = |cache: &Option<StemCache>, out: &Sender<StemsMsg>| {
-                        if let Some(cache) = cache.as_ref() {
-                            let _ = out.send(StemsMsg::Coverage {
-                                deck: job.deck,
-                                gen: job.gen,
-                                digest: digest.clone(),
-                                model_frames: frames,
-                                complete: cache.is_complete(),
-                            });
-                        }
-                    };
-                    coverage(&cache, &out);
-                    let track_rate = job.pcm.sample_rate.max(1);
-                    let mut writer = ChunkWriter::new(
-                        chunk_frames(track_rate),
-                        chunk_count(job.pcm.frames.len(), track_rate),
-                    );
-                    // A playhead past the end must still separate the last
-                    // span, not silently declare the track done.
-                    let spans = model_frames(&job.pcm).div_ceil(CHUNK_STEP);
-                    let first_span = ((job.start_secs.max(0.0) * STEMS_RATE as f64) as usize
-                        / CHUNK_STEP)
-                        .min(spans.saturating_sub(1));
-                    let resume = match cache.as_mut() {
-                        Some(cache) => run_cached(&job, cache, &mut writer, first_span, &out),
-                        None => Some(first_span),
-                    };
-                    let Some(resume) = resume else {
-                        let _ = out.send(StemsMsg::Done { deck: job.deck, gen: job.gen });
-                        coverage(&cache, &out);
-                        if prefetching {
-                            let _ = out.send(StemsMsg::PrefetchDone {
-                                digest,
-                                model_frames: frames,
-                                complete: cache.as_ref().is_some_and(|c| c.is_complete()),
-                            });
-                        }
-                        continue;
-                    };
-                    if model.is_none() {
-                        // Probed per job, never latched: the INSTALL MODELS
-                        // flow can put the checkpoint on disk mid-session,
-                        // and the next separation must pick it up. One stat
-                        // per track load is free.
-                        if !checkpoint.is_file() {
-                            let _ = out.send(StemsMsg::Status {
-                                deck: job.deck,
-                                gen: job.gen,
-                                text: "stems: model not installed".to_string(),
-                                working: false,
-                            });
-                            if prefetching {
-                                let _ = out.send(StemsMsg::PrefetchDone {
-                                    digest,
-                                    model_frames: frames,
-                                    complete: false,
-                                });
-                            }
-                            continue;
-                        }
-                        let _ = out.send(StemsMsg::Status {
-                            deck: job.deck,
-                            gen: job.gen,
-                            text: "stems: loading model…".to_string(),
-                            working: true,
-                        });
-                        match StemsModel::load(&checkpoint) {
-                            Ok(loaded) => model = Some(loaded),
-                            Err(error) => {
-                                // NOT latched. The usual reason a load of a
-                                // checkpoint that IS on disk fails is that the
-                                // device had no room for it just then — the
-                                // other models this app runs, or the game on
-                                // the same GPU. Latching turned one bad moment
-                                // into a session with no separation at all and
-                                // no way back short of a restart; the next
-                                // track simply tries again.
-                                let _ = out.send(StemsMsg::Status {
-                                    deck: job.deck,
-                                    gen: job.gen,
-                                    text: format!("stems: {error}"),
-                                    working: false,
-                                });
-                                if prefetching {
-                                    let _ = out.send(StemsMsg::PrefetchDone {
-                                        digest,
-                                        model_frames: frames,
-                                        complete: false,
-                                    });
-                                }
-                                continue;
-                            }
-                        }
-                    }
-                    let Some(loaded) = model.as_mut() else {
-                        if prefetching {
-                            let _ = out.send(StemsMsg::PrefetchDone {
-                                digest,
-                                model_frames: frames,
-                                complete: false,
-                            });
-                        }
-                        continue;
-                    };
-                    if let Err(error) = run_demixer(
-                        &job,
-                        loaded,
-                        cache.as_mut(),
-                        &mut writer,
-                        resume,
-                        &out,
-                        &should_yield,
-                    ) {
-                        let _ = out.send(StemsMsg::Status {
-                            deck: job.deck,
-                            gen: job.gen,
-                            text: format!("stems: {error}"),
-                            working: false,
-                        });
-                    }
-                    // The separation is as complete as this run made it. A
-                    // track covered end to end now has a whole VOCALS stem on
-                    // disk, which is the karaoke bake's cue to run.
-                    coverage(&cache, &out);
-                    if prefetching {
-                        let _ = out.send(StemsMsg::PrefetchDone {
-                            digest,
-                            model_frames: frames,
-                            complete: cache.as_ref().is_some_and(|c| c.is_complete()),
-                        });
-                    }
-                }
-            }) {
-            Ok(handle) => handle.detach(),
-            Err(error) => makepad_widgets::log!("vj stems worker unavailable: {error}"),
-        }
-    }
-
-    fn submit_to(&self, job: StemsJob, backend: SeparationBackend) {
-        // Raised BEFORE the send, so a background run cannot read the flag
-        // between the job arriving and the worker noticing it.
-        self.deck_waiting.store(true, Ordering::SeqCst);
-        let _ = self.tx.send((job, backend));
-    }
-
-    pub fn submit_local(&self, job: StemsJob) {
-        self.submit_to(job, SeparationBackend::Local);
-    }
-
-    pub fn submit_hub(&self, job: StemsJob) {
-        self.submit_to(job, SeparationBackend::Hub);
-    }
-
-    #[cfg(test)]
-    fn submit(&self, job: StemsJob) {
-        self.submit_local(job);
-    }
-
-    /// Warm a queued track's stem cache while nothing is asking for the
-    /// worker. The job carries [`PREFETCH_GEN`], which is what keeps its
-    /// audio out of every deck.
-    pub fn submit_prefetch(
-        &self,
-        pcm: Arc<TrackPcm>,
-        source: Option<PathBuf>,
-        action: SeparationAction,
-    ) {
-        let backend = match action {
-            SeparationAction::Hub => SeparationBackend::Hub,
-            SeparationAction::Local => SeparationBackend::Local,
-            _ => return,
-        };
-        let _ = self.prefetch_tx.send((
-            StemsJob {
-                deck: DeckId::A,
-                gen: PREFETCH_GEN,
-                pcm,
-                source,
-                start_secs: 0.0,
-            },
-            backend,
-        ));
-    }
-
-    pub fn poll(&self) -> Vec<StemsMsg> {
-        let mut out = Vec::new();
-        loop {
-            match self.rx.try_recv() {
-                Ok(message) => out.push(message),
-                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
-            }
-        }
-        out
-    }
-}
-
+#[path = "stems_queue.rs"]
+mod queue;
+pub use queue::StemsPool;
+use queue::{bounded_reason, JobOutput, StemSink, Work};
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "stems_hub.rs"]
+mod hub;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1774,7 +1408,7 @@ mod tests {
     }
 
     /// Everything the pool says about one job, up to and including `Done`.
-    fn run_to_done(pool: &StemsPool, timeout: std::time::Duration) -> Vec<StemsMsg> {
+    fn run_to_done(pool: &mut StemsPool, timeout: std::time::Duration) -> Vec<StemsMsg> {
         let deadline = crate::clock::Instant::now() + timeout;
         let mut out = Vec::new();
         loop {
@@ -1818,9 +1452,9 @@ mod tests {
             root.join("no-such-checkpoint.ckpt"),
             u64::MAX,
         );
-        pool.start(crate::test_thread_spawner());
+        pool.start(crate::test_thread_spawner(), crate::test_task_pool());
         pool.submit(cache_job(pcm.clone(), 0.0));
-        let messages = run_to_done(&pool, std::time::Duration::from_secs(30));
+        let messages = run_to_done(&mut pool, std::time::Duration::from_secs(30));
 
         let mut chunks = 0usize;
         let mut done = false;
@@ -1860,9 +1494,9 @@ mod tests {
         write_entry(&root, &digest, 1);
 
         let mut pool = StemsPool::with_paths(root.clone(), root.join("no-such.ckpt"), 0);
-        pool.start(crate::test_thread_spawner());
+        pool.start(crate::test_thread_spawner(), crate::test_task_pool());
         pool.submit(cache_job(pcm.clone(), 0.0));
-        let messages = run_to_done(&pool, std::time::Duration::from_secs(30));
+        let messages = run_to_done(&mut pool, std::time::Duration::from_secs(30));
         assert!(
             messages.iter().any(|m| matches!(m, StemsMsg::Done { .. })),
             "the deck's own track is served from the cache it was not evicted from"
