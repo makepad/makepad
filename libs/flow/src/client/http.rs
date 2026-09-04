@@ -1,8 +1,9 @@
 //! Small, blocking HTTP/1.1 transport for the two flow-server planes.
 //!
-//! Responses are accepted only when an exact `Content-Length` frames them.
-//! Transfer encodings, informational responses, and redirects are protocol
-//! errors. Each instance owns at most one idle keep-alive connection.
+//! Responses are accepted only when an exact `Content-Length` frames them,
+//! except for an inherently bodyless 204. Transfer encodings, informational
+//! responses, and redirects are protocol errors. Each instance owns at most
+//! one idle keep-alive connection.
 
 use super::client::{ClientError, ClientResult};
 use std::io::{Read, Write};
@@ -356,8 +357,15 @@ fn parse_head(block: &[u8]) -> ClientResult<ParsedHead> {
             }
         }
     }
-    let content_length = content_length
-        .ok_or_else(|| ClientError::Protocol("Content-Length response required".into()))?;
+    let content_length = match content_length {
+        Some(content_length) => content_length,
+        None if status == 204 => 0,
+        None => {
+            return Err(ClientError::Protocol(
+                "Content-Length response required".into(),
+            ))
+        }
+    };
     if status == 204 && content_length != 0 {
         return Err(ClientError::Protocol("204 response declared a body".into()));
     }
@@ -435,5 +443,17 @@ mod tests {
         assert_eq!(head.status, 200);
         assert_eq!(head.content_length, 12);
         assert!(!head.close);
+    }
+
+    #[test]
+    fn response_head_accepts_only_bodyless_204_without_content_length() {
+        let head = parse_head(b"HTTP/1.1 204 No Content").unwrap();
+        assert_eq!((head.status, head.content_length), (204, 0));
+
+        let head = parse_head(b"HTTP/1.1 204 No Content\r\nContent-Length: 0").unwrap();
+        assert_eq!((head.status, head.content_length), (204, 0));
+
+        assert!(parse_head(b"HTTP/1.1 204 No Content\r\nContent-Length: 1").is_err());
+        assert!(parse_head(b"HTTP/1.1 200 OK").is_err());
     }
 }
