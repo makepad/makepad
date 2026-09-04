@@ -1666,6 +1666,9 @@ fn collect_flexible_roots(
     if root.borrow::<ValueImage>().is_some()
         || root.borrow::<ValueText>().is_some()
         || root.borrow::<ValueView>().is_some()
+        || root
+            .borrow::<TextInput>()
+            .is_some_and(|input| input.is_multiline())
         || is_text_scroll(vm, root, text_scroll_proto)
     {
         out.push(root.clone());
@@ -1683,6 +1686,10 @@ fn set_flexible_card_layout(widget: &WidgetRef, cx: &mut Cx, sized: bool) {
         text.set_card_sized(cx, sized);
     } else if let Some(mut value) = widget.borrow_mut::<ValueView>() {
         value.set_card_sized(cx, sized);
+    } else if let Some(mut input) = widget.borrow_mut::<TextInput>() {
+        // A text area fills a sized card and keeps its default height in a
+        // card that fits its content.
+        input.set_height(cx, if sized { Size::fill() } else { Size::Fixed(96.0) });
     } else if let Some(mut scroll) = widget.borrow_mut::<View>() {
         scroll.walk.height = text_scroll_height(sized);
         scroll.redraw(cx);
@@ -1767,6 +1774,14 @@ fn wrap_declared_inputs(vm: &mut ScriptVm<'_>, root: &WidgetRef) {
             .enumerate()
             .filter_map(|(index, (id, child))| {
                 if child.borrow::<ModelPicker>().is_some() {
+                    return None;
+                }
+                // A multi-line text area is its own row: it fills the face
+                // and needs no name beside it (the prompt card).
+                if child
+                    .borrow::<TextInput>()
+                    .is_some_and(|input| input.is_multiline())
+                {
                     return None;
                 }
                 let source = child.script_source();
@@ -3656,6 +3671,30 @@ Flow{llm function http ask output}
                 Some(rect(40.0 + 10.0 * scale, 15.0 + 20.0 * scale, 30.0 * scale, 40.0 * scale))
             );
         }
+    }
+
+    #[test]
+    fn a_multiline_text_area_is_not_wrapped_in_a_labelled_row() {
+        let source = include_str!("../../../libs/flow/recipes/templates/prompt-to-image.splash");
+        let graph = makepad_flow::graph::evaluate(source, "<text-area>").unwrap();
+        let catalog = makepad_flow::graph::prelude_catalog().unwrap();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        let host = FaceHost::mount(
+            &mut cx,
+            WidgetUid(0),
+            "test",
+            "<text-area>",
+            source,
+            &graph,
+            &catalog,
+        );
+        assert!(host.error.is_none(), "{:?}", host.error);
+        let root = host.faces.get("prompt").unwrap().root.clone();
+        let area = root.child(live_id!(value));
+        assert!(area.borrow::<TextInput>().is_some_and(|input| input.is_multiline()));
+        assert!(area.child(live_id!(name)).borrow::<Label>().is_none());
+        host.free(&mut cx);
     }
 
     #[test]
