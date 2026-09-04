@@ -50,7 +50,10 @@ mod soundboard;
 pub mod fx;
 mod mt;
 pub mod learned;
+pub mod calibration;
+pub mod calibration_data;
 
+use calibration::CalibrationNote;
 use fx::{soft_clip, DcBlock, EarlyReflections, Eq, Limiter, Perspective, Reverb, ReverbParams, ReverbPreset, Tone};
 use keys::{build_key, KeyDesign, FIRST_KEY, LAST_KEY, NUM_KEYS};
 pub use params::{DesignParams, PianoPreset, Voicing, PIANO_PRESETS};
@@ -310,9 +313,28 @@ pub struct Piano {
 
 impl Piano {
     /// Builds the full instrument (all 88 key designs, voices, sympathetic
-    /// banks, soundboard, effects). Allocation happens only here.
+    /// banks, soundboard, effects), using `calibration_data::DEFAULT_CALIBRATION`.
+    /// Allocation happens at construction, never in the audio callback.
     pub fn new(sample_rate: f32) -> Self {
+        Self::new_with_calibration(sample_rate, calibration_data::DEFAULT_CALIBRATION)
+    }
+
+    /// Raw default physical design, without measured modal corrections.
+    /// Preserves the output of `Piano::new` before calibration was introduced.
+    pub fn new_uncalibrated(sample_rate: f32) -> Self {
         Self::new_with_params(sample_rate, &DesignParams::default())
+    }
+
+    /// Builds the default physical design with immutable modal calibration.
+    /// An empty table is bit-identical to `new_uncalibrated`. See
+    /// [`calibration`] for pitch/velocity interpolation and the partial tail.
+    ///
+    /// Panics at construction for unsorted/duplicate keys, keys outside
+    /// 21..=108, nonfinite or out-of-range gains (-36..=24 dB), or nonfinite
+    /// or out-of-range decay scales (0.1..=4). Invalid fits are not clamped.
+    pub fn new_with_calibration(sample_rate: f32, notes: &[CalibrationNote]) -> Self {
+        calibration::validate(notes);
+        Self::build(sample_rate, &DesignParams::default(), notes)
     }
 
     /// Builds one of the shipped instrument presets (see
@@ -332,14 +354,25 @@ impl Piano {
         self.set_reverb_mix(preset.reverb_mix);
     }
 
-    /// Same instrument, explicit design parameters (see params.rs). Used by
+    /// Raw instrument, explicit design parameters (see params.rs). Used by
     /// verification tooling that walks the design space against reference
-    /// recordings; `DesignParams::default()` IS `Piano::new`.
+    /// recordings. Never applies calibration, including the stock table;
+    /// default parameters are equivalent to `Piano::new_uncalibrated`.
     pub fn new_with_params(sample_rate: f32, dp: &DesignParams) -> Self {
+        Self::build(sample_rate, dp, &[])
+    }
+
+    fn build(sample_rate: f32, dp: &DesignParams, notes: &[CalibrationNote]) -> Self {
         assert!((8000.0..=192_000.0).contains(&sample_rate), "unsupported sample rate {sample_rate}");
         let fs = sample_rate as f64;
-        let keys: Vec<KeyDesign> = (FIRST_KEY..=LAST_KEY).map(|k| build_key(k, fs, dp)).collect();
-        let voices: Vec<Voice> = keys.iter().enumerate().map(|(i, k)| Voice::new(i, k)).collect();
+        let mut keys: Vec<KeyDesign> = (FIRST_KEY..=LAST_KEY).map(|k| build_key(k, fs, dp)).collect();
+        let voices: Vec<Voice> = keys.iter_mut().enumerate().map(|(i, k)| {
+            let note = calibration::for_key(notes, FIRST_KEY + i as u8);
+            if let Some(note) = &note {
+                note.apply_decay(k);
+            }
+            Voice::new(i, k, note)
+        }).collect();
         let sym: Vec<SymBank> = keys.iter().map(SymBank::new).collect();
         // Duplex / aliquot scale: the non-speaking string segments behind
         // the bridge, a shared bank of lightly damped resonators across the
@@ -795,6 +828,13 @@ impl Piano {
     #[doc(hidden)]
     pub fn keys_debug(&self) -> &[keys::KeyDesign] {
         &self.keys
+    }
+
+    /// Interpolated per-key calibration metadata; `None` for a raw instrument
+    /// or a key outside the piano compass. Read-only, with no runtime setters.
+    #[doc(hidden)]
+    pub fn calibration_debug(&self, key: u8) -> Option<&CalibrationNote> {
+        self.voices.get(key.checked_sub(FIRST_KEY)? as usize)?.calibration.as_ref()
     }
 
     /// Full state reset (voices, pedals, resonance, effects, clock).
