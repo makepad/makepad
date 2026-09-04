@@ -241,6 +241,16 @@ pub fn spawn_run_with_policy(
     events: Sender<RunEvent>,
     policy: NetPolicy,
 ) -> RunHandle {
+    spawn_run_with_policy_and_assets(input, seams, events, policy, None)
+}
+
+pub fn spawn_run_with_policy_and_assets(
+    input: RunInput,
+    seams: Seams,
+    events: Sender<RunEvent>,
+    policy: NetPolicy,
+    assets: Option<executors::publish::AssetWorkerHandle>,
+) -> RunHandle {
     let cancel = Arc::new(AtomicBool::new(false));
     let thread_cancel = cancel.clone();
     let (answer, answers) = channel();
@@ -298,6 +308,7 @@ pub fn spawn_run_with_policy(
                 events,
                 answers,
                 thread_cancel,
+                assets,
             );
         })
         .expect("spawn flow run thread");

@@ -4,6 +4,7 @@ mod.flow.ui = {
     InputFace: {}
     TextFace: {}
     OutputFace: {}
+    PublishFace: {}
     LlmFace: {}
     FnFace: {}
     HttpFace: {}
@@ -22,6 +23,7 @@ mod.flow.ImageFace = mod.flow.ui.ImageFace
 mod.flow.InputFace = mod.flow.ui.InputFace
 mod.flow.TextFace = mod.flow.ui.TextFace
 mod.flow.OutputFace = mod.flow.ui.OutputFace
+mod.flow.PublishFace = mod.flow.ui.PublishFace
 mod.flow.LlmFace = mod.flow.ui.LlmFace
 mod.flow.FnFace = mod.flow.ui.FnFace
 mod.flow.HttpFace = mod.flow.ui.HttpFace
@@ -52,7 +54,10 @@ mod.flow.Input = mod.flow.Node{
     type_name: "Input"
     /** Value type: text, image, audio, video, mesh, json, or list. */
     type: @text
-    /** Value used when the caller omits this input. */
+    /** Design value from the file, overridable per run by the caller. */
+    value: ""
+    // Read compatibility for flow files written before `value` became the
+    // canonical design setting. The graph evaluator folds this into `value`.
     default: ""
     ui: mod.flow.ui.InputFace
     text: fn() { self.out(@text) }
@@ -80,6 +85,26 @@ mod.flow.Output = mod.flow.Node{
     /** Port whose value becomes this result. */
     value: nil
     ui: mod.flow.ui.OutputFace
+}
+
+/** Publish a terminal flow value into the shared asset library. The value may be image, audio, video, mesh, text, or json. An alias makes later runs create a new revision of the same asset. */
+mod.flow.Publish = mod.flow.Node{
+    kind: @publish
+    type_name: "Publish"
+    /** Optional title; empty becomes "<flow> · <node>". */
+    title: ""
+    /** Asset namespace. */
+    namespace: "flows"
+    /** Search tags; empty becomes ["flow", "<flow name>"]. */
+    tags: []
+    /** Optional description; empty inherits an upstream text input when available. */
+    description: ""
+    /** Optional stable alias, with or without the namespace prefix. */
+    alias: ""
+    /** Terminal value to publish. */
+    value: nil
+    ui: mod.flow.ui.PublishFace
+    asset: fn() { self.out(@asset) }
 }
 
 /** Expand or transform text with a language model. */
@@ -177,6 +202,8 @@ mod.flow.Gen = mod.flow.Node{
     domain: ""
     /** Typed input and output port declaration: `{in: {name: @type, ...}, out: {name: @type, ...}}`. */
     ports: {in: {} out: {}}
+    /** Reproducible integer seed; @random or -1 draws a fresh seed for every run. */
+    seed: @random
     ui: mod.flow.ui.GenFace
 }
 
@@ -192,8 +219,8 @@ mod.flow.Image = mod.flow.Gen{
     height: 1024
     /** 1..50 */
     steps: 8
-    /** Reproducible seed; zero lets the provider choose. */
-    seed: 0
+    /** Reproducible integer seed; @random or -1 draws a fresh seed for every run. */
+    seed: @random
     /** Things the image should avoid. */
     negative: ""
     /** Model name; empty lets the hub choose. */

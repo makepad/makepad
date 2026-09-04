@@ -158,6 +158,7 @@ impl BodyNativeBackend {
         bbox: Option<[f32; 4]>,
         options: BodyOptions,
     ) -> Result<String, AssetAiError> {
+        let _ = options.detect;
         let packet = match &mut self.gen {
             Gen::Stub(gen) => gen(rgb, width, height, bbox)?,
             #[cfg(feature = "body-native")]

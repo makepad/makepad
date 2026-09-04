@@ -372,11 +372,37 @@ pub struct NodesResponse {
     pub brief: String,
 }
 
+/// One asset projected through the flow server. Keeping this DTO here lets
+/// flow-ui and tool callers browse without linking the asset store client.
+#[derive(Clone, Debug, PartialEq, Eq, SerJson, DeJson)]
+pub struct FlowAsset {
+    pub id: String,
+    pub alias: Option<String>,
+    pub namespace: String,
+    pub title: String,
+    pub kind: String,
+    pub tags: Vec<String>,
+    pub created_ms: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, SerJson, DeJson)]
+pub struct AssetsResponse {
+    pub assets: Vec<FlowAsset>,
+}
+
 #[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
 pub struct FleetNodeDto {
     pub base_url: String,
     pub fleet: String,
     pub healthy: bool,
+    pub gpu: Option<String>,
+    pub vram_total_mb: Option<u64>,
+    pub vram_usable_mb: Option<u64>,
+    pub vram_free_mb: Option<u64>,
+    /// Resident chat model whose lane count follows. Older hubs omit both.
+    pub lanes_model: Option<String>,
+    /// Configured concurrent chat lanes (`health.lanes.slots_total`).
+    pub lanes: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
@@ -397,6 +423,22 @@ pub struct ModelsResponse {
     pub nodes: Vec<FleetNodeDto>,
     pub models: Vec<ModelInfoDto>,
     pub snapshot_ms: u64,
+}
+
+/// One generation/chat node's contribution to a flow capacity estimate.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct ParallelismNodeDto {
+    pub node: String,
+    pub model: String,
+    pub nodes: u64,
+    pub lanes: u64,
+}
+
+/// `GET /v1/flows/{name}/parallelism`.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct ParallelismResponse {
+    pub max: u64,
+    pub per_node: Vec<ParallelismNodeDto>,
 }
 
 #[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
@@ -736,6 +778,31 @@ pub struct CreateInstanceResponse {
     pub instance: String,
 }
 
+/// `POST /v1/flows/{name}/batches {parallel, inputs?}`.
+#[derive(Clone, Debug, SerJson, DeJson)]
+pub struct CreateBatchRequest {
+    pub parallel: u64,
+    pub inputs: Option<HashMap<String, HashMap<String, InputValueDto>>>,
+}
+
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct BatchRunDto {
+    pub run_id: String,
+    pub instance: String,
+}
+
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct CreateBatchResponse {
+    pub batch: String,
+    pub runs: Vec<BatchRunDto>,
+}
+
+/// Response for cancelling or clearing one batch.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct BatchMutationResponse {
+    pub runs: u64,
+}
+
 /// The question an instance is parked on, mirroring `RunEventPayload::NodeWaiting`.
 #[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
 pub struct WaitingDto {
@@ -819,6 +886,10 @@ pub struct RunRowDto {
     pub run_id: String,
     pub instance: String,
     pub flow: String,
+    /// Present for runs created by the batch route.
+    pub batch: Option<String>,
+    /// One-based slice number within `batch`.
+    pub batch_index: Option<u64>,
     pub revision: u64,
     pub state: RunState,
     /// Exact node-pruned execution set used as the progress denominator.

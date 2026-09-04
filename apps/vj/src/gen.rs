@@ -1975,10 +1975,21 @@ impl GenModel {
     /// pipeline the store advances by itself; this path only ever sees the
     /// one-job pipes.
     pub fn status_arrived_at(&mut self, status: &JobStatusDto, now_ms: u64) {
+        let _ = self.take_produced_on_success(status, now_ms);
+    }
+
+    /// Same as [`Self::status_arrived_at`], but on a fresh success returns
+    /// the produced clip and the row title so the grid can show it without
+    /// waiting on the catalog event stream.
+    pub fn take_produced_on_success(
+        &mut self,
+        status: &JobStatusDto,
+        now_ms: u64,
+    ) -> Option<(AssetId, String)> {
         let already_published = self.published_assets.clone();
-        let Some(row) = self.job_by_id(status.job) else { return };
+        let Some(row) = self.job_by_id(status.job) else { return None };
         if row.state.is_terminal() {
-            return; // late duplicate
+            return None; // late duplicate
         }
         row.last_update_ms = now_ms;
         row.status_warning = None;
@@ -2046,6 +2057,14 @@ impl GenModel {
                 GenJobState::Cancelled
             }
         };
+        if matches!(row.state, GenJobState::Succeeded) {
+            if let Some(asset) = row.produced {
+                if row.kind == "video.generate" {
+                    return Some((asset, row.title.clone()));
+                }
+            }
+        }
+        None
     }
 
     /// A status poll failed (transient transport): keep the row, retry on a

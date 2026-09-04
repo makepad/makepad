@@ -18,6 +18,10 @@ pub struct HealthJson {
     pub gpu: Option<String>,
     pub vram_free_mb: Option<u64>,
     pub vram_total_mb: Option<u64>,
+    /// Maximum VRAM this service can make free after retiring all of its
+    /// residents. Missing on older services; schedulers then fall back to
+    /// `vram_total_mb` for the permanent card-size compatibility check.
+    pub vram_usable_mb: Option<u64>,
     /// Model ids currently in the "loaded" state.
     pub models_loaded: Vec<String>,
     /// Jobs queued or running right now. `None` on services predating the
@@ -116,6 +120,7 @@ pub const MODEL_STATE_DOWNLOADING: &str = "downloading";
 pub const MODEL_STATE_READY: &str = "ready";
 pub const MODEL_STATE_LOADED: &str = "loaded";
 pub const MODEL_STATE_ERROR: &str = "error";
+pub const MODEL_STATE_TOO_SMALL: &str = "too_small";
 
 #[derive(Clone, Debug, SerJson, DeJson)]
 pub struct ModelInfoJson {
@@ -128,7 +133,8 @@ pub struct ModelInfoJson {
     pub gated: bool,
     pub vram_gb: Option<f64>,
     pub note: Option<String>,
-    /// One of the MODEL_STATE_* constants.
+    /// One of the MODEL_STATE_* constants, including `too_small` when this
+    /// node's measured usable-VRAM ceiling cannot satisfy admission.
     pub state: String,
     /// Download progress in bytes while state == "downloading".
     pub progress_done: Option<u64>,

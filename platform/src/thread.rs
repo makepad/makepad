@@ -375,6 +375,7 @@ impl<T> TaskHandle<T> {
         self.priority_status
     }
 
+    #[allow(dead_code)]
     fn completed(ui_thread: ThreadId, result: Result<T, TaskError>) -> Self {
         let state = Arc::new(TaskState::default());
         state.complete(result);

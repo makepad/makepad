@@ -8,8 +8,8 @@
 //! is posted as a [`FaceBridgeCall`] action and the app acts on it on the
 //! next event dispatch.
 
-use crate::canvas::{declared_output_type, Camera, PortIcon};
-use crate::values::ValueCache;
+use crate::graph_view::{declared_output_type, PortIcon};
+use crate::values::{media_kind, MediaKind, ValueCache};
 use makepad_code_editor::code_view::CodeView;
 use makepad_flow::{
     Graph, InstanceRow, Literal, ModelsResponse, Node, NodeTypeCatalog, PortType, ValueBytes,
@@ -22,6 +22,8 @@ use makepad_widgets::makepad_script::*;
 use makepad_widgets::widget_async::{enter_isolate, leave_isolate, CxSplashVmExt, SplashVmId};
 use makepad_widgets::widget_tree::CxWidgetExt;
 use makepad_widgets::*;
+use makepad_flowgraph::{Camera, NodeFaces};
+use makepad_media_view::{AudioPlayer, MeshView, SplatView, VideoPlayer};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
@@ -245,6 +247,7 @@ pub struct ModelChoice {
     pub id: String,
     pub label: String,
     pub dimmed: bool,
+    pub note: String,
 }
 
 /// Collapse repeated model ids, count distinct advertising nodes, and put
@@ -253,37 +256,95 @@ pub fn model_choices(response: &ModelsResponse) -> Vec<ModelChoice> {
     #[derive(Default)]
     struct Acc {
         nodes: BTreeSet<String>,
-        ready_or_available: bool,
-        all_absent: bool,
+        ready: BTreeSet<String>,
+        absent: BTreeSet<String>,
+        too_small: BTreeSet<String>,
+        admissible: BTreeSet<String>,
+        reasons: BTreeSet<String>,
     }
 
     let mut by_id: BTreeMap<String, Acc> = BTreeMap::new();
     for model in &response.models {
-        let entry = by_id.entry(model.id.clone()).or_insert_with(|| Acc {
-            all_absent: true,
-            ..Acc::default()
-        });
+        let entry = by_id.entry(model.id.clone()).or_default();
         entry.nodes.insert(model.node.clone());
-        entry.ready_or_available |=
-            model.available || matches!(model.state.as_str(), "ready" | "loaded");
-        entry.all_absent &= model.state == "absent";
+        match model.state.as_str() {
+            "ready" | "loaded" => {
+                entry.ready.insert(model.node.clone());
+            }
+            "absent" => {
+                entry.absent.insert(model.node.clone());
+            }
+            "too_small" => {
+                entry.too_small.insert(model.node.clone());
+            }
+            _ => {}
+        }
+        if model.available && model.state != "too_small" {
+            entry.admissible.insert(model.node.clone());
+        }
+        if let Some(note) = model.note.as_ref().filter(|note| !note.is_empty()) {
+            entry.reasons.insert(note.clone());
+        }
     }
     let mut choices: Vec<_> = by_id
         .into_iter()
         .map(|(id, acc)| {
-            let label = format!("{} · {} nodes", id, acc.nodes.len());
+            let mut label = id.clone();
+            if !acc.ready.is_empty() {
+                label.push_str(&format!(" · {} ready", acc.ready.len()));
+            }
+            if !acc.absent.is_empty() {
+                label.push_str(&format!(" · {} absent", acc.absent.len()));
+            }
+            if !acc.too_small.is_empty() {
+                label.push_str(&format!(" · {} too small", acc.too_small.len()));
+            }
+            let accounted = acc
+                .ready
+                .union(&acc.absent)
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                .union(&acc.too_small)
+                .count();
+            if accounted < acc.nodes.len() {
+                label.push_str(&format!(" · {} other", acc.nodes.len() - accounted));
+            }
+            let ready_nodes: Vec<_> = acc
+                .ready
+                .iter()
+                .map(|url| {
+                    let gpu = response
+                        .nodes
+                        .iter()
+                        .find(|node| node.base_url == *url)
+                        .and_then(|node| node.gpu.as_deref());
+                    match gpu {
+                        Some(gpu) => format!("{} {gpu}", display_node(url)),
+                        None => display_node(url).to_string(),
+                    }
+                })
+                .collect();
+            let note = if !ready_nodes.is_empty() {
+                ready_nodes.join(" · ")
+            } else if acc.admissible.is_empty() {
+                acc.reasons.into_iter().collect::<Vec<_>>().join(" · ")
+            } else {
+                "downloads on first use".to_string()
+            };
+            let dimmed = acc.admissible.is_empty();
             (
-                if acc.all_absent {
-                    2
-                } else if acc.ready_or_available {
+                if !acc.ready.is_empty() {
                     0
+                } else if dimmed {
+                    2
                 } else {
                     1
                 },
                 ModelChoice {
                     id,
                     label,
-                    dimmed: acc.all_absent,
+                    dimmed,
+                    note,
                 },
             )
         })
@@ -294,6 +355,16 @@ pub fn model_choices(response: &ModelsResponse) -> Vec<ModelChoice> {
             .then_with(|| left.id.cmp(&right.id))
     });
     choices.into_iter().map(|(_, choice)| choice).collect()
+}
+
+fn display_node(base_url: &str) -> &str {
+    base_url
+        .strip_prefix("http://")
+        .or_else(|| base_url.strip_prefix("https://"))
+        .unwrap_or(base_url)
+        .split(':')
+        .next()
+        .unwrap_or(base_url)
 }
 
 script_mod! {
@@ -434,6 +505,22 @@ script_mod! {
         image := RoundedPicture{
             visible: false
         }
+        video := mod.widgets.VideoPlayer{
+            visible: false
+            height: 180
+        }
+        audio := mod.widgets.AudioPlayer{
+            visible: false
+            height: 150
+        }
+        mesh := mod.widgets.MeshView{
+            visible: false
+            height: 180
+        }
+        splat := mod.widgets.SplatView{
+            visible: false
+            height: 180
+        }
         text_scroll := mod.flow.ui.TextScroll{
             visible: false
             text := Label{
@@ -461,21 +548,37 @@ script_mod! {
     mod.flow.ui.ModelPicker = set_type_default() do mod.flow.ui.ModelPickerBase{
         width: Fill
         height: Fit
-        flow: Right
-        spacing: theme.space_2
-        align: Align{y: 0.5}
-        Label{
-            width: 44
-            text: "model"
-            draw_text +: {
-                color: theme.flow_text_muted
-                text_style: theme.font_regular{font_size: 9}
+        flow: Down
+        spacing: theme.space_1
+        select := View{
+            width: Fill
+            height: Fit
+            flow: Right
+            spacing: theme.space_2
+            align: Align{y: 0.5}
+            Label{
+                width: 44
+                text: "model"
+                draw_text +: {
+                    color: theme.flow_text_muted
+                    text_style: theme.font_regular{font_size: 9}
+                }
+            }
+            picker := ComboBox{
+                width: Fill
+                height: 26
+                labels: ["hub picks"]
             }
         }
-        picker := DropDown{
+        note := Label{
             width: Fill
-            height: 26
-            labels: ["hub picks"]
+            height: Fit
+            visible: false
+            text: ""
+            draw_text +: {
+                color: theme.flow_text_hint
+                text_style: theme.font_regular{font_size: 8}
+            }
         }
     }
 
@@ -510,7 +613,7 @@ script_mod! {
             quantize: true
             param_bind := @height
         }
-        picker := DropDown{
+        picker := ComboBox{
             width: Fill
             height: 26
             labels: ["Custom"]
@@ -519,6 +622,46 @@ script_mod! {
             width: 26
             height: 26
             text: "⇄"
+        }
+    }
+
+    mod.flow.ui.SeedPickerBase = #(SeedPicker::register_widget(vm))
+    mod.flow.ui.SeedPicker = set_type_default() do mod.flow.ui.SeedPickerBase{
+        width: Fill
+        height: 24
+        flow: Right
+        spacing: theme.space_1
+        field := mod.widgets.FabValueInput{
+            width: Fill
+            height: 24
+            label: "seed"
+            min: 0
+            max: 999999
+            step: 1
+            snap: 1
+            precision: 0
+            quantize: true
+        }
+        random_label := Label{
+            width: Fill
+            height: 24
+            visible: false
+            text: "seed  random"
+            padding: Inset{left: 8 top: 5}
+            draw_text +: {
+                color: theme.flow_text
+                text_style: theme.font_regular{font_size: 9}
+            }
+        }
+        die := ButtonFlatter{
+            width: 24
+            height: 24
+            text: ""
+            icon_walk: Walk{width: 13 height: 13}
+            draw_icon +: {
+                svg: crate_resource("self:resources/icons/dice.svg")
+                color: theme.flow_text_muted
+            }
         }
     }
 
@@ -743,8 +886,8 @@ impl ValueText {
     }
 }
 
-/// Shows whatever arrives: an image as a picture, text and json inline,
-/// anything else as its content type and byte count.
+/// Shows whatever arrives with the shared image/video/audio/mesh/splat
+/// viewers, and falls back to bounded inline text for non-media values.
 #[derive(Script, ScriptHook, Widget)]
 pub struct ValueView {
     #[deref]
@@ -755,6 +898,8 @@ pub struct ValueView {
     loaded: bool,
     #[rust]
     card_sized: bool,
+    #[rust]
+    media_kind: MediaKind,
 }
 
 impl Widget for ValueView {
@@ -767,7 +912,13 @@ impl Widget for ValueView {
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
         self.value = v.to_string();
         self.loaded = false;
+        self.media_kind = if v.is_empty() {
+            MediaKind::Unknown
+        } else {
+            MediaKind::Text
+        };
         self.view.image(cx, ids!(image)).set_visible(cx, false);
+        self.hide_media(cx);
         self.view
             .view(cx, ids!(text_scroll))
             .set_visible(cx, !v.is_empty());
@@ -790,6 +941,39 @@ impl ValueView {
         self.card_sized = sized;
         self.view.walk.height = card_height(sized);
         set_image_card_layout(&self.view.image(cx, ids!(image)), cx, sized);
+        let media_height = if sized {
+            Size::fill()
+        } else {
+            Size::Fixed(180.0)
+        };
+        if let Some(mut video) = self
+            .view
+            .widget(cx, ids!(video))
+            .borrow_mut::<VideoPlayer>()
+        {
+            video.set_size(cx, Size::fill(), media_height);
+        }
+        if let Some(mut audio) = self
+            .view
+            .widget(cx, ids!(audio))
+            .borrow_mut::<AudioPlayer>()
+        {
+            audio.set_size(cx, Size::fill(), media_height);
+        }
+        if let Some(mut mesh) = self
+            .view
+            .widget(cx, ids!(mesh))
+            .borrow_mut::<MeshView>()
+        {
+            mesh.set_size(cx, Size::fill(), media_height);
+        }
+        if let Some(mut splat) = self
+            .view
+            .widget(cx, ids!(splat))
+            .borrow_mut::<SplatView>()
+        {
+            splat.set_size(cx, Size::fill(), media_height);
+        }
         set_view_ref_height(
             &self.view.view(cx, ids!(empty)),
             cx,
@@ -812,6 +996,12 @@ impl ValueView {
     }
 
     pub fn set_image(&mut self, cx: &mut Cx, value: &ValueBytes) {
+        if self.loaded && self.media_kind == MediaKind::Image && self.value == value.digest {
+            return;
+        }
+        self.value = value.digest.clone();
+        self.hide_media(cx);
+        self.media_kind = MediaKind::Image;
         let image = self.view.image(cx, ids!(image));
         let loaded = if value.content_type.contains("jpeg") || value.content_type.contains("jpg") {
             image.load_jpg_from_data(cx, &value.bytes)
@@ -831,6 +1021,7 @@ impl ValueView {
             Err(error) => {
                 image.set_visible(cx, false);
                 self.set_text(cx, &format!("{} · {:?}", value.content_type, error));
+                self.media_kind = MediaKind::Image;
             }
         }
         self.view.redraw(cx);
@@ -838,6 +1029,98 @@ impl ValueView {
 
     pub fn is_loaded(&self) -> bool {
         self.loaded
+    }
+
+    #[cfg(test)]
+    pub(crate) fn media_kind(&self) -> MediaKind {
+        self.media_kind
+    }
+
+    /// Route bytes to the viewer selected by their content type/magic.
+    pub fn set_value(&mut self, cx: &mut Cx, value: &ValueBytes) {
+        let kind = media_kind(value);
+        if self.loaded && self.media_kind == kind && self.value == value.digest {
+            return;
+        }
+        if kind == MediaKind::Image {
+            self.set_image(cx, value);
+            return;
+        }
+        self.view.image(cx, ids!(image)).set_visible(cx, false);
+        self.hide_media(cx);
+        self.view.view(cx, ids!(text_scroll)).set_visible(cx, false);
+        self.view.label(cx, ids!(text)).set_visible(cx, false);
+        self.view.view(cx, ids!(empty)).set_visible(cx, false);
+        self.value = value.digest.clone();
+        self.media_kind = kind;
+        let result = match kind {
+            MediaKind::Video => self
+                .view
+                .widget(cx, ids!(video))
+                .borrow_mut::<VideoPlayer>()
+                .ok_or_else(|| "video viewer is unavailable".to_string())
+                .and_then(|mut viewer| viewer.load_bytes(cx, &value.bytes, &value.content_type))
+                .map(|_| self.view.widget(cx, ids!(video)).set_visible(cx, true)),
+            MediaKind::Audio => self
+                .view
+                .widget(cx, ids!(audio))
+                .borrow_mut::<AudioPlayer>()
+                .ok_or_else(|| "audio viewer is unavailable".to_string())
+                .and_then(|mut viewer| viewer.load_bytes(cx, &value.bytes, &value.content_type))
+                .map(|_| self.view.widget(cx, ids!(audio)).set_visible(cx, true)),
+            MediaKind::Mesh => self
+                .view
+                .widget(cx, ids!(mesh))
+                .borrow_mut::<MeshView>()
+                .ok_or_else(|| "mesh viewer is unavailable".to_string())
+                .and_then(|mut viewer| viewer.load_bytes(cx, &value.bytes, &value.content_type))
+                .map(|_| self.view.widget(cx, ids!(mesh)).set_visible(cx, true)),
+            MediaKind::Splat => self
+                .view
+                .widget(cx, ids!(splat))
+                .borrow_mut::<SplatView>()
+                .ok_or_else(|| "splat viewer is unavailable".to_string())
+                .and_then(|mut viewer| viewer.load_bytes(cx, &value.bytes, &value.content_type))
+                .map(|_| self.view.widget(cx, ids!(splat)).set_visible(cx, true)),
+            MediaKind::Text | MediaKind::Unknown => {
+                self.set_text(cx, &String::from_utf8_lossy(&value.bytes));
+                return;
+            }
+            MediaKind::Image => unreachable!(),
+        };
+        match result {
+            Ok(()) => self.loaded = true,
+            Err(error) => {
+                self.loaded = false;
+                self.view.view(cx, ids!(text_scroll)).set_visible(cx, true);
+                self.view.label(cx, ids!(text)).set_visible(cx, true);
+                self.view.label(cx, ids!(text)).set_text(cx, &error);
+            }
+        }
+        self.view.redraw(cx);
+    }
+
+    fn hide_media(&mut self, cx: &mut Cx) {
+        let video = self.view.widget(cx, ids!(video));
+        video.set_visible(cx, false);
+        if let Some(mut video) = video.borrow_mut::<VideoPlayer>() {
+            video.clear(cx);
+        }
+        let audio = self.view.widget(cx, ids!(audio));
+        audio.set_visible(cx, false);
+        if let Some(mut audio) = audio.borrow_mut::<AudioPlayer>() {
+            audio.clear(cx);
+        }
+        let mesh = self.view.widget(cx, ids!(mesh));
+        mesh.set_visible(cx, false);
+        if let Some(mut mesh) = mesh.borrow_mut::<MeshView>() {
+            mesh.clear(cx);
+        }
+        let splat = self.view.widget(cx, ids!(splat));
+        splat.set_visible(cx, false);
+        if let Some(mut splat) = splat.borrow_mut::<SplatView>() {
+            splat.clear(cx);
+        };
     }
 }
 
@@ -860,6 +1143,79 @@ pub struct FormatPicker {
     height_range: (f64, f64, f64),
 }
 
+/// Integer seed editor with an explicit random mode. The outer widget owns
+/// `param_bind`, so the face host commits one literal for either control.
+#[derive(Script, ScriptHook, Widget)]
+pub struct SeedPicker {
+    #[deref]
+    view: View,
+    #[rust]
+    random: bool,
+    #[rust]
+    last_number: f64,
+}
+
+impl Widget for SeedPicker {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.view.draw_walk(cx, scope, walk)
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+}
+
+impl SeedPicker {
+    pub(crate) fn set_literal(&mut self, cx: &mut Cx, value: &Literal) {
+        match value {
+            Literal::Id(value) | Literal::Str(value) if value == "random" => {
+                self.set_random(cx, true);
+            }
+            Literal::Num(value) if *value == -1.0 => self.set_random(cx, true),
+            Literal::Num(value) => {
+                self.last_number = value.max(0.0);
+                self.view
+                    .fab_value_input(cx, ids!(field))
+                    .set_value(cx, self.last_number);
+                self.set_random(cx, false);
+            }
+            _ => self.set_random(cx, true),
+        }
+    }
+
+    fn set_random(&mut self, cx: &mut Cx, random: bool) {
+        self.random = random;
+        self.view
+            .fab_value_input(cx, ids!(field))
+            .set_visible(cx, !random);
+        self.view
+            .label(cx, ids!(random_label))
+            .set_visible(cx, random);
+        self.redraw(cx);
+    }
+
+    pub(crate) fn changed(&mut self, cx: &mut Cx, actions: &Actions) -> Option<Literal> {
+        if self.view.button(cx, ids!(die)).clicked(actions) {
+            let random = !self.random;
+            self.set_random(cx, random);
+            if random {
+                return Some(Literal::Id("random".to_string()));
+            }
+            self.view
+                .fab_value_input(cx, ids!(field))
+                .set_value(cx, self.last_number);
+            return Some(Literal::Num(self.last_number));
+        }
+        let value = self
+            .view
+            .fab_value_input(cx, ids!(field))
+            .ended(actions)?;
+        self.last_number = value.max(0.0);
+        self.random = false;
+        Some(Literal::Num(self.last_number))
+    }
+}
+
 impl Widget for FormatPicker {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.view.draw_walk(cx, scope, walk)
@@ -879,7 +1235,7 @@ impl FormatPicker {
             .map(|index| index + 1)
             .unwrap_or(0);
         self.view
-            .drop_down(cx, ids!(picker))
+            .combo_box(cx, ids!(picker))
             .set_selected_item(cx, selected);
     }
 
@@ -904,7 +1260,7 @@ impl FormatPicker {
         self.presets = options.presets;
         let mut labels = vec![CUSTOM_FORMAT.to_string()];
         labels.extend(self.presets.iter().map(|preset| preset.name.clone()));
-        self.view.drop_down(cx, ids!(picker)).set_labels(cx, labels);
+        self.view.combo_box(cx, ids!(picker)).set_labels(cx, labels);
         let (width_min, width_max, width_step) = options.width_range;
         let (height_min, height_max, height_step) = options.height_range;
         self.width_range = options.width_range;
@@ -966,7 +1322,7 @@ impl FormatPicker {
             self.set_dimensions(cx, width, height);
             return Some((width, height));
         }
-        if let Some(index) = self.view.drop_down(cx, ids!(picker)).changed(actions) {
+        if let Some(index) = self.view.combo_box(cx, ids!(picker)).changed(actions) {
             let preset = index
                 .checked_sub(1)
                 .and_then(|index| self.presets.get(index))?
@@ -1033,19 +1389,31 @@ impl ModelPicker {
         if !selected.is_empty() && !labels.iter().any(|label| *label == selected) {
             labels.push(self.value.clone());
         }
-        let picker = self.view.drop_down(cx, ids!(picker));
+        let picker = self.view.combo_box(cx, ids!(select.picker));
         picker.set_labels(cx, labels);
-        let mut dimmed = vec![false];
-        dimmed.extend(self.models.iter().map(|model| model.dimmed));
-        picker.set_dimmed_items(cx, dimmed);
         let selected = if self.value.is_empty() { HUB_PICKS } else { &selected };
         picker.set_selected_by_label(selected, cx);
+        // The picker's own label already counts the ready nodes; the GPU
+        // list under a chosen model was clutter (user, 2026-09-04). The note
+        // stays only for a model no node can serve, where it names why.
+        let note = self
+            .models
+            .iter()
+            .find(|model| model.id == self.value && model.dimmed)
+            .map(|model| model.note.as_str())
+            .unwrap_or_default();
+        let note_label = self.view.label(cx, ids!(note));
+        note_label.set_text(cx, note);
+        note_label.set_visible(cx, !note.is_empty());
         self.view.redraw(cx);
     }
 
     /// The label the user picked, as the `model` param value.
     pub fn picked(&self, cx: &mut Cx, actions: &Actions) -> Option<String> {
-        let index = self.view.drop_down(cx, ids!(picker)).changed(actions)?;
+        let index = self
+            .view
+            .combo_box(cx, ids!(select.picker))
+            .changed(actions)?;
         Some(
             index
                 .checked_sub(1)
@@ -1064,6 +1432,7 @@ impl ModelPicker {
 
 /// Registers the Rust-backed face widgets into `mod.flow.ui` of an isolate.
 pub fn register_face_widgets(vm: &mut ScriptVm) {
+    makepad_media_view::script_mod(vm);
     self::script_mod(vm);
 }
 
@@ -1508,6 +1877,43 @@ pub struct FaceHost {
     event_order: Vec<String>,
     paused_stream_scrolls: HashSet<WidgetUid>,
     pending_stream_scrolls: HashSet<WidgetUid>,
+    /// A mounted run is a snapshot view. Design faces are the only editable
+    /// faces; this flag is applied as a separate pass after every mount.
+    locked: bool,
+}
+
+fn set_subtree_locked(cx: &mut Cx, root: &WidgetRef, locked: bool) {
+    // Text stays readable: a locked run's inputs are what the run used, so
+    // its fields go read-only, while controls (buttons, pickers, sliders)
+    // are disabled.
+    if root.borrow::<TextInput>().is_some() {
+        root.as_text_input().set_is_read_only(cx, locked);
+    } else {
+        root.set_disabled(cx, locked);
+    }
+    let mut children = Vec::new();
+    root.children(&mut |_, child| children.push(child));
+    for child in children {
+        set_subtree_locked(cx, &child, locked);
+    }
+}
+
+fn is_face_input_event(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::MouseDown(_)
+            | Event::MouseMove(_)
+            | Event::MouseUp(_)
+            | Event::LongPress(_)
+            | Event::TouchUpdate(_)
+            | Event::KeyDown(_)
+            | Event::KeyUp(_)
+            | Event::TextInput(_)
+            | Event::TextRangeReplace(_)
+            | Event::TextCut(_)
+            | Event::ImeAction(_)
+            | Event::SelectionHandleDrag(_)
+    )
 }
 
 fn is_text_scroll(
@@ -1568,6 +1974,9 @@ fn collect_flexible_roots(
     if root.borrow::<ValueImage>().is_some()
         || root.borrow::<ValueText>().is_some()
         || root.borrow::<ValueView>().is_some()
+        || root
+            .borrow::<TextInput>()
+            .is_some_and(|input| input.is_multiline())
         || is_text_scroll(vm, root, text_scroll_proto)
     {
         out.push(root.clone());
@@ -1585,6 +1994,10 @@ fn set_flexible_card_layout(widget: &WidgetRef, cx: &mut Cx, sized: bool) {
         text.set_card_sized(cx, sized);
     } else if let Some(mut value) = widget.borrow_mut::<ValueView>() {
         value.set_card_sized(cx, sized);
+    } else if let Some(mut input) = widget.borrow_mut::<TextInput>() {
+        // A text area fills a sized card and keeps its default height in a
+        // card that fits its content.
+        input.set_height(cx, if sized { Size::fill() } else { Size::Fixed(96.0) });
     } else if let Some(mut scroll) = widget.borrow_mut::<View>() {
         scroll.walk.height = text_scroll_height(sized);
         scroll.redraw(cx);
@@ -1669,6 +2082,14 @@ fn wrap_declared_inputs(vm: &mut ScriptVm<'_>, root: &WidgetRef) {
             .enumerate()
             .filter_map(|(index, (id, child))| {
                 if child.borrow::<ModelPicker>().is_some() {
+                    return None;
+                }
+                // A multi-line text area is its own row: it fills the face
+                // and needs no name beside it (the prompt card).
+                if child
+                    .borrow::<TextInput>()
+                    .is_some_and(|input| input.is_multiline())
+                {
                     return None;
                 }
                 let source = child.script_source();
@@ -1777,6 +2198,7 @@ impl FaceHost {
             event_order: graph.nodes.iter().map(|node| node.id.clone()).collect(),
             paused_stream_scrolls: HashSet::new(),
             pending_stream_scrolls: HashSet::new(),
+            locked: false,
         };
         let instance_name = instance.to_string();
         let nodes_for_bridge = node_objects.clone();
@@ -2002,7 +2424,7 @@ impl FaceHost {
                 if widget.borrow::<FormatPicker>().is_some() {
                     face.format_pickers.push(widget.clone());
                 }
-                if widget.borrow::<DropDown>().is_some() {
+                if widget.borrow::<ComboBox>().is_some() || widget.borrow::<DropDown>().is_some() {
                     face.dropdowns.push(widget.clone());
                 }
                 let src = widget.script_source();
@@ -2187,6 +2609,9 @@ impl FaceHost {
     /// through the inverse camera first, and a hit they claim is written
     /// back to the original event so the canvas does not claim it too.
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope, camera: Option<&Camera>) {
+        if self.locked && is_face_input_event(event) {
+            return;
+        }
         self.set_popup_anchor_transform(cx, camera.map(Camera::popup_anchor_transform));
         let mut roots: Vec<WidgetRef> = self
             .event_order
@@ -2249,6 +2674,17 @@ impl FaceHost {
         }
     }
 
+    /// Make every interactive descendant read-only/inert without changing the
+    /// mounted face structure. Widget disabled states provide the quiet dimmed
+    /// treatment; the event gate above also covers custom scrub controls.
+    pub fn set_locked(&mut self, cx: &mut Cx, locked: bool) {
+        self.locked = locked;
+        for face in self.faces.values().chain(self.flow_face.iter()) {
+            set_subtree_locked(cx, &face.root, locked);
+        }
+        self.staged_asks.clear();
+    }
+
     /// Keyboard events have no position to remap. Once a widget in a node
     /// face owns focus, the app routes those events only through this host so
     /// canvas shortcuts cannot observe them as a second target.
@@ -2270,9 +2706,15 @@ impl FaceHost {
         self.camera_transform = transform;
         for face in self.faces.values().chain(self.flow_face.iter()) {
             for dropdown in &face.dropdowns {
-                dropdown
-                    .as_drop_down()
-                    .set_popup_anchor_transform(cx, transform);
+                if dropdown.borrow::<ComboBox>().is_some() {
+                    dropdown
+                        .as_combo_box()
+                        .set_popup_anchor_transform(cx, transform);
+                } else {
+                    dropdown
+                        .as_drop_down()
+                        .set_popup_anchor_transform(cx, transform);
+                }
             }
         }
     }
@@ -2345,7 +2787,11 @@ impl FaceHost {
             if name == "options" {
                 if let Some(Literal::Arr(items)) = node_param(node, "options") {
                     let labels: Vec<String> = items.iter().filter_map(literal_text).collect();
-                    widget.as_drop_down().set_labels(cx, labels);
+                    if widget.borrow::<ComboBox>().is_some() {
+                        widget.as_combo_box().set_labels(cx, labels);
+                    } else {
+                        widget.as_drop_down().set_labels(cx, labels);
+                    }
                 }
             }
         }
@@ -2353,6 +2799,10 @@ impl FaceHost {
             let Some(value) = node_param(node, name) else {
                 continue;
             };
+            if let Some(mut seed) = widget.borrow_mut::<SeedPicker>() {
+                seed.set_literal(cx, value);
+                continue;
+            }
             if let Some(slider) = widget.borrow_mut::<Slider>() {
                 if let Literal::Num(number) = value {
                     drop(slider);
@@ -2393,13 +2843,13 @@ impl FaceHost {
                 }
             }
         }
-        // An input's declared default fills its textbox until the instance
+        // An input's design value fills its textbox until a run instance
         // carries a value of its own.
         for bind in &face.binds {
             if bind.node != node.id || bind.widget.borrow::<TextInput>().is_none() {
                 continue;
             }
-            let text = param_text(node, "default");
+            let text = param_text(node, "value");
             if text.is_empty() {
                 continue;
             }
@@ -2432,6 +2882,8 @@ impl FaceHost {
                     if input.text() != text {
                         input.set_text(cx, &text);
                     }
+                } else if bind.widget.borrow::<ComboBox>().is_some() {
+                    bind.widget.as_combo_box().set_selected_by_label(&text, cx);
                 } else if bind.widget.borrow::<DropDown>().is_some() {
                     bind.widget.as_drop_down().set_selected_by_label(&text, cx);
                 } else if bind.widget.borrow::<Slider>().is_some() {
@@ -2492,6 +2944,9 @@ impl FaceHost {
 
     /// Widget changes on `bind` widgets → `(node, port, text)`.
     pub fn bind_changes(&mut self, cx: &Cx, actions: &Actions) -> Vec<(String, String, String)> {
+        if self.locked {
+            return Vec::new();
+        }
         let mut out = Vec::new();
         for face in self.faces.values().chain(self.flow_face.iter()) {
             for bind in &face.binds {
@@ -2504,6 +2959,8 @@ impl FaceHost {
                     } else {
                         None
                     }
+                } else if bind.widget.borrow::<ComboBox>().is_some() {
+                    bind.widget.as_combo_box().changed_label(actions)
                 } else if bind.widget.borrow::<DropDown>().is_some() {
                     bind.widget.as_drop_down().changed_label(actions)
                 } else if bind.widget.borrow::<Slider>().is_some() {
@@ -2567,10 +3024,17 @@ impl FaceHost {
         cx: &mut Cx,
         actions: &Actions,
     ) -> Vec<(String, String, Literal)> {
+        if self.locked {
+            return Vec::new();
+        }
         let mut out = Vec::new();
         for (node, face) in &self.faces {
             for (widget, key) in &face.param_binds {
-                if widget.borrow::<Slider>().is_some() {
+                if let Some(mut seed) = widget.borrow_mut::<SeedPicker>() {
+                    if let Some(value) = seed.changed(cx, actions) {
+                        out.push((node.clone(), key.clone(), value));
+                    }
+                } else if widget.borrow::<Slider>().is_some() {
                     if let Some(value) = widget.as_slider().end_slide(actions) {
                         out.push((node.clone(), key.clone(), Literal::Num(value)));
                     }
@@ -2602,7 +3066,22 @@ impl FaceHost {
                     // Its dropdown is read by `model_changes`.
                 } else if widget.borrow::<TextInput>().is_some() {
                     if let Some(text) = widget.as_text_input().changed(actions) {
-                        out.push((node.clone(), key.clone(), Literal::Str(text)));
+                        let value = if key == "tags" {
+                            Literal::Arr(
+                                text.split(',')
+                                    .map(str::trim)
+                                    .filter(|value| !value.is_empty())
+                                    .map(|value| Literal::Str(value.to_string()))
+                                    .collect(),
+                            )
+                        } else {
+                            Literal::Str(text)
+                        };
+                        out.push((node.clone(), key.clone(), value));
+                    }
+                } else if widget.borrow::<ComboBox>().is_some() {
+                    if let Some(label) = widget.as_combo_box().changed_label(actions) {
+                        out.push((node.clone(), key.clone(), Literal::Str(label)));
                     }
                 } else if widget.borrow::<DropDown>().is_some() {
                     if let Some(label) = widget.as_drop_down().changed_label(actions) {
@@ -2625,6 +3104,9 @@ impl FaceHost {
 
     /// A ModelPicker's dropdown changed → `(node, key, model id)`.
     pub fn model_changes(&self, cx: &mut Cx, actions: &Actions) -> Vec<(String, String, Literal)> {
+        if self.locked {
+            return Vec::new();
+        }
         let mut out = Vec::new();
         for (node, face) in &self.faces {
             for (widget, key) in &face.param_binds {
@@ -2656,11 +3138,25 @@ impl FaceHost {
             .insert((node.to_string(), port.to_string()), value.clone());
         self.deltas.remove(&(node.to_string(), port.to_string()));
         let mut wants_bytes = false;
+        let declared_media = value.ty.is_media()
+            || matches!(
+                makepad_media_view::media_kind(&value.content_type, &[]),
+                MediaKind::Image
+                    | MediaKind::Video
+                    | MediaKind::Audio
+                    | MediaKind::Mesh
+                    | MediaKind::Splat
+            );
         let text = bytes
-            .filter(|_| !value.ty.is_media())
+            .filter(|_| !declared_media)
             .map(|bytes| String::from_utf8_lossy(&bytes.bytes).into_owned())
             .or_else(|| preview_text(value))
             .unwrap_or_else(|| format!("{} · {}", value.content_type, size_text(value.bytes)));
+        let text = if port == "asset" {
+            published_summary(&text).unwrap_or(text)
+        } else {
+            text
+        };
         let mut hooks = Vec::new();
         for (id, face) in self.faces.iter().chain(
             self.flow_face
@@ -2683,8 +3179,8 @@ impl FaceHost {
                     }
                 } else if let Some(mut view) = widget.borrow_mut::<ValueView>() {
                     match bytes {
-                        Some(bytes) if value.ty == PortType::Image => view.set_image(cx, bytes),
-                        _ if value.ty == PortType::Image => {
+                        Some(bytes) if declared_media => view.set_value(cx, bytes),
+                        _ if declared_media => {
                             wants_bytes = true;
                             view.set_text(cx, "loading…");
                         }
@@ -2853,9 +3349,29 @@ impl FaceHost {
     }
 }
 
+impl NodeFaces for FaceHost {
+    fn draw_face(&mut self, cx: &mut Cx2d, node: &str, walk: Walk, card_sized: bool) {
+        FaceHost::draw_face(self, cx, node, walk, card_sized);
+    }
+
+    fn set_z_order(&mut self, order: &[String]) {
+        FaceHost::set_z_order(self, order);
+    }
+
+    fn set_popup_anchor_transform(
+        &mut self,
+        cx: &mut Cx,
+        transform: Option<PopupAnchorTransform>,
+    ) {
+        FaceHost::set_popup_anchor_transform(self, cx, transform);
+    }
+}
+
 fn current_bound_value(cx: &Cx, widget: &WidgetRef) -> Option<String> {
     if widget.borrow::<TextInput>().is_some() {
         Some(widget.as_text_input().text())
+    } else if widget.borrow::<ComboBox>().is_some() {
+        Some(widget.as_combo_box().selected_label())
     } else if widget.borrow::<DropDown>().is_some() {
         Some(widget.as_drop_down().selected_label())
     } else if widget.borrow::<Slider>().is_some() {
@@ -2924,8 +3440,13 @@ pub fn param_text(node: &Node, name: &str) -> String {
             if let Some(steps) = num("steps") {
                 parts.push(format!("{steps} steps"));
             }
-            if let Some(seed) = num("seed") {
-                parts.push(format!("seed {seed}"));
+            match node_param(node, "seed") {
+                Some(Literal::Id(value) | Literal::Str(value)) if value == "random" => {
+                    parts.push("seed random".to_string())
+                }
+                Some(Literal::Num(-1.0)) => parts.push("seed random".to_string()),
+                Some(Literal::Num(seed)) => parts.push(format!("seed {}", *seed as i64)),
+                _ => {}
             }
             if let Some(seconds) = num("seconds") {
                 parts.push(format!("{seconds} s"));
@@ -2968,11 +3489,24 @@ fn set_widget_text(cx: &mut Cx, widget: &WidgetRef, text: &str) {
         }
         return;
     }
+    if widget.borrow::<ComboBox>().is_some() {
+        widget.as_combo_box().set_selected_by_label(text, cx);
+        return;
+    }
     if widget.borrow::<DropDown>().is_some() {
         widget.as_drop_down().set_selected_by_label(text, cx);
         return;
     }
     widget.set_text(cx, text);
+}
+
+fn published_summary(text: &str) -> Option<String> {
+    let value = makepad_strict_json::parse(text.as_bytes()).ok()?;
+    let name = value
+        .get("alias")
+        .and_then(|value| value.as_str())
+        .or_else(|| value.get("id").and_then(|value| value.as_str()))?;
+    Some(format!("published · {name}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -3148,27 +3682,66 @@ mod tests {
     #[test]
     fn models_are_deduped_counted_and_ready_first() {
         let response = ModelsResponse {
-            nodes: vec![FleetNodeDto {
-                base_url: "a".into(),
-                fleet: "test".into(),
-                healthy: true,
-            }],
+            nodes: (1..=6)
+                .map(|index| FleetNodeDto {
+                    base_url: format!("10.0.0.{index}"),
+                    fleet: "test".into(),
+                    healthy: true,
+                    gpu: (index == 1).then(|| "RTX PRO 6000".into()),
+                    vram_total_mb: None,
+                    vram_usable_mb: None,
+                    vram_free_mb: None,
+                    lanes_model: None,
+                    lanes: None,
+                })
+                .collect(),
             models: vec![
-                model("z-absent", "a", true, "absent"),
-                model("a-ready", "b", true, "ready"),
-                model("a-ready", "a", true, "loaded"),
-                model("z-absent", "a", true, "absent"),
+                model("flux2-dev", "10.0.0.1", true, "ready"),
+                model("flux2-dev", "10.0.0.2", true, "loaded"),
+                model("flux2-dev", "10.0.0.3", true, "absent"),
+                model("flux2-dev", "10.0.0.4", true, "absent"),
+                model("flux2-dev", "10.0.0.5", true, "absent"),
+                model("flux2-dev", "10.0.0.6", true, "absent"),
             ],
             snapshot_ms: 1,
         };
         let choices = model_choices(&response);
-        assert_eq!(choices.len(), 2);
-        assert_eq!(choices[0].id, "a-ready");
-        assert_eq!(choices[0].label, "a-ready · 2 nodes");
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].id, "flux2-dev");
+        assert_eq!(choices[0].label, "flux2-dev · 2 ready · 4 absent");
+        assert_eq!(
+            choices[0].note,
+            "10.0.0.1 RTX PRO 6000 · 10.0.0.2"
+        );
         assert!(!choices[0].dimmed);
-        assert_eq!(choices[1].id, "z-absent");
-        assert_eq!(choices[1].label, "z-absent · 1 nodes");
-        assert!(choices[1].dimmed);
+    }
+
+    #[test]
+    fn model_with_no_admissible_node_is_dimmed_with_the_capacity_reason() {
+        let mut too_small = model("flux2-dev", "10.0.0.217", false, "too_small");
+        too_small.note = Some("needs 31744 MB, this card can free 30603".into());
+        let response = ModelsResponse {
+            nodes: vec![FleetNodeDto {
+                base_url: "10.0.0.217".into(),
+                fleet: "test".into(),
+                healthy: true,
+                gpu: Some("RTX 5090".into()),
+                vram_total_mb: Some(32_607),
+                vram_usable_mb: Some(30_603),
+                vram_free_mb: Some(29_785),
+                lanes_model: None,
+                lanes: None,
+            }],
+            models: vec![too_small],
+            snapshot_ms: 1,
+        };
+        let choices = model_choices(&response);
+        assert_eq!(choices[0].label, "flux2-dev · 1 too small");
+        assert!(choices[0].dimmed);
+        assert_eq!(
+            choices[0].note,
+            "needs 31744 MB, this card can free 30603"
+        );
     }
 
     #[test]
@@ -3319,6 +3892,47 @@ Flow{llm function http ask output}
         }
     }
 
+    /// A node dropped from the palette is listed by the source rewritten
+    /// from the graph, so its face mounts. Against the file text from before
+    /// the drop the card wears "is not listed in Flow{}" instead.
+    #[test]
+    fn a_dropped_node_mounts_once_the_source_follows_the_graph() {
+        let source = include_str!("../../../libs/flow/recipes/templates/prompt-to-image.splash");
+        let graph = makepad_flow::graph::evaluate(source, "<dropped-node>").unwrap();
+        let catalog = makepad_flow::graph::prelude_catalog().unwrap();
+        let output = catalog.iter().find(|entry| entry.type_name == "Output").unwrap();
+        let (next, id) = crate::graph_edit::add_node(&graph, output, (400.0, 300.0));
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        let stale = FaceHost::mount(
+            &mut cx,
+            WidgetUid(0),
+            "test",
+            "<dropped-node>",
+            source,
+            &next,
+            &catalog,
+        );
+        assert_eq!(
+            stale.faces.get(&id).unwrap().error.as_deref(),
+            Some(format!("{id} is not listed in Flow{{}}").as_str())
+        );
+        let rewritten = makepad_flow::graph::write(&next);
+        let fresh = FaceHost::mount(
+            &mut cx,
+            WidgetUid(0),
+            "test",
+            "<dropped-node>",
+            &rewritten,
+            &next,
+            &catalog,
+        );
+        assert!(fresh.error.is_none(), "{:?}", fresh.error);
+        let errors = fresh.face_errors(&next);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(fresh.faces.contains_key(&id));
+    }
+
     #[test]
     fn mounted_placeholder_contains_one_type_icon() {
         let source = include_str!("../../../libs/flow/recipes/templates/prompt-to-image.splash");
@@ -3336,12 +3950,14 @@ Flow{llm function http ask output}
             &catalog,
         );
         assert!(host.error.is_none(), "{:?}", host.error);
+        // The picture lives on the Output card (the generator card shows
+        // only its settings).
         let empty = host
             .faces
-            .get("image")
+            .get("picture")
             .unwrap()
             .root
-            .child(live_id!(preview))
+            .child(live_id!(value))
             .child(live_id!(empty));
         let mut widgets = Vec::new();
         cx.with_script_vm_id_trusted(host.vm_id, |vm| {
@@ -3354,6 +3970,28 @@ Flow{llm function http ask output}
                 .count(),
             1
         );
+        host.free(&mut cx);
+    }
+
+    #[test]
+    fn generator_faces_keep_media_on_the_output_card() {
+        let source = "use mod.flow.*\nlet video = Video{}\nlet upscale = Upscale{}\nlet output = Output{type: @video value: video.video()}\nFlow{video upscale output}\n";
+        let graph = makepad_flow::graph::evaluate(source, "<output-only-media>").unwrap();
+        let catalog = makepad_flow::graph::prelude_catalog().unwrap();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        let host = FaceHost::mount(
+            &mut cx,
+            WidgetUid(0),
+            "test",
+            "<output-only-media>",
+            source,
+            &graph,
+            &catalog,
+        );
+        assert!(host.faces["video"].shows.is_empty());
+        assert!(host.faces["upscale"].shows.is_empty());
+        assert_eq!(host.faces["output"].shows.len(), 1);
         host.free(&mut cx);
     }
 
@@ -3373,13 +4011,13 @@ Flow{llm function http ask output}
             &graph,
             &catalog,
         );
-        let preview = host.faces["image"].root.child(live_id!(preview));
+        let preview = host.faces["picture"].root.child(live_id!(value));
         let empty = preview.child(live_id!(empty));
         let image = preview.child(live_id!(image));
         cx.with_vm(|vm| vm.bx.captured_errors = Some(Vec::new()));
 
         preview
-            .borrow_mut::<ValueImage>()
+            .borrow_mut::<ValueView>()
             .unwrap()
             .set_card_sized(&mut cx, true);
 
@@ -3387,11 +4025,50 @@ Flow{llm function http ask output}
         assert!(empty.walk(&mut cx).height.is_fill());
         assert!(image.walk(&mut cx).width.is_fill());
         assert!(image.walk(&mut cx).height.is_fill());
+        for id in [live_id!(video), live_id!(audio), live_id!(mesh), live_id!(splat)] {
+            assert!(preview.child(id).walk(&mut cx).height.is_fill());
+        }
         assert!(matches!(
             image.borrow::<Image>().unwrap().fit(),
             ImageFit::Smallest
         ));
         assert!(cx.with_vm(|vm| vm.take_errors()).is_empty());
+        host.free(&mut cx);
+    }
+
+    #[test]
+    fn value_view_selects_every_media_mode_before_decode() {
+        let source = "use mod.flow.*\nlet output = Output{}\nFlow{output}\n";
+        let graph = makepad_flow::graph::evaluate(source, "<value-media-modes>").unwrap();
+        let catalog = makepad_flow::graph::prelude_catalog().unwrap();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        let host = FaceHost::mount(
+            &mut cx,
+            WidgetUid(0),
+            "test",
+            "<value-media-modes>",
+            source,
+            &graph,
+            &catalog,
+        );
+        let value = host.faces["output"].root.child(live_id!(value));
+        for (content_type, expected) in [
+            ("image/png", MediaKind::Image),
+            ("video/mp4", MediaKind::Video),
+            ("audio/wav", MediaKind::Audio),
+            ("model/gltf-binary", MediaKind::Mesh),
+            ("application/x-ply", MediaKind::Splat),
+        ] {
+            let bytes = ValueBytes {
+                digest: content_type.into(),
+                content_type: content_type.into(),
+                bytes: Vec::new().into(),
+            };
+            let mut value = value.borrow_mut::<ValueView>().unwrap();
+            value.set_value(&mut cx, &bytes);
+            assert_eq!(value.media_kind(), expected, "{content_type}");
+        }
         host.free(&mut cx);
     }
 
@@ -3449,8 +4126,8 @@ Flow{llm function http ask output}
             };
             let screen = dvec2(140.0, 215.0);
             let expected = dvec2(
-                crate::canvas::LOCAL_ORIGIN + 100.0 / scale,
-                crate::canvas::LOCAL_ORIGIN + 200.0 / scale,
+                makepad_flowgraph::LOCAL_ORIGIN + 100.0 / scale,
+                makepad_flowgraph::LOCAL_ORIGIN + 200.0 / scale,
             );
             let click = Event::MouseDown(MouseDownEvent {
                 abs: screen,
@@ -3496,7 +4173,7 @@ Flow{llm function http ask output}
             if let Event::TweakRay(mapped) = &mapped {
                 mapped
                     .hit_rect
-                    .set(Some(rect(crate::canvas::LOCAL_ORIGIN + 10.0, crate::canvas::LOCAL_ORIGIN + 20.0, 30.0, 40.0)));
+                    .set(Some(rect(makepad_flowgraph::LOCAL_ORIGIN + 10.0, makepad_flowgraph::LOCAL_ORIGIN + 20.0, 30.0, 40.0)));
             }
             sync_handled(&original, &mapped, &camera);
             let Event::TweakRay(original) = original else { unreachable!() };
@@ -3505,6 +4182,30 @@ Flow{llm function http ask output}
                 Some(rect(40.0 + 10.0 * scale, 15.0 + 20.0 * scale, 30.0 * scale, 40.0 * scale))
             );
         }
+    }
+
+    #[test]
+    fn a_multiline_text_area_is_not_wrapped_in_a_labelled_row() {
+        let source = include_str!("../../../libs/flow/recipes/templates/prompt-to-image.splash");
+        let graph = makepad_flow::graph::evaluate(source, "<text-area>").unwrap();
+        let catalog = makepad_flow::graph::prelude_catalog().unwrap();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        let host = FaceHost::mount(
+            &mut cx,
+            WidgetUid(0),
+            "test",
+            "<text-area>",
+            source,
+            &graph,
+            &catalog,
+        );
+        assert!(host.error.is_none(), "{:?}", host.error);
+        let root = host.faces.get("prompt").unwrap().root.clone();
+        let area = root.child(live_id!(value));
+        assert!(area.borrow::<TextInput>().is_some_and(|input| input.is_multiline()));
+        assert!(area.child(live_id!(name)).borrow::<Label>().is_none());
+        host.free(&mut cx);
     }
 
     #[test]
@@ -3530,15 +4231,56 @@ Flow{llm function http ask output}
         assert!(row
             .child(live_id!(value))
             .child(live_id!(style))
-            .borrow::<DropDown>()
+            .borrow::<ComboBox>()
             .is_some());
         host.free(&mut cx);
     }
 
     #[test]
-    fn repeated_isolate_dropdown_mounts_release_popup_cache_and_vm() {
+    fn face_declared_combo_round_trips_its_bound_label() {
         let source = include_str!("../../../libs/flow/recipes/templates/prompt-to-image.splash");
-        let graph = makepad_flow::graph::evaluate(source, "<isolate-retire>").unwrap();
+        let graph = makepad_flow::graph::evaluate(source, "<combo-bind>").unwrap();
+        let catalog = makepad_flow::graph::prelude_catalog().unwrap();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        let mut host = FaceHost::mount(
+            &mut cx,
+            WidgetUid(0),
+            "test",
+            "<combo-bind>",
+            source,
+            &graph,
+            &catalog,
+        );
+        let picker = host.faces["add_style"]
+            .binds
+            .iter()
+            .find(|bind| bind.port == "style")
+            .expect("style bind")
+            .widget
+            .as_combo_box();
+        assert_eq!(picker.labels(), vec!["photo", "anime", "oil paint"]);
+        picker.set_selected_by_label("anime", &mut cx);
+        assert_eq!(picker.selected_label(), "anime");
+
+        let actions: ActionsBuf = vec![Box::new(WidgetAction {
+            data: None,
+            action: Box::new(ComboBoxAction::Select(2)),
+            widget_uid: picker.widget_uid(),
+            group: None,
+        })];
+        assert_eq!(
+            host.bind_changes(&cx, &actions),
+            vec![("add_style".into(), "style".into(), "oil paint".into())]
+        );
+        host.free(&mut cx);
+    }
+
+    #[test]
+    fn repeated_isolate_dropdown_mounts_release_popup_cache_and_vm() {
+        let source = include_str!("../../../libs/flow/recipes/templates/prompt-to-image.splash")
+            .replace("style := ComboBox", "style := DropDown");
+        let graph = makepad_flow::graph::evaluate(&source, "<isolate-retire>").unwrap();
         let catalog = makepad_flow::graph::prelude_catalog().unwrap();
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(makepad_widgets::script_mod);
@@ -3549,7 +4291,7 @@ Flow{llm function http ask output}
                 WidgetUid(0),
                 &format!("test-{index}"),
                 "<isolate-retire>",
-                source,
+                &source,
                 &graph,
                 &catalog,
             );

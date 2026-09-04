@@ -1,5 +1,6 @@
 use super::ServerError;
 use crate::engine::{NetPolicy, Seams};
+use crate::engine::executors::publish::AssetStoreConfig;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -32,6 +33,9 @@ pub struct FlowServerConfig {
     /// useful on beacon-less networks and makes the fleet seam deterministic
     /// in tests.
     pub fleet_hint: Vec<String>,
+    /// One shared, lazily connected asset client for Publish executors and
+    /// the asset-browser proxy routes.
+    pub asset: AssetStoreConfig,
     pub log: Box<dyn Fn(&str) + Send + Sync>,
     /// A specific local LLM to pin the `chat` executor's `HubChat` seam to
     /// (§5.4); `None` lets the hub elect / falls back to
@@ -59,6 +63,7 @@ pub struct FlowServerConfig {
 
 impl FlowServerConfig {
     pub fn new(root: PathBuf) -> Self {
+        let asset = AssetStoreConfig::new(root.join("asset-cache"));
         Self {
             root,
             control_addr: "127.0.0.1:0".to_string(),
@@ -71,6 +76,7 @@ impl FlowServerConfig {
             watch_interval_ms: 250,
             discovery: None,
             fleet_hint: Vec::new(),
+            asset,
             log: Box::new(|line| eprintln!("[flow-server] {line}")),
             chat_model: None,
             net: NetPolicy::default(),

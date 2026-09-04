@@ -311,10 +311,16 @@ pub struct BrowseModel<C: Clone = PageCursor> {
     /// updated_ms per placed asset, for the newest-first ordering.
     stamps: HashMap<AssetId, u64>,
     /// The PENDING head column: assets the generators published while the
-    /// operator was watching, filling the leftmost column top to bottom.
-    /// It merges into `order` when it fills (a new empty column starts) or
-    /// on the next re-sort. Never longer than [`PENDING_COLUMN`].
+    /// operator was watching, filling one complete left-edge chunk offscreen.
+    /// It merges into `order` only when it fills, so the visible grid moves
+    /// one whole column at a time. Never longer than [`PENDING_COLUMN`] - 1.
     pending: Vec<AssetId>,
+    /// Clips this session generated: they must survive a listing that has
+    /// not yet indexed them. A generator finishing used to wait on the
+    /// catalog event + 3s debounce + page-one re-list, and on the EFFECT
+    /// lane they never appeared at all. These are re-placed after a re-sort
+    /// if the first page did not already include them.
+    sticky: VecDeque<(AssetId, String, AssetKind)>,
     /// The next arriving first page re-sorts the body. Set by a real query
     /// change (text, category, kinds) and by an explicit re-sort — never by
     /// the event-driven refresh that a publish triggers.
@@ -422,6 +428,7 @@ impl<C: Clone> BrowseModel<C> {
             order: Vec::new(),
             stamps: HashMap::new(),
             pending: Vec::new(),
+            sticky: VecDeque::new(),
             // The first page of a fresh model IS the sort.
             resort: true,
         }
@@ -509,7 +516,6 @@ impl<C: Clone> BrowseModel<C> {
     /// visible tiles stay until that page arrives.
     pub fn refresh(&mut self) -> Vec<CatCmd<C>> {
         self.resort = true;
-        self.merge_pending();
         self.refresh_keeping_order()
     }
 
@@ -521,8 +527,114 @@ impl<C: Clone> BrowseModel<C> {
         self.refresh_keeping_order()
     }
 
-    /// Fold the head column into the body and start an empty one. Called
-    /// when the column fills and before every re-sort.
+    /// A generator just produced this asset. Put it on the pending column
+    /// NOW — do not wait for the catalog event, the debounce, or page one.
+    /// Returns resolve commands when the current lane can show it; otherwise
+    /// counts it as hidden-elsewhere (the EFFECT-lane miss).
+    pub fn ingest_published(
+        &mut self,
+        asset: AssetId,
+        title: String,
+        kind: AssetKind,
+    ) -> Vec<CatCmd<C>> {
+        if self.index.contains_key(&asset) {
+            return self.event_republished(asset);
+        }
+        let first_seen = match self.sticky.iter_mut().find(|(known, _, _)| *known == asset) {
+            Some((_, known_title, known_kind)) => {
+                *known_title = title.clone();
+                *known_kind = kind;
+                false
+            }
+            None => {
+                self.sticky.push_back((asset, title.clone(), kind));
+                true
+            }
+        };
+        if !self.kinds.contains(&kind) {
+            if first_seen {
+                self.event_touch(Some(kind));
+            }
+            return Vec::new();
+        }
+        self.push_fresh(asset, title, kind, true);
+        self.pump_resolves()
+    }
+
+    /// Apply the display identity that commonly follows a publish event.
+    /// Flow's batch publisher announces `asset_published` and then
+    /// `alias_set`; keeping both on this model means an externally produced
+    /// row acquires the same useful label as an in-app generation row.
+    pub fn event_alias(&mut self, asset: AssetId, alias: String) {
+        let title = alias
+            .rsplit('/')
+            .next()
+            .filter(|part| !part.is_empty())
+            .unwrap_or(&alias)
+            .to_string();
+        if let Some((_, known_title, _)) =
+            self.sticky.iter_mut().find(|(known, _, _)| *known == asset)
+        {
+            *known_title = title.clone();
+        }
+        if let Some(&i) = self.index.get(&asset) {
+            self.tiles[i].title = title;
+            self.tiles[i].alias = Some(alias);
+        }
+    }
+
+    fn push_fresh(
+        &mut self,
+        asset: AssetId,
+        title: String,
+        kind: AssetKind,
+        count_total: bool,
+    ) {
+        if self.index.contains_key(&asset) {
+            return;
+        }
+        let stamp = self
+            .stamps
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        self.stamps.insert(asset, stamp);
+        self.place_published(asset);
+        self.index.insert(asset, self.tiles.len());
+        self.tiles.push(Tile {
+            asset,
+            title,
+            alias: None,
+            live: true,
+            kind: Some(kind),
+            revision: None,
+            media: None,
+            source: None,
+            thumb: None,
+            state: TileState::Listed,
+        });
+        if count_total {
+            self.total = self.total.saturating_add(1);
+        }
+        self.resolve_queue.push_back(asset);
+    }
+
+    /// Buffer a live publication until a complete pad column is ready.
+    /// Partial columns are deliberately absent from [`Self::display_order`]:
+    /// five arrivals produce one left-edge shift, never five smaller shifts.
+    fn place_published(&mut self, asset: AssetId) {
+        if self.order.contains(&asset) || self.pending.contains(&asset) {
+            return;
+        }
+        self.pending.push(asset);
+        if self.pending.len() == PENDING_COLUMN {
+            self.merge_pending();
+        }
+    }
+
+    /// Fold a complete head column into the body and start an empty one.
     fn merge_pending(&mut self) {
         if self.pending.is_empty() {
             return;
@@ -532,19 +644,12 @@ impl<C: Clone> BrowseModel<C> {
         self.order = merged;
     }
 
-    /// The head column plus the body, in display order — CONTIGUOUS. The
-    /// head used to reserve its full column height with `None` cells so the
-    /// body never moved while it filled; on screen those reservations read
-    /// as random holes punched into the grid (the operator's words), which
-    /// is worse than the body stepping one cell per arrival. The `Option`
-    /// stays in the signature for the callers' sake, but every cell is
-    /// `Some` now.
+    /// Complete columns plus the body, in display order. The partial head
+    /// column stays offscreen until all five cells exist, so a generator can
+    /// only shift the grid one chunk at a time. The `Option` stays in the
+    /// signature for the callers' sake, but every displayed cell is `Some`.
     pub fn display_order(&self) -> Vec<Option<AssetId>> {
-        let mut out: Vec<Option<AssetId>> =
-            Vec::with_capacity(self.pending.len() + self.order.len());
-        out.extend(self.pending.iter().map(|a| Some(*a)));
-        out.extend(self.order.iter().map(|a| Some(*a)));
-        out
+        self.order.iter().map(|asset| Some(*asset)).collect()
     }
 
     /// How many freshly published tiles are waiting in the head column.
@@ -662,6 +767,12 @@ impl<C: Clone> BrowseModel<C> {
         let mut added = 0usize;
         let mut resorted = false;
         for hit in hits {
+            // Publications observed live keep their arrival-batch semantics
+            // even if the server's alias-ordered first page also contains
+            // them. They are inserted from `sticky` below, in event order.
+            if self.sticky.iter().any(|(asset, _, _)| *asset == hit.asset) {
+                continue;
+            }
             if self.index.contains_key(&hit.asset) {
                 continue; // keyset pages should not repeat; drop dupes anyway
             }
@@ -746,6 +857,15 @@ impl<C: Clone> BrowseModel<C> {
                 self.restarting[slot] = false;
             }
         }
+        // Session-generated clips the first page has not indexed yet:
+        // put them back at the head so GENERATE is not a vanishing act.
+        let sticky: Vec<(AssetId, String, AssetKind)> = self.sticky.iter().cloned().collect();
+        for (asset, title, kind) in sticky {
+            if self.kinds.contains(&kind) {
+                self.push_fresh(asset, title, kind, false);
+            }
+        }
+        cmds.extend(self.pump_resolves());
         cmds
     }
 
@@ -1017,6 +1137,8 @@ impl<C: Clone> BrowseModel<C> {
         // A retired asset must not be remembered, or the next listing would
         // paint a tile the store no longer has.
         self.forget(asset);
+        self.sticky.retain(|(known, _, _)| *known != asset);
+        self.pending.retain(|known| *known != asset);
         self.resort = true;
         self.refresh_wanted = true;
     }
@@ -1149,9 +1271,9 @@ mod tests {
     }
 
     /// The law the operator's hands depend on: a tile that is on screen
-    /// keeps its cell. Publishes land in a reserved head column and fill it
-    /// top to bottom; the body only moves when that column is full (one
-    /// shift per five arrivals instead of one per arrival) or on a re-sort.
+    /// keeps its cell. Publishes fill a hidden head column; the body only
+    /// moves when that column is full (one shift per five arrivals instead
+    /// of one per arrival) or on a re-sort.
     #[test]
     fn published_tiles_fill_a_head_column_without_moving_the_body() {
         let mut m: BrowseModel = BrowseModel::new(AssetKind::Video, "");
@@ -1171,13 +1293,11 @@ mod tests {
 
         let shown = m.display_order();
         assert_eq!(m.pending_len(), 2);
-        // CONTIGUOUS: the head holds exactly the tiles that exist — no
-        // reserved empty cells (those read as holes punched into the grid).
-        assert_eq!(shown.len(), 2 + 6);
-        assert_eq!(shown[0], Some(hit(7).asset));
-        assert_eq!(shown[1], Some(hit(8).asset));
-        assert!(shown.iter().all(|cell| cell.is_some()), "no gap cells ever");
-        assert_eq!(&shown[2..], &body.iter().map(|a| Some(*a)).collect::<Vec<_>>()[..]);
+        assert_eq!(
+            shown,
+            body.iter().map(|a| Some(*a)).collect::<Vec<_>>(),
+            "a partial new row stays offscreen and the old grid does not move"
+        );
 
         // Three more publishes fill the column exactly; it folds into the
         // body and a fresh empty one opens.
@@ -1196,7 +1316,7 @@ mod tests {
     }
 
     /// A query change is a re-sort: the strip is rebuilt in the server's
-    /// order and any open head column is folded away first.
+    /// order while an incomplete live-publish row remains buffered.
     #[test]
     fn a_query_change_resorts_and_retires_the_head_column() {
         let mut m: BrowseModel = BrowseModel::new(AssetKind::Video, "");
@@ -1210,7 +1330,7 @@ mod tests {
         // Typing in the filter re-sorts.
         let cmds = m.set_text("cats".into());
         let gen = search_gen(&cmds);
-        assert_eq!(m.pending_len(), 0);
+        assert_eq!(m.pending_len(), 1, "the partial row remains buffered until the swap");
         m.page_arrived(gen, 0, true, [3u8, 9, 1].iter().map(|s| hit(*s)).collect(), 3, None);
         assert_eq!(
             m.display_order(),
@@ -1634,6 +1754,63 @@ mod tests {
 
         // Tiles already resolving or resolved are left alone.
         assert!(m.resolve_visible_first(&[first_two[0]]).is_empty());
+    }
+
+    #[test]
+    fn ingest_published_commits_exactly_one_complete_row_without_a_listing() {
+        let mut m = BrowseModel::<u8>::new(AssetKind::Video, "");
+        let g = search_gen(&m.refresh());
+        m.page_arrived(g, 0, true, vec![hit(1)], 1, None);
+        assert_eq!(m.tiles().len(), 1);
+        let old_grid = m.display_order();
+        let fresh: Vec<AssetId> = (9..14)
+            .map(|seed| AssetId::from_bytes([seed; 16]))
+            .collect();
+        for (i, asset) in fresh.iter().enumerate() {
+            let cmds = m.ingest_published(
+                *asset,
+                format!("fresh clip {i}"),
+                AssetKind::Video,
+            );
+            assert!(!cmds.is_empty(), "the new tile must resolve");
+            assert!(m.tile(asset).is_some());
+            if i + 1 < PENDING_COLUMN {
+                assert_eq!(m.display_order(), old_grid, "partial rows stay offscreen");
+                assert_eq!(m.pending_len(), i + 1);
+            }
+        }
+        assert_eq!(m.pending_len(), 0);
+        let fresh_cells: Vec<Option<AssetId>> = fresh.iter().copied().map(Some).collect();
+        assert_eq!(&m.display_order()[..PENDING_COLUMN], &fresh_cells[..]);
+        let g = search_gen(&m.refresh());
+        m.page_arrived(g, 0, true, vec![hit(1)], 1, None);
+        assert_eq!(
+            &m.display_order()[..PENDING_COLUMN],
+            &fresh_cells[..],
+            "the committed row survives an alias-ordered first page"
+        );
+    }
+
+    #[test]
+    fn ingest_published_on_the_effect_lane_is_counted_not_drawn() {
+        let mut m = BrowseModel::<u8>::new(AssetKind::VjEffect, "");
+        let fresh: Vec<AssetId> = (20..25)
+            .map(|seed| AssetId::from_bytes([seed; 16]))
+            .collect();
+        for asset in &fresh {
+            let cmds = m.ingest_published(*asset, "flow clip".into(), AssetKind::Video);
+            assert!(cmds.is_empty());
+            assert!(m.tile(asset).is_none());
+        }
+        assert_eq!(m.elsewhere(), PENDING_COLUMN as u32);
+        m.event_alias(fresh[0], "flow/night-drive".into());
+
+        let g = search_gen(&m.set_kinds(vec![AssetKind::Video]));
+        m.page_arrived(g, 0, true, Vec::new(), 0, None);
+        let fresh_cells: Vec<Option<AssetId>> = fresh.iter().copied().map(Some).collect();
+        assert_eq!(&m.display_order()[..PENDING_COLUMN], &fresh_cells[..]);
+        let flow_tile = m.tile(&fresh[0]).expect("the external clip is listed");
+        assert_eq!(flow_tile.title, "night-drive");
     }
 }
 

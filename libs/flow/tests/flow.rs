@@ -442,6 +442,23 @@ fn prelude_catalog_walks_every_recipe_type_including_mesh() {
         ._in
         .iter()
         .any(|port| port.name == "reference_image" && port.ty == PortType::Image));
+    let publish = catalog
+        .iter()
+        .find(|node| node.type_name == "Publish")
+        .unwrap();
+    assert_eq!(publish.kind, "publish");
+    assert!(publish
+        .ports
+        ._in
+        .iter()
+        .any(|port| port.name == "value"));
+    assert!(publish
+        .ports
+        .out
+        .iter()
+        .any(|port| port.name == "asset" && port.ty == PortType::Json));
+    assert!(publish.params.iter().all(|param| !param.doc.is_empty()));
+    assert!(!publish.doc.is_empty());
 }
 
 #[test]
@@ -469,6 +486,7 @@ fn prelude_catalog_has_the_exact_public_node_type_set() {
             "Music",
             "Output",
             "Paint",
+            "Publish",
             "Rig",
             "Sfx",
             "Speech",
@@ -489,6 +507,7 @@ fn prelude_catalog_has_the_exact_public_node_type_set() {
         "InputFace",
         "TextFace",
         "OutputFace",
+        "PublishFace",
         "LlmFace",
         "FnFace",
         "HttpFace",

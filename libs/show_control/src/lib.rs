@@ -1209,9 +1209,9 @@ impl VideoArtNet {
                     packet.set_sequence(sequence);
                     let _ = socket.send_to(packet.as_bytes(), &target);
                     sequence = if sequence == u8::MAX { 1 } else { sequence + 1 };
-                    let spent = Cx::monotonic_now() - started;
-                    if spent < DMX_FRAME_DT {
-                        std::thread::sleep(Duration::from_secs_f64(DMX_FRAME_DT - spent));
+                    let spent = Duration::from_secs_f64(Cx::monotonic_now() - started);
+                    if spent < frame {
+                        std::thread::sleep(frame - spent);
                     }
                 }
                 // Art-Net receivers commonly hold the last universe. Always

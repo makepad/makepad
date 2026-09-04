@@ -182,7 +182,7 @@ impl Instance {
             {
                 continue;
             }
-            let Some(default) = param(node, "default") else {
+            let Some(default) = param(node, "value").or_else(|| param(node, "default")) else {
                 continue;
             };
             if matches!(default, Literal::Null) {

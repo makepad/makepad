@@ -953,6 +953,7 @@ mod tests {
                 gpu: Some("RTX".into()),
                 vram_free_mb: Some(20000),
                 vram_total_mb: Some(24576),
+                vram_usable_mb: None,
                 models_loaded: vec![id.into()],
                 jobs_pending: Some(0),
                 node_id: Some(1),

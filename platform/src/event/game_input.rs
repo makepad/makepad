@@ -74,6 +74,27 @@ pub struct WheelState {
     pub buttons: u32,
 }
 
+/// Haptic actuators exposed by a game controller. This is deliberately
+/// separate from [`GameInputOutput`]: wheel FFB is a raw-HID protocol while
+/// controller haptics are owned by the platform's game-controller API.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GamepadHapticCapabilities {
+    /// At least one handle actuator can play haptics.
+    pub handles: bool,
+    /// Left and right handles can be addressed independently.
+    pub separate_handles: bool,
+}
+
+/// A short controller-haptic sample. Repeated samples form continuous road
+/// and suspension texture; a stronger sample is used for impacts.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GamepadHapticPulse {
+    pub left: f32,
+    pub right: f32,
+    pub sharpness: f32,
+    pub duration_s: f32,
+}
+
 /// A handle that writes OUTPUT reports to one game-input device — the way a
 /// force-feedback wheel is driven. Platform-neutral so an app's FFB loop can
 /// live on its own thread: the closure is `Send + Sync` and owns whatever the

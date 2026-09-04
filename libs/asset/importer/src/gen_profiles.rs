@@ -282,6 +282,7 @@ mod tests {
                 gpu: None,
                 vram_free_mb: Some(total_mb),
                 vram_total_mb: Some(total_mb),
+                vram_usable_mb: None,
                 models_loaded: Vec::new(),
                 jobs_pending: Some(0),
                 node_id: None,

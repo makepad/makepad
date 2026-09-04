@@ -7,8 +7,8 @@ use mod.widgets.*
 // How a face talks to the flow, read by the host from each widget's own
 // object. They are written with `:=` (a typed widget refuses an unknown
 // `name:` property, but keeps `name :=` entries beside its children):
-//   bind := @self           an input widget's value → this node's port on the instance
-//   bind := "node.port"     → that node's port on the instance (PUT inputs)
+//   bind := @self           design: Input.value graph param; run: locked snapshot input
+//   bind := "node.port"     design graph setting (run faces are inert)
 //   show := @self           a display widget receives this node's first output
 //   show := "node.port"     → that port's value on node.done / node.delta
 //   param := @name          a display widget shows the graph param `name`
@@ -18,7 +18,7 @@ use mod.widgets.*
 // `on_state` on the face object; every bridge call is queued to the next frame.
 //
 // The canvas pads a card's content (14 px) and draws the port strip above
-// it; a picture face (`ImageFace`, `OutputFace`) fills its card edge to edge.
+// it. Generator cards contain settings only; OutputFace owns result media.
 
 let Face = View{
     width: Fill
@@ -96,6 +96,15 @@ mod.flow.ui.OutputFace = Face{
     }
 }
 
+mod.flow.ui.PublishFace = Face{
+    params := Strip{
+        title := TextInput{width: Fill height: 28 empty_text: "default title" param_bind := @title}
+        namespace := TextInput{width: Fill height: 28 param_bind := @namespace}
+        tags := TextInput{width: Fill height: 28 empty_text: "flow, tag" param_bind := @tags}
+    }
+    published := Meta{show := @self}
+}
+
 mod.flow.ui.LlmFace = Face{
     model := mod.flow.ui.ModelPicker{
         param_bind := @model
@@ -163,7 +172,7 @@ mod.flow.ui.AskFace = Face{
     question_scroll := mod.flow.ui.TextScroll{
         question := Body{param := @question}
     }
-    choice := DropDown{
+    choice := ComboBox{
         width: Fill
         height: 26
         param := @options
@@ -183,15 +192,12 @@ mod.flow.ui.AskFace = Face{
 
 mod.flow.ui.ImageFace = Face{
     spacing: 0
-    preview := mod.flow.ui.ValueImage{
-        show := @self
-    }
     params := Strip{
         summary := Meta{param := @summary}
         format := mod.flow.ui.FormatPicker{}
         Row{
             steps := Number{label: "steps" min: 1 max: 50 step: 0.25 snap: 1 param_bind := @steps}
-            seed := Number{label: "seed" min: 0 max: 999999 step: 1 snap: 1 param_bind := @seed}
+            seed := mod.flow.ui.SeedPicker{param_bind := @seed}
         }
         model := mod.flow.ui.ModelPicker{
             param_bind := @model
@@ -201,9 +207,6 @@ mod.flow.ui.ImageFace = Face{
 
 mod.flow.ui.UpscaleFace = Face{
     spacing: 0
-    preview := mod.flow.ui.ValueImage{
-        show := @self
-    }
     params := Strip{
         summary := Meta{param := @summary}
         model := mod.flow.ui.ModelPicker{
@@ -214,11 +217,9 @@ mod.flow.ui.UpscaleFace = Face{
 
 mod.flow.ui.GenFace = Face{
     domain := Meta{param := @domain}
-    out := mod.flow.ui.ValueView{
-        show := @self
-    }
     params := Strip{
         format := mod.flow.ui.FormatPicker{}
+        seed := mod.flow.ui.SeedPicker{param_bind := @seed}
         model := mod.flow.ui.ModelPicker{
             param_bind := @model
         }
@@ -231,6 +232,7 @@ mod.flow.Node.ui = nil
 mod.flow.Input.ui = mod.flow.ui.InputFace
 mod.flow.Text.ui = mod.flow.ui.TextFace
 mod.flow.Output.ui = mod.flow.ui.OutputFace
+mod.flow.Publish.ui = mod.flow.ui.PublishFace
 mod.flow.Llm.ui = mod.flow.ui.LlmFace
 mod.flow.Fn.ui = mod.flow.ui.FnFace
 mod.flow.Http.ui = mod.flow.ui.HttpFace
@@ -243,6 +245,7 @@ mod.flow.ImageFace = mod.flow.ui.ImageFace
 mod.flow.InputFace = mod.flow.ui.InputFace
 mod.flow.TextFace = mod.flow.ui.TextFace
 mod.flow.OutputFace = mod.flow.ui.OutputFace
+mod.flow.PublishFace = mod.flow.ui.PublishFace
 mod.flow.LlmFace = mod.flow.ui.LlmFace
 mod.flow.FnFace = mod.flow.ui.FnFace
 mod.flow.HttpFace = mod.flow.ui.HttpFace

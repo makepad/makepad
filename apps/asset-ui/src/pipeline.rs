@@ -3956,6 +3956,7 @@ mod tests {
                 gpu: Some("GPU".to_string()),
                 vram_free_mb: Some(24_000),
                 vram_total_mb: Some(24_000),
+                vram_usable_mb: None,
                 models_loaded: vec!["flux1-schnell".to_string()],
                 jobs_pending: Some(0),
                 node_id: Some(1),
@@ -4002,6 +4003,7 @@ mod tests {
                 gpu: Some("24 GB GPU".to_string()),
                 vram_free_mb: Some(24 * 1024),
                 vram_total_mb: Some(24 * 1024),
+                vram_usable_mb: None,
                 models_loaded: models
                     .iter()
                     .filter(|(_, state)| *state == MODEL_STATE_LOADED)

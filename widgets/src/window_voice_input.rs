@@ -661,7 +661,7 @@ fn spawn_voice_worker(
         // machine election), on the machine node, on a LAN node, else the OS
         // engine. Loading happens on the session's own thread and reports
         // through `poll`, so this worker keeps eating audio meanwhile.
-        let session = SttSession::start(SttConfig::live_dictation());
+        let session = SttSession::start(SttConfig::local_whisper());
         // PCM mode (Whisper, Apple): we gate with VAD and hand over utterances.
         // Engine-mic mode (Android / Windows system recognizers): the engine
         // owns the microphone; we only relay its results.

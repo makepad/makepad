@@ -170,14 +170,38 @@ impl FleetSnapshot {
                     .map(discovery::normalize_fleet)
                     .unwrap_or(result.fallback_fleet);
                 let healthy = result.health.is_some();
+                let gpu = result.health.as_ref().and_then(|health| health.gpu.clone());
+                let vram_total_mb = result.health.as_ref().and_then(|health| health.vram_total_mb);
+                let vram_usable_mb = result
+                    .health
+                    .as_ref()
+                    .and_then(|health| health.vram_usable_mb);
+                let vram_free_mb = result.health.as_ref().and_then(|health| health.vram_free_mb);
+                let lanes_model = result
+                    .health
+                    .as_ref()
+                    .and_then(|health| health.lanes.as_ref())
+                    .map(|lanes| lanes.model.clone());
+                let lanes = result
+                    .health
+                    .as_ref()
+                    .and_then(|health| health.lanes.as_ref())
+                    .map(|lanes| lanes.slots_total);
                 nodes.push(FleetNodeDto {
                     base_url: candidate.base_url.clone(),
                     fleet,
                     healthy,
+                    gpu,
+                    vram_total_mb,
+                    vram_usable_mb,
+                    vram_free_mb,
+                    lanes_model,
+                    lanes,
                 });
                 if let Some(rows) = result.models {
                     models.extend(
                         rows.into_iter()
+                            .filter(|model| listed_by_role(&candidate.base_url, &model.domain))
                             .map(|model| model_dto(&candidate.base_url, model)),
                     );
                 }
@@ -190,6 +214,24 @@ impl FleetSnapshot {
                     base_url: candidate.base_url.clone(),
                     fleet,
                     healthy: false,
+                    gpu: previous_nodes
+                        .get(&candidate.base_url)
+                        .and_then(|node| node.gpu.clone()),
+                    vram_total_mb: previous_nodes
+                        .get(&candidate.base_url)
+                        .and_then(|node| node.vram_total_mb),
+                    vram_usable_mb: previous_nodes
+                        .get(&candidate.base_url)
+                        .and_then(|node| node.vram_usable_mb),
+                    vram_free_mb: previous_nodes
+                        .get(&candidate.base_url)
+                        .and_then(|node| node.vram_free_mb),
+                    lanes_model: previous_nodes
+                        .get(&candidate.base_url)
+                        .and_then(|node| node.lanes_model.clone()),
+                    lanes: previous_nodes
+                        .get(&candidate.base_url)
+                        .and_then(|node| node.lanes),
                 });
                 if let Some(stale) = previous_models.get(&candidate.base_url) {
                     models.extend(stale.iter().cloned());
@@ -242,6 +284,14 @@ fn insert_candidate(candidates: &mut BTreeMap<String, Candidate>, base_url: &str
     });
 }
 
+/// A model a node's fleet role bars from serving is not listed for that
+/// node: the hub's pickers never route there, so a picker counting it as
+/// `ready` would promise a node the job cannot use (the `.165` incident:
+/// the PRO 6000 holds flux2-dev ready but its role is chat/text only).
+fn listed_by_role(base_url: &str, domain: &str) -> bool {
+    makepad_ai_hub::fleet::role_allows(base_url, domain)
+}
+
 fn model_dto(node: &str, model: ModelInfoJson) -> ModelInfoDto {
     ModelInfoDto {
         id: model.id,
@@ -279,7 +329,16 @@ fn join_finished_until(handles: &mut Vec<JoinHandle<()>>, deadline: Instant) {
 
 #[cfg(test)]
 mod tests {
-    use super::matches_requested_domain;
+    use super::{listed_by_role, matches_requested_domain};
+
+    #[test]
+    fn role_barred_models_are_not_listed_for_that_node() {
+        // The built-in role table: 10.0.0.165 serves chat, text and image only.
+        assert!(!listed_by_role("http://10.0.0.165:8123", "video"));
+        assert!(listed_by_role("http://10.0.0.165:8123", "chat"));
+        assert!(listed_by_role("http://10.0.0.165:8123", "image"));
+        assert!(listed_by_role("http://10.0.0.217:8123", "image"));
+    }
 
     #[test]
     fn text_picker_includes_chat_residency() {

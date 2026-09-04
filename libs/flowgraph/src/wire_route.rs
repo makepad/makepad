@@ -11,6 +11,18 @@ const ENDPOINT_STUB_DISTANCE: f64 = 24.0;
 const COLLISION_TOLERANCE: f64 = 4.0;
 const CHANNEL_CELL: f64 = 8.0;
 const ROUTE_SWITCH_RATIO: f64 = 0.95;
+const CALLER_CARD_CLEARANCE: f64 = 12.0;
+const NARROW_CLEARANCE: f64 = 6.0;
+const NARROW_RADIUS: f64 = 8.0;
+const MIN_PORT_STUB: f64 = 8.0;
+
+/// One visual routing language for every cable on a canvas.
+#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
+pub enum WireMode {
+    Bezier,
+    #[default]
+    Routed,
+}
 
 /// The card edge occupied by a port. For a target this is the side the
 /// cable approaches from; for a source it is the side the cable leaves.
@@ -112,9 +124,7 @@ pub struct RouteStyle {
 impl Default for RouteStyle {
     fn default() -> Self {
         Self {
-            // Two radii make room for an honest 16 px fillet at the first
-            // and last bend while exceeding the requested 24 px approach.
-            port_stub: 32.0,
+            port_stub: 10.0,
             corner_radius: 16.0,
             cable_spacing: 8.0,
         }
@@ -356,7 +366,31 @@ pub fn route_wire(
     style: RouteStyle,
     corridor_offset: f64,
 ) -> WireRoute {
-    route_wire_sticky(
+    route_wire_in_mode(
+        WireMode::Routed,
+        from,
+        source_side,
+        to,
+        target_side,
+        obstacles,
+        style,
+        corridor_offset,
+    )
+}
+
+/// Route one cable in the canvas's selected visual mode.
+pub fn route_wire_in_mode(
+    mode: WireMode,
+    from: Point,
+    source_side: PortSide,
+    to: Point,
+    target_side: PortSide,
+    obstacles: &[Obstacle],
+    style: RouteStyle,
+    corridor_offset: f64,
+) -> WireRoute {
+    route_wire_sticky_in_mode(
+        mode,
         from,
         source_side,
         to,
@@ -380,95 +414,105 @@ pub fn route_wire_sticky(
     corridor_offset: f64,
     previous: Option<&WireRoute>,
 ) -> WireRoute {
-    let radius = style.corner_radius.max(16.0);
-    let stub = style.port_stub.max(radius * 2.0).max(24.0);
-    let source_stub = Point::new(from.x + source_side.sign() * stub, from.y);
-    let target_stub = Point::new(to.x + target_side.sign() * stub, to.y);
-    let source_owner = endpoint_obstacle(from, obstacles, source_side);
-    let target_owner = endpoint_obstacle(to, obstacles, target_side);
-
-    let straight = cubic_route(from, source_side, to, target_side);
-    let straight_is_clear = route_samples_clear(
-        &straight.samples,
+    route_wire_sticky_in_mode(
+        WireMode::Routed,
+        from,
+        source_side,
+        to,
+        target_side,
         obstacles,
-        source_owner,
-        target_owner,
+        style,
+        corridor_offset,
+        previous,
+    )
+}
+
+/// Mode-aware sticky routing. Bezier mode deliberately ignores obstacles,
+/// offsets, and the previous route: its cubic is a pure function of its ports.
+#[allow(clippy::too_many_arguments)]
+pub fn route_wire_sticky_in_mode(
+    mode: WireMode,
+    from: Point,
+    source_side: PortSide,
+    to: Point,
+    target_side: PortSide,
+    obstacles: &[Obstacle],
+    style: RouteStyle,
+    corridor_offset: f64,
+    previous: Option<&WireRoute>,
+) -> WireRoute {
+    if mode == WireMode::Bezier {
+        return cubic_route(from, source_side, to, target_side);
+    }
+
+    let radius = style.corner_radius.max(16.0);
+    let narrow_center_clearance = NARROW_CLEARANCE + style.cable_spacing * 0.5;
+    let comfortable = orthogonal_candidates(
+        from,
+        source_side,
+        to,
+        target_side,
+        obstacles,
+        style,
+        corridor_offset,
+        radius,
+        radius,
+        radius * 2.0,
+        CALLER_CARD_CLEARANCE - NARROW_CLEARANCE,
+        false,
     );
 
-    if !segment_clear_except(from, source_stub, obstacles, source_owner)
-        || !segment_clear_except(target_stub, to, obstacles, target_owner)
-    {
-        return straight;
-    }
+    // The caller supplies cards inflated by 12 px. The narrow tier reserves
+    // 6 px on each side plus half a cable spacing for the centreline. Thus a
+    // raw gap of exactly spacing + 2 * 6 remains usable, with 8 px fillets.
+    let narrow_obstacles: Vec<Obstacle> = obstacles
+        .iter()
+        .map(|rect| rect.inflate(-(CALLER_CARD_CLEARANCE - narrow_center_clearance)))
+        .collect();
+    let narrow = orthogonal_candidates(
+        from,
+        source_side,
+        to,
+        target_side,
+        &narrow_obstacles,
+        style,
+        corridor_offset,
+        NARROW_RADIUS,
+        0.0,
+        0.0,
+        narrow_center_clearance - NARROW_CLEARANCE,
+        true,
+    );
 
-    // Reserving the fillet radius around every card ensures the quadratic
-    // corner, which lies inside its orthogonal guide, keeps the caller's full
-    // card margin.
-    let reserve = radius + corridor_offset.abs();
-    let guides: Vec<Obstacle> = obstacles.iter().map(|rect| rect.inflate(reserve)).collect();
-    let mut candidates = Vec::with_capacity(4 + obstacles.len() * 2);
-    if straight_is_clear {
-        candidates.push(Some(straight.clone()));
-    }
-
-    if source_stub.x <= target_stub.x {
-        if let Some(channel) = choose_forward_channel(source_stub, target_stub, &guides, corridor_offset)
+    // Preserve the full-clearance route unless the narrow tier opens a route
+    // with fewer bends or one that is meaningfully shorter. Sticky selection
+    // below is unchanged and still operates within the winning tier.
+    let candidates = match (
+        comfortable.iter().min_by(|left, right| compare_routes(left, right)),
+        narrow.iter().min_by(|left, right| compare_routes(left, right)),
+    ) {
+        (None, _) => narrow,
+        (_, None) => comfortable,
+        (Some(full), Some(tight))
+            if uses_narrow_channel(tight, obstacles, style.cable_spacing)
+                && (tight.bends() < full.bends()
+                    || (tight.bends() == full.bends()
+                        && tight.length() < full.length() * ROUTE_SWITCH_RATIO)) =>
         {
-            candidates.push(build_orthogonal_candidate(
-                from,
-                to,
-                vec![
-                    from,
-                    source_stub,
-                    Point::new(channel, source_stub.y),
-                    Point::new(channel, target_stub.y),
-                    target_stub,
-                    to,
-                ],
-                radius,
-                obstacles,
-                source_owner,
-                target_owner,
-                RouteChoice::CorridorX,
-                channel,
-            ));
+            narrow
         }
-    }
-
-    // Backward and vertically stacked connections first follow each port's
-    // requested side, cross on the shortest clear row, then approach the
-    // target from its requested side. Trying every obstacle boundary also
-    // finds the useful row between two stacked cards instead of needlessly
-    // going around the entire graph.
-    for row in routing_rows(from, to, obstacles, radius, corridor_offset) {
-        let choice = if row <= (from.y + to.y) * 0.5 {
-            RouteChoice::Above
-        } else {
-            RouteChoice::Below
-        };
-        candidates.push(build_orthogonal_candidate(
-            from,
-            to,
-            vec![
-                from,
-                source_stub,
-                Point::new(source_stub.x, row),
-                Point::new(target_stub.x, row),
-                target_stub,
-                to,
-            ],
-            radius,
-            obstacles,
-            source_owner,
-            target_owner,
-            choice,
-            source_stub.x.min(target_stub.x),
-        ));
-    }
-
-    let candidates: Vec<WireRoute> = candidates.into_iter().flatten().collect();
+        _ => comfortable,
+    };
     let Some(best) = candidates.iter().min_by(|left, right| compare_routes(left, right)) else {
-        return straight;
+        return least_bad_orthogonal(
+            from,
+            source_side,
+            to,
+            target_side,
+            &narrow_obstacles,
+            style,
+            corridor_offset,
+        );
     };
     if let Some(previous) = previous {
         if let Some(sticky) = candidates
@@ -485,6 +529,334 @@ pub fn route_wire_sticky(
     best.clone()
 }
 
+fn uses_narrow_channel(route: &WireRoute, obstacles: &[Obstacle], cable_spacing: f64) -> bool {
+    let envelopes: Vec<_> = obstacles
+        .iter()
+        .map(|obstacle| obstacle.inflate(cable_spacing * 0.5))
+        .collect();
+    for left in 0..envelopes.len() {
+        for right in left + 1..envelopes.len() {
+            let overlap = Obstacle {
+                min: Point::new(
+                    envelopes[left].min.x.max(envelopes[right].min.x),
+                    envelopes[left].min.y.max(envelopes[right].min.y),
+                ),
+                max: Point::new(
+                    envelopes[left].max.x.min(envelopes[right].max.x),
+                    envelopes[left].max.y.min(envelopes[right].max.y),
+                ),
+            };
+            if overlap.min.x >= overlap.max.x || overlap.min.y >= overlap.max.y {
+                continue;
+            }
+            if route
+                .samples
+                .windows(2)
+                .any(|pair| !segment_clear_rect(pair[0], pair[1], overlap))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[allow(clippy::too_many_arguments)]
+fn orthogonal_candidates(
+    from: Point,
+    source_side: PortSide,
+    to: Point,
+    target_side: PortSide,
+    obstacles: &[Obstacle],
+    style: RouteStyle,
+    corridor_offset: f64,
+    radius: f64,
+    row_clearance: f64,
+    channel_width: f64,
+    endpoint_clearance_inset: f64,
+    allow_doglegs: bool,
+) -> Vec<WireRoute> {
+    let stub = style.port_stub.max(MIN_PORT_STUB);
+    let source_stub = endpoint_stub(from, source_side, stub, corridor_offset);
+    let target_stub = endpoint_stub(to, target_side, stub, corridor_offset);
+    // Owner cards use their tier envelope after the endpoint run, but a
+    // 6 px envelope throughout keeps the short bend and its exit fillet safe.
+    let endpoint_obstacles = with_endpoint_clearance_inset(
+        from,
+        source_side,
+        to,
+        target_side,
+        obstacles,
+        endpoint_clearance_inset,
+    );
+    let source_owner = endpoint_obstacle(from, obstacles, source_side);
+    let target_owner = endpoint_obstacle(to, obstacles, target_side);
+    let mut candidates = Vec::with_capacity(5 + obstacles.len() * 2);
+
+    if ((from.x - to.x).abs() < 1e-6 || (from.y - to.y).abs() < 1e-6)
+        && route_samples_clear(&[from, to], obstacles, source_owner, target_owner)
+        && route_samples_clear(&[from, to], &endpoint_obstacles, source_owner, target_owner)
+    {
+        candidates.push(build_route(
+            from,
+            to,
+            RouteKind::Orthogonal {
+                points: vec![from, to],
+                radius,
+            },
+            vec![from, to],
+            RouteChoice::Straight,
+            f64::INFINITY,
+        ));
+    }
+
+    if !segment_clear_except(from, source_stub, &endpoint_obstacles, source_owner)
+        || !segment_clear_except(target_stub, to, &endpoint_obstacles, target_owner)
+    {
+        return candidates;
+    }
+
+    let guide_reserve = if radius > NARROW_RADIUS {
+        radius + corridor_offset.abs()
+    } else {
+        corridor_offset.abs()
+    };
+    let guides: Vec<Obstacle> = obstacles.iter().map(|rect| rect.inflate(guide_reserve)).collect();
+    if source_stub.x <= target_stub.x {
+        if let Some(channel) = choose_forward_channel(
+            source_stub,
+            target_stub,
+            &guides,
+            corridor_offset,
+            channel_width,
+        ) {
+            if let Some(candidate) = build_orthogonal_candidate(
+                from,
+                to,
+                vec![
+                    from,
+                    source_stub,
+                    Point::new(channel, source_stub.y),
+                    Point::new(channel, target_stub.y),
+                    target_stub,
+                    to,
+                ],
+                radius,
+                obstacles,
+                &endpoint_obstacles,
+                source_owner,
+                target_owner,
+                RouteChoice::CorridorX,
+                channel,
+            ) {
+                candidates.push(candidate);
+            }
+        }
+    }
+
+    // Boundary rows find both outside detours and lanes between stacked cards.
+    // Boundary columns add the dogleg needed to clear a card before entering
+    // such a row, or to leave the row before approaching the target.
+    let columns = routing_columns(from, to, obstacles, row_clearance, corridor_offset);
+    for row in routing_rows(from, to, obstacles, row_clearance, corridor_offset) {
+        let choice = if row <= (from.y + to.y) * 0.5 {
+            RouteChoice::Above
+        } else {
+            RouteChoice::Below
+        };
+        if let Some(candidate) = build_orthogonal_candidate(
+            from,
+            to,
+            vec![
+                from,
+                source_stub,
+                Point::new(source_stub.x, row),
+                Point::new(target_stub.x, row),
+                target_stub,
+                to,
+            ],
+            radius,
+            obstacles,
+            &endpoint_obstacles,
+            source_owner,
+            target_owner,
+            choice,
+            source_stub.x.min(target_stub.x),
+        ) {
+            candidates.push(candidate);
+        }
+        for column in columns.iter().filter(|_| allow_doglegs) {
+            for points in [
+                vec![
+                    from,
+                    source_stub,
+                    Point::new(*column, from.y),
+                    Point::new(*column, row),
+                    Point::new(target_stub.x, row),
+                    target_stub,
+                    to,
+                ],
+                vec![
+                    from,
+                    source_stub,
+                    Point::new(source_stub.x, row),
+                    Point::new(*column, row),
+                    Point::new(*column, to.y),
+                    target_stub,
+                    to,
+                ],
+            ] {
+                if let Some(candidate) = build_orthogonal_candidate(
+                    from,
+                    to,
+                    points,
+                    radius,
+                    obstacles,
+                    &endpoint_obstacles,
+                    source_owner,
+                    target_owner,
+                    choice,
+                    *column,
+                ) {
+                    candidates.push(candidate);
+                }
+            }
+        }
+    }
+    candidates
+}
+
+fn least_bad_orthogonal(
+    from: Point,
+    source_side: PortSide,
+    to: Point,
+    target_side: PortSide,
+    obstacles: &[Obstacle],
+    style: RouteStyle,
+    corridor_offset: f64,
+) -> WireRoute {
+    let stub = style.port_stub.max(MIN_PORT_STUB);
+    let source_stub = endpoint_stub(from, source_side, stub, corridor_offset);
+    let target_stub = endpoint_stub(to, target_side, stub, corridor_offset);
+    let mut candidates = Vec::new();
+    for row in routing_rows(
+        from,
+        to,
+        obstacles,
+        style.cable_spacing * 0.5,
+        corridor_offset,
+    ) {
+        let choice = if row <= (from.y + to.y) * 0.5 {
+            RouteChoice::Above
+        } else {
+            RouteChoice::Below
+        };
+        candidates.push(build_orthogonal_route(
+            from,
+            to,
+            vec![
+                from,
+                source_stub,
+                Point::new(source_stub.x, row),
+                Point::new(target_stub.x, row),
+                target_stub,
+                to,
+            ],
+            NARROW_RADIUS,
+            choice,
+            source_stub.x.min(target_stub.x),
+        ));
+    }
+    if candidates.is_empty() {
+        candidates.push(build_orthogonal_route(
+            from,
+            to,
+            vec![
+                from,
+                source_stub,
+                Point::new(source_stub.x, to.y),
+                target_stub,
+                to,
+            ],
+            NARROW_RADIUS,
+            RouteChoice::CorridorX,
+            source_stub.x,
+        ));
+    }
+    let source_owner = endpoint_obstacle(from, obstacles, source_side);
+    let target_owner = endpoint_obstacle(to, obstacles, target_side);
+    candidates
+        .into_iter()
+        .min_by(|left, right| {
+            collision_count(left, obstacles, source_owner, target_owner)
+                .cmp(&collision_count(right, obstacles, source_owner, target_owner))
+                .then_with(|| compare_routes(left, right))
+        })
+        .unwrap()
+}
+
+fn build_orthogonal_route(
+    from: Point,
+    to: Point,
+    points: Vec<Point>,
+    radius: f64,
+    choice: RouteChoice,
+    tie_x: f64,
+) -> WireRoute {
+    let mut points = simplify(points);
+    if points.len() < 2 {
+        points.push(to);
+    }
+    let samples = rounded_samples(&points, radius);
+    build_route(
+        from,
+        to,
+        RouteKind::Orthogonal { points, radius },
+        samples,
+        choice,
+        tie_x,
+    )
+}
+
+fn collision_count(
+    route: &WireRoute,
+    obstacles: &[Obstacle],
+    source_owner: Option<usize>,
+    target_owner: Option<usize>,
+) -> usize {
+    let (source_exemption, target_exemption) = match &route.kind {
+        RouteKind::Orthogonal { points, radius } => endpoint_run_exemptions(points, *radius),
+        RouteKind::Cubic { .. } => {
+            let exemption = ENDPOINT_STUB_DISTANCE + COLLISION_TOLERANCE;
+            (exemption, exemption)
+        }
+    };
+    route
+        .samples
+        .windows(2)
+        .enumerate()
+        .map(|(segment, pair)| {
+            obstacles
+                .iter()
+                .enumerate()
+                .filter(|(obstacle, rect)| {
+                    if source_owner == Some(*obstacle)
+                        && route.cumulative[segment + 1] <= source_exemption
+                    {
+                        return false;
+                    }
+                    if target_owner == Some(*obstacle)
+                        && route.length - route.cumulative[segment] <= target_exemption
+                    {
+                        return false;
+                    }
+                    !segment_clear_rect(pair[0], pair[1], **rect)
+                })
+                .count()
+        })
+        .sum()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_orthogonal_candidate(
     from: Point,
@@ -492,6 +864,7 @@ fn build_orthogonal_candidate(
     points: Vec<Point>,
     radius: f64,
     obstacles: &[Obstacle],
+    endpoint_obstacles: &[Obstacle],
     source_owner: Option<usize>,
     target_owner: Option<usize>,
     choice: RouteChoice,
@@ -502,7 +875,21 @@ fn build_orthogonal_candidate(
         return None;
     }
     let samples = rounded_samples(&points, radius);
-    route_samples_clear(&samples, obstacles, source_owner, target_owner).then(|| {
+    let (source_exemption, target_exemption) = endpoint_run_exemptions(&points, radius);
+    (route_samples_clear_with_exemptions(
+        &samples,
+        obstacles,
+        source_owner,
+        target_owner,
+        source_exemption,
+        target_exemption,
+    ) && route_samples_clear(
+        &samples,
+        endpoint_obstacles,
+        source_owner,
+        target_owner,
+    ))
+    .then(|| {
         build_route(
             from,
             to,
@@ -512,6 +899,31 @@ fn build_orthogonal_candidate(
             tie_x,
         )
     })
+}
+
+fn endpoint_run_exemptions(points: &[Point], radius: f64) -> (f64, f64) {
+    // Include the horizontal stub, the whole adjacent vertical run, and its
+    // exit fillet. The separate endpoint envelope still enforces 6 px from
+    // the owning card while this tier-specific envelope is exempted.
+    let fallback = ENDPOINT_STUB_DISTANCE + COLLISION_TOLERANCE;
+    if points.len() < 3 {
+        return (fallback, fallback);
+    }
+    let last = points.len() - 1;
+    (
+        fallback.max(
+            points[0].distance(points[1])
+                + points[1].distance(points[2])
+                + radius
+                + COLLISION_TOLERANCE,
+        ),
+        fallback.max(
+            points[last].distance(points[last - 1])
+                + points[last - 1].distance(points[last - 2])
+                + radius
+                + COLLISION_TOLERANCE,
+        ),
+    )
 }
 
 /// Ease used by the 600 ms value pulse. Kept here so animation timing is as
@@ -542,6 +954,37 @@ fn endpoint_obstacle(point: Point, obstacles: &[Obstacle], side: PortSide) -> Op
         .map(|(index, _)| index)
 }
 
+fn endpoint_stub(point: Point, side: PortSide, stub: f64, corridor_offset: f64) -> Point {
+    // A centred bundle shifts its vertical tracks in canvas x. The innermost
+    // track may use the owner's 6 px clearance, but never enter the card.
+    let distance = (stub + side.sign() * corridor_offset).max(NARROW_CLEARANCE);
+    Point::new(point.x + side.sign() * distance, point.y)
+}
+
+fn with_endpoint_clearance_inset(
+    from: Point,
+    source_side: PortSide,
+    to: Point,
+    target_side: PortSide,
+    obstacles: &[Obstacle],
+    inset: f64,
+) -> Vec<Obstacle> {
+    let source_owner = endpoint_obstacle(from, obstacles, source_side);
+    let target_owner = endpoint_obstacle(to, obstacles, target_side);
+    obstacles
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, original)| {
+            if source_owner == Some(index) || target_owner == Some(index) {
+                original.inflate(-inset)
+            } else {
+                original
+            }
+        })
+        .collect()
+}
+
 fn routing_rows(
     from: Point,
     to: Point,
@@ -559,10 +1002,33 @@ fn routing_rows(
     rows
 }
 
+fn routing_columns(
+    from: Point,
+    to: Point,
+    obstacles: &[Obstacle],
+    clearance: f64,
+    offset: f64,
+) -> Vec<f64> {
+    let mut columns = vec![from.x, to.x];
+    for rect in obstacles {
+        columns.push(rect.min.x - clearance + offset);
+        columns.push(rect.max.x + clearance + offset);
+    }
+    columns.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
+    columns.dedup_by(|left, right| (*left - *right).abs() < 1e-6);
+    columns
+}
+
 /// Find a clear vertical track between the stubs. Forbidden x intervals are
 /// accumulated in one pass and merged after sorting. This is O(cards log
 /// cards), with route validation remaining O(cards).
-fn choose_forward_channel(from: Point, to: Point, obstacles: &[Obstacle], offset: f64) -> Option<f64> {
+fn choose_forward_channel(
+    from: Point,
+    to: Point,
+    obstacles: &[Obstacle],
+    offset: f64,
+    channel_width: f64,
+) -> Option<f64> {
     let low = from.x.min(to.x);
     let high = from.x.max(to.x);
     if high - low < 32.0 {
@@ -599,20 +1065,20 @@ fn choose_forward_channel(from: Point, to: Point, obstacles: &[Obstacle], offset
     let mut gaps = Vec::new();
     let mut cursor = low;
     for (start, end) in forbidden {
-        if start > cursor {
+        if start >= cursor {
             gaps.push((cursor, start));
         }
         cursor = cursor.max(end);
     }
-    if cursor < high {
+    if cursor <= high + 1e-6 {
         gaps.push((cursor, high));
     }
     let desired = (low + high) * 0.5 + offset;
     gaps.into_iter()
-        .filter(|(a, b)| b - a >= 32.0)
+        .filter(|(a, b)| b - a + 1e-6 >= channel_width)
         .map(|(a, b)| {
-            let low = a + 16.0;
-            let high = b - 16.0;
+            let low = a + channel_width * 0.5;
+            let high = b - channel_width * 0.5;
             let channel = desired.clamp(low, high);
             ((channel / CHANNEL_CELL).round() * CHANNEL_CELL).clamp(low, high)
         })
@@ -655,7 +1121,7 @@ fn valid_orthogonal(
     points: &[Point],
     radius: f64,
 ) -> bool {
-    if points.len() < 4
+    if points.len() < 2
         || points.windows(2).any(|pair| {
             (pair[0].x - pair[1].x).abs() > 1e-6 && (pair[0].y - pair[1].y).abs() > 1e-6
         })
@@ -664,10 +1130,12 @@ fn valid_orthogonal(
     }
     for index in 0..points.len() - 1 {
         let length = points[index].distance(points[index + 1]);
-        let required = if index > 0 && index + 1 < points.len() - 1 {
-            radius * 2.0
+        let required = if index == 0 || index + 1 == points.len() - 1 {
+            // A centred parallel bundle may shift the 10 px base stub inward
+            // to the owning card's 6 px route clearance.
+            NARROW_CLEARANCE
         } else {
-            radius
+            radius * 2.0
         };
         if length + 1e-6 < required {
             return false;
@@ -676,17 +1144,35 @@ fn valid_orthogonal(
     true
 }
 
-/// Validate the sampled rendered path against the caller's margin-inflated
-/// obstacles. An endpoint's owner card is ignored only for the first/last
-/// port-stub distance along the route, with one sample's collision tolerance.
+/// Validate the sampled rendered path against the supplied obstacles. An
+/// endpoint's owner is ignored for the requested distance from that endpoint.
+/// The default retains the original endpoint-stub exemption and tolerance.
 fn route_samples_clear(
     samples: &[Point],
     obstacles: &[Obstacle],
     source_owner: Option<usize>,
     target_owner: Option<usize>,
 ) -> bool {
-    let length = path_length(samples);
     let endpoint_exemption = ENDPOINT_STUB_DISTANCE + COLLISION_TOLERANCE;
+    route_samples_clear_with_exemptions(
+        samples,
+        obstacles,
+        source_owner,
+        target_owner,
+        endpoint_exemption,
+        endpoint_exemption,
+    )
+}
+
+fn route_samples_clear_with_exemptions(
+    samples: &[Point],
+    obstacles: &[Obstacle],
+    source_owner: Option<usize>,
+    target_owner: Option<usize>,
+    source_exemption: f64,
+    target_exemption: f64,
+) -> bool {
+    let length = path_length(samples);
     let mut segment_start = 0.0;
 
     samples.windows(2).all(|pair| {
@@ -696,10 +1182,10 @@ fn route_samples_clear(
             let mut check_start = segment_start;
             let mut check_end = segment_end;
             if source_owner == Some(obstacle_index) {
-                check_start = check_start.max(endpoint_exemption);
+                check_start = check_start.max(source_exemption);
             }
             if target_owner == Some(obstacle_index) {
-                check_end = check_end.min(length - endpoint_exemption);
+                check_end = check_end.min(length - target_exemption);
             }
             if check_start >= check_end || segment_length <= f64::EPSILON {
                 return true;
@@ -904,40 +1390,124 @@ mod tests {
     }
 
     fn assert_route_misses_cards(route: &WireRoute, obstacles: &[Obstacle]) {
+        let obstacles = with_endpoint_clearance_inset(
+            route.from,
+            PortSide::Right,
+            route.to,
+            PortSide::Left,
+            obstacles,
+            CALLER_CARD_CLEARANCE - NARROW_CLEARANCE,
+        );
         assert!(route_samples_clear(
             &route.samples,
-            obstacles,
-            endpoint_obstacle(route.from, obstacles, PortSide::Right),
-            endpoint_obstacle(route.to, obstacles, PortSide::Left),
+            &obstacles,
+            endpoint_obstacle(route.from, &obstacles, PortSide::Right),
+            endpoint_obstacle(route.to, &obstacles, PortSide::Left),
         ));
     }
 
     #[test]
-    fn straight_when_clear() {
+    fn routed_mode_is_orthogonal_when_clear() {
         let route = route(Point::new(0.0, 20.0), Point::new(240.0, 80.0), &[]);
-        assert!(route.is_straight_cubic());
+        assert!(matches!(route.kind, RouteKind::Orthogonal { .. }));
     }
 
     #[test]
-    fn first_grab_geometry_prefers_clear_cubic() {
+    fn first_grab_geometry_stays_orthogonal() {
         let obstacles = facing_endpoint_cards(400.0, 540.0);
         let route = route(Point::new(400.0, 220.0), Point::new(540.0, 180.0), &obstacles);
-        let RouteKind::Cubic { control_1, control_2 } = route.kind else {
-            panic!("clear near-horizontal ports should use a cubic");
-        };
-        assert_eq!(route.bends(), 0);
-        assert_eq!(control_1, Point::new(460.0, 220.0));
-        assert_eq!(control_2, Point::new(480.0, 180.0));
+        assert!(matches!(route.kind, RouteKind::Orthogonal { .. }));
         assert_route_misses_cards(&route, &obstacles);
     }
 
     #[test]
-    fn second_grab_geometry_prefers_clear_cubic() {
+    fn second_grab_geometry_stays_orthogonal() {
         let obstacles = facing_endpoint_cards(160.0, 305.0);
         let route = route(Point::new(160.0, 190.0), Point::new(305.0, 155.0), &obstacles);
-        assert!(route.is_straight_cubic());
-        assert_eq!(route.bends(), 0);
+        assert!(matches!(route.kind, RouteKind::Orthogonal { .. }));
         assert_route_misses_cards(&route, &obstacles);
+    }
+
+    #[test]
+    fn first_bend_hugs_a_tall_source_card() {
+        let raw_source = Obstacle::from_xywh(0.0, 0.0, 100.0, 400.0);
+        let obstacles = [
+            raw_source.inflate(CALLER_CARD_CLEARANCE),
+            card(300.0, -100.0, 100.0, 100.0),
+        ];
+        let route = route(Point::new(100.0, 200.0), Point::new(300.0, -50.0), &obstacles);
+        let RouteKind::Orthogonal { points, .. } = &route.kind else {
+            panic!("expected routed geometry");
+        };
+        assert!(points[0].distance(points[1]) <= 12.0, "{points:?}");
+        assert_eq!(points[1].x, points[2].x, "{points:?}");
+        assert!(points[1].x - raw_source.max.x >= NARROW_CLEARANCE);
+        assert!(
+            route
+                .samples
+                .windows(2)
+                .all(|pair| segment_clear_rect(pair[0], pair[1], raw_source)),
+            "{points:?}"
+        );
+    }
+
+    #[test]
+    fn configured_port_stub_has_an_eight_pixel_minimum() {
+        let mut style = RouteStyle::default();
+        style.port_stub = 0.0;
+        let obstacles = facing_endpoint_cards(400.0, 540.0);
+        let route = route_wire(
+            Point::new(400.0, 220.0),
+            PortSide::Right,
+            Point::new(540.0, 180.0),
+            PortSide::Left,
+            &obstacles,
+            style,
+            0.0,
+        );
+        let RouteKind::Orthogonal { points, .. } = route.kind else {
+            panic!("expected routed geometry");
+        };
+        assert!((points[0].distance(points[1]) - MIN_PORT_STUB).abs() < 1e-6);
+    }
+
+    #[test]
+    fn adjacent_port_vertical_runs_keep_cable_spacing() {
+        let style = RouteStyle::default();
+        let obstacles = [
+            card(0.0, 0.0, 100.0, 400.0),
+            card(300.0, -100.0, 100.0, 200.0),
+        ];
+        let first = route_wire(
+            Point::new(100.0, 180.0),
+            PortSide::Right,
+            Point::new(300.0, -60.0),
+            PortSide::Left,
+            &obstacles,
+            style,
+            -style.cable_spacing * 0.5,
+        );
+        let second = route_wire(
+            Point::new(100.0, 188.0),
+            PortSide::Right,
+            Point::new(300.0, -52.0),
+            PortSide::Left,
+            &obstacles,
+            style,
+            style.cable_spacing * 0.5,
+        );
+        let RouteKind::Orthogonal { points: first, .. } = &first.kind else {
+            panic!("expected routed geometry");
+        };
+        let RouteKind::Orthogonal { points: second, .. } = &second.kind else {
+            panic!("expected routed geometry");
+        };
+        assert_eq!(first[1].x, first[2].x, "{first:?}");
+        assert_eq!(second[1].x, second[2].x, "{second:?}");
+        assert!(
+            (first[1].x - second[1].x).abs() >= style.cable_spacing - 0.1,
+            "{first:?} {second:?}"
+        );
     }
 
     #[test]
@@ -979,7 +1549,8 @@ mod tests {
             (PortSide::Left, PortSide::Left),
             (PortSide::Left, PortSide::Right),
         ] {
-            let route = route_wire(
+            let route = route_wire_in_mode(
+                WireMode::Bezier,
                 from,
                 source_side,
                 to,
@@ -1065,7 +1636,7 @@ mod tests {
         let RouteKind::Orthogonal { points, .. } = &route.kind else {
             panic!("stacked endpoint cards require a corridor");
         };
-        assert!(points[1].x >= route.from.x + 24.0, "{points:?}");
+        assert!((points[1].x - route.from.x - 10.0).abs() < 1e-6, "{points:?}");
         assert_route_misses_cards(&route, &obstacles);
     }
 
@@ -1081,7 +1652,7 @@ mod tests {
         let RouteKind::Orthogonal { points, .. } = &route.kind else {
             panic!("below-left endpoint cards require a corridor");
         };
-        assert!(points[1].x >= route.from.x + 24.0, "{points:?}");
+        assert!((points[1].x - route.from.x - 10.0).abs() < 1e-6, "{points:?}");
         assert!(
             points.iter().any(|point| point.y > 237.0 && point.y < 348.0),
             "route should cross between the stacked cards: {points:?}"
@@ -1090,13 +1661,123 @@ mod tests {
     }
 
     #[test]
-    fn dense_blocking_stubs_falls_back_to_cubic() {
+    fn dense_blocking_stubs_falls_back_to_orthogonal() {
         let obstacles = [
             Obstacle::from_xywh(20.0, -20.0, 60.0, 40.0),
             Obstacle::from_xywh(100.0, -100.0, 60.0, 200.0),
         ];
         let route = route(Point::new(0.0, 0.0), Point::new(220.0, 0.0), &obstacles);
-        assert!(route.is_straight_cubic());
+        assert!(matches!(route.kind, RouteKind::Orthogonal { .. }));
+    }
+
+    #[test]
+    fn screenshot_gap_fixture_is_orthogonal_and_avoids_prompt() {
+        let raw_prompt = Obstacle::from_xywh(430.0, 650.0, 580.0, 300.0);
+        let obstacles = [
+            card(100.0, 970.0, 580.0, 250.0),
+            raw_prompt.inflate(12.0),
+            card(930.0, 150.0, 600.0, 480.0),
+        ];
+        let route = route(Point::new(680.0, 1020.0), Point::new(930.0, 245.0), &obstacles);
+        assert!(matches!(
+            route.kind,
+            RouteKind::Orthogonal { radius: 8.0, .. }
+        ));
+        assert!(
+            route_samples_clear(&route.samples, &[raw_prompt], None, None),
+            "{:?}",
+            route.kind
+        );
+        assert!(
+            route.samples.iter().any(|point| point.y >= 950.0 && point.y <= 970.0),
+            "{:?}",
+            route.kind
+        );
+    }
+
+    #[test]
+    fn bezier_mode_always_returns_the_port_cubic() {
+        let from = Point::new(0.0, 20.0);
+        let to = Point::new(240.0, 80.0);
+        let obstacles = [Obstacle::from_xywh(40.0, -100.0, 180.0, 300.0)];
+        let first = route_wire_in_mode(
+            WireMode::Bezier,
+            from,
+            PortSide::Right,
+            to,
+            PortSide::Left,
+            &obstacles,
+            RouteStyle::default(),
+            48.0,
+        );
+        let second = route_wire_sticky_in_mode(
+            WireMode::Bezier,
+            from,
+            PortSide::Right,
+            to,
+            PortSide::Left,
+            &[],
+            RouteStyle::default(),
+            -48.0,
+            Some(&first),
+        );
+        assert!(matches!(first.kind, RouteKind::Cubic { .. }));
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn routed_mode_never_returns_a_cubic() {
+        for (from, to, obstacles) in [
+            (Point::new(0.0, 20.0), Point::new(240.0, 80.0), vec![]),
+            (
+                Point::new(0.0, 0.0),
+                Point::new(220.0, 0.0),
+                vec![
+                    Obstacle::from_xywh(20.0, -20.0, 60.0, 40.0),
+                    Obstacle::from_xywh(100.0, -100.0, 60.0, 200.0),
+                ],
+            ),
+        ] {
+            let route = route_wire_in_mode(
+                WireMode::Routed,
+                from,
+                PortSide::Right,
+                to,
+                PortSide::Left,
+                &obstacles,
+                RouteStyle::default(),
+                0.0,
+            );
+            assert!(matches!(route.kind, RouteKind::Orthogonal { .. }));
+        }
+    }
+
+    fn route_through_stacked_gap(gap: f64) -> WireRoute {
+        let y = gap * 0.5;
+        let obstacles = [
+            card(60.0, -100.0, 180.0, 100.0),
+            card(60.0, gap, 180.0, 100.0),
+        ];
+        route(Point::new(0.0, y), Point::new(300.0, y), &obstacles)
+    }
+
+    #[test]
+    fn twenty_pixel_gap_is_used_but_a_narrower_one_is_not() {
+        let exact = route_through_stacked_gap(20.0);
+        assert!(matches!(
+            exact.kind,
+            RouteKind::Orthogonal { radius: 8.0, .. }
+        ));
+        assert_eq!(exact.bends(), 0);
+        assert!(exact.distance_to_point(Point::new(150.0, 10.0)) < 1e-6);
+
+        let too_narrow = route_through_stacked_gap(19.0);
+        assert!(matches!(
+            too_narrow.kind,
+            RouteKind::Orthogonal { radius: 16.0, .. }
+        ));
+        assert!(too_narrow.bends() > 0);
+        assert!(too_narrow.distance_to_point(Point::new(150.0, 9.5)) > 1.0);
     }
 
     #[test]

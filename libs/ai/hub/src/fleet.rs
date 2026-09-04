@@ -96,10 +96,11 @@ pub struct FleetRoles {
     rules: Vec<(String, Vec<String>)>,
 }
 
-/// The ratified fleet end state: `.217` (RTX 5090) is the dedicated chat
-/// box — chat and the prompt expander live there, every other generative
-/// domain lives on the other nodes.
-const DEFAULT_FLEET_ROLES: &str = "10.0.0.165=chat,text";
+/// The ratified fleet end state: `.165` (RTX PRO 6000) carries chat, the
+/// prompt expander and image generation (user's order 2026-09-04: "let the
+/// rtx serve images too" — the 5090 cannot fit flux2-dev at the default
+/// reserve); every other generative domain lives on the other nodes.
+const DEFAULT_FLEET_ROLES: &str = "10.0.0.165=chat,text,image";
 
 /// Env var naming the roles; `off` disables the built-in list too.
 pub const FLEET_ROLES_ENV: &str = "MAKEPAD_FLEET_ROLES";
@@ -314,7 +315,7 @@ fn model_estimate_mb(model: &ModelInfoJson) -> Option<u64> {
     Some((gib * 1024.0).ceil().min(u64::MAX as f64) as u64)
 }
 
-fn vram_admission_for_model(snapshot: &BoxSnapshot, model: &ModelInfoJson) -> VramAdmission {
+pub fn vram_admission_for_model(snapshot: &BoxSnapshot, model: &ModelInfoJson) -> VramAdmission {
     let Some(estimate_mb) = model_estimate_mb(model) else {
         return VramAdmission::Admitted;
     };
@@ -336,7 +337,12 @@ fn vram_admission_for_model(snapshot: &BoxSnapshot, model: &ModelInfoJson) -> Vr
         .vram_reserve_mb
         .unwrap_or(crate::residency::DEFAULT_RESERVE_MB);
     let required_total_mb = estimate_mb.saturating_add(reserve_mb);
-    if let Some(total_mb) = health.vram_total_mb {
+    // New nodes publish the ceiling measured with every service resident
+    // evicted. That is the real permanent fit constraint: total card memory
+    // includes driver/display allocations the service can never recover.
+    // Old nodes have no such field, so retain their total-card behavior.
+    let usable_mb = health.vram_usable_mb.or(health.vram_total_mb);
+    if let Some(total_mb) = usable_mb {
         if total_mb < required_total_mb {
             return VramAdmission::Incompatible {
                 required_total_mb,
@@ -421,8 +427,7 @@ fn vram_admission_for_model(snapshot: &BoxSnapshot, model: &ModelInfoJson) -> Vr
                 .filter(|candidate| candidate.id != model.id && is_loaded(candidate))
                 .filter_map(model_estimate_mb)
                 .fold(0u64, u64::saturating_add);
-            let potential_free_mb = health
-                .vram_total_mb
+            let potential_free_mb = usable_mb
                 .map_or_else(
                     || free_mb.saturating_add(reclaimable_mb),
                     |total_mb| free_mb.saturating_add(reclaimable_mb).min(total_mb),
@@ -1186,7 +1191,8 @@ mod tests {
         let roles = FleetRoles::parse(DEFAULT_FLEET_ROLES);
         assert!(roles.allows("http://10.0.0.165:8123", "chat"));
         assert!(roles.allows("http://10.0.0.165:8123", "text"));
-        for domain in ["video", "image", "music", "mesh", "vision"] {
+        assert!(roles.allows("http://10.0.0.165:8123", "image"));
+        for domain in ["video", "music", "mesh", "vision"] {
             assert!(
                 !roles.allows("http://10.0.0.165:8123", domain),
                 "the dedicated chat box must not serve {domain}"
@@ -1334,6 +1340,7 @@ mod tests {
                 gpu: None,
                 vram_free_mb: Some(free_mb),
                 vram_total_mb: Some(total_mb),
+                vram_usable_mb: None,
                 models_loaded: Vec::new(),
                 jobs_pending: Some(0),
                 node_id: None,
@@ -1385,6 +1392,7 @@ mod tests {
                 gpu: None,
                 vram_free_mb: None,
                 vram_total_mb: None,
+                vram_usable_mb: None,
                 models_loaded: Vec::new(),
                 jobs_pending: Some(pending),
                 node_id: None,
@@ -1901,6 +1909,39 @@ mod tests {
             pick_for_domain_admitted(&snaps, "video"),
             Some((0, "minimax-h3".to_string()))
         );
+    }
+
+    #[test]
+    fn usable_vram_excludes_5090_for_flux2_but_admits_pro_6000() {
+        let mut flux2 = model("flux2-dev", "image", MODEL_STATE_READY, true);
+        flux2.vram_gb = Some(29.0);
+        let mut rtx5090 = with_vram(
+            snapshot("http://10.0.0.217", 0, vec![flux2.clone()]),
+            29_785,
+            32_607,
+            2_048,
+        );
+        rtx5090.health.as_mut().unwrap().vram_usable_mb = Some(30_603);
+        let mut pro6000 = with_vram(
+            snapshot("http://rtx-pro-6000", 0, vec![flux2]),
+            36_535,
+            97_887,
+            2_048,
+        );
+        pro6000.health.as_mut().unwrap().vram_usable_mb = Some(36_535);
+
+        assert_eq!(
+            model_admission(&rtx5090, "flux2-dev"),
+            Some(VramAdmission::Incompatible {
+                required_total_mb: 31_744,
+                total_mb: 30_603,
+            })
+        );
+        assert_eq!(
+            model_admission(&pro6000, "flux2-dev"),
+            Some(VramAdmission::Admitted)
+        );
+        assert_eq!(pick_box_admitted(&[rtx5090, pro6000], "flux2-dev"), Some(1));
     }
 
     #[test]
