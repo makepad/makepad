@@ -315,9 +315,10 @@ mod tests {
 
     #[test]
     fn role_barred_models_are_not_listed_for_that_node() {
-        // The built-in role table: 10.0.0.165 serves chat and text only.
-        assert!(!listed_by_role("http://10.0.0.165:8123", "image"));
+        // The built-in role table: 10.0.0.165 serves chat, text and image only.
+        assert!(!listed_by_role("http://10.0.0.165:8123", "video"));
         assert!(listed_by_role("http://10.0.0.165:8123", "chat"));
+        assert!(listed_by_role("http://10.0.0.165:8123", "image"));
         assert!(listed_by_role("http://10.0.0.217:8123", "image"));
     }
 
