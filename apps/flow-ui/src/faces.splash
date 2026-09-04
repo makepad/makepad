@@ -163,7 +163,7 @@ mod.flow.ui.AskFace = Face{
     question_scroll := mod.flow.ui.TextScroll{
         question := Body{param := @question}
     }
-    choice := DropDown{
+    choice := ComboBox{
         width: Fill
         height: 26
         param := @options

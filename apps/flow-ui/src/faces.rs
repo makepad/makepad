@@ -547,7 +547,7 @@ script_mod! {
                     text_style: theme.font_regular{font_size: 9}
                 }
             }
-            picker := DropDown{
+            picker := ComboBox{
                 width: Fill
                 height: 26
                 labels: ["hub picks"]
@@ -596,7 +596,7 @@ script_mod! {
             quantize: true
             param_bind := @height
         }
-        picker := DropDown{
+        picker := ComboBox{
             width: Fill
             height: 26
             labels: ["Custom"]
@@ -965,7 +965,7 @@ impl FormatPicker {
             .map(|index| index + 1)
             .unwrap_or(0);
         self.view
-            .drop_down(cx, ids!(picker))
+            .combo_box(cx, ids!(picker))
             .set_selected_item(cx, selected);
     }
 
@@ -990,7 +990,7 @@ impl FormatPicker {
         self.presets = options.presets;
         let mut labels = vec![CUSTOM_FORMAT.to_string()];
         labels.extend(self.presets.iter().map(|preset| preset.name.clone()));
-        self.view.drop_down(cx, ids!(picker)).set_labels(cx, labels);
+        self.view.combo_box(cx, ids!(picker)).set_labels(cx, labels);
         let (width_min, width_max, width_step) = options.width_range;
         let (height_min, height_max, height_step) = options.height_range;
         self.width_range = options.width_range;
@@ -1052,7 +1052,7 @@ impl FormatPicker {
             self.set_dimensions(cx, width, height);
             return Some((width, height));
         }
-        if let Some(index) = self.view.drop_down(cx, ids!(picker)).changed(actions) {
+        if let Some(index) = self.view.combo_box(cx, ids!(picker)).changed(actions) {
             let preset = index
                 .checked_sub(1)
                 .and_then(|index| self.presets.get(index))?
@@ -1119,11 +1119,8 @@ impl ModelPicker {
         if !selected.is_empty() && !labels.iter().any(|label| *label == selected) {
             labels.push(self.value.clone());
         }
-        let picker = self.view.drop_down(cx, ids!(select.picker));
+        let picker = self.view.combo_box(cx, ids!(select.picker));
         picker.set_labels(cx, labels);
-        let mut dimmed = vec![false];
-        dimmed.extend(self.models.iter().map(|model| model.dimmed));
-        picker.set_dimmed_items(cx, dimmed);
         let selected = if self.value.is_empty() { HUB_PICKS } else { &selected };
         picker.set_selected_by_label(selected, cx);
         let note = self
@@ -1142,7 +1139,7 @@ impl ModelPicker {
     pub fn picked(&self, cx: &mut Cx, actions: &Actions) -> Option<String> {
         let index = self
             .view
-            .drop_down(cx, ids!(select.picker))
+            .combo_box(cx, ids!(select.picker))
             .changed(actions)?;
         Some(
             index
@@ -2115,7 +2112,7 @@ impl FaceHost {
                 if widget.borrow::<FormatPicker>().is_some() {
                     face.format_pickers.push(widget.clone());
                 }
-                if widget.borrow::<DropDown>().is_some() {
+                if widget.borrow::<ComboBox>().is_some() || widget.borrow::<DropDown>().is_some() {
                     face.dropdowns.push(widget.clone());
                 }
                 let src = widget.script_source();
@@ -2383,9 +2380,15 @@ impl FaceHost {
         self.camera_transform = transform;
         for face in self.faces.values().chain(self.flow_face.iter()) {
             for dropdown in &face.dropdowns {
-                dropdown
-                    .as_drop_down()
-                    .set_popup_anchor_transform(cx, transform);
+                if dropdown.borrow::<ComboBox>().is_some() {
+                    dropdown
+                        .as_combo_box()
+                        .set_popup_anchor_transform(cx, transform);
+                } else {
+                    dropdown
+                        .as_drop_down()
+                        .set_popup_anchor_transform(cx, transform);
+                }
             }
         }
     }
@@ -2458,7 +2461,11 @@ impl FaceHost {
             if name == "options" {
                 if let Some(Literal::Arr(items)) = node_param(node, "options") {
                     let labels: Vec<String> = items.iter().filter_map(literal_text).collect();
-                    widget.as_drop_down().set_labels(cx, labels);
+                    if widget.borrow::<ComboBox>().is_some() {
+                        widget.as_combo_box().set_labels(cx, labels);
+                    } else {
+                        widget.as_drop_down().set_labels(cx, labels);
+                    }
                 }
             }
         }
@@ -2545,6 +2552,8 @@ impl FaceHost {
                     if input.text() != text {
                         input.set_text(cx, &text);
                     }
+                } else if bind.widget.borrow::<ComboBox>().is_some() {
+                    bind.widget.as_combo_box().set_selected_by_label(&text, cx);
                 } else if bind.widget.borrow::<DropDown>().is_some() {
                     bind.widget.as_drop_down().set_selected_by_label(&text, cx);
                 } else if bind.widget.borrow::<Slider>().is_some() {
@@ -2617,6 +2626,8 @@ impl FaceHost {
                     } else {
                         None
                     }
+                } else if bind.widget.borrow::<ComboBox>().is_some() {
+                    bind.widget.as_combo_box().changed_label(actions)
                 } else if bind.widget.borrow::<DropDown>().is_some() {
                     bind.widget.as_drop_down().changed_label(actions)
                 } else if bind.widget.borrow::<Slider>().is_some() {
@@ -2716,6 +2727,10 @@ impl FaceHost {
                 } else if widget.borrow::<TextInput>().is_some() {
                     if let Some(text) = widget.as_text_input().changed(actions) {
                         out.push((node.clone(), key.clone(), Literal::Str(text)));
+                    }
+                } else if widget.borrow::<ComboBox>().is_some() {
+                    if let Some(label) = widget.as_combo_box().changed_label(actions) {
+                        out.push((node.clone(), key.clone(), Literal::Str(label)));
                     }
                 } else if widget.borrow::<DropDown>().is_some() {
                     if let Some(label) = widget.as_drop_down().changed_label(actions) {
@@ -2987,6 +3002,8 @@ impl NodeFaces for FaceHost {
 fn current_bound_value(cx: &Cx, widget: &WidgetRef) -> Option<String> {
     if widget.borrow::<TextInput>().is_some() {
         Some(widget.as_text_input().text())
+    } else if widget.borrow::<ComboBox>().is_some() {
+        Some(widget.as_combo_box().selected_label())
     } else if widget.borrow::<DropDown>().is_some() {
         Some(widget.as_drop_down().selected_label())
     } else if widget.borrow::<Slider>().is_some() {
@@ -3097,6 +3114,10 @@ fn set_widget_text(cx: &mut Cx, widget: &WidgetRef, text: &str) {
         if input.text() != text {
             input.set_text(cx, text);
         }
+        return;
+    }
+    if widget.borrow::<ComboBox>().is_some() {
+        widget.as_combo_box().set_selected_by_label(text, cx);
         return;
     }
     if widget.borrow::<DropDown>().is_some() {
@@ -3722,15 +3743,56 @@ Flow{llm function http ask output}
         assert!(row
             .child(live_id!(value))
             .child(live_id!(style))
-            .borrow::<DropDown>()
+            .borrow::<ComboBox>()
             .is_some());
         host.free(&mut cx);
     }
 
     #[test]
-    fn repeated_isolate_dropdown_mounts_release_popup_cache_and_vm() {
+    fn face_declared_combo_round_trips_its_bound_label() {
         let source = include_str!("../../../libs/flow/recipes/templates/prompt-to-image.splash");
-        let graph = makepad_flow::graph::evaluate(source, "<isolate-retire>").unwrap();
+        let graph = makepad_flow::graph::evaluate(source, "<combo-bind>").unwrap();
+        let catalog = makepad_flow::graph::prelude_catalog().unwrap();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        let mut host = FaceHost::mount(
+            &mut cx,
+            WidgetUid(0),
+            "test",
+            "<combo-bind>",
+            source,
+            &graph,
+            &catalog,
+        );
+        let picker = host.faces["add_style"]
+            .binds
+            .iter()
+            .find(|bind| bind.port == "style")
+            .expect("style bind")
+            .widget
+            .as_combo_box();
+        assert_eq!(picker.labels(), vec!["photo", "anime", "oil paint"]);
+        picker.set_selected_by_label("anime", &mut cx);
+        assert_eq!(picker.selected_label(), "anime");
+
+        let actions: ActionsBuf = vec![Box::new(WidgetAction {
+            data: None,
+            action: Box::new(ComboBoxAction::Select(2)),
+            widget_uid: picker.widget_uid(),
+            group: None,
+        })];
+        assert_eq!(
+            host.bind_changes(&cx, &actions),
+            vec![("add_style".into(), "style".into(), "oil paint".into())]
+        );
+        host.free(&mut cx);
+    }
+
+    #[test]
+    fn repeated_isolate_dropdown_mounts_release_popup_cache_and_vm() {
+        let source = include_str!("../../../libs/flow/recipes/templates/prompt-to-image.splash")
+            .replace("style := ComboBox", "style := DropDown");
+        let graph = makepad_flow::graph::evaluate(&source, "<isolate-retire>").unwrap();
         let catalog = makepad_flow::graph::prelude_catalog().unwrap();
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(makepad_widgets::script_mod);
@@ -3741,7 +3803,7 @@ Flow{llm function http ask output}
                 WidgetUid(0),
                 &format!("test-{index}"),
                 "<isolate-retire>",
-                source,
+                &source,
                 &graph,
                 &catalog,
             );
