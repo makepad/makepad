@@ -37,7 +37,8 @@ use crate::{
     gpu_info::GpuPerformance,
     texture::TextureFormat,
     Area, Cx, CxDrawPassParent, CxOsOp, CxWindowPool, Event, KeyModifiers, MouseButton,
-    MouseMoveEvent, MouseUpEvent, SignalToUI, WindowClosedEvent, WindowGeomChangeEvent,
+    MouseMoveEvent, MouseUpEvent, SignalToUI, WaylandDecorationPreference, WindowClosedEvent,
+    WindowGeomChangeEvent,
 };
 use wayland_client::protocol::{wl_keyboard, wl_pointer};
 use wayland_client::{Connection, Proxy};
@@ -48,6 +49,41 @@ fn log_linux_backdrop_unsupported_once() {
     LOG_ONCE.call_once(|| {
         crate::log!("Window backdrop requested on Linux/Wayland; compositor backdrop blur is not supported in M1 (no-op).");
     });
+}
+
+fn parse_decoration_preference(value: &str) -> Option<WaylandDecorationPreference> {
+    match value {
+        "server" | "server-side" => Some(WaylandDecorationPreference::ServerSide),
+        "client" | "client-side" => Some(WaylandDecorationPreference::ClientSide),
+        _ => None,
+    }
+}
+
+fn decoration_preference_override() -> Option<WaylandDecorationPreference> {
+    std::env::args_os()
+        .find_map(|arg| {
+            arg.to_str()
+                .and_then(|arg| arg.strip_prefix("--wayland-decoration="))
+                .and_then(parse_decoration_preference)
+        })
+        .or_else(|| {
+            std::env::var("MAKEPAD_WAYLAND_DECORATION")
+                .ok()
+                .as_deref()
+                .and_then(parse_decoration_preference)
+        })
+}
+
+/// Whether a window's surface may be promised opaque to the compositor.
+///
+/// This is the same decision the macOS backend makes from the same two fields for its
+/// layer's `opaque` flag, and the one the Windows backend makes before enabling
+/// composition, so a window that is opaque on one platform is opaque on all of them.
+/// `transparent` is the documented opt-in for a see-through window; a backdrop effect
+/// needs the surface translucent to sample what is behind it, so it forfeits the
+/// promise as well, whether or not this platform implements it yet.
+fn window_is_opaque(transparent: bool, backdrop: crate::window::WindowBackdrop) -> bool {
+    !transparent && backdrop == crate::window::WindowBackdrop::None
 }
 
 pub fn wayland_event_loop(cx: Rc<RefCell<Cx>>) {
@@ -64,6 +100,7 @@ pub(crate) struct WaylandCx {
     /// callbacks the compositor withholds) from wedging the event loop. Disabled by
     /// `MAKEPAD_NO_VSYNC` for uncapped benchmarking.
     frame_pacing: bool,
+    decoration_preference_override: Option<WaylandDecorationPreference>,
 }
 
 impl WaylandCx {
@@ -79,6 +116,7 @@ impl WaylandCx {
             cx: cx.clone(),
             qhandle: None,
             frame_pacing: std::env::var_os("MAKEPAD_NO_VSYNC").is_none(),
+            decoration_preference_override: decoration_preference_override(),
         }));
         let conn = Connection::connect_to_env().unwrap();
         let display = conn.display();
@@ -187,39 +225,31 @@ impl WaylandCx {
                 // do this here because mac
                 let mut cx = self.cx.borrow_mut();
 
-                // When drawing our own window chrome (no server-side decorations),
-                // populate the chrome buttons bounding box: three buttons right-aligned
-                // at the top of the caption bar, matching the Makepad widget layout.
-                if matches!(
-                    cx.os_type(),
-                    OsType::LinuxWindow(LinuxWindowParams {
-                        custom_window_chrome: true,
-                        ..
-                    })
-                ) {
-                    const BUTTONS_W: f64 = 46.0 * 3.0;
-                    const BUTTONS_H: f64 = 29.0;
-                    let w = re.new_geom.inner_size.x;
-                    re.new_geom.window_chrome_buttons = Rect {
-                        pos: Vec2d {
-                            x: w - BUTTONS_W,
-                            y: 0.0,
-                        },
-                        size: Vec2d {
-                            x: BUTTONS_W,
-                            y: BUTTONS_H,
-                        },
-                    };
-                }
-
-                if let Some(window) = state
+                let window_index = state
                     .windows
-                    .iter_mut()
-                    .find(|w| w.window_id == re.window_id)
-                {
+                    .iter()
+                    .position(|window| window.window_id == re.window_id);
+                // Wayland's native surface state does not know the geometry of
+                // Makepad-drawn buttons. Populate it after DPI conversion below.
+                re.new_geom.window_chrome_buttons = Rect::default();
+
+                if let Some(window_index) = window_index {
                     // compare in native units, before new_geom is converted below
-                    let geom_changed = re.old_geom.inner_size != re.new_geom.inner_size
-                        || re.old_geom.dpi_factor != re.new_geom.dpi_factor;
+                    let window = &mut state.windows[window_index];
+                    let uses_csd = window.uses_client_side_decorations;
+                    let is_fullscreen = window.is_fullscreen;
+                    let old_chrome_buttons =
+                        cx.windows[re.window_id].window_geom.window_chrome_buttons;
+                    let decoration_changed = {
+                        let cx_window = &cx.windows[re.window_id];
+                        cx_window.uses_client_side_decorations != uses_csd
+                            || cx_window.wayland_is_fullscreen != is_fullscreen
+                    };
+                    let geom_changed = decoration_changed
+                        || window.csd_shadow_needs_update()
+                        || re.old_geom.inner_size != re.new_geom.inner_size
+                        || re.old_geom.dpi_factor != re.new_geom.dpi_factor
+                        || re.old_geom.is_fullscreen != re.new_geom.is_fullscreen;
 
                     // Keep the wayland geom native (buffer/viewport size + the next resize's dpi come
                     // from it). Store the zoomed geom here and the next resize reads its dpi back as
@@ -228,9 +258,19 @@ impl WaylandCx {
                     window.window_geom = re.new_geom.clone();
                     {
                         let cx_window = &mut cx.windows[re.window_id];
+                        cx_window.uses_client_side_decorations = uses_csd;
+                        cx_window.wayland_is_fullscreen = is_fullscreen;
                         cx_window.os_dpi_factor = Some(re.new_geom.dpi_factor);
                         re.new_geom = cx_window.native_window_geom_to_layout(re.new_geom);
                     }
+                    if uses_csd && !is_fullscreen {
+                        const BUTTONS_SIZE: Vec2d = Vec2d { x: 138.0, y: 29.0 };
+                        re.new_geom.window_chrome_buttons = Rect {
+                            pos: dvec2(re.new_geom.inner_size.x - BUTTONS_SIZE.x, 0.0),
+                            size: BUTTONS_SIZE,
+                        };
+                    }
+                    re.old_geom.window_chrome_buttons = old_chrome_buttons;
                     cx.windows[re.window_id].window_geom = re.new_geom.clone();
                     // redraw when the size or scale changed
                     if geom_changed {
@@ -547,8 +587,17 @@ impl WaylandCx {
         }
         cx.call_event_handler(&Event::WindowClosed(WindowClosedEvent { window_id }));
         cx.windows[window_id].is_created = false;
-        if state.pointer_window == Some(window_id) {
+        // The pointer may have been over the window's shadow gutter rather than the
+        // window, which leaves no `pointer_window` to match on.
+        if state.pointer_window == Some(window_id)
+            || state
+                .pointer_shadow
+                .is_some_and(|(shadow_window, _)| shadow_window == window_id)
+        {
             state.pointer_window = None;
+            state.pointer_shadow = None;
+            state.pointer_enter_serial = None;
+            state.last_resize_edge = None;
         }
         if state.keyboard_window == Some(window_id) {
             state.keyboard_window = None;
@@ -576,8 +625,17 @@ impl WaylandCx {
         let mut cx = self.cx.borrow_mut();
         cx.call_event_handler(&Event::WindowClosed(event));
         cx.windows[window_id].is_created = false;
-        if state.pointer_window == Some(window_id) {
+        // The pointer may have been over the window's shadow gutter rather than the
+        // window, which leaves no `pointer_window` to match on.
+        if state.pointer_window == Some(window_id)
+            || state
+                .pointer_shadow
+                .is_some_and(|(shadow_window, _)| shadow_window == window_id)
+        {
             state.pointer_window = None;
+            state.pointer_shadow = None;
+            state.pointer_enter_serial = None;
+            state.last_resize_edge = None;
         }
         if state.keyboard_window == Some(window_id) {
             state.keyboard_window = None;
@@ -640,9 +698,13 @@ impl WaylandCx {
                     } else {
                         &window.create_app_id
                     };
+                    let decoration_preference = self
+                        .decoration_preference_override
+                        .unwrap_or(window.wayland_decorations);
                     let window = WaylandWindow::new(
                         window_id,
                         compositor,
+                        state.subcompositor.as_ref(),
                         wm_base,
                         state.decoration_manager.as_ref(),
                         state.scale_manager.as_ref(),
@@ -656,6 +718,7 @@ impl WaylandCx {
                         &window.create_title,
                         app_id,
                         window.is_fullscreen,
+                        decoration_preference,
                     );
                     if cx.windows[window_id].backdrop != crate::window::WindowBackdrop::None {
                         log_linux_backdrop_unsupported_once();
@@ -668,8 +731,12 @@ impl WaylandCx {
                     // Seed the geom too: the default `dpi_factor` is 0.0, which would make
                     // `get_pass_rect()` produce NaN once the flag is on.
                     let native_geom = window.window_geom.clone();
+                    let uses_client_side_decorations = window.uses_client_side_decorations;
+                    let is_fullscreen = window.is_fullscreen;
                     state.windows.push(window);
                     let cx_window = &mut cx.windows[window_id];
+                    cx_window.uses_client_side_decorations = uses_client_side_decorations;
+                    cx_window.wayland_is_fullscreen = is_fullscreen;
                     cx_window.os_dpi_factor = Some(native_geom.dpi_factor);
                     let layout_geom = cx_window.native_window_geom_to_layout(native_geom);
                     cx_window.window_geom = layout_geom;
@@ -766,25 +833,20 @@ impl WaylandCx {
                     }
                 }
                 CxOsOp::ResizeWindow(window_id, size) => {
-                    // A Wayland client has no "set my size" request. Window geometry is by
-                    // default whatever the surface commits -- `xdg_surface.set_window_geometry`:
-                    // "If never set, the value is the full bounds of the surface ... This
-                    // updates dynamically on every commit" -- and this backend never sets it,
-                    // so a self-resize is just the next frame committed at a different extent.
-                    // The paint path derives the EGL extent and the viewport destination from
-                    // `window_geom.inner_size`, so writing it here is the whole operation.
+                    // A Wayland client has no "set my size" request. A self-resize changes the
+                    // next EGL buffer, viewport destination, and explicit xdg window geometry;
+                    // the latter excludes any CSD shadow subsurfaces from placement and snapping.
                     //
                     // Only a floating toplevel may choose its own size. Under xdg_toplevel's
                     // `maximized` state the configured window geometry must be obeyed "or the
                     // xdg_wm_base.invalid_surface_state error is raised", which disconnects the
-                    // client; under `fullscreen` the configured geometry is a maximum. The
-                    // configure handler folds both states into `is_fullscreen`, so that one
-                    // flag gates the operation. Popups take their extent from their positioner
-                    // and are deliberately not matched here.
+                    // client; under `fullscreen` the configured geometry is a maximum. Popups
+                    // take their extent from their positioner and are deliberately not matched
+                    // here.
                     if let Some(window) =
                         state.windows.iter_mut().find(|w| w.window_id == window_id)
                     {
-                        if window.window_geom.is_fullscreen {
+                        if window.is_maximized || window.is_fullscreen {
                             crate::error!(
                                 "ResizeWindow ignored: a maximized or fullscreen Wayland toplevel \
                                  must keep the size the compositor configured."
@@ -818,9 +880,9 @@ impl WaylandCx {
                 // by a restored position the way it can be on Windows, macOS and X11.
                 // xdg_toplevel exposes no absolute-positioning request: `move` is
                 // interactive and serial-gated ("This request must be used in response to
-                // some sort of user action"), and `reposition` is an xdg_popup request
-                // requiring xdg_wm_base v3, which `wayland_state.rs` does not bind. This arm
-                // is correct as a permanent no-op.
+                // some sort of user action"). `xdg_popup.reposition` only moves a popup
+                // relative to its parent using a new positioner; it cannot place a toplevel at
+                // absolute screen coordinates. This arm is therefore a permanent no-op.
                 CxOsOp::RepositionWindow(_window_id, _size) => {}
                 CxOsOp::SetWindowTitle(window_id, title) => {
                     if let Some(window) = state.windows.iter().find(|w| w.window_id == window_id) {
@@ -865,9 +927,15 @@ impl WaylandCx {
                     cx.call_event_handler(&Event::DragEnd);
                 }
                 CxOsOp::SetCursor(cursor) => {
-                    if let Some(cursor_shape) = state.cursor_shape.as_ref() {
-                        if let Some(serial) = state.pointer_serial.as_ref() {
-                            cursor_shape.set_shape(*serial, cursor.into());
+                    state.requested_cursor = cursor;
+                    // Native CSD resize hit-testing owns the cursor at an edge, and in the
+                    // shadow gutter the pointer is outside the window entirely, so the app
+                    // has no say over it there either.
+                    if state.last_resize_edge.is_none() && state.pointer_shadow.is_none() {
+                        if let Some(cursor_shape) = state.cursor_shape.as_ref() {
+                            if let Some(serial) = state.pointer_enter_serial.as_ref() {
+                                cursor_shape.set_shape(*serial, cursor.into());
+                            }
                         }
                     }
                 }
@@ -1176,13 +1244,26 @@ impl WaylandCx {
                         continue;
                     }
                     let mut presented = false;
+                    let opaque = {
+                        let cx_window = &cx.windows[window_id];
+                        window_is_opaque(cx_window.transparent, cx_window.backdrop)
+                    };
+                    let compositor = state.compositor.clone();
                     if let Some(window) =
                         state.windows.iter_mut().find(|w| w.window_id == window_id)
                     {
                         if !window.configured {
                             continue;
                         }
-                        window.resize_buffers();
+                        if !window.prepare_buffer_size(cx.os.opengl_cx.as_ref().unwrap()) {
+                            continue;
+                        }
+                        window.prepare_csd_shadow();
+                        if let (Some(compositor), Some(qhandle)) =
+                            (compositor.as_ref(), self.qhandle.as_ref())
+                        {
+                            window.sync_opaque_region(compositor, qhandle, opaque);
+                        }
                         if std::env::var_os("MAKEPAD_WAYLAND_TRACE").is_some() {
                             crate::log!(
                                 "Wayland paint window={:?} inner=({}, {}) dpi={} pix=({}, {})",
@@ -1199,8 +1280,7 @@ impl WaylandCx {
                             // `wp_viewport.set_destination` raises the `bad_value` protocol
                             // error, which disconnects the client, on a zero or negative
                             // extent, and a float-to-int cast turns both a negative and a NaN
-                            // into zero. Floor the destination the way `resize_buffers` floors
-                            // the EGL extent.
+                            // into zero. Floor the destination the same way as the EGL extent.
                             viewport.set_destination(
                                 window.window_geom.inner_size.x.max(1.0) as i32,
                                 window.window_geom.inner_size.y.max(1.0) as i32,
@@ -1230,14 +1310,15 @@ impl WaylandCx {
                         if !window.configured {
                             continue;
                         }
-                        window.resize_buffers();
+                        if !window.prepare_buffer_size(cx.os.opengl_cx.as_ref().unwrap()) {
+                            continue;
+                        }
                         if let Some(viewport) = window.viewport.as_ref() {
                             viewport.set_source(-1., -1., -1., -1.);
                             // `wp_viewport.set_destination` raises the `bad_value` protocol
                             // error, which disconnects the client, on a zero or negative
                             // extent, and a float-to-int cast turns both a negative and a NaN
-                            // into zero. Floor the destination the way `resize_buffers` floors
-                            // the EGL extent.
+                            // into zero. Floor the destination the same way as the EGL extent.
                             viewport.set_destination(
                                 window.window_geom.inner_size.x.max(1.0) as i32,
                                 window.window_geom.inner_size.y.max(1.0) as i32,
@@ -1274,5 +1355,35 @@ impl WaylandCx {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_window_that_asked_for_translucency_gives_up_the_opaque_promise() {
+        use crate::window::WindowBackdrop;
+        assert!(window_is_opaque(false, WindowBackdrop::None));
+        // Promising opacity for a window that wanted to be see-through would leave
+        // whatever is behind it on screen, so both opt-ins must veto it.
+        assert!(!window_is_opaque(true, WindowBackdrop::None));
+        assert!(!window_is_opaque(false, WindowBackdrop::Blur));
+        assert!(!window_is_opaque(false, WindowBackdrop::Acrylic));
+        assert!(!window_is_opaque(true, WindowBackdrop::Blur));
+    }
+
+    #[test]
+    fn parses_wayland_decoration_override_values() {
+        assert_eq!(
+            parse_decoration_preference("server"),
+            Some(WaylandDecorationPreference::ServerSide)
+        );
+        assert_eq!(
+            parse_decoration_preference("client-side"),
+            Some(WaylandDecorationPreference::ClientSide)
+        );
+        assert_eq!(parse_decoration_preference("invalid"), None);
     }
 }
