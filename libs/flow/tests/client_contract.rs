@@ -35,6 +35,13 @@ impl Reply {
             body: body.into(),
         }
     }
+
+    fn no_content() -> Self {
+        Self {
+            status: 204,
+            body: String::new(),
+        }
+    }
 }
 
 struct FixtureServer {
@@ -171,17 +178,25 @@ fn serve_connection(
         let reply = handler(&request);
         let reason = match reply.status {
             200 => "OK",
+            204 => "No Content",
             401 => "Unauthorized",
             422 => "Unprocessable Content",
             _ => "Error",
         };
-        let response = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
-            reply.status,
-            reason,
-            reply.body.len(),
-            reply.body
-        );
+        let response = if reply.status == 204 {
+            format!(
+                "HTTP/1.1 {} {}\r\nConnection: keep-alive\r\n\r\n",
+                reply.status, reason
+            )
+        } else {
+            format!(
+                "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
+                reply.status,
+                reason,
+                reply.body.len(),
+                reply.body
+            )
+        };
         if reader.get_mut().write_all(response.as_bytes()).is_err()
             || reader.get_mut().flush().is_err()
         {
@@ -258,6 +273,19 @@ fn source_put_maps_422_to_eval_error() {
     let requests = server.requests.lock().unwrap();
     let put = requests.iter().find(|request| request.method == "PUT").unwrap();
     assert!(std::str::from_utf8(&put.body).unwrap().contains("Flow{"));
+}
+
+#[test]
+fn delete_accepts_bodyless_204_without_content_length() {
+    let _serial = SerialTest::acquire();
+    let server = FixtureServer::start(|request| match request.target.as_str() {
+        "/v1/health" => Reply::json(200, health(1, SERVER_ID)),
+        "/v1/flows" if request.method == "GET" => Reply::json(200, "[]"),
+        "/v1/flows/demo" if request.method == "DELETE" => Reply::no_content(),
+        _ => Reply::json(500, "{}"),
+    });
+    let client = FlowClient::connect(server.endpoints(), "token".into(), None).unwrap();
+    client.delete("demo").unwrap();
 }
 
 #[test]
