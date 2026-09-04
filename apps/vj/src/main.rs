@@ -15013,9 +15013,17 @@ p2 {}
                                     self.dream_loops.clear();
                                 }
                                 self.dream_loops.insert(asset);
+                                let title = self
+                                    .gen
+                                    .jobs()
+                                    .find(|job| job.tag == finish.tag)
+                                    .map(|job| job.title.clone())
+                                    .unwrap_or_else(|| "generated".into());
+                                self.present_generated_video(cx, asset, title);
+                            } else {
+                                self.grids_dirty = true;
+                                self.refresh_surfaces_after_run();
                             }
-                            self.grids_dirty = true;
-                            self.refresh_surfaces_after_run();
                         }
                     }
                     Err(error) => {
@@ -15032,7 +15040,13 @@ p2 {}
                     }
                 },
                 PipeDone::JobStatus { job, result } => match result {
-                    Ok(status) => self.gen.status_arrived_at(&status, now_ms()),
+                    Ok(status) => {
+                        if let Some((asset, title)) =
+                            self.gen.take_produced_on_success(&status, now_ms())
+                        {
+                            self.present_generated_video(cx, asset, title);
+                        }
+                    }
                     Err(error) => {
                         self.gen.status_failed_at(job, error, Some(now_ms()));
                     }
@@ -15077,6 +15091,25 @@ p2 {}
     /// landed before the row knew what asset it was waiting for).
     fn refresh_surfaces_after_run(&mut self) {
         self.video_model.event_touch(None);
+    }
+
+    /// Put a just-produced clip on the VIDEO pads this frame. The default
+    /// EFFECT lane hides catalog video, and the single-job `video.generate`
+    /// path never asked the grid to refresh at all — so GENERATE would
+    /// finish and the pads would stay on last night's effects until someone
+    /// clicked VIDEO and waited out the 3s event debounce.
+    fn present_generated_video(&mut self, cx: &mut Cx, asset: AssetId, title: String) {
+        let video_lane = GridLane::Kind(AssetKind::Video);
+        if self.grid_lane != video_lane {
+            self.set_lower_tab(cx, LowerTab::Grid);
+            self.set_lane(cx, video_lane);
+        }
+        let cmds = self
+            .video_model
+            .ingest_published(asset, title, AssetKind::Video);
+        self.run_cat_cmds(Surface::Video, cmds);
+        self.grids_dirty = true;
+        self.ui.redraw(cx);
     }
 
     fn run_cue_cmds(&mut self, cx: &mut Cx, cmds: Vec<CueCmd>) {

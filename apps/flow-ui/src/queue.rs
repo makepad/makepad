@@ -526,6 +526,13 @@ impl QueueList {
         }
     }
 
+    /// No row is the shown run any more (the canvas went back to design).
+    pub fn deselect(&mut self, cx: &mut Cx) {
+        if self.model.selected.take().is_some() {
+            self.redraw(cx);
+        }
+    }
+
     pub fn actions(&mut self, cx: &mut Cx, actions: &Actions) -> Vec<QueueAction> {
         let mut out = Vec::new();
         if self.view.button(cx, ids!(clear_all)).clicked(actions) {

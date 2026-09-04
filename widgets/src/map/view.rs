@@ -4163,6 +4163,13 @@ pub struct MapView {
     /// camera is tilted (needs `detail_mbtiles_path`).
     #[live(false)]
     buildings_3d: bool,
+    /// Runtime presentation switches used by compact map-layer panels. The
+    /// vector buffers stay resident; hiding roads or labels is therefore an
+    /// immediate draw-pass decision, not a tile rebuild.
+    #[live(true)]
+    show_roads: bool,
+    #[live(true)]
+    show_labels: bool,
     #[live(false)]
     dark_theme: bool,
     /// Active theme: 0 = light, 1 = dark, 2 = circuit city. `dark_theme`
@@ -5338,6 +5345,9 @@ impl Widget for MapView {
                 // Hillshade sits over the land fills but UNDER the roads.
                 self.draw_terrain_overlay(cx);
             }
+            if phase != TilePhase::Fill && !self.show_roads {
+                continue;
+            }
             let mut ctx = tile_draw_ctx!(self, &frame, slots);
             for key in &draw_tiles {
                 let Some(entry) = self.tiles.get_mut(key) else {
@@ -5356,8 +5366,11 @@ impl Widget for MapView {
         // OVER street names (EV navigator), while their own in-bubble kW
         // text redraws after the pins in draw_pin_label_phase.
         let labels_start = cx.seconds_since_app_start();
-        let full_place =
-            self.place_and_draw_labels(cx, &draw_tiles, view_zoom, map_offset, rect);
+        let full_place = if self.show_labels {
+            self.place_and_draw_labels(cx, &draw_tiles, view_zoom, map_offset, rect)
+        } else {
+            false
+        };
         let labels_ms = (cx.seconds_since_app_start() - labels_start).max(0.0) * 1000.0;
         let icons_start = cx.seconds_since_app_start();
 
@@ -5425,7 +5438,9 @@ impl Widget for MapView {
             );
         }
 
-        self.draw_pin_label_phase(cx);
+        if self.show_labels {
+            self.draw_pin_label_phase(cx);
+        }
         self.draw_wind_particles(cx);
 
 
@@ -5908,6 +5923,41 @@ impl MapView {
         self.apply_theme_palette();
         self.restyle_tiles_keep_stale(cx);
         self.update_status_text();
+        self.redraw(cx);
+    }
+
+    /// Show or hide the road casing and centreline passes without touching
+    /// the resident GPU geometry.
+    pub fn set_roads_visible(&mut self, cx: &mut Cx, visible: bool) {
+        if self.show_roads == visible {
+            return;
+        }
+        self.show_roads = visible;
+        self.redraw(cx);
+    }
+
+    /// Show or hide all map labels. Re-enabling invalidates placement once
+    /// so the retained glyph batches are rebuilt for the current viewport.
+    pub fn set_labels_visible(&mut self, cx: &mut Cx, visible: bool) {
+        if self.show_labels == visible {
+            return;
+        }
+        self.show_labels = visible;
+        if visible {
+            self.label_cache_valid = false;
+            self.needs_label_followup = true;
+        }
+        self.redraw(cx);
+    }
+
+    /// Enable the extruded-building bake used by tilted views. This is the
+    /// one layer switch that requires a keep-stale tile restyle.
+    pub fn set_buildings_3d(&mut self, cx: &mut Cx, visible: bool) {
+        if self.buildings_3d == visible {
+            return;
+        }
+        self.buildings_3d = visible;
+        self.restyle_tiles_keep_stale(cx);
         self.redraw(cx);
     }
 
@@ -10863,6 +10913,24 @@ impl MapViewRef {
     pub fn set_theme(&self, cx: &mut Cx, theme: u32) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_theme(cx, theme);
+        }
+    }
+
+    pub fn set_roads_visible(&self, cx: &mut Cx, visible: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_roads_visible(cx, visible);
+        }
+    }
+
+    pub fn set_labels_visible(&self, cx: &mut Cx, visible: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_labels_visible(cx, visible);
+        }
+    }
+
+    pub fn set_buildings_3d(&self, cx: &mut Cx, visible: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_buildings_3d(cx, visible);
         }
     }
 
