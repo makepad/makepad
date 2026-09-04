@@ -49,7 +49,32 @@ pub const NOTE_WRITE: u8 = 81;
 pub const NOTE_POWER: u8 = 89;
 
 const SCENE_UI_COOLDOWN_SECS: f64 = 0.350;
-pub const SCENE_COUNT: usize = 13;
+pub const SCENE_COUNT: usize = 16;
+
+const DEFAULT_PRESET_DIR: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../local/vj/dmx/2025-04-30"
+);
+
+// Original numbered scenes only; the recovered dmx.ron current state is excluded.
+const RECOVERED_PRESETS: [&str; SCENE_COUNT] = [
+    include_str!("../resources/dmx/2025-04-30/dmx0.ron"),
+    include_str!("../resources/dmx/2025-04-30/dmx1.ron"),
+    include_str!("../resources/dmx/2025-04-30/dmx2.ron"),
+    include_str!("../resources/dmx/2025-04-30/dmx3.ron"),
+    include_str!("../resources/dmx/2025-04-30/dmx4.ron"),
+    include_str!("../resources/dmx/2025-04-30/dmx5.ron"),
+    include_str!("../resources/dmx/2025-04-30/dmx6.ron"),
+    include_str!("../resources/dmx/2025-04-30/dmx7.ron"),
+    include_str!("../resources/dmx/2025-04-30/dmx8.ron"),
+    include_str!("../resources/dmx/2025-04-30/dmx9.ron"),
+    include_str!("../resources/dmx/2025-04-30/dmx10.ron"),
+    include_str!("../resources/dmx/2025-04-30/dmx11.ron"),
+    include_str!("../resources/dmx/2025-04-30/dmx12.ron"),
+    include_str!("../resources/dmx/2025-04-30/dmx13.ron"),
+    include_str!("../resources/dmx/2025-04-30/dmx14.ron"),
+    include_str!("../resources/dmx/2025-04-30/dmx15.ron"),
+];
 
 /// True when this MIDI message belongs to the VJ clip grid or crossfader.
 pub fn is_vj_reserved_midi(data: [u8; 3]) -> bool {
@@ -263,7 +288,7 @@ impl PresetBank {
                 return PathBuf::from(path);
             }
         }
-        PathBuf::from("examples/automate/local/dmx")
+        PathBuf::from(DEFAULT_PRESET_DIR)
     }
 
     pub fn current_path(&self) -> PathBuf {
@@ -284,7 +309,23 @@ impl PresetBank {
     }
 
     pub fn load_slot(&self, slot: usize, state: &mut ControllerState) -> bool {
-        let Some(mut loaded) = load_state_file(&self.slot_path(slot)) else {
+        let Some(original) = RECOVERED_PRESETS.get(slot) else {
+            return false;
+        };
+        let path = self.slot_path(slot);
+        let loaded = match std::fs::read_to_string(&path) {
+            Ok(text) => parse_preset(&text),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                // A dangling symlink is still an explicit (broken) override.
+                match path.symlink_metadata() {
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => parse_preset(original),
+                    _ => None,
+                }
+            }
+            Err(_) => None,
+        };
+        // An existing unreadable or invalid overlay must never select another scene.
+        let Some(mut loaded) = loaded else {
             return false;
         };
         // Automate kept the smoke-timing bank (`dial_0`) across scene loads.
@@ -294,9 +335,54 @@ impl PresetBank {
     }
 
     pub fn save_slot(&self, slot: usize, state: &ControllerState) {
+        if slot >= SCENE_COUNT {
+            return;
+        }
         let _ = std::fs::create_dir_all(&self.dir);
         save_state_file(&self.slot_path(slot), state);
     }
+}
+
+#[derive(DeRon)]
+struct LegacyControllerState {
+    fade: [f32; 9],
+    dial_a: [f32; 8],
+    dial_b: [f32; 8],
+    dial_c: [f32; 8],
+}
+
+fn parse_preset(text: &str) -> Option<ControllerState> {
+    if let Ok(state) = ControllerState::deserialize_ron(text) {
+        return Some(state);
+    }
+    let legacy = LegacyControllerState::deserialize_ron(text).ok()?;
+    // The January 14 hardware migration (683bbf606) merged both speed knobs.
+    // They agree (both zero) in all three recovered legacy scenes. Reject an
+    // ambiguous override rather than silently discarding one of its speeds.
+    if legacy.dial_a[6] != legacy.dial_a[7] {
+        return None;
+    }
+    let mut state = ControllerState {
+        fade: legacy.fade,
+        tempo: legacy.dial_a[6],
+        ..Default::default()
+    };
+    state.fade.swap(1, 2); // Inner/outer movers.
+    state.fade.swap(6, 7); // UV.
+    state.dial_1[..6].copy_from_slice(&legacy.dial_a[..6]);
+    state.dial_top[0] = legacy.dial_c[0];
+    state.dial_top[1] = legacy.dial_c[2];
+    state.dial_top[2] = legacy.dial_c[1];
+    state.dial_top[3] = legacy.dial_c[3];
+    state.dial_top[5] = legacy.dial_b[1];
+    state.dial_5[..4].copy_from_slice(&[
+        legacy.dial_b[0],
+        legacy.dial_b[2],
+        legacy.dial_b[3],
+        legacy.dial_b[4],
+    ]);
+    state.dial_0[..3].copy_from_slice(&legacy.dial_b[5..8]);
+    Some(state)
 }
 
 fn load_state_file(path: &Path) -> Option<ControllerState> {
@@ -469,6 +555,248 @@ impl Drop for RoomShow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestBank(PresetBank);
+
+    impl TestBank {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../local/agent_state/dmx-preset-tests")
+                .join(format!(
+                    "{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                ));
+            std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+            std::fs::create_dir(&dir).unwrap();
+            Self(PresetBank::new(dir))
+        }
+    }
+
+    impl Drop for TestBank {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0.dir).unwrap();
+        }
+    }
+
+    fn assert_state_eq(actual: &ControllerState, expected: &ControllerState) {
+        assert_eq!(actual.serialize_ron(), expected.serialize_ron());
+    }
+
+    #[test]
+    fn all_sixteen_originals_load_with_source_values_and_preserve_smoke() {
+        let bank = TestBank::new();
+        // Literal dial_5[0] and dial_top[2] values from the originals (legacy
+        // b0/c1 for P14–P16). Repeated P9–P12 are intentional, not deduplicated.
+        let expected = [
+            (0.4566929, 0.28346458),
+            (0.015748031, 0.31496063),
+            (0.48818898, 0.5590551),
+            (0.15748031, 0.97637796),
+            (0.015748031, 0.31496063),
+            (0.9212598, 0.27559054),
+            (0.03937008, 0.22834645),
+            (0.28346458, 0.27559054),
+            (0.511811, 0.28346458),
+            (0.511811, 0.28346458),
+            (0.511811, 0.28346458),
+            (0.511811, 0.28346458),
+            (0.511811, 0.9055118),
+            (0.93700784, 0.61417323),
+            (0.93700784, 0.61417323),
+            (0.36220473, 0.8976378),
+        ];
+        assert_eq!(SCENE_COUNT, expected.len());
+        let smoke = [0.11, 0.22, 0.33, 0.44, 0.55, 0.66, 0.77, 0.88];
+        for (slot, (laser, color)) in expected.into_iter().enumerate() {
+            let mut state = ControllerState { dial_0: smoke, ..Default::default() };
+            assert!(bank.0.load_slot(slot, &mut state), "P{}", slot + 1);
+            assert_eq!(state.dial_5[0], laser, "P{} laser", slot + 1);
+            assert_eq!(state.dial_top[2], color, "P{} color", slot + 1);
+            assert_eq!(state.tempo, if slot == 7 { 0.27999997 } else { 0.0 });
+            assert_eq!(state.dial_0, smoke);
+            if slot < 13 {
+                let mut original = ControllerState::deserialize_ron(RECOVERED_PRESETS[slot]).unwrap();
+                original.dial_0 = smoke;
+                assert_state_eq(&state, &original);
+            }
+        }
+        // Reading fallbacks does not copy them into the writable overlay.
+        assert_eq!(std::fs::read_dir(&bank.0.dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn recovered_legacy_values_follow_the_january_hardware_migration() {
+        let expected = [
+            (13, [0.0, 0.0, 0.27559054, 0.023622047, 0.0, 0.7559055, 0.0, 0.0, 0.015748031],
+                [0.38582677, 0.77165353, 0.61417323, 0.5748032, 0.0, 0.14173229, 0.0, 0.0],
+                [0.93700784, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0], 0.26771653),
+            (14, [0.0, 0.023622047, 0.0, 0.0, 0.0, 0.7559055, 0.26771653, 1.0, 0.015748031],
+                [0.38582677, 0.1496063, 0.61417323, 0.5748032, 0.0, 0.070866145, 0.0, 0.0],
+                [0.93700784, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0], 0.0),
+            (15, [0.0, 0.23622048, 0.1496063, 0.023622047, 0.0, 0.7559055, 0.0, 0.0, 0.015748031],
+                [0.38582677, 0.28346458, 0.8976378, 0.68503934, 0.0, 0.0, 0.0, 0.0],
+                [0.36220473, 0.42519686, 0.27559054, 0.8425197, 0.0, 0.0, 0.0, 0.0], 0.26771653),
+        ];
+        for (slot, fade, dial_top, dial_5, smoke) in expected {
+            let legacy = LegacyControllerState::deserialize_ron(RECOVERED_PRESETS[slot]).unwrap();
+            assert_eq!(legacy.dial_a[6], 0.0);
+            assert_eq!(legacy.dial_a[7], legacy.dial_a[6]);
+            let converted = parse_preset(RECOVERED_PRESETS[slot]).unwrap();
+            let expected = ControllerState {
+                fade,
+                dial_top,
+                dial_5,
+                dial_1: [0.7480315, 0.15748031, 0.0, 0.0, 0.43307087, 0.0, 0.0, 0.0],
+                dial_0: [0.0, 0.0, smoke, 0.0, 0.0, 0.0, 0.0, 0.0],
+                ..Default::default()
+            };
+            assert_state_eq(&converted, &expected);
+        }
+    }
+
+    const LEGACY_TEST: &str = "(
+        fade:(0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8),
+        dial_a:(0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.17),
+        dial_b:(0.21, 0.22, 0.23, 0.24, 0.25, 0.26, 0.27, 0.28),
+        dial_c:(0.31, 0.32, 0.33, 0.34, 0.35, 0.36, 0.37, 0.38),
+    )";
+
+    #[test]
+    fn legacy_mapping_retains_active_fields_even_when_originals_have_zeroes() {
+        let expected = ControllerState {
+            fade: [0.0, 0.2, 0.1, 0.3, 0.4, 0.5, 0.7, 0.6, 0.8],
+            tempo: 0.17,
+            dial_0: [0.26, 0.27, 0.28, 0.0, 0.0, 0.0, 0.0, 0.0],
+            dial_1: [0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.0, 0.0],
+            dial_5: [0.21, 0.23, 0.24, 0.25, 0.0, 0.0, 0.0, 0.0],
+            dial_top: [0.31, 0.33, 0.32, 0.34, 0.0, 0.22, 0.0, 0.0],
+            ..Default::default()
+        };
+        assert_state_eq(&parse_preset(LEGACY_TEST).unwrap(), &expected);
+        assert!(parse_preset(&LEGACY_TEST.replace("0.17, 0.17", "0.17, 0.18")).is_none());
+    }
+
+    #[test]
+    fn all_scenes_trigger_through_the_shared_desk() {
+        let bank = TestBank::new();
+        let mut desk = DeskState::default();
+        desk.state.dial_0 = [0.42; 8];
+        for slot in 0..SCENE_COUNT {
+            desk.scene_cooldown_until = 0.0;
+            assert_eq!(desk.trigger_scene(slot, &bank.0), DeskEvent::SceneLoad(slot));
+            assert_eq!(desk.last_scene, Some(slot));
+            assert_eq!(desk.buttons.preset.len(), SCENE_COUNT);
+            for (index, pressed) in desk.buttons.preset.iter().enumerate() {
+                assert_eq!(*pressed, index == slot);
+            }
+            assert_eq!(desk.state.dial_0, [0.42; 8]);
+        }
+        assert_eq!(desk.trigger_scene(SCENE_COUNT, &bank.0), DeskEvent::Ignored);
+    }
+
+    #[test]
+    fn original_thirteen_midi_scene_routes_keep_their_slots() {
+        let bank = TestBank::new();
+        let mut desk = DeskState::default();
+        for slot in 0..13 {
+            let (channel, note) = if slot < 8 { (slot as u8, 52) } else { (0, 82 + slot as u8 - 8) };
+            desk.scene_cooldown_until = 0.0;
+            assert_eq!(desk.handle_midi(note_on(channel, note), &bank.0), DeskEvent::SceneLoad(slot));
+            assert_eq!(desk.last_scene, Some(slot));
+            let mut expected = ControllerState::default();
+            assert!(bank.0.load_slot(slot, &mut expected));
+            assert_state_eq(&desk.state, &expected);
+            assert_eq!(desk.handle_midi([0x80 | channel, note, 0], &bank.0), DeskEvent::Continuous);
+            assert!(!desk.buttons.preset[slot]);
+        }
+        for data in [note_on(8, 52), note_on(9, 52), note_on(10, 52), note_on(0, 87), note_on(0, 88)] {
+            desk.scene_cooldown_until = 0.0;
+            assert_eq!(desk.handle_midi(data, &bank.0), DeskEvent::Ignored);
+        }
+    }
+
+    #[test]
+    fn explicit_overlay_wins_and_saves_only_to_that_overlay() {
+        let bank = TestBank::new();
+        let mut desk = DeskState::default();
+        desk.state.fade = [0.37; 9];
+        desk.state.tempo = 0.61;
+        desk.state.dial_0 = [0.28; 8];
+        desk.set_write(true);
+        assert_eq!(desk.trigger_scene(15, &bank.0), DeskEvent::SceneSave(15));
+        let mut loaded = ControllerState { dial_0: [0.82; 8], ..Default::default() };
+        assert!(bank.0.load_slot(15, &mut loaded));
+        let mut expected = desk.state;
+        expected.dial_0 = loaded.dial_0;
+        assert_state_eq(&loaded, &expected);
+        assert_eq!(loaded.dial_0, [0.82; 8]);
+        assert_eq!(std::fs::read_dir(&bank.0.dir).unwrap().count(), 1);
+        assert!(bank.0.load_slot(14, &mut loaded));
+        assert_eq!(loaded.dial_top[1], 0.1496063);
+
+        std::fs::write(bank.0.slot_path(15), LEGACY_TEST).unwrap();
+        assert!(bank.0.load_slot(15, &mut loaded));
+        assert_eq!(loaded.tempo, 0.17);
+        assert_eq!(loaded.dial_5[0], 0.21);
+        assert_eq!(loaded.dial_0, [0.82; 8]);
+    }
+
+    #[test]
+    fn invalid_or_unreadable_overrides_do_not_fall_back_or_change_state() {
+        let bank = TestBank::new();
+        let mut desk = DeskState::default();
+        desk.state.fade = [0.37; 9];
+        desk.last_scene = Some(2);
+        let before = desk.state;
+        for invalid in [String::new(), "(fade: wrong)".into(), LEGACY_TEST.replace("0.17, 0.17", "0.17, 0.18")] {
+            std::fs::write(bank.0.slot_path(13), invalid).unwrap();
+            desk.scene_cooldown_until = 0.0;
+            assert_eq!(desk.trigger_scene(13, &bank.0), DeskEvent::SceneMissing(13));
+            assert_state_eq(&desk.state, &before);
+            assert_eq!(desk.last_scene, Some(2));
+        }
+        std::fs::remove_file(bank.0.slot_path(13)).unwrap();
+        std::fs::create_dir(bank.0.slot_path(13)).unwrap();
+        assert!(!bank.0.load_slot(13, &mut desk.state));
+        assert_state_eq(&desk.state, &before);
+        assert!(!bank.0.load_slot(SCENE_COUNT, &mut desk.state));
+        #[cfg(unix)]
+        {
+            std::fs::remove_dir(bank.0.slot_path(13)).unwrap();
+            std::os::unix::fs::symlink(bank.0.dir.join("missing.ron"), bank.0.slot_path(13)).unwrap();
+            assert!(!bank.0.load_slot(13, &mut desk.state));
+            assert_state_eq(&desk.state, &before);
+        }
+    }
+
+    #[test]
+    fn current_state_comes_only_from_the_writable_overlay() {
+        let bank = TestBank::new();
+        assert!(bank.0.load_current().is_none());
+        let current = ControllerState { tempo: 0.71, dial_0: [0.83; 8], ..Default::default() };
+        std::fs::write(bank.0.dir.join("dmx.ron"), current.serialize_ron()).unwrap();
+        assert!(bank.0.load_current().is_none());
+        bank.0.save_current(&current);
+        assert_state_eq(&bank.0.load_current().unwrap(), &current);
+        let mut scene = ControllerState::default();
+        assert!(bank.0.load_slot(0, &mut scene));
+        assert_eq!(scene.tempo, 0.0);
+    }
+
+    #[test]
+    fn default_overlay_is_absolute_and_environment_override_is_honored() {
+        let default = PathBuf::from(DEFAULT_PRESET_DIR);
+        assert!(default.is_absolute());
+        assert!(default.ends_with("local/vj/dmx/2025-04-30"));
+        let expected = std::env::var("VJ_DMX_PRESET_DIR")
+            .ok()
+            .filter(|path| !path.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or(default);
+        assert_eq!(PresetBank::default_dir(), expected);
+    }
 
     fn cc(channel: u8, param: u8, value: u8) -> [u8; 3] {
         [0xb0 | channel, param, value]

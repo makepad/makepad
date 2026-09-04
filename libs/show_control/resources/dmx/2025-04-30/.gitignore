@@ -1,0 +1,3 @@
+# Preserve the recovered originals despite the repository-wide dmx*.ron rule.
+!dmx[0-9].ron
+!dmx1[0-5].ron
