@@ -183,9 +183,6 @@ mod.flow.ui.AskFace = Face{
 
 mod.flow.ui.ImageFace = Face{
     spacing: 0
-    preview := mod.flow.ui.ValueImage{
-        show := @self
-    }
     params := Strip{
         summary := Meta{param := @summary}
         format := mod.flow.ui.FormatPicker{}
