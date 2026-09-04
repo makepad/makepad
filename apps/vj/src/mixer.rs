@@ -28,7 +28,7 @@ use crate::wave_analysis::{DeckClock, TrackGrid};
 use crate::music_dsp::{
     audible, knob, knob64,
     Autopan, Bitcrusher, DeckEcho, DeckEq, Distortion, Flanger, FrameSource, Freeze, MotorEnd,
-    ParamRamp, Phaser, RateReader, ScratchRamp, Tremolo,
+    ParamRamp, Phaser, RateReader, ScratchRamp, StereoWidth, Tremolo,
     Stretcher, STEM_COUNT,
     STRETCH_BYPASS_EPSILON, STRETCH_RATIO_MAX, STRETCH_RATIO_MIN, WSOLA_WINDOW,
     BRAKE_SECS, CENSOR_FLIP_SECS, CENSOR_RATE, CENSOR_RETURN_SECS, SOFT_START_SECS,
@@ -901,6 +901,7 @@ enum EffectKind {
     Distortion(Distortion),
     Phaser(Phaser),
     Autopan(Autopan),
+    StereoWidth(StereoWidth),
 }
 
 impl EffectKind {
@@ -916,15 +917,16 @@ impl EffectKind {
             EffectKind::Distortion(distortion) => distortion.process(frame, device_rate),
             EffectKind::Phaser(phaser) => phaser.process(frame, device_rate),
             EffectKind::Autopan(autopan) => autopan.process(frame, device_rate),
+            EffectKind::StereoWidth(stereo_width) => stereo_width.process(frame, device_rate),
         }
     }
 }
 
-const DECK_CHAIN_SLOTS: usize = 9;
+const DECK_CHAIN_SLOTS: usize = 10;
 
 /// A deck's pre-fader tone chain: a fixed list of slots, walked in order.
 /// Not a `Vec` -- sized once, at compile time, never resized. Today's
-/// nine slots are the whole roster and are permanently populated by
+/// ten slots are the whole roster and are permanently populated by
 /// construction; a slot that can stand empty, or be reassigned, is a
 /// separate decision for whenever growing the roster again asks for one.
 struct DeckChain {
@@ -944,6 +946,7 @@ impl DeckChain {
                 EffectKind::Distortion(Distortion::new()),
                 EffectKind::Phaser(Phaser::new()),
                 EffectKind::Autopan(Autopan::new()),
+                EffectKind::StereoWidth(StereoWidth::new()),
             ],
         }
     }
@@ -1012,6 +1015,12 @@ impl DeckChain {
     fn autopan_mut(&mut self) -> &mut Autopan {
         match &mut self.slots[8] {
             EffectKind::Autopan(autopan) => autopan,
+            _ => unreachable!(),
+        }
+    }
+    fn stereo_width_mut(&mut self) -> &mut StereoWidth {
+        match &mut self.slots[9] {
+            EffectKind::StereoWidth(stereo_width) => stereo_width,
             _ => unreachable!(),
         }
     }
@@ -1197,13 +1206,14 @@ impl DeckVoice {
         self.chain.flanger_mut().silence();
         self.chain.bitcrusher_mut().silence();
         self.chain.phaser_mut().reset();
-        // No call for the tremolo here or at the other three record-
-        // change sites, on purpose: its only state is an LFO phase, not
-        // audio content, so there is nothing from the old record for a
-        // stale line to leak -- and forcibly resetting the phase would
-        // itself be a discontinuity if the effect is already engaged
-        // (say under a MIX target spanning both decks) when a load
-        // lands on just one of them.
+        // No call for the tremolo, the distortion, the autopan or the
+        // stereo width here or at the other three record-change sites,
+        // on purpose: none of them holds audio content, only an LFO
+        // phase or a pure `ParamRamp`, so there is nothing from the old
+        // record for a stale line to leak -- and forcibly resetting a
+        // phase would itself be a discontinuity if the effect is
+        // already engaged (say under a MIX target spanning both decks)
+        // when a load lands on just one of them.
         self.reset_blend();
         if load.play {
             self.transport.slew(1.0, LOAD_SWAP_SECS);
@@ -2687,6 +2697,19 @@ impl Mixer {
         s.decks[deck.index()].chain.autopan_mut().set_rate(hz);
     }
 
+    /// The stereo width's on/off switch.
+    pub fn set_deck_stereo_width(&self, deck: DeckId, on: bool) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.stereo_width_mut().set_wet(if on { 1.0 } else { 0.0 });
+    }
+
+    /// How far the side signal is scaled: 0 collapses to mono, 1 is the
+    /// original image, above 1 widens further.
+    pub fn set_deck_stereo_width_amount(&self, deck: DeckId, width: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.stereo_width_mut().set_width(width);
+    }
+
     /// Momentary FREEZE: while held, the deck repeats a beat-sized
     /// capture of what it just played, post-filter, while the record
     /// itself keeps running underneath. `secs` is at the DEVICE --
@@ -4161,6 +4184,17 @@ pub(crate) mod fixtures {
         Arc::new(TrackPcm { frames: vec![[value, value]; frames], sample_rate: rate })
     }
 
+    /// A constant, but stereo: left and right held at their own separate
+    /// levels for the whole clip. `const_pcm`'s left and right are
+    /// identical, so side (L-R) is exactly zero throughout -- fine for a
+    /// mono-summing effect's click test, but it would make a stereo-width
+    /// click test vacuous: the left channel it measures never moves no
+    /// matter what `width` does, since mid+side*width collapses to the
+    /// same constant when side is already zero.
+    pub(crate) fn const_stereo_pcm(left: i16, right: i16, frames: usize, rate: u32) -> Arc<TrackPcm> {
+        Arc::new(TrackPcm { frames: vec![[left, right]; frames], sample_rate: rate })
+    }
+
     /// First half `a`, second half `b`: a signal a raw splice cannot hide
     /// in, for testing that jumps land as blends.
     pub(crate) fn split_pcm(a: i16, b: i16, frames: usize, rate: u32) -> Arc<TrackPcm> {
@@ -4218,6 +4252,30 @@ pub(crate) mod fixtures {
                     .sin();
                 let sample = (value * 12_000.0) as i16;
                 [sample, sample]
+            })
+            .collect();
+        Arc::new(TrackPcm { frames, sample_rate: rate })
+    }
+
+    /// A genuinely stereo tone: independent left and right frequencies,
+    /// so mid and side are both nonzero throughout. `tone_pcm`'s L and R
+    /// are identical, which makes side (L-R) exactly zero and would make
+    /// a stereo-width test vacuous regardless of what the effect does --
+    /// the same "nice value hides the bug" trap the bitcrusher's click
+    /// test found in a mono constant.
+    pub(crate) fn stereo_tone_pcm(
+        freq_l: f64,
+        freq_r: f64,
+        rate: u32,
+        seconds: f64,
+    ) -> Arc<TrackPcm> {
+        let len = (rate as f64 * seconds) as usize;
+        let frames = (0..len)
+            .map(|index| {
+                let t = index as f64 / rate as f64;
+                let l = (2.0 * std::f64::consts::PI * freq_l * t).sin();
+                let r = (2.0 * std::f64::consts::PI * freq_r * t).sin();
+                [(l * 12_000.0) as i16, (r * 12_000.0) as i16]
             })
             .collect();
         Arc::new(TrackPcm { frames, sample_rate: rate })

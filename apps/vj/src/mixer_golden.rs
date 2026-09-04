@@ -21,7 +21,9 @@
 //! are kept, marked, and un-marked by the work that ramps them.
 
 use crate::decks::{DeckId, SpinMotion};
-use crate::mixer::fixtures::{const_pcm, render, split_pcm, tone_pcm};
+use crate::mixer::fixtures::{
+    const_pcm, const_stereo_pcm, render, split_pcm, stereo_tone_pcm, tone_pcm,
+};
 use crate::mixer::{Mixer, TrackPcm};
 use crate::mixer_golden_refs::reference;
 use crate::wave_analysis::TrackGrid;
@@ -471,6 +473,22 @@ fn golden_autopan_sweep() {
     assert_golden("autopan_sweep", &left, &right);
 }
 
+/// A genuinely stereo source (independent left and right tones, not the
+/// mono `tone_pcm` every other golden test above uses): the whole point
+/// of the effect is what it does to the DIFFERENCE between the channels,
+/// which is exactly zero on a mono source, so a mono tone here would
+/// pass regardless of whether the mid/side math is right.
+#[test]
+fn golden_stereo_width_narrow() {
+    let mixer = deck_a(stereo_tone_pcm(233.0, 317.0, 48_000, 3.0));
+    mixer.set_deck_stereo_width(DeckId::A, true);
+    mixer.set_deck_stereo_width_amount(DeckId::A, 0.3);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let (left, right) = capture(&mixer, CAPTURE, |_| {});
+    assert_golden("stereo_width_narrow", &left, &right);
+}
+
 // ---------------------------------------------------------------------------
 // clicks
 // ---------------------------------------------------------------------------
@@ -819,6 +837,34 @@ fn engaging_and_releasing_the_autopan_are_click_free() {
         _ => {}
     });
     assert!(worst < CLICK, "engaging or releasing the autopan must ramp, biggest step {worst}");
+}
+
+#[test]
+fn engaging_and_releasing_the_stereo_width_are_click_free() {
+    let mixer = deck_a(const_stereo_pcm(16_384, -8_192, 480_000, 48_000));
+    mixer.set_deck_stereo_width_amount(DeckId::A, 1.8);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| match index {
+        8 => mixer.set_deck_stereo_width(DeckId::A, true),
+        24 => mixer.set_deck_stereo_width(DeckId::A, false),
+        _ => {}
+    });
+    assert!(worst < CLICK, "engaging or releasing the stereo width must ramp, biggest step {worst}");
+}
+
+#[test]
+fn a_stereo_width_amount_change_while_engaged_is_click_free() {
+    let mixer = deck_a(const_stereo_pcm(16_384, -8_192, 480_000, 48_000));
+    mixer.set_deck_stereo_width(DeckId::A, true);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| {
+        if index == 8 {
+            mixer.set_deck_stereo_width_amount(DeckId::A, 0.0);
+        }
+    });
+    assert!(worst < CLICK, "a width change must ramp, biggest step {worst}");
 }
 
 #[test]

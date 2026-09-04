@@ -2801,6 +2801,75 @@ impl Autopan {
     }
 }
 
+pub(crate) const STEREO_WIDTH_MIN: f32 = 0.0;
+pub(crate) const STEREO_WIDTH_MAX: f32 = 2.0;
+pub(crate) const STEREO_WIDTH_DEFAULT: f32 = 1.5;
+
+/// One deck's stereo width: mid/side decompose, scale the side signal
+/// by `width`, recombine. `width = 1.0` is the identity -- mid + side
+/// and mid - side reconstruct the original left and right exactly --
+/// `width = 0.0` collapses to mono (both channels become the mid), and
+/// `width > 1.0` exaggerates the difference between the channels.
+///
+/// No line, no filter history -- like [`Tremolo`]/[`Autopan`], the
+/// whole state is two `ParamRamp`s, so no lifecycle hook is wired for
+/// this one anywhere either. Deliberately no internal saturation: a
+/// worst-case, fully out-of-phase source at the top of the width range
+/// can genuinely exceed unity, and the master bus's own clamp downstream
+/// is what catches that, the same safety net every deck already relies
+/// on rather than each effect duplicating it.
+pub struct StereoWidth {
+    wet: ParamRamp,
+    width: ParamRamp,
+}
+
+impl StereoWidth {
+    pub fn new() -> StereoWidth {
+        StereoWidth { wet: ParamRamp::at(0.0), width: ParamRamp::at(STEREO_WIDTH_DEFAULT) }
+    }
+
+    /// The on/off switch.
+    pub fn set_wet(&mut self, wet: f32) {
+        if let Some(wet) = knob(wet, 0.0, 1.0) {
+            self.wet.slew(wet, EQ_ENGAGE_SECS);
+        }
+    }
+
+    /// How much the side signal is scaled: 0 collapses to mono, 1 is
+    /// the identity, above 1 widens further. A plain multiply is
+    /// continuous everywhere, so -- like the tremolo's depth -- this
+    /// needs no crossfaded handover.
+    pub fn set_width(&mut self, width: f32) {
+        if let Some(width) = knob(width, STEREO_WIDTH_MIN, STEREO_WIDTH_MAX) {
+            self.width.slew(width, EQ_ENGAGE_SECS);
+        }
+    }
+
+    pub fn engaged(&self) -> bool {
+        self.wet.target() > 0.0
+    }
+
+    /// Process one stereo frame.
+    #[inline]
+    pub fn process(&mut self, frame: [f32; 2], device_rate: f32) -> [f32; 2] {
+        let wet = self.wet.tick(device_rate);
+        if wet == 0.0 && self.wet.target() == 0.0 {
+            // No line, no tail: off is exactly the input.
+            return frame;
+        }
+        let width = self.width.tick(device_rate);
+
+        let mid = (frame[0] + frame[1]) * 0.5;
+        let side = (frame[0] - frame[1]) * 0.5;
+        let widened = [mid + side * width, mid - side * width];
+
+        [
+            frame[0] + (widened[0] - frame[0]) * wet,
+            frame[1] + (widened[1] - frame[1]) * wet,
+        ]
+    }
+}
+
 // ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
@@ -5412,5 +5481,135 @@ mod tests {
         assert_eq!(ap.depth.target(), 1.0);
         ap.set_depth(-1.0);
         assert_eq!(ap.depth.target(), 0.0);
+    }
+
+    /// Off, a fresh unit is exactly its input.
+    #[test]
+    fn a_stereo_width_that_was_never_engaged_is_bit_transparent() {
+        let rate = 48_000.0f32;
+        let mut sw = StereoWidth::new();
+        let mut phase = 0.0f32;
+        for _ in 0..4_000 {
+            phase += 2.0 * PI * 37.0 / rate;
+            let l = phase.sin() * 0.6;
+            let r = (phase * 1.7).cos() * 0.4;
+            assert_eq!(sw.process([l, r], rate), [l, r]);
+        }
+    }
+
+    /// The property `width = 1.0` exists for: mid + side and mid - side
+    /// reconstruct the original left and right exactly, so the neutral
+    /// point of the knob is a true no-op regardless of how engaged the
+    /// effect is -- unlike a filter or a pan law, there is no natural
+    /// "centre" coloration to correct for here, so this has to hold
+    /// exactly, not merely approximately.
+    #[test]
+    fn stereo_width_at_unity_is_transparent_when_engaged() {
+        let rate = 48_000.0f32;
+        let mut sw = StereoWidth::new();
+        sw.set_wet(1.0);
+        sw.set_width(1.0);
+        for _ in 0..SETTLE_FRAMES {
+            sw.process([0.0, 0.0], rate);
+        }
+        let mut phase = 0.0f32;
+        for _ in 0..4_000 {
+            phase += 2.0 * PI * 37.0 / rate;
+            let l = phase.sin() * 0.6;
+            let r = (phase * 1.7).cos() * 0.4;
+            let out = sw.process([l, r], rate);
+            assert!((out[0] - l).abs() < 1e-4, "{out:?} vs [{l}, {r}]");
+            assert!((out[1] - r).abs() < 1e-4, "{out:?} vs [{l}, {r}]");
+        }
+    }
+
+    /// The defining property at the other end of the range: `width = 0`
+    /// collapses both channels onto the mid signal, a genuinely mono
+    /// output, not merely a quieter or narrower one.
+    #[test]
+    fn stereo_width_at_zero_collapses_to_mono() {
+        let rate = 48_000.0f32;
+        let mut sw = StereoWidth::new();
+        sw.set_wet(1.0);
+        sw.set_width(0.0);
+        for _ in 0..SETTLE_FRAMES {
+            sw.process([0.0, 0.0], rate);
+        }
+        let mut phase = 0.0f32;
+        for _ in 0..4_000 {
+            phase += 2.0 * PI * 37.0 / rate;
+            let l = phase.sin() * 0.6;
+            let r = (phase * 1.7).cos() * 0.4;
+            let out = sw.process([l, r], rate);
+            let mid = (l + r) * 0.5;
+            assert!((out[0] - mid).abs() < 1e-4, "{out:?} vs mid {mid}");
+            assert!((out[1] - mid).abs() < 1e-4, "{out:?} vs mid {mid}");
+            assert!((out[0] - out[1]).abs() < 1e-6, "not mono: {out:?}");
+        }
+    }
+
+    /// Bounded and finite at the harshest settings -- a fully
+    /// out-of-phase source at the top of the width range, the one case
+    /// the doc comment calls out as able to exceed unity on its own.
+    #[test]
+    fn stereo_width_stays_bounded_at_the_harshest_settings() {
+        let rate = 48_000.0f32;
+        let mut sw = StereoWidth::new();
+        sw.set_wet(1.0);
+        sw.set_width(STEREO_WIDTH_MAX);
+        for _ in 0..SETTLE_FRAMES {
+            sw.process([0.0, 0.0], rate);
+        }
+        let mut phase = 0.0f32;
+        for _ in 0..48_000usize {
+            phase += 2.0 * PI * 233.0 / rate;
+            let x = phase.sin() * 0.9;
+            let out = sw.process([x, -x], rate);
+            assert!(out[0].is_finite() && out[0].abs() < 4.0, "unbounded: {out:?}");
+            assert!(out[1].is_finite() && out[1].abs() < 4.0, "unbounded: {out:?}");
+        }
+    }
+
+    /// No line, no history: disengage completes exactly the ramp's own
+    /// duration after `set_wet(0.0)`.
+    #[test]
+    fn switching_the_stereo_width_off_returns_to_bit_exact_bypass_after_its_ramp() {
+        let rate = 48_000.0f32;
+        let mut sw = StereoWidth::new();
+        sw.set_wet(1.0);
+        for _ in 0..SETTLE_FRAMES {
+            sw.process([0.5, 0.2], rate);
+        }
+        sw.set_wet(0.0);
+        for _ in 0..1_000 {
+            sw.process([0.5, 0.2], rate);
+        }
+        assert!(!sw.engaged());
+        for i in 0..1_000 {
+            let l = (i as f32 * 0.037).sin() * 0.5;
+            let r = (i as f32 * 0.061).cos() * 0.3;
+            assert_eq!(
+                sw.process([l, r], rate),
+                [l, r],
+                "a bit-exact bypass, not merely quiet"
+            );
+        }
+    }
+
+    #[test]
+    fn stereo_width_setters_clamp_to_their_documented_ranges() {
+        let mut sw = StereoWidth::new();
+        sw.set_wet(f32::NAN);
+        assert_eq!(sw.wet.target(), 0.0, "a bad value moves nothing");
+        sw.set_wet(5.0);
+        assert_eq!(sw.wet.target(), 1.0);
+        sw.set_wet(-5.0);
+        assert_eq!(sw.wet.target(), 0.0);
+        sw.set_width(f32::INFINITY);
+        assert_eq!(sw.width.target(), STEREO_WIDTH_DEFAULT, "unmoved by a bad value");
+        sw.set_width(10.0);
+        assert_eq!(sw.width.target(), STEREO_WIDTH_MAX);
+        sw.set_width(-5.0);
+        assert_eq!(sw.width.target(), STEREO_WIDTH_MIN);
     }
 }

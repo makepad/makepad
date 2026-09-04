@@ -2563,6 +2563,21 @@ script_mod! {
                                         default: 1.0
                                     }
                                 }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    sfx_fx_stereo_width := PillButton{width: 56 text: "WIDTH"}
+                                    sfx_fx_stereo_width_amount := Slider{
+                                        width: 170
+                                        text: "width"
+                                        min: 0.0
+                                        max: 2.0
+                                        default: 1.5
+                                    }
+                                }
                             }
 
                             // ============ MESH ============
@@ -14153,6 +14168,10 @@ p2 {}
                 DeckCmd::SetAutopanRate { deck, hz } => {
                     self.mixer.set_deck_autopan_rate(deck, hz)
                 }
+                DeckCmd::SetStereoWidth { deck, on } => self.mixer.set_deck_stereo_width(deck, on),
+                DeckCmd::SetStereoWidthAmount { deck, amount } => {
+                    self.mixer.set_deck_stereo_width_amount(deck, amount)
+                }
                 DeckCmd::SetStemGain { deck, stem, gain } => {
                     self.mixer.set_deck_stem_gain(deck, stem, gain)
                 }
@@ -14315,6 +14334,8 @@ p2 {}
         let (phaser_on, phaser_rate, phaser_feedback) =
             (deck.phaser_on, deck.phaser_rate as f64, deck.phaser_feedback as f64);
         let (autopan_on, autopan_rate) = (deck.autopan_on, deck.autopan_rate as f64);
+        let (stereo_width_on, stereo_width_amount) =
+            (deck.stereo_width_on, deck.stereo_width_amount as f64);
         self.ui.slider(cx, ids!(sfx_fx_feedback)).set_value(cx, feedback);
         self.paint_chip(cx, ids!(sfx_fx_flanger), flanger_on, None);
         self.ui.slider(cx, ids!(sfx_fx_flanger_rate)).set_value(cx, flanger_rate);
@@ -14329,6 +14350,8 @@ p2 {}
         self.ui.slider(cx, ids!(sfx_fx_phaser_feedback)).set_value(cx, phaser_feedback);
         self.paint_chip(cx, ids!(sfx_fx_autopan), autopan_on, None);
         self.ui.slider(cx, ids!(sfx_fx_autopan_rate)).set_value(cx, autopan_rate);
+        self.paint_chip(cx, ids!(sfx_fx_stereo_width), stereo_width_on, None);
+        self.ui.slider(cx, ids!(sfx_fx_stereo_width_amount)).set_value(cx, stereo_width_amount);
     }
 
     /// Push a deck's tone/stem knob positions back onto the surface, so the
@@ -29327,6 +29350,32 @@ impl MatchEvent for App {
                 FxTarget::Mix => {
                     let mut cmds = self.decks.set_autopan_rate(DeckId::A, v as f32);
                     cmds.extend(self.decks.set_autopan_rate(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        if self.ui.button(cx, ids!(sfx_fx_stereo_width)).clicked(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.toggle_stereo_width(DeckId::A),
+                FxTarget::B => self.decks.toggle_stereo_width(DeckId::B),
+                FxTarget::Mix => {
+                    let on = !self.decks.deck(DeckId::A).stereo_width_on;
+                    let mut cmds = self.decks.set_stereo_width(DeckId::A, on);
+                    cmds.extend(self.decks.set_stereo_width(DeckId::B, on));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+            self.sync_sfx_fx_ui(cx);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_stereo_width_amount)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_stereo_width_amount(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_stereo_width_amount(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_stereo_width_amount(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_stereo_width_amount(DeckId::B, v as f32));
                     cmds
                 }
             };

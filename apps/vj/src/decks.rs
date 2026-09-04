@@ -1300,6 +1300,12 @@ pub struct DeckState {
     pub autopan_on: bool,
     /// The autopan LFO's sweep speed, in Hz.
     pub autopan_rate: f32,
+    /// Whether the stereo width is on. Same channel-strip treatment as
+    /// the autopan beside it.
+    pub stereo_width_on: bool,
+    /// How far the side signal is scaled: 0 collapses to mono, 1 is the
+    /// original image, above 1 widens further.
+    pub stereo_width_amount: f32,
     /// Per-stem gains, in [`crate::music_dsp::StemKind`] order.
     pub stem_gain: [f32; STEM_COUNT],
     pub stem_kill: [bool; STEM_COUNT],
@@ -1385,6 +1391,8 @@ impl Default for DeckState {
             phaser_feedback: crate::music_dsp::PHASER_FEEDBACK_DEFAULT,
             autopan_on: false,
             autopan_rate: crate::music_dsp::AUTOPAN_RATE_DEFAULT,
+            stereo_width_on: false,
+            stereo_width_amount: crate::music_dsp::STEREO_WIDTH_DEFAULT,
             stem_gain: [1.0; STEM_COUNT],
             stem_kill: [false; STEM_COUNT],
             stem_solo: [false; STEM_COUNT],
@@ -1743,6 +1751,11 @@ pub enum DeckCmd {
     SetAutopan { deck: DeckId, on: bool },
     /// The autopan LFO's sweep speed, in Hz.
     SetAutopanRate { deck: DeckId, hz: f32 },
+    /// The stereo width's on/off switch.
+    SetStereoWidth { deck: DeckId, on: bool },
+    /// How far the side signal is scaled: 0 collapses to mono, 1 is the
+    /// original image, above 1 widens further.
+    SetStereoWidthAmount { deck: DeckId, amount: f32 },
     /// One stem lane's gain, 0 = muted.
     SetStemGain { deck: DeckId, stem: usize, gain: f32 },
     SplatSet { deck: DeckId, grid: Arc<SplatGrid> },
@@ -2202,6 +2215,8 @@ impl DeckEngine {
             DeckCmd::SetPhaserFeedback { deck, feedback: state.phaser_feedback },
             DeckCmd::SetAutopan { deck, on: state.autopan_on },
             DeckCmd::SetAutopanRate { deck, hz: state.autopan_rate },
+            DeckCmd::SetStereoWidth { deck, on: state.stereo_width_on },
+            DeckCmd::SetStereoWidthAmount { deck, amount: state.stereo_width_amount },
         ];
         for band in 0..3 {
             cmds.push(DeckCmd::SetEqBand { deck, band, gain: state.eq_effective(band) });
@@ -5226,6 +5241,32 @@ impl DeckEngine {
         vec![DeckCmd::SetAutopanRate { deck, hz: state.autopan_rate }]
     }
 
+    /// The stereo width's on/off switch.
+    pub fn toggle_stereo_width(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.stereo_width_on = !state.stereo_width_on;
+        vec![DeckCmd::SetStereoWidth { deck, on: state.stereo_width_on }]
+    }
+
+    /// Set the stereo width's on/off switch to an explicit value, rather
+    /// than flipping whatever it already was -- what a MIX-linked
+    /// broadcast needs, the same reason [`Self::set_flanger`] exists.
+    pub fn set_stereo_width(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
+        self.deck_mut(deck).stereo_width_on = on;
+        vec![DeckCmd::SetStereoWidth { deck, on }]
+    }
+
+    /// How far the side signal is scaled: 0 collapses to mono, 1 is the
+    /// original image, above 1 widens further.
+    pub fn set_stereo_width_amount(&mut self, deck: DeckId, amount: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.stereo_width_amount = amount.clamp(
+            crate::music_dsp::STEREO_WIDTH_MIN,
+            crate::music_dsp::STEREO_WIDTH_MAX,
+        );
+        vec![DeckCmd::SetStereoWidthAmount { deck, amount: state.stereo_width_amount }]
+    }
+
     /// Stem knob. Inert until the separated stems are loaded — the deck is
     /// playing the full mix and there is nothing to turn down.
     pub fn set_stem(&mut self, deck: DeckId, stem: usize, gain: f32) -> Vec<DeckCmd> {
@@ -5966,6 +6007,52 @@ mod tests {
         let cmds = e.track_ready(d, g, 20.0);
         assert!(cmds.contains(&DeckCmd::SetAutopan { deck: DeckId::B, on: true }));
         assert!(cmds.contains(&DeckCmd::SetAutopanRate { deck: DeckId::B, hz: 6.0 }));
+    }
+
+    #[test]
+    fn stereo_width_amount_clamps_to_its_documented_range() {
+        let mut e = DeckEngine::new();
+        assert_eq!(
+            e.set_stereo_width_amount(DeckId::A, 10.0),
+            vec![DeckCmd::SetStereoWidthAmount {
+                deck: DeckId::A,
+                amount: crate::music_dsp::STEREO_WIDTH_MAX
+            }]
+        );
+        assert_eq!(
+            e.set_stereo_width_amount(DeckId::A, -1.0),
+            vec![DeckCmd::SetStereoWidthAmount {
+                deck: DeckId::A,
+                amount: crate::music_dsp::STEREO_WIDTH_MIN
+            }]
+        );
+    }
+
+    #[test]
+    fn toggle_stereo_width_flips_and_set_stereo_width_lands_on_an_explicit_side() {
+        let mut e = DeckEngine::new();
+        assert!(!e.deck(DeckId::A).stereo_width_on);
+        assert_eq!(
+            e.toggle_stereo_width(DeckId::A),
+            vec![DeckCmd::SetStereoWidth { deck: DeckId::A, on: true }]
+        );
+        assert!(e.deck(DeckId::A).stereo_width_on);
+        assert_eq!(
+            e.set_stereo_width(DeckId::B, true),
+            vec![DeckCmd::SetStereoWidth { deck: DeckId::B, on: true }]
+        );
+        assert!(e.deck(DeckId::B).stereo_width_on);
+    }
+
+    #[test]
+    fn a_load_carries_the_operators_stereo_width_settings() {
+        let mut e = DeckEngine::new();
+        e.toggle_stereo_width(DeckId::B);
+        e.set_stereo_width_amount(DeckId::B, 0.4);
+        let (d, g) = load_gen(&e.click(item(3), DeckTarget::B));
+        let cmds = e.track_ready(d, g, 20.0);
+        assert!(cmds.contains(&DeckCmd::SetStereoWidth { deck: DeckId::B, on: true }));
+        assert!(cmds.contains(&DeckCmd::SetStereoWidthAmount { deck: DeckId::B, amount: 0.4 }));
     }
 
     // -----------------------------------------------------------------
