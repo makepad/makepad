@@ -21,6 +21,7 @@ workspace.members = [
     "apps/flow-server",
     "apps/flow-ui",
     "libs/flowgraph",
+    "libs/media_view",
     "apps/ai-hub",
     "apps/vj",
     "apps/mixer",

@@ -30,6 +30,7 @@
 //! PNG captures at fixed ticks, exit once all are on disk (the rig
 //! example's RIG_CAPTURE_DIR pattern).
 
+use crate::{is_glb, MediaFit, MediaKind, MediaViewAction};
 use makepad_render::play::{LocoState, Locomotion, PlayInput};
 use makepad_render::skin::{PoseBuffer, SkinnedModel, SKIN_VERTEX_FLOATS};
 use makepad_render::{
@@ -43,7 +44,7 @@ use makepad_widgets::*;
 // The static-PBR branch lives in its own file; declared from here (not
 // main.rs, which another lane owns) — `#[path]` resolves the sibling in src/.
 #[path = "pbr_preview.rs"]
-pub(crate) mod pbr_preview;
+pub mod pbr_preview;
 use pbr_preview::{PbrDisplayControls, PbrPreview, PbrStatus};
 
 script_mod! {
@@ -614,6 +615,9 @@ pub struct MeshView {
     draw_hud: DrawText,
     #[live(vec4(0.03, 0.045, 0.075, 1.0))]
     clear_color: Vec4f,
+    /// Hosts stack this pane beside other media panes and show one at a time.
+    #[live(true)]
+    visible: bool,
     #[new]
     pass: DrawPass,
     #[new]
@@ -787,14 +791,14 @@ fn is_playable_skin_shape(joints: usize, clips: usize) -> bool {
     joints > 0 && joints <= 256 && clips > 0
 }
 
-pub(crate) fn is_playable_skin(model: &SkinnedModel) -> bool {
+pub fn is_playable_skin(model: &SkinnedModel) -> bool {
     is_playable_skin_shape(model.joint_count(), model.clips.len())
 }
 
 /// Base-color image bytes out of a GLB, if it embeds one: material 0's
 /// baseColorTexture source, else image 0 (skin.rs ignores materials by
 /// design — the host binds the texture itself).
-pub(crate) fn extract_base_color(glb: &[u8]) -> Option<Vec<u8>> {
+pub fn extract_base_color(glb: &[u8]) -> Option<Vec<u8>> {
     let loaded = makepad_gltf::load_gltf_from_bytes(glb, None).ok()?;
     let doc = &loaded.document;
     let image_index = doc
@@ -817,7 +821,7 @@ fn load_sprite_frames(cx: &mut Cx, path: &std::path::Path) -> Vec<Texture> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     if ext.eq_ignore_ascii_case("billboard") {
         let text = std::fs::read_to_string(path).unwrap_or_default();
-        if let Ok(bb) = makepad_asset_importer::stateful_billboard::StatefulBillboard::parse(&text)
+        if let Ok(bb) = makepad_asset_data::stateful_billboard::StatefulBillboard::parse(&text)
         {
             let mut out = Vec::new();
             for frame in bb.preview_frames() {
@@ -842,7 +846,7 @@ fn load_sprite_frames(cx: &mut Cx, path: &std::path::Path) -> Vec<Texture> {
 
 /// Decode PNG or JPEG bytes into a texture (Blender/SkinTokens exports carry
 /// either), falling back to a 1x1 white so an untextured rig still draws.
-pub(crate) fn image_texture(cx: &mut Cx, bytes: Option<Vec<u8>>) -> Texture {
+pub fn image_texture(cx: &mut Cx, bytes: Option<Vec<u8>>) -> Texture {
     if let Some(bytes) = bytes {
         let decoded = if bytes.starts_with(&[0xff, 0xd8]) {
             ImageBuffer::from_jpg(&bytes).ok()
@@ -908,6 +912,62 @@ const CAPTURES: [(u64, &str); 14] = [
 ];
 
 impl MeshView {
+    /// Load a GLB from host-owned bytes. Parsing/upload remains deferred to
+    /// draw, exactly as in asset-ui's original viewer.
+    pub fn load_bytes(
+        &mut self,
+        cx: &mut Cx,
+        bytes: &[u8],
+        content_type: &str,
+    ) -> Result<(), String> {
+        if !is_glb(bytes) {
+            let error = format!("{content_type} is not a GLB payload");
+            cx.widget_action(self.widget_uid(), MediaViewAction::Failed(error.clone()));
+            return Err(error);
+        }
+        self.set_model_bytes(cx, bytes.to_vec(), None);
+        cx.widget_action(self.widget_uid(), MediaViewAction::Loaded(MediaKind::Mesh));
+        Ok(())
+    }
+
+    /// Forget every branch of the currently displayed model.
+    pub fn clear(&mut self, cx: &mut Cx) {
+        self.pending = None;
+        self.instance = None;
+        self.character = None;
+        self.walk_cam = None;
+        self.extra_instances.clear();
+        self.placed_sprites.clear();
+        self.pending_placed_models.clear();
+        self.pbr.clear(&mut self.draw_pbr);
+        self.status = "no mesh yet".into();
+        self.area.redraw(cx);
+    }
+
+    /// Select the camera framing used for ordinary embedded media surfaces.
+    pub fn set_fit(&mut self, cx: &mut Cx, fit: MediaFit) {
+        self.reset_studio_camera();
+        self.look.distance = match fit {
+            MediaFit::Contain => 4.2,
+            MediaFit::Cover => 3.4,
+            MediaFit::Stretch => 3.8,
+        };
+        self.area.redraw(cx);
+    }
+
+    pub fn set_size(&mut self, cx: &mut Cx, width: Size, height: Size) {
+        self.walk.width = width;
+        self.walk.height = height;
+        self.area.redraw(cx);
+    }
+
+    pub fn is_loaded(&self) -> bool {
+        self.pending.is_some()
+            || self.instance.is_some()
+            || self.character.is_some()
+            || self.pbr.bounds().is_some()
+    }
+
     /// Queue a GLB (and optional base-color PNG) for display; parsed and
     /// uploaded during the next draw. Routing is automatic: playable rig →
     /// play mode, static material-bearing GLB → PBR, anything else → statue.
@@ -1639,6 +1699,17 @@ impl WidgetNode for MeshView {
     fn redraw(&mut self, cx: &mut Cx) {
         self.area.redraw(cx);
     }
+
+    fn set_visible(&mut self, cx: &mut Cx, visible: bool) {
+        if self.visible != visible {
+            self.visible = visible;
+            self.area.redraw(cx);
+        }
+    }
+
+    fn visible(&self) -> bool {
+        self.visible
+    }
 }
 
 impl Widget for MeshView {
@@ -1796,6 +1867,9 @@ impl Widget for MeshView {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
         let rect = cx.walk_turtle_with_area(&mut self.area, walk);
         if rect.size.x <= 1.0 || rect.size.y <= 1.0 {
             return DrawStep::done();

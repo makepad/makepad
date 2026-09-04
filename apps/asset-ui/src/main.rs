@@ -55,7 +55,9 @@ mod import_classic;
 mod store_content;
 mod library;
 mod mask_paint;
-mod mesh_view;
+mod mesh_view {
+    pub use makepad_media_view::mesh_view::*;
+}
 mod music_page;
 use crate::mask_paint::{MaskPaint, MaskPaintAction};
 mod pipeline;
@@ -63,7 +65,9 @@ mod runs_chip;
 mod scheduler;
 mod store_views;
 mod thumbnail_renderer;
-mod video_player;
+mod video_player {
+    pub use makepad_media_view::{FileVideoPlayer as VideoPlayer, VideoDecoder};
+}
 mod webcam;
 
 use crate::artifact_io::{
@@ -14457,13 +14461,11 @@ impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
         // Draw shaders must register before the widgets that declare them.
-        makepad_render::script_mod(vm);
-        makepad_xr::script_mod(vm);
+        makepad_media_view::script_mod(vm);
         // Shared preview widgets (ContentPreview / AudioView): the pool this
         // app draws catalog content with, and the same one the VJ and DJ
         // surfaces adopt.
         makepad_asset_widgets::script_mod(vm);
-        crate::mesh_view::script_mod(vm);
         crate::mask_paint::script_mod(vm);
         crate::billboard_view::script_mod(vm);
         crate::thumbnail_renderer::script_mod(vm);

@@ -52,13 +52,13 @@ fn full_bleed(node: &Node) -> bool {
     match node.kind.as_str() {
         "output" => declared_output_type(node)
             .or_else(|| node.inputs.first().map(|input| input.ty))
-            == Some(PortType::Image),
+            .is_some_and(PortType::is_media),
         // A generator card shows its settings; the picture lives on the
         // Output card it feeds (user, 2026-09-04).
         "input" => node
             .outputs
             .first()
-            .is_some_and(|port| port.ty == PortType::Image),
+            .is_some_and(|port| port.ty.is_media()),
         _ => false,
     }
 }
@@ -220,5 +220,22 @@ mod tests {
         assert!(view.nodes[0].outputs[0].connected);
         assert!(view.nodes[1].inputs[0].connected);
         assert!(view.nodes[1].full_bleed);
+    }
+
+    #[test]
+    fn every_media_output_is_full_bleed() {
+        for ty in [
+            PortType::Image,
+            PortType::Video,
+            PortType::Audio,
+            PortType::Mesh,
+        ] {
+            let input = node("generator", "input", ty);
+            let mut output = node("output", "output", ty);
+            output.outputs.clear();
+            output.params = vec![("type".into(), Literal::Id(ty.as_str().into()))];
+            assert!(full_bleed(&input), "input generator for {ty:?}");
+            assert!(full_bleed(&output), "Output card for {ty:?}");
+        }
     }
 }

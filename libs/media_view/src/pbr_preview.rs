@@ -20,10 +20,13 @@
 //! behavior (geometric normal, factor-only metallic/roughness, occlusion 1)
 //! instead of guessing.
 //!
-//! This file is a child module of mesh_view.rs (declared there via
-//! `#[path]`) because main.rs is owned by another lane and must not change.
+//! This file is a child module of `mesh_view.rs` in `makepad-media-view`.
 
 use makepad_gltf::{decode_mesh_primitive, load_gltf_from_bytes, LoadedGltf};
+use makepad_zune_core::bit_depth::BitDepth;
+use makepad_zune_core::colorspace::ColorSpace;
+use makepad_zune_core::options::EncoderOptions;
+use makepad_zune_png::PngEncoder;
 use makepad_widgets::*;
 use makepad_xr::render::{GltfDrawObject, GltfMaterialState, GltfRenderer};
 use makepad_widgets::shader::draw_pbr::{DrawPbrMaterialState, DrawPbrTextureSet, PbrMeshHandle};
@@ -772,7 +775,15 @@ pub fn studio_equirect_png() -> Vec<u8> {
             rgba[i + 3] = 255;
         }
     }
-    makepad_ai_hub::testpattern::encode_png_rgba(&rgba, W, H).expect("studio equirect encodes")
+    let options = EncoderOptions::default()
+        .set_width(W)
+        .set_height(H)
+        .set_depth(BitDepth::Eight)
+        .set_colorspace(ColorSpace::RGBA);
+    let mut encoder = PngEncoder::new(&rgba, options);
+    let mut png = Vec::new();
+    encoder.encode(&mut png).expect("studio equirect encodes");
+    png
 }
 
 #[cfg(test)]

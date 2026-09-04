@@ -1,0 +1,15 @@
+[package]
+name = "makepad-media-view"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-render = { path = "../render" }
+makepad-gltf = { path = "../gltf" }
+makepad-xr = { path = "../../xr" }
+makepad-audio-decode = { path = "../audio_decode" }
+makepad-asset-data = { path = "../asset/data" }
+makepad-zune-core = { path = "../zune/zune-core" }
+makepad-zune-png = { path = "../zune/zune-png" }

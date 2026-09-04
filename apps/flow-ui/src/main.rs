@@ -3397,7 +3397,7 @@ impl App {
         self.source_mode = false;
         self.set_modes(cx);
         match self.values.get(&value.digest) {
-            Some(bytes) if value.content_type.starts_with("image/") => {
+            Some(bytes) if is_viewable_media(&bytes) => {
                 self.show_image_viewer(cx, node, port, &bytes)
             }
             Some(bytes) => self.show_preview(cx, &bytes),
@@ -4101,7 +4101,16 @@ impl App {
                 .map(|row| {
                     row.outputs
                         .iter()
-                        .filter(|(_, value)| value.content_type.starts_with("image/"))
+                        .filter(|(_, value)| {
+                            matches!(
+                                makepad_media_view::media_kind(&value.content_type, &[]),
+                                makepad_media_view::MediaKind::Image
+                                    | makepad_media_view::MediaKind::Video
+                                    | makepad_media_view::MediaKind::Audio
+                                    | makepad_media_view::MediaKind::Mesh
+                                    | makepad_media_view::MediaKind::Splat
+                            )
+                        })
                         .map(|(label, value)| {
                             (row.instance.clone(), label.clone(), value.digest.clone())
                         })
@@ -4114,7 +4123,15 @@ impl App {
                 .iter()
                 .flat_map(|(node, ports)| {
                     ports.iter().filter_map(move |(port, value)| {
-                        value.content_type.starts_with("image/").then(|| {
+                        matches!(
+                            makepad_media_view::media_kind(&value.content_type, &[]),
+                            makepad_media_view::MediaKind::Image
+                                | makepad_media_view::MediaKind::Video
+                                | makepad_media_view::MediaKind::Audio
+                                | makepad_media_view::MediaKind::Mesh
+                                | makepad_media_view::MediaKind::Splat
+                        )
+                        .then(|| {
                             (node.clone(), port.clone(), value.digest.clone())
                         })
                     })
@@ -4173,7 +4190,7 @@ impl App {
                                 .as_ref()
                                 .map(|(_, label)| label.clone())
                                 .unwrap_or_default();
-                            if bytes.content_type.starts_with("image/") {
+                            if is_viewable_media(&bytes) {
                                 let (node, port) = label
                                     .split_once('.')
                                     .unwrap_or((label.as_str(), "image"));
@@ -4209,6 +4226,17 @@ fn value_file_extension(content_type: &str) -> &'static str {
         "text/plain" | "text/markdown" => "txt",
         _ => "bin",
     }
+}
+
+fn is_viewable_media(value: &makepad_flow::ValueBytes) -> bool {
+    matches!(
+        values::media_kind(value),
+        makepad_media_view::MediaKind::Image
+            | makepad_media_view::MediaKind::Video
+            | makepad_media_view::MediaKind::Audio
+            | makepad_media_view::MediaKind::Mesh
+            | makepad_media_view::MediaKind::Splat
+    )
 }
 
 fn valid_node_id(id: &str) -> bool {
