@@ -853,6 +853,15 @@ impl Cx {
         &self.os_type
     }
 
+    /// Linux X11: hide WM decorations (the system title bar) so the app can
+    /// draw its own chrome. Wayland already requests client-side decorations.
+    /// Call from `Startup` before the window is created.
+    pub fn set_linux_custom_window_chrome(&mut self, enable: bool) {
+        if let OsType::LinuxWindow(params) = &mut self.os_type {
+            params.custom_window_chrome = enable;
+        }
+    }
+
     /// Returns the app's writable data directory path.
     ///
     /// On Android, this is the directory returned by Activity's getFilesDir().
