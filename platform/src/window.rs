@@ -50,6 +50,21 @@ pub enum MacosWindowLevel {
     StatusBar,
 }
 
+/// The decoration mode a Wayland toplevel asks the compositor to use.
+///
+/// `ServerSide` requests compositor decorations, but the compositor may select
+/// client-side mode instead. `ClientSide` explicitly uses Makepad's frame. If
+/// xdg-decoration is unavailable, Makepad always uses client-side decorations.
+/// `MAKEPAD_WAYLAND_DECORATION=client|server` can override it for all windows
+/// in a process. `--wayland-decoration=client|server` is also recognized when
+/// the application's own argument parser accepts framework arguments.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Script, ScriptHook, Default)]
+pub enum WaylandDecorationPreference {
+    #[default]
+    ServerSide,
+    ClientSide,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Script)]
 pub struct MacosWindowConfig {
     #[live]
@@ -353,6 +368,9 @@ impl WindowHandle {
         cxwindow.popup_position = None;
         cxwindow.popup_size = None;
         cxwindow.popup_grab_keyboard = true;
+        cxwindow.wayland_decorations = WaylandDecorationPreference::default();
+        cxwindow.uses_client_side_decorations = false;
+        cxwindow.wayland_is_fullscreen = false;
         cx.platform_ops
             .push_back(CxOsOp::CreateWindow(window.window_id()));
         window
@@ -379,6 +397,9 @@ impl WindowHandle {
             cxwindow.popup_position = Some(position);
             cxwindow.popup_size = Some(size);
             cxwindow.popup_grab_keyboard = true;
+            cxwindow.wayland_decorations = WaylandDecorationPreference::default();
+            cxwindow.uses_client_side_decorations = false;
+            cxwindow.wayland_is_fullscreen = false;
             cxwindow.popup_grab_keyboard
         };
         cx.platform_ops.push_back(CxOsOp::CreatePopupWindow {
@@ -420,6 +441,10 @@ pub struct ScriptWindowHandle {
     pub backdrop_intensity: f32,
     #[live(MacosWindowConfig::default())]
     pub macos: MacosWindowConfig,
+    /// Wayland only. Server-side decorations are requested by default; set
+    /// this to `ClientSide` to explicitly use Makepad's window frame.
+    #[live(WaylandDecorationPreference::ServerSide)]
+    pub wayland_decorations: WaylandDecorationPreference,
     /// Optionally override the caption bar height.
     /// * If `None` (the default), the caption bar's height is based on a system-calculated height
     ///   derived from window chrome button geometry, which will make the window chrome buttons
@@ -470,6 +495,9 @@ impl ScriptHook for ScriptWindowHandle {
         .normalized();
         let macos = self.macos.normalized();
         cx.windows[window_id].macos = macos;
+        if !cx.windows[window_id].is_created {
+            cx.windows[window_id].wayland_decorations = self.wayland_decorations;
+        }
         if cx.windows[window_id].window_visuals() != visuals {
             cx.windows[window_id].transparent = visuals.transparent;
             cx.windows[window_id].backdrop = visuals.backdrop;
@@ -521,6 +549,19 @@ impl WindowHandle {
     pub fn configure_macos_window(&mut self, cx: &mut Cx, config: MacosWindowConfig) {
         cx.windows[self.window_id()].macos = config.normalized();
     }
+
+    /// Selects the decoration mode requested when a Wayland window is created.
+    /// This has no effect after the native window has been created.
+    pub fn configure_wayland_decorations(
+        &mut self,
+        cx: &mut Cx,
+        preference: WaylandDecorationPreference,
+    ) {
+        let window = &mut cx.windows[self.window_id()];
+        if !window.is_created {
+            window.wayland_decorations = preference;
+        }
+    }
     pub fn get_inner_size(&self, cx: &Cx) -> Vec2d {
         cx.windows[self.window_id()].get_inner_size()
     }
@@ -561,6 +602,17 @@ impl WindowHandle {
 
     pub fn is_fullscreen(&self, cx: &Cx) -> bool {
         cx.windows[self.window_id()].window_geom.is_fullscreen
+    }
+
+    /// Whether this Wayland window is using Makepad-drawn decorations.
+    pub fn uses_wayland_client_side_decorations(&self, cx: &Cx) -> bool {
+        cx.windows[self.window_id()].uses_client_side_decorations
+    }
+
+    /// Whether this Wayland window is in true compositor fullscreen, as
+    /// distinct from the legacy `is_fullscreen` maximize-or-fullscreen flag.
+    pub fn is_wayland_fullscreen(&self, cx: &Cx) -> bool {
+        cx.windows[self.window_id()].wayland_is_fullscreen
     }
 
     pub fn xr_is_presenting(&mut self, cx: &mut Cx) -> bool {
@@ -683,6 +735,11 @@ pub struct CxWindow {
     pub backdrop: WindowBackdrop,
     pub backdrop_intensity: f32,
     pub macos: MacosWindowConfig,
+    pub wayland_decorations: WaylandDecorationPreference,
+    /// Effective Wayland decoration mode selected by the compositor.
+    pub(crate) uses_client_side_decorations: bool,
+    /// True compositor fullscreen, kept separate so CSD remains visible when maximized.
+    pub(crate) wayland_is_fullscreen: bool,
 }
 
 impl Default for CxWindow {
@@ -709,6 +766,9 @@ impl Default for CxWindow {
             backdrop: WindowBackdrop::None,
             backdrop_intensity: 1.0,
             macos: MacosWindowConfig::default(),
+            wayland_decorations: WaylandDecorationPreference::default(),
+            uses_client_side_decorations: false,
+            wayland_is_fullscreen: false,
         }
     }
 }
@@ -924,6 +984,32 @@ mod tests {
         assert!(!cx_window.transparent);
         assert_eq!(cx_window.backdrop, WindowBackdrop::None);
         assert_eq!(cx_window.backdrop_intensity, 1.0);
+        assert_eq!(
+            cx_window.wayland_decorations,
+            WaylandDecorationPreference::ServerSide
+        );
+    }
+
+    #[test]
+    fn reused_window_slot_resets_wayland_decoration_state() {
+        let mut cx = test_cx();
+        let first = WindowHandle::new(&mut cx);
+        let first_id = first.window_id();
+        cx.windows[first_id].wayland_decorations = WaylandDecorationPreference::ClientSide;
+        cx.windows[first_id].uses_client_side_decorations = true;
+        cx.windows[first_id].wayland_is_fullscreen = true;
+        drop(first);
+
+        let second = WindowHandle::new(&mut cx);
+        let second_id = second.window_id();
+        assert_eq!(second_id.0, first_id.0);
+        assert_ne!(second_id.1, first_id.1);
+        assert_eq!(
+            cx.windows[second_id].wayland_decorations,
+            WaylandDecorationPreference::ServerSide
+        );
+        assert!(!cx.windows[second_id].uses_client_side_decorations);
+        assert!(!cx.windows[second_id].wayland_is_fullscreen);
     }
 
     #[test]
@@ -1084,6 +1170,7 @@ mod tests {
             backdrop: WindowBackdrop::Blur,
             backdrop_intensity: 0.5,
             macos: MacosWindowConfig::floating_panel(),
+            wayland_decorations: WaylandDecorationPreference::ClientSide,
             caption_bar_height_override: None,
         };
 
@@ -1106,6 +1193,10 @@ mod tests {
             }
         );
         assert_eq!(cx_window.macos, MacosWindowConfig::floating_panel());
+        assert_eq!(
+            cx_window.wayland_decorations,
+            WaylandDecorationPreference::ClientSide
+        );
     }
 
     #[test]

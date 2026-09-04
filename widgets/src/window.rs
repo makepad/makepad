@@ -163,7 +163,7 @@ script_mod! {
                     draw_bg.button_type: DesktopButtonType.WindowsMin
                     width: 46 height: 29
                     draw_bg +: {
-                        color: #000, color_hover: #000, color_down: #000
+                        color: theme.color_label_inner, color_hover: #000, color_down: #000
                         bg_color_hover: #E9E9E9, bg_color_down: #CCCCCC
                     }
                 }
@@ -171,7 +171,7 @@ script_mod! {
                     draw_bg.button_type: DesktopButtonType.WindowsMax
                     width: 46 height: 29
                     draw_bg +: {
-                        color: #000, color_hover: #000, color_down: #000
+                        color: theme.color_label_inner, color_hover: #000, color_down: #000
                         bg_color_hover: #E9E9E9, bg_color_down: #CCCCCC
                     }
                 }
@@ -179,7 +179,7 @@ script_mod! {
                     draw_bg.button_type: DesktopButtonType.WindowsClose
                     width: 46 height: 29
                     draw_bg +: {
-                        color: #000, color_hover: #FFF, color_down: #FFF
+                        color: theme.color_label_inner, color_hover: #FFF, color_down: #FFF
                         bg_color_hover: #E81123, bg_color_down: #F1707A
                     }
                 }
@@ -374,13 +374,17 @@ pub struct Window {
     /// Used to only emit a platform op when the resolved value actually changes.
     #[rust]
     system_bar_dark_icons: Option<bool>,
-    /// Cached `(caption_bar visible, caption rect, buttons rect)` for `WindowDragQuery`. That event
-    /// fires once per `WM_NCHITTEST` — i.e. on every mouse move on Windows — and resolving the
-    /// views + their areas each time runs widget-tree lookups, a real source of scroll jitter when
-    /// the mouse is moved during a fling. These only change on relayout, so we recompute lazily and
-    /// invalidate on `WindowGeomChange`.
+    /// Cached `(caption_bar visible, caption rect, buttons rect)` for `WindowDragQuery`. It is
+    /// refreshed only after layout finishes, so a synchronous native hit-test between configure
+    /// and redraw cannot preserve rectangles from the previous window size.
     #[rust]
     drag_query_cache: Option<(bool, Rect, Rect)>,
+    /// Whether a completed draw has made this frame's areas authoritative, so a geometry
+    /// computed now may be cached. Between a configure and the redraw that answers it the
+    /// areas still describe the previous size, and a query in that window is answered live
+    /// without being stored.
+    #[rust]
+    drag_query_layout_valid: bool,
     /// The caption-layout inputs (show_caption_bar, height override, system caption height) that
     /// `drag_query_cache` was last computed against. When they change without a platform
     /// `WindowGeomChange` (e.g. a live/DSL reload toggling the caption), we drop the cache in
@@ -503,6 +507,54 @@ fn gauss_render_texture_y_flip_for_os(os_type: &OsType) -> f32 {
     match os_type {
         OsType::Android(_) => 1.0,
         _ => 0.0,
+    }
+}
+
+fn classify_window_drag_query(
+    visible: bool,
+    caption_rect: Rect,
+    buttons_rect: Rect,
+    transitional_buttons_rect: Rect,
+    point: Vec2d,
+) -> WindowDragQueryResponse {
+    if !visible {
+        return WindowDragQueryResponse::NoAnswer;
+    }
+    let hits_buttons = (buttons_rect.size != Vec2d::default() && buttons_rect.contains(point))
+        || (transitional_buttons_rect.size != Vec2d::default()
+            && transitional_buttons_rect.contains(point));
+    if hits_buttons {
+        WindowDragQueryResponse::Client
+    } else if caption_rect.contains(point) {
+        WindowDragQueryResponse::Caption
+    } else {
+        WindowDragQueryResponse::NoAnswer
+    }
+}
+
+fn configured_window_buttons_rect(buttons_rect: Rect, configured_rect: Rect) -> Rect {
+    if buttons_rect.size == Vec2d::default() || configured_rect.size == Vec2d::default() {
+        return configured_rect;
+    }
+    Rect {
+        pos: dvec2(
+            configured_rect.pos.x + configured_rect.size.x - buttons_rect.size.x,
+            buttons_rect.pos.y,
+        ),
+        size: buttons_rect.size,
+    }
+}
+
+fn configured_window_caption_rect(caption_rect: Rect, configured_size: Vec2d) -> Rect {
+    if caption_rect.size == Vec2d::default() || configured_size == Vec2d::default() {
+        return caption_rect;
+    }
+    Rect {
+        pos: caption_rect.pos,
+        size: dvec2(
+            (configured_size.x - caption_rect.pos.x).max(0.0),
+            caption_rect.size.y,
+        ),
     }
 }
 
@@ -984,15 +1036,20 @@ impl Window {
                     .set_visible(cx, self.show_caption_bar && !is_fullscreen);
             }
             OsType::LinuxWindow(params) => {
-                // Only show the caption bar if we're drawing our own window chrome
-                // (e.g. Wayland without server-side decorations). On X11 the WM
-                // provides native decorations, so we hide the in-app caption bar.
-                let custom_chrome = params.custom_window_chrome;
+                // X11 uses WM decorations. Wayland decides per window from the
+                // compositor's xdg-decoration configure event.
+                let custom_chrome = params.custom_window_chrome
+                    && self
+                        .window
+                        .handle
+                        .uses_wayland_client_side_decorations(cx);
+                let visible = self.show_caption_bar
+                    && custom_chrome
+                    && !self.window.handle.is_wayland_fullscreen(cx);
                 self.view(cx, ids!(caption_bar))
-                    .set_visible(cx, self.show_caption_bar && custom_chrome);
-                if custom_chrome {
-                    self.view(cx, ids!(windows_buttons)).set_visible(cx, true);
-                }
+                    .set_visible(cx, visible);
+                self.view(cx, ids!(windows_buttons))
+                    .set_visible(cx, visible);
             }
             OsType::LinuxDirect | OsType::Android(_) => {
                 //self.frame.get_view(ids!(caption_bar)).set_visible(false);
@@ -1002,6 +1059,21 @@ impl Window {
             }
             _ => (),
         }
+    }
+
+    fn caption_drag_geometry(&self, cx: &mut Cx) -> (bool, Rect, Rect) {
+        // Each `self.view` is a widget-tree walk, so the caption bar is resolved once
+        // rather than once per field read.
+        let caption = self.view(cx, ids!(caption_bar));
+        let visible = caption.visible();
+        let caption_rect = caption.area().rect(cx);
+        let buttons = self.view(cx, ids!(windows_buttons));
+        let buttons_rect = if buttons.visible() {
+            buttons.area().rect(cx)
+        } else {
+            Rect::default()
+        };
+        (visible, caption_rect, buttons_rect)
     }
 
     fn sync_caption_bar_height(&mut self, cx: &mut Cx) {
@@ -1117,6 +1189,7 @@ impl Window {
         if self.caption_query_sig != Some(caption_sig) {
             self.caption_query_sig = Some(caption_sig);
             self.drag_query_cache = None;
+            self.drag_query_layout_valid = false;
         }
 
         self.sync_caption_bar_state(cx);
@@ -1313,6 +1386,14 @@ impl Window {
 
         cx.end_pass_sized_turtle();
 
+        // Areas are authoritative only after this frame's layout has completed, so this is
+        // where a cached answer becomes allowed. Computing it here instead would charge
+        // every frame for three widget-tree walks that only a drag query ever reads, and
+        // most frames never see one. Dropping last frame's answer rather than keeping it
+        // means the first query after any relayout still recomputes, whether or not the
+        // relayout was one of the two that invalidate explicitly.
+        self.drag_query_cache = None;
+        self.drag_query_layout_valid = true;
         self.main_draw_list.end(cx);
         cx.end_pass(&self.pass.handle);
     }
@@ -1342,6 +1423,16 @@ impl Window {
         self.window.handle.configure_macos_window(cx, config);
     }
 
+    pub fn configure_wayland_decorations(
+        &mut self,
+        cx: &mut Cx,
+        preference: WaylandDecorationPreference,
+    ) {
+        self.window
+            .handle
+            .configure_wayland_decorations(cx, preference);
+    }
+
     pub fn window_index(&self) -> usize {
         self.window.handle.window_id().id()
     }
@@ -1362,6 +1453,66 @@ mod tests {
             gauss_render_texture_y_flip_for_os(&OsType::Android(Default::default())),
             1.0
         );
+    }
+
+    #[test]
+    fn native_button_geometry_wins_during_configure_to_draw_transition() {
+        let stale_caption = Rect {
+            pos: dvec2(0.0, 0.0),
+            size: dvec2(800.0, 29.0),
+        };
+        let stale_buttons = Rect {
+            pos: dvec2(662.0, 0.0),
+            size: dvec2(138.0, 29.0),
+        };
+        let configured_buttons = Rect {
+            pos: dvec2(1782.0, 0.0),
+            size: dvec2(138.0, 29.0),
+        };
+        assert!(matches!(
+            classify_window_drag_query(
+                true,
+                stale_caption,
+                stale_buttons,
+                configured_buttons,
+                dvec2(1851.0, 14.0),
+            ),
+            WindowDragQueryResponse::Client
+        ));
+        assert!(matches!(
+            classify_window_drag_query(
+                true,
+                stale_caption,
+                stale_buttons,
+                Rect::default(),
+                dvec2(400.0, 14.0),
+            ),
+            WindowDragQueryResponse::Caption
+        ));
+
+        let zoomed_buttons = Rect {
+            pos: dvec2(708.0, 0.0),
+            size: dvec2(92.0, 19.0),
+        };
+        assert_eq!(
+            configured_window_buttons_rect(zoomed_buttons, configured_buttons),
+            Rect {
+                pos: dvec2(1828.0, 0.0),
+                size: dvec2(92.0, 19.0),
+            }
+        );
+        let configured_caption =
+            configured_window_caption_rect(stale_caption, dvec2(1920.0, 1080.0));
+        assert!(matches!(
+            classify_window_drag_query(
+                true,
+                configured_caption,
+                stale_buttons,
+                configured_buttons,
+                dvec2(1200.0, 14.0),
+            ),
+            WindowDragQueryResponse::Caption
+        ));
     }
 }
 
@@ -1478,6 +1629,16 @@ impl WindowRef {
             inner.configure_macos_window(cx, config);
         }
     }
+
+    pub fn configure_wayland_decorations(
+        &self,
+        cx: &mut Cx,
+        preference: WaylandDecorationPreference,
+    ) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.configure_wayland_decorations(cx, preference);
+        }
+    }
 }
 
 impl Widget for Window {
@@ -1538,8 +1699,10 @@ impl Widget for Window {
             Event::WindowGeomChange(ev) => {
                 if ev.window_id == self.window.window_id() {
                     // The caption / buttons may have been re-laid-out; drop the WindowDragQuery
-                    // geometry cache so it is recomputed on the next hit-test.
+                    // geometry cache so it is recomputed on the next hit-test, and mark the
+                    // areas non-authoritative until the redraw that answers this configure.
                     self.drag_query_cache = None;
+                    self.drag_query_layout_valid = false;
                     match cx.os_type() {
                         OsType::Windows | OsType::Macos => {
                             if self.hide_caption_on_fullscreen && !cx.in_makepad_studio() {
@@ -1600,42 +1763,51 @@ impl Widget for Window {
             }
             Event::WindowDragQuery(dq) => {
                 if dq.window_id == self.window.window_id() {
-                    // Resolve the caption / buttons geometry at most once per relayout; this event
-                    // arrives per mouse-move (per WM_NCHITTEST) and the view lookups are not free.
-                    let (visible, caption_rect, buttons_rect) = match self.drag_query_cache {
-                        Some(c) => c,
+                    // A native query can arrive synchronously after configure but before redraw.
+                    // Use live areas for that one query, but only a completed draw may cache them.
+                    let cache_ready = self.drag_query_cache.is_some() || self.drag_query_layout_valid;
+                    let geometry = match self.drag_query_cache {
+                        Some(cached) => cached,
                         None => {
-                            let visible = self.view(cx, ids!(caption_bar)).visible();
-                            let caption_rect = self.view(cx, ids!(caption_bar)).area().rect(cx);
-                            let buttons_view = self.view(cx, ids!(windows_buttons));
-                            let buttons_visible = buttons_view.visible();
-                            let buttons_rect = buttons_view.area().rect(cx);
-                            // Only cache once the caption bar AND its (visible) buttons have actually
-                            // been laid out, so an early query doesn't pin a stale rect. Pinning a
-                            // zero buttons_rect while the buttons are visible-but-not-yet-laid-out
-                            // would make the min/max/close strip respond as draggable Caption (a
-                            // click on Close would drag the window) until the next geometry change. A
-                            // window with no (hidden) buttons keeps a zero buttons_rect, which is fine.
-                            let caption_ready = caption_rect.size != Vec2d::default();
-                            let buttons_ready =
-                                !buttons_visible || buttons_rect.size != Vec2d::default();
-                            if !visible || (caption_ready && buttons_ready) {
-                                self.drag_query_cache = Some((visible, caption_rect, buttons_rect));
+                            let live = self.caption_drag_geometry(cx);
+                            if self.drag_query_layout_valid {
+                                self.drag_query_cache = Some(live);
                             }
-                            (visible, caption_rect, buttons_rect)
+                            live
                         }
                     };
-                    if visible {
-                        if caption_rect.contains(dq.abs) {
-                            if buttons_rect.size != Vec2d::default()
-                                && buttons_rect.contains(dq.abs)
-                            {
-                                dq.response.set(WindowDragQueryResponse::Client);
-                            } else {
-                                dq.response.set(WindowDragQueryResponse::Caption);
-                            }
+                    let (visible, mut caption_rect, buttons_rect) = geometry;
+                    if !cache_ready {
+                        caption_rect = configured_window_caption_rect(
+                            caption_rect,
+                            cx.windows[dq.window_id].window_geom.inner_size,
+                        );
+                    }
+                    let transitional_buttons = if cache_ready {
+                        Rect::default()
+                    } else {
+                        configured_window_buttons_rect(
+                            buttons_rect,
+                            cx.windows[dq.window_id].window_geom.window_chrome_buttons,
+                        )
+                    };
+                    match classify_window_drag_query(
+                        visible,
+                        caption_rect,
+                        buttons_rect,
+                        transitional_buttons,
+                        dq.abs,
+                    ) {
+                        WindowDragQueryResponse::Client => {
+                            // Button geometry wins even if the stale caption rect still has the
+                            // previous width, and therefore also blocks native top-edge resize.
+                            dq.response.set(WindowDragQueryResponse::Client);
+                        }
+                        WindowDragQueryResponse::Caption => {
+                            dq.response.set(WindowDragQueryResponse::Caption);
                             cx.set_cursor(MouseCursor::Default);
                         }
+                        WindowDragQueryResponse::NoAnswer | WindowDragQueryResponse::SysMenu => {}
                     }
                 }
                 true

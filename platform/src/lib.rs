@@ -245,8 +245,8 @@ pub use {
         web_socket::{WebSocket, WebSocketMessage},
         window::{
             CxWindowPool, MacosWindowChrome, MacosWindowConfig, MacosWindowKind, MacosWindowLevel,
-            ScriptWindowHandle, WindowBackdrop, WindowHandle, WindowIcon, WindowIconBuffer,
-            WindowId, WindowVisuals,
+            ScriptWindowHandle, WaylandDecorationPreference, WindowBackdrop, WindowHandle,
+            WindowIcon, WindowIconBuffer, WindowId, WindowVisuals,
         },
         xr_tsdf::{
             ChunkKey, SparseTsdGridReadSnapshot, SparseTsdReadChunk, TsdfPublishedSnapshot,

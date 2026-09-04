@@ -281,6 +281,31 @@ impl OpenglCx {
         }
     }
 
+    /// Makes this context current on `egl_surface` for both drawing and reading.
+    ///
+    /// Wayland must bind the target surface before resizing its `wl_egl_window`:
+    /// some EGL implementations defer a resize of a non-current surface until
+    /// the next swap, which would render one frame with mismatched buffer geometry.
+    pub(crate) fn make_current_with_surface(&self, egl_surface: egl_sys::EGLSurface) -> bool {
+        unsafe {
+            let ok = (self.libegl.eglMakeCurrent.unwrap())(
+                self.egl_display,
+                egl_surface,
+                egl_surface,
+                self.egl_context,
+            );
+            if ok == 0 {
+                // `eglGetError` is called outside the latch: it clears EGL's per-thread
+                // error, and skipping it would leak a stale code into the next report.
+                let egl_error = (self.libegl.eglGetError.unwrap())();
+                self.report_egl_error("eglMakeCurrent(window surface)", egl_error);
+                return false;
+            }
+            self.make_current_error_logged.set(false);
+            true
+        }
+    }
+
     /// Logs an `eglMakeCurrent` failure once per outage, naming a lost context explicitly
     /// so a report of "the window went black" arrives with its cause attached.
     fn report_egl_error(&self, what: &str, egl_error: egl_sys::EGLint) {
@@ -330,20 +355,9 @@ impl Cx {
         unsafe {
             let gl = self.os.gl();
             let opengl_cx = self.os.opengl_cx.as_ref().unwrap();
-            let make_current_ok = (opengl_cx.libegl.eglMakeCurrent.unwrap())(
-                opengl_cx.egl_display,
-                egl_surface,
-                egl_surface,
-                opengl_cx.egl_context,
-            );
-            if make_current_ok == 0 {
-                // `eglGetError` is called outside the latch: it clears EGL's per-thread
-                // error, and skipping it would leak a stale code into the next report.
-                let egl_error = (opengl_cx.libegl.eglGetError.unwrap())();
-                opengl_cx.report_egl_error("eglMakeCurrent", egl_error);
+            if !opengl_cx.make_current_with_surface(egl_surface) {
                 return false;
             }
-            opengl_cx.make_current_error_logged.set(false);
             // Apply the configured swap interval (vsync) on the now-current window surface.
             // Re-applied per frame because it is surface-scoped and surfaces are recreated
             // on resize; the call is cheap and idempotent.
