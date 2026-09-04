@@ -647,6 +647,8 @@ pub struct MeshView {
     /// Dark backdrop: near-black ground + sky; the model stays fully lit.
     #[rust(false)]
     dark_enabled: bool,
+    #[rust(true)]
+    show_hud: bool,
     /// Studio light for the PBR lane: softbox environment (bright boxes
     /// for metals and gloss to reflect) + a strong warm key. Off = the
     /// procedural sky environment and the neutral rig.
@@ -1084,6 +1086,7 @@ impl MeshView {
                 color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
                 dynamic: true,
                 depth_order: 0.0,
+                custom_material: None,
                 part_poses: Vec::new(),
             });
         }
@@ -1197,6 +1200,11 @@ impl MeshView {
 
     pub fn dark_enabled(&self) -> bool {
         self.dark_enabled
+    }
+
+    pub fn set_show_hud(&mut self, cx: &mut Cx, show: bool) {
+        self.show_hud = show;
+        self.area.redraw(cx);
     }
 
     pub fn set_dark_enabled(&mut self, cx: &mut Cx, on: bool) {
@@ -1559,6 +1567,7 @@ impl MeshView {
                         color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
                         dynamic: true,
                         depth_order: 0.0,
+                        custom_material: None,
                         part_poses: Vec::new(),
                     });
                     self.status = format!("{triangles} tris{ao_note} · CSM · WASD walk, drag look");
@@ -1580,6 +1589,7 @@ impl MeshView {
                         // Realtime CSM only collects `dynamic` movers.
                         dynamic: true,
                         depth_order: 0.0,
+                        custom_material: None,
                         part_poses: Vec::new(),
                     });
                     self.status =
@@ -2090,11 +2100,13 @@ impl Widget for MeshView {
                 None => format!("{}   drag orbit, wheel zoom", self.status),
             },
         };
-        self.draw_hud.draw_abs(
-            cx,
-            dvec2(rect.pos.x + 10.0, rect.pos.y + rect.size.y - 22.0),
-            &help,
-        );
+        if self.show_hud {
+            self.draw_hud.draw_abs(
+                cx,
+                dvec2(rect.pos.x + 10.0, rect.pos.y + rect.size.y - 22.0),
+                &help,
+            );
+        }
         DrawStep::done()
     }
 }

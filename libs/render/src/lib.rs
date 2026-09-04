@@ -12,6 +12,7 @@
 #![allow(clippy::approx_constant)]
 
 pub mod ao;
+pub mod custom_material;
 pub mod level;
 pub mod ao_atlas;
 pub mod ao_lightmapper;
@@ -44,6 +45,7 @@ pub mod sun;
 pub mod thermometer;
 
 pub use bake::*;
+pub use custom_material::DrawSceneCustom;
 pub use gpu_lightmap::{
     dynamic_shadow_tiers, CsmConfig, DynamicShadowTiers, GpuLightmapMode, GpuLmMover,
     GpuLmSkin, DEFAULT_CSM_CONFIG,

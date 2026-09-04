@@ -39,7 +39,9 @@ script_mod! {
     mod.draw.DrawSplat = set_type_default() do #(DrawSplat::script_shader(vm)){
         alpha_blend: true
         depth_write: false
-        backface_culling: true
+        // Projected Gaussian billboards have no back face: their ellipse
+        // basis can reverse winding, including in an offscreen scene pass.
+        backface_culling: false
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)
@@ -1205,7 +1207,13 @@ impl Widget for ViewSplat {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if let Event::Signal = event {
             if self.poll_depth_sort_results() {
-                self.draw_splat.redraw(cx);
+                // The first sort completes before this widget has submitted
+                // any instances, so there is no draw area to invalidate yet.
+                if self.draw_splat.draw_vars.area.is_empty() {
+                    cx.redraw_all();
+                } else {
+                    self.draw_splat.redraw(cx);
+                }
             }
         }
     }

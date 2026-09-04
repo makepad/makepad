@@ -4,6 +4,7 @@
 //! `world.render_rev`; dynamics re-pack every frame.
 
 use makepad_draw::*;
+use crate::custom_material::DrawSceneCustom;
 use makepad_game_sim::{
     entity_index_sorted, BodyKind, ChunkKey, Entity, GameWorld, Part, Shape, Terrain, TerrainMaterials,
     VoxelField, WaterState, WaterVolume, MAX_WAVES,
@@ -339,6 +340,7 @@ pub struct Renderer {
     /// out of `self` for the duration of the draw so the loop can still
     /// borrow the model tables.
     pbr_draw: Option<Box<DrawScenePbr>>,
+    custom_draws: std::collections::BTreeMap<String, Box<DrawSceneCustom>>,
     /// Whether shiny loaded models use the PBR material lane. Enabled by
     /// default so existing hosts keep their rendering unchanged; CAD-style
     /// views can temporarily request the diffuse textured lane instead.
@@ -455,6 +457,7 @@ pub struct Renderer {
     /// own — UNLESS it moved the lamps' daylight-headroom scale, which is
     /// baked into the atlas RGB and cannot follow anything per frame.
     lm_kick_key: Option<(u64, u64, u32)>,
+    lm_kick_sun: Option<Vec3f>,
     shadow_geometry: Option<Geometry>,
     last_dynamic_shadow_tris: usize,
     shadow_points: Vec<Vec3f>,
@@ -842,6 +845,7 @@ struct LayerMaterial {
 enum ModelDraw<'a> {
     Diffuse(&'a mut DrawSceneSkinned),
     Pbr(&'a mut DrawScenePbr),
+    Custom(&'a str, &'a mut DrawSceneCustom),
 }
 
 impl ModelDraw<'_> {
@@ -849,6 +853,7 @@ impl ModelDraw<'_> {
         match self {
             ModelDraw::Diffuse(d) => d,
             ModelDraw::Pbr(d) => &mut d.skinned,
+            ModelDraw::Custom(_, d) => &mut d.skinned,
         }
     }
 
@@ -1215,6 +1220,8 @@ pub struct AnimPartBox {
 #[derive(Clone)]
 pub struct ModelInstance {
     pub model: String,
+    /// Visual-only opt-in; absent or failed custom shader uses the stock lane.
+    pub custom_material: Option<CustomMaterialInstance>,
     pub transform: Mat4f,
     /// Per-copy albedo multiplier. White preserves the authored material.
     pub tint: Vec4f,
@@ -1234,6 +1241,12 @@ pub struct ModelInstance {
     /// keyed by their source-neutral connection name. Missing entries sit in
     /// the authored rest pose, so generic viewers need no special handling.
     pub part_poses: Vec<ModelPartPose>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CustomMaterialInstance {
+    pub name: String,
+    pub params: Vec4f,
 }
 
 #[derive(Clone)]
@@ -1342,6 +1355,17 @@ fn lightmap_world_key(world: &GameWorld, models_rev: u64, day_key: u32) -> (u64,
     (world.render_rev, models_rev, day_key)
 }
 
+/// Only a baked sun-visibility consumer needs angle updates. Below the
+/// horizon every region has the same no-direct-sun result: the clock moving
+/// through midnight must not continually replace a town's lighting atlas.
+fn lightmap_sun_changed(previous: Option<Vec3f>, dir: Vec3f, mode: crate::gpu_lightmap::GpuLightmapMode) -> bool {
+    if mode != crate::gpu_lightmap::GpuLightmapMode::OnChange { return false; }
+    let Some(previous) = previous else { return true; };
+    let was_up = previous.y > 0.02;
+    let is_up = dir.y > 0.02;
+    was_up != is_up || (is_up && previous.normalize().dot(dir.normalize()) < 0.03_f32.cos())
+}
+
 fn placed_scene_signature(instances: &[ModelInstance]) -> u64 {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -1369,6 +1393,24 @@ fn placed_scene_signature(instances: &[ModelInstance]) -> u64 {
 }
 
 impl ModelInstance {
+    /// Explicit authored metre-space attachment. Unlike `on_body`, this
+    /// never measures/recentres/fits the mesh: `origin` lands on body origin.
+    /// +Z front becomes engine -Z and the full rigid frame carries bank/pitch.
+    /// Callers validate finite bounded scale/origin at the authoring boundary.
+    pub fn on_body_authored(model: String, scale: f32, origin: Vec3f, frame: &Mat4f) -> Self {
+        let mut local = Mat4f::identity();
+        local.v[0] = -scale;
+        local.v[5] = scale;
+        local.v[10] = -scale;
+        local.v[12] = origin.x * scale;
+        local.v[13] = -origin.y * scale;
+        local.v[14] = origin.z * scale;
+        Self {
+            model, transform: Mat4f::mul(frame, &local),
+            tint: vec4(1.0, 1.0, 1.0, 1.0), color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
+            dynamic: true, depth_order: 0.0, part_poses: Vec::new(), custom_material: None,
+        }
+    }
     /// Hang a model off a moving body, anchored by the MODEL's own measured
     /// bounds rather than by the body's collision box.
     ///
@@ -1431,12 +1473,18 @@ impl ModelInstance {
             color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
             dynamic: true,
             depth_order: 0.0,
+            custom_material: None,
             part_poses: Vec::new(),
         }
     }
 
     pub fn with_tint(mut self, tint: Vec4f) -> Self {
         self.tint = tint;
+        self
+    }
+
+    pub fn with_custom_material(mut self, material: Option<CustomMaterialInstance>) -> Self {
+        self.custom_material = material;
         self
     }
 
@@ -2192,6 +2240,7 @@ impl Default for Renderer {
             detail_fallback: None,
             orm_fallback: None,
             pbr_draw: None,
+            custom_draws: Default::default(),
             pbr_materials_enabled: true,
             ssao: None,
             lm_remaps: Vec::new(),
@@ -2239,6 +2288,7 @@ impl Default for Renderer {
             model_sdf_bytes: std::collections::HashMap::new(),
             sdf_baked_sun_len: 0.0,
             lm_kick_key: None,
+            lm_kick_sun: None,
             shadow_geometry: None,
             last_dynamic_shadow_tris: 0,
             shadow_points: Vec::new(),
@@ -2363,6 +2413,7 @@ impl Renderer {
     /// and pass pools, stage policy, bake settings, shadow budget, and the
     /// adaptive-quality history owned by this device.
     pub fn enter_realm(&mut self) {
+        self.custom_draws.clear();
         self.static_chunks.clear();
         self.chunk_visible.clear();
         self.slab_key = None;
@@ -2415,6 +2466,7 @@ impl Renderer {
         self.world_attachment_ground.clear();
         self.sdf_instances.clear();
         self.lm_kick_key = None;
+        self.lm_kick_sun = None;
 
         // Keep the counter monotonic even though all its consumers above
         // were cleared; this prevents a future cache from reintroducing the
@@ -2718,6 +2770,39 @@ impl Renderer {
         self.placed_models = instances;
         if scene_changed {
             self.rebuild_csm_static_casters();
+        }
+    }
+
+    /// Install only a successfully frontend-compiled material. Failure keeps
+    /// the previous draw (or the stock fallback), never a blank model.
+    pub fn install_custom_material(&mut self, name: String, draw: DrawSceneCustom) -> bool {
+        if !draw.draw_vars.can_instance() { return false; }
+        self.custom_draws.insert(name, Box::new(draw));
+        true
+    }
+
+    pub fn retain_custom_materials(&mut self, names: &[String]) {
+        self.custom_draws.retain(|name, _| names.contains(name));
+    }
+
+    pub fn custom_material_shader(&self, name: &str) -> Option<DrawShaderId> {
+        self.custom_draws.get(name).and_then(|draw| draw.draw_shader_id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_custom_models(
+        &mut self, cx: &mut Cx3d, eye: Vec3f, instances: &[ModelInstance],
+        lane: WorldModelLane, fog: (Vec3f, f32), sun: &SunLight,
+        frustum: Option<&Frustum>, stats: &mut RenderStats,
+    ) {
+        let names: Vec<String> = self.custom_draws.keys().filter(|name| {
+            instances.iter().any(|i| i.custom_material.as_ref().is_some_and(|m| &m.name == *name))
+        }).cloned().collect();
+        for name in names {
+            let Some(mut draw) = self.custom_draws.remove(&name) else { continue; };
+            self.draw_models_inner(cx, ModelDraw::Custom(&name, &mut draw), eye,
+                instances, lane, fog, sun, frustum, stats);
+            self.custom_draws.insert(name, draw);
         }
     }
 
@@ -4344,6 +4429,7 @@ impl Renderer {
         // The snapshot becomes render passes on the next frame
         // (gpu_lightmap.rs); delivery is a texture handle swap, no upload.
         self.gpu_baker.schedule(crate::gpu_lightmap::GpuBakeJob {
+            world_revision: (world.render_rev, self.models_rev),
             scene,
             mesh_geometry,
             mesh_map,
@@ -4441,6 +4527,10 @@ impl Renderer {
     /// Takes effect immediately: Realtime -> OnChange re-dirties every
     /// region so mover shadows stamped into the tiles are baked away.
     pub fn set_gpu_lightmap_mode(&mut self, mode: crate::gpu_lightmap::GpuLightmapMode) {
+        if self.gpu_baker.mode() != mode {
+            self.shadow_gate = ShadowRebuildGate::default();
+            self.lm_kick_sun = None;
+        }
         self.gpu_baker.set_mode(mode);
     }
 
@@ -4857,6 +4947,11 @@ impl Renderer {
             eye,
             csm_scene_bounds,
         ) {
+            // Geometry can change during the settle debounce while an older
+            // atlas finishes. Its remaps index the old model list.
+            if d.world_revision != (world.render_rev, self.models_rev) {
+                return;
+            }
             self.lightmap = Some(d.atlas);
             self.lm_remaps = vec![Vec4f::default(); self.placed_models.len()];
             for (k, pi) in d.mesh_map.iter().enumerate() {
@@ -5433,6 +5528,10 @@ impl Renderer {
             return;
         }
         let pbr_lane = draw.is_pbr();
+        let custom_name = match &draw {
+            ModelDraw::Custom(name, _) => Some((*name).to_string()),
+            _ => None,
+        };
         {
             let draw = draw.base();
             sun.write_into(
@@ -5558,7 +5657,16 @@ impl Renderer {
             // they must not be renumbered — and each takes only the models
             // its shader owns.
             let uses_pbr_lane = self.pbr_materials_enabled && loaded.1.wants_pbr;
-            if uses_pbr_lane != pbr_lane {
+            let wanted_custom = inst.custom_material.as_ref().filter(|m| {
+                custom_name.as_deref() == Some(m.name.as_str())
+                    || self.custom_draws.get(&m.name).is_some_and(|d| d.draw_vars.can_instance())
+            });
+            if let Some(name) = custom_name.as_deref() {
+                if wanted_custom.map(|m| m.name.as_str()) != Some(name) { continue; }
+                if let (ModelDraw::Custom(_, d), Some(material)) = (&mut draw, wanted_custom) {
+                    d.params = material.params;
+                }
+            } else if wanted_custom.is_some() || uses_pbr_lane != pbr_lane {
                 continue;
             }
             // Hoisted: `loaded` borrows self, and the per-instance light
@@ -6977,7 +7085,7 @@ impl Renderer {
                 // settle, sun changes included.
                 let world_key = lightmap_world_key(world, self.models_rev, day_key);
                 if self.lm_kick_key != Some(world_key)
-                    || self.gpu_baker.mode() == crate::gpu_lightmap::GpuLightmapMode::OnChange
+                    || lightmap_sun_changed(self.lm_kick_sun, sun.dir, self.gpu_baker.mode())
                 {
                     // Name the cause in the bake's own log line: a blowout
                     // that pops in has to be attributable to the run that
@@ -6990,6 +7098,7 @@ impl Renderer {
                         Some(_) => crate::gpu_lightmap::BakeTrigger::SunChange,
                     };
                     self.lm_kick_key = Some(world_key);
+                    self.lm_kick_sun = Some(sun.dir);
                     self.kick_lightmap_bake(world, &sun, trigger);
                 }
                 self.shadow_gate.mark_built(key);
@@ -7561,6 +7670,8 @@ impl Renderer {
                 frustum,
                 &mut stats,
             );
+            self.draw_custom_models(cx, camera_pos, &instances, WorldModelLane::Placed,
+                (fog_color, fog_density), &sun, frustum, &mut stats);
             self.placed_models = instances;
 
             // Actor-attached props share the world material/depth pass, but
@@ -7607,6 +7718,8 @@ impl Renderer {
                 frustum,
                 &mut stats,
             );
+            self.draw_custom_models(cx, camera_pos, &attachments, WorldModelLane::Attachment,
+                (fog_color, fog_density), &sun, frustum, &mut stats);
             self.world_attachments = attachments;
         }
 
@@ -8179,6 +8292,7 @@ mod realm_lifecycle_tests {
             color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
             dynamic,
             depth_order,
+            custom_material: None,
             part_poses: Vec::new(),
         }
     }
@@ -8229,6 +8343,66 @@ mod realm_lifecycle_tests {
         world.mark_render_dirty();
         assert_ne!(lightmap_world_key(&world, 3, 6), bake, "geometry still re-kicks the bake");
         assert_ne!(static_slab_key(&world, 2), static_slab_key(&world, 1), "a rebake still repacks");
+    }
+
+    #[test]
+    fn a_night_clock_does_not_rekick_baked_sun_visibility() {
+        use crate::gpu_lightmap::GpuLightmapMode::{OnChange, Realtime};
+        let midnight = SunLight::from_time_of_day(0.0, 52.0).dir;
+        for i in 0..120 {
+            let dir = SunLight::from_time_of_day(i as f32 / 60.0, 52.0).dir;
+            assert!(!lightmap_sun_changed(Some(midnight), dir, OnChange));
+        }
+        let noon = SunLight::from_time_of_day(12.0, 52.0).dir;
+        assert!(lightmap_sun_changed(Some(midnight), noon, OnChange));
+        assert!(lightmap_sun_changed(Some(noon), midnight, OnChange));
+        assert!(!lightmap_sun_changed(Some(noon), noon, OnChange));
+        assert!(lightmap_sun_changed(Some(noon), SunLight::from_time_of_day(13.0, 52.0).dir, OnChange));
+        assert!(!lightmap_sun_changed(Some(midnight), noon, Realtime));
+    }
+
+    #[test]
+    fn sun_presentation_changes_preserve_layout_but_invalidate_baked_daylight() {
+        use crate::gpu_lightmap::GpuLightmapMode::{OnChange, Realtime};
+        let mut world = GameWorld::new();
+        world.sun = makepad_game_sim::SunConfig {
+            dir: Some(vec3f(0.0, 1.0, 0.0)),
+            color: Some(vec3f(0.05, 0.05, 0.05)),
+            ambient: Some(vec3f(0.05, 0.05, 0.05)),
+            ..Default::default()
+        };
+        let dim = crate::sun::resolve_sun(&world.sun);
+        let models_rev = 9;
+        let geometry = (world.render_rev, models_rev);
+        let old_key = lightmap_world_key(&world, models_rev, Renderer::lamp_daylight_key(&dim));
+        // Color and ambient affect baked lamp headroom even when direction
+        // is identical. They must reach the daylight key, not geometry.
+        for ambient_only in [false, true] {
+            world.sun.color = Some(if ambient_only { vec3f(0.05, 0.05, 0.05) } else { vec3f(1.0, 1.0, 1.0) });
+            world.sun.ambient = Some(if ambient_only { vec3f(1.0, 1.0, 1.0) } else { vec3f(0.05, 0.05, 0.05) });
+            let sun = crate::sun::resolve_sun(&world.sun);
+            let key = lightmap_world_key(&world, models_rev, Renderer::lamp_daylight_key(&sun));
+            assert_eq!((key.0, key.1), geometry);
+            assert_ne!(key.2, old_key.2, "baked lamp headroom must refresh");
+            assert!(!lightmap_sun_changed(Some(dim.dir), sun.dir, OnChange));
+            assert!(!lightmap_sun_changed(Some(dim.dir), sun.dir, Realtime));
+        }
+        let lit = crate::sun::resolve_sun(&world.sun);
+        let lit_key = lightmap_world_key(&world, models_rev, Renderer::lamp_daylight_key(&lit));
+        world.sun.shadow_alpha = Some(0.17);
+        let softer = crate::sun::resolve_sun(&world.sun);
+        assert_eq!(softer.shadow_alpha, 0.17);
+        assert_eq!(lightmap_world_key(&world, models_rev, Renderer::lamp_daylight_key(&softer)), lit_key,
+            "shadow opacity is analytic, not an atlas contribution");
+
+        // A directional change refreshes baked visibility in OnChange,
+        // while Realtime gets the new direction through its per-frame CSM.
+        world.sun.dir = Some(vec3f(1.0, 1.0, 0.0));
+        let moved = crate::sun::resolve_sun(&world.sun);
+        assert!(lightmap_sun_changed(Some(lit.dir), moved.dir, OnChange));
+        assert!(!lightmap_sun_changed(Some(lit.dir), moved.dir, Realtime));
+        assert_eq!((world.render_rev, models_rev), geometry,
+            "an in-flight atlas still has a valid layout after sun updates");
     }
 
     #[test]
@@ -9577,6 +9751,7 @@ mod anim_part_tests {
             color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
             dynamic: false,
             depth_order: 0.0,
+            custom_material: None,
             part_poses: Vec::new(),
         }]);
         assert!(renderer
@@ -9602,6 +9777,26 @@ mod anim_part_tests {
         assert_eq!(blue.tint, vec4(0.2, 0.5, 1.0, 1.0));
         assert_eq!(blue.color_adjust, vec4(210.0, 1.1, 0.9, 0.0));
         assert_eq!(neutral.tint, vec4(1.0, 1.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn authored_model_origin_and_front_follow_full_bank_pitch_frame() {
+        let origin = vec3f(0.3, -0.7, 1.2);
+        for angles in [vec3f(0.0,0.0,0.0), vec3f(0.31,1.1,-0.64)] {
+            let mut frame = Mat4f::rotation(angles);
+            frame.v[12] = 17.0; frame.v[13] = 28.0; frame.v[14] = -9.0;
+            let instance = ModelInstance::on_body_authored("trainer".into(), 2.0, origin, &frame);
+            for (model_point, body_point) in [
+                (origin, vec3f(0.0,0.0,0.0)),
+                (origin + vec3f(0.0,0.0,1.0),vec3f(0.0,0.0,-2.0)),
+                (origin + vec3f(1.0,0.0,0.0),vec3f(-2.0,0.0,0.0)),
+                (origin + vec3f(0.0,1.0,0.0),vec3f(0.0,2.0,0.0)),
+            ] {
+                let got = instance.transform.transform_vec4(vec4(model_point.x,model_point.y,model_point.z,1.0));
+                let expected = frame.transform_vec4(vec4(body_point.x,body_point.y,body_point.z,1.0));
+                assert!((got.x-expected.x).abs()<1e-5 && (got.y-expected.y).abs()<1e-5 && (got.z-expected.z).abs()<1e-5);
+            }
+        }
     }
 
     #[test]
