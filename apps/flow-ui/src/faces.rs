@@ -625,6 +625,46 @@ script_mod! {
         }
     }
 
+    mod.flow.ui.SeedPickerBase = #(SeedPicker::register_widget(vm))
+    mod.flow.ui.SeedPicker = set_type_default() do mod.flow.ui.SeedPickerBase{
+        width: Fill
+        height: 24
+        flow: Right
+        spacing: theme.space_1
+        field := mod.widgets.FabValueInput{
+            width: Fill
+            height: 24
+            label: "seed"
+            min: 0
+            max: 999999
+            step: 1
+            snap: 1
+            precision: 0
+            quantize: true
+        }
+        random_label := Label{
+            width: Fill
+            height: 24
+            visible: false
+            text: "seed  random"
+            padding: Inset{left: 8 top: 5}
+            draw_text +: {
+                color: theme.flow_text
+                text_style: theme.font_regular{font_size: 9}
+            }
+        }
+        die := ButtonFlatter{
+            width: 24
+            height: 24
+            text: ""
+            icon_walk: Walk{width: 13 height: 13}
+            draw_icon +: {
+                svg: crate_resource("self:resources/icons/dice.svg")
+                color: theme.flow_text_muted
+            }
+        }
+    }
+
     // The host wraps direct, named face controls that carry a bind in this
     // row. It keeps user-declared controls aligned with the built-in strip.
     mod.flow.ui.DeclaredInputRow = View{
@@ -1101,6 +1141,79 @@ pub struct FormatPicker {
     width_range: (f64, f64, f64),
     #[rust]
     height_range: (f64, f64, f64),
+}
+
+/// Integer seed editor with an explicit random mode. The outer widget owns
+/// `param_bind`, so the face host commits one literal for either control.
+#[derive(Script, ScriptHook, Widget)]
+pub struct SeedPicker {
+    #[deref]
+    view: View,
+    #[rust]
+    random: bool,
+    #[rust]
+    last_number: f64,
+}
+
+impl Widget for SeedPicker {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.view.draw_walk(cx, scope, walk)
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+}
+
+impl SeedPicker {
+    pub(crate) fn set_literal(&mut self, cx: &mut Cx, value: &Literal) {
+        match value {
+            Literal::Id(value) | Literal::Str(value) if value == "random" => {
+                self.set_random(cx, true);
+            }
+            Literal::Num(value) if *value == -1.0 => self.set_random(cx, true),
+            Literal::Num(value) => {
+                self.last_number = value.max(0.0);
+                self.view
+                    .fab_value_input(cx, ids!(field))
+                    .set_value(cx, self.last_number);
+                self.set_random(cx, false);
+            }
+            _ => self.set_random(cx, true),
+        }
+    }
+
+    fn set_random(&mut self, cx: &mut Cx, random: bool) {
+        self.random = random;
+        self.view
+            .fab_value_input(cx, ids!(field))
+            .set_visible(cx, !random);
+        self.view
+            .label(cx, ids!(random_label))
+            .set_visible(cx, random);
+        self.redraw(cx);
+    }
+
+    pub(crate) fn changed(&mut self, cx: &mut Cx, actions: &Actions) -> Option<Literal> {
+        if self.view.button(cx, ids!(die)).clicked(actions) {
+            let random = !self.random;
+            self.set_random(cx, random);
+            if random {
+                return Some(Literal::Id("random".to_string()));
+            }
+            self.view
+                .fab_value_input(cx, ids!(field))
+                .set_value(cx, self.last_number);
+            return Some(Literal::Num(self.last_number));
+        }
+        let value = self
+            .view
+            .fab_value_input(cx, ids!(field))
+            .ended(actions)?;
+        self.last_number = value.max(0.0);
+        self.random = false;
+        Some(Literal::Num(self.last_number))
+    }
 }
 
 impl Widget for FormatPicker {
@@ -2686,6 +2799,10 @@ impl FaceHost {
             let Some(value) = node_param(node, name) else {
                 continue;
             };
+            if let Some(mut seed) = widget.borrow_mut::<SeedPicker>() {
+                seed.set_literal(cx, value);
+                continue;
+            }
             if let Some(slider) = widget.borrow_mut::<Slider>() {
                 if let Literal::Num(number) = value {
                     drop(slider);
@@ -2913,7 +3030,11 @@ impl FaceHost {
         let mut out = Vec::new();
         for (node, face) in &self.faces {
             for (widget, key) in &face.param_binds {
-                if widget.borrow::<Slider>().is_some() {
+                if let Some(mut seed) = widget.borrow_mut::<SeedPicker>() {
+                    if let Some(value) = seed.changed(cx, actions) {
+                        out.push((node.clone(), key.clone(), value));
+                    }
+                } else if widget.borrow::<Slider>().is_some() {
                     if let Some(value) = widget.as_slider().end_slide(actions) {
                         out.push((node.clone(), key.clone(), Literal::Num(value)));
                     }
@@ -3319,8 +3440,13 @@ pub fn param_text(node: &Node, name: &str) -> String {
             if let Some(steps) = num("steps") {
                 parts.push(format!("{steps} steps"));
             }
-            if let Some(seed) = num("seed") {
-                parts.push(format!("seed {seed}"));
+            match node_param(node, "seed") {
+                Some(Literal::Id(value) | Literal::Str(value)) if value == "random" => {
+                    parts.push("seed random".to_string())
+                }
+                Some(Literal::Num(-1.0)) => parts.push("seed random".to_string()),
+                Some(Literal::Num(seed)) => parts.push(format!("seed {}", *seed as i64)),
+                _ => {}
             }
             if let Some(seconds) = num("seconds") {
                 parts.push(format!("{seconds} s"));
@@ -3565,6 +3691,8 @@ mod tests {
                     vram_total_mb: None,
                     vram_usable_mb: None,
                     vram_free_mb: None,
+                    lanes_model: None,
+                    lanes: None,
                 })
                 .collect(),
             models: vec![
@@ -3601,6 +3729,8 @@ mod tests {
                 vram_total_mb: Some(32_607),
                 vram_usable_mb: Some(30_603),
                 vram_free_mb: Some(29_785),
+                lanes_model: None,
+                lanes: None,
             }],
             models: vec![too_small],
             snapshot_ms: 1,

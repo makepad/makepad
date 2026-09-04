@@ -15,9 +15,10 @@ use makepad_ai_hub::sha256::sha256_hex;
 use makepad_flow::engine::FixedGen;
 use makepad_flow::host::{FlowServer, FlowServerConfig};
 use makepad_flow::{
-    CreateInstanceRequest, CreateInstanceResponse, CreateRunRequest, CreateRunResponse,
-    EventsResponse, InputValueDto, InstanceRow, PortType, PutSourceRequest, PutValueResponse,
-    RunRowDto, Seams, SetInputsResponse,
+    BatchMutationResponse, CreateBatchRequest, CreateBatchResponse, CreateInstanceRequest,
+    CreateInstanceResponse, CreateRunRequest, CreateRunResponse, EventsResponse, InputValueDto,
+    InstanceRow, PortType, PutSourceRequest, PutValueResponse, RunRowDto, RunState, Seams,
+    SetInputsResponse,
 };
 use makepad_micro_serde::{DeJson, JsonValue, SerJson};
 use std::collections::HashMap;
@@ -1092,4 +1093,233 @@ Flow{prompt, image, picture}
     assert_eq!(sha256_hex(&fetched.bytes), digest.trim_start_matches("sha256:"));
 
     server.shutdown();
+}
+
+#[test]
+fn batch_route_creates_slices_and_cancel_all_cancels_each() {
+    let root = TempRoot::new("batch-cancel");
+    let mut stalled = FakeChat::done("unused");
+    stalled.pending = true;
+    let server = start(
+        &root.0,
+        seams(stalled, FakeGen::done(), FakeHttp::json(200, "{}")),
+    );
+    let endpoints = server.endpoints();
+    put_flow(
+        endpoints.control,
+        &endpoints.token,
+        "batch-demo",
+        STALLED_FLOW,
+    );
+
+    let created = request(
+        endpoints.control,
+        "POST",
+        "/v1/flows/batch-demo/batches",
+        Some(&endpoints.token),
+        &CreateBatchRequest {
+            parallel: 3,
+            inputs: Some(one_input("prompt", "text", text_input("batch text"))),
+        }
+        .serialize_json(),
+    );
+    assert_eq!(created.status, 202, "{}", created.body);
+    let batch = CreateBatchResponse::deserialize_json(&created.body).unwrap();
+    assert_eq!(batch.runs.len(), 3);
+
+    let instances = request(
+        endpoints.control,
+        "GET",
+        "/v1/instances?flow=batch-demo",
+        Some(&endpoints.token),
+        "",
+    );
+    let instances = Vec::<InstanceRow>::deserialize_json(&instances.body).unwrap();
+    assert_eq!(instances.len(), 3);
+    for row in &instances {
+        assert!(
+            row.label
+                .as_deref()
+                .is_some_and(|label| label.starts_with(&format!("batch-{}#", batch.batch)))
+        );
+        assert_eq!(row.input_text("prompt", "text"), Some("batch text".to_string()));
+    }
+
+    let one = request(
+        endpoints.control,
+        "POST",
+        &format!("/v1/runs/{}/cancel", batch.runs[0].run_id),
+        Some(&endpoints.token),
+        "",
+    );
+    assert_eq!(one.status, 200, "{}", one.body);
+    wait_run_state(
+        endpoints.control,
+        &endpoints.token,
+        &batch.runs[0].run_id,
+        RunState::Cancelled,
+    );
+    let sibling = request(
+        endpoints.control,
+        "GET",
+        &format!("/v1/instances/{}", batch.runs[1].instance),
+        Some(&endpoints.token),
+        "",
+    );
+    assert_eq!(sibling.status, 200, "single-slice cancel touched a sibling");
+
+    let cancelled = request(
+        endpoints.control,
+        "POST",
+        &format!("/v1/batches/{}/cancel", batch.batch),
+        Some(&endpoints.token),
+        "",
+    );
+    assert_eq!(cancelled.status, 200, "{}", cancelled.body);
+    assert_eq!(
+        BatchMutationResponse::deserialize_json(&cancelled.body)
+            .unwrap()
+            .runs,
+        3
+    );
+    for run in &batch.runs {
+        let row = wait_run_state(
+            endpoints.control,
+            &endpoints.token,
+            &run.run_id,
+            RunState::Cancelled,
+        );
+        assert_eq!(row.batch.as_deref(), Some(batch.batch.as_str()));
+        let instance = request(
+            endpoints.control,
+            "GET",
+            &format!("/v1/instances/{}", run.instance),
+            Some(&endpoints.token),
+            "",
+        );
+        assert_eq!(instance.status, 404);
+    }
+
+    let cleared = request(
+        endpoints.control,
+        "DELETE",
+        &format!("/v1/batches/{}", batch.batch),
+        Some(&endpoints.token),
+        "",
+    );
+    assert_eq!(cleared.status, 200, "{}", cleared.body);
+    for run in &batch.runs {
+        let row = request(
+            endpoints.control,
+            "GET",
+            &format!("/v1/runs/{}", run.run_id),
+            Some(&endpoints.token),
+            "",
+        );
+        assert_eq!(row.status, 404);
+    }
+    server.shutdown();
+}
+
+#[test]
+fn random_seed_is_distinct_per_batch_slice_and_recorded() {
+    let root = TempRoot::new("batch-seeds");
+    let gen = FakeGen::done();
+    let requests = gen.requests.clone();
+    let server = start(
+        &root.0,
+        seams(FakeChat::done("unused"), gen, FakeHttp::json(200, "{}")),
+    );
+    let endpoints = server.endpoints();
+    put_flow(
+        endpoints.control,
+        &endpoints.token,
+        "seed-demo",
+        r#"use mod.flow.*
+let image = Image{prompt: "a cube" seed: @random}
+let picture = Output{type: @image value: image.image()}
+Flow{image, picture}
+"#,
+    );
+    let created = request(
+        endpoints.control,
+        "POST",
+        "/v1/flows/seed-demo/batches",
+        Some(&endpoints.token),
+        &CreateBatchRequest {
+            parallel: 2,
+            inputs: None,
+        }
+        .serialize_json(),
+    );
+    assert_eq!(created.status, 202, "{}", created.body);
+    let batch = CreateBatchResponse::deserialize_json(&created.body).unwrap();
+    let rows: Vec<_> = batch
+        .runs
+        .iter()
+        .map(|run| {
+            wait_run_state(
+                endpoints.control,
+                &endpoints.token,
+                &run.run_id,
+                RunState::Done,
+            )
+        })
+        .collect();
+    let mut seeds: Vec<u64> = requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, request)| request.seed.expect("resolved random seed"))
+        .collect();
+    assert_eq!(seeds.len(), 2);
+    assert_ne!(seeds[0], seeds[1]);
+    let mut recorded: Vec<u64> = rows
+        .iter()
+        .map(|row| {
+            row.nodes["image"]
+            .outputs
+            .iter()
+            .find(|output| output.port == "seed_used")
+            .and_then(|output| output.value.preview.as_ref())
+            .and_then(|literal| match literal {
+                makepad_flow::Literal::Str(value) => value.parse::<u64>().ok(),
+                _ => None,
+            })
+            .expect("seed_used output")
+        })
+        .collect();
+    seeds.sort_unstable();
+    recorded.sort_unstable();
+    assert_eq!(recorded, seeds);
+    server.shutdown();
+}
+
+fn wait_run_state(
+    address: SocketAddr,
+    token: &str,
+    run_id: &str,
+    wanted: RunState,
+) -> RunRowDto {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let response = request(
+            address,
+            "GET",
+            &format!("/v1/runs/{run_id}"),
+            Some(token),
+            "",
+        );
+        assert_eq!(response.status, 200, "{}", response.body);
+        let row = RunRowDto::deserialize_json(&response.body).unwrap();
+        if row.state == wanted {
+            return row;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "run {run_id} stayed {:?}",
+            row.state
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }

@@ -272,7 +272,7 @@ const IMAGE_PARAMS: &[ParamSpec] = &[
     ParamSpec::new("width", ParamType::Number, DefaultValue::Num(1024.0)),
     ParamSpec::new("height", ParamType::Number, DefaultValue::Num(1024.0)),
     ParamSpec::new("steps", ParamType::Number, DefaultValue::Num(8.0)),
-    ParamSpec::new("seed", ParamType::Number, DefaultValue::Num(0.0)),
+    ParamSpec::new("seed", ParamType::Literal, DefaultValue::Id("random")),
     ParamSpec::new("negative", ParamType::String, DefaultValue::Str("")),
     ParamSpec::new("model", ParamType::String, DefaultValue::Str("")),
 ];

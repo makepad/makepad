@@ -202,6 +202,8 @@ mod.flow.Gen = mod.flow.Node{
     domain: ""
     /** Typed input and output port declaration: `{in: {name: @type, ...}, out: {name: @type, ...}}`. */
     ports: {in: {} out: {}}
+    /** Reproducible integer seed; @random or -1 draws a fresh seed for every run. */
+    seed: @random
     ui: mod.flow.ui.GenFace
 }
 
@@ -217,8 +219,8 @@ mod.flow.Image = mod.flow.Gen{
     height: 1024
     /** 1..50 */
     steps: 8
-    /** Reproducible seed; zero lets the provider choose. */
-    seed: 0
+    /** Reproducible integer seed; @random or -1 draws a fresh seed for every run. */
+    seed: @random
     /** Things the image should avoid. */
     negative: ""
     /** Model name; empty lets the hub choose. */

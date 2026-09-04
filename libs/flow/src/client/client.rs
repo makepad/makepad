@@ -1,8 +1,9 @@
 use super::http::{HttpClient, Method};
 use crate::{
-    AssetsResponse, CreateFromTemplateRequest, CreateInstanceRequest, CreateInstanceResponse, CreateRunResponse,
+    AssetsResponse, BatchMutationResponse, CreateBatchRequest, CreateBatchResponse,
+    CreateFromTemplateRequest, CreateInstanceRequest, CreateInstanceResponse, CreateRunResponse,
     EvalError, EventsPage, FlowDefinition, FlowSummary, Graph, Health, InstanceRow, NodesResponse,
-    ModelsResponse, PutFlowResponse, RunRowDto, SetInputsResponse, TemplateResponse,
+    ModelsResponse, ParallelismResponse, PutFlowResponse, RunRowDto, SetInputsResponse, TemplateResponse,
     TemplateSummary, ValueBytes,
 };
 use makepad_micro_serde::{DeJson, SerJson};
@@ -172,6 +173,12 @@ impl FlowClient {
         decode(&body, "model list")
     }
 
+    pub fn parallelism(&self, name: &str) -> ClientResult<ParallelismResponse> {
+        let target = format!("/v1/flows/{}/parallelism", flow_name(name)?);
+        let body = self.call(Method::Get, &target, None, true, None)?;
+        decode(&body, "parallelism estimate")
+    }
+
     pub fn flows(&self) -> ClientResult<Vec<FlowSummary>> {
         let body = self.call(Method::Get, "/v1/flows", None, true, None)?;
         decode(&body, "flow list")
@@ -316,6 +323,29 @@ impl FlowClient {
         let body = request.serialize_json().into_bytes();
         let response = self.call(Method::Post, &target, Some(&body), true, None)?;
         decode(&response, "create instance response")
+    }
+
+    pub fn create_batch(
+        &self,
+        name: &str,
+        request: &CreateBatchRequest,
+    ) -> ClientResult<CreateBatchResponse> {
+        let target = format!("/v1/flows/{}/batches", flow_name(name)?);
+        let body = request.serialize_json().into_bytes();
+        let response = self.call(Method::Post, &target, Some(&body), true, None)?;
+        decode(&response, "create batch response")
+    }
+
+    pub fn cancel_batch(&self, id: &str) -> ClientResult<BatchMutationResponse> {
+        let target = format!("/v1/batches/{}/cancel", route_id(id, "batch")?);
+        let response = self.call(Method::Post, &target, None, true, None)?;
+        decode(&response, "cancel batch response")
+    }
+
+    pub fn clear_batch(&self, id: &str) -> ClientResult<BatchMutationResponse> {
+        let target = format!("/v1/batches/{}", route_id(id, "batch")?);
+        let response = self.call(Method::Delete, &target, None, true, None)?;
+        decode(&response, "clear batch response")
     }
 
     pub fn create_instance_json(&self, name: &str, request: &Value) -> ClientResult<Value> {

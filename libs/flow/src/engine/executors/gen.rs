@@ -328,6 +328,7 @@ pub struct GenExecutor {
     job_id: Option<String>,
     node: Option<Node>,
     request: Option<GenerateRequestJson>,
+    seed_used: Option<u64>,
     provider_url: Option<String>,
     refusals: Vec<(String, String)>,
     attempts: usize,
@@ -355,6 +356,7 @@ impl GenExecutor {
             job_id: None,
             node: None,
             request: None,
+            seed_used: None,
             provider_url: None,
             refusals: Vec::new(),
             attempts: 0,
@@ -514,6 +516,7 @@ impl Executor for GenExecutor {
         let domain = Domain::parse(domain_text)
             .ok_or_else(|| format!("unknown generation domain `{domain_text}`"))?;
         let request = build_request(node, inputs, &self.origin)?;
+        self.seed_used = request.seed;
         self.domain = Some(domain);
         self.node = Some(node.clone());
         self.request = Some(request);
@@ -643,6 +646,7 @@ impl Executor for GenExecutor {
                     };
                     outputs.push((output.name.clone(), value));
                 }
+                append_seed_used(&mut outputs, self.seed_used);
                 Poll::Done(outputs)
             }
             makepad_ai_hub::protocol::JOB_STATE_ERROR => {
@@ -736,7 +740,7 @@ fn build_request(
     request.negative_prompt = string_opt(node, "negative").or_else(|| string_opt(node, "negative_prompt"));
     request.width = u32_param(node, "width");
     request.height = u32_param(node, "height");
-    request.seed = u64_param(node, "seed");
+    request.seed = seed_param(node)?;
     request.steps = u32_param(node, "steps");
     request.guidance = f64_param(node, "guidance");
     request.queue_policy = string_opt(node, "queue_policy");
@@ -815,6 +819,39 @@ fn f64_param(node: &Node, name: &str) -> Option<f64> {
 
 fn u64_param(node: &Node, name: &str) -> Option<u64> {
     f64_param(node, name).filter(|value| *value >= 0.0).map(|value| value as u64)
+}
+
+fn seed_param(node: &Node) -> Result<Option<u64>, String> {
+    match param(node, "seed") {
+        None => Ok(None),
+        Some(Literal::Num(value)) if *value == -1.0 => Ok(Some(draw_seed())),
+        Some(Literal::Id(value) | Literal::Str(value)) if value == "random" => {
+            Ok(Some(draw_seed()))
+        }
+        Some(Literal::Num(value))
+            if value.is_finite()
+                && value.fract() == 0.0
+                && *value >= 0.0
+                && *value <= u64::MAX as f64 =>
+        {
+            Ok(Some(*value as u64))
+        }
+        Some(_) => Err("seed must be a non-negative integer, -1, or @random".to_string()),
+    }
+}
+
+/// A fresh seed in the UI's six-digit space from the OS entropy behind
+/// `RandomState` (every call gets new keys; no process-wide state).
+fn draw_seed() -> u64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    RandomState::new().build_hasher().finish() % 1_000_000
+}
+
+fn append_seed_used(outputs: &mut Vec<(String, Value)>, seed: Option<u64>) {
+    if let Some(seed) = seed {
+        outputs.push(("seed_used".to_string(), Value::json(seed.to_string())));
+    }
 }
 
 fn u32_param(node: &Node, name: &str) -> Option<u32> {
@@ -904,4 +941,45 @@ fn chat_messages_param(node: &Node) -> Result<Option<Vec<ChatMessageJson>>, Stri
         });
     }
     Ok((!messages.is_empty()).then_some(messages))
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::{append_seed_used, seed_param};
+    use crate::{Literal, Loc, Node};
+
+    fn random_node() -> Node {
+        Node {
+            id: "image".into(),
+            kind: "gen".into(),
+            type_name: "Image".into(),
+            params: vec![("seed".into(), Literal::Id("random".into()))],
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            at: None,
+            size: None,
+            flip: false,
+            loc: Loc { line: 1, col: 1 },
+            fn_src: None,
+            face_src: None,
+            on_fail: "stop".into(),
+            label: None,
+            domain: Some("image".into()),
+            doc: None,
+        }
+    }
+
+    #[test]
+    fn random_seed_is_fresh_and_recorded_as_seed_used() {
+        let mut node = random_node();
+        let first = seed_param(&node).unwrap().unwrap();
+        let second = seed_param(&node).unwrap().unwrap();
+        assert_ne!(first, second);
+        node.params[0].1 = Literal::Num(-1.0);
+        assert_ne!(seed_param(&node).unwrap().unwrap(), second);
+        let mut outputs = Vec::new();
+        append_seed_used(&mut outputs, Some(first));
+        assert_eq!(outputs[0].0, "seed_used");
+        assert_eq!(outputs[0].1.as_text().unwrap(), first.to_string());
+    }
 }
