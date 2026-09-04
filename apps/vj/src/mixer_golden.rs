@@ -425,6 +425,20 @@ fn golden_tremolo_pulse() {
     assert_golden("tremolo_pulse", &left, &right);
 }
 
+/// A pure waveshaper adds harmonics to whatever is already there rather
+/// than comb-filtering or aliasing it, so -- like the tremolo's -- no
+/// special frequency choice is needed here either.
+#[test]
+fn golden_distortion_drive() {
+    let mixer = deck_a(tone_pcm(233.0, 48_000, 3.0));
+    mixer.set_deck_distortion(DeckId::A, true);
+    mixer.set_deck_distortion_drive(DeckId::A, 8.0);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let (left, right) = capture(&mixer, CAPTURE, |_| {});
+    assert_golden("distortion_drive", &left, &right);
+}
+
 // ---------------------------------------------------------------------------
 // clicks
 // ---------------------------------------------------------------------------
@@ -703,6 +717,36 @@ fn a_tremolo_depth_change_while_engaged_is_click_free() {
         }
     });
     assert!(worst < CLICK, "a depth change must ramp, biggest step {worst}");
+}
+
+#[test]
+fn engaging_and_releasing_the_distortion_are_click_free() {
+    let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| match index {
+        8 => mixer.set_deck_distortion(DeckId::A, true),
+        24 => mixer.set_deck_distortion(DeckId::A, false),
+        _ => {}
+    });
+    assert!(worst < CLICK, "engaging or releasing the distortion must ramp, biggest step {worst}");
+}
+
+/// `pade_tanh` is continuous everywhere it is defined, so unlike the
+/// bitcrusher's bit depth, drive is expected to need no handover -- this
+/// test is the confirmation of that, not a search for a bug.
+#[test]
+fn a_distortion_drive_change_while_engaged_is_click_free() {
+    let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
+    mixer.set_deck_distortion(DeckId::A, true);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| {
+        if index == 8 {
+            mixer.set_deck_distortion_drive(DeckId::A, 18.0);
+        }
+    });
+    assert!(worst < CLICK, "a drive change must ramp, biggest step {worst}");
 }
 
 #[test]

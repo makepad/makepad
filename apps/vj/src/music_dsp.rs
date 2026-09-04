@@ -2475,6 +2475,76 @@ impl Tremolo {
     }
 }
 
+pub(crate) const DISTORTION_DRIVE_MIN: f32 = 1.0;
+pub(crate) const DISTORTION_DRIVE_MAX: f32 = 20.0;
+pub(crate) const DISTORTION_DRIVE_DEFAULT: f32 = 4.0;
+
+/// One deck's distortion: [`pade_tanh`] soft-clipping driven by a pre-gain
+/// ("drive"), with a makeup gain that keeps the effect's OWN average
+/// level roughly steady as drive moves, so turning the knob changes the
+/// character rather than jumping the volume.
+///
+/// The makeup here is a static function of `drive` alone --
+/// `1 / pade_tanh(drive)` -- not a live envelope follower over the
+/// actual signal. A true RMS follower would need its own persisted
+/// envelope state and its own lifecycle policy (another `silence`-style
+/// question this file has already answered three times over for the
+/// echo, the flanger and the bitcrusher); `pade_tanh(drive)` already
+/// says, for a unity-amplitude peak, how much THIS drive setting
+/// compresses it, which is the number that actually needs compensating.
+/// Nothing here holds audio content across frames, so -- like
+/// [`Tremolo`] -- there is no lifecycle hook wired for it anywhere.
+pub struct Distortion {
+    wet: ParamRamp,
+    drive: ParamRamp,
+}
+
+impl Distortion {
+    pub fn new() -> Distortion {
+        Distortion { wet: ParamRamp::at(0.0), drive: ParamRamp::at(DISTORTION_DRIVE_DEFAULT) }
+    }
+
+    /// The on/off switch.
+    pub fn set_wet(&mut self, wet: f32) {
+        if let Some(wet) = knob(wet, 0.0, 1.0) {
+            self.wet.slew(wet, EQ_ENGAGE_SECS);
+        }
+    }
+
+    /// The pre-gain into the soft clip. `pade_tanh` is continuous
+    /// everywhere it is defined, so unlike the bitcrusher's bit depth
+    /// this needs no crossfaded handover -- a plain ramp cannot step
+    /// the output, because the function it feeds cannot step either.
+    pub fn set_drive(&mut self, drive: f32) {
+        if let Some(drive) = knob(drive, DISTORTION_DRIVE_MIN, DISTORTION_DRIVE_MAX) {
+            self.drive.slew(drive, EQ_ENGAGE_SECS);
+        }
+    }
+
+    pub fn engaged(&self) -> bool {
+        self.wet.target() > 0.0
+    }
+
+    /// Process one stereo frame.
+    #[inline]
+    pub fn process(&mut self, frame: [f32; 2], device_rate: f32) -> [f32; 2] {
+        let wet = self.wet.tick(device_rate);
+        if wet <= 0.0 {
+            // No line, no history: off is exactly the input.
+            return frame;
+        }
+        let drive = self.drive.tick(device_rate);
+        let makeup = 1.0 / pade_tanh(drive).max(0.15);
+        let shaped =
+            [pade_tanh(frame[0] * drive) * makeup, pade_tanh(frame[1] * drive) * makeup];
+
+        [
+            frame[0] + (shaped[0] - frame[0]) * wet,
+            frame[1] + (shaped[1] - frame[1]) * wet,
+        ]
+    }
+}
+
 // ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
@@ -4717,5 +4787,107 @@ mod tests {
         assert_eq!(trem.depth.target(), 1.0);
         trem.set_depth(-1.0);
         assert_eq!(trem.depth.target(), 0.0);
+    }
+
+    /// Off, a fresh unit is exactly its input.
+    #[test]
+    fn a_distortion_that_was_never_engaged_is_bit_transparent() {
+        let rate = 48_000.0f32;
+        let mut dist = Distortion::new();
+        let mut phase = 0.0f32;
+        for _ in 0..4_000 {
+            phase += 2.0 * PI * 37.0 / rate;
+            let x = phase.sin() * 0.6;
+            assert_eq!(dist.process([x, -x], rate), [x, -x]);
+        }
+    }
+
+    /// The implementation must faithfully compute what it documents:
+    /// `pade_tanh(frame * drive) * makeup`, with
+    /// `makeup = 1 / pade_tanh(drive)`. Cross-checks the compiled output
+    /// against the formula computed independently in the test, the same
+    /// way `bitcrusher_quantizes_to_the_documented_level_count` checks
+    /// its own unit's formula.
+    #[test]
+    fn distortion_output_matches_its_own_shaping_formula() {
+        let rate = 48_000.0f32;
+        let mut dist = Distortion::new();
+        dist.set_wet(1.0);
+        dist.set_drive(6.0);
+        for _ in 0..SETTLE_FRAMES {
+            dist.process([0.0, 0.0], rate);
+        }
+        let drive = 6.0f32;
+        let makeup = 1.0 / pade_tanh(drive).max(0.15);
+        for i in 0..200usize {
+            let x = -0.9 + 1.8 * (i as f32 / 200.0);
+            let out = dist.process([x, x], rate)[0];
+            let expected = pade_tanh(x * drive) * makeup;
+            assert!((out - expected).abs() < 1e-4, "{out} vs {expected} at x={x}");
+        }
+    }
+
+    /// No feedback path to diverge, but bounded and finite is worth
+    /// locking in at the harshest settings, the same property every
+    /// other effect in this file is held to.
+    #[test]
+    fn distortion_stays_bounded_at_the_harshest_settings() {
+        let rate = 48_000.0f32;
+        let mut dist = Distortion::new();
+        dist.set_wet(1.0);
+        dist.set_drive(DISTORTION_DRIVE_MAX);
+        for _ in 0..SETTLE_FRAMES {
+            dist.process([0.0, 0.0], rate);
+        }
+        let mut phase = 0.0f32;
+        for _ in 0..48_000usize {
+            phase += 2.0 * PI * 233.0 / rate;
+            let x = phase.sin() * 1.5;
+            let out = dist.process([x, x], rate);
+            assert!(out[0].is_finite() && out[0].abs() < 8.0, "unbounded: {out:?}");
+            assert!(out[1].is_finite() && out[1].abs() < 8.0, "unbounded: {out:?}");
+        }
+    }
+
+    /// No line, no history: disengage completes exactly the ramp's own
+    /// duration after `set_wet(0.0)`.
+    #[test]
+    fn switching_the_distortion_off_returns_to_bit_exact_bypass_after_its_ramp() {
+        let rate = 48_000.0f32;
+        let mut dist = Distortion::new();
+        dist.set_wet(1.0);
+        for _ in 0..SETTLE_FRAMES {
+            dist.process([0.5, 0.5], rate);
+        }
+        dist.set_wet(0.0);
+        for _ in 0..1_000 {
+            dist.process([0.5, 0.5], rate);
+        }
+        assert!(!dist.engaged());
+        for i in 0..1_000 {
+            let x = (i as f32 * 0.037).sin() * 0.5;
+            assert_eq!(
+                dist.process([x, -x], rate),
+                [x, -x],
+                "a bit-exact bypass, not merely quiet"
+            );
+        }
+    }
+
+    #[test]
+    fn distortion_setters_clamp_to_their_documented_ranges() {
+        let mut dist = Distortion::new();
+        dist.set_wet(f32::NAN);
+        assert_eq!(dist.wet.target(), 0.0, "a bad value moves nothing");
+        dist.set_wet(5.0);
+        assert_eq!(dist.wet.target(), 1.0);
+        dist.set_wet(-5.0);
+        assert_eq!(dist.wet.target(), 0.0);
+        dist.set_drive(f32::INFINITY);
+        assert_eq!(dist.drive.target(), DISTORTION_DRIVE_DEFAULT, "unmoved by a bad value");
+        dist.set_drive(1_000.0);
+        assert_eq!(dist.drive.target(), DISTORTION_DRIVE_MAX);
+        dist.set_drive(-1.0);
+        assert_eq!(dist.drive.target(), DISTORTION_DRIVE_MIN);
     }
 }

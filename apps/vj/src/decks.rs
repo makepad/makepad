@@ -1282,6 +1282,11 @@ pub struct DeckState {
     pub tremolo_rate: f32,
     /// The tremolo LFO's swing, 0..1.
     pub tremolo_depth: f32,
+    /// Whether the distortion is on. Same channel-strip treatment as
+    /// the tremolo beside it.
+    pub distortion_on: bool,
+    /// The distortion's pre-gain into the soft clip.
+    pub distortion_drive: f32,
     /// Per-stem gains, in [`crate::music_dsp::StemKind`] order.
     pub stem_gain: [f32; STEM_COUNT],
     pub stem_kill: [bool; STEM_COUNT],
@@ -1360,6 +1365,8 @@ impl Default for DeckState {
             tremolo_on: false,
             tremolo_rate: crate::music_dsp::TREMOLO_RATE_DEFAULT,
             tremolo_depth: crate::music_dsp::TREMOLO_DEPTH_DEFAULT,
+            distortion_on: false,
+            distortion_drive: crate::music_dsp::DISTORTION_DRIVE_DEFAULT,
             stem_gain: [1.0; STEM_COUNT],
             stem_kill: [false; STEM_COUNT],
             stem_solo: [false; STEM_COUNT],
@@ -1703,6 +1710,10 @@ pub enum DeckCmd {
     SetTremoloRate { deck: DeckId, hz: f32 },
     /// The tremolo LFO's swing.
     SetTremoloDepth { deck: DeckId, depth: f32 },
+    /// The distortion's on/off switch.
+    SetDistortion { deck: DeckId, on: bool },
+    /// The distortion's pre-gain into the soft clip.
+    SetDistortionDrive { deck: DeckId, drive: f32 },
     /// One stem lane's gain, 0 = muted.
     SetStemGain { deck: DeckId, stem: usize, gain: f32 },
     SplatSet { deck: DeckId, grid: Arc<SplatGrid> },
@@ -2155,6 +2166,8 @@ impl DeckEngine {
             DeckCmd::SetTremolo { deck, on: state.tremolo_on },
             DeckCmd::SetTremoloRate { deck, hz: state.tremolo_rate },
             DeckCmd::SetTremoloDepth { deck, depth: state.tremolo_depth },
+            DeckCmd::SetDistortion { deck, on: state.distortion_on },
+            DeckCmd::SetDistortionDrive { deck, drive: state.distortion_drive },
         ];
         for band in 0..3 {
             cmds.push(DeckCmd::SetEqBand { deck, band, gain: state.eq_effective(band) });
@@ -5099,6 +5112,31 @@ impl DeckEngine {
         vec![DeckCmd::SetTremoloDepth { deck, depth: state.tremolo_depth }]
     }
 
+    /// The distortion's on/off switch.
+    pub fn toggle_distortion(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.distortion_on = !state.distortion_on;
+        vec![DeckCmd::SetDistortion { deck, on: state.distortion_on }]
+    }
+
+    /// Set the distortion's on/off switch to an explicit value, rather
+    /// than flipping whatever it already was -- what a MIX-linked
+    /// broadcast needs, the same reason [`Self::set_flanger`] exists.
+    pub fn set_distortion(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
+        self.deck_mut(deck).distortion_on = on;
+        vec![DeckCmd::SetDistortion { deck, on }]
+    }
+
+    /// The distortion's pre-gain into the soft clip.
+    pub fn set_distortion_drive(&mut self, deck: DeckId, drive: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.distortion_drive = drive.clamp(
+            crate::music_dsp::DISTORTION_DRIVE_MIN,
+            crate::music_dsp::DISTORTION_DRIVE_MAX,
+        );
+        vec![DeckCmd::SetDistortionDrive { deck, drive: state.distortion_drive }]
+    }
+
     /// Stem knob. Inert until the separated stems are loaded — the deck is
     /// playing the full mix and there is nothing to turn down.
     pub fn set_stem(&mut self, deck: DeckId, stem: usize, gain: f32) -> Vec<DeckCmd> {
@@ -5702,6 +5740,52 @@ mod tests {
         let cmds = e.track_ready(d, g, 20.0);
         assert!(cmds.contains(&DeckCmd::SetTremolo { deck: DeckId::B, on: true }));
         assert!(cmds.contains(&DeckCmd::SetTremoloRate { deck: DeckId::B, hz: 8.0 }));
+    }
+
+    #[test]
+    fn distortion_drive_clamps_to_its_documented_range() {
+        let mut e = DeckEngine::new();
+        assert_eq!(
+            e.set_distortion_drive(DeckId::A, 1_000.0),
+            vec![DeckCmd::SetDistortionDrive {
+                deck: DeckId::A,
+                drive: crate::music_dsp::DISTORTION_DRIVE_MAX,
+            }]
+        );
+        assert_eq!(
+            e.set_distortion_drive(DeckId::A, -1.0),
+            vec![DeckCmd::SetDistortionDrive {
+                deck: DeckId::A,
+                drive: crate::music_dsp::DISTORTION_DRIVE_MIN,
+            }]
+        );
+    }
+
+    #[test]
+    fn toggle_distortion_flips_and_set_distortion_lands_on_an_explicit_side() {
+        let mut e = DeckEngine::new();
+        assert!(!e.deck(DeckId::A).distortion_on);
+        assert_eq!(
+            e.toggle_distortion(DeckId::A),
+            vec![DeckCmd::SetDistortion { deck: DeckId::A, on: true }]
+        );
+        assert!(e.deck(DeckId::A).distortion_on);
+        assert_eq!(
+            e.set_distortion(DeckId::B, true),
+            vec![DeckCmd::SetDistortion { deck: DeckId::B, on: true }]
+        );
+        assert!(e.deck(DeckId::B).distortion_on);
+    }
+
+    #[test]
+    fn a_load_carries_the_operators_distortion_settings() {
+        let mut e = DeckEngine::new();
+        e.toggle_distortion(DeckId::B);
+        e.set_distortion_drive(DeckId::B, 10.0);
+        let (d, g) = load_gen(&e.click(item(3), DeckTarget::B));
+        let cmds = e.track_ready(d, g, 20.0);
+        assert!(cmds.contains(&DeckCmd::SetDistortion { deck: DeckId::B, on: true }));
+        assert!(cmds.contains(&DeckCmd::SetDistortionDrive { deck: DeckId::B, drive: 10.0 }));
     }
 
     // -----------------------------------------------------------------
