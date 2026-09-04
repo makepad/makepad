@@ -60,6 +60,14 @@ const FIRST_TEMPLATE: &str = "prompt-to-image";
 /// How often the hub's model lists are refreshed while a flow with generators is open.
 const MODELS_REFRESH_SECS: f64 = 10.0;
 
+const TEMPLATES_MENU: &str = "Templates";
+
+/// The menu id of a template's entry; the name is the server's, so it is
+/// stable across list refreshes.
+fn template_menu_id(name: &str) -> LiveId {
+    LiveId::from_str(&format!("template:{name}"))
+}
+
 fn set_wire_menu_checks(menus: &mut [MenuDef], mode: WireMode) {
     for entry in menus.iter_mut().flat_map(|menu| &mut menu.items) {
         if entry.id == live_id!(wires_routed) {
@@ -1383,6 +1391,41 @@ impl App {
         });
     }
 
+    /// The Templates menu lists every template the server serves, one entry
+    /// each, alphabetical; choosing one creates a flow from it and opens it.
+    /// Rebuilt whenever the template list arrives.
+    fn refresh_templates_menu(&mut self, cx: &mut Cx) {
+        let menu_bar = self.ui.menu_bar(cx, ids!(menu_bar));
+        let mut menus: Vec<MenuDef> = menu_bar
+            .borrow()
+            .map(|bar| bar.menus().to_vec())
+            .unwrap_or_default();
+        if menus.is_empty() {
+            return;
+        }
+        menus.retain(|menu| menu.label != TEMPLATES_MENU);
+        let mut templates = self.templates.clone();
+        templates.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+        let items: Vec<makepad_widgets::menu_bar::MenuEntry> = templates
+            .iter()
+            .map(|template| {
+                makepad_widgets::menu_bar::MenuEntry::item(
+                    template_menu_id(&template.name),
+                    template.label.as_str(),
+                    None,
+                )
+            })
+            .collect();
+        if items.is_empty() {
+            menu_bar.set_menus(cx, menus);
+            return;
+        }
+        // Second on the bar, right after File: the place a new flow starts.
+        let at = menus.len().min(1);
+        menus.insert(at, MenuDef::new(TEMPLATES_MENU, items));
+        menu_bar.set_menus(cx, menus);
+    }
+
     fn create_from_template(&mut self, template: &str) {
         let name = self.fresh_flow_name(template);
         let template = template.to_string();
@@ -1723,6 +1766,7 @@ impl App {
                         {
                             picker.set_templates(cx, self.templates.clone());
                         }
+                        self.refresh_templates_menu(cx);
                     }
                     Err(error) => self.show_error(cx, &error),
                 },
@@ -3587,7 +3631,16 @@ impl App {
                 self.show_help(cx, "The flow language", makepad_flow::AUTHORING_BRIEF)
             }
             id if id == live_id!(help_about) => self.show_help(cx, "About Flow", HELP_ABOUT),
-            _ => {}
+            id => {
+                let template = self
+                    .templates
+                    .iter()
+                    .find(|template| template_menu_id(&template.name) == id)
+                    .map(|template| template.name.clone());
+                if let Some(template) = template {
+                    self.create_from_template(&template);
+                }
+            }
         }
     }
 
@@ -5006,6 +5059,61 @@ mod layout_tests {
             .widget(&cx, ids!(preview_value))
             .borrow::<faces::ValueView>()
             .is_some());
+    }
+
+    #[test]
+    fn the_templates_menu_lists_every_template_and_opens_one() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let mut app = cx.with_vm(|vm| App::from_script_mod(vm, <App as AppMain>::script_mod));
+        let template = |name: &str, label: &str| TemplateSummary {
+            name: name.into(),
+            label: label.into(),
+            brief: String::new(),
+            node_count: 3,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        };
+        app.templates = vec![
+            template("text-to-video", "Text to video"),
+            template("prompt-to-image", "Prompt to image"),
+        ];
+        app.refresh_templates_menu(&mut cx);
+        let labels: Vec<String> = app
+            .ui
+            .menu_bar(&cx, ids!(menu_bar))
+            .borrow()
+            .unwrap()
+            .menus()
+            .iter()
+            .map(|menu| menu.label.clone())
+            .collect();
+        assert_eq!(labels[1], "Templates", "{labels:?}");
+        assert_eq!(menu_label(&app, &cx, template_menu_id("text-to-video")), "Text to video");
+        // Alphabetical: the picture template comes before the video one.
+        let entries: Vec<String> = app
+            .ui
+            .menu_bar(&cx, ids!(menu_bar))
+            .borrow()
+            .unwrap()
+            .menus()[1]
+            .items
+            .iter()
+            .map(|entry| entry.label.clone())
+            .collect();
+        assert_eq!(entries, vec!["Prompt to image", "Text to video"]);
+        // A refresh replaces the menu instead of stacking a second one.
+        app.refresh_templates_menu(&mut cx);
+        let count = app
+            .ui
+            .menu_bar(&cx, ids!(menu_bar))
+            .borrow()
+            .unwrap()
+            .menus()
+            .iter()
+            .filter(|menu| menu.label == "Templates")
+            .count();
+        assert_eq!(count, 1);
     }
 
     #[test]
