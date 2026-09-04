@@ -2578,6 +2578,21 @@ script_mod! {
                                         default: 1.5
                                     }
                                 }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    sfx_fx_plate_reverb := PillButton{width: 70 text: "REVERB"}
+                                    sfx_fx_plate_reverb_size := Slider{
+                                        width: 170
+                                        text: "reverb size"
+                                        min: 0.0
+                                        max: 1.0
+                                        default: 0.5
+                                    }
+                                }
                             }
 
                             // ============ MESH ============
@@ -14172,6 +14187,10 @@ p2 {}
                 DeckCmd::SetStereoWidthAmount { deck, amount } => {
                     self.mixer.set_deck_stereo_width_amount(deck, amount)
                 }
+                DeckCmd::SetPlateReverb { deck, on } => self.mixer.set_deck_plate_reverb(deck, on),
+                DeckCmd::SetPlateReverbSize { deck, size } => {
+                    self.mixer.set_deck_plate_reverb_size(deck, size)
+                }
                 DeckCmd::SetStemGain { deck, stem, gain } => {
                     self.mixer.set_deck_stem_gain(deck, stem, gain)
                 }
@@ -14336,6 +14355,8 @@ p2 {}
         let (autopan_on, autopan_rate) = (deck.autopan_on, deck.autopan_rate as f64);
         let (stereo_width_on, stereo_width_amount) =
             (deck.stereo_width_on, deck.stereo_width_amount as f64);
+        let (plate_reverb_on, plate_reverb_size) =
+            (deck.plate_reverb_on, deck.plate_reverb_size as f64);
         self.ui.slider(cx, ids!(sfx_fx_feedback)).set_value(cx, feedback);
         self.paint_chip(cx, ids!(sfx_fx_flanger), flanger_on, None);
         self.ui.slider(cx, ids!(sfx_fx_flanger_rate)).set_value(cx, flanger_rate);
@@ -14352,6 +14373,8 @@ p2 {}
         self.ui.slider(cx, ids!(sfx_fx_autopan_rate)).set_value(cx, autopan_rate);
         self.paint_chip(cx, ids!(sfx_fx_stereo_width), stereo_width_on, None);
         self.ui.slider(cx, ids!(sfx_fx_stereo_width_amount)).set_value(cx, stereo_width_amount);
+        self.paint_chip(cx, ids!(sfx_fx_plate_reverb), plate_reverb_on, None);
+        self.ui.slider(cx, ids!(sfx_fx_plate_reverb_size)).set_value(cx, plate_reverb_size);
     }
 
     /// Push a deck's tone/stem knob positions back onto the surface, so the
@@ -29376,6 +29399,32 @@ impl MatchEvent for App {
                 FxTarget::Mix => {
                     let mut cmds = self.decks.set_stereo_width_amount(DeckId::A, v as f32);
                     cmds.extend(self.decks.set_stereo_width_amount(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        if self.ui.button(cx, ids!(sfx_fx_plate_reverb)).clicked(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.toggle_plate_reverb(DeckId::A),
+                FxTarget::B => self.decks.toggle_plate_reverb(DeckId::B),
+                FxTarget::Mix => {
+                    let on = !self.decks.deck(DeckId::A).plate_reverb_on;
+                    let mut cmds = self.decks.set_plate_reverb(DeckId::A, on);
+                    cmds.extend(self.decks.set_plate_reverb(DeckId::B, on));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+            self.sync_sfx_fx_ui(cx);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_plate_reverb_size)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_plate_reverb_size(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_plate_reverb_size(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_plate_reverb_size(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_plate_reverb_size(DeckId::B, v as f32));
                     cmds
                 }
             };

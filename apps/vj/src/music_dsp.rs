@@ -2870,6 +2870,261 @@ impl StereoWidth {
     }
 }
 
+pub(crate) const PLATE_REVERB_SIZE_MIN: f32 = 0.0;
+pub(crate) const PLATE_REVERB_SIZE_MAX: f32 = 1.0;
+pub(crate) const PLATE_REVERB_SIZE_DEFAULT: f32 = 0.5;
+
+/// Comb delay lengths for the left and right tanks, in milliseconds.
+/// Mutually non-commensurate (no small shared factor) so the parallel
+/// combs' resonances interleave into a dense tail rather than
+/// reinforcing a single audible pitch, and the left set is offset from
+/// the right so the two channels decorrelate instead of reading as one
+/// mono tail panned to both speakers.
+const PLATE_REVERB_COMB_MS_L: [f32; 4] = [29.7, 37.1, 41.1, 43.7];
+const PLATE_REVERB_COMB_MS_R: [f32; 4] = [30.9, 38.3, 42.5, 44.9];
+/// Series allpass stages after the comb bank, textbook Schroeder
+/// diffusion: short, again non-commensurate with each other and with
+/// the combs above.
+const PLATE_REVERB_ALLPASS_MS: [f32; 2] = [5.0, 1.7];
+const PLATE_REVERB_ALLPASS_G: f32 = 0.5;
+/// One-pole lowpass coefficient inside each comb's feedback path: higher
+/// damps the tail's top end faster than its body, the way a real room's
+/// air and surfaces do.
+const PLATE_REVERB_DAMP: f32 = 0.2;
+const PLATE_REVERB_FEEDBACK_MIN: f32 = 0.6;
+const PLATE_REVERB_FEEDBACK_MAX: f32 = 0.97;
+/// Below this peak the tail is treated as fully decayed -- the same
+/// threshold and the same reason `DeckEcho`'s own `quiet` tracking uses
+/// one: once wet is at zero AND the tank has actually rung out, the
+/// lines stop being touched at all rather than being asked to keep
+/// circulating silence forever.
+const PLATE_REVERB_QUIET: f32 = 1e-5;
+
+#[inline]
+fn ms_to_frames(ms: f32, sample_rate: f32) -> usize {
+    ((ms / 1000.0) * sample_rate).round().max(1.0) as usize
+}
+
+/// A comb filter with a one-pole damping filter in its feedback path:
+/// the resonant building block of the tank below. `process` returns the
+/// OLD content of the line before writing this call's input plus
+/// feedback into the same slot, so a length-1 line is a trivial one-
+/// sample delay rather than a divide-by-zero.
+struct ReverbComb {
+    line: Vec<f32>,
+    write: usize,
+    damp_state: f32,
+}
+
+impl ReverbComb {
+    fn new(frames: usize) -> ReverbComb {
+        ReverbComb { line: vec![0.0; frames.max(1)], write: 0, damp_state: 0.0 }
+    }
+
+    #[inline]
+    fn process(&mut self, x: f32, feedback: f32, damp: f32) -> f32 {
+        let out = self.line[self.write];
+        self.damp_state = out * (1.0 - damp) + self.damp_state * damp;
+        self.line[self.write] = x + self.damp_state * feedback;
+        self.write += 1;
+        if self.write >= self.line.len() {
+            self.write = 0;
+        }
+        out
+    }
+
+    fn silence(&mut self) {
+        self.line.iter_mut().for_each(|s| *s = 0.0);
+        self.damp_state = 0.0;
+    }
+}
+
+/// The one-multiply Schroeder allpass: unity gain at every frequency,
+/// so it diffuses the comb bank's output into a denser tail without
+/// coloring it. `w[n] = x[n] + g*w[n-D]`, `y[n] = w[n-D] - g*w[n]` --
+/// one delay line carries both the numerator and denominator halves of
+/// the transfer function, so only `w` needs storing.
+struct ReverbAllpass {
+    line: Vec<f32>,
+    write: usize,
+}
+
+impl ReverbAllpass {
+    fn new(frames: usize) -> ReverbAllpass {
+        ReverbAllpass { line: vec![0.0; frames.max(1)], write: 0 }
+    }
+
+    #[inline]
+    fn process(&mut self, x: f32, g: f32) -> f32 {
+        let delayed = self.line[self.write];
+        let w = x + g * delayed;
+        let y = delayed - g * w;
+        self.line[self.write] = w;
+        self.write += 1;
+        if self.write >= self.line.len() {
+            self.write = 0;
+        }
+        y
+    }
+
+    fn silence(&mut self) {
+        self.line.iter_mut().for_each(|s| *s = 0.0);
+    }
+}
+
+/// One channel's worth of tank: four parallel combs summed and averaged,
+/// then diffused through two series allpasses. `PlateReverb` holds two
+/// of these, built from different comb lengths, for the left and right
+/// output.
+struct ReverbTank {
+    combs: [ReverbComb; 4],
+    allpasses: [ReverbAllpass; 2],
+}
+
+impl ReverbTank {
+    fn new(comb_ms: [f32; 4], sample_rate: f32) -> ReverbTank {
+        ReverbTank {
+            combs: comb_ms.map(|ms| ReverbComb::new(ms_to_frames(ms, sample_rate))),
+            allpasses: PLATE_REVERB_ALLPASS_MS.map(|ms| ReverbAllpass::new(ms_to_frames(ms, sample_rate))),
+        }
+    }
+
+    #[inline]
+    fn process(&mut self, x: f32, feedback: f32) -> f32 {
+        let mut sum = 0.0f32;
+        for comb in &mut self.combs {
+            sum += comb.process(x, feedback, PLATE_REVERB_DAMP);
+        }
+        sum *= 0.25;
+        for allpass in &mut self.allpasses {
+            sum = allpass.process(sum, PLATE_REVERB_ALLPASS_G);
+        }
+        sum
+    }
+
+    fn silence(&mut self) {
+        for comb in &mut self.combs {
+            comb.silence();
+        }
+        for allpass in &mut self.allpasses {
+            allpass.silence();
+        }
+    }
+}
+
+/// One deck's plate reverb: a mono send into two decorrelated tanks,
+/// added back onto the dry frame -- an additive send like
+/// [`DeckEcho`], never a dry/wet crossfade like the tone-shaping
+/// effects above it, because muting the dry signal the instant the
+/// reverb engages would remove exactly the transient a reverb is
+/// supposed to be heard alongside.
+///
+/// `size` is the tank's only exposed control today, the same
+/// ship-one-knob-first choice this file already made for the autopan's
+/// depth: it maps onto the comb feedback, the single parameter that
+/// most changes how the reverb reads (how long the tail rings), while
+/// damping stays a fixed constant.
+pub struct PlateReverb {
+    tank_l: ReverbTank,
+    tank_r: ReverbTank,
+    sample_rate: f32,
+    wet: ParamRamp,
+    size: ParamRamp,
+    /// Set once the tank has genuinely rung out after `wet` reached
+    /// zero, so a long-released tail keeps decaying through the lines
+    /// instead of being cut the moment the engage ramp finishes.
+    quiet: bool,
+}
+
+impl PlateReverb {
+    pub fn new(sample_rate: f32) -> PlateReverb {
+        let sample_rate = if sample_rate.is_finite() && sample_rate > 0.0 { sample_rate } else { 48_000.0 };
+        PlateReverb {
+            tank_l: ReverbTank::new(PLATE_REVERB_COMB_MS_L, sample_rate),
+            tank_r: ReverbTank::new(PLATE_REVERB_COMB_MS_R, sample_rate),
+            sample_rate,
+            wet: ParamRamp::at(0.0),
+            size: ParamRamp::at(PLATE_REVERB_SIZE_DEFAULT),
+            quiet: true,
+        }
+    }
+
+    /// Rebuild the tank's fixed delay lines for a new device rate. A
+    /// rare, hard-reset-worthy event, like the EQ's own crossover
+    /// coefficients rebuilt by [`DeckEq::set_sample_rate`]: these
+    /// lengths are physical constants converted to frames, not
+    /// something an operator retunes live, so there is no in-flight
+    /// handover to preserve across the change.
+    pub fn set_sample_rate(&mut self, sample_rate: f32) {
+        if !sample_rate.is_finite() || sample_rate <= 0.0 {
+            return;
+        }
+        if (self.sample_rate - sample_rate).abs() < 0.5 {
+            return;
+        }
+        self.sample_rate = sample_rate;
+        self.tank_l = ReverbTank::new(PLATE_REVERB_COMB_MS_L, sample_rate);
+        self.tank_r = ReverbTank::new(PLATE_REVERB_COMB_MS_R, sample_rate);
+        self.quiet = true;
+    }
+
+    /// The on/off switch.
+    pub fn set_wet(&mut self, wet: f32) {
+        if let Some(wet) = knob(wet, 0.0, 1.0) {
+            self.wet.slew(wet, EQ_ENGAGE_SECS);
+        }
+    }
+
+    /// How long the tail rings: maps onto the comb bank's feedback.
+    pub fn set_size(&mut self, size: f32) {
+        if let Some(size) = knob(size, PLATE_REVERB_SIZE_MIN, PLATE_REVERB_SIZE_MAX) {
+            self.size.slew(size, EQ_ENGAGE_SECS);
+        }
+    }
+
+    pub fn engaged(&self) -> bool {
+        self.wet.target() > 0.0
+    }
+
+    /// Drop the tank's stored energy directly rather than freeing it --
+    /// the lines are a few hundred samples each, so a fixed-size clear
+    /// is cheap enough for the audio thread, matching [`DeckEcho::silence`]
+    /// and [`Flanger::silence`]'s reasoning exactly.
+    pub fn silence(&mut self) {
+        self.tank_l.silence();
+        self.tank_r.silence();
+        self.quiet = true;
+    }
+
+    /// Process one stereo frame.
+    #[inline]
+    pub fn process(&mut self, frame: [f32; 2], device_rate: f32) -> [f32; 2] {
+        let wet = self.wet.tick(device_rate);
+        if self.quiet && wet == 0.0 && self.wet.target() == 0.0 {
+            // Off, and the tail already rang out: the lines are not
+            // touched at all, and the frame is the input exactly.
+            return frame;
+        }
+        let size = self.size.tick(device_rate);
+        let feedback =
+            PLATE_REVERB_FEEDBACK_MIN + (PLATE_REVERB_FEEDBACK_MAX - PLATE_REVERB_FEEDBACK_MIN) * size;
+        // The write into the tank is scaled by the SAME `wet` that
+        // gates the output -- the wet-gates-the-write rule every
+        // delay-holding effect in this file follows, or full-amplitude
+        // content would enter the lines during an engage ramp and
+        // surface later as a click once it ages past the delay.
+        let mono_in = (frame[0] + frame[1]) * 0.5 * wet;
+        let wet_l = self.tank_l.process(mono_in, feedback);
+        let wet_r = self.tank_r.process(mono_in, feedback);
+        if wet == 0.0 && self.wet.target() == 0.0 {
+            self.quiet = wet_l.abs().max(wet_r.abs()) < PLATE_REVERB_QUIET;
+        } else {
+            self.quiet = false;
+        }
+        [frame[0] + wet_l, frame[1] + wet_r]
+    }
+}
+
 // ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
@@ -5611,5 +5866,187 @@ mod tests {
         assert_eq!(sw.width.target(), STEREO_WIDTH_MAX);
         sw.set_width(-5.0);
         assert_eq!(sw.width.target(), STEREO_WIDTH_MIN);
+    }
+
+    /// Off, a fresh unit is exactly its input.
+    #[test]
+    fn a_plate_reverb_that_was_never_engaged_is_bit_transparent() {
+        let rate = 48_000.0f32;
+        let mut pr = PlateReverb::new(rate);
+        let mut phase = 0.0f32;
+        for _ in 0..4_000 {
+            phase += 2.0 * PI * 233.0 / rate;
+            let x = phase.sin() * 0.6;
+            assert_eq!(pr.process([x, -x], rate), [x, -x]);
+        }
+    }
+
+    /// The two tanks are built from different comb lengths so the tail
+    /// decorrelates between channels -- a mono send through identical
+    /// tanks would read as a mono reverb panned to both speakers, not a
+    /// stereo one. Feeding a mono source in should still come back with
+    /// audibly different left and right tails.
+    #[test]
+    fn the_two_tanks_decorrelate_a_mono_source() {
+        let rate = 48_000.0f32;
+        let mut pr = PlateReverb::new(rate);
+        pr.set_wet(1.0);
+        pr.set_size(0.8);
+        let mut phase = 0.0f32;
+        let mut saw_difference = false;
+        for _ in 0..24_000usize {
+            phase += 2.0 * PI * 137.0 / rate;
+            let x = phase.sin() * 0.5;
+            let out = pr.process([x, x], rate);
+            if (out[0] - out[1]).abs() > 1e-4 {
+                saw_difference = true;
+            }
+        }
+        assert!(saw_difference, "left and right tails never diverged");
+    }
+
+    /// Bounded and finite at the harshest setting the knob reaches,
+    /// sustained well past any reasonable tail length -- the same
+    /// property every other effect in this file is held to, and the one
+    /// a comb/allpass network's stability actually depends on: every
+    /// feedback coefficient in range stays under 1.0.
+    #[test]
+    fn plate_reverb_stays_bounded_at_the_harshest_settings() {
+        let rate = 48_000.0f32;
+        let mut pr = PlateReverb::new(rate);
+        pr.set_wet(1.0);
+        pr.set_size(PLATE_REVERB_SIZE_MAX);
+        let mut phase = 0.0f32;
+        for _ in 0..(rate as usize * 2) {
+            phase += 2.0 * PI * 233.0 / rate;
+            let x = phase.sin() * 0.9;
+            let out = pr.process([x, x], rate);
+            assert!(out[0].is_finite() && out[0].abs() < 8.0, "unbounded: {out:?}");
+            assert!(out[1].is_finite() && out[1].abs() < 8.0, "unbounded: {out:?}");
+        }
+    }
+
+    /// The property the `quiet` tracking exists for: releasing the
+    /// reverb must not chop its tail off the instant the engage ramp
+    /// finishes. Feed an impulse in while engaged, then disengage --
+    /// the tank must still be audibly ringing for a while after the
+    /// (short) engage ramp completes, and only reach bit-exact bypass
+    /// once the tail has genuinely decayed away.
+    #[test]
+    fn switching_the_plate_reverb_off_lets_its_tail_ring_out_before_bypass() {
+        let rate = 48_000.0f32;
+        let mut pr = PlateReverb::new(rate);
+        pr.set_size(0.9);
+        pr.set_wet(1.0);
+        // Let the engage ramp finish BEFORE firing the impulse: the
+        // write is scaled by `wet`, so an impulse fired mid-ramp would
+        // barely enter the tank at all and this test would be checking
+        // almost nothing.
+        for _ in 0..1_000 {
+            pr.process([0.0, 0.0], rate);
+        }
+        // An impulse, not a tone: a short, sharp excitation gives the
+        // tank something to ring with that a settle loop of silence
+        // would not.
+        pr.process([1.0, 1.0], rate);
+        // Longer than the longest comb delay (~45 ms, ~2 155 frames at
+        // this rate) so every tap has read the impulse back at least
+        // once before disengaging.
+        for _ in 0..3_000 {
+            pr.process([0.0, 0.0], rate);
+        }
+        pr.set_wet(0.0);
+        // Run PAST the engage ramp's own duration first, so `wet` itself
+        // has already reached exactly zero -- only the `quiet` tracking
+        // is left standing between here and bit-exact bypass. A version
+        // that bypassed on `wet == 0.0` alone, ignoring `quiet`, behaves
+        // identically to the correct one during the ramp itself (both
+        // still have wet > 0 partway through it), so the ramp window is
+        // not where this property is actually observable.
+        let ramp_frames = (EQ_ENGAGE_SECS * rate) as usize + 8;
+        for _ in 0..ramp_frames {
+            pr.process([0.0, 0.0], rate);
+        }
+        assert!(!pr.engaged());
+        // Immediately past the ramp: if the tail were cut the instant
+        // `wet` reached zero rather than left to decay on its own, every
+        // one of these frames would already be an exact zero.
+        let mut still_ringing = false;
+        for _ in 0..2_000 {
+            let out = pr.process([0.0, 0.0], rate);
+            if out[0].abs() > 1e-4 || out[1].abs() > 1e-4 {
+                still_ringing = true;
+            }
+        }
+        assert!(still_ringing, "the tail was cut the instant the ramp finished");
+        // Long enough for even the harsher feedback settings this test
+        // does not use to fall under the quiet threshold.
+        for _ in 0..(rate as usize * 3) {
+            pr.process([0.0, 0.0], rate);
+        }
+        for i in 0..1_000 {
+            let x = (i as f32 * 0.037).sin() * 0.5;
+            assert_eq!(
+                pr.process([x, -x], rate),
+                [x, -x],
+                "a bit-exact bypass once the tail has actually rung out"
+            );
+        }
+    }
+
+    /// `silence` drops the tank's content directly, without waiting for
+    /// it to ring out on its own -- the record-change path every other
+    /// delay-holding effect in this file relies on.
+    #[test]
+    fn silence_lets_a_ringing_tank_bypass_immediately() {
+        let rate = 48_000.0f32;
+        let mut pr = PlateReverb::new(rate);
+        pr.set_wet(1.0);
+        pr.set_size(0.9);
+        pr.process([1.0, 1.0], rate);
+        for _ in 0..2_000 {
+            pr.process([0.0, 0.0], rate);
+        }
+        pr.set_wet(0.0);
+        pr.silence();
+        for i in 0..1_000 {
+            let x = (i as f32 * 0.037).sin() * 0.5;
+            assert_eq!(pr.process([x, -x], rate), [x, -x], "silence must drop the tank at once");
+        }
+    }
+
+    #[test]
+    fn plate_reverb_setters_clamp_to_their_documented_ranges() {
+        let mut pr = PlateReverb::new(48_000.0);
+        pr.set_wet(f32::NAN);
+        assert_eq!(pr.wet.target(), 0.0, "a bad value moves nothing");
+        pr.set_wet(5.0);
+        assert_eq!(pr.wet.target(), 1.0);
+        pr.set_wet(-5.0);
+        assert_eq!(pr.wet.target(), 0.0);
+        pr.set_size(f32::INFINITY);
+        assert_eq!(pr.size.target(), PLATE_REVERB_SIZE_DEFAULT, "unmoved by a bad value");
+        pr.set_size(10.0);
+        assert_eq!(pr.size.target(), PLATE_REVERB_SIZE_MAX);
+        pr.set_size(-5.0);
+        assert_eq!(pr.size.target(), PLATE_REVERB_SIZE_MIN);
+    }
+
+    /// A device rate change is a rare, hard-reset-worthy event: the
+    /// tank's lines are rebuilt to the new rate's frame lengths and any
+    /// stored content is gone, so a unit already ringing must land back
+    /// on bit-exact bypass once its (now-silent) tank is asked to keep
+    /// ringing at the old rate's stale content.
+    #[test]
+    fn a_sample_rate_change_rebuilds_the_tank_and_drops_its_content() {
+        let mut pr = PlateReverb::new(48_000.0);
+        pr.set_wet(1.0);
+        pr.set_size(0.9);
+        pr.process([1.0, 1.0], 48_000.0);
+        for _ in 0..2_000 {
+            pr.process([0.0, 0.0], 48_000.0);
+        }
+        pr.set_sample_rate(44_100.0);
+        assert!(pr.quiet, "a rebuilt tank starts with nothing to ring");
     }
 }

@@ -489,6 +489,22 @@ fn golden_stereo_width_narrow() {
     assert_golden("stereo_width_narrow", &left, &right);
 }
 
+/// 233 Hz, not a round number: the comb bank inside the tank is a bank
+/// of comb filters, the same reasoning the flanger and the phaser above
+/// already follow, so a frequency with no tidy relationship to the comb
+/// spacings is what keeps the reference from landing on a numerically
+/// degenerate coincidence with them.
+#[test]
+fn golden_plate_reverb_tail() {
+    let mixer = deck_a(tone_pcm(233.0, 48_000, 3.0));
+    mixer.set_deck_plate_reverb(DeckId::A, true);
+    mixer.set_deck_plate_reverb_size(DeckId::A, 0.6);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let (left, right) = capture(&mixer, CAPTURE, |_| {});
+    assert_golden("plate_reverb_tail", &left, &right);
+}
+
 // ---------------------------------------------------------------------------
 // clicks
 // ---------------------------------------------------------------------------
@@ -865,6 +881,34 @@ fn a_stereo_width_amount_change_while_engaged_is_click_free() {
         }
     });
     assert!(worst < CLICK, "a width change must ramp, biggest step {worst}");
+}
+
+#[test]
+fn engaging_and_releasing_the_plate_reverb_are_click_free() {
+    let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
+    mixer.set_deck_plate_reverb_size(DeckId::A, 0.9);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| match index {
+        8 => mixer.set_deck_plate_reverb(DeckId::A, true),
+        24 => mixer.set_deck_plate_reverb(DeckId::A, false),
+        _ => {}
+    });
+    assert!(worst < CLICK, "engaging or releasing the plate reverb must ramp, biggest step {worst}");
+}
+
+#[test]
+fn a_plate_reverb_size_change_while_engaged_is_click_free() {
+    let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
+    mixer.set_deck_plate_reverb(DeckId::A, true);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| {
+        if index == 8 {
+            mixer.set_deck_plate_reverb_size(DeckId::A, 0.95);
+        }
+    });
+    assert!(worst < CLICK, "a size change must ramp, biggest step {worst}");
 }
 
 #[test]

@@ -28,7 +28,7 @@ use crate::wave_analysis::{DeckClock, TrackGrid};
 use crate::music_dsp::{
     audible, knob, knob64,
     Autopan, Bitcrusher, DeckEcho, DeckEq, Distortion, Flanger, FrameSource, Freeze, MotorEnd,
-    ParamRamp, Phaser, RateReader, ScratchRamp, StereoWidth, Tremolo,
+    ParamRamp, Phaser, PlateReverb, RateReader, ScratchRamp, StereoWidth, Tremolo,
     Stretcher, STEM_COUNT,
     STRETCH_BYPASS_EPSILON, STRETCH_RATIO_MAX, STRETCH_RATIO_MIN, WSOLA_WINDOW,
     BRAKE_SECS, CENSOR_FLIP_SECS, CENSOR_RATE, CENSOR_RETURN_SECS, SOFT_START_SECS,
@@ -902,6 +902,7 @@ enum EffectKind {
     Phaser(Phaser),
     Autopan(Autopan),
     StereoWidth(StereoWidth),
+    PlateReverb(PlateReverb),
 }
 
 impl EffectKind {
@@ -918,15 +919,16 @@ impl EffectKind {
             EffectKind::Phaser(phaser) => phaser.process(frame, device_rate),
             EffectKind::Autopan(autopan) => autopan.process(frame, device_rate),
             EffectKind::StereoWidth(stereo_width) => stereo_width.process(frame, device_rate),
+            EffectKind::PlateReverb(plate_reverb) => plate_reverb.process(frame, device_rate),
         }
     }
 }
 
-const DECK_CHAIN_SLOTS: usize = 10;
+const DECK_CHAIN_SLOTS: usize = 11;
 
 /// A deck's pre-fader tone chain: a fixed list of slots, walked in order.
 /// Not a `Vec` -- sized once, at compile time, never resized. Today's
-/// ten slots are the whole roster and are permanently populated by
+/// eleven slots are the whole roster and are permanently populated by
 /// construction; a slot that can stand empty, or be reassigned, is a
 /// separate decision for whenever growing the roster again asks for one.
 struct DeckChain {
@@ -947,6 +949,7 @@ impl DeckChain {
                 EffectKind::Phaser(Phaser::new()),
                 EffectKind::Autopan(Autopan::new()),
                 EffectKind::StereoWidth(StereoWidth::new()),
+                EffectKind::PlateReverb(PlateReverb::new(sample_rate)),
             ],
         }
     }
@@ -1021,6 +1024,12 @@ impl DeckChain {
     fn stereo_width_mut(&mut self) -> &mut StereoWidth {
         match &mut self.slots[9] {
             EffectKind::StereoWidth(stereo_width) => stereo_width,
+            _ => unreachable!(),
+        }
+    }
+    fn plate_reverb_mut(&mut self) -> &mut PlateReverb {
+        match &mut self.slots[10] {
+            EffectKind::PlateReverb(plate_reverb) => plate_reverb,
             _ => unreachable!(),
         }
     }
@@ -1206,6 +1215,7 @@ impl DeckVoice {
         self.chain.flanger_mut().silence();
         self.chain.bitcrusher_mut().silence();
         self.chain.phaser_mut().reset();
+        self.chain.plate_reverb_mut().silence();
         // No call for the tremolo, the distortion, the autopan or the
         // stereo width here or at the other three record-change sites,
         // on purpose: none of them holds audio content, only an LFO
@@ -1213,7 +1223,9 @@ impl DeckVoice {
         // record for a stale line to leak -- and forcibly resetting a
         // phase would itself be a discontinuity if the effect is
         // already engaged (say under a MIX target spanning both decks)
-        // when a load lands on just one of them.
+        // when a load lands on just one of them. The plate reverb's
+        // tank DOES hold audio content, so it gets the same silence()
+        // call the echo, the flanger and the bitcrusher get.
         self.reset_blend();
         if load.play {
             self.transport.slew(1.0, LOAD_SWAP_SECS);
@@ -2264,6 +2276,7 @@ impl Mixer {
                 d.chain.flanger_mut().silence();
                 d.chain.bitcrusher_mut().silence();
                 d.chain.phaser_mut().reset();
+                d.chain.plate_reverb_mut().silence();
                 d.reset_blend();
             } else {
                 d.pending = Some(PendingLoad { pcm, play: keep_playing, grid: None });
@@ -2316,6 +2329,7 @@ impl Mixer {
         d.chain.flanger_mut().silence();
         d.chain.bitcrusher_mut().silence();
         d.chain.phaser_mut().reset();
+        d.chain.plate_reverb_mut().silence();
         d.reset_blend();
         self.publish_deck(&s, deck.index());
         drop(s);
@@ -2708,6 +2722,18 @@ impl Mixer {
     pub fn set_deck_stereo_width_amount(&self, deck: DeckId, width: f32) {
         let mut s = self.state.lock().unwrap();
         s.decks[deck.index()].chain.stereo_width_mut().set_width(width);
+    }
+
+    /// The plate reverb's on/off switch.
+    pub fn set_deck_plate_reverb(&self, deck: DeckId, on: bool) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.plate_reverb_mut().set_wet(if on { 1.0 } else { 0.0 });
+    }
+
+    /// How long the reverb tank's tail rings.
+    pub fn set_deck_plate_reverb_size(&self, deck: DeckId, size: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.plate_reverb_mut().set_size(size);
     }
 
     /// Momentary FREEZE: while held, the deck repeats a beat-sized
@@ -3110,6 +3136,7 @@ impl Mixer {
         dst.chain.flanger_mut().silence();
         dst.chain.bitcrusher_mut().silence();
         dst.chain.phaser_mut().reset();
+        dst.chain.plate_reverb_mut().silence();
         let to_index = to.index();
         self.publish_deck(&s, to_index);
     }
@@ -3521,6 +3548,11 @@ impl Mixer {
             // the expensive part and a buffer is well under a millisecond.
             voice.chain.eq_mut().set_sample_rate(rate);
             voice.chain.eq_mut().prepare_block();
+            // The reverb's tank lines are fixed lengths in frames, not
+            // musical time, so they get the same once-a-buffer rebuild
+            // trigger as the EQ's crossover coefficients -- both are
+            // cheap to compare against and rare to actually rebuild.
+            voice.chain.plate_reverb_mut().set_sample_rate(rate);
             // The musical clock, once per buffer per deck, from the same
             // platter the snapshot reports. Travel is only promised when
             // the read path will actually read this buffer, and a splat

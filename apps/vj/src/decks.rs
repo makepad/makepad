@@ -1306,6 +1306,11 @@ pub struct DeckState {
     /// How far the side signal is scaled: 0 collapses to mono, 1 is the
     /// original image, above 1 widens further.
     pub stereo_width_amount: f32,
+    /// Whether the plate reverb is on. Same channel-strip treatment as
+    /// the stereo width beside it.
+    pub plate_reverb_on: bool,
+    /// How long the reverb tank's tail rings.
+    pub plate_reverb_size: f32,
     /// Per-stem gains, in [`crate::music_dsp::StemKind`] order.
     pub stem_gain: [f32; STEM_COUNT],
     pub stem_kill: [bool; STEM_COUNT],
@@ -1393,6 +1398,8 @@ impl Default for DeckState {
             autopan_rate: crate::music_dsp::AUTOPAN_RATE_DEFAULT,
             stereo_width_on: false,
             stereo_width_amount: crate::music_dsp::STEREO_WIDTH_DEFAULT,
+            plate_reverb_on: false,
+            plate_reverb_size: crate::music_dsp::PLATE_REVERB_SIZE_DEFAULT,
             stem_gain: [1.0; STEM_COUNT],
             stem_kill: [false; STEM_COUNT],
             stem_solo: [false; STEM_COUNT],
@@ -1756,6 +1763,10 @@ pub enum DeckCmd {
     /// How far the side signal is scaled: 0 collapses to mono, 1 is the
     /// original image, above 1 widens further.
     SetStereoWidthAmount { deck: DeckId, amount: f32 },
+    /// The plate reverb's on/off switch.
+    SetPlateReverb { deck: DeckId, on: bool },
+    /// How long the reverb tank's tail rings.
+    SetPlateReverbSize { deck: DeckId, size: f32 },
     /// One stem lane's gain, 0 = muted.
     SetStemGain { deck: DeckId, stem: usize, gain: f32 },
     SplatSet { deck: DeckId, grid: Arc<SplatGrid> },
@@ -2217,6 +2228,8 @@ impl DeckEngine {
             DeckCmd::SetAutopanRate { deck, hz: state.autopan_rate },
             DeckCmd::SetStereoWidth { deck, on: state.stereo_width_on },
             DeckCmd::SetStereoWidthAmount { deck, amount: state.stereo_width_amount },
+            DeckCmd::SetPlateReverb { deck, on: state.plate_reverb_on },
+            DeckCmd::SetPlateReverbSize { deck, size: state.plate_reverb_size },
         ];
         for band in 0..3 {
             cmds.push(DeckCmd::SetEqBand { deck, band, gain: state.eq_effective(band) });
@@ -5267,6 +5280,31 @@ impl DeckEngine {
         vec![DeckCmd::SetStereoWidthAmount { deck, amount: state.stereo_width_amount }]
     }
 
+    /// The plate reverb's on/off switch.
+    pub fn toggle_plate_reverb(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.plate_reverb_on = !state.plate_reverb_on;
+        vec![DeckCmd::SetPlateReverb { deck, on: state.plate_reverb_on }]
+    }
+
+    /// Set the plate reverb's on/off switch to an explicit value, rather
+    /// than flipping whatever it already was -- what a MIX-linked
+    /// broadcast needs, the same reason [`Self::set_flanger`] exists.
+    pub fn set_plate_reverb(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
+        self.deck_mut(deck).plate_reverb_on = on;
+        vec![DeckCmd::SetPlateReverb { deck, on }]
+    }
+
+    /// How long the reverb tank's tail rings.
+    pub fn set_plate_reverb_size(&mut self, deck: DeckId, size: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.plate_reverb_size = size.clamp(
+            crate::music_dsp::PLATE_REVERB_SIZE_MIN,
+            crate::music_dsp::PLATE_REVERB_SIZE_MAX,
+        );
+        vec![DeckCmd::SetPlateReverbSize { deck, size: state.plate_reverb_size }]
+    }
+
     /// Stem knob. Inert until the separated stems are loaded — the deck is
     /// playing the full mix and there is nothing to turn down.
     pub fn set_stem(&mut self, deck: DeckId, stem: usize, gain: f32) -> Vec<DeckCmd> {
@@ -6053,6 +6091,52 @@ mod tests {
         let cmds = e.track_ready(d, g, 20.0);
         assert!(cmds.contains(&DeckCmd::SetStereoWidth { deck: DeckId::B, on: true }));
         assert!(cmds.contains(&DeckCmd::SetStereoWidthAmount { deck: DeckId::B, amount: 0.4 }));
+    }
+
+    #[test]
+    fn plate_reverb_size_clamps_to_its_documented_range() {
+        let mut e = DeckEngine::new();
+        assert_eq!(
+            e.set_plate_reverb_size(DeckId::A, 10.0),
+            vec![DeckCmd::SetPlateReverbSize {
+                deck: DeckId::A,
+                size: crate::music_dsp::PLATE_REVERB_SIZE_MAX
+            }]
+        );
+        assert_eq!(
+            e.set_plate_reverb_size(DeckId::A, -1.0),
+            vec![DeckCmd::SetPlateReverbSize {
+                deck: DeckId::A,
+                size: crate::music_dsp::PLATE_REVERB_SIZE_MIN
+            }]
+        );
+    }
+
+    #[test]
+    fn toggle_plate_reverb_flips_and_set_plate_reverb_lands_on_an_explicit_side() {
+        let mut e = DeckEngine::new();
+        assert!(!e.deck(DeckId::A).plate_reverb_on);
+        assert_eq!(
+            e.toggle_plate_reverb(DeckId::A),
+            vec![DeckCmd::SetPlateReverb { deck: DeckId::A, on: true }]
+        );
+        assert!(e.deck(DeckId::A).plate_reverb_on);
+        assert_eq!(
+            e.set_plate_reverb(DeckId::B, true),
+            vec![DeckCmd::SetPlateReverb { deck: DeckId::B, on: true }]
+        );
+        assert!(e.deck(DeckId::B).plate_reverb_on);
+    }
+
+    #[test]
+    fn a_load_carries_the_operators_plate_reverb_settings() {
+        let mut e = DeckEngine::new();
+        e.toggle_plate_reverb(DeckId::B);
+        e.set_plate_reverb_size(DeckId::B, 0.7);
+        let (d, g) = load_gen(&e.click(item(3), DeckTarget::B));
+        let cmds = e.track_ready(d, g, 20.0);
+        assert!(cmds.contains(&DeckCmd::SetPlateReverb { deck: DeckId::B, on: true }));
+        assert!(cmds.contains(&DeckCmd::SetPlateReverbSize { deck: DeckId::B, size: 0.7 }));
     }
 
     // -----------------------------------------------------------------
