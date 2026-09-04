@@ -515,7 +515,12 @@ fn golden_moog_ladder_lowpass() {
     mixer.set_deck_moog_ladder_cutoff(DeckId::A, 800.0);
     mixer.set_deck_moog_ladder_resonance(DeckId::A, 0.6);
     mixer.set_deck_playing(DeckId::A, true);
-    settle(&mixer, SETTLE);
+    // Cutoff and resonance ramp over 144ms (widened after a click was
+    // found in a large single-jump gesture), longer than the ordinary
+    // SETTLE -- SETTLE_STRETCH clears that with margin so the reference
+    // captures the filter's steady-state character, not the tail of its
+    // own engage ramp settling in.
+    settle(&mixer, SETTLE_STRETCH);
     let (left, right) = capture(&mixer, CAPTURE, |_| {});
     assert_golden("moog_ladder_lowpass", &left, &right);
 }

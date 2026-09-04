@@ -3253,18 +3253,40 @@ impl MoogLadder {
         }
     }
 
-    /// Where the ladder starts rolling off, in Hz.
+    /// Where the ladder starts rolling off, in Hz. Ramped over 144ms
+    /// (12x [`EQ_ENGAGE_SECS`]), much wider than the 48ms
+    /// [`DeckEq::set_filter`] uses for its own swept corner: unlike the
+    /// phaser's allpass coefficient (unity gain everywhere, only phase
+    /// moves), this filter's coefficient controls actual GAIN, so a
+    /// wide, ordinary-speed excursion -- ordinary because the slider
+    /// spans 60 to 12000Hz and an ordinary drag covers that range in a
+    /// few dozen milliseconds -- can leave the cascade's state lagging
+    /// far behind a coefficient that has already reached a much less
+    /// attenuating value, producing a real, audible step on release
+    /// even though the ramp itself is perfectly continuous. This is a
+    /// threshold effect, not a proportional one: an adversarial review
+    /// found a worst-case step of 0.052 against this file's own 0.02
+    /// click budget at 12ms, widening to 48ms (DeckEq's own multiplier)
+    /// only brought it to 0.046, and it took 120ms to clear the budget
+    /// -- 144ms is that with margin. No dual-cascade crossfade handover
+    /// (DeckEq's other mechanism, needed there because its coefficients
+    /// are quantized to one recompute per device buffer rather than
+    /// ramped continuously) turned out to be necessary once the ramp
+    /// itself was slow enough.
     pub fn set_cutoff(&mut self, hz: f32) {
         if let Some(hz) = knob(hz, MOOG_LADDER_CUTOFF_MIN, MOOG_LADDER_CUTOFF_MAX) {
-            self.cutoff.slew(hz, EQ_ENGAGE_SECS);
+            self.cutoff.slew(hz, EQ_ENGAGE_SECS * 12.0);
         }
     }
 
     /// How much of the last stage feeds back into the first; 1.0 can
-    /// self-oscillate.
+    /// self-oscillate. Same widened ramp as [`Self::set_cutoff`] and
+    /// for the same reason: `k` scales the feedback tap directly, so a
+    /// fast excursion while the tap is already large can also step the
+    /// output.
     pub fn set_resonance(&mut self, resonance: f32) {
         if let Some(resonance) = knob(resonance, MOOG_LADDER_RESONANCE_MIN, MOOG_LADDER_RESONANCE_MAX) {
-            self.resonance.slew(resonance, EQ_ENGAGE_SECS);
+            self.resonance.slew(resonance, EQ_ENGAGE_SECS * 12.0);
         }
     }
 
@@ -6439,5 +6461,74 @@ mod tests {
         assert_eq!(ml.resonance.target(), MOOG_LADDER_RESONANCE_MAX);
         ml.set_resonance(-5.0);
         assert_eq!(ml.resonance.target(), MOOG_LADDER_RESONANCE_MIN);
+    }
+
+    /// Regression: a single large `set_cutoff()` call while engaged used
+    /// to click, found by an adversarial review (worst step 0.052 against
+    /// this file's own 0.02 CLICK budget, from an entirely ordinary
+    /// slider drag). The coefficient itself is always continuous, but
+    /// the cascade's own state can lag far enough behind a fast-moving
+    /// coefficient that the OUTPUT still steps -- fixed by widening the
+    /// ramp the same way `DeckEq::set_filter` already had to for its own
+    /// swept corner. Reproduces the review's own worst case: settled at
+    /// the floor cutoff (heavily attenuating) with resonance already at
+    /// its max, then one jump straight to the ceiling.
+    #[test]
+    fn a_large_cutoff_jump_while_engaged_does_not_click() {
+        let rate = 48_000.0f32;
+        let mut ml = MoogLadder::new();
+        ml.set_wet(1.0);
+        ml.set_cutoff(MOOG_LADDER_CUTOFF_MIN);
+        ml.set_resonance(MOOG_LADDER_RESONANCE_MAX);
+        let mut phase = 0.0f32;
+        for _ in 0..SETTLE_FRAMES {
+            phase += 2.0 * PI * 233.0 / rate;
+            let x = phase.sin() * 0.9;
+            ml.process([x, x], rate);
+        }
+        ml.set_cutoff(MOOG_LADDER_CUTOFF_MAX);
+        let mut worst = 0.0f32;
+        let mut prev: Option<f32> = None;
+        for _ in 0..4_000 {
+            phase += 2.0 * PI * 233.0 / rate;
+            let x = phase.sin() * 0.9;
+            let out = ml.process([x, x], rate);
+            if let Some(p) = prev {
+                worst = worst.max((out[0] - p).abs());
+            }
+            prev = Some(out[0]);
+        }
+        assert!(worst < 0.02, "a large cutoff jump while engaged clicked, worst step {worst}");
+    }
+
+    /// Same property, the resonance knob: `k` scales the feedback tap
+    /// directly, so a fast excursion while the tap is already large can
+    /// also step the output.
+    #[test]
+    fn a_large_resonance_jump_while_engaged_does_not_click() {
+        let rate = 48_000.0f32;
+        let mut ml = MoogLadder::new();
+        ml.set_wet(1.0);
+        ml.set_cutoff(MOOG_LADDER_CUTOFF_MIN);
+        ml.set_resonance(MOOG_LADDER_RESONANCE_MIN);
+        let mut phase = 0.0f32;
+        for _ in 0..SETTLE_FRAMES {
+            phase += 2.0 * PI * 233.0 / rate;
+            let x = phase.sin() * 0.9;
+            ml.process([x, x], rate);
+        }
+        ml.set_resonance(MOOG_LADDER_RESONANCE_MAX);
+        let mut worst = 0.0f32;
+        let mut prev: Option<f32> = None;
+        for _ in 0..4_000 {
+            phase += 2.0 * PI * 233.0 / rate;
+            let x = phase.sin() * 0.9;
+            let out = ml.process([x, x], rate);
+            if let Some(p) = prev {
+                worst = worst.max((out[0] - p).abs());
+            }
+            prev = Some(out[0]);
+        }
+        assert!(worst < 0.02, "a large resonance jump while engaged clicked, worst step {worst}");
     }
 }
