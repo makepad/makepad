@@ -18,7 +18,7 @@ let add_style = Fn{
     at: vec2(680, 120)
     ui: FnFace{
         /* the style picker lives on the node whose input it sets */
-        style := DropDown{
+        style := ComboBox{
             width: Fill height: 26
             labels: ["photo", "anime", "oil paint"]
             bind := "add_style.style"

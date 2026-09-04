@@ -433,7 +433,7 @@ script_mod! {
                 width: Fill height: Fit flow: Down spacing: 2
                 top := Row{
                     name := RowLabel{}
-                    value := DropDown{width: Fill height: 26}
+                    value := ComboBox{width: Fill height: 26}
                     reset := ButtonFlatter{text: "Reset"}
                 }
                 help := MetaText{margin: Inset{left: 88}}
@@ -1168,6 +1168,21 @@ fn setting_action(node: &str, key: &str, value: Literal) -> InspectorAction {
     }
 }
 
+fn inspector_combo_choice(
+    combo_box: &ComboBoxRef,
+    actions: &Actions,
+    key: &str,
+) -> Option<Literal> {
+    let label = combo_box.changed_label(actions)?;
+    Some(if matches!(key, "type" | "method" | "out" | "on_fail") {
+        Literal::Id(label)
+    } else if let Ok(number) = label.parse::<f64>() {
+        Literal::Num(number)
+    } else {
+        Literal::Str(label)
+    })
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct Inspector {
     #[deref]
@@ -1497,14 +1512,9 @@ impl Inspector {
                     }
                 }
                 Row::Choice { key, default, .. } => {
-                    if let Some(label) = item.drop_down(cx, ids!(value)).changed_label(actions) {
-                        let value = if matches!(key.as_str(), "type" | "method" | "out" | "on_fail") {
-                            Literal::Id(label)
-                        } else if let Ok(number) = label.parse::<f64>() {
-                            Literal::Num(number)
-                        } else {
-                            Literal::Str(label)
-                        };
+                    if let Some(value) =
+                        inspector_combo_choice(&item.combo_box(cx, ids!(value)), actions, key)
+                    {
                         out.push(setting_action(&node, key, value));
                     }
                     if item.button(cx, ids!(reset)).clicked(actions) {
@@ -1739,10 +1749,10 @@ impl Widget for Inspector {
                     } => {
                         item.label(cx, ids!(name)).set_text(cx, key);
                         item.label(cx, ids!(help)).set_text(cx, help);
-                        let drop_down = item.drop_down(cx, ids!(value));
+                        let combo_box = item.combo_box(cx, ids!(value));
                         if !existed {
-                            drop_down.set_labels(cx, options.clone());
-                            drop_down.set_selected_by_label(value, cx);
+                            combo_box.set_labels(cx, options.clone());
+                            combo_box.set_selected_by_label(value, cx);
                         }
                         let reset = item.button(cx, ids!(reset));
                         reset.set_visible(cx, default.is_some());
@@ -2562,8 +2572,29 @@ impl Widget for AppView {
 
 #[cfg(test)]
 mod tests {
-    use super::{inspector_commit_number, inspector_setting_names};
+    use super::{inspector_combo_choice, inspector_commit_number, inspector_setting_names};
     use makepad_flow::Literal;
+    use makepad_widgets::*;
+
+    #[test]
+    fn inspector_one_of_combo_commits_the_selected_item() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        let combo = cx.with_vm(ComboBox::script_new_with_default);
+        let combo = WidgetRef::new_with_inner(Box::new(combo)).as_combo_box();
+        combo.set_labels(&mut cx, vec!["GET".into(), "POST".into()]);
+        let actions: ActionsBuf = vec![Box::new(WidgetAction {
+            data: None,
+            action: Box::new(ComboBoxAction::Select(1)),
+            widget_uid: combo.widget_uid(),
+            group: None,
+        })];
+
+        assert_eq!(
+            inspector_combo_choice(&combo, &actions, "method"),
+            Some(Literal::Id("POST".into()))
+        );
+    }
 
     #[test]
     fn inspector_number_commit_snaps_and_clamps() {
