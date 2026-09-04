@@ -1,10 +1,9 @@
 //! The panels around the canvas (DESIGN.md §8): the flow list, the Running
 //! list, the palette of prelude types, the inspector for the selected node,
-//! the template picker behind New, the run's total progress bar, and the
-//! App view that shows a flow as a product.
+//! the template picker behind New, and the run's total progress bar.
 
 use crate::faces::{
-    format_preset_name, param_text, snap_stepped_value, FaceHost, ModelChoice, SeedPicker,
+    format_preset_name, param_text, snap_stepped_value, ModelChoice, SeedPicker,
 };
 use makepad_flow::{
     FlowAsset, FlowSummary, Graph, Literal, Node, NodeInputValue, NodeTypeCatalog,
@@ -13,7 +12,8 @@ use makepad_flow::{
 use makepad_widgets::fab_controls::*;
 use makepad_widgets::makepad_micro_serde::{JsonValue, SerJson};
 use makepad_widgets::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -32,7 +32,7 @@ script_mod! {
         width: Fill
         height: Fit
         flow: Down
-        padding: Inset{left: 10 right: 10 top: 8 bottom: 8}
+        padding: Inset{left: 8 right: 8 top: 5 bottom: 5}
         spacing: theme.space_1
         show_bg: true
         draw_bg +: {
@@ -75,11 +75,11 @@ script_mod! {
     let EmptyHint = Label{
         width: Fill
         height: Fit
-        margin: Inset{top: 8}
+        margin: Inset{top: 4}
         text: ""
         draw_text +: {
             color: theme.flow_text_hint
-            text_style: theme.font_regular{font_size: 9}
+            text_style: theme.font_regular{font_size: 8}
         }
     }
 
@@ -98,7 +98,7 @@ script_mod! {
             Item := View{
                 width: Fill
                 height: Fit
-                padding: Inset{bottom: 4}
+                padding: Inset{bottom: 2}
                 card := Card{
                     flow: Right
                     align: Align{y: 0.5}
@@ -122,15 +122,15 @@ script_mod! {
     // -- palette ----------------------------------------------------------------
 
     let Badge = RoundedView{
-        width: 30
-        height: 30
+        width: 26
+        height: 26
         align: Align{x: 0.5 y: 0.5}
         draw_bg +: {
-            border_radius: 8.0
+            border_radius: 7.0
             color: theme.flow_surface_raised
         }
         icon := Icon{
-            icon_walk: Walk{width: 16 height: Fit}
+            icon_walk: Walk{width: 14 height: Fit}
             draw_icon +: {
                 color: theme.flow_text_white
             }
@@ -140,14 +140,14 @@ script_mod! {
     let PaletteCard = View{
         width: Fill
         height: Fit
-        padding: Inset{bottom: 6}
+        padding: Inset{bottom: 3}
         card := RoundedView{
             width: Fill
             height: Fit
             flow: Right
             align: Align{y: 0.5}
             spacing: theme.space_2
-            padding: Inset{left: 8 right: 6 top: 6 bottom: 6}
+            padding: Inset{left: 7 right: 6 top: 4 bottom: 4}
             cursor: MouseCursor.Hand
             show_bg: true
             draw_bg +: {
@@ -167,7 +167,7 @@ script_mod! {
                     height: Fit
                     text: ""
                     draw_text +: {
-                        text_style: theme.font_bold{font_size: 9.5}
+                        text_style: theme.font_bold{font_size: 9}
                         color: theme.flow_text
                     }
                 }
@@ -177,7 +177,7 @@ script_mod! {
                     text: ""
                     draw_text +: {
                         color: theme.flow_text_muted
-                        text_style: theme.font_regular{font_size: 8}
+                        text_style: theme.font_regular{font_size: 7.5}
                     }
                 }
             }
@@ -207,12 +207,12 @@ script_mod! {
             Kind := View{
                 width: Fill
                 height: Fit
-                padding: Inset{left: 2 top: 8 bottom: 4}
+                padding: Inset{left: 2 top: 4 bottom: 2}
                 title := Label{
                     text: ""
                     draw_text +: {
                         color: theme.flow_text_subtle
-                        text_style: theme.font_bold{font_size: 8.5}
+                        text_style: theme.font_bold{font_size: 8}
                     }
                 }
             }
@@ -280,7 +280,10 @@ script_mod! {
             inspector_tab := ButtonFlat{width: Fill text: "Inspector" enabled: false}
             assets_tab := ButtonFlat{width: Fill text: "Assets"}
         }
-        list := PortalList{
+        inspector_view := View{
+            width: Fill
+            height: Fill
+            list := PortalList{
             width: Fill
             height: Fill
             scroll_bar: ScrollBar{}
@@ -336,13 +339,13 @@ script_mod! {
                 width: Fill
                 height: Fit
                 flow: Down
-                padding: Inset{left: 2 right: 2 top: 10 bottom: 2}
-                spacing: 4
+                padding: Inset{left: 2 right: 2 top: 5 bottom: 1}
+                spacing: 2
                 title := Label{
                     text: ""
                     draw_text +: {
                         color: theme.flow_text_subtle
-                        text_style: theme.font_bold{font_size: 8.5}
+                        text_style: theme.font_bold{font_size: 8}
                     }
                 }
                 Hr{}
@@ -468,7 +471,7 @@ script_mod! {
                 height: Fit
                 flow: Down
                 spacing: theme.space_1
-                padding: Inset{left: 2 right: 2 top: 4 bottom: 6}
+                padding: Inset{left: 2 right: 2 top: 2 bottom: 3}
                 head := View{
                     width: Fill height: Fit flow: Right align: Align{y: 0.5} spacing: theme.space_1
                     name := RowLabel{width: Fill}
@@ -476,7 +479,7 @@ script_mod! {
                     copy := ButtonFlatter{text: "Copy digest"}
                 }
                 thumb := View{
-                    width: Fill height: 136 flow: Overlay cursor: MouseCursor.Hand
+                    width: Fill height: 128 flow: Overlay cursor: MouseCursor.Hand
                     image := Image{width: Fill height: Fill fit: ImageFit.Smallest}
                 }
                 text_scroll := OutputScroll{
@@ -493,7 +496,7 @@ script_mod! {
                 marker := Label{visible: false}
             }
             Advanced := View{
-                width: Fill height: Fit padding: Inset{top: 8 bottom: 2}
+                width: Fill height: Fit padding: Inset{top: 4 bottom: 1}
                 toggle := ButtonFlat{width: Fill text: "▸  ADVANCED"}
             }
             FaceSource := View{
@@ -521,27 +524,32 @@ script_mod! {
                 hint := EmptyHint{margin: Inset{top: 2}}
             }
         }
+        }
         assets_view := View{
             visible: false
             width: Fill
             height: Fill
             flow: Down
-            spacing: theme.space_2
+            spacing: theme.space_1
             tools := View{
                 width: Fill
                 height: Fit
                 flow: Right
                 spacing: theme.space_1
                 align: Align{y: 0.5}
-                search := TextInput{width: Fill height: 28 empty_text: "Search assets"}
+                search := TextInput{width: Fill height: 25 empty_text: "Search assets"}
                 all_assets := Toggle{width: Fit text: "all assets"}
             }
             asset_status := MetaText{text: "Open Assets to browse flow results."}
-            asset_list := PortalList{
+            asset_list_frame := View{
                 width: Fill
                 height: Fill
-                scroll_bar: ScrollBar{}
-                Asset := RoundedView{
+                flow: Down
+                asset_list := PortalList{
+                    width: Fill
+                    height: Fill
+                    scroll_bar: ScrollBar{}
+                    Asset := RoundedView{
                     width: Fill
                     height: 76
                     flow: Right
@@ -560,6 +568,15 @@ script_mod! {
                         show_bg: true
                         draw_bg +: {color: theme.flow_surface_raised border_radius: 6}
                         image := Image{visible: false width: Fill height: Fill fit: ImageFit.Smallest}
+                        kind_badge := Label{
+                            width: Fill
+                            height: Fit
+                            align: Align{x: 0.5 y: 0.5}
+                            draw_text +: {
+                                color: theme.flow_text_muted
+                                text_style: theme.font_bold{font_size: 8}
+                            }
+                        }
                     }
                     info := View{
                         width: Fill
@@ -572,8 +589,25 @@ script_mod! {
                         }
                         kind_time := MetaText{}
                         labels := MetaText{}
+                        excerpt := Label{
+                            visible: false
+                            width: Fill
+                            height: Fit
+                            draw_text +: {
+                                color: theme.flow_text_muted
+                                text_style: theme.font_code{font_size: 8}
+                            }
+                        }
                     }
                     marker := Label{visible: false}
+                }
+                }
+                load_more := ButtonFlat{
+                    visible: false
+                    width: Fill
+                    height: 25
+                    text: "Load more assets"
+                    draw_text +: {text_style: theme.font_bold{font_size: 8.5} color: theme.flow_text_muted}
                 }
             }
         }
@@ -660,22 +694,7 @@ script_mod! {
         height: 6
     }
 
-    // -- app view -----------------------------------------------------------------------
 
-    mod.widgets.AppViewBase = #(AppView::register_widget(vm))
-    mod.widgets.AppView = set_type_default() do mod.widgets.AppViewBase{
-        width: Fill
-        height: Fill
-        flow: Down
-        padding: theme.mspace_3
-        spacing: theme.space_2
-        draw_bg +: {color: theme.flow_grid_a}
-        draw_frame +: {color: theme.flow_surface}
-        draw_text +: {
-            text_style: theme.font_bold{font_size: 10}
-            color: theme.flow_text
-        }
-    }
 }
 
 fn set_dot(cx: &mut Cx, item: &WidgetRef, color: Vec4f) {
@@ -739,7 +758,7 @@ impl Widget for FlowList {
                 };
                 item.button(cx, ids!(select)).set_text(cx, &title);
                 let count = if row.instances > 0 {
-                    format!("{} live", row.instances)
+                    format!("{} sessions", row.instances)
                 } else {
                     String::new()
                 };
@@ -809,6 +828,7 @@ pub enum InspectorAction {
         port: String,
     },
     RefreshAssets,
+    LoadMoreAssets,
     OpenAsset(FlowAsset),
 }
 
@@ -855,6 +875,18 @@ impl AssetListModel {
         });
         self.rows = rows;
     }
+
+    pub fn merge_rows(&mut self, rows: Vec<FlowAsset>, append: bool) {
+        if !append {
+            self.set_rows(rows);
+            return;
+        }
+        let mut merged = std::mem::take(&mut self.rows);
+        merged.extend(rows);
+        let mut seen = std::collections::HashSet::new();
+        merged.retain(|row| seen.insert(row.id.clone()));
+        self.set_rows(merged);
+    }
 }
 
 pub fn relative_time(now_ms: u64, created_ms: u64) -> String {
@@ -865,6 +897,79 @@ pub fn relative_time(now_ms: u64, created_ms: u64) -> String {
         60..=3_599 => format!("{} min ago", seconds / 60),
         3_600..=86_399 => format!("{} hr ago", seconds / 3_600),
         _ => format!("{} days ago", seconds / 86_400),
+    }
+}
+
+fn asset_kind_label(kind: &str) -> &'static str {
+    match kind {
+        "texture" | "image" => "IMAGE",
+        "video" => "VIDEO",
+        "audio" => "AUDIO",
+        "mesh" | "world" | "character" | "weapon" | "vehicle" | "prop" => "3D",
+        "data" | "text" | "json" => "TEXT",
+        _ => "ASSET",
+    }
+}
+
+fn asset_kind_is_text(kind: &str) -> bool {
+    matches!(kind, "data" | "text" | "json")
+}
+
+/// Convert a text response into the compact, readable excerpt used by an
+/// asset row. This deliberately rejects binary-looking data and caps work
+/// before the value reaches the UI text widget.
+fn text_asset_excerpt(bytes: &ValueBytes) -> Option<String> {
+    let mime = bytes
+        .content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let text_type = mime == "text/plain"
+        || mime == "text/markdown"
+        || mime == "application/json"
+        || mime == "application/ld+json";
+    if !text_type || bytes.bytes.iter().take(4096).any(|byte| *byte == 0) {
+        return None;
+    }
+    let text = std::str::from_utf8(&bytes.bytes).ok()?;
+    let mut excerpt = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(" · ");
+    if excerpt.chars().count() > 120 {
+        excerpt = excerpt.chars().take(117).collect();
+        excerpt.push('…');
+    }
+    (!excerpt.is_empty()).then_some(excerpt)
+}
+
+fn image_preview_bytes(bytes: &ValueBytes) -> bool {
+    let mime = bytes
+        .content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    mime.starts_with("image/")
+        || bytes.bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+        || bytes.bytes.starts_with(&[0xff, 0xd8, 0xff])
+}
+
+fn next_asset_cursor(
+    current: Option<String>,
+    incoming: Option<String>,
+    preserve_current: bool,
+) -> Option<String> {
+    if preserve_current && current.is_some() {
+        current
+    } else {
+        incoming
     }
 }
 
@@ -1305,9 +1410,17 @@ pub struct Inspector {
     #[rust]
     asset_thumbnails: HashMap<String, ValueBytes>,
     #[rust]
+    asset_excerpts: HashMap<String, String>,
+    #[rust]
+    asset_preview_order: VecDeque<String>,
+    #[rust]
     last_asset_refresh: f64,
     #[rust]
     asset_now_ms: u64,
+    #[rust]
+    asset_cursor: Option<String>,
+    #[rust]
+    assets_loading: bool,
     #[rust]
     locked: bool,
 }
@@ -1330,7 +1443,7 @@ impl Inspector {
     pub(crate) fn set_tab(&mut self, cx: &mut Cx, tab: InspectorTab) {
         self.tab = tab;
         self.view
-            .portal_list(cx, ids!(list))
+            .view(cx, ids!(inspector_view))
             .set_visible(cx, tab == InspectorTab::Inspector);
         self.view
             .view(cx, ids!(assets_view))
@@ -1348,12 +1461,27 @@ impl Inspector {
         self.tab == InspectorTab::Assets
     }
 
-    pub fn asset_request(&mut self, now: f64) -> (String, Option<String>, u32) {
+    pub fn asset_request(
+        &mut self,
+        cx: &mut Cx,
+        now: f64,
+        next_page: bool,
+        preserve_cursor: bool,
+    ) -> (String, Option<String>, u32, Option<String>) {
         self.last_asset_refresh = now;
+        if !next_page && !preserve_cursor {
+            self.asset_cursor = None;
+        }
+        self.assets_loading = true;
+        self.view.label(cx, ids!(assets_view.asset_status)).set_text(
+            cx,
+            if next_page { "Loading more assets…" } else { "Loading assets…" },
+        );
         (
             self.assets.search.clone(),
             self.assets.namespace().map(str::to_string),
             50,
+            next_page.then(|| self.asset_cursor.clone()).flatten(),
         )
     }
 
@@ -1366,8 +1494,16 @@ impl Inspector {
         }
     }
 
-    pub fn set_assets(&mut self, cx: &mut Cx, rows: Vec<FlowAsset>) -> Vec<String> {
-        self.assets.set_rows(rows);
+    pub fn set_assets_page(
+        &mut self,
+        cx: &mut Cx,
+        response: makepad_flow::AssetsResponse,
+        merge_existing: bool,
+        preserve_cursor: bool,
+    ) -> Vec<String> {
+        self.assets.merge_rows(response.assets, merge_existing);
+        self.asset_cursor = next_asset_cursor(self.asset_cursor.take(), response.cursor, preserve_cursor);
+        self.assets_loading = false;
         self.asset_now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1382,26 +1518,114 @@ impl Inspector {
             .assets
             .rows
             .iter()
-            .filter_map(|row| row.alias.as_ref())
-            .filter(|alias| !self.asset_thumbnails.contains_key(*alias))
-            .cloned()
+            .filter(|row| {
+                if asset_kind_is_text(&row.kind) {
+                    !self.asset_excerpts.contains_key(&row.id)
+                } else {
+                    !self.asset_thumbnails.contains_key(&row.id)
+                }
+            })
+            .map(|row| row.id.clone())
             .collect();
         self.redraw(cx);
         missing
     }
 
     pub fn set_assets_error(&mut self, cx: &mut Cx, error: &str) {
+        self.assets_loading = false;
         self.view.label(cx, ids!(assets_view.asset_status)).set_text(cx, error);
         self.redraw(cx);
     }
 
-    pub fn set_asset_thumbnail(&mut self, cx: &mut Cx, alias: String, bytes: ValueBytes) {
-        self.asset_thumbnails.insert(alias, bytes);
+    pub fn reset_asset_paging(&mut self, cx: &mut Cx) {
+        self.asset_cursor = None;
+        self.view
+            .label(cx, ids!(assets_view.asset_status))
+            .set_text(cx, "Asset list changed · refreshing…");
         self.redraw(cx);
     }
 
-    pub fn asset_thumbnail(&self, alias: &str) -> Option<ValueBytes> {
-        self.asset_thumbnails.get(alias).cloned()
+    pub fn set_asset_thumbnail(&mut self, cx: &mut Cx, alias: String, bytes: ValueBytes) {
+        if let Some(excerpt) = text_asset_excerpt(&bytes) {
+            self.asset_excerpts.insert(alias.clone(), excerpt);
+            // Text/data rows must never retain their complete source in the
+            // image cache. The excerpt is the only list payload we need.
+            self.asset_thumbnails.remove(&alias);
+        } else if image_preview_bytes(&bytes) {
+            self.asset_thumbnails.insert(alias.clone(), bytes);
+        } else {
+            // A data row may be binary. It was fetched only to discover that
+            // it has no readable excerpt; never retain that source as a
+            // thumbnail payload.
+            self.asset_thumbnails.remove(&alias);
+        }
+        self.remember_asset_preview(&alias);
+        self.redraw(cx);
+    }
+
+    /// Supply a bounded text preview fetched from the asset content endpoint.
+    /// Keeping this separate from thumbnails lets the list show text/data
+    /// assets without pretending their bytes are an image.
+    pub fn set_asset_excerpt(&mut self, cx: &mut Cx, alias: String, excerpt: String) {
+        self.asset_excerpts.insert(alias.clone(), excerpt);
+        self.remember_asset_preview(&alias);
+        self.redraw(cx);
+    }
+
+    fn remember_asset_preview(&mut self, alias: &str) {
+        self.asset_preview_order.retain(|item| item != alias);
+        self.asset_preview_order.push_back(alias.to_string());
+        while self.asset_preview_order.len() > 64 {
+            let Some(evicted) = self.asset_preview_order.pop_front() else { break };
+            self.asset_thumbnails.remove(&evicted);
+            self.asset_excerpts.remove(&evicted);
+        }
+    }
+
+    pub fn asset_query(&self) -> (String, Option<String>) {
+        (self.assets.search.clone(), self.assets.namespace().map(str::to_string))
+    }
+
+    pub fn asset_needs_text_preview(&self, id: &str) -> bool {
+        self.assets
+            .rows
+            .iter()
+            .find(|row| row.id == id)
+            .is_some_and(|row| asset_kind_is_text(&row.kind))
+    }
+
+    /// Return only the rows in (and just beyond) the current viewport. The
+    /// PortalList recycles item widgets, so asking for every row here would
+    /// turn a large asset library into a full thumbnail download.
+    pub fn visible_asset_preview_ids(&self, cx: &Cx) -> Vec<String> {
+        if !self.assets_visible() {
+            return Vec::new();
+        }
+        let list = self.view.portal_list(cx, ids!(assets_view.asset_list));
+        let first = list.first_id();
+        let count = list.visible_items();
+        if count == 0 {
+            return Vec::new();
+        }
+        let end = first.saturating_add(count.saturating_add(2)).min(self.assets.rows.len());
+        self.assets.rows[first.min(end)..end]
+            .iter()
+            .filter(|row| {
+                if asset_kind_is_text(&row.kind) {
+                    !self.asset_excerpts.contains_key(&row.id)
+                } else {
+                    !self.asset_thumbnails.contains_key(&row.id)
+                }
+            })
+            .map(|row| row.id.clone())
+            .collect()
+    }
+
+    pub fn adjacent_asset(&self, id: &str, direction: i32) -> Option<FlowAsset> {
+        let rows = &self.assets.rows;
+        let current = rows.iter().position(|row| row.id == id)?;
+        let next = (current as i64 + direction as i64).rem_euclid(rows.len() as i64) as usize;
+        Some(rows[next].clone())
     }
 
     pub fn show_edge(
@@ -1616,9 +1840,6 @@ impl Inspector {
     /// Edits made in the rows, as actions for the app.
     pub fn changes(&mut self, cx: &mut Cx, actions: &Actions) -> Vec<InspectorAction> {
         let mut out = Vec::new();
-        if self.locked {
-            return out;
-        }
         let mut toggle_advanced = false;
         if self.view.button(cx, ids!(tabs.inspector_tab)).clicked(actions) {
             self.set_tab(cx, InspectorTab::Inspector);
@@ -1643,6 +1864,15 @@ impl Inspector {
             self.assets.all_assets = value;
             out.push(InspectorAction::RefreshAssets);
         }
+        if self
+            .view
+            .button(cx, ids!(assets_view.asset_list_frame.load_more))
+            .clicked(actions)
+            && self.asset_cursor.is_some()
+            && !self.assets_loading
+        {
+            out.push(InspectorAction::LoadMoreAssets);
+        }
         let asset_list = self.view.portal_list(cx, ids!(assets_view.asset_list));
         for (index, item) in asset_list.items_with_actions(actions) {
             if item
@@ -1655,6 +1885,7 @@ impl Inspector {
                 }
             }
         }
+        if self.locked { return out; }
         let Some(node) = self.node.clone() else {
             return out;
         };
@@ -1896,6 +2127,13 @@ impl Widget for Inspector {
                 continue;
             };
             if self.tab == InspectorTab::Assets {
+                let load_more = self.view.button(cx, ids!(assets_view.asset_list_frame.load_more));
+                load_more.set_visible(cx, self.asset_cursor.is_some());
+                load_more.set_enabled(cx, !self.assets_loading);
+                load_more.set_text(
+                    cx,
+                    if self.assets_loading { "Loading assets…" } else { "Load more assets" },
+                );
                 list.set_item_range(cx, 0, self.assets.rows.len());
                 while let Some(index) = list.next_visible_item(cx) {
                     let Some(row) = self.assets.rows.get(index) else { continue };
@@ -1911,20 +2149,36 @@ impl Widget for Inspector {
                         labels.push_str(&row.tags.join(", "));
                     }
                     item.label(cx, ids!(labels)).set_text(cx, &labels);
+                    let excerpt = self.asset_excerpts.get(&row.id).cloned().unwrap_or_default();
+                    let excerpt_label = item.label(cx, ids!(excerpt));
+                    excerpt_label.set_text(cx, &excerpt);
+                    excerpt_label.set_visible(cx, !excerpt.is_empty());
                     let image = item.image(cx, ids!(thumb.image));
-                    if let Some(alias) = row.alias.as_ref() {
+                    let kind_badge = item.label(cx, ids!(thumb.kind_badge));
+                    kind_badge.set_text(cx, asset_kind_label(&row.kind));
+                    {
+                        let alias = &row.id;
                         let marker = item.label(cx, ids!(marker));
                         let bytes = self.asset_thumbnails.get(alias);
                         let needs_load = !existed || marker.text() != *alias || !image.has_content();
                         marker.set_text(cx, alias);
                         if needs_load {
                             let loaded = bytes.is_some_and(|bytes| {
-                                image.load_image_from_data(cx, &bytes.bytes).is_ok()
+                                let cache_key = PathBuf::from(format!("flow-asset-thumb/{alias}"));
+                                image
+                                    .load_image_from_data_async(cx, &cache_key, bytes.bytes.clone())
+                                    .is_ok()
                             });
                             image.set_visible(cx, loaded);
+                            // Non-image assets retain a readable type tile
+                            // even when the server returns its generic
+                            // placeholder PNG. Video can still show the
+                            // poster behind the small type label.
+                            kind_badge.set_visible(
+                                cx,
+                                !loaded || !matches!(row.kind.as_str(), "texture" | "image"),
+                            );
                         }
-                    } else {
-                        image.set_visible(cx, false);
                     }
                     item.draw_all_unscoped(cx);
                 }
@@ -2032,8 +2286,8 @@ impl Widget for Inspector {
                                 snap: #(*step)
                                 precision: #(if integral { 0usize } else { 2usize })
                             });
-                            field.set_value(cx, *value);
                         }
+                        field.set_value(cx, *value);
                         let reset = item.button(cx, ids!(reset));
                         reset.set_visible(cx, default.is_some());
                         reset.set_enabled(
@@ -2264,6 +2518,11 @@ impl Widget for Inspector {
                         | Event::TouchUpdate(_)
                 ))
         {
+            // A run locks graph editing; library navigation remains interactive.
+            self.view.widget(cx, ids!(tabs)).handle_event(cx, event, scope);
+            if self.tab == InspectorTab::Assets {
+                self.view.widget(cx, ids!(assets_view)).handle_event(cx, event, scope);
+            }
             return;
         }
         self.view.handle_event(cx, event, scope);
@@ -2669,129 +2928,13 @@ impl Widget for RunBar {
     }
 }
 
-// ---------------------------------------------------------------------------
-// App view
-// ---------------------------------------------------------------------------
-
-/// The flow as a product: its own face full-size, or the input faces above
-/// the output faces (a waiting Ask on top). Same instance, same faces.
-#[derive(Script, ScriptHook, Widget)]
-pub struct AppView {
-    #[uid]
-    uid: WidgetUid,
-    #[source]
-    source: ScriptObjectRef,
-    #[walk]
-    walk: Walk,
-    #[layout]
-    layout: Layout,
-    #[redraw]
-    #[live]
-    draw_bg: DrawColor,
-    #[live]
-    draw_frame: DrawColor,
-    #[live]
-    draw_text: DrawText,
-    #[rust]
-    area: Area,
-    #[rust]
-    graph: Option<Graph>,
-    #[rust]
-    pub waiting: Option<String>,
-}
-
-impl AppView {
-    pub fn set_graph(&mut self, cx: &mut Cx, graph: Option<Graph>) {
-        self.graph = graph;
-        self.redraw(cx);
-    }
-
-    fn draw_node_face(&mut self, cx: &mut Cx2d, scope: &mut Scope, node: &Node) {
-        let width = cx.turtle().rect().size.x - 2.0 * self.layout.padding.left;
-        self.draw_frame.begin(
-            cx,
-            Walk {
-                abs_pos: None,
-                margin: Inset::default(),
-                width: Size::Fixed(width.max(200.0)),
-                height: Size::fit(),
-                metrics: Metrics::default(),
-            },
-            Layout {
-                flow: Flow::Down,
-                padding: Inset {
-                    left: 12.0,
-                    right: 12.0,
-                    top: 6.0,
-                    bottom: 12.0,
-                },
-                ..Layout::default()
-            },
-        );
-        let header = cx.walk_turtle(Walk::fixed(width - 24.0, 22.0));
-        let title = node
-            .doc
-            .clone()
-            .or_else(|| node.label.clone())
-            .unwrap_or_else(|| format!("{} · {}", node.id, node.type_name));
-        self.draw_text.draw_abs(cx, header.pos + dvec2(0.0, 4.0), &title);
-        if let Some(faces) = scope.data.get_mut::<FaceHost>() {
-            faces.draw_face(cx, &node.id, Walk::fill_fit(), false);
-        } else {
-            let text = param_text(node, "value");
-            let rect = cx.walk_turtle(Walk::fixed(width - 24.0, 20.0));
-            self.draw_text.draw_abs(cx, rect.pos, &text);
-        }
-        self.draw_frame.end(cx);
-    }
-}
-
-impl Widget for AppView {
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        self.draw_bg.begin(cx, walk, self.layout);
-        let Some(graph) = self.graph.clone() else {
-            self.draw_bg.end(cx);
-            return DrawStep::done();
-        };
-        let has_flow_face = scope
-            .data
-            .get::<FaceHost>()
-            .is_some_and(|faces| faces.flow_face.as_ref().is_some_and(|face| !face.root.is_empty()));
-        if has_flow_face {
-            if let Some(faces) = scope.data.get_mut::<FaceHost>() {
-                faces.draw_flow_face(cx, Walk::fill());
-            }
-        } else {
-            if let Some(waiting) = self.waiting.clone() {
-                if let Some(node) = graph.nodes.iter().find(|node| node.id == waiting).cloned() {
-                    self.draw_node_face(cx, scope, &node);
-                }
-            }
-            for node in graph.nodes.iter().filter(|node| node.kind == "input").cloned() {
-                self.draw_node_face(cx, scope, &node);
-            }
-            for node in graph
-                .nodes
-                .iter()
-                .filter(|node| matches!(node.kind.as_str(), "output" | "publish"))
-                .cloned()
-            {
-                self.draw_node_face(cx, scope, &node);
-            }
-        }
-        self.draw_bg.end(cx);
-        self.area = self.draw_bg.draw_vars.area;
-        DrawStep::done()
-    }
-
-    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        inspector_combo_choice, inspector_commit_number, inspector_setting_names, relative_time,
-        palette_group_name, palette_group_rank, AssetListModel, InspectorTab, PALETTE_GROUPS,
+        inspector_combo_choice, inspector_commit_number, inspector_setting_names, next_asset_cursor,
+        asset_kind_is_text, relative_time, text_asset_excerpt, palette_group_name, palette_group_rank,
+        AssetListModel, InspectorTab, PALETTE_GROUPS,
+        ValueBytes,
     };
     use makepad_flow::{FlowAsset, Literal};
     use makepad_widgets::*;
@@ -2905,6 +3048,57 @@ mod tests {
         assert_eq!(model.rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(), vec!["sky"]);
         model.all_assets = true;
         assert_eq!(model.namespace(), None);
+    }
+
+    #[test]
+    fn asset_pages_append_in_order_and_deduplicate_ids() {
+        let mut model = AssetListModel::default();
+        model.set_rows(vec![asset("first", 30), asset("older", 10)]);
+        model.merge_rows(vec![asset("older", 5), asset("middle", 20), asset("new", 40)], true);
+        assert_eq!(
+            model.rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            vec!["new", "first", "middle", "older"]
+        );
+
+        model.merge_rows(vec![asset("fresh", 50)], false);
+        assert_eq!(model.rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(), vec!["fresh"]);
+    }
+
+    #[test]
+    fn preserved_refresh_adopts_a_new_cursor_after_an_exhausted_page() {
+        assert_eq!(
+            next_asset_cursor(None, Some("page-2".into()), true),
+            Some("page-2".into())
+        );
+        assert_eq!(
+            next_asset_cursor(Some("page-3".into()), Some("page-2".into()), true),
+            Some("page-3".into())
+        );
+        assert_eq!(next_asset_cursor(Some("old".into()), None, false), None);
+    }
+
+    #[test]
+    fn text_asset_excerpt_is_bounded_and_ignores_binary_payloads() {
+        let text = ValueBytes {
+            digest: "text".into(),
+            content_type: "text/plain; charset=utf-8".into(),
+            bytes: std::sync::Arc::from(
+                b"first line\n\nsecond line with a little more context".as_slice(),
+            ),
+        };
+        assert_eq!(
+            text_asset_excerpt(&text).as_deref(),
+            Some("first line · second line with a little more context")
+        );
+        let binary = ValueBytes {
+            digest: "bin".into(),
+            content_type: "application/octet-stream".into(),
+            bytes: std::sync::Arc::from([0u8, 1, 2].as_slice()),
+        };
+        assert!(text_asset_excerpt(&binary).is_none());
+        assert!(asset_kind_is_text("data"));
+        assert!(asset_kind_is_text("json"));
+        assert!(!asset_kind_is_text("video"));
     }
 
     #[test]

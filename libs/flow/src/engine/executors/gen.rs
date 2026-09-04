@@ -329,6 +329,9 @@ impl GenExecutor {
             }
             match picked.provider.request(domain, &submitted) {
                 Ok(job_id) => {
+                    // A retry moves the accepted request to another machine,
+                    // preserving the model the user already started with.
+                    self.request = Some(submitted);
                     let retry_stage = (!self.refusals.is_empty()).then(|| {
                         let refused = self
                             .refusals
@@ -424,10 +427,11 @@ impl GenExecutor {
 
 fn is_admission_refusal(error: &str) -> bool {
     error.contains("insufficient VRAM")
+        || error.starts_with("model unavailable: disk-space:")
 }
 
 fn admission_refusal_summary(error: &str) -> &str {
-    if is_admission_refusal(error) {
+    if error.contains("insufficient VRAM") {
         "insufficient VRAM"
     } else {
         error
@@ -494,6 +498,12 @@ impl Executor for GenExecutor {
             }
         } else if !active {
             self.last_keepalive = None;
+        }
+        if status.state == makepad_ai_hub::protocol::JOB_STATE_CANCELLED
+            && self.partial_text.is_empty()
+            && status.error.as_deref().is_some_and(|error| error.starts_with("local-use:"))
+        {
+            return self.retry_after_refusal(status.error.unwrap());
         }
         if let Some(partial) = status.partial_text.as_deref() {
             if let Some(delta) = partial.strip_prefix(&self.partial_text) {
@@ -577,7 +587,7 @@ impl Executor for GenExecutor {
                 let error = status
                     .error
                     .unwrap_or_else(|| "generation error".to_string());
-                if is_admission_refusal(&error) {
+                if self.partial_text.is_empty() && is_admission_refusal(&error) {
                     self.retry_after_refusal(error)
                 } else {
                     Poll::Failed(error)
@@ -597,6 +607,9 @@ impl Executor for GenExecutor {
             let _ = provider.provider.cancel(job_id);
             provider.bye();
         }
+        self.provider = None;
+        self.job_id = None;
+        self.pending_stage = None;
         self.last_keepalive = None;
     }
 }

@@ -226,6 +226,20 @@ mod.flow.ui.GenFace = Face{
     }
 }
 
+mod.flow.ui.VideoFace = Face{
+    spacing: 0
+    params := Strip{
+        format := mod.flow.ui.FormatPicker{}
+        Row{
+            frames := Number{label: "frames" min: 5 max: 4096 step: 1 snap: 1 param_bind := @frames}
+            seed := mod.flow.ui.SeedPicker{param_bind := @seed}
+        }
+        model := mod.flow.ui.ModelPicker{
+            param_bind := @model
+        }
+    }
+}
+
 // The node types keep the objects the core prelude gave them; only their
 // default faces are re-pointed at the real widgets.
 mod.flow.Node.ui = nil
@@ -242,6 +256,7 @@ mod.flow.Image.ui = mod.flow.ui.ImageFace
 mod.flow.Upscale.ui = mod.flow.ui.UpscaleFace
 
 mod.flow.ImageFace = mod.flow.ui.ImageFace
+mod.flow.VideoFace = mod.flow.ui.VideoFace
 mod.flow.InputFace = mod.flow.ui.InputFace
 mod.flow.TextFace = mod.flow.ui.TextFace
 mod.flow.OutputFace = mod.flow.ui.OutputFace

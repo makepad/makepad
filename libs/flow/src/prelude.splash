@@ -11,6 +11,7 @@ mod.flow.ui = {
     AskFace: {}
     GenFace: {}
     ImageFace: {}
+    VideoFace: {}
     UpscaleFace: {}
     ValueImage: {}
     ValueText: {}

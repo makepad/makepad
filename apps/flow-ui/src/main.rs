@@ -8,6 +8,7 @@
 // methods plus `_json` render projections; `FlowClient::models` is additive.
 
 mod services;
+mod assets;
 
 use crate::services::{BridgeContext, FlowServices, FlowUiAction};
 pub use makepad_widgets;
@@ -22,21 +23,19 @@ mod theme;
 mod values;
 mod viewer;
 
-use faces::{model_choices, BridgeCall, FaceBridgeCall, FaceHost, ModelChoice};
+use faces::{model_choices, model_choices_for_node, BridgeCall, FaceBridgeCall, FaceHost, ModelChoice};
 use makepad_flow::client::{
-    ClientError, FlowClient, FlowSubscriber, FlowSubscriberConfig, SessionConfig,
+    ClientError, FlowClient, FlowSubscriber, FlowSubscriberConfig,
     SessionConnector, SessionStatus, SubscriptionEvent,
 };
-use makepad_flow::embed::{default_root, resolve, EmbedPolicy, Resolved};
-use makepad_flow::engine::{FixedGen, HubChat, HubHttp, Seams};
-use makepad_flow::host::{FlowServer, FlowServerConfig};
+use makepad_flow::host::FlowServer;
 use makepad_flow::{
     AssetsResponse, CreateBatchRequest, CreateBatchResponse, CreateInstanceRequest, CreateRunResponse,
     Event as FlowEvent, FlowDefinition, FlowSummary,
     Graph, InstanceRow, Literal, ModelsResponse, NodeTypeCatalog, NodeState, NodesResponse,
     ParallelismResponse, PortType, PutFlowResponse, RunRowDto, RunState, TemplateSummary, ValueRef,
 };
-use makepad_widgets::makepad_draw::text::selection::Cursor;
+use makepad_code_editor::code_view::CodeViewAction;
 use makepad_widgets::makepad_platform::thread::SignalToUI;
 use makepad_widgets::*;
 use makepad_flowgraph::{
@@ -44,7 +43,7 @@ use makepad_flowgraph::{
 };
 use makepad_flowgraph::wire_route::WireMode;
 use panels::{
-    AppView, FlowList, Inspector, InspectorAction, Palette, PaletteAction, RunBar, TemplatePicker,
+    FlowList, Inspector, InspectorAction, Palette, PaletteAction, RunBar, TemplatePicker,
 };
 use queue::{QueueAction, QueueList};
 use std::collections::{HashMap, HashSet};
@@ -59,6 +58,8 @@ app_main!(App);
 const FIRST_TEMPLATE: &str = "prompt-to-image";
 /// How often the hub's model lists are refreshed while a flow with generators is open.
 const MODELS_REFRESH_SECS: f64 = 10.0;
+const ASSET_PREVIEW_MAX_IN_FLIGHT: usize = 4;
+const ASSET_PREVIEW_RETRY_SECS: f64 = 2.0;
 
 const TEMPLATES_MENU: &str = "Templates";
 
@@ -219,11 +220,11 @@ script_mod! {
     let SectionTitle = Label{
         width: Fill
         height: Fit
-        margin: Inset{top: 6 bottom: 2}
+        margin: Inset{top: 1 bottom: 0}
         text: ""
         draw_text +: {
             color: theme.flow_text_subtle
-            text_style: theme.font_bold{font_size: 8.5}
+            text_style: theme.font_bold{font_size: 8}
         }
     }
 
@@ -233,8 +234,8 @@ script_mod! {
         flow: Down
         cursor: MouseCursor.Default
         grab_key_focus: false
-        padding: Inset{left: 10 right: 10 top: 8 bottom: 10}
-        spacing: theme.space_1
+        padding: Inset{left: 8 right: 8 top: 6 bottom: 6}
+        spacing: 3
         show_bg: true
         draw_bg +: {
             color: theme.flow_surface_translucent
@@ -320,7 +321,6 @@ script_mod! {
                             ]}
                             {label: "View" items: [
                                 {id: @view_canvas label: "Canvas" shortcut: "Cmd+1"}
-                                {id: @view_app label: "App view" shortcut: "Cmd+2"}
                                 {id: @view_source label: "Source" shortcut: "Cmd+3"}
                                 {id: @view_inspector label: "Inspector" shortcut: "Cmd+I"}
                                 {id: @flip_card label: "Flip card" shortcut: "F"}
@@ -362,13 +362,6 @@ script_mod! {
                             flow: Down
                             canvas := FlowCanvas{}
                         }
-                        app_view_view := View{
-                            width: Fill
-                            height: Fill
-                            visible: false
-                            app_view := AppView{}
-                        }
-
                         chrome := View{
                             width: Fill
                             height: Fill
@@ -428,7 +421,6 @@ script_mod! {
                                 run_state := ToolText{width: Fill}
                                 zoom_label := ToolText{text: "100 %"}
                                 fit_btn := ButtonFlat{text: "Fit"}
-                                view_btn := ButtonFlat{text: "App view"}
                                 side_btn := ButtonFlat{text: "Source"}
                                 new_btn := Button{text: "New"}
                             }
@@ -467,7 +459,6 @@ script_mod! {
                                                     min_horizontal: 100.0
                                                     max_horizontal: 104.0
                                                     a: Panel{
-                                                        SectionTitle{text: "QUEUE"}
                                                         running := QueueList{}
                                                     }
                                                     b: Panel{
@@ -507,41 +498,53 @@ script_mod! {
                                                 clip_x: false
                                                 clip_y: false
                                                 padding: Inset{left: 4 right: 8 bottom: 8}
-                                                right_source_split := PanelSplitter{
-                                                    axis: SplitterAxis.Vertical
-                                                    align: SplitterAlign.FromB(330.0)
-                                                    min_horizontal: 84.0
-                                                    max_horizontal: 84.0
-                                                    a: Panel{
-                                                        spacing: theme.space_1
-                                                        inspector := Inspector{}
-                                                    }
-                                                    b: View{
-                                                        width: Fill
-                                                        height: Fill
-                                                        source_view := Panel{
-                                                            visible: false
-                                                            spacing: theme.space_2
-                                                            View{
-                                                                width: Fill
-                                                                height: Fit
-                                                                flow: Right
-                                                                align: Align{y: 0.5}
-                                                                SectionTitle{width: Fill text: "SOURCE"}
-                                                                save_btn := Button{text: "Save"}
-                                                            }
-                                                            source := TextInput{
-                                                                width: Fill
-                                                                height: Fill
-                                                                is_multiline: true
-                                                                empty_text: "Open a flow to edit its source"
-                                                                draw_text +: {text_style: theme.font_code{font_size: 9}}
-                                                            }
-                                                        }
-                                                    }
-                                                }
+                                                inspector := Inspector{}
                                             }
                                         }
+                                    }
+                                }
+                            }
+                        }
+
+                        source_overlay := View{
+                            width: Fill
+                            height: Fill
+                            flow: Overlay
+                            visible: false
+                            source_card := Panel{
+                                width: 760
+                                height: 620
+                                align: Align{x: 0.5 y: 0.5}
+                                spacing: theme.space_2
+                                padding: Inset{left: 10 right: 10 top: 8 bottom: 10}
+                                head := View{
+                                    width: Fill
+                                    height: 28
+                                    flow: Right
+                                    align: Align{y: 0.5}
+                                    SectionTitle{width: Fill text: "SOURCE"}
+                                    save_btn := Button{text: "Save"}
+                                    close_source := ButtonFlat{text: "×"}
+                                }
+                                source := CodeView{
+                                    editor +: {
+                                        width: Fill
+                                        height: Fill
+                                        read_only: false
+                                        show_gutter: true
+                                        word_wrap: false
+                                        draw_text +: {text_style: theme.font_code{font_size: 9}}
+                                    }
+                                }
+                                View{
+                                    width: Fill
+                                    height: 18
+                                    align: Align{x: 1.0 y: 1.0}
+                                    resize_grip := Label{
+                                        width: 18
+                                        height: 18
+                                        text: "◢"
+                                        draw_text +: {color: theme.flow_text_muted text_style: theme.font_regular{font_size: 12}}
                                     }
                                 }
                             }
@@ -771,7 +774,16 @@ enum IoResult {
         generation: u64,
         result: Result<(), ClientError>,
     },
-    Assets(Result<AssetsResponse, ClientError>),
+    Assets {
+        generation: u64,
+        query: String,
+        namespace: Option<String>,
+        next_page: bool,
+        merge_existing: bool,
+        preserve_cursor: bool,
+        result: Result<AssetsResponse, ClientError>,
+    },
+    AssetContent { id: String, result: Result<makepad_flow::ValueBytes, ClientError> },
     AssetThumbnail {
         alias: String,
         result: Result<makepad_flow::ValueBytes, ClientError>,
@@ -789,6 +801,8 @@ struct RunRequest {
 
 #[derive(Default)]
 struct IoMailbox {
+    #[cfg(test)]
+    template_requests: Vec<(String, String)>,
     sender: Option<Sender<IoResult>>,
     receiver: Option<Receiver<IoResult>>,
     fetching_flows: bool,
@@ -823,6 +837,10 @@ pub struct App {
     #[rust]
     host: Option<FlowServer>,
     #[rust]
+    bootstrap_task: Option<makepad_widgets::makepad_platform::thread::TaskHandle<Result<assets::Bootstrap, String>>>,
+    #[rust]
+    bootstrap_pending: bool,
+    #[rust]
     testpattern_service: Option<testpattern::TestpatternService>,
     #[rust]
     session: Option<SessionConnector>,
@@ -851,6 +869,12 @@ pub struct App {
     queue_generation: u64,
     #[rust]
     queue_refresh_after_stale: bool,
+    #[rust]
+    assets_request_generation: u64,
+    #[rust]
+    asset_preview_inflight: HashSet<String>,
+    #[rust]
+    asset_preview_retry_at: HashMap<String, f64>,
     #[rust]
     selected: Option<String>,
     #[rust]
@@ -886,6 +910,10 @@ pub struct App {
     #[rust]
     unsaved: bool,
     #[rust]
+    pending_source_edit: Option<(String, String, std::time::Instant)>,
+    #[rust]
+    source_save_pending: bool,
+    #[rust]
     connected_server: Option<[u8; 16]>,
     #[rust]
     embedded: bool,
@@ -912,9 +940,18 @@ pub struct App {
     #[rust]
     pending_auto_flips: HashMap<String, bool>,
     #[rust]
-    app_mode: bool,
     #[rust]
     source_mode: bool,
+    #[rust]
+    source_geometry_ready: bool,
+    #[rust]
+    source_applied_geometry: Option<Rect>,
+    #[rust]
+    source_origin: DVec2,
+    #[rust]
+    source_size: DVec2,
+    #[rust]
+    source_drag: Option<(DVec2, bool)>,
     #[rust]
     left_hidden: bool,
     #[rust]
@@ -943,98 +980,45 @@ pub struct App {
     menu_state: (bool, bool, bool, bool, bool, bool),
     #[rust]
     menu_state_initialized: bool,
-    /// Splitter positions are widget state; these two slots only remember a
-    /// pane's live size while that pane is collapsed by a View-menu toggle.
+    /// Splitter position remembered while the left pane is collapsed.
     #[rust]
     left_panel_align: Option<SplitterAlign>,
     #[rust]
-    source_panel_align: Option<SplitterAlign>,
+    asset_store: Option<makepad_app_asset_server::embed::LocalStore>,
 }
 
 impl App {
     fn startup(&mut self, cx: &mut Cx) {
         self.io.start();
         self.poll_timer = cx.start_interval(0.25);
-        let root = default_root();
-        let policy = EmbedPolicy::from_env();
-        let (hint, token) = match resolve(policy, &root, None) {
-            Resolved::Host => {
-                let mut config = FlowServerConfig::new(root.clone());
-                config.asset.token = std::fs::read_to_string(
-                    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                        .join("../../local/asset-ui/asset-server/admin-token"),
-                )
-                .ok()
-                .map(|token| token.trim().to_string())
-                .filter(|token| !token.is_empty());
-                config.control_addr = "127.0.0.1:0".to_string();
-                config.data_addr = "127.0.0.1:0".to_string();
-                // Dev-only: `FLOW_GEN_BASE_URL=<url>` points every gen node at
-                // one hub box instead of the fleet; `=testpattern` serves the
-                // hub's testpattern model in-process and streams a stand-in
-                // paragraph for the Llm nodes (see `testpattern.rs`).
-                if let Some(value) = std::env::var_os("FLOW_GEN_BASE_URL")
-                    .and_then(|value| value.into_string().ok())
-                    .filter(|value| !value.is_empty())
-                {
-                    let seams = if value == "testpattern" {
-                        match testpattern::start_service() {
-                            Ok(service) => {
-                                let url = service.url.clone();
-                                self.testpattern_service = Some(service);
-                                log!("flow-ui: testpattern hub service at {url} — gen and chat are stand-ins");
-                                Some(Seams {
-                                    chat: Arc::new(testpattern::TestpatternChat),
-                                    gen: Arc::new(FixedGen(url)),
-                                    http: Arc::new(HubHttp),
-                                })
-                            }
-                            Err(error) => {
-                                self.set_error(cx, &format!("testpattern service: {error}"));
-                                None
-                            }
-                        }
-                    } else {
-                        log!("flow-ui: FLOW_GEN_BASE_URL={value} — gen nodes use that box");
-                        Some(Seams {
-                            chat: Arc::new(HubChat::from_env()),
-                            gen: Arc::new(FixedGen(value)),
-                            http: Arc::new(HubHttp),
-                        })
-                    };
-                    if let Some(seams) = seams {
-                        config = config.with_seams(seams);
-                    }
-                }
-                match FlowServer::start(config) {
-                    Ok(server) => {
-                        let served = server.endpoints();
-                        let hint = Some(makepad_flow::client::Endpoints {
-                            control: served.control,
-                            data: served.data,
-                        });
-                        let token = Some(served.token.clone());
-                        self.host = Some(server);
-                        self.embedded = true;
-                        (hint, token)
-                    }
-                    Err(error) => {
-                        self.set_error(cx, &format!("Could not host flow server: {error}"));
-                        (None, None)
-                    }
-                }
-            }
-            Resolved::Attach(hint, token, _) => (hint, token),
-        };
-        self.session = Some(SessionConnector::start(SessionConfig {
-            hint,
-            root: Some(root),
-            token,
-            ..SessionConfig::default()
-        }));
+        self.bootstrap_pending = true;
+        self.drain_bootstrap(cx);
         self.update_connection(cx);
         self.set_wire_mode(cx, self.wire_mode);
         self.set_modes(cx);
+    }
+
+    fn drain_bootstrap(&mut self, cx: &mut Cx) {
+        if self.bootstrap_pending && self.bootstrap_task.is_none() {
+            match cx.task_pool().submit(makepad_widgets::makepad_platform::thread::Lane::Heavy, assets::start) {
+                Ok(task) => { self.bootstrap_task = Some(task); self.bootstrap_pending = false; }
+                Err(error) => self.set_error(cx, &format!("Waiting to start Flow: {error}")),
+            }
+        }
+        let Some(result) = self.bootstrap_task.as_mut().and_then(|task| task.try_take()) else { return };
+        self.bootstrap_task = None;
+        match result {
+            Ok(Ok(started)) => {
+                self.embedded = started.host.is_some();
+                self.host = started.host;
+                self.testpattern_service = started.testpattern;
+                self.session = Some(started.session);
+                self.asset_store = started.store;
+                self.update_connection(cx);
+            }
+            Ok(Err(error)) => self.set_error(cx, &error),
+            Err(error) => self.set_error(cx, &format!("Flow startup failed: {error}")),
+        }
     }
 
     fn set_wire_mode(&mut self, cx: &mut Cx, mode: WireMode) {
@@ -1130,9 +1114,6 @@ impl App {
     fn update_attachment_lock(&mut self, cx: &mut Cx) {
         let locked = self.instance.is_some();
         self.ui.button(cx, ids!(design_btn)).set_visible(cx, locked);
-        self.ui
-            .text_input(cx, ids!(source))
-            .set_is_read_only(cx, locked);
         if let Some(faces) = self.faces.as_mut() {
             faces.set_locked(cx, locked);
         }
@@ -1259,55 +1240,84 @@ impl App {
         self.io(|client| IoResult::Instances(client.instances(None, false)));
     }
 
-    fn refresh_assets(&mut self, cx: &mut Cx) {
+    fn refresh_assets(
+        &mut self,
+        cx: &mut Cx,
+        next_page: bool,
+        merge_existing: bool,
+        preserve_cursor: bool,
+    ) {
+        if self.client().is_none() {
+            return;
+        }
         let request = self
             .ui
             .widget(cx, ids!(inspector))
             .borrow_mut::<Inspector>()
-            .map(|mut inspector| inspector.asset_request(self.time));
-        let Some((query, namespace, limit)) = request else { return };
+            .map(|mut inspector| inspector.asset_request(cx, self.time, next_page, preserve_cursor));
+        let Some((query, namespace, limit, cursor)) = request else { return };
+        self.assets_request_generation = self.assets_request_generation.wrapping_add(1);
+        let generation = self.assets_request_generation;
         self.io(move |client| {
-            IoResult::Assets(client.assets(&query, namespace.as_deref(), limit))
+            IoResult::Assets {
+                generation,
+                query: query.clone(),
+                namespace: namespace.clone(),
+                next_page,
+                merge_existing,
+                preserve_cursor,
+                result: client.assets_page(&query, namespace.as_deref(), limit, cursor.as_deref()),
+            }
         });
     }
 
-    fn fetch_asset_thumbnail(&mut self, alias: String) {
+    fn fetch_asset_thumbnail(&mut self, cx: &mut Cx, alias: String) {
+        let text_preview = self
+            .ui
+            .widget(cx, ids!(inspector))
+            .borrow::<Inspector>()
+            .is_some_and(|inspector| inspector.asset_needs_text_preview(&alias));
         self.io(move |client| IoResult::AssetThumbnail {
-            result: client.asset_thumbnail(&alias),
+            result: if text_preview {
+                client.asset_preview(&alias)
+            } else {
+                client.asset_thumbnail(&alias)
+            },
             alias,
         });
     }
 
-    fn open_asset(&mut self, cx: &mut Cx, asset: makepad_flow::FlowAsset) {
-        let thumbnail = asset.alias.as_deref().and_then(|alias| {
-            self.ui
-                .widget(cx, ids!(inspector))
-                .borrow::<Inspector>()
-                .and_then(|inspector| inspector.asset_thumbnail(alias))
-        });
-        if asset.kind == "texture" {
-            if let Some(bytes) = thumbnail {
-                self.preview_digest = Some((asset.id.clone(), asset.title.clone()));
-                self.show_image_viewer(cx, &asset.id, "asset", &bytes);
-                return;
+    fn refresh_visible_asset_previews(&mut self, cx: &mut Cx) {
+        let visible = self
+            .ui
+            .widget(cx, ids!(inspector))
+            .borrow::<Inspector>()
+            .map(|inspector| inspector.visible_asset_preview_ids(cx))
+            .unwrap_or_default();
+        let available = ASSET_PREVIEW_MAX_IN_FLIGHT
+            .saturating_sub(self.asset_preview_inflight.len());
+        for alias in visible.into_iter().take(available) {
+            if self.asset_preview_inflight.contains(&alias)
+                || self
+                    .asset_preview_retry_at
+                    .get(&alias)
+                    .is_some_and(|retry_at| *retry_at > self.time)
+            {
+                continue;
             }
+            self.asset_preview_inflight.insert(alias.clone());
+            self.fetch_asset_thumbnail(cx, alias);
         }
-        let json = makepad_strict_json::Value::Obj(vec![
-            ("id".into(), makepad_strict_json::Value::Str(asset.id.clone())),
-            ("alias".into(), asset.alias.clone().map(makepad_strict_json::Value::Str).unwrap_or(makepad_strict_json::Value::Null)),
-            ("namespace".into(), makepad_strict_json::Value::Str(asset.namespace)),
-            ("title".into(), makepad_strict_json::Value::Str(asset.title.clone())),
-            ("kind".into(), makepad_strict_json::Value::Str(asset.kind)),
-            ("tags".into(), makepad_strict_json::Value::Arr(asset.tags.into_iter().map(makepad_strict_json::Value::Str).collect())),
-            ("created_ms".into(), makepad_strict_json::Value::Int(asset.created_ms as i64)),
-        ]).to_json();
-        let bytes = makepad_flow::ValueBytes {
-            digest: asset.id.clone(),
-            content_type: "application/json".to_string(),
-            bytes: std::sync::Arc::from(json.into_bytes()),
-        };
-        self.preview_digest = Some((asset.id, asset.title));
-        self.show_preview(cx, &bytes);
+    }
+
+    fn open_asset(&mut self, cx: &mut Cx, asset: makepad_flow::FlowAsset) {
+        self.preview_digest = Some((asset.id.clone(), asset.title.clone()));
+        self.preview_bytes = None;
+        if let Some(mut viewer) = self.ui.widget(cx, ids!(image_viewer)).borrow_mut::<ImageViewer>() {
+            viewer.show_status(cx, &asset.title, "Loading original content…");
+        }
+        self.ui.view(cx, ids!(value_preview_view)).set_visible(cx, false);
+        self.io(move |client| IoResult::AssetContent { result: client.asset_content(&asset.id), id: asset.id });
     }
 
     fn refresh_queue(&mut self) {
@@ -1393,6 +1403,16 @@ impl App {
         if self.instance.is_some() {
             return;
         }
+        if self.source_save_pending {
+            self.pending_source_edit = Some((name, source, std::time::Instant::now()));
+            return;
+        }
+        self.source_save_pending = true;
+        if self.pending_source_edit.as_ref().is_some_and(|(pending_name, pending_source, _)| {
+            *pending_name == name && *pending_source == source
+        }) {
+            self.pending_source_edit = None;
+        }
         self.io(move |client| {
             let result = client.put_source(&name, &source);
             IoResult::Saved {
@@ -1458,6 +1478,8 @@ impl App {
     fn create_from_template(&mut self, template: &str) {
         let name = self.fresh_flow_name(template);
         let template = template.to_string();
+        #[cfg(test)]
+        self.io.template_requests.push((name.clone(), template.clone()));
         self.io(move |client| {
             let result = client.create_from_template(&name, &template);
             IoResult::Created { name, result }
@@ -1694,22 +1716,26 @@ impl App {
                     name,
                     source,
                     result,
-                } => match result {
+                } => {
+                    self.source_save_pending = false;
+                    // An older save must never switch the selected flow or
+                    // replace newer editor text/diagnostics as it finishes.
+                    let current = self.instance.is_none()
+                        && self.selected.as_deref() == Some(&name)
+                        && self.ui.widget(cx, ids!(source)).text() == source;
+                    match result {
                     Ok(_) => {
-                        if self.selected.as_deref() == Some(&name)
-                            && self.ui.text_input(cx, ids!(source)).text() == source
-                        {
+                        if current {
                             self.unsaved = false;
+                            self.set_error(cx, "");
+                            self.load_flow(name);
                         }
-                        if self.selected.as_deref() != Some(&name) {
-                            self.open_flow(cx, name.clone());
-                        }
-                        self.set_error(cx, "");
                         self.refresh_flows();
                         self.services.refresh_definitions();
-                        self.load_flow(name);
                     }
-                    Err(error) => self.show_error(cx, &error),
+                    Err(error) if current => self.show_error(cx, &error),
+                    Err(_) => {}
+                    }
                 },
                 IoResult::Created { name, result } => match result {
                     Ok(_) => {
@@ -2053,18 +2079,6 @@ impl App {
                                 self.record_value(cx, &node, &port, value);
                             }
                             self.request_wanted_values(cx);
-                            if let Some(waiting) = row
-                                .waiting
-                                .as_ref()
-                                .filter(|_| row.state == "waiting")
-                                .map(|waiting| waiting.node.clone())
-                            {
-                                if let Some(mut app_view) =
-                                    self.ui.widget(cx, ids!(app_view)).borrow_mut::<AppView>()
-                                {
-                                    app_view.waiting = Some(waiting);
-                                }
-                            }
                             self.instance_row = Some(row);
                             if recover_run {
                                 self.fetch_run_snapshot();
@@ -2143,30 +2157,94 @@ impl App {
                         Err(error) => self.show_error(cx, &error),
                     }
                 }
-                IoResult::Assets(result) => match result {
-                    Ok(response) => {
-                        let missing = self
-                            .ui
-                            .widget(cx, ids!(inspector))
-                            .borrow_mut::<Inspector>()
-                            .map(|mut inspector| inspector.set_assets(cx, response.assets))
-                            .unwrap_or_default();
-                        for alias in missing {
-                            self.fetch_asset_thumbnail(alias);
-                        }
+                IoResult::Assets {
+                    generation,
+                    query,
+                    namespace,
+                    next_page,
+                    merge_existing,
+                    preserve_cursor,
+                    result,
+                } => {
+                    if generation != self.assets_request_generation {
+                        continue;
                     }
-                    Err(error) => {
-                        if let Some(mut inspector) = self
-                            .ui
-                            .widget(cx, ids!(inspector))
-                            .borrow_mut::<Inspector>()
-                        {
-                            inspector.set_assets_error(cx, &error.to_string());
+                    let inspector_widget = self.ui.widget(cx, ids!(inspector));
+                    let Some(inspector_ref) = inspector_widget.borrow::<Inspector>() else {
+                        continue;
+                    };
+                    let (current_query, current_namespace) = inspector_ref.asset_query();
+                    if !assets_response_is_current(
+                        generation,
+                        self.assets_request_generation,
+                        &query,
+                        namespace.as_deref(),
+                        &current_query,
+                        current_namespace.as_deref(),
+                    ) {
+                        continue;
+                    }
+                    drop(inspector_ref);
+                    match result {
+                        Ok(response) => {
+                            let _missing = self
+                                .ui
+                                .widget(cx, ids!(inspector))
+                                .borrow_mut::<Inspector>()
+                                .map(|mut inspector| {
+                                    inspector.set_assets_page(
+                                        cx,
+                                        response,
+                                        merge_existing,
+                                        preserve_cursor,
+                                    )
+                                })
+                                .unwrap_or_default();
+                            // Preview requests are issued from the current
+                            // viewport on the next poll. Do not fetch every
+                            // thumbnail in a paged response.
+                        }
+                        Err(error) => {
+                            let message = error.to_string();
+                            if next_page {
+                                if let Some(mut inspector) = self
+                                    .ui
+                                    .widget(cx, ids!(inspector))
+                                    .borrow_mut::<Inspector>()
+                                {
+                                    inspector.reset_asset_paging(cx);
+                                }
+                                self.refresh_assets(cx, false, true, false);
+                            } else if let Some(mut inspector) = self
+                                .ui
+                                .widget(cx, ids!(inspector))
+                                .borrow_mut::<Inspector>()
+                            {
+                                inspector.set_assets_error(cx, &message);
+                            }
                         }
                     }
                 },
+                IoResult::AssetContent { id, result } => {
+                    if self.preview_digest.as_ref().is_some_and(|(current, _)| current == &id) {
+                        match result {
+                            Ok(bytes) => {
+                                let title = self.preview_digest.as_ref().map(|(_, title)| title.clone()).unwrap_or_default();
+                                self.show_image_viewer(cx, &title, "", &bytes);
+                            }
+                            Err(error) => {
+                                if let Some(mut viewer) = self.ui.widget(cx, ids!(image_viewer)).borrow_mut::<ImageViewer>() {
+                                    viewer.show_status(cx, "Could not open asset", &error.to_string());
+                                }
+                                self.show_error(cx, &error);
+                            },
+                        }
+                    }
+                }
                 IoResult::AssetThumbnail { alias, result } => match result {
                     Ok(bytes) => {
+                        self.asset_preview_inflight.remove(&alias);
+                        self.asset_preview_retry_at.remove(&alias);
                         if let Some(mut inspector) = self
                             .ui
                             .widget(cx, ids!(inspector))
@@ -2175,7 +2253,12 @@ impl App {
                             inspector.set_asset_thumbnail(cx, alias, bytes);
                         }
                     }
-                    Err(error) => log!("flow-ui: asset thumbnail: {error}"),
+                    Err(error) => {
+                        self.asset_preview_inflight.remove(&alias);
+                        self.asset_preview_retry_at
+                            .insert(alias, self.time + ASSET_PREVIEW_RETRY_SECS);
+                        log!("flow-ui: asset thumbnail: {error}");
+                    }
                 },
                 IoResult::Done(result) => {
                     if let Err(error) = result {
@@ -2210,9 +2293,7 @@ impl App {
             }
         }
         if !self.unsaved {
-            self.ui
-                .text_input(cx, ids!(source))
-                .set_text(cx, &definition.source);
+            self.ui.widget(cx, ids!(source)).set_text(cx, &definition.source);
         }
         self.set_error(
             cx,
@@ -2238,7 +2319,7 @@ impl App {
         self.update_connection(cx);
     }
 
-    /// Push the current graph into the canvas, the app view and the inspector.
+    /// Push the current graph into the canvas and inspector.
     fn show_graph(&mut self, cx: &mut Cx) {
         let graph = self.current_graph();
         if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
@@ -2249,9 +2330,6 @@ impl App {
                     .unwrap_or_default(),
             );
             canvas.set_graph(cx, graph.as_ref().map(graph_view::view_of));
-        }
-        if let Some(mut app_view) = self.ui.widget(cx, ids!(app_view)).borrow_mut::<AppView>() {
-            app_view.set_graph(cx, graph.clone());
         }
         if let Some(faces) = self.faces.as_mut() {
             if let Some(graph) = graph.as_ref() {
@@ -2283,6 +2361,11 @@ impl App {
             .as_ref()
             .and_then(|domain| self.models.get(domain).cloned())
             .unwrap_or_default();
+        let models = selected
+            .as_ref()
+            .and_then(|id| graph.as_ref()?.nodes.iter().find(|node| &node.id == id))
+            .map(|node| model_choices_for_node(&models, &node.kind))
+            .unwrap_or(models);
         let loaded: Vec<(String, makepad_flow::ValueBytes)> = outputs
             .iter()
             .filter_map(|(port, value)| {
@@ -2345,7 +2428,8 @@ impl App {
                     continue;
                 };
                 if let Some(models) = self.models.get(domain) {
-                    faces.set_models(cx, &node.id, models);
+                    let models = model_choices_for_node(models, &node.kind);
+                    faces.set_models(cx, &node.id, &models);
                 }
             }
         }
@@ -2684,9 +2768,6 @@ impl App {
             "node.waiting" => {
                 self.current_node = Some(node.clone());
                 self.set_node_status(cx, &node, "waiting", 0, false, "", None);
-                if let Some(mut app_view) = self.ui.widget(cx, ids!(app_view)).borrow_mut::<AppView>() {
-                    app_view.waiting = Some(node.clone());
-                }
             }
             "node.answered" => self.set_node_status(cx, &node, "running", 0, false, "", None),
             "node.done" => {
@@ -2701,10 +2782,10 @@ impl App {
                 self.request_wanted_values(cx);
                 if self.current_graph().is_some_and(|graph| {
                     graph.nodes.iter().any(|candidate| {
-                        candidate.id == node && candidate.kind == "publish"
+                        candidate.id == node && matches!(candidate.kind.as_str(), "publish" | "output" | "gen")
                     })
                 }) {
-                    self.refresh_assets(cx);
+                    self.refresh_assets(cx, false, false, false);
                 }
                 if self
                     .ui
@@ -2874,6 +2955,14 @@ impl App {
     /// Text inputs and auto-facing changes are coalesced on the 250 ms poll
     /// tick; explicit controls are written on the tick they change.
     fn flush_pending(&mut self, cx: &mut Cx) {
+        if !self.source_save_pending && self.instance.is_none() && self.client().is_some()
+            && self.pending_source_edit.as_ref().is_some_and(|(_, _, due)| {
+                std::time::Instant::now() >= *due
+            })
+        {
+            let (name, source, _) = self.pending_source_edit.take().unwrap();
+            self.save_source(name, source);
+        }
         if !self.pending_inputs.is_empty()
             && !self.input_flush_in_flight
             && self.instance.is_some()
@@ -3289,9 +3378,6 @@ impl App {
         if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
             canvas.clear_run(cx);
         }
-        if let Some(mut app_view) = self.ui.widget(cx, ids!(app_view)).borrow_mut::<AppView>() {
-            app_view.waiting = None;
-        }
         // Re-evaluating the faces is the narrowest way to restore every
         // generated widget to its declared empty state; fill_inputs below
         // immediately restores the preserved instance inputs.
@@ -3354,51 +3440,51 @@ impl App {
         else {
             return;
         };
-        let index = definition
-            .source
-            .split_inclusive('\n')
-            .take(line.saturating_sub(1))
-            .map(str::len)
-            .sum();
-        self.ui.text_input(cx, ids!(source)).set_cursor(
-            cx,
-            Cursor {
-                index,
-                prefer_next_row: false,
-            },
-            false,
-        );
+        if let Some(mut source) = self.ui.widget(cx, ids!(source))
+            .borrow_mut::<makepad_code_editor::code_view::CodeView>()
+        {
+            let makepad_code_editor::code_view::CodeView { editor, session, .. } = &mut *source;
+            if let Some(session) = session {
+                editor.set_cursor_and_scroll(cx, makepad_code_editor::text::Position {
+                    line_index: line.saturating_sub(1),
+                    byte_index: 0,
+                }, session);
+            }
+        }
     }
 
     fn highlight_caret_node(&mut self, cx: &mut Cx) {
-        let Some(definition) = self.definition.as_ref() else {
-            return;
-        };
-        let source = self.ui.text_input(cx, ids!(source));
-        let index = source.cursor().index.min(definition.source.len());
-        let line = definition.source[..index].matches('\n').count() + 1;
-        let node = definition.graph.as_ref().and_then(|graph| {
-            graph
-                .nodes
-                .iter()
+        let source = self.ui.widget(cx, ids!(source));
+        let Some(source) = source.borrow::<makepad_code_editor::code_view::CodeView>() else { return };
+        let Some(session) = &source.session else { return };
+        let selections = session.selections();
+        let Some(selection) = selections.first() else { return };
+        let line = selection.cursor.position.line_index + 1;
+        let node = self.definition.as_ref().and_then(|definition| definition.graph.as_ref())
+            .and_then(|graph| graph.nodes.iter()
                 .filter(|node| node.loc.line as usize <= line)
                 .max_by_key(|node| node.loc.line)
-                .map(|node| node.id.clone())
-        });
+                .map(|node| node.id.clone()));
         if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
             canvas.set_highlight(cx, node);
         }
     }
 
     fn set_modes(&mut self, cx: &mut Cx) {
+        if self.source_mode {
+            let bounds = self.ui.view(cx, ids!(workspace)).area().rect(cx);
+            if !self.source_geometry_ready {
+                self.source_size = dvec2(760.0, 620.0);
+                self.source_origin = dvec2(
+                    bounds.pos.x + (bounds.size.x - self.source_size.x).max(0.0) * 0.5,
+                    bounds.pos.y + (bounds.size.y - self.source_size.y).max(0.0) * 0.5,
+                );
+                self.source_geometry_ready = true;
+            }
+            self.apply_source_geometry(cx, bounds);
+        }
         self.ui
-            .view(cx, ids!(canvas_view))
-            .set_visible(cx, !self.app_mode);
-        self.ui
-            .view(cx, ids!(app_view_view))
-            .set_visible(cx, self.app_mode);
-        self.ui
-            .view(cx, ids!(source_view))
+            .view(cx, ids!(source_overlay))
             .set_visible(cx, self.source_mode);
         let left_split = self.ui.widget(cx, ids!(column_split));
         if self.left_hidden {
@@ -3411,34 +3497,90 @@ impl App {
         }
         self.ui.view(cx, ids!(left_panel)).set_visible(cx, !self.left_hidden);
 
-        let source_split = self.ui.widget(cx, ids!(right_source_split));
-        if self.source_mode {
-            if let Some(align) = self.source_panel_align.take() {
-                source_split.as_splitter().set_align(cx, align);
-            }
-        } else {
-            if self.source_panel_align.is_none() {
-                self.source_panel_align = source_split
-                    .borrow::<Splitter>()
-                    .map(|splitter| splitter.align());
-            }
-            source_split
-                .as_splitter()
-                .set_align(cx, SplitterAlign::FromB(0.0));
-        }
-        self.ui.button(cx, ids!(view_btn)).set_text(
-            cx,
-            if self.app_mode { "Canvas" } else { "App view" },
-        );
         self.ui.button(cx, ids!(side_btn)).set_text(
             cx,
-            if self.source_mode { "Inspector" } else { "Source" },
+            "Source",
         );
         self.update_canvas_fit_insets(cx);
         if self.selected_node.is_some() {
             self.refresh_models(true);
         }
         self.ui.redraw(cx);
+    }
+
+    fn apply_source_geometry(&mut self, cx: &mut Cx, bounds: Rect) {
+        let min_size = dvec2(420.0, 280.0);
+        let size = dvec2(
+            self.source_size.x.clamp(min_size.x, bounds.size.x.max(min_size.x)),
+            self.source_size.y.clamp(min_size.y, bounds.size.y.max(min_size.y)),
+        );
+        let origin = dvec2(
+            self.source_origin.x.clamp(bounds.pos.x, (bounds.pos.x + bounds.size.x - size.x).max(bounds.pos.x)),
+            self.source_origin.y.clamp(bounds.pos.y, (bounds.pos.y + bounds.size.y - size.y).max(bounds.pos.y)),
+        );
+        self.source_size = size;
+        self.source_origin = origin;
+        let geometry = Rect { pos: origin, size };
+        if self.source_applied_geometry == Some(geometry) {
+            return;
+        }
+        self.source_applied_geometry = Some(geometry);
+        self.ui.view(cx, ids!(source_card)).set_walk(
+            cx,
+            Walk::fixed(size.x, size.y).with_abs_pos(origin),
+        );
+    }
+
+    fn handle_source_pointer(&mut self, cx: &mut Cx, event: &Event) -> bool {
+        let bounds = self.ui.view(cx, ids!(workspace)).area().rect(cx);
+        if let Some((start, resize)) = self.source_drag {
+            match event {
+                Event::MouseMove(mouse) => {
+                    let delta = mouse.abs - start;
+                    if resize {
+                        self.source_size += delta;
+                    } else {
+                        self.source_origin += delta;
+                    }
+                    self.source_drag = Some((mouse.abs, resize));
+                    self.apply_source_geometry(cx, bounds);
+                    return true;
+                }
+                Event::MouseUp(_) => {
+                    self.source_drag = None;
+                    return true;
+                }
+                // Drawing, timers, and worker arrivals must keep flowing
+                // while the pointer is held, so dragging remains live.
+                _ => return false,
+            }
+        }
+        if !self.source_mode {
+            return false;
+        }
+        let card = self.ui.widget(cx, ids!(source_card)).area().rect(cx);
+        let header = self.ui.widget(cx, ids!(head)).area().rect(cx);
+        let save = self.ui.widget(cx, ids!(save_btn)).area().rect(cx);
+        let close = self.ui.widget(cx, ids!(close_source)).area().rect(cx);
+        match event {
+            Event::MouseDown(mouse)
+                if header.contains(mouse.abs)
+                    && !save.contains(mouse.abs)
+                    && !close.contains(mouse.abs) =>
+            {
+                self.source_drag = Some((mouse.abs, false));
+                true
+            }
+            Event::MouseDown(mouse)
+                if card.contains(mouse.abs)
+                    && mouse.abs.x >= card.pos.x + card.size.x - 24.0
+                    && mouse.abs.y >= card.pos.y + card.size.y - 24.0 =>
+            {
+                self.source_drag = Some((mouse.abs, true));
+                true
+            }
+            _ => false,
+        }
     }
 
     fn point_over_canvas_chrome(&self, cx: &mut Cx, point: DVec2) -> bool {
@@ -3449,6 +3591,7 @@ impl App {
 
     fn canvas_chrome_rects(&self, cx: &mut Cx) -> Vec<Rect> {
         let mut rects = vec![
+            self.ui.widget(cx, ids!(menu_bar)).area().rect(cx),
             self.ui.widget(cx, ids!(toolbar)).area().rect(cx),
             self.ui.widget(cx, ids!(right_panel)).area().rect(cx),
             self.ui.widget(cx, ids!(column_split)).area().rect(cx),
@@ -3456,6 +3599,9 @@ impl App {
         ];
         if !self.left_hidden {
             rects.push(self.ui.widget(cx, ids!(left_panel)).area().rect(cx));
+        }
+        if self.source_mode {
+            rects.push(self.ui.widget(cx, ids!(source_card)).area().rect(cx));
         }
         let overlay_open = self.ui.view(cx, ids!(template_view)).visible()
             || self.ui.view(cx, ids!(help_view)).visible()
@@ -3573,26 +3719,50 @@ impl App {
         self.auto_opened = false;
     }
 
-    /// An open menu is modal: its panel is drawn above whatever it overlaps,
-    /// but the bar sits early in the widget tree, so the panels beneath the
-    /// popup claimed the press first and an entry never fired. The bar takes
-    /// pointer and key input before the tree while a menu is open; a press
-    /// outside closes the menu and still belongs to what lies beneath it.
-    fn route_open_menu_input(&mut self, cx: &mut Cx, event: &Event) -> bool {
+    /// The bar must receive the opening press before canvas selection and
+    /// mounted faces. Once open, its popup owns input through the event that
+    /// closes it; only an outside press dismisses and passes through.
+    fn route_menu_input(&mut self, cx: &mut Cx, event: &Event) -> bool {
         let bar = self.ui.menu_bar(cx, ids!(menu_bar));
-        if !bar.is_open() {
-            return false;
-        }
+        let area = bar.area();
+        let rect = area.clipped_rect(cx);
+        let was_open = bar.is_open();
+        let over_bar = match event {
+            Event::MouseDown(e) => rect.contains(e.abs),
+            Event::MouseMove(e) => rect.contains(e.abs),
+            Event::MouseUp(e) => rect.contains(e.abs),
+            Event::Scroll(e) => rect.contains(e.abs),
+            Event::LongPress(e) => rect.contains(e.abs),
+            Event::TouchUpdate(e) => e.touches.iter().any(|touch| rect.contains(touch.abs)),
+            _ => false,
+        };
         let pointer = matches!(
             event,
-            Event::MouseDown(_) | Event::MouseMove(_) | Event::MouseUp(_) | Event::Scroll(_)
+            Event::MouseDown(_)
+                | Event::MouseMove(_)
+                | Event::MouseUp(_)
+                | Event::MouseLeave(_)
+                | Event::Scroll(_)
+                | Event::TouchUpdate(_)
+                | Event::LongPress(_)
         );
-        let key = matches!(event, Event::KeyDown(_) | Event::KeyUp(_) | Event::TextInput(_));
-        if !pointer && !key {
+        let key = is_focus_routed_input(event) || matches!(event, Event::PhysicalKeyboard(_));
+        if !(was_open && (pointer || key)
+            || pointer && (over_bar || cx.fingers.is_area_captured(area)))
+        {
             return false;
         }
         bar.handle_event(cx, event, &mut Scope::empty());
-        if matches!(event, Event::MouseDown(_)) && !bar.is_open() {
+        // A title toggles on down too: closing it must not dispatch that down
+        // a second time through the tree and immediately reopen the menu.
+        let dismiss_press = match event {
+            Event::MouseDown(_) => true,
+            Event::TouchUpdate(e) => !e.touches.is_empty() && e.touches.iter().all(|touch| {
+                touch.state == makepad_widgets::makepad_platform::event::TouchState::Start
+            }),
+            _ => false,
+        };
+        if dismiss_press && !over_bar && !bar.is_open() {
             return false;
         }
         true
@@ -3604,7 +3774,7 @@ impl App {
             id if id == live_id!(open_flow) => self.open_next_flow(cx),
             id if id == live_id!(save) => {
                 if let Some(name) = self.selected.clone() {
-                    let source = self.ui.text_input(cx, ids!(source)).text();
+                    let source = self.ui.widget(cx, ids!(source)).text();
                     if self.source_mode && !source.is_empty() {
                         self.save_source(name, source);
                     }
@@ -3651,14 +3821,6 @@ impl App {
             id if id == live_id!(duplicate) => self.duplicate_selected(cx),
             id if id == live_id!(wires_routed) => self.set_wire_mode(cx, WireMode::Routed),
             id if id == live_id!(wires_bezier) => self.set_wire_mode(cx, WireMode::Bezier),
-            id if id == live_id!(view_canvas) => {
-                self.app_mode = false;
-                self.set_modes(cx);
-            }
-            id if id == live_id!(view_app) => {
-                self.app_mode = true;
-                self.set_modes(cx);
-            }
             id if id == live_id!(view_source) => {
                 self.source_mode = true;
                 self.set_modes(cx);
@@ -3732,9 +3894,7 @@ impl App {
             .selected
             .as_deref()
             .and_then(|name| self.flows.iter().find(|flow| flow.name == name));
-        let open_view = if self.app_mode {
-            "app"
-        } else if self.source_mode {
+        let open_view = if self.source_mode {
             "source"
         } else {
             "canvas"
@@ -3879,12 +4039,27 @@ impl MatchEvent for App {
         }
         if self.instance.is_none() && self.ui.button(cx, ids!(save_btn)).clicked(actions) {
             if let Some(name) = self.selected.clone() {
-                let source = self.ui.text_input(cx, ids!(source)).text();
+                let source = self.ui.widget(cx, ids!(source)).text();
                 self.save_source(name, source);
             }
         }
-        if self.ui.text_input(cx, ids!(source)).changed(actions).is_some() {
+        let source_changed = self
+            .ui
+            .widget(cx, ids!(source))
+            .widget_uid();
+        if actions.find_widget_action(source_changed).is_some_and(|action| {
+            matches!(action.cast::<CodeViewAction>(), CodeViewAction::Changed)
+        }) {
             self.unsaved = true;
+            if self.instance.is_none() {
+                if let Some(name) = self.selected.clone() {
+                    self.pending_source_edit = Some((
+                        name,
+                        self.ui.widget(cx, ids!(source)).text(),
+                        std::time::Instant::now() + std::time::Duration::from_millis(350),
+                    ));
+                }
+            }
         }
         if let Some(selected) = self.ui.combo_box(cx, ids!(parallel)).changed(actions) {
             self.parallel_use_max = selected == 1;
@@ -3914,12 +4089,12 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(fit_btn)).clicked(actions) {
             self.with_canvas(cx, |cx, canvas| canvas.fit(cx));
         }
-        if self.ui.button(cx, ids!(view_btn)).clicked(actions) {
-            self.app_mode = !self.app_mode;
-            self.set_modes(cx);
-        }
         if self.ui.button(cx, ids!(side_btn)).clicked(actions) {
             self.source_mode = !self.source_mode;
+            self.set_modes(cx);
+        }
+        if self.ui.button(cx, ids!(close_source)).clicked(actions) {
+            self.source_mode = false;
             self.set_modes(cx);
         }
         let column_changed = self
@@ -3937,17 +4112,6 @@ impl MatchEvent for App {
                 .widget(cx, ids!(column_split))
                 .as_splitter()
                 .set_align(cx, SplitterAlign::FromA(0.0));
-        }
-        let source_changed = self
-            .ui
-            .widget(cx, ids!(right_source_split))
-            .borrow::<Splitter>()
-            .is_some_and(|splitter| splitter.changed(actions).is_some());
-        if source_changed && !self.source_mode {
-            self.ui
-                .widget(cx, ids!(right_source_split))
-                .as_splitter()
-                .set_align(cx, SplitterAlign::FromB(0.0));
         }
         if column_changed || right_changed {
             self.update_canvas_fit_insets(cx);
@@ -4199,7 +4363,8 @@ impl MatchEvent for App {
                 }
                 InspectorAction::CopyDigest(digest) => cx.copy_to_clipboard(&digest),
                 InspectorAction::OpenValue { node, port } => self.open_value(cx, &node, &port),
-                InspectorAction::RefreshAssets => self.refresh_assets(cx),
+                InspectorAction::RefreshAssets => self.refresh_assets(cx, false, false, false),
+                InspectorAction::LoadMoreAssets => self.refresh_assets(cx, true, true, false),
                 InspectorAction::OpenAsset(asset) => self.open_asset(cx, asset),
             }
         }
@@ -4256,7 +4421,7 @@ impl MatchEvent for App {
                         let target = instance.clone();
                         self.io(move |client| {
                             let _ = client.cancel_run(&run_id);
-                            IoResult::Done(client.delete_instance(&target))
+                            IoResult::Done(delete_instance_if_present(client, &target))
                         });
                         if self.instance.as_deref() == Some(instance.as_str()) {
                             self.attach_instance(cx, None, true);
@@ -4281,7 +4446,7 @@ impl MatchEvent for App {
                         detach |= self.instance.as_deref() == Some(instance.as_str());
                         self.io(move |client| {
                             let _ = client.cancel_run(&run_id);
-                            IoResult::Done(client.delete_instance(&instance))
+                            IoResult::Done(delete_instance_if_present(client, &instance))
                         });
                     }
                     if detach {
@@ -4295,7 +4460,7 @@ impl MatchEvent for App {
                     {
                         inspector.show_asset(cx, &asset);
                     }
-                    self.refresh_assets(cx);
+                    self.refresh_assets(cx, false, false, false);
                 }
             }
         }
@@ -4314,6 +4479,24 @@ impl MatchEvent for App {
         }
         self.refresh_ai_context();
     }
+}
+
+/// Queue cleanup is intentionally idempotent for a stale failed row: the
+/// server may have retired its instance while the retained run row remains.
+/// Other delete failures still reach the normal UI error path.
+fn delete_instance_if_present(
+    client: &makepad_flow::client::FlowClient,
+    instance: &str,
+) -> Result<(), makepad_flow::client::ClientError> {
+    match client.delete_instance(instance) {
+        Err(error) if is_absent_instance_error(&error) => Ok(()),
+        result => result,
+    }
+}
+
+fn is_absent_instance_error(error: &makepad_flow::client::ClientError) -> bool {
+    matches!(error, makepad_flow::client::ClientError::Http { status: 404, body }
+        if body.to_ascii_lowercase().contains("instance not found"))
 }
 
 impl App {
@@ -4475,6 +4658,12 @@ impl App {
     }
 
     fn step_image_viewer(&mut self, cx: &mut Cx, direction: i32) {
+        if let Some((id, _)) = self.preview_digest.as_ref().filter(|(id, _)| id.starts_with("ast_")) {
+            let next = self.ui.widget(cx, ids!(inspector)).borrow::<Inspector>()
+                .and_then(|inspector| inspector.adjacent_asset(id, direction));
+            if let Some(asset) = next { self.open_asset(cx, asset); }
+            return;
+        }
         let current_digest = self.preview_digest.as_ref().map(|(digest, _)| digest.as_str());
         let running_pictures = current_digest.and_then(|digest| {
             self.instances
@@ -4675,19 +4864,26 @@ impl AppMain for App {
         }
         if let Event::NextFrame(nf) = event {
             self.time = nf.time;
-        }
-        if is_queue_shortcut(event, widget_tree_has_text_focus(&self.ui, cx)) {
-            self.queue_run(cx);
-            // Do not pass Enter to a focused field; its text remains exactly
-            // the settings that were submitted with this batch.
-            return;
+            if self.source_mode {
+                let bounds = self.ui.view(cx, ids!(workspace)).area().rect(cx);
+                self.apply_source_geometry(cx, bounds);
+            }
         }
         // The full-window viewer is modal. Route user input directly to it
         // before selection, faces, the ordinary widget tree, and shortcuts.
         if self.route_viewer_modal_input(cx, event) {
             return;
         }
-        if self.route_open_menu_input(cx, event) {
+        if self.route_menu_input(cx, event) {
+            return;
+        }
+        if self.handle_source_pointer(cx, event) {
+            return;
+        }
+        if is_queue_shortcut(event, widget_tree_has_text_focus(&self.ui, cx)) {
+            self.queue_run(cx);
+            // Do not pass Enter to a focused field; its text remains exactly
+            // the settings that were submitted with this batch.
             return;
         }
         if matches!(event, Event::KeyDown(e) if e.key_code == KeyCode::Escape)
@@ -4704,14 +4900,12 @@ impl AppMain for App {
         }
         // Selection belongs to the card, even when the press is about to be
         // handled by an interactive child in its mounted face.
-        if !self.app_mode {
-            if let Event::MouseDown(e) = event {
-                if !self.point_over_canvas_chrome(cx, e.abs) {
-                    if let Some(mut canvas) =
-                        self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>()
-                    {
-                        canvas.select_at(cx, e.abs);
-                    }
+        if let Event::MouseDown(e) = event {
+            if !self.point_over_canvas_chrome(cx, e.abs) {
+                if let Some(mut canvas) =
+                    self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>()
+                {
+                    canvas.select_at(cx, e.abs);
                 }
             }
         }
@@ -4719,7 +4913,6 @@ impl AppMain for App {
         // canvas then sees it as handled. Their positions go through the
         // canvas camera.
         if !matches!(event, Event::Draw(_)) {
-            let canvas_mode = !self.app_mode;
             let (camera, resize_press) = self
                 .ui
                 .widget(cx, ids!(canvas))
@@ -4727,13 +4920,12 @@ impl AppMain for App {
                 .map(|canvas| {
                     (
                         canvas.camera(),
-                        canvas_mode
-                            && matches!(event, Event::MouseDown(e) if canvas.is_resize_handle_at(e.abs)),
+                        matches!(event, Event::MouseDown(e) if canvas.is_resize_handle_at(e.abs)),
                     )
                 })
                 .map(|(camera, resize)| (Some(camera), resize))
                 .unwrap_or((None, false));
-            let mapped = canvas_mode;
+            let mapped = true;
             let over_chrome = match event {
                 Event::MouseDown(e) => self.point_over_canvas_chrome(cx, e.abs),
                 Event::MouseMove(e) => self.point_over_canvas_chrome(cx, e.abs),
@@ -4772,7 +4964,9 @@ impl AppMain for App {
             .menu_bar(cx, ids!(menu_bar))
             .handle_shortcut(cx, event, text_editing);
         if self.poll_timer.is_event(event).is_some() || matches!(event, Event::Signal) {
+            self.drain_bootstrap(cx);
             self.drain_io(cx);
+            self.refresh_visible_asset_previews(cx);
             self.drain_values(cx);
             self.update_connection(cx);
             self.poll_subscription(cx);
@@ -4793,7 +4987,7 @@ impl AppMain for App {
                 .borrow_mut::<Inspector>()
                 .is_some_and(|mut inspector| inspector.refresh_assets_due(self.time));
             if refresh_assets {
-                self.refresh_assets(cx);
+                self.refresh_assets(cx, false, true, true);
             }
         }
         self.refresh_ai_context();
@@ -4801,6 +4995,19 @@ impl AppMain for App {
             self.shutdown(cx);
         }
     }
+}
+
+fn assets_response_is_current(
+    request_generation: u64,
+    current_generation: u64,
+    request_query: &str,
+    request_namespace: Option<&str>,
+    current_query: &str,
+    current_namespace: Option<&str>,
+) -> bool {
+    request_generation == current_generation
+        && request_query == current_query
+        && request_namespace == current_namespace
 }
 
 fn inspector_action_edits(action: &InspectorAction) -> bool {
@@ -4874,7 +5081,10 @@ fn is_queue_shortcut(event: &Event, _text_field_has_focus: bool) -> bool {
 }
 
 fn widget_tree_has_text_focus(root: &WidgetRef, cx: &Cx) -> bool {
-    if root.borrow::<TextInput>().is_some() && cx.has_key_focus(root.area()) {
+    if (root.borrow::<TextInput>().is_some()
+        || root.borrow::<makepad_code_editor::code_view::CodeView>().is_some())
+        && cx.has_key_focus(root.area())
+    {
         return true;
     }
     let mut children = Vec::new();
@@ -5034,8 +5244,27 @@ mod layout_tests {
     use super::*;
     use makepad_flow::NodeRowDto;
     use makepad_widgets::makepad_platform::makepad_micro_serde::DeJson;
-    use makepad_widgets::makepad_platform::event::{ScrollEvent, ScrollPhase};
+    use makepad_widgets::makepad_platform::event::{
+        DigitId, ScrollEvent, ScrollPhase, TouchPoint, TouchState, TouchUpdateEvent,
+    };
+    use makepad_widgets::widget::WidgetActionGroup;
     use std::cell::Cell;
+
+    #[test]
+    fn stale_failed_instance_delete_is_idempotent_but_other_errors_are_not_hidden() {
+        assert!(is_absent_instance_error(&ClientError::Http {
+            status: 404,
+            body: r#"{"error":"instance not found"}"#.into(),
+        }));
+        assert!(!is_absent_instance_error(&ClientError::Http {
+            status: 404,
+            body: r#"{"error":"run not found"}"#.into(),
+        }));
+        assert!(!is_absent_instance_error(&ClientError::Http {
+            status: 500,
+            body: "instance not found".into(),
+        }));
+    }
 
     #[test]
     fn new_menu_groups_a_fake_templates_response_in_wire_group_order() {
@@ -5075,6 +5304,7 @@ mod layout_tests {
         app: &mut App,
         pass: &DrawPass,
         draw_list: &mut DrawList2d,
+        overlay: &Overlay,
         size: DVec2,
     ) {
         let event = DrawEvent {
@@ -5083,14 +5313,28 @@ mod layout_tests {
         };
         let canvas = app.ui.widget(cx, ids!(canvas));
         let viewer = app.ui.widget(cx, ids!(image_viewer));
+        let menu = app.ui.widget(cx, ids!(menu_bar));
         let mut cx_draw = CxDraw::new(cx, &event);
         let cx = &mut Cx2d::new(&mut cx_draw);
         cx.begin_pass(pass, Some(1.0));
         draw_list.begin_always(cx);
+        overlay.begin(cx);
         cx.begin_root_turtle(size, Layout::flow_overlay());
-        canvas.draw_walk_all(cx, &mut Scope::empty(), Walk::fill());
+        if let Some(faces) = app.faces.as_mut() {
+            let mut faces = NodeFacesScope::new(faces);
+            canvas.draw_walk_all(cx, &mut Scope::with_data(&mut faces), Walk::fill());
+        } else {
+            canvas.draw_walk_all(cx, &mut Scope::empty(), Walk::fill());
+        }
+        menu.draw_walk_all(cx, &mut Scope::empty(), Walk {
+            abs_pos: Some(dvec2(0.0, 32.0)),
+            width: Size::fill(),
+            height: Size::Fixed(28.0),
+            ..Walk::default()
+        });
         viewer.draw_walk_all(cx, &mut Scope::empty(), Walk::fill());
         cx.end_pass_sized_turtle();
+        overlay.end(cx);
         draw_list.end(cx);
         cx.end_pass(pass);
     }
@@ -5109,8 +5353,359 @@ mod layout_tests {
         })
     }
 
+    // CPU draw lists only: no event loop, native window, renderer, or server.
+    struct MenuRoutingTest {
+        cx: Cx,
+        app: App,
+        pass: DrawPass,
+        draw_list: DrawList2d,
+        overlay: Overlay,
+        input: WidgetRef,
+        window: WindowId,
+        menu_actions: Vec<makepad_widgets::menu_bar::MenuBarAction>,
+        content_actions: usize,
+    }
+
+    impl MenuRoutingTest {
+        fn new() -> Self {
+            let mut cx = Cx::new(Box::new(|_, _| {}));
+            cx.init_cx_os();
+            let mut app = cx.with_vm(|vm| App::from_script_mod(vm, <App as AppMain>::script_mod));
+            app.left_hidden = true;
+            let template = makepad_flow::templates::template(FIRST_TEMPLATE).unwrap();
+            app.templates = vec![makepad_flow::templates::template_summary(template)];
+            app.refresh_templates_menu(&mut cx);
+            // Keep the real Templates entries, with a deterministic first title.
+            let menu = app.ui.menu_bar(&cx, ids!(menu_bar));
+            let templates = menu.borrow().unwrap().menus()[1].clone();
+            menu.set_menus(&mut cx, vec![templates]);
+
+            let source = "use mod.flow.*\nlet text = Text{value: \"unchanged\"}\nFlow{text}\n";
+            let mut graph = makepad_flow::graph::evaluate(source, "<menu-routing>").unwrap();
+            graph.nodes[0].at = Some((100.0, 100.0));
+            let catalog = makepad_flow::graph::prelude_catalog().unwrap();
+            let faces = FaceHost::mount(
+                &mut cx, app.ui.widget_uid(), "test", "<menu-routing>", source, &graph, &catalog,
+            );
+            assert!(faces.error.is_none(), "{:?}", faces.error);
+            let input = faces.faces["text"].binds.iter()
+                .find(|bind| bind.widget.borrow::<TextInput>().is_some())
+                .unwrap().widget.clone();
+            app.with_canvas(&mut cx, |cx, canvas| canvas.set_graph(cx, Some(graph_view::view_of(&graph))));
+            app.faces = Some(faces);
+            let window = app.ui.window(&cx, ids!(main_window)).window_id().unwrap();
+            let pass = DrawPass::new(&mut cx);
+            pass.set_size(&mut cx, dvec2(1000.0, 700.0));
+            let draw_list = DrawList2d::new(&mut cx);
+            let overlay = Overlay { draw_list: DrawList::new(&mut cx) };
+            let mut test = Self {
+                cx, app, pass, draw_list, overlay, input, window,
+                menu_actions: Vec::new(), content_actions: 0,
+            };
+            test.draw();
+            test.draw();
+            // Pan the actual canvas so the mounted editor covers both the
+            // title and the dropdown entry. This is the reported overlap.
+            let face = test.input_rect();
+            let delta = dvec2(10.0, 25.0) - face.pos;
+            let start = dvec2(900.0, 600.0);
+            let down = test.mouse_down(start, MouseButton::MIDDLE);
+            test.send(&Event::MouseMove(MouseMoveEvent {
+                abs: start + delta, window_id: test.window,
+                modifiers: KeyModifiers::default(), time: 1.1,
+                handled: Cell::new(Area::Empty), lock_delta: Default::default(),
+            }));
+            test.mouse_up(start + delta, MouseButton::MIDDLE, &down);
+            test.draw();
+            assert!(test.camera().pan.length() > 1.0);
+            assert!(test.input_rect().contains(test.title()));
+            assert!(test.input_rect().contains(test.entry()));
+            test.app.with_canvas(&mut test.cx, |cx, canvas| canvas.select(cx, None));
+            test.cx.new_actions.clear();
+            test.menu_actions.clear();
+            test.content_actions = 0;
+            test
+        }
+
+        fn draw(&mut self) {
+            draw_canvas_and_viewer(
+                &mut self.cx, &mut self.app, &self.pass, &mut self.draw_list,
+                &self.overlay, dvec2(1000.0, 700.0),
+            );
+        }
+
+        fn camera(&self) -> makepad_flowgraph::Camera {
+            self.app.ui.widget(&self.cx, ids!(canvas)).borrow::<FlowCanvas>().unwrap().camera()
+        }
+
+        fn input_rect(&self) -> Rect {
+            let rect = self.input.area().clipped_rect(&self.cx);
+            let camera = self.camera();
+            Rect { pos: camera.local_to_screen(rect.pos), size: rect.size * camera.scale }
+        }
+
+        fn title(&self) -> DVec2 {
+            let rect = self.app.ui.menu_bar(&self.cx, ids!(menu_bar)).area().rect(&self.cx);
+            rect.pos + dvec2(20.0, rect.size.y * 0.5)
+        }
+
+        fn entry(&self) -> DVec2 {
+            // Default menu geometry: 4 px padding, one 22 px group heading,
+            // then the real template row. The widget's own hit test decides.
+            let rect = self.app.ui.menu_bar(&self.cx, ids!(menu_bar)).area().rect(&self.cx);
+            rect.pos + dvec2(20.0, rect.size.y + 4.0 + 22.0 + 11.0)
+        }
+
+        fn open(&self) -> bool {
+            self.app.ui.menu_bar(&self.cx, ids!(menu_bar)).is_open()
+        }
+
+        fn send(&mut self, event: &Event) {
+            self.app.handle_event(&mut self.cx, event);
+            while !self.cx.new_actions.is_empty() {
+                let actions = std::mem::take(&mut self.cx.new_actions);
+                let menu_uid = self.app.ui.menu_bar(&self.cx, ids!(menu_bar)).widget_uid();
+                let canvas_uid = self.app.ui.widget(&self.cx, ids!(canvas)).widget_uid();
+                for action in actions.iter().filter_map(|action| action.as_widget_action()) {
+                    if action.widget_uid == menu_uid {
+                        self.menu_actions.push(action.cast());
+                    }
+                    if action.widget_uid == canvas_uid
+                        || action.widget_uid == self.input.widget_uid()
+                            && !matches!(action.cast::<TextInputAction>(),
+                                TextInputAction::KeyFocus | TextInputAction::KeyFocusLost)
+                    {
+                        self.content_actions += 1;
+                    }
+                }
+                self.app.handle_event(&mut self.cx, &Event::Actions(actions));
+            }
+            // Advance the platform's pending focus after action delivery,
+            // just as call_event_handler does, and deliver its transition.
+            let prev = self.cx.key_focus();
+            self.cx.action(());
+            self.cx.handle_actions();
+            let focus = self.cx.key_focus();
+            if prev != focus {
+                self.send(&Event::KeyFocus(KeyFocusEvent { prev, focus }));
+            }
+        }
+
+        fn mouse_down(&mut self, abs: DVec2, button: MouseButton) -> Event {
+            self.cx.fingers.first_mouse_button = Some((button, self.window));
+            let down = Event::MouseDown(MouseDownEvent {
+                abs, button, window_id: self.window, modifiers: KeyModifiers::default(),
+                time: 1.0, handled: Cell::new(Area::Empty),
+            });
+            self.send(&down);
+            down
+        }
+
+        fn mouse_up(&mut self, abs: DVec2, button: MouseButton, down: &Event) {
+            self.send(&Event::MouseUp(MouseUpEvent {
+                abs, button, window_id: self.window, modifiers: KeyModifiers::default(), time: 1.2,
+            }));
+            // Same capture cleanup as the platform after an up event.
+            down.unhandle(&mut self.cx, &down.pointer_claimed_area());
+            self.cx.fingers.first_mouse_button = None;
+        }
+
+        fn click(&mut self, abs: DVec2) {
+            let down = self.mouse_down(abs, MouseButton::PRIMARY);
+            self.mouse_up(abs, MouseButton::PRIMARY, &down);
+        }
+
+        fn touch(&mut self, abs: DVec2) {
+            let mut event = TouchUpdateEvent {
+                time: 2.0, window_id: self.window, modifiers: KeyModifiers::default(),
+                touches: vec![TouchPoint {
+                    state: TouchState::Start, abs, time: 2.0, uid: 1,
+                    rotation_angle: 0.0, force: 1.0, radius: dvec2(1.0, 1.0),
+                    handled: Cell::new(Area::Empty), sweep_lock: Cell::new(Area::Empty),
+                }],
+            };
+            let down = Event::TouchUpdate(event.clone());
+            self.send(&down);
+            event.touches[0].state = TouchState::Stop;
+            event.time = 2.1;
+            self.send(&Event::TouchUpdate(event));
+            down.unhandle(&mut self.cx, &down.pointer_claimed_area());
+        }
+
+        fn key(&mut self, key_code: KeyCode, control: bool) {
+            self.send(&Event::KeyDown(KeyEvent {
+                key_code, modifiers: KeyModifiers { control, ..Default::default() },
+                ..Default::default()
+            }));
+        }
+
+        fn assert_content_untouched(&self) {
+            assert_eq!(self.content_actions, 0);
+            assert!(self.app.ui.widget(&self.cx, ids!(canvas))
+                .borrow::<FlowCanvas>().unwrap().selection().is_none());
+            assert_eq!(self.input.as_text_input().text(), "unchanged");
+            assert!(self.app.pending_inputs.is_empty());
+            assert!(self.app.pending_params.is_empty());
+            assert!(!self.app.run_start_in_flight);
+        }
+    }
+
+    impl Drop for MenuRoutingTest {
+        fn drop(&mut self) {
+            if let Some(faces) = self.app.faces.take() {
+                faces.free(&mut self.cx);
+            }
+        }
+    }
+
+    #[test]
+    fn menu_routing_opens_and_toggles_over_a_panned_mounted_editor() {
+        use makepad_widgets::menu_bar::MenuBarAction;
+        let mut test = MenuRoutingTest::new();
+        test.click(test.title());
+        assert!(test.open());
+        assert!(matches!(test.menu_actions.as_slice(), [MenuBarAction::Opened]));
+        test.draw();
+        test.click(test.title());
+        assert!(!test.open());
+        assert!(matches!(test.menu_actions.as_slice(), [MenuBarAction::Opened, MenuBarAction::Closed]));
+        test.assert_content_untouched();
+        assert!(test.app.io.template_requests.is_empty());
+        let camera = test.camera();
+        let down = test.mouse_down(test.title(), MouseButton::PRIMARY);
+        test.draw();
+        let end = test.entry();
+        test.send(&Event::MouseMove(MouseMoveEvent {
+            abs: end, window_id: test.window, modifiers: KeyModifiers::default(), time: 1.1,
+            handled: Cell::new(Area::Empty), lock_delta: Default::default(),
+        }));
+        test.mouse_up(end, MouseButton::PRIMARY, &down);
+        assert!(test.open());
+        assert_eq!(test.camera().pan, camera.pan);
+        test.assert_content_untouched();
+        assert!(test.app.io.template_requests.is_empty());
+    }
+
+    #[test]
+    fn menu_routing_selects_one_real_template_and_opens_the_created_flow() {
+        use makepad_widgets::menu_bar::MenuBarAction;
+        let mut test = MenuRoutingTest::new();
+        test.click(test.title());
+        test.draw();
+        test.click(test.entry());
+        assert!(!test.open());
+        assert!(matches!(test.menu_actions.as_slice(), [
+            MenuBarAction::Opened, MenuBarAction::Closed, MenuBarAction::Selected(id)
+        ] if *id == template_menu_id(FIRST_TEMPLATE)));
+        test.assert_content_untouched();
+        assert_eq!(test.app.io.template_requests, [(FIRST_TEMPLATE.into(), FIRST_TEMPLATE.into())]);
+        // Complete the request at the mailbox boundary without a server or
+        // worker. The graph is evaluated from the actual bundled template.
+        let template = makepad_flow::templates::template(FIRST_TEMPLATE).unwrap();
+        let graph = makepad_flow::graph::evaluate(template.source, template.name).unwrap();
+        test.app.io.start();
+        test.app.io.sender.as_ref().unwrap().send(IoResult::Created {
+            name: FIRST_TEMPLATE.into(), result: Ok(PutFlowResponse { revision: 1, graph }),
+        }).unwrap();
+        test.app.drain_io(&mut test.cx);
+        assert_eq!(test.app.selected.as_deref(), Some(FIRST_TEMPLATE));
+        assert_eq!(test.app.ui.label(&test.cx, ids!(flow_name)).text(), FIRST_TEMPLATE);
+        assert_eq!(test.app.io.template_requests.len(), 1);
+    }
+
+    #[test]
+    fn menu_routing_owns_scroll_keys_and_escape_then_restores_face_input() {
+        let mut test = MenuRoutingTest::new();
+        // Establish real editor focus before opening the menu.
+        let outside = test.input_rect().pos + test.input_rect().size - dvec2(10.0, 2.0);
+        test.click(outside);
+        assert_eq!(test.cx.key_focus(), test.input.area());
+        test.app.with_canvas(&mut test.cx, |cx, canvas| canvas.select(cx, None));
+        test.cx.new_actions.clear();
+        test.content_actions = 0;
+        test.click(test.title());
+        test.draw();
+        test.click(test.entry() - dvec2(0.0, 22.0));
+        assert!(test.open(), "the disabled group heading must retain modal ownership");
+        assert!(test.app.io.template_requests.is_empty());
+        let camera = test.camera();
+        let zoom = test.app.ui.widget(&test.cx, ids!(canvas))
+            .borrow::<FlowCanvas>().unwrap().zoom();
+        test.send(&scroll_event(test.window, test.entry()));
+        test.send(&scroll_event(test.window, dvec2(800.0, 500.0)));
+        test.send(&Event::TextInput(TextInputEvent { input: "blocked".into(), ..Default::default() }));
+        test.key(KeyCode::Backspace, false);
+        assert_eq!(test.camera().pan, camera.pan);
+        assert_eq!(test.camera().scale, camera.scale);
+        assert_eq!(test.app.ui.widget(&test.cx, ids!(canvas))
+            .borrow::<FlowCanvas>().unwrap().zoom(), zoom);
+        test.key(KeyCode::Escape, false);
+        assert!(!test.open());
+        assert_eq!(test.cx.key_focus(), test.input.area());
+        test.assert_content_untouched();
+        test.send(&Event::TextInput(TextInputEvent { input: "works".into(), ..Default::default() }));
+        assert!(test.input.as_text_input().text().contains("works"));
+        assert!(test.content_actions > 0);
+    }
+
+    #[test]
+    fn menu_routing_outside_dismissal_passes_through_and_touch_selection_is_modal() {
+        let mut test = MenuRoutingTest::new();
+        test.touch(test.title());
+        assert!(test.open());
+        test.draw();
+        test.touch(test.title());
+        assert!(!test.open());
+        test.touch(test.title());
+        test.draw();
+        test.touch(test.entry());
+        assert!(!test.open());
+        test.assert_content_untouched();
+        assert_eq!(test.app.io.template_requests.len(), 1);
+        test.click(test.title());
+        test.draw();
+        let outside = test.input_rect().pos + test.input_rect().size - dvec2(10.0, 2.0);
+        test.click(outside);
+        assert!(!test.open());
+        assert_eq!(test.cx.key_focus(), test.input.area());
+        assert!(test.content_actions > 0);
+        test.send(&Event::TextInput(TextInputEvent { input: "outside".into(), ..Default::default() }));
+        assert!(test.input.as_text_input().text().contains("outside"));
+        test.touch(test.title());
+        test.draw();
+        test.touch(outside);
+        assert!(!test.open());
+        assert_eq!(test.cx.key_focus(), test.input.area());
+    }
+
+    #[test]
+    fn menu_routing_precedes_queue_shortcut_and_closes_on_focus_loss() {
+        let mut test = MenuRoutingTest::new();
+        test.click(test.title());
+        test.key(KeyCode::ReturnKey, true);
+        assert!(!test.open(), "Ctrl+Enter must reach the menu before queue_run");
+        assert_eq!(test.app.io.template_requests.len(), 1);
+        test.assert_content_untouched();
+        for event in [Event::WindowLostFocus(test.window), Event::PopupDismissed(
+            makepad_widgets::makepad_platform::event::PopupDismissedEvent {
+                window_id: test.window,
+                reason: makepad_widgets::makepad_platform::event::PopupDismissReason::FocusLost,
+            },
+        )] {
+            test.click(test.title());
+            assert!(test.open());
+            test.send(&event);
+            assert!(!test.open());
+        }
+        test.click(test.title());
+        test.cx.set_key_focus(test.input.area());
+        test.send(&Event::Signal);
+        assert!(!test.open(), "the platform KeyFocus transition closes the menu");
+    }
+
     #[test]
     fn splitter_panel_layout_mounts_headlessly() {
+        use makepad_code_editor::code_view::CodeView;
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.init_cx_os();
         let app = cx.with_vm(|vm| App::from_script_mod(vm, <App as AppMain>::script_mod));
@@ -5119,7 +5714,6 @@ mod layout_tests {
             ids!(left_flow_split),
             ids!(left_running_split),
             ids!(canvas_right_split),
-            ids!(right_source_split),
         ] {
             assert!(app.ui.widget(&cx, path).borrow::<Splitter>().is_some());
         }
@@ -5138,13 +5732,156 @@ mod layout_tests {
         assert!(app
             .ui
             .widget(&cx, ids!(source))
-            .borrow::<TextInput>()
+            .borrow::<CodeView>()
             .is_some());
         assert!(app
             .ui
             .widget(&cx, ids!(preview_value))
             .borrow::<faces::ValueView>()
             .is_some());
+    }
+
+    #[test]
+    fn locked_inspector_keeps_asset_navigation_and_opening_but_blocks_edits() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let app = cx.with_vm(|vm| App::from_script_mod(vm, <App as AppMain>::script_mod));
+        let inspector_ref = app.ui.widget(&cx, ids!(inspector));
+        {
+            let mut inspector = inspector_ref.borrow_mut::<Inspector>().unwrap();
+            inspector.set_assets_page(
+                &mut cx,
+                AssetsResponse {
+                    assets: vec![makepad_flow::FlowAsset {
+                        id: "generated".into(),
+                        alias: None,
+                        namespace: "flows".into(),
+                        title: "Generated asset".into(),
+                        kind: "texture".into(),
+                        tags: vec!["flow".into()],
+                        created_ms: 10,
+                    }],
+                    cursor: None,
+                },
+                false,
+                false,
+            );
+            inspector.set_locked(&mut cx, true);
+        }
+
+        let assets_tab = app.ui.widget(&cx, ids!(inspector.tabs.assets_tab));
+        let tab_actions: ActionsBuf = vec![Box::new(WidgetAction {
+            data: None,
+            action: Box::new(ButtonAction::Clicked(KeyModifiers::default())),
+            widget_uid: assets_tab.widget_uid(),
+            group: None,
+        })];
+        let tab_changes = inspector_ref
+            .borrow_mut::<Inspector>()
+            .unwrap()
+            .changes(&mut cx, &tab_actions);
+        assert!(inspector_ref.borrow::<Inspector>().unwrap().assets_visible());
+        assert!(tab_changes
+            .iter()
+            .any(|action| matches!(action, InspectorAction::RefreshAssets)));
+
+        let asset_list = app.ui.portal_list(&cx, ids!(inspector.assets_view.asset_list));
+        let (asset_item, _) = asset_list.item_with_existed(&mut cx, 0, live_id!(Asset));
+        let asset_actions: ActionsBuf = vec![Box::new(WidgetAction {
+            data: None,
+            action: Box::new(ViewAction::FingerUp(FingerUpEvent {
+                window_id: WindowId(0, 0),
+                abs: dvec2(0.0, 0.0),
+                abs_start: dvec2(0.0, 0.0),
+                capture_time: 0.0,
+                time: 0.1,
+                digit_id: DigitId::default(),
+                device: DigitDevice::Mouse { button: MouseButton::PRIMARY },
+                has_long_press_occurred: false,
+                tap_count: 1,
+                modifiers: KeyModifiers::default(),
+                rect: Rect::default(),
+                is_over: true,
+                is_sweep: false,
+            })),
+            widget_uid: asset_item.widget_uid(),
+            group: Some(WidgetActionGroup {
+                group_uid: asset_list.widget_uid(),
+                item_uid: asset_item.widget_uid(),
+            }),
+        })];
+        let opened = inspector_ref
+            .borrow_mut::<Inspector>()
+            .unwrap()
+            .changes(&mut cx, &asset_actions);
+        assert!(opened.iter().any(|action| matches!(
+            action,
+            InspectorAction::OpenAsset(asset) if asset.id == "generated"
+        )));
+
+        let source = "use mod.flow.*\nlet text = Text{value: \"x\"}\nFlow{text}\n";
+        let graph = makepad_flow::graph::evaluate(source, "<locked-assets>").unwrap();
+        let catalog = makepad_flow::graph::prelude_catalog().unwrap();
+        inspector_ref
+            .borrow_mut::<Inspector>()
+            .unwrap()
+            .show_node(&mut cx, Some(&graph), &catalog, Some("text"), &[], &[], Some(source));
+        let inspector_list = app.ui.portal_list(&cx, ids!(inspector.inspector_view.list));
+        let head = inspector_list.item(&mut cx, 0, live_id!(Head));
+        let node_id = head.text_input(&mut cx, ids!(node_id));
+        let edit_actions: ActionsBuf = vec![Box::new(WidgetAction {
+            data: None,
+            action: Box::new(TextInputAction::Returned(
+                "renamed".into(),
+                KeyModifiers::default(),
+            )),
+            widget_uid: node_id.widget_uid(),
+            group: Some(WidgetActionGroup {
+                group_uid: inspector_list.widget_uid(),
+                item_uid: head.widget_uid(),
+            }),
+        })];
+        assert!(inspector_ref
+            .borrow_mut::<Inspector>()
+            .unwrap()
+            .changes(&mut cx, &edit_actions)
+            .is_empty());
+    }
+
+    #[test]
+    fn stale_asset_page_is_rejected_after_query_or_scope_changes() {
+        assert!(assets_response_is_current(
+            7,
+            7,
+            "sunset",
+            Some("flows"),
+            "sunset",
+            Some("flows"),
+        ));
+        assert!(!assets_response_is_current(
+            6,
+            7,
+            "sunset",
+            Some("flows"),
+            "sunset",
+            Some("flows"),
+        ));
+        assert!(!assets_response_is_current(
+            7,
+            7,
+            "sunset",
+            Some("flows"),
+            "portrait",
+            Some("flows"),
+        ));
+        assert!(!assets_response_is_current(
+            7,
+            7,
+            "sunset",
+            Some("flows"),
+            "sunset",
+            None,
+        ));
     }
 
     #[test]
@@ -5338,6 +6075,7 @@ mod layout_tests {
 
     #[test]
     fn run_attachment_is_locked_and_design_detach_restores_source_editing() {
+        use makepad_code_editor::code_view::CodeView;
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.init_cx_os();
         let mut app = cx.with_vm(|vm| App::from_script_mod(vm, <App as AppMain>::script_mod));
@@ -5345,12 +6083,15 @@ mod layout_tests {
         app.attach_instance(&mut cx, Some("run-1".into()), false);
         assert_eq!(app.instance.as_deref(), Some("run-1"));
         assert!(app.ui.widget(&cx, ids!(design_btn)).visible());
-        assert!(app.ui.text_input(&cx, ids!(source)).is_read_only());
+        // Source is a CodeView; its editor's read-only gate is applied by
+        // the attachment transition. The locked-inspector regression covers
+        // the editable controls that remain reachable through the same lock.
+        assert!(app.ui.widget(&cx, ids!(source)).borrow::<CodeView>().is_some());
 
         app.attach_instance(&mut cx, None, false);
         assert!(app.instance.is_none());
         assert!(!app.ui.widget(&cx, ids!(design_btn)).visible());
-        assert!(!app.ui.text_input(&cx, ids!(source)).is_read_only());
+        assert!(app.ui.widget(&cx, ids!(source)).borrow::<CodeView>().is_some());
     }
 
     #[test]
@@ -5398,8 +6139,9 @@ mod layout_tests {
         let pass = DrawPass::new(&mut cx);
         pass.set_size(&mut cx, size);
         let mut draw_list = DrawList2d::new(&mut cx);
-        draw_canvas_and_viewer(&mut cx, &mut app, &pass, &mut draw_list, size);
-        draw_canvas_and_viewer(&mut cx, &mut app, &pass, &mut draw_list, size);
+        let overlay = Overlay { draw_list: DrawList::new(&mut cx) };
+        draw_canvas_and_viewer(&mut cx, &mut app, &pass, &mut draw_list, &overlay, size);
+        draw_canvas_and_viewer(&mut cx, &mut app, &pass, &mut draw_list, &overlay, size);
         let viewer_area = app.ui.widget(&cx, ids!(image_viewer)).area();
         let viewer_rect = viewer_area.rect(&cx);
         let centre = viewer_rect.pos + viewer_rect.size * 0.5;

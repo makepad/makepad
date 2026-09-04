@@ -237,7 +237,17 @@ impl WireRoute {
             let dy = self.samples[upper].y - self.samples[lower].y;
             let length = (dx * dx + dy * dy).sqrt();
             if length > f64::EPSILON {
-                return (point, Point::new(dx / length, dy / length));
+                let mut tangent = Point::new(dx / length, dy / length);
+                // A very short cubic can briefly turn back at its midpoint
+                // when its two port-facing controls form a tiny S. The
+                // chevron is a flow marker, so keep it pointing from source
+                // to target even when the nearest sampled segment reverses.
+                let flow = Point::new(self.to.x - self.from.x, self.to.y - self.from.y);
+                if tangent.x * flow.x + tangent.y * flow.y < 0.0 {
+                    tangent.x = -tangent.x;
+                    tangent.y = -tangent.y;
+                }
+                return (point, tangent);
             }
         }
         (point, Point::new(1.0, 0.0))
@@ -2034,5 +2044,26 @@ mod tests {
         );
         let (_, tangent) = s_route.midpoint_tangent();
         assert!(tangent.x.abs() < 0.05 && tangent.y > 0.99, "{tangent:?}");
+    }
+
+    #[test]
+    fn midpoint_tangent_does_not_reverse_short_s_flow_marker() {
+        let from = Point::new(0.0, 0.0);
+        let control_1 = Point::new(100.0, 0.0);
+        let control_2 = Point::new(-100.0, 0.0);
+        let to = Point::new(10.0, 0.0);
+        let samples = (0..=64)
+            .map(|step| cubic_point(from, control_1, control_2, to, step as f64 / 64.0))
+            .collect();
+        let route = build_route(
+            from,
+            to,
+            RouteKind::Cubic { control_1, control_2 },
+            samples,
+            RouteChoice::Straight,
+            f64::INFINITY,
+        );
+        let (_, tangent) = route.midpoint_tangent();
+        assert!(tangent.x > 0.0, "{tangent:?}");
     }
 }

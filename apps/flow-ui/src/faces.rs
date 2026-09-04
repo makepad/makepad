@@ -24,6 +24,7 @@ use makepad_widgets::widget_tree::CxWidgetExt;
 use makepad_widgets::*;
 use makepad_flowgraph::{Camera, NodeFaces};
 use makepad_media_view::{AudioPlayer, MeshView, SplatView, VideoPlayer};
+use makepad_asset_client::ChatProviderKind;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
@@ -250,6 +251,27 @@ pub struct ModelChoice {
     pub note: String,
 }
 
+/// Provider-backed chat entries are advertised with reserved model ids by the
+/// Flow host. They are valid only for chat nodes; generation nodes must never
+/// send one of these ids to a GPU model executor.
+pub fn is_provider_model(id: &str) -> bool {
+    id.strip_prefix("provider:")
+        .and_then(ChatProviderKind::parse)
+        .is_some()
+}
+
+pub fn model_choices_for_node(models: &[ModelChoice], node_kind: &str) -> Vec<ModelChoice> {
+    if node_kind == "chat" {
+        models.to_vec()
+    } else {
+        models
+            .iter()
+            .filter(|model| !is_provider_model(&model.id))
+            .cloned()
+            .collect()
+    }
+}
+
 /// Collapse repeated model ids, count distinct advertising nodes, and put
 /// ready/available choices before models that still need acquiring.
 pub fn model_choices(response: &ModelsResponse) -> Vec<ModelChoice> {
@@ -264,7 +286,22 @@ pub fn model_choices(response: &ModelsResponse) -> Vec<ModelChoice> {
     }
 
     let mut by_id: BTreeMap<String, Acc> = BTreeMap::new();
+    let mut providers: BTreeMap<String, (ChatProviderKind, bool, BTreeSet<String>)> = BTreeMap::new();
     for model in &response.models {
+        if let Some(provider) = model
+            .id
+            .strip_prefix("provider:")
+            .and_then(ChatProviderKind::parse)
+        {
+            let entry = providers
+                .entry(provider.as_str().to_string())
+                .or_insert_with(|| (provider, false, BTreeSet::new()));
+            entry.1 |= model.available;
+            if let Some(note) = model.note.as_ref().filter(|note| !note.is_empty()) {
+                entry.2.insert(note.clone());
+            }
+            continue;
+        }
         let entry = by_id.entry(model.id.clone()).or_default();
         entry.nodes.insert(model.node.clone());
         match model.state.as_str() {
@@ -349,6 +386,24 @@ pub fn model_choices(response: &ModelsResponse) -> Vec<ModelChoice> {
             )
         })
         .collect();
+    for (_, (provider, available, reasons)) in providers {
+        let note = if available {
+            String::new()
+        } else if reasons.is_empty() {
+            "provider unavailable".to_string()
+        } else {
+            reasons.into_iter().collect::<Vec<_>>().join(" · ")
+        };
+        choices.push((
+            if available { 0 } else { 2 },
+            ModelChoice {
+                id: format!("provider:{}", provider.as_str()),
+                label: provider.label().to_string(),
+                dimmed: !available,
+                note,
+            },
+        ));
+    }
     choices.sort_by(|(left_rank, left), (right_rank, right)| {
         left_rank
             .cmp(right_rank)
@@ -2250,9 +2305,7 @@ impl FaceHost {
             }
         };
         for node in &graph.nodes {
-            let face_name = catalog
-                .iter()
-                .find(|entry| entry.type_name == node.type_name)
+            let face_name = catalog_entry_for_node(node, catalog)
                 .map(|entry| entry.face.clone())
                 .unwrap_or_else(|| "NodeFace".to_string());
             let face = match flow.as_ref() {
@@ -2349,9 +2402,17 @@ impl FaceHost {
         let node_id = node_id.to_string();
         let default_face = default_face.map(str::to_string);
         let mounted = cx.with_script_vm_id_trusted(vm_id, |vm| {
-            let mut face_value = owner
-                .and_then(|owner| deep_value(vm, owner, field))
-                .unwrap_or(NIL);
+            // A node's inherited ui is the primitive GenFace. Use the
+            // catalog fallback for nodes without an explicit source-level
+            // face, while preserving inline custom faces.
+            let explicit_face = graph_node.as_ref().is_some_and(|node| node.face_src.is_some());
+            let mut face_value = if graph_node.is_some() && !explicit_face {
+                NIL
+            } else {
+                owner
+                    .and_then(|owner| deep_value(vm, owner, field))
+                    .unwrap_or(NIL)
+            };
             let mut face_obj = face_value.as_object();
             vm.bx.captured_errors = Some(Vec::new());
             let mut root = if face_obj.is_some() {
@@ -3768,6 +3829,36 @@ mod tests {
     }
 
     #[test]
+    fn provider_models_use_sandbox_labels_and_filter_from_generation_nodes() {
+        let mut provider = model("provider:openai", "flow-host", true, "ready");
+        provider.note = Some("gpt-5".into());
+        let unavailable = ModelInfoDto {
+            id: "provider:grok".into(),
+            domain: "text".into(),
+            backend: "provider".into(),
+            node: "flow-host".into(),
+            available: false,
+            gated: false,
+            state: "unavailable".into(),
+            vram_gb: None,
+            note: Some("no API key".into()),
+        };
+        let response = ModelsResponse {
+            nodes: Vec::new(),
+            models: vec![provider, unavailable],
+            snapshot_ms: 1,
+        };
+        let choices = model_choices(&response);
+        assert_eq!(choices[0].label, "OpenAI · API");
+        assert!(!choices[0].dimmed);
+        assert_eq!(choices[1].label, "Grok · API");
+        assert!(choices[1].dimmed);
+        assert_eq!(choices[1].note, "no API key");
+        assert_eq!(model_choices_for_node(&choices, "chat").len(), 2);
+        assert!(model_choices_for_node(&choices, "gen").is_empty());
+    }
+
+    #[test]
     fn format_preset_maps_to_dimensions() {
         let presets: Vec<_> = IMAGE_FORMAT_PRESETS
             .iter()
@@ -4015,6 +4106,47 @@ Flow{llm function http ask output}
         assert!(host.faces["video"].shows.is_empty());
         assert!(host.faces["upscale"].shows.is_empty());
         assert_eq!(host.faces["output"].shows.len(), 1);
+        host.free(&mut cx);
+    }
+
+    #[test]
+    fn canonical_generic_video_mounts_video_face_and_preserves_frames() {
+        let source = r#"use mod.flow.*
+let video = Gen{
+    domain: "video"
+    frames: 73
+    ports: {in: {prompt: @text} out: {video: @video}}
+}
+Flow{video}
+"#;
+        let graph = makepad_flow::graph::evaluate(source, "<generic-video>").unwrap();
+        let rewritten = makepad_flow::graph::write(&graph);
+        assert!(rewritten.contains("domain: \"video\""));
+        assert!(rewritten.contains("frames: 73"));
+        let round_tripped = makepad_flow::graph::evaluate(&rewritten, "<generic-video-canonical>")
+            .unwrap();
+        let catalog = makepad_flow::graph::prelude_catalog().unwrap();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        let host = FaceHost::mount(
+            &mut cx,
+            WidgetUid(0),
+            "test",
+            "<generic-video-canonical>",
+            &rewritten,
+            &round_tripped,
+            &catalog,
+        );
+        let frames = host.faces["video"]
+            .param_binds
+            .iter()
+            .find(|(_, key)| key == "frames")
+            .unwrap_or_else(|| {
+                panic!("canonical video uses VideoFace: rewritten={rewritten:?}")
+            })
+            .0
+            .clone();
+        assert_eq!(frames.as_fab_value_input().value(), 73.0);
         host.free(&mut cx);
     }
 

@@ -1,4 +1,5 @@
 use super::executors::ask::AskExecutor;
+use super::executors::archive::ArchiveExecutor;
 use super::executors::chat::ChatExecutor;
 use super::executors::func::FuncExecutor;
 use super::executors::gen::{unsupported_params, GenExecutor, UsedProviders};
@@ -19,6 +20,7 @@ use std::time::{Duration, Instant};
 enum ActiveExecutor {
     Input(InputExecutor),
     Output(OutputExecutor),
+    Archive(ArchiveExecutor),
     Chat(ChatExecutor),
     Gen(GenExecutor),
     Func(FuncExecutor),
@@ -32,6 +34,7 @@ impl ActiveExecutor {
         match self {
             Self::Input(value) => value.poll(),
             Self::Output(value) => value.poll(),
+            Self::Archive(value) => value.poll(),
             Self::Chat(value) => value.poll(),
             Self::Gen(value) => value.poll(),
             Self::Func(value) => value.poll(),
@@ -45,6 +48,7 @@ impl ActiveExecutor {
         match self {
             Self::Input(value) => value.cancel(),
             Self::Output(value) => value.cancel(),
+            Self::Archive(value) => value.cancel(),
             Self::Chat(value) => value.cancel(),
             Self::Gen(value) => value.cancel(),
             Self::Func(value) => value.cancel(),
@@ -115,6 +119,13 @@ pub(crate) fn run(
         .collect();
     let mut values: HashMap<(String, String), Value> = HashMap::new();
     let mut active: HashMap<String, ActiveExecutor> = HashMap::new();
+    // Ordinary Output nodes are catalog sinks when the host has an asset
+    // worker. Keep one publication per content digest for duplicate outputs
+    // in the same run; explicit Publish nodes retain their own semantics.
+    let mut published_output_digests = HashSet::new();
+    let mut in_flight_output_digests = HashSet::new();
+    let mut output_publish_keys = HashMap::new();
+    let mut archive_publish_keys: HashMap<String, Vec<String>> = HashMap::new();
     let warnings: Vec<_> = graph
         .nodes
         .iter()
@@ -170,6 +181,27 @@ pub(crate) fn run(
                     continue;
                 }
             };
+            let output_publish_key = (node.kind == "output" && assets.as_ref().is_some_and(|worker| worker.archive_outputs))
+                .then(|| {
+                    resolved.iter().find_map(|(port, value)| {
+                        (port == "value").then(|| {
+                            format!("{}:{}:{}", value.digest_hex(), value.ty.as_str(), value.content_type)
+                        })
+                    })
+                })
+                .flatten();
+            if output_publish_key
+                .as_ref()
+                .is_some_and(|key| in_flight_output_digests.contains(key))
+            {
+                // Wait for the first publisher instead of silently completing
+                // a duplicate while its publication is still uncertain.
+                states.insert(node_id.clone(), NodeState::Pending);
+                continue;
+            }
+            let publish_output = output_publish_key
+                .as_ref()
+                .is_some_and(|key| !published_output_digests.contains(key));
             match start_executor(
                 node,
                 &resolved,
@@ -182,8 +214,14 @@ pub(crate) fn run(
                 assets.clone(),
                 &input,
                 default_publish_description(graph, &node.id, &values),
+                publish_output,
             ) {
                 Ok((executor, waiting)) => {
+                    if publish_output {
+                        let key = output_publish_key.unwrap();
+                        in_flight_output_digests.insert(key.clone());
+                        output_publish_keys.insert(node_id.clone(), key);
+                    }
                     if waiting {
                         states.insert(node_id.clone(), NodeState::Waiting);
                         let output = node.outputs.first().unwrap();
@@ -247,6 +285,7 @@ pub(crate) fn run(
         let active_ids: Vec<_> = active.keys().cloned().collect();
         let mut completed = Vec::new();
         for node_id in active_ids {
+            let is_archive = matches!(active.get(&node_id), Some(ActiveExecutor::Archive(_)));
             let poll = active.get_mut(&node_id).unwrap().poll();
             match poll {
                 Poll::Pending => {}
@@ -270,6 +309,46 @@ pub(crate) fn run(
                         values.insert((node_id.clone(), port.clone()), value.clone());
                     }
                     states.insert(node_id.clone(), NodeState::Done);
+                    let archive = if node.kind == "gen" && !is_archive {
+                        if let Some(worker) = assets.clone().filter(|worker| worker.archive_outputs) {
+                            let flow = std::path::Path::new(&input.file_name)
+                                .file_stem().and_then(|name| name.to_str())
+                                .unwrap_or(&input.file_name).to_string();
+                            let queued = published_output_digests.union(&in_flight_output_digests).cloned().collect();
+                            match ArchiveExecutor::new(node, outputs.clone(), worker, flow, input.instance.clone(), &queued) {
+                                Ok(archive) => Some(archive),
+                                Err(error) => {
+                                    fail_node(&node_id, format!("Could not archive generated content: {error}"), graph, &mut states, &mut values, &events);
+                                    completed.push(node_id);
+                                    continue;
+                                }
+                            }
+                        } else { None }
+                    } else { None };
+                    if let Some(archive) = archive {
+                        let keys: Vec<_> = archive.keys().collect();
+                        if !keys.is_empty() {
+                            for key in &keys {
+                                if !published_output_digests.contains(key) {
+                                    in_flight_output_digests.insert(key.clone());
+                                }
+                            }
+                            states.insert(node_id.clone(), NodeState::Running);
+                            archive_publish_keys.insert(node_id.clone(), keys);
+                            active.insert(node_id.clone(), ActiveExecutor::Archive(archive));
+                            continue;
+                        }
+                    }
+                    if let Some(key) = output_publish_keys.remove(&node_id) {
+                        in_flight_output_digests.remove(&key);
+                        published_output_digests.insert(key);
+                    }
+                    if let Some(keys) = archive_publish_keys.remove(&node_id) {
+                        for key in keys {
+                            in_flight_output_digests.remove(&key);
+                            published_output_digests.insert(key);
+                        }
+                    }
                     if node.kind != "output" {
                         let _ = events.send(RunEvent::NodeDone {
                             node: node_id.clone(),
@@ -279,6 +358,12 @@ pub(crate) fn run(
                     completed.push(node_id);
                 }
                 Poll::Failed(error) => {
+                    if let Some(keys) = archive_publish_keys.remove(&node_id) {
+                        for key in keys { in_flight_output_digests.remove(&key); }
+                    }
+                    if let Some(key) = output_publish_keys.remove(&node_id) {
+                        in_flight_output_digests.remove(&key);
+                    }
                     fail_node(
                         &node_id,
                         error,
@@ -341,6 +426,7 @@ fn start_executor(
     assets: Option<AssetWorkerHandle>,
     run: &RunInput,
     publish_description: String,
+    publish_output: bool,
 ) -> Result<(ActiveExecutor, bool), String> {
     match node.kind.as_str() {
         "input" => {
@@ -350,7 +436,22 @@ fn start_executor(
         }
         "output" => {
             let mut executor = OutputExecutor::default();
-            executor.start(node, inputs)?;
+            if publish_output {
+                let flow = std::path::Path::new(&run.file_name)
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(&run.file_name)
+                    .to_string();
+                executor.start_with_asset_publish(
+                    node,
+                    inputs,
+                    assets.ok_or_else(|| "asset worker missing for Output publication".to_string())?,
+                    flow,
+                    run.instance.clone(),
+                )?;
+            } else {
+                executor.start(node, inputs)?;
+            }
             Ok((ActiveExecutor::Output(executor), false))
         }
         "chat" => {

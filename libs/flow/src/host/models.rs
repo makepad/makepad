@@ -57,12 +57,15 @@ impl FleetSnapshot {
         domain: Option<&str>,
     ) -> ModelsResponse {
         self.refresh_if_due(fleet_hint);
-        let models = self
+        let mut models: Vec<ModelInfoDto> = self
             .models
             .iter()
             .filter(|model| matches_requested_domain(&model.domain, domain))
             .cloned()
             .collect();
+        if domain.is_none() || domain == Some("text") {
+            models.extend(crate::engine::executors::chat::provider_model_rows());
+        }
         ModelsResponse {
             nodes: self.nodes.clone(),
             models,

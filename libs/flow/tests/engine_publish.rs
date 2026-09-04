@@ -102,6 +102,7 @@ fn picture_publish_and_alias_republish_create_revisions() {
     let mut roots = Roots::new();
     let (mut server, token) = start_store(roots.make("store"));
     let config = AssetStoreConfig {
+        archive_outputs: false,
         cache_dir: roots.make("cache"),
         token: Some(token),
         endpoints: Some(ApiEndpoints { control: server.control_addr(), data: server.data_addr() }),
@@ -119,7 +120,7 @@ fn picture_publish_and_alias_republish_create_revisions() {
     assert_eq!(second.get("title").and_then(|v| v.as_str()), Some("Sunset result"));
     assert_eq!(second.get("kind").and_then(|v| v.as_str()), Some("texture"));
 
-    let rows = worker.handle().list(AssetListQuery { text: String::new(), namespace: Some("flows".into()), limit: 10 }).unwrap();
+    let rows = worker.handle().list(AssetListQuery { text: String::new(), namespace: Some("flows".into()), limit: 10, cursor: None }).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].title, "Sunset result");
     assert_eq!(rows[0].namespace, "flows");

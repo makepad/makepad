@@ -97,15 +97,15 @@ mod.flow.Depth = mod.flow.Gen{
     /** Image preview with generic depth parameters. */ ui: mod.flow.ui.ImageFace
 }
 
-/** Generate a video, optionally from a first image keyframe. Default face: `mod.flow.ui.GenFace`. */
+/** Generate a video, optionally from a first image keyframe. Default face: `mod.flow.ui.VideoFace`. */
 mod.flow.Video = mod.flow.Gen{
     kind: @gen
     domain: "video"
     type_name: "Video"
     /** 640..960 step 32 paired sizes: 640x352, 864x480, 960x544 */ width: 640
     /** 352..544 step 32 paired sizes: 640x352, 864x480, 960x544 */ height: 352
-    /** one of: 39, 65, 97, 129 */ frames: 39
-    /** paired with frames: one of 30, 30, 40, 50 */ steps: 30
+    /** 5..4096 step 1. Requested native frames; H3 rounds up to 17n+5. Larger clips require more VRAM. */ frames: 39
+    /** Denoising steps. */ steps: 30
     /** one of: h264, h265, hevc */ codec: "h264"
     /** Decode and mux the jointly generated audio track. */ audio: true
     /** one of: 1, 2, 4 */ interpolate: 1
@@ -120,7 +120,7 @@ mod.flow.Video = mod.flow.Gen{
         out: { video: @video }
     }
     video: fn() { self.out(@video) }
-    /** Generic parameter and video-result face. */ ui: mod.flow.ui.GenFace
+    /** Video settings with an editable frame count. */ ui: mod.flow.ui.VideoFace
 }
 
 /** Upscale, interpolate, or add motion metadata to a video. Default face: `mod.flow.ui.GenFace`. */

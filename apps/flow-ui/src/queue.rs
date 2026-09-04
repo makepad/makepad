@@ -18,22 +18,41 @@ script_mod! {
         width: Fill
         height: Fill
         flow: Down
-        spacing: theme.space_1
+        spacing: 2
         tools := View{
             width: Fill
-            height: Fit
+            height: 20
             flow: Right
-            align: Align{x: 1.0 y: 0.5}
-            clear_all := ButtonFlatter{text: "Clear all"}
+            align: Align{y: 0.5}
+            padding: Inset{left: 2 right: 0}
+            title := Label{
+                width: Fill
+                height: Fit
+                text: "QUEUE"
+                draw_text +: {
+                    color: theme.flow_text_subtle
+                    text_style: theme.font_bold{font_size: 8}
+                }
+            }
+            clear_all := ButtonFlatter{
+                width: Fit
+                height: 20
+                text: "Clear all"
+                padding: Inset{left: 4 right: 2 top: 0 bottom: 0}
+                draw_text +: {
+                    color: theme.flow_text_muted
+                    text_style: theme.font_regular{font_size: 8}
+                }
+            }
         }
         hint := Label{
             width: Fill
             height: Fit
-            margin: Inset{top: 6}
+            margin: Inset{top: 2}
             text: "The queue is empty. Ctrl+Enter adds a batch."
             draw_text +: {
                 color: theme.flow_text_hint
-                text_style: theme.font_regular{font_size: 9}
+                text_style: theme.font_regular{font_size: 8}
             }
         }
         list := PortalList{
@@ -42,17 +61,17 @@ script_mod! {
             scroll_bar: ScrollBar{}
             Header := View{
                 width: Fill
-                height: 22
+                height: 18
                 flow: Right
                 align: Align{y: 0.5}
-                padding: Inset{left: 6 right: 2}
-                spacing: 6
+                padding: Inset{left: 4 right: 2}
+                spacing: 4
                 title := Label{
                     width: Fill
                     height: Fit
                     draw_text +: {
                         color: theme.flow_text_muted
-                        text_style: theme.font_bold{font_size: 8}
+                        text_style: theme.font_bold{font_size: 7.5}
                     }
                 }
                 cancel_batch := ButtonFlatter{
@@ -70,11 +89,11 @@ script_mod! {
             // centre line.
             Run := RoundedView{
                 width: Fill
-                height: 26
+                height: 24
                 flow: Right
                 align: Align{y: 0.5}
                 padding: Inset{left: 4 right: 4}
-                spacing: 8
+                spacing: 6
                 cursor: MouseCursor.Hand
                 capture_overload: true
                 show_bg: true
