@@ -173,6 +173,7 @@ impl Cx {
         }
 
         for order_index in 0..draw_order_len {
+            let uniforms_gen = self.next_uniform_gen();
             let Some(draw_item_id) =
                 self.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
             else {
@@ -182,6 +183,12 @@ impl Cx {
                 .kind
                 .sub_list()
             {
+                // A retained sub-list its owner dropped between the parent's
+                // last record and this paint: the slot may already hold
+                // another widget's list. Nothing to draw here.
+                if self.draw_lists.is_id_freed(sub_list_id) {
+                    continue;
+                }
                 let child_resets_zbias = self.draw_lists[sub_list_id].reset_zbias;
                 let mut own_zbias = 0.0f32;
                 let child_zbias = if child_resets_zbias {
@@ -192,14 +199,23 @@ impl Cx {
                 // An overlay list carries a depth floor: this is what makes it
                 // composite above body content that uses `draw_depth`.
                 self.draw_lists[sub_list_id].raise_zbias_to_floor(child_zbias);
-                self.render_view(
-                    draw_pass_id,
-                    sub_list_id,
-                    child_zbias,
-                    zbias_step,
-                    encoder,
-                    metal_cx,
-                );
+                // A retained list is one unit of paint order: its calls all
+                // take the counter at entry, it advances by the layers the
+                // list reported. See `CxDrawList::zbias_hold`.
+                if let Some(steps) = self.draw_lists[sub_list_id].zbias_hold {
+                    let mut held = *child_zbias;
+                    self.render_view(draw_pass_id, sub_list_id, &mut held, 0.0, encoder, metal_cx);
+                    *child_zbias += steps as f32 * zbias_step;
+                } else {
+                    self.render_view(
+                        draw_pass_id,
+                        sub_list_id,
+                        child_zbias,
+                        zbias_step,
+                        encoder,
+                        metal_cx,
+                    );
+                }
             } else {
                 let draw_list = &mut self.draw_lists[draw_list_id];
                 let draw_item = &mut draw_list.draw_items[draw_item_id];
@@ -266,7 +282,7 @@ impl Cx {
                 }
 
                 // update the zbias uniform if we have it.
-                draw_call.resolve_zbias(*zbias, sploded);
+                draw_call.resolve_zbias(*zbias, sploded, uniforms_gen);
                 *zbias += zbias_step;
 
                 if draw_call.uniforms_dirty {
@@ -321,6 +337,9 @@ impl Cx {
                     continue;
                 };
 
+                if self.geometries.skip_stale(geometry_id) {
+                    continue;
+                }
                 let geometry = &mut self.geometries[geometry_id];
                 if !crate::geometry::geometry_layout_matches_shader(
                     geometry,
@@ -700,7 +719,12 @@ impl Cx {
             .unwrap();
 
         if !self.passes[draw_pass_id].keep_camera_matrix {
-            self.passes[draw_pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size);
+            let uniforms_gen = self.next_uniform_gen();
+            self.passes[draw_pass_id].set_ortho_matrix(
+                pass_rect.pos,
+                pass_rect.size,
+                uniforms_gen,
+            );
         }
 
         if pass_rect.size.x < 0.5 || pass_rect.size.y < 0.5 {
@@ -713,7 +737,8 @@ impl Cx {
 
         self.passes[draw_pass_id].paint_dirty = false;
 
-        self.passes[draw_pass_id].set_dpi_factor(dpi_factor);
+        let uniforms_gen = self.next_uniform_gen();
+        self.passes[draw_pass_id].set_dpi_factor(dpi_factor, uniforms_gen);
 
         if matches!(&mode, DrawPassMode::MTKView(_)) {
             let color_attachments: ObjcId =
@@ -1064,6 +1089,10 @@ impl Cx {
                 let drawable: ObjcId = unsafe { msg_send![view, currentDrawable] };
                 let first_texture: ObjcId = unsafe { msg_send![drawable, texture] };
                 let () = unsafe { msg_send![command_buffer, presentDrawable: drawable] };
+                crate::os::apple::macos::macos_app::try_with_macos_app(|app| {
+                    let now = app.time_now();
+                    app.frame_trace.present(now);
+                });
                 let screenshot = self.build_screenshot_struct(
                     metal_cx,
                     command_buffer,
@@ -1151,6 +1180,10 @@ impl Cx {
                 } else {
                     let () = unsafe { msg_send![command_buffer, presentDrawable: drawable] };
                 }
+                crate::os::apple::macos::macos_app::try_with_macos_app(|app| {
+                    let now = app.time_now();
+                    app.frame_trace.present(now);
+                });
                 let screenshot = self.build_screenshot_struct(
                     metal_cx,
                     command_buffer,
@@ -2227,6 +2260,11 @@ impl Cx {
         let mut enc = VecUploadEncoder::new(command_buffer);
         let mut stack: Vec<DrawListId> = vec![draw_list_id];
         while let Some(list_id) = stack.pop() {
+            // A retained sub-list its owner dropped since the parent last
+            // recorded: not part of this pass (see `render_view`).
+            if self.draw_lists.is_id_freed(list_id) {
+                continue;
+            }
             let draw_list = &self.draw_lists[list_id];
             for order_index in 0..draw_list.draw_item_order_len() {
                 let Some(item_id) = draw_list.draw_item_id_at_order_index(order_index) else {
@@ -2521,6 +2559,7 @@ impl DrawVars {
 
             // Access Cx from the vm host
             let cx = vm.host.cx_mut();
+            mapping.scope_uniforms_gen = cx.next_uniform_gen();
 
             // Allocate CxDrawShader with os_shader_id set to None
             let index = cx.draw_shaders.shaders.len();
@@ -2728,6 +2767,12 @@ impl CxOsDrawShader {
 #[derive(Default)]
 pub struct CxOsDrawCall {
     instance_buffer: MetalBuffer,
+    #[cfg(test)]
+    pub uniforms_recording_gen: Option<u64>,
+    #[cfg(test)]
+    pub draw_call_uniforms_gen: Option<u64>,
+    #[cfg(test)]
+    pub user_uniforms_gen: Option<u64>,
 }
 
 #[derive(Default)]

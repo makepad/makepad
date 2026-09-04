@@ -323,6 +323,14 @@ impl View {
 }
 
 impl ViewRef {
+    /// Updates this view's typed walk without evaluating script.
+    pub fn set_walk(&self, cx: &mut Cx, walk: Walk) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.walk = walk;
+            inner.redraw(cx);
+        }
+    }
+
     pub fn set_debug_dump(&self, cx: &mut Cx, debug: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_debug_dump(cx, debug);
@@ -967,6 +975,11 @@ impl Widget for View {
                             } else {*/
                             cx.set_pass_area(&texture_cache.pass, self.area);
                             //}
+                            // The cache hit still consumes the texture: keep
+                            // the pass attached, or a repaint of the cached
+                            // subtree (an animated child, `repaint`) would find
+                            // it orphaned and never re-render.
+                            cx.make_child_pass(&texture_cache.pass);
                         }
                         return DrawStep::done();
                     }

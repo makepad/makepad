@@ -8,10 +8,8 @@ use makepad_ai_hub::{
 };
 use makepad_widgets::*;
 
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 pub const DEFAULT_LOCAL_MODEL: &str = "local/models/Qwen3.5-9B-UD-Q4_K_XL.gguf";
 const MAX_CONTEXT: u32 = 32768;
@@ -28,11 +26,11 @@ pub struct LocalAgent {
     awaiting_tools: usize,
     tool_results: Vec<(String, String, bool)>,
     next_tool_id: u64,
-    timing: Arc<Mutex<String>>,
+    timing: ToUISender<String>,
 }
 
 impl LocalAgent {
-    pub fn new(model_path: String, timing: Arc<Mutex<String>>) -> Self {
+    pub fn new(model_path: String, timing: ToUISender<String>) -> Self {
         Self {
             model_path: model_path.into(),
             session: None,
@@ -47,9 +45,7 @@ impl LocalAgent {
     }
 
     fn set_timing(&self, text: String) {
-        if let Ok(mut timing) = self.timing.lock() {
-            *timing = text;
-        }
+        let _ = self.timing.send(text);
     }
 }
 

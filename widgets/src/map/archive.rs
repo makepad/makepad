@@ -1,17 +1,26 @@
 use super::geometry::TileKey;
 use crate::makepad_draw::*;
-use makepad_mbtile_reader::{mkmap_tile_id, BlobRef, MkmapLeaf, MkmapRoot};
+use makepad_mbtile_reader::{mkmap_tile_id, BlobRef, LeafParseLimits, MkmapLeaf, MkmapRoot};
+use makepad_platform::archive_cache::ArchiveCacheStore;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use makepad_platform::thread::lock_from_ui;
 
 const LEAF_CACHE_CAPACITY: usize = 32;
 const LEAF_CACHE_BYTE_CAPACITY: usize = 64 * 1024 * 1024;
+/// A leaf directory too large for the leaf budget is decoded as a window
+/// around the waiting tiles' ids, widened by this much on each side so a pan
+/// keeps hitting the kept entries (ids are Hilbert-ordered per zoom band).
+const LEAF_WINDOW_MARGIN_IDS: u64 = 1 << 18;
 const FILE_CACHE_CAPACITY: usize = 8;
 const MAX_ARCHIVE_WAITERS: usize = 64;
 const MAX_ARCHIVE_IN_FLIGHT_BYTES: u64 = 64 * 1024 * 1024;
+/// The in-flight floor a budget cannot push below: one leaf directory of a
+/// hosted overlay is 8 MiB packed and must still be readable.
+const MIN_ARCHIVE_IN_FLIGHT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ROOT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RANGE_BYTES: u64 = 64 * 1024 * 1024;
 const HTTP_RANGE_CACHE_BYTE_CAPACITY: usize = 64 * 1024 * 1024;
@@ -21,16 +30,27 @@ const DEFAULT_COALESCE_MAX_LEN: u64 = 4 * 1024 * 1024;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ReadToken(pub u64);
 
+const ARCHIVE_QUEUE_CAPACITY: usize = 256;
+
+/// Archive reads and parses go to the runtime pool's light lane through a
+/// UI-owned staging queue (newest first, one job per token, prunable until
+/// handed over). The queue is shared by the byte source and the tile archive
+/// of one map, on the UI thread only — hence `Rc`, never a lock.
 #[derive(Clone)]
 pub enum ArchiveWorkerPool {
-    Threaded(Arc<TaskPool>),
+    Threaded {
+        pool: TaskPool,
+        queue: Rc<RefCell<TaskQueue<ReadToken>>>,
+    },
     Serial,
 }
 
 impl ArchiveWorkerPool {
     pub fn ptr_eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Threaded(left), Self::Threaded(right)) => Arc::ptr_eq(left, right),
+            (Self::Threaded { queue: left, .. }, Self::Threaded { queue: right, .. }) => {
+                Rc::ptr_eq(left, right)
+            }
             (Self::Serial, Self::Serial) => true,
             _ => false,
         }
@@ -41,37 +61,60 @@ impl ArchiveWorkerPool {
         F: FnOnce() + Send + 'static,
     {
         match self {
-            Self::Threaded(pool) => {
-                let task = pool.submit_tagged(key, true, QueueOrder::Lifo, job)?;
-                task.detach();
+            Self::Threaded { pool, queue } => {
+                let mut queue = queue.borrow_mut();
+                let window = pool_window(pool, queue.in_flight());
+                queue.set_in_flight_limit(window);
+                queue.push(pool, key, true, QueueOrder::Lifo, job)
             }
-            Self::Serial => job(),
+            Self::Serial => {
+                drop(job);
+                Err(SubmitError::Closed)
+            }
         }
-        Ok(())
     }
 
     pub fn retain_queued(&self, keep: impl FnMut(&ReadToken) -> bool) -> Vec<ReadToken> {
         match self {
-            Self::Threaded(pool) => pool.retain_queued::<ReadToken>(keep),
+            Self::Threaded { queue, .. } => queue.borrow_mut().retain(keep),
             Self::Serial => Vec::new(),
+        }
+    }
+
+    /// Hand staged jobs over once workers free up. Called whenever read
+    /// completions are drained and on the UI signal.
+    pub fn pump(&self) {
+        if let Self::Threaded { pool, queue } = self {
+            let mut queue = queue.borrow_mut();
+            if queue.staged_len() == 0 {
+                return;
+            }
+            let window = pool_window(pool, queue.in_flight());
+            queue.set_in_flight_limit(window);
+            queue.pump(pool);
         }
     }
 }
 
+/// How many jobs a light-lane staging queue may have with the pool: what it
+/// has in flight plus the workers parked right now. Jobs handed over beyond
+/// that would only sit in the pool's channel, out of reach of the queue's
+/// newest-first order and pruning.
+pub fn pool_window(pool: &TaskPool, in_flight: usize) -> usize {
+    in_flight + pool.idle_workers()
+}
+
 pub fn new_archive_worker_pool(cx: &mut Cx) -> ArchiveWorkerPool {
-    match TaskPool::new(
-        cx.thread_spawner(),
-        PoolOptions {
-            workers: std::num::NonZeroUsize::new(2).unwrap(),
-            capacity: std::num::NonZeroUsize::new(256).unwrap(),
-            name: "map-archive".into(),
-        },
-    ) {
-        Ok(pool) => ArchiveWorkerPool::Threaded(Arc::new(pool)),
-        Err(error) => {
-            error!("Map archive pool unavailable, using serial work: {error}");
-            ArchiveWorkerPool::Serial
+    let pool = cx.task_pool();
+    if pool.is_open() {
+        let queue = TaskQueue::new(Lane::Light, pool.worker_count(), ARCHIVE_QUEUE_CAPACITY);
+        ArchiveWorkerPool::Threaded {
+            pool,
+            queue: Rc::new(RefCell::new(queue)),
         }
+    } else {
+        error!("Map archive pool unavailable; file reads will be refused");
+        ArchiveWorkerPool::Serial
     }
 }
 
@@ -99,6 +142,12 @@ pub trait ByteSource {
         tile_key: Option<TileKey>,
     );
     fn reprioritize(&mut self, _token: ReadToken, _priority: u64, _tile_key: TileKey) {}
+    /// Bytes this source retains in memory (range/root caches).
+    fn cache_bytes(&self) -> usize {
+        0
+    }
+    /// Ceiling for the source's in-memory caches; a ceiling, not a target.
+    fn set_cache_budget(&mut self, _bytes: usize) {}
     fn flush(&mut self, _cx: &mut Cx) {}
     fn cancel(&mut self, cx: &mut Cx, token: ReadToken);
     fn poll(&mut self, cx: &mut Cx, event: &Event) -> Vec<ReadCompletion>;
@@ -111,6 +160,7 @@ struct ShardFileCache {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 enum FileReadState {
     Queued,
     Running,
@@ -118,13 +168,18 @@ enum FileReadState {
     Cancelled,
 }
 
+struct FileReadEvent {
+    token: ReadToken,
+    result: Option<Result<Arc<[u8]>, String>>,
+}
+
 /// Local `.mkmap` reads performed by Makepad workers, never by the UI thread.
 pub struct FileByteSource {
     dir: PathBuf,
-    completions: ToUIReceiver<ReadCompletion>,
+    completions: ToUIReceiver<FileReadEvent>,
     workers: ArchiveWorkerPool,
     shard_files: Arc<Mutex<ShardFileCache>>,
-    token_states: Arc<Mutex<HashMap<ReadToken, FileReadState>>>,
+    token_states: HashMap<ReadToken, Arc<AtomicU8>>,
     #[cfg(test)]
     completion_barriers: Option<(
         Arc<std::sync::Barrier>,
@@ -153,56 +208,27 @@ impl FileByteSource {
 }
 
 fn begin_file_read(
-    states: &Mutex<HashMap<ReadToken, FileReadState>>,
-    token: ReadToken,
-    from_ui: bool,
+    state: &AtomicU8,
 ) -> bool {
-    let mut states = if from_ui {
-        lock_from_ui(states)
-    } else {
-        let Ok(states) = states.lock() else {
-            return false;
-        };
-        states
-    };
-    match states.get_mut(&token) {
-        Some(state @ FileReadState::Queued) => {
-            *state = FileReadState::Running;
-            true
-        }
-        Some(FileReadState::Cancelled) => {
-            states.remove(&token);
-            false
-        }
-        _ => false,
-    }
+    state
+        .compare_exchange(
+            FileReadState::Queued as u8,
+            FileReadState::Running as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_ok()
 }
 
-fn complete_file_read(
-    states: &Mutex<HashMap<ReadToken, FileReadState>>,
-    token: ReadToken,
-    from_ui: bool,
-) -> bool {
-    let mut states = if from_ui {
-        lock_from_ui(states)
-    } else {
-        let Ok(states) = states.lock() else {
-            return false;
-        };
-        states
-    };
-    match states.get_mut(&token) {
-        Some(state @ FileReadState::Running) => {
-            *state = FileReadState::Completed;
-            states.remove(&token);
-            true
-        }
-        Some(FileReadState::Cancelled) => {
-            states.remove(&token);
-            false
-        }
-        _ => false,
-    }
+fn complete_file_read(state: &AtomicU8) -> bool {
+    state
+        .compare_exchange(
+            FileReadState::Running as u8,
+            FileReadState::Completed as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_ok()
 }
 
 impl ByteSource for FileByteSource {
@@ -210,13 +236,13 @@ impl ByteSource for FileByteSource {
         let path = self.dir.join("root.mkidx");
         let sender = self.completions.sender();
         let rejected_sender = sender.clone();
-        let token_states = self.token_states.clone();
-        let read_runs_on_ui = matches!(self.workers, ArchiveWorkerPool::Serial);
-        lock_from_ui(&self.token_states).insert(token, FileReadState::Queued);
+        let state = Arc::new(AtomicU8::new(FileReadState::Queued as u8));
+        self.token_states.insert(token, state.clone());
         #[cfg(test)]
         let completion_barriers = self.completion_barriers.clone();
         match self.workers.submit(token, move || {
-            if !begin_file_read(&token_states, token, read_runs_on_ui) {
+            if !begin_file_read(&state) {
+                let _ = sender.send(FileReadEvent { token, result: None });
                 return;
             }
             let result = std::fs::read(&path)
@@ -231,16 +257,15 @@ impl ByteSource for FileByteSource {
                 reached.wait();
                 release.wait();
             }
-            if complete_file_read(&token_states, token, read_runs_on_ui) {
-                let _ = sender.send(ReadCompletion { token, result });
-            }
+            let result = complete_file_read(&state).then_some(result);
+            let _ = sender.send(FileReadEvent { token, result });
         }) {
             Ok(()) => {}
             Err(error) => {
-                lock_from_ui(&self.token_states).remove(&token);
-                let _ = rejected_sender.send(ReadCompletion {
+                self.token_states.remove(&token);
+                let _ = rejected_sender.send(FileReadEvent {
                     token,
-                    result: Err(format!("archive worker submission failed: {error}")),
+                    result: Some(Err(format!("archive worker submission failed: {error}"))),
                 });
             }
         }
@@ -257,9 +282,9 @@ impl ByteSource for FileByteSource {
         _tile_key: Option<TileKey>,
     ) {
         if len == 0 || len > MAX_RANGE_BYTES || offset.checked_add(len).is_none() {
-            let _ = self.completions.sender().send(ReadCompletion {
+            let _ = self.completions.sender().send(FileReadEvent {
                 token,
-                result: Err("invalid mkmap file range".to_string()),
+                result: Some(Err("invalid mkmap file range".to_string())),
             });
             return;
         }
@@ -267,13 +292,13 @@ impl ByteSource for FileByteSource {
         let sender = self.completions.sender();
         let rejected_sender = sender.clone();
         let shard_files = self.shard_files.clone();
-        let token_states = self.token_states.clone();
-        let read_runs_on_ui = matches!(self.workers, ArchiveWorkerPool::Serial);
-        lock_from_ui(&self.token_states).insert(token, FileReadState::Queued);
+        let state = Arc::new(AtomicU8::new(FileReadState::Queued as u8));
+        self.token_states.insert(token, state.clone());
         #[cfg(test)]
         let completion_barriers = self.completion_barriers.clone();
         match self.workers.submit(token, move || {
-            if !begin_file_read(&token_states, token, read_runs_on_ui) {
+            if !begin_file_read(&state) {
+                let _ = sender.send(FileReadEvent { token, result: None });
                 return;
             }
             let result = read_file_range(
@@ -282,53 +307,55 @@ impl ByteSource for FileByteSource {
                 offset,
                 len,
                 &shard_files,
-                read_runs_on_ui,
             );
             #[cfg(test)]
             if let Some((reached, release)) = completion_barriers {
                 reached.wait();
                 release.wait();
             }
-            if complete_file_read(&token_states, token, read_runs_on_ui) {
-                let _ = sender.send(ReadCompletion { token, result });
-            }
+            let result = complete_file_read(&state).then_some(result);
+            let _ = sender.send(FileReadEvent { token, result });
         }) {
             Ok(()) => {}
             Err(error) => {
-                lock_from_ui(&self.token_states).remove(&token);
-                let _ = rejected_sender.send(ReadCompletion {
+                self.token_states.remove(&token);
+                let _ = rejected_sender.send(FileReadEvent {
                     token,
-                    result: Err(format!("archive worker submission failed: {error}")),
+                    result: Some(Err(format!("archive worker submission failed: {error}"))),
                 });
             }
         }
     }
 
     fn cancel(&mut self, _cx: &mut Cx, token: ReadToken) {
-        let mut states = lock_from_ui(&self.token_states);
-        if let Some(state @ (FileReadState::Queued | FileReadState::Running)) =
-            states.get_mut(&token)
-        {
-            *state = FileReadState::Cancelled;
+        if let Some(state) = self.token_states.get(&token) {
+            let _ = state.fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                matches!(
+                    state,
+                    value if value == FileReadState::Queued as u8
+                        || value == FileReadState::Running as u8
+                )
+                .then_some(FileReadState::Cancelled as u8)
+            });
         }
-        drop(states);
         let dropped = self.workers.retain_queued(|queued| *queued != token);
         if !dropped.is_empty() {
-            let mut states = lock_from_ui(&self.token_states);
-            if matches!(
-                states.get(&token),
-                Some(FileReadState::Queued | FileReadState::Cancelled)
-            ) {
-                states.remove(&token);
-            }
+            self.token_states.remove(&token);
         }
     }
 
     fn poll(&mut self, _cx: &mut Cx, _event: &Event) -> Vec<ReadCompletion> {
         let mut out = Vec::new();
-        while let Ok(completion) = self.completions.try_recv() {
-            out.push(completion);
+        while let Ok(event) = self.completions.try_recv() {
+            self.token_states.remove(&event.token);
+            if let Some(result) = event.result {
+                out.push(ReadCompletion {
+                    token: event.token,
+                    result,
+                });
+            }
         }
+        self.workers.pump();
         out
     }
 }
@@ -339,18 +366,13 @@ fn read_file_range(
     offset: u64,
     len: u64,
     shard_files: &Mutex<ShardFileCache>,
-    from_ui: bool,
 ) -> Result<Arc<[u8]>, String> {
     use std::io::{Read, Seek, SeekFrom};
 
     let len = usize::try_from(len).map_err(|_| "mkmap range is too large".to_string())?;
-    let mut files = if from_ui {
-        lock_from_ui(shard_files)
-    } else {
-        shard_files
-            .lock()
-            .map_err(|_| "mkmap shard file cache lock poisoned".to_string())?
-    };
+    let mut files = shard_files
+        .lock()
+        .map_err(|_| "mkmap shard file cache lock poisoned".to_string())?;
     if !files.files.contains_key(&shard) {
         while files.files.len() >= FILE_CACHE_CAPACITY {
             if let Some(oldest) = files.lru.pop_front() {
@@ -446,28 +468,47 @@ struct CachedHttpRange {
 /// HTTP `.mkmap` source using one whole-root GET and strict shard ranges.
 pub struct HttpRangeByteSource {
     root_url: String,
+    disk_cache: Option<ArchiveCacheStore>,
     requests: HashMap<LiveId, HttpNetworkRead>,
     queued: Vec<PendingHttpRead>,
     ready: VecDeque<ReadCompletion>,
     root_cache: Option<Arc<[u8]>>,
     range_cache: HashMap<HttpRangeKey, CachedHttpRange>,
     range_cache_bytes: usize,
+    range_cache_budget: usize,
     cache_clock: u64,
     priority_dirty: bool,
+    disk_range_count: u64,
+    fetched_range_count: u64,
+    fetched_range_bytes: u64,
 }
 
 impl HttpRangeByteSource {
     pub fn new(root_url: impl Into<String>) -> Self {
+        let root_url = root_url.into().trim_end_matches('/').to_string();
+        let disk_cache = ArchiveCacheStore::open_for_url(&root_url);
+        Self::new_with_disk_cache(root_url, disk_cache)
+    }
+
+    fn new_with_disk_cache(
+        root_url: impl Into<String>,
+        disk_cache: Option<ArchiveCacheStore>,
+    ) -> Self {
         Self {
             root_url: root_url.into().trim_end_matches('/').to_string(),
+            disk_cache,
             requests: HashMap::new(),
             queued: Vec::new(),
             ready: VecDeque::new(),
             root_cache: None,
             range_cache: HashMap::new(),
             range_cache_bytes: 0,
+            range_cache_budget: HTTP_RANGE_CACHE_BYTE_CAPACITY,
             cache_clock: 0,
             priority_dirty: false,
+            disk_range_count: 0,
+            fetched_range_count: 0,
+            fetched_range_bytes: 0,
         }
     }
 
@@ -576,22 +617,8 @@ impl HttpRangeByteSource {
         }
     }
 
-    fn cache_range(&mut self, key: HttpRangeKey, bytes: Arc<[u8]>) {
-        if bytes.len() > HTTP_RANGE_CACHE_BYTE_CAPACITY {
-            return;
-        }
-        self.cache_clock = self.cache_clock.wrapping_add(1);
-        if let Some(old) = self.range_cache.insert(
-            key,
-            CachedHttpRange {
-                bytes: bytes.clone(),
-                used: self.cache_clock,
-            },
-        ) {
-            self.range_cache_bytes = self.range_cache_bytes.saturating_sub(old.bytes.len());
-        }
-        self.range_cache_bytes = self.range_cache_bytes.saturating_add(bytes.len());
-        while self.range_cache_bytes > HTTP_RANGE_CACHE_BYTE_CAPACITY {
+    fn evict_ranges_to_budget(&mut self) {
+        while self.range_cache_bytes > self.range_cache_budget {
             let Some(oldest) = self
                 .range_cache
                 .iter()
@@ -606,6 +633,24 @@ impl HttpRangeByteSource {
         }
     }
 
+    fn cache_range(&mut self, key: HttpRangeKey, bytes: Arc<[u8]>) {
+        if bytes.len() > self.range_cache_budget {
+            return;
+        }
+        self.cache_clock = self.cache_clock.wrapping_add(1);
+        if let Some(old) = self.range_cache.insert(
+            key,
+            CachedHttpRange {
+                bytes: bytes.clone(),
+                used: self.cache_clock,
+            },
+        ) {
+            self.range_cache_bytes = self.range_cache_bytes.saturating_sub(old.bytes.len());
+        }
+        self.range_cache_bytes = self.range_cache_bytes.saturating_add(bytes.len());
+        self.evict_ranges_to_budget();
+    }
+
     fn complete_network_read(
         &mut self,
         pending: HttpNetworkRead,
@@ -613,6 +658,9 @@ impl HttpRangeByteSource {
     ) -> Vec<ReadCompletion> {
         match pending.kind {
             HttpReadKind::Root => {
+                if let Some(cache) = self.disk_cache.as_mut() {
+                    let _ = cache.write_root(&bytes);
+                }
                 self.root_cache = Some(bytes.clone());
                 pending
                     .waiters
@@ -625,6 +673,13 @@ impl HttpRangeByteSource {
             }
             HttpReadKind::Range { shard, offset, len } => {
                 let fetched = HttpRangeKey { shard, offset, len };
+                if let Some(cache) = self.disk_cache.as_mut() {
+                    let _ = cache.write_range(shard, offset, &bytes);
+                }
+                self.fetched_range_count = self.fetched_range_count.saturating_add(1);
+                self.fetched_range_bytes = self
+                    .fetched_range_bytes
+                    .saturating_add(bytes.len() as u64);
                 self.cache_range(fetched, bytes.clone());
                 pending
                     .waiters
@@ -746,11 +801,36 @@ impl HttpRangeByteSource {
 }
 
 impl ByteSource for HttpRangeByteSource {
+    fn cache_bytes(&self) -> usize {
+        self.range_cache_bytes
+            .saturating_add(self.root_cache.as_ref().map_or(0, |root| root.len()))
+    }
+
+    fn set_cache_budget(&mut self, bytes: usize) {
+        self.range_cache_budget = bytes;
+        self.evict_ranges_to_budget();
+    }
+
     fn request_root(&mut self, cx: &mut Cx, token: ReadToken) {
         if let Some(bytes) = self.root_cache.as_ref() {
             self.ready.push_back(ReadCompletion {
                 token,
                 result: Ok(bytes.clone()),
+            });
+            cx.redraw_all();
+            return;
+        }
+        if let Some(bytes) = self
+            .disk_cache
+            .as_mut()
+            .and_then(ArchiveCacheStore::read_root)
+            .filter(|bytes| (112..=MAX_ROOT_BYTES).contains(&bytes.len()))
+        {
+            let bytes: Arc<[u8]> = Arc::from(bytes);
+            self.root_cache = Some(bytes.clone());
+            self.ready.push_back(ReadCompletion {
+                token,
+                result: Ok(bytes),
             });
             cx.redraw_all();
             return;
@@ -797,6 +877,21 @@ impl ByteSource for HttpRangeByteSource {
     ) {
         let requested = HttpRangeKey { shard, offset, len };
         if let Some(bytes) = self.cached_range(requested) {
+            self.ready.push_back(ReadCompletion {
+                token,
+                result: Ok(bytes),
+            });
+            cx.redraw_all();
+            return;
+        }
+        if let Some(bytes) = self
+            .disk_cache
+            .as_mut()
+            .and_then(|cache| cache.read_range(shard, offset, len))
+        {
+            let bytes: Arc<[u8]> = Arc::from(bytes);
+            self.disk_range_count = self.disk_range_count.saturating_add(1);
+            self.cache_range(requested, bytes.clone());
             self.ready.push_back(ReadCompletion {
                 token,
                 result: Ok(bytes),
@@ -930,6 +1025,20 @@ impl ByteSource for HttpRangeByteSource {
     }
 }
 
+impl Drop for HttpRangeByteSource {
+    fn drop(&mut self) {
+        let ranges = self
+            .disk_range_count
+            .saturating_add(self.fetched_range_count);
+        log!(
+            "tiles: {ranges} ranges, {} from disk cache, {} fetched, {:.1} MiB",
+            self.disk_range_count,
+            self.fetched_range_count,
+            self.fetched_range_bytes as f64 / (1024.0 * 1024.0),
+        );
+    }
+}
+
 fn validate_http_response(
     kind: &HttpReadKind,
     response: &HttpResponse,
@@ -999,9 +1108,62 @@ fn validate_http_response(
         .unwrap_or_else(|| Arc::from([])))
 }
 
+/// A tile's bytes as the archive holds them: the shared packed blob plus the
+/// root that knows how to decode it. Decoding happens where the bytes are
+/// consumed (a bake or terrain job on the pool), so the tiles staged behind
+/// the bake slots hold no private decoded copy each.
+#[derive(Clone, Debug)]
+pub enum TileBlob {
+    Decoded(Arc<[u8]>),
+    Packed { bytes: Arc<[u8]>, root: Arc<MkmapRoot> },
+}
+
+impl TileBlob {
+    pub fn decode(&self) -> Result<Arc<[u8]>, String> {
+        match self {
+            Self::Decoded(bytes) => Ok(bytes.clone()),
+            Self::Packed { bytes, root } => root.decode_blob(bytes).map(Arc::from),
+        }
+    }
+
+    /// Bytes this handle keeps alive (shared with the range cache when packed).
+    pub fn held_len(&self) -> usize {
+        match self {
+            Self::Decoded(bytes) | Self::Packed { bytes, .. } => bytes.len(),
+        }
+    }
+}
+
+impl PartialEq for TileBlob {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Decoded(a), Self::Decoded(b)) => a == b,
+            (
+                Self::Packed { bytes: a, root: ra },
+                Self::Packed { bytes: b, root: rb },
+            ) => Arc::ptr_eq(ra, rb) && a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for TileBlob {}
+
+impl From<Vec<u8>> for TileBlob {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self::Decoded(Arc::from(bytes))
+    }
+}
+
+impl From<Arc<[u8]>> for TileBlob {
+    fn from(bytes: Arc<[u8]>) -> Self {
+        Self::Decoded(bytes)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TileBytesResult {
-    Bytes(Arc<[u8]>),
+    Bytes(TileBlob),
     Missing,
     Error(String),
 }
@@ -1037,6 +1199,12 @@ enum PendingRead {
         start_tile_id: u64,
         end_tile_id: u64,
         dir_len: u64,
+        /// The parse keeps at most this many entries; a larger directory is
+        /// kept only inside `window` (inclusive tile ids), of which `core`
+        /// is the span the waiting tiles need.
+        max_entries: usize,
+        window: (u64, u64),
+        core: (u64, u64),
     },
     Blob { generation: u64, blob: BlobRef },
 }
@@ -1068,7 +1236,7 @@ struct BlobInFlight {
 enum ProcessedRead {
     Root(Result<MkmapRoot, String>),
     Leaf(Result<MkmapLeaf, String>),
-    Blob(Result<Arc<[u8]>, String>),
+    Blob(Result<TileBlob, String>),
 }
 
 struct ProcessedCompletion {
@@ -1093,6 +1261,10 @@ pub struct TileArchive<S: ByteSource> {
     root_error: Option<String>,
     root_in_flight: Option<ReadToken>,
     leaves: HashMap<usize, CachedLeaf>,
+    leaf_cache_budget: usize,
+    /// Bytes of reads allowed in flight at once; bodies in transit are
+    /// memory too, so this follows the cache budget.
+    in_flight_limit: u64,
     leaf_lru_clock: u64,
     leaf_in_flight: HashMap<usize, ReadToken>,
     blob_in_flight: HashMap<BlobRef, BlobInFlight>,
@@ -1114,6 +1286,8 @@ impl<S: ByteSource> TileArchive<S> {
             root_error: None,
             root_in_flight: None,
             leaves: HashMap::new(),
+            leaf_cache_budget: LEAF_CACHE_BYTE_CAPACITY,
+            in_flight_limit: MAX_ARCHIVE_IN_FLIGHT_BYTES,
             leaf_lru_clock: 0,
             leaf_in_flight: HashMap::new(),
             blob_in_flight: HashMap::new(),
@@ -1123,6 +1297,28 @@ impl<S: ByteSource> TileArchive<S> {
             generation: None,
             in_flight_bytes: 0,
         }
+    }
+
+    /// Ceiling for what this archive keeps in memory beyond in-flight reads:
+    /// half for decoded leaves, half for the source's range cache. A ceiling
+    /// only; nothing fills it ahead of use.
+    pub fn set_cache_budget(&mut self, bytes: usize) {
+        self.leaf_cache_budget = bytes / 2;
+        self.source.set_cache_budget(bytes - bytes / 2);
+        self.in_flight_limit = (bytes as u64)
+            .max(MIN_ARCHIVE_IN_FLIGHT_BYTES)
+            .min(MAX_ARCHIVE_IN_FLIGHT_BYTES);
+        self.enforce_leaf_cache_bounds();
+    }
+
+    /// Bytes retained by the leaf cache, the source's caches and the root
+    /// record together.
+    pub fn memory_bytes(&self) -> usize {
+        self.leaves
+            .values()
+            .map(|cached| cached.leaf.retained_bytes())
+            .fold(0usize, usize::saturating_add)
+            .saturating_add(self.source.cache_bytes())
     }
 
     pub fn zoom_range(&self) -> Option<(u32, u32)> {
@@ -1242,6 +1438,7 @@ impl<S: ByteSource> TileArchive<S> {
     }
 
     pub fn drain(&mut self, cx: &mut Cx, event: &Event) -> Vec<TileBytes> {
+        self.workers.pump();
         for completion in self.source.poll(cx, event) {
             let Some(pending) = self.pending_reads.get(&completion.token).copied() else {
                 continue;
@@ -1268,20 +1465,44 @@ impl<S: ByteSource> TileArchive<S> {
                 let result = match pending {
                     PendingRead::Root { .. } => ProcessedRead::Root(MkmapRoot::parse(&bytes)),
                     PendingRead::Leaf {
+                        index,
                         shard_count,
                         start_tile_id,
                         end_tile_id,
+                        max_entries,
+                        window,
+                        core,
                         ..
-                    } => ProcessedRead::Leaf(MkmapLeaf::parse_for_root(
-                        &bytes,
-                        shard_count,
-                        start_tile_id,
-                        end_tile_id,
-                    )),
+                    } => ProcessedRead::Leaf(
+                        MkmapLeaf::parse_for_root_limited(
+                            &bytes,
+                            shard_count,
+                            start_tile_id,
+                            end_tile_id,
+                            LeafParseLimits {
+                                max_entries,
+                                window: Some(window),
+                                core: Some(core),
+                            },
+                        )
+                        .inspect(|leaf| {
+                            if leaf.is_partial() {
+                                log!(
+                                    "mkmap leaf {index}: directory exceeds the {max_entries}-entry \
+budget; kept {} entries for tile ids {}..={}",
+                                    leaf.len(),
+                                    window.0,
+                                    window.1
+                                );
+                            }
+                        }),
+                    ),
+                    // Not decoded here: the consumer decodes on its own pool
+                    // job, so a tile waiting for a bake slot costs only its
+                    // packed bytes (shared with the range cache).
                     PendingRead::Blob { .. } => ProcessedRead::Blob(
                         root.ok_or_else(|| "mkmap root disappeared".to_string())
-                            .and_then(|root| root.decode_blob(&bytes))
-                            .map(Arc::from),
+                            .map(|root| TileBlob::Packed { bytes, root }),
                     ),
                 };
                 let _ = sender.send(ProcessedCompletion { token, result });
@@ -1314,10 +1535,48 @@ impl<S: ByteSource> TileArchive<S> {
                         }
                     }
                 }
-                (PendingRead::Leaf { generation, index, .. }, ProcessedRead::Leaf(result)) => {
+                (
+                    PendingRead::Leaf {
+                        generation,
+                        index,
+                        core,
+                        ..
+                    },
+                    ProcessedRead::Leaf(result),
+                ) => {
                     self.leaf_in_flight.remove(&index);
                     match result {
-                        Ok(leaf) => self.insert_leaf(index, leaf),
+                        Ok(leaf) => {
+                            // A window that could not hold every id it was
+                            // asked for fails those waiters instead of
+                            // re-requesting the same window forever; ids
+                            // outside the requested core fall through to a
+                            // fresh request with their own window.
+                            let uncovered: Vec<TileKey> = self
+                                .waiters
+                                .iter()
+                                .filter(|(key, waiter)| {
+                                    waiter.stage == WaitStage::Leaf(index)
+                                        && tile_id_for_key(**key).is_some_and(|id| {
+                                            id >= core.0 && id <= core.1 && !leaf.covers(id)
+                                        })
+                                })
+                                .map(|(key, _)| *key)
+                                .collect();
+                            self.insert_leaf(index, leaf);
+                            for key in uncovered {
+                                if let Some(waiter) = self.waiters.get(&key).copied() {
+                                    self.finish(
+                                        key,
+                                        waiter.generation,
+                                        TileBytesResult::Error(
+                                            "mkmap leaf window exceeds the archive cache budget"
+                                                .to_string(),
+                                        ),
+                                    );
+                                }
+                            }
+                        }
                         Err(error) => self.fail_waiters(
                             generation,
                             |waiter| waiter.stage == WaitStage::Leaf(index),
@@ -1376,11 +1635,11 @@ impl<S: ByteSource> TileArchive<S> {
     }
 
     fn can_start_range(&self, len: u64) -> bool {
-        len <= MAX_ARCHIVE_IN_FLIGHT_BYTES
+        len <= self.in_flight_limit
             && self
                 .in_flight_bytes
                 .checked_add(len)
-                .is_some_and(|total| total <= MAX_ARCHIVE_IN_FLIGHT_BYTES)
+                .is_some_and(|total| total <= self.in_flight_limit)
     }
 
     fn insert_pending_read(&mut self, token: ReadToken, pending: PendingRead, byte_len: u64) {
@@ -1422,12 +1681,13 @@ impl<S: ByteSource> TileArchive<S> {
                 self.finish(key, waiter.generation, TileBytesResult::Missing);
                 continue;
             };
-            let cached = if let Some(cached) = self.leaves.get_mut(&record.index) {
-                self.leaf_lru_clock = self.leaf_lru_clock.wrapping_add(1);
-                cached.used = self.leaf_lru_clock;
-                Some(cached.leaf.find(tile_id))
-            } else {
-                None
+            let cached = match self.leaves.get_mut(&record.index) {
+                Some(cached) if cached.leaf.covers(tile_id) => {
+                    self.leaf_lru_clock = self.leaf_lru_clock.wrapping_add(1);
+                    cached.used = self.leaf_lru_clock;
+                    Some(cached.leaf.find(tile_id))
+                }
+                _ => None,
             };
             match cached {
                 Some(Some(blob)) => {
@@ -1472,6 +1732,7 @@ impl<S: ByteSource> TileArchive<S> {
                         self.reprioritize_waiter(key);
                     } else if self.can_start_range(record.dir_len) {
                         self.waiters.get_mut(&key).unwrap().stage = WaitStage::Leaf(record.index);
+                        let (window, core) = self.leaf_window_for_record(record.index, tile_id);
                         let token = next_archive_task_token();
                         self.leaf_in_flight.insert(record.index, token);
                         self.insert_pending_read(
@@ -1483,6 +1744,10 @@ impl<S: ByteSource> TileArchive<S> {
                                 start_tile_id: record.start_tile_id,
                                 end_tile_id: record.end_tile_id,
                                 dir_len: record.dir_len,
+                                max_entries: (self.leaf_cache_budget / MkmapLeaf::ENTRY_BYTES)
+                                    .max(1),
+                                window,
+                                core,
                             },
                             record.dir_len,
                         );
@@ -1499,6 +1764,33 @@ impl<S: ByteSource> TileArchive<S> {
                 }
             }
         }
+    }
+
+    /// The inclusive id spans a leaf parse must cover: the core is every
+    /// waiter that resolves to this root record, the window widens it by
+    /// `LEAF_WINDOW_MARGIN_IDS` on each side. Only consulted when the
+    /// directory is over the leaf budget; a whole directory ignores both.
+    fn leaf_window_for_record(&self, index: usize, tile_id: u64) -> ((u64, u64), (u64, u64)) {
+        let Some(root) = self.root.as_ref() else {
+            return ((tile_id, tile_id), (tile_id, tile_id));
+        };
+        let (mut lo, mut hi) = (tile_id, tile_id);
+        for key in self.waiters.keys() {
+            let Some(id) = tile_id_for_key(*key) else {
+                continue;
+            };
+            if root.locate(id).is_some_and(|record| record.index == index) {
+                lo = lo.min(id);
+                hi = hi.max(id);
+            }
+        }
+        (
+            (
+                lo.saturating_sub(LEAF_WINDOW_MARGIN_IDS),
+                hi.saturating_add(LEAF_WINDOW_MARGIN_IDS),
+            ),
+            (lo, hi),
+        )
     }
 
     fn insert_leaf(&mut self, index: usize, leaf: MkmapLeaf) {
@@ -1519,7 +1811,7 @@ impl<S: ByteSource> TileArchive<S> {
                 .values()
                 .map(|cached| cached.leaf.retained_bytes())
                 .sum::<usize>()
-                > LEAF_CACHE_BYTE_CAPACITY
+                > self.leaf_cache_budget
         {
             if let Some(oldest) = self
                 .leaves
@@ -1559,7 +1851,7 @@ impl<S: ByteSource> TileArchive<S> {
         &mut self,
         generation: u64,
         blob: BlobRef,
-        result: Result<Arc<[u8]>, String>,
+        result: Result<TileBlob, String>,
     ) {
         let Some(in_flight) = self.blob_in_flight.remove(&blob) else {
             return;
@@ -1779,6 +2071,20 @@ impl MapTileArchive {
         }
     }
 
+    pub fn memory_bytes(&self) -> usize {
+        match self {
+            Self::File(archive) => archive.memory_bytes(),
+            Self::Http(archive) => archive.memory_bytes(),
+        }
+    }
+
+    pub fn set_cache_budget(&mut self, bytes: usize) {
+        match self {
+            Self::File(archive) => archive.set_cache_budget(bytes),
+            Self::Http(archive) => archive.set_cache_budget(bytes),
+        }
+    }
+
     pub fn zoom_range(&self) -> Option<(u32, u32)> {
         match self {
             Self::File(archive) => archive.zoom_range(),
@@ -1807,6 +2113,29 @@ impl MapTileArchive {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+    use std::time::{Duration, SystemTime};
+
+    struct TestCacheDir(PathBuf);
+
+    impl TestCacheDir {
+        fn new(name: &str) -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(1);
+            let unique = NEXT.fetch_add(1, AtomicOrdering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "makepad-archive-cache-{name}-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestCacheDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[derive(Clone, Copy, Debug)]
     enum MockRequest {
@@ -1976,7 +2305,10 @@ mod tests {
 
     fn retry_http_range(first: HttpResponse, second: HttpResponse) -> ReadCompletion {
         let mut cx = Cx::new(Box::new(|_, _| {}));
-        let mut source = HttpRangeByteSource::new("https://tiles.invalid/world.mkmap");
+        let mut source = HttpRangeByteSource::new_with_disk_cache(
+            "https://tiles.invalid/world.mkmap",
+            None,
+        );
         let token = next_archive_task_token();
         source.request_range(&mut cx, 0, 10, 4, token, 0, None);
         source.flush(&mut cx);
@@ -2022,7 +2354,10 @@ mod tests {
         }
 
         let mut cx = Cx::new(Box::new(|_, _| {}));
-        let mut source = HttpRangeByteSource::new("https://tiles.invalid/world.mkmap");
+        let mut source = HttpRangeByteSource::new_with_disk_cache(
+            "https://tiles.invalid/world.mkmap",
+            None,
+        );
         let first = next_archive_task_token();
         let second = next_archive_task_token();
         source.request_range(&mut cx, 0, 10, 4, first, 0, None);
@@ -2088,7 +2423,10 @@ mod tests {
     #[test]
     fn root_truncation_retries_then_reports_second_attempt() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
-        let mut source = HttpRangeByteSource::new("https://tiles.invalid/world.mkmap");
+        let mut source = HttpRangeByteSource::new_with_disk_cache(
+            "https://tiles.invalid/world.mkmap",
+            None,
+        );
         let token = next_archive_task_token();
         source.request_root(&mut cx, token);
         let first_id = *source.requests.keys().next().unwrap();
@@ -2136,9 +2474,90 @@ mod tests {
     }
 
     #[test]
+    fn archive_disk_cache_write_read_round_trip_uses_documented_layout() {
+        let directory = TestCacheDir::new("round-trip");
+        let url = "https://tiles.invalid/round-trip.mkmap";
+        let mut cache = ArchiveCacheStore::open_at(&directory.0, url, 1024 * 1024).unwrap();
+        cache.write_root(b"whole root").unwrap();
+        cache.write_range(7, 100, b"01234567").unwrap();
+
+        assert_eq!(cache.read_root().as_deref(), Some(b"whole root".as_slice()));
+        assert_eq!(cache.read_range(7, 102, 4).as_deref(), Some(b"2345".as_slice()));
+        assert!(cache.archive_dir().join("root.mkidx").is_file());
+        assert!(cache.archive_dir().join("007/100-8.bin").is_file());
+    }
+
+    #[test]
+    fn archive_disk_cache_lru_sweeps_to_budget_by_file_mtime() {
+        let directory = TestCacheDir::new("lru");
+        let url = "https://tiles.invalid/lru.mkmap";
+        let mut cache = ArchiveCacheStore::open_at(&directory.0, url, 1024 * 1024).unwrap();
+        cache.write_range(0, 0, b"old!").unwrap();
+        cache.write_range(0, 4, b"new!").unwrap();
+        let old = cache.archive_dir().join("000/0-4.bin");
+        let new = cache.archive_dir().join("000/4-4.bin");
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(10))
+            .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&new)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(20))
+            .unwrap();
+        let one_entry_budget = std::fs::metadata(&new).unwrap().len();
+        drop(cache);
+
+        let mut cache = ArchiveCacheStore::open_at(&directory.0, url, one_entry_budget).unwrap();
+        assert_eq!(cache.read_range(0, 0, 4), None);
+        assert_eq!(cache.read_range(0, 4, 4).as_deref(), Some(b"new!".as_slice()));
+    }
+
+    #[test]
+    fn archive_disk_cache_corrupt_entry_is_ignored_and_refetched() {
+        let directory = TestCacheDir::new("corrupt");
+        let url = "https://tiles.invalid/corrupt.mkmap";
+        let mut cache = ArchiveCacheStore::open_at(&directory.0, url, 1024 * 1024).unwrap();
+        cache.write_range(2, 10, b"bad!").unwrap();
+        let path = cache.archive_dir().join("002/10-4.bin");
+        let mut encoded = std::fs::read(&path).unwrap();
+        *encoded.last_mut().unwrap() ^= 0xff;
+        std::fs::write(&path, encoded).unwrap();
+        drop(cache);
+
+        let cache = ArchiveCacheStore::open_at(&directory.0, url, 1024 * 1024).unwrap();
+        let mut source = HttpRangeByteSource::new_with_disk_cache(url, Some(cache));
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let token = next_archive_task_token();
+        source.request_range(&mut cx, 2, 10, 4, token, 0, None);
+        source.flush(&mut cx);
+        assert_eq!(source.requests.len(), 1, "corrupt cache must fall through to HTTP");
+        let request_id = *source.requests.keys().next().unwrap();
+        let done = source.poll(
+            &mut cx,
+            &Event::NetworkResponses(vec![NetworkResponse::HttpResponse {
+                request_id,
+                response: response(206, Some("bytes 10-13/100"), b"good"),
+            }]),
+        );
+        assert_eq!(done[0].result.as_ref().unwrap().as_ref(), b"good");
+        assert_eq!(source.fetched_range_count, 1);
+        assert_eq!(
+            source.disk_cache.as_mut().unwrap().read_range(2, 10, 4).as_deref(),
+            Some(b"good".as_slice())
+        );
+    }
+
+    #[test]
     fn http_range_cache_serves_second_settle_pass_without_fetching_again() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
-        let mut source = HttpRangeByteSource::new("https://tiles.invalid/world.mkmap");
+        let mut source = HttpRangeByteSource::new_with_disk_cache(
+            "https://tiles.invalid/world.mkmap",
+            None,
+        );
         let key = TileKey { z: 3, x: 2, y: 1 };
         let first = next_archive_task_token();
         source.request_range(&mut cx, 7, 100, 4, first, 0, Some(key));
@@ -2166,7 +2585,10 @@ mod tests {
     #[test]
     fn http_queue_drops_obsolete_range_but_keeps_dispatched_download() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
-        let mut source = HttpRangeByteSource::new("https://tiles.invalid/world.mkmap");
+        let mut source = HttpRangeByteSource::new_with_disk_cache(
+            "https://tiles.invalid/world.mkmap",
+            None,
+        );
         let active = next_archive_task_token();
         let obsolete = next_archive_task_token();
         source.request_range(&mut cx, 0, 0, 4, active, 0, None);
@@ -2268,7 +2690,7 @@ mod tests {
         let blobs = done
             .iter()
             .map(|tile| match &tile.result {
-                TileBytesResult::Bytes(bytes) => bytes,
+                TileBytesResult::Bytes(TileBlob::Packed { bytes, .. }) => bytes,
                 result => panic!("unexpected tile result: {result:?}"),
             })
             .collect::<Vec<_>>();
@@ -2483,18 +2905,20 @@ mod tests {
         reached.wait();
         source.cancel(&mut cx, token);
         assert_eq!(
-            source.token_states.lock().unwrap().get(&token),
-            Some(&FileReadState::Cancelled)
+            source.token_states[&token].load(Ordering::Acquire),
+            FileReadState::Cancelled as u8
         );
         release.wait();
         for _ in 0..2_000 {
-            if source.token_states.lock().unwrap().is_empty() {
+            let completions = source.poll(&mut cx, &Event::Startup);
+            assert!(completions.is_empty());
+            if source.token_states.is_empty() {
                 break;
             }
             std::thread::yield_now();
         }
         assert!(source.poll(&mut cx, &Event::Startup).is_empty());
-        assert!(source.token_states.lock().unwrap().is_empty());
+        assert!(source.token_states.is_empty());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -2504,7 +2928,10 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let workers = new_archive_worker_pool(&mut cx);
         let mut archive = TileArchive::new(
-            HttpRangeByteSource::new("https://tiles.invalid/world.mkmap"),
+            HttpRangeByteSource::new_with_disk_cache(
+                "https://tiles.invalid/world.mkmap",
+                None,
+            ),
             workers,
         );
         archive.request_tile(&mut cx, key, 1);

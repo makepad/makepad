@@ -10,7 +10,6 @@ default = ["native"]
 native = [
     "makepad-widgets/voice",
     "dep:makepad-map-build",
-    "dep:makepad-geodata",
     "dep:makepad-mbtile-reader",
     "dep:serde_json",
     "dep:makepad-ai-hub",
@@ -26,7 +25,7 @@ makepad-ai-services = { path = "../../libs/ai/services" }
 makepad-map-nav = { path = "../../libs/map_nav" }          # M1: route.* tools (search + A* graph)
 makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }
 makepad-map-build = { path = "../../libs/map_build", features = ["faces"], optional = true } # first run: download + bake a test map
-makepad-geodata = { path = "../../libs/geodata", optional = true }          # M1: geo.* corridor queries, rain radar
+makepad-geodata = { path = "../../libs/geodata" }          # shared terrain renderer; native also uses geo/radar
 makepad-mbtile-reader = { path = "../../libs/mbtile_reader", optional = true } # terrain drape landcover source
 serde_json      = { version = "1", optional = true }                                      # geodata FeatureHit attrs
 

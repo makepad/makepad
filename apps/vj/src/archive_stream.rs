@@ -24,9 +24,11 @@ use makepad_mp4_index::{
 use makepad_widgets::makepad_platform::video_file::{
     nv12, DecodedFrame, StreamVideoCodec, VideoStreamDecoder,
 };
+use makepad_widgets::makepad_platform::thread::{ThreadOptions, ThreadSpawner};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 use crate::clock::Instant;
 use std::time::Duration;
@@ -99,11 +101,11 @@ pub struct StreamSwatch {
 }
 
 impl StreamSwatch {
-    pub fn open(url: String) -> StreamSwatch {
-        Self::open_as(url, FrameFormat::Bgra)
+    pub fn open(url: String, spawner: ThreadSpawner) -> StreamSwatch {
+        Self::open_as(url, FrameFormat::Bgra, spawner)
     }
 
-    pub fn open_as(url: String, format: FrameFormat) -> StreamSwatch {
+    pub fn open_as(url: String, format: FrameFormat, spawner: ThreadSpawner) -> StreamSwatch {
         let shared = Arc::new(Shared {
             stop: AtomicBool::new(false),
             paused: AtomicBool::new(false),
@@ -119,15 +121,25 @@ impl StreamSwatch {
         });
         let cancel = CancelToken::new();
         let (thread_shared, thread_cancel) = (shared.clone(), cancel.clone());
-        if let Err(e) = thread::Builder::new()
-            .name("vj-archive-stream".into())
-            .spawn(move || {
-                if let Err(failure) = stream_main(url, format, thread_shared.clone(), thread_cancel) {
+        let stream_spawner = spawner.clone();
+        // The decode loop lives as long as this stream is open; it feeds a
+        // fetch loop of its own over a channel.
+        let options = ThreadOptions { name: Some("vj-archive-stream".into()), ..Default::default() };
+        match spawner.spawn_worker(options, move || {
+                if let Err(failure) = stream_main(
+                    url,
+                    format,
+                    thread_shared.clone(),
+                    thread_cancel,
+                    stream_spawner,
+                ) {
                     *thread_shared.failure.lock().unwrap() = Some(failure);
                 }
-            })
-        {
-            *shared.failure.lock().unwrap() = Some(StreamFailure::Setup(e.to_string()));
+            }) {
+            Ok(handle) => handle.detach(),
+            Err(error) => {
+                *shared.failure.lock().unwrap() = Some(StreamFailure::Setup(error.to_string()));
+            }
         }
         StreamSwatch { shared, cancel }
     }
@@ -223,20 +235,24 @@ fn fetch_loop(
                 Err(TryRecvError::Disconnected) => return,
             }
         }
-        // A window fetched but not yet accepted by a full channel.
+        // A window fetched but not yet accepted by a full channel: block
+        // on the send instead of polling (a worker thread may block on a
+        // channel). A stale send during a superseding seek is harmless —
+        // the window's `gen` makes the decode+present loop skip it.
         if let Some(w) = parked.take() {
-            match windows.try_send(w) {
-                Ok(()) => {}
-                Err(TrySendError::Full(w)) => {
-                    parked = Some(w);
-                    thread::sleep(Duration::from_millis(5));
-                    continue;
-                }
-                Err(TrySendError::Disconnected(_)) => return,
+            if windows.send(w).is_err() {
+                return;
             }
         }
         let Some((gen, offset)) = cursor else {
-            thread::sleep(Duration::from_millis(10));
+            // Idle: block for the next command instead of polling.
+            match cmds.recv() {
+                Ok(FetchCmd::Start { gen, offset }) => {
+                    cursor = Some((gen, offset));
+                    parked = None;
+                }
+                Err(_) => return,
+            }
             continue;
         };
         if offset >= size {
@@ -304,6 +320,7 @@ fn stream_main(
     format: FrameFormat,
     shared: Arc<Shared>,
     cancel: CancelToken,
+    spawner: ThreadSpawner,
 ) -> Result<(), StreamFailure> {
     // ---- index
     let mut source = RangeSource::open(&url, &cancel)
@@ -355,9 +372,10 @@ fn stream_main(
     let (cmd_tx, cmd_rx) = mpsc::channel::<FetchCmd>();
     let (win_tx, win_rx) = mpsc::sync_channel::<Window>(WINDOWS_AHEAD);
     let fetch_shared = shared.clone();
-    thread::Builder::new()
-        .name("vj-archive-fetch".into())
-        .spawn(move || fetch_loop(source, cmd_rx, win_tx, fetch_shared))
+    let options = ThreadOptions { name: Some("vj-archive-fetch".into()), ..Default::default() };
+    spawner
+        .spawn_worker(options, move || fetch_loop(source, cmd_rx, win_tx, fetch_shared))
+        .map(|handle| handle.detach())
         .map_err(|e| StreamFailure::Setup(e.to_string()))?;
 
     let mut decoder = VideoStreamDecoder::new(StreamVideoCodec::H264)
@@ -398,6 +416,10 @@ fn stream_main(
             // Parked is parked, not buffering — the flag must not stick
             // from the fetch wait that ran just before the pause.
             shared.buffering.store(false, Ordering::Release);
+            // Native-only: everything past `VideoStreamDecoder::new` above
+            // is unreachable on wasm32 (that decoder is stubbed to Windows
+            // and macOS only, so this loop never runs there).
+            #[cfg(not(target_arch = "wasm32"))]
             thread::sleep(Duration::from_millis(20));
             origin += Duration::from_millis(20);
         }
@@ -452,6 +474,8 @@ fn stream_main(
                     if !reorder.is_empty() && reorder.len() > REORDER_DEPTH {
                         present(&mut reorder, REORDER_DEPTH, format, &shared, &mut origin, &mut base_100ns, &mut show_one, &mut bgra);
                     } else {
+                        // Native-only: see the pause-park comment above.
+                        #[cfg(not(target_arch = "wasm32"))]
                         thread::sleep(Duration::from_millis(4));
                         origin += Duration::from_millis(4);
                     }
@@ -534,6 +558,9 @@ fn present(
                     if remaining.is_zero() || shared.stop.load(Ordering::Acquire) {
                         break;
                     }
+                    // Native-only: `present` is only ever called from the
+                    // decode loop above, which never runs on wasm32.
+                    #[cfg(not(target_arch = "wasm32"))]
                     thread::sleep(remaining.min(Duration::from_millis(4)));
                 }
             }

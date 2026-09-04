@@ -87,6 +87,8 @@ pub struct Cx {
     pub(crate) memory_budget_bytes: usize,
     pub(crate) memory_budget_initialized: bool,
     pub(crate) thread_spawner: crate::thread::ThreadSpawner,
+    /// The runtime's warm background executor; see `Cx::task_pool`.
+    pub(crate) task_pool: std::cell::OnceCell<crate::thread::TaskPool>,
     pub null_texture: Texture,
     pub null_cube_texture: Texture,
     pub windows: CxWindowPool,
@@ -102,6 +104,11 @@ pub struct Cx {
     pub new_draw_event: DrawEvent,
 
     pub redraw_id: u64,
+
+    /// Process-wide source of uniform block generations. A generation is
+    /// issued once and never reused, so pooled draw/pass/list slots cannot
+    /// compare equal to a previous occupant's cached upload generation.
+    pub(crate) uniform_gen: u64,
 
     pub(crate) repaint_id: u64,
     pub(crate) event_id: u64,
@@ -183,7 +190,7 @@ pub struct Cx {
     pub performance_stats: PerformanceStats,
     /// Frame monitor behind the PerfGraph widget; off until the widget enables it.
     pub perf_monitor: PerfMonitor,
-    /// The F10 exploded z-layer inspection view. Inert while off.
+    /// The exploded z-layer inspection view. Inert while off.
     pub sploded: SplodedView,
     /// How many `WidgetRef` draw scopes deep the current draw is — the turtle
     /// nesting AS COMPONENTS SEE IT. Maintained by `WidgetRef::draw_walk` and
@@ -299,6 +306,10 @@ pub struct WebParams {
     pub search: String,
     #[live]
     pub hash: String,
+    /// Phone-class browser (see `WasmBridge.is_phone`): the memory budget is
+    /// `PHONE_WEB_MEMORY_BUDGET_BYTES` and the wasm heap maximum is 512 MiB.
+    #[live]
+    pub is_phone: bool,
 }
 
 #[derive(Clone, Debug, Default, Script, ScriptHook)]
@@ -333,6 +344,10 @@ pub struct XrCapabilities {
 }
 
 impl OsType {
+    /// The platform has ONE window. A second `Window` is not created there
+    /// (the web reports it once and never paints its pass; the canvas is
+    /// window zero's), so an app that wants a second surface — a projector
+    /// output, say — hosts it in-page when this is true.
     pub fn is_single_window(&self) -> bool {
         match self {
             OsType::Web(_) => true,
@@ -408,6 +423,11 @@ impl OsType {
 }
 
 const DEFAULT_MEMORY_BUDGET_BYTES: usize = 1536 * 1024 * 1024;
+/// Working budget for a phone-class browser tab: the wasm heap maximum there
+/// is 512 MiB and the tab dies around 1 GiB total, so elastic caches must
+/// stop well below the heap ceiling.
+#[allow(dead_code)]
+pub const PHONE_WEB_MEMORY_BUDGET_BYTES: usize = 320 * 1024 * 1024;
 #[allow(dead_code)]
 const LOW_MEMORY_DEVICE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 #[allow(dead_code)]
@@ -511,7 +531,11 @@ fn windows_physical_memory_bytes() -> Option<u64> {
 
 #[cfg(target_arch = "wasm32")]
 fn platform_memory_budget(web_memory_bytes: usize) -> (usize, &'static str) {
-    (web_memory_bytes, "wasm memory maximum")
+    if web_memory_bytes == PHONE_WEB_MEMORY_BUDGET_BYTES {
+        (web_memory_bytes, "phone web policy")
+    } else {
+        (web_memory_bytes, "wasm memory maximum")
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -586,7 +610,47 @@ fn platform_memory_budget(default: usize) -> (usize, &'static str) {
     (default, "default")
 }
 
+/// Owner breakdown of the process memory the platform itself holds: CPU-side
+/// geometry staging, draw-list instance buffers, texture data, script
+/// resources (font files) and, on wasm, what the allocator holds from the
+/// linear memory. Walks the pools once; read it from a slow timer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CxMemoryReport {
+    /// Linear memory size on wasm; 0 elsewhere.
+    pub wasm_memory_bytes: usize,
+    /// Live direct (above the size classes) allocations on wasm; 0 elsewhere.
+    pub alloc_large_bytes: usize,
+    pub alloc_large_count: usize,
+    /// Live 64 KiB size-class chunks on wasm; 0 elsewhere.
+    pub alloc_chunk_bytes: usize,
+    /// CPU vertex/index staging still held by geometry slots (free slots included).
+    pub geometry_cpu_bytes: usize,
+    pub geometry_slots: usize,
+    /// CPU instance buffers held by draw items across every draw-list slot.
+    pub instance_cpu_bytes: usize,
+    pub draw_list_slots: usize,
+    /// CPU pixel data held by texture slots.
+    pub texture_cpu_bytes: usize,
+    /// Loaded script resource bytes (font files and other crate resources).
+    pub resource_bytes: usize,
+}
+
 impl Cx {
+    /// Issue the next nonzero, process-wide uniform generation.
+    #[inline]
+    pub fn next_uniform_gen(&mut self) -> u64 {
+        Self::next_uniform_gen_from(&mut self.uniform_gen)
+    }
+
+    #[inline]
+    pub(crate) fn next_uniform_gen_from(uniform_gen: &mut u64) -> u64 {
+        let next = *uniform_gen;
+        *uniform_gen = uniform_gen
+            .checked_add(1)
+            .expect("uniform generation counter exhausted");
+        next
+    }
+
     /// A conservative process-wide memory envelope for cache/batch budgets.
     /// Native keeps a generous fixed ceiling; web reports the shared wasm
     /// browser memory envelope through `ToWasmInit` before `Event::Startup`.
@@ -606,6 +670,63 @@ impl Cx {
             budget / (1024 * 1024),
             source
         );
+    }
+
+    pub fn memory_report(&self) -> CxMemoryReport {
+        let mut report = CxMemoryReport::default();
+        #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+        {
+            let stats = crate::web_alloc::stats();
+            report.wasm_memory_bytes = crate::web_alloc::wasm_memory_bytes();
+            report.alloc_large_bytes = stats.large_bytes;
+            report.alloc_large_count = stats.large_count;
+            report.alloc_chunk_bytes = stats.chunk_bytes;
+        }
+        for slot in &self.geometries.0.pool {
+            report.geometry_slots += 1;
+            report.geometry_cpu_bytes = report
+                .geometry_cpu_bytes
+                .saturating_add(slot.item.vertices.capacity_bytes())
+                .saturating_add(slot.item.indices.capacity_bytes());
+        }
+        for slot in &self.draw_lists.0.pool {
+            report.draw_list_slots += 1;
+            for item in &slot.item.draw_items.buffer {
+                if let Some(instances) = &item.instances {
+                    report.instance_cpu_bytes = report
+                        .instance_cpu_bytes
+                        .saturating_add(instances.capacity().saturating_mul(4));
+                }
+            }
+        }
+        for slot in &self.textures.0.pool {
+            report.texture_cpu_bytes = report
+                .texture_cpu_bytes
+                .saturating_add(slot.item.format.cpu_data_bytes());
+        }
+        report.resource_bytes = self
+            .script_data
+            .resources
+            .resources
+            .borrow()
+            .iter()
+            .map(|resource| resource.loaded_len())
+            .fold(0usize, usize::saturating_add);
+        report
+    }
+
+    /// Direct allocations of 4 MiB or more since the previous call, oldest
+    /// first, as `(bytes, linear memory bytes at that moment)`. Empty outside
+    /// wasm. Names the requests that grew the heap between two reports.
+    pub fn take_big_allocation_events(&self) -> Vec<(usize, usize)> {
+        #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+        {
+            crate::web_alloc::take_big_events()
+        }
+        #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
+        {
+            Vec::new()
+        }
     }
 
     /// Select the application's font policy before script/theme registration.
@@ -698,6 +819,7 @@ impl Cx {
             thread_spawner: crate::thread::ThreadSpawner::for_current_thread(
                 crate::thread::available_parallelism().get(),
             ),
+            task_pool: std::cell::OnceCell::new(),
             in_makepad_studio: false,
             game_input_remote: Vec::new(),
             in_draw_event: false,
@@ -719,6 +841,7 @@ impl Cx {
             new_actions: Default::default(),
 
             redraw_id: 1,
+            uniform_gen: 1,
             event_id: 1,
             repaint_id: 1,
             timer_id: 1,
@@ -896,6 +1019,14 @@ mod memory_budget_tests {
     const GIB: u64 = 1024 * MIB;
 
     #[test]
+    fn uniform_generation_counter_starts_at_one_and_is_monotonic() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        assert_eq!(cx.next_uniform_gen(), 1);
+        assert_eq!(cx.next_uniform_gen(), 2);
+        assert_eq!(cx.next_uniform_gen(), 3);
+    }
+
+    #[test]
     fn low_memory_desktop_uses_one_quarter_of_physical_ram() {
         assert_eq!(
             memory_budget_from_physical_memory(4 * GIB, MemoryBudgetPolicy::Desktop),
@@ -933,5 +1064,23 @@ mod memory_budget_tests {
             memory_budget_from_physical_memory(8 * GIB, MemoryBudgetPolicy::Mobile),
             DEFAULT_MEMORY_BUDGET_BYTES
         );
+    }
+}
+
+impl Cx {
+    /// True while the platform is still compiling draw shaders it was handed
+    /// and is therefore dropping (WebGL) their draw calls. Native backends
+    /// build pipelines inside the paint that first uses them and never
+    /// answer true. An offscreen bake that captures pixels polls this before
+    /// trusting a frame: a capture drawn while its program links is black.
+    pub fn draw_shaders_pending(&self) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.os.webgl_shaders_pending > 0
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            false
+        }
     }
 }

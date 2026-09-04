@@ -452,6 +452,11 @@ impl AssetClient {
         Ok(AssetsPage { assets: page.assets, next: self.wrap_cursor(page.cursor) })
     }
 
+    /// Run one bounded read-only catalog query through the connected store.
+    pub fn assets_query(&self, sql: &str) -> ClientResult<crate::dto::AssetsQueryDto> {
+        self.api.assets_query(sql)
+    }
+
     pub fn asset_detail(&self, id: &makepad_asset_data::AssetId) -> ClientResult<AssetDetailDto> {
         self.api.asset_detail(id)
     }
@@ -1035,7 +1040,7 @@ impl AssetClient {
         abort: &dyn Fn() -> bool,
     ) -> ClientResult<PathBuf> {
         let digest = *blob.as_bytes();
-        let mut writer = self.cache().open_partial(&digest)?;
+        let mut writer = self.cache().open_partial_at(&digest, now_ms())?;
 
         // A partial already at/above the expected size cannot be extended by
         // a range request; it is either complete (commit will prove it) or

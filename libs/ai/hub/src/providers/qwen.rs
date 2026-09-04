@@ -14,12 +14,15 @@
 //! - `/models` entries for chat models carry `"domain": "chat"` and the
 //!   existing `available` / `unavailable_reason` fields.
 //! - `POST /generate` accepts `{"model", "domain": "chat", "chat_system",
-//!   "chat_messages": [{"role", "text"}...], "max_tokens"}`. `prompt` is
+//!   "chat_messages": [{"role", "text"}...], "max_tokens"?, "thinking"?}`. `prompt` is
 //!   also set (last user text) for forward compatibility.
 //! - `GET /job/<id>` gains `"partial_text"`: the assistant text so far, a
 //!   monotonically growing prefix of the final text. The final text is the
 //!   terminal `partial_text` — no separate artifact fetch is required for
 //!   chat.
+//! - The `/generate` response optionally carries `"think_open"`, saying
+//!   whether the node's generation prefill opened a think block. Older nodes
+//!   omit it, in which case the client retains its model-id inference.
 //!
 //! Until a fleet node implements this, `availability()` honestly reports
 //! `Unavailable` with the per-node reasons — which is exactly what the UI
@@ -208,9 +211,10 @@ impl FleetPickCache {
         (probed == base).then_some(*lanes)
     }
 
-    /// Take the stale pick for the scan's last-resort fallback.
-    fn take_stale(&self) -> Option<(String, String, bool)> {
-        let pick = self.lock().pick.take()?;
+    /// Inspect the stale pick for the scan's last-resort fallback. A caller
+    /// looking for another model must not remove the shared last-good pick.
+    fn stale(&self) -> Option<(String, String, bool)> {
+        let pick = self.lock().pick.clone()?;
         Some((pick.base, pick.model, pick.text_fallback))
     }
 }
@@ -219,7 +223,16 @@ pub struct FleetQwenChatProvider<T: FleetTransport> {
     transport: T,
     /// Node base URLs from LAN discovery, e.g. `http://10.0.0.169:8123`.
     bases: Vec<String>,
-    max_tokens: u32,
+    /// Exact fleet model requested by the caller. `None` keeps the normal
+    /// provider preference order.
+    preferred_model: Option<String>,
+    /// `None` leaves the field off the wire so the serving node chooses its
+    /// own default. A positive value is forwarded without alteration.
+    max_tokens: Option<u32>,
+    /// `None` preserves the serving model's default thinking mode.
+    thinking: Option<bool>,
+    /// Every turn gets a fresh sample, including an empty-completion retry.
+    sample_seed: u64,
     active: Option<ActiveJob>,
     /// Private by default; the broker hands EVERY session's provider the
     /// same one so the fleet is probed once, not once per session.
@@ -274,18 +287,42 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         FleetQwenChatProvider {
             transport,
             bases,
+            preferred_model: None,
             // NOT a policy number: the client requests the maximum and the
             // serving lane clamps to its physics (context minus prompt).
             // Every policy cap tried here got observed cutting a real
             // level-building turn mid-source (2048, then 3072 on 2026-08-27,
             // dog-shop interior). Boxes serving an older build clamp this to
             // their fixed ceiling, which is merely what they did before.
-            max_tokens: u32::MAX,
+            max_tokens: Some(u32::MAX),
+            thinking: None,
+            sample_seed: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0)
+                ^ std::process::id() as u64,
             active: None,
             picks,
             conversation: Self::conversation_id(),
             wire: Vec::new(),
         }
+    }
+
+    /// Prefer one exact advertised fleet model id, falling back to normal
+    /// election when no node advertises it.
+    pub fn with_preferred_model(mut self, model: Option<String>) -> Self {
+        self.preferred_model = model.map(|model| model.trim().to_string()).filter(|model| !model.is_empty());
+        self
+    }
+
+    pub fn with_max_tokens(mut self, max_tokens: Option<u32>) -> Self {
+        self.max_tokens = max_tokens.filter(|tokens| *tokens > 0);
+        self
+    }
+
+    pub fn with_thinking(mut self, thinking: Option<bool>) -> Self {
+        self.thinking = thinking;
+        self
     }
 
     fn mark_dead(&mut self, base: &str) {
@@ -302,7 +339,9 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
     /// scan stops at the first usable node (last-good first).
     fn probe(&mut self) -> Result<(String, String, bool), String> {
         if let Some(pick) = self.picks.fresh() {
-            return Ok(pick);
+            if self.preferred_model.as_deref().is_none_or(|wanted| wanted == pick.1) {
+                return Ok(pick);
+            }
         }
         if self.bases.is_empty() {
             return Err(format!(
@@ -327,32 +366,28 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         // home queues the turn behind whatever those lanes are doing —
         // measured tonight as one runaway think-loop starving every other
         // conversation on the box.
-        let mut full_home: Option<(String, String, bool)> = None;
-        let mut laneless: Option<(String, String, bool)> = None;
+        let mut preferred = PickLadder::default();
+        let mut fallback = PickLadder::default();
         for base in order {
             if self.picks.is_dead(&base) {
                 reasons.push(format!("{base}: skipped (recently unreachable)"));
                 continue;
             }
-            match self.probe_one(&base, &mut reasons) {
-                Some((model, text_fallback, HomeTier::FreeLane)) => {
-                    self.picks.remember(base.clone(), model.clone(), text_fallback);
-                    return Ok((base, model, text_fallback));
-                }
-                Some((model, text_fallback, HomeTier::FullLanes)) => {
-                    if full_home.is_none() {
-                        full_home = Some((base, model, text_fallback));
+            if let Some(hit) = self.probe_one(&base, &mut reasons) {
+                if let Some((model, text_fallback)) = hit.preferred {
+                    let pick = (base.clone(), model, text_fallback);
+                    if hit.tier == HomeTier::FreeLane {
+                        self.picks.remember(pick.0.clone(), pick.1.clone(), pick.2);
+                        return Ok(pick);
                     }
+                    preferred.offer(pick, hit.tier);
                 }
-                Some((model, text_fallback, HomeTier::NoLanes)) => {
-                    if laneless.is_none() {
-                        laneless = Some((base, model, text_fallback));
-                    }
+                if let Some((model, text_fallback)) = hit.fallback {
+                    fallback.offer((base, model, text_fallback), hit.tier);
                 }
-                None => {}
             }
         }
-        if let Some((base, model, text_fallback)) = full_home.or(laneless) {
+        if let Some((base, model, text_fallback)) = preferred.best().or_else(|| fallback.best()) {
             self.picks.remember(base.clone(), model.clone(), text_fallback);
             return Ok((base, model, text_fallback));
         }
@@ -363,7 +398,7 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         // POST decide (it has its own connect handling). Without this the
         // FINAL round of a long successful turn died at the re-probe and
         // the user saw an error after their level had already built.
-        if let Some((base, model, text_fallback)) = self.picks.take_stale() {
+        if let Some((base, model, text_fallback)) = self.picks.stale() {
             self.picks.remember(base.clone(), model.clone(), text_fallback);
             return Ok((base, model, text_fallback));
         }
@@ -386,7 +421,7 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
 
     /// The third element of a hit places this box on the scan's ladder
     /// (see `probe`).
-    fn probe_one(&mut self, base: &str, reasons: &mut Vec<String>) -> Option<(String, bool, HomeTier)> {
+    fn probe_one(&mut self, base: &str, reasons: &mut Vec<String>) -> Option<NodePicks> {
         let health = match self.get_json_retry(&format!("{base}/health")) {
             Ok(v) => v,
             Err(e) => {
@@ -425,6 +460,8 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         if !has_chat {
             reasons.push(format!("{base}: no chat capability (will try text models)"));
         }
+        let mut preferred_chat: Option<String> = None;
+        let mut preferred_text: Option<String> = None;
         let mut chat_id: Option<String> = None;
         let mut text_id: Option<String> = None;
         for row in rows {
@@ -440,6 +477,15 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
                 reasons.push(format!("{base}: {id} {why}"));
                 continue;
             }
+            if let Some(wanted) = &self.preferred_model {
+                if id == wanted {
+                    if domain == "chat" {
+                        preferred_chat = Some(id.to_string());
+                    } else if domain == "text" {
+                        preferred_text = Some(id.to_string());
+                    }
+                }
+            }
             if domain == "chat" {
                 if better_pick(chat_id.as_deref(), id, row) {
                     chat_id = Some(id.to_string());
@@ -450,13 +496,45 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
                 }
             }
         }
-        if let Some(model) = chat_id {
-            return Some((model, false, tier));
+        let preferred = preferred_chat
+            .map(|model| (model, false))
+            .or_else(|| preferred_text.map(|model| (model, true)));
+        let fallback = chat_id
+            .map(|model| (model, false))
+            .or_else(|| text_id.map(|model| (model, true)));
+        (preferred.is_some() || fallback.is_some()).then_some(NodePicks {
+            preferred,
+            fallback,
+            tier,
+        })
+    }
+}
+
+struct NodePicks {
+    preferred: Option<(String, bool)>,
+    fallback: Option<(String, bool)>,
+    tier: HomeTier,
+}
+
+#[derive(Default)]
+struct PickLadder {
+    free: Option<(String, String, bool)>,
+    full: Option<(String, String, bool)>,
+    laneless: Option<(String, String, bool)>,
+}
+
+impl PickLadder {
+    fn offer(&mut self, pick: (String, String, bool), tier: HomeTier) {
+        match tier {
+            HomeTier::FreeLane if self.free.is_none() => self.free = Some(pick),
+            HomeTier::FullLanes if self.full.is_none() => self.full = Some(pick),
+            HomeTier::NoLanes if self.laneless.is_none() => self.laneless = Some(pick),
+            _ => {}
         }
-        if let Some(model) = text_id {
-            return Some((model, true, tier));
-        }
-        None
+    }
+
+    fn best(self) -> Option<(String, String, bool)> {
+        self.free.or(self.full).or(self.laneless)
     }
 }
 
@@ -520,7 +598,10 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
         }
         tap_turn_input(input);
         let (base, model, text_fallback) = self.probe()?;
-        let open_think = crate::protocol::model_uses_open_think(&model);
+        // Older nodes do not advertise the prefill shape, so retain the
+        // historical model/request inference only as a compatibility fallback.
+        let inferred_open_think = self.thinking != Some(false)
+            && crate::protocol::model_uses_open_think(&model);
         // The WIRE transcript is append-only, mirroring the lane's KV: turns
         // already sent are reused byte-for-byte (raw assistant replies
         // included — the node's own tokens), and only the tail the session
@@ -594,15 +675,24 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
             last_user
         };
         let domain = if text_fallback { "text" } else { "chat" };
-        let body = json::obj(vec![
+        let seed = self.sample_seed & i64::MAX as u64;
+        self.sample_seed = self.sample_seed.wrapping_add(1);
+        let mut fields = vec![
             ("model", json::s(model)),
             ("domain", json::s(domain)),
+            ("seed", Value::Int(seed as i64)),
             ("prompt", json::s(prompt)),
             ("chat_system", json::s(input.system.clone())),
             ("chat_session", json::s(self.conversation.clone())),
             ("chat_messages", Value::Arr(messages)),
-            ("max_tokens", Value::Int(self.max_tokens as i64)),
-        ]);
+        ];
+        if let Some(max_tokens) = self.max_tokens {
+            fields.push(("max_tokens", Value::Int(max_tokens as i64)));
+        }
+        if let Some(thinking) = self.thinking {
+            fields.push(("thinking", Value::Bool(thinking)));
+        }
+        let body = json::obj(fields);
         // Connect-refused/timeout means the TCP session never opened, so no
         // job exists server-side — the ONE retriable POST failure class on
         // this flaky LAN (anything after connect could have created the job
@@ -636,6 +726,10 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
             .and_then(Value::as_str)
             .ok_or_else(|| "generate response missing job_id".to_string())?
             .to_string();
+        let open_think = resp
+            .get("think_open")
+            .and_then(Value::as_bool)
+            .unwrap_or(inferred_open_think);
         self.active = Some(ActiveJob {
             base,
             job,
@@ -756,7 +850,7 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
         let partial = status.get("partial_text").and_then(Value::as_str).unwrap_or("");
         if !active.think_opened
             && active.delivered == 0
-            && (active.open_think || active.think_tokens.is_some_and(|n| n > 0))
+            && active.open_think
             && !partial.starts_with("<think>")
         {
             // First tokens of a reasoning turn, template-opened: give the
@@ -1037,6 +1131,8 @@ mod wire_transcript_tests {
     struct Scripted {
         generates: Rc<RefCell<Vec<Value>>>,
         replies: Rc<RefCell<VecDeque<String>>>,
+        polls: Rc<RefCell<VecDeque<Value>>>,
+        think_open: Rc<RefCell<Option<bool>>>,
     }
 
     impl FleetTransport for Scripted {
@@ -1044,7 +1140,11 @@ mod wire_transcript_tests {
             assert!(url.ends_with("/generate"), "{url}");
             self.generates.borrow_mut().push(body.clone());
             let n = self.generates.borrow().len();
-            Ok(json::obj(vec![("job_id", json::s(format!("j{n}")))]))
+            let mut fields = vec![("job_id", json::s(format!("j{n}")))];
+            if let Some(think_open) = *self.think_open.borrow() {
+                fields.push(("think_open", Value::Bool(think_open)));
+            }
+            Ok(json::obj(fields))
         }
         fn get_json(&mut self, url: &str) -> Result<Value, String> {
             if url.ends_with("/health") {
@@ -1056,13 +1156,24 @@ mod wire_transcript_tests {
             if url.ends_with("/models") {
                 return Ok(json::obj(vec![(
                     "models",
-                    Value::Arr(vec![json::obj(vec![
-                        ("id", json::s("qwen3.8-27b")),
-                        ("domain", json::s("chat")),
-                        ("available", Value::Bool(true)),
-                        ("state", json::s("loaded")),
-                    ])]),
+                    Value::Arr(vec![
+                        json::obj(vec![
+                            ("id", json::s("qwen3.8-27b")),
+                            ("domain", json::s("chat")),
+                            ("available", Value::Bool(true)),
+                            ("state", json::s("loaded")),
+                        ]),
+                        json::obj(vec![
+                            ("id", json::s("qwen3.6-27b")),
+                            ("domain", json::s("chat")),
+                            ("available", Value::Bool(true)),
+                            ("state", json::s("loaded")),
+                        ]),
+                    ]),
                 )]));
+            }
+            if let Some(status) = self.polls.borrow_mut().pop_front() {
+                return Ok(status);
             }
             // A job poll: pop the scripted raw reply.
             let raw = self
@@ -1111,6 +1222,129 @@ mod wire_transcript_tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn an_exact_preferred_model_overrides_the_default_rank() {
+        let transport = Scripted::default();
+        let mut provider = FleetQwenChatProvider::new(transport.clone(), vec!["http://n1:1".into()])
+            .with_preferred_model(Some("qwen3.6-27b".into()));
+        assert!(matches!(
+            provider.availability(),
+            ProviderAvailability::Available { model, .. } if model == "qwen3.6-27b"
+        ));
+        provider
+            .begin_turn(&TurnInput::new("SYS", vec![user("hello")]))
+            .unwrap();
+        assert_eq!(
+            transport.generates.borrow()[0].get("model").and_then(Value::as_str),
+            Some("qwen3.6-27b")
+        );
+    }
+
+    #[test]
+    fn a_missing_preferred_model_falls_back_to_the_default_qwen() {
+        let transport = Scripted::default();
+        let mut provider = FleetQwenChatProvider::new(transport, vec!["http://n1:1".into()])
+            .with_preferred_model(Some("qwen-does-not-exist".into()));
+        assert!(matches!(
+            provider.availability(),
+            ProviderAvailability::Available { model, .. } if model == "qwen3.8-27b"
+        ));
+    }
+
+    #[test]
+    fn authoritative_closed_think_keeps_tagless_short_answers() {
+        for answer in ["x", "7", "✅"] {
+            let transport = Scripted::default();
+            *transport.think_open.borrow_mut() = Some(false);
+            transport.replies.borrow_mut().push_back(answer.to_string());
+            let mut provider = FleetQwenChatProvider::new(
+                transport,
+                vec!["http://n1:1".into()],
+            );
+            provider
+                .begin_turn(&TurnInput::new("SYS", vec![user("hello")]))
+                .unwrap();
+            let events = provider.poll();
+            assert!(events.iter().any(
+                |event| matches!(event, ProviderEvent::Delta(text) if text == answer)
+            ));
+            assert!(events.iter().any(
+                |event| matches!(event, ProviderEvent::Done { text } if text == answer)
+            ));
+        }
+    }
+
+    #[test]
+    fn tagless_visible_text_streams_incrementally_when_think_is_closed() {
+        let transport = Scripted::default();
+        *transport.think_open.borrow_mut() = Some(false);
+        transport.polls.borrow_mut().extend([
+            json::obj(vec![
+                ("state", json::s("running")),
+                ("partial_text", json::s("✅")),
+                (
+                    "serving",
+                    json::obj(vec![("think_tokens", Value::Int(1))]),
+                ),
+            ]),
+            json::obj(vec![
+                ("state", json::s("done")),
+                ("partial_text", json::s("✅7")),
+            ]),
+        ]);
+        let mut provider = FleetQwenChatProvider::new(
+            transport,
+            vec!["http://n1:1".into()],
+        );
+        provider
+            .begin_turn(&TurnInput::new("SYS", vec![user("hello")]))
+            .unwrap();
+        let first = provider.poll();
+        assert!(first
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::Delta(text) if text == "✅")));
+        assert!(first
+            .iter()
+            .all(|event| !matches!(event, ProviderEvent::Delta(text) if text.contains("<think>"))));
+        let second = provider.poll();
+        assert!(second.iter().any(
+            |event| matches!(event, ProviderEvent::Delta(text) if text == "7")
+        ));
+        assert!(second.iter().any(
+            |event| matches!(event, ProviderEvent::Done { text } if text == "✅7")
+        ));
+    }
+
+    #[test]
+    fn generation_options_are_additive_and_token_caps_are_exact() {
+        let omitted = Scripted::default();
+        let mut provider = FleetQwenChatProvider::new(
+            omitted.clone(),
+            vec!["http://n1:1".into()],
+        )
+        .with_max_tokens(None)
+        .with_thinking(Some(false));
+        provider
+            .begin_turn(&TurnInput::new("SYS", vec![user("hello")]))
+            .unwrap();
+        let body = &omitted.generates.borrow()[0];
+        assert!(body.get("max_tokens").is_none());
+        assert_eq!(body.get("thinking").and_then(Value::as_bool), Some(false));
+
+        let capped = Scripted::default();
+        let mut provider = FleetQwenChatProvider::new(
+            capped.clone(),
+            vec!["http://n1:1".into()],
+        )
+        .with_max_tokens(Some(73));
+        provider
+            .begin_turn(&TurnInput::new("SYS", vec![user("hello")]))
+            .unwrap();
+        let body = &capped.generates.borrow()[0];
+        assert_eq!(body.get("max_tokens").and_then(Value::as_u64), Some(73));
+        assert!(body.get("thinking").is_none());
     }
 
     /// The wire mirror echoes the RAW reply and carries a stable

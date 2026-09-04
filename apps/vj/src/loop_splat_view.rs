@@ -70,7 +70,6 @@ pub struct SplatViewModel {
     pub enabled: bool,
     pub cols: usize,
     pub col_bars: [u8; SPLAT_COLS],
-    pub col_start_secs: [f64; SPLAT_COLS],
     /// Each cell's source-time start and length. Missing cells stay zeroed.
     pub spans: [[(f32, f32); SPLAT_COLS]; SPLAT_ROWS],
     pub duration_secs: f32,
@@ -90,7 +89,6 @@ impl PartialEq for SplatViewModel {
             && self.enabled == other.enabled
             && self.cols == other.cols
             && self.col_bars == other.col_bars
-            && self.col_start_secs == other.col_start_secs
             && self.spans == other.spans
             && self.duration_secs == other.duration_secs
             && self.cells == other.cells
@@ -114,7 +112,6 @@ impl SplatViewModel {
             enabled: false,
             cols: 0,
             col_bars: [0; SPLAT_COLS],
-            col_start_secs: [0.0; SPLAT_COLS],
             spans: [[(0.0, 0.0); SPLAT_COLS]; SPLAT_ROWS],
             duration_secs: 0.0,
             cells: [[SplatCellView::Empty; SPLAT_COLS]; SPLAT_ROWS],
@@ -489,7 +486,7 @@ impl VjLoopSplat {
             .cells
             .iter()
             .flatten()
-            .any(|cell| matches!(cell, SplatCellView::Queued { .. } | SplatCellView::Playing { .. } ))
+            .any(|cell| matches!(cell, SplatCellView::Queued { .. } | SplatCellView::Playing { .. }))
     }
 
     fn hit_at(&self, cx: &Cx, pos: DVec2) -> Option<SplatHit> {
@@ -1095,7 +1092,6 @@ mod tests {
         assert!(!model.enabled);
         assert_eq!(model.cols, 0);
         assert_eq!(model.col_bars, [0; SPLAT_COLS]);
-        assert_eq!(model.col_start_secs, [0.0; SPLAT_COLS]);
         assert_eq!(model.spans, [[(0.0, 0.0); SPLAT_COLS]; SPLAT_ROWS]);
         assert_eq!(model.duration_secs, 0.0);
         assert!(model.blocks.iter().flatten().all(Option::is_none));

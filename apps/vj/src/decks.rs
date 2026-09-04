@@ -486,6 +486,30 @@ pub struct SplatUiState {
     pub grid: Arc<SplatGrid>,
     pub enabled: bool,
     pub last: SplatSnapshot,
+    /// The slot whose source position drives the deck picture. This mirrors
+    /// the audio state's view choice without putting UI metadata in audio.
+    pub view: Option<(SplatRow, u8, SplatPart)>,
+}
+
+impl SplatUiState {
+    /// The exact source sub-span highlighted on the large waveform, plus
+    /// its one-based column label. A disabled grid has no overlay.
+    pub fn view_loop(&self) -> Option<(LoopSpan, u8)> {
+        if !self.enabled {
+            return None;
+        }
+        let (row, col, part) = self.view?;
+        if usize::from(col) >= SPLAT_COLS {
+            return None;
+        }
+        if !part.is_valid() {
+            return None;
+        }
+        let cell = self.grid.cells[row.index()][usize::from(col)]?;
+        let len = cell.span.len_secs() / f64::from(part.den);
+        let start = cell.span.start_secs + f64::from(part.num) * len;
+        Some((LoopSpan { start_secs: start, end_secs: start + len }, col + 1))
+    }
 }
 
 impl LoopSpan {
@@ -693,6 +717,16 @@ impl DeckState {
     }
 
     /// A view for the sync arithmetic.
+    /// The loop grid is switched on: it owns the deck's clock, every row
+    /// derives from one master running at the track's own rate, and the
+    /// playhead the mixer reports cycles inside the cell that is sounding.
+    /// A phase landing here would re-seat that master under the loop —
+    /// so sync holds the tempo (harmless; the grid ignores it) and never
+    /// moves the playhead.
+    pub fn grid_owns_time(&self) -> bool {
+        self.splat.as_ref().is_some_and(|splat| splat.enabled)
+    }
+
     pub fn sync_view(&self) -> Option<SyncView> {
         let grid = self.grid.filter(|grid| grid.has_grid())?;
         Some(SyncView {
@@ -768,6 +802,12 @@ pub enum DeckCmd {
     SetFilter { deck: DeckId, position: f32 },
     /// One stem lane's gain, 0 = muted.
     SetStemGain { deck: DeckId, stem: usize, gain: f32 },
+    /// Move the playhead by `delta_secs` FROM WHERE IT IS on the audio
+    /// thread. The sync landings use this: a phase error measured against
+    /// a snapshot is still the same error when the command arrives, however
+    /// long that took, where an absolute target computed from the snapshot
+    /// would be stale by exactly that long.
+    SeekRelative { deck: DeckId, delta_secs: f64 },
     SplatSet { deck: DeckId, grid: Arc<SplatGrid> },
     SplatEnable { deck: DeckId, on: bool },
     SplatLaunch { deck: DeckId, row: SplatRow, col: u8, part: SplatPart },
@@ -821,12 +861,6 @@ pub struct DeckEngine {
     /// heuristic only elects; once elected, the master stands until it is
     /// ejected, replaced by handover, or the group dissolves.
     sync_master: Option<DeckId>,
-    /// How long a SeekSeconds takes to reach the audio (UI pump + command
-    /// delivery + the next block). A phase landing is computed from
-    /// positions that are this stale, so the follower is placed where the
-    /// lock will be true when the seek LANDS, not where it was true when it
-    /// was computed. 0 = uncompensated (the tests' frame of reference).
-    pub land_lookahead_secs: f64,
 }
 
 impl Default for DeckEngine {
@@ -848,7 +882,6 @@ impl Default for DeckEngine {
             last_requeued: None,
             auto_fade_hold: None,
             sync_master: None,
-            land_lookahead_secs: 0.0,
         }
     }
 }
@@ -876,16 +909,21 @@ impl DeckEngine {
         }
         let enabled = self.splat(deck).is_some_and(|splat| splat.enabled);
         let last = self.splat(deck).map(|splat| splat.last).unwrap_or_default();
+        let view = self.splat(deck).and_then(|splat| splat.view);
         self.deck_mut(deck).splat = Some(SplatUiState {
             grid: grid.clone(),
             enabled,
             last,
+            view,
         });
         vec![DeckCmd::SplatSet { deck, grid }]
     }
 
     pub fn splat_enable(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
         let Some(splat) = self.deck_mut(deck).splat.as_mut() else { return Vec::new() };
+        if splat.enabled != on {
+            splat.view = None;
+        }
         splat.enabled = on;
         vec![DeckCmd::SplatEnable { deck, on }]
     }
@@ -905,6 +943,7 @@ impl DeckEngine {
         {
             return Vec::new();
         }
+        self.deck_mut(deck).splat.as_mut().unwrap().view = Some((row, col, part));
         vec![DeckCmd::SplatLaunch { deck, row, col, part }]
     }
 
@@ -917,9 +956,17 @@ impl DeckEngine {
     }
 
     pub fn splat_scene(&mut self, deck: DeckId, col: u8) -> Vec<DeckCmd> {
-        if self.splat(deck).is_none() || col as usize >= SPLAT_COLS {
+        let Some(splat) = self.splat(deck) else { return Vec::new() };
+        if col as usize >= SPLAT_COLS {
             return Vec::new();
         }
+        let view = SplatRow::ALL
+            .into_iter()
+            .filter(|row| *row != SplatRow::Mix)
+            .filter(|row| splat.grid.cells[row.index()][usize::from(col)].is_some())
+            .last()
+            .map(|row| (row, col, SplatPart::WHOLE));
+        self.deck_mut(deck).splat.as_mut().unwrap().view = view;
         vec![DeckCmd::SplatLaunchScene { deck, col }]
     }
 
@@ -935,6 +982,21 @@ impl DeckEngine {
         if let (Some(state), Some(snapshot)) = (self.deck_mut(deck).splat.as_mut(), snapshot) {
             state.enabled = snapshot.active;
             state.last = snapshot;
+            if !snapshot.active {
+                state.view = None;
+                return;
+            }
+            let view_is_live = state.view.is_some_and(|(row, col, part)| {
+                snapshot.playing[row.index()] == Some((col, part))
+                    || snapshot.queued[row.index()] == Some((col, part))
+            });
+            if !view_is_live {
+                state.view = SplatRow::ALL.into_iter().find_map(|row| {
+                    snapshot.queued[row.index()]
+                        .or(snapshot.playing[row.index()])
+                        .map(|(col, part)| (row, col, part))
+                });
+            }
         }
     }
 
@@ -1071,6 +1133,18 @@ impl DeckEngine {
             }
         }
         Vec::new()
+    }
+
+    /// The decoder is still delivering the track already on the deck — it
+    /// opened on a lead — and its length is now known better: the
+    /// container's expectation while chunks arrive, exact at the end.
+    /// Stale generations and decks that never opened are ignored.
+    pub fn track_grew(&mut self, deck: DeckId, gen: DeckGen, duration_secs: f64) {
+        let state = self.deck_mut(deck);
+        if state.load_gen != gen || !matches!(state.load, DeckLoad::Loaded { .. }) {
+            return;
+        }
+        state.duration_secs = duration_secs.max(0.0);
     }
 
     pub fn play_pause(&mut self, deck: DeckId) -> Vec<DeckCmd> {
@@ -1845,9 +1919,11 @@ impl DeckEngine {
         // A paused leader is a frozen phase: match the tempo so the decks
         // run together when it starts, but never jump a playhead to align
         // with a playhead that is not moving. The play() re-lock lands the
-        // phase when the leader actually runs.
+        // phase when the leader actually runs. A paused FOLLOWER is left
+        // exactly where it is for the same reason, and because a freshly
+        // loaded track that sits past zero before play is pressed reads as
+        // a fault: the phase lands when the deck starts.
         let leader_playing = self.deck(leader).playing;
-        let lookahead = self.land_lookahead_secs;
         let mut cmds = Vec::new();
         let state = self.deck_mut(follower);
         state.synced = true;
@@ -1857,23 +1933,17 @@ impl DeckEngine {
             state.pitch = (plan.rate - 1.0).clamp(-0.5, 0.5);
             cmds.push(DeckCmd::SetRate { deck: follower, rate: plan.rate });
         }
-        // A hand on the record owns the playhead; the phase lock waits.
-        if !state.scratching && leader_playing && state.playing {
+        // A hand on the record owns the playhead, and so does a running
+        // loop grid; the phase lock waits.
+        if !state.scratching && !state.grid_owns_time() && leader_playing && state.playing {
             if let Some(secs) = plan.seek_secs {
-                // Land where the lock is true when the seek ARRIVES: both
-                // decks keep moving while the command crosses to the audio
-                // thread, so an uncompensated landing is late by exactly
-                // that much, every time.
-                let secs = secs + plan.rate * lookahead;
+                // The landing is the phase ERROR, applied to the live
+                // playhead when it arrives: both decks keep moving while
+                // the command crosses to the audio thread, and a relative
+                // move is right whenever it lands.
+                let delta_secs = secs - state.position_secs;
                 state.position_secs = secs;
-                cmds.push(DeckCmd::SeekSeconds { deck: follower, secs });
-            }
-        } else if !state.scratching && !state.playing {
-            // A stopped follower can be placed freely — no lookahead: it is
-            // not moving, so the landing cannot go stale.
-            if let Some(secs) = plan.seek_secs {
-                state.position_secs = secs;
-                cmds.push(DeckCmd::SeekSeconds { deck: follower, secs });
+                cmds.push(DeckCmd::SeekRelative { deck: follower, delta_secs });
             }
         }
         cmds
@@ -2045,7 +2115,12 @@ impl DeckEngine {
                 continue;
             }
             let state = self.deck(deck);
-            if !state.synced || state.ext_sync || !state.playing || state.scratching {
+            if !state.synced
+                || state.ext_sync
+                || !state.playing
+                || state.scratching
+                || state.grid_owns_time()
+            {
                 continue;
             }
             cmds.extend(self.follow_view(deck, &view));
@@ -2064,7 +2139,6 @@ impl DeckEngine {
         let Some(follow) = external_follow(reference, &view, envelope) else {
             return Vec::new();
         };
-        let lookahead = self.land_lookahead_secs;
         let mut cmds = Vec::new();
         let state = self.deck_mut(deck);
         if (state.rate - follow.rate).abs() > 1e-4 {
@@ -2072,10 +2146,12 @@ impl DeckEngine {
             state.pitch = (follow.rate - 1.0).clamp(-0.5, 0.5);
             cmds.push(DeckCmd::SetRate { deck, rate: follow.rate });
         }
-        if let Some(secs) = follow.reseek_secs {
-            let secs = secs + follow.rate * lookahead;
+        if let Some(secs) = follow.reseek_secs.filter(|_| !state.grid_owns_time()) {
+            // Relative, like every sync landing: the error is what is
+            // known, and it stays right however late the seek lands.
+            let delta_secs = secs - state.position_secs;
             state.position_secs = secs;
-            cmds.push(DeckCmd::SeekSeconds { deck, secs });
+            cmds.push(DeckCmd::SeekRelative { deck, delta_secs });
         }
         cmds
     }
@@ -3525,15 +3601,32 @@ mod tests {
             "B plays at {} BPM",
             100.0 * rate
         );
-        // A cued deck gets the bar-accurate landing: the same position
-        // WITHIN the bar as the leader, so both hit their downbeat together.
-        let landed = seek_of(&cmds, DeckId::B).expect("a phase move for B");
-        let leader_bar = engine.deck(DeckId::A).grid.unwrap().bar_at(20.0).rem_euclid(1.0);
-        let follower_bar =
-            engine.deck(DeckId::B).grid.unwrap().bar_at(landed).rem_euclid(1.0);
+        // A cued deck is held to the TEMPO only: it stays exactly where it
+        // was put (a fresh load sits at zero until play), and the phase
+        // lands the moment it starts — as a relative move, the error the
+        // model measured, whenever the command reaches the audio thread.
         assert!(
-            (leader_bar - follower_bar).abs() < 1e-9,
-            "bar phase {follower_bar} vs {leader_bar}"
+            !cmds.iter().any(|cmd| matches!(cmd, DeckCmd::SeekSeconds { deck: DeckId::B, .. } | DeckCmd::SeekRelative { deck: DeckId::B, .. })),
+            "no phase move for a cued deck: {cmds:?}"
+        );
+        assert_eq!(engine.deck(DeckId::B).position_secs, 0.0);
+        let cmds = engine.play_pause(DeckId::B);
+        let delta = cmds.iter().find_map(|cmd| match cmd {
+            DeckCmd::SeekRelative { deck: DeckId::B, delta_secs } => Some(*delta_secs),
+            _ => None,
+        });
+        let landed = engine.deck(DeckId::B).position_secs;
+        assert!(
+            delta.is_some_and(|delta| (delta - landed).abs() < 1e-9),
+            "play lands the phase as a relative move from zero: {cmds:?}"
+        );
+        let leader_bar = engine.deck(DeckId::A).grid.unwrap().bar_at(20.0).rem_euclid(1.0);
+        let follower_beat =
+            engine.deck(DeckId::B).grid.unwrap().beat_at(landed).rem_euclid(1.0);
+        let leader_beat = engine.deck(DeckId::A).grid.unwrap().beat_at(20.0).rem_euclid(1.0);
+        assert!(
+            (leader_beat - follower_beat).abs() < 1e-9,
+            "beat phase {follower_beat} vs {leader_beat} (leader bar phase {leader_bar})"
         );
         // The leader is untouched.
         assert!(rate_of(&cmds, DeckId::A).is_none());
@@ -3602,6 +3695,10 @@ mod tests {
         engine.play_pause(DeckId::A);
         engine.observe(DeckId::A, 10.0, true);
         engine.apply_auto_sync();
+        // A PLAYING follower: a paused one is never moved by the lock, so a
+        // scrub on a paused deck simply stays where the hand left it.
+        engine.play_pause(DeckId::B);
+        engine.observe(DeckId::B, 3.0, true);
 
         let cmds = engine.scratch(DeckId::B, ScratchMotion::Grab);
         assert_eq!(
@@ -3611,16 +3708,19 @@ mod tests {
         assert!(engine.deck(DeckId::B).scratching);
         // While a hand is on the record no phase move is issued.
         engine.observe(DeckId::A, 10.4, true);
-        engine.observe(DeckId::B, 3.17, false);
+        engine.observe(DeckId::B, 3.17, true);
         let cmds = engine.apply_auto_sync();
         assert!(seek_of(&cmds, DeckId::B).is_none(), "no seek under a hand");
         let cmds = engine.scratch(DeckId::B, ScratchMotion::Move { rate: -1.5 });
         assert!(seek_of(&cmds, DeckId::B).is_none());
 
-        // Letting go re-locks it.
+        // Letting go re-locks it — relatively, from wherever the hand left it.
         let cmds = engine.scratch(DeckId::B, ScratchMotion::Release);
         assert!(!engine.deck(DeckId::B).scratching);
-        assert!(seek_of(&cmds, DeckId::B).is_some(), "release must re-lock: {cmds:?}");
+        assert!(
+            cmds.iter().any(|cmd| matches!(cmd, DeckCmd::SeekRelative { deck: DeckId::B, .. })),
+            "release must re-lock: {cmds:?}"
+        );
     }
 
     /// Phase difference between the decks, in beats of the follower's grid.
@@ -4042,6 +4142,23 @@ mod tests {
     }
 
     #[test]
+    fn seek_to_start_preserves_play_state_and_clamps_a_stopped_deck() {
+        let mut engine = DeckEngine::new();
+        let (deck, gen) = load_gen(&engine.click(item(1), DeckTarget::A));
+        engine.track_ready(deck, gen, 30.0);
+
+        engine.observe(deck, 12.0, true);
+        engine.seek_secs(deck, 0.0);
+        assert!(engine.deck(deck).playing);
+        assert_eq!(engine.deck(deck).position_secs, 0.0);
+
+        engine.observe(deck, 12.0, false);
+        engine.seek_secs(deck, -1.0);
+        assert!(!engine.deck(deck).playing);
+        assert_eq!(engine.deck(deck).position_secs, 0.0);
+    }
+
+    #[test]
     fn a_fresh_load_carries_the_channel_strip_onto_the_deck() {
         let mut engine = DeckEngine::new();
         engine.set_eq(DeckId::B, 2, 0.3);
@@ -4289,36 +4406,143 @@ mod tests {
         assert!(engine.hold_deck_sync().is_empty());
     }
 
-    /// A phase landing is placed where the lock will be true when the seek
-    /// ARRIVES: with a landing latency declared, the follower leads the
-    /// computed point by exactly rate × lookahead.
+    /// A phase landing is RELATIVE: the command carries the error the
+    /// model measured, so however late it lands on the audio thread it is
+    /// still the right move; and a paused follower is never moved at all —
+    /// its phase lands when it starts.
     #[test]
-    fn a_sync_landing_leads_by_the_declared_lookahead() {
-        let bare = {
-            let mut engine = DeckEngine::new();
-            load_analysed(&mut engine, DeckId::A, 1, 128.0, 0.1);
-            load_analysed(&mut engine, DeckId::B, 2, 124.0, 0.05);
-            engine.play_pause(DeckId::A);
-            engine.play_pause(DeckId::B);
-            engine.observe(DeckId::A, 30.0, true);
-            engine.observe(DeckId::B, 20.0, true);
-            engine.apply_auto_sync();
-            engine.deck(DeckId::B).position_secs
-        };
+    fn a_sync_landing_is_a_relative_move_and_never_moves_a_paused_deck() {
         let mut engine = DeckEngine::new();
-        engine.land_lookahead_secs = 0.02;
+        load_analysed(&mut engine, DeckId::A, 1, 128.0, 0.1);
+        load_analysed(&mut engine, DeckId::B, 2, 124.0, 0.05);
+        engine.play_pause(DeckId::A);
+        engine.observe(DeckId::A, 30.0, true);
+        engine.observe(DeckId::B, 0.0, false);
+        // Deck B is loaded and paused while A plays: tempo only, no move.
+        let cmds = engine.apply_auto_sync();
+        assert!(
+            !cmds.iter().any(|cmd| matches!(cmd, DeckCmd::SeekRelative { .. } | DeckCmd::SeekSeconds { .. })),
+            "a paused follower stays where it was put: {cmds:?}"
+        );
+        assert_eq!(engine.deck(DeckId::B).position_secs, 0.0);
+        // Once it plays, the landing is a delta equal to the phase error.
+        engine.play_pause(DeckId::B);
+        engine.observe(DeckId::A, 30.0, true);
+        engine.observe(DeckId::B, 20.0, true);
+        let before = engine.deck(DeckId::B).position_secs;
+        let cmds = engine.apply_auto_sync();
+        let delta = cmds.iter().find_map(|cmd| match cmd {
+            DeckCmd::SeekRelative { deck: DeckId::B, delta_secs } => Some(*delta_secs),
+            _ => None,
+        });
+        let landed = engine.deck(DeckId::B).position_secs;
+        match delta {
+            Some(delta) => assert!((before + delta - landed).abs() < 1e-9, "{before} + {delta} != {landed}"),
+            None => assert!((landed - before).abs() < 1e-9, "no move means no command"),
+        }
+        assert!(
+            !cmds.iter().any(|cmd| matches!(cmd, DeckCmd::SeekSeconds { .. })),
+            "a sync never issues an absolute seek: {cmds:?}"
+        );
+    }
+
+    /// A deck whose loop grid is on is never phase-moved by sync — not by
+    /// the event lock, not by the per-pump servo: the grid owns its clock
+    /// and a landing would re-seat the loop. The tempo match still goes
+    /// out (the grid ignores it), and the plain transport gets its landing
+    /// back the moment the grid is off.
+    #[test]
+    fn a_looping_follower_is_never_phase_moved_by_sync() {
+        let mut engine = DeckEngine::new();
         load_analysed(&mut engine, DeckId::A, 1, 128.0, 0.1);
         load_analysed(&mut engine, DeckId::B, 2, 124.0, 0.05);
         engine.play_pause(DeckId::A);
         engine.play_pause(DeckId::B);
+        let grid = Arc::new(SplatGrid {
+            bpm: 124.0,
+            bar_secs: 4.0 * 60.0 / 124.0,
+            first_bar_secs: 0.05,
+            sections: Vec::new(),
+            cells: [[None; SPLAT_COLS]; crate::loop_splat::SPLAT_ROWS],
+            bars_per_col: [1; SPLAT_COLS],
+        });
+        engine.splat_set(DeckId::B, grid);
+        engine.splat_enable(DeckId::B, true);
+        assert!(engine.deck(DeckId::B).grid_owns_time());
+        let moved = |cmds: &[DeckCmd]| {
+            cmds.iter().any(|cmd| {
+                matches!(
+                    cmd,
+                    DeckCmd::SeekRelative { deck: DeckId::B, .. } | DeckCmd::SeekSeconds { deck: DeckId::B, .. }
+                )
+            })
+        };
+
         engine.observe(DeckId::A, 30.0, true);
         engine.observe(DeckId::B, 20.0, true);
-        engine.apply_auto_sync();
-        let landed = engine.deck(DeckId::B).position_secs;
-        let rate = engine.deck(DeckId::B).rate;
+        let cmds = engine.apply_auto_sync();
         assert!(
-            (landed - (bare + rate * 0.02)).abs() < 1e-9,
-            "landed {landed}, uncompensated {bare}, rate {rate}"
+            (engine.deck(DeckId::B).rate - 128.0 / 124.0).abs() < 1e-9,
+            "the tempo is matched all the same: {}",
+            engine.deck(DeckId::B).rate
+        );
+        assert!(!moved(&cmds), "no landing under a running grid: {cmds:?}");
+        for position in [20.3, 20.7, 21.4] {
+            engine.observe(DeckId::A, 30.0 + position - 20.0, true);
+            engine.observe(DeckId::B, position, true);
+            let cmds = engine.hold_deck_sync();
+            assert!(!moved(&cmds), "the servo never seeks a looping deck: {cmds:?}");
+        }
+        let cmds = engine.seek_secs(DeckId::B, 40.0);
+        assert_eq!(
+            cmds.iter().filter(|cmd| matches!(cmd, DeckCmd::SeekSeconds { deck: DeckId::B, .. })).count(),
+            1,
+            "the operator's own seek goes through, with no re-lock on top: {cmds:?}"
+        );
+        assert!(!cmds.iter().any(|cmd| matches!(cmd, DeckCmd::SeekRelative { deck: DeckId::B, .. })));
+
+        // Grid off: the plain transport is held again.
+        engine.splat_enable(DeckId::B, false);
+        engine.observe(DeckId::A, 30.0, true);
+        engine.observe(DeckId::B, 20.7, true);
+        let cmds = engine.apply_auto_sync();
+        assert!(moved(&cmds), "the landing is back once the grid is off: {cmds:?}");
+    }
+
+    #[test]
+    fn a_splat_loop_exposes_its_exact_subspan_and_slot_to_the_wave_lane() {
+        let mut engine = DeckEngine::new();
+        load_analysed(&mut engine, DeckId::A, 1, 120.0, 0.0);
+        let mut cells = [[None; SPLAT_COLS]; crate::loop_splat::SPLAT_ROWS];
+        cells[SplatRow::Drums.index()][2] = Some(crate::loop_splat::SplatCell {
+            span: LoopSpan { start_secs: 8.0, end_secs: 12.0 },
+            bars: 2,
+            energy: 1.0,
+            silent: false,
+        });
+        let grid = Arc::new(SplatGrid {
+            bpm: 120.0,
+            bar_secs: 2.0,
+            first_bar_secs: 0.0,
+            sections: Vec::new(),
+            cells,
+            bars_per_col: [1; SPLAT_COLS],
+        });
+        engine.splat_set(DeckId::A, grid);
+        engine.splat_enable(DeckId::A, true);
+        let part = SplatPart { num: 1, den: 2 };
+        engine.splat_launch(DeckId::A, SplatRow::Drums, 2, part);
+        assert_eq!(
+            engine.splat(DeckId::A).and_then(SplatUiState::view_loop),
+            Some((LoopSpan { start_secs: 10.0, end_secs: 12.0 }, 3))
+        );
+        let mut snapshot = SplatSnapshot { active: true, ..SplatSnapshot::default() };
+        snapshot.playing[SplatRow::Drums.index()] = Some((2, part));
+        engine.observe_splat(DeckId::A, Some(snapshot));
+
+        assert_eq!(
+            engine.splat(DeckId::A).and_then(SplatUiState::view_loop),
+            Some((LoopSpan { start_secs: 10.0, end_secs: 12.0 }, 3))
         );
     }
 

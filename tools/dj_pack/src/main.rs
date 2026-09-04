@@ -6,7 +6,7 @@ use makepad_ai_hub::protocol::{
 use makepad_ai_hub::registry::Domain;
 use makepad_ai_stems::{CacheHeader, StemCache, StemSet, StereoBuf, CHUNK_STEP, SAMPLE_RATE};
 use makepad_asset_data::{
-    sha256, AssetAlias, AssetFile, AssetId, AssetKind, AssetManifest, Axis, BlobId, Bounds,
+    AssetAlias, AssetFile, AssetId, AssetKind, AssetManifest, Axis, BlobId, Bounds,
     Capabilities, CoordinateSystem, DerivativePolicy, DeviceTier, FileRole, MediaType, Metrics,
     Pivot, Redistribution, Rights, Vec3,
 };
@@ -16,7 +16,7 @@ use makepad_asset_store::{
 };
 use makepad_audio_decode::{decode_any, read_tags, DecodedAudio};
 use makepad_audio_sidechannels::{encode_stem_oggs, side_channel_files_with_analysis};
-use makepad_micro_serde::SerJson;
+use makepad_micro_serde::{DeJson, DeJsonErr, DeJsonState, SerJson};
 use std::collections::BTreeSet;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -26,7 +26,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const STEM_OGG_NAMES: [&str; 4] = ["drums.ogg", "bass.ogg", "vocals.ogg", "other.ogg"];
 const DJ_ANALYSIS_NAME: &str = "analysis.wave";
 const DJ_LOOP_SPLAT_NAME: &str = "loop-splat.bin";
-const MAX_STEMS_JOB_FRAMES: usize = SAMPLE_RATE as usize * 60 * 20;
+// Keep each raw eight-channel f32 result comfortably below LocalService's
+// 1 GiB artifact-response ceiling. Long tracks are stitched with one chunk
+// of overlap below, so this does not limit input duration.
+const MAX_STEMS_JOB_FRAMES: usize = SAMPLE_RATE as usize * 60 * 10;
 
 fn usage() -> &'static str {
     "makepad-dj-pack — bake web-DJ tracks through the AI hub and export a static store\n\
@@ -262,7 +265,18 @@ struct PreparedAudio {
     digest: String,
     title: String,
     artist: String,
-    comment: String,
+    embedded_attribution: TrackAttribution,
+}
+
+#[derive(Clone, Debug, Default, DeJson)]
+struct TrackAttribution {
+    title: String,
+    artist: String,
+    artist_url: String,
+    album: String,
+    source_url: String,
+    license: String,
+    license_url: String,
 }
 
 fn prepare_audio(path: &Path) -> Result<PreparedAudio, String> {
@@ -285,12 +299,29 @@ fn prepare_audio(path: &Path) -> Result<PreparedAudio, String> {
         .to_string();
     let title = clean_text(tags.title.as_deref().unwrap_or(&fallback), 512);
     let artist = clean_text(tags.artist.as_deref().unwrap_or(&fallback), 512);
-    let comment = clean_text(
-        id3_comment(&bytes).as_deref().unwrap_or(""),
-        makepad_asset_client::wire::MAX_SNIPPET_BYTES,
-    );
+    let tag = |names: &[&str]| {
+        names.iter().find_map(|name| tags.get(name)).unwrap_or("").to_string()
+    };
+    let tagged_source = tag(&["SOURCE_URL", "SOURCE", "WOAS"]);
+    let embedded_attribution = TrackAttribution {
+        title: title.clone(),
+        artist: artist.clone(),
+        artist_url: tag(&["ARTIST_URL", "ARTISTURL", "WOAR"]),
+        album: tags.album.clone().unwrap_or_default(),
+        source_url: if tagged_source.is_empty() {
+            clean_text(
+                id3_comment(&bytes).as_deref().unwrap_or(""),
+                makepad_asset_client::wire::MAX_SNIPPET_BYTES,
+            )
+        } else {
+            tagged_source
+        },
+        license: tag(&["LICENSE", "LICENCE"]),
+        license_url: tag(&["LICENSE_URL", "LICENSEURL", "LICENCE_URL", "WCOP"]),
+    };
     Ok(PreparedAudio {
-        path: path.to_path_buf(), bytes, media, frames, sample_rate, digest, title, artist, comment,
+        path: path.to_path_buf(), bytes, media, frames, sample_rate, digest, title, artist,
+        embedded_attribution,
     })
 }
 
@@ -895,7 +926,7 @@ struct PackTrack {
     alias: AssetAlias,
     side_files: Vec<makepad_asset_client::side_channels::SideChannelFile>,
     rights: Rights,
-    license_text: String,
+    attribution: TrackAttribution,
     description: String,
 }
 
@@ -903,7 +934,10 @@ fn run_pack(args: PackArgs) -> Result<(), String> {
     let mut tracks = Vec::new();
     let mut aliases = BTreeSet::new();
     for path in &args.audio {
-        let audio = prepare_audio(path)?;
+        let mut audio = prepare_audio(path)?;
+        let attribution = load_attribution(&audio)?;
+        audio.title = attribution.title.clone();
+        audio.artist = attribution.artist.clone();
         if audio.media == MediaType::Bin {
             return Err(format!(
                 "{}: FLAC can be separated but FileRole::Audio has no FLAC media type; transcode before pack",
@@ -925,7 +959,7 @@ fn run_pack(args: PackArgs) -> Result<(), String> {
         let (analysis, splat) = load_analysis_caches(&args, &audio.digest)?;
         if args.dry_run {
             let has_lyrics = load_lyrics(&args, &audio.digest)?.is_some();
-            let (_, _, description) = load_rights(&audio)?;
+            let (_, description) = attribution_rights(&audio, &attribution)?;
             let mut side_channels = Vec::new();
             if stems_complete {
                 side_channels.extend(["stem_drums", "stem_bass", "stem_vocals", "stem_other"]);
@@ -967,8 +1001,8 @@ fn run_pack(args: PackArgs) -> Result<(), String> {
         };
         let lyrics = load_lyrics(&args, &audio.digest)?;
         let side_files = side_channel_files_with_analysis(oggs, lyrics, analysis, splat);
-        let (rights, license_text, description) = load_rights(&audio)?;
-        tracks.push(PackTrack { audio, alias, side_files, rights, license_text, description });
+        let (rights, description) = attribution_rights(&audio, &attribution)?;
+        tracks.push(PackTrack { audio, alias, side_files, rights, attribution, description });
     }
     if args.dry_run {
         return Ok(());
@@ -1032,62 +1066,135 @@ fn load_lyrics(args: &PackArgs, digest: &str) -> Result<Option<String>, String> 
         .map_err(|_| format!("{}: lyrics JSON is not UTF-8", path.display()))
 }
 
-fn load_rights(audio: &PreparedAudio) -> Result<(Rights, String, String), String> {
-    let path = audio.path.parent().unwrap_or_else(|| Path::new(".")).join("LICENSE.txt");
-    let bytes = std::fs::read(&path)
-        .map_err(|error| format!("{}: required licence beside audio: {error}", path.display()))?;
-    let text = String::from_utf8(bytes.clone())
-        .map_err(|_| format!("{}: licence is not UTF-8", path.display()))?;
-    let lowercase = text.to_ascii_lowercase();
-    if !lowercase.contains("cc0") && !lowercase.contains("creative commons zero") {
+fn attribution_path(audio: &Path) -> PathBuf {
+    let mut name = audio.file_name().unwrap_or_default().to_os_string();
+    name.push(".attribution.json");
+    audio.with_file_name(name)
+}
+
+fn load_attribution(audio: &PreparedAudio) -> Result<TrackAttribution, String> {
+    let path = attribution_path(&audio.path);
+    let mut attribution = if path.is_file() {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|error| format!("{}: read attribution sidecar: {error}", path.display()))?;
+        TrackAttribution::deserialize_json(&text)
+            .map_err(|error| format!("{}: invalid attribution JSON: {error:?}", path.display()))?
+    } else {
+        audio.embedded_attribution.clone()
+    };
+    for value in [
+        &mut attribution.title,
+        &mut attribution.artist,
+        &mut attribution.artist_url,
+        &mut attribution.album,
+        &mut attribution.source_url,
+        &mut attribution.license,
+        &mut attribution.license_url,
+    ] {
+        *value = clean_text(value, makepad_asset_client::wire::MAX_SNIPPET_BYTES);
+    }
+    if attribution.title.is_empty() {
+        attribution.title = audio.title.clone();
+    }
+    if attribution.artist.is_empty() {
+        attribution.artist = audio.artist.clone();
+    }
+    if attribution.license.is_empty() {
         return Err(format!(
-            "{}: only the declared CC0 demo-track licence is accepted for public export",
-            path.display()
+            "{}: track has no licence; add {} with a non-empty license field (unlicensed tracks must not ship)",
+            audio.path.display(),
+            path.display(),
         ));
     }
+    for (name, url) in [
+        ("artist_url", &attribution.artist_url),
+        ("source_url", &attribution.source_url),
+        ("license_url", &attribution.license_url),
+    ] {
+        if !url.is_empty() && !url.starts_with("https://") && !url.starts_with("http://") {
+            return Err(format!("{}: attribution {name} must be an http(s) URL", path.display()));
+        }
+    }
+    Ok(attribution)
+}
+
+/// The licences a public demo may redistribute — attribution and share-alike in every CC version,
+/// and the public domain. Returns the SPDX-style id, its version and the licence text URL.
+fn licence_spec(text: &str) -> Option<(String, String, String)> {
+    let text = text.trim();
+    if text == "Public Domain (CC0 1.0)" || text == "CC0 1.0" {
+        return Some((
+            "CC0-1.0".to_string(),
+            "1.0".to_string(),
+            "https://creativecommons.org/publicdomain/zero/1.0/legalcode".to_string(),
+        ));
+    }
+    if text == "Public Domain" || text == "Public Domain Mark 1.0" {
+        return Some((
+            "PDM-1.0".to_string(),
+            "1.0".to_string(),
+            "https://creativecommons.org/publicdomain/mark/1.0/".to_string(),
+        ));
+    }
+    let (version, slug) = if let Some(rest) = text.strip_prefix("CC BY-SA ") {
+        (rest.trim(), "by-sa")
+    } else if let Some(rest) = text.strip_prefix("CC BY ") {
+        (rest.trim(), "by")
+    } else {
+        return None;
+    };
+    if !matches!(version, "1.0" | "2.0" | "2.5" | "3.0" | "4.0") {
+        return None;
+    }
+    Some((
+        format!("CC-{}-{version}", slug.to_ascii_uppercase()),
+        version.to_string(),
+        format!("https://creativecommons.org/licenses/{slug}/{version}/legalcode"),
+    ))
+}
+
+fn attribution_rights(
+    audio: &PreparedAudio,
+    attribution: &TrackAttribution,
+) -> Result<(Rights, String), String> {
+    let Some((license, revision, default_terms_url)) = licence_spec(&attribution.license) else {
+        return Err(format!(
+            "{}: unsupported licence {:?}; expected \"CC BY <version>\", \"CC BY-SA <version>\", \"Public Domain (CC0 1.0)\" or \"Public Domain\"",
+            audio.path.display(),
+            attribution.license
+        ));
+    };
     let rights = Rights {
-        license: "CC0-1.0".to_string(),
-        license_revision: "1.0".to_string(),
-        terms_digest: Some(sha256(&bytes)),
-        terms_url: "https://creativecommons.org/publicdomain/zero/1.0/legalcode".to_string(),
-        credits: String::new(),
-        source: audio.path.file_name().and_then(|name| name.to_str()).unwrap_or("track").to_string(),
+        license: license.to_string(),
+        license_revision: revision.to_string(),
+        terms_digest: None,
+        terms_url: if attribution.license_url.is_empty() {
+            default_terms_url.to_string()
+        } else {
+            attribution.license_url.clone()
+        },
+        credits: attribution.artist.clone(),
+        source: if attribution.source_url.is_empty() {
+            audio.path.file_name().and_then(|name| name.to_str()).unwrap_or("track").to_string()
+        } else {
+            attribution.source_url.clone()
+        },
         source_archive: None,
         redistribution: Redistribution::Allowed,
         derivatives: DerivativePolicy::Allowed,
     };
-    let source = license_source_url(&text, &audio.path).unwrap_or_else(|| audio.comment.clone());
-    let description = track_description(&audio.title, &audio.artist, &source);
-    let license_text = if text.len() <= makepad_asset_data::limits::MAX_DESCRIPTION_BYTES
-        && text.chars().all(|character| {
-            !character.is_control() || matches!(character, '\n' | '\r' | '\t')
-        })
-    {
-        text
-    } else {
-        String::new()
-    };
-    Ok((rights, license_text, description))
+    let description = track_description(attribution);
+    Ok((rights, description))
 }
 
-fn license_source_url(license: &str, audio: &Path) -> Option<String> {
-    let file_name = audio.file_name()?.to_str()?;
-    let file_name_lower = file_name.to_ascii_lowercase();
-    let line = license.lines().find(|line| line.to_ascii_lowercase().contains(&file_name_lower))?;
-    let start = line.find("https://").or_else(|| line.find("http://"))?;
-    let url = line[start..]
-        .split_whitespace()
-        .next()?
-        .trim_end_matches(|character: char| matches!(character, ')' | ']' | '}' | ',' | ';'));
-    let url = clean_text(url, makepad_asset_client::wire::MAX_SNIPPET_BYTES);
-    (!url.is_empty()).then_some(url)
-}
-
-fn track_description(title: &str, artist: &str, source: &str) -> String {
-    let text = if source.is_empty() {
-        format!("{title} — {artist} — CC0 1.0")
+fn track_description(attribution: &TrackAttribution) -> String {
+    let text = if attribution.source_url.is_empty() {
+        format!("{} — {} — {}", attribution.title, attribution.artist, attribution.license)
     } else {
-        format!("{title} — {artist} — CC0 1.0 — {source}")
+        format!(
+            "{} — {} — {} — {}",
+            attribution.title, attribution.artist, attribution.license, attribution.source_url
+        )
     };
     clean_text(&text, makepad_asset_client::wire::MAX_SNIPPET_BYTES)
 }
@@ -1296,12 +1403,18 @@ fn make_annotation(track: &PackTrack) -> AssetAnnotation {
         categories: vec!["music".to_string()],
         tags: vec!["music".to_string(), "stems".to_string()],
         creator: track.audio.artist.clone(),
+        artist: track.attribution.artist.clone(),
+        artist_url: track.attribution.artist_url.clone(),
+        album: track.attribution.album.clone(),
+        source_url: track.attribution.source_url.clone(),
+        license: track.attribution.license.clone(),
+        license_url: track.attribution.license_url.clone(),
         owner: None,
         generator: "makepad-dj-pack".to_string(),
         backend: "ai-hub".to_string(),
         model: "bs-roformer-4stem".to_string(),
         prompt: String::new(),
-        provenance: track.license_text.clone(),
+        provenance: String::new(),
         visibility: Visibility::Public,
     }
 }
@@ -1404,6 +1517,16 @@ mod tests {
             pcm.extend_from_slice(&[value, value]);
         }
         encode_vorbis(SAMPLE_RATE, 2, &pcm, &EncodeOptions::default()).unwrap()
+    }
+
+    fn write_attribution(audio: &Path, license: &str) {
+        std::fs::write(
+            attribution_path(audio),
+            format!(
+                "{{\"title\":\"tone\",\"artist\":\"tone\",\"artist_url\":\"https://example.test/artist\",\"album\":\"Fixture Album\",\"source_url\":\"https://example.test/tone\",\"license\":\"{license}\",\"license_url\":\"https://creativecommons.org/licenses/by/4.0/\"}}"
+            ),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1525,9 +1648,7 @@ mod tests {
         std::fs::create_dir_all(&lyrics).unwrap();
         let audio_path = tracks.join("tone.ogg");
         std::fs::write(&audio_path, tone_ogg(2)).unwrap();
-        let license_text = "Demo tracks — CC0 1.0 Universal\n\
-- tone.ogg — https://example.test/tone\n";
-        std::fs::write(tracks.join("LICENSE.txt"), license_text).unwrap();
+        write_attribution(&audio_path, "CC BY 4.0");
         let audio = prepare_audio(&audio_path).unwrap();
         let stems = tone_stems(2);
         write_cache(&cache, &audio.digest, &stems).unwrap();
@@ -1575,9 +1696,18 @@ mod tests {
         assert!(static_manifest.contains("\"role\":\"lyrics\""));
         assert!(static_manifest.contains("\"role\":\"dj_analysis\""));
         assert!(static_manifest.contains(
-            "\"description\":\"tone — tone — CC0 1.0 — https://example.test/tone\""
+            "\"description\":\"tone — tone — CC BY 4.0 — https://example.test/tone\""
         ));
-        assert!(!static_manifest.contains("Demo tracks — CC0 1.0 Universal"));
+        for field in [
+            "\"artist\":\"tone\"",
+            "\"artist_url\":\"https://example.test/artist\"",
+            "\"album\":\"Fixture Album\"",
+            "\"source_url\":\"https://example.test/tone\"",
+            "\"license\":\"CC BY 4.0\"",
+            "\"license_url\":\"https://creativecommons.org/licenses/by/4.0/\"",
+        ] {
+            assert!(static_manifest.contains(field), "missing {field}");
+        }
         assert!(std::fs::read_dir(site.join("assets")).unwrap().next().is_some());
         assert!(std::fs::read_dir(site.join("revisions")).unwrap().next().is_some());
         assert!(std::fs::read_dir(site.join("blobs")).unwrap().next().is_some());
@@ -1590,7 +1720,10 @@ mod tests {
                 .unwrap()
                 .unwrap();
             let annotation = core.search().annotation(&head.asset_id).unwrap().unwrap();
-            assert_eq!(annotation.provenance, license_text);
+            assert_eq!(annotation.artist, "tone");
+            assert_eq!(annotation.album, "Fixture Album");
+            assert_eq!(annotation.license, "CC BY 4.0");
+            assert_eq!(annotation.source_url, "https://example.test/tone");
         }
 
         // The exact same pack is a revision replay and atomically replaces the snapshot.
@@ -1617,8 +1750,7 @@ mod tests {
         std::fs::create_dir_all(&cache).unwrap();
         let audio_path = tracks.join("tone.ogg");
         std::fs::write(&audio_path, tone_ogg(1)).unwrap();
-        std::fs::write(tracks.join("LICENSE.txt"), "CC0 1.0 Universal\nsynthetic fixture")
-            .unwrap();
+        write_attribution(&audio_path, "Public Domain (CC0 1.0)");
         let digest = prepare_audio(&audio_path).unwrap().digest;
 
         let error = run_pack(PackArgs {
@@ -1657,14 +1789,34 @@ mod tests {
     }
 
     #[test]
+    fn pack_refuses_a_track_without_a_licence() {
+        let dir = TestDir::new("missing-licence");
+        let audio_path = dir.0.join("tone.ogg");
+        std::fs::write(&audio_path, tone_ogg(1)).unwrap();
+        let error = run_pack(PackArgs {
+            store: dir.0.join("store"),
+            site_out: dir.0.join("site"),
+            stem_cache: None,
+            lyrics_cache: None,
+            wave_cache: dir.0.join("wave-cache"),
+            loop_cache: dir.0.join("loop-cache"),
+            require_stems: false,
+            dry_run: true,
+            audio: vec![audio_path],
+        })
+        .unwrap_err();
+        assert!(error.contains("track has no licence"), "{error}");
+        assert!(error.contains("unlicensed tracks must not ship"), "{error}");
+    }
+
+    #[test]
     fn dry_run_writes_nothing_in_read_only_directory() {
         let dir = TestDir::new("dry-run-read-only");
         let tracks = dir.0.join("tracks");
         std::fs::create_dir_all(&tracks).unwrap();
         let audio_path = tracks.join("tone.ogg");
         std::fs::write(&audio_path, tone_ogg(1)).unwrap();
-        std::fs::write(tracks.join("LICENSE.txt"), "CC0 1.0 Universal\nsynthetic fixture")
-            .unwrap();
+        write_attribution(&audio_path, "Public Domain (CC0 1.0)");
 
         let original_permissions = std::fs::metadata(&dir.0).unwrap().permissions();
         let mut read_only_permissions = original_permissions.clone();

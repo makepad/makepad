@@ -38,14 +38,16 @@ use makepad_asset_data::{
 };
 use makepad_asset_importer::thumbs;
 use makepad_asset_importer::videothumb::probe_video;
+use makepad_widgets::makepad_platform::thread::{
+    CancellationToken, Lane, TaskPool, ThreadOptions, ThreadSpawner,
+};
 use makepad_widgets::makepad_platform::video_file::{nv12, VideoFileDecoder};
-use makepad_widgets::{ImageBuffer, Texture};
+use makepad_widgets::{Cx, ImageBuffer, Texture};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
-use std::thread;
 use crate::clock::Instant;
 use std::time::Duration;
 
@@ -294,6 +296,8 @@ pub struct ArchivePanel {
     /// autocue the moment the candidates exist.
     pending_autocue: bool,
     publish_rx: Option<Receiver<PublishMsg>>,
+    spawner: Option<ThreadSpawner>,
+    pool: Option<TaskPool>,
 }
 
 impl Default for ArchivePanel {
@@ -329,11 +333,23 @@ impl Default for ArchivePanel {
             swatch_on_file_path: false,
             pending_autocue: false,
             publish_rx: None,
+            spawner: None,
+            pool: None,
         }
     }
 }
 
 impl ArchivePanel {
+    /// The spawner makes the decode loop and one loop per open swatch or
+    /// stream; one-shot work (publishing) goes to `pool`.
+    pub fn set_spawner(&mut self, spawner: ThreadSpawner) {
+        self.spawner = Some(spawner);
+    }
+
+    pub fn set_task_pool(&mut self, pool: TaskPool) {
+        self.pool = Some(pool);
+    }
+
     /// Where downloads and tiles are cached: `<cache_parent>/archive-cache`.
     pub fn set_cache_parent(&mut self, cache_parent: &Path) {
         self.cache_dir = cache_parent.join("archive-cache");
@@ -362,9 +378,9 @@ impl ArchivePanel {
         if self.decode_tx.is_none() {
             let (req_tx, req_rx) = mpsc::channel::<DecodeReq>();
             let (done_tx, done_rx) = mpsc::channel::<DecodeDone>();
-            thread::Builder::new()
-                .name("vj-archive-decode".into())
-                .spawn(move || {
+            let spawner = self.spawner.clone().expect("archive worker is not started");
+            let options = ThreadOptions { name: Some("vj-archive-decode".into()), ..Default::default() };
+            match spawner.spawn_worker(options, move || {
                     while let Ok(req) = req_rx.recv() {
                         let done = match req {
                             DecodeReq::Thumb { identifier, bytes } => DecodeDone::Thumb {
@@ -388,8 +404,10 @@ impl ArchivePanel {
                             return;
                         }
                     }
-                })
-                .expect("spawn archive decode thread");
+                }) {
+                Ok(handle) => handle.detach(),
+                Err(error) => makepad_widgets::log!("archive decode worker unavailable: {error}"),
+            }
             self.decode_tx = Some(req_tx);
             self.decode_rx = Some(done_rx);
         }
@@ -614,7 +632,10 @@ impl ArchivePanel {
                 // a look, and a paused stream stops fetching once its few
                 // read-ahead windows are in — so auditioning then throwing
                 // the clip on a deck never streams the file twice.
-                let stream = StreamSwatch::open(url);
+                let stream = StreamSwatch::open(
+                    url,
+                    self.spawner.clone().expect("archive worker is not started"),
+                );
                 stream.set_paused(true);
                 self.player = Some(SwatchBackend::Stream(stream));
                 self.swatch_texture = None;
@@ -950,7 +971,10 @@ impl ArchivePanel {
                     } else {
                         whole
                     };
-                    let player = SwatchPlayer::open(SwatchSource { part: Some(part), final_path });
+                    let player = SwatchPlayer::open(
+                        SwatchSource { part: Some(part), final_path },
+                        self.spawner.clone().expect("archive worker is not started"),
+                    );
                     // Paused poster here too — one behavior, whatever the
                     // backend (the download itself continues; it is the
                     // point of this path).
@@ -1015,10 +1039,13 @@ impl ArchivePanel {
                                         .and_then(|n| n.to_str())
                                         .is_some_and(|n| n.contains(".head."))
                                         .then_some(makepad_archive_org::PREVIEW_HEAD_BYTES);
-                                    let player = SwatchPlayer::open(SwatchSource {
-                                        part: None,
-                                        final_path: path,
-                                    });
+                                    let player = SwatchPlayer::open(
+                                        SwatchSource {
+                                            part: None,
+                                            final_path: path,
+                                        },
+                                        self.spawner.clone().expect("archive worker is not started"),
+                                    );
                                     player.set_paused(true);
                                     self.swatch = Swatch::Video {
                                         playing: false,
@@ -1066,13 +1093,17 @@ impl ArchivePanel {
                             self.import = ImportState::Publishing;
                             let (tx, rx) = mpsc::channel();
                             self.publish_rx = Some(rx);
-                            thread::Builder::new()
-                                .name("vj-archive-publish".into())
-                                .spawn(move || {
+                            if let Some(pool) = self.pool.as_ref() {
+                                match pool.submit(Lane::Heavy, move || {
                                     let verdict = publish(target, &item, &file, &path);
                                     let _ = tx.send(PublishMsg::Done(verdict));
-                                })
-                                .ok();
+                                }) {
+                                    Ok(handle) => handle.detach(),
+                                    Err(error) => makepad_widgets::log!(
+                                        "archive publish worker unavailable: {error}"
+                                    ),
+                                }
+                            }
                         }
                         Ok(_) => {
                             self.import = ImportState::Failed("downloaded the wrong file".into());
@@ -1168,13 +1199,21 @@ pub struct SwatchPlayer {
 
 /// How long the thread waits at the frontier / for the header.
 const FRONTIER_WAIT: Duration = Duration::from_millis(250);
+
+/// Pace a download-frontier retry. A plain sleep reads the std clock and
+/// panics on a wasm worker; `wait_until` paces off `Cx::monotonic_now()`
+/// instead.
+fn wait_frontier() {
+    let wait = CancellationToken::new();
+    let _ = wait.wait_until(Cx::monotonic_now() + FRONTIER_WAIT.as_secs_f64());
+}
 /// Bytes that must be on disk before the first open is even tried: the
 /// header of a streamable mp4 fits, and a decoder is not asked to sniff
 /// an empty file every quarter second.
 const MIN_OPEN_BYTES: u64 = 256 * 1024;
 
 impl SwatchPlayer {
-    pub fn open(source: SwatchSource) -> SwatchPlayer {
+    pub fn open(source: SwatchSource, spawner: ThreadSpawner) -> SwatchPlayer {
         let shared = Arc::new(SwatchShared {
             stop: AtomicBool::new(false),
             paused: AtomicBool::new(false),
@@ -1187,11 +1226,13 @@ impl SwatchPlayer {
             failure: Mutex::new(None),
         });
         let thread_shared = shared.clone();
-        if let Err(e) = thread::Builder::new()
-            .name("vj-archive-swatch".into())
-            .spawn(move || swatch_loop(source, thread_shared))
-        {
-            *shared.failure.lock().unwrap() = Some(e.to_string());
+        // A loop for as long as this swatch is open, fed by the shared flags.
+        let options = ThreadOptions { name: Some("vj-archive-swatch".into()), ..Default::default() };
+        match spawner.spawn_worker(options, move || swatch_loop(source, thread_shared)) {
+            Ok(handle) => handle.detach(),
+            Err(error) => {
+                *shared.failure.lock().unwrap() = Some(error.to_string());
+            }
         }
         SwatchPlayer { shared }
     }
@@ -1266,7 +1307,10 @@ fn swatch_loop(source: SwatchSource, shared: Arc<SwatchShared>) {
             if shared.stop.load(Ordering::Acquire) {
                 return;
             }
-            thread::sleep(Duration::from_millis(20));
+            // A plain sleep reads the std clock and panics on a wasm
+            // worker; `wait_until` paces off `Cx::monotonic_now()`.
+            let wait = CancellationToken::new();
+            let _ = wait.wait_until(Cx::monotonic_now() + 0.020);
             origin += Duration::from_millis(20);
         }
         let seek = shared.seek_100ns.swap(-1, Ordering::AcqRel);
@@ -1292,7 +1336,7 @@ fn swatch_loop(source: SwatchSource, shared: Arc<SwatchShared>) {
                 return;
             };
             if source.growing() && file_len(&path) < MIN_OPEN_BYTES {
-                thread::sleep(FRONTIER_WAIT);
+                wait_frontier();
                 continue;
             }
             match VideoFileDecoder::open(&path) {
@@ -1315,7 +1359,7 @@ fn swatch_loop(source: SwatchSource, shared: Arc<SwatchShared>) {
                         // up only if the whole file arrived and still will
                         // not open — that is handled on the next pass,
                         // when `growing()` turns false.
-                        thread::sleep(FRONTIER_WAIT);
+                        wait_frontier();
                         continue;
                     }
                     *shared.failure.lock().unwrap() = Some(e.to_string());
@@ -1349,7 +1393,13 @@ fn swatch_loop(source: SwatchSource, shared: Arc<SwatchShared>) {
                     if remaining.is_zero() || shared.stop.load(Ordering::Acquire) {
                         break;
                     }
-                    thread::sleep(remaining.min(Duration::from_millis(4)));
+                    // A plain sleep reads the std clock and panics on a
+                    // wasm worker; `wait_until` paces off
+                    // `Cx::monotonic_now()` instead.
+                    let wait = CancellationToken::new();
+                    let _ = wait.wait_until(
+                        Cx::monotonic_now() + remaining.min(Duration::from_millis(4)).as_secs_f64(),
+                    );
                 }
                 if shared.stop.load(Ordering::Acquire) {
                     return;
@@ -1368,7 +1418,7 @@ fn swatch_loop(source: SwatchSource, shared: Arc<SwatchShared>) {
                 // moves (a stalled download) is not a hang here — the
                 // panel's own download failure ends the swatch.
                 decoder = None;
-                thread::sleep(FRONTIER_WAIT);
+                wait_frontier();
                 // The clock restarts at the resume point.
                 base_100ns = -1;
             }

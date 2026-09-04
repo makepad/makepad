@@ -191,7 +191,9 @@ impl Cx {
             .and_then(|session| session.vulkan.as_ref())
             .is_some();
         for draw_pass_id in &passes_todo {
-            self.passes[*draw_pass_id].set_time(self.os.timers.time_now() as f32);
+            let uniforms_gen = self.next_uniform_gen();
+            self.passes[*draw_pass_id]
+                .set_time(self.os.timers.time_now() as f32, uniforms_gen);
             match self.passes[*draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {
                     #[cfg(use_vulkan)]
@@ -682,6 +684,7 @@ impl CxOpenXr {
         &mut self,
         display: &CxAndroidDisplay,
         #[cfg(use_vulkan)] vulkan: Option<&mut CxVulkan>,
+        #[cfg(use_vulkan)] spawner: &crate::thread::ThreadSpawner,
         options: CxOpenXrOptions,
         os_type: &OsType,
     ) -> Result<(), String> {
@@ -695,6 +698,8 @@ impl CxOpenXr {
             display,
             #[cfg(use_vulkan)]
             vulkan,
+            #[cfg(use_vulkan)]
+            spawner,
             options,
         )?);
         if let Some(session) = &mut self.session {
@@ -1034,11 +1039,12 @@ impl CxOpenXrSession {
         instance: XrInstance,
         display: &CxAndroidDisplay,
         #[cfg(use_vulkan)] vulkan: Option<&mut CxVulkan>,
+        #[cfg(use_vulkan)] spawner: &crate::thread::ThreadSpawner,
         options: CxOpenXrOptions,
     ) -> Result<CxOpenXrSession, String> {
         #[cfg(use_vulkan)]
         if let Some(vulkan) = vulkan {
-            return Self::create_session_vulkan(xr, system_id, instance, vulkan, options);
+            return Self::create_session_vulkan(xr, system_id, instance, vulkan, spawner, options);
         }
 
         Self::create_session_gles(xr, system_id, instance, display, options)

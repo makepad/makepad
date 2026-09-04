@@ -51,6 +51,21 @@ pub fn stem_color(stem: usize) -> Vec4f {
     vec4(c[0], c[1], c[2], c[3])
 }
 
+const DECK_ACCENTS: [[f32; 4]; 2] = [
+    [1.0, 0.361, 0.224, 1.0],
+    [0.416, 0.659, 1.0, 1.0],
+];
+
+fn deck_accent(deck: DeckId) -> Vec4f {
+    let c = DECK_ACCENTS[deck.index()];
+    vec4(c[0], c[1], c[2], c[3])
+}
+
+fn set_loop_color_uniform(lane: &mut DrawWaveLane, cx: &Cx2d, color: Vec4f) {
+    lane.draw_vars
+        .set_uniform(cx, live_id!(color_loop), &[color.x, color.y, color.z, 0.18]);
+}
+
 /// Push the stem palette into the wave-lane shader's four colour uniforms.
 fn set_stem_color_uniforms(lane: &mut DrawWaveLane, cx: &Cx2d) {
     for (id, stem) in [
@@ -268,8 +283,6 @@ script_mod! {
                 + clamp(self.phase, 0.0, 1.0) * max(x1 - x0 - 4.0, 0.0)
             let played = step(x0 + 2.0, p.x) * step(p.x, play_x) * inside_y * playing
             let filled = base.mix(vec4(1.0, 1.0, 1.0, 1.0), played * 0.18)
-            // A dark one-pixel edge around the white two-pixel hairline
-            // keeps it crisp over both pale hits and saturated waveforms.
             let distance = abs(p.x - play_x)
             let edge = (1.0 - smoothstep(1.5, 2.0, distance)) * inside_y * playing
             let line = (1.0 - smoothstep(0.75, 1.0, distance)) * inside_y * playing
@@ -316,7 +329,7 @@ script_mod! {
                 * mix(self.has_stems, 1.0, is_mix)
                 * step(0.001, self.span_cols)
             if wave_available < 0.5 {
-                // Analysis is still pending: retain the old flat state fill.
+                // Analysis or stems are still pending: retain the flat state fill.
                 if self.state < 1.5 {
                     sdf.stroke(vec4(rgb.x, rgb.y, rgb.z, 0.25), 1.0)
                 } else if self.state < 2.5 {
@@ -333,9 +346,9 @@ script_mod! {
                         1.0
                     )
                     if self.state < 3.5 {
-                    let pulse = 0.5 + 0.5 * sin(self.time * 12.5663706)
-                    sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.34 + pulse * 0.34))
-                    sdf.stroke(vec4(1.0, 1.0, 1.0, 0.45 + pulse * 0.5), 2.0)
+                        let pulse = 0.5 + 0.5 * sin(self.time * 12.5663706)
+                        sdf.fill(vec4(rgb.x, rgb.y, rgb.z, 0.34 + pulse * 0.34))
+                        sdf.stroke(vec4(1.0, 1.0, 1.0, 0.45 + pulse * 0.5), 2.0)
                     } else {
                         sdf.fill(vec4(rgb.x * 0.82, rgb.y * 0.82, rgb.z * 0.82, 0.92))
                         sdf.stroke(vec4(1.0, 1.0, 1.0, 0.95), 2.0)
@@ -344,8 +357,8 @@ script_mod! {
                 return self.countdown(self.playing_progress(sdf.result))
             }
 
-            // The rounded pad remains quiet behind the waveform; state is
-            // carried by its outline and by the envelope itself.
+            // Keep the pad quiet behind its waveform; state remains visible
+            // in the outline, queued pulse and playing progress.
             if self.state < 1.5 {
                 sdf.stroke(vec4(rgb.x, rgb.y, rgb.z, 0.25), 1.0)
             } else if self.state < 2.5 {
@@ -386,8 +399,6 @@ script_mod! {
             let stem_level = (stems.x * c0 + stems.y * c1 + stems.z * c2 + stems.w * c3) / present
             let level = clamp(mix(tile.w * stem_level, tile.w, is_mix), 0.0, 1.0) * 0.80
 
-            // Symmetric envelope with a one-pixel feather and a four-pixel
-            // inset, so the wave never spills through the rounded corners.
             let active = step(2.5, self.state)
             let part_h = max(self.part_y1 - self.part_y0, 0.001)
             let part_y = clamp((self.pos.y - self.part_y0) / part_h, 0.0, 1.0)
@@ -469,7 +480,7 @@ script_mod! {
         color_grid_bar: uniform(#xffffff6e)
         // The running loop, in the app-wide accent. Low alpha: a wash the
         // waveform stays readable through, not a fill that replaces it.
-        color_loop: uniform(#xff5c3924)
+        color_loop: uniform(#xff5c392e)
         // The loop's span as (start_col, end_col, _, _). A UNIFORM and not
         // two `#[live]` fields: those become per-instance VERTEX INPUTS,
         // and this lane already sits on the vs_5_0 limit of 32 — two more
@@ -563,18 +574,25 @@ script_mod! {
             return vec4(c.x, c.y, c.z, c.w * a)
         }
 
-        // The running loop: a wash across the span, and a hard rule on each
-        // edge. The edges are the seam — where the sound actually jumps —
-        // so they are drawn as firmly as a bar ruling rather than fading
-        // out with the wash.
+        // The running loop: a translucent wash plus one-pixel bracket
+        // edges. The short top/bottom caps make IN and OUT read as a pair,
+        // not as two unrelated grid rules.
         loop_at: fn(column: float) -> float {
             if self.loop_span.y <= self.loop_span.x {
                 return 0.0
             }
             let inside = step(self.loop_span.x, column) * step(column, self.loop_span.y)
-            let de = min(abs(column - self.loop_span.x), abs(column - self.loop_span.y))
-            let edge = 1.0 - smoothstep(0.5, 1.8, de / max(self.cols_per_px, 0.0001))
-            return max(inside * self.color_loop.w, edge)
+            let scale = max(self.cols_per_px, 0.0001)
+            let from_in = (column - self.loop_span.x) / scale
+            let from_out = (self.loop_span.y - column) / scale
+            let edge_in = 1.0 - smoothstep(0.5, 1.0, abs(from_in))
+            let edge_out = 1.0 - smoothstep(0.5, 1.0, abs(from_out))
+            let y = min(self.pos.y, 1.0 - self.pos.y) * self.rect_size.y
+            let cap_y = 1.0 - smoothstep(0.5, 1.0, y)
+            let cap_in = step(0.0, from_in) * step(from_in, 6.0)
+            let cap_out = step(0.0, from_out) * step(from_out, 6.0)
+            let bracket = max(max(edge_in, edge_out), cap_y * max(cap_in, cap_out))
+            return max(inside * self.color_loop.w, bracket)
         }
 
         // A drag's would-be landing: the same band at reduced weight, so
@@ -677,8 +695,8 @@ script_mod! {
             // A whisper of the rulings survives on top, so the two decks
             // can be read against each other through a loud passage.
             let ruled = body.mix(vec4(g.x, g.y, g.z, 1.0), g.w * 0.30)
-            // The overview strip carries its own playhead; the zoomed lanes
-            // share one drawn over both, so they pass head_on = 0.
+            // The overview and a stationary loop lane carry an in-shader
+            // playhead; normally the zoomed lanes share the centre overlay.
             // The loop sits over the picture, under the playhead: you have
             // to be able to see the band through a loud passage.
             let la = max(self.loop_at(column), self.preview_at(column))
@@ -883,6 +901,7 @@ script_mod! {
         // holds the word-aligned transcript.
         row_stem := TrackText{width: 36 draw_text.color: #x35c05f}
         row_krk := TrackText{width: 30 draw_text.color: #x35c05f}
+        row_license := TrackText{width: 128 draw_text.color: #x6f7b87}
         row_tags := TrackText{width: Fill{max: 190.} draw_text.color: #x6f7b87}
         // Headphone pre-listen: green while this row is the one in
         // the phones. Painted per row from the host's active key.
@@ -1296,6 +1315,24 @@ script_mod! {
         }
     }
 
+    // The deck transports are the console's primary hand targets. They use
+    // the same chrome as the compact utility controls, but at a size that is
+    // comfortable to hit; two rows keep that size inside each 316pt deck.
+    let MusicTransportButton = MusicButton{
+        height: 38
+        padding: Inset{left: 8.0 right: 8.0 top: 0.0 bottom: 0.0}
+        align: Align{x: 0.5, y: 0.5}
+        draw_bg +: {border_radius: 7.0}
+        draw_text +: {text_style: theme.font_bold{font_size: 11}}
+    }
+
+    let MusicTransportIconButton = MusicIconButton{
+        width: 40
+        height: 38
+        icon_walk: Walk{width: 16 height: Fit}
+        draw_bg +: {border_radius: 7.0}
+    }
+
     // An accordion chevron: bare, quiet, and the height of the heading it
     // sits beside. It says which way the block will go, and nothing else.
     let ChevronIcon = ButtonIcon{
@@ -1494,6 +1531,26 @@ script_mod! {
         draw_text.text_style: theme.font_bold{font_size: 7}
     }
 
+    let AttributionLink = LinkLabel{
+        height: Fit
+        margin: 0
+        padding: 0
+        draw_bg +: {
+            color: #x00000000
+            color_focus: #x00000000
+            color_hover: #x00000000
+            color_down: #x00000000
+            border_size: 0.0
+        }
+        draw_text +: {
+            color: #x6f7b87
+            color_focus: #x6f7b87
+            color_hover: #x9fabb7
+            color_down: #x5f6a76
+            text_style: theme.font_bold{font_size: 7}
+        }
+    }
+
     let KnobStack = View{
         width: 46
         height: Fit
@@ -1504,7 +1561,7 @@ script_mod! {
 
     // Four stems have to fit the same width three tone bands do.
     let StemStack = KnobStack{width: 44}
-    let StemKnob = MusicKnob{width: 40 height: 40}
+    let StemKnob = MusicKnob{width: 40 height: 40 default: 1.0}
 
     let MusicFader = Slider{
         axis: DragAxis.Vertical
@@ -1549,6 +1606,7 @@ script_mod! {
         height: 40
         min: 0.0
         max: 1.0
+        default: 0.5
         scroll_step: 0.025
         text: ""
         text_input: TextInput{width: 0 height: 0}
@@ -1669,6 +1727,20 @@ script_mod! {
                     height: Fit
                     flow: Down
                     deck_a_title := MusicValue{width: Fill text: "empty"}
+                    deck_a_credit := View{
+                        visible: false
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 3
+                        deck_a_credit_artist := AttributionLink{text: ""}
+                        Label{
+                            text: "·"
+                            draw_text.color: #x6f7b87
+                            draw_text.text_style: theme.font_bold{font_size: 7}
+                        }
+                        deck_a_credit_license := AttributionLink{text: ""}
+                    }
                     deck_a_artist := MusicLabel{width: Fill text: ""}
                 }
                 View{
@@ -1735,6 +1807,20 @@ script_mod! {
                     height: Fit
                     flow: Down
                     deck_b_title := MusicValue{width: Fill text: "empty"}
+                    deck_b_credit := View{
+                        visible: false
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 3
+                        deck_b_credit_artist := AttributionLink{text: ""}
+                        Label{
+                            text: "·"
+                            draw_text.color: #x6f7b87
+                            draw_text.text_style: theme.font_bold{font_size: 7}
+                        }
+                        deck_b_credit_license := AttributionLink{text: ""}
+                    }
                     deck_b_artist := MusicLabel{width: Fill text: ""}
                 }
                 deck_b_art := Image{width: 44 height: 44}
@@ -2114,47 +2200,68 @@ script_mod! {
                             deck_a_lyrics := mod.widgets.VjLyricReader{height: Fill}
                         }
                     }
-                    // The deck's own transport, at the foot of its column. These
-                    // rows do not move when the strip beside them wraps: the
-                    // extra rows are paid for by the waveform lanes, not by this
-                    // column's knobs and karaoke.
+                    // The deck's own transport, at the foot of its column. Two
+                    // explicit wrapping rows keep every primary control large
+                    // without letting either line escape the fixed deck panel.
                     View{
                         width: Fill
                         height: Fit
-                        flow: Right
-                        spacing: 3
-                        align: Align{x: 0.0, y: 0.5}
-                        deck_a_play := MusicIconButton{
-                            draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
+                        flow: Down
+                        spacing: 5
+                        View{
+                            width: Fill
+                            height: Fit
+                            flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
+                            spacing: 5
+                            wrap_spacing: 5
+                            align: Align{x: 0.0, y: 0.5}
+                            deck_a_to_start := MusicTransportIconButton{
+                                draw_icon +: { svg: crate_resource("self:resources/icons/skip_start.svg") }
+                            }
+                            deck_a_play := MusicTransportIconButton{
+                                draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
+                            }
+                            deck_a_cue := MusicTransportButton{width: 52 text: "CUE"}
+                            // Headphone cue: latch this deck onto the phones bus.
+                            // Green when live — monitoring, never program.
+                            deck_a_hp := MusicTransportIconButton{
+                                draw_icon +: { svg: crate_resource("self:resources/icons/headphones.svg") }
+                            }
+                            // Beat jump: four bars back / forward on the deck's own
+                            // grid (shift: sixteen), so a synced deck stays in phase.
+                            deck_a_jump_back := MusicTransportIconButton{
+                                draw_icon +: { svg: crate_resource("self:resources/icons/rewind.svg") }
+                            }
+                            deck_a_jump_fwd := MusicTransportIconButton{
+                                draw_icon +: { svg: crate_resource("self:resources/icons/fast_forward.svg") }
+                            }
                         }
-                        deck_a_cue := MusicButton{width: 40 height: 24 text: "CUE"}
-                        // Headphone cue: latch this deck onto the phones bus.
-                        // Green when live — monitoring, never program.
-                        deck_a_hp := MusicIconButton{
-                            draw_icon +: { svg: crate_resource("self:resources/icons/headphones.svg") }
-                        }
-                        // Beat jump: four bars back / forward on the deck's own
-                        // grid (shift: sixteen), so a synced deck stays in phase.
-                        deck_a_jump_back := MusicIconButton{
-                            draw_icon +: { svg: crate_resource("self:resources/icons/rewind.svg") }
-                        }
-                        deck_a_jump_fwd := MusicIconButton{
-                            draw_icon +: { svg: crate_resource("self:resources/icons/fast_forward.svg") }
-                        }
-                        deck_a_loop := MusicIconButton{
-                            draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
-                        }
-                        deck_a_loop_halve := MusicButton{width: 22 height: 24 text: "<"}
-                        deck_a_loop_len := VjBeatsDrop{width: 24 loop_rows: true draw_bg +: {arrow: 0.0}}
-                        deck_a_loop_double := MusicButton{width: 22 height: 24 text: ">"}
-                        // The CDJ's loop pair, in glyphs that read as the marks
-                        // they set: `[` in, `]` out. The loop icon left of the
-                        // stepper is RELOOP/EXIT; the sparkle past them opens the
-                        // scanner, which is also where marks go to be forgotten.
-                        deck_a_loop_in := MusicButton{width: 22 height: 24 text: "["}
-                        deck_a_loop_out := MusicButton{width: 22 height: 24 text: "]"}
-                        deck_a_loop_scan := MusicIconButton{
-                            draw_icon +: { svg: crate_resource("self:resources/icons/sparkle.svg") }
+                        View{
+                            width: Fill
+                            height: Fit
+                            flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
+                            spacing: 5
+                            wrap_spacing: 5
+                            align: Align{x: 0.0, y: 0.5}
+                            deck_a_loop := MusicTransportIconButton{
+                                draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
+                            }
+                            deck_a_loop_halve := MusicTransportButton{width: 36 text: "<"}
+                            deck_a_loop_len := VjBeatsDrop{
+                                width: 42 height: 38 loop_rows: true
+                                draw_bg +: {arrow: 0.0}
+                                draw_text +: {text_style: theme.font_bold{font_size: 11}}
+                            }
+                            deck_a_loop_double := MusicTransportButton{width: 36 text: ">"}
+                            // The CDJ's loop pair, in glyphs that read as the marks
+                            // they set: `[` in, `]` out. The loop icon left of the
+                            // stepper is RELOOP/EXIT; the sparkle past them opens the
+                            // scanner, which is also where marks go to be forgotten.
+                            deck_a_loop_in := MusicTransportButton{width: 36 text: "["}
+                            deck_a_loop_out := MusicTransportButton{width: 36 text: "]"}
+                            deck_a_loop_scan := MusicTransportIconButton{
+                                draw_icon +: { svg: crate_resource("self:resources/icons/sparkle.svg") }
+                            }
                         }
                     }
                 }
@@ -2637,44 +2744,60 @@ script_mod! {
                             }
                         }
                     }
-                    // Deck B's transport, at the foot of ITS column, right-aligned
-                    // so the two decks mirror across the waveforms.
+                    // Deck B mirrors both transport rows across the waveforms.
                     View{
                         width: Fill
                         height: Fit
-                        flow: Right
-                        spacing: 3
-                        align: Align{x: 1.0, y: 0.5}
-                        // Deck B's row runs right to left, so the pair mirrors:
-                        // the sparkle outermost, then out, then in.
-                        deck_b_loop_scan := MusicIconButton{
-                            draw_icon +: { svg: crate_resource("self:resources/icons/sparkle.svg") }
+                        flow: Down
+                        spacing: 5
+                        View{
+                            width: Fill
+                            height: Fit
+                            flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
+                            spacing: 5
+                            wrap_spacing: 5
+                            align: Align{x: 1.0, y: 0.5}
+                            deck_b_jump_back := MusicTransportIconButton{
+                                draw_icon +: { svg: crate_resource("self:resources/icons/rewind.svg") }
+                            }
+                            deck_b_jump_fwd := MusicTransportIconButton{
+                                draw_icon +: { svg: crate_resource("self:resources/icons/fast_forward.svg") }
+                            }
+                            deck_b_hp := MusicTransportIconButton{
+                                draw_icon +: { svg: crate_resource("self:resources/icons/headphones.svg") }
+                            }
+                            deck_b_cue := MusicTransportButton{width: 52 text: "CUE"}
+                            deck_b_to_start := MusicTransportIconButton{
+                                draw_icon +: { svg: crate_resource("self:resources/icons/skip_start.svg") }
+                            }
+                            deck_b_play := MusicTransportIconButton{
+                                draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
+                            }
                         }
-                        // NOT mirrored like the rest of the row: IN then OUT is the
-                        // temporal order of the gesture, and hands read it
-                        // left-to-right on every CDJ regardless of deck side.
-                        deck_b_loop_in := MusicButton{width: 22 height: 24 text: "["}
-                        deck_b_loop_out := MusicButton{width: 22 height: 24 text: "]"}
-                        deck_b_loop_halve := MusicButton{width: 22 height: 24 text: "<"}
-                        deck_b_loop_len := VjBeatsDrop{width: 24 loop_rows: true draw_bg +: {arrow: 0.0}}
-                        deck_b_loop_double := MusicButton{width: 22 height: 24 text: ">"}
-                        deck_b_loop := MusicIconButton{
-                            draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
-                        }
-                        // The mirror of deck A's phones latch: hp then CUE,
-                        // reading inward like the rest of the row.
-                        deck_b_jump_back := MusicIconButton{
-                            draw_icon +: { svg: crate_resource("self:resources/icons/rewind.svg") }
-                        }
-                        deck_b_jump_fwd := MusicIconButton{
-                            draw_icon +: { svg: crate_resource("self:resources/icons/fast_forward.svg") }
-                        }
-                        deck_b_hp := MusicIconButton{
-                            draw_icon +: { svg: crate_resource("self:resources/icons/headphones.svg") }
-                        }
-                        deck_b_cue := MusicButton{width: 40 height: 24 text: "CUE"}
-                        deck_b_play := MusicIconButton{
-                            draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
+                        View{
+                            width: Fill
+                            height: Fit
+                            flow: Flow.Right{wrap: true, row_align: RowAlign.Center}
+                            spacing: 5
+                            wrap_spacing: 5
+                            align: Align{x: 1.0, y: 0.5}
+                            // The sparkle stays outermost. IN then OUT keeps the
+                            // gesture's temporal order on both CDJ sides.
+                            deck_b_loop_scan := MusicTransportIconButton{
+                                draw_icon +: { svg: crate_resource("self:resources/icons/sparkle.svg") }
+                            }
+                            deck_b_loop_in := MusicTransportButton{width: 36 text: "["}
+                            deck_b_loop_out := MusicTransportButton{width: 36 text: "]"}
+                            deck_b_loop_halve := MusicTransportButton{width: 36 text: "<"}
+                            deck_b_loop_len := VjBeatsDrop{
+                                width: 42 height: 38 loop_rows: true
+                                draw_bg +: {arrow: 0.0}
+                                draw_text +: {text_style: theme.font_bold{font_size: 11}}
+                            }
+                            deck_b_loop_double := MusicTransportButton{width: 36 text: ">"}
+                            deck_b_loop := MusicTransportIconButton{
+                                draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
+                            }
                         }
                     }
                 }
@@ -2856,6 +2979,7 @@ script_mod! {
                                 height: Fit
                                 music_th_krk := MusicColHead{width: Fill text: "KRK"}
                             }
+                            th_license := MusicColHead{width: 128 text: "LICENSE"}
                             th_tags := MusicColHead{width: Fill{max: 190.} text: "TAGS"}
                             MusicLabel{width: 26 text: ""}
                         }
@@ -3075,6 +3199,18 @@ script_mod! {
                         // Checked mixes body-to-body; unchecked rides the
                         // outro, the classic hand-off.
                         auto_style := CheckBox{text: "BODY TO BODY"}
+                    }
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{x: 0.0, y: 0.5}
+                        MusicLabel{width: 110 text: "Stem separation"}
+                        stem_separation := DropDown{
+                            labels: ["Off" "AI hub" "Local"]
+                            selected_item: 1
+                        }
                     }
                     View{
                         width: Fill
@@ -3589,6 +3725,8 @@ pub struct WaveLane {
     /// The running loop in source seconds — the tile timebase, so this
     /// converts to columns exactly the way the grid does.
     pub loop_span: Option<(f64, f64)>,
+    /// One-based loop slot shown at the overlay's top-left.
+    pub loop_slot: Option<u8>,
     /// Playback rate, so the grid rules where the music actually lands.
     pub rate: f64,
     pub playing: bool,
@@ -3613,7 +3751,13 @@ impl WaveLane {
             return self.position_secs;
         }
         let elapsed = (now - self.stamp).clamp(0.0, 0.5);
-        (self.position_secs + elapsed * self.rate.max(0.0)).max(0.0)
+        let position = (self.position_secs + elapsed * self.rate.max(0.0)).max(0.0);
+        match self.loop_span {
+            Some((start, end)) if end > start && position >= start => {
+                start + (position - start).rem_euclid(end - start)
+            }
+            _ => position,
+        }
     }
 
     /// The tile column under the playhead.
@@ -3696,6 +3840,10 @@ pub struct VjWaveScroll {
     zoom_secs: f64,
     #[rust]
     lane_rects: [Rect; 2],
+    /// The viewport centre captured when a loop becomes active. The wave
+    /// stays put at the user's current zoom while its head crosses the band.
+    #[rust]
+    loop_centres: [Option<f64>; 2],
     /// Which lane a pointer is holding, and where/when it was last seen.
     #[rust]
     drag: Option<DragState>,
@@ -3827,7 +3975,17 @@ struct DragState {
 impl VjWaveScroll {
     pub fn set_lane(&mut self, cx: &mut Cx, deck: DeckId, lane: WaveLane) {
         let stamp = cx.seconds_since_app_start();
-        self.lanes[deck.index()] = WaveLane { stamp, ..lane };
+        let index = deck.index();
+        if self.lanes[index].loop_span != lane.loop_span {
+            self.loop_centres[index] = lane.loop_span.map(|(start, end)| {
+                if end > start {
+                    lane.position_secs.clamp(start, end) * ZOOM_COLS_PER_SEC
+                } else {
+                    lane.position_secs * ZOOM_COLS_PER_SEC
+                }
+            });
+        }
+        self.lanes[index] = WaveLane { stamp, ..lane };
         self.area.redraw(cx);
     }
 
@@ -3866,12 +4024,29 @@ impl VjWaveScroll {
 
     /// The deck's running loop, for the band. Diffed: this comes off the
     /// status pump and hardly ever changes between ticks.
-    pub fn set_loop_span(&mut self, cx: &mut Cx, deck: DeckId, span: Option<(f64, f64)>) {
-        let lane = &mut self.lanes[deck.index()];
-        if lane.loop_span == span {
+    pub fn set_loop_span(
+        &mut self,
+        cx: &mut Cx,
+        deck: DeckId,
+        span: Option<(f64, f64)>,
+        slot: Option<u8>,
+    ) {
+        let index = deck.index();
+        let lane = &mut self.lanes[index];
+        if lane.loop_span == span && lane.loop_slot == slot {
             return;
         }
+        if lane.loop_span != span {
+            self.loop_centres[index] = span.map(|(start, end)| {
+                if end > start {
+                    lane.position_secs.clamp(start, end) * ZOOM_COLS_PER_SEC
+                } else {
+                    lane.position_secs * ZOOM_COLS_PER_SEC
+                }
+            });
+        }
         lane.loop_span = span;
+        lane.loop_slot = slot;
         self.area.redraw(cx);
     }
 
@@ -4045,8 +4220,8 @@ impl Widget for VjWaveScroll {
             return DrawStep::done();
         }
         let now = cx.seconds_since_app_start();
-        // A playing deck redraws every frame: the waveform scrolls with the
-        // music rather than in twenty-hertz steps.
+        // A playing deck redraws every frame: the normal waveform scrolls,
+        // while a loop keeps the waveform still and advances only its head.
         if self.lanes.iter().any(|lane| lane.playing) {
             self.next_frame = cx.new_next_frame();
         }
@@ -4055,6 +4230,7 @@ impl Widget for VjWaveScroll {
         let gutter = 14.0f64;
         let lane_h = ((rect.size.y - gutter) * 0.5).max(8.0);
         let cols_per_px = (self.zoom_secs * ZOOM_COLS_PER_SEC / rect.size.x) as f32;
+        let mut moving_heads = [false; 2];
         for index in 0..2 {
             let y = if index == 0 {
                 rect.pos.y
@@ -4103,13 +4279,17 @@ impl Widget for VjWaveScroll {
             self.draw_lane.gain_drums = lane.stem_gain[1];
             self.draw_lane.gain_bass = lane.stem_gain[2];
             self.draw_lane.gain_other = lane.stem_gain[3];
-            // The shared playhead is one quad over both lanes.
-            self.draw_lane.head_on = 0.0;
             self.draw_lane.cols = lane.cols as f32;
             // Snap the scroll to whole device pixels. A sub-pixel offset
             // makes every column's sample point crawl between neighbours
             // frame to frame, which reads as a shimmer over the whole wave.
-            let raw_centre = lane.head_column_at(now);
+            let head = lane.head_column_at(now);
+            let loop_columns = lane.loop_columns();
+            moving_heads[index] = loop_columns.is_some();
+            // A loop captures the viewport where it engaged. The waveform
+            // and user zoom stay untouched while the in-shader head moves
+            // through (and wraps inside) the highlighted source span.
+            let raw_centre = self.loop_centres[index].filter(|_| moving_heads[index]).unwrap_or(head);
             let columns_per_pixel = cols_per_px as f64;
             let centre = if columns_per_pixel > 0.0 {
                 (raw_centre / columns_per_pixel).round() * columns_per_pixel
@@ -4118,7 +4298,10 @@ impl Widget for VjWaveScroll {
             };
             self.draw_lane.centre_col = centre as f32;
             self.draw_lane.cols_per_px = cols_per_px;
-            set_loop_span_uniform(&mut self.draw_lane, cx, lane.loop_columns());
+            self.draw_lane.head_col = head as f32;
+            self.draw_lane.head_on = if moving_heads[index] { 1.0 } else { 0.0 };
+            set_loop_color_uniform(&mut self.draw_lane, cx, deck_accent(if index == 0 { DeckId::A } else { DeckId::B }));
+            set_loop_span_uniform(&mut self.draw_lane, cx, loop_columns);
             set_preview_span_uniform(&mut self.draw_lane, cx, None);
             let (beat_cols, phase) = lane.grid_columns().unwrap_or((0.0, 0.0));
             self.draw_lane.beat_cols = beat_cols as f32;
@@ -4127,13 +4310,40 @@ impl Widget for VjWaveScroll {
             self.draw_lane.draw_abs(cx, lane_rect);
         }
 
+        // Slot number at the visible top-left of the active band. Text is
+        // direct-drawn over the same lane; the overlay remains one widget.
+        for index in 0..2 {
+            let lane = &self.lanes[index];
+            let Some(slot) = lane.loop_slot.filter(|_| moving_heads[index]) else { continue };
+            let Some((start, end)) = lane.loop_columns() else { continue };
+            let centre = self.loop_centres[index].unwrap_or_else(|| lane.head_column_at(now));
+            let start_x = rect.pos.x + rect.size.x * 0.5
+                + (start - centre) / cols_per_px.max(1e-4) as f64;
+            let end_x = rect.pos.x + rect.size.x * 0.5
+                + (end - centre) / cols_per_px.max(1e-4) as f64;
+            let lane_rect = self.lane_rects[index];
+            if end_x < lane_rect.pos.x || start_x > lane_rect.pos.x + lane_rect.size.x {
+                continue;
+            }
+            self.draw_text.color = Vec4f::from_u32(0xf4f7faff);
+            self.draw_text.text_style.font_size = 9.0;
+            self.draw_text.draw_abs(
+                cx,
+                dvec2(start_x.max(lane_rect.pos.x) + 3.0, lane_rect.pos.y + 2.0),
+                &slot.to_string(),
+            );
+        }
+
         // Bar numbers, ruled off whichever deck is leading the view.
+        self.draw_text.color = Vec4f::from_u32(0x8e9aa7ff);
         let ruler = if self.lanes[0].grid.is_some() { 0 } else { 1 };
         let lane = &self.lanes[ruler];
         if let Some((beat_cols, phase)) = lane.grid_columns() {
             let bar_cols = beat_cols * 4.0;
             if bar_cols > 1.0 {
-                let centre = lane.head_column_at(now);
+                let centre = self.loop_centres[ruler]
+                    .filter(|_| moving_heads[ruler])
+                    .unwrap_or_else(|| lane.head_column_at(now));
                 let half_cols = self.zoom_secs * ZOOM_COLS_PER_SEC * 0.5;
                 let first = ((centre - half_cols - phase) / bar_cols).floor();
                 let last = ((centre + half_cols - phase) / bar_cols).ceil();
@@ -4183,14 +4393,31 @@ impl Widget for VjWaveScroll {
             );
         }
 
-        // The one shared playhead, straight through both lanes.
-        self.draw_head.draw_abs(
-            cx,
-            Rect {
-                pos: dvec2(rect.pos.x + rect.size.x * 0.5 - 6.0, rect.pos.y),
-                size: dvec2(12.0, rect.size.y),
-            },
-        );
+        // Unlooped lanes keep the familiar fixed centre head. A looping
+        // lane draws its moving head in the waveform shader instead.
+        if !moving_heads[0] && !moving_heads[1] {
+            self.draw_head.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(rect.pos.x + rect.size.x * 0.5 - 6.0, rect.pos.y),
+                    size: dvec2(12.0, rect.size.y),
+                },
+            );
+        } else {
+            for index in 0..2 {
+                if moving_heads[index] {
+                    continue;
+                }
+                let lane_rect = self.lane_rects[index];
+                self.draw_head.draw_abs(
+                    cx,
+                    Rect {
+                        pos: dvec2(lane_rect.pos.x + lane_rect.size.x * 0.5 - 6.0, lane_rect.pos.y),
+                        size: dvec2(12.0, lane_rect.size.y),
+                    },
+                );
+            }
+        }
         DrawStep::done()
     }
 }
@@ -4203,6 +4430,9 @@ impl Widget for VjWaveScroll {
 struct WaveLoadView {
     phase: f32,
     progress: Option<f32>,
+    /// The deck is already playing what has arrived: the waveform stays
+    /// in view and the progress is a thin line under it, not a curtain.
+    playable: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -4348,10 +4578,11 @@ pub struct VjWaveOverview {
 }
 
 impl VjWaveOverview {
-    pub fn set_load(&mut self, cx: &mut Cx, visual: Option<(f32, f32, f32)>) {
-        let load = visual.map(|(phase, progress, indeterminate)| WaveLoadView {
+    pub fn set_load(&mut self, cx: &mut Cx, visual: Option<(f32, f32, f32, bool)>) {
+        let load = visual.map(|(phase, progress, indeterminate, playable)| WaveLoadView {
             phase,
             progress: (indeterminate < 0.5).then_some(progress),
+            playable,
         });
         if self.load == load {
             return;
@@ -4731,6 +4962,7 @@ impl Widget for VjWaveOverview {
         let columns = self
             .loop_span
             .map(|(start, end)| (start * ZOOM_COLS_PER_SEC, end * ZOOM_COLS_PER_SEC));
+        set_loop_color_uniform(&mut self.draw_lane, cx, self.draw_load.color);
         set_loop_span_uniform(&mut self.draw_lane, cx, columns);
         // During a drag the ghost above stays put and this is where release
         // will land — the pair is the whole point of the ghost model.
@@ -4751,11 +4983,22 @@ impl Widget for VjWaveOverview {
         self.draw_lane.draw_abs(cx, rect);
         if let Some(load) = self.load {
             let accent = self.draw_load.color;
-            self.draw_load.color = Vec4f::from_u32(0x090c10d9);
-            self.draw_load.draw_abs(cx, rect);
-            let track = Rect {
-                pos: dvec2(rect.pos.x + 12.0, rect.pos.y + rect.size.y * 0.5 - 4.0),
-                size: dvec2((rect.size.x - 24.0).max(1.0), 8.0),
+            // A deck that is already playing keeps its picture: the bar is
+            // a thin line along the bottom edge, where the decoded region
+            // grows under the waveform drawing in above it. A deck still
+            // waiting gets the curtain and the bar across the middle.
+            let track = if load.playable {
+                Rect {
+                    pos: dvec2(rect.pos.x, rect.pos.y + rect.size.y - 3.0),
+                    size: dvec2(rect.size.x.max(1.0), 3.0),
+                }
+            } else {
+                self.draw_load.color = Vec4f::from_u32(0x090c10d9);
+                self.draw_load.draw_abs(cx, rect);
+                Rect {
+                    pos: dvec2(rect.pos.x + 12.0, rect.pos.y + rect.size.y * 0.5 - 4.0),
+                    size: dvec2((rect.size.x - 24.0).max(1.0), 8.0),
+                }
             };
             self.draw_load.color = Vec4f::from_u32(0x2a323cff);
             self.draw_load.draw_abs(cx, track);
@@ -4935,6 +5178,7 @@ pub struct TrackRowEntry {
     pub bpm: String,
     pub musical_key: String,
     pub duration: String,
+    pub license: String,
     pub tags: String,
     /// The store holds this track's four separated stems.
     pub stem: bool,
@@ -4955,6 +5199,7 @@ impl TrackRowEntry {
             bpm: String::new(),
             musical_key: String::new(),
             duration: String::new(),
+            license: String::new(),
             tags: String::new(),
             stem: false,
             krk: false,
@@ -4967,9 +5212,10 @@ impl TrackRowEntry {
 /// Below this list width the explorer drops its word headers: STEM and KRK
 /// read S and K, and their columns shrink to `MARK_COLUMN_NARROW`. Measured
 /// against the column set: badge, artist, bpm, key, time, the two marks,
-/// tags and the queue chip cost ~670 points before the title gets its floor
-/// of 180, so a list under ~900 is already spending pixels it does not have.
-pub const LIBRARY_NARROW_WIDTH: f64 = 900.0;
+/// licence, tags and the queue chip cost ~800 points before the title gets
+/// its floor of 180, so a list under ~1040 is already spending pixels it
+/// does not have.
+pub const LIBRARY_NARROW_WIDTH: f64 = 1040.0;
 
 // ---------------------------------------------------------------------------
 // the transport strip: three groups, an order that depends on the width
@@ -5719,6 +5965,7 @@ impl Widget for VjTrackList {
                         .set_text(cx, if entry.stem { "✓" } else { "" });
                     item.label(cx, ids!(row_krk))
                         .set_text(cx, if entry.krk { "✓" } else { "" });
+                    item.label(cx, ids!(row_license)).set_text(cx, &entry.license);
                     item.label(cx, ids!(row_tags)).set_text(cx, &entry.tags);
                     // The tick columns follow the header's S/K: one
                     // measurement (App::sync_library_density) decides both,
@@ -5743,6 +5990,7 @@ impl Widget for VjTrackList {
                         ids!(row_time),
                         ids!(row_stem),
                         ids!(row_krk),
+                        ids!(row_license),
                         ids!(row_tags),
                     ] {
                         item.widget(cx, column).set_visible(cx, wide);
@@ -6162,6 +6410,16 @@ mod tests {
         // the edge rules would still draw on top of each other.
         lane.loop_span = Some((2.0, 2.0));
         assert!(lane.loop_columns().is_none());
+    }
+
+    #[test]
+    fn the_loop_playhead_wraps_without_moving_the_waveform_timebase() {
+        let mut lane = lane(120.0, 3.9);
+        lane.playing = true;
+        lane.stamp = 10.0;
+        lane.loop_span = Some((2.0, 4.0));
+        assert!((lane.position_at(10.2) - 2.1).abs() < 1e-9);
+        assert_eq!(lane.loop_columns(), Some((200.0, 400.0)));
     }
 
     #[test]

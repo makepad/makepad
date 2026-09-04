@@ -25,7 +25,9 @@
 //! the running turn. Losing the engine loses warmth, never the conversation
 //! (aicore.md §7).
 
-use makepad_ai_llm::{LlamaSession, LlamaSessionConfig};
+use makepad_ai_llm::{
+    LlamaSamplerState, LlamaSamplingParams, LlamaSession, LlamaSessionConfig,
+};
 
 use std::{
     path::PathBuf,
@@ -252,6 +254,58 @@ fn tool_response_turn(results: &[(String, bool)]) -> String {
     out
 }
 
+/// Hold leading whitespace until the turn has proved it has visible content.
+/// Once the first non-whitespace fragment arrives, streaming is immediate.
+#[derive(Default)]
+struct LeadingVisible {
+    pending: String,
+    emitted: bool,
+}
+
+impl LeadingVisible {
+    fn push(&mut self, text: String, send: &impl Fn(ChatEvent)) {
+        if self.emitted {
+            send(ChatEvent::Delta(text));
+            return;
+        }
+        self.pending.push_str(&text);
+        if !self.pending.trim().is_empty() {
+            self.emitted = true;
+            send(ChatEvent::Delta(std::mem::take(&mut self.pending)));
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CompletionDecision {
+    Complete,
+    Retry,
+    Fail,
+}
+
+fn completion_decision(
+    attempt: usize,
+    has_visible: bool,
+    has_tool_call: bool,
+    interrupted: bool,
+) -> CompletionDecision {
+    if has_visible || has_tool_call || interrupted {
+        CompletionDecision::Complete
+    } else if attempt == 0 {
+        CompletionDecision::Retry
+    } else {
+        CompletionDecision::Fail
+    }
+}
+
+fn fresh_sample_seed() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+        ^ (std::process::id() as u64).rotate_left(17)
+}
+
 // --------------------------------------------------------------- the worker
 
 pub(crate) fn worker_main(
@@ -340,7 +394,7 @@ pub(crate) fn worker_main(
     let think_close = session.vocab().token_id("</think>");
 
     let mut first = first;
-    loop {
+    'worker: loop {
         let msg = match first.take() {
             Some(msg) => msg,
             None => match msg_rx.recv() {
@@ -363,71 +417,123 @@ pub(crate) fn worker_main(
             continue;
         }
 
-        // Stream the answer; capture <tool_call> bodies; swallow <think>.
+        // The boundary is the whole prompt, before any generated token. An
+        // empty first attempt is rewound here and sampled once with a fresh
+        // seed; replaying the unchanged greedy decode would reproduce it.
+        let prompt_boundary = session.token_ids().to_vec();
         let generating = std::time::Instant::now();
-        let mut decoder = session.vocab().text_decoder();
-        let mut generated = 0usize;
-        let mut in_tool_call = false;
-        let mut in_think = false;
-        let mut tool_body = String::new();
-        let mut tool_calls: Vec<(String, Vec<(String, String)>)> = Vec::new();
-        loop {
-            if cancel.load(Ordering::Relaxed) {
-                // Close the dangling assistant turn so the cache stays valid,
-                // and drop the tool calls: an interrupted question must not
-                // keep looking at things.
-                if let Some(im_end) = im_end {
-                    let _ = session.append_token(im_end);
-                }
-                tool_calls.clear();
-                break;
-            }
-            if generated >= config.max_new_tokens
-                || session.remaining_context() < config.min_remaining_context
-            {
-                if let Some(im_end) = im_end {
-                    let _ = session.append_token(im_end);
-                }
-                break;
-            }
-            let token = match session.next_greedy_token() {
-                Ok(Some(token)) => token,
-                // End of turn, or nothing left to say.
-                _ => break,
+        let mut attempt = 0usize;
+        let (tool_calls, generated) = 'attempt: loop {
+            // Stream the answer; capture <tool_call> bodies; swallow <think>.
+            let mut decoder = session.vocab().text_decoder();
+            let mut generated = 0usize;
+            let mut in_tool_call = false;
+            let mut in_think = false;
+            let mut tool_body = String::new();
+            let mut tool_calls: Vec<(String, Vec<(String, String)>)> = Vec::new();
+            let mut visible = LeadingVisible::default();
+            let mut interrupted = false;
+            let sampling = LlamaSamplingParams {
+                seed: fresh_sample_seed(),
+                ..Default::default()
             };
-            generated += 1;
-            if Some(token) == tool_call_open {
-                in_tool_call = true;
-                tool_body.clear();
-                continue;
-            }
-            if Some(token) == tool_call_close {
-                if in_tool_call {
-                    in_tool_call = false;
-                    match parse_tool_call(&tool_body) {
-                        Ok(call) => tool_calls.push(call),
-                        // Malformed: show what it tried rather than hanging.
-                        Err(error) => send(ChatEvent::Delta(format!("[bad tool call: {error}]"))),
+            let mut sampler = LlamaSamplerState::new(sampling.seed);
+            loop {
+                if cancel.load(Ordering::Relaxed) {
+                    // Close the dangling assistant turn so the cache stays valid,
+                    // and drop the tool calls: an interrupted question must not
+                    // keep looking at things.
+                    if let Some(im_end) = im_end {
+                        let _ = session.append_token(im_end);
+                    }
+                    tool_calls.clear();
+                    interrupted = true;
+                    break;
+                }
+                if generated >= config.max_new_tokens
+                    || session.remaining_context() < config.min_remaining_context
+                {
+                    if let Some(im_end) = im_end {
+                        let _ = session.append_token(im_end);
+                    }
+                    break;
+                }
+                let token = if attempt == 0 {
+                    match session.next_greedy_token() {
+                        Ok(Some(token)) => token,
+                        // End of turn, or nothing left to say.
+                        _ => break,
+                    }
+                } else {
+                    match session.continue_sampled_with(1, sampling, &mut sampler) {
+                        Ok(result) => match result.token_ids.into_iter().next() {
+                            Some(token) => token,
+                            None => break,
+                        },
+                        Err(_) => break,
+                    }
+                };
+                generated += 1;
+                if Some(token) == tool_call_open {
+                    in_tool_call = true;
+                    tool_body.clear();
+                    continue;
+                }
+                if Some(token) == tool_call_close {
+                    if in_tool_call {
+                        in_tool_call = false;
+                        match parse_tool_call(&tool_body) {
+                            Ok(call) => tool_calls.push(call),
+                            // Malformed: show what it tried rather than hanging.
+                            Err(error) => visible.push(
+                                format!("[bad tool call: {error}]"),
+                                &send,
+                            ),
+                        }
+                    }
+                    continue;
+                }
+                if Some(token) == think_open {
+                    in_think = true;
+                    continue;
+                }
+                if Some(token) == think_close {
+                    in_think = false;
+                    continue;
+                }
+                if let Some(text) = decoder.push_token(session.vocab(), token) {
+                    if in_tool_call {
+                        tool_body.push_str(&text);
+                    } else if !in_think {
+                        visible.push(text, &send);
                     }
                 }
-                continue;
             }
-            if Some(token) == think_open {
-                in_think = true;
-                continue;
-            }
-            if Some(token) == think_close {
-                in_think = false;
-                continue;
-            }
-            if let Some(text) = decoder.push_token(session.vocab(), token) {
-                if in_tool_call {
-                    tool_body.push_str(&text);
-                } else if !in_think {
-                    send(ChatEvent::Delta(text));
+            match completion_decision(
+                attempt,
+                visible.emitted,
+                !tool_calls.is_empty(),
+                interrupted,
+            ) {
+                CompletionDecision::Complete => break 'attempt (tool_calls, generated),
+                CompletionDecision::Retry => {
+                    if session.reset().is_err() || session.append_tokens(&prompt_boundary).is_err() {
+                        send(ChatEvent::Failed("could not restore prompt for empty-completion retry".into()));
+                        return;
+                    }
+                    attempt += 1;
+                }
+                CompletionDecision::Fail => {
+                    if session.reset().is_ok() && session.append_tokens(&prompt_boundary).is_ok() {
+                        if let Some(im_end) = im_end {
+                            let _ = session.append_token(im_end);
+                        }
+                    }
+                    send(ChatEvent::Failed("empty completion".to_string()));
+                    continue 'worker;
                 }
             }
-        }
+        };
         let secs = generating.elapsed().as_secs_f64();
         let tool_call_count = tool_calls.len();
         for (name, args) in tool_calls {
@@ -534,5 +640,50 @@ mod tests {
         let mut out = String::new();
         push_json_string(&mut out, "a \"quoted\" \\ path\nnewline");
         assert_eq!(out, "\"a \\\"quoted\\\" \\\\ path\\nnewline\"");
+    }
+
+    #[test]
+    fn direct_in_process_empty_completion_retries_once_then_fails() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let send = |event| events.borrow_mut().push(event);
+        let mut first = LeadingVisible::default();
+        first.push(" \n\t".to_string(), &send);
+        assert_eq!(
+            completion_decision(0, first.emitted, false, false),
+            CompletionDecision::Retry
+        );
+
+        let mut second = LeadingVisible::default();
+        second.push("   ".to_string(), &send);
+        assert_eq!(
+            completion_decision(1, second.emitted, false, false),
+            CompletionDecision::Fail
+        );
+        assert!(events.borrow().is_empty(), "whitespace must never escape");
+        assert_eq!(
+            completion_decision(0, false, true, false),
+            CompletionDecision::Complete,
+            "a valid tool-only turn is not empty"
+        );
+    }
+
+    #[test]
+    fn leading_whitespace_is_buffered_but_visible_text_streams_incrementally() {
+        let mut output = LeadingVisible::default();
+        let events = std::cell::RefCell::new(Vec::new());
+        let send = |event| events.borrow_mut().push(event);
+        output.push(" \n".to_string(), &send);
+        assert!(events.borrow().is_empty());
+        output.push("7".to_string(), &send);
+        output.push("✅".to_string(), &send);
+        let text: String = events
+            .into_inner()
+            .into_iter()
+            .filter_map(|event| match event {
+                ChatEvent::Delta(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, " \n7✅");
     }
 }

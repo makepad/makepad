@@ -10,7 +10,6 @@ use crate::{format_bytes, Theme};
 use makepad_widgets::*;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -520,7 +519,7 @@ pub struct ProcessTable {
     #[rust]
     selected_pid: Option<u32>,
     /// A process that has just been sent SIGTERM: pressing kill again inside
-    /// [`FORCE_WINDOW`] escalates to SIGKILL.
+    /// [`FORCE_WINDOW_SECS`] escalates to SIGKILL.
     #[rust]
     force_armed: Option<Armed>,
     #[rust]
@@ -552,11 +551,11 @@ pub struct ProcessTable {
 #[derive(Clone, Copy, Debug)]
 struct Armed {
     pid: u32,
-    since: Instant,
+    since: f64,
 }
 
 /// How long after a SIGTERM the next kill press escalates to SIGKILL.
-const FORCE_WINDOW: Duration = Duration::from_secs(5);
+const FORCE_WINDOW_SECS: f64 = 5.0;
 
 /// (can this be killed, is the force escalation armed).
 type KillButtonState = (bool, bool);
@@ -801,7 +800,9 @@ impl ProcessTable {
 
     fn force_is_armed(&self) -> bool {
         match (self.force_armed, self.selected_pid) {
-            (Some(armed), Some(pid)) => armed.pid == pid && armed.since.elapsed() <= FORCE_WINDOW,
+            (Some(armed), Some(pid)) => {
+                armed.pid == pid && Cx::monotonic_now() - armed.since <= FORCE_WINDOW_SECS
+            }
             _ => false,
         }
     }
@@ -832,7 +833,7 @@ impl ProcessTable {
     }
 
     /// Kill the selected process. The first press asks politely (SIGTERM); a
-    /// second press within [`FORCE_WINDOW`], or a shift-click, forces it
+    /// second press within [`FORCE_WINDOW_SECS`], or a shift-click, forces it
     /// (SIGKILL). No modal — the status row carries the escalation offer.
     fn kill_selected(&mut self, cx: &mut Cx, force_requested: bool) {
         let Some(pid) = self.selected_pid else {
@@ -848,7 +849,9 @@ impl ProcessTable {
         let force = force_requested
             || self
                 .force_armed
-                .is_some_and(|armed| armed.pid == pid && armed.since.elapsed() <= FORCE_WINDOW);
+                .is_some_and(|armed| {
+                    armed.pid == pid && Cx::monotonic_now() - armed.since <= FORCE_WINDOW_SECS
+                });
         self.notice = Some(match terminate(pid, force) {
             Ok(()) => {
                 let signal = if force { "SIGKILL" } else { "SIGTERM" };
@@ -858,7 +861,7 @@ impl ProcessTable {
                     self.force_armed = None;
                     format!("SIGKILL sent to PID {pid}")
                 } else {
-                    self.force_armed = Some(Armed { pid, since: Instant::now() });
+                    self.force_armed = Some(Armed { pid, since: Cx::monotonic_now() });
                     format!("SIGTERM sent to PID {pid}  ·  kill again within 5 s to force (SIGKILL)")
                 }
             }

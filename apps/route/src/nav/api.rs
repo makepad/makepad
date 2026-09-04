@@ -7,9 +7,11 @@ use crate::{
     assistant::{AssistantController, AssistantService},
     clock,
     nav_api::{ApiOperation, NavApi, NavApiEvent, RadarManifest, RouteRequestContext},
+    overlays::{self, OverlaySelection, TerrainLayer},
     provisioner::MapProvisioner,
     side_panel::{PanelAction, PanelController},
     ChatEntry, ChatState, EntryKind, AMSTERDAM_CENTER,
+    ThemePreference,
 };
 use makepad_map_nav::{
     geo::LonLat,
@@ -105,7 +107,7 @@ impl NavService for NavApi {
 
 #[derive(Default)]
 struct DemoLayers {
-    overlays: [bool; 6],
+    overlays: OverlaySelection,
     rain: bool,
     wind: bool,
     terrain: bool,
@@ -120,6 +122,8 @@ pub struct App {
     #[rust]
     started: bool,
     #[rust]
+    theme_preference: ThemePreference,
+    #[rust]
     provisioner: MapProvisioner,
     #[rust]
     assistant: AssistantService,
@@ -132,6 +136,8 @@ pub struct App {
     #[rust]
     layers: DemoLayers,
     #[rust]
+    terrain_layer: TerrainLayer,
+    #[rust]
     layers_panel_open: bool,
     #[rust]
     assistant_panel_open: bool,
@@ -139,6 +145,10 @@ pub struct App {
     warp_check_disabled: Option<bool>,
     #[rust]
     position: Option<LocationUpdateEvent>,
+    /// The first fix flies the map to the user (Amsterdam stays the default
+    /// until then), as the native build does.
+    #[rust]
+    had_first_fix: bool,
     #[rust]
     route: Option<Route>,
     #[rust]
@@ -170,8 +180,8 @@ impl App {
             return;
         }
         self.started = true;
+        self.theme_preference.start(cx);
         self.layers.tilt_shift = true;
-        self.layers.theme = theme_for_hour(local_hour_now());
         let map = self.ui.map_view(cx, ids!(map));
         self.provisioner.ensure_source(cx, &map);
         self.api = NavApi::new(self.provisioner.api_url());
@@ -206,13 +216,8 @@ impl App {
     }
 
     fn sync_layer_checkboxes(&self, cx: &mut Cx) {
+        overlays::sync_checkboxes(cx, &self.ui, &self.layers.overlays);
         for (id, on) in [
-            (ids!(layer_chargers), self.layers.overlays[0]),
-            (ids!(layer_transit), self.layers.overlays[1]),
-            (ids!(layer_nature), self.layers.overlays[2]),
-            (ids!(layer_districts), self.layers.overlays[3]),
-            (ids!(layer_buildings), self.layers.overlays[4]),
-            (ids!(layer_demographics), self.layers.overlays[5]),
             (ids!(layer_rain), self.layers.rain),
             (ids!(layer_wind), self.layers.wind),
             (ids!(layer_terrain), self.layers.terrain),
@@ -287,7 +292,11 @@ impl App {
     fn apply_layers(&mut self, cx: &mut Cx) {
         self.sync_layer_checkboxes(cx);
         self.apply_ui_theme(cx);
-        self.ui.map_view(cx, ids!(map)).set_theme(cx, self.layers.theme);
+        let map = self.ui.map_view(cx, ids!(map));
+        map.set_overlays(cx, self.provisioner.overlay_sources(&self.layers.overlays));
+        map.set_theme(cx, self.layers.theme);
+        self.terrain_layer
+            .set_enabled(cx, &map, self.layers.terrain, None);
     }
 
     fn set_rain(&mut self, cx: &mut Cx, on: bool) {
@@ -458,14 +467,8 @@ impl MatchEvent for App {
             self.assistant_panel_open = !self.assistant_panel_open;
             self.ui.widget(cx, ids!(assistant_panel)).set_visible(cx, self.assistant_panel_open);
         }
-        let overlay_ids = [
-            ids!(layer_chargers), ids!(layer_transit), ids!(layer_nature),
-            ids!(layer_districts), ids!(layer_buildings), ids!(layer_demographics),
-        ];
-        for (index, id) in overlay_ids.into_iter().enumerate() {
-            if let Some(on) = self.ui.check_box(cx, id).changed(actions) {
-                self.layers.overlays[index] = on;
-            }
+        if overlays::handle_checkboxes(cx, &self.ui, actions, &mut self.layers.overlays) {
+            self.apply_layers(cx);
         }
         if let Some(on) = self.ui.check_box(cx, ids!(layer_rain)).changed(actions) {
             self.set_rain(cx, on);
@@ -475,9 +478,7 @@ impl MatchEvent for App {
         }
         if let Some(on) = self.ui.check_box(cx, ids!(layer_terrain)).changed(actions) {
             self.layers.terrain = on;
-            if !on {
-                self.ui.map_view(cx, ids!(map)).set_terrain_overlay(cx, TerrainOverlayData::default());
-            }
+            self.apply_layers(cx);
         }
         if let Some(on) = self.ui.check_box(cx, ids!(tilt_check)).changed(actions) {
             self.layers.tilt_shift = on;
@@ -491,11 +492,17 @@ impl MatchEvent for App {
         }
         if let Some(on) = self.ui.check_box(cx, ids!(theme_night)).changed(actions) {
             self.layers.theme = if on { 1 } else { 0 };
+            self.theme_preference.save(cx, self.layers.theme);
             self.apply_layers(cx);
         }
         if let Some(on) = self.ui.check_box(cx, ids!(theme_circuit)).changed(actions) {
             self.layers.theme = if on { 2 } else { 0 };
+            self.theme_preference.save(cx, self.layers.theme);
             self.apply_layers(cx);
+        }
+        let map = self.ui.map_view(cx, ids!(map));
+        if map.viewport_changed(actions).is_some() && self.layers.terrain {
+            self.terrain_layer.request(cx, &map);
         }
     }
 }
@@ -510,6 +517,12 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.ensure_started(cx);
+        if let Some(theme) = self.theme_preference.restored(event) {
+            self.layers.theme = theme;
+            self.apply_layers(cx);
+        }
+        let map = self.ui.map_view(cx, ids!(map));
+        self.terrain_layer.handle_event(cx, event, &map);
         self.provisioner.handle_event();
         if self.layers.rain && self.radar_timer.is_event(event).is_some() {
             self.api.radar_manifest(cx);
@@ -527,6 +540,11 @@ impl AppMain for App {
                 cx,
                 Some(MapPuck::new(fix.lon, fix.lat, fix.heading_deg, fix.accuracy_m)),
             );
+            if !self.had_first_fix {
+                self.had_first_fix = true;
+                map.fly_to(cx, fix.lon, fix.lat, 14.0);
+                self.set_status(cx, &format!("gps: fix acquired (±{:.0}m)", fix.accuracy_m));
+            }
             if let (Some(session), Some(started)) = (&mut self.nav_session, self.nav_started) {
                 let status = session.update(
                     LonLat::new(fix.lon, fix.lat),
@@ -555,26 +573,5 @@ impl AppMain for App {
         let tilt = self.ui.map_view(cx, ids!(map)).tilt() as f32;
         self.chat.tilt_strength = ((tilt - 5.0) / 50.0).clamp(0.0, 1.0);
         self.ui.handle_event(cx, event, &mut Scope::with_data(&mut self.chat));
-    }
-}
-
-fn local_hour_now() -> u32 {
-    ((Cx::time_now() as i64).rem_euclid(86_400) / 3_600) as u32
-}
-
-fn theme_for_hour(hour: u32) -> u32 {
-    if hour >= 19 || hour < 7 { 1 } else { 0 }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn civil_twilight_theme_matches_native_boundaries() {
-        assert_eq!(theme_for_hour(6), 1);
-        assert_eq!(theme_for_hour(7), 0);
-        assert_eq!(theme_for_hour(18), 0);
-        assert_eq!(theme_for_hour(19), 1);
     }
 }

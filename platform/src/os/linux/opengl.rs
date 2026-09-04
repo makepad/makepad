@@ -257,6 +257,7 @@ impl DrawVars {
             };
 
             let cx = vm.host.cx_mut();
+            mapping.scope_uniforms_gen = cx.next_uniform_gen();
             let index = cx.draw_shaders.shaders.len();
             cx.draw_shaders.shaders.push(CxDrawShader {
                 debug_id: LiveId(0),
@@ -377,6 +378,7 @@ impl Cx {
             .update_uniform_buffer(self.os.gl(), draw_list.draw_list_uniforms.as_slice());
 
         for order_index in 0..draw_order_len {
+            let uniforms_gen = self.next_uniform_gen();
             let Some(draw_item_id) =
                 self.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
             else {
@@ -386,6 +388,12 @@ impl Cx {
                 .kind
                 .sub_list()
             {
+                // A retained sub-list its owner dropped between the parent's
+                // last record and this paint: the slot may already hold
+                // another widget's list. Nothing to draw here.
+                if self.draw_lists.is_id_freed(sub_list_id) {
+                    continue;
+                }
                 let child_resets_zbias = self.draw_lists[sub_list_id].reset_zbias;
                 let mut own_zbias = 0.0f32;
                 let child_zbias = if child_resets_zbias {
@@ -396,7 +404,16 @@ impl Cx {
                 // An overlay list carries a depth floor: this is what makes it
                 // composite above body content that uses `draw_depth`.
                 self.draw_lists[sub_list_id].raise_zbias_to_floor(child_zbias);
-                self.render_view(draw_pass_id, sub_list_id, child_zbias, zbias_step);
+                // A retained list is one unit of paint order: its calls all
+                // take the counter at entry, it advances by the layers the
+                // list reported. See `CxDrawList::zbias_hold`.
+                if let Some(steps) = self.draw_lists[sub_list_id].zbias_hold {
+                    let mut held = *child_zbias;
+                    self.render_view(draw_pass_id, sub_list_id, &mut held, 0.0);
+                    *child_zbias += steps as f32 * zbias_step;
+                } else {
+                    self.render_view(draw_pass_id, sub_list_id, child_zbias, zbias_step);
+                }
             } else {
                 let gl = self.os.gl();
 
@@ -470,7 +487,7 @@ impl Cx {
                 }
 
                 // update the zbias uniform if we have it.
-                draw_call.resolve_zbias(*zbias, sploded);
+                draw_call.resolve_zbias(*zbias, sploded, uniforms_gen);
                 *zbias += zbias_step;
 
                 draw_item
@@ -502,6 +519,9 @@ impl Cx {
                     continue;
                 };
 
+                if self.geometries.skip_stale(geometry_id) {
+                    continue;
+                }
                 let geometry = &mut self.geometries[geometry_id];
                 if !crate::geometry::geometry_backend_supports_typed(
                     geometry,
@@ -881,8 +901,11 @@ impl Cx {
             return None;
         }
 
+        let ortho_uniforms_gen = self.next_uniform_gen();
+        let dpi_uniforms_gen = self.next_uniform_gen();
+        let pass = &mut self.passes[draw_pass_id];
         if !pass.keep_camera_matrix {
-            pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
+            pass.set_ortho_matrix(pass_rect.pos, pass_rect.size, ortho_uniforms_gen);
             if to_texture {
                 // OFFSCREEN passes render UPSIDE DOWN on GL: an FBO's rows
                 // are stored bottom-up, so inverting the projection's Y
@@ -898,7 +921,7 @@ impl Cx {
                 m[13] = -m[13];
             }
         }
-        pass.set_dpi_factor(dpi_factor);
+        pass.set_dpi_factor(dpi_factor, dpi_uniforms_gen);
 
         pass.os
             .pass_uniforms
@@ -2442,6 +2465,12 @@ pub struct CxOsDrawCall {
     pub user_uniforms: OpenglBuffer,
     pub inst_vb: OpenglBuffer,
     pub vao: Option<CxOsDrawCallVao>,
+    #[cfg(test)]
+    pub uniforms_recording_gen: Option<u64>,
+    #[cfg(test)]
+    pub draw_call_uniforms_gen: Option<u64>,
+    #[cfg(test)]
+    pub user_uniforms_gen: Option<u64>,
 }
 
 impl CxOsDrawCall {

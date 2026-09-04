@@ -376,6 +376,9 @@ pub struct WColorTarget {
 
 #[derive(FromWasm, Default)]
 pub struct WDepthTarget {
+    /// false = the pass has no depth texture (`Default`); a texture id of 0 is
+    /// a real texture, so absence needs its own flag.
+    pub attached: bool,
     pub texture_id: usize,
     pub init_only: bool,
     pub clear_depth: f32,
@@ -415,10 +418,21 @@ pub struct FromWasmDrawCall {
     pub depth_write: bool,
     pub backface_culling: bool,
     pub pass_uniforms: WasmPtrF32,
+    pub pass_uniforms_gen_lo: u32,
+    pub pass_uniforms_gen_hi: u32,
     pub draw_list_uniforms: WasmPtrF32,
+    pub draw_list_uniforms_gen_lo: u32,
+    pub draw_list_uniforms_gen_hi: u32,
     pub draw_call_uniforms: WasmPtrF32,
+    pub draw_call_uniforms_gen_lo: u32,
+    pub draw_call_uniforms_gen_hi: u32,
     pub user_uniforms: WasmPtrF32,
+    pub user_uniforms_gen_lo: u32,
+    pub user_uniforms_gen_hi: u32,
     pub live_uniforms: WasmPtrF32,
+    pub live_uniforms_gen_lo: u32,
+    pub live_uniforms_gen_hi: u32,
+    pub reset_draw_uniforms: bool,
     pub const_table: WasmPtrF32,
     pub textures: [Option<usize>; DRAW_CALL_TEXTURE_SLOTS],
 }

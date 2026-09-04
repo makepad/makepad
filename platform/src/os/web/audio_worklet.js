@@ -70,6 +70,24 @@ class AudioWorklet extends AudioWorkletProcessor {
 
             }
         };
+        // The module declares every import the platform links against — threads, clocks,
+        // the network — and WebAssembly.instantiate refuses the whole module when one is
+        // missing, which left the audio thread without a callback. Complete the set from
+        // the module's own import list: clocks tell the time, a wake reaches the UI thread
+        // through the port, and everything else (spawning, sockets, HTTP) is not something
+        // the audio thread does, so those stubs report and return.
+        const report = (text) => this.port.postMessage({ message_type: "console_error", value: text });
+        for (const imp of WebAssembly.Module.imports(thread_info.module)) {
+            if (imp.module !== "env" || imp.kind !== "function" || env[imp.name] !== undefined) continue;
+            const name = imp.name;
+            if (name === "js_time_now" || name === "js_monotonic_now") {
+                env[name] = () => Date.now() / 1000.0;
+            } else if (name === "js_wake_ui") {
+                env[name] = () => this.port.postMessage({ message_type: "wake_ui" });
+            } else {
+                env[name] = (..._args) => { report("audio thread: " + name + " is not available on the audio thread"); return 0; };
+            }
+        }
         WebAssembly.instantiate(thread_info.module, { env }).then(async wasm => {
             await instantiate_secondary(wasm, env);
 
@@ -90,6 +108,23 @@ class AudioWorklet extends AudioWorkletProcessor {
     }
 
     process(inputs, outputs, parameters) {
+        // A throw inside process() kills the processor silently (the page only sees an
+        // ErrorEvent without a message): report it once with the real text, then stop.
+        try {
+            return this.process_inner(inputs, outputs, parameters);
+        } catch (error) {
+            if (!this._reported) {
+                this._reported = true;
+                this.port.postMessage({
+                    message_type: "console_error",
+                    value: "audio worklet: process threw: " + (error && error.stack ? error.stack : error)
+                });
+            }
+            return false;
+        }
+    }
+
+    process_inner(inputs, outputs, parameters) {
         if (this._context !== undefined) {
             let context = this._context;
 

@@ -19,7 +19,6 @@ use makepad_widgets::*;
 
 app_main!(
     App,
-    font_set: International,
     font_assets: ["makepad_widgets/resources/jetbrains_mono_variable.ttf"]
 );
 
@@ -113,6 +112,7 @@ impl App {
                 // Nothing here runs long enough to cancel, and the sheet has
                 // no chat of its own to step aside.
                 PortEvent::Cancel { .. } | PortEvent::ChatOpen { .. } => {}
+                PortEvent::Subscribe { .. } | PortEvent::Unsubscribe { .. } => {}
             }
         }
     }

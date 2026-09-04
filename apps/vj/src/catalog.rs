@@ -315,6 +315,12 @@ pub struct BrowseModel<C: Clone = PageCursor> {
     /// It merges into `order` when it fills (a new empty column starts) or
     /// on the next re-sort. Never longer than [`PENDING_COLUMN`].
     pending: Vec<AssetId>,
+    /// Clips this session generated: they must survive a listing that has
+    /// not yet indexed them. A generator finishing used to wait on the
+    /// catalog event + 3s debounce + page-one re-list, and on the EFFECT
+    /// lane they never appeared at all. These are re-placed after a re-sort
+    /// if the first page did not already include them.
+    sticky: HashMap<AssetId, (String, AssetKind)>,
     /// The next arriving first page re-sorts the body. Set by a real query
     /// change (text, category, kinds) and by an explicit re-sort — never by
     /// the event-driven refresh that a publish triggers.
@@ -422,6 +428,7 @@ impl<C: Clone> BrowseModel<C> {
             order: Vec::new(),
             stamps: HashMap::new(),
             pending: Vec::new(),
+            sticky: HashMap::new(),
             // The first page of a fresh model IS the sort.
             resort: true,
         }
@@ -519,6 +526,63 @@ impl<C: Clone> BrowseModel<C> {
     pub fn refresh_event(&mut self) -> Vec<CatCmd<C>> {
         self.resort = false;
         self.refresh_keeping_order()
+    }
+
+    /// A generator just produced this asset. Put it on the pending column
+    /// NOW — do not wait for the catalog event, the debounce, or page one.
+    /// Returns resolve commands when the current lane can show it; otherwise
+    /// counts it as hidden-elsewhere (the EFFECT-lane miss).
+    pub fn ingest_published(
+        &mut self,
+        asset: AssetId,
+        title: String,
+        kind: AssetKind,
+    ) -> Vec<CatCmd<C>> {
+        self.sticky.insert(asset, (title.clone(), kind));
+        if !self.kinds.contains(&kind) {
+            self.event_touch(Some(kind));
+            return Vec::new();
+        }
+        self.push_fresh(asset, title, kind);
+        self.pump_resolves()
+    }
+
+    fn push_fresh(&mut self, asset: AssetId, title: String, kind: AssetKind) {
+        if self.index.contains_key(&asset) {
+            return;
+        }
+        let stamp = self
+            .stamps
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        self.stamps.insert(asset, stamp);
+        // Always the pending column — even if a query-change re-sort is
+        // still latched. GENERATE is "what just came in", not another
+        // body append that waits on the next listing sort.
+        if !self.order.contains(&asset) && !self.pending.contains(&asset) {
+            self.pending.push(asset);
+            if self.pending.len() >= PENDING_COLUMN {
+                self.merge_pending();
+            }
+        }
+        self.index.insert(asset, self.tiles.len());
+        self.tiles.push(Tile {
+            asset,
+            title,
+            alias: None,
+            live: true,
+            kind: Some(kind),
+            revision: None,
+            media: None,
+            source: None,
+            thumb: None,
+            state: TileState::Listed,
+        });
+        self.total = self.total.saturating_add(1);
+        self.resolve_queue.push_back(asset);
     }
 
     /// Fold the head column into the body and start an empty one. Called
@@ -744,6 +808,18 @@ impl<C: Clone> BrowseModel<C> {
                 });
             } else {
                 self.restarting[slot] = false;
+            }
+        }
+        // Session-generated clips the first page has not indexed yet:
+        // put them back at the head so GENERATE is not a vanishing act.
+        let sticky: Vec<(AssetId, String, AssetKind)> = self
+            .sticky
+            .iter()
+            .map(|(&asset, (title, kind))| (asset, title.clone(), *kind))
+            .collect();
+        for (asset, title, kind) in sticky {
+            if self.kinds.contains(&kind) {
+                self.push_fresh(asset, title, kind);
             }
         }
         cmds
@@ -1634,6 +1710,33 @@ mod tests {
 
         // Tiles already resolving or resolved are left alone.
         assert!(m.resolve_visible_first(&[first_two[0]]).is_empty());
+    }
+
+    #[test]
+    fn ingest_published_lands_on_the_pending_column_without_a_listing() {
+        let mut m = BrowseModel::<u8>::new(AssetKind::Video, "");
+        let g = search_gen(&m.refresh());
+        m.page_arrived(g, 0, true, vec![hit(1)], 1, None);
+        assert_eq!(m.tiles().len(), 1);
+        let asset = AssetId::from_bytes([9; 16]);
+        let cmds = m.ingest_published(asset, "fresh clip".into(), AssetKind::Video);
+        assert!(!cmds.is_empty(), "the new tile must resolve");
+        assert!(m.tile(&asset).is_some());
+        assert_eq!(m.pending_len(), 1);
+        assert_eq!(m.display_order()[0], Some(asset), "newest clip leads");
+        let g = search_gen(&m.refresh());
+        m.page_arrived(g, 0, true, vec![hit(1)], 1, None);
+        assert!(m.tile(&asset).is_some(), "sticky survives a re-sort listing");
+    }
+
+    #[test]
+    fn ingest_published_on_the_effect_lane_is_counted_not_drawn() {
+        let mut m = BrowseModel::<u8>::new(AssetKind::VjEffect, "");
+        let asset = AssetId::from_bytes([7; 16]);
+        let cmds = m.ingest_published(asset, "clip".into(), AssetKind::Video);
+        assert!(cmds.is_empty());
+        assert!(m.tile(&asset).is_none());
+        assert_eq!(m.elsewhere(), 1);
     }
 }
 

@@ -200,6 +200,9 @@ pub struct ServiceShared {
     pub models: Mutex<HashMap<String, ModelTrack>>,
     pub artifacts: Mutex<HashMap<String, ArtifactMeta>>,
     pub gpu: GpuCache,
+    /// Idle-card VRAM ceiling measured before any service model loaded and
+    /// refreshed whenever an eviction pass leaves no resident behind.
+    pub vram_usable: residency::UsableVram,
     /// Optional bearer secret protecting the service HTTP surface. Deliberately
     /// omitted from all logs and Debug output.
     fabric_secret: Option<String>,
@@ -289,7 +292,14 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
     // full hardware snapshot as request/discovery availability so an empty-
     // artifact backend with hard GPU requirements does not start as Ready on
     // unknown or incompatible hardware.
-    let startup_gpu = crate::gpu::query_gpu();
+    // A cold thread makes this a no-op; if startup is ever reached after an
+    // in-process service restart, do not publish an allocator-depressed VRAM
+    // ceiling inherited from the previous run.
+    let startup_trim = residency::trim_cached_pool_with(crate::gpu::query_gpu, || {
+        release_worker_thread_device_caches(&mut |_| {});
+    });
+    let startup_gpu = startup_trim.after_gpu;
+    let startup_usable_mb = residency::usable_vram_mb(&startup_gpu);
     let mut models = HashMap::new();
     for spec in &config.registry.models {
         let state = if spec.files.is_empty() {
@@ -334,6 +344,7 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
         models: Mutex::new(models),
         artifacts: Mutex::new(HashMap::new()),
         gpu: GpuCache::new(),
+        vram_usable: residency::UsableVram::new(startup_usable_mb),
         fabric_secret,
         node_id,
         node_key,
@@ -835,7 +846,7 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
     };
     // Lenient: unknown fields are allowed so params can grow without
     // breaking older services.
-    let request = match GenerateRequestJson::deserialize_json_lenient(text) {
+    let mut request = match GenerateRequestJson::deserialize_json_lenient(text) {
         Ok(request) => request,
         Err(e) => return error_json(400, format!("bad generate request: {e:?}")),
     };
@@ -843,6 +854,9 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
         Some(spec) => spec,
         None => return error_json(404, format!("unknown model: {}", request.model)),
     };
+    if spec.backend == "llm" {
+        crate::llm_backend::apply_chat_thinking_control(&mut request);
+    }
     let gpu = shared.gpu.get();
     if let Err(reason) = model_availability(spec, &gpu, shared.residency.reserve_mb) {
         return error_json(503, format!("model {} is unavailable: {reason}", spec.id));
@@ -855,6 +869,11 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
         Ok(params) => params,
         Err(e) => return error_json(400, e.to_string()),
     };
+    // Tell chat clients what the prompt ACTUALLY did instead of making them
+    // infer it from the model id. In particular, a Qwen3.8 node in `brief`
+    // mode uses a closed prefill and its first token is already visible.
+    let think_open = (spec.backend == "llm" && params.target_domain == "chat")
+        .then(|| params.prompt.ends_with(crate::protocol::CHAT_THINK_PREFILL_OPEN));
     // Only the flux backend can apply LoRAs — refuse rather than render an
     // un-adapted image that looks like a broken adapter.
     if let Err(e) = validate_loras_for_backend(&spec.backend, &params.loras) {
@@ -914,6 +933,7 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
                 GenerateResponseJson {
                     job_id: Some(job_id),
                     error: None,
+                    think_open,
                 }
                 .serialize_json(),
             )
@@ -940,6 +960,7 @@ fn generate_refused(refused: &AssetAiError) -> HttpServerResponse {
         GenerateResponseJson {
             job_id: None,
             error: Some(refused.to_string()),
+            think_open: None,
         }
         .serialize_json(),
     )
@@ -1031,7 +1052,13 @@ fn health_json(shared: &Arc<ServiceShared>) -> HealthJson {
         .registry
         .models
         .iter()
-        .filter(|spec| model_availability(spec, &gpu, shared.residency.reserve_mb).is_ok())
+        .filter(|spec| {
+            model_availability(spec, &gpu, shared.residency.reserve_mb).is_ok()
+                && shared.vram_usable.get().is_none_or(|usable_mb| {
+                    residency::too_small_note(spec, shared.residency.reserve_mb, usable_mb)
+                        .is_none()
+                })
+        })
         .map(|spec| spec.domain.as_str().to_string())
         .collect();
     // Same llm weights serve conversational chat; advertise it so FleetQwen
@@ -1047,6 +1074,7 @@ fn health_json(shared: &Arc<ServiceShared>) -> HealthJson {
         gpu: gpu.name,
         vram_free_mb: gpu.vram_free_mb,
         vram_total_mb: gpu.vram_total_mb,
+        vram_usable_mb: shared.vram_usable.get(),
         models_loaded,
         jobs_pending: Some(jobs_pending),
         node_id: Some(shared.node_id),
@@ -1138,7 +1166,10 @@ fn models_json(shared: &Arc<ServiceShared>) -> ModelsJson {
                 shared.residency.reserve_mb,
             )
             .err();
-            let available = unavailable_reason.is_none();
+            let too_small_note = shared.vram_usable.get().and_then(|usable_mb| {
+                residency::too_small_note(spec, shared.residency.reserve_mb, usable_mb)
+            });
+            let available = unavailable_reason.is_none() && too_small_note.is_none();
             ModelInfoJson {
                 id: spec.id.clone(),
                 domain: spec.domain.as_str().to_string(),
@@ -1146,14 +1177,18 @@ fn models_json(shared: &Arc<ServiceShared>) -> ModelsJson {
                 available,
                 gated: spec.gated,
                 vram_gb: spec.vram_gb,
-                note: spec.note.clone(),
-                state: state.to_string(),
+                note: too_small_note.clone().or_else(|| spec.note.clone()),
+                state: if too_small_note.is_some() {
+                    MODEL_STATE_TOO_SMALL.to_string()
+                } else {
+                    state.to_string()
+                },
                 progress_done,
                 progress_total,
                 downloading_file,
                 error,
                 revision: model_revision(spec),
-                unavailable_reason,
+                unavailable_reason: unavailable_reason.or(too_small_note),
                 license_name: spec.license.as_ref().map(|l| l.name.clone()),
                 license_url: spec.license.as_ref().map(|l| l.url.clone()),
                 license_summary: spec.license.as_ref().map(|l| l.summary.clone()),
@@ -1345,10 +1380,17 @@ fn release_orphaned_device_caches(
     if still_resident {
         return false;
     }
-    let before = residency::fresh_free_mb();
     let mut said: Vec<String> = Vec::new();
-    release_worker_thread_device_caches(&mut |line| said.push(line.to_string()));
-    let after = residency::fresh_free_mb();
+    let trimmed = residency::trim_cached_pool_with(crate::gpu::query_gpu, || {
+        release_worker_thread_device_caches(&mut |line| said.push(line.to_string()));
+    });
+    let before = trimmed.before_free_mb;
+    let after = trimmed.after_free_mb();
+    with_backends(shared, |backends| {
+        if !any_backend_resident(backends) {
+            shared.vram_usable.refresh_from_gpu(&trimmed.after_gpu);
+        }
+    });
     if let (Some(before), Some(after)) = (before, after) {
         // Only worth a log line when it actually recovered something. A quiet
         // box that was already clean should stay quiet.
@@ -1417,7 +1459,7 @@ fn idle_evict_sweep(shared: &Arc<ServiceShared>) {
             evict_resident(shared, backends, &model_id, &mut |_| {})
         });
         match result {
-            Ok(()) => {}
+            Ok(_) => {}
             Err(e) => eprintln!("residency: idle-evict {model_id} failed: {e}"),
         }
     }
@@ -2174,6 +2216,32 @@ fn any_backend_resident(backends: &HashMap<String, Box<dyn ContentBackend>>) -> 
     backends.values().any(|backend| backend.is_resident())
 }
 
+fn refresh_usable_vram_if_idle(
+    shared: &Arc<ServiceShared>,
+    backends: &HashMap<String, Box<dyn ContentBackend>>,
+) {
+    if !any_backend_resident(backends) {
+        shared.vram_usable.refresh();
+    }
+}
+
+/// Release cached CUDA allocations on the worker that owns them, bracketed by
+/// uncached NVML samples. An empty-card ceiling is published only from the
+/// post-trim sample.
+fn trim_worker_thread_cached_pool(
+    shared: &Arc<ServiceShared>,
+    backends: &HashMap<String, Box<dyn ContentBackend>>,
+    progress: &mut dyn FnMut(&str),
+) -> residency::CachedPoolTrim {
+    let trimmed = residency::trim_cached_pool_with(crate::gpu::query_gpu, || {
+        release_worker_thread_device_caches(progress);
+    });
+    if !any_backend_resident(backends) {
+        shared.vram_usable.refresh_from_gpu(&trimmed.after_gpu);
+    }
+    trimmed
+}
+
 /// Unloads one resident and VERIFIES the freed VRAM became visible through
 /// fresh NVML reads before returning (serialized teardown — "do not assume
 /// VRAM magically unloads"). Model state goes Ready on success; an unload
@@ -2183,7 +2251,7 @@ fn evict_resident(
     backends: &mut HashMap<String, Box<dyn ContentBackend>>,
     model_id: &str,
     progress: &mut dyn FnMut(&str),
-) -> Result<(), AssetAiError> {
+) -> Result<Option<residency::CachedPoolTrim>, AssetAiError> {
     let est_mb = shared
         .registry
         .find(model_id)
@@ -2210,7 +2278,7 @@ fn evict_resident(
                 ))
             })?;
         }
-        None => return Ok(()),
+        None => return Ok(None),
     }
     set_model_state(shared, model_id, ModelTrack::Ready);
     // A backend's `unload()` can only reach what it owns. The device memory it
@@ -2221,9 +2289,8 @@ fn evict_resident(
     // invalidate, and re-uploading on the next miss is exactly what the cache
     // is designed for. This is the step whose absence left the card full while
     // the service reported it empty.
-    if !any_backend_resident(backends) {
-        release_worker_thread_device_caches(progress);
-    }
+    let pool_trim = (!any_backend_resident(backends))
+        .then(|| trim_worker_thread_cached_pool(shared, backends, progress));
     if let (Some(before), true) = (before, est_mb > 0) {
         // Expect at least a quarter of the estimate back (estimates are
         // peaks; steady-resident footprints are smaller), capped under the
@@ -2266,7 +2333,13 @@ fn evict_resident(
             );
         }
     }
-    Ok(())
+    // The driver may publish more of the release during the verification
+    // window above. This remains post-trim, so it is safe to raise the public
+    // empty-card ceiling to the final sample.
+    if pool_trim.is_some() {
+        refresh_usable_vram_if_idle(shared, backends);
+    }
+    Ok(pool_trim)
 }
 
 /// Releases device memory cached on THIS worker thread outside any
@@ -2278,7 +2351,8 @@ fn evict_resident(
 /// worker thread and is released by `FluxBackend::unload` instead. No-op on
 /// builds without a GPU pipeline surface.
 #[allow(unused_variables, unused_mut)]
-fn release_worker_thread_device_caches(progress: &mut dyn FnMut(&str)) {
+fn release_worker_thread_device_caches(progress: &mut dyn FnMut(&str)) -> usize {
+    let mut released_bytes = 0usize;
     #[cfg(any(
         feature = "flux",
         feature = "mesh",
@@ -2298,14 +2372,24 @@ fn release_worker_thread_device_caches(progress: &mut dyn FnMut(&str)) {
         feature = "upscale-native"
     ))]
     {
-        match makepad_ai_common::backend::gpu_weight_cache_evict_prefix("") {
+        match makepad_ai_common::backend::gpu_weight_cache_evict_prefix_if_loaded("") {
             Ok(count) => progress(&format!(
-                "vram-release: evicted {count} cached weight buffers + idle pool on the service worker thread"
+                "vram-release: evicted {count} cached weight buffers on the service worker thread"
             )),
             Err(error) => progress(&format!("vram-release: weight cache evict failed: {error}")),
         }
-        makepad_ai_common::backend::gpu_pool_clear();
+        match makepad_ai_common::backend::gpu_release_cached() {
+            Ok(bytes) => {
+                released_bytes = bytes;
+                progress(&format!(
+                    "vram-release: allocator released {} MB of cached pool on the service worker thread",
+                    bytes / (1024 * 1024)
+                ));
+            }
+            Err(error) => progress(&format!("vram-release: cached pool trim failed: {error}")),
+        }
     }
+    released_bytes
 }
 
 /// The admission gate run before a model loads: single-heavy default
@@ -2334,7 +2418,21 @@ fn admit_for_load(
         .get(&spec.id)
         .map(|backend| backend.is_resident())
         .unwrap_or(false);
+    let mut pool_trim = None;
 
+    // A model switch always retires ordinary residents, including models
+    // whose own estimate is zero. Pins survive this first pass and are only
+    // considered below when the byte gate cannot otherwise be met.
+    for model_id in resident_others_lru(shared, backends, &spec.id)
+        .into_iter()
+        .filter(|model_id| !shared.residency.pins.contains(model_id))
+    {
+        cancel.check()?;
+        progress(&format!("switching models: evicting {model_id}"));
+        if let Some(trimmed) = evict_resident(shared, backends, &model_id, &mut progress)? {
+            pool_trim = Some(trimmed);
+        }
+    }
     if already_resident {
         return Ok(());
     }
@@ -2356,7 +2454,9 @@ fn admit_for_load(
         progress(&format!(
             "queued-for-memory: need {need} MB, free {free} MB — evicting pinned {model_id}"
         ));
-        evict_resident(shared, backends, &model_id, &mut progress)?;
+        if let Some(trimmed) = evict_resident(shared, backends, &model_id, &mut progress)? {
+            pool_trim = Some(trimmed);
+        }
         free = residency::fresh_free_mb().unwrap_or(free);
         if free >= need {
             return Ok(());
@@ -2368,9 +2468,12 @@ fn admit_for_load(
     // hooks, idle pool blocks), then give the driver a bounded window to
     // publish the freed memory (WDDM bookkeeping trails the allocator), and
     // only then refuse — explicitly, never a silent fallback.
-    release_worker_thread_device_caches(&mut progress);
-    free = residency::fresh_free_mb().unwrap_or(free);
-    if free >= need {
+    let pool_trim = pool_trim.unwrap_or_else(|| {
+        trim_worker_thread_cached_pool(shared, backends, &mut progress)
+    });
+    let (post_trim_free, admitted) = residency::admission_after_trim(&pool_trim, free, need);
+    free = post_trim_free;
+    if admitted {
         return Ok(());
     }
     progress(&format!(
@@ -2378,11 +2481,20 @@ fn admit_for_load(
     ));
     match residency::wait_free_at_least(need, residency::ADMIT_TIMEOUT) {
         None => Ok(()),
-        Some(seen) if seen >= need => Ok(()),
-        Some(seen) => Err(AssetAiError::Backend(format!(
-            "insufficient VRAM for {}: need {need} MB (estimate {est_mb} MB + reserve {} MB), only {seen} MB free after evicting every resident — refusing to load (no CPU/other-node fallback)",
-            spec.id, shared.residency.reserve_mb
-        ))),
+        Some(seen) if seen >= need => {
+            refresh_usable_vram_if_idle(shared, backends);
+            Ok(())
+        }
+        Some(seen) => {
+            refresh_usable_vram_if_idle(shared, backends);
+            Err(AssetAiError::Backend(residency::insufficient_vram_message(
+                &spec.id,
+                est_mb,
+                shared.residency.reserve_mb,
+                seen,
+                pool_trim.released_mb_at(seen),
+            )))
+        }
     }
 }
 
@@ -2406,6 +2518,7 @@ fn oom_evict_all_others(
         evict_resident(shared, backends, &model_id, &mut progress)?;
     }
     release_worker_thread_device_caches(&mut progress);
+    refresh_usable_vram_if_idle(shared, backends);
     Ok(())
 }
 
@@ -2517,6 +2630,7 @@ mod lifecycle_tests {
             models: Mutex::new(HashMap::new()),
             artifacts: Mutex::new(HashMap::new()),
             gpu: GpuCache::new(),
+            vram_usable: residency::UsableVram::new(None),
             fabric_secret: fabric_secret.map(str::to_string),
             node_id: 1,
             node_key: "f".repeat(32),
@@ -2776,6 +2890,43 @@ mod lifecycle_tests {
         let models = shared.models.lock().unwrap();
         assert!(matches!(models.get("old-a"), Some(ModelTrack::Ready)));
         assert!(matches!(models.get("old-b"), Some(ModelTrack::Ready)));
+    }
+
+    #[test]
+    fn models_marks_a_permanently_unadmittable_model_too_small() {
+        let mut shared = fixture_shared(&[]);
+        let inner = Arc::get_mut(&mut shared).unwrap();
+        inner.registry.models.push(ModelSpec {
+            id: "flux2-dev".into(),
+            domain: crate::registry::Domain::Image,
+            backend: "testpattern".into(),
+            available: true,
+            gated: false,
+            vram_gb: Some(29.0),
+            min_vram_gb: None,
+            min_compute_cap: None,
+            note: None,
+            license: None,
+            files: Vec::new(),
+        });
+        inner
+            .models
+            .get_mut()
+            .unwrap()
+            .insert("flux2-dev".into(), ModelTrack::Ready);
+        inner.vram_usable = residency::UsableVram::new(Some(30_603));
+
+        let model = models_json(&shared)
+            .models
+            .into_iter()
+            .find(|model| model.id == "flux2-dev")
+            .unwrap();
+        assert!(!model.available);
+        assert_eq!(model.state, MODEL_STATE_TOO_SMALL);
+        assert_eq!(
+            model.note.as_deref(),
+            Some("needs 31744 MB, this card can free 30603")
+        );
     }
 
     /// The lease lifecycle over the wire (aicore §8): a renewed job stays,

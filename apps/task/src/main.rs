@@ -10,9 +10,8 @@
 pub use makepad_widgets;
 
 use makepad_widgets::*;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
+use makepad_widgets::makepad_platform::thread::TaskHandle;
+use std::sync::mpsc::{self, Receiver, Sender};
 
 mod backend;
 mod sampler;
@@ -416,11 +415,10 @@ pub struct App {
     snapshot_rx: Option<Receiver<Snapshot>>,
     #[rust]
     sampler_started: bool,
-    /// Shared with the sampler thread: the tick period in milliseconds. The
-    /// thread re-reads it between sleeps, so a change takes effect at once
-    /// even when it was mid-way through a 10 second wait.
     #[rust]
-    interval_ms: Arc<AtomicU64>,
+    sampler_interval_tx: Option<Sender<u64>>,
+    #[rust]
+    sampler_task: Option<TaskHandle<()>>,
     #[rust]
     theme: Theme,
     #[rust]
@@ -444,25 +442,36 @@ impl App {
     /// Starts the sampler thread, unless a warm-pool instance is still
     /// dormant — a cached task manager must not sample at its 0.1s default
     /// while nobody is looking at it.
-    fn start_sampler(&mut self) {
+    fn start_sampler(&mut self, cx: &mut Cx) {
         if self.sampler_started || self.dormancy.is_dormant() {
             return;
         }
-        self.sampler_started = true;
-        self.interval_ms.store(REFRESH_CHOICES_MS[DEFAULT_REFRESH], Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
-        self.snapshot_rx = Some(rx);
-        sampler::spawn(tx, self.interval_ms.clone());
+        let (interval_tx, interval_rx) = mpsc::channel();
+        match sampler::spawn(
+            &cx.thread_spawner(),
+            tx,
+            interval_rx,
+            REFRESH_CHOICES_MS[DEFAULT_REFRESH],
+        ) {
+            Ok(task) => {
+                self.sampler_started = true;
+                self.snapshot_rx = Some(rx);
+                self.sampler_interval_tx = Some(interval_tx);
+                self.sampler_task = Some(task);
+            }
+            Err(error) => log!("task: could not start sampler worker: {error}"),
+        }
     }
 
     /// Wakes a dormant warm instance: `WmEvent::Adopted`, or defensively the
     /// first real key/pointer input in case that message was lost. A no-op
     /// past the first call (`Dormancy::wake` only fires once), so mashing
     /// keys after `Adopted` already woke it never restarts the sampler.
-    fn wake(&mut self) {
+    fn wake(&mut self, cx: &mut Cx) {
         if self.dormancy.wake() {
             log!("task: warm instance woken, starting sampler");
-            self.start_sampler();
+            self.start_sampler(cx);
         }
     }
 
@@ -751,7 +760,9 @@ impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         if let Some(choice) = self.ui.drop_down(cx, ids!(refresh_select)).changed(actions) {
             let millis = REFRESH_CHOICES_MS.get(choice).copied().unwrap_or(1000);
-            self.interval_ms.store(millis, Ordering::Relaxed);
+            if let Some(tx) = &self.sampler_interval_tx {
+                let _ = tx.send(millis);
+            }
             log!("task: refresh interval now {millis} ms");
         }
     }
@@ -781,7 +792,7 @@ impl AppMain for App {
             }
             self.layout_from_window(cx);
             // No-ops while dormant — see `start_sampler`.
-            self.start_sampler();
+            self.start_sampler(cx);
         }
         // The window is often an wm tile, so the layout follows its size
         // rather than assuming a desktop-sized window.
@@ -795,13 +806,13 @@ impl AppMain for App {
         // `Event::Custom(json)`; `Adopted` is what wakes a warm instance.
         if let Event::Custom(json) = event {
             if let Some(makepad_wm_api::WmEvent::Adopted) = makepad_wm_api::WmEvent::parse(json) {
-                self.wake();
+                self.wake(cx);
             }
         }
         // Defensive fallback: a lost `Adopted` message must not leave a
         // visibly-adopted, actually-being-used instance sampling nothing.
         if self.dormancy.is_dormant() && is_wake_input(event) {
-            self.wake();
+            self.wake(cx);
         }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());

@@ -8,7 +8,7 @@
 
 #![allow(dead_code)] // shell surface (icons, OSD, panels) built ahead of the flows that use it
 pub use makepad_widgets;
-use makepad_widgets::makepad_platform::thread::SignalToUI;
+use makepad_widgets::makepad_platform::thread::{Lane, SignalToUI, TaskHandle};
 use makepad_widgets::*;
 
 mod ai_bus;
@@ -44,7 +44,7 @@ use makepad_wm_api::{WmEvent, WmRequest};
 use preview::PreviewCache;
 use run_view::{MpRunView, MpRunViewAction};
 use makepad_widgets::makepad_micro_serde::*;
-use shell::bar::{BarData, BarModule, ShellBar, ShellBarAction};
+use shell::bar::{BarData, BarModule, SampledStatus, ShellBar, ShellBarAction};
 use shell::menu::{MenuSkin, ShellMenu, ShellMenuAction};
 use shell::notifications::ShellNotifications;
 use shell::osd::ShellOsd;
@@ -53,7 +53,7 @@ use shell::ShellTokens;
 use ai_bus::{AiBus, Route};
 use apps::{AppRegistry, Hosting};
 use makepad_ai_services::wire::{ServiceCall, ServiceDown, ToolResult};
-use makepad_app_module::{AppModule, ExecOutcome};
+use makepad_app_module::{AppModule, ExecOutcome, ModuleUpstream};
 use module_host::ModuleHost;
 use pane_links::{PaneCall, PaneLinks};
 use makepad_widgets::ai_slot::AiSlotRequests;
@@ -269,10 +269,12 @@ pub struct App {
     /// What the shell bar's status modules show, sampled on the tick.
     #[rust]
     bar_sample: BarData,
-    /// The background sampler's cache (fork+exec off the main thread —
-    /// see shell::bar::start_status_sampler).
     #[rust]
-    status_cache: Option<std::sync::Arc<std::sync::Mutex<shell::bar::SampledStatus>>>,
+    status_rx: Option<std::sync::mpsc::Receiver<SampledStatus>>,
+    #[rust]
+    status_worker: Option<TaskHandle<()>>,
+    #[rust]
+    status_sample: SampledStatus,
     #[rust]
     status_tick: u32,
     /// The clock's alternate format (right-click cycles it, `formatAlt`).
@@ -282,6 +284,8 @@ pub struct App {
     /// colours, not the pictures); the tick applies the first one to land.
     #[rust]
     backgrounds_pending: bool,
+    #[rust]
+    background_task: Option<TaskHandle<usize>>,
     /// Which bar module's flyout is open, for the accent pill.
     #[rust]
     shell_panel_open: Option<BarModule>,
@@ -571,8 +575,10 @@ impl App {
         let state = self.state_mut();
         let term_env = state.term_env.clone();
         let lines = self.line_sender();
+        let pool = cx.task_pool();
         let state = self.state_mut();
         match spawn_client(
+            &pool,
             app,
             id,
             hub_port,
@@ -721,14 +727,14 @@ impl App {
         log!("wm: adopted warm {} as client {}", app_id, client);
         self.redraw_all(cx);
         // …and the next one starts warming immediately.
-        self.spawn_warm(app_id);
+        self.spawn_warm(cx, app_id);
         true
     }
 
     /// Put one dormant instance of `app_id` in the pool. Quiet by design:
     /// the pool is invisible infrastructure, and anything it cannot do
     /// simply means the next launch of that app is a cold one.
-    fn spawn_warm(&mut self, app_id: &str) {
+    fn spawn_warm(&mut self, cx: &mut Cx, app_id: &str) {
         if !self.warm_pool.wants(app_id, host::now()) {
             return;
         }
@@ -745,7 +751,9 @@ impl App {
         let cwd = self.launch_cwd(app_id, false);
         let term_env = self.state_mut().term_env.clone();
         let lines = self.line_sender();
+        let pool = cx.task_pool();
         match spawn_client(
+            &pool,
             &app,
             id,
             hub_port,
@@ -773,11 +781,11 @@ impl App {
     /// Top the pool up, ONE spawn per tick: a cold desktop otherwise forks
     /// four cargo builds into the same target-dir lock at once, and they
     /// would only queue behind each other anyway.
-    fn top_up_warm_pool(&mut self) {
+    fn top_up_warm_pool(&mut self, cx: &mut Cx) {
         let Some(app) = self.warm_pool.next_missing(host::now()) else {
             return;
         };
-        self.spawn_warm(&app);
+        self.spawn_warm(cx, &app);
     }
 
     /// Hand a dormant instance a geometry and a framebuffer of its own so
@@ -1076,7 +1084,8 @@ impl App {
         let id = self.next_id;
         self.next_id += 1;
         let lines = self.line_sender();
-        let slot = match preview::spawn_for_request(&req, id, hub_port, lines) {
+        let pool = cx.task_pool();
+        let slot = match preview::spawn_for_request(&pool, &req, id, hub_port, lines) {
             Ok(slot) => slot,
             Err(err) => {
                 log!("wm: open request failed: {}", err);
@@ -1201,7 +1210,8 @@ impl App {
         let id = self.next_id;
         self.next_id += 1;
         let lines = self.line_sender();
-        let slot = match preview::spawn_for_request(&open, id, hub_port, lines) {
+        let pool = cx.task_pool();
+        let slot = match preview::spawn_for_request(&pool, &open, id, hub_port, lines) {
             Ok(mut slot) => {
                 slot.is_preview = true;
                 slot.takes_focus = false;
@@ -1354,9 +1364,10 @@ impl App {
         }
         if !polite {
             // Never connected (still building): nothing to ask politely.
+            let pool = cx.task_pool();
             if let Some(slot) = self.state_mut().clients.get_mut(&client) {
                 if let Some(child) = slot.child.as_mut() {
-                    clients::kill_child_group(child, clients::GROUP_KILL_GRACE);
+                    clients::kill_child_group(child, clients::GROUP_KILL_GRACE, &pool);
                 }
             }
         }
@@ -1531,6 +1542,7 @@ impl App {
 
     fn reap_exited(&mut self, cx: &mut Cx) {
         // A client that ignored the polite close gets the fallback.
+        let pool = cx.task_pool();
         for slot in self.state_mut().clients.values_mut() {
             let Some(since) = slot.closing else { continue };
             if host::now() - since < clients::CLOSE_GRACE.as_secs_f64() {
@@ -1538,7 +1550,7 @@ impl App {
             }
             if let Some(child) = slot.child.as_mut() {
                 if matches!(child.try_wait(), Ok(None)) {
-                    clients::kill_child_group(child, clients::GROUP_KILL_GRACE);
+                    clients::kill_child_group(child, clients::GROUP_KILL_GRACE, &pool);
                 }
             }
         }
@@ -1675,7 +1687,8 @@ impl App {
         let id = self.next_id;
         self.next_id += 1;
         let lines = self.line_sender();
-        match spawn_client(&app, id, hub_port, None, None, &[], false, lines) {
+        let pool = cx.task_pool();
+        match spawn_client(&pool, &app, id, hub_port, None, None, &[], false, lines) {
             Ok(mut slot) => {
                 slot.pane = true;
                 self.state_mut().clients.insert(id, slot);
@@ -1826,14 +1839,15 @@ impl App {
 
     /// The WM is going down: the pane's child has no window of its own
     /// and no tile, so nothing else would reap it.
-    fn kill_pane_child(&mut self) {
+    fn kill_pane_child(&mut self, cx: &mut Cx) {
         let Some(client) = self.ai_bus.pane_client else {
             return;
         };
+        let pool = cx.task_pool();
         if let Some(slot) = self.state_mut().clients.get_mut(&client) {
             if let Some(child) = slot.child.as_mut() {
                 log!("wm: shutdown kills the AI pane's child {}", client);
-                clients::kill_child_group(child, clients::GROUP_KILL_GRACE);
+                clients::kill_child_group(child, clients::GROUP_KILL_GRACE, &pool);
             }
         }
     }
@@ -1903,6 +1917,10 @@ impl App {
                 self.send_to_pane(frame);
             }
             ServiceDown::Cancel { call_id } => self.module_host.cancel(cx, client, &call_id),
+            ServiceDown::Subscribe { sub_id, topic, filter } => {
+                self.module_host.subscribe(cx, client, &sub_id, &topic, filter.as_deref())
+            }
+            ServiceDown::Unsubscribe { sub_id } => self.module_host.unsubscribe(cx, client, &sub_id),
             // The pane state reaches instances through `broadcast_chat_open`.
             ServiceDown::ChatOpen { .. } | ServiceDown::Registered { .. } => {}
         }
@@ -1911,13 +1929,25 @@ impl App {
     /// Results in-process executors answered later, up to the pane: down
     /// the instance's link when the assistant is in-process, as a frame to
     /// the aichat child otherwise.
-    fn drain_module_replies(&mut self) {
-        for (client, result) in self.module_host.drain_replies() {
-            if self.pane_links.is_instance(client) {
-                self.pane_links.reply(client, result);
-            } else {
-                let frame = self.ai_bus.local_reply(client, result);
-                self.send_to_pane(frame);
+    fn drain_module_upstream(&mut self) {
+        for (client, upstream) in self.module_host.drain_upstream() {
+            match upstream {
+                ModuleUpstream::Result(result) => {
+                    if self.pane_links.is_instance(client) {
+                        self.pane_links.reply(client, result);
+                    } else {
+                        let frame = self.ai_bus.local_reply(client, result);
+                        self.send_to_pane(frame);
+                    }
+                }
+                ModuleUpstream::Message { sub_id, message } => {
+                    if self.pane_links.is_instance(client) {
+                        self.pane_links.publish(client, sub_id, message);
+                    } else {
+                        let frame = self.ai_bus.local_message(client, sub_id, message);
+                        self.send_to_pane(frame);
+                    }
+                }
             }
         }
     }
@@ -1955,6 +1985,12 @@ impl App {
                     self.pane_links.reply(client, result);
                 }
                 PaneCall::Cancel(client, call_id) => self.module_host.cancel(cx, client, &call_id),
+                PaneCall::Subscribe { client, sub_id, topic, filter } => {
+                    self.module_host.subscribe(cx, client, &sub_id, &topic, filter.as_deref())
+                }
+                PaneCall::Unsubscribe { client, sub_id } => {
+                    self.module_host.unsubscribe(cx, client, &sub_id)
+                }
             }
         }
         // The chat's own Escape (an idle, empty composer) asks the slot it
@@ -2426,7 +2462,7 @@ impl App {
     /// tick polls `theme_backgrounds` while `backgrounds_pending`). The
     /// bundled default theme ships without wallpapers, so a fresh install
     /// gets the omarchy look on its own; no network, no pictures, no harm.
-    fn fetch_backgrounds_if_missing(&mut self) {
+    fn fetch_backgrounds_if_missing(&mut self, cx: &mut Cx) {
         if !host::processes_available() {
             return;
         }
@@ -2436,13 +2472,33 @@ impl App {
         }
         self.backgrounds_pending = true;
         log!("wm: theme '{}' has no wallpapers; fetching them", name);
-        let _ = std::thread::Builder::new()
-            .name("wm-backgrounds".into())
-            .spawn(move || {
+        match cx.task_pool().submit(Lane::Heavy, move || {
                 let n = theme::fetch_backgrounds_if_missing(&name);
                 log!("wm: fetched {} wallpaper(s) for '{}'", n, name);
-                SignalToUI::set_ui_signal();
-            });
+                n
+            }) {
+            Ok(task) => self.background_task = Some(task),
+            Err(error) => {
+                self.backgrounds_pending = false;
+                log!("wm: could not queue wallpaper fetch: {error}");
+            }
+        }
+    }
+
+    fn poll_backgrounds(&mut self, cx: &mut Cx) {
+        let Some(task) = self.background_task.as_mut() else {
+            return;
+        };
+        let Some(result) = task.try_take() else {
+            return;
+        };
+        self.background_task = None;
+        self.backgrounds_pending = false;
+        match result {
+            Ok(count) if count > 0 => self.apply_background(cx, 0),
+            Ok(_) => {}
+            Err(error) => log!("wm: wallpaper fetch task failed: {error}"),
+        }
     }
 
     /// SUPER+CTRL+SPACE — the theme's next wallpaper.
@@ -2808,10 +2864,21 @@ impl App {
         // this thread that starved the hosted tiles' 8ms Ticks (visible
         // ~0.5s hiccups in every child app). A background thread samples
         // and we only copy its cache here.
-        let cache = self
-            .status_cache
-            .get_or_insert_with(shell::bar::start_status_sampler);
-        let s = cache.lock().map(|s| s.clone()).unwrap_or_default();
+        if self.status_rx.is_none() {
+            match shell::bar::start_status_sampler(&cx.thread_spawner()) {
+                Ok((rx, worker)) => {
+                    self.status_rx = Some(rx);
+                    self.status_worker = Some(worker);
+                }
+                Err(error) => log!("wm: could not start status worker: {error}"),
+            }
+        }
+        if let Some(rx) = &self.status_rx {
+            while let Ok(sample) = rx.try_recv() {
+                self.status_sample = sample;
+            }
+        }
+        let s = self.status_sample.clone();
         self.bar_sample.volume = s.volume;
         self.bar_sample.muted = s.muted;
         // No sampler (no processes to fork `date` in: the web): the clock
@@ -2894,12 +2961,13 @@ impl App {
     /// no window, so nothing else would ever reap it. Kill the cache's
     /// processes outright — `--stdin-loop` children do notice an orphaned
     /// parent eventually, but "eventually" is not a shutdown story.
-    fn kill_warm_previews(&mut self) {
+    fn kill_warm_previews(&mut self, cx: &mut Cx) {
+        let pool = cx.task_pool();
         for client in self.preview_cache.warm_clients() {
             if let Some(slot) = self.state_mut().clients.get_mut(&client) {
                 if let Some(child) = slot.child.as_mut() {
                     log!("wm: shutdown kills warm preview client {}", client);
-                    clients::kill_child_group(child, clients::GROUP_KILL_GRACE);
+                    clients::kill_child_group(child, clients::GROUP_KILL_GRACE, &pool);
                 }
             }
         }
@@ -3711,7 +3779,11 @@ impl MatchEvent for App {
 
         // The client hub is the PROCESS host's: a build without processes
         // (the web) never binds one and hosts its linked modules instead.
-        let hub = if host::processes_available() { WmHub::start() } else { None };
+        let hub = if host::processes_available() {
+            WmHub::start(cx.thread_spawner())
+        } else {
+            None
+        };
         let hub_port = hub.as_ref().map(|h| h.port).unwrap_or(0);
         if hub.is_none() && host::processes_available() {
             log!("wm: could not bind the client hub; tiles will not start");
@@ -3812,7 +3884,7 @@ impl MatchEvent for App {
         }
 
         self.apply_background(cx, 0);
-        self.fetch_backgrounds_if_missing();
+        self.fetch_backgrounds_if_missing(cx);
         self.update_bar(cx);
         self.update_status(cx);
         // The platform installs a default menu whose Quit is ⌘Q — which
@@ -3974,7 +4046,7 @@ impl MatchEvent for App {
         if self.state.is_some() {
             self.drain_hub(cx);
             self.drain_client_lines(cx);
-            self.drain_module_replies();
+            self.drain_module_upstream();
         }
     }
 }
@@ -4143,20 +4215,14 @@ impl AppMain for App {
         }
         if let Event::Shutdown = event {
             if self.state.is_some() {
-                self.kill_warm_previews();
-                self.kill_pane_child();
+                self.kill_warm_previews(cx);
+                self.kill_pane_child(cx);
             }
         }
         if let Event::Timer(te) = event {
             if self.tick.is_timer(te).is_some() && self.state.is_some() {
                 self.reap_exited(cx);
-                if self.backgrounds_pending {
-                    let name = self.state_mut().theme_name.clone();
-                    if !theme::theme_backgrounds(&name).is_empty() {
-                        self.backgrounds_pending = false;
-                        self.apply_background(cx, 0);
-                    }
-                }
+                self.poll_backgrounds(cx);
                 self.drain_client_lines(cx);
                 self.explain_first_exec_scan(cx);
                 self.update_status(cx);
@@ -4166,7 +4232,7 @@ impl AppMain for App {
                 // per second, so a cold desktop never forks four cargo
                 // builds at once.
                 if !self.gallery {
-                    self.top_up_warm_pool();
+                    self.top_up_warm_pool(cx);
                 }
             }
             if self.warm_tick.is_timer(te).is_some() && self.state.is_some() {
@@ -4176,6 +4242,7 @@ impl AppMain for App {
         if let Event::Signal = event {
             if SignalToUI::check_and_clear_ui_signal() && self.state.is_some() {
                 crate::run_view::trace_host("sig");
+                self.poll_backgrounds(cx);
                 self.drain_hub(cx);
                 self.drain_client_lines(cx);
             }

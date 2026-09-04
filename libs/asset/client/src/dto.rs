@@ -301,6 +301,12 @@ pub struct CatalogHit {
     /// Public creator/artist annotation. Optional on the wire so clients
     /// remain compatible with stores predating this projection.
     pub creator: String,
+    pub artist: String,
+    pub artist_url: String,
+    pub album: String,
+    pub source_url: String,
+    pub license: String,
+    pub license_url: String,
     pub snippet: String,
     pub score: u64,
     pub live: bool,
@@ -436,6 +442,20 @@ pub fn parse_catalog_page(v: &Value) -> ClientResult<CatalogPageDto> {
             Some(_) => need_str(h, "creator", 128, "hit creator")?.to_string(),
         };
         check_display(&creator, "hit creator")?;
+        let optional_text = |key: &'static str, what: &'static str| -> ClientResult<String> {
+            let text = match h.get(key) {
+                None | Some(Value::Null) => String::new(),
+                Some(_) => need_str(h, key, MAX_SNIPPET_BYTES, what)?.to_string(),
+            };
+            check_display(&text, what)?;
+            Ok(text)
+        };
+        let artist = optional_text("artist", "hit artist")?;
+        let artist_url = optional_text("artist_url", "hit artist url")?;
+        let album = optional_text("album", "hit album")?;
+        let source_url = optional_text("source_url", "hit source url")?;
+        let license = optional_text("license", "hit license")?;
+        let license_url = optional_text("license_url", "hit license url")?;
         let snippet = need_str(h, "snippet", MAX_SNIPPET_BYTES, "hit snippet")?.to_string();
         check_display(&snippet, "hit snippet")?;
         let score = need_u64(h, "score", "hit score")?;
@@ -463,6 +483,12 @@ pub fn parse_catalog_page(v: &Value) -> ClientResult<CatalogPageDto> {
             kind,
             title,
             creator,
+            artist,
+            artist_url,
+            album,
+            source_url,
+            license,
+            license_url,
             snippet,
             score,
             live,
@@ -2379,6 +2405,12 @@ pub struct AnnotationDto {
     pub categories: Vec<String>,
     pub tags: Vec<String>,
     pub creator: String,
+    pub artist: String,
+    pub artist_url: String,
+    pub album: String,
+    pub source_url: String,
+    pub license: String,
+    pub license_url: String,
     pub generator: String,
     pub backend: String,
     pub model: String,
@@ -2434,6 +2466,12 @@ pub fn parse_annotation(v: &Value) -> ClientResult<AnnotationDto> {
         categories: labels("categories", "annotation categories")?,
         tags: labels("tags", "annotation tags")?,
         creator: text("creator", 128, "annotation creator")?,
+        artist: text("artist", 4096, "annotation artist")?,
+        artist_url: text("artist_url", 4096, "annotation artist url")?,
+        album: text("album", 4096, "annotation album")?,
+        source_url: text("source_url", 4096, "annotation source url")?,
+        license: text("license", 4096, "annotation license")?,
+        license_url: text("license_url", 4096, "annotation license url")?,
         generator: text("generator", 128, "annotation generator")?,
         backend: text("backend", 128, "annotation backend")?,
         model: text("model", 128, "annotation model")?,

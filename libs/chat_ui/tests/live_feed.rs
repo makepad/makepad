@@ -16,6 +16,7 @@
 use makepad_chat_ui::feed::{ChatFeed, FeedConfig, NoClientTools};
 use makepad_chat_ui::transcript::{ChatData, ChatRole, CHAT};
 use makepad_asset_client::ApiEndpoints;
+use makepad_widgets::Cx;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -73,7 +74,8 @@ fn a_live_turn_streams_and_reports_a_real_rate() {
         return;
     };
     ChatData::clear();
-    let feed = ChatFeed::start(cfg, Box::new(NoClientTools));
+    let cx = Cx::new(Box::new(|_, _| {}));
+    let feed = ChatFeed::start(cfg, Box::new(NoClientTools), cx.thread_spawner());
     // Long enough to be MEASURED: a one-delta reply lands inside a single
     // sample and has no honest rate to report.
     feed.send("count from 1 to 40, one number per line, nothing else.".into(), Vec::new());
@@ -84,6 +86,7 @@ fn a_live_turn_streams_and_reports_a_real_rate() {
     // probe, the assembled context, then prefill.
     let mut live: Option<String> = None;
     wait_until("the turn to land", 240, || {
+        let _ = feed.take_dirty();
         if let Some(rate) = ChatData::live_rate_label() {
             live = Some(rate);
         }
@@ -120,17 +123,22 @@ fn escape_ends_a_live_turn_in_flight() {
         return;
     };
     ChatData::clear();
-    let feed = ChatFeed::start(cfg, Box::new(NoClientTools));
+    let cx = Cx::new(Box::new(|_, _| {}));
+    let feed = ChatFeed::start(cfg, Box::new(NoClientTools), cx.thread_spawner());
     feed.send("write a long detailed essay about rust ownership.".into(), Vec::new());
     // A cold 27B box spends real time on the first session: the provider
     // probe, the assembled context, then prefill.
     wait_until("the first token", 240, || {
+        let _ = feed.take_dirty();
         CHAT.read().map(|d| !d.streaming_text.is_empty()).unwrap_or(false)
     });
     feed.cancel();
     // Cancel is the broker's route, not a local flag: the turn has to STOP,
     // and it has to stop soon enough to be worth pressing.
-    wait_until("the cancelled turn to stop", 30, || !ChatData::is_streaming());
+    wait_until("the cancelled turn to stop", 30, || {
+        let _ = feed.take_dirty();
+        !ChatData::is_streaming()
+    });
     println!("cancelled after: {:?}", ChatData::item_count());
     ChatData::clear();
 }

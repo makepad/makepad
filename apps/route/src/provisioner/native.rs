@@ -1,21 +1,28 @@
 use crate::testmap::TestMapBuild;
-use makepad_widgets::{Cx, MapViewRef};
+use crate::overlays::{
+    overlay_source, OverlaySelection, OCEAN_OVERLAY_LAYERS, OVERLAY_LAYERS,
+};
+use makepad_widgets::{Cx, MapViewRef, OverlaySource, TileSourceConfig};
+use std::fs;
 use std::ops::{Deref, DerefMut};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub const PROFILE: super::ProvisioningProfile = super::ProvisioningProfile::Native;
+const WORLD_ARCHIVE: &str = "world.mkmap";
 
-/// Native provisioning keeps the existing first-run download and bake flow.
+/// Native source selection plus the existing test-map state used by the rest
+/// of the app's provisioning UI.
 pub struct MapProvisioner {
     build: TestMapBuild,
-    adopted: bool,
 }
 
 impl Default for MapProvisioner {
     fn default() -> Self {
+        let _ = fs::remove_file(
+            makepad_widgets::makepad_platform::home::makepad_home().join("route/tile-source"),
+        );
         Self {
             build: TestMapBuild::default(),
-            adopted: false,
         }
     }
 }
@@ -26,8 +33,8 @@ pub struct ProvisionerUpdate {
 }
 
 impl MapProvisioner {
-    /// Select production data, an already-baked test map, or start the
-    /// established first-run flow. Filesystem policy stays inside this seam.
+    /// Use a local world archive when the configured maps folder contains
+    /// one, otherwise fall back to the hosted range-cached archive.
     pub fn ensure_source(
         &mut self,
         cx: &mut Cx,
@@ -35,50 +42,41 @@ impl MapProvisioner {
         maps_root: &Path,
     ) -> Option<String> {
         self.build.set_maps_root(maps_root);
-        if let Some(archive) = crate::testmap::production_archive(maps_root) {
-            self.adopt_production_map(cx, map, maps_root, &archive);
-            return None;
-        }
-        if self.build.paths.archive.is_file() {
-            self.adopt_existing_test_map(cx, map);
-            return None;
-        }
-        // The DSL has checkout-relative placeholders so it can be previewed,
-        // but runtime filesystem policy must never fall back to the cwd.
-        map.set_source_paths(cx, "", "", "");
-        self.build.offer_if_no_map(false);
-        if self.build.is_offered() {
-            self.build.start(cx);
-        }
+        self.install_source(cx, map, maps_root);
         None
     }
 
-    fn adopt_production_map(
+    fn install_source(
         &mut self,
         cx: &mut Cx,
         map: &MapViewRef,
         maps_root: &Path,
-        archive: &Path,
     ) {
-        if self.adopted {
-            return;
-        }
-        self.adopted = true;
-        let archive = archive.to_string_lossy();
+        let archive = local_archive(maps_root);
         let bridge = maps_root.join("nl-bridge-dz.mbtiles");
         let bridge = bridge
             .is_file()
             .then(|| bridge.to_string_lossy().into_owned())
             .unwrap_or_default();
-        map.set_source_paths(cx, &archive, &archive, &bridge);
-        let overlays = ["ocean-low.mbtiles", "ocean-high.mbtiles"]
-            .into_iter()
-            .map(|name| maps_root.join(name))
-            .filter(|path| path.is_file())
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join(";");
-        map.set_overlay_paths(cx, &overlays);
+        let config = if archive.is_file() {
+            TileSourceConfig::LocalArchive {
+                mbtiles_path: archive.to_string_lossy().into_owned(),
+                detail_mbtiles_path: archive.to_string_lossy().into_owned(),
+                bridge_dz_path: bridge,
+            }
+        } else {
+            let mut config = super::demo::hosted_tile_source();
+            let TileSourceConfig::HttpArchive {
+                bridge_dz_path,
+                ..
+            } = &mut config
+            else {
+                unreachable!();
+            };
+            *bridge_dz_path = bridge;
+            config
+        };
+        map.set_source_config(cx, config);
     }
 
     pub fn handle_event(&mut self, cx: &mut Cx, map: &MapViewRef) -> ProvisionerUpdate {
@@ -94,24 +92,59 @@ impl MapProvisioner {
         }
     }
 
+    pub fn overlay_sources(
+        &self,
+        selection: &OverlaySelection,
+        maps_root: &Path,
+    ) -> Vec<OverlaySource> {
+        let (ocean_urls, selectable_urls) = super::demo::HOSTED_CONFIG
+            .overlays
+            .split_at(OCEAN_OVERLAY_LAYERS.len());
+        let mut sources = OCEAN_OVERLAY_LAYERS
+            .iter()
+            .zip(ocean_urls.iter().copied())
+            .map(|(layer, url)| {
+                let path = maps_root.join(layer.local_mbtiles);
+                let source = if path.is_file() {
+                    TileSourceConfig::local_archive(path.to_string_lossy().into_owned())
+                } else {
+                    TileSourceConfig::http_archive(url)
+                };
+                overlay_source(*layer, source)
+            })
+            .collect::<Vec<_>>();
+        let available = OVERLAY_LAYERS
+            .iter()
+            .zip(selectable_urls.iter().copied())
+            .map(|(layer, url)| {
+                let source = Path::new(layer.local_mbtiles);
+                let source = if source.is_file() {
+                    TileSourceConfig::local_archive(layer.local_mbtiles)
+                } else {
+                    TileSourceConfig::http_archive(url)
+                };
+                overlay_source(*layer, source)
+            })
+            .collect::<Vec<_>>();
+        sources.extend(selection.enabled_sources(&available));
+        sources
+    }
+
     fn adopt_existing_test_map(&mut self, cx: &mut Cx, map: &MapViewRef) {
-        if self.adopted {
-            return;
-        }
-        self.adopted = true;
         let archive = self.build.paths.archive.to_string_lossy().into_owned();
         map.set_source_paths(cx, &archive, &archive, "");
-        map.set_overlay_paths(cx, "");
+        map.set_overlays(cx, Vec::new());
     }
 
     fn adopt_completed_test_map(&mut self, cx: &mut Cx, map: &MapViewRef) -> Option<String> {
-        if self.adopted {
-            return None;
-        }
         self.adopt_existing_test_map(cx, map);
         map.set_center(cx, crate::AMSTERDAM_CENTER.0, crate::AMSTERDAM_CENTER.1);
         Some(self.build.paths.nav_basename.to_string_lossy().into_owned())
     }
+}
+
+fn local_archive(maps_root: &Path) -> PathBuf {
+    maps_root.join(WORLD_ARCHIVE)
 }
 
 impl Deref for MapProvisioner {

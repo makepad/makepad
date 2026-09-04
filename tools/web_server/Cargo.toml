@@ -26,3 +26,4 @@ nightly=[]
 makepad-asset-data = { path = "../../libs/asset/data" }
 makepad-asset-store = { path = "../../libs/asset/store" }
 makepad-mbtile-reader = { path = "../../libs/mbtile_reader" }
+serde_json = "1.0"

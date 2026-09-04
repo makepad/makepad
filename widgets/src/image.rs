@@ -27,6 +27,7 @@ script_mod! {
         fit_pan: vec2(0.0, 0.0)
         async_load: 0.0
         rotation: 0.0
+        sample_mode: 0.0
         image_dim_w: 0.0
         image_dim_h: 0.0
 
@@ -91,6 +92,8 @@ pub struct DrawImage {
     async_load: f32,
     #[live]
     pub rotation: f32,
+    #[live]
+    pub sample_mode: f32,
     /// When non-zero, `get_color` rotates the image rigidly (aspect-correct):
     /// the image of this pixel size is rotated by `rotation` and inscribed in the
     /// quad, instead of rotating texture UVs in normalized space (which squishes
@@ -222,6 +225,19 @@ impl ImageCacheImpl for Image {
 }
 
 impl Image {
+    /// Updates layout and aspect fitting without evaluating script. This is
+    /// useful for widgets owned by an isolated VM: their typed Rust state can
+    /// be changed safely even while the host VM is active.
+    pub fn set_walk_and_fit(&mut self, cx: &mut Cx, walk: Walk, fit: ImageFit) {
+        self.walk = walk;
+        self.fit = fit;
+        self.redraw(cx);
+    }
+
+    pub fn fit(&self) -> ImageFit {
+        self.fit
+    }
+
     fn load_from_resource(&mut self, cx: &mut Cx) {
         if self.src_loaded {
             return;
@@ -898,6 +914,13 @@ pub enum AsyncLoad {
 }
 
 impl ImageRef {
+    /// See [`Image::set_walk_and_fit`].
+    pub fn set_walk_and_fit(&self, cx: &mut Cx, walk: Walk, fit: ImageFit) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_walk_and_fit(cx, walk, fit);
+        }
+    }
+
     /// Loads the image at the given `image_path` resource into this `ImageRef`.
     pub fn load_image_dep_by_path(&self, cx: &mut Cx, image_path: &str) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {

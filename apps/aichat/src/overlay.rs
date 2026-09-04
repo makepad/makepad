@@ -79,6 +79,17 @@ pub fn transcript_json(state: &EngineState) -> String {
                 status: String::new(),
                 note: String::new(),
             },
+            Entry::Event(event) => TranscriptRow {
+                kind: "event".into(),
+                text: event.text.clone(),
+                title: format!("{} · {}", event.service_label, event.topic),
+                status: if event.final_ { "final".into() } else { "message".into() },
+                note: if event.dropped == 0 {
+                    format!("sub_id: {}", event.sub_id)
+                } else {
+                    format!("sub_id: {} · dropped: {}", event.sub_id, event.dropped)
+                },
+            },
             Entry::Assistant { text, streaming } => TranscriptRow {
                 kind: "assistant".into(),
                 text: text.clone(),
@@ -200,7 +211,7 @@ impl Widget for AiChatOverlay {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use makepad_ai_services::state::{ServiceInfo, ToolEntry};
+    use makepad_ai_services::state::{EventEntry, ServiceInfo, ToolEntry};
     use makepad_ai_services::wire::ToolOutcome;
 
     #[test]
@@ -218,6 +229,15 @@ mod tests {
             tool_count: 1,
         });
         state.entries.push(Entry::User { text: "/sheets.summary {}".into() });
+        state.entries.push(Entry::Event(EventEntry {
+            sub_id: "s1".into(),
+            service_label: "Sheets".into(),
+            topic: "changes".into(),
+            text: "A1 changed".into(),
+            data: None,
+            dropped: 2,
+            final_: false,
+        }));
         state.entries.push(Entry::Tool(ToolEntry {
             call_id: "c1".into(),
             service: "sheets".into(),
@@ -234,6 +254,7 @@ mod tests {
         assert!(json.contains(r#""status":"idle""#), "{json}");
         assert!(json.contains(r#""apps":["Sheets"]"#), "{json}");
         assert!(json.contains(r#""kind":"user""#) && json.contains(r#""kind":"tool""#), "{json}");
+        assert!(json.contains(r#""kind":"event""#) && json.contains("sub_id: s1") && json.contains("dropped: 2"), "{json}");
         assert!(json.contains(r#""title":"Sheets · summary""#) && json.contains(r#""status":"ok""#), "{json}");
         assert!(json.contains(r#""generation":7"#), "{json}");
     }

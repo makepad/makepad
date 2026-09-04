@@ -84,7 +84,10 @@ impl GenService {
                         job.cancel.store(true, Ordering::Relaxed);
                     }
                 }
-                PortEvent::Registered(_) | PortEvent::ChatOpen { .. } => {}
+                PortEvent::Registered(_)
+                | PortEvent::ChatOpen { .. }
+                | PortEvent::Subscribe { .. }
+                | PortEvent::Unsubscribe { .. } => {}
             }
         }
         self.poll();
@@ -245,19 +248,13 @@ fn run_image(args: &ImageArgs, cancel: &Arc<AtomicBool>, progress: &mut dyn FnMu
         ("width", json::Value::Int(args.width as i64)),
         ("height", json::Value::Int(args.height as i64)),
     ]);
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(1);
+    let seed = (Cx::time_now().max(0.0) * 1_000_000_000.0) as u64;
     progress("finding an image node", 0);
     let generated = generate_bytes("image.generate", &body, seed, cancel, progress)?;
     let artifact = generated.artifact.ok_or("the node returned no picture")?;
     let dir = makepad_home().join("gen");
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot make {}: {e}", dir.display()))?;
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let stamp = Cx::time_now().max(0.0) as u64;
     let path = dir.join(format!("{stamp}-{}.{}", slug(&args.prompt), extension_for(&artifact.content_type)));
     std::fs::write(&path, &artifact.bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     Ok(GenDone { path, node: generated.node })

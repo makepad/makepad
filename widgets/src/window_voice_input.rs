@@ -1,16 +1,15 @@
 use crate::makepad_draw::{
     audio::{AudioBuffer, AudioDeviceId, AudioDevicesEvent, AudioInputOptions},
     permission::{Permission, PermissionResult, PermissionStatus},
-    thread::SignalToUI,
+    thread::{CancellationToken, SignalToUI, ThreadOptions, ThreadSpawner},
     Cx, CxMediaApi, Event, NextFrame,
 };
 use makepad_ai_hub::speech::{Segment, SttConfig, SttEvent, SttSession};
 use makepad_ai_speech::vad::{SileroVad, VadStream};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 const VOICE_TARGET_SAMPLE_RATE: f64 = 16_000.0;
 const VOICE_AUDIO_PACKET_SAMPLES: usize = 320; // 20ms @16k
@@ -156,6 +155,7 @@ impl WindowVoiceInput {
         }
         if let Some((audio_rx, control_rx, text_tx, wave_tx)) = self.worker_inputs.take() {
             spawn_voice_worker(
+                &cx.thread_spawner(),
                 audio_rx,
                 control_rx,
                 text_tx,
@@ -255,7 +255,7 @@ impl WindowVoiceInput {
     }
 
     fn reset_pipeline(&mut self) {
-        if let Ok(mut callback_state) = self.callback_state.lock() {
+        if let Ok(mut callback_state) = self.callback_state.try_lock() {
             callback_state.reset();
         }
         let _ = self.control_tx.send(VoiceControlMessage::Reset);
@@ -306,7 +306,7 @@ impl WindowVoiceInput {
         let _ = self.control_tx.send(VoiceControlMessage::Stop);
         self.capture_enabled.store(false, Ordering::Relaxed);
         cx.use_audio_inputs(&[]);
-        if let Ok(mut callback_state) = self.callback_state.lock() {
+        if let Ok(mut callback_state) = self.callback_state.try_lock() {
             callback_state.flush_partial_packet();
         }
     }
@@ -648,6 +648,7 @@ impl StreamingDownsampler {
 }
 
 fn spawn_voice_worker(
+    spawner: &ThreadSpawner,
     audio_rx: Receiver<Vec<f32>>,
     control_rx: Receiver<VoiceControlMessage>,
     text_tx: mpsc::Sender<String>,
@@ -655,12 +656,12 @@ fn spawn_voice_worker(
     text_signal: SignalToUI,
     engine_mic: Arc<AtomicBool>,
 ) {
-    std::thread::spawn(move || {
+    let spawned = spawner.spawn_worker(ThreadOptions { name: Some("makepad-voice".into()), ..Default::default() }, move || {
         // The hub picks the recognizer: Whisper in this process (weights here,
         // machine election), on the machine node, on a LAN node, else the OS
         // engine. Loading happens on the session's own thread and reports
         // through `poll`, so this worker keeps eating audio meanwhile.
-        let session = SttSession::start(SttConfig::live_dictation());
+        let session = SttSession::start(SttConfig::local_whisper());
         // PCM mode (Whisper, Apple): we gate with VAD and hand over utterances.
         // Engine-mic mode (Android / Windows system recognizers): the engine
         // owns the microphone; we only relay its results.
@@ -688,6 +689,7 @@ fn spawn_voice_worker(
         let mut saw_speech_since_flush = false;
         let mut voiced_samples_since_flush = 0usize;
         let mut idle_timeout_ticks = 0usize;
+        let pacing = CancellationToken::new();
 
         'worker: loop {
             for event in session.poll() {
@@ -775,7 +777,7 @@ fn spawn_voice_worker(
                 }
             }
 
-            match audio_rx.recv_timeout(Duration::from_millis(10)) {
+            match audio_rx.try_recv() {
                 Ok(audio_chunk) => {
                     if engine_owns_mic {
                         // Our capture is being released; nothing to gate.
@@ -829,10 +831,11 @@ fn spawn_voice_worker(
                         );
                     }
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
+                Err(TryRecvError::Empty) => {
                     idle_timeout_ticks += 1;
+                    let _ = pacing.wait_until(Cx::monotonic_now() + 0.010);
                 }
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(TryRecvError::Disconnected) => break,
             }
 
             if pending_samples.len() > VOICE_MAX_PENDING_SAMPLES {
@@ -897,6 +900,9 @@ fn spawn_voice_worker(
             }
         }
     });
+    if let Ok(handle) = spawned {
+        handle.detach();
+    }
 }
 
 fn trim_pending_to_recent(samples: &mut VecDeque<f32>, keep: usize) {

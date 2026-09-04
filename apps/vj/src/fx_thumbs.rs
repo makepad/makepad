@@ -79,7 +79,7 @@ use makepad_asset_data::{AssetId, AssetRevisionId, ThumbnailCells};
 use makepad_widgets::*;
 use makepad_widgets::makepad_platform::{
     storage::{StorageHandle, StorageRequestId, StorageResult},
-    thread::TaskHandle,
+    thread::{Lane as PoolLane, TaskHandle},
 };
 use std::collections::{HashMap, HashSet};
 use crate::clock::Instant;
@@ -274,7 +274,10 @@ pub struct FxThumbSheet {
 //    now share the same key/value path.
 // 8: web keeps native's 30 Hz timeline and 27-step feedback preroll even
 //    though it stores one representative cell.
-pub const RECIPE: u32 = 8;
+// 9: WebGL texture passes honour the effect's 3D camera (the platform used
+//    to overwrite it with the 2D ortho, so every r8 browser sheet of a 3D
+//    engine is its clear colour with the scene collapsed to a few pixels).
+pub const RECIPE: u32 = 9;
 
 /// The same lever for the TWO-DECK STAND-INS alone
 /// ([`crate::effects::deck_pattern`]). A transition sheet is a picture OF
@@ -477,7 +480,37 @@ struct ActiveJob {
     /// Draw polls spent on this job across load, bake, readback and encode.
     /// This is the outer watchdog; phase-specific failures remain more useful.
     lane_polls: u32,
+    /// Frames spent in [`Phase::Encoding`] with the worker not finished —
+    /// the same poll-counted timeout. On the web every encode is a fresh
+    /// worker; one that never starts or never reports must not hold its
+    /// lane for the rest of the session.
+    encode_polls: u32,
+    /// Polls the warmup has been HELD because the platform was still
+    /// compiling draw shaders (their draw calls are dropped until then —
+    /// a capture taken in that window is a black frame, not the effect).
+    warmup_holds: u32,
 }
+
+impl ActiveJob {
+    /// Keep the job in warmup while shaders are still compiling: the draw
+    /// that queued them has happened, nothing more is drawn or ticked until
+    /// they link. Capped in polls like every other wait here, so a
+    /// completion the platform never reports cannot wedge a lane.
+    fn hold_warmup(&mut self, shaders_pending: bool) -> bool {
+        if !matches!(self.phase, Phase::Warmup(_))
+            || !shaders_pending
+            || self.warmup_holds > WAIT_POLL_LIMIT
+        {
+            return false;
+        }
+        self.warmup_holds += 1;
+        true
+    }
+}
+
+/// Polls a lane may spend waiting on its capture or its encode worker before
+/// the job fails and the lane moves on: ~10 s of frames at 60 Hz.
+const WAIT_POLL_LIMIT: u32 = 600;
 
 /// One lane's own render target: the sheet the GPU packs cell by cell, plus
 /// the pass that owns it. The effect's passes are begun INSIDE this one
@@ -714,8 +747,6 @@ impl VjFxThumbs {
         self.cache_sweep.finished = true;
         if let Some(error) = self.cache_sweep.error.as_deref() {
             log!("fx thumbs: sweep failed: {error}");
-        } else {
-            log!("fx thumbs: swept {} stale entries", self.cache_sweep.stale_count);
         }
     }
 
@@ -1166,6 +1197,8 @@ impl VjFxThumbs {
                         sheet_cleared: false,
                         await_polls: 0,
                         lane_polls: 0,
+                        encode_polls: 0,
+                        warmup_holds: 0,
                     });
                 }
                 Err(error) => {
@@ -1183,11 +1216,28 @@ impl VjFxThumbs {
     }
 
     /// Harvest finished encode workers without ever blocking the UI thread.
+    /// A worker that never finishes times out on polls, exactly like a
+    /// capture that never lands ([`Self::poll_captures`]): the lane fails
+    /// its job and pulls the next one instead of stalling the bank.
     fn poll_encoders(&mut self, cx: &mut Cx) {
         for index in 0..self.lanes.len() {
-            let finished = self.lanes[index].job.as_ref().is_some_and(|a| {
-                a.phase == Phase::Encoding && a.encoder.as_ref().is_some_and(|h| h.is_finished())
-            });
+            let (finished, timed_out) = match self.lanes[index].job.as_mut() {
+                Some(a) if a.phase == Phase::Encoding => {
+                    let finished = a.encoder.as_ref().is_some_and(|h| h.is_finished());
+                    if !finished {
+                        a.encode_polls += 1;
+                    }
+                    (finished, !finished && a.encode_polls > WAIT_POLL_LIMIT)
+                }
+                _ => (false, false),
+            };
+            if timed_out {
+                if let Some(handle) = self.lanes[index].job.as_mut().and_then(|a| a.encoder.take()) {
+                    handle.cancel();
+                }
+                self.fail_lane(cx, index, "encode worker never finished".to_string());
+                continue;
+            }
             if !finished {
                 continue;
             }
@@ -1312,6 +1362,7 @@ impl VjFxThumbs {
         scratch: &mut Vec<u32>,
         budget: &mut usize,
         deadline: f64,
+        shaders_pending: bool,
     ) -> bool {
         match lane.job.as_ref().map(|a| a.phase) {
             None | Some(Phase::Encoding) => return false,
@@ -1353,9 +1404,13 @@ impl VjFxThumbs {
         cx.begin_root_turtle(pass_size, Layout::flow_overlay());
 
         let ready = if view.bake_batch_limit() > 1 {
-            Self::lane_steps_batched(cx, view, job, trans_tex, cell, scratch, budget, deadline)
+            Self::lane_steps_batched(
+                cx, view, job, trans_tex, cell, scratch, budget, deadline, shaders_pending,
+            )
         } else {
-            Self::lane_step_sequential(cx, view, job, trans_tex, cell, scratch, budget)
+            Self::lane_step_sequential(
+                cx, view, job, trans_tex, cell, scratch, budget, shaders_pending,
+            )
         };
 
         cx.end_pass_sized_turtle();
@@ -1366,8 +1421,9 @@ impl VjFxThumbs {
 
     /// One sequential step is done (its chain ran, or it had no chain):
     /// advance the phase. `stepped` = [`VjFxView::needs_stepped_time`].
-    fn advance_sequential_phase(phase: Phase, stepped: bool) -> Phase {
+    fn advance_sequential_phase(phase: Phase, stepped: bool, hold: bool) -> Phase {
         match phase {
+            Phase::Warmup(n) if hold => Phase::Warmup(n),
             Phase::Warmup(n) if n + 1 < WARMUP_DRAWS => Phase::Warmup(n + 1),
             Phase::Warmup(_) => {
                 if stepped {
@@ -1402,9 +1458,11 @@ impl VjFxThumbs {
         cell: &mut DrawVjFxThumbCell,
         scratch: &mut Vec<u32>,
         budget: &mut usize,
+        shaders_pending: bool,
     ) -> bool {
         let Some(active) = job.as_mut() else { return false };
         *budget = budget.saturating_sub(1);
+        let hold = active.hold_warmup(shaders_pending);
 
         // CHAIN HALF: last paint's scene has settled; run the chain, blit
         // if this step captured, and only then advance the phase. With the
@@ -1419,12 +1477,21 @@ impl VjFxThumbs {
                 active.sheet_cleared = true;
             }
             active.phase =
-                Self::advance_sequential_phase(active.phase, view.needs_stepped_time());
+                Self::advance_sequential_phase(active.phase, view.needs_stepped_time(), hold);
             if !view.bake_seq_pipeline()
                 || matches!(active.phase, Phase::Readback | Phase::Flush | Phase::Encoding)
             {
                 return false;
             }
+        }
+
+        // HELD: the platform is still compiling programs. The chain half
+        // above may have just queued the chain's own; nothing more is drawn
+        // until they are linked, so the number of effect draws a sheet
+        // sees never depends on compile timing — the bake stays a pure
+        // function of the document on a cold browser and a warm one.
+        if hold {
+            return false;
         }
 
         // SCENE HALF. What this step stands for:
@@ -1460,7 +1527,7 @@ impl VjFxThumbs {
                 active.sheet_cleared = true;
             }
             active.phase =
-                Self::advance_sequential_phase(phase, view.needs_stepped_time());
+                Self::advance_sequential_phase(phase, view.needs_stepped_time(), hold);
         }
         false
     }
@@ -1480,6 +1547,7 @@ impl VjFxThumbs {
         scratch: &mut Vec<u32>,
         budget: &mut usize,
         deadline: f64,
+        shaders_pending: bool,
     ) -> bool {
         let Some(active) = job.as_mut() else { return false };
 
@@ -1515,6 +1583,9 @@ impl VjFxThumbs {
         // Batched documents need no warmup: the pipeline builds in the
         // same paint that executes the first batch's draws.
         if let Phase::Warmup(_) = active.phase {
+            if active.hold_warmup(shaders_pending) {
+                return false;
+            }
             active.phase = if view.needs_stepped_time() {
                 Phase::Preroll { left: PREROLL_STEPS, dt: FRAME_STEP }
             } else {
@@ -1644,8 +1715,8 @@ impl VjFxThumbs {
         let revision = active.job.revision;
         active.phase = Phase::Encoding;
         match cx
-            .thread_spawner()
-            .spawn(move || encode_jpeg(bytes, w, h, revision))
+            .task_pool()
+            .submit(PoolLane::Light, move || encode_jpeg(bytes, w, h, revision))
         {
             Ok(handle) => {
                 active.encoder = Some(handle);
@@ -1690,8 +1761,8 @@ impl VjFxThumbs {
             let timed_out = match self.lanes[index].job.as_mut() {
                 Some(a) if a.phase == Phase::AwaitRead => {
                     a.await_polls += 1;
-                    // ~10s of frames at 60Hz; polls, not wall time (above).
-                    a.await_polls > 600
+                    // Polls, not wall time (above).
+                    a.await_polls > WAIT_POLL_LIMIT
                 }
                 _ => false,
             };
@@ -1916,6 +1987,8 @@ impl Widget for VjFxThumbs {
         // [`SLOT_W`]x[`SLOT_H`] on any screen — the bake is screen-blind.
         let dpi = cx.current_dpi_factor().max(0.5);
         let slot = dvec2(SLOT_W / dpi, SLOT_H / dpi);
+        // Cold programs are still linking: every lane holds its warmup.
+        let shaders_pending = cx.cx.draw_shaders_pending();
         self.ensure_lanes();
         self.poll_cache_timeouts(cx.cx);
         self.poll_encoders(cx.cx);
@@ -1955,6 +2028,7 @@ impl Widget for VjFxThumbs {
                 &mut self.trans_data,
                 &mut budget,
                 deadline,
+                shaders_pending,
             ) {
                 ready.push(index);
             }
@@ -1982,9 +2056,7 @@ impl Widget for VjFxThumbs {
             self.next_frame = cx.cx.new_next_frame();
         } else {
             if let Some(started) = self.batch_started.take() {
-                if self.batch_rendered + self.batch_cached + self.batch_stored + self.batch_failed
-                    > 0
-                {
+                if self.batch_rendered > 0 || self.batch_failed > 0 {
                     log!(
                         "fx thumbs: {} rendered, {} cached, {} stored, {} failed, {:.1} s, all cached visible {:.1} s",
                         self.batch_rendered,

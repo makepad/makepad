@@ -19,15 +19,19 @@ impl Cx {
         zbias: &mut f32,
         zbias_step: f32,
     ) {
+        let shaders_pending = self.os.webgl_shaders_pending != 0;
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
         // Exploded z-layer view: z is the call's nesting depth, not paint order.
         let sploded = self.passes[draw_pass_id].sploded.is_some();
-        self.draw_lists[draw_list_id]
-            .draw_list_uniforms
-            .view_transform = Mat4f::identity();
+        // The list's own `view_transform` is the app's (a magnifier well, a
+        // render stage matrix) and uploads as set — Metal and GL never reset
+        // it; this walk used to overwrite it with the identity, which drew the
+        // tweaker's mirrored material at the window's top-left instead of in
+        // its well on the web.
 
         for order_index in 0..draw_order_len {
+            let uniforms_gen = self.next_uniform_gen();
             let Some(draw_item_id) =
                 self.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
             else {
@@ -36,6 +40,12 @@ impl Cx {
             if let Some(sub_list_id) =
                 self.draw_lists[draw_list_id].draw_items[draw_item_id].sub_list()
             {
+                // A retained sub-list its owner dropped between the parent's
+                // last record and this paint: the slot may already hold
+                // another widget's list. Nothing to draw here.
+                if self.draw_lists.is_id_freed(sub_list_id) {
+                    continue;
+                }
                 let child_resets_zbias = self.draw_lists[sub_list_id].reset_zbias;
                 let mut own_zbias = 0.0f32;
                 let child_zbias = if child_resets_zbias {
@@ -46,9 +56,19 @@ impl Cx {
                 // An overlay list carries a depth floor: this is what makes it
                 // composite above body content that uses `draw_depth`.
                 self.draw_lists[sub_list_id].raise_zbias_to_floor(child_zbias);
-                self.render_view(draw_pass_id, sub_list_id, child_zbias, zbias_step);
+                // A retained list is one unit of paint order: its calls all
+                // take the counter at entry, it advances by the layers the
+                // list reported. See `CxDrawList::zbias_hold`.
+                if let Some(steps) = self.draw_lists[sub_list_id].zbias_hold {
+                    let mut held = *child_zbias;
+                    self.render_view(draw_pass_id, sub_list_id, &mut held, 0.0);
+                    *child_zbias += steps as f32 * zbias_step;
+                } else {
+                    self.render_view(draw_pass_id, sub_list_id, child_zbias, zbias_step);
+                }
             } else {
                 let draw_list = &mut self.draw_lists[draw_list_id];
+                let draw_list_recording_gen = draw_list.recording_gen;
                 //view.platform.uni_vw.update_with_f32_data(device, &view.uniforms);
                 let draw_item = &mut draw_list.draw_items[draw_item_id];
                 let draw_call = if let Some(draw_call) = draw_item.kind.draw_call_mut() {
@@ -81,7 +101,7 @@ impl Cx {
                     });
                     draw_call.instance_dirty = false;
                 }
-                draw_call.resolve_zbias(*zbias, sploded);
+                draw_call.resolve_zbias(*zbias, sploded, uniforms_gen);
                 *zbias += zbias_step;
 
                 // update/alloc textures?
@@ -176,6 +196,9 @@ impl Cx {
                     continue;
                 };
 
+                if self.geometries.skip_stale(geometry_id) {
+                    continue;
+                }
                 let geometry = &mut self.geometries[geometry_id];
                 if !crate::geometry::geometry_layout_matches_shader(
                     geometry,
@@ -283,9 +306,17 @@ impl Cx {
                         geom_vb_id: vao.geom_vb_id.unwrap(),
                         inst_vb_id: draw_item.os.inst_vb_id.unwrap(),
                     });
+                    draw_item.os.uniforms_recording_gen = None;
+                    draw_item.os.draw_call_uniforms_gen = None;
+                    draw_item.os.user_uniforms_gen = None;
                 }
 
-                let pass_uniforms = &self.passes[draw_pass_id].pass_uniforms;
+                // A custom-camera texture pass uploads its Y-flipped copy
+                // (see `setup_render_pass`); everything else its own.
+                let pass_uniforms: &[f32] = match &self.passes[draw_pass_id].os.flipped_uniforms {
+                    Some(flipped) => flipped.as_slice(),
+                    None => self.passes[draw_pass_id].pass_uniforms.as_slice(),
+                };
                 let instances = if sh.mapping.instances.total_slots == 0 {
                     0
                 } else {
@@ -311,17 +342,63 @@ impl Cx {
                     }
                 }
 
+                let reset_draw_uniforms =
+                    draw_item.os.uniforms_recording_gen != Some(draw_list_recording_gen);
+                let upload_draw_call_uniforms = reset_draw_uniforms
+                    || draw_item.os.draw_call_uniforms_gen != Some(draw_call.uniforms_gen);
+                let upload_user_uniforms = reset_draw_uniforms
+                    || draw_item.os.user_uniforms_gen != Some(draw_call.uniforms_gen);
+                let draw_call_uniforms: &[f32] = if upload_draw_call_uniforms {
+                    draw_call.draw_call_uniforms.as_slice()
+                } else {
+                    &[]
+                };
+                let user_uniforms = if upload_user_uniforms {
+                    draw_call.dyn_uniforms.as_slice()
+                } else {
+                    &[]
+                };
+                if !shaders_pending {
+                    draw_item.os.uniforms_recording_gen = Some(draw_list_recording_gen);
+                    if upload_draw_call_uniforms {
+                        draw_item.os.draw_call_uniforms_gen = Some(draw_call.uniforms_gen);
+                    }
+                    if upload_user_uniforms {
+                        draw_item.os.user_uniforms_gen = Some(draw_call.uniforms_gen);
+                    }
+                }
+
+                let pass_uniforms_gen = self.passes[draw_pass_id].pass_uniforms_gen;
+                let draw_list_uniforms_gen = draw_list.uniforms_gen;
+                let uniforms_gen = draw_call.uniforms_gen;
+                let live_uniforms_gen = sh.mapping.scope_uniforms_gen;
+                debug_assert_ne!(pass_uniforms_gen, 0);
+                debug_assert_ne!(draw_list_uniforms_gen, 0);
+                debug_assert_ne!(uniforms_gen, 0);
+                debug_assert_ne!(live_uniforms_gen, 0);
+
                 self.os.from_wasm(FromWasmDrawCall {
                     shader_id: sh.os_shader_id.unwrap(),
                     vao_id: draw_item.os.vao.as_ref().unwrap().vao_id,
                     index_width: geometry.index_width as u32,
                     depth_write: draw_call.options.depth_write,
                     backface_culling: draw_call.options.backface_culling,
-                    pass_uniforms: WasmPtrF32::new(pass_uniforms.as_slice()),
+                    pass_uniforms: WasmPtrF32::new(pass_uniforms),
+                    pass_uniforms_gen_lo: pass_uniforms_gen as u32,
+                    pass_uniforms_gen_hi: (pass_uniforms_gen >> 32) as u32,
                     draw_list_uniforms: WasmPtrF32::new(draw_list.draw_list_uniforms.as_slice()),
-                    draw_call_uniforms: WasmPtrF32::new(draw_call.draw_call_uniforms.as_slice()),
-                    user_uniforms: WasmPtrF32::new(draw_call.dyn_uniforms.as_slice()),
+                    draw_list_uniforms_gen_lo: draw_list_uniforms_gen as u32,
+                    draw_list_uniforms_gen_hi: (draw_list_uniforms_gen >> 32) as u32,
+                    draw_call_uniforms: WasmPtrF32::new(draw_call_uniforms),
+                    draw_call_uniforms_gen_lo: uniforms_gen as u32,
+                    draw_call_uniforms_gen_hi: (uniforms_gen >> 32) as u32,
+                    user_uniforms: WasmPtrF32::new(user_uniforms),
+                    user_uniforms_gen_lo: uniforms_gen as u32,
+                    user_uniforms_gen_hi: (uniforms_gen >> 32) as u32,
                     live_uniforms: WasmPtrF32::new(&sh.mapping.scope_uniforms_buf),
+                    live_uniforms_gen_lo: live_uniforms_gen as u32,
+                    live_uniforms_gen_hi: (live_uniforms_gen >> 32) as u32,
+                    reset_draw_uniforms,
                     const_table: WasmPtrF32::new(&[]),
                     textures,
                 });
@@ -339,34 +416,70 @@ impl Cx {
         self.passes[draw_pass_id].paint_dirty = false;
         let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
         let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
+        let dpi_uniforms_gen = self.next_uniform_gen();
+        let changed_uniforms_gen = self.next_uniform_gen();
+        let ortho_uniforms_gen = self.next_uniform_gen();
         let pass = &mut self.passes[draw_pass_id];
-        pass.set_dpi_factor(dpi_factor);
+        pass.set_dpi_factor(dpi_factor, dpi_uniforms_gen);
+        // WebGL render-to-texture coordinates are vertically inverted relative
+        // to onscreen canvas rendering: an FBO's rows are stored bottom-up.
+        // Every offscreen pass therefore renders with its projection's Y
+        // inverted, so the texels land in the same top-left row order Metal
+        // and D3D produce and every consumer plain-samples. The JS side pairs
+        // this with a clockwise front face for texture passes (the flip
+        // reverses triangle winding), so backface culling keeps culling the
+        // same faces it culls on the canvas.
+        pass.os.flipped_uniforms = None;
         if to_texture {
-            // WebGL render-to-texture coordinates are vertically inverted relative to
-            // onscreen canvas rendering. Flip Y in the projection for offscreen passes.
-            let offset = pass_rect.pos + pass.view_shift;
-            let size = pass_rect.size * pass.view_scale;
-            pass.pass_uniforms.camera_projection = Mat4f::ortho(
-                offset.x as f32,
-                (offset.x + size.x) as f32,
-                (offset.y + size.y) as f32,
-                offset.y as f32,
-                100.0,
-                -100.0,
-                1.0,
-                1.0,
-            );
-            pass.pass_uniforms.camera_view = Mat4f::identity();
+            if pass.keep_camera_matrix {
+                // A custom camera (3D scenes, VJ effects, mesh views): the
+                // pass owns its matrices. Overwriting them with the 2D ortho
+                // — what this branch did before — drew every 3D scene with a
+                // pixel-space projection, which is how the web effect
+                // thumbnails came out as their clear colour. Keep the
+                // caller's uniforms untouched (the retained draw list
+                // re-executes on repaints without the app re-setting the
+                // camera, so the flip must never accumulate) and upload a
+                // flipped copy instead.
+                let mut flipped = pass.pass_uniforms.clone();
+                flip_projection_y(&mut flipped.camera_projection);
+                flip_projection_y(&mut flipped.camera_projection_r);
+                pass.os.flipped_uniforms = Some(flipped.as_slice().to_vec());
+                pass.mark_pass_uniforms_dirty(changed_uniforms_gen);
+            } else {
+                // The 2D camera is built in ONE place, `set_ortho_matrix`,
+                // on every backend — it is also where the exploded view's
+                // `camera_view` comes from (`crate::sploded`). Building the
+                // ortho by hand here, with the identity for `camera_view`,
+                // dropped that camera for the exploded BODY pass, which
+                // renders through a texture: its draw calls sit at
+                // `nesting_depth * SPLODED_DEPTH_UNIT` in z, which without
+                // the explode camera's z scale lies far outside the ortho's
+                // clip range, so every one of them was clipped away and the
+                // web showed a bare window where Metal drew the stack. Same
+                // matrix as the canvas, then the Y inversion for the
+                // bottom-up target, as the custom-camera branch above.
+                pass.set_ortho_matrix(pass_rect.pos, pass_rect.size, changed_uniforms_gen);
+                flip_projection_y(&mut pass.pass_uniforms.camera_projection);
+            }
         } else {
             if !pass.keep_camera_matrix {
-                pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
+                pass.set_ortho_matrix(pass_rect.pos, pass_rect.size, ortho_uniforms_gen);
             }
         }
         pass_rect.size
     }
 
     pub fn draw_pass_to_canvas(&mut self, draw_pass_id: DrawPassId) {
-        let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
+        // A pass without a draw list (a debug overlay pass that drew nothing this frame) is
+        // skipped, as on Metal — unwrapping it took the whole web app down. Its dirt is
+        // cleared with it: `setup_render_pass` is what clears it on the normal path, and a
+        // pass left dirty here was re-tried — and re-reported — every frame.
+        let Some(draw_list_id) = self.passes[draw_pass_id].main_draw_list_id else {
+            self.passes[draw_pass_id].paint_dirty = false;
+            crate::error!("Draw pass has no draw list!");
+            return;
+        };
 
         self.webgl_compile_draw_list_shaders(draw_list_id);
 
@@ -400,7 +513,14 @@ impl Cx {
     }
 
     pub fn draw_pass_to_texture(&mut self, draw_pass_id: DrawPassId) {
-        let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
+        // A pass without a draw list (a debug overlay pass that drew nothing this frame) is
+        // skipped, as on Metal — unwrapping it took the whole web app down. Settled, as in
+        // `draw_pass_to_canvas`.
+        let Some(draw_list_id) = self.passes[draw_pass_id].main_draw_list_id else {
+            self.passes[draw_pass_id].paint_dirty = false;
+            crate::error!("Draw pass has no draw list!");
+            return;
+        };
 
         self.webgl_compile_draw_list_shaders(draw_list_id);
 
@@ -453,6 +573,7 @@ impl Cx {
             match self.passes[draw_pass_id].clear_depth {
                 DrawPassClearDepth::InitWith(clear_depth) => {
                     depth_target = WDepthTarget {
+                        attached: true,
                         texture_id: depth_texture.texture_id().0,
                         init_only: true,
                         clear_depth,
@@ -460,6 +581,7 @@ impl Cx {
                 }
                 DrawPassClearDepth::ClearWith(clear_depth) => {
                     depth_target = WDepthTarget {
+                        attached: true,
                         texture_id: depth_texture.texture_id().0,
                         init_only: false,
                         clear_depth,
@@ -489,6 +611,11 @@ impl Cx {
         draw_list_id: DrawListId,
         draw_shader_ids: &mut BTreeSet<usize>,
     ) {
+        // A retained sub-list its owner dropped since the parent last
+        // recorded: not part of this pass (see `render_view`).
+        if self.draw_lists.is_id_freed(draw_list_id) {
+            return;
+        }
         let draw_list = &self.draw_lists[draw_list_id];
         for order_index in 0..draw_list.draw_item_order_len() {
             let Some(draw_item_id) = draw_list.draw_item_id_at_order_index(order_index) else {
@@ -588,7 +715,7 @@ impl Cx {
                     inst_attribs,
                 });
                 self.draw_shaders.os_shaders.push(shp);
-                self.os.webgl_shaders_queued_this_frame += 1;
+                self.os.webgl_shaders_pending += 1;
                 os_shader_id = Some(shader_id);
             }
 
@@ -636,10 +763,10 @@ precision highp float;
 precision highp int;
 vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
 vec4 sample2d_lod(sampler2D sampler, vec2 pos, float lod){{return textureLod(sampler, vec2(pos.x, pos.y), lod);}}
-vec4 sample2d_bgra(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y)).zyxw;}}
+vec4 sample2d_bgra(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
 vec4 samplecube(samplerCube sampler, vec3 dir){{return texture(sampler, dir);}}
 vec4 samplecube_lod(samplerCube sampler, vec3 dir, float lod){{return textureLod(sampler, dir, lod);}}
-vec4 samplecube_bgra(samplerCube sampler, vec3 dir){{return texture(sampler, dir).zyxw;}}
+vec4 samplecube_bgra(samplerCube sampler, vec3 dir){{return texture(sampler, dir);}}
 vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
 {}",
             in_vertex
@@ -652,10 +779,10 @@ precision highp float;
 precision highp int;
 vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
 vec4 sample2d_lod(sampler2D sampler, vec2 pos, float lod){{return textureLod(sampler, vec2(pos.x, pos.y), lod);}}
-vec4 sample2d_bgra(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y)).zyxw;}}
+vec4 sample2d_bgra(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
 vec4 samplecube(samplerCube sampler, vec3 dir){{return texture(sampler, dir);}}
 vec4 samplecube_lod(samplerCube sampler, vec3 dir, float lod){{return textureLod(sampler, dir, lod);}}
-vec4 samplecube_bgra(samplerCube sampler, vec3 dir){{return texture(sampler, dir).zyxw;}}
+vec4 samplecube_bgra(samplerCube sampler, vec3 dir){{return texture(sampler, dir);}}
 vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
 {}",
             in_pixel
@@ -670,8 +797,25 @@ vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
     }
 }
 
+/// WebGL renders a texture pass into a bottom-up target: negate the
+/// projection's Y row so the texels land in the top-left row order Metal and
+/// D3D produce (see `Cx::setup_render_pass`).
+fn flip_projection_y(m: &mut Mat4f) {
+    m.v[1] = -m.v[1];
+    m.v[5] = -m.v[5];
+    m.v[9] = -m.v[9];
+    m.v[13] = -m.v[13];
+}
+
 #[derive(Default, Clone, Debug)]
-pub struct CxOsPass {}
+pub struct CxOsPass {
+    /// The pass uniforms a custom-camera (`keep_camera_matrix`) texture pass
+    /// actually uploads: the caller's matrices with the projection's Y
+    /// inverted for WebGL's bottom-up render targets. `None` for canvas
+    /// passes and for 2D texture passes, whose ortho is built flipped. Kept
+    /// as the upload slice (`DrawPassUniforms::as_slice`).
+    pub flipped_uniforms: Option<Vec<f32>>,
+}
 
 #[derive(Clone, Default)]
 pub struct CxOsDrawList {}
@@ -689,6 +833,9 @@ pub struct CxOsDrawCallVao {
 pub struct CxOsDrawCall {
     pub vao: Option<CxOsDrawCallVao>,
     pub inst_vb_id: Option<usize>,
+    pub uniforms_recording_gen: Option<u64>,
+    pub draw_call_uniforms_gen: Option<u64>,
+    pub user_uniforms_gen: Option<u64>,
 }
 
 #[derive(Clone)]

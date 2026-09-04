@@ -3,6 +3,11 @@ import { WasmBridge } from "../makepad_wasm_bridge/wasm_bridge.js"
 const MAKEPAD_CRASH_MAX_REPORTS = 20;
 const MAKEPAD_CRASH_POST_BYTES = 64 * 1024;
 const MAKEPAD_CRASH_GET_BYTES = 8 * 1024;
+const makepad_page_console = {};
+for (const level of ["log", "warn", "error"]) {
+    const method = typeof console !== "undefined" ? console[level] : undefined;
+    makepad_page_console[level] = typeof method === "function" ? method.bind(console) : () => {};
+}
 
 function makepad_json_replacer(_key, value) {
     if (typeof value === "bigint") {
@@ -437,6 +442,9 @@ export class WasmWebBrowser extends WasmBridge {
 
         this.dispatch = dispatch;
         this.canvas = canvas;
+        // The app owns all gestures over its drawable, including pinch and
+        // two-finger pan; never hand them to page zoom/scroll.
+        this.canvas.style.touchAction = 'none';
         this.handlers = new Proxy({}, {
             set(target, property, value) {
                 target[property] = typeof value === "function" ? (...args) => {
@@ -464,6 +472,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.xr_supported = false;
         this.signal_timeout = null;
         this.workers = new Map();
+        this.worker_console_recent = new Map();
         this.thread_stack_arena = [];
         this.thread_stack_size = 2 * 1024 * 1024;
         this.ui_wake_queued = false;
@@ -488,6 +497,10 @@ export class WasmWebBrowser extends WasmBridge {
 
     js_monotonic_now() {
         return performance.now() / 1000.0;
+    }
+
+    js_worker_wait(_timeout_ms) {
+        throw new Error("js_worker_wait may only run in a Web Worker");
     }
 
     js_wake_ui() {
@@ -652,7 +665,8 @@ export class WasmWebBrowser extends WasmBridge {
                 pathname: location.pathname + "",
                 search: location.search + "",
                 hash: location.hash + "",
-                has_thread_support: this.wasm._has_thread_support
+                has_thread_support: this.wasm._has_thread_support,
+                is_phone: WasmBridge.is_phone()
             },
             window_info: this.window_info,
         });
@@ -910,16 +924,21 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     FromWasmNormalScreen() {
-        if (this.canvas.exitFullscreen) {
-            this.canvas.exitFullscreen();
+        // Exiting is a DOCUMENT call (entering is on the element); nothing
+        // to do unless the page is actually fullscreen.
+        if (!is_fullscreen()) {
             return
         }
-        if (this.canvas.webkitExitFullscreen) {
-            this.canvas.webkitExitFullscreen();
+        if (document.exitFullscreen) {
+            document.exitFullscreen();
             return
         }
-        if (this.canvas.mozExitFullscreen) {
-            this.canvas.mozExitFullscreen();
+        if (document.webkitExitFullscreen) {
+            document.webkitExitFullscreen();
+            return
+        }
+        if (document.mozCancelFullScreen) {
+            document.mozCancelFullScreen();
             return
         }
     }
@@ -1256,6 +1275,13 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     resume_audio_from_gesture() {
+        this.had_user_gesture = true;
+        if (!this.audio_context && this.audio_start_args) {
+            const args = this.audio_start_args;
+            this.audio_start_args = null;
+            this.start_audio_output(args, 1);
+            return;
+        }
         const audio_context = this.audio_context;
         if (!audio_context) {
             return;
@@ -1273,9 +1299,6 @@ export class WasmWebBrowser extends WasmBridge {
             if (this.audio_context !== audio_context) {
                 return;
             }
-            console.log(
-                `web audio: resume state=${audio_context.state} sample_rate=${audio_context.sampleRate} buffer=pending`,
-            );
             if (audio_context.state === "running") {
                 this.watch_audio_callback(audio_context);
             } else {
@@ -1295,6 +1318,19 @@ export class WasmWebBrowser extends WasmBridge {
         if (this.audio_context) {
             return
         }
+        // The web's rule: an output is created inside a user gesture. The wasm asks at
+        // start-up; the first click or key press creates the context and the worklet.
+        if (!this.had_user_gesture) {
+            this.audio_start_args = args;
+            return;
+        }
+        this.start_audio_output(args, 1);
+    }
+
+    start_audio_output(args, attempt) {
+        if (this.audio_context) {
+            return
+        }
         let audio_context;
         try {
             audio_context = new AudioContext({
@@ -1306,9 +1342,6 @@ export class WasmWebBrowser extends WasmBridge {
         }
         this.audio_context = audio_context;
         this.audio_callback_started = false;
-        console.log(
-            `web audio: context created state=${audio_context.state} sample_rate=${audio_context.sampleRate} buffer=pending`,
-        );
 
         const start_worklet = async () => {
             if (this.wasm._secondary_ready) {
@@ -1317,12 +1350,21 @@ export class WasmWebBrowser extends WasmBridge {
             if (!this.wasm._has_thread_support) {
                 throw new Error("wasm threading support is unavailable");
             }
-            const thread_info = this.alloc_thread_stack(args.context_ptr);
+            // alloc_thread_stack(request_id, context_ptr, stack_size): the audio thread has no
+            // spawn request, and its context pointer is the wasm audio access — passing it as
+            // the request id left the worklet reading its audio state from address zero.
+            const thread_info = this.alloc_thread_stack(0, args.context_ptr);
             if (!thread_info) {
                 throw new Error("thread stack allocation prerequisites are unavailable");
             }
 
-            await audio_context.audioWorklet.addModule("./makepad_platform/audio_worklet.js", { credentials: 'omit' });
+            // A stalled module load (seen: it never settles until a second context exists)
+            // is not waited on forever — the deadline fails this attempt, and the retry below
+            // starts over on a fresh context.
+            await Promise.race([
+                audio_context.audioWorklet.addModule("./makepad_platform/audio_worklet.js", { credentials: 'omit' }),
+                new Promise((_, reject) => setTimeout(() => reject(new Error("worklet module load stalled")), 4000)),
+            ]);
 
             const audio_worklet = new AudioWorkletNode(audio_context, 'audio-worklet', {
                 numberOfInputs: 0,
@@ -1340,6 +1382,11 @@ export class WasmWebBrowser extends WasmBridge {
 
                     case "console_error":
                         console.error(data.value);
+                        break;
+
+                    case "wake_ui":
+                        // the audio thread raised the UI signal (meters, transport state): pump like a wake
+                        this.do_wasm_pump();
                         break;
 
                     case "audio_callback_started":
@@ -1371,7 +1418,17 @@ export class WasmWebBrowser extends WasmBridge {
             if (audio_context.state === "running") {
                 this.watch_audio_callback(audio_context);
             }
-        }).catch(error => console.error(`web audio: start failed: ${error}`));
+        }).catch(error => {
+            console.error(`web audio: start failed (attempt ${attempt}): ${error}`);
+            if (this.audio_context !== audio_context) {
+                return;
+            }
+            this.audio_context = null;
+            audio_context.close().catch(() => {});
+            if (attempt < 3) {
+                this.start_audio_output(args, attempt + 1);
+            }
+        });
     }
 
     FromWasmQueryAudioDevices(args) {
@@ -1481,9 +1538,7 @@ export class WasmWebBrowser extends WasmBridge {
                     this.reload_midi_ports();
                 }
                 this.reload_midi_ports();
-            }, () => {
-                console.error("Cannot open midi");
-            });
+            }, () => {});
         }
     }
 
@@ -1588,11 +1643,25 @@ export class WasmWebBrowser extends WasmBridge {
                 const message = event.data || {};
                 const message_kind = message.kind || message.type;
                 if (message_kind === 'breadcrumb') {
-                    makepad_crash_reporter.add_breadcrumb(
-                        `worker.${message.level || "log"}`,
-                        [message.text || ""],
-                        args.request_id
-                    );
+                    const level = ["log", "warn", "error"].includes(message.level)
+                        ? message.level
+                        : "log";
+                    const text = message.text || "";
+                    makepad_crash_reporter.add_breadcrumb(`worker.${level}`, [text], args.request_id);
+                    const key = `${level}\n${text}`;
+                    const now = performance.now();
+                    const previous = this.worker_console_recent.get(key);
+                    this.worker_console_recent.set(key, now);
+                    if (previous === undefined || now - previous > 100) {
+                        makepad_page_console[level](`[worker ${args.request_id}] ${text}`);
+                    }
+                    if (this.worker_console_recent.size > 100) {
+                        for (const [old_key, seen_at] of this.worker_console_recent) {
+                            if (now - seen_at > 100) {
+                                this.worker_console_recent.delete(old_key);
+                            }
+                        }
+                    }
                 } else if (message_kind === 'panic') {
                     record.last_panic = { text: String(message.text || ""), time: Date.now() };
                 } else if (message_kind === 'spawn_request') {
@@ -1902,12 +1971,6 @@ export class WasmWebBrowser extends WasmBridge {
             0,
             0
         );
-        console.log(
-            "[makepad][http][req]",
-            entry.method,
-            entry.fetch_url,
-            `tiles=${entry.tile_keys}`
-        );
         fetch(entry.fetch_url, {
             method: entry.method,
             headers: entry.headers,
@@ -1952,14 +2015,9 @@ export class WasmWebBrowser extends WasmBridge {
             let headers_u8 = this.string_to_u8(response_headers);
             let body_u8 = this.array_to_u8(response_body);
             entry.response_bytes = response_body.length;
-            console.log(
-                "[makepad][http][res]",
-                response.status,
-                entry.fetch_url,
-                response_body.length,
-                `tiles=${entry.tile_keys}`,
-                `ms=${Math.round(performance.now() - entry.started_at)}`
-            );
+            if (response.status >= 400) {
+                console.error("[makepad][http][fail]", response.status, entry.fetch_url);
+            }
             this.exports.wasm_network_http_response(
                 entry.request_id_lo,
                 entry.request_id_hi,
@@ -2017,15 +2075,6 @@ export class WasmWebBrowser extends WasmBridge {
         this.network_http_pump(entry.host_key);
         if (host.pending === 0) {
             if (host.round) {
-                const tiles = Array.from(host.round.tiles).sort().join(",");
-                console.log(
-                    "[makepad][http][round]",
-                    entry.host_key,
-                    `ranges=${host.round.ranges}`,
-                    `bytes=${host.round.bytes}`,
-                    `ms=${Math.round(performance.now() - host.round.started_at)}`,
-                    `tiles=${tiles}`
-                );
                 host.round = null;
             }
             if (host.active === 0 && host.queue.length === 0) {
@@ -2046,15 +2095,6 @@ export class WasmWebBrowser extends WasmBridge {
                 host.queue = host.queue.filter(item => item !== entry);
                 host.pending = Math.max(0, host.pending - 1);
                 if (host.pending === 0 && host.round) {
-                    const tiles = Array.from(host.round.tiles).sort().join(",");
-                    console.log(
-                        "[makepad][http][round]",
-                        entry.host_key,
-                        `ranges=${host.round.ranges}`,
-                        `bytes=${host.round.bytes}`,
-                        `ms=${Math.round(performance.now() - host.round.started_at)}`,
-                        `tiles=${tiles}`
-                    );
                     host.round = null;
                 }
             }
@@ -2671,6 +2711,13 @@ export class WasmWebBrowser extends WasmBridge {
 
         window.addEventListener('resize', _ => this.handlers.on_screen_resize())
         window.addEventListener('orientationchange', _ => this.handlers.on_screen_resize())
+        // Fullscreen is part of the window geometry (`is_fullscreen`), and
+        // the browser leaves it on its own Esc without telling the page a
+        // key was pressed — this is how the app learns. A resize does not
+        // always come with it (a viewport already at screen size, or an
+        // emulated one, keeps its size).
+        document.addEventListener('fullscreenchange', _ => this.handlers.on_screen_resize())
+        document.addEventListener('webkitfullscreenchange', _ => this.handlers.on_screen_resize())
     }
 
     bind_mouse_and_touch() {
@@ -2895,11 +2942,11 @@ export class WasmWebBrowser extends WasmBridge {
             return false
         }
 
-        canvas.addEventListener('touchstart', e => this.handlers.on_touchstart(e))
+        canvas.addEventListener('touchstart', e => this.handlers.on_touchstart(e), { passive: false })
         canvas.addEventListener('touchmove', e => this.handlers.on_touchmove(e), { passive: false })
-        canvas.addEventListener('touchend', e => this.handlers.on_touch_end_cancel_leave(e));
-        canvas.addEventListener('touchcancel', e => this.handlers.on_touch_end_cancel_leave(e));
-        canvas.addEventListener('touchleave', e => this.handlers.on_touch_end_cancel_leave(e));
+        canvas.addEventListener('touchend', e => this.handlers.on_touch_end_cancel_leave(e), { passive: false });
+        canvas.addEventListener('touchcancel', e => this.handlers.on_touch_end_cancel_leave(e), { passive: false });
+        canvas.addEventListener('touchleave', e => this.handlers.on_touch_end_cancel_leave(e), { passive: false });
 
         var last_wheel_time;
         var last_was_wheel;
@@ -3181,6 +3228,9 @@ export class WasmWebBrowser extends WasmBridge {
             //if (code == 91) {firefox_logo_key = true; e.preventDefault();}
             if (code == 18 || code == 17 || code == 16) e.preventDefault(); // alt
             if (code === 8 || code === 9) e.preventDefault() // backspace/tab
+            if (code === 121 && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+                e.preventDefault() // Shift+F10: tweaker
+            }
             if ((code === 88 || code == 67) && (e.metaKey || e.ctrlKey)) { // copy or cut
                 // we need to request the clipboard
                 this.to_wasm.ToWasmTextCopy();

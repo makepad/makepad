@@ -132,6 +132,7 @@ impl Cx {
         }
 
         for order_index in 0..draw_order_len {
+            let uniforms_gen = self.next_uniform_gen();
             let Some(draw_item_id) =
                 self.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
             else {
@@ -141,6 +142,12 @@ impl Cx {
                 .kind
                 .sub_list()
             {
+                // A retained sub-list its owner dropped between the parent's
+                // last record and this paint: the slot may already hold
+                // another widget's list. Nothing to draw here.
+                if self.draw_lists.is_id_freed(sub_list_id) {
+                    continue;
+                }
                 let child_resets_zbias = self.draw_lists[sub_list_id].reset_zbias;
                 let mut own_zbias = 0.0f32;
                 let child_zbias = if child_resets_zbias {
@@ -151,7 +158,16 @@ impl Cx {
                 // An overlay list carries a depth floor: this is what makes it
                 // composite above body content that uses `draw_depth`.
                 self.draw_lists[sub_list_id].raise_zbias_to_floor(child_zbias);
-                self.render_view(pass_id, sub_list_id, child_zbias, zbias_step, d3d11_cx);
+                // A retained list is one unit of paint order: its calls all
+                // take the counter at entry, it advances by the layers the
+                // list reported. See `CxDrawList::zbias_hold`.
+                if let Some(steps) = self.draw_lists[sub_list_id].zbias_hold {
+                    let mut held = *child_zbias;
+                    self.render_view(pass_id, sub_list_id, &mut held, 0.0, d3d11_cx);
+                    *child_zbias += steps as f32 * zbias_step;
+                } else {
+                    self.render_view(pass_id, sub_list_id, child_zbias, zbias_step, d3d11_cx);
+                }
             } else {
                 let draw_list = &mut self.draw_lists[draw_list_id];
                 let draw_item = &mut draw_list.draw_items[draw_item_id];
@@ -164,7 +180,7 @@ impl Cx {
                 // order. It must advance for every draw call in the tree, ahead of the early-outs
                 // below, or the sequence would depend on which draw calls happen to be dirty this
                 // frame rather than on the draw tree alone.
-                let zbias_changed = draw_call.resolve_zbias(*zbias, sploded);
+                let zbias_changed = draw_call.resolve_zbias(*zbias, sploded, uniforms_gen);
                 *zbias += zbias_step;
 
                 // A cached draw call (one whose draw list was not redrawn this frame) has
@@ -253,6 +269,9 @@ impl Cx {
                     continue;
                 };
 
+                if self.geometries.skip_stale(geometry_id) {
+                    continue;
+                }
                 let geometry = &mut self.geometries[geometry_id];
 
                 if !crate::geometry::geometry_backend_supports_typed(
@@ -521,11 +540,17 @@ impl Cx {
 
         let pass_rect = self.get_pass_rect(pass_id, dpi_factor).unwrap();
         if !self.passes[pass_id].keep_camera_matrix {
-            self.passes[pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size);
+            let uniforms_gen = self.next_uniform_gen();
+            self.passes[pass_id].set_ortho_matrix(
+                pass_rect.pos,
+                pass_rect.size,
+                uniforms_gen,
+            );
         }
         self.passes[pass_id].paint_dirty = false;
 
-        self.passes[pass_id].set_dpi_factor(dpi_factor);
+        let uniforms_gen = self.next_uniform_gen();
+        self.passes[pass_id].set_dpi_factor(dpi_factor, uniforms_gen);
 
         let viewport = D3D11_VIEWPORT {
             Width: (pass_rect.size.x * dpi_factor) as f32,
@@ -747,7 +772,13 @@ impl Cx {
         // compositor kept it. Assuming it spent when it was not only costs one
         // paced wait; assuming it held when it was spent would remove the pacing
         // for this window entirely, so err on the side of waiting again.
-        try_with_win32_app(|app| app.spend_beat_credit(window_id));
+        try_with_win32_app(|app| {
+            app.spend_beat_credit(window_id);
+            if presented {
+                let now = app.time_now();
+                app.frame_trace.present(now);
+            }
+        });
         // Reveal the window only once a frame reached the compositor; showing it
         // earlier would flash an uncomposited black window.
         if presented && d3d11_window.first_draw {
@@ -1957,6 +1988,7 @@ impl D3d11Window {
                 // as not-presented and let the occlusion probe back us off, the same
                 // way the macOS backend handles `occlusionState`.
                 self.occluded_since.get_or_insert_with(std::time::Instant::now);
+                try_with_win32_app(|app| app.frame_trace.present_occluded());
                 return false;
             }
             if hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET {
@@ -2283,6 +2315,12 @@ pub struct CxOsDrawCall {
     pub draw_call_uniforms: D3d11Buffer,
     pub user_uniforms: D3d11Buffer,
     pub inst_vbuf: D3d11Buffer,
+    #[cfg(test)]
+    pub uniforms_recording_gen: Option<u64>,
+    #[cfg(test)]
+    pub draw_call_uniforms_gen: Option<u64>,
+    #[cfg(test)]
+    pub user_uniforms_gen: Option<u64>,
 }
 
 #[derive(Default, Clone)]
@@ -3333,6 +3371,7 @@ impl DrawVars {
 
             // Access Cx from the vm host
             let cx = vm.host.cx_mut();
+            mapping.scope_uniforms_gen = cx.next_uniform_gen();
 
             // Allocate CxDrawShader with os_shader_id set to None
             let index = cx.draw_shaders.shaders.len();

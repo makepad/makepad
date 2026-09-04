@@ -17,4 +17,5 @@ path = "src/main.rs"
 makepad-fast-inflate = { path = "../fast_inflate", version = "0.1.0" }
 makepad-mbtile-reader = { path = "../mbtile_reader" }
 makepad-map-nav = { path = "../map_nav" }
+makepad-network = { path = "../../platform/network", version = "1.0.0" }
 serde_json = "1.0"

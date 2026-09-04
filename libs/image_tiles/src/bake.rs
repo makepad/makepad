@@ -16,10 +16,11 @@ use crate::tape::{
     FULL_BPP, FULL_MAX_PX, LEVELS, PAGE_BPP, PYRAMID_LEVELS, SHARD_CAP,
 };
 use makepad_network::blocking_http::{self, Limits, Request};
+use makepad_widgets::makepad_platform::thread::{Lane, TaskPool};
+use makepad_widgets::Cx;
 use std::collections::VecDeque;
-use std::sync::mpsc::{self, SyncSender};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Mutex;
+use std::time::Duration;
 
 /// The largest picture download accepted.
 pub const PICTURE_MAX_BYTES: usize = 64 * 1024 * 1024;
@@ -214,6 +215,7 @@ pub fn bake(
     sources: &[Source],
     options: &BakeOptions,
     log: &mut dyn FnMut(String),
+    pool: &TaskPool,
 ) -> Result<BakeSummary, String> {
     let library = Library::new(root);
     library.ensure_dirs()?;
@@ -245,68 +247,38 @@ pub fn bake(
     // The hard encoder cap — see BakeOptions::encode_threads.
     let encode_threads = options.encode_threads.clamp(1, 8);
 
-    let (job_tx, job_rx) = mpsc::channel::<(i64, String)>();
-    for job in &pending {
-        let _ = job_tx.send(job.clone());
-    }
-    drop(job_tx);
-    let job_rx = Arc::new(Mutex::new(job_rx));
-    // Bounded: fetched bytes wait here for a core, and a fast line must not
-    // move the whole manifest into RAM.
-    let (fetched_tx, fetched_rx) = mpsc::sync_channel::<(i64, Vec<u8>)>(encode_threads);
-    let fetched_rx = Arc::new(Mutex::new(fetched_rx));
-    let (done_tx, done_rx) = mpsc::channel::<PackMsg>();
-
     let total = pending.len();
-    let result = std::thread::scope(|scope| -> Result<(), String> {
-        for _ in 0..fetch_threads {
-            let job_rx = job_rx.clone();
-            let fetched_tx: SyncSender<(i64, Vec<u8>)> = fetched_tx.clone();
-            let done_tx = done_tx.clone();
-            scope.spawn(move || loop {
-                let job = { job_rx.lock().unwrap().recv() };
-                let Ok((id, url)) = job else { break };
-                match fetch_bytes(&url, PICTURE_MAX_BYTES) {
-                    Ok(bytes) => {
-                        if fetched_tx.send((id, bytes)).is_err() {
-                            break;
-                        }
-                    }
-                    Err(error) => {
-                        if done_tx.send(PackMsg::Failed { id, error }).is_err() {
-                            break;
-                        }
-                    }
-                }
-            });
-        }
-        drop(fetched_tx);
-        for _ in 0..encode_threads {
-            let fetched_rx = fetched_rx.clone();
-            let done_tx = done_tx.clone();
-            let library = library.clone();
-            scope.spawn(move || loop {
-                let job = { fetched_rx.lock().unwrap().recv() };
-                let Ok((id, bytes)) = job else { break };
-                let msg = match process_picture(&library, id, &bytes) {
-                    Ok(baked) => PackMsg::Baked { id, baked },
-                    Err(error) => PackMsg::Failed { id, error },
-                };
-                if done_tx.send(msg).is_err() {
-                    break;
-                }
-            });
-        }
-        drop(done_tx);
+    // This function itself runs as one heavy pool job. Process bounded
+    // batches with the pool's caller-helping fan-out so a bake never creates
+    // temporary fetch/encode threads and never holds the whole manifest's
+    // downloaded bytes at once.
+    let batch_width = fetch_threads.min(encode_threads).max(1);
+    let mut completed = Vec::with_capacity(total);
+    for batch in pending.chunks(batch_width) {
+        let results = Mutex::new((0..batch.len()).map(|_| None).collect::<Vec<Option<PackMsg>>>());
+        pool.fan_out(Lane::Heavy, batch.len(), |index| {
+            let (id, url) = &batch[index];
+            let msg = match fetch_bytes(url, PICTURE_MAX_BYTES) {
+                Ok(bytes) => match process_picture(&library, *id, &bytes) {
+                    Ok(baked) => PackMsg::Baked { id: *id, baked },
+                    Err(error) => PackMsg::Failed { id: *id, error },
+                },
+                Err(error) => PackMsg::Failed { id: *id, error },
+            };
+            results.lock().unwrap()[index] = Some(msg);
+        });
+        completed.extend(results.into_inner().unwrap().into_iter().flatten());
+    }
 
+    let result: Result<(), String> = (|| {
         // The packer: this thread. One open shard, slots filled in arrival
         // order, sealed when full.
         let mut open: Option<OpenShard> = None;
         let mut next_shard = db.next_shard()?;
         let mut taken = 0usize;
-        let mut last_report = Instant::now();
+        let mut last_report = Cx::monotonic_now();
         let mut recent_errors: VecDeque<String> = VecDeque::new();
-        while let Ok(msg) = done_rx.recv() {
+        for msg in completed {
             taken += 1;
             match msg {
                 PackMsg::Baked { id, baked } => {
@@ -339,8 +311,8 @@ pub fn bake(
                     }
                 }
             }
-            if last_report.elapsed().as_secs_f64() > 2.0 || taken == total {
-                last_report = Instant::now();
+            if Cx::monotonic_now() - last_report > 2.0 || taken == total {
+                last_report = Cx::monotonic_now();
                 let mut line = format!("baked {}/{total} ({} failed)", summary.baked, summary.failed);
                 for e in recent_errors.drain(..) {
                     line.push_str(&format!("\n  {e}"));
@@ -353,7 +325,7 @@ pub fn bake(
             summary.shards_sealed += 1;
         }
         Ok(())
-    });
+    })();
     result?;
     let (pending_after, ready_after, failed_after) = db.counts()?;
     log(format!(

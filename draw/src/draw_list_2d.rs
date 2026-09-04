@@ -36,9 +36,8 @@ impl DrawListExt for DrawList {
             /*if cx.draw_lists[draw_list_id].locked_view_transform {
                 return
             }*/
-            cx.draw_lists[draw_list_id]
-                .draw_list_uniforms
-                .view_transform = *mat;
+            let uniforms_gen = cx.next_uniform_gen();
+            cx.draw_lists[draw_list_id].set_uniform_view_transform(mat, uniforms_gen);
             let draw_order_len = cx.draw_lists[draw_list_id].draw_item_order_len();
             for order_index in 0..draw_order_len {
                 let Some(draw_item_id) =
@@ -49,6 +48,9 @@ impl DrawListExt for DrawList {
                 if let Some(sub_list_id) =
                     cx.draw_lists[draw_list_id].draw_items[draw_item_id].sub_list()
                 {
+                    if cx.draw_lists.is_id_freed(sub_list_id) {
+                        continue;
+                    }
                     set_view_transform_recur(sub_list_id, cx, mat);
                 }
             }
@@ -57,7 +59,8 @@ impl DrawListExt for DrawList {
     }
 
     fn set_view_transform_self_only(&self, cx: &mut Cx, mat: &Mat4f) {
-        cx.draw_lists[self.id()].draw_list_uniforms.view_transform = *mat;
+        let uniforms_gen = cx.next_uniform_gen();
+        cx.draw_lists[self.id()].set_uniform_view_transform(mat, uniforms_gen);
     }
 
     fn begin_always(&mut self, cx: &mut CxDraw) {
@@ -106,7 +109,13 @@ impl DrawListExt for DrawList {
             cx.passes[pass_id].paint_dirty = true;
         }
 
-        cx.cx.draw_lists[self.id()].clear_draw_items(redraw_id);
+        let recording_gen = cx.cx.next_uniform_gen();
+        let uniforms_gen = cx.cx.next_uniform_gen();
+        cx.cx.draw_lists[self.id()].clear_draw_items(
+            redraw_id,
+            recording_gen,
+            uniforms_gen,
+        );
 
         cx.nav_list_clear(self.id());
 
@@ -246,7 +255,7 @@ pub fn overlay_z_lift(nesting: usize) -> f32 {
 
 impl DrawList2d {
     pub fn new(cx: &mut Cx) -> Self {
-        let draw_list = cx.draw_lists.alloc();
+        let draw_list = DrawList::new(cx);
         Self {
             dirty_check_rect: Default::default(),
             draw_list,
@@ -331,7 +340,13 @@ impl DrawList2d {
             cx.passes[pass_id].paint_dirty = true;
         }
 
-        cx.cx.draw_lists[self.draw_list.id()].clear_draw_items(redraw_id);
+        let recording_gen = cx.cx.next_uniform_gen();
+        let uniforms_gen = cx.cx.next_uniform_gen();
+        cx.cx.draw_lists[self.draw_list.id()].clear_draw_items(
+            redraw_id,
+            recording_gen,
+            uniforms_gen,
+        );
 
         cx.nav_list_clear(self.draw_list.id());
 
@@ -361,6 +376,10 @@ impl<'a> CxDraw<'a> {
         draw_vars.draw_shader_id?;
         let draw_shader = draw_vars.draw_shader_id.unwrap();
 
+        // Issued before borrowing the draw-list fields; unused only when this
+        // request appends to an existing draw call.
+        let uniforms_gen = self.cx.next_uniform_gen();
+
         let sh = &self.cx.draw_shaders[draw_shader.index];
 
         // The nesting depth this call belongs to. `depth_target` is Some only
@@ -378,7 +397,13 @@ impl<'a> CxDraw<'a> {
             }
         }
 
-        Some(draw_list.append_draw_call(self.cx.redraw_id, sh, draw_vars, turtle_depth))
+        Some(draw_list.append_draw_call(
+            self.cx.redraw_id,
+            sh,
+            draw_vars,
+            turtle_depth,
+            uniforms_gen,
+        ))
     }
 
     pub fn begin_many_instances(&mut self, draw_vars: &DrawVars) -> Option<ManyInstances> {

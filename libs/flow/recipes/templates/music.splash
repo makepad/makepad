@@ -1,0 +1,23 @@
+use mod.flow.*
+
+/** Genre, tempo, mood, vocals, and arrangement. */
+let prompt = Input{ type: @text  default: "slow dub techno, 92 BPM, deep chord echoes, instrumental"  at: vec2(40, 80) }
+
+/** Optional section-tagged lyrics; leave empty for instrumental music. */
+let lyrics = Input{ type: @text  default: "[Instrumental]"  at: vec2(40, 240) }
+
+let music = Music{
+    prompt: prompt.text()
+    lyrics: lyrics.text()
+    seconds: 180
+    at: vec2(360, 160)
+}
+
+/** The generated song. */
+let song = Output{ type: @audio  value: music.audio()  at: vec2(680, 160) }
+
+Flow{
+    label: "Music"
+    brief: "Generates a three-minute song from a production brief and structured lyrics."
+    prompt, lyrics, music, song
+}

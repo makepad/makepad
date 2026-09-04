@@ -52,7 +52,8 @@ pub fn production_archive(maps_root: &Path) -> Option<PathBuf> {
 
 /// Resolve once at startup: a checked-out executable uses that checkout's
 /// `local/maps`; an installed/copied executable uses Makepad's per-user home.
-/// The saved setting wins over both. The process cwd is deliberately absent.
+/// A developer override in `route/maps-root` wins over both. The process cwd
+/// is deliberately absent.
 pub fn resolve_maps_root() -> PathBuf {
     static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     ROOT.get_or_init(|| {
@@ -95,32 +96,6 @@ fn resolve_maps_root_with(
         directory = candidate.parent();
     }
     home.join("maps")
-}
-
-/// Persist the settings-panel override. Empty restores automatic resolution;
-/// a non-empty setting must be absolute so it can never regain cwd semantics.
-pub fn save_maps_root_setting(value: &str) -> Result<(), String> {
-    let home = makepad_widgets::makepad_platform::home::makepad_home();
-    let path = home.join(MAPS_ROOT_PREF);
-    let value = value.trim();
-    if value.is_empty() {
-        match fs::remove_file(&path) {
-            Ok(()) => return Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(format!("remove {}: {error}", path.display())),
-        }
-    }
-    let root = Path::new(value);
-    if !root.is_absolute() {
-        return Err("maps root must be an absolute path".to_string());
-    }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("create {}: {error}", parent.display()))?;
-    }
-    let partial = path.with_extension("part");
-    fs::write(&partial, value).map_err(|error| format!("write {}: {error}", partial.display()))?;
-    fs::rename(&partial, &path).map_err(|error| format!("publish {}: {error}", path.display()))
 }
 
 /// What the worker thread sends back.
@@ -229,7 +204,7 @@ impl TestMapBuild {
         }
         self.fraction = 0.0;
         if self.paths.pbf.is_file() {
-            self.start_bake();
+            self.start_bake(cx);
             return;
         }
         self.stage = Stage::Fetching { loaded: 0, total: testmap::AMSTERDAM_PBF_APPROX_BYTES };
@@ -282,7 +257,12 @@ impl TestMapBuild {
         true
     }
 
-    pub fn handle_http_response(&mut self, request_id: LiveId, response: &HttpResponse) -> bool {
+    pub fn handle_http_response(
+        &mut self,
+        cx: &mut Cx,
+        request_id: LiveId,
+        response: &HttpResponse,
+    ) -> bool {
         if !self.owns_request(request_id) {
             return false;
         }
@@ -314,7 +294,7 @@ impl TestMapBuild {
             return true;
         }
         self.push_log(format!("extract saved: {:.0} MB", body.len() as f64 / 1.0e6));
-        self.start_bake();
+        self.start_bake(cx);
         true
     }
 
@@ -366,7 +346,7 @@ impl TestMapBuild {
         changed
     }
 
-    fn start_bake(&mut self) {
+    fn start_bake(&mut self, cx: &mut Cx) {
         self.stage = Stage::Baking;
         self.headline = "Baking tiles".to_string();
         let sender = Mutex::new(self.rx.sender());
@@ -384,7 +364,8 @@ impl TestMapBuild {
         let mut options = BakeOptions::amsterdam();
         options.paths = self.paths.clone();
         let done = self.rx.sender();
-        std::thread::spawn(move || {
+        let rejected = done.clone();
+        match cx.task_pool().submit(Lane::Heavy, move || {
             // NoFetch: the extract is on disk before this thread starts —
             // downloading is the window's job, where progress comes free.
             //
@@ -401,7 +382,14 @@ impl TestMapBuild {
                 Ok(stats) => BakeMsg::Done { skipped: stats.skipped_tiles },
                 Err(error) => BakeMsg::Failed(error),
             });
-        });
+        }) {
+            Ok(handle) => handle.detach(),
+            Err(error) => {
+                let _ = rejected.send(BakeMsg::Failed(format!(
+                    "test-map bake task rejected: {error}"
+                )));
+            }
+        }
     }
 
     fn fail(&mut self, error: String) {

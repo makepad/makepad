@@ -7,6 +7,7 @@ use makepad_asset_chat::wire::ToolOutcome;
 use makepad_asset_client::dto::{ChatProviderKind, ChatToolOutcomeDto};
 use makepad_asset_client::json::Value;
 use makepad_asset_client::{ApiEndpoints, ChatAttachment};
+use makepad_widgets::makepad_platform::thread::ThreadSpawner;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -74,7 +75,11 @@ pub struct ChatFeed {
 }
 
 impl ChatFeed {
-    pub fn start(_cfg: FeedConfig, _tools: Box<dyn ClientTools>) -> Self {
+    pub fn start(
+        _cfg: FeedConfig,
+        _tools: Box<dyn ClientTools>,
+        _spawner: ThreadSpawner,
+    ) -> Self {
         ChatData::set_status("AI chat unavailable on web");
         Self { dirty: AtomicBool::new(true) }
     }

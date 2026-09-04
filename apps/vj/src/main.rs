@@ -23,6 +23,9 @@ use makepad_widgets::value_input::{ValueInput, ValueInputAction};
 use makepad_widgets::makepad_platform::file_dialogs::{
     FileDialog, FileDialogAction, VirtualFile,
 };
+use makepad_widgets::makepad_platform::thread::{
+    CancellationToken, Lane, TaskPool, ThreadOptions, ThreadSpawner, ToUIReceiver, ToUISender,
+};
 use crate::import_ui::ImportPanel;
 use crate::local_store::LocalStore;
 use crate::music_import_ui::{MusicImporter, PreparedMusicImport};
@@ -70,6 +73,7 @@ mod fx_slot;
 // already knows how to animate (digest-keyed persistent cache; see fx_thumbs.rs).
 mod fx_thumbs;
 mod import_ui;
+mod ironfish;
 mod pipelines;
 mod gen;
 mod lanes;
@@ -95,6 +99,9 @@ mod mesh_view;
 mod midi_learn;
 mod mix;
 mod mixer;
+mod program_mix;
+mod synth;
+mod synth_ui;
 mod models;
 mod notes_map;
 // Two-deck music mode: deck DSP, off-thread track analysis, deck surface.
@@ -109,6 +116,7 @@ mod browser_store {
     pub struct BrowserStore;
 }
 mod score_preview;
+mod spsc;
 mod stems;
 mod wave_analysis;
 mod pads;
@@ -143,7 +151,7 @@ use crate::loop_splat_view::{
 use crate::autopilot::{AutoCmd, AutoDeckObs, AutoLoad, AutoObs, AutoPilot, AutoStyle};
 use crate::blend::MixBrain;
 use crate::decks::{
-    DeckCmd, DeckEngine, DeckId, DeckLoad, DeckTarget, ScratchMotion, SyncMode,
+    DeckCmd, DeckEngine, DeckId, DeckLoad, DeckState, DeckTarget, ScratchMotion, SyncMode,
     SyncView, TrackItem, TrackSideChannels,
 };
 use crate::console_scale::TabStage;
@@ -163,7 +171,9 @@ use crate::music_view::{
 use crate::lyrics::{
     KaraokeSchedule, KaraokeTiming, LyricsDispatch, LyricsJob, LyricsMsg, LyricsPool, TrackLyrics,
 };
-use crate::stems::{StemsJob, StemsMsg, StemsPool};
+use crate::stems::{
+    separation_action, SeparationAction, StemSeparation, StemsJob, StemsMsg, StemsPool,
+};
 use crate::wave_analysis::{AnalysisJob, AnalysisKey, AnalysisPool, TrackAnalysis, TrackGrid};
 use crate::loop_scan::LoopScanPool;
 use crate::loop_scan::ScanSettings;
@@ -179,9 +189,15 @@ use crate::lanes::{LatestWins, AUDIO_LANE};
 use crate::media::{DecodeDone, DecodeJob, DecodePool, DecodeSource, SlotPlayer};
 use crate::mixer::{
     TrackStems,
-    CueMode, CueReadState, MixCmd, Mixer, TrackPcm, VideoTransitionError, VideoTransitionId,
+    CueMode, CueReadState, Mixer, TrackPcm, VideoTransitionError, VideoTransitionId,
     VideoTransitionPhase,
 };
+use crate::program_mix::{MasterParam, MasterParams, StripId, STRIP_COUNT};
+use crate::synth::{
+    FilterKind, IronfishParam, IronfishPatch, LfoWave, OscillatorKind, RackPatterns, RootNote,
+    ScaleKind, SynthClock, SynthTrack,
+};
+use crate::synth_ui::{VjStepGrid, VjStepGridAction};
 use crate::pads::{PadCmd, PadEngine, PadItem};
 use crate::chat::{ChatBridge, ChatData};
 use crate::views::{GridEntry, JobRowEntry, VjJobList, VjPadMatrix, VjTileGrid, GRID_SLOTS};
@@ -194,7 +210,7 @@ use crate::mix::MixState;
 use makepad_asset_client::side_channels::SideChannelOutcome;
 use makepad_asset_client::{
     select_file, CatalogSubscriptionEvent, ClientError, ClientEvent, ClientOutput, ClientRequest,
-    ClientMode, RequestId, SessionConnector, SessionHandles, SessionMsg, SessionStatus,
+    RequestId, SessionConnector, SessionHandles, SessionMsg, SessionStatus,
     TierPreference,
 };
 use makepad_asset_data::{
@@ -213,9 +229,20 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
-use makepad_widgets::makepad_platform::thread::lock_from_ui;
+use std::sync::Arc;
 use crate::clock::Instant;
+
+#[cfg(test)]
+pub(crate) fn test_thread_spawner() -> ThreadSpawner {
+    Cx::new(Box::new(|_, _| {})).thread_spawner()
+}
+
+/// A two-worker pool for tests that exercise one-shot jobs.
+#[cfg(test)]
+pub(crate) fn test_task_pool() -> TaskPool {
+    let options = makepad_widgets::makepad_platform::thread::PoolOptions::with_workers(2, 0);
+    TaskPool::new(test_thread_spawner(), options).expect("test pool")
+}
 use std::time::Duration;
 
 app_main!(App);
@@ -292,6 +319,7 @@ script_mod! {
             track_color: uniform(#x2b343f)
             fill_color: uniform(#xff5c39)
             cap_color: uniform(#xe8eef4)
+            inert: instance(0.0)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 let track_h = 6.
@@ -308,7 +336,47 @@ script_mod! {
                 let cap_x = left + w * self.slide_pos - cap_w * 0.5
                 sdf.box(cap_x, 3., cap_w, self.rect_size.y - 6., 3.)
                 sdf.fill(self.cap_color)
-                return sdf.result
+                return sdf.result * (1.0 - self.inert * 0.72)
+            }
+        }
+    }
+
+    // A normalized 0..1 control whose semantic zero is the centre. The data
+    // path stays identical to ApcHSlider; only the fill law changes, so MIDI
+    // mapping and persistence remain stable.
+    let ApcBipolarSlider = Slider{
+        width: Fill
+        height: 22
+        min: 0.0
+        max: 1.0
+        text: ""
+        text_input: TextInput{width: 0 height: 0}
+        draw_bg +: {
+            body_color: uniform(#x1d222a)
+            track_color: uniform(#x2b343f)
+            fill_color: uniform(#xff5c39)
+            cap_color: uniform(#xe8eef4)
+            centre_color: uniform(#xffffff36)
+            inert: instance(0.0)
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let track_h = 6.
+                let track_y = (self.rect_size.y - track_h) * 0.5
+                sdf.box(1., track_y, self.rect_size.x - 2., track_h, 3.)
+                sdf.fill(self.track_color)
+                let cap_w = 10.
+                let left = 1. + cap_w * 0.5
+                let w = self.rect_size.x - 2. - cap_w
+                let lo = min(self.slide_pos, 0.5)
+                let hi = max(self.slide_pos, 0.5)
+                sdf.box(left + w * lo, track_y, max(1., w * (hi - lo)), track_h, 3.)
+                sdf.fill(self.fill_color)
+                sdf.rect(left + w * 0.5 - 0.5, track_y - 2., 1., track_h + 4.)
+                sdf.fill(self.centre_color)
+                let cap_x = left + w * self.slide_pos - cap_w * 0.5
+                sdf.box(cap_x, 3., cap_w, self.rect_size.y - 6., 3.)
+                sdf.fill(self.cap_color)
+                return sdf.result * (1.0 - self.inert * 0.72)
             }
         }
     }
@@ -478,6 +546,31 @@ script_mod! {
         draw_text.text_style: theme.font_bold{font_size: 8}
     }
 
+    // Synth sound-design groups use the same restrained panel chrome as the
+    // MIX final bus. Keeping this as one template makes the dense Ironfish
+    // editor read as an instrument, rather than a spreadsheet of sliders.
+    let SynthPanel = RoundedView{
+        width: Fill
+        height: Fit
+        flow: Down
+        spacing: 3
+        padding: 7
+        draw_bg +: {
+            color: #x181e25
+            border_color: #xffffff20
+            border_size: 1.0
+            border_radius: 3.0
+        }
+    }
+
+    let SynthParamRow = View{
+        width: Fill
+        height: 22
+        flow: Right
+        spacing: 5
+        align: Align{x: 0.0 y: 0.5}
+    }
+
     let FaderCol = View{
         width: 44
         height: Fit
@@ -524,6 +617,27 @@ script_mod! {
                 sdf.fill(self.cap_color)
                 return sdf.result
             }
+        }
+    }
+
+    // THE OUTPUT SURFACE: what the projector shows. One template, two
+    // hosts — the output window on a platform with a second window, and
+    // `output_layer` in the console on a platform with one (the web). The
+    // App addresses it through its host (`output_program_path` & co),
+    // never by a bare id: both hosts carry these names.
+    let OutputSurface = PageFlip{
+        width: Fill
+        height: Fill
+        active_page: @video_out_page
+        video_out_page := View{
+            width: Fill
+            height: Fill
+            program := VideoProgram{}
+        }
+        mesh_out_page := View{
+            width: Fill
+            height: Fill
+            mesh_program := VjMeshView{}
         }
     }
 
@@ -609,13 +723,13 @@ script_mod! {
                                     }
                                 }
                             }
-                            // The three MODES sit far left, where the
+                            // The four full-workspace modes sit far left, where the
                             // wordmark used to be — the lit mode button IS
-                            // the label. VJ = the visual surface, DJ the
-                            // two-deck music mode, SFX the pad sampler.
+                            // the label. Each button replaces the whole console body.
                             mode_vj := PillButton{text: "VJ"}
                             mode_dj := PillButton{text: "DJ"}
-                            mode_sfx := PillButton{text: "SFX"}
+                            mode_synth := PillButton{text: "SYNTH"}
+                            mode_mix := PillButton{text: "MIX"}
                             // OFFSCREEN RENDER HOSTS — every 4x4 heartbeat
                             // widget stacked in ONE overlay slot with a
                             // bar-colored cover on top: the sample draws
@@ -842,7 +956,9 @@ script_mod! {
                                     }
                                 }
                             }
-                            Tip{ text: "Output window"
+                            // Its text names the mode this platform gives the
+                            // output (`App::sync_output_button`).
+                            open_output_tip := Tip{ text: "Open output window"
                                 open_output := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/monitor.svg") } }
                             }
                             // MASTER VOLUME as a DROPDOWN SLIDER: the chip
@@ -1990,7 +2106,7 @@ script_mod! {
                                                 chip_image := PillButton{width: Fill text: "IMAGE"}
                                                 chip_mesh := PillButton{width: Fill text: "MESH"}
                                                 chip_map := PillButton{width: Fill text: "MAP"}
-                                                // The special pages ride the
+                                                // The VJ-local utility pages ride the
                                                 // same rail: not content
                                                 // lanes but places — any
                                                 // content chip returns to
@@ -2344,6 +2460,379 @@ script_mod! {
                                 height: Fill
                                 flow: Down
                                 music_surface := MusicDeckPage{}
+                            }
+
+                            // ============ SYNTH / MIX ============
+                            synth_page := View{
+                                width: Fill
+                                height: Fill
+                                flow: Down
+                                spacing: 6
+                                // Transport is global to the rack. Instrument
+                                // selection and CLEAR live with the sequencer
+                                // they affect, so this line stays honest as the
+                                // rack grows.
+                                View{
+                                    width: Fill height: 28 flow: Right spacing: 8
+                                    align: Align{x: 0.0 y: 0.5}
+                                    synth_play := ChromeButton{width: 62 text: "PLAY"}
+                                    synth_status := Label{
+                                        width: Fit text: "STEP 01"
+                                        draw_text.color: #xffe0a3
+                                        draw_text.text_style.font_size: 9
+                                    }
+                                    synth_clock_status := Label{
+                                        width: Fit text: "120.0 · FREE"
+                                        draw_text.color: #x8e9aa7
+                                        draw_text.text_style.font_size: 9
+                                    }
+                                    synth_drop_status := Label{
+                                        width: Fit text: ""
+                                        draw_text.color: #xff5c39
+                                        draw_text.text_style: theme.font_bold{font_size: 8}
+                                    }
+                                    View{width: Fill height: 1}
+                                    Tick{width: Fit text: "ONE CLOCK · ALL INSTRUMENTS"}
+                                }
+                                View{
+                                    width: Fill height: Fill flow: Right spacing: 10
+                                    // Sequencer plus rack overview. This side
+                                    // expands to the full page for Piano and
+                                    // Drums, whose engines have no editable
+                                    // parameter surface.
+                                    View{
+                                        width: Fill height: Fill flow: Down spacing: 7
+                                        synth_editors := PageFlip{
+                                            width: Fill
+                                            height: 575
+                                            active_page: @synth_piano_editor
+                                            synth_piano_editor := View{
+                                                width: Fill height: Fill flow: Down spacing: 5
+                                                View{
+                                                    width: Fill height: 24 flow: Right spacing: 6
+                                                    align: Align{x: 0.0 y: 0.5}
+                                                    Tick{width: Fit text: "PIANO · C3–B3 · 12 NOTE LANES"}
+                                                    View{width: Fill height: 1}
+                                                    Label{
+                                                        width: Fit text: "consecutive notes tie"
+                                                        draw_text.color: #x657383
+                                                        draw_text.text_style.font_size: 8
+                                                    }
+                                                    piano_clear := ChromeButton{width: 54 text: "CLEAR"}
+                                                }
+                                                View{width: Fill height: Fill flow: Right spacing: 8
+                                                    View{width: 74 height: Fill flow: Down
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "B3"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "A#3"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "A3"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "G#3"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "G3"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "F#3"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "F3"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "E3"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "D#3"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "D3"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "C#3"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "C3"}}
+                                                    }
+                                                    piano_grid := VjStepGrid{width: Fill height: Fill rows: 12}
+                                                }
+                                            }
+                                            synth_ironfish_editor := View{
+                                                width: Fill height: Fill flow: Down spacing: 5
+                                                View{
+                                                    width: Fill height: 24 flow: Right spacing: 6
+                                                    align: Align{x: 0.0 y: 0.5}
+                                                    Tick{width: Fit text: "IRONFISH · 12 SCALE-DEGREE LANES"}
+                                                    View{width: Fill height: 1}
+                                                    Tick{width: 30 text: "ROOT"}
+                                                    ironfish_root := DropDown{width: 92 labels: ["A" "A#" "B" "C" "C#" "D" "D#" "E" "F" "F#" "G" "G#"]}
+                                                    Tick{width: 34 text: "SCALE"}
+                                                    ironfish_scale := DropDown{width: 116 labels: ["MINOR" "MAJOR" "DORIAN" "PENTATONIC"]}
+                                                    ironfish_clear := ChromeButton{width: 54 text: "CLEAR"}
+                                                }
+                                                View{width: Fill height: Fill flow: Right spacing: 8
+                                                    View{width: 74 height: Fill flow: Down
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_11 := Tick{text: ""}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_10 := Tick{text: ""}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_9 := Tick{text: ""}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_8 := Tick{text: ""}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_7 := Tick{text: ""}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_6 := Tick{text: ""}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_5 := Tick{text: ""}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_4 := Tick{text: ""}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_3 := Tick{text: ""}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_2 := Tick{text: ""}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_1 := Tick{text: ""}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_0 := Tick{text: ""}}
+                                                    }
+                                                    ironfish_grid := VjStepGrid{width: Fill height: Fill rows: 12}
+                                                }
+                                            }
+                                            synth_drums_editor := View{
+                                                width: Fill height: Fill flow: Down spacing: 5
+                                                View{
+                                                    width: Fill height: 24 flow: Right spacing: 6
+                                                    align: Align{x: 0.0 y: 0.5}
+                                                    Tick{width: Fit text: "DRUM COMPUTER · 8 LANES"}
+                                                    View{width: Fill height: 1}
+                                                    drums_clear := ChromeButton{width: 54 text: "CLEAR"}
+                                                }
+                                                View{
+                                                    width: Fill height: Fill flow: Right spacing: 8
+                                                    View{
+                                                        width: 82 height: Fill flow: Down
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "CRASH"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "RIDE"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "TOM HIGH"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "TOM LOW"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "OPEN HAT"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "CLOSED HAT"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "SNARE"}}
+                                                        View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "KICK"}}
+                                                    }
+                                                    drums_grid := VjStepGrid{width: Fill height: Fill rows: 8}
+                                                }
+                                            }
+                                        }
+                                        // The rack is the scalable instrument
+                                        // chooser. Selection is orange; runtime
+                                        // activity and the MIX mute state remain
+                                        // visible without duplicating faders.
+                                        SynthPanel{
+                                            width: Fill height: Fit
+                                            View{width: Fill height: 18 flow: Right
+                                                Tick{width: Fill text: "RACK · SELECT AN INSTRUMENT TO EDIT"}
+                                                Tick{width: Fit text: "MUTE IS SHARED WITH MIX"}
+                                            }
+                                            View{width: Fill height: 30 flow: Right spacing: 7 align: Align{x: 0.0 y: 0.5}
+                                                synth_piano_btn := PillButton{width: 82 text: "PIANO"}
+                                                rack_piano_state := Label{width: 150 text: "IDLE · 12 NOTE LANES" draw_text.color: #x657383 draw_text.text_style.font_size: 9}
+                                                piano_rack_grid := VjStepGrid{width: Fill height: 22 rows: 1 read_only: true}
+                                                rack_piano_mute := ChromeButton{width: 34 text: "M"}
+                                            }
+                                            View{width: Fill height: 30 flow: Right spacing: 7 align: Align{x: 0.0 y: 0.5}
+                                                synth_ironfish_btn := PillButton{width: 82 text: "IRONFISH"}
+                                                rack_ironfish_state := Label{width: 150 text: "IDLE · DUAL OSC SYNTH" draw_text.color: #x657383 draw_text.text_style.font_size: 9}
+                                                ironfish_rack_grid := VjStepGrid{width: Fill height: 22 rows: 1 read_only: true}
+                                                rack_ironfish_mute := ChromeButton{width: 34 text: "M"}
+                                            }
+                                            View{width: Fill height: 30 flow: Right spacing: 7 align: Align{x: 0.0 y: 0.5}
+                                                synth_drums_btn := PillButton{width: 82 text: "DRUMS"}
+                                                rack_drums_state := Label{width: 150 text: "IDLE · 8 DRUM LANES" draw_text.color: #x657383 draw_text.text_style.font_size: 9}
+                                                drums_rack_grid := VjStepGrid{width: Fill height: 22 rows: 1 read_only: true}
+                                                rack_drums_mute := ChromeButton{width: 34 text: "M"}
+                                            }
+                                            Tick{width: Fill text: "+ FUTURE SYNTHS APPEAR HERE · THE TRANSPORT AND MIX BUS STAY SHARED"}
+                                        }
+                                    }
+
+                                    // Ironfish engine. VOICE and FX are one
+                                    // gesture apart and each page is complete;
+                                    // the ScrollYView is only a short-window
+                                    // fallback, not the primary navigation.
+                                    synth_engine_column := SynthPanel{
+                                        width: 600 height: Fill spacing: 5
+                                        View{width: Fill height: 20 flow: Right align: Align{x: 0.0 y: 0.5}
+                                            Tick{width: Fill text: "IRONFISH"}
+                                            ironfish_voice_status := Label{width: Fit text: "0 / 16 VOICES" draw_text.color: #xffe0a3 draw_text.text_style.font_size: 9}
+                                        }
+                                        View{width: Fill height: 22 flow: Right spacing: 4
+                                            ironfish_preset_0 := ChromeButton{width: Fill text: "INIT"}
+                                            ironfish_preset_1 := ChromeButton{width: Fill text: "GLASS"}
+                                            ironfish_preset_2 := ChromeButton{width: Fill text: "ACID"}
+                                            ironfish_preset_3 := ChromeButton{width: Fill text: "SUB"}
+                                            ironfish_preset_4 := ChromeButton{width: Fill text: "FORMANT"}
+                                            ironfish_preset_5 := ChromeButton{width: Fill text: "CRUSH"}
+                                            ironfish_preset_6 := ChromeButton{width: Fill text: "WIDE"}
+                                            ironfish_preset_7 := ChromeButton{width: Fill text: "PAD"}
+                                        }
+                                        View{width: Fill height: 22 flow: Right spacing: 4
+                                            ironfish_voice_tab := PillButton{width: 76 text: "VOICE"}
+                                            ironfish_fx_tab := PillButton{width: 62 text: "FX"}
+                                            View{width: Fill height: 1}
+                                            Tick{width: Fit text: "FULL FINAL ENGINE · SHARED CLOCK"}
+                                        }
+                                        ironfish_engine_pages := PageFlip{
+                                            width: Fill height: Fill active_page: @ironfish_voice_page
+                                            ironfish_voice_page := ScrollYView{
+                                                width: Fill height: Fill flow: Down spacing: 6 padding: Inset{right: 3}
+                                                scroll_bars.scroll_bar_y.drag_scrolling: false
+                                                View{width: Fill height: Fit flow: Right spacing: 6
+                                                    SynthPanel{
+                                                        Tick{width: Fill text: "OSCILLATOR 1"}
+                                                        ironfish_osc1_type := DropDown{width: Fill labels: ["DPW SAW" "BLAMP TRI" "PURE SINE" "SUPERSAW" "HYPERSAW" "HARMONIC"]}
+                                                        SynthParamRow{Tick{width: 62 text: "TRANSPOSE"} ironfish_osc1_transpose := ApcBipolarSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "DETUNE"} ironfish_osc1_detune := ApcBipolarSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "SPREAD"} ironfish_osc1_spread := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "VOICES"} ironfish_osc1_diffuse := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "HARMONIC"} ironfish_osc1_harmonic := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "HARM ENV"} ironfish_osc1_harmonic_env := ApcBipolarSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "HARM LFO"} ironfish_osc1_harmonic_lfo := ApcBipolarSlider{}}
+                                                    }
+                                                    SynthPanel{
+                                                        Tick{width: Fill text: "OSCILLATOR 2"}
+                                                        ironfish_osc2_type := DropDown{width: Fill labels: ["DPW SAW" "BLAMP TRI" "PURE SINE" "SUPERSAW" "HYPERSAW" "HARMONIC"]}
+                                                        SynthParamRow{Tick{width: 62 text: "TRANSPOSE"} ironfish_osc2_transpose := ApcBipolarSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "DETUNE"} ironfish_osc2_detune := ApcBipolarSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "SPREAD"} ironfish_osc2_spread := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "VOICES"} ironfish_osc2_diffuse := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "HARMONIC"} ironfish_osc2_harmonic := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "HARM ENV"} ironfish_osc2_harmonic_env := ApcBipolarSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "HARM LFO"} ironfish_osc2_harmonic_lfo := ApcBipolarSlider{}}
+                                                    }
+                                                }
+                                                SynthPanel{
+                                                    Tick{width: Fill text: "VOICE MIX"}
+                                                    View{width: Fill height: Fit flow: Right spacing: 6
+                                                        SynthParamRow{Tick{width: 62 text: "BALANCE"} ironfish_osc_balance := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 40 text: "SUB"} ironfish_sub := ApcHSlider{}}
+                                                    }
+                                                    View{width: Fill height: Fit flow: Right spacing: 6
+                                                        SynthParamRow{Tick{width: 62 text: "NOISE"} ironfish_noise := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 40 text: "PORTA"} ironfish_portamento := ApcHSlider{}}
+                                                    }
+                                                }
+                                                View{width: Fill height: Fit flow: Right spacing: 6
+                                                    SynthPanel{
+                                                        Tick{width: Fill text: "AMP ENVELOPE"}
+                                                        SynthParamRow{Tick{width: 62 text: "PREDELAY"} ironfish_amp_predelay := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "ATTACK"} ironfish_amp_attack := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "HOLD"} ironfish_amp_hold := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "DECAY"} ironfish_amp_decay := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "SUSTAIN"} ironfish_amp_sustain := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "RELEASE"} ironfish_amp_release := ApcHSlider{}}
+                                                    }
+                                                    SynthPanel{
+                                                        Tick{width: Fill text: "MOD ENVELOPE"}
+                                                        SynthParamRow{Tick{width: 62 text: "PREDELAY"} ironfish_mod_predelay := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "ATTACK"} ironfish_mod_attack := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "HOLD"} ironfish_mod_hold := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "DECAY"} ironfish_mod_decay := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "SUSTAIN"} ironfish_mod_sustain := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "RELEASE"} ironfish_mod_release := ApcHSlider{}}
+                                                    }
+                                                }
+                                                View{width: Fill height: Fit flow: Right spacing: 6
+                                                    SynthPanel{
+                                                        Tick{width: Fill text: "FILTER"}
+                                                        ironfish_filter_type := DropDown{width: Fill labels: ["LOW PASS" "HIGH PASS" "BAND PASS" "BAND REJECT"]}
+                                                        SynthParamRow{Tick{width: 62 text: "CUTOFF"} ironfish_filter_cutoff := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "RESONANCE"} ironfish_filter_resonance := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "ENV AMT"} ironfish_filter_env := ApcBipolarSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "LFO AMT"} ironfish_filter_lfo := ApcBipolarSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "TOUCH AMT"} ironfish_filter_touch := ApcBipolarSlider{}}
+                                                    }
+                                                    SynthPanel{
+                                                        Tick{width: Fill text: "LFO + PERFORMANCE"}
+                                                        ironfish_lfo_wave := DropDown{width: Fill labels: ["SAW" "SINE" "PULSE" "TRIANGLE"]}
+                                                        SynthParamRow{Tick{width: 62 text: "RATE"} ironfish_lfo_rate := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "TOUCH"} ironfish_touch := ApcHSlider{}}
+                                                        View{width: Fill height: 22 flow: Right spacing: 5
+                                                            ironfish_lfo_key_sync := Toggle{width: 92 text: "KEY SYNC"}
+                                                            ironfish_arp_enable := Toggle{width: 70 text: "ARP"}
+                                                        }
+                                                        SynthParamRow{Tick{width: 62 text: "OCTAVES"} ironfish_arp_octaves := ApcBipolarSlider{}}
+                                                    }
+                                                }
+                                            }
+                                            ironfish_fx_page := ScrollYView{
+                                                width: Fill height: Fill flow: Down spacing: 6 padding: Inset{right: 3}
+                                                scroll_bars.scroll_bar_y.drag_scrolling: false
+                                                View{width: Fill height: Fit flow: Right spacing: 6
+                                                    View{width: Fill height: Fit flow: Down spacing: 6
+                                                        SynthPanel{
+                                                            View{width: Fill height: 22 flow: Right
+                                                                Tick{width: Fill text: "BITCRUSH"}
+                                                                ironfish_bitcrush_enable := Toggle{width: 48 text: "ON"}
+                                                            }
+                                                            SynthParamRow{Tick{width: 62 text: "AMOUNT"} ironfish_bitcrush := ApcHSlider{}}
+                                                        }
+                                                        SynthPanel{
+                                                            Tick{width: Fill text: "CROSS STEREO DELAY"}
+                                                            SynthParamRow{Tick{width: 62 text: "SEND"} ironfish_delay_send := ApcHSlider{}}
+                                                            SynthParamRow{Tick{width: 62 text: "FEEDBACK"} ironfish_delay_feedback := ApcHSlider{}}
+                                                            SynthParamRow{Tick{width: 62 text: "CROSS"} ironfish_delay_cross := ApcHSlider{}}
+                                                            SynthParamRow{Tick{width: 62 text: "DIFFERENCE"} ironfish_delay_difference := ApcHSlider{}}
+                                                            SynthParamRow{Tick{width: 62 text: "LENGTH"} ironfish_delay_length := ApcHSlider{}}
+                                                        }
+                                                        SynthPanel{
+                                                            Tick{width: Fill text: "OUTPUT"}
+                                                            SynthParamRow{Tick{width: 62 text: "LEVEL"} ironfish_output := ApcHSlider{}}
+                                                        }
+                                                    }
+                                                    View{width: Fill height: Fit flow: Down spacing: 6
+                                                        SynthPanel{
+                                                            Tick{width: Fill text: "SIX-LINE WAVEGUIDE CHORUS"}
+                                                            SynthParamRow{Tick{width: 62 text: "MIN DELAY"} ironfish_chorus_min_delay := ApcHSlider{}}
+                                                            SynthParamRow{Tick{width: 62 text: "DEPTH"} ironfish_chorus_mod_depth := ApcHSlider{}}
+                                                            SynthParamRow{Tick{width: 62 text: "RATE"} ironfish_chorus_rate := ApcHSlider{}}
+                                                            SynthParamRow{Tick{width: 62 text: "PHASE"} ironfish_chorus_phase_diff := ApcHSlider{}}
+                                                            SynthParamRow{Tick{width: 62 text: "MIX"} ironfish_chorus_mix := ApcHSlider{}}
+                                                            SynthParamRow{Tick{width: 62 text: "FEEDBACK"} ironfish_chorus_feedback := ApcHSlider{}}
+                                                        }
+                                                        SynthPanel{
+                                                            Tick{width: Fill text: "GRIESINGER REVERB"}
+                                                            SynthParamRow{Tick{width: 62 text: "MIX"} ironfish_reverb_mix := ApcHSlider{}}
+                                                            SynthParamRow{Tick{width: 62 text: "FEEDBACK"} ironfish_reverb_feedback := ApcHSlider{}}
+                                                        }
+                                                    }
+                                                }
+                                                View{width: Fill height: Fill}
+                                                Label{
+                                                    width: Fill text: "Historical order: bitcrush → chorus → cross delay → reverb. Final dynamics live in MIX."
+                                                    draw_text.color: #x657383
+                                                    draw_text.text_style.font_size: 9
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            mix_page := View{
+                                width: Fill height: Fill flow: Down spacing: 6
+                                View{
+                                    width: Fill height: Fit flow: Right spacing: 8
+                                    Tick{width: Fit text: "PROGRAM MIX"}
+                                    mix_solo_status := Label{
+                                        width: Fill text: "all channels listening"
+                                        draw_text.color: #x8e9aa7
+                                        draw_text.text_style.font_size: 9
+                                    }
+                                    mix_master_meter := Label{
+                                        width: Fit text: "PEAK — · GR —"
+                                        draw_text.color: #xe8eef4
+                                        draw_text.text_style.font_size: 9
+                                    }
+                                }
+                                View{
+                                    width: Fill height: Fill flow: Right spacing: 10
+                                    FaderCol{width: 54 Tick{text: "VIDEO"} mix_video_meter := Tick{text: "····"} mix_video_gain := ApcFader{max: 1.5} mix_video_mute := ChromeButton{width: 54 text: "MUTE"} mix_video_solo := ChromeButton{width: 54 text: "SOLO"}}
+                                    FaderCol{width: 54 Tick{text: "DJ A"} mix_dja_meter := Tick{text: "····"} mix_dja_gain := ApcFader{max: 1.5} mix_dja_mute := ChromeButton{width: 54 text: "MUTE"} mix_dja_solo := ChromeButton{width: 54 text: "SOLO"}}
+                                    FaderCol{width: 54 Tick{text: "DJ B"} mix_djb_meter := Tick{text: "····"} mix_djb_gain := ApcFader{max: 1.5} mix_djb_mute := ChromeButton{width: 54 text: "MUTE"} mix_djb_solo := ChromeButton{width: 54 text: "SOLO"}}
+                                    FaderCol{width: 54 Tick{text: "SFX"} mix_sfx_meter := Tick{text: "····"} mix_sfx_gain := ApcFader{max: 1.5} mix_sfx_mute := ChromeButton{width: 54 text: "MUTE"} mix_sfx_solo := ChromeButton{width: 54 text: "SOLO"}}
+                                    FaderCol{width: 54 Tick{text: "PIANO"} mix_piano_meter := Tick{text: "····"} mix_piano_gain := ApcFader{max: 1.5} mix_piano_mute := ChromeButton{width: 54 text: "MUTE"} mix_piano_solo := ChromeButton{width: 54 text: "SOLO"}}
+                                    FaderCol{width: 54 Tick{text: "IRON"} mix_ironfish_meter := Tick{text: "····"} mix_ironfish_gain := ApcFader{max: 1.5} mix_ironfish_mute := ChromeButton{width: 54 text: "MUTE"} mix_ironfish_solo := ChromeButton{width: 54 text: "SOLO"}}
+                                    FaderCol{width: 54 Tick{text: "DRUMS"} mix_drums_meter := Tick{text: "····"} mix_drums_gain := ApcFader{max: 1.5} mix_drums_mute := ChromeButton{width: 54 text: "MUTE"} mix_drums_solo := ChromeButton{width: 54 text: "SOLO"}}
+                                    View{width: 8 height: Fill}
+                                    RoundedView{
+                                        width: Fill height: Fill flow: Down spacing: 3 padding: 8
+                                        draw_bg +: {color: #x181e25 border_color: #xffffff20 border_size: 1.0 border_radius: 3.0}
+                                        View{width: Fill height: Fit flow: Right
+                                            Tick{width: Fill text: "FINAL BUS · COMPRESSOR / LIMITER"}
+                                            mix_master_bypass := ChromeButton{width: 66 text: "BYPASS"}
+                                        }
+                                        View{width: Fill height: Fit flow: Right spacing: 5 Tick{width: 72 text: "THRESHOLD"} mix_comp_threshold := ApcHSlider{} Tick{width: 52 text: "RATIO"} mix_comp_ratio := ApcHSlider{}}
+                                        View{width: Fill height: Fit flow: Right spacing: 5 Tick{width: 72 text: "ATTACK"} mix_comp_attack := ApcHSlider{} Tick{width: 52 text: "RELEASE"} mix_comp_release := ApcHSlider{}}
+                                        View{width: Fill height: Fit flow: Right spacing: 5 Tick{width: 72 text: "MAKEUP"} mix_comp_makeup := ApcHSlider{} Tick{width: 52 text: "CEILING"} mix_limiter_ceiling := ApcHSlider{}}
+                                        View{width: Fill height: Fill}
+                                        Label{
+                                            width: Fill text: "All audio sources meet here. Solo is a listen mask; mute state is preserved. Dynamics are post-channel and post-DJ crossfade."
+                                            draw_text.color: #x657383
+                                            draw_text.text_style.font_size: 9
+                                        }
+                                    }
+                                }
                             }
 
                             // ============ SFX ============
@@ -2807,9 +3296,25 @@ script_mod! {
                             }
                         }
                     }
-                    // The system tooltip host: LAST in the overlay stack,
-                    // draws on the overlay layer over every panel.
+                    // The system tooltip host: draws on the overlay layer
+                    // over every panel.
                     tip_layer := TipLayer{}
+                    // The IN-PAGE OUTPUT: the program surface over the whole
+                    // console — the mode a one-window platform (the web)
+                    // gets instead of the projector window below
+                    // (`OutputWindowLifecycle::InPage`). Hidden until the
+                    // OUTPUT button asks for it; Esc, a double-click or the
+                    // button puts it away. Last in the stack, and with a
+                    // cursor so it takes every click the console under it
+                    // would otherwise get.
+                    output_layer := SolidView{
+                        visible: false
+                        width: Fill
+                        height: Fill
+                        cursor: MouseCursor.Default
+                        draw_bg.color: #x000000
+                        out_pages := OutputSurface{}
+                    }
                     }
                 }
             }
@@ -2830,21 +3335,7 @@ script_mod! {
                         height: Fill
                         flow: Down
                         draw_bg.color: #x000000
-                        out_pages := PageFlip{
-                            width: Fill
-                            height: Fill
-                            active_page: @video_out_page
-                            video_out_page := View{
-                                width: Fill
-                                height: Fill
-                                program := VideoProgram{}
-                            }
-                            mesh_out_page := View{
-                                width: Fill
-                                height: Fill
-                                mesh_program := VjMeshView{}
-                            }
-                        }
+                        out_pages := OutputSurface{}
                     }
                 }
             }
@@ -2866,12 +3357,17 @@ script_mod! {
 struct SungWorker {
     tx: std::sync::mpsc::Sender<(usize, u64, crate::blend::SungMap)>,
     rx: std::sync::mpsc::Receiver<(usize, u64, crate::blend::SungMap)>,
+    pool: Option<TaskPool>,
 }
 
 impl SungWorker {
     fn new() -> SungWorker {
         let (tx, rx) = std::sync::mpsc::channel();
-        SungWorker { tx, rx }
+        SungWorker { tx, rx, pool: None }
+    }
+
+    fn set_task_pool(&mut self, pool: TaskPool) {
+        self.pool = Some(pool);
     }
 }
 
@@ -2882,18 +3378,20 @@ struct SplatRefineDone {
 }
 
 struct SplatRefineWorker {
-    tx: std::sync::mpsc::Sender<SplatRefineDone>,
-    rx: std::sync::mpsc::Receiver<SplatRefineDone>,
+    tx: ToUISender<SplatRefineDone>,
+    rx: ToUIReceiver<SplatRefineDone>,
 }
 
 impl SplatRefineWorker {
     fn new() -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let rx = ToUIReceiver::default();
+        let tx = rx.sender();
         Self { tx, rx }
     }
 
     fn submit(
         &self,
+        pool: TaskPool,
         deck: DeckId,
         gen: u64,
         stems: Arc<TrackStems>,
@@ -2901,18 +3399,86 @@ impl SplatRefineWorker {
         analysis: Arc<TrackAnalysis>,
     ) -> bool {
         let tx = self.tx.clone();
-        std::thread::Builder::new()
-            .name("loop-splat-refine".to_string())
-            .spawn(move || {
+        match pool.submit(Lane::Heavy, move || {
                 let levels = Arc::new(splat_stem_levels(&stems, &pcm, &analysis));
                 let grid = build_splat(&analysis, Some(&levels)).map(Arc::new);
                 let _ = tx.send(SplatRefineDone { deck, gen, grid });
-            })
-            .is_ok()
+            }) {
+            Ok(handle) => {
+                handle.detach();
+                true
+            }
+            Err(error) => {
+                log!("loop-splat refine worker unavailable: {error}");
+                false
+            }
+        }
     }
 
     fn poll(&self) -> Vec<SplatRefineDone> {
-        self.rx.try_iter().collect()
+        let mut done = Vec::new();
+        while let Ok(item) = self.rx.try_recv() {
+            done.push(item);
+        }
+        done
+    }
+}
+
+#[cfg(test)]
+mod splat_refine_tests {
+    use super::*;
+    use crate::wave_analysis::{TempoMap, WaveTiles};
+
+    #[test]
+    fn splat_refine_result_arrives_over_the_ui_channel() {
+        let cx = Cx::new(Box::new(|_, _| {}));
+        let worker = SplatRefineWorker::new();
+        let frame_count = 66;
+        let pcm = Arc::new(TrackPcm {
+            frames: vec![[0; 2]; frame_count],
+            sample_rate: 8,
+        });
+        let mut stems = TrackStems::new(frame_count, 1);
+        for lane in &mut stems.lanes {
+            lane[0] = Some(Arc::new(vec![[1_000; 2]; frame_count]));
+        }
+        let analysis = Arc::new(TrackAnalysis {
+            duration_secs: 8.25,
+            sample_rate: 8,
+            grid: TrackGrid {
+                bpm: 120.0,
+                beat_secs: 0.5,
+                first_beat_secs: 0.25,
+                downbeat_phase: 0,
+                confidence: 0.9,
+            },
+            tempo_map: TempoMap::default(),
+            tiles: WaveTiles::default(),
+            changes_secs: Vec::new(),
+        });
+
+        assert!(worker.submit(
+            cx.task_pool(),
+            DeckId::B,
+            17,
+            Arc::new(stems),
+            pcm,
+            analysis,
+        ));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let done = loop {
+            if let Some(done) = worker.poll().into_iter().next() {
+                break done;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "refine worker did not publish its channel result"
+            );
+            std::thread::yield_now();
+        };
+        assert_eq!(done.deck, DeckId::B);
+        assert_eq!(done.gen, 17);
+        assert!(done.grid.is_some());
     }
 }
 
@@ -3079,6 +3645,7 @@ struct LoopScoreWorker {
     notes_model: Arc<
         std::sync::Mutex<Option<(std::path::PathBuf, makepad_ai_notes::NotesModel)>>,
     >,
+    pool: Option<TaskPool>,
 }
 
 impl LoopScoreWorker {
@@ -3093,7 +3660,12 @@ impl LoopScoreWorker {
             active: Vec::new(),
             next_thread: 0,
             notes_model: Arc::new(std::sync::Mutex::new(None)),
+            pool: None,
         }
+    }
+
+    fn set_task_pool(&mut self, pool: TaskPool) {
+        self.pool = Some(pool);
     }
 
     fn submit(&mut self, job: LoopScoreJob) -> bool {
@@ -3111,11 +3683,12 @@ impl LoopScoreWorker {
             let key = job.key;
             let tx = self.tx.clone();
             let notes_model = self.notes_model.clone();
-            let thread = self.next_thread;
             self.next_thread = self.next_thread.wrapping_add(1);
-            let spawned = std::thread::Builder::new()
-                .name(format!("loop-score-{thread}"))
-                .spawn(move || {
+            let Some(pool) = self.pool.as_ref() else {
+                self.pending.push_front(job);
+                break;
+            };
+            let spawned = pool.submit(Lane::Heavy, move || {
                 let mono = copy_loop_mono(
                     &job.pcm,
                     job.stems.as_ref().map(|(stems, stem)| (stems.as_ref(), *stem)),
@@ -3188,8 +3761,12 @@ impl LoopScoreWorker {
                 let blocks = Arc::new(transcription.blocks(key.bars));
                 let _ = tx.send(LoopScoreDone { key, transcription, blocks });
             });
-            if spawned.is_ok() {
-                self.active.push(key);
+            match spawned {
+                Ok(handle) => {
+                    handle.detach();
+                    self.active.push(key);
+                }
+                Err(error) => log!("loop score worker unavailable: {error}"),
             }
         }
     }
@@ -3295,12 +3872,15 @@ struct ScanModalSnapshot {
 struct DeckRefs {
     title: LabelRef,
     artist: LabelRef,
+    credit_artist: LinkLabelRef,
+    credit_license: LinkLabelRef,
     bpm: LabelRef,
     pitch_text: LabelRef,
     time: LabelRef,
     grid_state: LabelRef,
     stem_state: LabelRef,
     range: ButtonRef,
+    to_start: ButtonRef,
     play: ButtonRef,
     cue: ButtonRef,
     hp: ButtonRef,
@@ -3346,12 +3926,15 @@ impl DeckRefs {
         DeckRefs {
             title: ui.label(cx, ids.title),
             artist: ui.label(cx, ids.artist),
+            credit_artist: ui.link_label(cx, ids.credit_artist),
+            credit_license: ui.link_label(cx, ids.credit_license),
             bpm: ui.label(cx, ids.bpm),
             pitch_text: ui.label(cx, ids.pitch_text),
             time: ui.label(cx, ids.time),
             grid_state: ui.label(cx, ids.grid_state),
             stem_state: ui.label(cx, ids.stem_state),
             range: ui.button(cx, ids.range),
+            to_start: ui.button(cx, ids.to_start),
             play: ui.button(cx, ids.play),
             cue: ui.button(cx, ids.cue),
             hp: ui.button(cx, ids.hp),
@@ -3448,6 +4031,9 @@ impl MusicRefs {
 struct MusicDeckIds {
     title: &'static [LiveId],
     artist: &'static [LiveId],
+    credit: &'static [LiveId],
+    credit_artist: &'static [LiveId],
+    credit_license: &'static [LiveId],
     bpm: &'static [LiveId],
     pitch_text: &'static [LiveId],
     time: &'static [LiveId],
@@ -3455,6 +4041,7 @@ struct MusicDeckIds {
     stem_state: &'static [LiveId],
     range: &'static [LiveId],
     loop_len: &'static [LiveId],
+    to_start: &'static [LiveId],
     play: &'static [LiveId],
     cue: &'static [LiveId],
     hp: &'static [LiveId],
@@ -3502,6 +4089,9 @@ impl MusicDeckIds {
             DeckId::A => MusicDeckIds {
                 title: ids!(deck_a_title),
                 artist: ids!(deck_a_artist),
+                credit: ids!(deck_a_credit),
+                credit_artist: ids!(deck_a_credit_artist),
+                credit_license: ids!(deck_a_credit_license),
                 bpm: ids!(deck_a_bpm),
                 pitch_text: ids!(deck_a_pitch_text),
                 time: ids!(deck_a_time),
@@ -3509,6 +4099,7 @@ impl MusicDeckIds {
                 stem_state: ids!(deck_a_stem_state),
                 range: ids!(deck_a_range),
                 loop_len: ids!(deck_a_loop_len),
+                to_start: ids!(deck_a_to_start),
                 play: ids!(deck_a_play),
                 cue: ids!(deck_a_cue),
                 hp: ids!(deck_a_hp),
@@ -3584,6 +4175,9 @@ impl MusicDeckIds {
             DeckId::B => MusicDeckIds {
                 title: ids!(deck_b_title),
                 artist: ids!(deck_b_artist),
+                credit: ids!(deck_b_credit),
+                credit_artist: ids!(deck_b_credit_artist),
+                credit_license: ids!(deck_b_credit_license),
                 bpm: ids!(deck_b_bpm),
                 pitch_text: ids!(deck_b_pitch_text),
                 time: ids!(deck_b_time),
@@ -3591,6 +4185,7 @@ impl MusicDeckIds {
                 stem_state: ids!(deck_b_stem_state),
                 range: ids!(deck_b_range),
                 loop_len: ids!(deck_b_loop_len),
+                to_start: ids!(deck_b_to_start),
                 play: ids!(deck_b_play),
                 cue: ids!(deck_b_cue),
                 hp: ids!(deck_b_hp),
@@ -3723,12 +4318,27 @@ struct BillboardSlot {
     last: Option<f64>,
 }
 
+/// Where the OUTPUT is. `Opening`/`Open` are the projector window — a
+/// second OS window; `InPage` is the same surface as a layer over the
+/// console, which is what a platform with ONE window (the web) gets: a
+/// second window is a platform capability, not a service the web build
+/// could swap. One state machine either way — the button, the fill
+/// politeness and the mesh liveness read `is_up`, not the host.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum OutputWindowLifecycle {
     #[default]
     Closed,
     Opening,
     Open,
+    InPage,
+}
+
+impl OutputWindowLifecycle {
+    /// The output is on a screen: the projector window is up, or the
+    /// in-page layer is.
+    fn is_up(self) -> bool {
+        matches!(self, Self::Open | Self::InPage)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3736,28 +4346,22 @@ enum OutputWindowCommand {
     Recreate,
     Restore,
     Deminiaturize,
+    ShowInPage,
 }
 
+/// What the OUTPUT button does from `lifecycle`, on a platform with a
+/// second window or without one (`single_window`: `OsType::is_single_window`).
 fn output_window_command(
     lifecycle: OutputWindowLifecycle,
     is_macos: bool,
+    single_window: bool,
 ) -> Option<OutputWindowCommand> {
     match lifecycle {
+        OutputWindowLifecycle::Closed if single_window => Some(OutputWindowCommand::ShowInPage),
         OutputWindowLifecycle::Closed => Some(OutputWindowCommand::Recreate),
-        OutputWindowLifecycle::Opening => None,
+        OutputWindowLifecycle::Opening | OutputWindowLifecycle::InPage => None,
         OutputWindowLifecycle::Open if is_macos => Some(OutputWindowCommand::Deminiaturize),
         OutputWindowLifecycle::Open => Some(OutputWindowCommand::Restore),
-    }
-}
-
-fn output_window_available() -> Result<(), ClientError> {
-    if cfg!(target_arch = "wasm32") {
-        Err(ClientError::Unavailable {
-            capability: "output_window",
-            mode: ClientMode::StaticWeb,
-        })
-    } else {
-        Ok(())
     }
 }
 
@@ -3906,11 +4510,32 @@ fn stale_fade_to_land(
     active.filter(|schedule| *schedule != published)
 }
 
-/// The three top-level modes. Everything else is a filter or a drawer.
-const MODE_BUTTONS: [(&[LiveId], ApcSurface); 3] = [
-    (ids!(mode_vj), ApcSurface::Video),
-    (ids!(mode_dj), ApcSurface::Music),
-    (ids!(mode_sfx), ApcSurface::Sfx),
+/// The four operator workspaces. VJ and DJ also select their matching APC
+/// surface; SYNTH and MIX leave the controller on its last performance surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConsoleMode {
+    Vj,
+    Dj,
+    Synth,
+    Mix,
+}
+
+impl ConsoleMode {
+    fn page(self) -> LiveId {
+        match self {
+            Self::Vj => live_id!(video_page),
+            Self::Dj => live_id!(music_page),
+            Self::Synth => live_id!(synth_page),
+            Self::Mix => live_id!(mix_page),
+        }
+    }
+}
+
+const MODE_BUTTONS: [(&[LiveId], ConsoleMode); 4] = [
+    (ids!(mode_vj), ConsoleMode::Vj),
+    (ids!(mode_dj), ConsoleMode::Dj),
+    (ids!(mode_synth), ConsoleMode::Synth),
+    (ids!(mode_mix), ConsoleMode::Mix),
 ];
 
 /// The explorer's lane: exactly one chip at a time (radio; the selected
@@ -4019,6 +4644,141 @@ impl LowerTab {
         }
     }
 }
+
+/// UI-owned edit model for the rack and program bus. Audio owns its own copy;
+/// every edit crosses the bounded mixer command queue, never a shared lock.
+#[derive(Clone, Copy, Debug)]
+struct SynthMixUiState {
+    selected: SynthTrack,
+    /// The two Ironfish pages are navigation state, not audio state.
+    ironfish_fx_page: bool,
+    /// A program is lit only until the operator changes a parameter.
+    ironfish_program: Option<u8>,
+    patterns: RackPatterns,
+    patch: IronfishPatch,
+    playing: bool,
+    strip_gains: [f32; STRIP_COUNT],
+    strip_mutes: [bool; STRIP_COUNT],
+    strip_solos: [bool; STRIP_COUNT],
+    master: MasterParams,
+    last_step: u8,
+    last_clock_token: Option<(u64, u8)>,
+}
+
+impl Default for SynthMixUiState {
+    fn default() -> Self {
+        Self {
+            selected: SynthTrack::Piano,
+            ironfish_fx_page: false,
+            ironfish_program: Some(0),
+            patterns: RackPatterns::default(),
+            patch: IronfishPatch::default(),
+            playing: false,
+            strip_gains: [1.0; STRIP_COUNT],
+            strip_mutes: [false; STRIP_COUNT],
+            strip_solos: [false; STRIP_COUNT],
+            master: MasterParams::default(),
+            last_step: u8::MAX,
+            last_clock_token: None,
+        }
+    }
+}
+
+const MIX_STRIP_CONTROLS: [(
+    StripId,
+    &[LiveId],
+    &[LiveId],
+    &[LiveId],
+    &[LiveId],
+); STRIP_COUNT] = [
+    (StripId::Video, ids!(mix_video_gain), ids!(mix_video_mute), ids!(mix_video_solo), ids!(mix_video_meter)),
+    (StripId::DjA, ids!(mix_dja_gain), ids!(mix_dja_mute), ids!(mix_dja_solo), ids!(mix_dja_meter)),
+    (StripId::DjB, ids!(mix_djb_gain), ids!(mix_djb_mute), ids!(mix_djb_solo), ids!(mix_djb_meter)),
+    (StripId::Sfx, ids!(mix_sfx_gain), ids!(mix_sfx_mute), ids!(mix_sfx_solo), ids!(mix_sfx_meter)),
+    (StripId::Piano, ids!(mix_piano_gain), ids!(mix_piano_mute), ids!(mix_piano_solo), ids!(mix_piano_meter)),
+    (StripId::Ironfish, ids!(mix_ironfish_gain), ids!(mix_ironfish_mute), ids!(mix_ironfish_solo), ids!(mix_ironfish_meter)),
+    (StripId::Drums, ids!(mix_drums_gain), ids!(mix_drums_mute), ids!(mix_drums_solo), ids!(mix_drums_meter)),
+];
+
+const IRONFISH_CONTROLS: [(IronfishParam, &[LiveId]); 53] = [
+    (IronfishParam::OscBalance, ids!(ironfish_osc_balance)),
+    (IronfishParam::Osc1Transpose, ids!(ironfish_osc1_transpose)),
+    (IronfishParam::Osc1Detune, ids!(ironfish_osc1_detune)),
+    (IronfishParam::Osc1Spread, ids!(ironfish_osc1_spread)),
+    (IronfishParam::Osc1Diffuse, ids!(ironfish_osc1_diffuse)),
+    (IronfishParam::Osc1Harmonic, ids!(ironfish_osc1_harmonic)),
+    (IronfishParam::Osc1HarmonicEnv, ids!(ironfish_osc1_harmonic_env)),
+    (IronfishParam::Osc1HarmonicLfo, ids!(ironfish_osc1_harmonic_lfo)),
+    (IronfishParam::Osc2Transpose, ids!(ironfish_osc2_transpose)),
+    (IronfishParam::Osc2Detune, ids!(ironfish_osc2_detune)),
+    (IronfishParam::Osc2Spread, ids!(ironfish_osc2_spread)),
+    (IronfishParam::Osc2Diffuse, ids!(ironfish_osc2_diffuse)),
+    (IronfishParam::Osc2Harmonic, ids!(ironfish_osc2_harmonic)),
+    (IronfishParam::Osc2HarmonicEnv, ids!(ironfish_osc2_harmonic_env)),
+    (IronfishParam::Osc2HarmonicLfo, ids!(ironfish_osc2_harmonic_lfo)),
+    (IronfishParam::Sub, ids!(ironfish_sub)),
+    (IronfishParam::Noise, ids!(ironfish_noise)),
+    (IronfishParam::Portamento, ids!(ironfish_portamento)),
+    (IronfishParam::AmpPredelay, ids!(ironfish_amp_predelay)),
+    (IronfishParam::AmpAttack, ids!(ironfish_amp_attack)),
+    (IronfishParam::AmpHold, ids!(ironfish_amp_hold)),
+    (IronfishParam::AmpDecay, ids!(ironfish_amp_decay)),
+    (IronfishParam::AmpSustain, ids!(ironfish_amp_sustain)),
+    (IronfishParam::AmpRelease, ids!(ironfish_amp_release)),
+    (IronfishParam::ModPredelay, ids!(ironfish_mod_predelay)),
+    (IronfishParam::ModAttack, ids!(ironfish_mod_attack)),
+    (IronfishParam::ModHold, ids!(ironfish_mod_hold)),
+    (IronfishParam::ModDecay, ids!(ironfish_mod_decay)),
+    (IronfishParam::ModSustain, ids!(ironfish_mod_sustain)),
+    (IronfishParam::ModRelease, ids!(ironfish_mod_release)),
+    (IronfishParam::FilterCutoff, ids!(ironfish_filter_cutoff)),
+    (IronfishParam::FilterResonance, ids!(ironfish_filter_resonance)),
+    (IronfishParam::FilterEnvAmount, ids!(ironfish_filter_env)),
+    (IronfishParam::FilterLfoAmount, ids!(ironfish_filter_lfo)),
+    (IronfishParam::FilterTouchAmount, ids!(ironfish_filter_touch)),
+    (IronfishParam::LfoRate, ids!(ironfish_lfo_rate)),
+    (IronfishParam::Touch, ids!(ironfish_touch)),
+    (IronfishParam::Bitcrush, ids!(ironfish_bitcrush)),
+    (IronfishParam::DelaySend, ids!(ironfish_delay_send)),
+    (IronfishParam::DelayFeedback, ids!(ironfish_delay_feedback)),
+    (IronfishParam::DelayCross, ids!(ironfish_delay_cross)),
+    (IronfishParam::DelayDifference, ids!(ironfish_delay_difference)),
+    (IronfishParam::DelayLength, ids!(ironfish_delay_length)),
+    (IronfishParam::ChorusMinDelay, ids!(ironfish_chorus_min_delay)),
+    (IronfishParam::ChorusModDepth, ids!(ironfish_chorus_mod_depth)),
+    (IronfishParam::ChorusRate, ids!(ironfish_chorus_rate)),
+    (IronfishParam::ChorusPhaseDiff, ids!(ironfish_chorus_phase_diff)),
+    (IronfishParam::ChorusMix, ids!(ironfish_chorus_mix)),
+    (IronfishParam::ChorusFeedback, ids!(ironfish_chorus_feedback)),
+    (IronfishParam::ReverbMix, ids!(ironfish_reverb_mix)),
+    (IronfishParam::ReverbFeedback, ids!(ironfish_reverb_feedback)),
+    (IronfishParam::ArpOctaves, ids!(ironfish_arp_octaves)),
+    (IronfishParam::Output, ids!(ironfish_output)),
+];
+
+const LEGACY_IRONFISH_PARAMS: [IronfishParam; 12] = [
+    IronfishParam::OscBalance,
+    IronfishParam::FilterCutoff,
+    IronfishParam::FilterResonance,
+    IronfishParam::FilterEnvAmount,
+    IronfishParam::AmpAttack,
+    IronfishParam::AmpDecay,
+    IronfishParam::AmpSustain,
+    IronfishParam::AmpRelease,
+    IronfishParam::ChorusMix,
+    IronfishParam::DelaySend,
+    IronfishParam::ReverbMix,
+    IronfishParam::Output,
+];
+
+const MASTER_CONTROLS: [(MasterParam, &[LiveId]); 6] = [
+    (MasterParam::Threshold, ids!(mix_comp_threshold)),
+    (MasterParam::Ratio, ids!(mix_comp_ratio)),
+    (MasterParam::Attack, ids!(mix_comp_attack)),
+    (MasterParam::Release, ids!(mix_comp_release)),
+    (MasterParam::Makeup, ids!(mix_comp_makeup)),
+    (MasterParam::Ceiling, ids!(mix_limiter_ceiling)),
+];
 
 /// Whose native folder picker is open. The answer arrives in a later
 /// actions pass with nothing in it to say who asked, so the app has to
@@ -4267,7 +5027,6 @@ enum CatPurpose {
         gen: CatGen,
         slot: usize,
         first: bool,
-        namespace: Option<String>,
     },
     Detail { surface: Surface, gen: CatGen, asset: AssetId },
     Manifest { surface: Surface, gen: CatGen, asset: AssetId, revision: AssetRevisionId },
@@ -4403,6 +5162,16 @@ struct DeckLoadProgress {
     stem_bytes: [u64; 4],
     stem_totals: [u64; 4],
     wants_stems: bool,
+    /// The deck opened on a decoded lead and is playing while the rest of
+    /// the load — decode, stems — goes on underneath.
+    playable: bool,
+}
+
+/// What a deck's `InstallTrack` puts on the mixer: the growing chunk table
+/// of a track still decoding, or a file that landed whole.
+enum DeckIncoming {
+    Stream(Arc<crate::mixer::StreamPcm>),
+    Whole(Arc<TrackPcm>, Vec<(f32, f32)>),
 }
 
 impl DeckLoadProgress {
@@ -4413,6 +5182,25 @@ impl DeckLoadProgress {
             stem_bytes: [0; 4],
             stem_totals: [0; 4],
             wants_stems: false,
+            playable: false,
+        };
+    }
+
+    /// The deck opened on a lead: from here the indicator reports, it does
+    /// not block.
+    fn playable(&mut self, gen: u64) {
+        if self.gen == gen && !matches!(self.phase, DeckLoadPhase::Failed(_)) {
+            self.playable = true;
+        }
+    }
+
+    /// Decoded frames against the decoder's expectation (0 = unknown).
+    fn decode_progress(&mut self, gen: u64, done: u64, total: u64) {
+        if self.gen != gen || !matches!(self.phase, DeckLoadPhase::Decoding { .. }) {
+            return;
+        }
+        self.phase = DeckLoadPhase::Decoding {
+            progress: (total > 0).then_some((done.min(total), total)),
         };
     }
 
@@ -4469,8 +5257,8 @@ impl DeckLoadProgress {
         };
     }
 
-    /// A side-channel miss falls back to optional local separation; the
-    /// playable track itself is ready and should no longer look blocked.
+    /// A side-channel miss falls through to the operator's separation
+    /// choice; the playable track itself is ready and no longer blocked.
     fn stems_unavailable(&mut self, gen: u64) {
         if self.gen != gen {
             return;
@@ -4506,15 +5294,31 @@ impl DeckLoadProgress {
                 *total as f64 / (1024.0 * 1024.0),
             )),
             DeckLoadPhase::Fetching { .. } => Some("fetching".to_string()),
-            DeckLoadPhase::Decoding { .. } => Some("decoding".to_string()),
-            DeckLoadPhase::Stems => Some("stems".to_string()),
+            DeckLoadPhase::Decoding { progress } => {
+                let percent = progress
+                    .filter(|(_, total)| *total > 0)
+                    .map(|(done, total)| format!(" {:.0} %", done as f64 * 100.0 / total as f64))
+                    .unwrap_or_default();
+                Some(if self.playable {
+                    format!("playing while decoding{percent}")
+                } else {
+                    format!("decoding{percent}")
+                })
+            }
+            DeckLoadPhase::Stems => Some(if self.playable {
+                "playing while stems load".to_string()
+            } else {
+                "stems".to_string()
+            }),
             DeckLoadPhase::Failed(error) => Some(format!("failed: {error}")),
         }
     }
 
-    /// `(phase, fraction, indeterminate)` for the waveform strip. Fetch is
-    /// phase 1, decode 2, stems 3 and failure 4.
-    fn visual(&self) -> Option<(f32, f32, f32)> {
+    /// `(phase, fraction, indeterminate, playable)` for the waveform strip.
+    /// Fetch is phase 1, decode 2, stems 3 and failure 4; `playable` says
+    /// the deck is already playing under it, so the strip reports instead
+    /// of covering the picture.
+    fn visual(&self) -> Option<(f32, f32, f32, bool)> {
         let fraction = |done: u64, total: u64| {
             if total > 0 {
                 (done as f64 / total as f64).clamp(0.0, 1.0) as f32
@@ -4522,18 +5326,20 @@ impl DeckLoadProgress {
                 0.0
             }
         };
+        let playable = self.playable;
         match &self.phase {
             DeckLoadPhase::Idle | DeckLoadPhase::Ready => None,
             DeckLoadPhase::Fetching { bytes, total } => Some((
                 1.0,
                 fraction(*bytes, *total),
                 if *total == 0 { 1.0 } else { 0.0 },
+                playable,
             )),
             DeckLoadPhase::Decoding { progress } => match progress {
                 Some((done, total)) if *total > 0 => {
-                    Some((2.0, fraction(*done, *total), 0.0))
+                    Some((2.0, fraction(*done, *total), 0.0, playable))
                 }
-                _ => Some((2.0, 0.0, 1.0)),
+                _ => Some((2.0, 0.0, 1.0, playable)),
             },
             DeckLoadPhase::Stems => {
                 let done = self.stem_bytes.iter().sum();
@@ -4542,9 +5348,10 @@ impl DeckLoadProgress {
                     3.0,
                     fraction(done, total),
                     if total == 0 || done >= total { 1.0 } else { 0.0 },
+                    playable,
                 ))
             }
-            DeckLoadPhase::Failed(_) => Some((4.0, 1.0, 0.0)),
+            DeckLoadPhase::Failed(_) => Some((4.0, 1.0, 0.0, playable)),
         }
     }
 
@@ -4565,15 +5372,15 @@ mod deck_load_progress_tests {
         load.arm_stems(7, [mib, 2 * mib, mib, 4 * mib]);
         load.fetch_progress(7, 12 * mib, 32 * mib);
         assert_eq!(load.text().as_deref(), Some("fetching 12.0 / 32.0 MB"));
-        assert_eq!(load.visual(), Some((1.0, 0.375, 0.0)));
+        assert_eq!(load.visual(), Some((1.0, 0.375, 0.0, false)));
 
         load.decoding(7);
         assert_eq!(load.phase, DeckLoadPhase::Decoding { progress: None });
-        assert_eq!(load.visual(), Some((2.0, 0.0, 1.0)));
+        assert_eq!(load.visual(), Some((2.0, 0.0, 1.0, false)));
         load.stem_progress(7, 0, mib, mib);
         load.decoded(7);
         assert_eq!(load.phase, DeckLoadPhase::Stems);
-        assert_eq!(load.visual(), Some((3.0, 0.125, 0.0)));
+        assert_eq!(load.visual(), Some((3.0, 0.125, 0.0, false)));
         load.stems_ready(7);
         assert_eq!(load.phase, DeckLoadPhase::Ready);
 
@@ -4581,9 +5388,40 @@ mod deck_load_progress_tests {
         load.decoding(8);
         load.failed(8, "bad audio".to_string());
         assert_eq!(load.text().as_deref(), Some("failed: bad audio"));
-        assert_eq!(load.visual(), Some((4.0, 1.0, 0.0)));
+        assert_eq!(load.visual(), Some((4.0, 1.0, 0.0, false)));
         load.stems_ready(7); // stale completion cannot clear the failure
         assert!(load.is_failed());
+    }
+
+    #[test]
+    fn a_playable_deck_reports_instead_of_blocking() {
+        let mut load = DeckLoadProgress::default();
+        load.begin(3, 0);
+        load.decoding(3);
+        assert_eq!(load.text().as_deref(), Some("decoding"));
+        // Chunks land, the expectation is known, the deck opens.
+        load.decode_progress(3, 1_000, 10_000);
+        assert_eq!(load.text().as_deref(), Some("decoding 10 %"));
+        load.playable(3);
+        load.decode_progress(3, 4_200, 10_000);
+        assert_eq!(load.text().as_deref(), Some("playing while decoding 42 %"));
+        assert_eq!(load.visual(), Some((2.0, 0.42, 0.0, true)));
+        // A stale generation says nothing.
+        load.decode_progress(2, 9_000, 10_000);
+        assert_eq!(load.text().as_deref(), Some("playing while decoding 42 %"));
+        // Stems keep the deck playing under them too.
+        load.arm_stems(3, [1, 1, 1, 1]);
+        load.decoded(3);
+        assert_eq!(load.text().as_deref(), Some("playing while stems load"));
+        assert!(matches!(load.visual(), Some((3.0, _, _, true))));
+        load.stems_ready(3);
+        assert_eq!(load.text(), None);
+        assert_eq!(load.visual(), None);
+        // A new load starts blocking again.
+        load.begin(4, 0);
+        load.decoding(4);
+        assert_eq!(load.text().as_deref(), Some("decoding"));
+        assert_eq!(load.visual(), Some((2.0, 0.0, 1.0, false)));
     }
 }
 
@@ -5040,9 +5878,6 @@ pub struct SyncSnapshot {
     pub suppressed: bool,
 }
 
-struct SyncShared {
-    snap: Mutex<SyncSnapshot>,
-}
 
 /// The analysis worker: drains the capture ring OFF the realtime callback
 /// and publishes a coherent snapshot for the UI thread. The pure beat
@@ -5050,23 +5885,30 @@ struct SyncShared {
 /// until it lands the snapshot carries capture health and `beat` stays
 /// honestly `None`, so every consumer falls back to immediate fades.
 pub struct SyncWorker {
-    shared: Arc<SyncShared>,
+    /// Snapshots arrive over a channel, newest last; the latest one taken
+    /// is kept here for the readers in between. The UI never locks
+    /// anything the worker holds.
+    snapshots: std::sync::mpsc::Receiver<SyncSnapshot>,
+    latest: std::cell::RefCell<SyncSnapshot>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     resync: Arc<std::sync::atomic::AtomicBool>,
     suppress: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl SyncWorker {
-    pub fn start(feed: Arc<CaptureFeed>) -> SyncWorker {
-        let shared = Arc::new(SyncShared { snap: Mutex::new(SyncSnapshot::default()) });
+    pub fn start(
+        feed: Arc<CaptureFeed>,
+        spawner: ThreadSpawner,
+    ) -> SyncWorker {
+        let (snap_tx, snapshots) = std::sync::mpsc::channel::<SyncSnapshot>();
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let resync = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let suppress = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let thread_shared = shared.clone();
         let thread_stop = stop.clone();
         let thread_resync = resync.clone();
         let thread_suppress = suppress.clone();
-        let _ = std::thread::Builder::new().name("vj-beat-sync".into()).spawn(move || {
+        let options = ThreadOptions { name: Some("vj-sync".into()), ..Default::default() };
+        match spawner.spawn_worker(options, move || {
             let mut scratch: Vec<f32> = Vec::with_capacity(CAPTURE_RING);
             let mut analyzer: Option<BeatSyncAnalyzer> = None;
             let mut lock_started_beat: Option<i64> = None;
@@ -5158,22 +6000,42 @@ impl SyncWorker {
                 let beat = analyzer_snapshot.as_ref().and_then(|snapshot| {
                     beat_info_from_snapshot(snapshot, &mut lock_started_beat, Instant::now())
                 });
+                if snap_tx
+                    .send(SyncSnapshot {
+                        sample_rate: rate,
+                        frames: stats.frames_written,
+                        dropped: stats.dropped_samples,
+                        peak: stats.peak,
+                        lock_state,
+                        beat,
+                        wave,
+                        wave_stamp,
+                        suppressed,
+                    })
+                    .is_err()
                 {
-                    let mut snap = thread_shared.snap.lock().unwrap();
-                    snap.sample_rate = rate;
-                    snap.frames = stats.frames_written;
-                    snap.dropped = stats.dropped_samples;
-                    snap.peak = stats.peak;
-                    snap.lock_state = lock_state;
-                    snap.beat = beat;
-                    snap.wave = wave;
-                    snap.wave_stamp = wave_stamp;
-                    snap.suppressed = suppressed;
+                    // The handle is gone: nobody will read another one.
+                    return;
                 }
-                std::thread::sleep(Duration::from_millis(10));
+                // A plain sleep reads the std clock and panics on a wasm
+                // worker; `wait_until` paces off `Cx::monotonic_now()`
+                // instead of the ring's own arrival (there is no channel
+                // to block on — the capture ring is filled by the audio
+                // callback, not a message).
+                let tick = CancellationToken::new();
+                let _ = tick.wait_until(Cx::monotonic_now() + 0.010);
             }
-        });
-        SyncWorker { shared, stop, resync, suppress }
+        }) {
+            Ok(handle) => handle.detach(),
+            Err(error) => log!("vj beat-sync worker unavailable: {error}"),
+        }
+        SyncWorker {
+            snapshots,
+            latest: std::cell::RefCell::new(SyncSnapshot::default()),
+            stop,
+            resync,
+            suppress,
+        }
     }
 
     /// Park the detector: a deck is playing, so the room is only ever going
@@ -5183,8 +6045,14 @@ impl SyncWorker {
         self.suppress.store(on, Ordering::Release);
     }
 
+    /// The newest snapshot the worker has published. Never waits: the
+    /// channel is drained with `try_recv`.
     pub fn snapshot(&self) -> SyncSnapshot {
-        lock_from_ui(&self.shared.snap).clone()
+        let mut latest = self.latest.borrow_mut();
+        while let Ok(snap) = self.snapshots.try_recv() {
+            *latest = snap;
+        }
+        latest.clone()
     }
 
     /// Drop the tracked grid and re-derive tempo and phase from the audio
@@ -5786,15 +6654,14 @@ impl LoopAccum {
 /// Spawn the loop-analysis worker: it accumulates bounded signatures per
 /// slot (decimating to stay under `loop_detect`'s frame cap) and publishes
 /// a `LoopReport` per revision every couple dozen accepted frames.
-fn start_loop_worker() -> (
+fn start_loop_worker(spawner: ThreadSpawner) -> (
     std::sync::mpsc::Sender<LoopScanCtl>,
-    Arc<Mutex<Vec<(AssetRevisionId, LoopReport)>>>,
+    std::sync::mpsc::Receiver<(AssetRevisionId, LoopReport)>,
 ) {
     let (tx, rx) = std::sync::mpsc::channel::<LoopScanCtl>();
-    let results: Arc<Mutex<Vec<(AssetRevisionId, LoopReport)>>> =
-        Arc::new(Mutex::new(Vec::new()));
-    let worker_results = results.clone();
-    let _ = std::thread::Builder::new().name("vj-loop-detect".into()).spawn(move || {
+    let (worker_results, results) = std::sync::mpsc::channel::<(AssetRevisionId, LoopReport)>();
+    let options = ThreadOptions { name: Some("vj-loop-worker".into()), ..Default::default() };
+    match spawner.spawn_worker(options, move || {
         let mut slots: [LoopAccum; 2] = Default::default();
         for accum in &mut slots {
             accum.accept_mod = 1;
@@ -5850,12 +6717,17 @@ fn start_loop_worker() -> (
                             detection,
                             period_secs: detection.period_frames as f64 * seconds_per_frame,
                         };
-                        worker_results.lock().unwrap().push((revision, report));
+                        if worker_results.send((revision, report)).is_err() {
+                            return;
+                        }
                     }
                 }
             }
         }
-    });
+    }) {
+        Ok(handle) => handle.detach(),
+        Err(error) => log!("vj loop-detect worker unavailable: {error}"),
+    }
     (tx, results)
 }
 
@@ -6097,11 +6969,12 @@ enum MusicSort {
     Time,
     Stem,
     Krk,
+    License,
     Tags,
 }
 
 /// The heads, their ids and the words under the arrow.
-const MUSIC_HEADS: [(MusicSort, &[LiveId], &str); 8] = [
+const MUSIC_HEADS: [(MusicSort, &[LiveId], &str); 9] = [
     (MusicSort::Title, ids!(th_title), "TITLE"),
     (MusicSort::Artist, ids!(th_artist), "ARTIST"),
     (MusicSort::Bpm, ids!(th_bpm), "BPM"),
@@ -6109,8 +6982,17 @@ const MUSIC_HEADS: [(MusicSort, &[LiveId], &str); 8] = [
     (MusicSort::Time, ids!(th_time), "TIME"),
     (MusicSort::Stem, ids!(music_th_stem), "STEM"),
     (MusicSort::Krk, ids!(music_th_krk), "KRK"),
+    (MusicSort::License, ids!(th_license), "LICENSE"),
     (MusicSort::Tags, ids!(th_tags), "TAGS"),
 ];
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct MusicAttribution {
+    artist: String,
+    source_url: String,
+    license: String,
+    license_url: String,
+}
 /// The library row's chips and the words they wear when there is room. Below
 /// `LIBRARY_NARROW_WIDTH` they keep only their icons.
 const LIBRARY_CHIPS: [(&[LiveId], &str); 8] = [
@@ -6155,6 +7037,11 @@ pub struct App {
     ai_context: String,
     #[rust]
     started: bool,
+    #[rust]
+    thread_spawner: Option<ThreadSpawner>,
+    /// The runtime pool every one-shot job runs on.
+    #[rust]
+    task_pool: Option<TaskPool>,
     /// The IMPORT CONTENT panel: its path, its worker and its progress.
     #[rust]
     import: ImportPanel,
@@ -6725,6 +7612,10 @@ pub struct App {
     /// The lower region's tab: content grid, lights desk or the archive.
     #[rust]
     lower_tab: LowerTab,
+    /// Rack patterns, Ironfish patch and final-bus controls mirrored on the
+    /// UI thread. The callback receives bounded copy commands only.
+    #[rust]
+    synth_mix: SynthMixUiState,
     /// The ARCHIVE.ORG panel: search, swatch, import.
     #[rust]
     archive: ArchivePanel,
@@ -6780,7 +7671,7 @@ pub struct App {
     #[rust]
     loop_tx: Option<Sender<LoopScanCtl>>,
     #[rust]
-    loop_results: Option<Arc<Mutex<Vec<(AssetRevisionId, LoopReport)>>>>,
+    loop_results: Option<std::sync::mpsc::Receiver<(AssetRevisionId, LoopReport)>>,
     #[rust]
     loop_reports: HashMap<AssetRevisionId, LoopReport>,
     #[rust]
@@ -6792,7 +7683,15 @@ pub struct App {
 
     // Decks.
     #[rust]
-    deck_incoming: HashMap<(usize, u64), (Arc<TrackPcm>, Vec<(f32, f32)>)>,
+    deck_incoming: HashMap<(usize, u64), DeckIncoming>,
+    /// The chunk stream of the track a deck is decoding (and, until the
+    /// analysis lands, the hops its provisional waveform is drawn from).
+    #[rust]
+    deck_stream: [Option<media::DeckStream>; 2],
+    /// When each deck's streamed picture was last rebuilt (app seconds):
+    /// a fast native decode lands chunks faster than the eye needs frames.
+    #[rust]
+    deck_stream_wave_at: [f64; 2],
     #[rust]
     deck_load_progress: [DeckLoadProgress; 2],
     #[rust]
@@ -6915,6 +7814,10 @@ pub struct App {
     /// Source separation, off-thread, per deck.
     #[rust(StemsPool::new())]
     stems: StemsPool,
+    /// The operator's one global placement choice for missing stems. Hub is
+    /// the safe default: its failure is unavailable, never a local model run.
+    #[rust(StemSeparation::AiHub)]
+    stem_separation: StemSeparation,
     /// The other way to get stems: precomputed ones off the store, decoded
     /// on their own worker so a deck load never waits behind a model.
     #[rust(SideChannelPool::new())]
@@ -7004,9 +7907,9 @@ pub struct App {
     /// Rows on screen, so a row click maps back to a track.
     #[rust]
     music_rows: Vec<TrackRowEntry>,
-    /// Public creator annotations from the static catalog projection.
+    /// Public track credits from the live/static catalog projection.
     #[rust]
-    music_artists: HashMap<AssetId, String>,
+    music_attributions: HashMap<AssetId, MusicAttribution>,
     #[rust]
     queue_rows: Vec<TrackRowEntry>,
     /// Browsing local audio files instead of the store catalog.
@@ -7112,7 +8015,7 @@ pub struct App {
     /// contended callback IS an audible gap; render high-water says whether
     /// the render itself ever threatens its buffer.
     #[rust]
-    audio_contended_seen: u64,
+    audio_overruns_seen: u64,
     #[rust]
     audio_render_max_seen: u64,
     /// Wasm play-to-device watchdog. Both values come from atomics/the UI
@@ -7156,6 +8059,9 @@ pub struct App {
     /// Frame-loop hang detector: the previous pump's instant.
     #[rust]
     frame_watch: Option<crate::clock::Instant>,
+    /// Last reported frame hang; repeated stalls are rate-limited.
+    #[rust]
+    framehang_reported: Option<crate::clock::Instant>,
     /// One wasm-only duration sample around the first widget-tree draw.
     #[rust]
     first_draw_timed: bool,
@@ -7212,6 +8118,11 @@ pub struct App {
     // demand instead of leaving its WindowHandle permanently closed.
     #[rust(OutputWindowLifecycle::default())]
     output_window_lifecycle: OutputWindowLifecycle,
+    /// This platform has ONE window (`OsType::is_single_window`), so the
+    /// output is the in-page layer rather than a second window. Decided
+    /// once, at startup.
+    #[rust]
+    output_in_page: bool,
     /// Which console page and which output page are up. A walked level
     /// raycasts its collision mesh sixty times a second and re-renders a
     /// full pass; `sync_mesh_liveness` uses these to stop that for a picture
@@ -7234,6 +8145,9 @@ pub struct App {
     pending_filter: Option<String>,
     #[rust]
     filter_timer: Timer,
+    /// Debounces rack/mix persistence while a fader is moving.
+    #[rust]
+    synth_mix_save_timer: Timer,
     /// The import mini-panel's completion flash: shows the verdict for a
     /// beat after a run ends, then the panel folds away.
     #[rust]
@@ -7645,6 +8559,7 @@ impl App {
                     }
                 }
                 PortEvent::Cancel { .. } | PortEvent::ChatOpen { .. } => {}
+                PortEvent::Subscribe { .. } | PortEvent::Unsubscribe { .. } => {}
             }
         }
     }
@@ -7653,6 +8568,34 @@ impl App {
         match slot {
             SlotId::A => ids!(slot_mesh_a),
             SlotId::B => ids!(slot_mesh_b),
+        }
+    }
+
+    /// The output surface's widgets in the host THIS platform gave them
+    /// (`output_in_page`). Both hosts carry the same `OutputSurface`
+    /// template, so a bare `program` would find the console's copy first
+    /// and the projector window would go dark.
+    fn output_pages_path(&self) -> &'static [LiveId] {
+        if self.output_in_page {
+            ids!(output_layer.out_pages)
+        } else {
+            ids!(output_window.out_pages)
+        }
+    }
+
+    fn output_program_path(&self) -> &'static [LiveId] {
+        if self.output_in_page {
+            ids!(output_layer.program)
+        } else {
+            ids!(output_window.program)
+        }
+    }
+
+    fn output_mesh_path(&self) -> &'static [LiveId] {
+        if self.output_in_page {
+            ids!(output_layer.mesh_program)
+        } else {
+            ids!(output_window.mesh_program)
         }
     }
 
@@ -7751,7 +8694,7 @@ impl App {
     /// page. Nothing is forgotten when a view goes dormant: the tour keeps
     /// its position and its map memory and resumes on the next frame.
     fn sync_mesh_liveness(&mut self, cx: &mut Cx) {
-        let output_up = self.output_window_lifecycle == OutputWindowLifecycle::Open;
+        let output_up = self.output_window_lifecycle.is_up();
         let video_front = self.console_page == live_id!(video_page);
         let program_up = output_up && self.out_page == live_id!(video_out_page);
         let mix = self.live_program_mix();
@@ -7771,7 +8714,7 @@ impl App {
             }
         }
         let live = output_up && self.out_page == live_id!(mesh_out_page);
-        let widget = self.ui.widget(cx, ids!(mesh_program));
+        let widget = self.ui.widget(cx, self.output_mesh_path());
         let view = widget.borrow_mut::<mesh_view::VjMeshView>();
         if let Some(mut view) = view {
             view.set_live(cx, live);
@@ -7864,6 +8807,7 @@ impl App {
             stream: crate::archive_stream::StreamSwatch::open_as(
                 url,
                 crate::archive_stream::FrameFormat::Nv12,
+                self.thread_spawner.clone().expect("thread workers are not started"),
             ),
             title,
             failed: false,
@@ -7906,6 +8850,705 @@ impl App {
             self.sync_archive_ui(cx);
         }
         self.ui.redraw(cx);
+    }
+
+    fn select_synth_track(&mut self, cx: &mut Cx, track: SynthTrack) {
+        self.synth_mix.selected = track;
+        let page = match track {
+            SynthTrack::Piano => id!(synth_piano_editor),
+            SynthTrack::Ironfish => id!(synth_ironfish_editor),
+            SynthTrack::Drums => id!(synth_drums_editor),
+        };
+        self.ui
+            .page_flip(cx, ids!(synth_editors))
+            .set_active_page(cx, page.into());
+        self.ui
+            .view(cx, ids!(synth_engine_column))
+            .set_visible(cx, track == SynthTrack::Ironfish);
+        self.sync_synth_mix_ui(cx);
+        self.schedule_synth_mix_save(cx);
+    }
+
+    fn set_grid_pattern(&mut self, cx: &mut Cx, path: &[LiveId], pattern: synth::StepPattern) {
+        let widget = self.ui.widget(cx, path);
+        if let Some(mut grid) = widget.borrow_mut::<VjStepGrid>() {
+            grid.set_pattern(cx, pattern);
+        };
+    }
+
+    /// Push the edit model into controls and audio. This is called at boot
+    /// and after a page switch; the 20 Hz meter path below only updates live
+    /// readouts and the playhead.
+    fn sync_synth_mix_ui(&mut self, cx: &mut Cx) {
+        let editor = match self.synth_mix.selected {
+            SynthTrack::Piano => id!(synth_piano_editor),
+            SynthTrack::Ironfish => id!(synth_ironfish_editor),
+            SynthTrack::Drums => id!(synth_drums_editor),
+        };
+        self.ui
+            .page_flip(cx, ids!(synth_editors))
+            .set_active_page(cx, editor.into());
+        self.ui
+            .view(cx, ids!(synth_engine_column))
+            .set_visible(cx, self.synth_mix.selected == SynthTrack::Ironfish);
+        self.ui
+            .page_flip(cx, ids!(ironfish_engine_pages))
+            .set_active_page(
+                cx,
+                if self.synth_mix.ironfish_fx_page {
+                    id!(ironfish_fx_page)
+                } else {
+                    id!(ironfish_voice_page)
+                }
+                .into(),
+            );
+        for (track, path, label) in [
+            (SynthTrack::Piano, ids!(synth_piano_btn), "PIANO"),
+            (SynthTrack::Ironfish, ids!(synth_ironfish_btn), "IRONFISH"),
+            (SynthTrack::Drums, ids!(synth_drums_btn), "DRUMS"),
+        ] {
+            self.paint_chip(cx, path, self.synth_mix.selected == track, Some(label));
+        }
+        self.paint_chip(
+            cx,
+            ids!(ironfish_voice_tab),
+            !self.synth_mix.ironfish_fx_page,
+            Some("VOICE"),
+        );
+        self.paint_chip(cx, ids!(ironfish_fx_tab), self.synth_mix.ironfish_fx_page, Some("FX"));
+        for (index, (path, label)) in [
+            (ids!(ironfish_preset_0), "INIT"),
+            (ids!(ironfish_preset_1), "GLASS"),
+            (ids!(ironfish_preset_2), "ACID"),
+            (ids!(ironfish_preset_3), "SUB"),
+            (ids!(ironfish_preset_4), "FORMANT"),
+            (ids!(ironfish_preset_5), "CRUSH"),
+            (ids!(ironfish_preset_6), "WIDE"),
+            (ids!(ironfish_preset_7), "PAD"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            self.paint_chip(
+                cx,
+                path,
+                self.synth_mix.ironfish_program == Some(index as u8),
+                Some(label),
+            );
+        }
+        for (strip, path) in [
+            (StripId::Piano, ids!(rack_piano_mute)),
+            (StripId::Ironfish, ids!(rack_ironfish_mute)),
+            (StripId::Drums, ids!(rack_drums_mute)),
+        ] {
+            self.paint_lit(cx, path, self.synth_mix.strip_mutes[strip.index()]);
+        }
+        for (strip, path) in [
+            (StripId::Piano, ids!(piano_rack_grid)),
+            (StripId::Ironfish, ids!(ironfish_rack_grid)),
+            (StripId::Drums, ids!(drums_rack_grid)),
+        ] {
+            if let Some(mut grid) = self.ui.widget(cx, path).borrow_mut::<VjStepGrid>() {
+                grid.set_dim(cx, if self.synth_mix.strip_mutes[strip.index()] { 1.0 } else { 0.0 });
+            }
+        }
+        self.paint_lit(cx, ids!(synth_play), self.synth_mix.playing);
+        self.ui
+            .button(cx, ids!(synth_play))
+            .set_text(cx, if self.synth_mix.playing { "STOP" } else { "PLAY" });
+
+        self.set_grid_pattern(cx, ids!(piano_grid), self.synth_mix.patterns.piano);
+        self.set_grid_pattern(cx, ids!(ironfish_grid), self.synth_mix.patterns.ironfish);
+        self.set_grid_pattern(cx, ids!(drums_grid), self.synth_mix.patterns.drums);
+        let activity = |pattern: synth::StepPattern| pattern.map(|column| u16::from(column != 0));
+        self.set_grid_pattern(
+            cx,
+            ids!(piano_rack_grid),
+            activity(self.synth_mix.patterns.piano),
+        );
+        self.set_grid_pattern(
+            cx,
+            ids!(ironfish_rack_grid),
+            activity(self.synth_mix.patterns.ironfish),
+        );
+        self.set_grid_pattern(
+            cx,
+            ids!(drums_rack_grid),
+            activity(self.synth_mix.patterns.drums),
+        );
+        for (param, path) in IRONFISH_CONTROLS {
+            self.ui
+                .slider(cx, path)
+                .set_value(cx, self.synth_mix.patch.normalised(param) as f64);
+        }
+        for (path, selected) in [
+            (ids!(ironfish_osc1_type), self.synth_mix.patch.osc1.kind.index()),
+            (ids!(ironfish_osc2_type), self.synth_mix.patch.osc2.kind.index()),
+            (ids!(ironfish_filter_type), self.synth_mix.patch.filter.kind.index()),
+            (ids!(ironfish_lfo_wave), self.synth_mix.patch.lfo.wave.index()),
+            (ids!(ironfish_root), self.synth_mix.patch.root.index()),
+            (ids!(ironfish_scale), self.synth_mix.patch.scale.index()),
+        ] {
+            self.ui.drop_down(cx, path).set_selected_item(cx, selected);
+        }
+        const NOTE_NAMES: [&str; 12] =
+            ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+        for (row, path) in [
+            ids!(ironfish_lane_0),
+            ids!(ironfish_lane_1),
+            ids!(ironfish_lane_2),
+            ids!(ironfish_lane_3),
+            ids!(ironfish_lane_4),
+            ids!(ironfish_lane_5),
+            ids!(ironfish_lane_6),
+            ids!(ironfish_lane_7),
+            ids!(ironfish_lane_8),
+            ids!(ironfish_lane_9),
+            ids!(ironfish_lane_10),
+            ids!(ironfish_lane_11),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let note = self.synth_mix.patch.grid_note(row);
+            let name = NOTE_NAMES[note as usize % NOTE_NAMES.len()];
+            self.ui
+                .label(cx, path)
+                .set_text(cx, &format!("{name}{}", note / 12 - 1));
+        }
+        for (path, active) in [
+            (ids!(ironfish_lfo_key_sync), self.synth_mix.patch.lfo.key_sync),
+            (ids!(ironfish_bitcrush_enable), self.synth_mix.patch.bitcrush_enabled),
+            (ids!(ironfish_arp_enable), self.synth_mix.patch.arp_enabled),
+        ] {
+            self.ui.check_box(cx, path).set_active(cx, active, Animate::No);
+        }
+        let osc1_cloud = matches!(
+            self.synth_mix.patch.osc1.kind,
+            OscillatorKind::SuperSaw | OscillatorKind::HyperSaw
+        );
+        let osc2_cloud = matches!(
+            self.synth_mix.patch.osc2.kind,
+            OscillatorKind::SuperSaw | OscillatorKind::HyperSaw
+        );
+        let osc1_harmonic = self.synth_mix.patch.osc1.kind == OscillatorKind::HarmonicSeries;
+        let osc2_harmonic = self.synth_mix.patch.osc2.kind == OscillatorKind::HarmonicSeries;
+        for (path, active) in [
+            (ids!(ironfish_osc1_spread), osc1_cloud),
+            (ids!(ironfish_osc1_diffuse), osc1_cloud),
+            (ids!(ironfish_osc2_spread), osc2_cloud),
+            (ids!(ironfish_osc2_diffuse), osc2_cloud),
+            (ids!(ironfish_osc1_harmonic), osc1_harmonic),
+            (ids!(ironfish_osc1_harmonic_env), osc1_harmonic),
+            (ids!(ironfish_osc1_harmonic_lfo), osc1_harmonic),
+            (ids!(ironfish_osc2_harmonic), osc2_harmonic),
+            (ids!(ironfish_osc2_harmonic_env), osc2_harmonic),
+            (ids!(ironfish_osc2_harmonic_lfo), osc2_harmonic),
+            (ids!(ironfish_bitcrush), self.synth_mix.patch.bitcrush_enabled),
+            (ids!(ironfish_arp_octaves), self.synth_mix.patch.arp_enabled),
+        ] {
+            let inert = if active { 0.0f64 } else { 1.0 };
+            let mut slider = self.ui.slider(cx, path);
+            script_apply_eval!(cx, slider, {
+                draw_bg +: { inert: #(inert) }
+            });
+        }
+        for (strip, gain, mute, solo, _) in MIX_STRIP_CONTROLS {
+            let index = strip.index();
+            self.ui
+                .slider(cx, gain)
+                .set_value(cx, self.synth_mix.strip_gains[index] as f64);
+            self.paint_lit(cx, mute, self.synth_mix.strip_mutes[index]);
+            self.paint_lit(cx, solo, self.synth_mix.strip_solos[index]);
+        }
+        for (param, path) in MASTER_CONTROLS {
+            self.ui
+                .slider(cx, path)
+                .set_value(cx, self.synth_mix.master.normalised(param) as f64);
+        }
+        self.paint_lit(cx, ids!(mix_master_bypass), self.synth_mix.master.bypass);
+    }
+
+    fn push_synth_mix_state(&mut self, cx: &mut Cx) {
+        let rate = self.mixer.output_sample_rate().unwrap_or(48_000.0).round() as u32;
+        self.mixer.ensure_synth_rate(rate, self.synth_mix.patch);
+        for track in SynthTrack::ALL {
+            self.mixer
+                .set_synth_pattern(track, self.synth_mix.patterns.get(track));
+        }
+        self.mixer.set_ironfish_patch(self.synth_mix.patch);
+        self.mixer.set_synth_playing(self.synth_mix.playing);
+        for strip in StripId::ALL {
+            let index = strip.index();
+            self.mixer.set_strip_gain(strip, self.synth_mix.strip_gains[index]);
+            self.mixer.set_strip_muted(strip, self.synth_mix.strip_mutes[index]);
+            self.mixer.set_strip_soloed(strip, self.synth_mix.strip_solos[index]);
+        }
+        self.mixer.set_master_dynamics(self.synth_mix.master);
+        self.sync_synth_mix_ui(cx);
+    }
+
+    fn handle_synth_mix_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        for (track, path) in [
+            (SynthTrack::Piano, ids!(synth_piano_btn)),
+            (SynthTrack::Ironfish, ids!(synth_ironfish_btn)),
+            (SynthTrack::Drums, ids!(synth_drums_btn)),
+        ] {
+            if self.ui.button(cx, path).clicked(actions) {
+                self.select_synth_track(cx, track);
+            }
+        }
+        for (path, fx_page) in [
+            (ids!(ironfish_voice_tab), false),
+            (ids!(ironfish_fx_tab), true),
+        ] {
+            if self.ui.button(cx, path).clicked(actions) {
+                self.synth_mix.ironfish_fx_page = fx_page;
+                self.sync_synth_mix_ui(cx);
+            }
+        }
+        if self.ui.button(cx, ids!(synth_play)).clicked(actions) {
+            self.synth_mix.playing = !self.synth_mix.playing;
+            self.mixer.set_synth_playing(self.synth_mix.playing);
+            self.sync_synth_mix_ui(cx);
+        }
+        for (track, path) in [
+            (SynthTrack::Piano, ids!(piano_clear)),
+            (SynthTrack::Ironfish, ids!(ironfish_clear)),
+            (SynthTrack::Drums, ids!(drums_clear)),
+        ] {
+            if self.ui.button(cx, path).clicked(actions) {
+                self.synth_mix.patterns.set(track, [0; synth::STEPS]);
+                self.mixer.set_synth_pattern(track, [0; synth::STEPS]);
+                self.sync_synth_mix_ui(cx);
+                self.schedule_synth_mix_save(cx);
+            }
+        }
+        for (strip, path) in [
+            (StripId::Piano, ids!(rack_piano_mute)),
+            (StripId::Ironfish, ids!(rack_ironfish_mute)),
+            (StripId::Drums, ids!(rack_drums_mute)),
+        ] {
+            if self.ui.button(cx, path).clicked(actions) {
+                let index = strip.index();
+                self.synth_mix.strip_mutes[index] = !self.synth_mix.strip_mutes[index];
+                self.mixer.set_strip_muted(strip, self.synth_mix.strip_mutes[index]);
+                self.paint_lit(cx, path, self.synth_mix.strip_mutes[index]);
+                self.paint_lit(
+                    cx,
+                    MIX_STRIP_CONTROLS[index].2,
+                    self.synth_mix.strip_mutes[index],
+                );
+                self.sync_synth_mix_ui(cx);
+                self.schedule_synth_mix_save(cx);
+            }
+        }
+
+        for (track, path) in [
+            (SynthTrack::Piano, ids!(piano_grid)),
+            (SynthTrack::Ironfish, ids!(ironfish_grid)),
+            (SynthTrack::Drums, ids!(drums_grid)),
+        ] {
+            let widget = self.ui.widget(cx, path);
+            let changed = actions
+                .find_widget_action(widget.widget_uid())
+                .is_some_and(|item| matches!(item.cast(), VjStepGridAction::Changed));
+            if changed {
+                if let Some(grid) = widget.borrow::<VjStepGrid>() {
+                    let pattern = grid.pattern();
+                    drop(grid);
+                    self.synth_mix.patterns.set(track, pattern);
+                    self.mixer.set_synth_pattern(track, pattern);
+                    self.schedule_synth_mix_save(cx);
+                }
+            }
+        }
+
+        let mut changed = false;
+        let mut ironfish_changed = false;
+        for (index, path) in [
+            ids!(ironfish_preset_0),
+            ids!(ironfish_preset_1),
+            ids!(ironfish_preset_2),
+            ids!(ironfish_preset_3),
+            ids!(ironfish_preset_4),
+            ids!(ironfish_preset_5),
+            ids!(ironfish_preset_6),
+            ids!(ironfish_preset_7),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if self.ui.button(cx, path).clicked(actions) {
+                self.synth_mix.patch = IronfishPatch::preset(index);
+                self.synth_mix.ironfish_program = Some(index as u8);
+                self.mixer.set_ironfish_patch(self.synth_mix.patch);
+                self.sync_synth_mix_ui(cx);
+                changed = true;
+            }
+        }
+        for (param, path) in IRONFISH_CONTROLS {
+            if let Some(value) = self.ui.slider(cx, path).slided(actions) {
+                let value = value as f32;
+                self.synth_mix.patch.set_normalised(param, value);
+                self.synth_mix.ironfish_program = None;
+                self.mixer.set_ironfish_param(param, value);
+                changed = true;
+                ironfish_changed = true;
+            }
+        }
+        let mut discrete_changed = false;
+        if let Some(index) = self.ui.drop_down(cx, ids!(ironfish_osc1_type)).selected(actions) {
+            self.synth_mix.patch.osc1.kind = OscillatorKind::from_index(index);
+            discrete_changed = true;
+        }
+        if let Some(index) = self.ui.drop_down(cx, ids!(ironfish_osc2_type)).selected(actions) {
+            self.synth_mix.patch.osc2.kind = OscillatorKind::from_index(index);
+            discrete_changed = true;
+        }
+        if let Some(index) = self.ui.drop_down(cx, ids!(ironfish_filter_type)).selected(actions) {
+            self.synth_mix.patch.filter.kind = FilterKind::from_index(index);
+            discrete_changed = true;
+        }
+        if let Some(index) = self.ui.drop_down(cx, ids!(ironfish_lfo_wave)).selected(actions) {
+            self.synth_mix.patch.lfo.wave = LfoWave::from_index(index);
+            discrete_changed = true;
+        }
+        if let Some(index) = self.ui.drop_down(cx, ids!(ironfish_root)).selected(actions) {
+            self.synth_mix.patch.root = RootNote::from_index(index);
+            discrete_changed = true;
+        }
+        if let Some(index) = self.ui.drop_down(cx, ids!(ironfish_scale)).selected(actions) {
+            self.synth_mix.patch.scale = ScaleKind::from_index(index);
+            discrete_changed = true;
+        }
+        for (path, field) in [
+            (ids!(ironfish_lfo_key_sync), 0u8),
+            (ids!(ironfish_bitcrush_enable), 1u8),
+            (ids!(ironfish_arp_enable), 2u8),
+        ] {
+            if let Some(active) = self.ui.check_box(cx, path).changed(actions) {
+                match field {
+                    0 => self.synth_mix.patch.lfo.key_sync = active,
+                    1 => self.synth_mix.patch.bitcrush_enabled = active,
+                    _ => self.synth_mix.patch.arp_enabled = active,
+                }
+                discrete_changed = true;
+            }
+        }
+        if discrete_changed {
+            self.synth_mix.patch = self.synth_mix.patch.sanitise();
+            self.synth_mix.ironfish_program = None;
+            self.mixer.set_ironfish_patch(self.synth_mix.patch);
+            changed = true;
+            ironfish_changed = true;
+        }
+        for (strip, gain, mute, solo, _) in MIX_STRIP_CONTROLS {
+            let index = strip.index();
+            if let Some(value) = self.ui.slider(cx, gain).slided(actions) {
+                self.synth_mix.strip_gains[index] = value as f32;
+                self.mixer.set_strip_gain(strip, value as f32);
+                changed = true;
+            }
+            if self.ui.button(cx, mute).clicked(actions) {
+                self.synth_mix.strip_mutes[index] = !self.synth_mix.strip_mutes[index];
+                self.mixer.set_strip_muted(strip, self.synth_mix.strip_mutes[index]);
+                self.paint_lit(cx, mute, self.synth_mix.strip_mutes[index]);
+                changed = true;
+            }
+            if self.ui.button(cx, solo).clicked(actions) {
+                self.synth_mix.strip_solos[index] = !self.synth_mix.strip_solos[index];
+                self.mixer.set_strip_soloed(strip, self.synth_mix.strip_solos[index]);
+                self.paint_lit(cx, solo, self.synth_mix.strip_solos[index]);
+                changed = true;
+            }
+        }
+        for (param, path) in MASTER_CONTROLS {
+            if let Some(value) = self.ui.slider(cx, path).slided(actions) {
+                self.synth_mix.master.set_normalised(param, value as f32);
+                self.mixer.set_master_dynamics_param(param, value as f32);
+                changed = true;
+            }
+        }
+        if self.ui.button(cx, ids!(mix_master_bypass)).clicked(actions) {
+            self.synth_mix.master.bypass = !self.synth_mix.master.bypass;
+            self.mixer
+                .set_master_dynamics_bypass(self.synth_mix.master.bypass);
+            self.paint_lit(cx, ids!(mix_master_bypass), self.synth_mix.master.bypass);
+            changed = true;
+        }
+        if ironfish_changed {
+            self.sync_synth_mix_ui(cx);
+        }
+        if changed {
+            self.schedule_synth_mix_save(cx);
+        }
+    }
+
+    fn sync_synth_clock(&mut self, beat: &BeatInfo) {
+        let token = (beat.beats_observed, beat.beat_index as u8);
+        let rate = self.mixer.output_sample_rate().unwrap_or(48_000.0);
+        self.mixer.ensure_synth_rate(rate.round() as u32, self.synth_mix.patch);
+        if self.synth_mix.last_clock_token == Some(token) {
+            return;
+        }
+        let delay = beat.next_beat.saturating_duration_since(Instant::now());
+        let beat_frame = self
+            .mixer
+            .rendered_output_frames()
+            .saturating_add((delay.as_secs_f64() * rate).round() as u64);
+        self.mixer.set_synth_clock(SynthClock {
+            beat_frame,
+            frames_per_beat: beat.period.as_secs_f64() * rate,
+            beat_index: beat.beat_index as u8,
+        });
+        self.synth_mix.last_clock_token = Some(token);
+    }
+
+    fn sync_synth_runtime_ui(&mut self, cx: &mut Cx) {
+        if self.console_page != live_id!(synth_page) && self.console_page != live_id!(mix_page) {
+            return;
+        }
+        let rack = self.mixer.synth_snapshot();
+        if rack.step != self.synth_mix.last_step {
+            self.synth_mix.last_step = rack.step;
+            for path in [
+                ids!(piano_grid),
+                ids!(ironfish_grid),
+                ids!(drums_grid),
+                ids!(piano_rack_grid),
+                ids!(ironfish_rack_grid),
+                ids!(drums_rack_grid),
+            ] {
+                let widget = self.ui.widget(cx, path);
+                if let Some(mut grid) = widget.borrow_mut::<VjStepGrid>() {
+                    grid.set_playhead(cx, self.synth_mix.playing.then_some(rack.step));
+                };
+            }
+        }
+        self.ui.label(cx, ids!(synth_status)).set_text(
+            cx,
+            &format!("STEP {:02}", rack.step as usize + 1),
+        );
+        // The queue count is cumulative and deliberately visible only when it
+        // needs operator attention.
+        let drop_text = (rack.dropped_events != 0)
+            .then(|| format!("DROP {}", rack.dropped_events))
+            .unwrap_or_default();
+        self.ui
+            .label(cx, ids!(synth_drop_status))
+            .set_text(cx, &drop_text);
+        self.ui.label(cx, ids!(ironfish_voice_status)).set_text(
+            cx,
+            &format!("{} / 16 VOICES", rack.ironfish_voices),
+        );
+        self.ui.label(cx, ids!(rack_piano_state)).set_text(
+            cx,
+            &format!(
+                "{} · 12 NOTE LANES",
+                if rack.piano_notes > 0 {
+                    format!("{} NOTES", rack.piano_notes)
+                } else {
+                    "IDLE".to_string()
+                }
+            ),
+        );
+        self.ui.label(cx, ids!(rack_ironfish_state)).set_text(
+            cx,
+            &format!(
+                "{} · DUAL OSC SYNTH",
+                if rack.ironfish_voices > 0 {
+                    format!("{} VOICES", rack.ironfish_voices)
+                } else {
+                    "IDLE".to_string()
+                }
+            ),
+        );
+        self.ui.label(cx, ids!(rack_drums_state)).set_text(
+            cx,
+            if rack.drums_active { "PLAYING · 8 DRUM LANES" } else { "IDLE · 8 DRUM LANES" },
+        );
+
+        let (strips, master) = self.mixer.program_mix_snapshot();
+        for (strip, _, _, _, meter) in MIX_STRIP_CONTROLS {
+            let snap = strips[strip.index()];
+            let level = snap.peak_l.max(snap.peak_r).clamp(0.0, 1.0);
+            let bars = (level * 4.0).ceil() as usize;
+            self.ui
+                .label(cx, meter)
+                .set_text(cx, &format!("{}{}", "#".repeat(bars), "·".repeat(4 - bars)));
+        }
+        let solo_count = self.synth_mix.strip_solos.iter().filter(|&&on| on).count();
+        self.ui.label(cx, ids!(mix_solo_status)).set_text(
+            cx,
+            if solo_count == 0 {
+                "all channels listening"
+            } else {
+                "solo listen active · mute states preserved"
+            },
+        );
+        self.ui.label(cx, ids!(mix_master_meter)).set_text(
+            cx,
+            &format!(
+                "PEAK {:>4.1} · COMP -{:>3.1} · LIM -{:>3.1} dB",
+                master.peak,
+                master.compressor_reduction_db,
+                master.limiter_reduction_db,
+            ),
+        );
+    }
+
+    fn schedule_synth_mix_save(&mut self, _cx: &mut Cx) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            _cx.stop_timer(self.synth_mix_save_timer);
+            self.synth_mix_save_timer = _cx.start_timeout(0.35);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn synth_mix_path() -> PathBuf {
+        service::session_config_from_env()
+            .cache_parent
+            .join("synth-mix.txt")
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn save_synth_mix(&self) {
+        fn pattern(value: synth::StepPattern) -> String {
+            value.map(|column| format!("{column:04x}")).join(",")
+        }
+        fn values<const N: usize>(value: [f32; N]) -> String {
+            value.map(|v| format!("{v:.7}")).join(",")
+        }
+        fn flags<const N: usize>(value: [bool; N]) -> String {
+            value.map(|v| if v { "1" } else { "0" }).join(",")
+        }
+        let patch = IRONFISH_CONTROLS.map(|(param, _)| self.synth_mix.patch.normalised(param));
+        let master = MASTER_CONTROLS.map(|(param, _)| self.synth_mix.master.normalised(param));
+        let patch_modes = format!(
+            "{},{},{},{},{},{},{},{},{}",
+            self.synth_mix.patch.osc1.kind.index(),
+            self.synth_mix.patch.osc2.kind.index(),
+            self.synth_mix.patch.filter.kind.index(),
+            self.synth_mix.patch.lfo.wave.index(),
+            self.synth_mix.patch.root.index(),
+            self.synth_mix.patch.scale.index(),
+            u8::from(self.synth_mix.patch.lfo.key_sync),
+            u8::from(self.synth_mix.patch.bitcrush_enabled),
+            u8::from(self.synth_mix.patch.arp_enabled),
+        );
+        let body = format!(
+            "VJ_SYNTH_MIX 3\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{},{}\n",
+            self.synth_mix.selected as u8,
+            pattern(self.synth_mix.patterns.piano),
+            pattern(self.synth_mix.patterns.ironfish),
+            pattern(self.synth_mix.patterns.drums),
+            values(patch),
+            patch_modes,
+            values(self.synth_mix.strip_gains),
+            flags(self.synth_mix.strip_mutes),
+            values(master),
+            u8::from(self.synth_mix.master.bypass),
+        );
+        let path = Self::synth_mix_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(error) = std::fs::write(&path, body) {
+            log!("synth/mix settings: could not write {}: {error}", path.display());
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn load_synth_mix(&mut self) {
+        fn floats<const N: usize>(line: Option<&str>) -> Option<[f32; N]> {
+            let mut out = [0.0; N];
+            let mut parts = line?.split(',');
+            for item in &mut out {
+                *item = parts.next()?.parse().ok()?;
+            }
+            Some(out)
+        }
+        fn flags<const N: usize>(line: Option<&str>) -> Option<[bool; N]> {
+            floats::<N>(line).map(|value| value.map(|v| v != 0.0))
+        }
+        fn pattern(line: Option<&str>) -> Option<synth::StepPattern> {
+            let mut out = [0u16; synth::STEPS];
+            let mut parts = line?.split(',');
+            for item in &mut out {
+                *item = u16::from_str_radix(parts.next()?, 16).ok()?;
+            }
+            Some(out)
+        }
+        let Ok(body) = std::fs::read_to_string(Self::synth_mix_path()) else { return };
+        let mut lines = body.lines();
+        let version = match lines.next() {
+            Some("VJ_SYNTH_MIX 1") => 1,
+            Some("VJ_SYNTH_MIX 2") => 2,
+            Some("VJ_SYNTH_MIX 3") => 3,
+            _ => return,
+        };
+        self.synth_mix.selected = match lines.next().and_then(|line| line.parse().ok()) {
+            Some(1) => SynthTrack::Ironfish,
+            Some(2) => SynthTrack::Drums,
+            _ => SynthTrack::Piano,
+        };
+        if let Some(value) = pattern(lines.next()) {
+            self.synth_mix.patterns.piano = value;
+        }
+        if let Some(value) = pattern(lines.next()) {
+            self.synth_mix.patterns.ironfish = value;
+        }
+        if let Some(value) = pattern(lines.next()) {
+            self.synth_mix.patterns.drums = value;
+        }
+        if version >= 3 {
+            if let Some(value) = floats::<53>(lines.next()) {
+                for ((param, _), value) in IRONFISH_CONTROLS.into_iter().zip(value) {
+                    self.synth_mix.patch.set_normalised(param, value);
+                }
+            }
+            if let Some(modes) = floats::<9>(lines.next()) {
+                self.synth_mix.patch.osc1.kind = OscillatorKind::from_index(modes[0] as usize);
+                self.synth_mix.patch.osc2.kind = OscillatorKind::from_index(modes[1] as usize);
+                self.synth_mix.patch.filter.kind = FilterKind::from_index(modes[2] as usize);
+                self.synth_mix.patch.lfo.wave = LfoWave::from_index(modes[3] as usize);
+                self.synth_mix.patch.root = RootNote::from_index(modes[4] as usize);
+                self.synth_mix.patch.scale = ScaleKind::from_index(modes[5] as usize);
+                self.synth_mix.patch.lfo.key_sync = modes[6] != 0.0;
+                self.synth_mix.patch.bitcrush_enabled = modes[7] != 0.0;
+                self.synth_mix.patch.arp_enabled = modes[8] != 0.0;
+            }
+        } else if let Some(value) = floats::<12>(lines.next()) {
+            for (param, value) in LEGACY_IRONFISH_PARAMS.into_iter().zip(value) {
+                self.synth_mix.patch.set_normalised(param, value);
+            }
+        }
+        if let Some(value) = floats::<STRIP_COUNT>(lines.next()) {
+            self.synth_mix.strip_gains = value.map(|gain| gain.clamp(0.0, 1.5));
+        }
+        if let Some(value) = flags::<STRIP_COUNT>(lines.next()) {
+            self.synth_mix.strip_mutes = value;
+        }
+        if version == 1 {
+            // Version 1 briefly wrote the listen mask. Consume it for
+            // forward compatibility, but a fresh session always clears solo.
+            let _ = lines.next();
+        }
+        if let Some(value) = floats::<6>(lines.next()) {
+            for ((param, _), value) in MASTER_CONTROLS.into_iter().zip(value) {
+                self.synth_mix.master.set_normalised(param, value);
+            }
+        }
+        self.synth_mix.master.bypass = lines
+            .next()
+            .and_then(|value| value.parse::<u8>().ok())
+            .is_some_and(|value| value != 0);
+        self.synth_mix.patch = self.synth_mix.patch.sanitise();
+        // The persisted document stores patch values rather than a possibly
+        // stale program number. A program lights again when explicitly chosen.
+        self.synth_mix.ironfish_program = None;
     }
 
     // ---- ARCHIVE.ORG panel --------------------------------------------------
@@ -9550,9 +11193,8 @@ p2 {}
         self.paint_lit(cx, ids!(autofade), on);
     }
 
-    /// Paint the ONE radio group of lane chips (and the mode buttons).
-    /// The special pages (LIGHTS, ARCHIVE) are part of the same radio: when
-    /// one of them is up, no content lane reads selected.
+    /// Paint the VJ lane radio and the independent top-level workspace switcher.
+    /// LIGHTS and ARCHIVE are VJ-local pages, so they suppress the content lane.
     fn sync_lane_chips_ui(&mut self, cx: &mut Cx) {
         let on_grid = self.lower_tab == LowerTab::Grid;
         for (chip, lane, label) in LANE_CHIPS {
@@ -9560,8 +11202,8 @@ p2 {}
         }
         self.paint_chip(cx, ids!(chip_lights), self.lower_tab == LowerTab::Lights, Some("LIGHTS"));
         self.paint_chip(cx, ids!(chip_archive), self.lower_tab == LowerTab::Archive, Some("ARCHIVE"));
-        for (button, surface) in MODE_BUTTONS {
-            self.paint_chip(cx, button, self.apc.surface == surface, None);
+        for (button, mode) in MODE_BUTTONS {
+            self.paint_chip(cx, button, self.console_page == mode.page(), None);
         }
     }
 
@@ -9630,12 +11272,22 @@ p2 {}
         self.set_lane(cx, lane);
     }
 
-    /// Switch top-level mode. The APC surface and the page are the same
-    /// choice seen from two sides, so they move together.
-    fn select_mode(&mut self, cx: &mut Cx, surface: ApcSurface) {
-        self.apc.surface = surface;
-        self.apc.bank = 0;
-        self.show_apc_surface(cx);
+    /// Switch the entire console workspace. The two performance pages also
+    /// select their APC surface; editing/mixing does not steal the controller.
+    fn select_mode(&mut self, cx: &mut Cx, mode: ConsoleMode) {
+        match mode {
+            ConsoleMode::Vj => {
+                self.apc.surface = ApcSurface::Video;
+                self.apc.bank = 0;
+            }
+            ConsoleMode::Dj => {
+                self.apc.surface = ApcSurface::Music;
+                self.apc.bank = 0;
+            }
+            ConsoleMode::Synth | ConsoleMode::Mix => self.sync_synth_mix_ui(cx),
+        }
+        Self::save_ui_surface(mode);
+        self.show_console_page(cx, mode.page());
     }
 
     fn set_visual_mix(&mut self, cx: &mut Cx, value: f32) {
@@ -10092,7 +11744,10 @@ p2 {}
                 cx.audio_input(0, move |info, buffer| {
                     callback_feed.push(info.sample_rate, buffer);
                 });
-                self.sync_worker = Some(SyncWorker::start(feed.clone()));
+                self.sync_worker = Some(SyncWorker::start(
+                    feed.clone(),
+                    self.thread_spawner.clone().expect("thread workers are not started"),
+                ));
                 self.capture = Some(feed);
             }
             cx.use_audio_inputs(&self.loopback_ids.clone());
@@ -11238,30 +12893,32 @@ p2 {}
         }
     }
 
-    /// Where the last-active surface sleeps between sessions: one word in
-    /// a file, so closing on the DJ tab reopens on the DJ tab.
+    /// Where the last-active workspace sleeps between sessions: one word in
+    /// a file, so closing on any top-level tab reopens on that tab.
     fn ui_surface_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/vj/ui-surface")
     }
 
-    fn save_ui_surface(surface: ApcSurface) {
+    fn save_ui_surface(mode: ConsoleMode) {
         let path = Self::ui_surface_path();
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let name = match surface {
-            ApcSurface::Video => "video",
-            ApcSurface::Music => "music",
-            ApcSurface::Sfx => "sfx",
+        let name = match mode {
+            ConsoleMode::Vj => "video",
+            ConsoleMode::Dj => "music",
+            ConsoleMode::Synth => "synth",
+            ConsoleMode::Mix => "mix",
         };
         let _ = std::fs::write(path, name);
     }
 
-    fn load_ui_surface() -> Option<ApcSurface> {
+    fn load_ui_surface() -> Option<ConsoleMode> {
         match std::fs::read_to_string(Self::ui_surface_path()).ok()?.trim() {
-            "video" => Some(ApcSurface::Video),
-            "music" => Some(ApcSurface::Music),
-            "sfx" => Some(ApcSurface::Sfx),
+            "video" | "sfx" => Some(ConsoleMode::Vj),
+            "music" => Some(ConsoleMode::Dj),
+            "synth" => Some(ConsoleMode::Synth),
+            "mix" => Some(ConsoleMode::Mix),
             _ => None,
         }
     }
@@ -11417,7 +13074,10 @@ p2 {}
             ApcSurface::Music => id!(music_page),
             ApcSurface::Sfx => id!(sfx_page),
         };
-        Self::save_ui_surface(self.apc.surface);
+        self.show_console_page(cx, page);
+    }
+
+    fn show_console_page(&mut self, cx: &mut Cx, page: LiveId) {
         self.ui.page_flip(cx, ids!(pages)).set_active_page(cx, page.into());
         self.console_page = page.into();
         self.sync_mesh_liveness(cx);
@@ -12027,10 +13687,7 @@ p2 {}
     /// releases the rate back to 1.0 when the beat lock decays).
     fn pump_loop_reports(&mut self) {
         if let Some(results) = self.loop_results.as_ref() {
-            let drained: Vec<(AssetRevisionId, LoopReport)> = results
-                .try_lock()
-                .map(|mut results| results.drain(..).collect())
-                .unwrap_or_default();
+            let drained: Vec<(AssetRevisionId, LoopReport)> = results.try_iter().collect();
             for (revision, report) in drained {
                 self.loop_reports.insert(revision, report);
             }
@@ -12508,7 +14165,7 @@ p2 {}
             self.drum_bank_rx = None;
             match completed {
                 Ok((bank, summary)) => {
-                    self.mixer.run_cmd(MixCmd::SetDrumBank(bank));
+                    self.mixer.set_drum_bank(bank);
                     self.drum_bank_loaded = true;
                     log!("drum kit: {summary}");
                     if let Some(key) = self.loop_score_presented {
@@ -12535,15 +14192,18 @@ p2 {}
         let (sender, receiver) = std::sync::mpsc::channel();
         self.drum_bank_requested = Some(dir.clone());
         self.drum_bank_rx = Some(receiver);
-        if let Err(error) = std::thread::Builder::new()
-            .name("salamander-drumkit-load".to_string())
-            .spawn(move || {
+        if let Err(error) = self
+            .task_pool
+            .as_ref()
+            .expect("thread workers are not started")
+            .submit(Lane::Heavy, move || {
                 let result = makepad_drumkit::SampleBank::load(&dir).map(|bank| {
                     let summary = bank.summary();
                     (Arc::new(bank), summary)
                 });
                 let _ = sender.send(result);
             })
+            .map(|handle| handle.detach())
         {
             self.drum_bank_rx = None;
             log!("drum kit loader could not start: {error}");
@@ -13073,19 +14733,13 @@ p2 {}
                     // pages behind them, and a page outranks a thumbnail
                     // blob: an empty tile with no title is worse than a tile
                     // waiting for its picture.
-                    let namespace = query.namespace.clone();
-                    let kind = query.kind;
                     if let Ok(id) = up.catalog.submit_with(
                         ClientRequest::CatalogSearch { query, cursor },
                         makepad_asset_client::SubmitOptions::newest_first(),
                     ) {
-                        log!(
-                            "catalog request: id={id} namespace={} kind={kind:?}",
-                            namespace.as_deref().unwrap_or("*")
-                        );
                         self.cat_reqs.insert(
                             id,
-                            CatPurpose::Page { surface, gen, slot, first, namespace },
+                            CatPurpose::Page { surface, gen, slot, first },
                         );
                     }
                 }
@@ -13359,9 +15013,17 @@ p2 {}
                                     self.dream_loops.clear();
                                 }
                                 self.dream_loops.insert(asset);
+                                let title = self
+                                    .gen
+                                    .jobs()
+                                    .find(|job| job.tag == finish.tag)
+                                    .map(|job| job.title.clone())
+                                    .unwrap_or_else(|| "generated".into());
+                                self.present_generated_video(cx, asset, title);
+                            } else {
+                                self.grids_dirty = true;
+                                self.refresh_surfaces_after_run();
                             }
-                            self.grids_dirty = true;
-                            self.refresh_surfaces_after_run();
                         }
                     }
                     Err(error) => {
@@ -13378,7 +15040,13 @@ p2 {}
                     }
                 },
                 PipeDone::JobStatus { job, result } => match result {
-                    Ok(status) => self.gen.status_arrived_at(&status, now_ms()),
+                    Ok(status) => {
+                        if let Some((asset, title)) =
+                            self.gen.take_produced_on_success(&status, now_ms())
+                        {
+                            self.present_generated_video(cx, asset, title);
+                        }
+                    }
                     Err(error) => {
                         self.gen.status_failed_at(job, error, Some(now_ms()));
                     }
@@ -13423,6 +15091,25 @@ p2 {}
     /// landed before the row knew what asset it was waiting for).
     fn refresh_surfaces_after_run(&mut self) {
         self.video_model.event_touch(None);
+    }
+
+    /// Put a just-produced clip on the VIDEO pads this frame. The default
+    /// EFFECT lane hides catalog video, and the single-job `video.generate`
+    /// path never asked the grid to refresh at all — so GENERATE would
+    /// finish and the pads would stay on last night's effects until someone
+    /// clicked VIDEO and waited out the 3s event debounce.
+    fn present_generated_video(&mut self, cx: &mut Cx, asset: AssetId, title: String) {
+        let video_lane = GridLane::Kind(AssetKind::Video);
+        if self.grid_lane != video_lane {
+            self.set_lower_tab(cx, LowerTab::Grid);
+            self.set_lane(cx, video_lane);
+        }
+        let cmds = self
+            .video_model
+            .ingest_published(asset, title, AssetKind::Video);
+        self.run_cat_cmds(Surface::Video, cmds);
+        self.grids_dirty = true;
+        self.ui.redraw(cx);
     }
 
     fn run_cue_cmds(&mut self, cx: &mut Cx, cmds: Vec<CueCmd>) {
@@ -13632,6 +15319,8 @@ p2 {}
                                 self.mixer.clone(),
                                 self.video_loop,
                                 true,
+                                self.thread_spawner.clone().expect("thread workers are not started"),
+                                self.task_pool.clone().expect("thread workers are not started"),
                             ) {
                                 Ok(mut player) => {
                                     // STICKY per-clip profile: the same
@@ -13902,9 +15591,20 @@ p2 {}
                         .find(|(d, _)| *d == deck.index())
                         .copied();
                     if let Some(key) = key {
-                        if let Some((pcm, peaks)) = self.deck_incoming.remove(&key) {
-                            self.mixer.install_deck(deck, pcm.clone());
-                            self.deck_tracks[deck.index()] = Some((pcm.clone(), peaks));
+                        if let Some(incoming) = self.deck_incoming.remove(&key) {
+                            match incoming {
+                                // Still decoding: the deck opens on the
+                                // chunks in hand and everything that needs
+                                // the whole file waits for `deck_decoded`.
+                                DeckIncoming::Stream(table) => {
+                                    self.mixer.install_deck_stream(deck, table);
+                                    self.deck_tracks[deck.index()] = None;
+                                }
+                                DeckIncoming::Whole(pcm, peaks) => {
+                                    self.mixer.install_deck(deck, pcm.clone());
+                                    self.deck_tracks[deck.index()] = Some((pcm, peaks));
+                                }
+                            }
                             // The waveform and the beat grid come from a
                             // worker: never the UI thread, never the audio
                             // callback. Until it answers the deck shows the
@@ -13949,38 +15649,10 @@ p2 {}
                             // digest, this deck matches no cached transcript.
                             self.deck_track_digest[deck.index()] = None;
                             self.mixer.clear_deck_stems(deck);
-                            #[cfg(not(target_arch = "wasm32"))]
-                            self.submit_analysis(deck, pcm.clone());
-                            #[cfg(target_arch = "wasm32")]
-                            {
-                                self.try_install_demo_analysis(cx, deck, key.1);
-                                self.try_install_demo_splat(cx, deck, key.1);
-                            }
-                            // Fetch or compute, decided when the track was
-                            // clicked: a deck whose side-channel fetch is
-                            // armed for this generation never loads the
-                            // separation model at all. The fetch's own
-                            // failure paths fall back here.
-                            let mode = self.decks.deck(deck).stems_mode;
-                            if !mode.shows() {
-                                // Off: this track never costs a separation,
-                                // and nothing of it would be heard anyway.
-                                self.deck_stem_status[deck.index()] =
-                                    String::new();
-                                self.deck_stem_busy[deck.index()] = None;
-                            } else if self.side_channels_armed(deck, key.1) {
-                                self.deck_stem_status[deck.index()] =
-                                    "stems: fetching…".to_string();
-                                self.deck_stem_busy[deck.index()] = Some(true);
-                                self.try_start_side_channels(deck, key.1);
-                            } else if mode.computes() {
-                                self.submit_separation(deck, pcm);
-                            } else {
-                                // Cached: a fetch of work already done is
-                                // welcome, starting the machine is not.
-                                self.deck_stem_status[deck.index()] = String::new();
-                                self.deck_stem_busy[deck.index()] = None;
-                            }
+                            // The analysis and the stems need the whole
+                            // file: `deck_decoded` starts them when the
+                            // decoder is done, which for a track that
+                            // landed whole is this same pump.
                         }
                     }
                 }
@@ -13992,6 +15664,11 @@ p2 {}
                         let source_rate = self.deck_tracks[deck.index()]
                             .as_ref()
                             .map(|(pcm, _)| pcm.sample_rate)
+                            .or_else(|| {
+                                self.deck_stream[deck.index()]
+                                    .as_ref()
+                                    .map(media::DeckStream::sample_rate)
+                            })
                             .unwrap_or(0);
                         log!(
                             "audio: deck {deck:?} transport playing={playing} source_rate={source_rate} device_frames={frames}"
@@ -14025,6 +15702,9 @@ p2 {}
                 DeckCmd::SeekSeconds { deck, secs } => {
                     self.mixer.seek_deck_seconds(deck, secs)
                 }
+                DeckCmd::SeekRelative { deck, delta_secs } => {
+                    self.mixer.nudge_deck_seconds(deck, delta_secs)
+                }
                 DeckCmd::Scratch { deck, motion } => self.mixer.scratch_deck(deck, motion),
                 DeckCmd::SetKeylock { deck, on } => self.mixer.set_deck_keylock(deck, on),
                 DeckCmd::SetKeyShift { deck, semitones } => {
@@ -14056,6 +15736,7 @@ p2 {}
                 DeckCmd::SwapVoices => {
                     self.mixer.swap_decks();
                     self.deck_tracks.swap(0, 1);
+                    self.deck_stream.swap(0, 1);
                     self.deck_load_progress.swap(0, 1);
                     self.deck_analysis.swap(0, 1);
                     self.deck_demo_analysis.swap(0, 1);
@@ -14088,6 +15769,7 @@ p2 {}
                     self.deck_lyrics_status[index] = String::new();
                     self.deck_track_digest[index] = None;
                     self.deck_side_channels[index] = None;
+                    self.deck_stream[index] = None;
                     self.deck_stem_status[index] = String::new();
                     self.deck_stem_busy[index] = None;
                     self.deck_load_progress[index].clear();
@@ -14149,7 +15831,7 @@ p2 {}
             let cmds = self.decks.splat_set(deck, Arc::new(splat));
             self.run_deck_cmds(cx, cmds);
             if self.deck_stem_coverage[index].is_some_and(|(_, complete)| complete) {
-                self.submit_splat_refinement(deck, gen);
+                self.submit_splat_refinement(cx, deck, gen);
             }
         }
         let shape = crate::track_shape::track_shape(
@@ -14164,7 +15846,15 @@ p2 {}
                 None => AnalysisKey::from_blob(item.media_blob),
             };
             let analysis = flipped.clone();
-            std::thread::spawn(move || crate::wave_analysis::store_analysis(&key, &analysis));
+            match self
+                .task_pool
+                .as_ref()
+                .expect("thread workers are not started")
+                .submit(Lane::Heavy, move || crate::wave_analysis::store_analysis(&key, &analysis))
+            {
+                Ok(handle) => handle.detach(),
+                Err(error) => log!("analysis-cache worker unavailable: {error}"),
+            }
         }
         self.push_deck_wave(cx, deck);
         self.refresh_splat_surface(cx);
@@ -14238,18 +15928,22 @@ p2 {}
     // ---- polling ------------------------------------------------------------
 
     fn pump(&mut self, cx: &mut Cx) {
-        // Audio health first, so a dropout heard in the room shows up here
-        // with a cause attached: contended = a UI-thread lock hold silenced
-        // a whole callback; render high-water = the render itself is the
-        // threat. Atomic reads, so this costs nothing when all is well.
-        let (contended, render_max) = self.mixer.audio_health();
-        if contended != self.audio_contended_seen {
+        // Audio first: re-send what a full command ring refused and take
+        // back the payloads the callback retired, so they are freed here
+        // and never in a callback.
+        self.mixer.pump();
+        // Then its health, so a dropout heard in the room shows up here
+        // with a cause attached: an overrun = the render itself outran its
+        // buffer and starved the device. Atomic reads, so this costs
+        // nothing when all is well.
+        let (overruns, render_max) = self.mixer.audio_health();
+        if overruns != self.audio_overruns_seen {
             log!(
-                "audio: {} SILENT callback(s) from lock contention (+{} since last)",
-                contended,
-                contended - self.audio_contended_seen
+                "audio: {} overrun callback(s) (+{} since last)",
+                overruns,
+                overruns - self.audio_overruns_seen
             );
-            self.audio_contended_seen = contended;
+            self.audio_overruns_seen = overruns;
         }
         if render_max > self.audio_render_max_seen && render_max > 2_000_000 {
             log!(
@@ -14278,8 +15972,13 @@ p2 {}
             let t = crate::clock::Instant::now();
             if let Some(last) = self.frame_watch {
                 let gap = t.duration_since(last).as_secs_f64() * 1e3;
-                if gap > 200.0 {
+                if gap > 1_000.0
+                    && self.framehang_reported.is_none_or(|reported| {
+                        t.duration_since(reported) >= std::time::Duration::from_secs(10)
+                    })
+                {
                     log!("framehang: {gap:.0}ms between frames");
+                    self.framehang_reported = Some(t);
                 }
             }
             self.frame_watch = Some(t);
@@ -14489,6 +16188,17 @@ p2 {}
             .is_some_and(|up| up.capabilities.ai)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn stem_hub_reachable(&self) -> bool {
+        self.store_ai_available()
+            && !makepad_ai_hub::discovery::start_listener().nodes().is_empty()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn stem_hub_reachable(&self) -> bool {
+        false
+    }
+
     /// Apply store capabilities to durable deck state and to the controls
     /// which could otherwise start unavailable work. This is called for
     /// every new session, so switching from a native store to the browser
@@ -14578,7 +16288,15 @@ p2 {}
                         // fresh publish as it commits.
                         let (bundle_tx, bundle_rx) = std::sync::mpsc::channel();
                         self.fx_bundle_rx = Some(bundle_rx);
-                        std::thread::spawn(move || {
+                        let seed_options = ThreadOptions {
+                            name: Some("vj-fx-bundle".into()),
+                            ..Default::default()
+                        };
+                        let seed_worker = self
+                            .thread_spawner
+                            .as_ref()
+                            .expect("thread workers are not started")
+                            .spawn_worker(seed_options, move || {
                             let _ = std::fs::create_dir_all(&cache);
                             let connect = || {
                                 let mut cfg =
@@ -14647,6 +16365,10 @@ p2 {}
                                 }
                             }
                         });
+                        match seed_worker {
+                            Ok(handle) => handle.detach(),
+                            Err(error) => log!("vjfx seed worker unavailable: {error}"),
+                        }
                     }
                     // Restored slots learn which ASSET they are running, so
                     // a livecoded document saved on disk reaches them.
@@ -14706,7 +16428,7 @@ p2 {}
                     .cache_parent
                     .join("cache-chat");
                 if let Some(endpoints) = up.endpoints {
-                    self.chat.connect(endpoints, up.token.clone(), cache);
+                    self.chat.connect(cx, endpoints, up.token.clone(), cache);
                 }
                 // The pane says "waiting for the asset server" until
                 // something redraws it, and the feed only marks itself
@@ -14858,7 +16580,6 @@ p2 {}
     fn pump_catalog_runtime(&mut self, cx: &mut Cx) {
         let has_up = self.up.is_some();
         if self.catalog_pump_up_seen != Some(has_up) {
-            log!("catalog runtime pump: up={}", if has_up { "Some" } else { "None" });
             self.catalog_pump_up_seen = Some(has_up);
         }
         let (mut events, static_ready) = match self.up.as_mut() {
@@ -14873,7 +16594,6 @@ p2 {}
             None => return,
         };
         if static_ready {
-            log!("catalog runtime: take_ready_event=true");
             log!("static catalog: ready — refreshing browse models");
             for surface in SURFACES {
                 let cmds = self.model(surface).refresh();
@@ -14892,7 +16612,7 @@ p2 {}
                 ClientEvent::Done { output, .. } => {
                     self.note_session_ok();
                     let Some(purpose) = self.cat_reqs.remove(&id) else { continue };
-                    self.catalog_done(cx, id, purpose, output);
+                    self.catalog_done(cx, purpose, output);
                 }
                 ClientEvent::Failed { error, .. } => {
                     if is_session_loss(&error) {
@@ -14985,27 +16705,32 @@ p2 {}
     fn catalog_done(
         &mut self,
         cx: &mut Cx,
-        request_id: RequestId,
         purpose: CatPurpose,
         output: ClientOutput,
     ) {
         match (purpose, output) {
             (
-                CatPurpose::Page { surface, gen, slot, first, namespace },
+                CatPurpose::Page { surface, gen, slot, first },
                 ClientOutput::CatalogPage(page),
             ) => {
-                log!(
-                    "catalog response: id={request_id} namespace={} hits={}",
-                    namespace.as_deref().unwrap_or("*"),
-                    page.hits.len()
-                );
                 let hits = page
                     .hits
                     .into_iter()
                     .map(|h| {
-                        #[cfg(target_arch = "wasm32")]
                         if surface == Surface::Music {
-                            self.music_artists.insert(h.asset_id, h.creator.clone());
+                            self.music_attributions.insert(
+                                h.asset_id,
+                                MusicAttribution {
+                                    artist: if h.artist.is_empty() {
+                                        h.creator.clone()
+                                    } else {
+                                        h.artist.clone()
+                                    },
+                                    source_url: h.source_url.clone(),
+                                    license: h.license.clone(),
+                                    license_url: h.license_url.clone(),
+                                },
+                            );
                         }
                         catalog::HitRow {
                             updated_ms: h.updated_ms,
@@ -15703,9 +17428,15 @@ p2 {}
         self.session_loss_since = None;
         if let Some(up) = self.up.take() {
             // Runtime joins wait out in-flight transfers: never on the UI thread.
-            let _ = std::thread::Builder::new()
-                .name("vj-session-teardown".into())
-                .spawn(move || up.shutdown());
+            match self
+                .task_pool
+                .as_ref()
+                .expect("thread workers are not started")
+                .submit(Lane::Heavy, move || up.shutdown())
+            {
+                Ok(handle) => handle.detach(),
+                Err(error) => log!("session teardown worker unavailable: {error}"),
+            }
         }
         let lost_music_import = self.cat_reqs.values().find_map(|purpose| match purpose {
             CatPurpose::MusicImportAlias { prepared }
@@ -15915,7 +17646,7 @@ p2 {}
         }
         if let Err(error) = self
             .music_import_run
-            .start_files(files, cx.thread_spawner())
+            .start_files(files)
         {
             crate::log!("music import refused: {error}");
         }
@@ -16532,9 +18263,16 @@ p2 {}
         {
             let (tx, rx) = std::sync::mpsc::channel();
             self.import_scan_rx = Some(rx);
-            std::thread::spawn(move || {
+            match self
+                .task_pool
+                .as_ref()
+                .expect("thread workers are not started")
+                .submit(Lane::Heavy, move || {
                 let _ = tx.send(media_scan::scan(&root).files.len());
-            });
+            }) {
+                Ok(handle) => handle.detach(),
+                Err(error) => log!("import scan worker unavailable: {error}"),
+            }
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -16698,6 +18436,9 @@ p2 {}
         }
         let deadline = crate::clock::Instant::now()
             + std::time::Duration::from_micros((media::UI_STEP_BUDGET_MS * 1000.0) as u64);
+        // Decks whose streamed picture grew this pump: redrawn once below,
+        // however many chunks landed.
+        let mut wave_touched = [false; 2];
         while let Some(done) = self.next_decode_result(deadline) {
             match done {
                 // A background warm-up borrows the deck decode lane and is
@@ -16705,16 +18446,72 @@ p2 {}
                 // must never reach `deck_incoming`.
                 DecodeDone::Deck { gen, result, .. } if gen == stems::PREFETCH_GEN => {
                     match result {
-                        Ok((pcm, _peaks)) if self.store_ai_available() => {
-                            self.stems.submit_prefetch(pcm, self.prefetch.source.clone());
-                            self.prefetch.stage = PrefetchStage::Separating;
+                        Ok((pcm, _peaks)) => {
+                            let action = separation_action(
+                                self.stem_separation,
+                                false,
+                                self.stem_hub_reachable(),
+                            );
+                            if matches!(action, SeparationAction::Hub | SeparationAction::Local) {
+                                self.stems.submit_prefetch(
+                                    pcm,
+                                    self.prefetch.source.clone(),
+                                    action,
+                                );
+                                self.prefetch.stage = PrefetchStage::Separating;
+                            } else {
+                                self.prefetch_release(false);
+                            }
                         }
-                        Ok(_) => self.prefetch_release(false),
                         Err(error) => {
                             log!("prefetch: decode failed: {error}");
                             self.prefetch_release(true);
                         }
                     }
+                }
+                // The prefetch's decode cuts no chunks; if one ever came,
+                // it would have no deck to go to.
+                DecodeDone::DeckChunk { gen, .. } if gen == stems::PREFETCH_GEN => {}
+                DecodeDone::DeckChunk { deck, gen, chunk } => {
+                    let index = deck.index();
+                    // A load this chunk no longer belongs to: dropped whole.
+                    if self.decks.deck(deck).load_gen != gen {
+                        continue;
+                    }
+                    if !self.deck_stream[index].as_ref().is_some_and(|stream| stream.gen == gen) {
+                        self.deck_stream[index] = Some(media::DeckStream::new(gen));
+                    }
+                    let stream = self.deck_stream[index].as_mut().expect("just made");
+                    let became_playable = match stream.accept(*chunk) {
+                        Ok(became) => became,
+                        Err(error) => {
+                            // Once per stream: the rest are dropped silently
+                            // and the whole file installs when it lands.
+                            log!("deck {deck:?}: stream broken, waiting for the whole file: {error}");
+                            continue;
+                        }
+                    };
+                    let table = stream.table();
+                    let frames = stream.frames() as u64;
+                    let expected = stream.fraction().map_or(0, |_| stream.expected_frames() as u64);
+                    let seconds = stream.seconds();
+                    let expected_secs = stream.expected_seconds();
+                    let playing = stream.is_playable();
+                    self.deck_load_progress[index].decode_progress(gen, frames, expected);
+                    if became_playable {
+                        self.deck_incoming.insert((index, gen), DeckIncoming::Stream(table));
+                        if self.deck_playable(cx, deck, gen, expected_secs) {
+                            log!(
+                                "deck {deck:?}: playable at {} of ~{} while decoding",
+                                format_duration(seconds),
+                                format_duration(expected_secs)
+                            );
+                        }
+                    } else if playing {
+                        self.mixer.grow_deck_stream(deck, table);
+                        self.decks.track_grew(deck, gen, expected_secs);
+                    }
+                    wave_touched[index] = true;
                 }
                 DecodeDone::Preview { gen, result } => {
                     // A stale preview (the operator moved on) lands here
@@ -16742,70 +18539,34 @@ p2 {}
                         {
                             self.web_status_error.clear();
                         }
-                        let seconds = pcm.seconds();
-                        // Level-match trim, measured while the samples are
-                        // in hand: RMS over the whole track against a target
-                        // that leaves headroom for the loud ones. A quiet
-                        // master comes up, a hot one comes down, and the
-                        // fader still reads what the operator set — the trim
-                        // only rides along while NORMALISE is latched.
-                        let trim = Self::level_trim(&pcm);
-                        self.deck_incoming.insert((deck.index(), gen), (pcm, peaks));
-                        let cmds = self.decks.track_ready(deck, gen, seconds);
-                        let trim_cmds = self.decks.set_norm_gain(deck, trim);
-                        let installed = !cmds.is_empty();
-                        if !installed {
-                            self.deck_incoming.remove(&(deck.index(), gen));
-                        } else {
-                            self.deck_load_progress[deck.index()].decoded(gen);
-                        }
-                        self.run_deck_cmds(cx, cmds);
-                        self.run_deck_cmds(cx, trim_cmds);
-                        if installed {
-                            log!("deck {deck:?}: ready {}", format_duration(seconds));
-                            // Marks saved for this track come back with it,
-                            // and so does the red marker: a track starts
-                            // where the operator left it, not at the top.
-                            if let Some(item) = self.decks.deck(deck).item().cloned() {
-                                let marks = Self::load_loop_marks(&item);
-                                if !marks.is_empty() {
-                                    self.decks.restore_loop_slots(deck, marks);
-                                }
-                                if let Some(cue) = Self::load_track_cue(&item) {
-                                    self.decks.set_cue(deck, cue);
-                                    let cmds = self.decks.seek_secs(deck, cue);
-                                    self.run_deck_cmds(cx, cmds);
-                                }
-                                let (found, scores) = Self::load_found_loops(&item);
-                                self.deck_found_scores[deck.index()] = scores;
-                                self.decks.install_found_loops(deck, found);
-                                // AUTO FIND: a record nobody has scanned
-                                // scans itself. The FILE's absence is the
-                                // test, not an empty list — an empty file
-                                // means the operator cleared the marks on
-                                // purpose, and bringing them back would undo
-                                // a deliberate act. Parking is safe HERE
-                                // where it is not inside `start_loop_scan`
-                                // itself: InstallTrack's unconditional clear
-                                // of scan_pending has already run by the
-                                // time this block does.
-                                if self.scan_automatic
-                                    && !Self::found_loops_path(&item).exists()
-                                {
-                                    let config = self.scan_settings().to_config();
-                                    self.start_loop_scan(deck, config);
-                                }
+                        let index = deck.index();
+                        // The stream opened the deck already — the usual
+                        // case. Otherwise (a broken stream, a decoder that
+                        // cut nothing) the file installs whole, as it did
+                        // before streaming existed.
+                        let opened = self.decks.deck(deck).load_gen == gen
+                            && self.decks.deck(deck).is_loaded()
+                            && self.deck_stream[index]
+                                .as_ref()
+                                .is_some_and(|stream| stream.gen == gen && stream.is_playable());
+                        if !opened {
+                            let seconds = pcm.seconds();
+                            self.deck_incoming
+                                .insert((index, gen), DeckIncoming::Whole(pcm.clone(), peaks.clone()));
+                            if !self.deck_playable(cx, deck, gen, seconds) {
+                                continue;
                             }
-                            // AUTOPLAY: the pick that armed this deck is
-                            // now something it can actually play.
-                            self.spend_autoplay(cx, deck);
                         }
-                        self.sync_deck_controls(cx);
+                        self.deck_decoded(cx, deck, gen, pcm, peaks);
+                        wave_touched[index] = true;
                     }
                     Err(error) => {
                         log!("deck-load: failed deck={deck:?} gen={gen}: {error}");
                         self.set_web_status_error(format!("music decode: {error}"));
                         self.deck_load_progress[deck.index()].failed(gen, error.clone());
+                        // A deck that opened on a lead and then lost its
+                        // decoder keeps what it has; one that never opened
+                        // fails as before.
                         let cmds = self.decks.track_failed(deck, gen, error);
                         self.run_deck_cmds(cx, cmds);
                     }
@@ -16827,7 +18588,7 @@ p2 {}
                     }
                     match result {
                         Ok(prepared) => {
-                            let mesh = self.ui.widget(cx, ids!(mesh_program));
+                            let mesh = self.ui.widget(cx, self.output_mesh_path());
                             let borrow = mesh.borrow_mut::<mesh_view::VjMeshView>();
                             if let Some(mut view) = borrow {
                                 view.set_prepared(cx, prepared);
@@ -17117,6 +18878,11 @@ p2 {}
                 DecodeDone::ThumbDropped { .. } | DecodeDone::ThumbTimedOut { .. } => {}
             }
         }
+        for deck in [DeckId::A, DeckId::B] {
+            if wave_touched[deck.index()] {
+                self.refresh_stream_wave(cx, deck);
+            }
+        }
         if !self.decode_backlog.is_empty() {
             self.thumb_stats.budget_hits += 1;
             self.decode_pump = cx.new_next_frame();
@@ -17311,7 +19077,7 @@ p2 {}
         // POLITENESS: while a set is running — the program window on a
         // screen, or a deck playing — the renderer keeps to a single lane.
         // At boot, idle, or a bulk regen it opens up to the full bank.
-        let performing = self.output_window_lifecycle == OutputWindowLifecycle::Open
+        let performing = self.output_window_lifecycle.is_up()
             || self.decks.deck(DeckId::A).playing
             || self.decks.deck(DeckId::B).playing;
         // Same verdict, every fill lane: the render bank below, the catalog
@@ -17435,11 +19201,53 @@ p2 {}
         if let Some(mut thumbs) = widget.borrow_mut::<fx_thumbs::VjFxThumbs>() {
             thumbs.set_priority(&visible, open_tab);
         }
+        let mut seen: HashSet<AssetId> = HashSet::new();
+        let mut cache_probes = 0usize;
+        // THE PREFABS FIRST: pads on screen whose tile is a bundled head
+        // without a catalog row — the whole library on the web, where the
+        // static catalog lists no effects; a still-resolving boot natively.
+        // They never reach the catalog loop below, and the bundled feed
+        // asks for each sheet exactly ONCE, so a decode the thumb lane
+        // dropped (its 64-deep queue under a 260-sheet cache burst, or a
+        // scroll's epoch change) stayed a spinner for the session. This
+        // pass is the heal: what is on screen asks for its cached sheet
+        // again, through the same head identity the bank and cache use.
+        let mut visible_head_aliases: Vec<String> =
+            self.video_pad_pending.iter().flatten().cloned().collect();
+        visible_head_aliases.extend(self.video_pad_assets.iter().flatten().filter_map(|asset| {
+            self.fx_heads.iter().find_map(|(alias, (head_asset, _, _, _))| {
+                (head_asset == asset).then(|| alias.clone())
+            })
+        }));
+        for alias in visible_head_aliases {
+            let Some((asset, revision, transition, source)) =
+                self.fx_heads.get(&alias).cloned()
+            else {
+                continue;
+            };
+            if !seen.insert(asset) {
+                continue;
+            }
+            if self.request_fx_head(
+                cx,
+                &alias,
+                asset,
+                revision,
+                transition,
+                source,
+                now,
+                render_disabled,
+            ) {
+                cache_probes += 1;
+                if cache_probes >= 16 {
+                    return;
+                }
+            }
+        }
         // Candidates: the pads on screen lead, the rest of the loaded
         // catalog window follows.
         let mut order: Vec<AssetId> = self.video_pad_assets.iter().flatten().copied().collect();
         order.extend(self.video_model.tiles().iter().map(|t| t.asset));
-        let mut seen: HashSet<AssetId> = HashSet::new();
         for asset in order {
             if !seen.insert(asset) {
                 continue;
@@ -17448,22 +19256,48 @@ p2 {}
             if tile.kind != Some(AssetKind::VjEffect) {
                 continue;
             }
-            let Some(revision) = tile.revision else { continue };
-            #[cfg(target_arch = "wasm32")]
-            if tile
-                .alias
-                .as_ref()
-                .is_some_and(|alias| self.fx_heads.contains_key(alias))
-            {
-                // Bundled web documents use the compiled source-digest feed
-                // above. The static catalog's asset revision is a second
-                // identity for the same immutable source; rendering it too
-                // would duplicate every browser-local cache entry.
-                continue;
-            }
+            let tile_alias = tile.alias.clone();
+            let tile_revision = tile.revision;
             // A revision whose picture already declares cells has a REAL
             // animated thumbnail (store-side or ours) — nothing to do.
-            if tile.thumb.as_ref().is_some_and(|t| t.anim.is_some()) {
+            let tile_has_cells = tile.thumb.as_ref().is_some_and(|t| t.anim.is_some());
+            let tile_media = tile.media.clone();
+            // THE IDENTITY the bank and the cache use. A bundled document is
+            // keyed by its HEAD (the bundled feed above): natively that is
+            // the catalog revision; on the web the static catalog carries a
+            // second revision for the same immutable source, and a sheet
+            // rendered under it would duplicate every browser-local entry.
+            // Resolving through the head — instead of skipping bundled
+            // tiles on the web, as this loop used to — keeps the prefab
+            // heal above and the catalog row on one path.
+            let head = tile_alias
+                .as_deref()
+                .and_then(|alias| self.fx_heads.get(alias).cloned());
+            if let Some((asset, revision, transition, source)) = head {
+                if !seen.insert(asset) {
+                    continue;
+                }
+                let alias = tile_alias.clone().unwrap_or_default();
+                if self.request_fx_head(
+                    cx,
+                    &alias,
+                    asset,
+                    revision,
+                    transition,
+                    source,
+                    now,
+                    render_disabled,
+                ) {
+                    cache_probes += 1;
+                    if cache_probes >= 16 {
+                        break;
+                    }
+                }
+                continue;
+            }
+            let Some(revision) = tile_revision else { continue };
+            let transition = Self::alias_is_transition(tile_alias.as_deref());
+            if tile_has_cells {
                 continue;
             }
             if self.thumbs.contains_key(&revision) || self.thumb_anims.contains_key(&revision) {
@@ -17484,7 +19318,6 @@ p2 {}
             if held {
                 continue;
             }
-            let transition = Self::alias_is_transition(tile.alias.as_deref());
             let cache_missed = widget
                 .borrow_mut::<fx_thumbs::VjFxThumbs>()
                 .is_some_and(|mut thumbs| {
@@ -17502,8 +19335,7 @@ p2 {}
             if self.fx_source_inflight.contains(&revision) {
                 continue;
             }
-            let Some(media) = tile.media.clone() else { continue };
-            let alias = tile.alias.clone();
+            let Some(media) = tile_media else { continue };
             if media.media != MediaType::Text || media.len > media::MAX_THUMB_BYTES {
                 continue;
             }
@@ -17520,10 +19352,73 @@ p2 {}
                     .insert(id, CatPurpose::FxSource { asset, revision });
                 // LIVECODING: which FILE this revision is, so the render
                 // outcome can be written under the stem an agent edits.
-                livecode::remember(&revision.to_string(), alias.as_deref());
+                livecode::remember(&revision.to_string(), tile_alias.as_deref());
                 self.fx_source_inflight.insert(revision);
             }
         }
+    }
+
+    /// One bundled head's thumbnail request — the unit both passes of
+    /// [`Self::pump_fx_thumbs`] spend. A sheet the persistent cache holds
+    /// is read again (it lands in the decode lane through `take_results`
+    /// like any other); a missing one bakes from the compiled-in source,
+    /// no store round trip. Returns true when a cache probe was spent —
+    /// the caller meters those per tick.
+    #[allow(clippy::too_many_arguments)]
+    fn request_fx_head(
+        &mut self,
+        cx: &mut Cx,
+        alias: &str,
+        asset: AssetId,
+        revision: AssetRevisionId,
+        transition: bool,
+        source: &'static str,
+        now: f64,
+        render_disabled: bool,
+    ) -> bool {
+        if self.thumbs.contains_key(&revision) || self.thumb_anims.contains_key(&revision) {
+            return false;
+        }
+        if self
+            .fx_decode_pending
+            .get(&revision)
+            .is_some_and(|at| now - at < 3.0)
+        {
+            return false;
+        }
+        let widget = self.ui.widget(cx, ids!(fx_thumbs));
+        // Failed this session (terminal per revision), or already
+        // pending / on a lane in the bank.
+        let held = widget
+            .borrow::<fx_thumbs::VjFxThumbs>()
+            .is_some_and(|t| t.is_failed(&revision) || t.holds(&revision));
+        if held {
+            return false;
+        }
+        let cache_missed = widget
+            .borrow_mut::<fx_thumbs::VjFxThumbs>()
+            .is_some_and(|mut thumbs| thumbs.probe_cache(cx, asset, revision, transition));
+        if !cache_missed {
+            return true;
+        }
+        if render_disabled {
+            return false;
+        }
+        // `enqueue` dedupes against the pending set and the lanes.
+        if let Some(mut thumbs) = widget.borrow_mut::<fx_thumbs::VjFxThumbs>() {
+            let name = alias.strip_prefix("vjfx/").unwrap_or(alias);
+            thumbs.enqueue(
+                cx,
+                fx_thumbs::FxThumbJob {
+                    asset,
+                    revision,
+                    title: crate::effects::seed::preset_title(name, source),
+                    source: source.to_string(),
+                    transition,
+                },
+            );
+        }
+        false
     }
 
     // ---- UI sync ------------------------------------------------------------
@@ -18216,14 +20111,38 @@ p2 {}
     }
 
     fn handle_output_window_event(&mut self, cx: &mut Cx, event: &Event) {
+        let main_id = self.ui.window(cx, ids!(main_window)).window_id();
         // Closing the MAIN window is closing the app: the render/output
         // window must not survive it and keep the event loop alive — that
         // left a headless output window on screen blocking shutdown.
         if let Event::WindowClosed(ev) = event {
-            if Some(ev.window_id) == self.ui.window(cx, ids!(main_window)).window_id() {
+            if Some(ev.window_id) == main_id {
                 self.close_output_window(cx);
                 cx.quit();
                 return;
+            }
+        }
+        if self.output_window_lifecycle == OutputWindowLifecycle::InPage {
+            match event {
+                // Esc leaves the in-page output, the way it leaves a
+                // browser's fullscreen.
+                Event::KeyDown(ke) if ke.key_code == KeyCode::Escape => {
+                    self.close_output_window(cx);
+                    return;
+                }
+                // The browser left fullscreen by itself (its own Esc never
+                // reaches the page): the layer follows it down. Only a real
+                // fullscreen→windowed edge counts — a refused request never
+                // went fullscreen, and the layer stays up without it.
+                Event::WindowGeomChange(ev)
+                    if Some(ev.window_id) == main_id
+                        && ev.old_geom.is_fullscreen
+                        && !ev.new_geom.is_fullscreen =>
+                {
+                    self.close_output_window(cx);
+                    return;
+                }
+                _ => {}
             }
         }
         let Some(output_id) = self.ui.window(cx, ids!(output_window)).window_id() else {
@@ -18255,16 +20174,28 @@ p2 {}
         }
     }
 
-    fn open_output_window(&mut self, cx: &mut Cx) -> Result<(), ClientError> {
-        output_window_available()?;
-        let output = self.ui.window(cx, ids!(output_window));
-        let Some(window_id) = output.window_id() else {
-            return Ok(());
-        };
+    fn open_output_window(&mut self, cx: &mut Cx) {
         let command = output_window_command(
             self.output_window_lifecycle,
             matches!(cx.os_type(), OsType::Macos),
+            self.output_in_page,
         );
+        if command == Some(OutputWindowCommand::ShowInPage) {
+            self.ui.view(cx, ids!(output_layer)).set_visible(cx, true);
+            self.output_window_lifecycle = OutputWindowLifecycle::InPage;
+            // The projector case on the web: the browser's own fullscreen,
+            // which the viewer leaves with Esc as browsers do — and the
+            // layer follows (`handle_output_window_event`).
+            self.ui.window(cx, ids!(main_window)).fullscreen(cx);
+            self.sync_output_button(cx);
+            self.sync_mesh_liveness(cx);
+            self.ui.redraw(cx);
+            return;
+        }
+        let output = self.ui.window(cx, ids!(output_window));
+        let Some(window_id) = output.window_id() else {
+            return;
+        };
         match command {
             Some(OutputWindowCommand::Recreate) => {
                 // A closed native surface leaves its stable WindowId, widget
@@ -18289,49 +20220,71 @@ p2 {}
                     makepad_widgets::makepad_platform::CxOsOp::RestoreWindow(window_id),
                 );
             }
-            None => {}
+            Some(OutputWindowCommand::ShowInPage) | None => {}
         }
-        Ok(())
     }
 
-    /// Put the output window away. The widget tree, its render pass and the
-    /// stable `WindowId` all survive a closed native surface — that is what
+    /// Put the output away. The widget tree, its render pass and the stable
+    /// `WindowId` all survive a closed native surface — that is what
     /// `OutputWindowCommand::Recreate` reopens — so this is symmetric with
-    /// `open_output_window` and never rebuilds the Root.
+    /// `open_output_window` and never rebuilds the Root. The in-page layer
+    /// just hides, and gives the browser's fullscreen back if it took it.
     fn close_output_window(&mut self, cx: &mut Cx) {
-        if output_window_available().is_err()
-            || self.output_window_lifecycle == OutputWindowLifecycle::Closed
-        {
-            self.output_window_lifecycle = OutputWindowLifecycle::Closed;
-            self.sync_output_button(cx);
-            return;
-        }
-        let output = self.ui.window(cx, ids!(output_window));
-        let Some(window_id) = output.window_id() else {
-            return;
-        };
-        if cx.windows.is_valid(window_id) {
-            cx.push_unique_platform_op(
-                makepad_widgets::makepad_platform::CxOsOp::CloseWindow(window_id),
-            );
+        match self.output_window_lifecycle {
+            OutputWindowLifecycle::Closed => {}
+            OutputWindowLifecycle::InPage => {
+                self.ui.view(cx, ids!(output_layer)).set_visible(cx, false);
+                let main = self.ui.window(cx, ids!(main_window));
+                if main.is_fullscreen(cx) {
+                    main.disable_fullscreen(cx);
+                }
+            }
+            OutputWindowLifecycle::Opening | OutputWindowLifecycle::Open => {
+                let output = self.ui.window(cx, ids!(output_window));
+                if let Some(window_id) = output.window_id() {
+                    if cx.windows.is_valid(window_id) {
+                        cx.push_unique_platform_op(
+                            makepad_widgets::makepad_platform::CxOsOp::CloseWindow(window_id),
+                        );
+                    }
+                }
+            }
         }
         self.output_window_lifecycle = OutputWindowLifecycle::Closed;
         self.sync_output_button(cx);
+        self.sync_mesh_liveness(cx);
+        self.ui.redraw(cx);
     }
 
-    /// The OUTPUT button wears its state: lit while the window is up, plain
-    /// when it is not — including when the operator closed it with the
-    /// window's own close box, which is why this is driven from the
-    /// lifecycle rather than from the click.
+    /// The OUTPUT button wears its state: lit while the output is up, plain
+    /// when it is not — including when the operator closed the window with
+    /// its own close box, or left the layer with Esc, which is why this is
+    /// driven from the lifecycle rather than from the click. Its tip names
+    /// the mode this platform gives the output, and the way back.
     fn sync_output_button(&mut self, cx: &mut Cx) {
-        let open = matches!(self.output_window_lifecycle, OutputWindowLifecycle::Open);
-        // The button's COLOR is the whole story: orange = window up,
+        let up = self.output_window_lifecycle.is_up();
+        // The button's COLOR is the whole story: orange = output up,
         // black = off — the app's standard on/off language.
-        self.paint_icon_button(cx, ids!(open_output), open);
+        self.paint_icon_button(cx, ids!(open_output), up);
+        let text = match (self.output_in_page, up) {
+            (false, false) => "Open output window",
+            (false, true) => "Close output window",
+            (true, false) => "Output layer (full screen)",
+            (true, true) => "Leave output layer (Esc)",
+        };
+        if let Some(mut tip) = self
+            .ui
+            .widget(cx, ids!(open_output_tip))
+            .borrow_mut::<makepad_widgets::tip::Tip>()
+        {
+            tip.text = text.to_string();
+        }
     }
 
     fn show_output_page(&mut self, cx: &mut Cx, page: LiveId) {
-        self.ui.page_flip(cx, ids!(out_pages)).set_active_page(cx, page);
+        self.ui
+            .page_flip(cx, self.output_pages_path())
+            .set_active_page(cx, page);
         self.out_page = page;
         self.sync_mesh_liveness(cx);
         self.ui.redraw(cx);
@@ -18641,7 +20594,7 @@ p2 {}
         let Some(item) = item else { return };
         let Some(key) = self.preview_key_at(list, index) else { return };
         // One preview at a time: the newcomer replaces whatever played.
-        let dropped = self.mixer.clear_preview();
+        self.mixer.clear_preview();
         self.phones_preview_gen += 1;
         let gen = self.phones_preview_gen;
         self.preview_active = Some(key);
@@ -18698,12 +20651,10 @@ p2 {}
             }
         }
         self.sync_phones_player_ui(cx);
-        // The replaced track's buffer dies here, outside the mixer lock.
-        drop(dropped);
     }
 
     fn stop_preview(&mut self, cx: &mut Cx) {
-        let dropped = self.mixer.clear_preview();
+        self.mixer.clear_preview();
         // In-flight decodes for the old preview land stale and die.
         self.phones_preview_gen += 1;
         self.preview_active = None;
@@ -18712,7 +20663,6 @@ p2 {}
         self.preview_title.clear();
         self.preview_peaks = Arc::new(Vec::new());
         self.sync_phones_player_ui(cx);
-        drop(dropped);
     }
 
     /// `m:ss.t / m:ss.t` — tenths, the mockup's clock.
@@ -19106,9 +21056,9 @@ p2 {}
         }
     }
 
-    /// The AUTO DJ panel survives restarts: brain, style, guard, snap and
-    /// the queue's repeat/shuffle. The ON latch is deliberately absent —
-    /// an armed action boots off, always.
+    /// The AUTO DJ panel survives restarts: brain, style, guard, snap,
+    /// repeat/shuffle and the stem-separation placement. The ON latch is
+    /// deliberately absent — an armed action boots off, always.
     fn save_autopilot_settings(&self) {
         let brain = match self.autopilot.brain {
             MixBrain::Fade => 0,
@@ -19127,6 +21077,7 @@ p2 {}
 {}
 {}
 {}
+{}
 ",
             brain,
             style,
@@ -19134,6 +21085,11 @@ p2 {}
             u8::from(self.autopilot.phrase_snap),
             u8::from(self.decks.repeat),
             u8::from(self.decks.shuffle),
+            match self.stem_separation {
+                StemSeparation::Off => 0,
+                StemSeparation::AiHub => 1,
+                StemSeparation::Local => 2,
+            },
         );
         let path = Self::autopilot_settings_path();
         if let Some(dir) = path.parent() {
@@ -19167,6 +21123,11 @@ p2 {}
         self.autopilot.phrase_snap = next(1) == 1;
         self.decks.repeat = next(0) == 1;
         self.decks.shuffle = next(0) == 1;
+        self.stem_separation = match next(1) {
+            0 => StemSeparation::Off,
+            2 => StemSeparation::Local,
+            _ => StemSeparation::AiHub,
+        };
     }
 
     /// Push the loaded settings into the panel's controls — the persisted
@@ -19184,6 +21145,14 @@ p2 {}
         self.ui
             .check_box(cx, ids!(auto_style))
             .set_active(cx, body, Animate::No);
+        let separation = match self.stem_separation {
+            StemSeparation::Off => 0,
+            StemSeparation::AiHub => 1,
+            StemSeparation::Local => 2,
+        };
+        self.ui
+            .drop_down(cx, ids!(stem_separation))
+            .set_selected_item(cx, separation);
     }
 
     /// The gen panel survives restarts: pipe, length, CONT arm and the
@@ -20153,6 +22122,10 @@ p2 {}
         // Everything below reads the SAME resolved clock the fades, the
         // visual PLL and the loop rate-fit run on.
         let clock = self.current_beat();
+        if let Some(beat) = clock.as_ref() {
+            self.sync_synth_clock(beat);
+        }
+        self.sync_synth_runtime_ui(cx);
         // The NOMINAL tempo, not the effective one: a correction in flight
         // is a transient, and a BPM readout that swings to 280 while the
         // clock catches half a beat is a lie about the music.
@@ -20164,6 +22137,10 @@ p2 {}
         } else {
             self.free_bpm
         };
+        self.ui.label(cx, ids!(synth_clock_status)).set_text(
+            cx,
+            &format!("{shown_bpm:.1} · {lock_text}"),
+        );
         if let Some(mut field) =
             self.ui.widget(cx, ids!(bpm_field)).borrow_mut::<ValueInput>()
         {
@@ -20345,10 +22322,8 @@ p2 {}
         self.autopilot.shape_ready(gen, shape);
         self.autopilot.changes_ready(gen, analysis.changes_secs.clone());
         self.deck_analysis[index] = Some(analysis);
-        if derive_splat
-            && self.deck_stem_coverage[index].is_some_and(|(_, complete)| complete)
-        {
-            self.submit_splat_refinement(deck, gen);
+        if self.deck_stem_coverage[index].is_some_and(|(_, complete)| complete) {
+            self.submit_splat_refinement(cx, deck, gen);
         }
         match self.scan_pending[index].take() {
             Some((pending_gen, config)) if pending_gen == gen => {
@@ -20659,8 +22634,8 @@ p2 {}
     }
 
     /// A side-channel file is not coming. Missing lyrics only cost the words;
-    /// a missing stem costs the whole set, and the deck separates locally
-    /// after all.
+    /// a missing stem costs the whole set, and the deck returns to the
+    /// operator-selected separation path.
     fn side_channel_failed(&mut self, deck: DeckId, gen: u64, stem: bool, error: &str) {
         if !self.side_channels_armed(deck, gen) {
             return;
@@ -20676,7 +22651,7 @@ p2 {}
             return;
         }
         self.deck_side_channels[index] = None;
-        log!("deck {deck:?}: side-channel stem fetch failed ({error}); separating locally");
+        log!("deck {deck:?}: side-channel stem fetch failed ({error})");
         self.deck_load_progress[index].stems_unavailable(gen);
         self.fall_back_to_separation(deck, gen);
     }
@@ -20706,6 +22681,156 @@ p2 {}
         self.sidechan.submit(job);
     }
 
+    /// The deck opens on what has arrived: the engine installs whatever is
+    /// in `deck_incoming` for `(deck, gen)` — the chunk table of a track
+    /// still decoding, or a file that landed whole — and the transport,
+    /// the marks and the autoplay all go live. False when the load was
+    /// superseded and nothing installed.
+    fn deck_playable(&mut self, cx: &mut Cx, deck: DeckId, gen: u64, duration_secs: f64) -> bool {
+        let index = deck.index();
+        let cmds = self.decks.track_ready(deck, gen, duration_secs);
+        if cmds.is_empty() {
+            self.deck_incoming.remove(&(index, gen));
+            return false;
+        }
+        self.run_deck_cmds(cx, cmds);
+        self.deck_load_progress[index].playable(gen);
+        // Marks saved for this track come back with it, and so does the
+        // red marker: a track starts where the operator left it, not at
+        // the top.
+        if let Some(item) = self.decks.deck(deck).item().cloned() {
+            let marks = Self::load_loop_marks(&item);
+            if !marks.is_empty() {
+                self.decks.restore_loop_slots(deck, marks);
+            }
+            if let Some(cue) = Self::load_track_cue(&item) {
+                self.decks.set_cue(deck, cue);
+                let cmds = self.decks.seek_secs(deck, cue);
+                self.run_deck_cmds(cx, cmds);
+            }
+            let (found, scores) = Self::load_found_loops(&item);
+            self.deck_found_scores[index] = scores;
+            self.decks.install_found_loops(deck, found);
+        }
+        // AUTOPLAY: the pick that armed this deck is now something it can
+        // actually play.
+        self.spend_autoplay(cx, deck);
+        self.sync_deck_controls(cx);
+        true
+    }
+
+    /// The whole file is in. The mixer swaps it in for the chunk table at
+    /// the playhead, and everything that needs the track entire starts:
+    /// the level trim, the analysis, the stems, the automatic loop scan.
+    fn deck_decoded(
+        &mut self,
+        cx: &mut Cx,
+        deck: DeckId,
+        gen: u64,
+        pcm: Arc<TrackPcm>,
+        peaks: Vec<(f32, f32)>,
+    ) {
+        let index = deck.index();
+        let seconds = pcm.seconds();
+        self.mixer.complete_deck(deck, pcm.clone());
+        self.deck_tracks[index] = Some((pcm.clone(), peaks));
+        self.decks.track_grew(deck, gen, seconds);
+        if let Some(stream) = self.deck_stream[index].as_mut().filter(|stream| stream.gen == gen) {
+            // The audio is on the deck whole now; the hops stay for the
+            // picture until the analysis replaces it.
+            stream.release_audio();
+        }
+        // Level-match trim, measured while the samples are in hand: RMS
+        // over the whole track against a target that leaves headroom for
+        // the loud ones. A quiet master comes up, a hot one comes down,
+        // and the fader still reads what the operator set — the trim only
+        // rides along while NORMALISE is latched.
+        let trim = Self::level_trim(&pcm);
+        let cmds = self.decks.set_norm_gain(deck, trim);
+        self.run_deck_cmds(cx, cmds);
+        self.deck_load_progress[index].decoded(gen);
+        log!("deck {deck:?}: decoded {}", format_duration(seconds));
+        #[cfg(not(target_arch = "wasm32"))]
+        self.submit_analysis(deck, pcm.clone());
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.try_install_demo_analysis(cx, deck, gen);
+            self.try_install_demo_splat(cx, deck, gen);
+        }
+        // Fetch or compute, decided when the track was clicked: a deck
+        // whose side-channel fetch is armed for this generation never
+        // loads the separation model at all. The fetch's own failure paths
+        // return to this same choice.
+        let mode = self.decks.deck(deck).stems_mode;
+        let separation = separation_action(
+            self.stem_separation,
+            self.side_channels_armed(deck, gen),
+            self.stem_hub_reachable(),
+        );
+        if !mode.shows() {
+            // Off: this track never costs a separation, and nothing of it
+            // would be heard anyway.
+            self.deck_stem_status[index] = String::new();
+            self.deck_stem_busy[index] = None;
+        } else if separation == SeparationAction::SideChannel {
+            self.deck_stem_status[index] = "stems: fetching…".to_string();
+            self.deck_stem_busy[index] = Some(true);
+            self.try_start_side_channels(deck, gen);
+        } else if mode.computes() {
+            self.submit_separation_action(deck, pcm, separation);
+        } else {
+            // Cached: a fetch of work already done is welcome, starting
+            // the machine is not.
+            self.deck_stem_status[index] = String::new();
+            self.deck_stem_busy[index] = None;
+        }
+        // AUTO FIND: a record nobody has scanned scans itself. The FILE's
+        // absence is the test, not an empty list — an empty file means the
+        // operator cleared the marks on purpose, and bringing them back
+        // would undo a deliberate act. Parking is safe HERE where it is
+        // not inside `start_loop_scan` itself: InstallTrack's unconditional
+        // clear of scan_pending has already run by the time this does.
+        if let Some(item) = self.decks.deck(deck).item().cloned() {
+            if self.scan_automatic && !Self::found_loops_path(&item).exists() {
+                let config = self.scan_settings().to_config();
+                self.start_loop_scan(deck, config);
+            }
+        }
+        self.sync_deck_controls(cx);
+    }
+
+    /// Redraw a deck's waveform from the chunks decoded so far — the
+    /// provisional picture, scaled to the length the decoder expects so it
+    /// fills in from the left. The analysis's tiles replace it when they
+    /// land; until then (or for good, where no analysis runs) this is the
+    /// wave.
+    fn refresh_stream_wave(&mut self, cx: &mut Cx, deck: DeckId) {
+        let index = deck.index();
+        if self.deck_analysis[index].is_some() {
+            return;
+        }
+        let Some(stream) = self.deck_stream[index].as_ref() else { return };
+        if self.decks.deck(deck).load_gen != stream.gen {
+            return;
+        }
+        // A native decode lands a chunk every few tens of milliseconds; a
+        // rebuild over every hop so far that often would own the UI thread
+        // of a long set. A few pictures a second is all the eye takes, and
+        // the end of the stream always draws.
+        const STREAM_WAVE_INTERVAL_SECS: f64 = 0.2;
+        let now = cx.seconds_since_app_start();
+        if !stream.is_complete()
+            && self.deck_zoom_tex[index].is_some()
+            && now - self.deck_stream_wave_at[index] < STREAM_WAVE_INTERVAL_SECS
+        {
+            return;
+        }
+        self.deck_stream_wave_at[index] = now;
+        let tiles = wave_analysis::provisional_tiles(&stream.hops, stream.wave_columns());
+        self.deck_zoom_tex[index] = crate::music_view::zoom_texture(cx, &tiles);
+        self.push_deck_wave(cx, deck);
+    }
+
     /// Whether `deck_tracks` holds the audio of THIS load generation — the
     /// deck holds the previous track's PCM until the new one installs.
     fn deck_track_is(&self, deck: DeckId, gen: u64) -> bool {
@@ -20713,9 +22838,9 @@ p2 {}
         state.load_gen == gen && state.is_loaded() && self.deck_tracks[deck.index()].is_some()
     }
 
-    /// Separate locally after all: the fetched side-channel never arrived or
-    /// would not decode. When the track has not installed yet there is
-    /// nothing to do here — the arming is gone, so `InstallTrack` separates.
+    /// Use the operator-selected separation path after a fetched side-channel
+    /// did not arrive or decode. When the track has not installed yet there
+    /// is nothing to do here — `InstallTrack` makes the same decision later.
     fn fall_back_to_separation(&mut self, deck: DeckId, gen: u64) {
         if !self.deck_track_is(deck, gen) {
             return;
@@ -20728,32 +22853,69 @@ p2 {}
     /// Ask the separator for this deck's stems, starting where the
     /// playhead is so the knobs go live where they are needed first.
     fn submit_separation(&mut self, deck: DeckId, pcm: Arc<TrackPcm>) {
-        let capabilities = self
-            .up
-            .as_ref()
-            .map(|up| up.capabilities)
-            .unwrap_or_default();
-        if !crate::music_import_ui::stems_may_run(
-            capabilities,
-            self.decks.deck(deck).stems_mode,
-        ) {
-            self.deck_stem_status[deck.index()] = String::new();
+        if !self.decks.deck(deck).stems_mode.computes() {
             self.deck_stem_busy[deck.index()] = None;
             return;
+        }
+        let action = separation_action(
+            self.stem_separation,
+            false,
+            self.stem_hub_reachable(),
+        );
+        self.submit_separation_action(deck, pcm, action);
+    }
+
+    fn submit_separation_action(
+        &mut self,
+        deck: DeckId,
+        pcm: Arc<TrackPcm>,
+        action: SeparationAction,
+    ) {
+        match action {
+            SeparationAction::Off => {
+                log!("deck {deck:?}: stems: separation off");
+                self.deck_stem_status[deck.index()] = "stems: separation off".to_string();
+                self.deck_stem_busy[deck.index()] = None;
+                self.deck_load_progress[deck.index()]
+                    .stems_unavailable(self.decks.deck(deck).load_gen);
+                return;
+            }
+            SeparationAction::Unavailable => {
+                log!("deck {deck:?}: stems: unavailable");
+                self.deck_stem_status[deck.index()] = "stems: unavailable".to_string();
+                self.deck_stem_busy[deck.index()] = Some(false);
+                self.deck_load_progress[deck.index()]
+                    .stems_unavailable(self.decks.deck(deck).load_gen);
+                return;
+            }
+            SeparationAction::Hub | SeparationAction::Local => {}
+            SeparationAction::SideChannel => unreachable!("side-channel handled before submit"),
         }
         let state = self.decks.deck(deck);
         let Some(item) = state.item() else { return };
         let source = self.local_by_asset.get(&item.asset).cloned();
         let (position, _duration, _playing) = self.mixer.deck_position(deck);
-        self.deck_stem_status[deck.index()] = "stems: queued".to_string();
+        self.deck_stem_status[deck.index()] = match action {
+            SeparationAction::Hub => "stems: queued on hub".to_string(),
+            SeparationAction::Local => "stems: queued locally".to_string(),
+            _ => unreachable!(),
+        };
         self.deck_stem_busy[deck.index()] = Some(true);
-        self.stems.submit(StemsJob {
+        let job = StemsJob {
             deck,
             gen: state.load_gen,
             pcm,
             source,
             start_secs: position,
-        });
+        };
+        match action {
+            SeparationAction::Hub => self.stems.submit_hub(job),
+            SeparationAction::Local => {
+                log!("deck {deck:?}: stems locally");
+                self.stems.submit_local(job);
+            }
+            _ => unreachable!(),
+        }
     }
 
     // ---- first-use model install (stem splitter + whisper) ----
@@ -20928,7 +23090,10 @@ p2 {}
             return;
         }
         self.model_install_note = "models: starting download…".to_string();
-        self.model_install = Some(models::start_install(missing));
+        self.model_install = Some(models::start_install(
+            missing,
+            self.task_pool.clone().expect("thread workers are not started"),
+        ));
         self.refresh_models_row(cx);
     }
 
@@ -21070,9 +23235,6 @@ p2 {}
     /// Start warming the next queued track, if this is a moment to do it.
     /// Cheap when it is not: two array reads and a queue peek.
     fn pump_prefetch(&mut self) {
-        if !self.store_ai_available() {
-            return;
-        }
         if !self.prefetch.may_start(Instant::now()) {
             return;
         }
@@ -21082,6 +23244,24 @@ p2 {}
         let Some(item) = self.decks.queue().first().cloned() else { return };
         if self.prefetch.done.contains(&item.asset) {
             return;
+        }
+        let action = separation_action(
+            self.stem_separation,
+            item.side.stems.is_some(),
+            self.stem_hub_reachable(),
+        );
+        match action {
+            // Nothing to warm: the side-channel rides with the real load.
+            SeparationAction::SideChannel => {
+                self.prefetch.asset = Some(item.asset);
+                self.prefetch_release(true);
+                return;
+            }
+            SeparationAction::Hub | SeparationAction::Local => {}
+            SeparationAction::Off | SeparationAction::Unavailable => {
+                self.prefetch_release(false);
+                return;
+            }
         }
         // A file on this machine decodes straight off disk, exactly as a
         // deck load of the same track would.
@@ -21138,8 +23318,7 @@ p2 {}
         self.prefetch.release(finished, Instant::now());
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    fn submit_splat_refinement(&mut self, deck: DeckId, gen: u64) {
+    fn submit_splat_refinement(&mut self, cx: &Cx, deck: DeckId, gen: u64) {
         let index = deck.index();
         if self.deck_splat_refining[index] == Some(gen) {
             return;
@@ -21149,15 +23328,13 @@ p2 {}
             self.deck_tracks[index].clone(),
             self.deck_analysis[index].clone(),
         ) {
-            if self.splat_refine.submit(deck, gen, stems, pcm, analysis) {
+            if self
+                .splat_refine
+                .submit(cx.task_pool(), deck, gen, stems, pcm, analysis)
+            {
                 self.deck_splat_refining[index] = Some(gen);
             }
         }
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn submit_splat_refinement(&mut self, _deck: DeckId, _gen: u64) {
-        // Static web sessions only consume the prebuilt DjLoopSplat role.
     }
 
     fn pump_stems(&mut self, cx: &mut Cx) {
@@ -21174,9 +23351,9 @@ p2 {}
                 self.run_deck_cmds(cx, cmds);
             }
         }
-        // Two sources, one vocabulary: the local separator and the fetched
-        // side-channel publish the same chunks and the same status lines, so
-        // everything below this point is blind to which one served the deck.
+        // Three sources, one vocabulary: hub/local separation and the fetched
+        // side-channel publish the same chunks and status lines, so everything
+        // below this point is blind to which one served the deck.
         let mut messages = self.stems.poll();
         for message in self.sidechan.poll() {
             match message {
@@ -21196,7 +23373,7 @@ p2 {}
                     }
                 }
                 SideChannelMsg::Fallback { deck, gen, reason } => {
-                    log!("deck {deck:?}: side-channel unusable ({reason}); separating locally");
+                    log!("deck {deck:?}: side-channel unusable ({reason})");
                     self.set_web_status_error(format!("music side-channel decode: {reason}"));
                     self.deck_side_channels[deck.index()] = None;
                     self.deck_load_progress[deck.index()].stems_unavailable(gen);
@@ -21224,13 +23401,14 @@ p2 {}
                     if self.decks.deck(deck).load_gen != gen {
                         continue;
                     }
+                    log!("deck {deck:?}: stems in");
                     self.deck_stem_status[deck.index()] = "stems: live".to_string();
                     self.deck_stem_busy[deck.index()] = None;
                     self.deck_load_progress[deck.index()].stems_ready(gen);
                     if self.deck_stem_coverage[deck.index()]
                         .is_some_and(|(_, complete)| complete)
                     {
-                        self.submit_splat_refinement(deck, gen);
+                        self.submit_splat_refinement(cx, deck, gen);
                     }
                 }
                 StemsMsg::Coverage { deck, gen, digest, model_frames, complete } => {
@@ -21255,7 +23433,7 @@ p2 {}
                         self.arm_stems_write_back(deck, &digest, model_frames);
                     }
                     if complete {
-                        self.submit_splat_refinement(deck, gen);
+                        self.submit_splat_refinement(cx, deck, gen);
                     }
                     // Words already in hand for this digest — the other deck
                     // played it, or an earlier load did. Hang them now: the
@@ -21460,7 +23638,7 @@ p2 {}
 
     // ---- music mode: giving the analysis back ------------------------------
 
-    /// Offer a locally separated store track's stems back to the store.
+    /// Offer a newly separated store track's stems back to the store.
     ///
     /// Everything about this is deliberately timid. It runs ONLY for a track
     /// that came from the store (a local file has no asset to attach to),
@@ -21754,19 +23932,29 @@ p2 {}
         let index = deck.index();
         let pyramid = self.deck_zoom_tex[index].clone();
         let stem_pyramid = self.deck_stem_tex[index].clone();
+        // The analysis's columns once it has answered; the streamed
+        // picture's (scaled to the expected length) before that.
         let cols = self
             .deck_analysis[index]
             .as_ref()
             .map(|analysis| analysis.tiles.zoom.len())
+            .or_else(|| {
+                self.deck_stream[index]
+                    .as_ref()
+                    .filter(|_| self.deck_zoom_tex[index].is_some())
+                    .map(media::DeckStream::wave_columns)
+            })
             .unwrap_or(0);
         let state = self.decks.deck(deck);
+        let (loop_span, loop_slot) = Self::wave_loop_overlay(state);
         let lane = WaveLane {
             pyramid,
             stem_pyramid,
             cols,
             position_secs: state.position_secs,
             grid: state.grid,
-            loop_span: state.loop_span.map(|s| (s.start_secs, s.end_secs)),
+            loop_span,
+            loop_slot,
             rate: state.rate,
             playing: state.playing,
             loaded: state.is_loaded(),
@@ -21795,6 +23983,24 @@ p2 {}
                 cols,
             );
         };
+    }
+
+    /// The large lane follows the loop-splat slot that drives the deck
+    /// picture. Ordinary deck loops use the same overlay; a saved one also
+    /// carries its one-based slot number.
+    fn wave_loop_overlay(state: &DeckState) -> (Option<(f64, f64)>, Option<u8>) {
+        if let Some((span, slot)) = state.splat.as_ref().and_then(|splat| splat.view_loop()) {
+            return (Some((span.start_secs, span.end_secs)), Some(slot));
+        }
+        let Some(span) = state.loop_span else {
+            return (state.bookmark.map(|mark| (mark, mark)), None);
+        };
+        let slot = state
+            .loop_slots
+            .iter()
+            .position(|saved| *saved == span)
+            .and_then(|slot| u8::try_from(slot + 1).ok());
+        (Some((span.start_secs, span.end_secs)), slot)
     }
 
     fn overview_path(deck: DeckId) -> &'static [LiveId] {
@@ -21853,7 +24059,7 @@ p2 {}
                     self.run_deck_cmds(cx, cmds);
                     let gen = self.decks.deck(deck).load_gen;
                     if self.deck_stem_coverage[index].is_some_and(|(_, complete)| complete) {
-                        self.submit_splat_refinement(deck, gen);
+                        self.submit_splat_refinement(cx, deck, gen);
                     }
                 }
             }
@@ -21905,6 +24111,12 @@ p2 {}
             return None;
         }
         if cols == 0 {
+            if self.deck_analysis[index].is_some() {
+                return Some((
+                    "no loop grid: beat grid too irregular".to_string(),
+                    Some(0.0),
+                ));
+            }
             #[cfg(target_arch = "wasm32")]
             {
                 let gen = self.decks.deck(deck).load_gen;
@@ -21914,22 +24126,18 @@ p2 {}
                 ) {
                     return Some(("beat-grid cache not available for this track".to_string(), Some(0.0)));
                 }
-                if self.deck_analysis[index].is_some()
-                    && matches!(
-                        self.deck_demo_splat[index],
-                        DemoCacheValue::Unavailable { gen: unavailable } if unavailable == gen
-                    )
-                {
-                    return Some(("loop-slice cache not available for this track".to_string(), Some(0.0)));
-                }
             }
-            return Some(match self.deck_analysis[index] {
-                None => ("analysing the beat grid…".to_string(), None),
-                Some(_) => ("no steady beat found — this track cannot be split into loops".to_string(), Some(0.0)),
-            });
+            return Some(("analysing the beat grid…".to_string(), None));
         }
+        // The banner is for something PENDING on the stems: a separation
+        // or a fetch in flight. Once they are in, or nothing is running —
+        // finished, never asked for, or failed (the deck's own status line
+        // carries the reason) — the grid has nothing to wait for, whatever
+        // the coverage counter got to say: a side-channel fetch never
+        // files a complete one, which is what left "stems: live" over the
+        // grid for good.
         let complete = self.deck_stem_coverage[index].is_some_and(|(_, complete)| complete);
-        if complete && self.deck_stems[index].is_some() {
+        if self.deck_stem_busy[index] != Some(true) || (complete && self.deck_stems[index].is_some()) {
             return None;
         }
         let progress = self.deck_stem_coverage[index].and_then(|(covered, _)| {
@@ -21985,6 +24193,11 @@ p2 {}
                 DeckLoad::Loaded { item } => (item.title.clone(), String::new()),
                 DeckLoad::Failed { item, error } => (item.title.clone(), error.clone()),
             };
+            let credit = state
+                .item()
+                .and_then(|item| self.music_attributions.get(&item.asset))
+                .cloned()
+                .unwrap_or_default();
             let load_failed = self.deck_load_progress[index].is_failed()
                 || matches!(&state.load, DeckLoad::Failed { .. });
             let load_visual = self.deck_load_progress[index].visual();
@@ -22021,6 +24234,7 @@ p2 {}
                 .loop_span
                 .map(|span| (span.start_secs, span.end_secs))
                 .or(state.bookmark.map(|mark| (mark, mark)));
+            let (wave_loop_span, wave_loop_slot) = Self::wave_loop_overlay(state);
             let muted = state.muted;
             let keylock = state.keylock;
             let key_shift = state.key_shift;
@@ -22042,6 +24256,19 @@ p2 {}
             let refs = std::mem::take(&mut self.music_refs.decks[index]);
             self.set_label(cx, base, &refs.title, &title);
             self.set_label(cx, base + 1, &refs.artist, &artist);
+            if self.label_cache.get(&(base + 9)) != Some(&credit.artist) {
+                self.label_cache.insert(base + 9, credit.artist.clone());
+                refs.credit_artist.set_text(cx, &credit.artist);
+            }
+            if self.label_cache.get(&(base + 10)) != Some(&credit.license) {
+                self.label_cache.insert(base + 10, credit.license.clone());
+                refs.credit_license.set_text(cx, &credit.license);
+            }
+            refs.credit_artist.set_url(&credit.source_url);
+            refs.credit_license.set_url(&credit.license_url);
+            self.ui
+                .view(cx, ids.credit)
+                .set_visible(cx, !credit.artist.is_empty() || !credit.license.is_empty());
             refs.artist.set_text_color(
                 cx,
                 Vec4f::from_u32(if load_failed { 0xe5484dff } else { 0xa6b1bdff }),
@@ -22183,7 +24410,7 @@ p2 {}
             if let Some(mut scroll) = self.music_refs.waves.borrow_mut::<VjWaveScroll>() {
                 scroll.set_position(cx, deck, position, playing, scratching);
                 scroll.set_grid(cx, deck, grid, rate);
-                scroll.set_loop_span(cx, deck, loop_span);
+                scroll.set_loop_span(cx, deck, wave_loop_span, wave_loop_slot);
                 scroll.set_stem_gain(cx, deck, stem_gains);
             };
             if let Some(mut strip) =
@@ -22544,6 +24771,7 @@ p2 {}
                 bpm: String::new(),
                 musical_key: String::new(),
                 duration: String::new(),
+                license: String::new(),
                 tags: String::new(),
                 stem: false,
                 krk: false,
@@ -22613,6 +24841,7 @@ p2 {}
                         bpm: String::new(),
                         musical_key: String::new(),
                         duration: String::new(),
+                        license: String::new(),
                         tags: path
                             .parent()
                             .map(|dir| dir.to_string_lossy().to_string())
@@ -22661,14 +24890,17 @@ p2 {}
                 TrackRowEntry {
                     key,
                     title: tile.title.clone(),
-                    artist: self
-                        .music_artists
+                    artist: self.music_attributions
                         .get(&tile.asset)
-                        .cloned()
+                        .map(|credit| credit.artist.clone())
                         .unwrap_or_default(),
                     bpm,
                     musical_key: String::new(),
                     duration,
+                    license: self.music_attributions
+                        .get(&tile.asset)
+                        .map(|credit| credit.license.clone())
+                        .unwrap_or_default(),
                     tags: tile.alias.clone().unwrap_or_default(),
                     stem,
                     krk,
@@ -22688,6 +24920,7 @@ p2 {}
                 bpm: String::new(),
                 musical_key: String::new(),
                 duration: String::new(),
+                license: String::new(),
                 tags: format!("browser local · {}", track.alias),
                 stem: false,
                 krk: false,
@@ -22736,6 +24969,7 @@ p2 {}
             }),
             MusicSort::Stem => rows.sort_by_key(|row| row.stem),
             MusicSort::Krk => rows.sort_by_key(|row| row.krk),
+            MusicSort::License => rows.sort_by(|a, b| text(&a.license, &b.license)),
             MusicSort::Tags => rows.sort_by(|a, b| text(&a.tags, &b.tags)),
         }
         if self.music_sort_desc {
@@ -23721,7 +25955,8 @@ p2 {}
             self.apply_fx_slots(cx, a, b, mix, mix_state);
         self.pump_fx_slot_tiles(cx);
         let karaoke = self.karaoke_overlay();
-        for (is_output, target) in [(true, ids!(program)), (false, ids!(preview))] {
+        let output_program = self.output_program_path();
+        for (is_output, target) in [(true, output_program), (false, &ids!(preview)[..])] {
             let widget = self.ui.widget(cx, target);
             let borrow = widget.borrow_mut::<views::VideoProgram>();
             if let Some(mut program) = borrow {
@@ -24072,6 +26307,11 @@ p2 {}
             // Take the resolved refs out for the duration: every check below
             // is a pointer deref, not a walk of the widget tree.
             let refs = std::mem::take(&mut self.music_refs.decks[deck.index()]);
+            if refs.to_start.clicked(actions) {
+                self.deck_hands_on();
+                let cmds = self.decks.seek_secs(deck, 0.0);
+                self.run_deck_cmds(cx, cmds);
+            }
             if refs.play.clicked(actions) {
                 self.deck_hands_on();
                 let cmds = self.decks.play_pause(deck);
@@ -24370,6 +26610,15 @@ p2 {}
                 _ => self.autopilot.set_brain_random(true),
             }
             self.save_autopilot_settings();
+        }
+        if let Some(index) = self.ui.drop_down(cx, ids!(stem_separation)).selected(actions) {
+            self.stem_separation = match index {
+                0 => StemSeparation::Off,
+                2 => StemSeparation::Local,
+                _ => StemSeparation::AiHub,
+            };
+            self.save_autopilot_settings();
+            self.refresh_models_row(cx);
         }
         if self.ui.button(cx, ids!(auto_vocal)).clicked(actions) {
             let on = !self.autopilot.vocal_guard;
@@ -24731,7 +26980,12 @@ p2 {}
             let duration = state.duration_secs;
             let out = self.autopilot_sung_results.tx.clone();
             self.autopilot_sung_fed[index] = Some((gen, false));
-            std::thread::spawn(move || {
+            match self
+                .autopilot_sung_results
+                .pool
+                .as_ref()
+                .expect("thread workers are not started")
+                .submit(Lane::Heavy, move || {
                 // Decimated mono of the vocals lane: ×4 costs nothing a
                 // phrase map can feel, and quarters the arithmetic.
                 let lane = &stems.lanes[crate::blend::VOCALS];
@@ -24752,7 +27006,10 @@ p2 {}
                         .collect(),
                 );
                 let _ = out.send((index, gen, map));
-            });
+            }) {
+                Ok(handle) => handle.detach(),
+                Err(error) => log!("sung-map worker unavailable: {error}"),
+            }
         }
         // Finished envelope maps, minus any whose load has moved on.
         while let Ok((index, gen, map)) = self.autopilot_sung_results.rx.try_recv() {
@@ -25272,8 +27529,8 @@ p2 {}
             media_blob: digest,
             media_len: 0,
             media: MediaType::Wav,
-            // A file on this machine has no revision on any store: it
-            // separates locally, exactly as it always has.
+            // A file on this machine has no revision on any store. Its
+            // missing stems follow the same explicit setting as store audio.
             side: TrackSideChannels::default(),
         })
     }
@@ -25322,15 +27579,32 @@ impl MatchEvent for App {
         let startup_started = Cx::monotonic_now();
         #[cfg(target_arch = "wasm32")]
         log!("startup: app setup begin");
+        // The spawner makes the app's dedicated loops (once, here); every
+        // one-shot job goes to the runtime pool, warm since Event::Startup.
+        let spawner = cx.thread_spawner();
+        let pool = cx.task_pool();
+        self.thread_spawner = Some(spawner.clone());
+        self.task_pool = Some(pool.clone());
+        self.import.set_task_pool(pool.clone());
+        self.music_import_run.set_task_pool(pool.clone());
+        self.archive.set_spawner(spawner.clone());
+        self.archive.set_task_pool(pool.clone());
+        self.pipelines.set_spawner(spawner.clone());
+        self.pipelines.set_task_pool(pool.clone());
+        self.autopilot_sung_results.set_task_pool(pool.clone());
+        self.loop_score_worker.set_task_pool(pool.clone());
+        livecode::start_worker(spawner.clone());
+        self.analysis.start(spawner.clone());
+        self.loop_scan.start(spawner.clone());
+        self.stems.start(spawner.clone());
+        self.lyrics.start(spawner.clone());
+        self.writeback.start(spawner.clone());
         self.ai_port = AiServicePort::open(cx, ai::manifest());
         self.status_text = "starting…".to_string();
-        let output_available = output_window_available().is_ok();
-        self.ui
-            .button(cx, ids!(open_output))
-            .set_enabled(cx, output_available);
-        self.ui
-            .widget(cx, ids!(open_output))
-            .set_disabled(cx, !output_available);
+        // Where the output goes on THIS platform: a second OS window, or —
+        // where the OS has one window, the web — the layer over the console.
+        self.output_in_page = cx.os_type().is_single_window();
+        self.sync_output_button(cx);
         #[cfg(target_arch = "wasm32")]
         {
             self.browser_store.start(cx);
@@ -25339,8 +27613,8 @@ impl MatchEvent for App {
                 (Cx::monotonic_now() - startup_started) * 1e3
             );
         }
-        self.decode.start(cx.thread_spawner());
-        self.sidechan.start(cx.thread_spawner());
+        self.decode.start(spawner.clone());
+        self.sidechan.start(spawner, pool);
         self.paint_lit(cx, ids!(loop_score_loop), self.loop_score_loop);
         // THE GRID IS FULL BEFORE THE FIRST FRAME. The effect library is
         // compiled in, so its art is generated here — ahead of any store,
@@ -25407,10 +27681,6 @@ impl MatchEvent for App {
         // only party with a clock, so it seeds once here.
         let seed = Cx::time_now().to_bits().max(1);
         self.decks.seed_shuffle(seed);
-        // A sync landing is computed from playheads that keep moving while
-        // the seek crosses to the audio thread — place it where the lock
-        // will be true when it arrives (UI pump + one audio block).
-        self.decks.land_lookahead_secs = 0.012;
         self.poll_timer = cx.start_interval(0.05);
         self.refresh_timer = cx.start_interval(1.0);
         self.video_loop = true;
@@ -25458,7 +27728,7 @@ impl MatchEvent for App {
                     self.run_deck_cmds(cx, cmds);
                 }
             }
-        } else if let Some(surface) = {
+        } else if let Some(mode) = {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 Self::load_ui_surface()
@@ -25469,14 +27739,24 @@ impl MatchEvent for App {
             }
         } {
             // No explicit ask (files, VJ_SURFACE): reopen where the last
-            // session closed, so shutting down on the DJ tab comes back on
-            // the DJ tab.
-            self.apc.surface = surface;
-            self.show_apc_surface(cx);
+            // session closed, so every top-level workspace comes back where
+            // the operator left it.
+            match mode {
+                ConsoleMode::Vj => self.apc.surface = ApcSurface::Video,
+                ConsoleMode::Dj => self.apc.surface = ApcSurface::Music,
+                ConsoleMode::Synth | ConsoleMode::Mix => {}
+            }
+            self.show_console_page(cx, mode.page());
         } else {
             self.paint_tabs(cx, id!(video_page));
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.load_synth_mix();
         self.set_lower_tab(cx, self.lower_tab);
+        self.push_synth_mix_state(cx);
+        if self.console_page == live_id!(synth_page) || self.console_page == live_id!(mix_page) {
+            self.sync_synth_mix_ui(cx);
+        }
         // GEN starts put away unless the operator had it open last time
         // (load_gen_panel may reopen it after the session connects).
         self.set_gen_panel_open(cx, self.gen_panel_open);
@@ -25539,10 +27819,12 @@ impl MatchEvent for App {
         self.ui.drop_down(cx, ids!(gen_profile)).set_selected_item(cx, 2);
         if !self.audio_installed {
             self.audio_installed = true;
-            let mixer = self.mixer.clone();
+            // The engine leaves the UI thread here, for good: from now on
+            // only the device callback touches the mix state.
+            let mut engine = self.mixer.take_engine().expect("the mix engine is installed once");
             cx.audio_output(0, move |info, output| {
                 output.zero();
-                mixer.render(info.sample_rate, output);
+                engine.render(info.sample_rate, output);
             });
             // The headphone cue rides slot 1 unconditionally: with no
             // second device requested the closure simply never runs. It
@@ -25558,7 +27840,9 @@ impl MatchEvent for App {
         // The system-audio capture is NOT installed here: MONITOR AUDIO
         // (top bar) starts it on demand — see `set_monitor_audio`.
         if self.loop_tx.is_none() {
-            let (tx, results) = start_loop_worker();
+            let (tx, results) = start_loop_worker(
+                self.thread_spawner.clone().expect("thread workers are not started"),
+            );
             self.loop_tx = Some(tx);
             self.loop_results = Some(results);
         }
@@ -25587,12 +27871,13 @@ impl MatchEvent for App {
             .iter()
             .any(|desc| desc.device_type.is_loopback() && desc.has_failed);
         self.loopback_ids = loopback;
-        log!(
-            "audio devices: {} loopback device(s), failed={}, monitor={}",
-            self.loopback_ids.len(),
-            self.loopback_failed,
-            self.monitor_audio
-        );
+        if self.monitor_audio {
+            log!(
+                "audio devices: {} loopback device(s), failed={}, monitor=true",
+                self.loopback_ids.len(),
+                self.loopback_failed,
+            );
+        }
         // MONITOR AUDIO gates the actual device open (that open is what
         // fires the OS screen-recording prompt).
         if self.monitor_audio {
@@ -25655,13 +27940,14 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        // The lane tabs are gone: VJ/DJ/SFX are the modes (see
-        // `select_mode`) and the presets filter the VJ explorer.
-        for (button, surface) in MODE_BUTTONS {
+        // Full-console navigation. VJ/DJ also retarget the APC; SYNTH/MIX
+        // deliberately leave its current performance surface alone.
+        for (button, mode) in MODE_BUTTONS {
             if self.ui.button(cx, button).clicked(actions) {
-                self.select_mode(cx, surface);
+                self.select_mode(cx, mode);
             }
         }
+        self.handle_synth_mix_actions(cx, actions);
         if self.ui.button(cx, ids!(gen_fold)).clicked(actions) {
             self.set_gen_panel_open(cx, !self.gen_panel_open);
             self.save_gen_panel();
@@ -26058,7 +28344,7 @@ impl MatchEvent for App {
             // Turning it off has to clear the words that are already on the
             // program, not merely stop updating them.
             if !on {
-                for target in [ids!(program), ids!(preview)] {
+                for target in [self.output_program_path(), &ids!(preview)[..]] {
                     if let Some(mut program) = self
                         .ui
                         .widget(cx, target)
@@ -26453,7 +28739,7 @@ impl MatchEvent for App {
             }
         }
 
-        // ---- lower-region tabs ----
+        // ---- VJ-local lower-region tabs ----
         if self.ui.button(cx, ids!(chip_lights)).clicked(actions) {
             self.set_lower_tab(cx, LowerTab::Lights);
             self.save_gen_panel();
@@ -26880,14 +29166,23 @@ impl MatchEvent for App {
         // ---- output window ----
         if self.ui.button(cx, ids!(open_output)).clicked(actions) {
             // A toggle, not a one-way door: the second press puts the
-            // output window away again.
-            match self.output_window_lifecycle {
-                OutputWindowLifecycle::Open => self.close_output_window(cx),
-                _ => {
-                    if let Err(error) = self.open_output_window(cx) {
-                        log!("output window refused: {error}");
-                        self.status_text = error.to_string();
-                    }
+            // output away again — window or layer.
+            if self.output_window_lifecycle.is_up() {
+                self.close_output_window(cx);
+            } else {
+                self.open_output_window(cx);
+            }
+        }
+        // A double-click on the in-page output leaves it: the way out
+        // where there is no Esc key (a phone), and the same gesture the
+        // projector window answers with its maximize toggle.
+        let layer_uid = self.ui.widget(cx, ids!(output_layer)).widget_uid();
+        if let Some(action) = actions.find_widget_action(layer_uid) {
+            if let makepad_widgets::view::ViewAction::FingerDown(down) = action.cast() {
+                if down.tap_count >= 2
+                    && self.output_window_lifecycle == OutputWindowLifecycle::InPage
+                {
+                    self.close_output_window(cx);
                 }
             }
         }
@@ -26914,6 +29209,7 @@ impl AppMain for App {
         crate::fx_thumbs::script_mod(vm);
         crate::fx_slot::script_mod(vm);
         crate::midi_learn::script_mod(vm);
+        crate::synth_ui::script_mod(vm);
         self::script_mod(vm)
     }
 
@@ -26995,20 +29291,20 @@ impl AppMain for App {
                     } else {
                         34.0
                     };
-                    // The stretch between the SFX tab and the beat-wave/BPM
+                    // The stretch between the MIX tab and the beat-wave/BPM
                     // cluster carries only the status label (no clicks to
                     // lose), so — like the gripper — it is genuinely empty
                     // bar and answers Caption too. Everything else in the
                     // strip still answers Client explicitly.
-                    let sfx = self.ui.widget(cx, ids!(mode_sfx)).area();
+                    let mode_end = self.ui.widget(cx, ids!(mode_mix)).area();
                     let beats = self.ui.view(cx, ids!(beat_cluster)).area();
                     let in_gap = dq.abs.y <= strip_bottom
-                        && sfx.is_valid(cx)
+                        && mode_end.is_valid(cx)
                         && beats.is_valid(cx)
                         && {
-                            let sfx_rect = sfx.rect(cx);
+                            let mode_rect = mode_end.rect(cx);
                             let beats_rect = beats.rect(cx);
-                            let gap_left = sfx_rect.pos.x + sfx_rect.size.x;
+                            let gap_left = mode_rect.pos.x + mode_rect.size.x;
                             let gap_right = beats_rect.pos.x;
                             gap_right > gap_left
                                 && dq.abs.x >= gap_left
@@ -27214,6 +29510,10 @@ impl AppMain for App {
                 let cmds = self.model(Surface::Video).set_text(text.trim().to_string());
                 self.run_cat_cmds(Surface::Video, cmds);
             }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.synth_mix_save_timer.is_event(event).is_some() {
+            self.save_synth_mix();
         }
         if self.phones_retry_timer.is_event(event).is_some() {
             // Second leg of a repositioning: the truncated request has had
@@ -27741,25 +30041,46 @@ mod sync_tests {
     #[test]
     fn output_window_recreates_after_close_and_restores_when_still_alive() {
         assert_eq!(
-            output_window_command(OutputWindowLifecycle::default(), false),
+            output_window_command(OutputWindowLifecycle::default(), false, false),
             Some(OutputWindowCommand::Recreate)
         );
         assert_eq!(
-            output_window_command(OutputWindowLifecycle::Closed, false),
+            output_window_command(OutputWindowLifecycle::Closed, false, false),
             Some(OutputWindowCommand::Recreate)
         );
         assert_eq!(
-            output_window_command(OutputWindowLifecycle::Open, false),
+            output_window_command(OutputWindowLifecycle::Open, false, false),
             Some(OutputWindowCommand::Restore)
         );
         assert_eq!(
-            output_window_command(OutputWindowLifecycle::Open, true),
+            output_window_command(OutputWindowLifecycle::Open, true, false),
             Some(OutputWindowCommand::Deminiaturize)
         );
         assert_eq!(
-            output_window_command(OutputWindowLifecycle::Opening, false),
+            output_window_command(OutputWindowLifecycle::Opening, false, false),
             None
         );
+    }
+
+    /// A platform with one window (the web) gets the output as the in-page
+    /// layer — never a second window, whatever the OS — and the layer,
+    /// once up, is closed by the toggle rather than reopened.
+    #[test]
+    fn output_window_is_the_in_page_layer_without_a_second_window() {
+        for is_macos in [false, true] {
+            assert_eq!(
+                output_window_command(OutputWindowLifecycle::Closed, is_macos, true),
+                Some(OutputWindowCommand::ShowInPage)
+            );
+            assert_eq!(
+                output_window_command(OutputWindowLifecycle::InPage, is_macos, true),
+                None
+            );
+        }
+        assert!(OutputWindowLifecycle::InPage.is_up());
+        assert!(OutputWindowLifecycle::Open.is_up());
+        assert!(!OutputWindowLifecycle::Opening.is_up());
+        assert!(!OutputWindowLifecycle::Closed.is_up());
     }
 
     #[test]
@@ -28084,7 +30405,7 @@ mod sync_tests {
 
     #[test]
     fn loop_worker_accumulates_and_reports_the_visual_period() {
-        let (tx, results) = start_loop_worker();
+        let (tx, results) = start_loop_worker(test_thread_spawner());
         let revision = AssetRevisionId::from_bytes([7; 32]);
         tx.send(LoopScanCtl::Reset { slot: 0, revision: Some(revision) }).unwrap();
         // Five clean 24-frame cycles at 30 fps → a 0.8 s Wrap loop.
@@ -28109,7 +30430,7 @@ mod sync_tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut best: Option<LoopReport> = None;
         while Instant::now() < deadline {
-            for (got_revision, report) in results.lock().unwrap().drain(..) {
+            for (got_revision, report) in results.try_iter() {
                 assert_eq!(got_revision, revision);
                 best = Some(report);
             }
@@ -28132,7 +30453,7 @@ mod sync_tests {
     #[test]
     fn sync_worker_publishes_capture_health_and_no_fake_beat() {
         let feed = Arc::new(CaptureFeed::new());
-        let worker = SyncWorker::start(feed.clone());
+        let worker = SyncWorker::start(feed.clone(), test_thread_spawner());
         let mut buffer = AudioBuffer::new_with_size(512, 2);
         for sample in buffer.channel_mut(0).iter_mut() {
             *sample = 0.5;
@@ -28156,7 +30477,7 @@ mod sync_tests {
     #[test]
     fn sync_worker_publishes_a_stamped_capture_envelope() {
         let feed = Arc::new(CaptureFeed::new());
-        let worker = SyncWorker::start(feed.clone());
+        let worker = SyncWorker::start(feed.clone(), test_thread_spawner());
         let mut buffer = AudioBuffer::new_with_size(512, 2);
         for channel in 0..2 {
             for (index, sample) in buffer.channel_mut(channel).iter_mut().enumerate() {

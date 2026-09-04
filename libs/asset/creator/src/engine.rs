@@ -112,6 +112,23 @@ impl Default for EngineConfig {
 /// Run one pipeline to a terminal state. Returns the per-stage outputs of
 /// every DONE stage (a failed run still returns what finished — resumability
 /// is built on exactly this).
+#[cfg(target_arch = "wasm32")]
+pub fn run(
+    spec: &PipelineSpec,
+    orders: &[StageOrder],
+    providers: &dyn ProviderPick,
+    config: &EngineConfig,
+    events: &Sender<RunEvent>,
+    cancel: &Arc<AtomicBool>,
+) -> Result<HashMap<String, Arc<StageOutput>>, AssetAiError> {
+    let _ = (spec, orders, providers, config, events, cancel);
+    Err(AssetAiError::Unavailable(
+        "asset creator LAN fleet is unavailable on wasm".to_string(),
+    ))
+}
+
+// LAN fleet discovery and its polling loop are native-only.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run(
     spec: &PipelineSpec,
     orders: &[StageOrder],
@@ -254,7 +271,10 @@ pub fn run(
         let run_state = derive_state(&states);
         match run_state {
             RunState::Running | RunState::Pending => {
+                #[cfg(not(target_arch = "wasm32"))]
                 std::thread::sleep(config.poll_interval);
+                #[cfg(target_arch = "wasm32")]
+                std::hint::spin_loop();
             }
             terminal => {
                 let _ = events.send(RunEvent::RunFinished { state: terminal });

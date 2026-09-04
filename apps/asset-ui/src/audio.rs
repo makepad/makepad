@@ -1,15 +1,16 @@
 //! Artifact playback + waveform strip.
 //!
-//! Same shape as the sandbox's `VideoAudio` mixer (apps/sandbox/src/
-//! video_player.rs): a process-global resampling stereo queue mixed
-//! additively from the `cx.audio_output` callback, so playback needs no
-//! plumbing through the widget tree. The service emits PCM16 WAV (kokoro:
-//! mono 24kHz, sa3-sfx: stereo 44.1kHz), decoded here with a minimal RIFF
-//! parser (libs/asset/ai wav.rs is encode-only).
+//! The UI owns a transport handle and the device callback owns the playback
+//! engine. Commands and atomic snapshots cross between them; neither side
+//! waits on a mutex. The service emits PCM16 WAV (kokoro: mono 24kHz,
+//! sa3-sfx: stereo 44.1kHz), decoded here with a minimal RIFF parser
+//! (libs/asset/ai wav.rs is encode-only).
 
 use makepad_widgets::makepad_platform::audio::AudioBuffer;
+use makepad_widgets::makepad_platform::thread::{Lane, TaskHandle, TaskPool};
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{mpsc, Arc};
 
 #[derive(Clone)]
 pub struct WavPcm {
@@ -103,23 +104,21 @@ pub fn parse_wav(bytes: &[u8]) -> Result<WavPcm, String> {
 /// advances it; UI code only loads, pauses and seeks.
 const FP_ONE: u64 = 1 << 32;
 
-struct WavMixer {
-    clip: Mutex<Option<Arc<WavPcm>>>,
+struct AudioSnapshot {
     cursor_fp: AtomicU64,
     playing: AtomicBool,
+    ack: AtomicU64,
 }
 
-impl Default for WavMixer {
+impl Default for AudioSnapshot {
     fn default() -> Self {
         Self {
-            clip: Mutex::new(None),
             cursor_fp: AtomicU64::new(0),
             playing: AtomicBool::new(false),
+            ack: AtomicU64::new(0),
         }
     }
 }
-
-static WAV_MIXER: LazyLock<WavMixer> = LazyLock::new(WavMixer::default);
 
 // ---------------------------------------------------------------------------
 // Separated layers ("split audio layers")
@@ -150,33 +149,301 @@ pub const STEM_LANES: usize = 4;
 /// files are published and fetched in, so no index ever has to be remapped.
 pub const STEM_LANE_NAMES: [&str; STEM_LANES] = ["drums", "bass", "vocals", "other"];
 
-struct StemMixer {
-    lanes: Mutex<Option<Arc<[StemPcm; STEM_LANES]>>>,
-    /// Per-lane mute. Read by the audio callback, written by the UI.
-    mute: [AtomicBool; STEM_LANES],
-    /// Whether the layers are what the transport plays. Kept separate from
-    /// the lock so the callback can tell "no stems" from "stems, but the UI
-    /// holds the lock this quantum" — the second must be silence, not a
-    /// blip of the mixed track.
-    active: AtomicBool,
-    /// The clip generation these layers belong to. The mixed audio and the
-    /// four stems arrive on two different workers in either order; this is
-    /// what lets the second one to land know it is the same track.
-    generation: AtomicU64,
+enum AudioCommand {
+    InstallClip {
+        serial: u64,
+        clip: Arc<WavPcm>,
+    },
+    ClearClip {
+        serial: u64,
+    },
+    InstallStems {
+        serial: u64,
+        lanes: Arc<[StemPcm; STEM_LANES]>,
+    },
+    ClearStems {
+        serial: u64,
+    },
+    Play {
+        serial: u64,
+    },
+    Pause {
+        serial: u64,
+    },
+    Stop {
+        serial: u64,
+    },
+    Seek {
+        serial: u64,
+        cursor_fp: u64,
+    },
+    MuteLane {
+        serial: u64,
+        lane: usize,
+        muted: bool,
+    },
 }
 
-impl Default for StemMixer {
-    fn default() -> Self {
+enum RetiredAudio {
+    Clip(Arc<WavPcm>),
+    Stems(Arc<[StemPcm; STEM_LANES]>),
+}
+
+struct PendingDecode {
+    generation: u64,
+    task: TaskHandle<Result<WavPcm, String>>,
+}
+
+/// UI-thread transport handle. It owns the requested state and communicates
+/// with the realtime callback exclusively through commands and atomics.
+struct AudioMixer {
+    commands: mpsc::Sender<AudioCommand>,
+    retired: mpsc::Receiver<RetiredAudio>,
+    snapshot: Arc<AudioSnapshot>,
+    engine: Option<AudioEngine>,
+    clip: Option<Arc<WavPcm>>,
+    stems: Option<Arc<[StemPcm; STEM_LANES]>>,
+    stem_generation: u64,
+    muted: [bool; STEM_LANES],
+    cursor_fp: u64,
+    playing: bool,
+    serial: u64,
+    load_generation: u64,
+    pending_decodes: Vec<PendingDecode>,
+}
+
+/// Realtime-owned state. Once installed in `cx.audio_output`, only the audio
+/// callback touches these payloads and cursors.
+pub struct AudioEngine {
+    commands: mpsc::Receiver<AudioCommand>,
+    retired: mpsc::Sender<RetiredAudio>,
+    snapshot: Arc<AudioSnapshot>,
+    clip: Option<Arc<WavPcm>>,
+    stems: Option<Arc<[StemPcm; STEM_LANES]>>,
+    muted: [bool; STEM_LANES],
+    cursor_fp: u64,
+    playing: bool,
+    ack: u64,
+}
+
+impl AudioMixer {
+    fn new() -> Self {
+        let (command_tx, command_rx) = mpsc::channel();
+        let (retired_tx, retired_rx) = mpsc::channel();
+        let snapshot = Arc::new(AudioSnapshot::default());
+        let engine = AudioEngine {
+            commands: command_rx,
+            retired: retired_tx,
+            snapshot: snapshot.clone(),
+            clip: None,
+            stems: None,
+            muted: [false; STEM_LANES],
+            cursor_fp: 0,
+            playing: false,
+            ack: 0,
+        };
         Self {
-            lanes: Mutex::new(None),
-            mute: Default::default(),
-            active: AtomicBool::new(false),
-            generation: AtomicU64::new(u64::MAX),
+            commands: command_tx,
+            retired: retired_rx,
+            snapshot,
+            engine: Some(engine),
+            clip: None,
+            stems: None,
+            stem_generation: u64::MAX,
+            muted: [false; STEM_LANES],
+            cursor_fp: 0,
+            playing: false,
+            serial: 0,
+            load_generation: 0,
+            pending_decodes: Vec::new(),
         }
+    }
+
+    fn take_engine(&mut self) -> Option<AudioEngine> {
+        self.engine.take()
+    }
+
+    fn next_serial(&mut self) -> u64 {
+        self.serial = self.serial.wrapping_add(1).max(1);
+        self.serial
+    }
+
+    fn send(&self, command: AudioCommand) {
+        let _ = self.commands.send(command);
+    }
+
+    fn refresh_snapshot(&mut self) {
+        let ack = self.snapshot.ack.load(Ordering::Acquire);
+        if ack >= self.serial {
+            self.cursor_fp = self.snapshot.cursor_fp.load(Ordering::Acquire);
+            self.playing = self.snapshot.playing.load(Ordering::Acquire);
+        }
+    }
+
+    fn pump(&mut self) {
+        self.refresh_snapshot();
+        for retired in self.retired.try_iter() {
+            match retired {
+                RetiredAudio::Clip(clip) => drop(clip),
+                RetiredAudio::Stems(stems) => drop(stems),
+            }
+        }
+        let pending_decodes = std::mem::take(&mut self.pending_decodes);
+        let mut waiting = Vec::with_capacity(pending_decodes.len());
+        for mut pending in pending_decodes {
+            let Some(result) = pending.task.try_take() else {
+                waiting.push(pending);
+                continue;
+            };
+            match result {
+                Ok(Ok(pcm)) if pending.generation == self.load_generation => {
+                    self.install(pcm, pending.generation);
+                }
+                Ok(Err(error)) if pending.generation == self.load_generation => {
+                    makepad_widgets::log!("audio decode failed: {error}");
+                }
+                Err(error) if pending.generation == self.load_generation => {
+                    makepad_widgets::log!("audio decode task failed: {error}");
+                }
+                _ => {}
+            }
+        }
+        self.pending_decodes = waiting;
+    }
+
+    fn clear_stems(&mut self) {
+        self.stems = None;
+        self.stem_generation = u64::MAX;
+        self.muted = [false; STEM_LANES];
+        let serial = self.next_serial();
+        self.send(AudioCommand::ClearStems { serial });
+    }
+
+    fn clear(&mut self) {
+        self.clear_stems();
+        self.clip = None;
+        self.cursor_fp = 0;
+        self.playing = false;
+        let serial = self.next_serial();
+        self.send(AudioCommand::ClearClip { serial });
+    }
+
+    fn install(&mut self, pcm: WavPcm, generation: u64) -> bool {
+        if self.load_generation != generation {
+            return false;
+        }
+        if pcm.frames.is_empty() || pcm.sample_rate == 0 {
+            self.clear();
+            return false;
+        }
+        if self.stem_generation != generation {
+            self.clear_stems();
+        }
+        let clip = Arc::new(pcm);
+        self.clip = Some(clip.clone());
+        self.cursor_fp = 0;
+        self.playing = false;
+        let serial = self.next_serial();
+        self.send(AudioCommand::InstallClip { serial, clip });
+        true
+    }
+
+    fn load(&mut self, pcm: WavPcm) -> bool {
+        self.load_generation = self.load_generation.wrapping_add(1);
+        self.install(pcm, self.load_generation)
+    }
+
+    fn set_stems(&mut self, lanes: [StemPcm; STEM_LANES], generation: u64) -> bool {
+        if self.load_generation != generation {
+            return false;
+        }
+        if lanes
+            .iter()
+            .any(|lane| lane.frames.is_empty() || lane.sample_rate == 0)
+        {
+            self.clear_stems();
+            return false;
+        }
+        let lanes = Arc::new(lanes);
+        self.stems = Some(lanes.clone());
+        self.stem_generation = generation;
+        self.muted = [false; STEM_LANES];
+        let serial = self.next_serial();
+        self.send(AudioCommand::InstallStems { serial, lanes });
+        true
+    }
+
+    fn play(&mut self) {
+        let Some(clip) = self.clip.as_ref() else {
+            return;
+        };
+        let end = (clip.frames.len() as u64) << 32;
+        if self.cursor_fp >= end {
+            self.cursor_fp = 0;
+        }
+        self.playing = true;
+        let serial = self.next_serial();
+        self.send(AudioCommand::Play { serial });
+    }
+
+    fn pause(&mut self) {
+        self.playing = false;
+        let serial = self.next_serial();
+        self.send(AudioCommand::Pause { serial });
+    }
+
+    fn stop(&mut self) {
+        self.playing = false;
+        self.cursor_fp = 0;
+        let serial = self.next_serial();
+        self.send(AudioCommand::Stop { serial });
+    }
+
+    fn seek_fraction(&mut self, fraction: f64) {
+        let Some(clip) = self.clip.as_ref() else {
+            return;
+        };
+        let frame = (fraction.clamp(0.0, 1.0) * clip.frames.len() as f64) as u64;
+        self.cursor_fp = frame.min(clip.frames.len() as u64) << 32;
+        let serial = self.next_serial();
+        self.send(AudioCommand::Seek {
+            serial,
+            cursor_fp: self.cursor_fp,
+        });
+    }
+
+    fn set_lane_muted(&mut self, lane: usize, muted: bool) {
+        let Some(slot) = self.muted.get_mut(lane) else {
+            return;
+        };
+        *slot = muted;
+        let serial = self.next_serial();
+        self.send(AudioCommand::MuteLane {
+            serial,
+            lane,
+            muted,
+        });
     }
 }
 
-static STEM_MIXER: LazyLock<StemMixer> = LazyLock::new(StemMixer::default);
+thread_local! {
+    static AUDIO_MIXER: RefCell<AudioMixer> = RefCell::new(AudioMixer::new());
+}
+
+fn with_mixer<T>(f: impl FnOnce(&mut AudioMixer) -> T) -> T {
+    AUDIO_MIXER.with(|mixer| f(&mut mixer.borrow_mut()))
+}
+
+/// Move the engine into the app's one audio callback. It is intentionally
+/// one-shot: there must never be a second owner of realtime state.
+pub fn take_engine() -> AudioEngine {
+    with_mixer(|mixer| mixer.take_engine()).expect("audio engine is installed once")
+}
+
+/// Poll background decodes and reclaim callback-retired payloads on the UI.
+pub fn pump() {
+    with_mixer(AudioMixer::pump);
+}
 
 /// Install four separated layers over the loaded clip. From here the
 /// transport plays their SUM instead of the mixed track — which is also the
@@ -190,63 +457,32 @@ static STEM_MIXER: LazyLock<StemMixer> = LazyLock::new(StemMixer::default);
 /// Refused (and the layers cleared) when a lane is empty: half a stem set is
 /// a lie about what the asset carries.
 pub fn set_stems(lanes: [StemPcm; STEM_LANES], generation: u64) -> bool {
-    if LOAD_GENERATION.load(Ordering::Acquire) != generation {
-        return false;
-    }
-    if lanes
-        .iter()
-        .any(|lane| lane.frames.is_empty() || lane.sample_rate == 0)
-    {
-        clear_stems();
-        return false;
-    }
-    for mute in &STEM_MIXER.mute {
-        mute.store(false, Ordering::Release);
-    }
-    *STEM_MIXER.lanes.lock().unwrap() = Some(Arc::new(lanes));
-    STEM_MIXER.generation.store(generation, Ordering::Release);
-    STEM_MIXER.active.store(true, Ordering::Release);
-    true
+    with_mixer(|mixer| mixer.set_stems(lanes, generation))
 }
 
 /// Back to the mixed track. Called whenever the clip changes, so a new
 /// selection can never play the previous track's layers.
 pub fn clear_stems() {
-    STEM_MIXER.active.store(false, Ordering::Release);
-    STEM_MIXER.generation.store(u64::MAX, Ordering::Release);
-    *STEM_MIXER.lanes.lock().unwrap() = None;
-    for mute in &STEM_MIXER.mute {
-        mute.store(false, Ordering::Release);
-    }
+    with_mixer(AudioMixer::clear_stems);
 }
 
 /// True when the transport is playing separated layers.
 pub fn stems_ready() -> bool {
-    STEM_MIXER.active.load(Ordering::Acquire)
+    with_mixer(|mixer| mixer.stems.is_some())
 }
 
 pub fn lane_muted(lane: usize) -> bool {
-    STEM_MIXER
-        .mute
-        .get(lane)
-        .is_some_and(|mute| mute.load(Ordering::Acquire))
+    with_mixer(|mixer| mixer.muted.get(lane).copied().unwrap_or(false))
 }
 
 pub fn set_lane_muted(lane: usize, muted: bool) {
-    if let Some(mute) = STEM_MIXER.mute.get(lane) {
-        mute.store(muted, Ordering::Release);
-    }
+    with_mixer(|mixer| mixer.set_lane_muted(lane, muted));
 }
 
 /// Length of the installed layers, for the honest "these are this track's
 /// stems" check a host wants before it draws the toggles.
 pub fn stems_seconds() -> f64 {
-    STEM_MIXER
-        .lanes
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map_or(0.0, |lanes| lanes[0].seconds())
+    with_mixer(|mixer| mixer.stems.as_ref().map_or(0.0, |lanes| lanes[0].seconds()))
 }
 
 /// One lane at a fixed-point cursor, linearly interpolated — the same
@@ -276,88 +512,44 @@ fn sample_lane(lane: &StemPcm, cursor: u64) -> (f32, f32) {
 /// a new clip generation, which invalidates any separated layers installed
 /// for the previous one.
 pub fn load(pcm: WavPcm) -> bool {
-    let generation = LOAD_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
-    install(pcm, generation)
-}
-
-/// Install a decoded clip under the generation it was decoded FOR. A newer
-/// pick having happened in the meantime drops it.
-///
-/// The layers are cleared unless they were installed for THIS clip: the
-/// fetch of a track's stems and the decode of its mixed audio run on two
-/// workers, and whichever finishes second must not wipe the first.
-fn install(pcm: WavPcm, generation: u64) -> bool {
-    if LOAD_GENERATION.load(Ordering::Acquire) != generation {
-        return false;
-    }
-    if pcm.frames.is_empty() || pcm.sample_rate == 0 {
-        clear();
-        return false;
-    }
-    if STEM_MIXER.generation.load(Ordering::Acquire) != generation {
-        clear_stems();
-    }
-    WAV_MIXER.playing.store(false, Ordering::Release);
-    *WAV_MIXER.clip.lock().unwrap() = Some(Arc::new(pcm));
-    WAV_MIXER.cursor_fp.store(0, Ordering::Release);
-    true
+    with_mixer(|mixer| mixer.load(pcm))
 }
 
 /// Discard the loaded clip and make the transport unavailable.
 pub fn clear() {
-    clear_stems();
-    WAV_MIXER.playing.store(false, Ordering::Release);
-    *WAV_MIXER.clip.lock().unwrap() = None;
-    WAV_MIXER.cursor_fp.store(0, Ordering::Release);
+    with_mixer(AudioMixer::clear);
 }
-
-/// Which load request is current. A user clicking down a list starts several;
-/// only the newest may install itself, or a slow decode of the track before
-/// last lands on top of the one they are looking at.
-static LOAD_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Take a track's bytes — WAV, MP3 or Ogg — and make the transport play them.
 ///
-/// Decoding happens on a worker: the music library is MP3s, and turning six
-/// minutes of one into PCM on the frame thread is a visible stall. The mixer
-/// is process-global, so the worker installs the result itself; there is
-/// nothing to plumb back through the widget tree.
+/// Decoding happens in the runtime pool: the music library is MP3s, and
+/// turning six minutes of one into PCM on the frame thread is a visible
+/// stall. The UI polls the task and sends the accepted result to the engine.
 ///
 /// The transport goes unavailable immediately, because the previous track is
 /// no longer what the well is showing — a stale clip left loaded is a play
 /// button that plays the wrong song.
 /// Returns the clip generation this request claimed, which is what a
 /// side-channel fetch for the same track carries back into [`set_stems`].
-pub fn load_clip_async(bytes: Vec<u8>) -> u64 {
-    let generation = LOAD_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
-    clear();
-    let bytes = Arc::new(bytes);
-    let spawned = std::thread::Builder::new()
-        .name("asset-ui-audio-decode".into())
-        .spawn({
-            let bytes = Arc::clone(&bytes);
-            move || {
-                let Ok(pcm) = decode_clip(&bytes) else {
-                    return;
-                };
-                // A newer pick happened while this was decoding: drop it.
-                install(pcm, generation);
-            }
-        });
-    if spawned.is_err() {
-        // No worker to be had: decode here rather than leave a dead
-        // transport under a drawn waveform.
-        if let Ok(pcm) = decode_clip(&bytes) {
-            install(pcm, generation);
+pub fn load_clip_async(pool: &TaskPool, bytes: Vec<u8>) -> u64 {
+    with_mixer(|mixer| {
+        mixer.load_generation = mixer.load_generation.wrapping_add(1);
+        let generation = mixer.load_generation;
+        mixer.clear();
+        match pool.submit(Lane::Heavy, move || decode_clip(&bytes)) {
+            Ok(task) => mixer
+                .pending_decodes
+                .push(PendingDecode { generation, task }),
+            Err(error) => makepad_widgets::log!("audio decode job refused: {error}"),
         }
-    }
-    generation
+        generation
+    })
 }
 
 /// The clip generation currently claimed. A side-channel fetch records it
 /// with the request and hands it back to [`set_stems`].
 pub fn clip_generation() -> u64 {
-    LOAD_GENERATION.load(Ordering::Acquire)
+    with_mixer(|mixer| mixer.load_generation)
 }
 
 /// Any container the catalog carries, in the mixer's shape. RIFF is parsed
@@ -388,48 +580,45 @@ pub fn decode_clip(bytes: &[u8]) -> Result<WavPcm, String> {
 
 /// Start or resume. Starting from the end restarts at zero.
 pub fn play() {
-    let clip = WAV_MIXER.clip.lock().unwrap();
-    let Some(clip) = clip.as_ref() else { return };
-    let end = (clip.frames.len() as u64) << 32;
-    if WAV_MIXER.cursor_fp.load(Ordering::Acquire) >= end {
-        WAV_MIXER.cursor_fp.store(0, Ordering::Release);
-    }
-    WAV_MIXER.playing.store(true, Ordering::Release);
+    with_mixer(AudioMixer::play);
 }
 
 pub fn pause() {
-    WAV_MIXER.playing.store(false, Ordering::Release);
+    with_mixer(AudioMixer::pause);
 }
 
 /// Stop returns to the start but retains the decoded clip for replay.
 pub fn stop() {
-    pause();
-    WAV_MIXER.cursor_fp.store(0, Ordering::Release);
+    with_mixer(AudioMixer::stop);
 }
 
 pub fn is_ready() -> bool {
-    WAV_MIXER.clip.lock().unwrap().is_some()
+    with_mixer(|mixer| mixer.clip.is_some())
 }
 
 pub fn is_playing() -> bool {
-    WAV_MIXER.playing.load(Ordering::Acquire) && !at_end()
+    with_mixer(|mixer| {
+        mixer.refresh_snapshot();
+        let end = mixer
+            .clip
+            .as_ref()
+            .map_or(0, |clip| (clip.frames.len() as u64) << 32);
+        mixer.playing && mixer.cursor_fp < end
+    })
 }
 
 pub fn duration_secs() -> f64 {
-    WAV_MIXER
-        .clip
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map_or(0.0, |clip| clip.seconds())
+    with_mixer(|mixer| mixer.clip.as_ref().map_or(0.0, |clip| clip.seconds()))
 }
 
 /// Truthful device-clocked playhead, never derived from a UI timer.
 pub fn playhead_secs() -> f64 {
-    let clip = WAV_MIXER.clip.lock().unwrap();
-    let Some(clip) = clip.as_ref() else { return 0.0 };
-    (WAV_MIXER.cursor_fp.load(Ordering::Acquire) as f64 / FP_ONE as f64)
-        / clip.sample_rate as f64
+    with_mixer(|mixer| {
+        mixer.refresh_snapshot();
+        mixer.clip.as_ref().map_or(0.0, |clip| {
+            (mixer.cursor_fp as f64 / FP_ONE as f64) / clip.sample_rate as f64
+        })
+    })
 }
 
 /// Normalized playhead across the loaded clip for the waveform overlay:
@@ -443,19 +632,18 @@ pub fn playhead_fraction() -> f64 {
 }
 
 pub fn at_end() -> bool {
-    let clip = WAV_MIXER.clip.lock().unwrap();
-    let Some(clip) = clip.as_ref() else { return false };
-    WAV_MIXER.cursor_fp.load(Ordering::Acquire) >= (clip.frames.len() as u64) << 32
+    with_mixer(|mixer| {
+        mixer.refresh_snapshot();
+        mixer
+            .clip
+            .as_ref()
+            .is_some_and(|clip| mixer.cursor_fp >= (clip.frames.len() as u64) << 32)
+    })
 }
 
 /// Sample-accurate fractional seek, clamped to the decoded clip.
 pub fn seek_fraction(frac: f64) {
-    let clip = WAV_MIXER.clip.lock().unwrap();
-    let Some(clip) = clip.as_ref() else { return };
-    let frame = (frac.clamp(0.0, 1.0) * clip.frames.len() as f64) as u64;
-    WAV_MIXER
-        .cursor_fp
-        .store((frame.min(clip.frames.len() as u64)) << 32, Ordering::Release);
+    with_mixer(|mixer| mixer.seek_fraction(frac));
 }
 
 /// Long-form threshold for the audition policy below: at/under this a voice
@@ -484,95 +672,170 @@ pub fn format_time(secs: f64) -> String {
     format!("{minutes}:{:04.1}", secs - minutes as f64 * 60.0)
 }
 
-/// One additive source in the app's single `cx.audio_output` callback.
-/// The callback never blocks on a UI load/seek: a contended quantum is silent.
-pub fn mix_into(output: &mut AudioBuffer, device_rate: f64) {
-    if !WAV_MIXER.playing.load(Ordering::Acquire) || device_rate <= 0.0 {
-        return;
+impl AudioEngine {
+    fn retire(&self, retired: RetiredAudio) {
+        let _ = self.retired.send(retired);
     }
-    let Ok(clip) = WAV_MIXER.clip.try_lock() else { return };
-    let Some(clip) = clip.as_ref() else {
-        WAV_MIXER.playing.store(false, Ordering::Release);
-        return;
-    };
-    let end = (clip.frames.len() as u64) << 32;
-    let mut cursor = WAV_MIXER.cursor_fp.load(Ordering::Acquire);
-    if cursor >= end {
-        WAV_MIXER.playing.store(false, Ordering::Release);
-        return;
-    }
-    let step = ((clip.sample_rate as f64 / device_rate) * FP_ONE as f64) as u64;
-    if step == 0 {
-        return;
-    }
-    const GAIN: f32 = 0.9;
 
-    // Separated layers REPLACE the mixed track while they are installed.
-    // A contended lane lock is silence for this quantum, never a blip of
-    // the original — the same rule the clip lock above follows.
-    if STEM_MIXER.active.load(Ordering::Acquire) {
-        let Ok(guard) = STEM_MIXER.lanes.try_lock() else { return };
-        let Some(lanes) = guard.as_ref() else { return };
-        // ONE cursor for all four lanes — they cannot drift from each other
-        // — re-derived from the track cursor at every quantum, so they
-        // cannot drift from the timeline the waveform and the transport
-        // draw either. The layers are at the model's rate; the clip may not
-        // be, hence the second step.
-        let stem_rate = lanes[0].sample_rate.max(1) as f64;
-        let stem_step = ((stem_rate / device_rate) * FP_ONE as f64) as u64;
-        let secs = (cursor as f64 / FP_ONE as f64) / clip.sample_rate as f64;
-        let mut stem_cursor = (secs * stem_rate * FP_ONE as f64) as u64;
-        // The mute flags are read ONCE per quantum, not per sample: a
-        // toggle lands on the next buffer, which is inaudible, and the
-        // callback stays free of per-sample atomics.
-        let audible: [bool; STEM_LANES] =
-            std::array::from_fn(|lane| !STEM_MIXER.mute[lane].load(Ordering::Relaxed));
+    fn drain_commands(&mut self) {
+        while let Ok(command) = self.commands.try_recv() {
+            let serial = match command {
+                AudioCommand::InstallClip { serial, clip } => {
+                    if let Some(old) = self.clip.replace(clip) {
+                        self.retire(RetiredAudio::Clip(old));
+                    }
+                    self.cursor_fp = 0;
+                    self.playing = false;
+                    serial
+                }
+                AudioCommand::ClearClip { serial } => {
+                    if let Some(old) = self.clip.take() {
+                        self.retire(RetiredAudio::Clip(old));
+                    }
+                    self.cursor_fp = 0;
+                    self.playing = false;
+                    serial
+                }
+                AudioCommand::InstallStems { serial, lanes } => {
+                    if let Some(old) = self.stems.replace(lanes) {
+                        self.retire(RetiredAudio::Stems(old));
+                    }
+                    self.muted = [false; STEM_LANES];
+                    serial
+                }
+                AudioCommand::ClearStems { serial } => {
+                    if let Some(old) = self.stems.take() {
+                        self.retire(RetiredAudio::Stems(old));
+                    }
+                    self.muted = [false; STEM_LANES];
+                    serial
+                }
+                AudioCommand::Play { serial } => {
+                    if let Some(clip) = self.clip.as_ref() {
+                        let end = (clip.frames.len() as u64) << 32;
+                        if self.cursor_fp >= end {
+                            self.cursor_fp = 0;
+                        }
+                        self.playing = true;
+                    }
+                    serial
+                }
+                AudioCommand::Pause { serial } => {
+                    self.playing = false;
+                    serial
+                }
+                AudioCommand::Stop { serial } => {
+                    self.playing = false;
+                    self.cursor_fp = 0;
+                    serial
+                }
+                AudioCommand::Seek { serial, cursor_fp } => {
+                    self.cursor_fp = self.clip.as_ref().map_or(0, |clip| {
+                        cursor_fp.min((clip.frames.len() as u64) << 32)
+                    });
+                    serial
+                }
+                AudioCommand::MuteLane {
+                    serial,
+                    lane,
+                    muted,
+                } => {
+                    if let Some(slot) = self.muted.get_mut(lane) {
+                        *slot = muted;
+                    }
+                    serial
+                }
+            };
+            self.ack = serial;
+        }
+    }
+
+    fn publish(&self) {
+        self.snapshot.cursor_fp.store(self.cursor_fp, Ordering::Relaxed);
+        self.snapshot.playing.store(self.playing, Ordering::Relaxed);
+        self.snapshot.ack.store(self.ack, Ordering::Release);
+    }
+
+    /// Add this transport to the app's output. Commands are drained first;
+    /// no application lock or wait occurs on the realtime callback.
+    pub fn mix_into(&mut self, output: &mut AudioBuffer, device_rate: f64) {
+        self.drain_commands();
+        if !self.playing || device_rate <= 0.0 {
+            self.publish();
+            return;
+        }
+        let Some(clip) = self.clip.as_ref() else {
+            self.playing = false;
+            self.publish();
+            return;
+        };
+        let end = (clip.frames.len() as u64) << 32;
+        if self.cursor_fp >= end {
+            self.playing = false;
+            self.publish();
+            return;
+        }
+        let step = ((clip.sample_rate as f64 / device_rate) * FP_ONE as f64) as u64;
+        if step == 0 {
+            self.publish();
+            return;
+        }
+        const GAIN: f32 = 0.9;
+
+        if let Some(lanes) = self.stems.as_ref() {
+            let stem_rate = lanes[0].sample_rate.max(1) as f64;
+            let stem_step = ((stem_rate / device_rate) * FP_ONE as f64) as u64;
+            let secs = (self.cursor_fp as f64 / FP_ONE as f64) / clip.sample_rate as f64;
+            let mut stem_cursor = (secs * stem_rate * FP_ONE as f64) as u64;
+            for frame in 0..output.frame_count() {
+                if self.cursor_fp >= end {
+                    self.playing = false;
+                    self.cursor_fp = end;
+                    break;
+                }
+                let (mut l, mut r) = (0.0f32, 0.0f32);
+                for (index, lane) in lanes.iter().enumerate() {
+                    if self.muted[index] {
+                        continue;
+                    }
+                    let (ll, rr) = sample_lane(lane, stem_cursor);
+                    l += ll;
+                    r += rr;
+                }
+                l *= GAIN;
+                r *= GAIN;
+                for channel in 0..output.channel_count() {
+                    output.channel_mut(channel)[frame] += if channel == 0 { l } else { r };
+                }
+                self.cursor_fp = self.cursor_fp.saturating_add(step);
+                stem_cursor = stem_cursor.saturating_add(stem_step);
+            }
+            self.cursor_fp = self.cursor_fp.min(end);
+            self.publish();
+            return;
+        }
+
         for frame in 0..output.frame_count() {
-            if cursor >= end {
-                WAV_MIXER.playing.store(false, Ordering::Release);
-                cursor = end;
+            if self.cursor_fp >= end {
+                self.playing = false;
+                self.cursor_fp = end;
                 break;
             }
-            let (mut l, mut r) = (0.0f32, 0.0f32);
-            for (lane, on) in lanes.iter().zip(audible.iter()) {
-                if !on {
-                    continue;
-                }
-                let (ll, rr) = sample_lane(lane, stem_cursor);
-                l += ll;
-                r += rr;
-            }
-            l *= GAIN;
-            r *= GAIN;
+            let index = (self.cursor_fp >> 32) as usize;
+            let fraction = (self.cursor_fp & (FP_ONE - 1)) as f32 / FP_ONE as f32;
+            let next = (index + 1).min(clip.frames.len() - 1);
+            let (al, ar) = clip.frames[index];
+            let (bl, br) = clip.frames[next];
+            let l = (al + (bl - al) * fraction) * GAIN;
+            let r = (ar + (br - ar) * fraction) * GAIN;
             for channel in 0..output.channel_count() {
                 output.channel_mut(channel)[frame] += if channel == 0 { l } else { r };
             }
-            cursor = cursor.saturating_add(step);
-            stem_cursor = stem_cursor.saturating_add(stem_step);
+            self.cursor_fp = self.cursor_fp.saturating_add(step);
         }
-        WAV_MIXER.cursor_fp.store(cursor.min(end), Ordering::Release);
-        return;
+        self.cursor_fp = self.cursor_fp.min(end);
+        self.publish();
     }
-
-    for frame in 0..output.frame_count() {
-        if cursor >= end {
-            WAV_MIXER.playing.store(false, Ordering::Release);
-            cursor = end;
-            break;
-        }
-        let index = (cursor >> 32) as usize;
-        let fraction = (cursor & (FP_ONE - 1)) as f32 / FP_ONE as f32;
-        let next = (index + 1).min(clip.frames.len() - 1);
-        let (al, ar) = clip.frames[index];
-        let (bl, br) = clip.frames[next];
-        let l = (al + (bl - al) * fraction) * GAIN;
-        let r = (ar + (br - ar) * fraction) * GAIN;
-        for channel in 0..output.channel_count() {
-            output.channel_mut(channel)[frame] += if channel == 0 { l } else { r };
-        }
-        cursor = cursor.saturating_add(step);
-    }
-    WAV_MIXER.cursor_fp.store(cursor.min(end), Ordering::Release);
 }
 
 // ---------------------------------------------------------------------------
@@ -660,7 +923,10 @@ pub fn waveform_bgra(pcm: &WavPcm, width: usize, height: usize) -> Vec<u32> {
 mod tests {
     use super::*;
 
-    static TRANSPORT_TEST_LOCK: Mutex<()> = Mutex::new(());
+    fn reset_transport() -> AudioEngine {
+        AUDIO_MIXER.with(|slot| *slot.borrow_mut() = AudioMixer::new());
+        take_engine()
+    }
 
     fn transport_pcm() -> WavPcm {
         WavPcm {
@@ -715,7 +981,7 @@ mod tests {
 
     #[test]
     fn transport_is_device_clocked_pauseable_seekable_and_restarts_at_end() {
-        let _serial = TRANSPORT_TEST_LOCK.lock().unwrap();
+        let mut engine = reset_transport();
         clear();
         assert!(load(transport_pcm()));
         assert!(is_ready());
@@ -728,7 +994,7 @@ mod tests {
         assert_eq!(playhead_secs(), 0.0);
         assert_eq!(playhead_fraction(), 0.0);
         let mut output = AudioBuffer::new_with_size(2, 2);
-        mix_into(&mut output, 10.0);
+        engine.mix_into(&mut output, 10.0);
         assert!((playhead_secs() - 0.2).abs() < 1e-9);
         // The drawn playhead tracks the same device-clocked cursor.
         assert!((playhead_fraction() - 0.5).abs() < 1e-9);
@@ -737,7 +1003,7 @@ mod tests {
         pause();
         let paused_at = playhead_secs();
         let mut silent = AudioBuffer::new_with_size(2, 2);
-        mix_into(&mut silent, 10.0);
+        engine.mix_into(&mut silent, 10.0);
         assert_eq!(playhead_secs(), paused_at);
         assert!(silent.channel(0).iter().all(|sample| *sample == 0.0));
 
@@ -752,7 +1018,7 @@ mod tests {
         assert_eq!(playhead_secs(), 0.0);
 
         let mut to_end = AudioBuffer::new_with_size(8, 2);
-        mix_into(&mut to_end, 10.0);
+        engine.mix_into(&mut to_end, 10.0);
         assert!(at_end());
         assert!(!is_playing());
         clear();
@@ -768,7 +1034,7 @@ mod tests {
 
     #[test]
     fn layers_replace_the_mixed_track_and_mute_one_at_a_time() {
-        let _serial = TRANSPORT_TEST_LOCK.lock().unwrap();
+        let mut engine = reset_transport();
         clear();
         assert!(!stems_ready(), "no clip, no layers");
         assert!(load(transport_pcm()));
@@ -788,7 +1054,7 @@ mod tests {
 
         play();
         let mut all = AudioBuffer::new_with_size(1, 2);
-        mix_into(&mut all, 10.0);
+        engine.mix_into(&mut all, 10.0);
         assert!(
             (all.channel(0)[0] - expect(1_000 + 2_000 + 4_000 + 8_000)).abs() < 1e-4,
             "all four layers sum: {}",
@@ -803,7 +1069,7 @@ mod tests {
         set_lane_muted(2, true);
         assert!(lane_muted(2) && !lane_muted(0));
         let mut without_vocals = AudioBuffer::new_with_size(1, 2);
-        mix_into(&mut without_vocals, 10.0);
+        engine.mix_into(&mut without_vocals, 10.0);
         assert!(
             (without_vocals.channel(0)[0] - expect(1_000 + 2_000 + 8_000)).abs() < 1e-4,
             "vocals muted: {}",
@@ -816,7 +1082,7 @@ mod tests {
             set_lane_muted(index, true);
         }
         let mut silent = AudioBuffer::new_with_size(1, 2);
-        mix_into(&mut silent, 10.0);
+        engine.mix_into(&mut silent, 10.0);
         assert!(silent.channel(0)[0].abs() < 1e-6, "{}", silent.channel(0)[0]);
 
         // Clearing the layers hands playback back to the mixed track.
@@ -824,7 +1090,7 @@ mod tests {
         assert!(!stems_ready());
         seek_fraction(0.5);
         let mut mixed = AudioBuffer::new_with_size(1, 2);
-        mix_into(&mut mixed, 10.0);
+        engine.mix_into(&mut mixed, 10.0);
         assert!(
             (mixed.channel(0)[0] - 0.8 * GAIN).abs() < 1e-4,
             "the clip's own third frame: {}",
@@ -854,7 +1120,7 @@ mod tests {
 
     #[test]
     fn an_empty_layer_is_refused_rather_than_played_as_a_hole() {
-        let _serial = TRANSPORT_TEST_LOCK.lock().unwrap();
+        let _engine = reset_transport();
         clear();
         assert!(load(transport_pcm()));
         assert!(!set_stems(
@@ -909,7 +1175,7 @@ mod tests {
 
     #[test]
     fn empty_clip_is_unavailable() {
-        let _serial = TRANSPORT_TEST_LOCK.lock().unwrap();
+        let _engine = reset_transport();
         clear();
         assert!(!load(WavPcm {
             frames: Vec::new(),

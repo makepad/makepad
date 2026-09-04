@@ -45,9 +45,12 @@ use std::path::{Path, PathBuf};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Sender};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::mpsc;
+use std::sync::mpsc::Sender;
 use std::sync::{Mutex, OnceLock};
 use crate::clock::Instant;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 /// How long after a load the settle pass harvests compile errors. A draw
@@ -288,20 +291,23 @@ enum Job {
     Failed { stem: String, revision: String, error: String },
 }
 
-fn worker() -> &'static Sender<Job> {
-    static TX: OnceLock<Sender<Job>> = OnceLock::new();
-    TX.get_or_init(|| {
+static WORKER: OnceLock<Sender<Job>> = OnceLock::new();
+
+pub fn start_worker(spawner: makepad_widgets::makepad_platform::thread::ThreadSpawner) {
+    #[cfg(target_arch = "wasm32")]
+    let _ = spawner;
+    #[cfg(not(target_arch = "wasm32"))]
+    WORKER.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<Job>();
         // One thread, only ever sleeping and writing two small files. It
         // outlives the app by design: there is nothing to shut down and
         // nothing it holds that matters at exit. The web build has no
         // observed origin on disk, so the status files are not written.
-        #[cfg(target_arch = "wasm32")]
-        drop(rx);
-        #[cfg(not(target_arch = "wasm32"))]
-        let _ = std::thread::Builder::new()
-            .name("vj-livecode-status".to_string())
-            .spawn(move || {
+        let options = makepad_widgets::makepad_platform::thread::ThreadOptions {
+            name: Some("vj-livecode-status".into()),
+            ..Default::default()
+        };
+        match spawner.spawn_worker(options, move || {
                 let mut queue: VecDeque<Job> = VecDeque::new();
                 loop {
                     // Wait for work, then drain what is already queued.
@@ -335,9 +341,12 @@ fn worker() -> &'static Sender<Job> {
                         }
                     }
                 }
-            });
+            }) {
+            Ok(handle) => handle.detach(),
+            Err(error) => makepad_widgets::log!("vj livecode status worker unavailable: {error}"),
+        }
         tx
-    })
+    });
 }
 
 /// Report what happened to a document that was just loaded and drawn.
@@ -358,7 +367,9 @@ pub fn report(revision: &str, mark: u64, outcome: Result<(), String>) {
             at: Instant::now() + Duration::from_millis(SETTLE_MS),
         },
     };
-    let _ = worker().send(job);
+    if let Some(worker) = WORKER.get() {
+        let _ = worker.send(job);
+    }
 }
 
 #[cfg(target_arch = "wasm32")]

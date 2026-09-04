@@ -97,263 +97,263 @@
     "restriction": "community"
    },
    "vram_gb": 0.0,
-   "note": "37 overhead samples from the Salamander Drumkit (48 kHz, 24-bit stereo). This is a sample bank for makepad-drumkit, not a runnable AI model.",
+   "note": "37 overhead samples from the Salamander Drumkit (48 kHz, 24-bit stereo), mirrored unmodified on makepad.nl with an ATTRIBUTION.txt beside them (the GitHub repo carries only the .sfz files). This is a sample bank for makepad-drumkit, not a runnable AI model.",
    "files": [
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/kick_OH_P_1.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/kick_OH_P_1.wav",
      "cache_as": "drums/salamander/OH/kick_OH_P_1.wav",
      "size": 12832244,
      "sha256": "bab7bc6aaec2c0d6db39c8e33214c4bf6870f51b557238eb1a5ce88052c92f06"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/kick_OH_P_2.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/kick_OH_P_2.wav",
      "cache_as": "drums/salamander/OH/kick_OH_P_2.wav",
      "size": 137012,
      "sha256": "3520f1518c7d05a7ad507aee1d50aa6e299572c6daba9c9d50731bfd9e33beb3"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/kick_OH_F_1.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/kick_OH_F_1.wav",
      "cache_as": "drums/salamander/OH/kick_OH_F_1.wav",
      "size": 135920,
      "sha256": "fc1a6388402144f1888a3febce1207799795fbbc3d87f41ce84be31f4adc70ae"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/kick_OH_F_2.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/kick_OH_F_2.wav",
      "cache_as": "drums/salamander/OH/kick_OH_F_2.wav",
      "size": 136316,
      "sha256": "30bfcd1f944c3a427e443db037a813278f404628bde6349cba96cd1501365fc2"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/kick_OH_FF_1.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/kick_OH_FF_1.wav",
      "cache_as": "drums/salamander/OH/kick_OH_FF_1.wav",
      "size": 136022,
      "sha256": "f3c3272a7d0623b6d9b7cb028b08b5b3812c650fd22f4739e43e77e9faf69b28"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/kick_OH_FF_2.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/kick_OH_FF_2.wav",
      "cache_as": "drums/salamander/OH/kick_OH_FF_2.wav",
      "size": 135296,
      "sha256": "d7a5c50cdd03cf985b330397030dada2a4ce4350b6a6db43fa1b8a3db48c9a75"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/snare_OH_Ghost_1.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/snare_OH_Ghost_1.wav",
      "cache_as": "drums/salamander/OH/snare_OH_Ghost_1.wav",
      "size": 133448,
      "sha256": "b856339d674b8c92200cdb2aaace161c6b54001e029df7f1f7328c182fc59f0a"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/snare_OH_Ghost_2.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/snare_OH_Ghost_2.wav",
      "cache_as": "drums/salamander/OH/snare_OH_Ghost_2.wav",
      "size": 132026,
      "sha256": "abe51b8167caff1f9d2e9fafff7dcaf632647359e65293ef8bfdd0604423cb10"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/snare_OH_Ghost_3.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/snare_OH_Ghost_3.wav",
      "cache_as": "drums/salamander/OH/snare_OH_Ghost_3.wav",
      "size": 132980,
      "sha256": "1829e6a8ab0e76a301f032f7b0b1a32307247d2aec77741bc25f69bf5997971c"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/snare_OH_MP_1.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/snare_OH_MP_1.wav",
      "cache_as": "drums/salamander/OH/snare_OH_MP_1.wav",
      "size": 440678,
      "sha256": "9f671962ba0eccd713d85f5b297bfb5e2cde2e7f4ff7735e535480b524aa185f"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/snare_OH_MP_2.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/snare_OH_MP_2.wav",
      "cache_as": "drums/salamander/OH/snare_OH_MP_2.wav",
      "size": 439310,
      "sha256": "cbfec703cc8d3bec8b12127aa4d9daf626af2d50842995fd98fc27716eac17f9"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/snare_OH_MP_3.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/snare_OH_MP_3.wav",
      "cache_as": "drums/salamander/OH/snare_OH_MP_3.wav",
      "size": 439832,
      "sha256": "4aea5fd07444a45f30a3a79304e58aa2f0e31d267a694dd7fbf813730c704aab"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/snare_OH_F_1.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/snare_OH_F_1.wav",
      "cache_as": "drums/salamander/OH/snare_OH_F_1.wav",
      "size": 479102,
      "sha256": "502b42305ae9c82c34060b1664d5ab5bf9d23dc7afacedbafaf92bb7047b7457"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/snare_OH_F_2.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/snare_OH_F_2.wav",
      "cache_as": "drums/salamander/OH/snare_OH_F_2.wav",
      "size": 476714,
      "sha256": "4daaefe7f43a7e8a2d9a45f9bb1ef35502122ec95191cf9dbf6a55776f401ff3"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/snare_OH_F_3.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/snare_OH_F_3.wav",
      "cache_as": "drums/salamander/OH/snare_OH_F_3.wav",
      "size": 492866,
      "sha256": "79450ca54856fc8351bb0b5c6f3cef7d10e6c7aa9f9b92480de3fec1254e0d73"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/snare_OH_FF_1.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/snare_OH_FF_1.wav",
      "cache_as": "drums/salamander/OH/snare_OH_FF_1.wav",
      "size": 526562,
      "sha256": "4f30503ba0b27e702c75f027cfecdb49ec526ae31ea510f7bea71f98eaf9dc39"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/snare_OH_FF_2.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/snare_OH_FF_2.wav",
      "cache_as": "drums/salamander/OH/snare_OH_FF_2.wav",
      "size": 514484,
      "sha256": "4a4e1a3cd56d87e013cd93379e71e4ef9e8c8b781cbb0cd177f5f068b168bf29"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/snare_OH_FF_3.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/snare_OH_FF_3.wav",
      "cache_as": "drums/salamander/OH/snare_OH_FF_3.wav",
      "size": 527324,
      "sha256": "5cc0315e222b2a2e8ffc538f03fd76bf9de34acd8d42111ca08460f9d099fee5"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/snareStick_OH_F_1.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/snareStick_OH_F_1.wav",
      "cache_as": "drums/salamander/OH/snareStick_OH_F_1.wav",
      "size": 200330,
      "sha256": "cf1eb153fd033d822325071e7496f54a1f7610ae1702c2d700135ac98eaf5354"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/hihatClosed_OH_P_1.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/hihatClosed_OH_P_1.wav",
      "cache_as": "drums/salamander/OH/hihatClosed_OH_P_1.wav",
      "size": 150878,
      "sha256": "75e3a8ee84db75d0e9cec922d8bb44b977f5a73648145fbcd59a76e706636040"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/hihatClosed_OH_F_1.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/hihatClosed_OH_F_1.wav",
      "cache_as": "drums/salamander/OH/hihatClosed_OH_F_1.wav",
      "size": 162758,
      "sha256": "bd485de70450f68bb4692557a4ae909caaa965f5739693317365ebe85c986cbb"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/hihatOpen_OH_P_1.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/hihatOpen_OH_P_1.wav",
      "cache_as": "drums/salamander/OH/hihatOpen_OH_P_1.wav",
      "size": 2397722,
      "sha256": "3aeb5939739ac0d94a0ab5e0d237d96c46545f0c98778a5b2b18001be1090391"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/hihatOpen_OH_F_1.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/hihatOpen_OH_F_1.wav",
      "cache_as": "drums/salamander/OH/hihatOpen_OH_F_1.wav",
      "size": 2554610,
      "sha256": "7493fce31fb00093e4944f878a7fe802177a5c311e82725ac0ce7956e86f2fdc"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/hihatOpen_OH_FF_1.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/hihatOpen_OH_FF_1.wav",
      "cache_as": "drums/salamander/OH/hihatOpen_OH_FF_1.wav",
      "size": 2897654,
      "sha256": "ef88d66d0289de4befe583de11298d75bae788de9ea63f156b493689668a7d54"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/hihatFoot_OH_MP_1.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/hihatFoot_OH_MP_1.wav",
      "cache_as": "drums/salamander/OH/hihatFoot_OH_MP_1.wav",
      "size": 382556,
      "sha256": "2ad5e1bc38e5b9984d923b278b8ec5488540366082f4de9401d4702b9ba95e4c"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/hiTom_OH_P_1.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/hiTom_OH_P_1.wav",
      "cache_as": "drums/salamander/OH/hiTom_OH_P_1.wav",
      "size": 599078,
      "sha256": "fe826370a1ef7562a3c11701281a536f2b722f10390bf0322f95655919581568"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/hiTom_OH_F_1.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/hiTom_OH_F_1.wav",
      "cache_as": "drums/salamander/OH/hiTom_OH_F_1.wav",
      "size": 789824,
      "sha256": "b6802ce4ff40974f91ab9e30dea885a51db324376db3a56bbcaaaa6eaf69a043"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/hiTom_OH_FF_1.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/hiTom_OH_FF_1.wav",
      "cache_as": "drums/salamander/OH/hiTom_OH_FF_1.wav",
      "size": 871400,
      "sha256": "25d6092617cc798ba488b2d4843f1ea789324a795007ba405884c981f63f079e"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/loTom_OH_PP_1.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/loTom_OH_PP_1.wav",
      "cache_as": "drums/salamander/OH/loTom_OH_PP_1.wav",
      "size": 583160,
      "sha256": "8afb4c8bbb7a46472f387db6cb0d6597f3ad14f73a6e23bbf58ed945accef0e1"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/loTom_OH_MP_1.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/loTom_OH_MP_1.wav",
      "cache_as": "drums/salamander/OH/loTom_OH_MP_1.wav",
      "size": 609278,
      "sha256": "4c1fdf7233a170eb625efa5e5681d1811fb53fb7f34a85a05c8bc936d5ac60b2"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/loTom_OH_FF_1.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/loTom_OH_FF_1.wav",
      "cache_as": "drums/salamander/OH/loTom_OH_FF_1.wav",
      "size": 680900,
      "sha256": "bfb74d255554c2965bf012452bc3717dee88a44aa04d120f2a1b86b9b6a7082d"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/crash1_OH_P_1.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/crash1_OH_P_1.wav",
      "cache_as": "drums/salamander/OH/crash1_OH_P_1.wav",
      "size": 2558096,
      "sha256": "82b0ff9452b35ee6cf56445420af28b554d5ccc3659dff48167c21f1a357d795"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/crash1_OH_FF_1.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/crash1_OH_FF_1.wav",
      "cache_as": "drums/salamander/OH/crash1_OH_FF_1.wav",
      "size": 3312620,
      "sha256": "da28a2e9446c0e0a124f37ccf727db796f0d8575f63fbc923d16ad0143f1310c"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/crash2_OH_FF_1.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/crash2_OH_FF_1.wav",
      "cache_as": "drums/salamander/OH/crash2_OH_FF_1.wav",
      "size": 3088784,
      "sha256": "a361cfd992cb33026b1174c82b97b7cf04c10f23af7c9c5c1d1f588dfabc2ff1"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/ride1_OH_MP_1.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/ride1_OH_MP_1.wav",
      "cache_as": "drums/salamander/OH/ride1_OH_MP_1.wav",
      "size": 1946042,
      "sha256": "9e9135d595edf9f41ee3bd5caa9c797233422f62a3fb2c63ea542c58fb5ba155"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/ride1_OH_FF_1.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/ride1_OH_FF_1.wav",
      "cache_as": "drums/salamander/OH/ride1_OH_FF_1.wav",
      "size": 3094256,
      "sha256": "5dbdf8cdecd62b83acfde4e268be6a52da0ca64ae145536004ffce3b1b7d6608"
     },
     {
      "repo": "endolith/Salamander-Drumkit",
-     "path": "https://raw.githubusercontent.com/endolith/Salamander-Drumkit/master/OH/ride1Bell_OH_F_1.wav",
+     "path": "https://makepad.nl/models/drums/salamander/OH/ride1Bell_OH_F_1.wav",
      "cache_as": "drums/salamander/OH/ride1Bell_OH_F_1.wav",
      "size": 2123384,
      "sha256": "736bb2a58147359054df4b7c857b74c2d7b848efb9335b9e354661f025363e78"
@@ -691,9 +691,9 @@
     "summary": "FLUX.2-dev weights are under Black Forest Labs' non-commercial license. Personal and research use only unless you have a separate BFL grant.",
     "restriction": "non-commercial"
    },
-   "vram_gb": 29.0,
+   "vram_gb": 30.0,
    "min_vram_gb": 30.0,
-   "note": "FLUX.2-dev (32B guidance-distilled) text-to-image through the in-repo CUDA port of the official 32GB-card fp8 recipe (Comfy fp8mixed DiT: 48 singles + globals resident 1-byte, 8 doubles streamed through the pinned-host ring; Mistral-Small-3.2-24B fp8 TE taps [10,20,30] streamed per layer, flux2-vae, euler 20 steps guidance 4.0, 1024px default). Tekken tokenizer from the ungated Mistral-Small-3.1 repo (byte-identical to the gated BFL bundle). CUDA-only; fails closed without a GPU device. vram_gb is the ADMISSION estimate for the 32GB class it is built for: the measured process peak on the RTX 5090 is ~30.1GB (nvidia-smi 30.65GB incl. context, 2026-08-19, validator at 1024px) with an elastic activation pool, and the service adds its 2GB reserve on top, so 29.0 is what lets a cold 32GB card (32607 MB) admit it (29x1024+2048 = 31744 MB) while min_vram_gb 30 still refuses 24GB cards. Request: prompt (+ optional width/height/steps/guidance/seed).",
+   "note": "FLUX.2-dev (32B guidance-distilled) text-to-image through the in-repo CUDA port of the official 32GB-card fp8 recipe (Comfy fp8mixed DiT: 48 singles + globals resident 1-byte, 8 doubles streamed through the pinned-host ring; Mistral-Small-3.2-24B fp8 TE taps [10,20,30] streamed per layer, flux2-vae, euler 20 steps guidance 4.0, 1024px default). Tekken tokenizer from the ungated Mistral-Small-3.1 repo (byte-identical to the gated BFL bundle). CUDA-only; fails closed without a GPU device. vram_gb is the ADMISSION estimate for the 32GB class it is built for: the measured process peak on the RTX 5090 is ~30.1GB (nvidia-smi 30.65GB incl. context, 2026-08-19, validator at 1024px) with an elastic activation pool, and the service adds its 2GB reserve on top, so 29.0 is what lets a cold 32GB card (32607 MB) admit it (29x1024+2048 = 31744 MB) while min_vram_gb 30 still refuses 24GB cards. Request: prompt (+ optional width/height/steps/guidance/seed). Measured peak 30.5 GB used on an RTX 5090 (2026-09-04, 1024x1024, 8 steps, nvidia-smi 250 ms samples): the 32 GB card fits it with the node reserve at 1024 MB.",
    "files": [
     {
      "role": "transformer",

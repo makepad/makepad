@@ -26,8 +26,9 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs::File;
+use std::io::Read;
 #[cfg(not(target_arch = "wasm32"))]
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Seek, SeekFrom};
 use std::path::Path;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
@@ -40,7 +41,9 @@ const VERSION: u32 = 2;
 const HEADER_LEN: usize = 112;
 const ROOT_RECORD_LEN: usize = 36;
 const MAX_METADATA_BYTES: usize = 16 * 1024 * 1024;
-const MAX_LEAF_BYTES: usize = 64 * 1024 * 1024;
+// A root record lists every tile of one shard; the densest world shards carry over five
+// million tiles, whose decoded refs pass 64 MiB (the repack died on record 185 at that cap).
+const MAX_LEAF_BYTES: usize = 512 * 1024 * 1024;
 const MAX_TILE_BYTES: usize = 64 * 1024 * 1024;
 
 // --- Hilbert tile ids (identical to the writer) ---
@@ -363,15 +366,114 @@ impl MkmapRoot {
     }
 }
 
-/// Parsed, I/O-free leaf directory.
+/// How much of a leaf directory a caller can hold. A directory with more
+/// entries than `max_entries` is parsed as a window: only the entries whose
+/// tile ids fall inside `window` are kept, and the leaf answers only for
+/// those ids (`MkmapLeaf::covers`). `core` is the part of the window the
+/// caller actually needs; when the budget cannot hold the whole window, the
+/// margin below the core is dropped first and the margin above it is cut.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LeafParseLimits {
+    pub max_entries: usize,
+    pub window: Option<(u64, u64)>,
+    pub core: Option<(u64, u64)>,
+}
+
+impl LeafParseLimits {
+    pub const UNBOUNDED: Self = Self {
+        max_entries: usize::MAX,
+        window: None,
+        core: None,
+    };
+}
+
+/// Parsed, I/O-free leaf directory: the whole directory, or — when it holds
+/// more entries than the caller's budget — the entries inside one
+/// contiguous tile-id window. The packed record is decoded as a stream, so
+/// parsing never materializes the decompressed directory.
 #[derive(Clone, Debug)]
 pub struct MkmapLeaf {
     entries: Vec<LeafEntry>,
+    /// `None` for a whole directory; otherwise the inclusive id range this
+    /// leaf answers for.
+    window: Option<(u64, u64)>,
+}
+
+/// Pulls varints from a brotli stream through a small buffer, counting the
+/// decoded bytes against `MAX_LEAF_BYTES`.
+struct LeafVarints<'a> {
+    decoder: brotli::Decompressor<&'a [u8]>,
+    buffer: Vec<u8>,
+    position: usize,
+    filled: usize,
+    decoded: usize,
+    eof: bool,
+}
+
+impl<'a> LeafVarints<'a> {
+    const BUFFER_LEN: usize = 64 * 1024;
+
+    fn new(packed: &'a [u8]) -> Self {
+        Self {
+            decoder: brotli::Decompressor::new(packed, 16 * 1024),
+            buffer: vec![0; Self::BUFFER_LEN],
+            position: 0,
+            filled: 0,
+            decoded: 0,
+            eof: false,
+        }
+    }
+
+    fn next_byte(&mut self) -> Result<Option<u8>> {
+        if self.position == self.filled {
+            if self.eof {
+                return Ok(None);
+            }
+            let read = self
+                .decoder
+                .read(&mut self.buffer)
+                .map_err(|err| Error::Codec(format!("brotli decode failed: {err}")))?;
+            if read == 0 {
+                self.eof = true;
+                return Ok(None);
+            }
+            self.decoded = self.decoded.saturating_add(read);
+            if self.decoded > MAX_LEAF_BYTES {
+                return Err(Error::Codec("decoded byte limit".to_string()));
+            }
+            self.position = 0;
+            self.filled = read;
+        }
+        let byte = self.buffer[self.position];
+        self.position += 1;
+        Ok(Some(byte))
+    }
+
+    fn next_varint(&mut self) -> Result<u64> {
+        let mut value = 0_u64;
+        for byte_index in 0..10_u32 {
+            let byte = self.next_byte()?.ok_or(Error::CorruptVarint)?;
+            if byte_index == 9 && byte & 0xfe != 0 {
+                return Err(Error::CorruptVarint);
+            }
+            value |= u64::from(byte & 0x7f) << (byte_index * 7);
+            if byte & 0x80 == 0 {
+                if byte_index != 0 && byte & 0x7f == 0 {
+                    return Err(Error::CorruptVarint);
+                }
+                return Ok(value);
+            }
+        }
+        Err(Error::CorruptVarint)
+    }
 }
 
 impl MkmapLeaf {
+    /// Bytes one kept entry costs; a cache budget divides by this.
+    pub const ENTRY_BYTES: usize = std::mem::size_of::<LeafEntry>();
+
     pub fn parse(packed: &[u8]) -> std::result::Result<MkmapLeaf, String> {
-        Self::parse_inner(packed, None).map_err(|err| err.to_string())
+        Self::parse_inner(packed, None, LeafParseLimits::UNBOUNDED).map_err(|err| err.to_string())
     }
 
     pub fn parse_for_root(
@@ -380,9 +482,26 @@ impl MkmapLeaf {
         start_tile_id: u64,
         end_tile_id: u64,
     ) -> std::result::Result<MkmapLeaf, String> {
+        Self::parse_for_root_limited(
+            packed,
+            shard_count,
+            start_tile_id,
+            end_tile_id,
+            LeafParseLimits::UNBOUNDED,
+        )
+    }
+
+    pub fn parse_for_root_limited(
+        packed: &[u8],
+        shard_count: u32,
+        start_tile_id: u64,
+        end_tile_id: u64,
+        limits: LeafParseLimits,
+    ) -> std::result::Result<MkmapLeaf, String> {
         Self::parse_inner(
             packed,
             Some((shard_count, start_tile_id, end_tile_id)),
+            limits,
         )
         .map_err(|err| err.to_string())
     }
@@ -390,33 +509,50 @@ impl MkmapLeaf {
     fn parse_inner(
         packed: &[u8],
         bounds: Option<(u32, u64, u64)>,
+        limits: LeafParseLimits,
     ) -> Result<MkmapLeaf> {
-        let raw = TileCodec::from_metadata(
-            &[("compression".to_string(), "br".to_string())]
-                .into_iter()
-                .collect(),
-        )?
-        .decode_limited(packed, MAX_LEAF_BYTES)?;
-        let mut cursor = 0_usize;
-        let count = usize::try_from(read_varint(&raw, &mut cursor)?)
+        let mut varints = LeafVarints::new(packed);
+        let count = usize::try_from(varints.next_varint()?)
             .map_err(|_| Error::CorruptRecord("mkmap leaf count"))?;
-        if count > raw.len().saturating_sub(cursor) / 4 {
+        // Every entry is at least four bytes of the decoded stream.
+        if count > MAX_LEAF_BYTES / 4 {
             return Err(Error::CorruptRecord("mkmap leaf count"));
         }
-        let mut entries = Vec::with_capacity(count);
+        let window = if count <= limits.max_entries {
+            None
+        } else {
+            match limits.window {
+                Some(window) => Some(window),
+                None => {
+                    return Err(Error::Codec(format!(
+                        "mkmap leaf holds {count} entries, over the {} the caller can keep",
+                        limits.max_entries
+                    )))
+                }
+            }
+        };
+        let mut entries = Vec::with_capacity(if window.is_none() { count } else { 0 });
         let mut tile_id = 0_u64;
+        // The ids this leaf will answer for. `kept_from` is the number of
+        // leading (lowest-id) kept entries given up to make room for the
+        // core; everything from `entries[kept_from]` up to `claimed_hi` is
+        // authoritative.
+        let core_lo = limits.core.map_or(u64::MAX, |(lo, _)| lo);
+        let mut kept_from = 0_usize;
+        let mut claimed_lo = window.map(|(lo, _)| lo);
+        let mut claimed_hi = window.map(|(_, hi)| hi);
         for index in 0..count {
-            let delta = read_varint(&raw, &mut cursor)?;
+            let delta = varints.next_varint()?;
             if index != 0 && delta == 0 {
                 return Err(Error::CorruptRecord("mkmap leaf tile order"));
             }
             tile_id = tile_id
                 .checked_add(delta)
                 .ok_or(Error::CorruptRecord("mkmap leaf tile id"))?;
-            let shard = u32::try_from(read_varint(&raw, &mut cursor)?)
+            let shard = u32::try_from(varints.next_varint()?)
                 .map_err(|_| Error::CorruptRecord("mkmap leaf shard"))?;
-            let blob_offset = read_varint(&raw, &mut cursor)?;
-            let len = read_varint(&raw, &mut cursor)?;
+            let blob_offset = varints.next_varint()?;
+            let len = varints.next_varint()?;
             if len == 0
                 || len > MAX_TILE_BYTES as u64
                 || blob_offset.checked_add(len).is_none()
@@ -426,19 +562,72 @@ impl MkmapLeaf {
             {
                 return Err(Error::CorruptRecord("mkmap leaf entry"));
             }
-            entries.push(LeafEntry {
+            let entry = LeafEntry {
                 tile_id,
                 blob: BlobRef {
                     shard,
                     offset: blob_offset,
                     len,
                 },
-            });
+            };
+            match window {
+                None => entries.push(entry),
+                Some((lo, hi)) => {
+                    if tile_id > hi {
+                        // Ascending ids: nothing after this is inside the window.
+                        break;
+                    }
+                    if tile_id < lo {
+                        continue;
+                    }
+                    if entries.len() - kept_from >= limits.max_entries {
+                        // Budget full: give up the margin below the core
+                        // first (ascending ids: the lowest kept entries),
+                        // otherwise answer only for the ids held so far.
+                        if entries[kept_from].tile_id < core_lo && tile_id <= limits.core.map_or(0, |(_, hi)| hi) {
+                            kept_from += 1;
+                            claimed_lo = Some(entries[kept_from].tile_id);
+                        } else {
+                            claimed_hi = Some(tile_id - 1);
+                            break;
+                        }
+                    }
+                    entries.push(entry);
+                }
+            }
         }
-        if cursor != raw.len() {
+        if window.is_none() && varints.next_byte()?.is_some() {
             return Err(Error::CorruptRecord("mkmap leaf trailing bytes"));
         }
-        Ok(MkmapLeaf { entries })
+        if kept_from > 0 {
+            entries.drain(..kept_from);
+        }
+        Ok(MkmapLeaf {
+            entries,
+            window: window.map(|(lo, _)| {
+                let lo = claimed_lo.unwrap_or(lo);
+                (lo, claimed_hi.unwrap_or(lo).max(lo))
+            }),
+        })
+    }
+
+    /// Whether `find` is authoritative for this id: always for a whole
+    /// directory, only inside the kept window otherwise.
+    pub fn covers(&self, tile_id: u64) -> bool {
+        self.window
+            .map_or(true, |(lo, hi)| tile_id >= lo && tile_id <= hi)
+    }
+
+    pub fn is_partial(&self) -> bool {
+        self.window.is_some()
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 
     pub fn find(&self, tile_id: u64) -> Option<BlobRef> {
@@ -449,7 +638,7 @@ impl MkmapLeaf {
     }
 
     pub fn retained_bytes(&self) -> usize {
-        self.entries.len().saturating_mul(std::mem::size_of::<LeafEntry>())
+        self.entries.len().saturating_mul(Self::ENTRY_BYTES)
     }
 }
 
@@ -556,6 +745,7 @@ impl MkmapReader {
                 record.start_tile_id,
                 record.end_tile_id,
             )),
+            LeafParseLimits::UNBOUNDED,
         )
     }
 
@@ -892,6 +1082,84 @@ mod tests {
 
     fn brotli(raw: &[u8]) -> Vec<u8> {
         crate::compress_tile(&crate::TileCompression::Brotli { quality: 5 }, None, raw).unwrap()
+    }
+
+    fn packed_leaf(entries: &[(u64, u32, u64, u64)]) -> Vec<u8> {
+        let mut raw = Vec::new();
+        write_varint(entries.len() as u64, &mut raw);
+        let mut previous = 0_u64;
+        for (tile_id, shard, offset, len) in entries {
+            write_varint(tile_id - previous, &mut raw);
+            write_varint(u64::from(*shard), &mut raw);
+            write_varint(*offset, &mut raw);
+            write_varint(*len, &mut raw);
+            previous = *tile_id;
+        }
+        brotli(&raw)
+    }
+
+    #[test]
+    fn leaf_over_the_entry_budget_keeps_only_the_requested_window() {
+        let entries: Vec<(u64, u32, u64, u64)> = (0..1000_u64)
+            .map(|index| (1000 + index * 3, 0, index * 100, 10 + index))
+            .collect();
+        let packed = packed_leaf(&entries);
+
+        let whole = MkmapLeaf::parse(&packed).unwrap();
+        assert!(!whole.is_partial());
+        assert_eq!(whole.len(), 1000);
+        assert_eq!(whole.find(1000 + 500 * 3).unwrap().offset, 50_000);
+
+        let limits = LeafParseLimits {
+            max_entries: 64,
+            window: Some((1000 + 400 * 3, 1000 + 420 * 3)),
+            core: Some((1000 + 405 * 3, 1000 + 415 * 3)),
+        };
+        let window = MkmapLeaf::parse_for_root_limited(&packed, 1, 0, u64::MAX, limits).unwrap();
+        assert!(window.is_partial());
+        assert_eq!(window.len(), 21);
+        assert!(window.covers(1000 + 400 * 3));
+        assert!(window.covers(1000 + 420 * 3));
+        assert!(window.covers(1000 + 410 * 3 + 1));
+        assert!(!window.covers(1000 + 399 * 3));
+        assert!(!window.covers(1000 + 421 * 3));
+        assert_eq!(window.find(1000 + 410 * 3).unwrap().len, 10 + 410);
+        assert_eq!(window.find(1000 + 410 * 3 + 1), None);
+        assert!(window.retained_bytes() < whole.retained_bytes() / 40);
+
+        // A window wider than the budget gives up its low margin first, so
+        // the core is still answered, then cuts the high margin.
+        let limits = LeafParseLimits {
+            max_entries: 10,
+            window: Some((1000 + 100 * 3, 1000 + 200 * 3)),
+            core: Some((1000 + 150 * 3, 1000 + 155 * 3)),
+        };
+        let clipped = MkmapLeaf::parse_for_root_limited(&packed, 1, 0, u64::MAX, limits).unwrap();
+        assert_eq!(clipped.len(), 10);
+        assert!(!clipped.covers(1000 + 145 * 3));
+        assert!(clipped.covers(1000 + 150 * 3));
+        assert!(clipped.covers(1000 + 155 * 3));
+        assert!(!clipped.covers(1000 + 156 * 3));
+        assert_eq!(clipped.find(1000 + 152 * 3).unwrap().len, 10 + 152);
+
+        // A core larger than the budget answers only for what it holds.
+        let limits = LeafParseLimits {
+            max_entries: 4,
+            window: Some((1000 + 100 * 3, 1000 + 200 * 3)),
+            core: Some((1000 + 150 * 3, 1000 + 160 * 3)),
+        };
+        let short = MkmapLeaf::parse_for_root_limited(&packed, 1, 0, u64::MAX, limits).unwrap();
+        assert_eq!(short.len(), 4);
+        assert!(short.covers(1000 + 153 * 3));
+        assert!(!short.covers(1000 + 154 * 3));
+
+        // Over budget with no window is refused rather than materialized.
+        let limits = LeafParseLimits {
+            max_entries: 64,
+            window: None,
+            core: None,
+        };
+        assert!(MkmapLeaf::parse_for_root_limited(&packed, 1, 0, u64::MAX, limits).is_err());
     }
 
     fn tiny_archive_parts() -> (Vec<u8>, Vec<u8>, u64, u64) {

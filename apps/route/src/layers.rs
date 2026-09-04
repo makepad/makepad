@@ -6,23 +6,8 @@
 //! the MapView after each tool run and feeds worker results as they arrive.
 
 use makepad_widgets::*;
+use crate::overlays::{OverlaySelection, OVERLAY_LAYERS};
 use std::path::PathBuf;
-use std::sync::mpsc;
-
-/// Always-on ocean sidecars (sea from coastline-derived polygons; low serves
-/// open ocean via ancestor overzoom, high carries exact coastal tiles).
-pub const OCEAN_LOW_MBTILES: &str = "ocean-low.mbtiles";
-pub const OCEAN_HIGH_MBTILES: &str = "ocean-high.mbtiles";
-
-/// name → overlay mbtiles path (order = fixed toggle slots).
-pub const OVERLAY_LAYERS: [(&str, &str); 6] = [
-    ("chargers", "local/overlays/nl-chargers.mbtiles?fast"),
-    ("transit", "local/overlays/nl-transit.mbtiles"),
-    ("nature", "local/overlays/nl-nature.mbtiles"),
-    ("districts", "local/overlays/nl-wijkbuurt.mbtiles"),
-    ("buildings_age", "local/overlays/nl-buildings-age.mbtiles"),
-    ("demographics", "local/overlays/nl-demographics.mbtiles"),
-];
 
 pub struct WindUpdate {
     pub nx: usize,
@@ -32,23 +17,9 @@ pub struct WindUpdate {
     pub bbox: (f64, f64, f64, f64),
 }
 
-/// (normalized-mercator bbox, sun dir, cast_shadows)
-pub type TerrainRequest = ((f64, f64, f64, f64), (f32, f32, f32), bool);
-
-pub struct TerrainUpdate {
-    pub texels: Vec<u32>,
-    pub width: usize,
-    pub height: usize,
-    pub elev_texels: Vec<u32>,
-    pub elev: Vec<f32>,
-    pub elev_width: usize,
-    pub elev_height: usize,
-    pub bbox: (f64, f64, f64, f64),
-}
-
 pub struct LayerState {
     pub maps_root: PathBuf,
-    pub overlay_on: [bool; OVERLAY_LAYERS.len()],
+    pub overlays: OverlaySelection,
     pub rain: bool,
     pub wind: bool,
     pub terrain: bool,
@@ -61,15 +32,13 @@ pub struct LayerState {
     pub dirty: bool,
     pub wind_worker_started: bool,
     pub wind_cache: Option<WindUpdate>,
-    pub terrain_tx: Option<mpsc::Sender<TerrainRequest>>,
-    pub last_terrain_key: Option<(i64, i64, i64, i64)>,
 }
 
 impl Default for LayerState {
     fn default() -> Self {
         Self {
             maps_root: PathBuf::new(),
-            overlay_on: [false; OVERLAY_LAYERS.len()],
+            overlays: OverlaySelection::default(),
             rain: false,
             wind: false,
             terrain: false,
@@ -78,8 +47,6 @@ impl Default for LayerState {
             dirty: false,
             wind_worker_started: false,
             wind_cache: None,
-            terrain_tx: None,
-            last_terrain_key: None,
         }
     }
 }
@@ -111,19 +78,13 @@ impl LayerState {
                 Ok("tiltshift")
             }
             _ => {
-                for (i, (layer_name, _)) in OVERLAY_LAYERS.iter().enumerate() {
-                    if *layer_name == key
-                        || (key == "wijkbuurt" && *layer_name == "districts")
-                        || (key == "buildings-age" && *layer_name == "buildings_age")
-                    {
-                        self.overlay_on[i] = on;
-                        return Ok(layer_name);
-                    }
+                if let Some(layer_name) = self.overlays.set_named(&key, on) {
+                    return Ok(layer_name);
                 }
                 self.dirty = false;
                 Err(format!(
                     "unknown layer '{name}' — available: rain, wind, terrain, {}",
-                    OVERLAY_LAYERS.map(|(n, _)| n).join(", ")
+                    OVERLAY_LAYERS.map(|layer| layer.name).join(", ")
                 ))
             }
         }
@@ -141,30 +102,8 @@ impl LayerState {
         Ok(theme)
     }
 
-    pub fn overlay_paths(&self) -> String {
-        // Ocean sidecars are always on: sea polygons are base data (the
-        // pbf-base schema has no coastline stage), not a toggleable layer.
-        let mut paths = vec![
-            self.maps_root.join(OCEAN_LOW_MBTILES).to_string_lossy().into_owned(),
-            self.maps_root.join(OCEAN_HIGH_MBTILES).to_string_lossy().into_owned(),
-        ];
-        paths.extend(
-            OVERLAY_LAYERS
-                .iter()
-                .zip(self.overlay_on.iter())
-                .filter(|(_, on)| **on)
-                .map(|((_, path), _)| (*path).to_string()),
-        );
-        paths.join(";")
-    }
-
     pub fn summary(&self) -> String {
-        let mut on: Vec<&str> = OVERLAY_LAYERS
-            .iter()
-            .zip(self.overlay_on.iter())
-            .filter(|(_, o)| **o)
-            .map(|((n, _), _)| *n)
-            .collect();
+        let mut on = self.overlays.enabled_names();
         if self.rain {
             on.push("rain");
         }
@@ -187,10 +126,16 @@ impl LayerState {
 }
 
 /// GFS wind worker: 30 min disk-gated NOMADS polls, cached GRIB2 on disk.
-pub fn start_wind_worker(sender: ToUISender<WindUpdate>) {
-    std::thread::spawn(move || {
+pub fn start_wind_worker(spawner: ThreadSpawner, sender: ToUISender<WindUpdate>) {
+    let spawned = spawner.spawn_worker(
+        ThreadOptions {
+            name: Some("route-wind".into()),
+            ..Default::default()
+        },
+        move || {
         use makepad_geodata::wind::{WindSync, WIND_EAST, WIND_NORTH, WIND_SOUTH, WIND_WEST};
         let sync = WindSync::new("local/overlays/wind");
+        let pacing = CancellationToken::new();
         loop {
             let field = sync.sync().ok().flatten().or_else(|| sync.cached());
             if let Some(field) = field {
@@ -202,116 +147,11 @@ pub fn start_wind_worker(sender: ToUISender<WindUpdate>) {
                     bbox: (WIND_WEST, WIND_SOUTH, WIND_EAST, WIND_NORTH),
                 });
             }
-            std::thread::sleep(std::time::Duration::from_secs(300));
+            let _ = pacing.wait_until(Cx::monotonic_now() + 300.0);
         }
     });
-}
-
-/// Terrain worker: hillshade renders for requested view bboxes from the
-/// local terrarium mbtiles, with landcover drape (shared with examples/map).
-pub fn start_terrain_worker(
-    sender: ToUISender<TerrainUpdate>,
-    maps_root: PathBuf,
-) -> mpsc::Sender<TerrainRequest> {
-    let (tx, rx) = mpsc::channel::<TerrainRequest>();
-    std::thread::spawn(move || {
-        use makepad_geodata::terrain_shade::TerrainShader;
-        let Ok(mut shader) =
-            TerrainShader::open(std::path::Path::new("local/overlays/nl-terrain.mbtiles"))
-        else {
-            return;
-        };
-        let mut land_reader = makepad_mbtile_reader::MbtilesReader::open(
-            &maps_root.join("europe-shortbread.mbtiles"),
-        )
-        .ok();
-        while let Ok(mut request) = rx.recv() {
-            // Only the newest pending request matters.
-            while let Ok(newer) = rx.try_recv() {
-                request = newer;
-            }
-            let (bbox, sun, cast_shadows) = request;
-            shader.sun = sun;
-            shader.cast_shadows = cast_shadows;
-            let (w, h) = (4096usize, 3072usize);
-            let (mut rgba, elev_full, shade) =
-                shader.shade_region(bbox.0, bbox.1, bbox.2, bbox.3, w, h);
-            if let Some(reader) = land_reader.as_mut() {
-                makepad_widgets::map::drape::drape_landcover(
-                    reader, bbox, w, h, &elev_full, &shade, &mut rgba,
-                );
-            }
-            let texels = makepad_geodata::radar_raster::rgba_to_bgra_texels(&rgba);
-            // Displacement grid matching the renderer's terrain mesh corners
-            // (same constants as examples/map).
-            let (ew, eh) = (289usize, 217usize);
-            let mut elev = vec![0f32; ew * eh];
-            let mut elev_texels = vec![0u32; ew * eh];
-            for y in 0..eh {
-                for x in 0..ew {
-                    let sx = (x * (w - 1)) / (ew - 1);
-                    let sy = (y * (h - 1)) / (eh - 1);
-                    let m = elev_full[sy * w + sx].max(0.0);
-                    elev[y * ew + x] = m;
-                    // Terrarium pack: m + 32768 in R*256 + G + B/256.
-                    let v = ((m + 32768.0) * 256.0) as u32;
-                    let (r, g, b) = (v >> 16 & 255, v >> 8 & 255, v & 255);
-                    elev_texels[y * ew + x] = b | (g << 8) | (r << 16) | (255 << 24);
-                }
-            }
-            let _ = sender.send(TerrainUpdate {
-                texels,
-                width: w,
-                height: h,
-                elev_texels,
-                elev,
-                elev_width: ew,
-                elev_height: eh,
-                bbox,
-            });
-        }
-    });
-    tx
-}
-
-/// Terrain render request for the current viewport, debounced by view key
-/// (same policy as examples/map: ~3 viewports coverage, half-viewport
-/// re-render steps, integer zoom buckets).
-pub fn request_terrain(cx: &mut Cx, map: &MapViewRef, state: &mut LayerState) {
-    if !state.terrain || state.terrain_tx.is_none() {
-        return;
+    match spawned {
+        Ok(handle) => handle.detach(),
+        Err(error) => log!("wind worker unavailable: {error}"),
     }
-    let Some((lon, lat)) = map.center() else {
-        return;
-    };
-    let zoom = map.map_zoom().unwrap_or(10.0);
-    let tilt = map.tilt();
-    let world_px = 256.0 * 2f64.powf(zoom);
-    let margin = 3.0 + 1.6 * tilt.to_radians().sin();
-    let half_w = 1000.0 * margin / world_px;
-    let half_h = 750.0 * margin / world_px;
-    let nx = (lon + 180.0) / 360.0;
-    let lat_rad = lat.to_radians();
-    let ny = (1.0 - (lat_rad.tan() + 1.0 / lat_rad.cos()).ln() / std::f64::consts::PI) / 2.0;
-    let bbox = (nx - half_w, ny - half_h, nx + half_w, ny + half_h);
-    let step = half_w / 3.0;
-    let key = (
-        (nx / step).round() as i64,
-        (ny / step).round() as i64,
-        zoom.floor() as i64,
-        (tilt > 0.5) as i64,
-    );
-    if state.last_terrain_key == Some(key) {
-        return;
-    }
-    state.last_terrain_key = Some(key);
-    let shiny = map.shiny().unwrap_or_default();
-    if let Some(tx) = &state.terrain_tx {
-        let _ = tx.send((
-            bbox,
-            (shiny.sun.dir.x, shiny.sun.dir.y, shiny.sun.dir.z),
-            shiny.terrain_shadows,
-        ));
-    }
-    let _ = cx;
 }

@@ -26,7 +26,8 @@
 use crate::button::ButtonAction;
 use crate::widget_tree::CxWidgetExt;
 use crate::{
-    animator::*, makepad_derive_widget::*, makepad_draw::*, text_input::*, view::View, widget::*,
+    animator::*, makepad_derive_widget::*, makepad_draw::ime::TextInputConfig, makepad_draw::*,
+    text_input::*, view::View, widget::*,
 };
 use crate::makepad_script::script;
 
@@ -919,6 +920,10 @@ pub struct FabValueInput {
     walk: Walk,
     #[layout]
     layout: Layout,
+    /// A host can swap the field for another control in the same slot.
+    #[live(true)]
+    #[visible]
+    visible: bool,
 
     #[live]
     label: String,
@@ -1067,6 +1072,21 @@ impl FabValueInput {
         self.value
     }
 
+    /// Focus/IME state of the private text editor used while a scrub field is
+    /// being typed. Canvas hosts cannot discover this child through the
+    /// public widget tree because it is embedded directly, not a WidgetRef.
+    pub fn text_ime_anchor(&self, cx: &Cx) -> Option<(Area, Rect, TextInputConfig)> {
+        let area = self.text_input.area();
+        if !self.editing || area.is_empty() || !cx.has_key_focus(area) {
+            return None;
+        }
+        Some((
+            area,
+            self.text_input.cursor_rect_in_absolute(cx)?,
+            self.text_input.ime_config(),
+        ))
+    }
+
     fn publish(&mut self, cx: &mut Cx, uid: WidgetUid, v: f64, ended: bool) {
         if (v - self.value).abs() > f64::EPSILON {
             self.value = v;
@@ -1156,6 +1176,9 @@ impl FabValueInput {
 
 impl Widget for FabValueInput {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
         // The fill claims "this range means something": only bounded fields
         // paint one.
         self.draw_bg.fill = if self.show_fill && self.max > self.min {
@@ -1173,10 +1196,15 @@ impl Widget for FabValueInput {
             let fs = self.draw_text.text_style.font_size as f64;
             let value_reserve = (self.format().chars().count() as f64 + 0.5) * fs * 0.72 + 6.0;
             let label_w = (row - pad - value_reserve).max(0.0);
-            let mut label_walk = Walk::fit();
-            label_walk.width = Size::Fixed(label_w);
-            self.draw_text
-                .draw_walk(cx, label_walk, Align::default(), &self.label);
+            // A label that cannot fit is not drawn at all: a crushed "w"
+            // renders as a stray dot beside the number.
+            let needed = self.label.chars().count() as f64 * fs * 0.62 + 2.0;
+            if label_w >= needed {
+                let mut label_walk = Walk::fit();
+                label_walk.width = Size::Fixed(label_w);
+                self.draw_text
+                    .draw_walk(cx, label_walk, Align::default(), &self.label);
+            }
         }
         let iw = self.text_input.walk(cx);
         let _ = self.text_input.draw_walk(cx, &mut Scope::empty(), iw);

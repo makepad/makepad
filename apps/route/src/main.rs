@@ -37,6 +37,7 @@ mod layers;
 #[cfg(feature = "native")]
 mod local_agent;
 mod nav;
+mod overlays;
 #[cfg(any(feature = "demo", test))]
 mod nav_api;
 mod provisioner;
@@ -61,7 +62,9 @@ use ddg::{DdgEvent, DdgState};
 #[cfg(feature = "native")]
 use history::DriveLog;
 #[cfg(feature = "native")]
-use layers::{LayerState, TerrainUpdate, WindUpdate};
+use layers::{LayerState, WindUpdate};
+#[cfg(feature = "native")]
+use overlays::TerrainLayer;
 #[cfg(feature = "native")]
 use nav::{ActiveNav, NavAction, NavTick};
 #[cfg(feature = "native")]
@@ -79,15 +82,56 @@ use trip::TripModel;
 use voice::{GateResult, VoiceGate};
 
 #[cfg(feature = "native")]
-app_main!(App, font_set: International);
+app_main!(App);
 #[cfg(feature = "demo")]
 pub use nav::api::App;
 #[cfg(feature = "demo")]
-app_main!(App, font_set: International);
+app_main!(App);
 
 /// Dam square, the point the map opens on and where a fresh test map
 /// lands.
 pub(crate) const AMSTERDAM_CENTER: (f64, f64) = (4.8952, 52.3702);
+
+const THEME_STORAGE: &str = "route";
+const THEME_KEY: &str = "theme";
+
+#[derive(Default)]
+struct ThemePreference {
+    load: Option<StorageRequestId>,
+}
+
+impl ThemePreference {
+    fn start(&mut self, cx: &mut Cx) {
+        self.load = Some(cx.storage(THEME_STORAGE).get(cx, THEME_KEY));
+    }
+
+    fn restored(&mut self, event: &Event) -> Option<u32> {
+        let Event::Storage(responses) = event else {
+            return None;
+        };
+        let request_id = self.load?;
+        let response = responses
+            .iter()
+            .find(|response| response.request_id == request_id)?;
+        self.load = None;
+        let Ok(StorageResult::Value(Some(bytes))) = &response.result else {
+            return None;
+        };
+        match bytes.as_slice() {
+            b"light" => Some(0),
+            b"night" => Some(1),
+            b"circuit" => Some(2),
+            _ => None,
+        }
+    }
+
+    fn save(&mut self, cx: &mut Cx, theme: u32) {
+        self.load = None;
+        let name = ["light", "night", "circuit"][theme.min(2) as usize];
+        cx.storage(THEME_STORAGE)
+            .set(cx, THEME_KEY, name.as_bytes().to_vec());
+    }
+}
 
 #[cfg(feature = "native")]
 const SYSTEM_PROMPT: &str = "\
@@ -172,7 +216,6 @@ script_mod! {
                             mbtiles_path: "local/maps/world.mkmap"
                             detail_mbtiles_path: "local/maps/world.mkmap"
                             bridge_dz_mbtiles_path: "local/maps/nl-bridge-dz.mbtiles"
-                            overlay_mbtiles_paths: "local/maps/ocean-low.mbtiles;local/maps/ocean-high.mbtiles"
                             buildings_3d: true
                         }
 
@@ -399,23 +442,6 @@ script_mod! {
                                 }
                                 theme_night := LayerCheck{text: "Night theme"}
                                 theme_circuit := LayerCheck{text: "Circuit City"}
-                                Hr{
-                                    height: 16
-                                }
-                                Label{
-                                    text: "Maps folder (next launch)"
-                                    draw_text +: {
-                                        color: #x223038
-                                        text_style: theme.font_regular{font_size: 9}
-                                    }
-                                }
-                                maps_root_input := TextInput{
-                                    width: 270
-                                    empty_text: "Automatic"
-                                }
-                                maps_root_save := AppButton{
-                                    text: "Save maps folder"
-                                }
                             }
                             layers_button := AppButton{
                                 margin: Inset{left: 14, bottom: 16}
@@ -722,6 +748,8 @@ pub struct App {
     ui: WidgetRef,
     #[rust]
     started: bool,
+    #[rust]
+    theme_preference: ThemePreference,
     /// Route's tools toward the WM assistant (or a parked in-process host).
     #[rust]
     ai_port: Option<AiServicePort>,
@@ -755,7 +783,7 @@ pub struct App {
     pending_cloud: Option<(String, String)>,
     /// Turn timing shared with the LocalAgent worker.
     #[rust]
-    local_timing: Option<std::sync::Arc<std::sync::Mutex<String>>>,
+    local_timing: Option<ToUIReceiver<String>>,
     #[rust]
     busy: bool,
     #[rust]
@@ -813,7 +841,7 @@ pub struct App {
     #[rust]
     wind_rx: ToUIReceiver<WindUpdate>,
     #[rust]
-    terrain_rx: ToUIReceiver<TerrainUpdate>,
+    terrain_layer: TerrainLayer,
     /// Kokoro voice output (🔊 button). None until first startup.
     #[rust]
     speech: Option<SpeechOutput>,
@@ -829,76 +857,6 @@ pub struct App {
     /// Previous (name, args) this turn — breaks identical-call loops.
     #[rust]
     last_tool_call: Option<(String, String)>,
-}
-
-/// The machine's UTC offset in seconds, read once. The platform has no
-/// timezone database, so we ask the system's own `date` — which knows about
-/// DST — instead of guessing. Same house pattern as
-/// `apps/files/src/model.rs::local_utc_offset_secs`.
-#[cfg(feature = "native")]
-fn local_utc_offset_secs() -> i64 {
-    static OFFSET: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
-    *OFFSET.get_or_init(|| {
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
-        {
-            let Ok(out) = std::process::Command::new("date").arg("+%z").output() else {
-                return 0;
-            };
-            return parse_utc_offset(String::from_utf8_lossy(&out.stdout).trim());
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        0
-    })
-}
-
-/// `+0200` / `-0730` -> seconds east of UTC.
-#[cfg(feature = "native")]
-fn parse_utc_offset(text: &str) -> i64 {
-    let bytes = text.as_bytes();
-    if bytes.len() < 5 || (bytes[0] != b'+' && bytes[0] != b'-') {
-        return 0;
-    }
-    let Ok(hours) = text[1..3].parse::<i64>() else {
-        return 0;
-    };
-    let Ok(minutes) = text[3..5].parse::<i64>() else {
-        return 0;
-    };
-    let magnitude = hours * 3600 + minutes * 60;
-    if bytes[0] == b'-' {
-        -magnitude
-    } else {
-        magnitude
-    }
-}
-
-/// The current local hour-of-day (0..24), wall clock + system UTC offset.
-/// `--hour=N` on the command line pins it: a render gate compares grabs
-/// taken at different times of day against one daylight baseline.
-#[cfg(feature = "native")]
-fn local_hour_now() -> u32 {
-    if let Some(hour) = std::env::args()
-        .find_map(|arg| arg.strip_prefix("--hour=").and_then(|v| v.parse::<u32>().ok()))
-    {
-        return hour % 24;
-    }
-    let epoch_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let local_secs = epoch_secs + local_utc_offset_secs();
-    (local_secs.rem_euclid(86_400) / 3600) as u32
-}
-
-/// Civil-twilight approximation for the startup theme, no location lookup:
-/// night from 19:00 through 06:59, light from 07:00 through 18:59.
-#[cfg(feature = "native")]
-fn theme_name_for_hour(hour: u32) -> &'static str {
-    if hour >= 19 || hour < 7 {
-        "night"
-    } else {
-        "light"
-    }
 }
 
 /// Pull "ctx USED/MAX" out of the local timing status line.
@@ -943,32 +901,28 @@ impl App {
             return;
         }
         self.started = true;
+        self.theme_preference.start(cx);
         self.ai_port = AiServicePort::open(cx, ai::manifest());
         self.assistant.configure_ui(cx, &self.ui);
         start_memory_watchdog(None);
-        // Civil-twilight default (route.md follow-up): night 19:00-06:59,
-        // light 07:00-18:59, local wall clock, no location lookup. Same
-        // set_theme_name + apply_layers path the "Night theme" checkbox
-        // uses, so the checkbox, the chrome and the map all agree; the
-        // user can still flip it manually afterwards.
-        let _ = self.layers.set_theme_name(theme_name_for_hour(local_hour_now()));
         self.layers.dirty = false;
         let maps_root = testmap::resolve_maps_root();
         log!("maps root: {}", maps_root.display());
-        self.ui
-            .text_input(cx, ids!(maps_root_input))
-            .set_text(cx, &maps_root.to_string_lossy());
         self.layers.set_maps_root(maps_root.clone());
         // Applies the theme above (chrome + map + checkboxes) and reflects
         // the rest of the LayerState defaults (e.g. tilt-shift on) in the
         // layers popover.
         self.apply_layers(cx);
         self.adopt_map_source(cx, &maps_root);
-        nav_data::start_radar_worker(self.radar_rx.sender());
+        nav_data::start_radar_worker(
+            cx.thread_spawner(),
+            cx.task_pool(),
+            self.radar_rx.sender(),
+        );
         cx.start_location_updates();
         // Kokoro af_heart when weights are in reach (this process, the machine
         // node, a LAN box), else the OS voice — the hub decides.
-        let speech = SpeechOutput::new("af_heart");
+        let speech = SpeechOutput::new("af_heart", cx.thread_spawner());
         speech.install_audio_output(cx, 0);
         self.speech = Some(speech);
         self.init_agent(cx);
@@ -1029,6 +983,7 @@ impl App {
                 }
                 // Calls are synchronous, so there is no worker to cancel.
                 PortEvent::Cancel { .. } => {}
+                PortEvent::Subscribe { .. } | PortEvent::Unsubscribe { .. } => {}
                 PortEvent::ChatOpen { open } => {
                     if open && self.assistant_panel_open {
                         self.assistant_panel_open = false;
@@ -1047,12 +1002,12 @@ impl App {
     fn adopt_map_source(&mut self, cx: &mut Cx, maps_root: &std::path::Path) {
         let nav_basename = nav_data::nav_basename(maps_root);
         if let Some(basename) = nav_basename.clone() {
-            nav_data::start_nav_load(self.nav_rx.sender(), basename);
+            nav_data::start_nav_load(cx.task_pool(), self.nav_rx.sender(), basename);
         }
         let map = self.ui.map_view(cx, ids!(map));
         if let Some(basename) = self.testmap.ensure_source(cx, &map, maps_root) {
             if nav_basename.is_none() {
-                nav_data::start_nav_load(self.nav_rx.sender(), basename);
+                nav_data::start_nav_load(cx.task_pool(), self.nav_rx.sender(), basename);
             }
         }
         self.refresh_testmap_ui(cx);
@@ -1136,9 +1091,10 @@ impl App {
         } else {
             let model_path = std::env::var("MAKEPAD_ROUTE_LOCAL_MODEL")
                 .unwrap_or_else(|_| local_agent::DEFAULT_LOCAL_MODEL.to_string());
-            let timing = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-            self.local_timing = Some(timing.clone());
-            Box::new(local_agent::LocalAgent::new(model_path, timing))
+            let timing = ToUIReceiver::default();
+            let timing_sender = timing.sender();
+            self.local_timing = Some(timing);
+            Box::new(local_agent::LocalAgent::new(model_path, timing_sender))
         };
         let session = agent.create_session(
             cx,
@@ -1392,7 +1348,7 @@ impl App {
                 // resident so startup peaks don't stack (iPad jetsam kills
                 // on peak footprint, not steady state).
                 if self.voice_gate.is_none() {
-                    self.voice_gate = Some(VoiceGate::new());
+                    self.voice_gate = Some(VoiceGate::new(cx.thread_spawner()));
                 }
                 // Chain whisper after the LLMs (eager but serialized).
                 self.ui.voice_wave(cx, ids!(mic_wave)).prewarm(cx);
@@ -1425,11 +1381,15 @@ impl App {
                 }
                 self.busy = false;
                 self.current_prompt = None;
-                let timing = self
-                    .local_timing
-                    .as_ref()
-                    .and_then(|t| t.lock().ok().map(|s| s.clone()))
-                    .filter(|s| !s.is_empty())
+                let timing = self.local_timing.as_ref().and_then(|receiver| {
+                    let mut latest = None;
+                    while let Ok(value) = receiver.try_recv() {
+                        latest = Some(value);
+                    }
+                    latest
+                });
+                let timing = timing
+                    .filter(|value| !value.is_empty())
                     .unwrap_or_else(|| "ready".to_string());
                 // The session is append-only: once the context is nearly
                 // full it cannot recover — restart with a fresh session
@@ -1712,7 +1672,7 @@ impl App {
     /// Start/stop the VoiceWave capture and lazily spawn the gate worker.
     fn sync_voice_state(&mut self, cx: &mut Cx) {
         if self.mic_on && self.voice_gate.is_none() {
-            self.voice_gate = Some(VoiceGate::new());
+            self.voice_gate = Some(VoiceGate::new(cx.thread_spawner()));
         }
         let wave = self.ui.voice_wave(cx, ids!(mic_wave));
         wave.set_enabled(cx, self.mic_on);
@@ -1904,19 +1864,7 @@ impl App {
     /// Mirror LayerState into the popover checkboxes (agent tools and the
     /// UI share one state).
     fn sync_layer_checkboxes(&mut self, cx: &mut Cx) {
-        let overlay_ids = [
-            ids!(layer_chargers),
-            ids!(layer_transit),
-            ids!(layer_nature),
-            ids!(layer_districts),
-            ids!(layer_buildings),
-            ids!(layer_demographics),
-        ];
-        for (i, id) in overlay_ids.iter().enumerate() {
-            self.ui
-                .check_box(cx, *id)
-                .set_active(cx, self.layers.overlay_on[i], Animate::No);
-        }
+        overlays::sync_checkboxes(cx, &self.ui, &self.layers.overlays);
         self.ui
             .check_box(cx, ids!(layer_rain))
             .set_active(cx, self.layers.rain, Animate::No);
@@ -2025,7 +1973,11 @@ impl App {
         self.sync_layer_checkboxes(cx);
         self.apply_ui_theme(cx);
         let map = self.ui.map_view(cx, ids!(map));
-        map.set_overlay_paths(cx, &self.layers.overlay_paths());
+        map.set_overlays(
+            cx,
+            self.testmap
+                .overlay_sources(&self.layers.overlays, &self.layers.maps_root),
+        );
         map.set_theme(cx, self.layers.theme);
 
         let bbox = nav_data::radar_display_bbox();
@@ -2049,7 +2001,7 @@ impl App {
         if self.layers.wind {
             if !self.layers.wind_worker_started {
                 self.layers.wind_worker_started = true;
-                layers::start_wind_worker(self.wind_rx.sender());
+                layers::start_wind_worker(cx.thread_spawner(), self.wind_rx.sender());
             }
             if let Some(update) = &self.layers.wind_cache {
                 map.set_wind_field(
@@ -2065,18 +2017,12 @@ impl App {
             map.set_wind_field(cx, 0, 0, Vec::new(), Vec::new(), (0.0, 0.0, 0.0, 0.0));
         }
 
-        if self.layers.terrain {
-            if self.layers.terrain_tx.is_none() {
-                self.layers.terrain_tx = Some(layers::start_terrain_worker(
-                    self.terrain_rx.sender(),
-                    self.layers.maps_root.clone(),
-                ));
-            }
-            self.layers.last_terrain_key = None;
-            layers::request_terrain(cx, &map, &mut self.layers);
-        } else if self.layers.terrain_tx.is_some() {
-            map.set_terrain_overlay(cx, TerrainOverlayData::default());
-        }
+        self.terrain_layer.set_enabled(
+            cx,
+            &map,
+            self.layers.terrain,
+            Some(&self.layers.maps_root),
+        );
     }
 }
 
@@ -2093,7 +2039,7 @@ impl MatchEvent for App {
     }
 
     fn handle_http_response(&mut self, cx: &mut Cx, request_id: LiveId, response: &HttpResponse) {
-        if self.testmap.handle_http_response(request_id, response) {
+        if self.testmap.handle_http_response(cx, request_id, response) {
             self.refresh_testmap_ui(cx);
         }
     }
@@ -2189,30 +2135,21 @@ impl MatchEvent for App {
                 .widget(cx, ids!(layers_panel))
                 .set_visible(cx, self.layers_panel_open);
         }
-        if self.ui.button(cx, ids!(maps_root_save)).clicked(actions) {
-            let value = self.ui.text_input(cx, ids!(maps_root_input)).text();
-            match testmap::save_maps_root_setting(&value) {
-                Ok(()) => self.set_status(cx, "maps folder saved; it will apply next launch"),
-                Err(error) => self.set_status(cx, &format!("maps folder: {error}")),
-            }
-        }
         if self.ui.button(cx, ids!(assistant_button)).clicked(actions) {
             self.assistant_panel_open = !self.assistant_panel_open;
             self.ui
                 .widget(cx, ids!(assistant_panel))
                 .set_visible(cx, self.assistant_panel_open);
         }
-        let layer_checks: [(&[LiveId], &str); 10] = [
+        if overlays::handle_checkboxes(cx, &self.ui, actions, &mut self.layers.overlays) {
+            self.layers.dirty = false;
+            self.apply_layers(cx);
+        }
+        let layer_checks: [(&[LiveId], &str); 4] = [
             (ids!(layer_rain), "rain"),
             (ids!(layer_wind), "wind"),
             (ids!(layer_terrain), "terrain"),
             (ids!(tilt_check), "tiltshift"),
-            (ids!(layer_chargers), "chargers"),
-            (ids!(layer_transit), "transit"),
-            (ids!(layer_nature), "nature"),
-            (ids!(layer_districts), "districts"),
-            (ids!(layer_buildings), "buildings_age"),
-            (ids!(layer_demographics), "demographics"),
         ];
         for (id, name) in layer_checks {
             if let Some(on) = self.ui.check_box(cx, id).changed(actions) {
@@ -2238,11 +2175,13 @@ impl MatchEvent for App {
         }
         if let Some(on) = self.ui.check_box(cx, ids!(theme_night)).changed(actions) {
             let _ = self.layers.set_theme_name(if on { "night" } else { "light" });
+            self.theme_preference.save(cx, self.layers.theme);
             self.layers.dirty = false;
             self.apply_layers(cx);
         }
         if let Some(on) = self.ui.check_box(cx, ids!(theme_circuit)).changed(actions) {
             let _ = self.layers.set_theme_name(if on { "circuit" } else { "light" });
+            self.theme_preference.save(cx, self.layers.theme);
             self.layers.dirty = false;
             self.apply_layers(cx);
         }
@@ -2257,7 +2196,7 @@ impl MatchEvent for App {
             self.push_line(cx, &format!("map: long-press at {lon:.5}, {lat:.5}"));
         }
         if map.viewport_changed(actions).is_some() && self.layers.terrain {
-            layers::request_terrain(cx, &map, &mut self.layers);
+            self.terrain_layer.request(cx, &map);
         }
         // '>' on a trip row: re-apply that snapshot.
         let list = self.ui.portal_list(cx, ids!(list));
@@ -2307,6 +2246,13 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.ensure_started(cx);
+        if let Some(theme) = self.theme_preference.restored(event) {
+            self.layers.theme = theme;
+            self.layers.dirty = false;
+            self.apply_layers(cx);
+        }
+        let map = self.ui.map_view(cx, ids!(map));
+        self.terrain_layer.handle_event(cx, event, &map);
         self.drain_ai_port(cx, event);
         // The Space-warp row tracks the camera live: grayed (but visible,
         // so it stays discoverable) outside the near-first-person regime,
@@ -2413,7 +2359,7 @@ impl AppMain for App {
         let map = self.ui.map_view(cx, ids!(map));
         let provisioner_update = self.testmap.handle_event(cx, &map);
         if let Some(basename) = provisioner_update.nav_basename {
-            nav_data::start_nav_load(self.nav_rx.sender(), basename);
+            nav_data::start_nav_load(cx.task_pool(), self.nav_rx.sender(), basename);
             self.push_entry(
                 cx,
                 EntryKind::Info,
@@ -2444,23 +2390,6 @@ impl AppMain for App {
             self.layers.wind_cache = Some(update);
             if self.layers.wind {
                 self.apply_layers(cx);
-            }
-        }
-        while let Ok(update) = self.terrain_rx.try_recv() {
-            if self.layers.terrain {
-                self.ui.map_view(cx, ids!(map)).set_terrain_overlay(
-                    cx,
-                    TerrainOverlayData {
-                        texels: update.texels,
-                        width: update.width,
-                        height: update.height,
-                        elev_texels: update.elev_texels,
-                        elev: update.elev,
-                        elev_width: update.elev_width,
-                        elev_height: update.elev_height,
-                        bbox: update.bbox,
-                    },
-                );
             }
         }
         if let Some(mut agent) = self.agent.take() {
@@ -2535,28 +2464,6 @@ mod ui_parity_tests {
 #[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
-
-    /// 19:00 through 06:59 is night; 07:00 through 18:59 is light — the
-    /// boundary hours (6/7/18/19) are the ones a fencepost bug would miss.
-    #[test]
-    fn theme_for_hour_matches_civil_twilight_rule() {
-        assert_eq!(theme_name_for_hour(19), "night");
-        assert_eq!(theme_name_for_hour(7), "light");
-        assert_eq!(theme_name_for_hour(6), "night");
-        assert_eq!(theme_name_for_hour(18), "light");
-        assert_eq!(theme_name_for_hour(0), "night");
-        assert_eq!(theme_name_for_hour(23), "night");
-        assert_eq!(theme_name_for_hour(12), "light");
-        assert_eq!(theme_name_for_hour(20), "night");
-    }
-
-    #[test]
-    fn utc_offset_parses_sign_and_magnitude() {
-        assert_eq!(parse_utc_offset("+0200"), 7200);
-        assert_eq!(parse_utc_offset("-0730"), -27000);
-        assert_eq!(parse_utc_offset("+0000"), 0);
-        assert_eq!(parse_utc_offset("garbage"), 0);
-    }
 
     #[test]
     fn demo_provisioner_configuration_installs_on_real_map_view() {

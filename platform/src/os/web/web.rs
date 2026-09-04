@@ -21,7 +21,7 @@ use {
             StorageError, StorageEstimate, StorageList, StorageOp, StorageRequestId,
             StorageRequestKind, StorageResult, StorageStat,
         },
-        thread::SignalToUI,
+        thread::{lock_from_ui, SignalToUI},
         HttpError, HttpProgress, HttpResponse, Vec2d,
     },
     std::{
@@ -182,10 +182,16 @@ impl Cx {
                     crate::web_alloc::prefill_main_thread_cache();
                     self.cpu_cores = (tw.cpu_cores as usize).max(1);
                     // A browser may accept a 4 GiB wasm maximum, but elastic
-                    // caches must still target the 1 GiB deployment class.
-                    self.memory_budget_bytes = (tw.wasm_memory_max_pages as usize)
-                        .saturating_mul(64 * 1024)
-                        .clamp(64 * 1024 * 1024, 1024 * 1024 * 1024);
+                    // caches must still target the 1 GiB deployment class; a
+                    // phone gets the fixed phone budget regardless of what the
+                    // bridge could reserve.
+                    self.memory_budget_bytes = if tw.browser_info.is_phone {
+                        crate::cx::PHONE_WEB_MEMORY_BUDGET_BYTES
+                    } else {
+                        (tw.wasm_memory_max_pages as usize)
+                            .saturating_mul(64 * 1024)
+                            .clamp(64 * 1024 * 1024, 1024 * 1024 * 1024)
+                    };
                     crate::thread::set_web_available_parallelism(self.cpu_cores);
                     self.gpu_info.init_from_info(
                         tw.gpu_info.min_uniform_vectors,
@@ -415,6 +421,7 @@ impl Cx {
                         }
                         4 => {
                             self.call_event_handler(&Event::Shutdown);
+                            self.close_task_pool();
                             self.thread_spawner.close_runtime();
                         }
                         _ => {}
@@ -441,6 +448,12 @@ impl Cx {
 
                 live_id!(ToWasmRedrawAll) => {
                     self.redraw_all();
+                }
+
+                live_id!(ToWasmWebGLShadersDone) => {
+                    let tw = ToWasmWebGLShadersDone::read_to_wasm(&mut to_wasm);
+                    self.os.webgl_shaders_pending =
+                        self.os.webgl_shaders_pending.saturating_sub(tw.count);
                 }
 
                 live_id!(ToWasmPaintDirty) => {
@@ -755,11 +768,7 @@ impl Cx {
 
                 live_id!(ToWasmAudioDeviceList) => {
                     let tw = ToWasmAudioDeviceList::read_to_wasm(&mut to_wasm);
-                    self.os
-                        .web_audio()
-                        .lock()
-                        .unwrap()
-                        .to_wasm_audio_device_list(tw);
+                    lock_from_ui(&self.os.web_audio()).to_wasm_audio_device_list(tw);
                 }
                 live_id!(ToWasmMidiPortList) => {
                     let tw = ToWasmMidiPortList::read_to_wasm(&mut to_wasm);
@@ -801,36 +810,9 @@ impl Cx {
 
         if let Some(time) = is_animation_frame {
             if self.need_redrawing() {
-                let first_draw = !self.os.webgl_first_draw_logged;
-                if first_draw {
-                    crate::log!(
-                        "makepad.webgl.first_draw phase=begin ms={:.2} registry={} compile_set={}",
-                        self.seconds_since_app_start() * 1000.0,
-                        self.draw_shaders.shaders.len(),
-                        self.draw_shaders.compile_set.len()
-                    );
-                }
                 self.call_draw_event(time);
-                if first_draw {
-                    crate::log!(
-                        "makepad.webgl.first_draw phase=draw_event_done ms={:.2} registry={} compile_set={}",
-                        self.seconds_since_app_start() * 1000.0,
-                        self.draw_shaders.shaders.len(),
-                        self.draw_shaders.compile_set.len()
-                    );
-                }
             }
-            self.os.webgl_shaders_queued_this_frame = 0;
             self.handle_repaint(time);
-            if !self.os.webgl_first_draw_logged {
-                crate::log!(
-                    "makepad.webgl.first_draw phase=commands_queued ms={:.2} queued={} deferred={}",
-                    self.seconds_since_app_start() * 1000.0,
-                    self.os.webgl_shaders_queued_this_frame,
-                    self.draw_shaders.compile_set.len()
-                );
-                self.os.webgl_first_draw_logged = true;
-            }
         }
 
         if network_responses.len() != 0 {
@@ -865,12 +847,20 @@ impl Cx {
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for draw_pass_id in &passes_todo {
-            self.passes[*draw_pass_id].set_time(time as f32);
+            let uniforms_gen = self.next_uniform_gen();
+            self.passes[*draw_pass_id].set_time(time as f32, uniforms_gen);
             match self.passes[*draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
-                CxDrawPassParent::Window(_) => {
-                    //et dpi_factor = self.os.window_geom.dpi_factor;
-                    self.draw_pass_to_canvas(*draw_pass_id);
+                CxDrawPassParent::Window(window_id) => {
+                    // ONE canvas: only window zero paints. A second window's
+                    // pass is recorded but never presented (see CreateWindow
+                    // below) — settled here, so it neither errors nor keeps
+                    // requesting frames.
+                    if self.windows.current_id_zero() == Some(window_id) {
+                        self.draw_pass_to_canvas(*draw_pass_id);
+                    } else {
+                        self.passes[*draw_pass_id].paint_dirty = false;
+                    }
                 }
                 CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
@@ -898,6 +888,22 @@ impl Cx {
                         let window = &mut self.windows[window_id];
                         window.create_title.clone()
                     };
+                    // The browser gives an app one canvas, so the platform
+                    // has one window: a second `Window` is NOT created — it
+                    // never becomes `is_created`, its pass never paints —
+                    // and that is said once. `OsType::is_single_window` says
+                    // it up front, so an app hosts that surface in-page
+                    // instead of asking.
+                    if self.windows.current_id_zero().is_some_and(|zero| zero != window_id) {
+                        if !self.os.second_window_reported {
+                            self.os.second_window_reported = true;
+                            crate::log!(
+                                "web: one canvas, one window — {:?} {title:?} is not created (OsType::is_single_window)",
+                                window_id
+                            );
+                        }
+                        continue;
+                    }
 
                     self.os.from_wasm(FromWasmSetDocumentTitle { title });
 
@@ -1349,6 +1355,7 @@ impl CxOsApi for Cx {
             ToWasmTimerFired::to_js_code(),
             ToWasmPaintDirty::to_js_code(),
             ToWasmRedrawAll::to_js_code(),
+            ToWasmWebGLShadersDone::to_js_code(),
             ToWasmLiveFileChange::to_js_code(),
             ToWasmLocationChange::to_js_code(),
             ToWasmWindowGotFocus::to_js_code(),
@@ -1523,8 +1530,10 @@ pub struct CxOs {
     pub(crate) vertex_buffers: usize,
     pub(crate) index_buffers: usize,
     pub(crate) vaos: usize,
-    pub(crate) webgl_first_draw_logged: bool,
-    pub(crate) webgl_shaders_queued_this_frame: usize,
+    /// WebGL programs queued for compile that JavaScript has not yet reported
+    /// linked or failed (`ToWasmWebGLShadersDone`). While non-zero, draw calls
+    /// on those programs are dropped by the browser side.
+    pub(crate) webgl_shaders_pending: usize,
 
     pub(crate) to_wasm_js: Vec<String>,
     pub(crate) from_wasm_js: Vec<String>,
@@ -1532,6 +1541,9 @@ pub struct CxOs {
     pub(crate) media: CxWebMedia,
     pub(crate) render_texture_captures:
         Vec<(crate::texture::TextureId, usize, usize, Vec<u8>)>,
+    /// The one-line notice that a second window maps to nothing has been
+    /// given (`CxOsOp::CreateWindow`).
+    pub(crate) second_window_reported: bool,
 }
 
 impl Default for CxOs {
@@ -1546,14 +1558,14 @@ impl Default for CxOs {
             vertex_buffers: 0,
             index_buffers: 0,
             vaos: 0,
-            webgl_first_draw_logged: false,
-            webgl_shaders_queued_this_frame: 0,
+            webgl_shaders_pending: 0,
 
             to_wasm_js: Vec::new(),
             from_wasm_js: Vec::new(),
 
             media: CxWebMedia::default(),
             render_texture_captures: Vec::new(),
+            second_window_reported: false,
         }
     }
 }

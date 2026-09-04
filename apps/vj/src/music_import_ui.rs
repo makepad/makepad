@@ -20,7 +20,7 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 use makepad_asset_client::{ApiEndpoints, AssetClient, ClientConfig};
-use makepad_asset_client::{PublishRequest, StoreCapabilities};
+use makepad_asset_client::PublishRequest;
 use makepad_asset_data::BlobId;
 #[cfg(not(target_arch = "wasm32"))]
 use makepad_asset_importer::music_import::{
@@ -29,15 +29,13 @@ use makepad_asset_importer::music_import::{
 #[cfg(target_arch = "wasm32")]
 use makepad_asset_importer::music_import::{self, TrackOutcome};
 use makepad_widgets::makepad_platform::file_dialogs::VirtualFile;
-use makepad_widgets::makepad_platform::thread::ThreadSpawner;
+use makepad_widgets::makepad_platform::thread::{Lane, TaskPool};
 use std::collections::{HashSet, VecDeque};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
-#[cfg(not(target_arch = "wasm32"))]
-use std::thread;
 
 /// Namespace imported tracks land in. The asset UI's music importer uses
 /// the same one, so a library filled from either app is one library.
@@ -166,12 +164,6 @@ enum Msg {
     Finished(MusicImportPhase),
 }
 
-/// The single gate used before any stem fetch or local separation is
-/// submitted. Store capability wins over the deck's persisted mode.
-pub fn stems_may_run(capabilities: StoreCapabilities, mode: crate::decks::ProcessMode) -> bool {
-    capabilities.ai && mode.computes()
-}
-
 /// The DJ importer's whole state.
 #[derive(Default)]
 pub struct MusicImporter {
@@ -183,9 +175,14 @@ pub struct MusicImporter {
     prepared_done: usize,
     prepared_total: usize,
     prepared_summary: Option<MusicImportSummary>,
+    pool: Option<TaskPool>,
 }
 
 impl MusicImporter {
+    pub fn set_task_pool(&mut self, pool: TaskPool) {
+        self.pool = Some(pool);
+    }
+
     pub fn busy(&self) -> bool {
         self.phase.busy()
     }
@@ -232,13 +229,16 @@ impl MusicImporter {
         self.rx = Some(rx);
         self.phase = MusicImportPhase::Reading { done: 0, total: 0, current: String::new() };
         let cache = cache_parent.join("music-import-cache");
-        thread::Builder::new()
-            .name("vj-music-import".into())
-            .spawn(move || {
+        let pool = self
+            .pool
+            .clone()
+            .ok_or_else(|| self.refuse("import worker is not started"))?;
+        pool.submit(Lane::Heavy, move || {
                 let verdict = run(&paths, endpoints, server_id, token, cache, &tx, &cancel);
                 let _ = tx.send(Msg::Finished(verdict));
             })
-            .map_err(|e| self.refuse(format!("cannot start the import thread: {e}")))?;
+            .map(|handle| handle.detach())
+            .map_err(|e| self.refuse(format!("cannot start the import job: {e}")))?;
         Ok(())
     }
 
@@ -249,7 +249,6 @@ impl MusicImporter {
     pub fn start_files(
         &mut self,
         files: Vec<VirtualFile>,
-        spawner: ThreadSpawner,
     ) -> Result<(), String> {
         if self.busy() {
             return Err("an import is already running".to_string());
@@ -267,7 +266,11 @@ impl MusicImporter {
         let cancel = self.cancel.clone();
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
-        launch_file_preparation(files, tx, cancel, spawner)
+        let pool = self
+            .pool
+            .clone()
+            .ok_or_else(|| self.refuse("import worker is not started"))?;
+        launch_file_preparation(files, tx, cancel, pool)
             .map_err(|error| self.refuse(format!("cannot start the import: {error}")))?;
         Ok(())
     }
@@ -403,10 +406,9 @@ fn launch_file_preparation(
     files: Vec<VirtualFile>,
     tx: mpsc::Sender<Msg>,
     cancel: Arc<AtomicBool>,
-    spawner: ThreadSpawner,
+    pool: TaskPool,
 ) -> Result<(), String> {
-    spawner
-        .spawn(move || {
+    pool.submit(Lane::Heavy, move || {
             let (imports, summary, cancelled) = prepare_files(files, &tx, &cancel);
             let _ = tx.send(Msg::Prepared {
                 imports,
@@ -742,23 +744,4 @@ mod tests {
         assert!(describe(&MusicImportPhase::Done(summary)).contains("broken.wav"));
     }
 
-    #[test]
-    fn a_store_without_ai_short_circuits_live_stems() {
-        assert!(!stems_may_run(
-            StoreCapabilities::browser(),
-            crate::decks::ProcessMode::Live,
-        ));
-        assert!(!stems_may_run(
-            StoreCapabilities::native(),
-            crate::decks::ProcessMode::Off,
-        ));
-        assert!(stems_may_run(
-            StoreCapabilities::native(),
-            crate::decks::ProcessMode::Live,
-        ));
-        assert!(!stems_may_run(
-            StoreCapabilities::static_site(),
-            crate::decks::ProcessMode::Live,
-        ));
-    }
 }

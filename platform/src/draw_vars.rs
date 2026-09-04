@@ -262,6 +262,7 @@ impl DrawVars {
     ) {
         if let Some(draw_shader_id) = self.draw_shader_id {
             if let Some(inst) = self.area.valid_instance(cx) {
+                let uniforms_gen = cx.next_uniform_gen();
                 let sh = &cx.draw_shaders[draw_shader_id.index];
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
                 let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
@@ -281,7 +282,7 @@ impl DrawVars {
                 }
 
                 if any_updated {
-                    draw_call.uniforms_dirty = true;
+                    draw_call.mark_uniforms_dirty(uniforms_gen);
                     cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
                     self.area.redraw(cx);
                 }
@@ -466,26 +467,144 @@ impl DrawVars {
             // Find the uniform input
             if let Some(input) = sh.mapping.dyn_uniforms.inputs.iter().find(|i| i.id == id) {
                 let slots = input.slots.min(value.len());
+                let offset = input.offset;
 
                 // Update local dyn_uniforms
                 for i in 0..slots {
-                    self.dyn_uniforms[input.offset + i] = value[i];
+                    self.dyn_uniforms[offset + i] = value[i];
                 }
 
                 // Update the draw call if we have a valid area
                 if let Some(inst) = self.area.valid_instance(cx) {
+                    let uniforms_gen = cx.next_uniform_gen();
                     let draw_list = &mut cx.draw_lists[inst.draw_list_id];
                     let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
                     let draw_call = draw_item.kind.draw_call_mut().unwrap();
 
                     for i in 0..slots {
-                        draw_call.dyn_uniforms[input.offset + i] = value[i];
+                        draw_call.dyn_uniforms[offset + i] = value[i];
                     }
-                    draw_call.uniforms_dirty = true;
+                    draw_call.mark_uniforms_dirty(uniforms_gen);
                     cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
                 }
             }
         }
+    }
+
+    /// Writes one uniform onto the retained draw call behind `area` — any
+    /// draw call of this shader, not only the one this `DrawVars` last
+    /// emitted — and marks its pass for repaint. A clock or camera value
+    /// shared by every call a widget keeps resident moves this way, with no
+    /// redraw and no instance upload. `false` (nothing written) when the
+    /// area is stale, another shader's, or the shader has no such uniform.
+    pub fn set_uniform_on_draw_call(
+        &self,
+        cx: &mut Cx,
+        area: Area,
+        id: LiveId,
+        value: &[f32],
+    ) -> bool {
+        let Some(draw_shader_id) = self.draw_shader_id else {
+            return false;
+        };
+        let Some(inst) = area.valid_instance(cx).copied() else {
+            return false;
+        };
+        let sh = &cx.draw_shaders[draw_shader_id.index];
+        let Some(input) = sh.mapping.dyn_uniforms.inputs.iter().find(|i| i.id == id) else {
+            return false;
+        };
+        let (offset, slots) = (input.offset, input.slots.min(value.len()));
+        let uniforms_gen = cx.next_uniform_gen();
+        let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+        let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
+        let Some(draw_call) = draw_item.kind.draw_call_mut() else {
+            return false;
+        };
+        if draw_call.draw_shader_id != draw_shader_id {
+            return false;
+        }
+        draw_call.dyn_uniforms[offset..offset + slots].copy_from_slice(&value[..slots]);
+        draw_call.mark_uniforms_dirty(uniforms_gen);
+        if let Some(pass_id) = draw_list.draw_pass_id {
+            cx.passes[pass_id].paint_dirty = true;
+        }
+        true
+    }
+
+    /// Pushes every dyn uniform and texture slot this `DrawVars` holds onto
+    /// the retained draw call behind `area`, and marks its pass for repaint.
+    /// The whole-block twin of `set_uniform_on_area`: a widget that keeps
+    /// its draw lists across frames re-stamps its staging copy per call
+    /// (`set_uniform`, `set_texture`) and hands the result over in one
+    /// copy, so a camera move touches uniforms only and never the resident
+    /// instance buffers. `false` when the area is stale or belongs to
+    /// another shader; nothing is written then.
+    pub fn update_uniforms_on_area(&self, cx: &mut Cx, area: Area) -> bool {
+        let Some(draw_shader_id) = self.draw_shader_id else {
+            return false;
+        };
+        let Some(inst) = area.valid_instance(cx).copied() else {
+            return false;
+        };
+        let uniforms_gen = cx.next_uniform_gen();
+        let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+        let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
+        let Some(draw_call) = draw_item.kind.draw_call_mut() else {
+            return false;
+        };
+        if draw_call.draw_shader_id != draw_shader_id {
+            return false;
+        }
+        draw_call.dyn_uniforms = self.dyn_uniforms;
+        draw_call.texture_slots = self.texture_slots.clone();
+        draw_call.uniform_buffer_slots = self.uniform_buffer_slots.clone();
+        draw_call.mark_uniforms_dirty(uniforms_gen);
+        if let Some(pass_id) = draw_list.draw_pass_id {
+            cx.passes[pass_id].paint_dirty = true;
+        }
+        true
+    }
+
+    /// Pushes every dyn uniform and texture slot this `DrawVars` holds onto
+    /// EVERY retained draw call of this shader in the draw list `list`, and
+    /// marks its pass for repaint: the list-wide twin of
+    /// `update_uniforms_on_area`, for a batch a widget recorded once and
+    /// re-presents under this frame's camera. `false` when no call took it.
+    pub fn update_uniforms_on_draw_list(
+        &self,
+        cx: &mut Cx,
+        list: crate::draw_list::DrawListId,
+    ) -> bool {
+        let Some(draw_shader_id) = self.draw_shader_id else {
+            return false;
+        };
+        let Some(draw_list) = cx.draw_lists.checked_index(list) else {
+            return false;
+        };
+        let pass_id = draw_list.draw_pass_id;
+        let uniform_gen = &mut cx.uniform_gen;
+        let draw_list = &mut cx.draw_lists[list];
+        let mut touched = false;
+        for item in 0..draw_list.draw_items.len() {
+            let Some(draw_call) = draw_list.draw_items[item].kind.draw_call_mut() else {
+                continue;
+            };
+            if draw_call.draw_shader_id != draw_shader_id {
+                continue;
+            }
+            draw_call.dyn_uniforms = self.dyn_uniforms;
+            draw_call.texture_slots = self.texture_slots.clone();
+            draw_call.uniform_buffer_slots = self.uniform_buffer_slots.clone();
+            draw_call.mark_uniforms_dirty(Cx::next_uniform_gen_from(uniform_gen));
+            touched = true;
+        }
+        if touched {
+            if let Some(pass_id) = pass_id {
+                cx.passes[pass_id].paint_dirty = true;
+            }
+        }
+        touched
     }
 
     /// Writes one uniform into EVERY retained draw call of this shader in
@@ -503,6 +622,7 @@ impl DrawVars {
         for i in 0..slots {
             self.dyn_uniforms[offset + i] = value[i];
         }
+        let uniform_gen = &mut cx.uniform_gen;
         let draw_list = &mut cx.draw_lists[draw_list_id];
         let mut touched = false;
         for item in 0..draw_list.draw_items.len() {
@@ -514,7 +634,7 @@ impl DrawVars {
             for i in 0..slots {
                 draw_call.dyn_uniforms[offset + i] = value[i];
             }
-            draw_call.uniforms_dirty = true;
+            draw_call.mark_uniforms_dirty(Cx::next_uniform_gen_from(uniform_gen));
             touched = true;
         }
         if touched {
@@ -1100,6 +1220,7 @@ impl DrawVars {
             self.dyn_instance_slots = mapping.instances.total_slots;
 
             let cx = vm.host.cx_mut();
+            mapping.scope_uniforms_gen = cx.next_uniform_gen();
             let index = cx.draw_shaders.shaders.len();
             cx.draw_shaders.shaders.push(CxDrawShader {
                 debug_id: LiveId(0),

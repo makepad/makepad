@@ -71,6 +71,7 @@ const STATIC_EXPORT_MIN_SCHEMA_VERSION: i64 = 9;
 ///   surface). Same copy+rename retrofit again.
 /// - v13: the search kind CHECK accepts `model-program` (editable CSG source
 ///   plus its derived render GLB).
+/// - v14: public music attribution fields on search annotations.
 ///
 /// `open` migrates older versions forward one step at a time, each step in
 /// its own transaction; a version newer than this build refuses to open.
@@ -253,6 +254,20 @@ fn migrate(db: &Db, cas: &FsCas, budgets: &Budgets) -> ServerResult<()> {
                         )?;
                     }
                     db.exec("create search schema", crate::search::SEARCH_SCHEMA)?;
+                }
+                // v14: typed attribution travels with public annotations and
+                // static search documents. Defaults preserve old rows.
+                13 => {
+                    let columns = [
+                        "artist", "artist_url", "album", "source_url", "license", "license_url",
+                    ];
+                    for (column, sql) in
+                        columns.into_iter().zip(crate::search::ATTRIBUTION_MIGRATION_SQL)
+                    {
+                        if !table_has_column(db, "search_annotations", column)? {
+                            db.exec("add attribution column", sql)?;
+                        }
+                    }
                 }
                 other => return Err(ServerError::UnsupportedSchema { found: other }),
             }

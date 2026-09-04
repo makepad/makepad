@@ -11,7 +11,8 @@
 //! scrollbar thumb by dragging is therefore deliberately NOT possible while
 //! exploded — a drag is the orbit — and that is the coexistence rule.
 //!
-//! Shift+F10 tilts the window into an isometric stack that renders **the component
+//! The tweaker's exploded-view button tilts the window into an isometric stack
+//! that renders **the component
 //! nesting structure**: one plane per nesting level, siblings sharing a plane,
 //! children lifting toward the viewer and their parents staying at the bottom
 //! of the stack. The point is to see — and click — the fully-covered parent
@@ -460,8 +461,8 @@ impl Cx {
 
     /// Programmatic toggle (the tweaker's panel button). DEFERRED: safe to
     /// call from anywhere including action handling — the intercept
-    /// performs it at the next event, pre-dispatch. Leave via Esc / Shift+F10, or
-    /// the same button (a press inside a declared flat band always reaches
+    /// performs it at the next event, pre-dispatch. Leave via Escape or the
+    /// same button (a press inside a declared flat band always reaches
     /// the app, so the panel stays clickable while the mode is up).
     pub fn sploded_toggle(&mut self) {
         self.sploded.pending_toggle = true;
@@ -588,6 +589,9 @@ impl Cx {
         let mut planes: Vec<Vec<Rect>> = vec![Vec::new(); max + 1];
         let mut stack = vec![root];
         while let Some(list_id) = stack.pop() {
+            if self.draw_lists.is_id_freed(list_id) {
+                continue;
+            }
             let draw_list = &self.draw_lists[list_id];
             let u = &draw_list.draw_list_uniforms;
             let has_clip = draw_list.draw_list_has_clip;
@@ -716,9 +720,10 @@ impl Cx {
     /// First stop for every event. Returns true when the event was consumed
     /// by the mode and must not reach the app.
     ///
-    /// Off, this only ever looks at one key. On, it claims the mode's own
-    /// keys and the orbit drag — nothing else. Every other pointer event
-    /// flows on through `sploded_route` to the app: the view is live.
+    /// Off, this only applies a pending programmatic toggle. On, it claims
+    /// the mode's own keys and the orbit drag — nothing else. Every other
+    /// pointer event flows on through `sploded_route` to the app: the view is
+    /// live.
     pub(crate) fn sploded_intercept(&mut self, event: &Event) -> bool {
         if self.sploded.pending_toggle {
             self.sploded.pending_toggle = false;
@@ -727,14 +732,6 @@ impl Cx {
         }
         match event {
             Event::KeyDown(e) => {
-                if e.key_code == KeyCode::F10 && e.modifiers.shift {
-                    if e.is_repeat {
-                        return true;
-                    }
-                    let on = !self.sploded.active;
-                    self.sploded_set_active(on);
-                    return true;
-                }
                 if !self.sploded.active {
                     return false;
                 }
@@ -862,7 +859,7 @@ impl Cx {
         self.sploded_sync();
         if active {
             crate::log!(
-                "sploded view ON — {} nesting levels, drag to orbit, wheel scrolls the app, +/- to explode, I = isometric, 0 resets, esc/Shift+F10 exits",
+                "sploded view ON — {} nesting levels, drag to orbit, wheel scrolls the app, +/- to explode, I = isometric, 0 resets, Escape exits",
                 self.sploded.layers as u32
             );
         } else {
@@ -913,6 +910,7 @@ impl Cx {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::{KeyEvent, KeyModifiers};
 
     /// Params equivalent to a real window: 1200x800 at the default angles,
     /// with a 10-level deep tree.
@@ -1029,5 +1027,30 @@ mod tests {
             worst_offset.abs() < one_level.abs() * 0.05,
             "draw_depth 20 moves {worst_offset}, more than 5% of a {one_level} level step"
         );
+    }
+
+    #[test]
+    fn key_events_do_not_toggle_the_sploded_view() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let modifiers = KeyModifiers {
+            shift: true,
+            ..Default::default()
+        };
+
+        for event in [
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::F10,
+                modifiers,
+                ..Default::default()
+            }),
+            Event::KeyUp(KeyEvent {
+                key_code: KeyCode::F10,
+                modifiers,
+                ..Default::default()
+            }),
+        ] {
+            assert!(!cx.sploded_intercept(&event));
+            assert!(!cx.sploded_active());
+        }
     }
 }

@@ -10,11 +10,216 @@ use crate::png;
 use makepad_mbtile_reader::MbtilesReader;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 const TILE_PX: usize = 256;
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TerrainTileKey {
+    pub z: u32,
+    pub x: i64,
+    pub y: i64,
+}
+
+/// Elevation input behind one shader surface. Native development can read the
+/// original MBTiles directly; production native and web jobs receive the
+/// decoded tile payloads fetched by the shared `.mkmap` archive plane.
+pub enum TerrainSource {
+    LocalMbtiles(MbtilesReader),
+    Archive {
+        min_zoom: u32,
+        max_zoom: u32,
+        tiles: HashMap<TerrainTileKey, Option<Arc<[u8]>>>,
+    },
+}
+
+impl TerrainSource {
+    pub fn local_mbtiles(path: &Path) -> Result<Self, String> {
+        MbtilesReader::open(path)
+            .map(Self::LocalMbtiles)
+            .map_err(|error| format!("open terrain: {error}"))
+    }
+
+    pub fn archive(
+        min_zoom: u32,
+        max_zoom: u32,
+        tiles: HashMap<TerrainTileKey, Option<Arc<[u8]>>>,
+    ) -> Self {
+        Self::Archive {
+            min_zoom,
+            max_zoom,
+            tiles,
+        }
+    }
+
+    pub fn replace_archive_tiles(
+        &mut self,
+        min_zoom: u32,
+        max_zoom: u32,
+        tiles: HashMap<TerrainTileKey, Option<Arc<[u8]>>>,
+    ) -> Result<(), String> {
+        let Self::Archive {
+            min_zoom: source_min,
+            max_zoom: source_max,
+            tiles: source_tiles,
+        } = self
+        else {
+            return Err("terrain source kind changed".to_string());
+        };
+        *source_min = min_zoom;
+        *source_max = max_zoom;
+        *source_tiles = tiles;
+        Ok(())
+    }
+
+    fn zoom_range(&mut self) -> (u32, u32) {
+        match self {
+            Self::LocalMbtiles(reader) => reader
+                .get_metadata()
+                .ok()
+                .and_then(|metadata| {
+                    let min = metadata.get("minzoom")?.parse::<u32>().ok()?;
+                    let max = metadata.get("maxzoom")?.parse::<u32>().ok()?;
+                    (min <= max).then_some((min, max))
+                })
+                .unwrap_or((6, 12)),
+            Self::Archive {
+                min_zoom,
+                max_zoom,
+                ..
+            } => (*min_zoom, *max_zoom),
+        }
+    }
+
+    fn tile_bytes(&mut self, key: TerrainTileKey) -> Option<Arc<[u8]>> {
+        match self {
+            Self::LocalMbtiles(reader) => {
+                let n = 1i64 << key.z;
+                reader
+                    .get_tile(key.z as i64, key.x, n - 1 - key.y)
+                    .ok()
+                    .flatten()
+                    .map(Arc::from)
+            }
+            Self::Archive { tiles, .. } => tiles.get(&key).cloned().flatten(),
+        }
+    }
+}
+
+/// Reused CPU render storage. Constructing it reserves the maximum render
+/// dimensions, so viewport renders at or below that cap only change lengths
+/// and clear bytes; they never allocate new backing buffers.
+pub struct TerrainScratch {
+    max_width: usize,
+    max_height: usize,
+    elevation_apron: Vec<f32>,
+    rgba: Vec<u8>,
+    elevation: Vec<f32>,
+    shade: Vec<u8>,
+    shadow: Vec<f32>,
+}
+
+impl TerrainScratch {
+    /// Bytes `with_capacity` reserves for these caps.
+    pub fn capacity_bytes(max_width: usize, max_height: usize) -> usize {
+        let pixels = max_width.saturating_mul(max_height);
+        let apron = max_width
+            .saturating_add(2)
+            .saturating_mul(max_height.saturating_add(2));
+        apron
+            .saturating_mul(4)
+            .saturating_add(pixels.saturating_mul(4 + 4 + 1 + 4))
+    }
+
+    pub fn with_capacity(max_width: usize, max_height: usize) -> Self {
+        let pixels = max_width.saturating_mul(max_height);
+        let apron = max_width
+            .saturating_add(2)
+            .saturating_mul(max_height.saturating_add(2));
+        Self {
+            max_width,
+            max_height,
+            elevation_apron: Vec::with_capacity(apron),
+            rgba: Vec::with_capacity(pixels.saturating_mul(4)),
+            elevation: Vec::with_capacity(pixels),
+            shade: Vec::with_capacity(pixels),
+            shadow: Vec::with_capacity(pixels),
+        }
+    }
+
+    fn prepare(&mut self, width: usize, height: usize) {
+        assert!(width <= self.max_width && height <= self.max_height);
+        let pixels = width * height;
+        self.elevation_apron.resize((width + 2) * (height + 2), 0.0);
+        self.rgba.resize(pixels * 4, 0);
+        self.elevation.resize(pixels, 0.0);
+        self.shade.resize(pixels, 0);
+        self.shadow.resize(pixels, 1.0);
+        self.elevation_apron.fill(0.0);
+        self.rgba.fill(0);
+        self.elevation.fill(0.0);
+        self.shade.fill(0);
+        self.shadow.fill(1.0);
+    }
+
+    pub fn rgba(&self) -> &[u8] {
+        &self.rgba
+    }
+
+    pub fn elevation(&self) -> &[f32] {
+        &self.elevation
+    }
+
+    pub fn shade(&self) -> &[u8] {
+        &self.shade
+    }
+
+    pub fn render_parts(&mut self) -> (&mut [u8], &[f32], &[u8]) {
+        (&mut self.rgba, &self.elevation, &self.shade)
+    }
+}
+
+fn render_zoom(span: f64, width: usize, min_zoom: u32, max_zoom: u32) -> u32 {
+    let want = (width as f64 / (span.max(1e-9) * TILE_PX as f64))
+        .log2()
+        .ceil() as i64;
+    want.clamp(min_zoom as i64, max_zoom as i64) as u32
+}
+
+/// Exact XYZ tile rectangle sampled by a render, including the one-pixel
+/// gradient apron. Callers use this plan to range-fetch before submitting the
+/// CPU job, so the shader never performs I/O on a wasm worker.
+pub fn terrain_tile_plan(
+    bbox: (f64, f64, f64, f64),
+    width: usize,
+    height: usize,
+    min_zoom: u32,
+    max_zoom: u32,
+) -> Vec<TerrainTileKey> {
+    let (west, north, east, south) = bbox;
+    let z = render_zoom(east - west, width, min_zoom, max_zoom);
+    let n = 1i64 << z;
+    let apron_x = (east - west) * 0.5 / width.max(1) as f64;
+    let apron_y = (south - north) * 0.5 / height.max(1) as f64;
+    let x0 = (((west - apron_x).clamp(0.0, 1.0) * n as f64).floor() as i64)
+        .clamp(0, n - 1);
+    let x1 = (((east + apron_x).clamp(0.0, 1.0) * n as f64).floor() as i64)
+        .clamp(0, n - 1);
+    let y0 = (((north - apron_y).clamp(0.0, 1.0) * n as f64).floor() as i64)
+        .clamp(0, n - 1);
+    let y1 = (((south + apron_y).clamp(0.0, 1.0) * n as f64).floor() as i64)
+        .clamp(0, n - 1);
+    let mut keys = Vec::with_capacity(((x1 - x0 + 1) * (y1 - y0 + 1)) as usize);
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            keys.push(TerrainTileKey { z, x, y });
+        }
+    }
+    keys
+}
+
 pub struct TerrainShader {
-    reader: MbtilesReader,
+    source: TerrainSource,
     min_zoom: u32,
     max_zoom: u32,
     /// Decoded elevation tiles (z, x, y) → 256x256 meters grid.
@@ -43,27 +248,35 @@ fn terrarium_decode(png: &png::DecodedPng) -> Option<Vec<f32>> {
 
 impl TerrainShader {
     pub fn open(path: &Path) -> Result<Self, String> {
-        let mut reader = MbtilesReader::open(path).map_err(|e| format!("open terrain: {e}"))?;
-        let (min_zoom, max_zoom) = reader
-            .get_metadata()
-            .ok()
-            .and_then(|meta| {
-                let get = |k: &str| {
-                    meta.iter()
-                        .find(|(name, _)| name.as_str() == k)
-                        .and_then(|(_, v)| v.parse::<u32>().ok())
-                };
-                Some((get("minzoom")?, get("maxzoom")?))
-            })
-            .unwrap_or((6, 12));
+        Self::new(TerrainSource::local_mbtiles(path)?)
+    }
+
+    pub fn new(mut source: TerrainSource) -> Result<Self, String> {
+        let (min_zoom, max_zoom) = source.zoom_range();
+        if min_zoom > max_zoom || max_zoom > 30 {
+            return Err("invalid terrain zoom range".to_string());
+        }
         Ok(Self {
-            reader,
+            source,
             min_zoom,
             max_zoom,
             cache: HashMap::new(),
             sun: (-0.5, -0.62, 0.6),
             cast_shadows: false,
         })
+    }
+
+    pub fn replace_archive_tiles(
+        &mut self,
+        min_zoom: u32,
+        max_zoom: u32,
+        tiles: HashMap<TerrainTileKey, Option<Arc<[u8]>>>,
+    ) -> Result<(), String> {
+        self.source
+            .replace_archive_tiles(min_zoom, max_zoom, tiles)?;
+        self.min_zoom = min_zoom;
+        self.max_zoom = max_zoom;
+        Ok(())
     }
 
     fn tile(&mut self, z: u32, x: i64, y: i64) -> Option<&Vec<f32>> {
@@ -73,20 +286,16 @@ impl TerrainShader {
             let decoded = if x < 0 || y < 0 || x >= n || y >= n {
                 None
             } else {
-                self.reader
-                    .get_tile(z as i64, x, n - 1 - y)
-                    .ok()
-                    .flatten()
+                if self.cache.len() >= 512 {
+                    self.cache.clear();
+                }
+                self.source
+                    .tile_bytes(TerrainTileKey { z, x, y })
                     .and_then(|data| png::decode(&data).ok())
                     .and_then(|png| terrarium_decode(&png))
             };
             // Cache misses too: all-ocean tiles simply don't exist.
             self.cache.insert(key, decoded);
-            if self.cache.len() > 512 {
-                self.cache.clear();
-                self.cache.insert(key, None);
-                return None;
-            }
         }
         self.cache.get(&key).and_then(|t| t.as_ref())
     }
@@ -126,15 +335,42 @@ impl TerrainShader {
         width: usize,
         height: usize,
     ) -> (Vec<u8>, Vec<f32>, Vec<u8>) {
+        let mut scratch = TerrainScratch::with_capacity(width, height);
+        self.shade_region_into(
+            norm_west,
+            norm_north,
+            norm_east,
+            norm_south,
+            width,
+            height,
+            &mut scratch,
+        );
+        (
+            scratch.rgba,
+            scratch.elevation,
+            scratch.shade,
+        )
+    }
+
+    pub fn shade_region_into(
+        &mut self,
+        norm_west: f64,
+        norm_north: f64,
+        norm_east: f64,
+        norm_south: f64,
+        width: usize,
+        height: usize,
+        scratch: &mut TerrainScratch,
+    ) {
+        scratch.prepare(width, height);
         // Zoom with ~1 source pixel per output pixel.
         let span = (norm_east - norm_west).max(1e-9);
-        let want = (width as f64 / (span * TILE_PX as f64)).log2().ceil() as i64;
-        let z = want.clamp(self.min_zoom as i64, self.max_zoom as i64) as u32;
+        let z = render_zoom(span, width, self.min_zoom, self.max_zoom);
 
         // Elevation grid with a 1px apron for gradients.
         let gw = width + 2;
         let gh = height + 2;
-        let mut elev = vec![0f32; gw * gh];
+        let elev = &mut scratch.elevation_apron;
         for gy in 0..gh {
             let ny = norm_north
                 + (norm_south - norm_north) * ((gy as f64 - 1.0 + 0.5) / height as f64);
@@ -158,10 +394,10 @@ impl TerrainShader {
         // the elevation grid; terrain rising above the sun ray shadows it.
         // Exponential stride keeps it ~13 samples/px; only run when the
         // region has relief that could actually cast (skips the lowlands).
-        let mut shadow_dim: Option<Vec<f32>> = None;
+        let mut shadow_active = false;
         if self.cast_shadows {
             let (mut e_min, mut e_max) = (f32::MAX, f32::MIN);
-            for &e in &elev {
+            for &e in elev.iter() {
                 if !e.is_nan() {
                     e_min = e_min.min(e);
                     e_max = e_max.max(e);
@@ -177,7 +413,7 @@ impl TerrainShader {
                     1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 11.0, 15.0, 21.0, 29.0, 40.0, 56.0, 78.0,
                     109.0, 152.0, 213.0, 298.0,
                 ];
-                let mut dim = vec![1.0f32; width * height];
+                let dim = &mut scratch.shadow;
                 for y in 0..height {
                     for x in 0..width {
                         let e0 = elev[(y + 1) * gw + (x + 1)];
@@ -209,15 +445,15 @@ impl TerrainShader {
                         }
                     }
                 }
-                shadow_dim = Some(dim);
+                shadow_active = true;
             }
         }
 
-        let mut out = vec![0u8; width * height * 4];
-        let mut elev_out = vec![0f32; width * height];
+        let out = &mut scratch.rgba;
+        let elev_out = &mut scratch.elevation;
         // Hillshade light factor (x255) per pixel, for draping landcover
         // colors with the same lighting as the hypsometric ramp.
-        let mut shade_out = vec![0u8; width * height];
+        let shade_out = &mut scratch.shade;
         for y in 0..height {
             for x in 0..width {
                 let g = (y + 1) * gw + (x + 1);
@@ -242,9 +478,11 @@ impl TerrainShader {
                 let inv = 1.0 / (1.0 + gx * gx + gy * gy).sqrt();
                 let (nx, ny, nz) = (-gx * inv, -gy * inv, inv);
                 let ndl = (nx * lx + ny * ly + nz * lz).max(0.0);
-                let cast = shadow_dim
-                    .as_ref()
-                    .map_or(1.0, |dim| dim[y * width + x]);
+                let cast = if shadow_active {
+                    scratch.shadow[y * width + x]
+                } else {
+                    1.0
+                };
                 let shade = (0.45 + 0.55 * ndl) * cast;
                 shade_out[y * width + x] = (shade * 255.0).min(255.0) as u8;
                 // Hypsometric ramp: NL polders green-blue, lowland
@@ -277,7 +515,6 @@ impl TerrainShader {
                 px[3] = 140;
             }
         }
-        (out, elev_out, shade_out)
     }
 }
 
@@ -286,6 +523,36 @@ impl TerrainShader {
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terrain_archive_source_reuses_scratch() {
+        let mut rgb = Vec::with_capacity(TILE_PX * TILE_PX * 3);
+        for _ in 0..TILE_PX * TILE_PX {
+            // Terrarium encoding for 100 m: 128 * 256 + 100 - 32768.
+            rgb.extend_from_slice(&[128, 100, 0]);
+        }
+        let bytes = crate::png::encode(
+            TILE_PX as u32,
+            TILE_PX as u32,
+            crate::png::PngFormat::Rgb8,
+            &rgb,
+        );
+        let mut tiles = HashMap::new();
+        tiles.insert(TerrainTileKey { z: 0, x: 0, y: 0 }, Some(Arc::from(bytes)));
+        let mut shader = TerrainShader::new(TerrainSource::archive(0, 0, tiles)).unwrap();
+        let mut scratch = TerrainScratch::with_capacity(32, 24);
+        let rgba_ptr = scratch.rgba.as_ptr();
+        let elevation_ptr = scratch.elevation.as_ptr();
+        shader.shade_region_into(0.25, 0.25, 0.75, 0.75, 32, 24, &mut scratch);
+        assert!(scratch
+            .elevation()
+            .iter()
+            .all(|elevation| (*elevation - 100.0).abs() < 0.01));
+        shader.shade_region_into(0.25, 0.25, 0.75, 0.75, 32, 24, &mut scratch);
+        assert_eq!(rgba_ptr, scratch.rgba.as_ptr());
+        assert_eq!(elevation_ptr, scratch.elevation.as_ptr());
+        assert_eq!(terrain_tile_plan((0.25, 0.25, 0.75, 0.75), 32, 24, 0, 0).len(), 1);
+    }
 
     fn norm_of(lon: f64, lat: f64) -> (f64, f64) {
         let x = (lon + 180.0) / 360.0;

@@ -225,7 +225,11 @@ impl BrowserStore {
         let worker_values = values.clone();
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
-        match cx.thread_spawner().spawn(move || {
+        let options = makepad_widgets::makepad_platform::thread::ThreadOptions {
+            name: Some("vj-browser-store".into()),
+            ..Default::default()
+        };
+        match cx.thread_spawner().spawn_worker(options, move || {
             let started = Cx::monotonic_now();
             let mut values = worker_values.lock().unwrap().take().unwrap();
             let store = match EmbeddedStore::open_durable(
@@ -380,6 +384,12 @@ impl WorkerStore {
                     categories: request.categories.clone(),
                     tags: request.tags.clone(),
                     creator: request.creator.clone(),
+                    artist: request.artist.clone(),
+                    artist_url: request.artist_url.clone(),
+                    album: request.album.clone(),
+                    source_url: request.source_url.clone(),
+                    license: request.license.clone(),
+                    license_url: request.license_url.clone(),
                     owner: None,
                     generator: request.generator.clone(),
                     backend: request.backend.clone(),

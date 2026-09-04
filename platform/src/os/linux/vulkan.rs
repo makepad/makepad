@@ -2559,13 +2559,15 @@ impl CxVulkan {
             return Ok(false);
         }
 
+        let ortho_uniforms_gen = cx.next_uniform_gen();
+        let dpi_uniforms_gen = cx.next_uniform_gen();
         {
             let pass = &mut cx.passes[draw_pass_id];
             pass.paint_dirty = false;
             if !pass.keep_camera_matrix {
-                pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
+                pass.set_ortho_matrix(pass_rect.pos, pass_rect.size, ortho_uniforms_gen);
             }
-            pass.set_dpi_factor(dpi_factor);
+            pass.set_dpi_factor(dpi_factor, dpi_uniforms_gen);
         }
 
         let clear_color = if cx.passes[draw_pass_id].color_textures.is_empty() {
@@ -3120,13 +3122,15 @@ impl CxVulkan {
             return Ok(());
         }
 
+        let ortho_uniforms_gen = cx.next_uniform_gen();
+        let dpi_uniforms_gen = cx.next_uniform_gen();
         {
             let pass = &mut cx.passes[draw_pass_id];
             pass.paint_dirty = false;
             if !pass.keep_camera_matrix {
-                pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
+                pass.set_ortho_matrix(pass_rect.pos, pass_rect.size, ortho_uniforms_gen);
             }
-            pass.set_dpi_factor(dpi_factor);
+            pass.set_dpi_factor(dpi_factor, dpi_uniforms_gen);
         }
 
         let target_width = (dpi_factor * pass_rect.size.x).max(1.0) as usize;
@@ -5440,6 +5444,7 @@ impl CxVulkan {
         // Exploded z-layer view: z is the call's nesting depth, not paint order.
         let sploded = cx.passes[draw_pass_id].sploded.is_some();
         for order_index in 0..draw_order_len {
+            let uniforms_gen = cx.next_uniform_gen();
             let Some(draw_item_id) =
                 cx.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
             else {
@@ -5452,6 +5457,12 @@ impl CxVulkan {
                 .kind
                 .sub_list()
             {
+                // A retained sub-list its owner dropped between the parent's
+                // last record and this paint: the slot may already hold
+                // another widget's list. Nothing to draw here.
+                if cx.draw_lists.is_id_freed(sub_list_id) {
+                    continue;
+                }
                 let child_resets_zbias = cx.draw_lists[sub_list_id].reset_zbias;
                 let mut own_zbias = 0.0f32;
                 let child_zbias = if child_resets_zbias {
@@ -5462,16 +5473,34 @@ impl CxVulkan {
                 // An overlay list carries a depth floor: this is what makes it
                 // composite above body content that uses `draw_depth`.
                 cx.draw_lists[sub_list_id].raise_zbias_to_floor(child_zbias);
-                self.record_draw_list(
-                    cx,
-                    draw_pass_id,
-                    sub_list_id,
-                    render_pass_key,
-                    child_zbias,
-                    zbias_step,
-                    draw_stats,
-                    xr_depth_view,
-                )?;
+                // A retained list is one unit of paint order: its calls all
+                // take the counter at entry, it advances by the layers the
+                // list reported. See `CxDrawList::zbias_hold`.
+                if let Some(steps) = cx.draw_lists[sub_list_id].zbias_hold {
+                    let mut held = *child_zbias;
+                    self.record_draw_list(
+                        cx,
+                        draw_pass_id,
+                        sub_list_id,
+                        render_pass_key,
+                        &mut held,
+                        0.0,
+                        draw_stats,
+                        xr_depth_view,
+                    )?;
+                    *child_zbias += steps as f32 * zbias_step;
+                } else {
+                    self.record_draw_list(
+                        cx,
+                        draw_pass_id,
+                        sub_list_id,
+                        render_pass_key,
+                        child_zbias,
+                        zbias_step,
+                        draw_stats,
+                        xr_depth_view,
+                    )?;
+                }
                 continue;
             }
 
@@ -5536,7 +5565,7 @@ impl CxVulkan {
                     cx.demo_time_repaint = true;
                 }
 
-                draw_call.resolve_zbias(*zbias, sploded);
+                draw_call.resolve_zbias(*zbias, sploded, uniforms_gen);
                 *zbias += zbias_step;
                 draw_call.instance_dirty = false;
                 draw_call.uniforms_dirty = false;

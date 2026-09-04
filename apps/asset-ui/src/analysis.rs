@@ -44,7 +44,7 @@ use makepad_audio_lyrics::bake::LyricsBaker;
 use makepad_audio_lyrics::TrackLyrics;
 use makepad_audio_sidechannels::{encode_stem_oggs, publish_side_channels};
 use makepad_widgets::log;
-use makepad_widgets::makepad_platform::thread::SignalToUI;
+use makepad_widgets::makepad_platform::thread::{SignalToUI, ThreadOptions, ThreadSpawner};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -545,14 +545,8 @@ pub struct AnalysisQueue {
     fetch_generation: u64,
 }
 
-impl Default for AnalysisQueue {
-    fn default() -> Self {
-        AnalysisQueue::start()
-    }
-}
-
 impl AnalysisQueue {
-    pub fn start() -> AnalysisQueue {
+    pub fn start(spawner: ThreadSpawner) -> AnalysisQueue {
         let (bake_tx, bake_requests) = channel::<BakeRequest>();
         let (bake_done, bake_rx) = channel::<BakeMsg>();
         let (fetch_tx, fetch_requests) = channel::<FetchRequest>();
@@ -561,12 +555,26 @@ impl AnalysisQueue {
         let worker_batch = Arc::clone(&batch);
         // A failed spawn is not fatal: the queue simply never runs, and
         // every enqueue reports it instead of pretending to work.
-        let _ = std::thread::Builder::new()
-            .name("asset-ui-stem-bake".into())
-            .spawn(move || bake_loop(bake_requests, bake_done, worker_batch));
-        let _ = std::thread::Builder::new()
-            .name("asset-ui-stem-fetch".into())
-            .spawn(move || fetch_loop(fetch_requests, fetch_done));
+        match spawner.spawn_worker(
+            ThreadOptions {
+                name: Some("asset-ui-stem-bake".into()),
+                ..Default::default()
+            },
+            move || bake_loop(bake_requests, bake_done, worker_batch),
+        ) {
+            Ok(handle) => handle.detach(),
+            Err(error) => log!("analysis bake worker unavailable: {error}"),
+        }
+        match spawner.spawn_worker(
+            ThreadOptions {
+                name: Some("asset-ui-stem-fetch".into()),
+                ..Default::default()
+            },
+            move || fetch_loop(fetch_requests, fetch_done),
+        ) {
+            Ok(handle) => handle.detach(),
+            Err(error) => log!("analysis fetch worker unavailable: {error}"),
+        }
         AnalysisQueue {
             bake_tx,
             bake_rx,
@@ -1473,7 +1481,8 @@ mod tests {
 
     #[test]
     fn the_queue_counts_a_batch_and_keeps_its_verdict() {
-        let mut queue = AnalysisQueue::start();
+        let cx = makepad_widgets::Cx::new(Box::new(|_, _| {}));
+        let mut queue = AnalysisQueue::start(cx.thread_spawner());
         assert!(!queue.busy());
         assert_eq!(queue.status_line(), "");
         assert_eq!(queue.progress_fraction(), 0.0);

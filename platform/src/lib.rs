@@ -1,6 +1,7 @@
 //#![cfg_attr(all(unix), feature(unix_socket_ancillary_data))]
 pub mod gl_render_bridge;
 pub mod home;
+pub mod archive_cache;
 pub mod os;
 
 #[cfg(any(
@@ -26,6 +27,7 @@ mod shared_bytes;
 
 pub mod action;
 pub mod game_input;
+pub mod frame_trace;
 
 pub mod audio;
 pub mod midi;
@@ -137,13 +139,14 @@ pub use {
         audio::*,
         component::{ComponentInfo, ComponentRegistries, ComponentRegistry},
         cursor::MouseCursor,
-        cx::{Cx, CxRef, LinuxWindowParams, OsType},
+        cx::{Cx, CxMemoryReport, CxRef, LinuxWindowParams, OsType},
         cx_api::{AccessibilityUpdatePayload, CxOsApi, CxOsOp, CxThreadPriority, OpenUrlInPlace},
         display_context::{DisplayContext, SystemBarAppearance},
         font_policy::{
             extend_font_asset_manifest, font_asset_manifest_len, FontAsset, FontChain, FontPolicy,
-            FontRole, FontSet, FONT_ASSET_MANIFEST_SECTION, INTERNATIONAL_FONT_ASSET_MANIFEST,
-            LATIN_FONT_ASSET_MANIFEST, MATH_VIEW_FONT_ASSET, UI_SYMBOL_FALLBACK,
+            FontRole, FontSet, LazyFontAsset, LazyFontFamily, FONT_ASSET_MANIFEST_SECTION,
+            INTERNATIONAL_FONT_ASSET_MANIFEST, LATIN_FONT_ASSET_MANIFEST,
+            LATIN_FONT_ASSET_PACKAGE_MANIFEST, MATH_VIEW_FONT_ASSET, UI_SYMBOL_FALLBACK,
         },
         draw_list::{CxDrawCall, CxDrawItem, CxDrawListPool, CxRectArea, DrawList, DrawListId},
         draw_matrix::DrawMatrix,

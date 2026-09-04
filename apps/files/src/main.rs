@@ -82,7 +82,7 @@ mod no_chat {
     }
 }
 
-app_main!(App, font_set: International);
+app_main!(App);
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -2619,8 +2619,9 @@ impl App {
                 }
                 PortEvent::Call(call) => {
                     let (cwd, home) = (self.current_dir(), self.home.clone());
+                    let spawner = cx.thread_spawner();
                     self.ai_runner
-                        .get_or_insert_with(ServiceRunner::new)
+                        .get_or_insert_with(|| ServiceRunner::new(&spawner))
                         .submit(&call, cwd, home);
                 }
                 PortEvent::Cancel { call_id } => {
@@ -2628,6 +2629,7 @@ impl App {
                         runner.cancel(&call_id);
                     }
                 }
+                PortEvent::Subscribe { .. } | PortEvent::Unsubscribe { .. } => {}
                 PortEvent::ChatOpen { open } => {
                     // The desktop's pane is the chat now: the app's own panel
                     // steps aside (Cmd+K brings it back on purpose).
@@ -4221,7 +4223,7 @@ impl App {
             CHAT_SYSTEM_PROMPT.to_string(),
             chat_tools::tools(),
         ));
-        self.tool_runner = Some(ToolRunner::new());
+        self.tool_runner = Some(ToolRunner::new(&cx.thread_spawner()));
         self.chat.push(
             ChatVoice::Info,
             format!("Loading {}…", display_name(&model)),
@@ -4977,7 +4979,7 @@ impl MatchEvent for App {
         self.ops = if vfs().is_instant() {
             None
         } else {
-            Some(Ops::new(Box::new(SignalToUI::set_ui_signal)))
+            Some(Ops::new(Box::new(SignalToUI::set_ui_signal), &cx.thread_spawner()))
         };
         self.home = vfs().home();
         // The desktop's assistant hears about this instance now — unless it

@@ -27,11 +27,13 @@
 
 use makepad_widgets::log;
 use makepad_widgets::makepad_platform::audio::AudioBuffer;
+use makepad_widgets::makepad_platform::thread::{CancellationToken, Lane, TaskHandle, TaskPool};
 use makepad_widgets::makepad_platform::video_file::VideoFileDecoder;
+use makepad_widgets::Cx;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 /// How many decoded frames the ring holds before the decode thread idles.
 const RING_FRAMES: usize = 3;
@@ -52,7 +54,6 @@ pub struct Frame {
 }
 
 struct Shared {
-    frames: Mutex<VecDeque<Frame>>,
     stop: AtomicBool,
     /// The decode thread exited for good — an honored stop or a fatal
     /// decode error. End of stream does NOT end the thread: it parks (see
@@ -79,12 +80,15 @@ pub struct VideoPlayer {
     pub fps: f64,
     pub has_audio: bool,
     shared: Arc<Shared>,
-    started: Option<Instant>,
+    frames: VecDeque<Frame>,
+    frame_rx: Receiver<Frame>,
+    decode_task: Option<TaskHandle<()>>,
+    started: Option<f64>,
     last_pts: i64,
     /// While paused: when the pause began. The clock rebases by the paused
     /// span on resume, so playback continues where it stopped instead of
     /// skipping the frames "missed" on the wall clock.
-    paused_at: Option<Instant>,
+    paused_at: Option<f64>,
     /// A paused seek hands over exactly ONE frame — its target. Without
     /// this latch a host that keeps pumping while paused (this one does,
     /// to fade its transport bar out) walks the ring forward frame by
@@ -94,7 +98,7 @@ pub struct VideoPlayer {
 }
 
 impl VideoPlayer {
-    pub fn new(path: &str) -> Result<Self, String> {
+    pub fn new(path: &str, pool: TaskPool) -> Result<Self, String> {
         let info = VideoFileDecoder::open(path)
             .map_err(|e| e.to_string())?
             .info()
@@ -128,27 +132,25 @@ impl VideoPlayer {
             audio.owner = epoch;
         }
         let shared = Arc::new(Shared {
-            frames: Mutex::new(VecDeque::new()),
             stop: AtomicBool::new(false),
             done: AtomicBool::new(false),
             eos: AtomicBool::new(false),
             seek_100ns: AtomicI64::new(-1),
         });
-        let thread_shared = shared.clone();
-        let thread_path = path.to_string();
-        // The JoinHandle is deliberately dropped: teardown must never join a
-        // possibly wedged hardware decoder on the UI thread. The thread is
-        // detached; `stop` + the audio epoch make that safe.
-        std::thread::Builder::new()
-            .name("video-decode".into())
-            .spawn(move || {
-                match VideoFileDecoder::open(&thread_path) {
-                    Ok(decoder) => decode_loop(decoder, &thread_shared, epoch),
-                    Err(e) => log!("video: decode thread open failed: {}", e),
+        let (frame_tx, frame_rx) = sync_channel(RING_FRAMES);
+        let worker_shared = shared.clone();
+        let worker_path = path.to_string();
+        let wait = CancellationToken::new();
+        let worker_wait = wait.clone();
+        let decode_task = pool
+            .submit(Lane::Heavy, move || {
+                match VideoFileDecoder::open(&worker_path) {
+                    Ok(decoder) => decode_loop(decoder, &worker_shared, epoch, frame_tx, worker_wait),
+                    Err(e) => log!("video: decode task open failed: {}", e),
                 }
-                thread_shared.done.store(true, Ordering::Release);
+                worker_shared.done.store(true, Ordering::Release);
             })
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("could not queue video decode: {e}"))?;
         let fps = if info.fps_den > 0 {
             info.fps_num as f64 / info.fps_den as f64
         } else {
@@ -161,6 +163,9 @@ impl VideoPlayer {
             fps,
             has_audio: info.has_audio,
             shared,
+            frames: VecDeque::new(),
+            frame_rx,
+            decode_task: Some(decode_task),
             started: None,
             last_pts: 0,
             paused_at: None,
@@ -176,7 +181,7 @@ impl VideoPlayer {
     /// Freeze the picture; the soundtrack mutes with it. Idempotent.
     pub fn pause(&mut self) {
         if self.paused_at.is_none() {
-            self.paused_at = Some(Instant::now());
+            self.paused_at = Some(Cx::monotonic_now());
             self.paused_frame_taken = true;
             video_audio().lock().unwrap().muted = true;
         }
@@ -187,7 +192,7 @@ impl VideoPlayer {
     pub fn resume(&mut self) {
         if let Some(paused_at) = self.paused_at.take() {
             if let Some(started) = &mut self.started {
-                *started += paused_at.elapsed();
+                *started += Cx::monotonic_now() - paused_at;
             }
             self.paused_frame_taken = false;
             video_audio().lock().unwrap().muted = false;
@@ -197,6 +202,7 @@ impl VideoPlayer {
     /// The newest frame whose pts has been reached; `None` keeps whatever is
     /// on the texture. Call once per render frame.
     pub fn take_due_frame(&mut self) -> Option<Frame> {
+        self.drain_frames();
         if self.paused_at.is_some() {
             // Paused normally: hold the picture. Freshly seeked while
             // paused (clock unset, nothing handed over yet): show the seek
@@ -204,22 +210,20 @@ impl VideoPlayer {
             if self.started.is_some() || self.paused_frame_taken {
                 return None;
             }
-            let mut frames = self.shared.frames.lock().unwrap();
-            let frame = frames.pop_front()?;
+            let frame = self.frames.pop_front()?;
             self.last_pts = frame.pts_100ns;
             self.paused_frame_taken = true;
             // Keep the clock unset: resume rebases at the next frame.
             return Some(frame);
         }
-        let mut frames = self.shared.frames.lock().unwrap();
-        let first_pts = frames.front()?.pts_100ns;
+        let first_pts = self.frames.front()?.pts_100ns;
         let started = *self.started.get_or_insert_with(|| {
-            Instant::now() - Duration::from_nanos(first_pts.max(0) as u64 * 100)
+            Cx::monotonic_now() - first_pts.max(0) as f64 / 10_000_000.0
         });
-        let media_100ns = (started.elapsed().as_nanos() / 100) as i64;
+        let media_100ns = ((Cx::monotonic_now() - started).max(0.0) * 10_000_000.0) as i64;
         let mut due = None;
-        while frames.front().is_some_and(|f| f.pts_100ns <= media_100ns) {
-            due = frames.pop_front();
+        while self.frames.front().is_some_and(|f| f.pts_100ns <= media_100ns) {
+            due = self.frames.pop_front();
         }
         if let Some(frame) = &due {
             self.last_pts = frame.pts_100ns;
@@ -252,7 +256,8 @@ impl VideoPlayer {
         // `at_end()` for the ~10 ms of the seek and calls the clip over
         // again the instant it was told to replay.
         self.shared.eos.store(false, Ordering::Release);
-        self.shared.frames.lock().unwrap().clear();
+        self.frames.clear();
+        while self.frame_rx.try_recv().is_ok() {}
         self.started = None;
         self.paused_frame_taken = false;
         self.last_pts = target;
@@ -264,9 +269,10 @@ impl VideoPlayer {
 
     /// True end-of-playback for the frame pump: the decode thread has parked
     /// at end of stream (or exited) and every buffered frame has been taken.
-    pub fn at_end(&self) -> bool {
+    pub fn at_end(&mut self) -> bool {
+        self.drain_frames();
         (self.shared.eos.load(Ordering::Acquire) || self.shared.done.load(Ordering::Acquire))
-            && self.shared.frames.lock().unwrap().is_empty()
+            && self.frames.is_empty()
     }
 
     /// True while a seek request is still unconsumed by the decode thread —
@@ -274,16 +280,34 @@ impl VideoPlayer {
     pub fn seek_pending(&self) -> bool {
         self.shared.seek_100ns.load(Ordering::Acquire) >= 0
     }
+
+    fn drain_frames(&mut self) {
+        loop {
+            match self.frame_rx.try_recv() {
+                Ok(frame) => self.frames.push_back(frame),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            }
+        }
+        if self.decode_task.as_ref().is_some_and(TaskHandle::is_finished) {
+            let mut task = self.decode_task.take().unwrap();
+            if let Some(Err(error)) = task.try_take() {
+                log!("video: decode task failed: {error}");
+            }
+        }
+    }
 }
 
 impl Drop for VideoPlayer {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
-        // NEVER join the decode thread here: a wedged hardware decoder call
-        // would hang the UI thread. The detached thread observes `stop`
+        if let Some(task) = self.decode_task.take() {
+            task.cancel();
+        }
+        // NEVER join the decode task here: a wedged hardware decoder call
+        // would hang the UI thread. The detached task observes `stop`
         // between packets and exits on its own; until then the epoch guard
-        // keeps its audio pushes out of the queue, and its frame ring dies
-        // with the last Arc.
+        // keeps its audio pushes out of the queue and the frame receiver is
+        // already disconnected.
         let mut audio = video_audio().lock().unwrap();
         if audio.owner == self.epoch {
             audio.clear();
@@ -292,7 +316,13 @@ impl Drop for VideoPlayer {
     }
 }
 
-fn decode_loop(mut decoder: VideoFileDecoder, shared: &Shared, epoch: u64) {
+fn decode_loop(
+    mut decoder: VideoFileDecoder,
+    shared: &Shared,
+    epoch: u64,
+    frame_tx: SyncSender<Frame>,
+    wait: CancellationToken,
+) {
     let info = decoder.info().clone();
     let mut audio_eos = false;
     loop {
@@ -307,7 +337,6 @@ fn decode_loop(mut decoder: VideoFileDecoder, shared: &Shared, epoch: u64) {
             match decoder.seek(seek) {
                 Ok(()) => {
                     audio_eos = !info.has_audio;
-                    shared.frames.lock().unwrap().clear();
                     loop {
                         if shared.stop.load(Ordering::Relaxed) {
                             return;
@@ -318,12 +347,19 @@ fn decode_loop(mut decoder: VideoFileDecoder, shared: &Shared, epoch: u64) {
                         match decoder.next_frame() {
                             Ok(Some(frame)) if frame.pts_100ns + FRAME_EPS_100NS < seek => {}
                             Ok(Some(frame)) => {
-                                shared.frames.lock().unwrap().push_back(Frame {
+                                if !send_frame(
+                                    &frame_tx,
+                                    Frame {
                                     pts_100ns: frame.pts_100ns,
                                     width: frame.width,
                                     height: frame.height,
                                     nv12: frame.nv12,
-                                });
+                                    },
+                                    shared,
+                                    &wait,
+                                ) {
+                                    break;
+                                }
                                 break;
                             }
                             Ok(None) => break,
@@ -389,18 +425,19 @@ fn decode_loop(mut decoder: VideoFileDecoder, shared: &Shared, epoch: u64) {
                 }
             }
         }
-        if shared.frames.lock().unwrap().len() >= RING_FRAMES {
-            std::thread::sleep(Duration::from_millis(4));
-            continue;
-        }
         match decoder.next_frame() {
             Ok(Some(frame)) => {
-                shared.frames.lock().unwrap().push_back(Frame {
-                    pts_100ns: frame.pts_100ns,
-                    width: frame.width,
-                    height: frame.height,
-                    nv12: frame.nv12,
-                });
+                let _ = send_frame(
+                    &frame_tx,
+                    Frame {
+                        pts_100ns: frame.pts_100ns,
+                        width: frame.width,
+                        height: frame.height,
+                        nv12: frame.nv12,
+                    },
+                    shared,
+                    &wait,
+                );
             }
             Ok(None) => {
                 // End of stream: drain the soundtrack tail, then PARK. The
@@ -436,7 +473,7 @@ fn decode_loop(mut decoder: VideoFileDecoder, shared: &Shared, epoch: u64) {
                     if shared.seek_100ns.load(Ordering::Acquire) >= 0 {
                         break; // the top of the loop consumes it
                     }
-                    std::thread::sleep(Duration::from_millis(10));
+                    let _ = wait.wait_until(Cx::monotonic_now() + 0.010);
                 }
                 continue;
             }
@@ -444,6 +481,29 @@ fn decode_loop(mut decoder: VideoFileDecoder, shared: &Shared, epoch: u64) {
                 log!("video: decode error: {}", e);
                 return;
             }
+        }
+    }
+}
+
+fn send_frame(
+    tx: &SyncSender<Frame>,
+    mut frame: Frame,
+    shared: &Shared,
+    wait: &CancellationToken,
+) -> bool {
+    loop {
+        if shared.stop.load(Ordering::Relaxed)
+            || shared.seek_100ns.load(Ordering::Acquire) >= 0
+        {
+            return false;
+        }
+        match tx.try_send(frame) {
+            Ok(()) => return true,
+            Err(TrySendError::Full(returned)) => {
+                frame = returned;
+                let _ = wait.wait_until(Cx::monotonic_now() + 0.004);
+            }
+            Err(TrySendError::Disconnected(_)) => return false,
         }
     }
 }
@@ -606,6 +666,7 @@ mod tests {
     static VIDEO_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn test_player(shared: Arc<Shared>) -> VideoPlayer {
+        let (_frame_tx, frame_rx) = sync_channel(RING_FRAMES);
         VideoPlayer {
             width: 2,
             height: 2,
@@ -613,6 +674,9 @@ mod tests {
             fps: 30.0,
             has_audio: false,
             shared,
+            frames: VecDeque::new(),
+            frame_rx,
+            decode_task: None,
             started: None,
             last_pts: 0,
             paused_at: None,
@@ -623,7 +687,6 @@ mod tests {
 
     fn empty_shared() -> Arc<Shared> {
         Arc::new(Shared {
-            frames: Mutex::new(VecDeque::new()),
             stop: AtomicBool::new(false),
             done: AtomicBool::new(false),
             eos: AtomicBool::new(false),
@@ -631,8 +694,8 @@ mod tests {
         })
     }
 
-    fn push_frame(shared: &Shared, pts_100ns: i64) {
-        shared.frames.lock().unwrap().push_back(Frame {
+    fn push_frame(player: &mut VideoPlayer, pts_100ns: i64) {
+        player.frames.push_back(Frame {
             pts_100ns,
             width: 2,
             height: 2,
@@ -644,8 +707,8 @@ mod tests {
     fn at_end_needs_decode_exit_and_a_drained_ring() {
         let _serial = VIDEO_TEST_LOCK.lock().unwrap();
         let shared = empty_shared();
-        push_frame(&shared, 0);
         let mut player = test_player(shared.clone());
+        push_frame(&mut player, 0);
         // Still decoding: never EOS, with or without buffered frames.
         assert!(!player.at_end());
         // Decode parked at EOS, but a due frame is still buffered.
@@ -680,16 +743,16 @@ mod tests {
         let _serial = VIDEO_TEST_LOCK.lock().unwrap();
         let shared = empty_shared();
         let mut player = test_player(shared.clone());
-        push_frame(&shared, 0);
+        push_frame(&mut player, 0);
         assert!(player.take_due_frame().is_some(), "playing: frame is due");
         assert!(!player.is_paused());
         player.pause();
         assert!(player.is_paused());
         // Paused with a live clock: the picture holds even when a frame is
         // waiting in the ring.
-        push_frame(&shared, 10_000_000);
+        push_frame(&mut player, 10_000_000);
         assert!(player.take_due_frame().is_none());
-        std::thread::sleep(Duration::from_millis(20));
+        player.paused_at = Some(Cx::monotonic_now() - 0.020);
         player.resume();
         assert!(!player.is_paused());
         // The paused span was added to the clock base, so the frame that was
@@ -709,7 +772,7 @@ mod tests {
         player.pause();
         player.seek(0.5);
         for pts in [5_000_000, 5_400_000, 5_800_000] {
-            push_frame(&shared, pts);
+            push_frame(&mut player, pts);
         }
         assert!(player.take_due_frame().is_some(), "the seek target shows");
         assert!((player.position_secs() - 0.5).abs() < 0.001);
@@ -717,7 +780,7 @@ mod tests {
         for _ in 0..10 {
             assert!(player.take_due_frame().is_none(), "paused holds");
         }
-        assert_eq!(shared.frames.lock().unwrap().len(), 2);
+        assert_eq!(player.frames.len(), 2);
         // Resuming releases the ring again.
         player.resume();
         assert!(player.take_due_frame().is_some());

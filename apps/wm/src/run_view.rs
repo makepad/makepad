@@ -19,7 +19,9 @@ use makepad_widgets::*;
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
 use makepad_widgets::makepad_platform::shared_framebuf::aux_chan;
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-use std::sync::{Arc, Mutex};
+use makepad_widgets::makepad_platform::thread::{Lane, TaskHandle};
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+use std::sync::mpsc::Receiver;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -262,7 +264,13 @@ pub struct MpRunView {
 
     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
     #[rust]
-    aux_chan_host_endpoint: Option<Arc<Mutex<Option<aux_chan::HostEndpoint>>>>,
+    aux_chan_host_endpoint: Option<aux_chan::HostEndpoint>,
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[rust]
+    aux_chan_rx: Option<Receiver<Result<aux_chan::HostEndpoint, String>>>,
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[rust]
+    aux_chan_task: Option<TaskHandle<()>>,
 }
 
 impl ScriptHook for MpRunView {
@@ -304,6 +312,10 @@ impl MpRunView {
         #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
         {
             self.aux_chan_host_endpoint = None;
+            self.aux_chan_rx = None;
+            if let Some(task) = self.aux_chan_task.take() {
+                task.cancel();
+            }
         }
         self.last_rect = Rect::default();
         self.last_dpi_factor = 0.0;
@@ -455,8 +467,8 @@ impl MpRunView {
     }
 
     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    fn setup_aux_chan(&mut self, hub_port: u16, client: ClientId) {
-        if self.aux_chan_host_endpoint.is_some() {
+    fn setup_aux_chan(&mut self, cx: &mut Cx, hub_port: u16, client: ClientId) {
+        if self.aux_chan_host_endpoint.is_some() || self.aux_chan_rx.is_some() {
             return;
         }
         let studio_addr = format!("http://127.0.0.1:{}", hub_port);
@@ -470,19 +482,41 @@ impl MpRunView {
                 return;
             }
         };
-        let slot = Arc::new(Mutex::new(None));
-        self.aux_chan_host_endpoint = Some(slot.clone());
-        std::thread::Builder::new()
-            .name("wm-aux-chan-accept".into())
-            .spawn(move || match listener.accept_host_endpoint() {
-                Ok(endpoint) => {
-                    *slot.lock().unwrap() = Some(endpoint);
-                }
-                Err(err) => {
-                    log!("wm aux_chan accept failed: {}", err);
-                }
-            })
-            .ok();
+        let (tx, rx) = std::sync::mpsc::channel();
+        match cx.task_pool().submit(Lane::Heavy, move || {
+            let result = listener.accept_host_endpoint().map_err(|err| err.to_string());
+            let _ = tx.send(result);
+        }) {
+            Ok(task) => {
+                self.aux_chan_rx = Some(rx);
+                self.aux_chan_task = Some(task);
+            }
+            Err(error) => log!("wm aux_chan accept could not be queued: {error}"),
+        }
+    }
+
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    fn poll_aux_chan(&mut self) {
+        let Some(rx) = &self.aux_chan_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(endpoint)) => {
+                self.aux_chan_host_endpoint = Some(endpoint);
+                self.aux_chan_rx = None;
+            }
+            Ok(Err(error)) => {
+                log!("wm aux_chan accept failed: {error}");
+                self.aux_chan_rx = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.aux_chan_rx = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+        }
+        if let Some(mut task) = self.aux_chan_task.take() {
+            let _ = task.try_take();
+        }
     }
 
     fn ensure_swapchain_for_rect(
@@ -568,11 +602,8 @@ impl MpRunView {
 
         #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
         {
-            let Some(endpoint_slot) = self.aux_chan_host_endpoint.as_ref() else {
-                return outbound;
-            };
-            let endpoint_guard = endpoint_slot.lock().unwrap();
-            let Some(host_endpoint) = endpoint_guard.as_ref() else {
+            self.poll_aux_chan();
+            let Some(host_endpoint) = self.aux_chan_host_endpoint.as_ref() else {
                 return outbound;
             };
             if let Some(swapchain) = self.swapchain.as_mut() {
@@ -621,7 +652,7 @@ impl MpRunView {
     ) {
         self.set_target(cx, Some(RunTarget { client, window_id }));
         #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-        self.setup_aux_chan(_hub_port, client);
+        self.setup_aux_chan(cx, _hub_port, client);
     }
 
     /// CreateWindow arrived: the child's stdin loop is live, share the

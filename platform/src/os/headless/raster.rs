@@ -849,10 +849,18 @@ impl Cx {
 
                     // Set up pass uniforms
                     if !self.passes[*draw_pass_id].keep_camera_matrix {
-                        self.passes[*draw_pass_id].set_ortho_matrix(dvec2(0.0, 0.0), size);
+                        let uniforms_gen = self.next_uniform_gen();
+                        self.passes[*draw_pass_id].set_ortho_matrix(
+                            dvec2(0.0, 0.0),
+                            size,
+                            uniforms_gen,
+                        );
                     }
-                    self.passes[*draw_pass_id].set_dpi_factor(dpi_factor);
-                    self.passes[*draw_pass_id].set_time(time as f32);
+                    let dpi_uniforms_gen = self.next_uniform_gen();
+                    self.passes[*draw_pass_id]
+                        .set_dpi_factor(dpi_factor, dpi_uniforms_gen);
+                    let time_uniforms_gen = self.next_uniform_gen();
+                    self.passes[*draw_pass_id].set_time(time as f32, time_uniforms_gen);
 
                     let mut fb = window_framebuffers
                         .remove(&window_id.id())
@@ -1102,10 +1110,17 @@ impl Cx {
         };
 
         if !self.passes[draw_pass_id].keep_camera_matrix {
-            self.passes[draw_pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size);
+            let uniforms_gen = self.next_uniform_gen();
+            self.passes[draw_pass_id].set_ortho_matrix(
+                pass_rect.pos,
+                pass_rect.size,
+                uniforms_gen,
+            );
         }
-        self.passes[draw_pass_id].set_dpi_factor(dpi_factor);
-        self.passes[draw_pass_id].set_time(time as f32);
+        let dpi_uniforms_gen = self.next_uniform_gen();
+        self.passes[draw_pass_id].set_dpi_factor(dpi_factor, dpi_uniforms_gen);
+        let time_uniforms_gen = self.next_uniform_gen();
+        self.passes[draw_pass_id].set_time(time as f32, time_uniforms_gen);
 
         // Taking the framebuffer out of the store lets the raster below sample
         // every *other* offscreen target while writing into this one.
@@ -1219,6 +1234,7 @@ impl Cx {
         let sploded = self.passes[draw_pass_id].sploded.is_some();
 
         for order_index in 0..draw_order_len {
+            let uniforms_gen = self.next_uniform_gen();
             let Some(draw_item_id) =
                 self.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
             else {
@@ -1231,6 +1247,12 @@ impl Cx {
             };
 
             if let Some(sub_list_id) = kind_tag {
+                // A retained sub-list its owner dropped between the parent's
+                // last record and this paint: the slot may already hold
+                // another widget's list. Nothing to draw here.
+                if self.draw_lists.is_id_freed(sub_list_id) {
+                    continue;
+                }
                 let child_resets_zbias = self.draw_lists[sub_list_id].reset_zbias;
                 let mut own_zbias = 0.0f32;
                 let child_zbias = if child_resets_zbias {
@@ -1241,18 +1263,38 @@ impl Cx {
                 // An overlay list carries a depth floor: this is what makes it
                 // composite above body content that uses `draw_depth`.
                 self.draw_lists[sub_list_id].raise_zbias_to_floor(child_zbias);
-                self.headless_render_view(
-                    draw_pass_id,
-                    sub_list_id,
-                    child_zbias,
-                    zbias_step,
-                    options,
-                    fb,
-                    pass_raster,
-                    texture_cache,
-                    render_targets,
-                    profile.as_deref_mut(),
-                );
+                // A retained list is one unit of paint order: its calls all
+                // take the counter at entry, it advances by the layers the
+                // list reported. See `CxDrawList::zbias_hold`.
+                if let Some(steps) = self.draw_lists[sub_list_id].zbias_hold {
+                    let mut held = *child_zbias;
+                    self.headless_render_view(
+                        draw_pass_id,
+                        sub_list_id,
+                        &mut held,
+                        0.0,
+                        options,
+                        fb,
+                        pass_raster,
+                        texture_cache,
+                        render_targets,
+                        profile.as_deref_mut(),
+                    );
+                    *child_zbias += steps as f32 * zbias_step;
+                } else {
+                    self.headless_render_view(
+                        draw_pass_id,
+                        sub_list_id,
+                        child_zbias,
+                        zbias_step,
+                        options,
+                        fb,
+                        pass_raster,
+                        texture_cache,
+                        render_targets,
+                        profile.as_deref_mut(),
+                    );
+                }
                 continue;
             }
 
@@ -1261,7 +1303,7 @@ impl Cx {
                 if let CxDrawKind::DrawCall(dc) =
                     &mut self.draw_lists[draw_list_id].draw_items[draw_item_id].kind
                 {
-                    dc.resolve_zbias(current_zbias, sploded);
+                    dc.resolve_zbias(current_zbias, sploded, uniforms_gen);
                 }
             }
             *zbias += zbias_step;

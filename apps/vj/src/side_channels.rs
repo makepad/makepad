@@ -35,7 +35,10 @@ use crate::stems::{
 };
 use makepad_ai_stems::{CacheHeader, StemCache, SAMPLE_RATE as STEMS_RATE};
 use makepad_asset_data::AssetId;
-use makepad_widgets::makepad_platform::thread::ThreadSpawner;
+use makepad_widgets::makepad_platform::thread::{
+    CancellationToken, Lane, TaskPool, ThreadOptions, ThreadSpawner,
+};
+use makepad_widgets::Cx;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
@@ -142,12 +145,15 @@ impl SideChannelPool {
         SideChannelPool { tx, jobs: Some(jobs), out, rx }
     }
 
-    pub fn start(&mut self, spawner: ThreadSpawner) {
+    /// One dedicated worker for the app's life; the per-stem decodes it
+    /// fans out go to `pool`'s heavy lane.
+    pub fn start(&mut self, spawner: ThreadSpawner, pool: TaskPool) {
         let Some(jobs) = self.jobs.take() else { return };
         let out = self.out.clone();
-        match spawner.spawn(move || {
+        let options = ThreadOptions { name: Some("vj-side-channel".into()), ..Default::default() };
+        match spawner.spawn_worker(options, move || {
                 while let Ok(job) = jobs.recv() {
-                    run_fetched(job, &out);
+                    run_fetched(job, &out, &pool);
                 }
             }) {
             Ok(handle) => handle.detach(),
@@ -246,7 +252,7 @@ fn cut_chunks(
     out
 }
 
-fn run_fetched(job: FetchedJob, out: &Sender<SideChannelMsg>) {
+fn run_fetched(job: FetchedJob, out: &Sender<SideChannelMsg>, pool: &TaskPool) {
     let status = |text: &str, working: bool| {
         let _ = out.send(SideChannelMsg::Stems(StemsMsg::Status {
             deck: job.deck,
@@ -258,23 +264,25 @@ fn run_fetched(job: FetchedJob, out: &Sender<SideChannelMsg>) {
     status("stems: side-channel", true);
 
     let track_rate = job.pcm.sample_rate.max(1);
-    #[cfg(not(target_arch = "wasm32"))]
-    let mut decoded: Vec<Result<Vec<[i16; 2]>, String>> = Vec::with_capacity(4);
-    #[cfg(not(target_arch = "wasm32"))]
-    std::thread::scope(|scope| {
-        let mut handles = Vec::with_capacity(4);
-        for source in job.stem_files.iter() {
-            handles.push(scope.spawn(move || decode_stem(source, track_rate)));
+    // The four stems decode in parallel on the pool's heavy lane; this
+    // dedicated worker is the one that may wait for them (a pool job never
+    // waits on a sibling). A refused submission decodes that stem here.
+    let mut handles = Vec::with_capacity(4);
+    for source in job.stem_files.iter() {
+        let source = source.clone();
+        match pool.try_submit(Lane::Heavy, move || decode_stem(&source, track_rate)) {
+            Ok(handle) => handles.push(Ok(handle)),
+            Err(refused) => handles.push(Err((refused.job)())),
         }
-        for handle in handles {
-            decoded.push(handle.join().unwrap_or_else(|_| Err("decode panicked".into())));
-        }
-    });
-    #[cfg(target_arch = "wasm32")]
-    let mut decoded: Vec<Result<Vec<[i16; 2]>, String>> = job
-        .stem_files
-        .iter()
-        .map(|source| decode_stem(source, track_rate))
+    }
+    let mut decoded: Vec<Result<Vec<[i16; 2]>, String>> = handles
+        .into_iter()
+        .map(|handle| match handle {
+            Ok(handle) => handle
+                .join()
+                .unwrap_or_else(|error| Err(format!("stem decode: {error}"))),
+            Err(inline) => inline,
+        })
         .collect();
     let mut lanes: [Vec<[i16; 2]>; 4] = Default::default();
     for (lane, source) in LANE_FROM_ROLE.into_iter().enumerate() {
@@ -393,7 +401,6 @@ fn install_lyrics(source: &FetchedSource, digest: &str) -> Option<makepad_audio_
 /// How long the write-back stands aside before it starts. Separation has
 /// just finished, the deck is probably playing, and nothing about this work
 /// is urgent — it is for the NEXT machine to load this track.
-#[cfg(not(target_arch = "wasm32"))]
 const WRITE_BACK_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Read a completed span cache back and encode it, so the store can have it.
@@ -416,7 +423,10 @@ pub enum WriteBackMsg {
 /// One worker, so two tracks separated back to back never encode at once.
 pub struct WriteBackPool {
     tx: Sender<WriteBackJob>,
+    jobs: Option<Receiver<WriteBackJob>>,
+    out: Sender<WriteBackMsg>,
     rx: Receiver<WriteBackMsg>,
+    root: PathBuf,
 }
 
 impl Default for WriteBackPool {
@@ -433,12 +443,21 @@ impl WriteBackPool {
     pub fn with_root(root: PathBuf) -> WriteBackPool {
         let (tx, jobs) = channel::<WriteBackJob>();
         let (out, rx) = channel::<WriteBackMsg>();
-        #[cfg(not(target_arch = "wasm32"))]
-        let _ = std::thread::Builder::new()
-            .name("vj-sidechannel-writeback".into())
-            .spawn(move || {
+        WriteBackPool { tx, jobs: Some(jobs), out, rx, root }
+    }
+
+    pub fn start(&mut self, spawner: ThreadSpawner) {
+        let Some(jobs) = self.jobs.take() else { return };
+        let out = self.out.clone();
+        let root = self.root.clone();
+        let options = ThreadOptions { name: Some("vj-write-back".into()), ..Default::default() };
+        match spawner.spawn_worker(options, move || {
                 while let Ok(job) = jobs.recv() {
-                    std::thread::sleep(WRITE_BACK_DELAY);
+                    // A plain sleep reads the std clock and panics on a
+                    // wasm worker; `wait_until` paces off
+                    // `Cx::monotonic_now()` instead.
+                    let wait = CancellationToken::new();
+                    let _ = wait.wait_until(Cx::monotonic_now() + WRITE_BACK_DELAY.as_secs_f64());
                     let message = match encode_from_cache(&root, &job) {
                         Ok(oggs) => WriteBackMsg::Encoded { asset: job.asset, oggs },
                         Err(reason) => WriteBackMsg::Skipped { asset: job.asset, reason },
@@ -447,10 +466,10 @@ impl WriteBackPool {
                         return;
                     }
                 }
-            });
-        #[cfg(target_arch = "wasm32")]
-        drop((jobs, out, root));
-        WriteBackPool { tx, rx }
+            }) {
+            Ok(handle) => handle.detach(),
+            Err(error) => makepad_widgets::log!("vj write-back worker unavailable: {error}"),
+        }
     }
 
     pub fn submit(&self, job: WriteBackJob) {

@@ -22,6 +22,7 @@ export class WasmWebGL extends WasmWebBrowser {
     this.webgl_shader_batch_failed_count = 0;
     this.webgl_shader_summary_timer = undefined;
     this.video_players = {};
+    this.bgra_upload_scratch = new Uint32Array(0);
     this.init_webgl_context();
 
     this.load_deps();
@@ -200,24 +201,28 @@ export class WasmWebGL extends WasmWebBrowser {
     return index;
   }
 
-  upload_uniform_buffer_from_ptr(gl, gl_buf, ptr_f32) {
+  upload_uniform_buffer_from_ptr(gl, gl_buf, ptr_f32, gen_lo, gen_hi) {
     if (!gl_buf || ptr_f32.ptr == 0 || ptr_f32.len == 0) {
       return;
     }
     if (
-      gl_buf._last_upload_serial === this.buffer_upload_serial &&
-      gl_buf._last_upload_ptr === ptr_f32.ptr &&
-      gl_buf._last_upload_len === ptr_f32.len &&
-      gl_buf._last_upload_memory === this.memory.buffer
+      gl_buf._last_upload_gen_lo === gen_lo &&
+      gl_buf._last_upload_gen_hi === gen_hi
     ) {
       return;
     }
     let data = new Float32Array(this.memory.buffer, ptr_f32.ptr, ptr_f32.len);
     this.upload_uniform_buffer_data(gl, gl_buf, data, gl.DYNAMIC_DRAW);
-    gl_buf._last_upload_serial = this.buffer_upload_serial;
-    gl_buf._last_upload_ptr = ptr_f32.ptr;
-    gl_buf._last_upload_len = ptr_f32.len;
-    gl_buf._last_upload_memory = this.memory.buffer;
+    gl_buf._last_upload_gen_lo = gen_lo;
+    gl_buf._last_upload_gen_hi = gen_hi;
+  }
+
+  reset_uniform_buffer_upload_cache(gl_buf) {
+    if (!gl_buf) {
+      return;
+    }
+    gl_buf._last_upload_gen_lo = undefined;
+    gl_buf._last_upload_gen_hi = undefined;
   }
 
   upload_uniform_buffer_data(gl, gl_buf, data, usage = gl.DYNAMIC_DRAW) {
@@ -347,9 +352,11 @@ export class WasmWebGL extends WasmWebBrowser {
       if (this.pending_webgl_shader_count != 0) {
         return;
       }
-      console.log(
-        `webgl shaders: ${this.webgl_shader_batch_program_count} programs, ${this.webgl_shader_batch_failed_count} failed, ${(performance.now() - this.webgl_shader_timeline_start).toFixed(1)} ms`,
-      );
+      if (this.webgl_shader_batch_failed_count > 0) {
+        console.error(
+          `webgl shaders: ${this.webgl_shader_batch_program_count} programs, ${this.webgl_shader_batch_failed_count} failed, ${(performance.now() - this.webgl_shader_timeline_start).toFixed(1)} ms`,
+        );
+      }
       this.webgl_shader_timeline_start = undefined;
       this.webgl_shader_batch_program_count = 0;
       this.webgl_shader_batch_failed_count = 0;
@@ -368,6 +375,7 @@ export class WasmWebGL extends WasmWebBrowser {
     this.pending_webgl_shader_count -= shader.pending ? 1 : 0;
     shader.pending = false;
     this.webgl_shader_batch_failed_count++;
+    this.to_wasm.ToWasmWebGLShadersDone({ count: 1 });
     this.schedule_webgl_shader_summary();
   }
 
@@ -447,8 +455,6 @@ export class WasmWebGL extends WasmWebBrowser {
       ),
       pass_uniform_buf: gl.createBuffer(),
       draw_list_uniform_buf: gl.createBuffer(),
-      draw_call_uniform_buf: gl.createBuffer(),
-      user_uniform_buf: gl.createBuffer(),
       live_uniform_buf: gl.createBuffer(),
       texture_locs: texture_locs,
       geometry_slots: shader.geometry_slots,
@@ -460,6 +466,9 @@ export class WasmWebGL extends WasmWebBrowser {
     this.pending_webgl_shader_count -= shader.pending ? 1 : 0;
     shader.pending = false;
     this.assert_no_gl_error(gl, "compile_shader_end");
+    // The wasm side counts queued compiles; this closes one so
+    // Cx::draw_shaders_pending can tell a bake its draws are no longer dropped.
+    this.to_wasm.ToWasmWebGLShadersDone({ count: 1 });
     this.schedule_webgl_shader_summary();
     return true;
   }
@@ -631,6 +640,8 @@ export class WasmWebGL extends WasmWebBrowser {
     if (!geometry_buffer || !instance_buffer || !index_buffer) {
       return false;
     }
+    this.reset_uniform_buffer_upload_cache(vao.draw_call_uniform_buf);
+    this.reset_uniform_buffer_upload_cache(vao.user_uniform_buf);
     gl.bindVertexArray(vao.gl_vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, geometry_buffer.gl_buf);
 
@@ -711,6 +722,14 @@ export class WasmWebGL extends WasmWebBrowser {
       geom_ib_id: args.geom_ib_id,
       geom_vb_id: args.geom_vb_id,
       inst_vb_id: args.inst_vb_id,
+      draw_call_uniform_buf:
+        old_vao && old_vao.draw_call_uniform_buf
+          ? old_vao.draw_call_uniform_buf
+          : gl.createBuffer(),
+      user_uniform_buf:
+        old_vao && old_vao.user_uniform_buf
+          ? old_vao.user_uniform_buf
+          : gl.createBuffer(),
       ready: false,
     });
 
@@ -769,31 +788,48 @@ export class WasmWebGL extends WasmWebBrowser {
     } else {
       gl.disable(gl.CULL_FACE);
     }
+    // Texture passes render with an inverted projection Y (web_gl.rs
+    // setup_render_pass), which reverses triangle winding: front faces are
+    // clockwise there and counter-clockwise on the canvas, matching Metal.
+    gl.frontFace(this.texture_pass_front_face_cw ? gl.CW : gl.CCW);
 
     gl.bindVertexArray(vao.gl_vao);
 
     let index_buffer = this.index_buffers[vao.geom_ib_id];
     let instance_buffer = this.array_buffers[vao.inst_vb_id];
 
+    if (args.reset_draw_uniforms) {
+      this.reset_uniform_buffer_upload_cache(vao.draw_call_uniform_buf);
+      this.reset_uniform_buffer_upload_cache(vao.user_uniform_buf);
+    }
+
     this.upload_uniform_buffer_from_ptr(
       gl,
       shader.draw_list_uniform_buf,
       args.draw_list_uniforms,
+      args.draw_list_uniforms_gen_lo,
+      args.draw_list_uniforms_gen_hi,
     );
     this.upload_uniform_buffer_from_ptr(
       gl,
-      shader.draw_call_uniform_buf,
+      vao.draw_call_uniform_buf,
       args.draw_call_uniforms,
+      args.draw_call_uniforms_gen_lo,
+      args.draw_call_uniforms_gen_hi,
     );
     this.upload_uniform_buffer_from_ptr(
       gl,
-      shader.user_uniform_buf,
+      vao.user_uniform_buf,
       args.user_uniforms,
+      args.user_uniforms_gen_lo,
+      args.user_uniforms_gen_hi,
     );
     this.upload_uniform_buffer_from_ptr(
       gl,
       shader.live_uniform_buf,
       args.live_uniforms,
+      args.live_uniforms_gen_lo,
+      args.live_uniforms_gen_hi,
     );
 
     this.bind_uniform_block(
@@ -809,12 +845,12 @@ export class WasmWebGL extends WasmWebBrowser {
     this.bind_uniform_block(
       gl,
       shader.draw_call_uniforms_binding,
-      shader.draw_call_uniform_buf,
+      vao.draw_call_uniform_buf,
     );
     this.bind_uniform_block(
       gl,
       shader.user_uniforms_binding,
-      shader.user_uniform_buf,
+      vao.user_uniform_buf,
     );
     this.bind_uniform_block(
       gl,
@@ -844,12 +880,12 @@ export class WasmWebGL extends WasmWebBrowser {
     }
 
     let xr = this.xr;
-    let pass_uniforms = new Float32Array(
-      this.memory.buffer,
-      args.pass_uniforms.ptr,
-      args.pass_uniforms.len,
-    );
     if (xr !== undefined && xr.in_xr_pass) {
+      let pass_uniforms = new Float32Array(
+        this.memory.buffer,
+        args.pass_uniforms.ptr,
+        args.pass_uniforms.len,
+      );
       let left = xr.left_eye;
       let lvp = left.viewport;
       gl.viewport(lvp.x, lvp.y, lvp.width, lvp.height);
@@ -894,10 +930,12 @@ export class WasmWebGL extends WasmWebBrowser {
         instances,
       );
     } else {
-      this.upload_uniform_buffer_data(
+      this.upload_uniform_buffer_from_ptr(
         gl,
         shader.pass_uniform_buf,
-        pass_uniforms,
+        args.pass_uniforms,
+        args.pass_uniforms_gen_lo,
+        args.pass_uniforms_gen_hi,
       );
       gl.drawElementsInstanced(
         gl.TRIANGLES,
@@ -922,11 +960,23 @@ export class WasmWebGL extends WasmWebBrowser {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     //gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-    let data_array = new Uint8Array(
+    let pixel_count = args.width * args.height;
+    let source = new Uint32Array(
       this.memory.buffer,
       args.data.ptr,
-      args.width * args.height * 4,
+      pixel_count,
     );
+    if (this.bgra_upload_scratch.length < pixel_count) {
+      this.bgra_upload_scratch = new Uint32Array(pixel_count);
+    }
+    let converted = this.bgra_upload_scratch;
+    for (let i = 0; i < pixel_count; i++) {
+      let v = source[i];
+      converted[i] =
+        ((v & 0xff) << 16) | (v & 0xff00ff00) | ((v >>> 16) & 0xff);
+    }
+    // UNSIGNED_BYTE uploads must come from a Uint8Array view.
+    let data_array = new Uint8Array(converted.buffer, 0, pixel_count * 4);
     //agdconsole.log(args.width, args.height);
     gl.texImage2D(
       gl.TEXTURE_2D,
@@ -1013,12 +1063,22 @@ export class WasmWebGL extends WasmWebBrowser {
     gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
 
-    let face_size = args.width * args.height * 4;
-    let all_faces = new Uint8Array(
+    let face_pixels = args.width * args.height;
+    let pixel_count = face_pixels * 6;
+    let source = new Uint32Array(
       this.memory.buffer,
       args.data.ptr,
-      face_size * 6,
+      pixel_count,
     );
+    if (this.bgra_upload_scratch.length < pixel_count) {
+      this.bgra_upload_scratch = new Uint32Array(pixel_count);
+    }
+    let all_faces = this.bgra_upload_scratch;
+    for (let i = 0; i < pixel_count; i++) {
+      let v = source[i];
+      all_faces[i] =
+        ((v & 0xff) << 16) | (v & 0xff00ff00) | ((v >>> 16) & 0xff);
+    }
     let faces = [
       gl.TEXTURE_CUBE_MAP_POSITIVE_X,
       gl.TEXTURE_CUBE_MAP_NEGATIVE_X,
@@ -1028,9 +1088,11 @@ export class WasmWebGL extends WasmWebBrowser {
       gl.TEXTURE_CUBE_MAP_NEGATIVE_Z,
     ];
     for (let i = 0; i < 6; i++) {
-      let begin = i * face_size;
-      let end = begin + face_size;
-      let data_array = all_faces.subarray(begin, end);
+      let data_array = new Uint8Array(
+        all_faces.buffer,
+        i * face_pixels * 4,
+        face_pixels * 4,
+      );
       gl.texImage2D(
         faces[i],
         0,
@@ -1050,6 +1112,7 @@ export class WasmWebGL extends WasmWebBrowser {
     if (this.xr !== undefined) {
       this.xr.in_xr_pass = false;
     }
+    this.texture_pass_front_face_cw = true;
 
     let gl = this.gl;
     var gl_framebuffer =
@@ -1134,10 +1197,68 @@ export class WasmWebGL extends WasmWebBrowser {
         0,
       );
     }
-    // TODO implement depth target
+    // Depth target: a real depth/stencil texture, so a texture pass
+    // depth-tests exactly like the canvas and like Metal. Without it every
+    // 3D scene rendered into a texture (the tilted map under its tilt-shift
+    // blur, effect thumbnails) was draw-order only: roofs overpainted by
+    // the walls drawn after them, buildings hollow, landmarks buried.
+    let dt = args.depth_target;
+    if (dt.attached) {
+      var gl_dtex =
+        this.textures[dt.texture_id] ||
+        (this.textures[dt.texture_id] = gl.createTexture());
+      if (
+        gl_dtex._width != args.width ||
+        gl_dtex._height != args.height ||
+        !gl_dtex._depth
+      ) {
+        gl.bindTexture(gl.TEXTURE_2D, gl_dtex);
+        gl_dtex._width = args.width;
+        gl_dtex._height = args.height;
+        gl_dtex._depth = true;
+        gl_dtex._format = -1;
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(
+          gl.TEXTURE_2D,
+          0,
+          gl.DEPTH24_STENCIL8,
+          args.width,
+          args.height,
+          0,
+          gl.DEPTH_STENCIL,
+          gl.UNSIGNED_INT_24_8,
+          null,
+        );
+        clear_flags |= gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT;
+      } else if (!dt.init_only) {
+        clear_flags |= gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT;
+      }
+      clear_depth = dt.clear_depth;
+      gl.framebufferTexture2D(
+        gl.FRAMEBUFFER,
+        gl.DEPTH_STENCIL_ATTACHMENT,
+        gl.TEXTURE_2D,
+        gl_dtex,
+        0,
+      );
+    } else {
+      gl.framebufferTexture2D(
+        gl.FRAMEBUFFER,
+        gl.DEPTH_STENCIL_ATTACHMENT,
+        gl.TEXTURE_2D,
+        null,
+        0,
+      );
+    }
     gl.viewport(0, 0, args.width, args.height);
 
     if (clear_flags !== 0) {
+      // glClear honours the depth mask; the previous draw call may have
+      // left it off.
+      gl.depthMask(true);
       gl.clearColor(clear_color.r, clear_color.g, clear_color.b, clear_color.a);
       gl.clearDepth(clear_depth);
       gl.clear(clear_flags);
@@ -1279,6 +1400,7 @@ export class WasmWebGL extends WasmWebBrowser {
   FromWasmBeginRenderCanvas(args) {
     let gl = this.gl;
     let xr = this.xr;
+    this.texture_pass_front_face_cw = false;
 
     if (xr !== undefined) {
       xr.in_xr_pass = true;
@@ -1289,6 +1411,7 @@ export class WasmWebGL extends WasmWebBrowser {
       gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     }
     let c = args.clear_color;
+    gl.depthMask(true);
     gl.clearColor(c.r, c.g, c.b, c.a);
     gl.clearDepth(args.clear_depth);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);

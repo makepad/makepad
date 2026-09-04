@@ -1,0 +1,25 @@
+[package]
+name = "makepad-flow"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+default = ["client", "host", "hub-chat"]
+client = []
+host = []
+hub-chat = []
+
+[dependencies]
+makepad-script = { path = "../../platform/script" }
+makepad-micro-serde = { path = "../micro_serde" }
+makepad-strict-json = { path = "../strict_json" }
+makepad-ai-hub = { path = "../ai/hub", default-features = false, features = ["llm"] }
+makepad-asset-client = { path = "../asset/client" }
+makepad-asset-data = { path = "../asset/data" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+makepad-bounded-http = { path = "../bounded_http" }
+
+[dev-dependencies]
+makepad-asset-store = { path = "../asset/store" }

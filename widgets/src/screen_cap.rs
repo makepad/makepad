@@ -7,9 +7,8 @@
 //! the file — the indicator is drawn into the same pass the recorder reads
 //! back).
 //!
-//! The key sits beside the AI's plain F10 and the debugger's Shift+F10 on
-//! purpose: one assistant key, one debugger key, one recorder key. `widgets/src/tweaker.rs` explicitly lets the shifted
-//! chord through so the two never fire together.
+//! The key sits beside the AI's plain F10 and the tweaker's Shift+F10 on
+//! purpose: one assistant key, one designer key, one recorder key.
 //!
 //! Both halves come off platform seams added for this:
 //!
@@ -50,12 +49,12 @@ use makepad_platform::script::timer::script_local_utc_offset_secs;
 use makepad_platform::video_file::{
     PcmAudioTrackOptions, VideoFileCodec, VideoFileEncoder, VideoFileEncoderOptions,
 };
+use makepad_platform::thread::{CancellationToken, TaskHandle, ThreadOptions};
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::thread::JoinHandle;
 use std::time::Duration;
 
 script_mod! {
@@ -158,7 +157,7 @@ pub struct ScreenCap {
     #[live(KeyCode::F10)]
     hotkey: KeyCode,
     /// Whether the hotkey needs Shift held (false by default: Shift+F10 is
-    /// the exploded-view debugger).
+    /// the design tweaker).
     #[live(false)]
     hotkey_shift: bool,
     /// Whether the hotkey needs Ctrl held. Ctrl+F10 by default, so the
@@ -263,7 +262,7 @@ impl ScreenCap {
             }
         };
         let fps = capture_fps(self.max_fps);
-        let session = Session::start(path.clone(), self.window_id, fps);
+        let session = Session::start(cx, path.clone(), self.window_id, fps);
         log!("ScreenCap: recording to {}", path.display());
         self.session = Some(session);
         self.next_frame = cx.new_next_frame();
@@ -288,7 +287,8 @@ impl ScreenCap {
         if !session.is_finished() {
             return None;
         }
-        let result = self.session.take().unwrap().join();
+        let result = session.try_finish()?;
+        self.session = None;
         self.redraw_requested = true;
         Some(match result {
             Ok(path) => {
@@ -373,8 +373,8 @@ struct FrameSlot {
     /// Buffer handed back by the encoder thread, reused by the capture
     /// callback so a steady-state recording allocates nothing per frame.
     spare: Vec<u8>,
-    stop: bool,
     dropped: u64,
+    wake_generation: u64,
 }
 
 #[derive(Default)]
@@ -389,33 +389,38 @@ struct AudioQueue {
 
 struct Session {
     slot: Arc<(Mutex<FrameSlot>, Condvar)>,
+    stop: Arc<AtomicBool>,
     capture_id: u64,
     tap_id: u64,
     /// Cleared by the encoder thread on exit, so the UI can poll for the
     /// finalize without blocking on a join.
     running: Arc<AtomicBool>,
-    join: Option<JoinHandle<Result<PathBuf, String>>>,
+    join: Option<TaskHandle<Result<PathBuf, String>>>,
     stopping: bool,
 }
 
 impl Session {
-    fn start(path: PathBuf, window_id: Option<usize>, fps: u32) -> Self {
+    fn start(cx: &Cx, path: PathBuf, window_id: Option<usize>, fps: u32) -> Self {
         let slot = Arc::new((Mutex::new(FrameSlot::default()), Condvar::new()));
+        let stop = Arc::new(AtomicBool::new(false));
         let audio = Arc::new(Mutex::new(AudioQueue::default()));
         let running = Arc::new(AtomicBool::new(true));
 
         let capture_slot = slot.clone();
+        let capture_stop = stop.clone();
         let capture_id = add_screen_capture(
             ScreenCaptureOptions {
                 window_id,
                 max_fps: fps as f64,
             },
             move |frame| {
-                let (lock, cvar) = &*capture_slot;
-                let Ok(mut slot) = lock.lock() else { return };
-                if slot.stop {
+                if capture_stop.load(Ordering::Acquire) {
                     return;
                 }
+                let (lock, cvar) = &*capture_slot;
+                let Ok(mut slot) = lock.try_lock() else {
+                    return;
+                };
                 let mut buf = match slot.pending.take() {
                     Some(old) => {
                         slot.dropped += 1;
@@ -430,6 +435,7 @@ impl Session {
                     height: frame.height,
                     rgba: buf,
                 });
+                slot.wake_generation = slot.wake_generation.wrapping_add(1);
                 drop(slot);
                 cvar.notify_one();
             },
@@ -437,7 +443,7 @@ impl Session {
 
         let tap_audio = audio.clone();
         let tap_id = add_audio_output_tap(move |info, buffer| {
-            let Ok(mut queue) = tap_audio.lock() else {
+            let Ok(mut queue) = tap_audio.try_lock() else {
                 return;
             };
             if queue.rate == 0 {
@@ -454,14 +460,18 @@ impl Session {
 
         let thread_slot = slot.clone();
         let thread_audio = audio.clone();
+        let thread_stop = stop.clone();
         let thread_running = running.clone();
-        let join = std::thread::Builder::new()
-            .name("makepad-screencap".to_string())
-            .spawn(move || {
-                let result = encode_loop(&path, thread_slot, thread_audio, fps);
-                thread_running.store(false, Ordering::Release);
-                result.map(|_| path)
-            })
+        let join = cx
+            .thread_spawner()
+            .spawn_worker(
+                ThreadOptions { name: Some("makepad-screencap".into()), ..Default::default() },
+                move || {
+                    let result = encode_loop(&path, thread_slot, thread_audio, thread_stop, fps);
+                    thread_running.store(false, Ordering::Release);
+                    result.map(|_| path)
+                },
+            )
             .ok();
         if join.is_none() {
             running.store(false, Ordering::Release);
@@ -469,6 +479,7 @@ impl Session {
 
         Self {
             slot,
+            stop,
             capture_id,
             tap_id,
             running,
@@ -486,23 +497,32 @@ impl Session {
         self.stopping = true;
         remove_screen_capture(self.capture_id);
         remove_audio_output_tap(self.tap_id);
-        let (lock, cvar) = &*self.slot;
-        if let Ok(mut slot) = lock.lock() {
-            slot.stop = true;
-        }
-        cvar.notify_all();
+        self.stop.store(true, Ordering::Release);
+        self.slot.1.notify_all();
     }
 
     fn is_finished(&self) -> bool {
         self.stopping && !self.running.load(Ordering::Acquire)
     }
 
-    fn join(mut self) -> Result<PathBuf, String> {
+    /// Reap the encoder's result — never a blocking join, which
+    /// `TaskHandle` refuses from the UI thread. `is_finished` already told
+    /// the caller the worker set `running` false, so `try_take` normally
+    /// answers at once; `None` here just means the completion has not
+    /// posted yet and the caller polls again next frame.
+    fn try_finish(&mut self) -> Option<Result<PathBuf, String>> {
         match self.join.take() {
-            Some(handle) => handle
-                .join()
-                .unwrap_or_else(|_| Err("encoder thread panicked".to_string())),
-            None => Err("encoder thread could not be started".to_string()),
+            Some(mut handle) => match handle.try_take() {
+                Some(result) => Some(match result {
+                    Ok(outcome) => outcome,
+                    Err(task_error) => Err(format!("encoder thread panicked: {task_error}")),
+                }),
+                None => {
+                    self.join = Some(handle);
+                    None
+                }
+            },
+            None => Some(Err("encoder thread could not be started".to_string())),
         }
     }
 }
@@ -599,12 +619,14 @@ fn encode_loop(
     path: &Path,
     slot: Arc<(Mutex<FrameSlot>, Condvar)>,
     audio: Arc<Mutex<AudioQueue>>,
+    stop: Arc<AtomicBool>,
     fps: u32,
 ) -> Result<(), String> {
     let fps = fps.max(1);
+    let wait = CancellationToken::new();
     // Wait for the window's first presented frame: it fixes the resolution
     // for the whole file (an mp4 track cannot change size mid-stream).
-    let Some(first) = take_frame(&slot, None) else {
+    let Some(first) = take_frame(&slot, &stop, &wait, None) else {
         return Err("stopped before the window presented a frame".to_string());
     };
     let width = (first.width & !1).max(2);
@@ -617,10 +639,15 @@ fn encode_loop(
         if rate != 0 {
             break rate;
         }
-        if Cx::monotonic_now() >= grace_until || stopped(&slot) {
+        if Cx::monotonic_now() >= grace_until || stopped(&stop) {
             break FALLBACK_AUDIO_RATE;
         }
-        std::thread::sleep(Duration::from_millis(10));
+        #[cfg(not(target_arch = "wasm32"))]
+        if !wait_for_capture_wake(&slot, &stop) {
+            break FALLBACK_AUDIO_RATE;
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = wait.wait_until((Cx::monotonic_now() + 0.010).min(grace_until));
     };
 
     let options = VideoFileEncoderOptions {
@@ -673,11 +700,11 @@ fn encode_loop(
         // meanwhile. Nothing new = the screen did not change; the frame is
         // repeated so the file keeps real time.
         let deadline = start + tick_duration(frame_index + 1, fps).as_secs_f64();
-        let next = take_frame(&slot, Some(deadline));
+        let next = take_frame(&slot, &stop, &wait, Some(deadline));
         if let Some(frame) = next {
             blit_into(&mut canvas, width, height, &frame.rgba, frame.width, frame.height);
             recycle(&slot, frame.rgba);
-        } else if stopped(&slot) {
+        } else if stopped(&stop) {
             break;
         }
 
@@ -730,8 +757,8 @@ fn bitrate_for(width: u32, height: u32, fps: u32) -> u32 {
     bps.clamp(2_000_000, 40_000_000) as u32
 }
 
-fn stopped(slot: &Arc<(Mutex<FrameSlot>, Condvar)>) -> bool {
-    slot.0.lock().map(|s| s.stop).unwrap_or(true)
+fn stopped(stop: &AtomicBool) -> bool {
+    stop.load(Ordering::Acquire)
 }
 
 fn recycle(slot: &Arc<(Mutex<FrameSlot>, Condvar)>, buffer: Vec<u8>) {
@@ -742,20 +769,71 @@ fn recycle(slot: &Arc<(Mutex<FrameSlot>, Condvar)>, buffer: Vec<u8>) {
     }
 }
 
+/// Block the encoder worker until the UI's next presented frame or stop.
+#[cfg(not(target_arch = "wasm32"))]
+fn wait_for_capture_wake(
+    slot: &Arc<(Mutex<FrameSlot>, Condvar)>,
+    stop: &AtomicBool,
+) -> bool {
+    let (lock, cvar) = &**slot;
+    let Ok(guard) = lock.lock() else {
+        return false;
+    };
+    if stopped(stop) {
+        return false;
+    }
+    let generation = guard.wake_generation;
+    cvar.wait_while(guard, |slot| {
+        !stopped(stop) && slot.wake_generation == generation
+    })
+    .map(|_| !stopped(stop))
+    .unwrap_or(false)
+}
+
 /// The next presented frame, or `None` at `deadline` / on stop. `deadline`
-/// of `None` waits indefinitely (until stop).
+/// of `None` waits until a frame or stop without using a std timed wait.
 fn take_frame(
     slot: &Arc<(Mutex<FrameSlot>, Condvar)>,
+    stop: &AtomicBool,
+    wait: &CancellationToken,
     deadline: Option<f64>,
 ) -> Option<CapturedFrame> {
-    let (lock, cvar) = &**slot;
-    let mut guard = lock.lock().ok()?;
-    loop {
-        if let Some(frame) = guard.pending.take() {
-            return Some(frame);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = wait;
+        let (lock, cvar) = &**slot;
+        let mut guard = lock.lock().ok()?;
+        loop {
+            if let Some(frame) = guard.pending.take() {
+                return Some(frame);
+            }
+            if stopped(stop) {
+                return None;
+            }
+            if let Some(deadline) = deadline {
+                if Cx::monotonic_now() >= deadline {
+                    return None;
+                }
+            }
+            let generation = guard.wake_generation;
+            guard = cvar
+                .wait_while(guard, |slot| {
+                    !stopped(stop) && slot.wake_generation == generation
+                })
+                .ok()?;
         }
-        if guard.stop {
-            return None;
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    loop {
+        {
+            let mut guard = slot.0.lock().ok()?;
+            if let Some(frame) = guard.pending.take() {
+                return Some(frame);
+            }
+            if stopped(stop) {
+                return None;
+            }
         }
         match deadline {
             Some(deadline) => {
@@ -763,16 +841,10 @@ fn take_frame(
                 if now >= deadline {
                     return None;
                 }
-                let (next, timeout) = cvar
-                    .wait_timeout(guard, Duration::from_secs_f64(deadline - now))
-                    .ok()?;
-                guard = next;
-                if timeout.timed_out() && guard.pending.is_none() {
-                    return None;
-                }
+                let _ = wait.wait_until((now + 0.005).min(deadline));
             }
             None => {
-                guard = cvar.wait(guard).ok()?;
+                let _ = wait.wait_until(Cx::monotonic_now() + 0.005);
             }
         }
     }

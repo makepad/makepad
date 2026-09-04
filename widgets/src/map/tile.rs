@@ -1,4 +1,5 @@
 use super::geometry::*;
+use super::tile_draw::TileDrawLists;
 use super::icons::*;
 use super::label::*;
 use super::style::*;
@@ -8,7 +9,7 @@ use crate::makepad_draw::vector::{
     is_compact_face_record, is_compact_roof_record, pack_face_vertices, pack_fill_vertices,
     pack_road_vertices, pack_roof_vertices, pack_vector_vertices,
     FACE_TYPED_VERTEX_BYTES, FILL_TYPED_VERTEX_BYTES, ROAD_TYPED_VERTEX_BYTES,
-    ROOF_TYPED_VERTEX_BYTES,
+    ROOF_TYPED_VERTEX_BYTES, MAP_VERTEX_POSITION_SCALE,
     VECTOR_PACKED_FLOATS_PER_VERTEX,
     tessellate_path_fill, LineCap, LineJoin, Tessellator, VVertex,
     VectorPath, VectorRenderParams, VECTOR_ANALYTIC_FRINGE_STROKE_MULT,
@@ -18,7 +19,7 @@ use crate::makepad_draw::*;
 use crate::makepad_platform::makepad_micro_serde::*;
 use makepad_fast_inflate::{gzip_decompress_vec, zlib_decompress_vec};
 use makepad_mbtile_reader::{MbtilesReader, TileArchiveReader};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::ops::Range;
@@ -118,15 +119,15 @@ pub enum TileLoadState {
     LoadingNetwork,
     LoadingLocal,
     Ready {
-        fill_geometry: Option<Geometry>,
+        fill_geometry: Vec<Geometry>,
         /// Non-fill records formerly interleaved with ground fills (building
         /// outline strokes), retained on the generic vector layout.
         fill_misc_geometry: Option<Geometry>,
         /// Grounded road-union faces on the 16-byte face layout, drawn in
         /// the casing pass just before `casing_geometry`.
-        face_geometry: Option<Geometry>,
-        casing_geometry: Option<Geometry>,
-        stroke_geometry: Option<Geometry>,
+        face_geometry: Vec<Geometry>,
+        casing_geometry: Vec<Geometry>,
+        stroke_geometry: Vec<Geometry>,
         icon_geometry: Option<Geometry>,
         /// Street-band icons (zoom floor > ICON_HIGH_BAND_FLOOR) — drawn
         /// only when the view can actually reveal them.
@@ -139,14 +140,14 @@ pub enum TileLoadState {
         shadow_disc_instances: Vec<f32>,
         /// Analytic AA fringes — skipped at strong tilt where blur and
         /// density hide 1px edge AA.
-        fringe_geometry: Option<Geometry>,
+        fringe_geometry: Vec<Geometry>,
         /// 3D volume geometry, distance-faded from the view focus.
-        fill_3d_geometry: Option<Geometry>,
+        fill_3d_geometry: Vec<Geometry>,
         /// Lifted records that need the generic vector layout.
         fill_3d_misc_geometry: Option<Geometry>,
         wall_geometry: Option<Geometry>,
-        /// Building walls as instance records (see `WALL_INSTANCE_FLOATS`).
-        wall_instances: Vec<f32>,
+        /// Building walls as compact typed instance records.
+        wall_instances: Vec<MapWallInstance>,
         tree_geometry: Option<Geometry>,
         tree_cross_geometry: Option<Geometry>,
         /// The tile's street-tree templates (near ring / mid ring) and the
@@ -154,6 +155,12 @@ pub enum TileLoadState {
         tree_template_geometry: Option<Geometry>,
         tree_cross_template_geometry: Option<Geometry>,
         tree_instances: Vec<f32>,
+        /// Shared crossed-quad marker stalk and complete stoplight meshes,
+        /// placed by compact per-prop instance records.
+        stalk_template_geometry: Option<Geometry>,
+        stalk_instances: Vec<MapPropInstance>,
+        stoplight_template_geometry: Option<Geometry>,
+        stoplight_instances: Vec<MapPropInstance>,
         feature_count: usize,
         labels: Vec<TileLabel>,
         pin_hits: Vec<PinHit>,
@@ -194,6 +201,19 @@ pub struct TileEntry {
     /// Cross-fade state: the replaced generation's geometry stays drawable
     /// underneath while the new one fades in.
     pub fade: Option<TileFade>,
+    /// The tile's retained draw lists, one per carto pass: recorded when
+    /// this entry's content is first drawn, re-attached with fresh uniforms
+    /// on every later frame, freed with the entry.
+    pub draw: TileDrawLists,
+}
+
+impl TileEntry {
+    /// The cross-fade is over: the outgoing generation leaves the draw, so
+    /// every retained list is recorded again on its next frame.
+    pub fn end_fade(&mut self) {
+        self.fade = None;
+        self.draw.invalidate();
+    }
 }
 
 #[derive(Debug)]
@@ -210,11 +230,11 @@ pub struct TileFade {
     /// core. They stay fully opaque and at full height while only the
     /// mode-dependent fill/icon overlay cross-fades.
     pub reuse_road_core: bool,
-    pub fill_geometry: Option<Geometry>,
+    pub fill_geometry: Vec<Geometry>,
     pub fill_misc_geometry: Option<Geometry>,
-    pub face_geometry: Option<Geometry>,
-    pub casing_geometry: Option<Geometry>,
-    pub stroke_geometry: Option<Geometry>,
+    pub face_geometry: Vec<Geometry>,
+    pub casing_geometry: Vec<Geometry>,
+    pub stroke_geometry: Vec<Geometry>,
     pub icon_geometry: Option<Geometry>,
     /// The outgoing generation's instanced symbols (low band only: the
     /// street band is gated by zoom, not faded).
@@ -248,6 +268,11 @@ pub enum TileWorkerMessage {
         buffers: TileBuffers,
     },
     NetworkTileParseFailed {
+        style_epoch: u64,
+        tile_key: TileKey,
+        error: String,
+    },
+    TileJobPanicked {
         style_epoch: u64,
         tile_key: TileKey,
         error: String,
@@ -300,6 +325,8 @@ struct OutputCapacityHints {
     tree_cross_template_vertices: usize,
     tree_cross_template_indices: usize,
     tree_instances: usize,
+    stalk_instances: usize,
+    stoplight_instances: usize,
     road_icon_indices: usize,
     road_icon_vertices: usize,
 }
@@ -816,15 +843,60 @@ fn split_band_by(
     (high_vertices, high_indices)
 }
 
+/// Partition triangles by a predicate over all three vertex records. A
+/// vertex shared by triangles in different bands is copied into each band;
+/// no triangle can carry a record that did not participate in its decision.
+fn split_band_by_all(
+    vertices: &mut Vec<f32>,
+    indices: &mut Vec<u32>,
+    predicate: impl Fn(&[f32]) -> bool,
+) -> (Vec<f32>, Vec<u32>) {
+    let vert_count = vertices.len() / VECTOR_FLOATS_PER_VERTEX;
+    let is_high = vertices
+        .chunks_exact(VECTOR_FLOATS_PER_VERTEX)
+        .map(predicate)
+        .collect::<Vec<_>>();
+    let record = |index: u32| {
+        let start = index as usize * VECTOR_FLOATS_PER_VERTEX;
+        &vertices[start..start + VECTOR_FLOATS_PER_VERTEX]
+    };
+    let any_high = indices
+        .chunks_exact(3)
+        .any(|tri| tri.iter().all(|&index| is_high[index as usize]));
+    if !any_high {
+        return (Vec::new(), Vec::new());
+    }
+
+    let mut low_vertices = Vec::new();
+    let mut low_indices = Vec::new();
+    let mut high_vertices = Vec::new();
+    let mut high_indices = Vec::new();
+    let mut low_remap = vec![u32::MAX; vert_count];
+    let mut high_remap = vec![u32::MAX; vert_count];
+    for tri in indices.chunks_exact(3) {
+        let high = tri.iter().all(|&index| is_high[index as usize]);
+        let (band_vertices, band_indices, remap) = if high {
+            (&mut high_vertices, &mut high_indices, &mut high_remap)
+        } else {
+            (&mut low_vertices, &mut low_indices, &mut low_remap)
+        };
+        for &old in tri {
+            let slot = &mut remap[old as usize];
+            if *slot == u32::MAX {
+                *slot = (band_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
+                band_vertices.extend_from_slice(record(old));
+            }
+            band_indices.push(*slot);
+        }
+    }
+    *vertices = low_vertices;
+    *indices = low_indices;
+    (high_vertices, high_indices)
+}
+
 /// Floats per icon instance: anchor xy, screen-px offset xy, scale, the
 /// param4 composite (zoom floor + pin lift), zbias, unorm8x4 colour.
 pub const ICON_INSTANCE_FLOATS: usize = 8;
-
-/// Floats per building-wall instance: edge a xy, edge b xy, base m, top m,
-/// outward normal xy, bottom AO, unorm8x4 colour, zbias. The wall quad is
-/// extruded from this record in the vertex shader (`DrawMapWall`) — the
-/// bake no longer writes four 48-byte vertices per footprint edge.
-pub const WALL_INSTANCE_FLOATS: usize = 11;
 
 /// Floats per contact-shadow disc instance: centre xy, tile-local radius,
 /// and centre strength. A shared unit quad supplies the four mesh vertices.
@@ -835,6 +907,95 @@ pub const SHADOW_DISC_INSTANCE_FLOATS: usize = 4;
 /// at the mid LOD ring), drawn once per record with the anchor added in the
 /// vertex shader.
 pub const TREE_INSTANCE_FLOATS: usize = 3;
+
+/// One building-wall edge. Positions use the map's 1/64-tile-unit fixed
+/// point convention and heights use unsigned centimetres (the source is
+/// clamped to 220 m). Counter-clockwise (courtyard) edges are reversed when
+/// packed, so the shader can recover the original outward normal as the
+/// right-hand perpendicular of `b - a`. Z bias is stored in
+/// `VECTOR_ZBIAS_STEP` ticks, matching compact roof records.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[repr(C)]
+pub struct MapWallInstance {
+    pub a: I16x2,
+    pub b: I16x2,
+    pub heights: U16x2,
+    pub ao_zbias: F16x2,
+    pub color: UNorm8x4,
+}
+
+pub const MAP_WALL_INSTANCE_BYTES: usize = std::mem::size_of::<MapWallInstance>();
+
+impl MapWallInstance {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        a: (f32, f32),
+        b: (f32, f32),
+        base_m: f32,
+        height_m: f32,
+        color: [f32; 4],
+        ao_bottom: f32,
+        clockwise: bool,
+        zbias: f32,
+    ) -> Self {
+        let pack_position = |(x, y): (f32, f32)| {
+            let x = x * MAP_VERTEX_POSITION_SCALE;
+            let y = y * MAP_VERTEX_POSITION_SCALE;
+            debug_assert!((i16::MIN as f32..=i16::MAX as f32).contains(&x));
+            debug_assert!((i16::MIN as f32..=i16::MAX as f32).contains(&y));
+            I16x2::from_f32(x, y)
+        };
+        let (a, b) = if clockwise { (a, b) } else { (b, a) };
+        Self {
+            a: pack_position(a),
+            b: pack_position(b),
+            heights: U16x2::from_f32(base_m * 100.0, height_m * 100.0),
+            ao_zbias: F16x2::from_f32(
+                ao_bottom,
+                (zbias / VECTOR_ZBIAS_STEP).round(),
+            ),
+            color: UNorm8x4::from_f32(color[0], color[1], color[2], color[3]),
+        }
+    }
+
+    pub fn unpack_position(position: I16x2) -> Vec2f {
+        vec2(
+            position.x as f32 / MAP_VERTEX_POSITION_SCALE,
+            position.y as f32 / MAP_VERTEX_POSITION_SCALE,
+        )
+    }
+
+    pub fn unpack_heights(&self) -> (f32, f32) {
+        (self.heights.x as f32 * 0.01, self.heights.y as f32 * 0.01)
+    }
+}
+
+/// One marker stalk or stoplight placement. `size.x` scales the template's
+/// tile-local xy offsets (the stalk arm; 1 for a stoplight), while `size.y`
+/// scales its normalized metre height (the stalk lift or stoplight height).
+/// Colour is retained as UNorm8x4 and bitcast into the renderer's f32-backed
+/// instance buffer at draw time.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[repr(C)]
+pub struct MapPropInstance {
+    pub anchor: Vec2f,
+    pub size: Vec2f,
+    pub color: UNorm8x4,
+    pub zbias: f32,
+}
+
+pub const MAP_PROP_INSTANCE_BYTES: usize = std::mem::size_of::<MapPropInstance>();
+
+impl MapPropInstance {
+    fn new(anchor: (f32, f32), size: (f32, f32), color: [f32; 4], zbias: f32) -> Self {
+        Self {
+            anchor: vec2(anchor.0, anchor.1),
+            size: vec2(size.0, size.1),
+            color: UNorm8x4::from_f32(color[0], color[1], color[2], color[3]),
+            zbias,
+        }
+    }
+}
 
 /// One symbol mesh drawn N times: the mesh lives once on the GPU (per
 /// registry slot), every placement is an 8-float instance record instead of
@@ -851,31 +1012,191 @@ impl IconInstances {
     }
 }
 
+/// One independently uploaded piece of a typed map stream. Indices are
+/// always local to this chunk and therefore always fit the WebGL2/Metal u16
+/// path.
+#[derive(Debug, PartialEq, Clone, Default)]
+pub struct TypedStreamChunk {
+    pub indices: Vec<u16>,
+    pub vertices: Vec<u8>,
+}
+
+/// A triangle stream split at bake time so no geometry upload needs u32
+/// indices. The original vertex count is retained only to report the small
+/// number of boundary vertices copied into more than one chunk.
+#[derive(Debug, PartialEq, Clone, Default)]
+pub struct TypedStream {
+    pub chunks: Vec<TypedStreamChunk>,
+    source_vertex_count: usize,
+    duplicate_vertex_count: usize,
+}
+
+impl TypedStream {
+    const MAX_VERTICES_PER_CHUNK: usize = u16::MAX as usize;
+
+    pub fn from_u32(indices: Vec<u32>, vertices: Vec<u8>, stride: usize) -> Self {
+        debug_assert!(stride > 0 && vertices.len() % stride == 0);
+        debug_assert!(indices.len() % 3 == 0);
+        let source_vertex_count = vertices.len() / stride;
+        debug_assert!(indices.iter().all(|&index| (index as usize) < source_vertex_count));
+        if indices.is_empty() && vertices.is_empty() {
+            return Self::default();
+        }
+        if source_vertex_count <= Self::MAX_VERTICES_PER_CHUNK {
+            return Self {
+                chunks: vec![TypedStreamChunk {
+                    indices: indices.into_iter().map(|index| index as u16).collect(),
+                    vertices,
+                }],
+                source_vertex_count,
+                duplicate_vertex_count: 0,
+            };
+        }
+
+        let mut chunks = Vec::new();
+        let mut remap = HashMap::<u32, u16>::new();
+        let mut referenced = HashSet::<u32>::new();
+        let mut duplicate_vertex_count = 0usize;
+        let mut chunk_indices = Vec::new();
+        let mut chunk_vertices = Vec::new();
+        for triangle in indices.chunks_exact(3) {
+            let mut additional = 0usize;
+            for (position, &index) in triangle.iter().enumerate() {
+                if !remap.contains_key(&index)
+                    && !triangle[..position].iter().any(|&earlier| earlier == index)
+                {
+                    additional += 1;
+                }
+            }
+            if !chunk_indices.is_empty()
+                && remap.len() + additional > Self::MAX_VERTICES_PER_CHUNK
+            {
+                chunks.push(TypedStreamChunk {
+                    indices: std::mem::take(&mut chunk_indices),
+                    vertices: std::mem::take(&mut chunk_vertices),
+                });
+                remap.clear();
+            }
+            for &source_index in triangle {
+                let local_index = if let Some(&local_index) = remap.get(&source_index) {
+                    local_index
+                } else {
+                    let local_index = remap.len() as u16;
+                    let start = source_index as usize * stride;
+                    chunk_vertices.extend_from_slice(&vertices[start..start + stride]);
+                    remap.insert(source_index, local_index);
+                    if !referenced.insert(source_index) {
+                        duplicate_vertex_count += 1;
+                    }
+                    local_index
+                };
+                chunk_indices.push(local_index);
+            }
+        }
+        if !chunk_indices.is_empty() {
+            chunks.push(TypedStreamChunk {
+                indices: chunk_indices,
+                vertices: chunk_vertices,
+            });
+        }
+        debug_assert!(chunks.iter().all(|chunk| chunk.vertices.len() / stride < 65_536));
+        Self {
+            chunks,
+            source_vertex_count,
+            duplicate_vertex_count,
+        }
+    }
+
+    pub fn vertex_count(&self, stride: usize) -> usize {
+        self.chunks.iter().map(|chunk| chunk.vertices.len() / stride).sum()
+    }
+
+    pub fn source_vertex_count(&self) -> usize {
+        self.source_vertex_count
+    }
+
+    pub fn duplicate_vertex_count(&self) -> usize {
+        self.duplicate_vertex_count
+    }
+
+    pub fn index_count(&self) -> usize {
+        self.chunks.iter().map(|chunk| chunk.indices.len()).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.chunks.is_empty()
+    }
+
+    pub fn vertex_records(&self, stride: usize) -> impl Iterator<Item = &[u8]> {
+        self.chunks
+            .iter()
+            .flat_map(move |chunk| chunk.vertices.chunks_exact(stride))
+    }
+
+    #[cfg(test)]
+    fn indexed_vertex_bytes(&self, stride: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.index_count() * stride);
+        for chunk in &self.chunks {
+            for &index in &chunk.indices {
+                let start = index as usize * stride;
+                out.extend_from_slice(&chunk.vertices[start..start + stride]);
+            }
+        }
+        out
+    }
+
+    pub fn byte_size(&self) -> usize {
+        self.chunks
+            .iter()
+            .map(|chunk| chunk.vertices.len() + chunk.indices.len() * 2)
+            .sum()
+    }
+
+    pub fn unchunked_byte_size(&self, stride: usize) -> usize {
+        self.source_vertex_count * stride
+            + self.index_count()
+                * if self.source_vertex_count < 65_536 { 2 } else { 4 }
+    }
+
+    /// Reassemble chunks into a u32-indexed stream for CPU transforms such
+    /// as space-warp subdivision. Boundary copies remain harmless distinct
+    /// vertices and triangle order is unchanged.
+    pub fn into_u32(self, stride: usize) -> (Vec<u32>, Vec<u8>) {
+        let index_count = self.index_count();
+        let vertex_bytes = self.chunks.iter().map(|chunk| chunk.vertices.len()).sum();
+        let mut indices = Vec::with_capacity(index_count);
+        let mut vertices = Vec::with_capacity(vertex_bytes);
+        let mut vertex_offset = 0u32;
+        for chunk in self.chunks {
+            indices.extend(chunk.indices.into_iter().map(|index| vertex_offset + index as u32));
+            vertex_offset += (chunk.vertices.len() / stride) as u32;
+            vertices.extend(chunk.vertices);
+        }
+        (indices, vertices)
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub struct TileBuffers {
     pub pin_hits: Vec<PinHit>,
-    pub fill_indices: Vec<u32>,
-    pub fill_vertices: Vec<u8>,
+    pub fill: TypedStream,
     pub fill_misc_indices: Vec<u32>,
     pub fill_misc_vertices: Vec<f32>,
     /// Typed 16-byte `FaceVertexTyped` records: the grounded shape-0
     /// Boolean union faces split out of the casing pass (see
     /// `is_compact_face_record`). Drawn by the casing pass first, so the
     /// faces keep their place under the pass's expandable strokes.
-    pub face_indices: Vec<u32>,
-    pub face_vertices: Vec<u8>,
+    pub face: TypedStream,
     /// Typed 28-byte `RoadVertexTyped` records: GPU-expandable strokes
     /// (shape >= 100) and the shape-0 union records the face layout cannot
     /// carry (lifted faces, deck fascia walls).
-    pub casing_indices: Vec<u32>,
-    pub casing_vertices: Vec<u8>,
+    pub casing: TypedStream,
     /// Typed 28-byte `RoadVertexTyped` records. Rails, dashed tunnels
     /// and other patterned lines go through `append_expanded_stroke_geometry`
     /// (shape 11/12 become 111/112); plaza fills are shape-0. Oneway arrows
     /// stay in `icon_*` / `road_icon_*`. No leftover non-road shapes, so
     /// there is no `stroke_misc` stream.
-    pub stroke_indices: Vec<u32>,
-    pub stroke_vertices: Vec<u8>,
+    pub stroke: TypedStream,
     /// Vertex-baked symbols that must ride the map plane: road-surface
     /// decals (oneway arrows). Free-standing POI symbols are instances.
     pub icon_indices: Vec<u32>,
@@ -895,21 +1216,19 @@ pub struct TileBuffers {
     /// Analytic AA fringes split from `casing_*` (see split_fringe_band),
     /// stored as typed 28-byte `RoadVertexTyped` records and drawn
     /// with `DrawMapRoad` (same shader as casing/stroke; 25° tilt gate).
-    pub fringe_indices: Vec<u32>,
-    pub fringe_vertices: Vec<u8>,
+    pub fringe: TypedStream,
     /// 3D volume geometry (walls/roofs/trees/skirts): distance-faded under
     /// tilt so the far field skips its vertex mass.
-    pub fill_3d_indices: Vec<u32>,
-    pub fill_3d_vertices: Vec<u8>,
+    pub fill_3d: TypedStream,
     /// Lifted records that cannot use `RoofVertexTyped`.
     pub fill_3d_misc_indices: Vec<u32>,
     pub fill_3d_misc_vertices: Vec<f32>,
     /// Building walls (MAT_WALL) — skipped at the mid LOD ring.
     pub wall_indices: Vec<u32>,
     pub wall_vertices: Vec<f32>,
-    /// Building walls as instanced edge records (`WALL_INSTANCE_FLOATS` each);
-    /// drawn with the wall band's LOD gate.
-    pub wall_instances: Vec<f32>,
+    /// Building walls as compact typed edge records; drawn with the wall
+    /// band's LOD gate.
+    pub wall_instances: Vec<MapWallInstance>,
     /// Full canopy balls (MAT_CANOPY) — near ring only.
     pub tree_indices: Vec<u32>,
     pub tree_vertices: Vec<f32>,
@@ -923,6 +1242,16 @@ pub struct TileBuffers {
     pub tree_cross_template_indices: Vec<u32>,
     pub tree_cross_template_vertices: Vec<f32>,
     pub tree_instances: Vec<f32>,
+    /// One unit crossed-quad stalk; instances carry anchor, arm, lift,
+    /// colour and the original painter-order depth.
+    pub stalk_template_indices: Vec<u32>,
+    pub stalk_template_vertices: Vec<f32>,
+    pub stalk_instances: Vec<MapPropInstance>,
+    /// One complete pole + green/amber/red light template; instances carry
+    /// anchor, total height and painter-order depth.
+    pub stoplight_template_indices: Vec<u32>,
+    pub stoplight_template_vertices: Vec<f32>,
+    pub stoplight_instances: Vec<MapPropInstance>,
     /// Stable oneway-arrow subset of `icon_*`. The UI keeps this small CPU
     /// copy beside the resident GPU road meshes, then appends it to a
     /// mode-only 2D/3D icon rebake without regenerating the road Boolean.
@@ -941,32 +1270,79 @@ pub struct TileBuffers {
     pub stage_summary: String,
 }
 
-fn typed_stream_byte_size(vertex_bytes: usize, stride: usize, index_count: usize) -> usize {
-    let vertex_count = vertex_bytes / stride;
-    vertex_bytes + index_count * if vertex_count < 65_536 { 2 } else { 4 }
-}
-
 impl TileBuffers {
     /// Byte sizes for the report's fourteen named mesh streams. The typed
-    /// streams account for the per-tile u16/u32 index choice; legacy streams
-    /// remain f32 vertices with u32 indices.
+    /// streams include their chunk-local u16 indices; legacy streams remain
+    /// f32 vertices with u32 indices.
     pub fn stream_bytes(&self) -> [usize; 14] {
         [
-            typed_stream_byte_size(self.fill_vertices.len(), FILL_TYPED_VERTEX_BYTES, self.fill_indices.len()),
+            self.fill.byte_size(),
             (self.fill_misc_vertices.len() + self.fill_misc_indices.len()) * 4,
-            typed_stream_byte_size(self.face_vertices.len(), FACE_TYPED_VERTEX_BYTES, self.face_indices.len()),
-            typed_stream_byte_size(self.casing_vertices.len(), ROAD_TYPED_VERTEX_BYTES, self.casing_indices.len()),
-            typed_stream_byte_size(self.stroke_vertices.len(), ROAD_TYPED_VERTEX_BYTES, self.stroke_indices.len()),
-            typed_stream_byte_size(self.fringe_vertices.len(), ROAD_TYPED_VERTEX_BYTES, self.fringe_indices.len()),
+            self.face.byte_size(),
+            self.casing.byte_size(),
+            self.stroke.byte_size(),
+            self.fringe.byte_size(),
             (self.icon_vertices.len() + self.icon_indices.len()) * 4,
             (self.icon_high_vertices.len() + self.icon_high_indices.len()) * 4,
             (self.road_icon_vertices.len() + self.road_icon_indices.len()) * 4,
-            typed_stream_byte_size(self.fill_3d_vertices.len(), ROOF_TYPED_VERTEX_BYTES, self.fill_3d_indices.len()),
+            self.fill_3d.byte_size(),
             (self.fill_3d_misc_vertices.len() + self.fill_3d_misc_indices.len()) * 4,
             (self.wall_vertices.len() + self.wall_indices.len()) * 4,
             (self.tree_vertices.len() + self.tree_indices.len()) * 4,
             (self.tree_cross_vertices.len() + self.tree_cross_indices.len()) * 4,
         ]
+    }
+
+    /// Footprint the same streams would have had before typed u16 chunking.
+    pub fn unchunked_stream_bytes(&self) -> [usize; 14] {
+        [
+            self.fill.unchunked_byte_size(FILL_TYPED_VERTEX_BYTES),
+            (self.fill_misc_vertices.len() + self.fill_misc_indices.len()) * 4,
+            self.face.unchunked_byte_size(FACE_TYPED_VERTEX_BYTES),
+            self.casing.unchunked_byte_size(ROAD_TYPED_VERTEX_BYTES),
+            self.stroke.unchunked_byte_size(ROAD_TYPED_VERTEX_BYTES),
+            self.fringe.unchunked_byte_size(ROAD_TYPED_VERTEX_BYTES),
+            (self.icon_vertices.len() + self.icon_indices.len()) * 4,
+            (self.icon_high_vertices.len() + self.icon_high_indices.len()) * 4,
+            (self.road_icon_vertices.len() + self.road_icon_indices.len()) * 4,
+            self.fill_3d.unchunked_byte_size(ROOF_TYPED_VERTEX_BYTES),
+            (self.fill_3d_misc_vertices.len() + self.fill_3d_misc_indices.len()) * 4,
+            (self.wall_vertices.len() + self.wall_indices.len()) * 4,
+            (self.tree_vertices.len() + self.tree_indices.len()) * 4,
+            (self.tree_cross_vertices.len() + self.tree_cross_indices.len()) * 4,
+        ]
+    }
+
+    pub fn typed_duplicate_vertices(&self) -> usize {
+        self.fill.duplicate_vertex_count()
+            + self.face.duplicate_vertex_count()
+            + self.casing.duplicate_vertex_count()
+            + self.stroke.duplicate_vertex_count()
+            + self.fringe.duplicate_vertex_count()
+            + self.fill_3d.duplicate_vertex_count()
+    }
+
+    pub fn typed_source_vertices(&self) -> usize {
+        self.fill.source_vertex_count()
+            + self.face.source_vertex_count()
+            + self.casing.source_vertex_count()
+            + self.stroke.source_vertex_count()
+            + self.fringe.source_vertex_count()
+            + self.fill_3d.source_vertex_count()
+    }
+
+    pub fn max_typed_chunk_count(&self) -> usize {
+        [
+            self.fill.chunks.len(),
+            self.face.chunks.len(),
+            self.casing.chunks.len(),
+            self.stroke.chunks.len(),
+            self.fringe.chunks.len(),
+            self.fill_3d.chunks.len(),
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0)
     }
 
     /// Geometry byte footprint (vertex + index data).
@@ -978,9 +1354,16 @@ impl TileBuffers {
                 + self.tree_cross_template_indices.len()
                 + self.tree_cross_template_vertices.len()
                 + self.tree_instances.len()
-                + self.wall_instances.len()
                 + self.icon_instance_floats())
                 * 4
+            + (self.stalk_template_indices.len()
+                + self.stalk_template_vertices.len()
+                + self.stoplight_template_indices.len()
+                + self.stoplight_template_vertices.len())
+                * 4
+            + (self.stalk_instances.len() + self.stoplight_instances.len())
+                * MAP_PROP_INSTANCE_BYTES
+            + self.wall_instances.len() * MAP_WALL_INSTANCE_BYTES
     }
 
     /// Instance floats across both icon bands.
@@ -2875,7 +3258,8 @@ fn merge_overlay_features(
     points: &mut Vec<((f32, f32), TagSet)>,
     ways: &mut Vec<TileWay>,
 ) -> Result<(), String> {
-    let pbf_data = decode_vector_tile_payload(&overlay.raw)?;
+    let raw = overlay.raw.decode()?;
+    let pbf_data = decode_vector_tile_payload(&raw)?;
     let mut collector = MvtLocalCollector::new(render_scale);
     parse_mvt_tile(&pbf_data, tile_key, &mut collector)?;
     let scale = (1u32 << overlay.shift) as f32;
@@ -3666,35 +4050,25 @@ fn append_wall_quad(
     *zbias += VECTOR_ZBIAS_STEP;
 }
 
-/// One building wall edge as an instance record (`WALL_INSTANCE_FLOATS`):
+/// One building wall edge as a compact typed instance record:
 /// the shader builds the quad, lifts the top by the height and shades the
 /// bottom by the AO term — the same vertices `append_wall_quad` used to
 /// write. Takes the same zbias step so sibling geometry keeps its order.
 #[allow(clippy::too_many_arguments)]
 fn push_wall_instance(
-    out: &mut Vec<f32>,
+    out: &mut Vec<MapWallInstance>,
     a: (f32, f32),
     b: (f32, f32),
     base_m: f32,
     height_m: f32,
     color: [f32; 4],
     ao_bottom: f32,
-    normal: (f32, f32),
+    clockwise: bool,
     zbias: &mut f32,
 ) {
-    out.extend_from_slice(&[
-        a.0,
-        a.1,
-        b.0,
-        b.1,
-        base_m,
-        height_m,
-        normal.0,
-        normal.1,
-        ao_bottom,
-        crate::makepad_draw::vector::pack_unorm8x4(color[0], color[1], color[2], color[3]),
-        *zbias,
-    ]);
+    out.push(MapWallInstance::new(
+        a, b, base_m, height_m, color, ao_bottom, clockwise, *zbias,
+    ));
     *zbias += VECTOR_ZBIAS_STEP;
 }
 
@@ -3856,15 +4230,177 @@ fn profile_clock_elapsed_is_non_negative() {
 
 #[cfg(test)]
 #[test]
-fn typed_stream_bytes_switch_indices_at_u16_vertex_limit() {
-    assert_eq!(
-        typed_stream_byte_size(65_535 * 16, 16, 9),
-        65_535 * 16 + 9 * 2
+fn typed_stream_keeps_small_mesh_as_one_u16_chunk() {
+    let stream = TypedStream::from_u32(vec![0, 1, 2], vec![0; 65_535 * 4], 4);
+    assert_eq!(stream.chunks.len(), 1);
+    assert_eq!(stream.chunks[0].vertices.len(), 65_535 * 4);
+    assert_eq!(stream.chunks[0].indices, vec![0, 1, 2]);
+    assert_eq!(stream.byte_size(), 65_535 * 4 + 3 * 2);
+}
+
+#[cfg(test)]
+#[test]
+fn typed_stream_chunks_70k_vertices_without_splitting_triangles() {
+    const VERTICES: u32 = 70_000;
+    let mut vertices = Vec::with_capacity(VERTICES as usize * 4);
+    for index in 0..VERTICES {
+        vertices.extend_from_slice(&index.to_le_bytes());
+    }
+    let mut indices = Vec::with_capacity((VERTICES as usize - 2) * 3);
+    for index in 1..VERTICES - 1 {
+        indices.extend_from_slice(&[0, index, index + 1]);
+    }
+
+    let stream = TypedStream::from_u32(indices.clone(), vertices, 4);
+    assert!(stream.chunks.len() > 1);
+    assert!(stream.chunks.iter().all(|chunk| {
+        chunk.vertices.len() / 4 < 65_536
+            && chunk.indices.len() % 3 == 0
+            && chunk.indices.iter().all(|&index| index as usize * 4 < chunk.vertices.len())
+    }));
+
+    let reassembled: Vec<u32> = stream
+        .chunks
+        .iter()
+        .flat_map(|chunk| {
+            chunk.indices.iter().map(|&index| {
+                let start = index as usize * 4;
+                u32::from_le_bytes(chunk.vertices[start..start + 4].try_into().unwrap())
+            })
+        })
+        .collect();
+    assert_eq!(reassembled, indices);
+    assert_eq!(stream.index_count(), indices.len());
+    assert_eq!(stream.source_vertex_count(), VERTICES as usize);
+    assert!(stream.duplicate_vertex_count() > 0);
+    assert!(stream.byte_size() < stream.unchunked_byte_size(4));
+}
+
+#[cfg(test)]
+#[test]
+fn map_prop_instance_packing_roundtrips() {
+    use std::mem::{align_of, offset_of, size_of};
+
+    let logical_color = [0.17, 0.41, 0.73, 1.0];
+    let packed = MapPropInstance::new(
+        (123.25, -4.5),
+        (0.125, 42.75),
+        logical_color,
+        37.0 * VECTOR_ZBIAS_STEP,
     );
-    assert_eq!(
-        typed_stream_byte_size(65_536 * 16, 16, 9),
-        65_536 * 16 + 9 * 4
+    assert_eq!(size_of::<MapPropInstance>(), 24);
+    assert_eq!(MAP_PROP_INSTANCE_BYTES, 24);
+    assert_eq!(align_of::<MapPropInstance>(), 4);
+    assert_eq!(offset_of!(MapPropInstance, anchor), 0);
+    assert_eq!(offset_of!(MapPropInstance, size), 8);
+    assert_eq!(offset_of!(MapPropInstance, color), 16);
+    assert_eq!(offset_of!(MapPropInstance, zbias), 20);
+    assert_eq!(packed.anchor, vec2(123.25, -4.5));
+    assert_eq!(packed.size, vec2(0.125, 42.75));
+    let color = packed.color.to_f32();
+    for (actual, expected) in [color.0, color.1, color.2, color.3]
+        .into_iter()
+        .zip(logical_color)
+    {
+        assert!((actual - expected).abs() <= 0.5 / 255.0 + f32::EPSILON);
+    }
+    let color_lane = u32::from_le_bytes(packed.color.0);
+    assert_eq!(UNorm8x4(f32::from_bits(color_lane).to_bits().to_le_bytes()), packed.color);
+    assert_eq!(packed.zbias, 37.0 * VECTOR_ZBIAS_STEP);
+}
+
+#[cfg(test)]
+#[test]
+fn map_wall_instance_packing_roundtrips() {
+    use std::mem::{align_of, offset_of, size_of};
+
+    let logical_a = (123.25, -4.5);
+    let logical_b = (124.5, 2.25);
+    let logical_heights = (12.34, 83.125);
+    let logical_color = [0.17, 0.41, 0.73, 1.0];
+    let logical_ao = 0.77;
+    let zbias = 321.0 * VECTOR_ZBIAS_STEP;
+    let packed = MapWallInstance::new(
+        logical_a,
+        logical_b,
+        logical_heights.0,
+        logical_heights.1,
+        logical_color,
+        logical_ao,
+        true,
+        zbias,
     );
+
+    assert_eq!(size_of::<MapWallInstance>(), 20);
+    assert_eq!(MAP_WALL_INSTANCE_BYTES, 20);
+    assert_eq!(align_of::<MapWallInstance>(), 2);
+    assert_eq!(offset_of!(MapWallInstance, a), 0);
+    assert_eq!(offset_of!(MapWallInstance, b), 4);
+    assert_eq!(offset_of!(MapWallInstance, heights), 8);
+    assert_eq!(offset_of!(MapWallInstance, ao_zbias), 12);
+    assert_eq!(offset_of!(MapWallInstance, color), 16);
+
+    let a = MapWallInstance::unpack_position(packed.a);
+    let b = MapWallInstance::unpack_position(packed.b);
+    for (actual, expected) in [(a.x, logical_a.0), (a.y, logical_a.1), (b.x, logical_b.0), (b.y, logical_b.1)] {
+        assert!((actual - expected).abs() <= 0.5 / MAP_VERTEX_POSITION_SCALE);
+    }
+    let heights = packed.unpack_heights();
+    assert!((heights.0 - logical_heights.0).abs() <= 0.005);
+    assert!((heights.1 - logical_heights.1).abs() <= 0.005);
+    let (ao, zbias_ticks) = packed.ao_zbias.to_f32();
+    assert!((ao - logical_ao).abs() <= 0.0005);
+    assert!((zbias_ticks * VECTOR_ZBIAS_STEP - zbias).abs() <= VECTOR_ZBIAS_STEP * 0.5);
+    let color = packed.color.to_f32();
+    for (actual, expected) in [color.0, color.1, color.2, color.3]
+        .into_iter()
+        .zip(logical_color)
+    {
+        assert!((actual - expected).abs() <= 0.5 / 255.0 + f32::EPSILON);
+    }
+
+    let courtyard = MapWallInstance::new(
+        logical_a,
+        logical_b,
+        0.0,
+        8.0,
+        logical_color,
+        1.0,
+        false,
+        0.0,
+    );
+    assert_eq!(courtyard.a, packed.b);
+    assert_eq!(courtyard.b, packed.a);
+}
+
+#[cfg(test)]
+#[test]
+fn lifted_marker_emits_one_stalk_instance_and_no_generic_3d_misc() {
+    let tags = TagSet::from(HashMap::from([
+        ("layer".to_string(), "pois".to_string()),
+        ("amenity".to_string(), "cafe".to_string()),
+        ("name".to_string(), "Stalk fixture".to_string()),
+    ]));
+    let buffers = build_tile_buffers_from_features(
+        TileKey { z: 14, x: 8414, y: 5384 },
+        &[],
+        &[((128.0, 96.0), tags)],
+        &probe_compiled_theme(),
+        16,
+        true,
+        true,
+        Vec::new(),
+        false,
+        false,
+        Vec::new(),
+        None,
+    );
+    assert_eq!(buffers.stalk_instances.len(), 1);
+    assert_eq!(buffers.stalk_instances[0].anchor, vec2(128.0, 96.0));
+    assert_eq!(buffers.stalk_instances[0].size.y, 18.0);
+    assert!(!buffers.stalk_template_indices.is_empty());
+    assert!(buffers.fill_3d_misc_indices.is_empty());
+    assert!(buffers.fill_3d_misc_vertices.is_empty());
 }
 
 #[cfg(test)]
@@ -4025,6 +4561,68 @@ fn split_fringe_band_then_road_pack_round_trips() {
     assert_eq!(cov1, 0.0);
 }
 
+#[cfg(test)]
+#[test]
+fn map_face_band_split_requires_all_three_triangle_records() {
+    use crate::makepad_draw::vector::{
+        pack_road_record, FACE_TYPED_VERTEX_BYTES, ROAD_KIND_FILL,
+        ROAD_PARAM_KIND_SCALE,
+    };
+
+    // RoadPaintEvent::Face emits this exact record shape for a deck field
+    // crossing ground: fill uv throughout, but a per-vertex ramp height.
+    let verts = [
+        VVertex { x: 0.0, y: 0.0, u: 0.5, v: 1.0, ..Default::default() },
+        VVertex { x: 1.0, y: 0.0, u: 0.5, v: 1.0, ..Default::default() },
+        VVertex { x: 0.0, y: 1.0, u: 0.5, v: 1.0, ..Default::default() },
+        VVertex { x: 2.0, y: 0.0, u: 0.5, v: 1.0, ..Default::default() },
+        VVertex { x: 3.0, y: 0.0, u: 0.5, v: 1.0, ..Default::default() },
+        VVertex { x: 2.0, y: 1.0, u: 0.5, v: 1.0, ..Default::default() },
+    ];
+    let source_indices = [0, 1, 2, 3, 4, 5];
+    let decks = [0.0, 0.25, 0.5, 0.0, 0.0, 0.0];
+    let mut casing_vertices = Vec::new();
+    let mut casing_indices = Vec::new();
+    append_tessellated_geometry_decked(
+        &verts,
+        &source_indices,
+        &mut casing_vertices,
+        &mut casing_indices,
+        VectorRenderParams {
+            color: [0.2, 0.4, 0.6, 1.0],
+            stroke_mult: 1e6,
+            shape_id: 0.0,
+            params: [0.0; 6],
+            zbias: 0.0,
+        },
+        Some(&decks),
+    );
+
+    let emitted = casing_vertices.clone();
+    let (face_vertices, face_indices) = split_band_by_all(
+        &mut casing_vertices,
+        &mut casing_indices,
+        is_compact_face_record,
+    );
+
+    assert_eq!(casing_indices, [0, 1, 2], "the mixed ramp triangle stays on the road path");
+    assert_eq!(face_indices, [0, 1, 2], "the wholly compact triangle moves to the face path");
+    assert_eq!(casing_vertices, emitted[..3 * VECTOR_FLOATS_PER_VERTEX]);
+    assert_eq!(face_vertices, emitted[3 * VECTOR_FLOATS_PER_VERTEX..]);
+    for (record, expected_deck) in emitted
+        .chunks_exact(VECTOR_FLOATS_PER_VERTEX)
+        .take(3)
+        .zip(decks)
+    {
+        let road = pack_road_record(record);
+        assert_eq!(road.off.to_f32(), (0.0, 0.0));
+        assert_eq!(road.deck, expected_deck);
+        assert_eq!(road.uv.to_f32(), (0.5, 1.0));
+        assert_eq!(road.params.to_f32().0, ROAD_PARAM_KIND_SCALE * ROAD_KIND_FILL);
+    }
+    assert_eq!(pack_face_vertices(&face_vertices).len(), 3 * FACE_TYPED_VERTEX_BYTES);
+}
+
 /// A primary road (a union tier) crossing nothing, and a tram line (a
 /// patterned stroke that stays on the road layout).
 #[cfg(test)]
@@ -4081,18 +4679,14 @@ fn primary_road_and_tram_bake(want_fringe: bool) -> TileBuffers {
 fn fringe_free_bake_keeps_road_core_byte_identical() {
     let with_fringe = primary_road_and_tram_bake(true);
     let without_fringe = primary_road_and_tram_bake(false);
-    assert!(!with_fringe.fringe_vertices.is_empty());
-    assert!(!with_fringe.fringe_indices.is_empty());
-    assert!(!with_fringe.stroke_vertices.is_empty());
-    assert!(!with_fringe.stroke_indices.is_empty());
-    assert!(without_fringe.fringe_vertices.is_empty());
-    assert!(without_fringe.fringe_indices.is_empty());
-    assert_eq!(without_fringe.face_vertices, with_fringe.face_vertices);
-    assert_eq!(without_fringe.face_indices, with_fringe.face_indices);
-    assert_eq!(without_fringe.casing_vertices, with_fringe.casing_vertices);
-    assert_eq!(without_fringe.casing_indices, with_fringe.casing_indices);
-    assert_eq!(without_fringe.stroke_vertices, with_fringe.stroke_vertices);
-    assert_eq!(without_fringe.stroke_indices, with_fringe.stroke_indices);
+    assert!(!with_fringe.fringe.is_empty());
+    assert!(with_fringe.fringe.index_count() > 0);
+    assert!(!with_fringe.stroke.is_empty());
+    assert!(with_fringe.stroke.index_count() > 0);
+    assert!(without_fringe.fringe.is_empty());
+    assert_eq!(without_fringe.face, with_fringe.face);
+    assert_eq!(without_fringe.casing, with_fringe.casing);
+    assert_eq!(without_fringe.stroke, with_fringe.stroke);
 }
 
 /// Every stream a face bake touches, checked against what the road layout
@@ -4107,14 +4701,17 @@ fn assert_face_stream_is_the_road_form(buffers: &TileBuffers, what: &str) -> usi
         FACE_IMPLICIT_DECK, FACE_IMPLICIT_OFF, FACE_IMPLICIT_UV, ROAD_KIND_FILL,
         ROAD_PARAM_KIND_SCALE,
     };
-    assert_eq!(buffers.face_vertices.len() % FACE_TYPED_VERTEX_BYTES, 0, "{what}");
-    assert_eq!(buffers.face_indices.len() % 3, 0, "{what}");
-    let face_count = buffers.face_vertices.len() / FACE_TYPED_VERTEX_BYTES;
-    assert!(
-        buffers.face_indices.iter().all(|&index| (index as usize) < face_count),
-        "{what}: face index out of range"
-    );
-    for chunk in buffers.face_vertices.chunks_exact(FACE_TYPED_VERTEX_BYTES) {
+    let face_count = buffers.face.vertex_count(FACE_TYPED_VERTEX_BYTES);
+    for stream_chunk in &buffers.face.chunks {
+        assert_eq!(stream_chunk.vertices.len() % FACE_TYPED_VERTEX_BYTES, 0, "{what}");
+        assert_eq!(stream_chunk.indices.len() % 3, 0, "{what}");
+        let chunk_vertex_count = stream_chunk.vertices.len() / FACE_TYPED_VERTEX_BYTES;
+        assert!(
+            stream_chunk.indices.iter().all(|&index| (index as usize) < chunk_vertex_count),
+            "{what}: face index out of range"
+        );
+    }
+    for chunk in buffers.face.vertex_records(FACE_TYPED_VERTEX_BYTES) {
         let face = decode_face_vertex(chunk);
         let road = road_record_from_face(face);
         assert_eq!(face_record_from_road(road), Some(face), "{what}");
@@ -4129,7 +4726,7 @@ fn assert_face_stream_is_the_road_form(buffers: &TileBuffers, what: &str) -> usi
             assert_eq!(aux, FACE_IMPLICIT_UV.0, "{what}: coverage");
         }
     }
-    for chunk in buffers.casing_vertices.chunks_exact(ROAD_TYPED_VERTEX_BYTES) {
+    for chunk in buffers.casing.vertex_records(ROAD_TYPED_VERTEX_BYTES) {
         assert!(
             face_record_from_road(decode_road_vertex(chunk)).is_none(),
             "{what}: a face record stayed on the road layout"
@@ -4147,14 +4744,14 @@ fn union_faces_take_the_face_layout_and_keep_their_road_form() {
     assert!(face_count > 0, "the primary road's union faces");
     assert_eq!(
         buffers.stream_bytes()[2],
-        buffers.face_vertices.len() + buffers.face_indices.len() * 2
+        buffers.face.byte_size()
     );
     // The road layout keeps the expandable strokes (the tram's dashes among
     // them) exactly as before the split.
     let expanded = buffers
-        .casing_vertices
-        .chunks_exact(ROAD_TYPED_VERTEX_BYTES)
-        .chain(buffers.stroke_vertices.chunks_exact(ROAD_TYPED_VERTEX_BYTES))
+        .casing
+        .vertex_records(ROAD_TYPED_VERTEX_BYTES)
+        .chain(buffers.stroke.vertex_records(ROAD_TYPED_VERTEX_BYTES))
         .filter(|chunk| decode_road_vertex(chunk).params.to_f32().0 >= ROAD_PARAM_EXPANDED_FLAG)
         .count();
     assert!(expanded > 0);
@@ -4668,8 +5265,9 @@ fn build_tile_buffers_from_features_profiled(
     let mut icon_vertices = Vec::<f32>::with_capacity(capacity_hints.icon_vertices);
     let mut shadow_disc_instances =
         Vec::<f32>::with_capacity(capacity_hints.shadow_instances);
-    // Building walls as instance records; see WALL_INSTANCE_FLOATS.
-    let mut wall_instances = Vec::<f32>::with_capacity(capacity_hints.wall_instances);
+    // Building walls as compact typed instance records.
+    let mut wall_instances =
+        Vec::<MapWallInstance>::with_capacity(capacity_hints.wall_instances);
     // Street trees: one template mesh per LOD ring + TREE_INSTANCE_FLOATS per tree.
     let mut tree_template_vertices =
         Vec::<f32>::with_capacity(capacity_hints.tree_template_vertices);
@@ -4680,6 +5278,14 @@ fn build_tile_buffers_from_features_profiled(
     let mut tree_cross_template_indices =
         Vec::<u32>::with_capacity(capacity_hints.tree_cross_template_indices);
     let mut tree_instances = Vec::<f32>::with_capacity(capacity_hints.tree_instances);
+    let mut stalk_template_vertices = Vec::<f32>::new();
+    let mut stalk_template_indices = Vec::<u32>::new();
+    let mut stalk_instances =
+        Vec::<MapPropInstance>::with_capacity(capacity_hints.stalk_instances);
+    let mut stoplight_template_vertices = Vec::<f32>::new();
+    let mut stoplight_template_indices = Vec::<u32>::new();
+    let mut stoplight_instances =
+        Vec::<MapPropInstance>::with_capacity(capacity_hints.stoplight_instances);
     let mut road_icon_indices = Vec::<u32>::with_capacity(capacity_hints.road_icon_indices);
     let mut road_icon_vertices = Vec::<f32>::with_capacity(capacity_hints.road_icon_vertices);
     let mut fill_zbias = 0.0_f32;
@@ -5555,7 +6161,7 @@ fn build_tile_buffers_from_features_profiled(
                         job.height_m,
                         wall_color,
                         wall_ao(job.base_m),
-                        (nx, ny),
+                        clockwise,
                         &mut fill_zbias,
                     );
                 }
@@ -5879,8 +6485,9 @@ fn build_tile_buffers_from_features_profiled(
             }
         }
     }
-    // Marker stalks (3D mode): thin dark lines from the ground point up to
-    // every floating marker.
+    // Marker stalks (3D mode): one typed placement per floating marker. A
+    // single unit crossed-quad template replaces the two baked wall quads
+    // formerly repeated at every marker.
     if buildings_3d {
         let has_pins = icon_jobs.iter().any(|job| job.9 > 0.0);
         if has_pins {
@@ -5891,6 +6498,22 @@ fn build_tile_buffers_from_features_profiled(
             let units_per_m =
                 (crate::map::geometry::TILE_SIZE * n / (40_075_016.686 * lat.cos())) as f32;
             let stalk_color = hex_to_premul_rgba(0x4a5058, 1.0);
+            let mut template_zbias = 0.0;
+            for (a, b) in [((-1.0, 0.0), (1.0, 0.0)), ((0.0, -1.0), (0.0, 1.0))] {
+                append_wall_quad(
+                    a,
+                    b,
+                    0.0,
+                    1.0,
+                    [1.0; 4],
+                    1.0,
+                    (0.0, 0.0),
+                    MAT_NONE,
+                    &mut stalk_template_vertices,
+                    &mut stalk_template_indices,
+                    &mut template_zbias,
+                );
+            }
             for (job_index, job) in icon_jobs.iter().enumerate() {
                 let lift = job_lifts[job_index];
                 if lift <= 0.0 {
@@ -5898,40 +6521,24 @@ fn build_tile_buffers_from_features_profiled(
                 }
                 // Chargers get a slightly heavier stalk than POI markers.
                 let arm = if job.5 == 2 || job.5 == 3 { 0.22 } else { 0.14 } * units_per_m;
-                let (x, y) = job.0;
-                append_wall_quad(
-                    (x - arm, y),
-                    (x + arm, y),
-                    0.0,
-                    lift,
+                stalk_instances.push(MapPropInstance::new(
+                    job.0,
+                    (arm, lift),
                     stalk_color,
-                    1.0,
-                    (0.0, 0.0),
-                    MAT_NONE,
-                    &mut fill_vertices,
-                    &mut fill_indices,
-                    &mut fill_zbias,
-                );
-                append_wall_quad(
-                    (x, y - arm),
-                    (x, y + arm),
-                    0.0,
-                    lift,
-                    stalk_color,
-                    1.0,
-                    (0.0, 0.0),
-                    MAT_NONE,
-                    &mut fill_vertices,
-                    &mut fill_indices,
-                    &mut fill_zbias,
-                );
+                    fill_zbias,
+                ));
+                // Preserve the exact painter-ladder progression paid by the
+                // two removed append_wall_quad calls.
+                fill_zbias += VECTOR_ZBIAS_STEP;
+                fill_zbias += VECTOR_ZBIAS_STEP;
             }
         }
     }
 
-    // Little 3D stoplights (tilt mode): a slim dark pole with the classic
-    // three lights stacked on top — red above amber above green.
+    // Little 3D stoplights (tilt mode): one complete shared pole + three
+    // light template, with one typed placement per signal point.
     if !signal_points_3d.is_empty() {
+        const STOPLIGHT_HEIGHT_M: f32 = 5.7;
         let n = (1u32 << tile_key.z) as f64;
         let lat = (std::f64::consts::PI * (1.0 - 2.0 * (tile_key.y as f64 + 0.5) / n))
             .sinh()
@@ -5961,48 +6568,48 @@ fn build_tile_buffers_from_features_profiled(
                 ]);
             }
         }
+        let mut template_zbias = 0.0;
+        for (a, b) in [((-arm, 0.0), (arm, 0.0)), ((0.0, -arm), (0.0, arm))] {
+            append_wall_quad(
+                a,
+                b,
+                0.0,
+                3.2 / STOPLIGHT_HEIGHT_M,
+                pole_color,
+                1.0,
+                (0.0, 0.0),
+                MAT_NONE,
+                &mut stoplight_template_vertices,
+                &mut stoplight_template_indices,
+                &mut template_zbias,
+            );
+        }
+        for (color, height_m) in lights {
+            append_ball(
+                (0.0, 0.0),
+                0.5 * units_per_m,
+                0.5 / STOPLIGHT_HEIGHT_M,
+                height_m / STOPLIGHT_HEIGHT_M,
+                color,
+                8,
+                4,
+                &theme.shiny.sun,
+                MAT_NONE,
+                &mut stoplight_template_vertices,
+                &mut stoplight_template_indices,
+                &mut template_zbias,
+            );
+        }
         for (x, y) in &signal_points_3d {
-            append_wall_quad(
-                (*x - arm, *y),
-                (*x + arm, *y),
-                0.0,
-                3.2,
-                pole_color,
-                1.0,
-                (0.0, 0.0),
-                MAT_NONE,
-                &mut fill_vertices,
-                &mut fill_indices,
-                &mut fill_zbias,
-            );
-            append_wall_quad(
-                (*x, *y - arm),
-                (*x, *y + arm),
-                0.0,
-                3.2,
-                pole_color,
-                1.0,
-                (0.0, 0.0),
-                MAT_NONE,
-                &mut fill_vertices,
-                &mut fill_indices,
-                &mut fill_zbias,
-            );
-            for (color, height_m) in lights {
-                append_ball(
-                    (*x, *y),
-                    0.5 * units_per_m,
-                    0.5,
-                    height_m,
-                    color,
-                    8,
-                    4,
-                    &theme.shiny.sun,
-                    MAT_NONE,
-                    &mut fill_vertices,
-                    &mut fill_indices,
-                    &mut fill_zbias,
-                );
+            stoplight_instances.push(MapPropInstance::new(
+                (*x, *y),
+                (1.0, STOPLIGHT_HEIGHT_M),
+                [1.0; 4],
+                fill_zbias,
+            ));
+            // Two pole quads plus three light balls each took one step.
+            for _ in 0..5 {
+                fill_zbias += VECTOR_ZBIAS_STEP;
             }
             feature_count += 1;
         }
@@ -6713,16 +7320,12 @@ fn build_tile_buffers_from_features_profiled(
         recycle_tess_scratch(&mut tess_verts, &mut tess_indices);
         return TileBuffers {
             pin_hits: Vec::new(),
-            fill_indices: Vec::new(),
-            fill_vertices: Vec::new(),
+            fill: TypedStream::default(),
             fill_misc_indices: Vec::new(),
             fill_misc_vertices: Vec::new(),
-            face_indices: Vec::new(),
-            face_vertices: Vec::new(),
-            casing_indices: Vec::new(),
-            casing_vertices: Vec::new(),
-            stroke_indices: Vec::new(),
-            stroke_vertices: Vec::new(),
+            face: TypedStream::default(),
+            casing: TypedStream::default(),
+            stroke: TypedStream::default(),
             icon_indices: Vec::new(),
             icon_vertices: Vec::new(),
             icon_high_indices: Vec::new(),
@@ -6730,10 +7333,8 @@ fn build_tile_buffers_from_features_profiled(
             shadow_disc_instances: Vec::new(),
             icon_instances: Vec::new(),
             icon_high_instances: Vec::new(),
-            fringe_indices: Vec::new(),
-            fringe_vertices: Vec::new(),
-            fill_3d_indices: Vec::new(),
-            fill_3d_vertices: Vec::new(),
+            fringe: TypedStream::default(),
+            fill_3d: TypedStream::default(),
             fill_3d_misc_indices: Vec::new(),
             fill_3d_misc_vertices: Vec::new(),
             wall_indices: Vec::new(),
@@ -6748,6 +7349,12 @@ fn build_tile_buffers_from_features_profiled(
             tree_cross_template_indices: Vec::new(),
             tree_cross_template_vertices: Vec::new(),
             tree_instances: Vec::new(),
+            stalk_template_indices: Vec::new(),
+            stalk_template_vertices: Vec::new(),
+            stalk_instances: Vec::new(),
+            stoplight_template_indices: Vec::new(),
+            stoplight_template_vertices: Vec::new(),
+            stoplight_instances: Vec::new(),
             road_icon_indices: Vec::new(),
             road_icon_vertices: Vec::new(),
             mode_overlay_only: false,
@@ -7696,6 +8303,8 @@ fn build_tile_buffers_from_features_profiled(
             tree_cross_template_vertices: tree_cross_template_vertices.len(),
             tree_cross_template_indices: tree_cross_template_indices.len(),
             tree_instances: tree_instances.len(),
+            stalk_instances: stalk_instances.len(),
+            stoplight_instances: stoplight_instances.len(),
             road_icon_indices: road_icon_indices.len(),
             road_icon_vertices: road_icon_vertices.len(),
         },
@@ -7712,11 +8321,15 @@ fn build_tile_buffers_from_features_profiled(
     } else {
         (Vec::new(), Vec::new())
     };
-    // Grounded union faces take the 16-byte face layout; the split keeps
-    // both streams in emission order. Faces are whole triangles by
-    // construction (one record kind per feature), so nothing duplicates.
-    let (face_vertices, face_indices) =
-        split_band_by(&mut casing_vertices, &mut casing_indices, is_compact_face_record);
+    // Grounded union faces take the 16-byte face layout. Deck fields can
+    // cross zero inside one ramp triangle, so only triangles whose THREE
+    // records project losslessly may enter the compact stream. Mixed
+    // triangles stay on the road layout and shared vertices are copied.
+    let (face_vertices, face_indices) = split_band_by_all(
+        &mut casing_vertices,
+        &mut casing_indices,
+        is_compact_face_record,
+    );
     // 3D band sub-splits by material (param3, slot 14): walls skip at the
     // mid LOD ring ("roofs only"), canopy balls swap to crossed quads far
     // out. Materials were authored per-append so the predicate is exact.
@@ -7732,9 +8345,9 @@ fn build_tile_buffers_from_features_profiled(
         &mut fill_3d_indices,
         |record| record[14] > 3.5 && record[14] < 4.5,
     );
-    // Ordinary lifted shape-0 roofs use the 16-byte typed roof layout. Parapet
-    // depth variants, marker stalks, signals and any future gradient or
-    // patterned roof remain byte-for-byte on the generic vector path.
+    // Ordinary lifted shape-0 roofs use the 16-byte typed roof layout.
+    // Parapet depth variants and any future gradient or patterned roof stay
+    // on the generic vector path; stalks and signals now have instance bands.
     let (fill_3d_misc_vertices, fill_3d_misc_indices) = split_band_by(
         &mut fill_3d_vertices,
         &mut fill_3d_indices,
@@ -7778,16 +8391,12 @@ fn build_tile_buffers_from_features_profiled(
     recycle_tess_scratch(&mut tess_verts, &mut tess_indices);
     TileBuffers {
         pin_hits,
-        fill_indices,
-        fill_vertices,
+        fill: TypedStream::from_u32(fill_indices, fill_vertices, FILL_TYPED_VERTEX_BYTES),
         fill_misc_indices,
         fill_misc_vertices,
-        face_indices,
-        face_vertices,
-        casing_indices,
-        casing_vertices,
-        stroke_indices,
-        stroke_vertices,
+        face: TypedStream::from_u32(face_indices, face_vertices, FACE_TYPED_VERTEX_BYTES),
+        casing: TypedStream::from_u32(casing_indices, casing_vertices, ROAD_TYPED_VERTEX_BYTES),
+        stroke: TypedStream::from_u32(stroke_indices, stroke_vertices, ROAD_TYPED_VERTEX_BYTES),
         icon_indices,
         icon_vertices,
         icon_high_indices,
@@ -7795,10 +8404,8 @@ fn build_tile_buffers_from_features_profiled(
         shadow_disc_instances,
         icon_instances,
         icon_high_instances,
-        fringe_indices,
-        fringe_vertices,
-        fill_3d_indices,
-        fill_3d_vertices,
+        fringe: TypedStream::from_u32(fringe_indices, fringe_vertices, ROAD_TYPED_VERTEX_BYTES),
+        fill_3d: TypedStream::from_u32(fill_3d_indices, fill_3d_vertices, ROOF_TYPED_VERTEX_BYTES),
         fill_3d_misc_indices,
         fill_3d_misc_vertices,
         wall_indices,
@@ -7813,6 +8420,12 @@ fn build_tile_buffers_from_features_profiled(
         tree_cross_template_indices,
         tree_cross_template_vertices: pack_vector_vertices(&tree_cross_template_vertices),
         tree_instances,
+        stalk_template_indices,
+        stalk_template_vertices: pack_vector_vertices(&stalk_template_vertices),
+        stalk_instances,
+        stoplight_template_indices,
+        stoplight_template_vertices: pack_vector_vertices(&stoplight_template_vertices),
+        stoplight_instances,
         road_icon_indices,
         road_icon_vertices,
         mode_overlay_only: !build_road_core,
@@ -8139,7 +8752,8 @@ fn project_way_points_with_nodes(
 /// the ancestor shift (0 = exact zoom) and the quadrant offsets that map the
 /// ancestor's local space into this tile's.
 pub struct OverlayTileData {
-    pub raw: Vec<u8>,
+    /// Decoded on the bake job (`TileBlob::decode`), never on the UI thread.
+    pub raw: super::archive::TileBlob,
     pub shift: u32,
     pub quadrant_x: u32,
     pub quadrant_y: u32,
@@ -8169,6 +8783,7 @@ pub fn build_local_tile_from_archive_bytes(
     detail: Option<std::sync::Arc<[u8]>>,
     detail_mbtiles_path: Option<&Path>,
     bridge_dz_mbtiles_path: Option<&Path>,
+    mut overlay_tiles: Vec<OverlayTileData>,
     overlay_paths: &[String],
     theme: &CompiledMapTheme,
     render_zoom: u32,
@@ -8176,7 +8791,6 @@ pub fn build_local_tile_from_archive_bytes(
     want_fringe: bool,
     build_road_core: bool,
 ) -> Result<Option<LoadedLocalTile>, String> {
-    let mut overlay_tiles = Vec::new();
     for path in overlay_paths.iter().filter(|path| !path.is_empty()) {
         let (file, filter) = match path.split_once('?') {
             Some((file, "fast")) => (file, 1_u8),
@@ -8198,7 +8812,7 @@ pub fn build_local_tile_from_archive_bytes(
         let tms_row = (1_i64 << fetch_z) - 1 - fetch_y;
         if let Ok(Some(raw)) = reader.get_tile_decoded(fetch_z as i64, fetch_x, tms_row) {
             overlay_tiles.push(OverlayTileData {
-                raw,
+                raw: raw.into(),
                 shift,
                 quadrant_x: tile_key.x as u32 - ((fetch_x as u32) << shift),
                 quadrant_y: tile_key.y as u32 - ((fetch_y as u32) << shift),
@@ -8412,7 +9026,7 @@ pub fn load_local_tile_batch(
             let tms_row = (1_i64 << fetch_z) - 1 - fetch_y;
             if let Ok(Some(raw)) = reader.get_tile_decoded(fetch_z as i64, fetch_x, tms_row) {
                 out.push(OverlayTileData {
-                    raw,
+                    raw: raw.into(),
                     shift,
                     quadrant_x: (tile_key.x as u32) - ((fetch_x as u32) << shift),
                     quadrant_y: (tile_key.y as u32) - ((fetch_y as u32) << shift),
@@ -8828,6 +9442,7 @@ mod local_archive_regression_tests {
                 detail,
                 None,
                 None,
+                Vec::new(),
                 &overlay_paths,
                 &CompiledMapTheme::default(),
                 0,
@@ -8857,7 +9472,7 @@ mod local_archive_regression_tests {
         let mut archive = build(None);
         let mut with_unusable_detail = build(Some(vec![0xff, 0xff, 0xff].into()));
         assert!(legacy.feature_count > 0);
-        assert!(!legacy.fill_vertices.is_empty());
+        assert!(!legacy.fill.is_empty());
         legacy.stage_summary.clear();
         archive.stage_summary.clear();
         with_unusable_detail.stage_summary.clear();
@@ -11177,6 +11792,9 @@ mod tag_arena_tests {
     fn amsterdam_union_faces_ride_the_face_layout() {
         let theme = probe_compiled_theme();
         let mut face_records = 0usize;
+        let mut tilted_bytes = 0usize;
+        let mut flat_bytes = 0usize;
+        let mut wall_instances = 0usize;
         for x in 8412..=8416 {
             for y in 5382..=5386 {
                 let key = TileKey { z: 14, x, y };
@@ -11206,12 +11824,28 @@ mod tag_arena_tests {
                 let flat_faces =
                     assert_face_stream_is_the_road_form(&flat, &format!("{path} flat"));
                 assert_eq!(tilted_faces, flat_faces, "{path}");
-                assert_eq!(tilted.face_vertices, flat.face_vertices, "{path}");
-                assert_eq!(tilted.face_indices, flat.face_indices, "{path}");
+                assert_eq!(
+                    tilted.face.indexed_vertex_bytes(FACE_TYPED_VERTEX_BYTES),
+                    flat.face.indexed_vertex_bytes(FACE_TYPED_VERTEX_BYTES),
+                    "{path}"
+                );
                 face_records += tilted_faces;
+                tilted_bytes += tilted.byte_size();
+                flat_bytes += flat.byte_size();
+                wall_instances += tilted.wall_instances.len();
             }
         }
         println!("face records across the 25 fixtures: {face_records}");
+        let wall_bytes = wall_instances * MAP_WALL_INSTANCE_BYTES;
+        let legacy_wall_bytes = wall_instances * 11 * std::mem::size_of::<f32>();
+        println!(
+            "25-fixture bytes: tilted {:.1} MiB (legacy {:.1}), flat {:.1} MiB, wall_inst {:.1} MiB (legacy {:.1})",
+            tilted_bytes as f64 / (1024.0 * 1024.0),
+            (tilted_bytes + legacy_wall_bytes - wall_bytes) as f64 / (1024.0 * 1024.0),
+            flat_bytes as f64 / (1024.0 * 1024.0),
+            wall_bytes as f64 / (1024.0 * 1024.0),
+            legacy_wall_bytes as f64 / (1024.0 * 1024.0),
+        );
         assert!(face_records > 0);
     }
 
@@ -11348,17 +11982,24 @@ mod tag_arena_tests {
                 }
             };
         }
+        macro_rules! same_typed_stream {
+            ($field:ident, $stride:expr) => {{
+                let actual_triangles = actual.$field.indexed_vertex_bytes($stride);
+                let legacy_triangles = legacy.$field.indexed_vertex_bytes($stride);
+                assert_eq!(
+                    actual_triangles, legacy_triangles,
+                    "bake parity failed for {path}: {} triangle list differs",
+                    stringify!($field),
+                );
+            }};
+        }
         same_vec!(pin_hits);
-        same_vec!(fill_indices);
-        same_vec!(fill_vertices);
+        same_typed_stream!(fill, FILL_TYPED_VERTEX_BYTES);
         same_vec!(fill_misc_indices);
         same_float_vec!(fill_misc_vertices);
-        same_vec!(face_vertices);
-        same_vec!(face_indices);
-        same_vec!(casing_vertices);
-        same_vec!(casing_indices);
-        same_vec!(stroke_indices);
-        same_vec!(stroke_vertices);
+        same_typed_stream!(face, FACE_TYPED_VERTEX_BYTES);
+        same_typed_stream!(casing, ROAD_TYPED_VERTEX_BYTES);
+        same_typed_stream!(stroke, ROAD_TYPED_VERTEX_BYTES);
         same_vec!(icon_indices);
         same_float_vec!(icon_vertices);
         same_vec!(icon_high_indices);
@@ -11388,15 +12029,13 @@ mod tag_arena_tests {
             }
         }
         same_float_vec!(shadow_disc_instances);
-        same_vec!(fringe_indices);
-        same_vec!(fringe_vertices);
-        same_vec!(fill_3d_indices);
-        same_vec!(fill_3d_vertices);
+        same_typed_stream!(fringe, ROAD_TYPED_VERTEX_BYTES);
+        same_typed_stream!(fill_3d, ROOF_TYPED_VERTEX_BYTES);
         same_vec!(fill_3d_misc_indices);
         same_float_vec!(fill_3d_misc_vertices);
         same_vec!(wall_indices);
         same_float_vec!(wall_vertices);
-        same_float_vec!(wall_instances);
+        same_vec!(wall_instances);
         same_vec!(tree_indices);
         same_float_vec!(tree_vertices);
         same_vec!(tree_cross_indices);
@@ -11406,6 +12045,12 @@ mod tag_arena_tests {
         same_vec!(tree_cross_template_indices);
         same_float_vec!(tree_cross_template_vertices);
         same_float_vec!(tree_instances);
+        same_vec!(stalk_template_indices);
+        same_float_vec!(stalk_template_vertices);
+        same_vec!(stalk_instances);
+        same_vec!(stoplight_template_indices);
+        same_float_vec!(stoplight_template_vertices);
+        same_vec!(stoplight_instances);
         same_vec!(road_icon_indices);
         same_float_vec!(road_icon_vertices);
         same_vec!(labels);
@@ -11422,6 +12067,7 @@ mod tag_arena_tests {
         let mut arena_parse_times = Vec::with_capacity(25);
         let mut legacy_merge_times = Vec::with_capacity(25);
         let mut arena_merge_times = Vec::with_capacity(25);
+        let mut max_wall_height_error = 0.0f32;
 
         for x in 8412..=8416 {
             for y in 5382..=5386 {
@@ -11441,6 +12087,20 @@ mod tag_arena_tests {
                 };
                 let (legacy_collector, legacy_parse_elapsed) = collect(legacy_parse_mvt_tile);
                 let (arena_collector, arena_parse_elapsed) = collect(parse_mvt_tile_erased);
+                for way in &arena_collector.ways {
+                    if way.tags.contains_key("building")
+                        || way.tags.contains_key("building:part")
+                    {
+                        for height in [
+                            building_height_m(&way.tags),
+                            building_min_height_m(&way.tags),
+                        ] {
+                            let unpacked = U16x2::from_f32(height * 100.0, 0.0).x as f32 * 0.01;
+                            max_wall_height_error =
+                                max_wall_height_error.max((unpacked - height).abs());
+                        }
+                    }
+                }
                 legacy_parse_times.push(legacy_parse_elapsed);
                 arena_parse_times.push(arena_parse_elapsed);
                 assert_eq!(
@@ -11531,6 +12191,11 @@ mod tag_arena_tests {
         println!(
             "Amsterdam detail-merge (25 tiles): legacy median={legacy_merge_median:.3}ms p95={legacy_merge_p95:.3}ms; arena median={arena_merge_median:.3}ms p95={arena_merge_p95:.3}ms"
         );
+        println!(
+            "Amsterdam wall height centimetre-U16 max error: {:.6} m",
+            max_wall_height_error
+        );
+        assert!(max_wall_height_error <= 0.005);
     }
 }
 
@@ -11944,9 +12609,9 @@ mod bridge_probe_tests {
                 // runtime-vs-runtime must show the same equivalence as
                 // baked-vs-runtime (proving the bake adds no divergence
                 // beyond the pre-existing jitter).
-                let vert_multiset = |verts: &[u8], stride: usize, depth_at: usize| -> Vec<Vec<u8>> {
-                    let mut rows: Vec<Vec<u8>> = verts
-                        .chunks_exact(stride)
+                let vert_multiset = |stream: &TypedStream, stride: usize, depth_at: usize| -> Vec<Vec<u8>> {
+                    let mut rows: Vec<Vec<u8>> = stream
+                        .vertex_records(stride)
                         .map(|chunk| {
                             chunk
                                 .iter()
@@ -11962,25 +12627,25 @@ mod bridge_probe_tests {
                 for (name, a, b, c, stride, depth_at) in [
                     (
                         "casing",
-                        &runtime.casing_vertices,
-                        &runtime2.casing_vertices,
-                        &baked_build.casing_vertices,
+                        &runtime.casing,
+                        &runtime2.casing,
+                        &baked_build.casing,
                         ROAD_TYPED_VERTEX_BYTES,
                         20,
                     ),
                     (
                         "stroke",
-                        &runtime.stroke_vertices,
-                        &runtime2.stroke_vertices,
-                        &baked_build.stroke_vertices,
+                        &runtime.stroke,
+                        &runtime2.stroke,
+                        &baked_build.stroke,
                         ROAD_TYPED_VERTEX_BYTES,
                         20,
                     ),
                     (
                         "fill",
-                        &runtime.fill_vertices,
-                        &runtime2.fill_vertices,
-                        &baked_build.fill_vertices,
+                        &runtime.fill,
+                        &runtime2.fill,
+                        &baked_build.fill,
                         FILL_TYPED_VERTEX_BYTES,
                         12,
                     ),
@@ -12026,16 +12691,12 @@ mod bridge_probe_tests {
     fn mode_overlay_appends_cached_road_icons_with_rebased_indices() {
         let mut buffers = TileBuffers {
             pin_hits: Vec::new(),
-            fill_indices: Vec::new(),
-            fill_vertices: Vec::new(),
+            fill: TypedStream::default(),
             fill_misc_indices: Vec::new(),
             fill_misc_vertices: Vec::new(),
-            face_indices: Vec::new(),
-            face_vertices: Vec::new(),
-            casing_indices: Vec::new(),
-            casing_vertices: Vec::new(),
-            stroke_indices: Vec::new(),
-            stroke_vertices: Vec::new(),
+            face: TypedStream::default(),
+            casing: TypedStream::default(),
+            stroke: TypedStream::default(),
             // icon_vertices holds GPU-PACKED records post-finalize; the
             // cached road decals stay logical 19-float and pack on append.
             icon_indices: vec![0],
@@ -12045,10 +12706,8 @@ mod bridge_probe_tests {
             shadow_disc_instances: Vec::new(),
             icon_instances: Vec::new(),
             icon_high_instances: Vec::new(),
-            fringe_indices: Vec::new(),
-            fringe_vertices: Vec::new(),
-            fill_3d_indices: Vec::new(),
-            fill_3d_vertices: Vec::new(),
+            fringe: TypedStream::default(),
+            fill_3d: TypedStream::default(),
             fill_3d_misc_indices: Vec::new(),
             fill_3d_misc_vertices: Vec::new(),
             wall_indices: Vec::new(),
@@ -12063,6 +12722,12 @@ mod bridge_probe_tests {
             tree_cross_template_indices: Vec::new(),
             tree_cross_template_vertices: Vec::new(),
             tree_instances: Vec::new(),
+            stalk_template_indices: Vec::new(),
+            stalk_template_vertices: Vec::new(),
+            stalk_instances: Vec::new(),
+            stoplight_template_indices: Vec::new(),
+            stoplight_template_vertices: Vec::new(),
+            stoplight_instances: Vec::new(),
             stage_summary: String::new(),
             road_icon_indices: Vec::new(),
             road_icon_vertices: Vec::new(),
@@ -13143,14 +13808,14 @@ mod bridge_probe_tests {
                 .unwrap();
                 let overlay_ms = (Cx::monotonic_now() - overlay_clock) * 1000.0;
                 assert!(overlay.mode_overlay_only);
-                assert!(overlay.casing_vertices.is_empty());
-                assert!(overlay.stroke_vertices.is_empty());
+                assert!(overlay.casing.is_empty());
+                assert!(overlay.stroke.is_empty());
                 assert!(overlay.road_icon_vertices.is_empty());
                 println!(
                     "PROBE {name} z14/{tx}/{ty} rz{render_zoom}: full={full_ms:.0}ms mode-overlay={overlay_ms:.0}ms fill={}KB casing={}KB stroke={}KB icon={}KB",
-                    (buffers.fill_vertices.len() + buffers.fill_indices.len()) * 4 / 1024,
-                    (buffers.casing_vertices.len() + buffers.casing_indices.len()) * 4 / 1024,
-                    (buffers.stroke_vertices.len() + buffers.stroke_indices.len()) * 4 / 1024,
+                    buffers.fill.byte_size() / 1024,
+                    buffers.casing.byte_size() / 1024,
+                    buffers.stroke.byte_size() / 1024,
                     (buffers.icon_vertices.len() + buffers.icon_indices.len()) * 4 / 1024,
                 );
             }
@@ -13255,7 +13920,7 @@ mod bridge_probe_tests {
         )
         .unwrap();
         let mut rows: Vec<(i32, i32, f32, i32, u32)> = Vec::new();
-        for chunk in buffers.casing_vertices.chunks_exact(ROAD_TYPED_VERTEX_BYTES) {
+        for chunk in buffers.casing.vertex_records(ROAD_TYPED_VERTEX_BYTES) {
             let vertex = decode_road_vertex(chunk);
             let (x, y) = unpack_typed_position(vertex.pos);
             let deck = vertex.deck;
@@ -13334,7 +13999,7 @@ mod bridge_probe_tests {
         for (tag, buffers, x_off) in
             [('A', &buffers, 0.0f32), ('B', &buffers_b, 256.0)]
         {
-            for chunk in buffers.casing_vertices.chunks_exact(ROAD_TYPED_VERTEX_BYTES) {
+            for chunk in buffers.casing.vertex_records(ROAD_TYPED_VERTEX_BYTES) {
                 let vertex = decode_road_vertex(chunk);
                 let (x, y) = unpack_typed_position(vertex.pos);
                 let deck = vertex.deck;
@@ -13457,7 +14122,7 @@ mod bridge_probe_tests {
             .unwrap()
             .expect("z9 ancestor ocean tile missing");
         let overlay = OverlayTileData {
-            raw: araw,
+            raw: araw.into(),
             shift,
             quadrant_x: vx - (fx << shift),
             quadrant_y: vy - (fy << shift),
@@ -13563,7 +14228,7 @@ mod bridge_probe_tests {
         let buffers = &loaded[0].buffers;
         let mut decked = 0usize;
         let mut max_deck = 0.0f32;
-        for chunk in buffers.stroke_vertices.chunks_exact(ROAD_TYPED_VERTEX_BYTES) {
+        for chunk in buffers.stroke.vertex_records(ROAD_TYPED_VERTEX_BYTES) {
             let deck = decode_road_vertex(chunk).deck;
             if deck > 0.3 {
                 decked += 1;
@@ -13572,7 +14237,7 @@ mod bridge_probe_tests {
         }
         println!(
             "stroke verts {} decked {} max {:.1}",
-            buffers.stroke_vertices.len() / ROAD_TYPED_VERTEX_BYTES,
+            buffers.stroke.vertex_count(ROAD_TYPED_VERTEX_BYTES),
             decked,
             max_deck
         );
@@ -13885,7 +14550,7 @@ mod bridge_probe_tests {
                 "tile z{} icons {} strokes {} labels {}",
                 tile.tile_key.z,
                 tile.buffers.icon_vertices.len() / VECTOR_FLOATS_PER_VERTEX,
-                tile.buffers.stroke_vertices.len() / ROAD_TYPED_VERTEX_BYTES,
+                tile.buffers.stroke.vertex_count(ROAD_TYPED_VERTEX_BYTES),
                 tile.buffers.labels.len()
             );
         }
@@ -13909,7 +14574,7 @@ mod bridge_probe_tests {
             .unwrap();
         let key = TileKey { z: z as u32, x: x as i32, y: y as i32 };
         let overlay_tiles = vec![OverlayTileData {
-            raw: ov,
+            raw: ov.into(),
             shift: 0,
             quadrant_x: 0,
             quadrant_y: 0,
@@ -14120,7 +14785,7 @@ mod bridge_probe_tests {
                     best,
                     best,
                     buffers.feature_count,
-                    buffers.fill_vertices.len() / FILL_TYPED_VERTEX_BYTES,
+                    buffers.fill.vertex_count(FILL_TYPED_VERTEX_BYTES),
                 );
                 continue;
             }
@@ -14164,7 +14829,7 @@ mod bridge_probe_tests {
                 best,
                 best,
                 buffers.feature_count,
-                buffers.fill_vertices.len() / FILL_TYPED_VERTEX_BYTES,
+                buffers.fill.vertex_count(FILL_TYPED_VERTEX_BYTES),
             );
             println!(
                 "                  icons {} labels {}",
@@ -14222,14 +14887,14 @@ mod bridge_probe_tests {
         .unwrap();
         // Group decked vertices (param4 > 0.3) per buffer by quantized
         // color + param5, print bbox + deck range — who lifts where.
-        for (name, verts) in [
-            ("casing", &buffers.casing_vertices),
-            ("stroke", &buffers.stroke_vertices),
+        for (name, stream) in [
+            ("casing", &buffers.casing),
+            ("stroke", &buffers.stroke),
         ] {
             use std::collections::HashMap;
             let mut groups: HashMap<(u32, u32, u32), (f32, f32, f32, f32, f32, f32, usize)> =
                 HashMap::new();
-            for record in verts.chunks_exact(ROAD_TYPED_VERTEX_BYTES) {
+            for record in stream.vertex_records(ROAD_TYPED_VERTEX_BYTES) {
                 let vertex = decode_road_vertex(record);
                 let pos = unpack_typed_position(vertex.pos);
                 let deck = vertex.deck;
@@ -14267,22 +14932,22 @@ mod bridge_probe_tests {
                     *p5 as f32 / 1000.0
                 );
             }
-            println!("-- {name} total verts {}", verts.len() / ROAD_TYPED_VERTEX_BYTES);
+            println!("-- {name} total verts {}", stream.vertex_count(ROAD_TYPED_VERTEX_BYTES));
         }
         // SVG dump of the window's triangles in draw order (casing pass):
         // the tear must show as literal holes/overdraw in here.
         {
             use std::fmt::Write as _;
-            let (verts, indices) = (&buffers.casing_vertices, &buffers.casing_indices);
             let vb_env = std::env::var("TEAR_VB").unwrap_or_else(|_| "86 84 36 40".to_string());
             let mut svg = format!(
                 "<svg xmlns='http://www.w3.org/2000/svg' viewBox='{vb_env}' width='1440' height='1600'>\n",
             );
             let mut tris = 0usize;
-            for tri in indices.chunks_exact(3) {
-                let decode = |index: u32| {
+            for stream_chunk in &buffers.casing.chunks {
+            for tri in stream_chunk.indices.chunks_exact(3) {
+                let decode = |index: u16| {
                     let at = index as usize * ROAD_TYPED_VERTEX_BYTES;
-                    decode_road_vertex(&verts[at..at + ROAD_TYPED_VERTEX_BYTES])
+                    decode_road_vertex(&stream_chunk.vertices[at..at + ROAD_TYPED_VERTEX_BYTES])
                 };
                 let v0 = decode(tri[0]);
                 let v1 = decode(tri[1]);
@@ -14312,6 +14977,7 @@ mod bridge_probe_tests {
                     p0.0, p0.1, p1.0, p1.1, p2.0, p2.1, rgb.0, rgb.1, rgb.2, a
                 );
                 tris += 1;
+            }
             }
             svg.push_str("</svg>\n");
             let out = format!(
@@ -14358,7 +15024,7 @@ mod bridge_probe_tests {
         .unwrap();
         println!(
             "fill verts {} icon verts {} shadow_disc instances {}",
-            buffers.fill_vertices.len() / FILL_TYPED_VERTEX_BYTES,
+            buffers.fill.vertex_count(FILL_TYPED_VERTEX_BYTES),
             buffers.icon_vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX,
             buffers.shadow_disc_instances.len() / SHADOW_DISC_INSTANCE_FLOATS,
         );

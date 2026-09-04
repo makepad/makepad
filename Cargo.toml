@@ -18,6 +18,10 @@ workspace.members = [
     "apps/route",
     "apps/asset-ui",
     "apps/asset-server",
+    "apps/flow-server",
+    "apps/flow-ui",
+    "libs/flowgraph",
+    "libs/media_view",
     "apps/ai-hub",
     "apps/vj",
     "apps/mixer",
@@ -43,6 +47,8 @@ workspace.members = [
     "libs/sim/math",
     "libs/show_control",
     "libs/asset/creator",
+    "libs/bounded_http",
+    "libs/flow",
     "libs/strict_json",
     # === remesh (FaithC port) / xatlas (jpcy port) ===
     "libs/remesh",
@@ -145,6 +151,7 @@ workspace.members = [
     # === necessary tools ===
     "platform/video",
     "tools/cargo_makepad",
+    "tools/makepad_loader",
     # === OSM PBF -> tile archive + nav artifact bake passes (CLI + in-app) ===
     "libs/map_build",
     "tools/map_tiles",

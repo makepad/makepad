@@ -11,7 +11,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use makepad_network::http_server::{start_http_server, HttpServer, HttpServerRequest};
 use makepad_studio_protocol::{AppToStudio, AppToStudioVec, StudioToApp, StudioToAppVec};
 use makepad_widgets::makepad_micro_serde::{DeBin, SerBin};
-use makepad_widgets::makepad_platform::thread::SignalToUI;
+use makepad_widgets::makepad_platform::thread::{SignalToUI, ThreadOptions, ThreadSpawner};
 
 pub type ClientId = u64;
 
@@ -38,16 +38,16 @@ pub struct WmHub {
 
 impl WmHub {
     /// Bind the first free port in a small range and start serving.
-    pub fn start() -> Option<WmHub> {
+    pub fn start(spawner: ThreadSpawner) -> Option<WmHub> {
         for port in 8765..8785u16 {
-            if let Some(hub) = Self::start_on(port) {
+            if let Some(hub) = Self::start_on(port, &spawner) {
                 return Some(hub);
             }
         }
         None
     }
 
-    fn start_on(port: u16) -> Option<WmHub> {
+    fn start_on(port: u16, spawner: &ThreadSpawner) -> Option<WmHub> {
         let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().ok()?;
         // The http server's bind failure only prints; probe the port first
         // so a WM instance still holding it (or any other service) makes
@@ -69,9 +69,13 @@ impl WmHub {
         })?;
 
         let (event_tx, event_rx) = mpsc::channel::<HubEvent>();
-        std::thread::Builder::new()
-            .name("wm-hub".into())
-            .spawn(move || {
+        let worker = spawner
+            .spawn_worker(
+                ThreadOptions {
+                    name: Some("wm-hub".into()),
+                    ..Default::default()
+                },
+                move || {
                 // socket id -> client id, so binary frames route by socket.
                 let mut socket_client = HashMap::<u64, ClientId>::new();
                 while let Ok(request) = request_rx.recv() {
@@ -131,8 +135,10 @@ impl WmHub {
                         _ => {}
                     }
                 }
-            })
+                },
+            )
             .ok()?;
+        worker.detach();
 
         Some(WmHub {
             port,

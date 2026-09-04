@@ -1,3 +1,4 @@
+use crate::frame_trace::TickSource;
 use {
     crate::{
         cx::{Cx, OsType},
@@ -784,7 +785,8 @@ impl Cx {
                                 })
                             ]
                         };
-                        self.passes[*draw_pass_id].set_time(time_now);
+                        let uniforms_gen = self.next_uniform_gen();
+                        self.passes[*draw_pass_id].set_time(time_now, uniforms_gen);
                         let presented = if link_drawable.is_some() {
                             // This drawable came from a CAMetalDisplayLink update,
                             // which already schedules it for the update's target
@@ -833,11 +835,13 @@ impl Cx {
                 // between them, and neither matched NextFrame).
                 CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.passes[*draw_pass_id].set_time(time_now);
+                    let uniforms_gen = self.next_uniform_gen();
+                    self.passes[*draw_pass_id].set_time(time_now, uniforms_gen);
                     self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::Texture);
                 }
                 CxDrawPassParent::None => {
-                    self.passes[*draw_pass_id].set_time(time_now);
+                    let uniforms_gen = self.next_uniform_gen();
+                    self.passes[*draw_pass_id].set_time(time_now, uniforms_gen);
                     self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::Texture);
                 }
             }
@@ -1334,11 +1338,17 @@ impl Cx {
                 // ticking at the frame period. Unscoped beats (NSTimer,
                 // hidden windows) keep wall-now. Windows already does this
                 // (`paint_tick(flip_time)`), transport design-v2 §3 / §8 step 0.
-                let time_now = self
-                    .os
-                    .link_flip_time
-                    .unwrap_or_else(|| with_macos_app(|app| app.time_now()));
+                let link_flip_time = self.os.link_flip_time;
+                let time_now = with_macos_app(|app| {
+                    let wake = app.time_now();
+                    match link_flip_time {
+                        Some(flip) => app.frame_trace.tick(TickSource::Link, wake, Some(flip)),
+                        None => app.frame_trace.tick(TickSource::Timer, wake, None),
+                    }
+                    link_flip_time.unwrap_or(wake)
+                });
                 if has_next_frames {
+                    with_macos_app(|app| app.frame_trace.next_frame(time_now));
                     self.call_next_frame_event(time_now);
                 }
                 let needs_redrawing = self.need_redrawing();
@@ -1347,6 +1357,10 @@ impl Cx {
                     self.mtl_compile_shaders(&metal_cx);
                 }
                 let has_dirty_passes = self.any_passes_dirty();
+                with_macos_app(|app| {
+                    let now = app.time_now();
+                    app.frame_trace.maybe_print(now);
+                });
                 // Start timer if we have work
                 if has_next_frames
                     || needs_redrawing

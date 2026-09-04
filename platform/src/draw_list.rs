@@ -32,7 +32,13 @@ pub struct DrawList(PoolId);
 
 impl DrawList {
     pub fn new(cx: &mut Cx) -> Self {
-        cx.draw_lists.alloc()
+        let recording_gen = cx.next_uniform_gen();
+        let uniforms_gen = cx.next_uniform_gen();
+        let draw_list = cx.draw_lists.alloc();
+        let cx_draw_list = &mut cx.draw_lists[draw_list.id()];
+        cx_draw_list.recording_gen = recording_gen;
+        cx_draw_list.uniforms_gen = uniforms_gen;
+        draw_list
     }
 
     pub fn set_reset_zbias(&self, cx: &mut Cx, reset_zbias: bool) {
@@ -221,6 +227,9 @@ impl Cx {
             };
             let draw_item = &draw_list.draw_items[draw_item_id];
             if let Some(sub_list_id) = draw_item.kind.sub_list() {
+                if self.draw_lists.is_id_freed(sub_list_id) {
+                    continue;
+                }
                 self.collect_gpu_metrics_for_draw_list(
                     sub_list_id,
                     draw_pass_id,
@@ -324,7 +333,9 @@ impl DrawList {
 pub struct CxDrawListPool(pub(crate) IdPool<CxDrawList>);
 impl CxDrawListPool {
     pub fn alloc(&mut self) -> DrawList {
-        DrawList(self.0.alloc())
+        let draw_list = DrawList(self.0.alloc());
+        self[draw_list.id()].reset_draw_item_uniform_caches();
+        draw_list
     }
 
     /// Every live draw list id (the tweaker's colour pulse walks all
@@ -507,6 +518,9 @@ pub struct CxDrawCall {
     pub uniform_buffer_slots: [Option<UniformBuffer>; DRAW_CALL_UNIFORM_BUFFER_SLOTS],
     pub instance_dirty: bool,
     pub uniforms_dirty: bool,
+    /// Replaced with a process-wide generation whenever either uniform block
+    /// owned by this draw call changes.
+    pub uniforms_gen: u64,
     /// Component nesting depth (`Cx::nesting_depth`) at the moment this call
     /// was created. The exploded z-layer view hands this to the shader in
     /// place of the paint-order zbias, so one plane = one nesting level.
@@ -516,7 +530,13 @@ pub struct CxDrawCall {
 }
 
 impl CxDrawCall {
-    pub fn new(mapping: &CxDrawShaderMapping, draw_vars: &DrawVars, turtle_depth: f32) -> Self {
+    pub fn new(
+        mapping: &CxDrawShaderMapping,
+        draw_vars: &DrawVars,
+        turtle_depth: f32,
+        uniforms_gen: u64,
+    ) -> Self {
+        debug_assert_ne!(uniforms_gen, 0);
         CxDrawCall {
             geometry_id: draw_vars.geometry_id,
             options: draw_vars.options.clone(),
@@ -529,15 +549,28 @@ impl CxDrawCall {
             uniform_buffer_slots: draw_vars.uniform_buffer_slots.clone(),
             instance_dirty: true,
             uniforms_dirty: true,
+            uniforms_gen,
             turtle_depth,
         }
+    }
+
+    #[inline]
+    pub fn mark_uniforms_dirty(&mut self, uniforms_gen: u64) {
+        debug_assert_ne!(uniforms_gen, 0);
+        self.uniforms_dirty = true;
+        self.uniforms_gen = uniforms_gen;
     }
 
     /// The z the shader sees in `world.z`. Paint order normally; the emitting
     /// component's nesting depth while the pass is exploded — deeper nesting
     /// is a larger z, and the ortho maps larger z nearer the viewer, so
     /// children lift toward you and parents stay at the bottom of the stack.
-    pub fn resolve_zbias(&mut self, paint_order: f32, sploded: bool) -> bool {
+    pub fn resolve_zbias(
+        &mut self,
+        paint_order: f32,
+        sploded: bool,
+        uniforms_gen: u64,
+    ) -> bool {
         let z = if sploded {
             // One level is worth far more than any widget's own `draw_depth`,
             // so those stay an in-plane tie-break instead of whole planes of
@@ -546,7 +579,12 @@ impl CxDrawCall {
         } else {
             paint_order
         };
-        self.draw_call_uniforms.set_zbias(z)
+        let changed = self.draw_call_uniforms.set_zbias(z);
+        if changed {
+            debug_assert_ne!(uniforms_gen, 0);
+            self.uniforms_gen = uniforms_gen;
+        }
+        changed
     }
 }
 
@@ -663,6 +701,8 @@ pub struct CxDrawList {
     pub codeflow_parent_id: Option<DrawListId>, // the id of the parent we nest in, codeflow wise
 
     pub redraw_id: u64,
+    /// Replaced on every recording, including repeated recordings in one redraw.
+    pub recording_gen: u64,
     pub draw_pass_id: Option<DrawPassId>,
 
     pub draw_items: CxDrawItems,
@@ -677,7 +717,27 @@ pub struct CxDrawList {
     pub overlay_order: u64,
 
     pub draw_list_uniforms: DrawListUniforms,
+    /// Replaced when this list is recorded or its uniform block is changed.
+    pub uniforms_gen: u64,
     pub draw_list_has_clip: bool,
+
+    /// Paint order for a RETAINED sub-list. `None` — every ordinary list —
+    /// lets the backend walk hand each draw call its own step of the
+    /// running paint-order counter, as always. `Some(steps)` makes the list
+    /// one unit of that counter: every draw call in it resolves its zbias
+    /// to the counter value at entry, the list's internal layering is
+    /// authored by its owner in the instances' `draw_depth` (in units of
+    /// `zbias_step`), and the counter advances by `steps` on exit.
+    ///
+    /// A list recorded once and re-attached on later frames cannot know
+    /// how many calls precede it, so its baked depths must be relative to
+    /// its entry; the map's tile lists bake the same layering the
+    /// immediate path produced (one layer per stream, faces with their
+    /// casing) and report the layers used. Every backend's `render_view`
+    /// honours this in exactly one place — the sub-list branch, beside
+    /// `reset_zbias` — by walking the child with a zero step and a copy of
+    /// the counter.
+    pub zbias_hold: Option<u32>,
 
     pub os: CxOsDrawList,
     pub rect_areas: Vec<CxRectArea>,
@@ -690,6 +750,23 @@ pub struct CxRectArea {
 }
 
 impl CxDrawList {
+    #[inline]
+    pub fn set_uniform_view_transform(&mut self, transform: &Mat4f, uniforms_gen: u64) {
+        debug_assert_ne!(uniforms_gen, 0);
+        self.draw_list_uniforms.view_transform = *transform;
+        self.uniforms_gen = uniforms_gen;
+    }
+
+    #[inline]
+    fn reset_draw_item_uniform_caches(&mut self) {
+        #[cfg(any(target_arch = "wasm32", test))]
+        for item in &mut self.draw_items.buffer {
+            item.os.uniforms_recording_gen = None;
+            item.os.draw_call_uniforms_gen = None;
+            item.os.user_uniforms_gen = None;
+        }
+    }
+
     /// Raise a backend walk's running paint-order depth counter to this
     /// sub-list's floor, on the way into it. See [`CxDrawList::overlay_z_lift`].
     ///
@@ -941,6 +1018,7 @@ impl CxDrawList {
         sh: &CxDrawShader,
         draw_vars: &DrawVars,
         turtle_depth: f32,
+        uniforms_gen: u64,
     ) -> &mut CxDrawItem {
         Self::append_trace_log(format!(
             "append_new shader={} group={} draw_call_group={} items_before={}",
@@ -960,7 +1038,12 @@ impl CxDrawList {
         }
         self.draw_items.push_item(
             redraw_id,
-            CxDrawKind::DrawCall(CxDrawCall::new(&sh.mapping, draw_vars, turtle_depth)),
+            CxDrawKind::DrawCall(CxDrawCall::new(
+                &sh.mapping,
+                draw_vars,
+                turtle_depth,
+                uniforms_gen,
+            )),
         )
     }
 
@@ -982,8 +1065,18 @@ impl CxDrawList {
         (draw_item_id < self.draw_items.len()).then_some(draw_item_id)
     }
 
-    pub fn clear_draw_items(&mut self, redraw_id: u64) {
+    pub fn clear_draw_items(
+        &mut self,
+        redraw_id: u64,
+        recording_gen: u64,
+        uniforms_gen: u64,
+    ) {
+        debug_assert_ne!(recording_gen, 0);
+        debug_assert_ne!(uniforms_gen, 0);
         self.redraw_id = redraw_id;
+        self.recording_gen = recording_gen;
+        self.uniforms_gen = uniforms_gen;
+        self.reset_draw_item_uniform_caches();
         self.draw_items.clear();
         self.draw_item_reorder = None;
         self.rect_areas.clear();
@@ -1095,7 +1188,7 @@ impl Cx {
         let mut out = std::collections::HashSet::new();
         let mut stack: Vec<DrawListId> = roots.into_iter().collect();
         while let Some(list_id) = stack.pop() {
-            if !out.insert(list_id) {
+            if self.draw_lists.is_id_freed(list_id) || !out.insert(list_id) {
                 continue;
             }
             let draw_list = &self.draw_lists[list_id];
@@ -1132,5 +1225,130 @@ mod tests {
         assert!(!merges(&none, &texture_t));
         assert!(!merges(&texture_t, &none));
         assert!(!merges(&texture_t, &texture_u));
+    }
+}
+
+#[cfg(test)]
+mod retained_sub_list_tests {
+    use super::*;
+
+    /// The retained-sub-list contract: a parent list may keep naming a child
+    /// list that its owner dropped (a map tile evicted at event time, a hidden
+    /// page). The dropped id stays dead — before AND after the pool hands its
+    /// slot to a new list, whose id differs by generation — and every tree
+    /// walk skips it rather than landing on whatever list now holds the slot.
+    #[test]
+    fn a_dropped_sub_list_stays_dead_across_slot_reuse() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let parent = DrawList::new(&mut cx);
+        let child = DrawList::new(&mut cx);
+        let child_id = child.id();
+        cx.draw_lists[parent.id()].append_sub_list(1, child_id);
+        assert!(!cx.draw_lists.is_id_freed(child_id));
+        assert!(cx.attached_draw_lists_from([parent.id()]).contains(&child_id));
+
+        drop(child);
+        assert!(cx.draw_lists.is_id_freed(child_id));
+        assert!(cx.draw_lists.checked_index(child_id).is_some(), "slot kept until reuse");
+        assert!(!cx.attached_draw_lists_from([parent.id()]).contains(&child_id));
+
+        let reused = DrawList::new(&mut cx);
+        assert_eq!(reused.id().index(), child_id.index(), "the freed slot is reused");
+        assert_ne!(reused.id().generation(), child_id.generation());
+        assert!(cx.draw_lists.is_id_freed(child_id));
+        assert!(cx.draw_lists.checked_index(child_id).is_none());
+        assert!(!cx.draw_lists.is_id_freed(reused.id()));
+        let attached = cx.attached_draw_lists_from([parent.id()]);
+        assert!(attached.contains(&parent.id()));
+        assert!(!attached.contains(&child_id));
+        assert!(!attached.contains(&reused.id()), "the stale entry must not reach the new list");
+    }
+}
+
+#[cfg(test)]
+mod uniform_generation_tests {
+    use super::*;
+
+    fn test_draw_call(uniforms_gen: u64) -> CxDrawCall {
+        CxDrawCall {
+            draw_shader_id: DrawShaderId { index: 0 },
+            options: CxDrawShaderOptions::default(),
+            append_group_id: 0,
+            total_instance_slots: 0,
+            draw_call_uniforms: DrawCallUniforms::default(),
+            geometry_id: None,
+            dyn_uniforms: [0.0; DRAW_CALL_DYN_UNIFORMS],
+            texture_slots: Default::default(),
+            uniform_buffer_slots: Default::default(),
+            instance_dirty: true,
+            uniforms_dirty: true,
+            uniforms_gen,
+            turtle_depth: 0.0,
+        }
+    }
+
+    #[test]
+    fn pooled_draw_call_gets_a_globally_unique_generation() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let first_list = DrawList::new(&mut cx);
+        let first_id = first_list.id();
+        let first_gen = cx.next_uniform_gen();
+        let first_item = cx.draw_lists[first_id]
+            .draw_items
+            .push_item(1, CxDrawKind::DrawCall(test_draw_call(first_gen)));
+        first_item.os.uniforms_recording_gen = Some(first_gen);
+        first_item.os.draw_call_uniforms_gen = Some(first_gen);
+        first_item.os.user_uniforms_gen = Some(first_gen);
+
+        drop(first_list);
+        let reused_list = DrawList::new(&mut cx);
+        let reused_id = reused_list.id();
+        assert_eq!(first_id.index(), reused_id.index());
+        assert_ne!(first_id.generation(), reused_id.generation());
+        let retained_item = &cx.draw_lists[reused_id].draw_items.buffer[0];
+        assert_eq!(retained_item.os.uniforms_recording_gen, None);
+        assert_eq!(retained_item.os.draw_call_uniforms_gen, None);
+        assert_eq!(retained_item.os.user_uniforms_gen, None);
+
+        let recording_gen = cx.next_uniform_gen();
+        let list_uniforms_gen = cx.next_uniform_gen();
+        cx.draw_lists[reused_id].clear_draw_items(2, recording_gen, list_uniforms_gen);
+        let second_gen = cx.next_uniform_gen();
+        cx.draw_lists[reused_id]
+            .draw_items
+            .push_item(2, CxDrawKind::DrawCall(test_draw_call(second_gen)));
+
+        let issued = [first_gen, recording_gen, list_uniforms_gen, second_gen];
+        assert!(issued.iter().all(|gen| *gen != 0));
+        let unique: HashSet<_> = issued.into_iter().collect();
+        assert_eq!(unique.len(), issued.len());
+        assert_eq!(
+            cx.draw_lists[reused_id].draw_items[0]
+                .kind
+                .draw_call()
+                .unwrap()
+                .uniforms_gen,
+            second_gen
+        );
+    }
+
+    #[test]
+    fn clear_draw_items_resets_uniform_upload_generations() {
+        let mut draw_list = CxDrawList::default();
+        let item = draw_list
+            .draw_items
+            .push_item(1, CxDrawKind::DrawCall(test_draw_call(1)));
+        item.os.uniforms_recording_gen = Some(2);
+        item.os.draw_call_uniforms_gen = Some(3);
+        item.os.user_uniforms_gen = Some(4);
+
+        draw_list.clear_draw_items(2, 5, 6);
+
+        let item = &draw_list.draw_items.buffer[0];
+        assert_eq!(item.os.uniforms_recording_gen, None);
+        assert_eq!(item.os.draw_call_uniforms_gen, None);
+        assert_eq!(item.os.user_uniforms_gen, None);
+        assert_eq!(draw_list.recording_gen, 5);
+        assert_eq!(draw_list.uniforms_gen, 6);
     }
 }

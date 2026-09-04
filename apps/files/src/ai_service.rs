@@ -22,14 +22,16 @@ use std::{
         mpsc::{channel, Receiver, Sender},
         Arc,
     },
-    thread,
 };
 
 use makepad_ai_services::wire::{ServiceCall, ToolResult};
 use makepad_strict_json as json;
-use makepad_widgets::makepad_platform::thread::SignalToUI;
+use makepad_widgets::makepad_platform::thread::{SignalToUI, ThreadOptions, ThreadSpawner};
 
 use crate::chat_tools::{run_with, ToolJob, ToolOutcome};
+
+#[cfg(test)]
+use std::thread;
 
 /// One call on its way to the worker.
 struct ServiceJob {
@@ -52,17 +54,13 @@ pub struct ServiceRunner {
     live: HashMap<String, Arc<AtomicBool>>,
 }
 
-impl Default for ServiceRunner {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl ServiceRunner {
-    pub fn new() -> Self {
+    pub fn new(spawner: &ThreadSpawner) -> Self {
         let (jobs, job_rx) = channel::<ServiceJob>();
         let (reply_tx, replies) = channel::<ServiceReply>();
-        thread::spawn(move || {
+        if let Ok(handle) = spawner.spawn_worker(
+            ThreadOptions { name: Some("files-ai-service".into()), ..Default::default() },
+            move || {
             while let Ok(ServiceJob { call_id, job, cancel }) = job_rx.recv() {
                 let (result, mutated) = if cancel.load(Ordering::Relaxed) {
                     // Given up on while it waited its turn: never started.
@@ -93,7 +91,10 @@ impl ServiceRunner {
                 }
                 SignalToUI::set_ui_signal();
             }
-        });
+            },
+        ) {
+            handle.detach();
+        }
         Self { jobs, replies, live: HashMap::new() }
     }
 
@@ -211,7 +212,8 @@ mod tests {
     #[test]
     fn results_carry_their_own_call_ids_and_a_queued_cancel_never_runs() {
         let home = crate::model::home_dir();
-        let mut runner = ServiceRunner::new();
+        let spawner = makepad_widgets::Cx::new(Box::new(|_, _| {})).thread_spawner();
+        let mut runner = ServiceRunner::new(&spawner);
         // An unknown tool is refused; a jail escape is refused; both keep
         // their ids whatever order the worker answers in.
         runner.submit(&call("a", "stat", r#"{"path":"/etc/passwd"}"#), home.clone(), home.clone());

@@ -17,11 +17,18 @@
 
 use crate::cue::SlotId;
 use crate::decks::DeckId;
-use crate::mixer::{Mixer, TrackPcm, MAX_VIDEO_PLAYBACK_RATE, MIN_VIDEO_PLAYBACK_RATE};
+use crate::mixer::{
+    Mixer, StreamPcm, TrackPcm, MAX_VIDEO_PLAYBACK_RATE, MIN_VIDEO_PLAYBACK_RATE,
+    STREAM_CHUNK_FRAMES,
+};
 use crate::pads::PadKey;
+use crate::wave_analysis::{WaveHop, WaveHopBuilder, ZOOM_COLS_PER_SEC};
 use makepad_asset_data::{AssetRevisionId, MediaType, ThumbnailCells};
-use makepad_audio_decode::{decode_audio_limited, AudioFormat, Limits as AudioLimits};
-use makepad_widgets::makepad_platform::thread::{lock_from_ui, ThreadSpawner};
+use makepad_audio_decode::{
+    decode_audio_limited, mp3::Mp3Decoder, vorbis::VorbisDecoder, AudioFormat,
+    Limits as AudioLimits,
+};
+use makepad_widgets::makepad_platform::thread::{Lane, TaskPool, ThreadOptions, ThreadSpawner};
 use makepad_widgets::makepad_platform::video_file::{nv12, VideoFileDecoder, VideoFileInfo};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -393,6 +400,8 @@ impl SlotPlayer {
         mixer: Mixer,
         loop_on: bool,
         start_paused: bool,
+        spawner: ThreadSpawner,
+        pool: TaskPool,
     ) -> Result<SlotPlayer, String> {
         let input = DecoderInput::prepare(Path::new(path), media)?;
         let info = VideoFileDecoder::open(&input.path)
@@ -434,9 +443,12 @@ impl SlotPlayer {
         mixer.set_slot_paused(slot, start_paused);
         let thread_shared = shared.clone();
         let thread_mixer = mixer.clone();
-        std::thread::Builder::new()
-            .name(format!("vj-slot-{:?}", slot))
-            .spawn(move || decode_loop(slot, input, thread_mixer, thread_shared))
+        // The slot's decode loop lives as long as the slot; its repeat-cache
+        // fills are heavy pool jobs.
+        let options = ThreadOptions { name: Some("vj-slot-decode".into()), ..Default::default() };
+        spawner
+            .spawn_worker(options, move || decode_loop(slot, input, thread_mixer, thread_shared, pool))
+            .map(|handle| handle.detach())
             .map_err(|e| e.to_string())?;
         Ok(SlotPlayer {
             width: info.width,
@@ -529,7 +541,9 @@ impl SlotPlayer {
     /// The eager repeat cache, once complete — the tweener reads frame
     /// pairs straight out of it.
     pub fn cache_frames(&self) -> Option<Arc<Vec<Frame>>> {
-        lock_from_ui(&self.shared.repeat_cache).frames.clone()
+        // The fill thread holds this while it works; a frame in which it
+        // does simply reads as "not yet" instead of waiting on it.
+        self.shared.repeat_cache.try_lock().ok()?.frames.clone()
     }
 
     /// A stable identity for this player (this cue of this clip): the
@@ -779,7 +793,13 @@ impl Drop for SlotPlayer {
     }
 }
 
-fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<SlotShared>) {
+fn decode_loop(
+    slot: SlotId,
+    input: DecoderInput,
+    mixer: Mixer,
+    shared: Arc<SlotShared>,
+    pool: TaskPool,
+) {
     let path = &input.path;
     let mut decoder = match VideoFileDecoder::open(path) {
         Ok(d) => d,
@@ -809,7 +829,7 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
         }
         // The eager fill worker: spawned/refreshed here (a no-op lock
         // when settled). Trim-epoch invalidation lives inside it.
-        ensure_repeat_fill(&shared, path, &info);
+        ensure_repeat_fill(&shared, path, &info, &pool);
         // Seek: reopen and discard up to the target.
         let seek = shared.seek_100ns.swap(-1, Ordering::AcqRel);
         if seek >= 0 {
@@ -925,6 +945,10 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                 Instant::now() >= preroll_deadline,
             );
             shared.preroll_status.store(status as u8, Ordering::Release);
+            // Native-only: `decode_loop` returns at the top on wasm32
+            // (`VideoFileDecoder::open` is a Windows / macOS / Linux stub
+            // there and always fails), so nothing below that point runs.
+            #[cfg(not(target_arch = "wasm32"))]
             std::thread::sleep(Duration::from_millis(8));
             continue;
         }
@@ -967,6 +991,8 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
             }
         }
         if shared.frames.lock().unwrap().len() >= RING_FRAMES {
+            // Native-only: see the preroll wait above.
+            #[cfg(not(target_arch = "wasm32"))]
             std::thread::sleep(Duration::from_millis(4));
             continue;
         }
@@ -1214,6 +1240,8 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                         return;
                     }
                     if mixer.slot_buffered_secs(slot) > AUDIO_AHEAD_SECS {
+                        // Native-only: see the preroll wait above.
+                        #[cfg(not(target_arch = "wasm32"))]
                         std::thread::sleep(Duration::from_millis(20));
                         continue;
                     }
@@ -1249,6 +1277,8 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                         shared.end_of_stream.store(false, Ordering::Release);
                         break;
                     }
+                    // Native-only: see the preroll wait above.
+                    #[cfg(not(target_arch = "wasm32"))]
                     std::thread::sleep(Duration::from_millis(20));
                 }
                 match VideoFileDecoder::open(&path) {
@@ -1291,7 +1321,12 @@ struct RepeatCacheSlot {
 /// iteration. Cheap when settled (one lock). The budget verdict is
 /// ARITHMETIC — window length × NV12 frame bytes — so an over-budget clip
 /// is known the instant it is cued, not minutes into a decode.
-fn ensure_repeat_fill(shared: &Arc<SlotShared>, path: &str, info: &VideoFileInfo) {
+fn ensure_repeat_fill(
+    shared: &Arc<SlotShared>,
+    path: &str,
+    info: &VideoFileInfo,
+    pool: &TaskPool,
+) {
     if PlayMode::from_u8(shared.mode.load(Ordering::Acquire)) == PlayMode::Once {
         return;
     }
@@ -1339,14 +1374,19 @@ fn ensure_repeat_fill(shared: &Arc<SlotShared>, path: &str, info: &VideoFileInfo
     }
     let shared = shared.clone();
     let path = path.to_string();
-    let _ = std::thread::Builder::new().name("vj-cache-fill".into()).spawn(move || {
+    match pool.submit(Lane::Heavy, move || {
         let t0 = Instant::now();
         let ok = repeat_fill_worker(&shared, &path, epoch, t_in, t_out, open_ended);
         shared.repeat_cache.lock().unwrap().filling = false;
         if tl_on() {
             eprintln!("tl fill done ok={ok} in {}ms", t0.elapsed().as_millis());
         }
-    });
+    }) {
+        Ok(handle) => handle.detach(),
+        Err(error) => {
+            makepad_widgets::log!("vj repeat-cache worker unavailable: {error}");
+        }
+    }
 }
 
 /// The fill itself: a PRIVATE decoder, video track only, running at
@@ -1537,7 +1577,14 @@ fn park_while_resident(shared: &Arc<SlotShared>, has_audio: bool) {
         if shared.repeat_cache.lock().unwrap().frames.is_none() {
             return;
         }
+        // Native-only: called only from `decode_loop`, which returns
+        // before this point on wasm32 (`VideoFileDecoder` is a Windows /
+        // macOS / Linux stub there, so `VideoFileDecoder::open` always
+        // fails first).
+        #[cfg(not(target_arch = "wasm32"))]
         std::thread::sleep(Duration::from_millis(8));
+        #[cfg(target_arch = "wasm32")]
+        return;
     }
 }
 
@@ -1577,16 +1624,22 @@ fn seek_bounce_playback(
             || (has_audio && !shared.muted.load(Ordering::Acquire))
     }
     /// Pause-aware ring backpressure; true = exit requested.
+    // Native-only: `seek_bounce_playback` (and this nested `wait_ring`) is
+    // only ever called from `decode_loop`, which returns before this point
+    // on wasm32 (`VideoFileDecoder::open` is a Windows / macOS / Linux
+    // stub there and always fails).
     fn wait_ring(shared: &SlotShared, has_audio: bool, epoch0: u64) -> bool {
         loop {
             if must_exit(shared, has_audio, epoch0) {
                 return true;
             }
             if shared.paused.load(Ordering::Acquire) {
+                #[cfg(not(target_arch = "wasm32"))]
                 std::thread::sleep(Duration::from_millis(8));
                 continue;
             }
             if shared.frames.lock().unwrap().len() >= RING_FRAMES {
+                #[cfg(not(target_arch = "wasm32"))]
                 std::thread::sleep(Duration::from_millis(4));
                 continue;
             }
@@ -1697,6 +1750,8 @@ fn seek_bounce_playback(
             }
             scratching = scratch_on;
             if shared.paused.load(Ordering::Acquire) && !scratching {
+                // Native-only: see the comment on `wait_ring` above.
+                #[cfg(not(target_arch = "wasm32"))]
                 std::thread::sleep(Duration::from_millis(8));
                 continue;
             }
@@ -1767,11 +1822,15 @@ fn seek_bounce_playback(
                     // Ping-pong: the leg ends when the last resident
                     // frame has been served; a pinned scratch just holds.
                     if scratching {
+                        // Native-only: see the comment on `wait_ring` above.
+                        #[cfg(not(target_arch = "wasm32"))]
                         std::thread::sleep(Duration::from_millis(4));
                         continue;
                     }
                     break;
                 } else {
+                    // Native-only: see the comment on `wait_ring` above.
+                    #[cfg(not(target_arch = "wasm32"))]
                     std::thread::sleep(Duration::from_millis(2));
                     continue;
                 }
@@ -1854,6 +1913,8 @@ fn seek_bounce_playback(
                 }
             } else {
                 // Ring full, window decoded, resident still serving.
+                // Native-only: see the comment on `wait_ring` above.
+                #[cfg(not(target_arch = "wasm32"))]
                 std::thread::sleep(Duration::from_millis(2));
             }
         }
@@ -2047,6 +2108,354 @@ impl DecodeSource {
             Self::Path(path) => std::fs::read(path).map_err(|error| error.to_string()),
             Self::Bytes(bytes) => Ok(bytes.to_vec()),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// streaming deck decode
+// ---------------------------------------------------------------------------
+
+/// How much of a track must be in before the deck opens on it. From then on
+/// the decoder stays ahead by construction: the voice waits at the decoded
+/// edge rather than ever reading past it.
+pub const PLAYABLE_LEAD_SECS: f64 = 2.5;
+
+/// Cuts a decoder's output into ordered [`DeckChunk`]s for the deck while
+/// keeping the whole track for the analysis that needs it entire. The
+/// worker's side of the stream; [`DeckStream`] is the UI's.
+struct StreamCutter<'a> {
+    frames: Vec<[i16; 2]>,
+    sample_rate: u32,
+    total_hint: Option<usize>,
+    max_frames: usize,
+    emitted: usize,
+    seq: u32,
+    hops: WaveHopBuilder,
+    /// `None` for a decode nobody is listening to chunk by chunk (the stems
+    /// prefetch): the track is still assembled, nothing is copied out.
+    sink: Option<&'a mut dyn FnMut(DeckChunk)>,
+}
+
+impl<'a> StreamCutter<'a> {
+    fn new(
+        sample_rate: u32,
+        total_hint: Option<usize>,
+        max_frames: usize,
+        sink: Option<&'a mut dyn FnMut(DeckChunk)>,
+    ) -> StreamCutter<'a> {
+        let sample_rate = sample_rate.max(1);
+        let total_hint = total_hint.filter(|frames| *frames > 0).map(|frames| frames.min(max_frames));
+        StreamCutter {
+            frames: Vec::with_capacity(total_hint.unwrap_or(0)),
+            sample_rate,
+            total_hint,
+            max_frames,
+            emitted: 0,
+            seq: 0,
+            hops: WaveHopBuilder::new(sample_rate),
+            sink,
+        }
+    }
+
+    #[inline]
+    fn push(&mut self, frame: [i16; 2]) -> Result<(), String> {
+        if self.frames.len() >= self.max_frames {
+            return Err("audio clip exceeds the decode budget".into());
+        }
+        self.frames.push(frame);
+        Ok(())
+    }
+
+    /// Send every whole chunk that is in, keeping `holdback` frames back —
+    /// the gapless tail an MP3 only knows to trim once its end is reached.
+    fn flush(&mut self, holdback: usize) {
+        while self.frames.len().saturating_sub(holdback) >= self.emitted + STREAM_CHUNK_FRAMES {
+            self.emit(self.emitted + STREAM_CHUNK_FRAMES, false);
+        }
+    }
+
+    fn emit(&mut self, end: usize, last: bool) {
+        let Some(sink) = self.sink.as_mut() else {
+            self.emitted = end;
+            return;
+        };
+        let slice = &self.frames[self.emitted..end];
+        let mut hops = Vec::with_capacity(slice.len() / self.hops.hop_frames() + 1);
+        self.hops.push(slice, &mut hops);
+        if last {
+            self.hops.finish(&mut hops);
+        }
+        sink(DeckChunk {
+            seq: self.seq,
+            sample_rate: self.sample_rate,
+            total_frames_hint: self.total_hint,
+            frames: Arc::new(slice.to_vec()),
+            hops,
+            last,
+        });
+        self.seq += 1;
+        self.emitted = end;
+    }
+
+    /// The end of the stream: drop `trim_tail` frames, send what is left as
+    /// the last chunk (empty when a full chunk was the end) and hand back
+    /// the whole track.
+    fn finish(mut self, trim_tail: usize, what: &str) -> Result<TrackPcm, String> {
+        let keep = self.frames.len().saturating_sub(trim_tail).max(self.emitted);
+        self.frames.truncate(keep);
+        if self.frames.is_empty() {
+            return Err(format!("{what} decoded to zero frames"));
+        }
+        self.emit(self.frames.len(), true);
+        Ok(TrackPcm { frames: self.frames, sample_rate: self.sample_rate })
+    }
+}
+
+/// Decode a deck track, delivering it in order through `sink` as it comes
+/// off the decoder and returning it whole at the end. WAV parses at once
+/// and streams from memory; MP3 and Ogg Vorbis run the repo's progressive
+/// decoders frame by frame; MP4/M4A pulls the platform decoder's audio
+/// chunks. Native and web share every line of it.
+fn decode_deck_stream(
+    source: &DecodeSource,
+    media: MediaType,
+    max_frames: usize,
+    sink: Option<&mut dyn FnMut(DeckChunk)>,
+) -> Result<TrackPcm, String> {
+    let sample = |v: f32| (v.clamp(-1.0, 1.0) * 32767.0) as i16;
+    match media {
+        MediaType::Wav => {
+            let bytes = source.read_bytes()?;
+            let parsed = parse_wav(&bytes, max_frames)?;
+            let total = parsed.frames.len();
+            let mut cutter = StreamCutter::new(parsed.sample_rate, Some(total), max_frames, sink);
+            cutter.frames = parsed.frames;
+            cutter.flush(0);
+            cutter.finish(0, "wav")
+        }
+        MediaType::Mp4 => {
+            let DecodeSource::Path(path) = source else {
+                return Err("hardware MP4 audio decode is unavailable for in-memory web blobs".into());
+            };
+            // Cache objects are digest-only names; AVURLAsset keys off the
+            // extension. Lease a typed hard link the same way video slots do.
+            let input = DecoderInput::prepare(path, MediaType::Mp4)?;
+            let mut decoder = VideoFileDecoder::open(&input.path).map_err(|e| e.to_string())?;
+            let info = decoder.info().clone();
+            if !info.has_audio {
+                return Err("mp4 has no audio track".into());
+            }
+            // The rate is the first chunk's word, not the container's: some
+            // platform decoders advertise one and deliver another.
+            let mut cutter: Option<StreamCutter> = None;
+            let mut sink = sink;
+            loop {
+                match decoder.next_audio().map_err(|e| e.to_string())? {
+                    None => break,
+                    Some(chunk) => {
+                        let rate = chunk.sample_rate.max(1);
+                        let cutter = match cutter.as_mut() {
+                            Some(cutter) if cutter.sample_rate != rate => {
+                                return Err("mp4 audio changes sample rate mid-stream".into());
+                            }
+                            Some(cutter) => cutter,
+                            None => {
+                                let hint = (info.duration_100ns > 0).then(|| {
+                                    (info.duration_100ns as f64 / 10_000_000.0 * rate as f64) as usize
+                                });
+                                cutter.insert(StreamCutter::new(rate, hint, max_frames, sink.take()))
+                            }
+                        };
+                        let ch = chunk.channels.max(1) as usize;
+                        for frame in chunk.samples.chunks_exact(ch) {
+                            cutter.push([frame[0], frame[ch - 1]])?;
+                        }
+                        cutter.flush(0);
+                    }
+                }
+            }
+            match cutter {
+                Some(cutter) => cutter.finish(0, "mp4 audio"),
+                None => Err("mp4 audio decoded to zero frames".into()),
+            }
+        }
+        MediaType::Mp3 => {
+            let bytes = source.read_bytes()?;
+            let mut decoder =
+                Mp3Decoder::with_limits(&bytes, AudioLimits::with_max_frames(max_frames))
+                    .map_err(|e| e.to_string())?;
+            let rate = decoder.rate();
+            let hint = makepad_audio_decode::mp3::probe_duration(&bytes)
+                .ok()
+                .map(|secs| (secs * rate as f64) as usize);
+            // The gapless tail is trimmed once the end is known; those
+            // frames are held back from the stream until then.
+            let (_, skip_back) = decoder.trim();
+            let skip_back = skip_back as usize;
+            let mut cutter = StreamCutter::new(rate, hint, max_frames, sink);
+            let (mut channels, mut frame_rate) = (0u16, 0u32);
+            while let Some(frame) = decoder.next_frame().map_err(|e| e.to_string())? {
+                if channels != 0 && (frame.channels != channels || frame.rate != frame_rate) {
+                    return Err("mp3: format changes mid-stream".into());
+                }
+                channels = frame.channels;
+                frame_rate = frame.rate;
+                let ch = channels.max(1) as usize;
+                for pcm in frame.pcm.chunks_exact(ch) {
+                    cutter.push([sample(pcm[0]), sample(pcm[ch - 1])])?;
+                }
+                cutter.flush(skip_back);
+            }
+            cutter.finish(skip_back, "mp3")
+        }
+        MediaType::Ogg => {
+            let bytes = source.read_bytes()?;
+            let mut decoder =
+                VorbisDecoder::with_limits(&bytes, AudioLimits::with_max_frames(max_frames))
+                    .map_err(|e| e.to_string())?;
+            let channels = decoder.channels().max(1) as usize;
+            let hint = decoder.total_frames().map(|frames| frames as usize);
+            let mut cutter = StreamCutter::new(decoder.rate(), hint, max_frames, sink);
+            while let Some(block) = decoder.next_block().map_err(|e| e.to_string())? {
+                for pcm in block.chunks_exact(channels) {
+                    cutter.push([sample(pcm[0]), sample(pcm[channels - 1])])?;
+                }
+                cutter.flush(0);
+            }
+            cutter.finish(0, "ogg vorbis")
+        }
+        other => Err(format!("unsupported audio media {other:?}")),
+    }
+}
+
+/// The UI thread's side of a streaming deck decode. It takes the worker's
+/// chunks in order, keeps the table the mixer plays from — every chunk
+/// shared with it, nothing copied — and the waveform hops the picture is
+/// drawn from, and says when the deck may open.
+pub struct DeckStream {
+    pub gen: u64,
+    table: Arc<StreamPcm>,
+    next_seq: u32,
+    total_hint: Option<usize>,
+    playable: bool,
+    /// A chunk came out of order or after the end: the rest are dropped,
+    /// and the whole file installs when it lands, as it did before
+    /// streaming existed.
+    broken: bool,
+    pub hops: Vec<WaveHop>,
+}
+
+impl DeckStream {
+    pub fn new(gen: u64) -> DeckStream {
+        DeckStream {
+            gen,
+            table: Arc::new(StreamPcm::new(0, None)),
+            next_seq: 0,
+            total_hint: None,
+            playable: false,
+            broken: false,
+            hops: Vec::new(),
+        }
+    }
+
+    /// Take the next chunk. `Ok(true)` the one time the stream becomes
+    /// playable: the lead is in, or the whole (short) track is.
+    pub fn accept(&mut self, chunk: DeckChunk) -> Result<bool, String> {
+        if self.broken {
+            return Ok(false);
+        }
+        if self.table.complete {
+            self.broken = true;
+            return Err("a chunk arrived after the end of the stream".into());
+        }
+        if chunk.seq != self.next_seq {
+            self.broken = true;
+            return Err(format!(
+                "chunk {} arrived where {} was expected",
+                chunk.seq, self.next_seq
+            ));
+        }
+        if self.next_seq == 0 {
+            self.table = Arc::new(StreamPcm::new(chunk.sample_rate, chunk.total_frames_hint));
+        } else if chunk.sample_rate != self.table.sample_rate {
+            self.broken = true;
+            return Err("the sample rate changed mid-stream".into());
+        }
+        self.next_seq += 1;
+        if chunk.total_frames_hint.is_some() {
+            self.total_hint = chunk.total_frames_hint;
+        }
+        self.hops.extend(chunk.hops);
+        self.table = Arc::new(self.table.with_chunk(chunk.frames, chunk.last));
+        let became = !self.playable
+            && (self.table.seconds() >= PLAYABLE_LEAD_SECS || self.table.complete);
+        if became {
+            self.playable = true;
+        }
+        Ok(became)
+    }
+
+    /// The table the mixer plays from, as of the last chunk.
+    pub fn table(&self) -> Arc<StreamPcm> {
+        self.table.clone()
+    }
+
+    pub fn is_playable(&self) -> bool {
+        self.playable
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.table.complete
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.table.sample_rate
+    }
+
+    pub fn frames(&self) -> usize {
+        self.table.len
+    }
+
+    pub fn seconds(&self) -> f64 {
+        self.table.seconds()
+    }
+
+    /// The track's length as far as anyone knows: the container's claim
+    /// until the end, exact from then on.
+    pub fn expected_frames(&self) -> usize {
+        self.table.expected.max(self.table.len)
+    }
+
+    pub fn expected_seconds(&self) -> f64 {
+        self.table.expected_seconds()
+    }
+
+    /// Decoded over expected, when there is an expectation to measure by.
+    pub fn fraction(&self) -> Option<f32> {
+        if self.total_hint.is_none() && !self.table.complete {
+            return None;
+        }
+        let expected = self.expected_frames().max(1) as f64;
+        Some((self.table.len as f64 / expected).clamp(0.0, 1.0) as f32)
+    }
+
+    /// Waveform columns over the expected length — what the strip is
+    /// scaled to, so the picture fills in from the left.
+    pub fn wave_columns(&self) -> usize {
+        let secs = self.expected_frames() as f64 / self.table.sample_rate.max(1) as f64;
+        (secs * ZOOM_COLS_PER_SEC).ceil() as usize
+    }
+
+    /// Let the audio go once the whole file is on the deck. The hops stay:
+    /// they are the picture until the analysis replaces it.
+    pub fn release_audio(&mut self) {
+        self.table = Arc::new(StreamPcm {
+            sample_rate: self.table.sample_rate,
+            chunks: Vec::new(),
+            len: self.table.len,
+            expected: self.table.expected,
+            complete: self.table.complete,
+        });
     }
 }
 
@@ -2340,7 +2749,32 @@ pub enum PreparedMesh {
     },
 }
 
+/// One ordered piece of a deck's decode, sent while the rest of the file is
+/// still being read. Every chunk is [`STREAM_CHUNK_FRAMES`] long except the
+/// last, which says so; `hops` are the waveform hops those frames make, so
+/// the picture can be drawn as the audio arrives.
+pub struct DeckChunk {
+    pub seq: u32,
+    pub sample_rate: u32,
+    /// The container's own length claim, frames, when it makes one. The
+    /// same on every chunk of a stream.
+    pub total_frames_hint: Option<usize>,
+    pub frames: Arc<Vec<[i16; 2]>>,
+    pub hops: Vec<WaveHop>,
+    pub last: bool,
+}
+
 pub enum DecodeDone {
+    /// A piece of a deck track, ahead of its `Deck` result. In order, and
+    /// only for real loads — the stems prefetch borrows the lane and gets
+    /// its answer whole.
+    DeckChunk {
+        deck: DeckId,
+        gen: u64,
+        chunk: Box<DeckChunk>,
+    },
+    /// The whole track, after its chunks: what the analysis, the stems and
+    /// everything else that needs the file entire is given.
     Deck {
         deck: DeckId,
         gen: u64,
@@ -3538,18 +3972,26 @@ impl ThumbQueue {
             if self.closed.load(Ordering::Acquire) {
                 return None;
             }
-            // The timeout also closes the tiny notify/check race during
-            // teardown; workers otherwise sleep without polling.
+            // `close` takes this same lock around its store + notify (see
+            // below), so there is no notify/check race to guard with a
+            // timeout: every waiter here either observes `closed` already
+            // true above, or is woken by the notify that follows it.
             state = self
                 .cv
-                .wait_timeout(state, Duration::from_secs(1))
-                .unwrap_or_else(|error| error.into_inner())
-                .0;
+                .wait(state)
+                .unwrap_or_else(|error| error.into_inner());
         }
     }
 
     fn close(&self) {
+        // Set `closed` under the same lock `pop` holds while it checks the
+        // flag and waits, so a `close` racing a waiter can never land
+        // between that check and the wait: either it lands before (the
+        // waiter's next check sees `closed`) or after (the waiter is
+        // already parked on the condvar and this notify wakes it).
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         self.closed.store(true, Ordering::Release);
+        drop(state);
         self.cv.notify_all();
     }
 
@@ -3577,13 +4019,25 @@ fn test_sleep_marker(path: &Path) -> Option<Duration> {
     Some(Duration::from_millis(ms))
 }
 
-fn run_heavy_job(job: DecodeJob) -> DecodeDone {
+/// Run one job. `done` is for the pieces a deck decode sends ahead of its
+/// result; the result itself is returned.
+fn run_heavy_job(job: DecodeJob, done: &Sender<DecodeDone>) -> DecodeDone {
     match job {
         DecodeJob::Deck { deck, gen, source, media } => {
-            let result = decode_audio_source(&source, media, MAX_TRACK_FRAMES).map(|pcm| {
-                let peaks = wave_peaks(&pcm, WAVE_COLS);
-                (Arc::new(pcm), peaks)
-            });
+            // The stems prefetch borrows this lane under its own
+            // generation and wants the file whole; nothing listens to its
+            // chunks, so none are cut.
+            let streaming = gen != crate::stems::PREFETCH_GEN;
+            let mut sink = |chunk: DeckChunk| {
+                let _ = done.send(DecodeDone::DeckChunk { deck, gen, chunk: Box::new(chunk) });
+            };
+            let sink: Option<&mut dyn FnMut(DeckChunk)> =
+                if streaming { Some(&mut sink) } else { None };
+            let result =
+                decode_deck_stream(&source, media, MAX_TRACK_FRAMES, sink).map(|pcm| {
+                    let peaks = wave_peaks(&pcm, WAVE_COLS);
+                    (Arc::new(pcm), peaks)
+                });
             DecodeDone::Deck { deck, gen, result }
         }
         DecodeJob::Pad { pad, gen, revision, source, media } => {
@@ -3688,7 +4142,7 @@ impl DecodePool {
 
     /// Start the CPU lanes through Makepad's native/web-worker executor.
     /// Construction starts no OS primitive, so the web build never falls
-    /// through `std::thread::spawn` and silently loses its decoder.
+    /// through the standard-library launcher and silently loses its decoder.
     pub fn start(&mut self, spawner: ThreadSpawner) {
         let Some(job_rx) = self.heavy_rx.take() else { return };
         let (heavy_workers, thumb_workers) = lane_sizes(spawner.available_parallelism().get());
@@ -3697,13 +4151,14 @@ impl DecodePool {
         for i in 0..heavy_workers {
             let jobs = job_rx.clone();
             let done = self.done_tx.clone();
-            match spawner.spawn(move || loop {
+            let options = ThreadOptions { name: Some(format!("vj-decode-{i}").into()), ..Default::default() };
+            match spawner.spawn_worker(options, move || loop {
                     let job = {
                         let guard = jobs.lock().unwrap();
                         guard.recv()
                     };
                     let Ok(job) = job else { return };
-                    let out = run_heavy_job(job);
+                    let out = run_heavy_job(job, &done);
                     if done.send(out).is_err() {
                         return;
                     }
@@ -3716,7 +4171,8 @@ impl DecodePool {
         for i in 0..thumb_workers {
             let queue = self.thumb_queue.clone();
             let done = self.done_tx.clone();
-            match spawner.spawn(move || loop {
+            let options = ThreadOptions { name: Some(format!("vj-thumb-{i}").into()), ..Default::default() };
+            match spawner.spawn_worker(options, move || loop {
                     let Some((ticket, job)) = queue.pop() else { return };
                     let result = decode_thumb_source(&job.source, job.sheet, job.legacy_may_be_sheet);
                     if !queue.finished(ticket) {
@@ -4478,11 +4934,25 @@ mod tests {
         });
         let deadline = crate::clock::Instant::now() + Duration::from_secs(10);
         let mut results = Vec::new();
+        let mut chunks = Vec::new();
         while results.len() < 2 && crate::clock::Instant::now() < deadline {
-            results.extend(pool.poll());
+            for done in pool.poll() {
+                match done {
+                    DecodeDone::DeckChunk { deck, gen, chunk } => {
+                        assert_eq!((deck, gen), (DeckId::A, 7));
+                        chunks.push(chunk);
+                    }
+                    other => results.push(other),
+                }
+            }
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(results.len(), 2);
+        // The stream precedes the whole: one (short, last) chunk of 50.
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].last);
+        assert_eq!(chunks[0].frames.len(), 50);
+        assert_eq!(chunks[0].total_frames_hint, Some(50));
         for done in results {
             match done {
                 DecodeDone::Deck { deck, gen, result } => {
@@ -4491,6 +4961,7 @@ mod tests {
                     assert_eq!(pcm.frames.len(), 50);
                     assert_eq!(peaks.len(), WAVE_COLS);
                 }
+                DecodeDone::DeckChunk { .. } => unreachable!("chunks were set aside"),
                 DecodeDone::Pad { gen, result, .. } => {
                     assert_eq!(gen, 9);
                     assert!(result.is_err(), "bad wav must fail");
@@ -4508,6 +4979,133 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A synthetic chunk of `frames` frames at `rate`, numbered `seq`.
+    fn chunk(seq: u32, rate: u32, frames: usize, hint: Option<usize>, last: bool) -> DeckChunk {
+        DeckChunk {
+            seq,
+            sample_rate: rate,
+            total_frames_hint: hint,
+            frames: Arc::new(vec![[seq as i16 + 1, 0]; frames]),
+            hops: vec![WaveHop::default(); frames / (rate as usize / 100).max(1)],
+            last,
+        }
+    }
+
+    #[test]
+    fn a_stream_opens_on_the_lead_and_grows_to_its_end() {
+        let rate = 48_000;
+        let hint = Some(STREAM_CHUNK_FRAMES * 2 + 1_000);
+        let mut stream = DeckStream::new(3);
+        // One full chunk at 48 kHz is ~2.73 s: past the lead.
+        assert!(STREAM_CHUNK_FRAMES as f64 / rate as f64 >= PLAYABLE_LEAD_SECS);
+        assert_eq!(stream.accept(chunk(0, rate, STREAM_CHUNK_FRAMES, hint, false)), Ok(true));
+        assert!(stream.is_playable() && !stream.is_complete());
+        assert_eq!(stream.frames(), STREAM_CHUNK_FRAMES);
+        assert_eq!(stream.expected_frames(), hint.unwrap());
+        let fraction = stream.fraction().expect("a hinted stream measures its progress");
+        assert!((fraction - STREAM_CHUNK_FRAMES as f32 / hint.unwrap() as f32).abs() < 1e-4);
+        // The picture is scaled to the expectation, not to what is in.
+        let expected_cols = (hint.unwrap() as f64 / rate as f64 * ZOOM_COLS_PER_SEC).ceil() as usize;
+        assert_eq!(stream.wave_columns(), expected_cols);
+        assert!(stream.hops.len() < expected_cols);
+
+        // Playable is announced once; growth is silent.
+        assert_eq!(stream.accept(chunk(1, rate, STREAM_CHUNK_FRAMES, hint, false)), Ok(false));
+        assert_eq!(stream.table().chunks.len(), 2);
+        // The end: a short last chunk fixes the length exactly, even when
+        // the container over-claimed.
+        assert_eq!(stream.accept(chunk(2, rate, 500, hint, true)), Ok(false));
+        assert!(stream.is_complete());
+        assert_eq!(stream.frames(), STREAM_CHUNK_FRAMES * 2 + 500);
+        assert_eq!(stream.expected_frames(), stream.frames());
+        assert_eq!(stream.fraction(), Some(1.0));
+        assert!(stream.accept(chunk(3, rate, 10, hint, true)).is_err(), "nothing follows the end");
+        // Releasing the audio keeps the geometry for the picture.
+        stream.release_audio();
+        assert!(stream.table().chunks.is_empty());
+        assert_eq!(stream.expected_frames(), STREAM_CHUNK_FRAMES * 2 + 500);
+    }
+
+    #[test]
+    fn a_short_track_opens_on_its_last_chunk_and_the_mixer_table_reads_it() {
+        let rate = 48_000;
+        let mut stream = DeckStream::new(1);
+        // Under the lead, but whole: playable at once.
+        assert_eq!(stream.accept(chunk(0, rate, 4_800, None, true)), Ok(true));
+        assert!(stream.is_playable() && stream.is_complete());
+        assert_eq!(stream.fraction(), Some(1.0));
+        let table = stream.table();
+        assert_eq!(table.len, 4_800);
+        assert!(table.complete);
+        assert!((table.seconds() - 0.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_chunk_out_of_order_breaks_the_stream_quietly() {
+        let rate = 44_100;
+        let mut stream = DeckStream::new(9);
+        assert_eq!(stream.accept(chunk(0, rate, STREAM_CHUNK_FRAMES, None, false)), Ok(true));
+        // No hint and not complete: nothing to measure progress by.
+        assert_eq!(stream.fraction(), None);
+        assert_eq!(stream.expected_frames(), STREAM_CHUNK_FRAMES);
+        let error = stream.accept(chunk(2, rate, STREAM_CHUNK_FRAMES, None, false)).unwrap_err();
+        assert!(error.contains("expected"), "{error}");
+        // The table stands as it was; later chunks are dropped without a word.
+        assert_eq!(stream.frames(), STREAM_CHUNK_FRAMES);
+        assert_eq!(stream.accept(chunk(3, rate, STREAM_CHUNK_FRAMES, None, false)), Ok(false));
+        assert_eq!(stream.frames(), STREAM_CHUNK_FRAMES);
+        assert!(!stream.is_complete());
+    }
+
+    #[test]
+    fn the_cutter_streams_a_wav_in_order_and_returns_it_whole() {
+        let dir = std::env::temp_dir().join(format!("vj_stream_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Two full chunks and a tail, every frame numbered by position.
+        let total = STREAM_CHUNK_FRAMES * 2 + 12_345;
+        let frames: Vec<(i16, i16)> =
+            (0..total).map(|i| ((i % 30_000) as i16, -((i % 30_000) as i16))).collect();
+        let path = dir.join("numbered.wav");
+        std::fs::write(&path, wav_pcm16(&frames, 44_100)).unwrap();
+
+        let mut chunks: Vec<DeckChunk> = Vec::new();
+        let mut sink = |chunk: DeckChunk| chunks.push(chunk);
+        let pcm = decode_deck_stream(
+            &DecodeSource::Path(path.clone()),
+            MediaType::Wav,
+            MAX_TRACK_FRAMES,
+            Some(&mut sink),
+        )
+        .expect("the numbered wav decodes");
+        assert_eq!(pcm.frames.len(), total);
+        assert_eq!(chunks.len(), 3);
+        let mut assembled: Vec<[i16; 2]> = Vec::new();
+        let mut hops = 0usize;
+        for (index, chunk) in chunks.iter().enumerate() {
+            assert_eq!(chunk.seq as usize, index);
+            assert_eq!(chunk.sample_rate, 44_100);
+            assert_eq!(chunk.total_frames_hint, Some(total));
+            assert_eq!(chunk.last, index == 2);
+            assert_eq!(chunk.frames.len(), if chunk.last { 12_345 } else { STREAM_CHUNK_FRAMES });
+            assembled.extend_from_slice(&chunk.frames);
+            hops += chunk.hops.len();
+        }
+        // The chunks ARE the track, in order, and the hops cover it once.
+        assert_eq!(assembled, pcm.frames);
+        assert_eq!(hops, total.div_ceil(441));
+
+        // Nobody listening: the same track, no chunks cut.
+        let whole = decode_deck_stream(
+            &DecodeSource::Path(path),
+            MediaType::Wav,
+            MAX_TRACK_FRAMES,
+            None,
+        )
+        .expect("decodes without a sink");
+        assert_eq!(whole.frames, pcm.frames);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -5227,6 +5825,8 @@ mod mode_flip_tests {
             mixer,
             true,  // loop on
             false, // playing
+            crate::test_thread_spawner(),
+            crate::test_task_pool(),
         )
         .expect("open");
         player.set_muted(true);

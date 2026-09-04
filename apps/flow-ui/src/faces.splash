@@ -1,0 +1,256 @@
+use mod.prelude.widgets.*
+use mod.widgets.*
+// The face prelude (DESIGN.md §3). Evaluated in the instance's isolate after
+// the core + recipe preludes, so `mod.flow.ui.*` become REAL widget
+// prototypes and every node type's default `ui` is re-pointed at them.
+//
+// How a face talks to the flow, read by the host from each widget's own
+// object. They are written with `:=` (a typed widget refuses an unknown
+// `name:` property, but keeps `name :=` entries beside its children):
+//   bind := @self           design: Input.value graph param; run: locked snapshot input
+//   bind := "node.port"     design graph setting (run faces are inert)
+//   show := @self           a display widget receives this node's first output
+//   show := "node.port"     → that port's value on node.done / node.delta
+//   param := @name          a display widget shows the graph param `name`
+//   param_bind := @name     an input widget edits the graph param `name` (a graph PUT)
+// Handlers see `flow` (flow.input / flow.inputs / flow.value / flow.state /
+// flow.run / flow.cancel / flow.param) and the face hooks `on_value` and
+// `on_state` on the face object; every bridge call is queued to the next frame.
+//
+// The canvas pads a card's content (14 px) and draws the port strip above
+// it. Generator cards contain settings only; OutputFace owns result media.
+
+let Face = View{
+    width: Fill
+    height: Fit
+    flow: Down
+    spacing: theme.space_2
+}
+
+let Meta = Label{
+    width: Fill
+    height: Fit
+    text: ""
+    draw_text +: {
+        color: theme.flow_text_muted
+        text_style: theme.font_regular{font_size: 9}
+    }
+}
+
+let Body = Label{
+    width: Fill
+    height: Fit
+    text: ""
+    draw_text +: {
+        color: theme.flow_text_body
+        text_style: theme.font_regular{font_size: 9.5}
+    }
+}
+
+let FaceInput = TextInput{
+    width: Fill
+    height: 96
+    is_multiline: true
+    draw_text +: {
+        text_style: theme.font_regular{font_size: 10.5}
+    }
+}
+
+let Number = mod.widgets.FabValueInput{
+    width: Fill
+    height: 24
+    precision: 0
+    quantize: true
+}
+
+let Strip = View{
+    width: Fill
+    height: Fit
+    flow: Down
+    spacing: theme.space_2
+    padding: Inset{left: 14 right: 14 top: 10 bottom: 12}
+}
+
+let Row = View{
+    width: Fill
+    height: Fit
+    flow: Right
+    spacing: theme.space_2
+}
+
+mod.flow.ui.NodeFace = Face{}
+
+mod.flow.ui.InputFace = Face{
+    value := FaceInput{
+        empty_text: "Type the input value"
+        bind := @self
+    }
+}
+
+mod.flow.ui.TextFace = mod.flow.ui.InputFace{}
+
+mod.flow.ui.OutputFace = Face{
+    spacing: 0
+    value := mod.flow.ui.ValueView{
+        show := @self
+    }
+}
+
+mod.flow.ui.PublishFace = Face{
+    params := Strip{
+        title := TextInput{width: Fill height: 28 empty_text: "default title" param_bind := @title}
+        namespace := TextInput{width: Fill height: 28 param_bind := @namespace}
+        tags := TextInput{width: Fill height: 28 empty_text: "flow, tag" param_bind := @tags}
+    }
+    published := Meta{show := @self}
+}
+
+mod.flow.ui.LlmFace = Face{
+    model := mod.flow.ui.ModelPicker{
+        param_bind := @model
+    }
+    system := FoldHeader{
+        header: View{
+            width: Fill
+            height: Fit
+            flow: Right
+            align: Align{y: 0.5}
+            spacing: theme.space_1
+            FoldButton{}
+            Meta{width: Fit text: "system prompt"}
+        }
+        body: View{
+            width: Fill
+            height: Fit
+            flow: Down
+            padding: Inset{left: 18 top: 2 bottom: 6}
+            text := Meta{param := @system}
+        }
+        animator +: {
+            active +: {
+                default: @off
+            }
+        }
+    }
+    out_scroll := mod.flow.ui.TextScroll{
+        out := Markdown{
+            width: Fill
+            height: Fit
+            body: ""
+            show := @self
+        }
+    }
+}
+
+mod.flow.ui.FnFace = Face{
+    params := Strip{}
+    code_scroll := mod.flow.ui.TextScroll{
+        code := Label{
+            width: Fill
+            height: Fit
+            draw_text +: {
+                color: theme.flow_text_code
+                text_style: theme.font_code{font_size: 9}
+            }
+            param := @run
+        }
+    }
+    out := mod.flow.ui.ValueText{
+        show := @self
+    }
+}
+
+mod.flow.ui.HttpFace = Face{
+    url := Body{param := @url}
+    status := Meta{show := @meta}
+    out := mod.flow.ui.ValueView{
+        show := @self
+    }
+}
+
+mod.flow.ui.AskFace = Face{
+    question_scroll := mod.flow.ui.TextScroll{
+        question := Body{param := @question}
+    }
+    choice := ComboBox{
+        width: Fill
+        height: 26
+        param := @options
+        bind := @self
+    }
+    answer := TextInput{
+        width: Fill
+        height: 32
+        empty_text: "Answer"
+        bind := @self
+    }
+    answer_button := Button{
+        width: Fill
+        text: "Answer"
+    }
+}
+
+mod.flow.ui.ImageFace = Face{
+    spacing: 0
+    params := Strip{
+        summary := Meta{param := @summary}
+        format := mod.flow.ui.FormatPicker{}
+        Row{
+            steps := Number{label: "steps" min: 1 max: 50 step: 0.25 snap: 1 param_bind := @steps}
+            seed := mod.flow.ui.SeedPicker{param_bind := @seed}
+        }
+        model := mod.flow.ui.ModelPicker{
+            param_bind := @model
+        }
+    }
+}
+
+mod.flow.ui.UpscaleFace = Face{
+    spacing: 0
+    params := Strip{
+        summary := Meta{param := @summary}
+        model := mod.flow.ui.ModelPicker{
+            param_bind := @model
+        }
+    }
+}
+
+mod.flow.ui.GenFace = Face{
+    domain := Meta{param := @domain}
+    params := Strip{
+        format := mod.flow.ui.FormatPicker{}
+        seed := mod.flow.ui.SeedPicker{param_bind := @seed}
+        model := mod.flow.ui.ModelPicker{
+            param_bind := @model
+        }
+    }
+}
+
+// The node types keep the objects the core prelude gave them; only their
+// default faces are re-pointed at the real widgets.
+mod.flow.Node.ui = nil
+mod.flow.Input.ui = mod.flow.ui.InputFace
+mod.flow.Text.ui = mod.flow.ui.TextFace
+mod.flow.Output.ui = mod.flow.ui.OutputFace
+mod.flow.Publish.ui = mod.flow.ui.PublishFace
+mod.flow.Llm.ui = mod.flow.ui.LlmFace
+mod.flow.Fn.ui = mod.flow.ui.FnFace
+mod.flow.Http.ui = mod.flow.ui.HttpFace
+mod.flow.Ask.ui = mod.flow.ui.AskFace
+mod.flow.Gen.ui = mod.flow.ui.GenFace
+mod.flow.Image.ui = mod.flow.ui.ImageFace
+mod.flow.Upscale.ui = mod.flow.ui.UpscaleFace
+
+mod.flow.ImageFace = mod.flow.ui.ImageFace
+mod.flow.InputFace = mod.flow.ui.InputFace
+mod.flow.TextFace = mod.flow.ui.TextFace
+mod.flow.OutputFace = mod.flow.ui.OutputFace
+mod.flow.PublishFace = mod.flow.ui.PublishFace
+mod.flow.LlmFace = mod.flow.ui.LlmFace
+mod.flow.FnFace = mod.flow.ui.FnFace
+mod.flow.HttpFace = mod.flow.ui.HttpFace
+mod.flow.AskFace = mod.flow.ui.AskFace
+mod.flow.GenFace = mod.flow.ui.GenFace
+mod.flow.UpscaleFace = mod.flow.ui.UpscaleFace
+
+nil
