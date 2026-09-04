@@ -294,15 +294,15 @@ script_mod! {
 
     let KindIcon = mod.draw.DrawSvg{}
 
-    mod.widgets.FlowPortStyle = #(PortStyle::script_api(vm))
-    mod.widgets.FlowNodeStyle = #(NodeStyle::script_api(vm))
-    mod.widgets.FlowCanvasStyles = #(CanvasStyles::script_api(vm))
+    mod.widgets.FlowPortStyle = #(PortStyle::script_component(vm))
+    mod.widgets.FlowNodeStyle = #(NodeStyle::script_component(vm))
+    mod.widgets.FlowCanvasStyles = #(CanvasStyles::script_component(vm))
 
     mod.widgets.FlowCanvasBase = #(FlowCanvas::register_widget(vm))
     mod.widgets.FlowCanvas = set_type_default() do mod.widgets.FlowCanvasBase{
         width: Fill
         height: Fill
-        styles: FlowCanvasStyles{}
+        styles: mod.widgets.FlowCanvasStyles{}
         draw_bg +: {
             cell: 24.0
             origin: vec2(32768.0, 32768.0)
