@@ -120,19 +120,24 @@ impl HttpClient {
             .idle
             .lock()
             .map_err(|_| ClientError::Protocol("HTTP connection lock poisoned".into()))?;
-        let mut stream = match guard.take() {
-            Some(stream) => stream,
-            None => self.connect()?,
+        let (mut stream, reused) = match guard.take() {
+            Some(stream) => (stream, true),
+            None => (self.connect()?, false),
         };
+        let head_budget = head_deadline.unwrap_or(self.limits.head);
 
-        let result = self.call_on(
-            &mut stream,
-            method,
-            target,
-            bearer,
-            body,
-            head_deadline.unwrap_or(self.limits.head),
-        );
+        let mut stale = false;
+        let mut result =
+            self.call_on(&mut stream, method, target, bearer, body, head_budget, &mut stale);
+        if reused && stale {
+            // The server had already closed its idle keep-alive side, so the
+            // request never reached it (nothing of a response came back):
+            // replay it once on a fresh connection. A fresh connection that
+            // dies the same way is a real failure and is reported as one.
+            stream = self.connect()?;
+            result =
+                self.call_on(&mut stream, method, target, bearer, body, head_budget, &mut stale);
+        }
         match result {
             Ok((response, reusable)) => {
                 if reusable {
@@ -164,6 +169,7 @@ impl HttpClient {
         bearer: Option<&str>,
         body: Option<&[u8]>,
         head_budget: Duration,
+        stale: &mut bool,
     ) -> ClientResult<(Response, bool)> {
         let mut request = Vec::with_capacity(256 + body.map_or(0, <[u8]>::len));
         write!(&mut request, "{} {} HTTP/1.1\r\n", method.as_str(), target)
@@ -188,12 +194,12 @@ impl HttpClient {
         if let Some(bytes) = body {
             request.extend_from_slice(bytes);
         }
-        stream
-            .write_all(&request)
-            .map_err(|error| io_error("HTTP request write", error))?;
-        stream
-            .flush()
-            .map_err(|error| io_error("HTTP request flush", error))?;
+        if let Err(error) = stream.write_all(&request).and_then(|()| stream.flush()) {
+            // A peer that closed first refuses the bytes outright: none of
+            // the request was read, so the caller may replay it.
+            *stale = peer_closed(&error);
+            return Err(io_error("HTTP request write", error));
+        }
 
         let head_started = Instant::now();
         let mut bytes = Vec::with_capacity(4096);
@@ -213,10 +219,13 @@ impl HttpClient {
             let mut chunk = [0u8; 4096];
             match stream.read(&mut chunk) {
                 Ok(0) => {
+                    // Closed before a single response byte: the request was
+                    // never answered, so a reused connection was stale.
+                    *stale = bytes.is_empty();
                     return Err(ClientError::Io {
                         op: "HTTP response head",
                         kind: std::io::ErrorKind::UnexpectedEof,
-                    })
+                    });
                 }
                 Ok(count) => bytes.extend_from_slice(&chunk[..count]),
                 Err(error) if retryable_timeout(&error) => {
@@ -224,7 +233,10 @@ impl HttpClient {
                         return Err(ClientError::Timeout("HTTP response head".into()));
                     }
                 }
-                Err(error) => return Err(io_error("HTTP response head", error)),
+                Err(error) => {
+                    *stale = bytes.is_empty() && peer_closed(&error);
+                    return Err(io_error("HTTP response head", error));
+                }
             }
         };
 
@@ -386,6 +398,16 @@ fn find_head_end(bytes: &[u8]) -> Option<usize> {
     bytes.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
+/// The peer had closed the connection before this side used it.
+fn peer_closed(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+    )
+}
+
 fn retryable_timeout(error: &std::io::Error) -> bool {
     matches!(
         error.kind(),
@@ -435,5 +457,62 @@ mod tests {
         assert_eq!(head.status, 200);
         assert_eq!(head.content_length, 12);
         assert!(!head.close);
+    }
+
+    /// Serve `connections` connections; each answers one request with
+    /// `ok` and then closes, the way a server drops an idle keep-alive.
+    /// Every close is reported on the returned channel.
+    fn one_request_per_connection_server(
+        connections: usize,
+        answer: bool,
+    ) -> (SocketAddr, std::sync::mpsc::Receiver<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(connections) {
+                let mut stream = stream.unwrap();
+                if answer {
+                    let mut head = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap() == 1 {
+                        head.push(byte[0]);
+                    }
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok",
+                        )
+                        .unwrap();
+                }
+                drop(stream);
+                closed_tx.send(()).unwrap();
+            }
+        });
+        (addr, closed_rx)
+    }
+
+    #[test]
+    fn a_kept_alive_connection_the_server_closed_is_replayed_on_a_fresh_one() {
+        let (addr, closed) = one_request_per_connection_server(2, true);
+        let client = HttpClient::new(addr, 1024);
+        let first = client.call(Method::Get, "/a", None, None, None).unwrap();
+        assert_eq!(first.body, b"ok");
+        closed.recv().unwrap();
+        // The idle socket is half-closed by now: the call must land on a
+        // second connection instead of surfacing UnexpectedEof.
+        let second = client.call(Method::Get, "/b", None, None, None).unwrap();
+        assert_eq!(second.body, b"ok");
+        closed.recv().unwrap();
+    }
+
+    #[test]
+    fn a_fresh_connection_closed_without_a_response_is_an_error_not_a_retry() {
+        let (addr, closed) = one_request_per_connection_server(2, false);
+        let client = HttpClient::new(addr, 1024);
+        let error = client.call(Method::Get, "/a", None, None, None).unwrap_err();
+        assert!(matches!(error, ClientError::Io { .. }), "{error:?}");
+        closed.recv().unwrap();
+        // No second connection was opened for the replay.
+        assert!(closed.recv_timeout(Duration::from_millis(200)).is_err());
     }
 }

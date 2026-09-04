@@ -2614,9 +2614,13 @@ impl FlowCanvas {
                     || (matches!(state, "done" | "failed") && status.shown < 1.0 - 1e-6)
                     || matches!(state, "done" | "failed");
                 if show {
-                    let bx = r.pos.x as f32 + 12.0;
-                    let by = r.pos.y as f32 + 8.0;
-                    let bw = r.size.x as f32 - 24.0;
+                    // Inset well past the card's 16 px corners so the bar
+                    // sits inside the rounded box, and centred in the header
+                    // strip between the label row and the first port row.
+                    let inset = CARD_RADIUS + 8.0;
+                    let bx = r.pos.x as f32 + inset;
+                    let by = (r.pos.y + (CARD_HEADER_H - PROGRESS_H) * 0.5) as f32;
+                    let bw = r.size.x as f32 - 2.0 * inset;
                     self.draw_over.set_color(1.0, 1.0, 1.0, 0.08);
                     self.draw_over
                         .rounded_rect(bx, by, bw, PROGRESS_H as f32, 2.0);
