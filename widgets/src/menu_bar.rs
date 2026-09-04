@@ -41,6 +41,7 @@
 
 use crate::makepad_script::trap::NoTrap;
 use crate::makepad_script::ScriptObject;
+use crate::makepad_platform::event::TouchState;
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
 script_mod! {
@@ -566,10 +567,6 @@ pub struct MenuBar {
     hot_title: Option<usize>,
     #[rust]
     hot_entry: Option<usize>,
-    /// Focus restored when the menu closes.
-    #[rust]
-    focus_before_open: Area,
-
     #[rust]
     bar_rect: Rect,
     #[rust]
@@ -768,9 +765,6 @@ impl MenuBar {
         if index >= self.defs.len() || self.open_menu == Some(index) {
             return;
         }
-        if self.open_menu.is_none() {
-            self.focus_before_open = cx.key_focus();
-        }
         self.open_menu = Some(index);
         self.panel_scroll = 0.0;
         self.hot_entry = self.first_enabled(index);
@@ -792,7 +786,9 @@ impl MenuBar {
         self.redraw_overlay(cx);
         self.draw_bg.redraw(cx);
         if cx.key_focus() == self.draw_bg.area() {
-            cx.set_key_focus(self.focus_before_open);
+            // Cx tracks the previous focus through area replacements on
+            // redraw. A saved Area here would be stale after drawing a popup.
+            cx.revert_key_focus();
         }
         // The overlay draw list keeps painting until the whole pass is
         // rebuilt, so a close is a full redraw, exactly like FabColorPick's.
@@ -1224,7 +1220,7 @@ impl Widget for MenuBar {
         if matches!(event, Event::WindowLostFocus(_) | Event::PopupDismissed(_)) {
             self.close(cx);
         }
-        if let Event::KeyFocusLost(event) = event {
+        if let Event::KeyFocus(event) | Event::KeyFocusLost(event) = event {
             if event.prev == self.draw_bg.area() {
                 self.close(cx);
             }
@@ -1236,6 +1232,17 @@ impl Widget for MenuBar {
                     self.close(cx);
                     // Not a `return`: the press still belongs to whatever
                     // sits underneath it.
+                }
+            }
+            if let Event::TouchUpdate(event) = event {
+                if !event.touches.is_empty()
+                    && event.touches.iter().all(|touch| {
+                        touch.state == TouchState::Start
+                            && !self.panel_rect.contains(touch.abs)
+                            && !self.bar_rect.contains(touch.abs)
+                    })
+                {
+                    self.close(cx);
                 }
             }
         }

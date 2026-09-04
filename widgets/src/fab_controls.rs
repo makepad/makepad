@@ -1473,12 +1473,7 @@ impl FabValueInputRef {
     }
 
     pub fn ended(&self, actions: &Actions) -> Option<f64> {
-        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            if let FabValueInputAction::Ended(v) = item.cast() {
-                return Some(v);
-            }
-        }
-        None
+        ended_value(actions, self.widget_uid())
     }
 
     pub fn set_value(&self, cx: &mut Cx, v: f64) {
@@ -1490,6 +1485,15 @@ impl FabValueInputRef {
     pub fn value(&self) -> f64 {
         self.borrow().map_or(0.0, |i| i.value())
     }
+}
+
+fn ended_value(actions: &Actions, uid: WidgetUid) -> Option<f64> {
+    for action in actions.filter_widget_actions_cast::<FabValueInputAction>(uid) {
+        if let FabValueInputAction::Ended(v) = action {
+            return Some(v);
+        }
+    }
+    None
 }
 
 // ===========================================================================
@@ -2432,5 +2436,25 @@ mod tests {
         assert_eq!(field_zone(5.0, 200.0, 20.0), FieldZone::Decrement);
         assert_eq!(field_zone(100.0, 200.0, 20.0), FieldZone::Middle);
         assert_eq!(field_zone(195.0, 200.0, 20.0), FieldZone::Increment);
+    }
+
+    #[test]
+    fn ended_finds_commit_after_changed_action() {
+        let uid = WidgetUid(17);
+        let actions: ActionsBuf = vec![
+            Box::new(WidgetAction {
+                data: None,
+                action: Box::new(FabValueInputAction::Changed(72.0)),
+                widget_uid: uid,
+                group: None,
+            }),
+            Box::new(WidgetAction {
+                data: None,
+                action: Box::new(FabValueInputAction::Ended(73.0)),
+                widget_uid: uid,
+                group: None,
+            }),
+        ];
+        assert_eq!(ended_value(&actions, uid), Some(73.0));
     }
 }
