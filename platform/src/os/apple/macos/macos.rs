@@ -1027,7 +1027,7 @@ impl Cx {
                         || self.need_redrawing()
                         || !self.new_next_frames.is_empty()
                         || self.demo_time_repaint
-                        || !self.os.video_players.is_empty()
+                        || self.os.video_players.values().any(|player| player.needs_poll())
                     {
                         needs_timer = true;
                     }
@@ -1250,7 +1250,7 @@ impl Cx {
             }
             MacosEvent::Paint => {
                 // Poll video players for new frames and preparation status
-                let has_video_players = !self.os.video_players.is_empty();
+                let has_video_players = self.os.video_players.values().any(|player| player.needs_poll());
                 if has_video_players {
                     let mut video_events = Vec::new();
                     for (_video_id, player) in self.os.video_players.iter_mut() {
