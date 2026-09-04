@@ -209,8 +209,8 @@ use makepad_widgets::widget_tree::WidgetTreeStats;
 use crate::mix::MixState;
 use makepad_asset_client::side_channels::SideChannelOutcome;
 use makepad_asset_client::{
-    select_file, CatalogSubscriptionEvent, ClientError, ClientEvent, ClientOutput, ClientRequest,
-    RequestId, SessionConnector, SessionHandles, SessionMsg, SessionStatus,
+    select_file, CatalogEventKind, CatalogSubscriptionEvent, ClientError, ClientEvent, ClientOutput,
+    ClientRequest, RequestId, SessionConnector, SessionHandles, SessionMsg, SessionStatus,
     TierPreference,
 };
 use makepad_asset_data::{
@@ -15093,17 +15093,10 @@ p2 {}
         self.video_model.event_touch(None);
     }
 
-    /// Put a just-produced clip on the VIDEO pads this frame. The default
-    /// EFFECT lane hides catalog video, and the single-job `video.generate`
-    /// path never asked the grid to refresh at all — so GENERATE would
-    /// finish and the pads would stay on last night's effects until someone
-    /// clicked VIDEO and waited out the 3s event debounce.
+    /// Queue a just-produced clip for the next complete VIDEO row. Generation
+    /// never changes the operator's current tab or lane; five clips commit as
+    /// one left-edge grid shift when VIDEO is visible again.
     fn present_generated_video(&mut self, cx: &mut Cx, asset: AssetId, title: String) {
-        let video_lane = GridLane::Kind(AssetKind::Video);
-        if self.grid_lane != video_lane {
-            self.set_lower_tab(cx, LowerTab::Grid);
-            self.set_lane(cx, video_lane);
-        }
         let cmds = self
             .video_model
             .ingest_published(asset, title, AssetKind::Video);
@@ -16513,7 +16506,25 @@ p2 {}
                         }),
                     );
                     for ev in events {
-                        self.video_model.event_touch(ev.content_kind);
+                        let direct_video = ev.kind == CatalogEventKind::AssetPublished
+                            && ev.content_kind == Some(AssetKind::Video)
+                            && ev.asset_id.is_some();
+                        let video_metadata = !ev.kind.removes_content()
+                            && ev.content_kind == Some(AssetKind::Video)
+                            && ev.asset_id.is_some()
+                            && !direct_video;
+                        if video_metadata {
+                            // Flow publishes annotation + asset + alias in
+                            // one committed burst. Only the asset event is a
+                            // new grid item; metadata refreshes an active
+                            // VIDEO lane without counting the same clip two
+                            // extra times while another lane is selected.
+                            if self.video_model.kinds.contains(&AssetKind::Video) {
+                                self.video_model.event_touch(ev.content_kind);
+                            }
+                        } else if !direct_video {
+                            self.video_model.event_touch(ev.content_kind);
+                        }
                         self.music_model.event_touch(ev.content_kind);
                         self.sfx_model.event_touch(ev.content_kind);
                         self.mesh_model.event_touch(ev.content_kind);
@@ -16530,12 +16541,37 @@ p2 {}
                                 self.mesh_model.event_remove(asset);
                                 self.grids_dirty = true;
                             } else {
+                                if ev.content_kind == Some(AssetKind::Video) {
+                                    if let Some(alias) = ev.alias.clone() {
+                                        self.video_model.event_alias(asset, alias);
+                                        self.grids_dirty = true;
+                                    }
+                                }
                                 // Republished: every surface forgets the
                                 // revision it remembered for this asset, and
                                 // any tile of it on screen re-resolves in
                                 // place (keeping its current picture until
                                 // the new manifest lands).
+                                if direct_video {
+                                    let title = ev
+                                        .alias
+                                        .as_deref()
+                                        .and_then(|alias| alias.rsplit('/').next())
+                                        .filter(|title| !title.is_empty())
+                                        .unwrap_or("generated video")
+                                        .to_string();
+                                    let cmds = self.video_model.ingest_published(
+                                        asset,
+                                        title,
+                                        AssetKind::Video,
+                                    );
+                                    self.run_cat_cmds(Surface::Video, cmds);
+                                    self.grids_dirty = true;
+                                }
                                 for surface in SURFACES {
+                                    if direct_video && surface == Surface::Video {
+                                        continue;
+                                    }
                                     let cmds =
                                         self.model(surface).event_republished(asset);
                                     if !cmds.is_empty() {
