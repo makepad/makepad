@@ -913,9 +913,9 @@ const DECK_CHAIN_SLOTS: usize = 4;
 
 /// A deck's pre-fader tone chain: a fixed list of slots, walked in order.
 /// Not a `Vec` -- sized once, at compile time, never resized. Today's
-/// three slots are the whole roster and are permanently populated by
+/// four slots are the whole roster and are permanently populated by
 /// construction; a slot that can stand empty, or be reassigned, is a
-/// separate decision for whenever a fourth effect actually needs one.
+/// separate decision for whenever growing the roster again asks for one.
 struct DeckChain {
     slots: [EffectKind; DECK_CHAIN_SLOTS],
 }
