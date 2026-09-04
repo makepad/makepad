@@ -1424,8 +1424,11 @@ impl App {
             .is_none_or(|old| graph_edit::needs_face_remount(old, &graph));
         if let Some(definition) = self.definition.as_mut() {
             // The canvas draws the edit at once; the server's re-evaluation
-            // confirms or corrects it through flow.changed.
+            // confirms or corrects it through flow.changed. The file text
+            // follows the graph the way the server rewrites it, so a remount
+            // mounts against a `Flow{}` that already lists a dropped node.
             definition.graph = Some(graph.clone());
+            definition.source = makepad_flow::graph::write(&graph);
         }
         self.show_graph(cx);
         if remount {

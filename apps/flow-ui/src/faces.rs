@@ -3534,6 +3534,47 @@ Flow{llm function http ask output}
         }
     }
 
+    /// A node dropped from the palette is listed by the source rewritten
+    /// from the graph, so its face mounts. Against the file text from before
+    /// the drop the card wears "is not listed in Flow{}" instead.
+    #[test]
+    fn a_dropped_node_mounts_once_the_source_follows_the_graph() {
+        let source = include_str!("../../../libs/flow/recipes/templates/prompt-to-image.splash");
+        let graph = makepad_flow::graph::evaluate(source, "<dropped-node>").unwrap();
+        let catalog = makepad_flow::graph::prelude_catalog().unwrap();
+        let output = catalog.iter().find(|entry| entry.type_name == "Output").unwrap();
+        let (next, id) = crate::graph_edit::add_node(&graph, output, (400.0, 300.0));
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        let stale = FaceHost::mount(
+            &mut cx,
+            WidgetUid(0),
+            "test",
+            "<dropped-node>",
+            source,
+            &next,
+            &catalog,
+        );
+        assert_eq!(
+            stale.faces.get(&id).unwrap().error.as_deref(),
+            Some(format!("{id} is not listed in Flow{{}}").as_str())
+        );
+        let rewritten = makepad_flow::graph::write(&next);
+        let fresh = FaceHost::mount(
+            &mut cx,
+            WidgetUid(0),
+            "test",
+            "<dropped-node>",
+            &rewritten,
+            &next,
+            &catalog,
+        );
+        assert!(fresh.error.is_none(), "{:?}", fresh.error);
+        let errors = fresh.face_errors(&next);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(fresh.faces.contains_key(&id));
+    }
+
     #[test]
     fn mounted_placeholder_contains_one_type_icon() {
         let source = include_str!("../../../libs/flow/recipes/templates/prompt-to-image.splash");
