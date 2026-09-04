@@ -748,6 +748,16 @@ impl ComboBox {
         let label = self.selected_label().to_string();
         if self.input.text() != label {
             self.input.set_text(cx, &label);
+            // A closed control shows the START of a long label, not the tail
+            // the text field would scroll to after a set_text.
+            self.input.set_cursor(
+                cx,
+                crate::makepad_draw::text::selection::Cursor {
+                    index: 0,
+                    prefer_next_row: false,
+                },
+                false,
+            );
         }
     }
 

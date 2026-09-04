@@ -1123,10 +1123,13 @@ impl ModelPicker {
         picker.set_labels(cx, labels);
         let selected = if self.value.is_empty() { HUB_PICKS } else { &selected };
         picker.set_selected_by_label(selected, cx);
+        // The picker's own label already counts the ready nodes; the GPU
+        // list under a chosen model was clutter (user, 2026-09-04). The note
+        // stays only for a model no node can serve, where it names why.
         let note = self
             .models
             .iter()
-            .find(|model| model.id == self.value)
+            .find(|model| model.id == self.value && model.dimmed)
             .map(|model| model.note.as_str())
             .unwrap_or_default();
         let note_label = self.view.label(cx, ids!(note));
