@@ -134,7 +134,7 @@ fn lerp_color(a: Vec4f, b: Vec4f, t: f64) -> Vec4f {
 /// border, exactly fills the interior instead of flooring a pixel short of
 /// it and leaving a sliver. `border` is the ring's thickness: a tile never
 /// shrinks below two of them and one device pixel.
-fn snap_to_device(r: Rect, dpi: f64, border: f64) -> Rect {
+pub(crate) fn snap_to_device(r: Rect, dpi: f64, border: f64) -> Rect {
     let x0 = (r.pos.x / dpi).round() * dpi;
     let y0 = (r.pos.y / dpi).round() * dpi;
     let x1 = ((r.pos.x + r.size.x) / dpi).round() * dpi;
@@ -150,7 +150,7 @@ fn snap_to_device(r: Rect, dpi: f64, border: f64) -> Rect {
 /// (`Rect::dpi_snap` FLOORS pos and size to multiples of the dpi factor).
 /// Handing it a rect it will not move keeps the child strictly inside the
 /// border ring instead of sliding a pixel over it.
-fn snap_child_rect(r: Rect, dpi: f64) -> Rect {
+pub(crate) fn snap_child_rect(r: Rect, dpi: f64) -> Rect {
     let x0 = (r.pos.x / dpi).ceil() * dpi;
     let y0 = (r.pos.y / dpi).ceil() * dpi;
     let w = (((r.pos.x + r.size.x - x0) / dpi).floor() * dpi).max(dpi);
@@ -199,7 +199,7 @@ fn wash_alpha(glass: f32, arrival: f32) -> f32 {
 /// casts the shadow — gated on the same threshold the shader's square
 /// branch uses (a half-radius under 0.5 is square), so the two never
 /// disagree.
-fn tile_frame(desk: &DeskTokens, material: &MaterialTokens) -> (f32, f32, bool) {
+pub(crate) fn tile_frame(desk: &DeskTokens, material: &MaterialTokens) -> (f32, f32, bool) {
     let ring_half = (desk.corner_radius * 0.5) as f32;
     let child_half = ((desk.corner_radius - desk.border_size).max(0.0) * 0.5) as f32;
     let shadow = material.is_glass() && ring_half >= 0.5;
@@ -602,38 +602,38 @@ script_mod! {
 
 #[derive(Script, ScriptHook)]
 #[repr(C)]
-struct DrawTileBorder {
+pub struct DrawTileBorder {
     #[deref]
     draw_super: DrawQuad,
     #[live]
-    color: Vec4f,
+    pub color: Vec4f,
     #[live]
-    color_end: Vec4f,
+    pub color_end: Vec4f,
     #[live(45.0)]
-    angle: f32,
+    pub angle: f32,
     #[live(2.0)]
-    border_size: f32,
+    pub border_size: f32,
     #[live(0.0)]
-    corner_radius: f32,
+    pub corner_radius: f32,
     #[live]
-    shadow_color: Vec4f,
+    pub shadow_color: Vec4f,
     #[live(0.0)]
-    shadow_radius: f32,
+    pub shadow_radius: f32,
     #[live(0.0)]
-    shadow_offset_y: f32,
+    pub shadow_offset_y: f32,
 }
 
 #[derive(Script, ScriptHook)]
 #[repr(C)]
-struct DrawTilePanel {
+pub struct DrawTilePanel {
     #[deref]
     draw_super: DrawQuad,
     #[live]
-    color: Vec4f,
+    pub color: Vec4f,
     #[live(0.55)]
-    alpha: f32,
+    pub alpha: f32,
     #[live(0.0)]
-    radius: f32,
+    pub radius: f32,
 }
 
 #[derive(Script, ScriptHook)]

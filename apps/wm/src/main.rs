@@ -2325,6 +2325,7 @@ impl App {
             state.gaps_out = tokens.desk.gaps_out;
             state.palette = palette;
         }
+        let borders = self.state_mut().borders;
         if let Some(mut w) = self.ui.widget(cx, ids!(shell_bar)).borrow_mut::<ShellBar>() {
             w.set_tokens(cx, tokens);
         }
@@ -2348,7 +2349,7 @@ impl App {
             w.set_tokens(cx, tokens);
         }
         if let Some(mut w) = self.ui.widget(cx, ids!(shell_ai_pane)).borrow_mut::<ShellAiPane>() {
-            w.set_theme_colors(palette.background, palette.accent);
+            w.set_theme(palette.background, palette.accent, &tokens, &borders);
         }
         // The colours the DSL read off mod.wm_theme when it was evaluated.
         // Under glass the bar's own strip is transparent: the material
