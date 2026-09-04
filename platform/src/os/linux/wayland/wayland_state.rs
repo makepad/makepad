@@ -66,6 +66,119 @@ use super::opengl_wayland::{WaylandPopupWindow, WaylandWindow};
 /// Reserved timer ID for keyboard repeat. Uses a high value to avoid conflicts with app timers.
 const KEY_REPEAT_TIMER_ID: u64 = u64::MAX - 1;
 
+/// Whether a pointer frame's scroll came from a wheel-like source: one that ratchets in
+/// coarse steps, so its detents drive the delta, it carries no gesture phase, and it is
+/// reported to widgets as mouse input.
+///
+/// `source` is the frame's `wl_pointer::AxisSource`, or `None` when the compositor sent
+/// none — the event is optional and only sent when the source is known. With no source,
+/// the detents settle it: a device without discrete steps does not generate them, which
+/// the spec spells out for `axis_discrete`. Guessing wheel-like is in any case the safe
+/// guess, being the one classification that cannot strand a stretched rubber band waiting
+/// for a terminator the spec does not promise.
+fn scroll_is_wheel_like(source: Option<wl_pointer::AxisSource>, has_detents: bool) -> bool {
+    match source {
+        Some(wl_pointer::AxisSource::Wheel) | Some(wl_pointer::AxisSource::WheelTilt) => true,
+        // A trackpoint or button-held scroll is smooth, so it takes the raw pixel path even
+        // though it is not a gesture.
+        Some(wl_pointer::AxisSource::Finger) | Some(wl_pointer::AxisSource::Continuous) => false,
+        _ => has_detents,
+    }
+}
+
+/// What one pointer frame's axis events add up to.
+struct FrameScroll {
+    /// The delta in logical pixels.
+    delta: Vec2d,
+    phase: ScrollPhase,
+    /// Reported as `ScrollEvent::is_mouse`: a wheel that ratchets in steps, which widgets may
+    /// ease between. False for every smooth source, which needs no easing.
+    is_mouse: bool,
+}
+
+/// Resolve a pointer frame's accumulated axis events into one scroll, or `None` when the
+/// frame carries nothing worth dispatching.
+///
+/// `source` is the frame's `wl_pointer::AxisSource` (`None` if the compositor sent none),
+/// `gesture_active` whether the previous frame was a live touchpad gesture, and `stopped`
+/// whether an `AxisStop` arrived in this frame.
+fn frame_scroll(
+    source: Option<wl_pointer::AxisSource>,
+    gesture_active: bool,
+    stopped: bool,
+    acc: Vec2d,
+    detents: Vec2d,
+) -> Option<FrameScroll> {
+    let has_detents = detents.x != 0.0 || detents.y != 0.0;
+    let has_delta = acc.x != 0.0 || acc.y != 0.0 || has_detents;
+    let is_wheel_like = scroll_is_wheel_like(source, has_detents);
+    // `axis_source` is per-frame and optional, so a compositor may name the source on a
+    // gesture's motion frames and omit it on the lift-off frame. Treating that frame as
+    // sourceless would drop the terminator and leave a stretched rubber band with nothing
+    // to release it, so a gesture already in flight carries its classification forward --
+    // but never over a frame whose detents say it is a wheel.
+    let is_finger = match source {
+        Some(wl_pointer::AxisSource::Finger) => true,
+        None => gesture_active && !is_wheel_like,
+        _ => false,
+    };
+    // A stop alongside live motion is not the end of the gesture. Per the `frame` event:
+    // "When a wl_pointer.axis and a wl_pointer.axis_stop event occur within the same frame,
+    // this indicates that axis movement in one axis has stopped but continues in the other
+    // axis." The lift-off frame that does end the gesture carries its stops alone.
+    let gesture_ended = is_finger && stopped && !has_delta;
+    if !has_delta && !gesture_ended {
+        // Only `Finger` is guaranteed an `AxisStop`; the spec tells clients to treat wheel,
+        // wheel_tilt and continuous sequences "as unterminated by default". A bare stop from
+        // one of those says nothing, and dispatching a zero-delta `ScrollPhase::None` for it
+        // would clear a widget's overscroll and cut short a running bounce.
+        return None;
+    }
+    // Scale wheel detents to a fixed distance each, so slow deliberate clicks and fast spins
+    // both move proportionally. Decided per axis: a frame can carry detents on one axis and
+    // only a smooth value on the other, and scaling that second axis by a zero detent count
+    // would silently drop it.
+    //
+    // An axis with no detents keeps its raw value. Compositors pair a detent event with every
+    // wheel-source axis event — `axis_discrete` is documented as absent only for continuous
+    // devices — and the seat binds above the v5 that introduced it, so a physical wheel
+    // always brings one. The fallback is for virtual pointers: `zwlr_virtual_pointer_v1` lets
+    // a client send a wheel-source axis value with no discrete step, and `wl_pointer.axis`
+    // defines that value as a "length of vector in surface-local coordinate space" — already
+    // a distance, with no detent count to recover and no units-per-detent constant that could
+    // recover one (compositors disagree, and hwdb ships wheels from 10 to 30 degrees a click).
+    let axis_scroll = |detent: f64, raw: f64| {
+        if detent != 0.0 {
+            detent * PIXELS_PER_WHEEL_DETENT
+        } else {
+            raw
+        }
+    };
+    // Finger-driven (touchpad) scrolling reports `Changed` per frame and `Ended` when the
+    // fingers lift, which is what drives the rubber band at a scroll limit. Every other
+    // source is a plain delta with no gesture.
+    //
+    // Note this yields no kinetic scrolling for Wayland touchpads: widgets start their fling
+    // on `ScrollPhase::Momentum`, which only macOS emits — there the OS synthesizes that
+    // stream, while Wayland compositors do not and neither Linux backend fabricates one.
+    let phase = if !is_finger {
+        ScrollPhase::None
+    } else if gesture_ended {
+        ScrollPhase::Ended
+    } else {
+        ScrollPhase::Changed
+    };
+    Some(FrameScroll {
+        delta: if is_wheel_like {
+            dvec2(axis_scroll(detents.x, acc.x), axis_scroll(detents.y, acc.y))
+        } else {
+            acc
+        },
+        phase,
+        is_mouse: is_wheel_like,
+    })
+}
+
 fn is_caption_double_click(
     previous: Option<(WindowId, Vec2d, u32)>,
     window_id: WindowId,
@@ -284,12 +397,25 @@ pub(crate) struct WaylandState {
     /// (fractional detents on high-resolution wheels) or `AxisDiscrete` on pre-v8
     /// compositors. Same sign convention as `scroll_accumulator`.
     pub(crate) scroll_detents: Vec2d,
-    pub(crate) scroll_is_wheel: bool,
-    /// Set when `wl_pointer::AxisStop` arrives in the current pointer frame: the fingers
-    /// lifted off the touchpad. The frame's Scroll event is then sent with
-    /// `ScrollPhase::Ended` (even if its delta is zero) so widgets can start their own
-    /// fling — Wayland compositors do not synthesize momentum scrolling for clients.
+    /// The `wl_pointer::AxisSource` reported for the current pointer frame, or `None`
+    /// when the compositor sent no `AxisSource` event — the event is optional ("If the
+    /// source is unknown for a particular axis event sequence, no event is sent") and a
+    /// source value newer than this protocol copy is likewise recorded as `None`. Scoped
+    /// to one frame, so it resets on every `Frame` and must never be assumed to carry
+    /// over. See [`scroll_is_wheel_like`].
+    pub(crate) scroll_source: Option<wl_pointer::AxisSource>,
+    /// Set when `wl_pointer::AxisStop` arrives in the current pointer frame. It ends the
+    /// gesture — sending that frame's Scroll event with `ScrollPhase::Ended`, which springs
+    /// a stretched rubber band back and releases the widget's gesture ownership — only on a
+    /// finger frame that carries no motion of its own. A stop alongside live motion means
+    /// that one axis stopped while the other continues (see the `frame` event), not lift-off,
+    /// and a stop from a source that is not a gesture says nothing at all. See
+    /// [`frame_scroll`].
     pub(crate) scroll_stopped: bool,
+    /// Whether the last dispatched pointer frame was a live touchpad gesture, so that a
+    /// lift-off frame on which the compositor omitted its `AxisSource` is still recognised
+    /// as the end of that gesture rather than as an unclassified scroll.
+    pub(crate) scroll_gesture_active: bool,
     /// Windows whose last presented frame's `wl_surface::frame` callback has not fired
     /// yet. While a window is listed here the compositor is not ready for a new frame
     /// on that surface, so presenting it is skipped (its pass stays dirty). See the
@@ -362,7 +488,8 @@ impl WaylandState {
             event_callback: Some(event_callback),
             scroll_accumulator: dvec2(0.0, 0.0),
             scroll_detents: dvec2(0.0, 0.0),
-            scroll_is_wheel: false,
+            scroll_source: None,
+            scroll_gesture_active: false,
             scroll_stopped: false,
             frame_callbacks_pending: Vec::new(),
             event_flow: EventFlow::Wait,
@@ -1535,6 +1662,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                 state.flush_pending_clipboard_copy(qhandle, serial);
                 state.pointer_window = None;
                 state.pointer_shadow = None;
+                state.scroll_gesture_active = false;
                 state.pointer_enter_serial = None;
                 state.last_resize_edge = None;
                 state.caption_press = None;
@@ -1780,118 +1908,116 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                     }
                 }
             }
-            // Wayland axis values use motion-event coordinates: positive
-            // vertical = downward on screen = content slides down = viewport
-            // moves UP. Makepad's internal convention is positive = viewport
-            // moves DOWN (matching X11 button mapping and macOS after its
-            // negation of scrollingDeltaY). Negate to align conventions,
-            // same as winit does for the same reason.
+            // Wayland axis values already match Makepad's convention: positive vertical =
+            // scroll down = viewport moves DOWN. The spec pins the sign in
+            // wl_pointer::axis_relative_direction, whose `identical` case is fingers moving
+            // down producing a "vertical_scroll down" axis event; libinput documents the
+            // same ("the positive direction being down or right"). So pass the values
+            // through untouched — the compositor has already applied the user's
+            // natural-scrolling preference to the sign, and negating here would invert both
+            // settings. Toolkits that do negate (winit, SDL, Chromium) only do so because
+            // their own convention is inverted; GTK, which shares Makepad's, does not.
             wl_pointer::Event::Axis {
                 time: _,
                 axis,
                 value,
             } => match axis {
                 WEnum::Value(wl_pointer::Axis::VerticalScroll) => {
-                    state.scroll_accumulator.y -= value;
+                    state.scroll_accumulator.y += value;
                 }
                 WEnum::Value(wl_pointer::Axis::HorizontalScroll) => {
-                    state.scroll_accumulator.x -= value;
+                    state.scroll_accumulator.x += value;
                 }
                 _ => {}
             },
             wl_pointer::Event::AxisSource { axis_source } => {
-                state.scroll_is_wheel = axis_source == WEnum::Value(wl_pointer::AxisSource::Wheel);
+                // A source this protocol copy predates (`AxisSource` is `#[non_exhaustive]`)
+                // is as good as no source: record `None` rather than letting it fall through
+                // to the finger branch, which is the one classification that can strand a
+                // stretched rubber band.
+                state.scroll_source = match axis_source {
+                    WEnum::Value(source) => Some(source),
+                    WEnum::Unknown(_) => None,
+                };
             }
             wl_pointer::Event::Frame => {
-                let acc = state.scroll_accumulator;
-                let detents = state.scroll_detents;
-                // Dispatch when there is a scroll delta, or when the touchpad gesture just
-                // ended (AxisStop): the `Ended` event may carry a zero delta but is what lets
-                // widgets start their fling animation at finger lift-off.
-                if acc.x != 0.0
-                    || acc.y != 0.0
-                    || detents.x != 0.0
-                    || detents.y != 0.0
-                    || state.scroll_stopped
-                {
-                    if let Some(window_id) = state.pointer_window {
-                        // Deliver any buffered motion first so the Scroll event's hover
-                        // position is current (Button and Leave already do this).
-                        state.flush_pending_motion();
-                        let time_now = state.time_now();
-                        let scroll = if state.scroll_is_wheel {
-                            if detents.x != 0.0 || detents.y != 0.0 {
-                                // Scale wheel detents to a fixed distance each so slow,
-                                // deliberate clicks and fast spins both move proportionally.
-                                dvec2(
-                                    detents.x * PIXELS_PER_WHEEL_DETENT,
-                                    detents.y * PIXELS_PER_WHEEL_DETENT,
-                                )
-                            } else {
-                                // Some compositors send wheel frames without discrete or
-                                // value120 information; the accumulated axis value is
-                                // already a real distance in pixels.
-                                acc
-                            }
-                        } else {
-                            acc
-                        };
-                        // Wheels have no gesture phases. Finger-driven (touchpad) scrolling
-                        // reports `Changed` per frame and `Ended` when the fingers lift
-                        // (AxisStop), letting widgets run their own momentum fling —
-                        // Wayland compositors do not synthesize momentum for clients.
-                        let phase = if state.scroll_is_wheel {
-                            ScrollPhase::None
-                        } else if state.scroll_stopped {
-                            ScrollPhase::Ended
-                        } else {
-                            ScrollPhase::Changed
-                        };
-                        state.do_callback(XlibEvent::Scroll(ScrollEvent {
-                            window_id,
-                            scroll,
-                            abs: state.last_mouse_pos,
-                            modifiers: state.modifiers,
-                            is_mouse: state.scroll_is_wheel,
-                            handled_x: Cell::new(false),
-                            handled_y: Cell::new(false),
-                            time: time_now,
-                            phase,
-                        }));
-                    }
+                let frame = frame_scroll(
+                    state.scroll_source,
+                    state.scroll_gesture_active,
+                    state.scroll_stopped,
+                    state.scroll_accumulator,
+                    state.scroll_detents,
+                );
+                if let Some(frame) = &frame {
+                    // Tracked whether or not a window is under the pointer, so a gesture that
+                    // starts over one window and lifts over another still terminates.
+                    state.scroll_gesture_active = frame.phase == ScrollPhase::Changed;
+                }
+                if let (Some(frame), Some(window_id)) = (frame, state.pointer_window) {
+                    // Deliver any buffered motion first so the Scroll event's hover
+                    // position is current (Button and Leave already do this).
+                    state.flush_pending_motion();
+                    let time_now = state.time_now();
+                    state.do_callback(XlibEvent::Scroll(ScrollEvent {
+                        window_id,
+                        scroll: frame.delta,
+                        abs: state.last_mouse_pos,
+                        modifiers: state.modifiers,
+                        is_mouse: frame.is_mouse,
+                        handled_x: Cell::new(false),
+                        handled_y: Cell::new(false),
+                        time: time_now,
+                        phase: frame.phase,
+                    }));
                 }
                 state.scroll_accumulator = dvec2(0.0, 0.0);
                 state.scroll_detents = dvec2(0.0, 0.0);
-                state.scroll_is_wheel = false;
+                state.scroll_source = None;
                 state.scroll_stopped = false;
             }
-            wl_pointer::Event::AxisStop { time: _, axis: _ } => {
-                // Fingers lifted off the touchpad: mark the gesture ended so this pointer
-                // frame's Scroll event goes out with `ScrollPhase::Ended`.
-                state.scroll_stopped = true;
+            wl_pointer::Event::AxisStop { time: _, axis } => {
+                // An axis stopped. One flag for the whole frame rather than one per axis:
+                // `ScrollEvent` carries a single phase for both axes, so a per-axis mask
+                // could not be expressed anyway. `frame_scroll` separates the two cases the
+                // protocol defines — "this axis stopped, the other continues" from a real
+                // lift-off — by whether the frame also carries motion.
+                if matches!(
+                    axis,
+                    WEnum::Value(wl_pointer::Axis::VerticalScroll)
+                        | WEnum::Value(wl_pointer::Axis::HorizontalScroll)
+                ) {
+                    state.scroll_stopped = true;
+                }
             }
-            // Wheel detent counts, negated to match the Axis sign convention above.
+            // Wheel detent counts, carrying the same sign convention as the Axis event
+            // above: the spec states each expresses its direction in terms of the positive
+            // or negative direction of the same axis, never inverted relative to it.
             // AxisDiscrete is only sent by compositors below seat v8; v8+ compositors
             // send AxisValue120 instead (120 units per detent, fractional detents
             // allowed for high-resolution wheels), so the two never double-count.
             wl_pointer::Event::AxisDiscrete { axis, discrete } => match axis {
                 WEnum::Value(wl_pointer::Axis::VerticalScroll) => {
-                    state.scroll_detents.y -= discrete as f64;
+                    state.scroll_detents.y += discrete as f64;
                 }
                 WEnum::Value(wl_pointer::Axis::HorizontalScroll) => {
-                    state.scroll_detents.x -= discrete as f64;
+                    state.scroll_detents.x += discrete as f64;
                 }
                 _ => {}
             },
             wl_pointer::Event::AxisValue120 { axis, value120 } => match axis {
                 WEnum::Value(wl_pointer::Axis::VerticalScroll) => {
-                    state.scroll_detents.y -= value120 as f64 / 120.0;
+                    state.scroll_detents.y += value120 as f64 / 120.0;
                 }
                 WEnum::Value(wl_pointer::Axis::HorizontalScroll) => {
-                    state.scroll_detents.x -= value120 as f64 / 120.0;
+                    state.scroll_detents.x += value120 as f64 / 120.0;
                 }
                 _ => {}
             },
+            // Purely informational: the physical direction of the entity that caused the
+            // axis event. The axis value itself already reflects the user's natural-scrolling
+            // setting, so scrolling content must ignore this. It exists for widgets that
+            // should follow the physical wheel regardless of that setting — the spec's
+            // example is a volume slider — which Makepad has no plumbing for, so drop it.
             wl_pointer::Event::AxisRelativeDirection {
                 axis: _,
                 direction: _,
@@ -2307,6 +2433,166 @@ impl WaylandState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wheel_like_sources_take_the_detent_path() {
+        // Wheels and wheel tilts ratchet, whether or not this frame carried detents.
+        for source in [
+            wl_pointer::AxisSource::Wheel,
+            wl_pointer::AxisSource::WheelTilt,
+        ] {
+            assert!(scroll_is_wheel_like(Some(source), true));
+            assert!(scroll_is_wheel_like(Some(source), false));
+        }
+        // A touchpad gesture and a trackpoint / button-held scroll are both smooth.
+        for source in [
+            wl_pointer::AxisSource::Finger,
+            wl_pointer::AxisSource::Continuous,
+        ] {
+            assert!(!scroll_is_wheel_like(Some(source), false));
+            assert!(!scroll_is_wheel_like(Some(source), true));
+        }
+    }
+
+    #[test]
+    fn a_frame_without_an_axis_source_is_classified_by_its_detents() {
+        // `axis_source` is optional, and an unknown value is recorded as `None`. Detents
+        // then decide, and the sourceless default must not be the finger path.
+        assert!(scroll_is_wheel_like(None, true));
+        assert!(!scroll_is_wheel_like(None, false));
+    }
+
+    /// A frame carrying no stop, from a source with no gesture in flight.
+    fn plain_frame(
+        source: Option<wl_pointer::AxisSource>,
+        acc: Vec2d,
+        detents: Vec2d,
+    ) -> Option<FrameScroll> {
+        frame_scroll(source, false, false, acc, detents)
+    }
+
+    #[test]
+    fn each_axis_chooses_detents_or_raw_pixels_on_its_own() {
+        // A wheel frame with a detented vertical axis and a smooth horizontal one: scaling
+        // the horizontal by its zero detent count would drop it entirely.
+        let frame = plain_frame(
+            Some(wl_pointer::AxisSource::Wheel),
+            dvec2(7.5, 15.0),
+            dvec2(0.0, 1.0),
+        )
+        .expect("a frame with a delta dispatches");
+        assert_eq!(frame.delta, dvec2(7.5, PIXELS_PER_WHEEL_DETENT));
+        assert!(frame.is_mouse);
+        assert_eq!(frame.phase, ScrollPhase::None);
+    }
+
+    #[test]
+    fn a_wheel_frame_without_detents_keeps_its_raw_distance_unscaled() {
+        let frame = plain_frame(
+            Some(wl_pointer::AxisSource::Wheel),
+            dvec2(0.0, 15.0),
+            dvec2(0.0, 0.0),
+        )
+        .expect("a frame with a delta dispatches");
+        assert_eq!(frame.delta, dvec2(0.0, 15.0));
+    }
+
+    #[test]
+    fn a_sourceless_frame_with_detents_takes_the_wheel_path() {
+        let frame = plain_frame(None, dvec2(0.0, 15.0), dvec2(0.0, 1.0))
+            .expect("a frame with a delta dispatches");
+        assert_eq!(frame.delta, dvec2(0.0, PIXELS_PER_WHEEL_DETENT));
+        assert!(frame.is_mouse);
+        assert_eq!(frame.phase, ScrollPhase::None);
+    }
+
+    #[test]
+    fn a_touchpad_gesture_reports_changed_then_ended_at_lift_off() {
+        let moving = plain_frame(
+            Some(wl_pointer::AxisSource::Finger),
+            dvec2(0.0, 12.0),
+            dvec2(0.0, 0.0),
+        )
+        .expect("a frame with a delta dispatches");
+        assert_eq!(moving.phase, ScrollPhase::Changed);
+        assert_eq!(moving.delta, dvec2(0.0, 12.0));
+        assert!(!moving.is_mouse);
+
+        // Lift-off: the stops arrive alone, and the zero-delta event is what springs a
+        // stretched rubber band back.
+        let lifted = frame_scroll(
+            Some(wl_pointer::AxisSource::Finger),
+            true,
+            true,
+            dvec2(0.0, 0.0),
+            dvec2(0.0, 0.0),
+        )
+        .expect("a bare stop ends the gesture");
+        assert_eq!(lifted.phase, ScrollPhase::Ended);
+        assert_eq!(lifted.delta, dvec2(0.0, 0.0));
+    }
+
+    #[test]
+    fn a_stop_alongside_live_motion_is_one_axis_stopping_not_lift_off() {
+        // The `frame` event defines axis + axis_stop in one frame as "movement in one axis
+        // has stopped but continues in the other axis".
+        let frame = frame_scroll(
+            Some(wl_pointer::AxisSource::Finger),
+            true,
+            true,
+            dvec2(0.0, 12.0),
+            dvec2(0.0, 0.0),
+        )
+        .expect("a frame with a delta dispatches");
+        assert_eq!(frame.phase, ScrollPhase::Changed);
+    }
+
+    #[test]
+    fn a_gesture_in_flight_still_ends_when_the_compositor_drops_the_axis_source() {
+        // `axis_source` is per-frame and optional, so the lift-off frame may carry none.
+        // Losing the terminator would strand a stretched rubber band.
+        let frame = frame_scroll(None, true, true, dvec2(0.0, 0.0), dvec2(0.0, 0.0))
+            .expect("the in-flight gesture recognises its own lift-off");
+        assert_eq!(frame.phase, ScrollPhase::Ended);
+
+        // With no gesture in flight the same frame says nothing and must not dispatch.
+        assert!(frame_scroll(None, false, true, dvec2(0.0, 0.0), dvec2(0.0, 0.0)).is_none());
+    }
+
+    #[test]
+    fn a_bare_stop_from_a_source_with_no_gesture_dispatches_nothing() {
+        // Only `Finger` is guaranteed an AxisStop. A zero-delta `ScrollPhase::None` from one
+        // of the others would clear a widget's overscroll and cut short a running bounce.
+        for source in [
+            wl_pointer::AxisSource::Wheel,
+            wl_pointer::AxisSource::WheelTilt,
+            wl_pointer::AxisSource::Continuous,
+        ] {
+            assert!(
+                frame_scroll(Some(source), true, true, dvec2(0.0, 0.0), dvec2(0.0, 0.0))
+                    .is_none(),
+                "{source:?} has no gesture to end"
+            );
+        }
+    }
+
+    #[test]
+    fn a_trackpoint_scroll_is_a_plain_delta_that_skips_wheel_easing() {
+        let frame = plain_frame(
+            Some(wl_pointer::AxisSource::Continuous),
+            dvec2(0.0, 9.0),
+            dvec2(0.0, 0.0),
+        )
+        .expect("a frame with a delta dispatches");
+        assert_eq!(frame.phase, ScrollPhase::None);
+        assert_eq!(frame.delta, dvec2(0.0, 9.0));
+        assert!(!frame.is_mouse);
+    }
+
+    #[test]
+    fn an_empty_frame_dispatches_nothing() {
+        assert!(plain_frame(None, dvec2(0.0, 0.0), dvec2(0.0, 0.0)).is_none());
+    }
 
     fn encoded_states(states: &[u32]) -> Vec<u8> {
         states
