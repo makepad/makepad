@@ -12,6 +12,68 @@ already fixes `Image` at 1024×1024/8 steps and `Upscale.factor` at 2; the two
 places where those language defaults differ from today's creator are called
 out below and in [GAPS.md](GAPS.md).
 
+## F18 parity audit
+
+The Asset UI exposes 38 built-in presets. Thirty-six are finite
+linear/looped graphs and are covered below; the two fan-out rows are the
+`Map`/choice language gap recorded in [GAPS.md](GAPS.md). User-saved fast
+presets are parameter snapshots of these same pipeline names, so they apply
+their saved sizes, steps, guidance/model pins, durations, voices, and
+interpolation values to the corresponding template rather than introducing
+new graph shapes.
+
+| Asset UI preset | Flow template |
+|---|---|
+| `image` | `text-to-image.splash` |
+| `expand → image` | `expanded-prompt-to-image.splash` |
+| `text expand only` | `prompt-expand.splash` |
+| `speech` | `speech.splash` |
+| `audio sfx` | `sfx.splash` |
+| `video (small)` | `prompt-to-video.splash` |
+| `expand → video` | `text-to-video.splash` |
+| `image → mesh` | `prompt-to-mesh.splash`; `image-to-mesh-basic.splash` is the typed-input form |
+| `expand → image → mesh` | `expanded-prompt-to-mesh.splash` |
+| `image → mesh → PBR` | `prompt-to-pbr-mesh.splash`; `image-to-mesh.splash` is the typed-input form |
+| `image → cutout → mesh → hunyuan PBR` | `prompt-to-cutout-pbr-mesh.splash` |
+| `image → video (i2v)` | `image-to-video.splash` |
+| `expand → image → video` | `expanded-prompt-to-video.splash` |
+| `fleet images → choose → video` | language gap: `Map` plus choice gate |
+| `expand → fleet images → choose → video` | language gap: `Map` plus choice gate |
+| `image → world (splat)` | `prompt-to-world.splash` |
+| `image → splat (3D gaussians)` | `prompt-to-splat.splash` |
+| `splat from selected image` | `splat.splash` |
+| `expand → image → world` | `expanded-prompt-to-world.splash` |
+| `expand → sfx` | `expanded-prompt-to-sfx.splash` |
+| `music` | `music.splash` |
+| `expand → music` | `expanded-prompt-to-music.splash` |
+| `image → cutout (alpha)` | `prompt-to-cutout.splash`; `matte.splash` is the typed-input form |
+| `video → upscale / tween / motionvec` | `video-enhance.splash`; focused interpolation is `video-tween.splash` |
+| `edit selected image (instruction)` | `image-edit.splash` |
+| `sprite → enhance (hi-res)` | `sprite-enhance.splash` |
+| `image → upscale (×4)` | `image-upscale.splash` |
+| `image → depth-guided image` | `image-control.splash` |
+| `image → edge-guided image (canny)` | `image-control-canny.splash` |
+| `inpaint / outpaint selected image (paint mask)` | `inpaint.splash` |
+| `image → depthmap` | `prompt-to-depth.splash`; `depth.splash` is the typed-input form |
+| `image → segment` | `prompt-to-segment.splash`; `segment.splash` is the typed-input form |
+| `character (playable)` | `playable-character.splash` |
+| `image → character (no expand)` | `prompt-to-character.splash` |
+| `mesh → rig → motion (from selected mesh)` | `rig-and-motion.splash` |
+| `character (playable + hunyuan PBR)` | `playable-character-pbr.splash` |
+| `image → video loop` | `prompt-to-video-loop.splash` |
+| `expand → image → video loop` | `expanded-prompt-to-video-loop.splash` |
+
+Every one of the 27 domains advertised by the fleet registry also has a
+shipped recipe path:
+
+| Media group | Advertised domain → representative template |
+|---|---|
+| Image | `image` → `text-to-image`; `edit` → `image-edit`; `upscale` → `image-upscale`; `control` → `image-control`; `inpaint` → `inpaint`; `matte` → `matte`; `depth` → `depth` |
+| Video | `video` → `prompt-to-video`; `enhance` → `video-enhance`/`video-tween` |
+| Audio | `audio` → `sfx`; `music` → `music`; `speech` → `speech`; `stt` → `speech-to-text`; `beats` → `audio-beats`; `stems` → `audio-stems`; `notes` → `audio-notes` |
+| 3D | `mesh` → `image-to-mesh-basic`; `paint` → `image-to-mesh`; `rig`/`motion` → `rig-and-motion`; `splat` → `splat`; `world` → `world` |
+| Vision & text | `text` → `prompt-expand`; `vision` → `annotate`; `ocr` → `ocr`; `body` → `body-pose`; `segment` → `segment` |
+
 ## Generation kinds
 
 | Kind | Template | Hub domain | Inputs (flow types) | Outputs (flow types) | Parameters, defaults, and choices/ranges | Used today |
@@ -21,12 +83,12 @@ out below and in [GAPS.md](GAPS.md).
 | `image.generate` | `prompt-to-image.splash`, `dream.splash`, `image-enhance.splash` | `image` | `prompt:text`, `image:image?` | `image:image` (PNG) | Flow default `width=1024`, `height=1024`, `steps=8`; creator picker default is 512×512 and model-default steps. Size choices: 512×512, 768×768, 1024×1024, 768×512, 512×768, 1024×576. Step choices: 4, 8, 12, 20, 28, 50. `seed=0`, `negative=""` (`negative_prompt` on the wire), `model=""`, `loras=[]`; LoRA strength choices 1.0, 0.8, 0.6, 0.4, 1.2. | Asset UI `image`/`expand → image`, `apps/asset-ui/src/pipeline.rs:424-425`; VJ image and DREAM, `apps/vj/src/gen.rs:968-973,1013-1030`. |
 | `image.edit` | `image-enhance.splash` | `edit` | `prompt:text`, `image:image`, `reference_1:image?`, `reference_2:image?`, `reference_3:image?` | `image:image` (PNG) | `strength=1.0`; choices 1.0, 0.85, 0.7, 0.55, 0.4, 0.25. `seed=0`, `model=""` in the prototype; current instruction edit pins `flux2-klein-4b`, and sprite enhancement pins `flux2-dev`. Up to three optional typed reference-image ports, matching Asset UI's cap. | Asset UI instruction edit and sprite enhancement, `apps/asset-ui/src/pipeline.rs:501-508`; three-reference cap is `apps/asset-ui/src/store_views.rs:311-319`. |
 | `image.inpaint` | `inpaint.splash` | `inpaint` | `prompt:text`, `image:image`, `mask:image` | `image:image` (PNG) | Typed named ports: `image` and `mask` are both mandatory `image` ports, distinguished by declared type rather than name inference. Defaults are `steps=50`, `guidance=30`, `seed=0`, `model=""`. | Asset UI inpaint/outpaint, `apps/asset-ui/src/pipeline.rs:532-539`; named-input construction at `apps/asset-ui/src/pipeline.rs:1722-1747`. |
-| `image.control` | — | `control` | `prompt:text`, `control:image` | `image:image` (PNG) | `steps=30`; guidance defaults by model (depth 10, Canny 30); `canny_low=50`, `canny_high=200` (wire bounds 0..2000); `seed=0`, `model=""`. Current presets pin `flux1-depth-dev` or `flux1-canny-dev`. The flow port named `control` is routed to the hub's primary `input_b64` field. | Asset UI depth- and edge-guided image chains, `apps/asset-ui/src/pipeline.rs:518-530`. |
+| `image.control` | `image-control.splash`, `image-control-canny.splash` | `control` | `prompt:text`, `control:image` | `image:image` (PNG) | `steps=30`; guidance defaults by model (depth 10, Canny 30); `canny_low=50`, `canny_high=200` (wire bounds 0..2000); `seed=0`, `model=""`. Current presets pin `flux1-depth-dev` or `flux1-canny-dev`. The flow port named `control` is routed to the hub's primary `input_b64` field. | Asset UI depth- and edge-guided image chains, `apps/asset-ui/src/pipeline.rs:518-530`. |
 | `image.upscale` | `image-upscale.splash` | `upscale` | `image:image` | `image:image` (PNG) | RealESRGAN recipe is fixed 4× and pins `realesrgan-x4plus`; no factor field is sent by the current hub request. The base flow language nevertheless exposes `factor=2`; the template sets 4. | Asset UI image upscale, `apps/asset-ui/src/pipeline.rs:510-516`; request follows source dimensions at `apps/asset-ui/src/pipeline.rs:5371-5390`. |
 | `image.matte` | `matte.splash` | `matte` | `image:image` | `image:image` (RGBA PNG) | `model=""`; current character/cutout recipe pins `birefnet-hr`. No creator preset parameter. | Asset UI cutout and character chains, `apps/asset-ui/src/pipeline.rs:444-450,485,545-563`. |
 | `image.depth` | `depth.splash` | `depth` | `image:image` | `image:image` (16-bit metric-depth PNG) | `model=""`; current registry model is `da3-metric-large`. No creator preset parameter. | Asset UI depth-map and depth-control chains, `apps/asset-ui/src/pipeline.rs:522-525,540`. |
 | `video.generate` | `dream.splash`, `image-to-video.splash`, `text-to-video.splash` | `video` | `prompt:text`, `image:image?` (first frame), `last_frame:image?` (loop-closure keyframe) | `video:video` (MP4) | Creator default/first choices: 640×352, 39 frames, 30 steps; size choices 640×352, 864×480, 960×544; `(frames,steps)` choices (39,30), (65,30), (97,40), (129,50). `codec="h264"` in creator translation (`h265`/`hevc` also accepted), `audio=true`, `interpolate=1` with choices 1/2/4, `seed=0`, `model=""`. `last_frame` is a typed named port; DREAM sends its keyframe to both `image` and `last_frame`. | Asset UI video/i2v/loop chains, `apps/asset-ui/src/pipeline.rs:429-430,453-465,607-608`; VJ video/DREAM, `apps/vj/src/gen.rs:975-1008,1033-1050`. |
-| `video.enhance` | — (no tween template) | `enhance` | `video:video` | `video:video` (MP4) | `upscale=2`, `interpolate=2`, `flow_map=true`; upscale/interpolate choices are 1, 2, 4. `model=""` in the prototype; current recipes pin `video-enhance`. | Asset UI video post-process, `apps/asset-ui/src/pipeline.rs:491-500`; VJ deck-clip enhance sends the same defaults at `apps/vj/src/gen.rs:1538-1547`. |
+| `video.enhance` | `video-enhance.splash`, `video-tween.splash` | `enhance` | `video:video` | `video:video` (MP4) | `upscale=2`, `interpolate=2`, `flow_map=true`; upscale/interpolate choices are 1, 2, 4. `model=""` in the prototype; current recipes pin `video-enhance`. The focused tween recipe sets `upscale=1` and `flow_map=false`. | Asset UI video post-process, `apps/asset-ui/src/pipeline.rs:491-500`; VJ deck-clip enhance sends the same defaults at `apps/vj/src/gen.rs:1538-1547`. |
 | `audio.generate` | `sfx.splash` | `audio` | `prompt:text` | `audio:audio` (WAV) | `seconds=4.0` (0.5..120), `steps=8` (wire 1..200), `seed=0`, `model=""`. No creator duration preset exists. | Asset UI audio/SFX and expand→SFX, `apps/asset-ui/src/pipeline.rs:428,481`; request default at `apps/asset-ui/src/pipeline.rs:1596-1599`. |
 | `music.generate` | `music.splash` | `music` | `prompt:text`, `lyrics:text?`, `audio:audio?` reference clip | `audio:audio` (WAV) | Creator `seconds=180`; choices 60, 120, 180, 240, 300 and accepted range 5..300. `strength=0.8` represents the default every-fifth-frame reference cadence (wire range 0..1), `seed=0`, `model=""`. `lyrics` is a typed named text port, fed by its own `Input` in the template rather than folded into `prompt`. Reference audio must be 2..60 s and ≤50 MB. | Asset UI music and expand→music, `apps/asset-ui/src/pipeline.rs:482-484,1600-1629`; VJ expand→music, `apps/vj/src/gen.rs:1063-1073`. |
 | `speech.generate` | `speech.splash` | `speech` | `text:text`, `audio:audio?` reference voice | `audio:audio` (WAV) | `voice=""` (backend default; Kokoro's concrete default is `bm_daniel`), `speed=1.0` (0.25..4), `language=""`, `emotion=[]` or exactly eight values each 0..1.2, `seed=0`, `model=""`. | Asset UI speech, `apps/asset-ui/src/pipeline.rs:427,1585-1595`; its template uses `bm_daniel`, matching the current Kokoro default. |
@@ -184,6 +246,6 @@ rigged GLB becomes motion's `mesh` input. It pins `skintokens` and `hy-motion`
 and requests the default playable clip set. Current selected-mesh recipe:
 `apps/asset-ui/src/pipeline.rs:579-590`.
 
-There is intentionally no `image-tween.splash`: interpolation is not a
-generation kind. It is the `interpolate` parameter of `video.enhance`, covered
-by `VideoEnhance` and documented in GAPS.
+`video-tween.splash` is intentionally a `VideoEnhance` recipe rather than a
+new generation kind: tweening is the `interpolate` mode of the advertised
+`enhance` domain.

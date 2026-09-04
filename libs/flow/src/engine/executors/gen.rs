@@ -64,6 +64,12 @@ const MEDIA_INPUT_ROUTES: &[(&str, &[(&str, MediaDestination)])] = &[
     ("splat", &[("image", MediaDestination::Primary)]),
     ("world", &[("image", MediaDestination::Primary)]),
     ("vision", &[("image", MediaDestination::Primary)]),
+    ("body", &[("image", MediaDestination::Primary)]),
+    ("segment", &[("image", MediaDestination::Primary)]),
+    ("stt", &[("audio", MediaDestination::Primary)]),
+    ("beats", &[("audio", MediaDestination::Primary)]),
+    ("stems", &[("audio", MediaDestination::Primary)]),
+    ("notes", &[("audio", MediaDestination::Primary)]),
     ("music", &[("audio", MediaDestination::Primary)]),
     ("speech", &[("audio", MediaDestination::Primary)]),
 ];

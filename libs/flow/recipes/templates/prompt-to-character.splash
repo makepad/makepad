@@ -1,0 +1,30 @@
+use mod.flow.*
+
+/** The complete rig-safe character brief to use verbatim. */
+let prompt = Input{ type: @text default: "a nimble forest ranger, full body, relaxed wide A-pose, separated limbs, plain background" }
+let image = Image{ prompt: prompt.text() width: 512 height: 512 model: "flux1-dev" }
+let matte = Matte{ image: image.image() model: "birefnet-hr" }
+let mesh = Mesh{
+    prompt: prompt.text()
+    image: matte.out(@image)
+    remesh_resolution: 512
+    texture: true
+    decimation_target: 20000
+    texture_size: 1024
+    model: "trellis-2"
+}
+let rig = Rig{ prompt: prompt.text() mesh: mesh.mesh() model: "skintokens" }
+let motion = Motion{
+    prompt: prompt.text()
+    mesh: rig.out(@mesh)
+    motion_mode: "playable"
+    model: "hy-motion"
+}
+/** Publish the playable animated GLB into the flow asset library. */
+let published = Publish{ value: motion.out(@mesh) namespace: "flows" tags: ["flow", "character", "playable"] }
+
+Flow{
+    label: "Prompt to playable character"
+    brief: "Uses a complete prompt verbatim to paint, matte, reconstruct, rig, and animate a character."
+    prompt, image, matte, mesh, rig, motion, published
+}

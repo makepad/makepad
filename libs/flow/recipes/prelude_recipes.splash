@@ -269,6 +269,77 @@ mod.flow.World = mod.flow.Gen{
     /** Generic parameter and mesh-result face. */ ui: mod.flow.ui.GenFace
 }
 
+/** Recover structured human pose data from an image. Default face: `mod.flow.ui.GenFace`. */
+mod.flow.Body = mod.flow.Gen{
+    kind: @gen
+    domain: "body"
+    type_name: "Body"
+    /** `hands`, `detect`, and `persons=N` may be combined. */ prompt: ""
+    /** Empty selects the hub's best model for the body domain. */ model: ""
+    ports: { in: {image: @image}, out: {json: @json} }
+    json: fn() { self.out(@json) }
+    /** Generic parameter and structured-result face. */ ui: mod.flow.ui.GenFace
+}
+
+/** Segment one or more prompted subjects from an image. Default face: `mod.flow.ui.ImageFace`. */
+mod.flow.Segment = mod.flow.Gen{
+    kind: @gen
+    domain: "segment"
+    type_name: "Segment"
+    /** Multiplex prompt such as `person:1` or `cat:2`. */ prompt: "person:1"
+    /** Empty selects the hub's best model for the segment domain. */ model: ""
+    ports: { in: {image: @image}, out: {mask: @image, cutout: @image} }
+    mask: fn() { self.out(@mask) }
+    cutout: fn() { self.out(@cutout) }
+    /** Image preview with generic segmentation parameters. */ ui: mod.flow.ui.ImageFace
+}
+
+/** Transcribe speech audio into a timed JSON transcript. Default face: `mod.flow.ui.GenFace`. */
+mod.flow.Stt = mod.flow.Gen{
+    kind: @gen
+    domain: "stt"
+    type_name: "Stt"
+    /** Optional BCP-47 language hint; empty enables automatic detection. */ language: ""
+    /** Empty selects the hub's best model for speech transcription. */ model: ""
+    ports: { in: {audio: @audio}, out: {json: @json} }
+    json: fn() { self.out(@json) }
+    /** Generic parameter and transcript-result face. */ ui: mod.flow.ui.GenFace
+}
+
+/** Detect beats and downbeats in audio. Default face: `mod.flow.ui.GenFace`. */
+mod.flow.Beats = mod.flow.Gen{
+    kind: @gen
+    domain: "beats"
+    type_name: "Beats"
+    /** Empty selects the hub's best beat-analysis model. */ model: ""
+    ports: { in: {audio: @audio}, out: {json: @json} }
+    json: fn() { self.out(@json) }
+    /** Generic parameter and analysis-result face. */ ui: mod.flow.ui.GenFace
+}
+
+/** Separate stereo music into drums, bass, other, and vocals. Default face: `mod.flow.ui.GenFace`. */
+mod.flow.Stems = mod.flow.Gen{
+    kind: @gen
+    domain: "stems"
+    type_name: "Stems"
+    /** Empty selects the hub's best source-separation model. */ model: ""
+    ports: { in: {audio: @audio}, out: {stems: @bytes} }
+    stems: fn() { self.out(@stems) }
+    /** Generic parameter and stem-bundle face. */ ui: mod.flow.ui.GenFace
+}
+
+/** Transcribe polyphonic notes to JSON and MIDI. Default face: `mod.flow.ui.GenFace`. */
+mod.flow.Notes = mod.flow.Gen{
+    kind: @gen
+    domain: "notes"
+    type_name: "Notes"
+    /** Empty selects the hub's best note-transcription model. */ model: ""
+    ports: { in: {audio: @audio}, out: {json: @json, midi: @bytes} }
+    json: fn() { self.out(@json) }
+    midi: fn() { self.out(@midi) }
+    /** Generic parameter and transcription-result face. */ ui: mod.flow.ui.GenFace
+}
+
 /** Apply a vision answer to an existing asset's annotation record. Default face: `mod.flow.ui.GenFace`. */
 mod.flow.Annotate = mod.flow.Gen{
     kind: @gen

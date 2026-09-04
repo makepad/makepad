@@ -15,7 +15,7 @@ let video = Video{
     height: 352
     frames: 39
     steps: 30
-    audio: false
+    audio: true
     at: vec2(680, 120)
 }
 

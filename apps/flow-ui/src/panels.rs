@@ -2317,60 +2317,90 @@ fn kind_template(kind: &str) -> LiveId {
     }
 }
 
+const PALETTE_GROUPS: [&str; 10] = [
+    "Inputs",
+    "Outputs",
+    "Language models",
+    "Image",
+    "Video",
+    "Audio",
+    "3D",
+    "Vision",
+    "Logic",
+    "I/O",
+];
+
+fn palette_group_name(kind: &str, domain: Option<&str>) -> &'static str {
+    match kind {
+        "input" => "Inputs",
+        "output" | "publish" => "Outputs",
+        "chat" => "Language models",
+        "fn" | "ask" => "Logic",
+        "http" => "I/O",
+        "gen" => match domain.unwrap_or("") {
+            "image" | "edit" | "upscale" | "control" | "inpaint" | "matte" => "Image",
+            "video" | "enhance" => "Video",
+            "audio" | "music" | "speech" | "stt" | "beats" | "stems" | "notes" => "Audio",
+            "mesh" | "paint" | "rig" | "motion" | "splat" | "world" => "3D",
+            "vision" | "ocr" | "body" | "segment" | "depth" => "Vision",
+            _ => "I/O",
+        },
+        _ => "Logic",
+    }
+}
+
+fn palette_group_rank(group: &str) -> usize {
+    PALETTE_GROUPS
+        .iter()
+        .position(|candidate| *candidate == group)
+        .unwrap_or(PALETTE_GROUPS.len())
+}
+
 impl Palette {
     pub fn set_types(&mut self, cx: &mut Cx, catalog: &[NodeTypeCatalog], filtered: bool) {
         self.rows.clear();
         self.filtered = filtered;
-        // The flow's edge first, then the executors in the order a flow
-        // usually reads, then everything the recipes add.
-        const ORDER: [&str; 7] = ["input", "output", "chat", "fn", "http", "ask", "gen"];
-        let mut kinds: Vec<&str> = catalog.iter().map(|entry| entry.kind.as_str()).collect();
-        kinds.sort_by_key(|kind| {
-            (
-                ORDER.iter().position(|known| known == kind).unwrap_or(ORDER.len()),
-                kind.to_string(),
-            )
+        let mut entries: Vec<&NodeTypeCatalog> = catalog.iter().collect();
+        entries.sort_by(|left, right| {
+            let left_group = palette_group_name(&left.kind, left.domain.as_deref());
+            let right_group = palette_group_name(&right.kind, right.domain.as_deref());
+            palette_group_rank(left_group)
+                .cmp(&palette_group_rank(right_group))
+                .then_with(|| left.type_name.cmp(&right.type_name))
         });
-        kinds.dedup();
-        for kind in kinds {
-            let title = match kind {
-                "input" => "INPUTS",
-                "output" => "OUTPUTS",
-                "chat" => "LANGUAGE MODELS",
-                "fn" => "FUNCTIONS",
-                "http" => "HTTP",
-                "ask" => "ASK THE USER",
-                "gen" => "GENERATORS",
-                other => other,
-            };
-            self.rows.push(PaletteRow::Kind(if filtered {
-                format!("{title} · COMPATIBLE")
-            } else {
-                title.to_string()
-            }));
-            for entry in catalog.iter().filter(|entry| entry.kind == kind) {
-                let doc = entry
-                    .doc
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                let doc = if doc.is_empty() {
-                    entry
-                        .domain
-                        .as_ref()
-                        .map(|domain| format!("{domain} domain"))
-                        .unwrap_or_default()
+        let mut previous_group = None;
+        for entry in entries {
+            let group = palette_group_name(&entry.kind, entry.domain.as_deref());
+            if previous_group != Some(group) {
+                let title = group.to_ascii_uppercase();
+                self.rows.push(PaletteRow::Kind(if filtered {
+                    format!("{title} · COMPATIBLE")
                 } else {
-                    doc
-                };
-                self.rows.push(PaletteRow::Type {
-                    name: entry.type_name.clone(),
-                    kind: entry.kind.clone(),
-                    doc,
-                });
+                    title
+                }));
+                previous_group = Some(group);
             }
+            let doc = entry
+                .doc
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let doc = if doc.is_empty() {
+                entry
+                    .domain
+                    .as_ref()
+                    .map(|domain| format!("{domain} domain"))
+                    .unwrap_or_default()
+            } else {
+                doc
+            };
+            self.rows.push(PaletteRow::Type {
+                name: entry.type_name.clone(),
+                kind: entry.kind.clone(),
+                doc,
+            });
         }
         self.view
             .label(cx, ids!(hint))
@@ -2761,10 +2791,38 @@ impl Widget for AppView {
 mod tests {
     use super::{
         inspector_combo_choice, inspector_commit_number, inspector_setting_names, relative_time,
-        AssetListModel, InspectorTab,
+        palette_group_name, palette_group_rank, AssetListModel, InspectorTab, PALETTE_GROUPS,
     };
     use makepad_flow::{FlowAsset, Literal};
     use makepad_widgets::*;
+
+    #[test]
+    fn palette_groups_prelude_types_by_media_and_executor_role() {
+        let cases = [
+            ("input", None, "Inputs"),
+            ("publish", None, "Outputs"),
+            ("chat", Some("text"), "Language models"),
+            ("gen", Some("image"), "Image"),
+            ("gen", Some("enhance"), "Video"),
+            ("gen", Some("stt"), "Audio"),
+            ("gen", Some("motion"), "3D"),
+            ("gen", Some("body"), "Vision"),
+            ("fn", None, "Logic"),
+            ("http", None, "I/O"),
+        ];
+        let groups: Vec<_> = cases
+            .iter()
+            .map(|(kind, domain, expected)| {
+                let group = palette_group_name(kind, *domain);
+                assert_eq!(group, *expected);
+                group
+            })
+            .collect();
+        assert!(groups
+            .windows(2)
+            .all(|pair| palette_group_rank(pair[0]) < palette_group_rank(pair[1])));
+        assert_eq!(groups, PALETTE_GROUPS);
+    }
 
     #[test]
     fn inspector_one_of_combo_commits_the_selected_item() {

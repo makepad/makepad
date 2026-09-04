@@ -68,6 +68,18 @@ fn template_menu_id(name: &str) -> LiveId {
     LiveId::from_str(&format!("template:{name}"))
 }
 
+fn grouped_new_menu_templates(mut templates: Vec<TemplateSummary>) -> Vec<TemplateSummary> {
+    templates.sort_by(|left, right| {
+        makepad_flow::templates::group_rank(&left.group)
+            .cmp(&makepad_flow::templates::group_rank(&right.group))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    for template in &mut templates {
+        template.label = format!("{} · {}", template.group.to_ascii_uppercase(), template.label);
+    }
+    templates
+}
+
 fn set_wire_menu_checks(menus: &mut [MenuDef], mode: WireMode) {
     for entry in menus.iter_mut().flat_map(|menu| &mut menu.items) {
         if entry.id == live_id!(wires_routed) {
@@ -1405,17 +1417,34 @@ impl App {
         }
         menus.retain(|menu| menu.label != TEMPLATES_MENU);
         let mut templates = self.templates.clone();
-        templates.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
-        let items: Vec<makepad_widgets::menu_bar::MenuEntry> = templates
-            .iter()
-            .map(|template| {
-                makepad_widgets::menu_bar::MenuEntry::item(
-                    template_menu_id(&template.name),
-                    template.label.as_str(),
+        templates.sort_by(|left, right| {
+            makepad_flow::templates::group_rank(&left.group)
+                .cmp(&makepad_flow::templates::group_rank(&right.group))
+                .then_with(|| left.label.to_lowercase().cmp(&right.label.to_lowercase()))
+        });
+        // One greyed heading per group, its templates indented beneath it.
+        let mut items: Vec<makepad_widgets::menu_bar::MenuEntry> = Vec::new();
+        let mut previous_group: Option<&str> = None;
+        for template in &templates {
+            if previous_group != Some(template.group.as_str()) {
+                if previous_group.is_some() {
+                    items.push(makepad_widgets::menu_bar::MenuEntry::separator());
+                }
+                let mut heading = makepad_widgets::menu_bar::MenuEntry::item(
+                    LiveId::from_str(&format!("template-group:{}", template.group)),
+                    template.group.as_str(),
                     None,
-                )
-            })
-            .collect();
+                );
+                heading.enabled = false;
+                items.push(heading);
+                previous_group = Some(template.group.as_str());
+            }
+            items.push(makepad_widgets::menu_bar::MenuEntry::item(
+                template_menu_id(&template.name),
+                format!("  {}", template.label),
+                None,
+            ));
+        }
         if items.is_empty() {
             menu_bar.set_menus(cx, menus);
             return;
@@ -1757,14 +1786,22 @@ impl App {
                     Err(error) => self.show_error(cx, &error),
                 },
                 IoResult::Templates(result) => match result {
-                    Ok(templates) => {
+                    Ok(mut templates) => {
+                        // The shared list keeps the server's labels; the New
+                        // picker shows them prefixed by group, the Templates
+                        // menu under group headings.
+                        templates.sort_by(|left, right| {
+                            makepad_flow::templates::group_rank(&left.group)
+                                .cmp(&makepad_flow::templates::group_rank(&right.group))
+                                .then_with(|| left.label.to_lowercase().cmp(&right.label.to_lowercase()))
+                        });
                         self.templates = templates;
                         if let Some(mut picker) = self
                             .ui
                             .widget(cx, ids!(template_picker))
                             .borrow_mut::<TemplatePicker>()
                         {
-                            picker.set_templates(cx, self.templates.clone());
+                            picker.set_templates(cx, grouped_new_menu_templates(self.templates.clone()));
                         }
                         self.refresh_templates_menu(cx);
                     }
@@ -4996,8 +5033,29 @@ fn node_state_name(state: NodeState) -> &'static str {
 mod layout_tests {
     use super::*;
     use makepad_flow::NodeRowDto;
+    use makepad_widgets::makepad_platform::makepad_micro_serde::DeJson;
     use makepad_widgets::makepad_platform::event::{ScrollEvent, ScrollPhase};
     use std::cell::Cell;
+
+    #[test]
+    fn new_menu_groups_a_fake_templates_response_in_wire_group_order() {
+        let json = r#"[
+            {"name":"mesh","group":"3D","label":"Mesh","brief":"mesh","node_count":2,"inputs":[],"outputs":[]},
+            {"name":"video","group":"Video","label":"Video","brief":"video","node_count":2,"inputs":[],"outputs":[]},
+            {"name":"image-b","group":"Image","label":"Image B","brief":"image","node_count":2,"inputs":[],"outputs":[]},
+            {"name":"image-a","group":"Image","label":"Image A","brief":"image","node_count":2,"inputs":[],"outputs":[]}
+        ]"#;
+        let rows = Vec::<TemplateSummary>::deserialize_json(json).unwrap();
+        let grouped = grouped_new_menu_templates(rows);
+        assert_eq!(
+            grouped.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(),
+            ["image-a", "image-b", "video", "mesh"]
+        );
+        assert_eq!(
+            grouped.iter().map(|row| row.label.as_str()).collect::<Vec<_>>(),
+            ["IMAGE · Image A", "IMAGE · Image B", "VIDEO · Video", "3D · Mesh"]
+        );
+    }
 
     fn menu_label(app: &App, cx: &Cx, id: LiveId) -> String {
         let menu = app.ui.menu_bar(cx, ids!(menu_bar));
@@ -5094,8 +5152,9 @@ mod layout_tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.init_cx_os();
         let mut app = cx.with_vm(|vm| App::from_script_mod(vm, <App as AppMain>::script_mod));
-        let template = |name: &str, label: &str| TemplateSummary {
+        let template = |name: &str, group: &str, label: &str| TemplateSummary {
             name: name.into(),
+            group: group.into(),
             label: label.into(),
             brief: String::new(),
             node_count: 3,
@@ -5103,8 +5162,8 @@ mod layout_tests {
             outputs: Vec::new(),
         };
         app.templates = vec![
-            template("text-to-video", "Text to video"),
-            template("prompt-to-image", "Prompt to image"),
+            template("text-to-video", "Video", "Text to video"),
+            template("prompt-to-image", "Image", "Prompt to image"),
         ];
         app.refresh_templates_menu(&mut cx);
         let labels: Vec<String> = app
@@ -5117,9 +5176,9 @@ mod layout_tests {
             .map(|menu| menu.label.clone())
             .collect();
         assert_eq!(labels[1], "Templates", "{labels:?}");
-        assert_eq!(menu_label(&app, &cx, template_menu_id("text-to-video")), "Text to video");
-        // Alphabetical: the picture template comes before the video one.
-        let entries: Vec<String> = app
+        assert_eq!(menu_label(&app, &cx, template_menu_id("text-to-video")), "  Text to video");
+        // Group order (Image before Video), each under a greyed heading.
+        let entries: Vec<(String, bool, bool)> = app
             .ui
             .menu_bar(&cx, ids!(menu_bar))
             .borrow()
@@ -5127,9 +5186,18 @@ mod layout_tests {
             .menus()[1]
             .items
             .iter()
-            .map(|entry| entry.label.clone())
+            .map(|entry| (entry.label.clone(), entry.enabled, entry.separator))
             .collect();
-        assert_eq!(entries, vec!["Prompt to image", "Text to video"]);
+        assert_eq!(
+            entries,
+            vec![
+                ("Image".to_string(), false, false),
+                ("  Prompt to image".to_string(), true, false),
+                (String::new(), true, true),
+                ("Video".to_string(), false, false),
+                ("  Text to video".to_string(), true, false),
+            ]
+        );
         // A refresh replaces the menu instead of stacking a second one.
         app.refresh_templates_menu(&mut cx);
         let count = app

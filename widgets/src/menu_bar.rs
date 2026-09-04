@@ -580,6 +580,14 @@ pub struct MenuBar {
     panel_rect: Rect,
     #[rust]
     entry_rects: Vec<Rect>,
+    /// A menu taller than the window scrolls: the offset, its maximum, and
+    /// the height of the rows on screen.
+    #[rust]
+    panel_scroll: f64,
+    #[rust]
+    panel_scroll_max: f64,
+    #[rust]
+    panel_visible: f64,
 }
 
 impl ScriptHook for MenuBar {
@@ -764,6 +772,7 @@ impl MenuBar {
             self.focus_before_open = cx.key_focus();
         }
         self.open_menu = Some(index);
+        self.panel_scroll = 0.0;
         self.hot_entry = self.first_enabled(index);
         cx.set_key_focus(self.draw_bg.area());
         let uid = self.widget_uid();
@@ -831,6 +840,26 @@ impl MenuBar {
         None
     }
 
+    /// Scroll a tall menu so the keyboard's hot row is on screen.
+    fn keep_hot_visible(&mut self, menu: usize) {
+        if self.panel_scroll_max <= 0.0 {
+            return;
+        }
+        let (Some(hot), Some(def)) = (self.hot_entry, self.defs.get(menu)) else {
+            return;
+        };
+        let mut offset = 0.0;
+        for entry in def.items.iter().take(hot) {
+            offset += if entry.separator { self.separator_height } else { self.item_height };
+        }
+        if offset < self.panel_scroll {
+            self.panel_scroll = offset;
+        } else if offset + self.item_height > self.panel_scroll + self.panel_visible {
+            self.panel_scroll = offset + self.item_height - self.panel_visible;
+        }
+        self.panel_scroll = self.panel_scroll.clamp(0.0, self.panel_scroll_max);
+    }
+
     fn first_enabled(&self, menu: usize) -> Option<usize> {
         self.defs.get(menu)?.items.iter().position(|entry| !entry.separator && entry.enabled)
     }
@@ -880,10 +909,12 @@ impl MenuBar {
             }
             KeyCode::ArrowUp => {
                 self.hot_entry = self.step_entry(menu, self.hot_entry, -1);
+                self.keep_hot_visible(menu);
                 self.redraw_overlay(cx);
             }
             KeyCode::ArrowDown => {
                 self.hot_entry = self.step_entry(menu, self.hot_entry, 1);
+                self.keep_hot_visible(menu);
                 self.redraw_overlay(cx);
             }
             KeyCode::ReturnKey | KeyCode::Space => {
@@ -981,9 +1012,15 @@ impl MenuBar {
             .copied()
             .unwrap_or(self.bar_rect);
         let mut pos = dvec2(anchor.pos.x, self.bar_rect.pos.y + self.bar_rect.size.y);
-        // Flip above the bar when the drop would run off the bottom.
+        let content_height = height;
+        // Flip above the bar when the drop would run off the bottom and fits
+        // above; a list taller than the window stays put and scrolls.
         if pos.y + height > pass.y {
-            pos.y = (anchor.pos.y - height).max(0.0);
+            if anchor.pos.y - height >= 0.0 {
+                pos.y = anchor.pos.y - height;
+            } else {
+                height = (pass.y - pos.y - self.panel_pad).max(self.item_height * 2.0);
+            }
         }
         pos.x = pos.x.clamp(0.0, (pass.x - width).max(0.0));
         let panel_rect = Rect {
@@ -991,6 +1028,11 @@ impl MenuBar {
             size: dvec2(width, height),
         };
         self.panel_rect = panel_rect;
+        self.panel_scroll_max = (content_height - height).max(0.0);
+        self.panel_scroll = self.panel_scroll.clamp(0.0, self.panel_scroll_max);
+        self.panel_visible = height - self.panel_pad * 2.0;
+        let visible_top = pos.y + self.panel_pad;
+        let visible_bottom = pos.y + height - self.panel_pad;
 
         list.begin_overlay_reuse(cx);
         cx.begin_root_turtle(pass, Layout::flow_down());
@@ -998,7 +1040,7 @@ impl MenuBar {
         self.draw_panel.draw_abs(cx, panel_rect);
 
         self.entry_rects.clear();
-        let mut y = pos.y + self.panel_pad;
+        let mut y = pos.y + self.panel_pad - self.panel_scroll;
         for (i, entry) in items.iter().enumerate() {
             if entry.separator {
                 let row = Rect {
@@ -1008,6 +1050,12 @@ impl MenuBar {
                         self.separator_height,
                     ),
                 };
+                if row.pos.y < visible_top || row.pos.y + row.size.y > visible_bottom {
+                    // Scrolled out of the panel: no pixels, no hit rect.
+                    self.entry_rects.push(Rect::default());
+                    y += self.separator_height;
+                    continue;
+                }
                 self.draw_sep.draw_abs(
                     cx,
                     Rect {
@@ -1024,6 +1072,11 @@ impl MenuBar {
                 pos: dvec2(pos.x + self.panel_pad, y),
                 size: dvec2((width - self.panel_pad * 2.0).max(0.0), self.item_height),
             };
+            if row.pos.y < visible_top || row.pos.y + row.size.y > visible_bottom {
+                self.entry_rects.push(Rect::default());
+                y += self.item_height;
+                continue;
+            }
             self.draw_entry.hover = if self.hot_entry == Some(i) { 1.0 } else { 0.0 };
             self.draw_entry.draw_abs(cx, row);
 
@@ -1081,6 +1134,13 @@ impl MenuBar {
                 if self.hot_entry.take().is_some() {
                     self.redraw_overlay(cx);
                     self.draw_bg.redraw(cx);
+                }
+            }
+            Hit::FingerScroll(fe) if self.panel_scroll_max > 0.0 => {
+                let next = (self.panel_scroll + fe.scroll.y).clamp(0.0, self.panel_scroll_max);
+                if next != self.panel_scroll {
+                    self.panel_scroll = next;
+                    self.redraw_overlay(cx);
                 }
             }
             Hit::FingerUp(fe) if fe.is_primary_hit() && fe.is_over => {
