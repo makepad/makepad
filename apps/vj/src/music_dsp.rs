@@ -2534,6 +2534,14 @@ impl Distortion {
             return frame;
         }
         let drive = self.drive.tick(device_rate);
+        // The floor is not reachable today -- `drive` never leaves
+        // [DISTORTION_DRIVE_MIN, DISTORTION_DRIVE_MAX] = [1.0, 20.0],
+        // where pade_tanh(drive) is always at least pade_tanh(1.0),
+        // about 0.78, comfortably above 0.15. It stays anyway as a
+        // guard against a future, wider DRIVE_MIN reaching toward zero,
+        // where pade_tanh(drive) genuinely does approach zero and an
+        // unguarded reciprocal would spike -- found unreachable, not
+        // wrong, by an adversarial review of this effect.
         let makeup = 1.0 / pade_tanh(drive).max(0.15);
         let shaped =
             [pade_tanh(frame[0] * drive) * makeup, pade_tanh(frame[1] * drive) * makeup];

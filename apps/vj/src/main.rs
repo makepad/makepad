@@ -2540,6 +2540,13 @@ script_mod! {
                                         max: 5.0
                                         default: 0.5
                                     }
+                                    sfx_fx_phaser_feedback := Slider{
+                                        width: 170
+                                        text: "phaser feedback"
+                                        min: 0.0
+                                        max: 0.9
+                                        default: 0.3
+                                    }
                                 }
                                 View{
                                     width: Fill
@@ -14305,7 +14312,8 @@ p2 {}
             deck.distortion_on,
             deck.distortion_drive as f64,
         );
-        let (phaser_on, phaser_rate) = (deck.phaser_on, deck.phaser_rate as f64);
+        let (phaser_on, phaser_rate, phaser_feedback) =
+            (deck.phaser_on, deck.phaser_rate as f64, deck.phaser_feedback as f64);
         let (autopan_on, autopan_rate) = (deck.autopan_on, deck.autopan_rate as f64);
         self.ui.slider(cx, ids!(sfx_fx_feedback)).set_value(cx, feedback);
         self.paint_chip(cx, ids!(sfx_fx_flanger), flanger_on, None);
@@ -14318,6 +14326,7 @@ p2 {}
         self.ui.slider(cx, ids!(sfx_fx_distortion_drive)).set_value(cx, distortion_drive);
         self.paint_chip(cx, ids!(sfx_fx_phaser), phaser_on, None);
         self.ui.slider(cx, ids!(sfx_fx_phaser_rate)).set_value(cx, phaser_rate);
+        self.ui.slider(cx, ids!(sfx_fx_phaser_feedback)).set_value(cx, phaser_feedback);
         self.paint_chip(cx, ids!(sfx_fx_autopan), autopan_on, None);
         self.ui.slider(cx, ids!(sfx_fx_autopan_rate)).set_value(cx, autopan_rate);
     }
@@ -29280,6 +29289,18 @@ impl MatchEvent for App {
                 FxTarget::Mix => {
                     let mut cmds = self.decks.set_phaser_rate(DeckId::A, v as f32);
                     cmds.extend(self.decks.set_phaser_rate(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_phaser_feedback)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_phaser_feedback(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_phaser_feedback(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_phaser_feedback(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_phaser_feedback(DeckId::B, v as f32));
                     cmds
                 }
             };
