@@ -28,7 +28,7 @@ use crate::wave_analysis::{DeckClock, TrackGrid};
 use crate::music_dsp::{
     audible, knob, knob64,
     Bitcrusher, DeckEcho, DeckEq, Flanger, FrameSource, Freeze, MotorEnd, ParamRamp, RateReader,
-    ScratchRamp,
+    ScratchRamp, Tremolo,
     Stretcher, STEM_COUNT,
     STRETCH_BYPASS_EPSILON, STRETCH_RATIO_MAX, STRETCH_RATIO_MIN, WSOLA_WINDOW,
     BRAKE_SECS, CENSOR_FLIP_SECS, CENSOR_RATE, CENSOR_RETURN_SECS, SOFT_START_SECS,
@@ -897,6 +897,7 @@ enum EffectKind {
     Echo(DeckEcho),
     Flanger(Flanger),
     Bitcrusher(Bitcrusher),
+    Tremolo(Tremolo),
 }
 
 impl EffectKind {
@@ -908,15 +909,16 @@ impl EffectKind {
             EffectKind::Echo(echo) => echo.process(frame, device_rate),
             EffectKind::Flanger(flanger) => flanger.process(frame, device_rate),
             EffectKind::Bitcrusher(bitcrusher) => bitcrusher.process(frame, device_rate),
+            EffectKind::Tremolo(tremolo) => tremolo.process(frame, device_rate),
         }
     }
 }
 
-const DECK_CHAIN_SLOTS: usize = 5;
+const DECK_CHAIN_SLOTS: usize = 6;
 
 /// A deck's pre-fader tone chain: a fixed list of slots, walked in order.
 /// Not a `Vec` -- sized once, at compile time, never resized. Today's
-/// four slots are the whole roster and are permanently populated by
+/// six slots are the whole roster and are permanently populated by
 /// construction; a slot that can stand empty, or be reassigned, is a
 /// separate decision for whenever growing the roster again asks for one.
 struct DeckChain {
@@ -932,6 +934,7 @@ impl DeckChain {
                 EffectKind::Echo(DeckEcho::new()),
                 EffectKind::Flanger(Flanger::new()),
                 EffectKind::Bitcrusher(Bitcrusher::new()),
+                EffectKind::Tremolo(Tremolo::new()),
             ],
         }
     }
@@ -976,6 +979,12 @@ impl DeckChain {
     fn bitcrusher_mut(&mut self) -> &mut Bitcrusher {
         match &mut self.slots[4] {
             EffectKind::Bitcrusher(bitcrusher) => bitcrusher,
+            _ => unreachable!(),
+        }
+    }
+    fn tremolo_mut(&mut self) -> &mut Tremolo {
+        match &mut self.slots[5] {
+            EffectKind::Tremolo(tremolo) => tremolo,
             _ => unreachable!(),
         }
     }
@@ -1160,6 +1169,13 @@ impl DeckVoice {
         self.chain.freeze_mut().reset();
         self.chain.flanger_mut().silence();
         self.chain.bitcrusher_mut().silence();
+        // No call for the tremolo here or at the other three record-
+        // change sites, on purpose: its only state is an LFO phase, not
+        // audio content, so there is nothing from the old record for a
+        // stale line to leak -- and forcibly resetting the phase would
+        // itself be a discontinuity if the effect is already engaged
+        // (say under a MIX target spanning both decks) when a load
+        // lands on just one of them.
         self.reset_blend();
         if load.play {
             self.transport.slew(1.0, LOAD_SWAP_SECS);
@@ -2578,6 +2594,24 @@ impl Mixer {
     pub fn set_deck_bitcrusher_bits(&self, deck: DeckId, bits: f32) {
         let mut s = self.state.lock().unwrap();
         s.decks[deck.index()].chain.bitcrusher_mut().set_bits(bits);
+    }
+
+    /// The tremolo's on/off switch.
+    pub fn set_deck_tremolo(&self, deck: DeckId, on: bool) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.tremolo_mut().set_wet(if on { 1.0 } else { 0.0 });
+    }
+
+    /// The tremolo LFO's speed, in Hz.
+    pub fn set_deck_tremolo_rate(&self, deck: DeckId, hz: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.tremolo_mut().set_rate(hz);
+    }
+
+    /// The tremolo LFO's swing.
+    pub fn set_deck_tremolo_depth(&self, deck: DeckId, depth: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.tremolo_mut().set_depth(depth);
     }
 
     /// Momentary FREEZE: while held, the deck repeats a beat-sized

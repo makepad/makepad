@@ -2356,6 +2356,94 @@ impl Bitcrusher {
     }
 }
 
+pub(crate) const TREMOLO_RATE_MIN: f32 = 0.1;
+pub(crate) const TREMOLO_RATE_MAX: f32 = 20.0;
+pub(crate) const TREMOLO_RATE_DEFAULT: f32 = 4.0;
+pub(crate) const TREMOLO_DEPTH_DEFAULT: f32 = 0.85;
+
+/// One deck's tremolo: a unipolar sine LFO driving a subtractive gain
+/// multiplier -- it can only attenuate, never boost past unity, the same
+/// as a real tremolo circuit.
+///
+/// No delay line, no filter history, nothing that persists audio
+/// content across frames -- `phase` is an oscillator position, not
+/// sound, so none of the fed-back-line hazards `DeckEcho`/`Flanger`
+/// guard against apply here: there is no "later" for stale content to
+/// resurface from, and disengage needs no ring-out tail. That also
+/// means no lifecycle hook is wired anywhere for this unit -- see the
+/// module-level note beside its wiring in `mixer.rs`.
+pub struct Tremolo {
+    phase: f32,
+    wet: ParamRamp,
+    rate: ParamRamp,
+    depth: ParamRamp,
+}
+
+impl Tremolo {
+    pub fn new() -> Tremolo {
+        Tremolo {
+            phase: 0.0,
+            wet: ParamRamp::at(0.0),
+            rate: ParamRamp::at(TREMOLO_RATE_DEFAULT),
+            depth: ParamRamp::at(TREMOLO_DEPTH_DEFAULT),
+        }
+    }
+
+    /// The on/off switch.
+    pub fn set_wet(&mut self, wet: f32) {
+        if let Some(wet) = knob(wet, 0.0, 1.0) {
+            self.wet.slew(wet, EQ_ENGAGE_SECS);
+        }
+    }
+
+    /// The LFO's speed, in Hz. A hard change here only shifts the
+    /// modulation's slope, not the gain's value at any instant, so a
+    /// plain ramp is enough -- ramped anyway, for idiom consistency
+    /// with every other numeric setter in this file, not because
+    /// skipping it would click.
+    pub fn set_rate(&mut self, hz: f32) {
+        if let Some(hz) = knob(hz, TREMOLO_RATE_MIN, TREMOLO_RATE_MAX) {
+            self.rate.slew(hz, EQ_ENGAGE_SECS);
+        }
+    }
+
+    /// The LFO's swing, 0..1 of the full attenuation range.
+    pub fn set_depth(&mut self, depth: f32) {
+        if let Some(depth) = knob(depth, 0.0, 1.0) {
+            self.depth.slew(depth, EQ_ENGAGE_SECS);
+        }
+    }
+
+    pub fn engaged(&self) -> bool {
+        self.wet.target() > 0.0
+    }
+
+    /// Process one stereo frame.
+    #[inline]
+    pub fn process(&mut self, frame: [f32; 2], device_rate: f32) -> [f32; 2] {
+        let wet = self.wet.tick(device_rate);
+        if wet == 0.0 && self.wet.target() == 0.0 {
+            // No line, no tail: off is exactly the input, and stays
+            // exactly the input the instant the disengage ramp
+            // finishes -- unlike Flanger/Echo there is nothing here
+            // that can still be ringing.
+            return frame;
+        }
+        let rate_hz = self.rate.tick(device_rate);
+        let depth = self.depth.tick(device_rate);
+
+        self.phase += std::f32::consts::TAU * rate_hz / device_rate.max(1.0);
+        if self.phase >= std::f32::consts::TAU {
+            self.phase -= std::f32::consts::TAU;
+        }
+
+        let lfo01 = 0.5 * (1.0 + self.phase.sin());
+        let gain = 1.0 - wet * depth * (1.0 - lfo01);
+
+        [frame[0] * gain, frame[1] * gain]
+    }
+}
+
 // ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
@@ -4440,5 +4528,105 @@ mod tests {
         assert_eq!(bc.bits.target(), BITCRUSHER_BITS_MAX);
         bc.set_bits(-5.0);
         assert_eq!(bc.bits.target(), BITCRUSHER_BITS_MIN);
+    }
+
+    /// Off, a fresh unit is exactly its input.
+    #[test]
+    fn a_tremolo_that_was_never_engaged_is_bit_transparent() {
+        let rate = 48_000.0f32;
+        let mut trem = Tremolo::new();
+        let mut phase = 0.0f32;
+        for _ in 0..4_000 {
+            phase += 2.0 * PI * 37.0 / rate;
+            let x = phase.sin() * 0.6;
+            assert_eq!(trem.process([x, -x], rate), [x, -x]);
+        }
+    }
+
+    /// Engaged, the gain the LFO applies never inverts the signal and
+    /// never boosts past unity -- a strict, provable [1 - depth, 1.0].
+    #[test]
+    fn an_engaged_tremolo_stays_within_its_documented_gain_range() {
+        let rate = 48_000.0f32;
+        let mut trem = Tremolo::new();
+        trem.set_wet(1.0);
+        trem.set_depth(0.85);
+        for _ in 0..SETTLE_FRAMES {
+            trem.process([0.0, 0.0], rate);
+        }
+        let input = 0.5f32;
+        for _ in 0..48_000usize {
+            let out = trem.process([input, input], rate)[0];
+            let gain = out / input;
+            assert!(gain >= 1.0 - 0.85 - 1e-4 && gain <= 1.0 + 1e-4, "gain {gain} out of range");
+        }
+    }
+
+    /// No feedback path to diverge, but the invariant is worth locking
+    /// in against a future regression: cranked all the way, output
+    /// never exceeds the input's own magnitude and stays finite.
+    #[test]
+    fn cranked_tremolo_depth_and_rate_stay_bounded() {
+        let rate = 48_000.0f32;
+        let mut trem = Tremolo::new();
+        trem.set_wet(1.0);
+        trem.set_depth(1.0);
+        trem.set_rate(TREMOLO_RATE_MAX);
+        for _ in 0..SETTLE_FRAMES {
+            trem.process([0.0, 0.0], rate);
+        }
+        let mut phase = 0.0f32;
+        for _ in 0..48_000usize {
+            phase += 2.0 * PI * 233.0 / rate;
+            let x = phase.sin() * 0.9;
+            let out = trem.process([x, x], rate);
+            assert!(out[0].is_finite() && out[0].abs() <= x.abs() + 1e-6, "{out:?} vs {x}");
+        }
+    }
+
+    /// No line, no tail: disengage completes exactly the ramp's own
+    /// duration after `set_wet(0.0)`, unlike the echo's or the
+    /// flanger's, which must wait out a real ring-out first.
+    #[test]
+    fn switching_the_tremolo_off_returns_to_bit_exact_bypass_after_its_ramp() {
+        let rate = 48_000.0f32;
+        let mut trem = Tremolo::new();
+        trem.set_wet(1.0);
+        for _ in 0..SETTLE_FRAMES {
+            trem.process([0.5, 0.5], rate);
+        }
+        trem.set_wet(0.0);
+        // EQ_ENGAGE_SECS is 0.012s; a couple hundred extra frames of
+        // margin is comfortably past it without approaching anything
+        // that would matter for a unit with no tail to wait out.
+        for _ in 0..1_000 {
+            trem.process([0.5, 0.5], rate);
+        }
+        assert!(!trem.engaged());
+        for i in 0..1_000 {
+            let x = (i as f32 * 0.037).sin() * 0.5;
+            assert_eq!(trem.process([x, -x], rate), [x, -x], "a bit-exact bypass, not merely quiet");
+        }
+    }
+
+    #[test]
+    fn tremolo_setters_clamp_to_their_documented_ranges() {
+        let mut trem = Tremolo::new();
+        trem.set_wet(f32::NAN);
+        assert_eq!(trem.wet.target(), 0.0, "a bad value moves nothing");
+        trem.set_wet(5.0);
+        assert_eq!(trem.wet.target(), 1.0);
+        trem.set_wet(-5.0);
+        assert_eq!(trem.wet.target(), 0.0);
+        trem.set_rate(f32::INFINITY);
+        assert_eq!(trem.rate.target(), TREMOLO_RATE_DEFAULT, "unmoved by a bad value");
+        trem.set_rate(1_000.0);
+        assert_eq!(trem.rate.target(), TREMOLO_RATE_MAX);
+        trem.set_rate(-1.0);
+        assert_eq!(trem.rate.target(), TREMOLO_RATE_MIN);
+        trem.set_depth(2.0);
+        assert_eq!(trem.depth.target(), 1.0);
+        trem.set_depth(-1.0);
+        assert_eq!(trem.depth.target(), 0.0);
     }
 }

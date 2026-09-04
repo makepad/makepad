@@ -409,6 +409,22 @@ fn golden_bitcrusher_crush() {
     assert_golden("bitcrusher_crush", &left, &right);
 }
 
+/// No frequency-coincidence concern here the way the flanger's sweep or
+/// the bitcrusher's hold have: a pure amplitude multiply does not
+/// comb-filter or alias against the tone underneath it, so any steady
+/// tone already shows the pulse.
+#[test]
+fn golden_tremolo_pulse() {
+    let mixer = deck_a(tone_pcm(440.0, 48_000, 3.0));
+    mixer.set_deck_tremolo(DeckId::A, true);
+    mixer.set_deck_tremolo_rate(DeckId::A, 6.0);
+    mixer.set_deck_tremolo_depth(DeckId::A, 0.7);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let (left, right) = capture(&mixer, CAPTURE, |_| {});
+    assert_golden("tremolo_pulse", &left, &right);
+}
+
 // ---------------------------------------------------------------------------
 // clicks
 // ---------------------------------------------------------------------------
@@ -657,6 +673,36 @@ fn changing_crush_rate_mid_stream_is_click_free() {
         }
     });
     assert!(worst < CLICK, "a crush-rate change must ramp, biggest step {worst}");
+}
+
+#[test]
+fn engaging_and_releasing_the_tremolo_are_click_free() {
+    let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| match index {
+        8 => mixer.set_deck_tremolo(DeckId::A, true),
+        24 => mixer.set_deck_tremolo(DeckId::A, false),
+        _ => {}
+    });
+    assert!(worst < CLICK, "engaging or releasing the tremolo must ramp, biggest step {worst}");
+}
+
+/// A multiply, not a rounding function: unlike the bitcrusher's bits,
+/// nothing here is expected to need a handover, and this test is the
+/// confirmation of that, not a search for a bug.
+#[test]
+fn a_tremolo_depth_change_while_engaged_is_click_free() {
+    let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
+    mixer.set_deck_tremolo(DeckId::A, true);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| {
+        if index == 8 {
+            mixer.set_deck_tremolo_depth(DeckId::A, 0.1);
+        }
+    });
+    assert!(worst < CLICK, "a depth change must ramp, biggest step {worst}");
 }
 
 #[test]

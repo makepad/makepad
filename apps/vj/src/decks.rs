@@ -1275,6 +1275,13 @@ pub struct DeckState {
     pub bitcrusher_rate: f32,
     /// The bitcrusher's quantizer bit depth.
     pub bitcrusher_bits: f32,
+    /// Whether the tremolo is on. Same channel-strip treatment as the
+    /// bitcrusher beside it.
+    pub tremolo_on: bool,
+    /// The tremolo LFO's speed, in Hz.
+    pub tremolo_rate: f32,
+    /// The tremolo LFO's swing, 0..1.
+    pub tremolo_depth: f32,
     /// Per-stem gains, in [`crate::music_dsp::StemKind`] order.
     pub stem_gain: [f32; STEM_COUNT],
     pub stem_kill: [bool; STEM_COUNT],
@@ -1350,6 +1357,9 @@ impl Default for DeckState {
             bitcrusher_on: false,
             bitcrusher_rate: crate::music_dsp::BITCRUSHER_RATE_DEFAULT,
             bitcrusher_bits: crate::music_dsp::BITCRUSHER_BITS_DEFAULT,
+            tremolo_on: false,
+            tremolo_rate: crate::music_dsp::TREMOLO_RATE_DEFAULT,
+            tremolo_depth: crate::music_dsp::TREMOLO_DEPTH_DEFAULT,
             stem_gain: [1.0; STEM_COUNT],
             stem_kill: [false; STEM_COUNT],
             stem_solo: [false; STEM_COUNT],
@@ -1687,6 +1697,12 @@ pub enum DeckCmd {
     SetBitcrusherRate { deck: DeckId, hz: f32 },
     /// The bitcrusher's quantizer bit depth.
     SetBitcrusherBits { deck: DeckId, bits: f32 },
+    /// The tremolo's on/off switch.
+    SetTremolo { deck: DeckId, on: bool },
+    /// The tremolo LFO's speed, in Hz.
+    SetTremoloRate { deck: DeckId, hz: f32 },
+    /// The tremolo LFO's swing.
+    SetTremoloDepth { deck: DeckId, depth: f32 },
     /// One stem lane's gain, 0 = muted.
     SetStemGain { deck: DeckId, stem: usize, gain: f32 },
     SplatSet { deck: DeckId, grid: Arc<SplatGrid> },
@@ -2136,6 +2152,9 @@ impl DeckEngine {
             DeckCmd::SetBitcrusher { deck, on: state.bitcrusher_on },
             DeckCmd::SetBitcrusherRate { deck, hz: state.bitcrusher_rate },
             DeckCmd::SetBitcrusherBits { deck, bits: state.bitcrusher_bits },
+            DeckCmd::SetTremolo { deck, on: state.tremolo_on },
+            DeckCmd::SetTremoloRate { deck, hz: state.tremolo_rate },
+            DeckCmd::SetTremoloDepth { deck, depth: state.tremolo_depth },
         ];
         for band in 0..3 {
             cmds.push(DeckCmd::SetEqBand { deck, band, gain: state.eq_effective(band) });
@@ -5050,6 +5069,36 @@ impl DeckEngine {
         vec![DeckCmd::SetBitcrusherBits { deck, bits: state.bitcrusher_bits }]
     }
 
+    /// The tremolo's on/off switch.
+    pub fn toggle_tremolo(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.tremolo_on = !state.tremolo_on;
+        vec![DeckCmd::SetTremolo { deck, on: state.tremolo_on }]
+    }
+
+    /// Set the tremolo's on/off switch to an explicit value, rather
+    /// than flipping whatever it already was -- what a MIX-linked
+    /// broadcast needs, the same reason [`Self::set_flanger`] exists.
+    pub fn set_tremolo(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
+        self.deck_mut(deck).tremolo_on = on;
+        vec![DeckCmd::SetTremolo { deck, on }]
+    }
+
+    /// The tremolo LFO's speed, in Hz.
+    pub fn set_tremolo_rate(&mut self, deck: DeckId, hz: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.tremolo_rate =
+            hz.clamp(crate::music_dsp::TREMOLO_RATE_MIN, crate::music_dsp::TREMOLO_RATE_MAX);
+        vec![DeckCmd::SetTremoloRate { deck, hz: state.tremolo_rate }]
+    }
+
+    /// The tremolo LFO's swing.
+    pub fn set_tremolo_depth(&mut self, deck: DeckId, depth: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.tremolo_depth = depth.clamp(0.0, 1.0);
+        vec![DeckCmd::SetTremoloDepth { deck, depth: state.tremolo_depth }]
+    }
+
     /// Stem knob. Inert until the separated stems are loaded — the deck is
     /// playing the full mix and there is nothing to turn down.
     pub fn set_stem(&mut self, deck: DeckId, stem: usize, gain: f32) -> Vec<DeckCmd> {
@@ -5599,6 +5648,60 @@ mod tests {
         assert!(cmds.contains(&DeckCmd::SetBitcrusher { deck: DeckId::B, on: true }));
         assert!(cmds.contains(&DeckCmd::SetBitcrusherRate { deck: DeckId::B, hz: 2_000.0 }));
         assert!(cmds.contains(&DeckCmd::SetBitcrusherBits { deck: DeckId::B, bits: 4.0 }));
+    }
+
+    #[test]
+    fn tremolo_rate_and_depth_clamp_to_their_documented_ranges() {
+        let mut e = DeckEngine::new();
+        assert_eq!(
+            e.set_tremolo_rate(DeckId::A, 1_000.0),
+            vec![DeckCmd::SetTremoloRate {
+                deck: DeckId::A,
+                hz: crate::music_dsp::TREMOLO_RATE_MAX,
+            }]
+        );
+        assert_eq!(
+            e.set_tremolo_rate(DeckId::A, -1.0),
+            vec![DeckCmd::SetTremoloRate {
+                deck: DeckId::A,
+                hz: crate::music_dsp::TREMOLO_RATE_MIN,
+            }]
+        );
+        assert_eq!(
+            e.set_tremolo_depth(DeckId::A, 5.0),
+            vec![DeckCmd::SetTremoloDepth { deck: DeckId::A, depth: 1.0 }]
+        );
+        assert_eq!(
+            e.set_tremolo_depth(DeckId::A, -5.0),
+            vec![DeckCmd::SetTremoloDepth { deck: DeckId::A, depth: 0.0 }]
+        );
+    }
+
+    #[test]
+    fn toggle_tremolo_flips_and_set_tremolo_lands_on_an_explicit_side() {
+        let mut e = DeckEngine::new();
+        assert!(!e.deck(DeckId::A).tremolo_on);
+        assert_eq!(
+            e.toggle_tremolo(DeckId::A),
+            vec![DeckCmd::SetTremolo { deck: DeckId::A, on: true }]
+        );
+        assert!(e.deck(DeckId::A).tremolo_on);
+        assert_eq!(
+            e.set_tremolo(DeckId::B, true),
+            vec![DeckCmd::SetTremolo { deck: DeckId::B, on: true }]
+        );
+        assert!(e.deck(DeckId::B).tremolo_on);
+    }
+
+    #[test]
+    fn a_load_carries_the_operators_tremolo_settings() {
+        let mut e = DeckEngine::new();
+        e.toggle_tremolo(DeckId::B);
+        e.set_tremolo_rate(DeckId::B, 8.0);
+        let (d, g) = load_gen(&e.click(item(3), DeckTarget::B));
+        let cmds = e.track_ready(d, g, 20.0);
+        assert!(cmds.contains(&DeckCmd::SetTremolo { deck: DeckId::B, on: true }));
+        assert!(cmds.contains(&DeckCmd::SetTremoloRate { deck: DeckId::B, hz: 8.0 }));
     }
 
     // -----------------------------------------------------------------
