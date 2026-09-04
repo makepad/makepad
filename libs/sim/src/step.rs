@@ -149,6 +149,7 @@ pub fn step_world(world: &mut GameWorld) {
             terrain,
             world_terrain_materials.as_ref(),
             world_voxel.as_deref(),
+            decks,
             gravity,
         );
     }
@@ -499,7 +500,11 @@ pub fn step_world(world: &mut GameWorld) {
                 e.pos.y = deck + e.half.y;
                 e.on_floor = true;
                 e.floor_id = 0;
-                e.floor_normal = vec3f(0.0, 1.0, 0.0);
+                e.floor_normal = decks.iter().filter_map(|d| d.surface.as_ref())
+                    .filter_map(|s| s.contact_at(e.pos.x, e.pos.z))
+                    .filter(|(h, _)| (*h - deck).abs() <= CLIMB)
+                    .min_by(|a, b| (a.0 - deck).abs().total_cmp(&(b.0 - deck).abs()))
+                    .map_or(vec3f(0.0, 1.0, 0.0), |(_, n)| n);
                 e.vel.y = 0.0;
             }
         }
@@ -718,6 +723,7 @@ pub fn step_world(world: &mut GameWorld) {
             terrain,
             terrain_materials,
             voxel,
+            decks,
             water,
             gravity,
             tick,
@@ -729,6 +735,7 @@ pub fn step_world(world: &mut GameWorld) {
             terrain.as_ref(),
             terrain_materials.as_ref(),
             voxel.as_deref(),
+            decks,
             *gravity,
         );
         // Water buoyancy (W2): the dynamics pre-step force pass. AFTER the

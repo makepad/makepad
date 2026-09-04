@@ -666,6 +666,7 @@ impl GameWorld {
             terrain,
             terrain_materials,
             voxel,
+            decks,
             gravity,
             ..
         } = self;
@@ -675,6 +676,7 @@ impl GameWorld {
             terrain.as_ref(),
             terrain_materials.as_ref(),
             voxel.as_deref(),
+            decks,
             *gravity,
         );
     }
