@@ -17,6 +17,39 @@
 
 use makepad_math::*;
 
+/// Indexed world-space triangles, shared by the renderer, feet and box3d.
+/// Immutable behind an Arc: replacing/retracting a deck also replaces its
+/// collider, and rollback keeps the exact accepted surface alive.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DeckSurface {
+    pub vertices: Vec<Vec3f>,
+    pub indices: Vec<u32>,
+}
+
+impl DeckSurface {
+    /// Exact barycentric height and upward triangle normal. No bilinear
+    /// interpolation: the diagonal is the same one the mesh actually draws.
+    pub fn contact_at(&self, x: f32, z: f32) -> Option<(f32, Vec3f)> {
+        let mut best: Option<(f32, Vec3f)> = None;
+        for t in self.indices.chunks_exact(3) {
+            let (a, b, c) = (self.vertices[t[0] as usize], self.vertices[t[1] as usize], self.vertices[t[2] as usize]);
+            if x < a.x.min(b.x).min(c.x) - 1e-4 || x > a.x.max(b.x).max(c.x) + 1e-4
+                || z < a.z.min(b.z).min(c.z) - 1e-4 || z > a.z.max(b.z).max(c.z) + 1e-4 { continue; }
+            let (u, v) = (b - a, c - a);
+            let det = u.x * v.z - u.z * v.x;
+            if det.abs() < 1e-8 { continue; }
+            let s = ((x - a.x) * v.z - (z - a.z) * v.x) / det;
+            let t = (u.x * (z - a.z) - u.z * (x - a.x)) / det;
+            if s < -1e-4 || t < -1e-4 || s + t > 1.0001 { continue; }
+            let y = a.y + u.y * s + v.y * t;
+            let mut normal = Vec3f::cross(u, v).normalize();
+            if normal.y < 0.0 { normal = normal * -1.0; }
+            if best.map_or(true, |(h, _)| y > h) { best = Some((y, normal)); }
+        }
+        best
+    }
+}
+
 /// One corridor's walk surface.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DeckStrip {
@@ -28,6 +61,9 @@ pub struct DeckStrip {
     pub pts: Vec<Vec3f>,
     /// Half the ribbon's width: how far off the centreline the deck reaches.
     pub half_width: f32,
+    /// None preserves legacy road/rail strip behavior. A banked deck carries
+    /// its real triangles here and uses them for BOTH feet and rigid contacts.
+    pub surface: Option<std::sync::Arc<DeckSurface>>,
 }
 
 impl DeckStrip {
@@ -35,6 +71,9 @@ impl DeckStrip {
     /// the height interpolated along the nearest centreline segment.
     /// Ends overshoot by a half disc, like the slabs they replace.
     pub fn height_at(&self, x: f32, z: f32) -> Option<f32> {
+        if let Some(surface) = &self.surface {
+            return surface.contact_at(x, z).map(|(h, _)| h);
+        }
         let hw2 = self.half_width * self.half_width;
         let mut best: Option<(f32, f32)> = None;
         for w in self.pts.windows(2) {
@@ -142,10 +181,44 @@ pub fn box_floor_under(
 mod tests {
     use super::*;
 
+    #[test]
+    fn triangle_deck_rays_feet_and_rollback_share_grade_and_bank() {
+        let surface=std::sync::Arc::new(DeckSurface {
+            vertices:vec![vec3f(-10.0,0.0,-10.0),vec3f(10.0,1.0,-10.0),vec3f(10.0,3.0,10.0),vec3f(-10.0,2.0,10.0)],
+            indices:vec![0,2,1,0,3,2],
+        });
+        let mut world=crate::world::GameWorld::new();
+        world.gravity=30.0;
+        world.decks.push(DeckStrip {feature:"banked".into(),surface:Some(surface.clone()),..Default::default()});
+        world.sync_queries();
+        assert_eq!(world.dynamics.body_count(),1);
+        for iz in 0..35 { for ix in 0..35 {
+            let (x,z)=(-9.3+ix as f32*0.53,-9.2+iz as f32*0.51);
+            let (h,n)=surface.contact_at(x,z).unwrap();
+            let hit=crate::dynamics::cast_ray(&world.dynamics,vec3f(x,8.0,z),vec3f(0.0,-1.0,0.0),20.0).unwrap();
+            assert!((hit.pos.y-h).abs()<1e-4);
+            assert!(hit.normal.dot(n)>0.99999);
+            assert_eq!(world.decks[0].height_at(x,z),Some(h));
+        }}
+        let mut restored=world.clone();
+        world.decks.clear(); world.sync_queries();
+        assert_eq!(world.dynamics.body_count(),0);
+        assert!(crate::dynamics::cast_ray(&world.dynamics,vec3f(0.0,8.0,0.0),vec3f(0.0,-1.0,0.0),20.0).is_none());
+        restored.push_entity(mover(10,vec3f(0.0,4.0,0.0)));
+        for _ in 0..90 {crate::step::step_world(&mut restored);}
+        let e=restored.entity(10).unwrap();
+        assert!(e.on_floor);
+        assert!((e.pos.y-e.half.y-(1.5+0.35*0.15)).abs()<0.01);
+        assert!(e.floor_normal.dot(surface.contact_at(0.0,0.0).unwrap().1)>0.99999);
+        assert_eq!(restored.dynamics.body_count(),2);
+        restored.decks.clear(); restored.sync_queries();
+        assert_eq!(restored.dynamics.body_count(),1);
+    }
+
     fn graded_strip() -> DeckStrip {
         // 60 m at 6 %: y climbs 3.6 m, every 3 m a point.
         let pts = (0..=20).map(|i| vec3f(i as f32 * 3.0, i as f32 * 3.0 * 0.06, 0.0)).collect();
-        DeckStrip { feature: "road:0".into(), pts, half_width: 4.0 }
+        DeckStrip { feature: "road:0".into(), pts, half_width: 4.0, surface: None }
     }
 
     #[test]

@@ -275,6 +275,7 @@ pub struct RigidDynamics {
     /// the stale one is destroyed, both inside one reconcile — no solver
     /// step ever runs without a collider under a resting body.
     voxel_bodies: Vec<VoxelBody>,
+    deck_bodies: Vec<(std::sync::Arc<crate::deck::DeckSurface>, BodyId)>,
     last_gravity: f32,
     /// Live capsule↔rigid overlaps (D4's rigid-hits-mover signal), sorted.
     /// Updated from box3d sensor events after every step; consumed per tick
@@ -305,6 +306,7 @@ impl RigidDynamics {
             terrain_rev: None,
             terrain_body: None,
             voxel_bodies: Vec::new(),
+            deck_bodies: Vec::new(),
             // NAN forces the first reconcile to sync gravity.
             last_gravity: f32::NAN,
             overlaps: Vec::new(),
@@ -318,6 +320,7 @@ impl RigidDynamics {
         self.mirror.len()
             + self.terrain_body.iter().len()
             + self.voxel_bodies.len()
+            + self.deck_bodies.len()
             + self.ragdolls.iter().map(|r| r.bodies.len()).sum::<usize>()
     }
 
@@ -951,6 +954,11 @@ fn create_voxel_body(
         vertices.push(b3vec3(v[0], v[1], v[2]));
     }
     let indices: Vec<i32> = mesh.indices.iter().map(|i| *i as i32).collect();
+    create_static_surface_body(world, &vertices, &indices)
+}
+
+/// Shared static triangle mesh path for edited terrain and generated decks.
+fn create_static_surface_body(world: &mut World, vertices: &[B3Vec3], indices: &[i32]) -> Option<BodyId> {
     let def = MeshDef {
         vertices: &vertices,
         indices: &indices,
@@ -974,6 +982,27 @@ fn create_voxel_body(
     shape_def.user_data = TERRAIN_ID;
     create_mesh_shape(world, body, &shape_def, &data, b3vec3(1.0, 1.0, 1.0));
     Some(body)
+}
+
+fn sync_deck_colliders(dynamics: &mut RigidDynamics, decks: &[crate::deck::DeckStrip]) {
+    // Arc identity makes the steady state allocation-free. Decks are immutable
+    // products owned by GameWorld, including during feature removal and rollback.
+    dynamics.deck_bodies.retain(|(surface, body)| {
+        if decks.iter().any(|d| d.surface.as_ref().map_or(false, |s| std::sync::Arc::ptr_eq(s, surface))) {
+            true
+        } else {
+            destroy_body(&mut dynamics.world, *body);
+            false
+        }
+    });
+    for surface in decks.iter().filter_map(|d| d.surface.as_ref()) {
+        if dynamics.deck_bodies.iter().any(|(s, _)| std::sync::Arc::ptr_eq(s, surface)) { continue; }
+        let vertices: Vec<_> = surface.vertices.iter().map(|v| b3vec3(v.x, v.y, v.z)).collect();
+        let indices: Vec<_> = surface.indices.iter().map(|i| *i as i32).collect();
+        if let Some(body) = create_static_surface_body(&mut dynamics.world, &vertices, &indices) {
+            dynamics.deck_bodies.push((surface.clone(), body));
+        }
+    }
 }
 
 /// T4: diff the voxel field's mesh set against the live chunk colliders.
@@ -1050,10 +1079,12 @@ pub fn reconcile(
     terrain: Option<&Terrain>,
     terrain_materials: Option<&crate::terrain::TerrainMaterials>,
     voxel: Option<&crate::voxel::VoxelField>,
+    decks: &[crate::deck::DeckStrip],
     gravity: f32,
 ) {
     prune_orphaned_ragdolls(dynamics, entities);
     sync_voxel_colliders(dynamics, voxel);
+    sync_deck_colliders(dynamics, decks);
     if gravity != dynamics.last_gravity {
         world_set_gravity(&mut dynamics.world, b3vec3(0.0, -gravity, 0.0));
         dynamics.last_gravity = gravity;
@@ -1880,6 +1911,7 @@ impl Clone for RigidDynamics {
         if !self.mirror.is_empty()
             || self.terrain_body.is_some()
             || !self.voxel_bodies.is_empty()
+            || !self.deck_bodies.is_empty()
             || !self.ragdolls.is_empty()
         {
             let mut buf = RecBuffer::new();
@@ -1904,6 +1936,7 @@ impl Clone for RigidDynamics {
             // shapes are interned by the recording — chunk colliders clone
             // with the world.
             voxel_bodies: self.voxel_bodies.clone(),
+            deck_bodies: self.deck_bodies.clone(),
             last_gravity: self.last_gravity,
             // The live overlap set is world state: a rolled-back world must
             // replay the same impulses.
@@ -2011,7 +2044,7 @@ mod ragdoll_tests {
         assert!(cloned.ragdoll_active(7));
         assert!(entities[0].pos.y.is_finite());
 
-        reconcile(&mut cloned, &[], None, None, None, 9.8);
+        reconcile(&mut cloned, &[], None, None, None, &[], 9.8);
         assert!(!cloned.ragdoll_active(7));
         assert_eq!(cloned.body_count(), 0);
     }
