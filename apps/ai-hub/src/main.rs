@@ -36,10 +36,14 @@ fn run() -> Result<(), AssetAiError> {
     let mut cache_dir: Option<PathBuf> = None;
     let mut registry_path: Option<PathBuf> = None;
     let mut machine = false;
+    let mut activity_probe = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--activity-probe" => {
+                activity_probe = Some(args.next().ok_or_else(|| AssetAiError::Io("--activity-probe needs seconds (1..3600)".into()))?.parse::<u64>().map_err(|_| AssetAiError::Io("invalid activity probe seconds".into()))?);
+            }
             "--port" => {
                 let value = args
                     .next()
@@ -78,7 +82,7 @@ fn run() -> Result<(), AssetAiError> {
             }
             "--help" | "-h" => {
                 println!(
-                    "{SERVICE_NAME} {SERVICE_VERSION}\nusage: {SERVICE_NAME} [--port N] [--host ADDR] [--fleet NAME] [--cache-dir PATH] [--registry PATH] [--machine]"
+                    "{SERVICE_NAME} {SERVICE_VERSION}\nusage: {SERVICE_NAME} [--port N] [--host ADDR] [--fleet NAME] [--cache-dir PATH] [--registry PATH] [--machine] [--activity-probe SECONDS]"
                 );
                 return Ok(());
             }
@@ -86,6 +90,10 @@ fn run() -> Result<(), AssetAiError> {
                 return Err(AssetAiError::Io(format!("unknown argument {other:?}")));
             }
         }
+    }
+
+    if let Some(seconds) = activity_probe {
+        return makepad_ai_hub::activity::run_probe(seconds);
     }
 
     let port = match port {

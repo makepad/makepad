@@ -125,6 +125,7 @@ pub struct JobRecord {
     /// Shared cancel flag: raised by POST /job/<id>/cancel, checked by the
     /// backend between steps/tiles/load components.
     pub cancel: CancelToken,
+    interruption: Option<String>,
     /// Lifecycle timestamps (unix ms) surfaced on `/job/<id>`.
     pub queued_ms: u64,
     pub started_ms: Option<u64>,
@@ -199,6 +200,7 @@ pub enum JobClass {
 }
 
 pub struct JobStore {
+    activity: Option<Arc<crate::activity::ActivityGate>>,
     next_id: u64,
     jobs: HashMap<String, JobRecord>,
     queue: VecDeque<String>,
@@ -218,6 +220,7 @@ pub struct JobStore {
 impl Default for JobStore {
     fn default() -> Self {
         Self {
+            activity: None,
             next_id: 0,
             jobs: HashMap::new(),
             queue: VecDeque::new(),
@@ -234,6 +237,23 @@ impl Default for JobStore {
 impl JobStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn set_activity(&mut self, gate: Arc<crate::activity::ActivityGate>) { self.activity = Some(gate); }
+
+    /// No backend lock: publish cancellation to every executing lane, but
+    /// preserve accepted queued jobs and their original IDs/parameters.
+    pub(crate) fn interrupt_for_activity(&mut self) {
+        for job in self.jobs.values_mut() {
+            if matches!(job.state, JobState::Running {..} | JobState::Live {..}) && job.cancel.activity_interrupted() {
+                job.cancel.cancel();
+                if job.interruption.is_none() {
+                    let why = self.activity.as_ref().and_then(|g|g.refusal()).unwrap_or_else(|| "local-use: interrupted by machine activity".into());
+                    job.log_stage(&why, 0.0);
+                    job.interruption = Some(why);
+                }
+            }
+        }
     }
 
     /// Replaces the queued-job bound (`MAKEPAD_ASSET_AI_MAX_QUEUE` on the service).
@@ -293,6 +313,9 @@ impl JobStore {
         policy: QueuePolicy,
         class: JobClass,
     ) -> Result<String, AssetAiError> {
+        if let Some(reason) = self.activity.as_ref().and_then(|gate|gate.refusal()) {
+            return Err(AssetAiError::Unavailable(reason));
+        }
         if policy == QueuePolicy::Reject && self.is_busy() {
             return Err(AssetAiError::Busy);
         }
@@ -310,6 +333,7 @@ impl JobStore {
                 params: Some(params),
                 state: JobState::Queued,
                 cancel: CancelToken::new(),
+                interruption: None,
                 queued_ms: now_ms(),
                 started_ms: None,
                 finished_ms: None,
@@ -361,6 +385,8 @@ impl JobStore {
     /// single order to preserve, because they are no longer competing for one
     /// slot.
     pub fn take_next_of(&mut self, class: JobClass) -> Option<String> {
+        self.interrupt_for_activity();
+        if self.activity.as_ref().is_some_and(|gate| !gate.allows_work()) { return None; }
         match class {
             JobClass::Heavy => {
                 if self.running_heavy.is_some() {
@@ -379,6 +405,7 @@ impl JobStore {
             .position(|id| self.class_of(id) == class)?;
         let id = self.queue.remove(at)?;
         if let Some(job) = self.jobs.get_mut(&id) {
+            if let Some(gate) = &self.activity { job.cancel.bind_activity(gate.clone()); }
             let is_live = job.params.as_ref().map(JobParams::is_live).unwrap_or(false);
             job.state = if is_live {
                 JobState::Live {
@@ -474,6 +501,7 @@ impl JobStore {
 
     /// Worker saw AssetAiError::Cancelled: the job unwound mid-run.
     pub fn cancelled(&mut self, id: &str) {
+        self.interrupt_for_activity();
         if let Some(job) = self.jobs.get_mut(id) {
             job.state = JobState::Cancelled;
             job.finished_ms = Some(now_ms());
@@ -553,6 +581,8 @@ impl JobStore {
     }
 
     pub fn finish(&mut self, id: &str, artifacts: Vec<ArtifactRefJson>) {
+        self.interrupt_for_activity();
+        if self.jobs.get(id).is_some_and(|job|job.cancel.is_cancelled()) { self.cancelled(id); return; }
         if let Some(job) = self.jobs.get_mut(id) {
             job.state = JobState::Done { artifacts };
             job.finished_ms = Some(now_ms());
@@ -562,6 +592,8 @@ impl JobStore {
     }
 
     pub fn fail(&mut self, id: &str, message: String) {
+        self.interrupt_for_activity();
+        if self.jobs.get(id).is_some_and(|job|job.cancel.is_cancelled()) { self.cancelled(id); return; }
         if let Some(job) = self.jobs.get_mut(id) {
             job.state = JobState::Error { message };
             job.finished_ms = Some(now_ms());
@@ -606,6 +638,7 @@ impl JobStore {
     /// ahead of a video generation would be a number that never goes down for
     /// the reason it claims.
     fn queued_detail(&self, id: &str) -> String {
+        if let Some(reason) = self.activity.as_ref().and_then(|gate|gate.refusal()) { return format!("waiting for {reason}"); }
         let class = self.class_of(id);
         let ahead = self
             .queue
@@ -698,8 +731,10 @@ impl JobStore {
             }
             JobState::Cancelled => {
                 status.state = JOB_STATE_CANCELLED.to_string();
+                status.error = job.interruption.clone();
             }
         }
+        if let Some(reason) = &job.interruption { status.stage = Some(reason.clone()); }
         Some(status)
     }
 }
@@ -764,6 +799,126 @@ impl SharedJobs {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    fn activity_store() -> (JobStore, Arc<crate::activity::ActivityGate>) {
+        let gate = crate::activity::ActivityGate::new(crate::activity::Config {
+            enabled: true,
+            supported: true,
+            ..Default::default()
+        });
+        gate.test_publish(true);
+        gate.retirement_finished();
+        let mut store = JobStore::new();
+        store.set_activity(gate.clone());
+        (store, gate)
+    }
+
+    #[test]
+    fn activity_preserves_accepted_queue_and_ids_across_busy_retirement() {
+        let (mut store, gate) = activity_store();
+        let heavy = store.submit(params("image"), QueuePolicy::Queue).unwrap();
+        let chat = store.submit_as(params("qwen"), QueuePolicy::Queue, JobClass::Chat).unwrap();
+        gate.test_publish(false);
+        for _ in 0..3 {
+            assert!(store.take_next_of(JobClass::Heavy).is_none());
+            assert!(store.take_next_of(JobClass::Chat).is_none());
+            assert!(matches!(store.submit(params("refused"), QueuePolicy::Queue), Err(AssetAiError::Unavailable(_))));
+            assert!(matches!(store.submit_as(params("refused"), QueuePolicy::Queue, JobClass::Chat), Err(AssetAiError::Unavailable(_))));
+        }
+        assert_eq!(store.pending_count(), 2);
+        assert_eq!(store.jobs.len(), 2);
+        for id in [&heavy, &chat] {
+            let queued = store.status_json(id).unwrap();
+            assert_eq!(queued.state, "queued");
+            assert!(queued.stage.unwrap().contains("local-use:"));
+            assert!(queued.started_ms.is_none());
+        }
+        gate.test_publish(true);
+        assert!(store.take_next().is_none(), "quiet does not bypass pending retirement");
+        gate.retirement_finished();
+        assert_eq!(store.take_next(), Some(heavy.clone()));
+        assert_eq!(store.take_next_of(JobClass::Chat), Some(chat.clone()));
+        assert!(store.take_next().is_none());
+        assert!(store.take_next_of(JobClass::Chat).is_none());
+        let next = store.submit(params("next"), QueuePolicy::Queue).unwrap();
+        assert_eq!(next, "job-3", "refusals must neither accept nor consume job ids");
+        assert_eq!(store.jobs.len(), 3);
+        assert!(matches!(store.take_params(&heavy), Some(JobParams::Generate(_))));
+        assert!(store.take_params(&heavy).is_none(), "accepted params are consumed exactly once");
+    }
+
+    #[test]
+    fn activity_epoch_cancels_all_lanes_and_live_after_quiet_returns() {
+        let (mut store, gate) = activity_store();
+        store.set_chat_slots(2);
+        let live = store.submit(live_params("video"), QueuePolicy::Queue).unwrap();
+        assert_eq!(store.take_next(), Some(live.clone()));
+        let mut ids = vec![live];
+        for _ in 0..2 {
+            let chat = store.submit_as(params("qwen"), QueuePolicy::Queue, JobClass::Chat).unwrap();
+            assert_eq!(store.take_next_of(JobClass::Chat), Some(chat.clone()));
+            ids.push(chat);
+        }
+        let tokens: Vec<_> = ids.iter().map(|id| store.cancel_token(id).unwrap()).collect();
+        assert!(tokens.iter().all(|token| !token.is_cancelled()));
+        // No monitor/store callback observes busy: each token must retain
+        // the interruption through the epoch even after the gate reopens.
+        gate.test_publish(false);
+        gate.test_publish(true);
+        gate.retirement_finished();
+        assert!(tokens.iter().all(|token| token.is_cancelled()));
+        assert_eq!(store.running_models().len(), 3, "cancellation does not release executing slots");
+        store.interrupt_for_activity();
+        for id in &ids {
+            store.finish(id, vec![]);
+            let status = store.status_json(id).unwrap();
+            assert_eq!(status.state, "cancelled");
+            assert!(status.error.unwrap().contains("local-use:"));
+        }
+        assert!(store.running_models().is_empty());
+    }
+
+    #[test]
+    fn activity_finish_and_fail_after_busy_preserve_interruption_reason() {
+        for fail in [false, true] {
+            let (mut store, gate) = activity_store();
+            let id = store.submit(params("image"), QueuePolicy::Queue).unwrap();
+            assert_eq!(store.take_next(), Some(id.clone()));
+            gate.test_publish(false);
+            if fail { store.fail(&id, "backend error while unwinding".into()); }
+            else { store.finish(&id, vec![]); }
+            let status = store.status_json(&id).unwrap();
+            assert_eq!(status.state, "cancelled");
+            assert!(status.error.as_deref().unwrap().contains("local-use:"));
+            assert!(status.log.unwrap().iter().any(|line| line.contains("local-use:")));
+            assert_eq!(store.pending_count(), 0);
+            assert!(store.running_models().is_empty());
+        }
+    }
+
+    #[test]
+    fn activity_stale_monitor_refuses_admission_and_wakeup() {
+        let gate = crate::activity::ActivityGate::new(crate::activity::Config {
+            enabled: true,
+            supported: true,
+            stale_ms: 0,
+            ..Default::default()
+        });
+        // Queue before installing the injected gate to avoid timing the
+        // submission against a deliberately zero-length sample lifetime.
+        let mut store = JobStore::new();
+        let id = store.submit(params("image"), QueuePolicy::Queue).unwrap();
+        gate.test_publish(true);
+        gate.retirement_finished();
+        store.set_activity(gate.clone());
+        std::thread::sleep(Duration::from_millis(2));
+        assert_eq!(gate.snapshot().reason, "monitor-stale");
+        assert!(store.take_next().is_none());
+        assert!(store.take_next_of(JobClass::Chat).is_none());
+        assert!(matches!(store.submit(params("refused"), QueuePolicy::Queue), Err(AssetAiError::Unavailable(_))));
+        assert_eq!(store.status_json(&id).unwrap().state, "queued");
+        assert_eq!(store.jobs.len(), 1);
+    }
 
     fn params(model: &str) -> JobParams {
         JobParams::Generate(generate_params(model))

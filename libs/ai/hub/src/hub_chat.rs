@@ -158,6 +158,14 @@ impl HubChatSession {
     }
 }
 
+impl Drop for HubChatSession {
+    fn drop(&mut self) {
+        // Covers election/probe and pre-admission waits before the worker
+        // next observes its disconnected command receiver.
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
 /// The election key for a model file: its lowercase basename — the same key
 /// the service claims for a registry model's primary weights file, so an app
 /// and a machine node loading one GGUF meet in one election.
@@ -470,7 +478,7 @@ fn wait_next_user(msg_rx: &Receiver<WorkerMsg>, held: Option<WorkerMsg>) -> Opti
 /// in-process prefix carries, and splits the node's `<think>` and
 /// `<tool_call>` markup out of the streamed text with the one parser.
 fn run_proxy<T: FleetTransport>(
-    mut provider: FleetQwenChatProvider<T>,
+    provider: FleetQwenChatProvider<T>,
     config: &HubChatConfig,
     first: Option<WorkerMsg>,
     msg_rx: &Receiver<WorkerMsg>,
@@ -478,6 +486,7 @@ fn run_proxy<T: FleetTransport>(
     cancel: &Arc<AtomicBool>,
     route: ChatRoute,
 ) -> ProxyExit {
+    let mut provider = provider.with_cancel_signal(cancel.clone());
     let system = system_text(&config.system_prompt, &config.tools);
     send(ChatEvent::Ready {
         prefill_tokens: 0,
@@ -505,8 +514,11 @@ fn run_proxy<T: FleetTransport>(
             }
         }
         let input = TurnInput::new(system.clone(), history.clone());
-        let mut attempt = 0;
-        'attempt: loop {
+        'attempt: {
+            if cancel.load(Ordering::Relaxed) {
+                provider.cancel();
+                break 'attempt;
+            }
             if let Err(error) = provider.begin_turn(&input) {
                 send(ChatEvent::Failed(format!("{}: {error}", route.label())));
                 return match wait_next_user(msg_rx, None) {
@@ -576,10 +588,8 @@ fn run_proxy<T: FleetTransport>(
                             }
                         }
                         if !has_visible_text && bodies.is_empty() {
-                            if attempt == 0 {
-                                attempt += 1;
-                                continue 'attempt;
-                            }
+                            // An accepted job is never a reason to replay
+                            // the prompt, even when it produced only thinking.
                             send(ChatEvent::Failed("empty completion".to_string()));
                             break 'attempt;
                         }
@@ -624,7 +634,6 @@ fn run_proxy<T: FleetTransport>(
             }
             std::thread::sleep(POLL);
             }
-            break 'attempt;
         }
     }
 }
@@ -732,6 +741,20 @@ mod tests {
     use super::*;
     use makepad_strict_json::{self as json, Value};
     use std::collections::VecDeque;
+
+    #[test]
+    fn dropping_a_session_signals_cancellation_before_worker_disconnect() {
+        let (to_worker, msg_rx) = channel();
+        let (_event_tx, from_worker) = channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let session = HubChatSession {
+            to_worker, from_worker, cancel: cancel.clone(),
+            route: Arc::new(Mutex::new(None)),
+        };
+        drop(session);
+        assert!(cancel.load(Ordering::Relaxed));
+        assert!(matches!(msg_rx.try_recv(), Err(TryRecvError::Disconnected)));
+    }
 
     #[test]
     fn the_election_key_is_the_file_basename() {
@@ -1054,47 +1077,25 @@ mod tests {
     }
 
     #[test]
-    fn a_think_only_completion_retries_once_then_returns_the_answer() {
+    fn an_accepted_think_only_completion_is_not_resubmitted() {
         let (events, generates) = run_scripted_turn(&[
             "reasoning without an answer",
             "new reasoning\n</think>\n\nA visible answer.",
         ]);
-        let visible: String = events
-            .iter()
-            .filter_map(|event| match event {
-                ChatEvent::Delta(text) => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(visible.trim(), "A visible answer.");
-        assert!(matches!(events.last(), Some(ChatEvent::TurnDone { .. })), "{events:?}");
-        assert_eq!(generates.len(), 2);
-        assert_ne!(
-            generates[0].get("seed").and_then(Value::as_u64),
-            generates[1].get("seed").and_then(Value::as_u64),
-        );
-        assert_eq!(
-            generates[0].get("chat_system"),
-            generates[1].get("chat_system"),
-            "retry must preserve the exact system prompt"
-        );
-        assert_eq!(
-            generates[0].get("chat_messages"),
-            generates[1].get("chat_messages"),
-            "retry must preserve the exact transcript"
-        );
+        assert_eq!(generates.len(), 1);
+        assert!(events.iter().all(|event| !matches!(event, ChatEvent::Delta(_))));
+        assert_eq!(events.iter().filter(|e| matches!(e, ChatEvent::Failed(_))).count(), 1);
+        assert!(matches!(events.last(), Some(ChatEvent::Failed(error)) if error == "empty completion"));
     }
 
     #[test]
-    fn two_think_only_completions_fail_without_a_whitespace_delta() {
-        let (events, generates) =
-            run_scripted_turn(&["first reasoning only", "second reasoning only"]);
-        assert_eq!(generates.len(), 2);
-        assert!(
-            events.iter().all(|event| !matches!(event, ChatEvent::Delta(_))),
-            "{events:?}"
-        );
-        assert!(matches!(events.last(), Some(ChatEvent::Failed(error)) if error == "empty completion"));
+    fn empty_completions_fail_without_a_whitespace_delta() {
+        for reply in ["", "\n", "</think>\n\n"] {
+            let (events, generates) = run_scripted_turn(&[reply]);
+            assert_eq!(generates.len(), 1);
+            assert!(events.iter().all(|event| !matches!(event, ChatEvent::Delta(_))), "{events:?}");
+            assert!(matches!(events.last(), Some(ChatEvent::Failed(error)) if error == "empty completion"));
+        }
     }
 
     #[test]

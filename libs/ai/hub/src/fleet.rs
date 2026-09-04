@@ -263,6 +263,18 @@ impl BoxSnapshot {
         self.health.is_some()
     }
 
+    /// Temporary machine-use admission is independent of reachability and
+    /// capability. Old services omit the field; new busy/unknown services
+    /// must never be selected through a capability-picker fallback.
+    pub fn activity_admission_open(&self) -> bool {
+        self.health.as_ref().is_some_and(|health| {
+            health.activity.as_ref().is_none_or(|activity| {
+                activity.admission_open
+                    && matches!(activity.state.as_str(), "idle" | "disabled" | "unsupported")
+            })
+        })
+    }
+
     /// Queue depth for tiebreaks; unreachable or old services count as 0.
     pub fn jobs_pending(&self) -> u64 {
         self.health
@@ -584,7 +596,7 @@ fn vram_admission(
 /// VRAM admission for an advertised available model. `None` means the node
 /// is down, does not advertise that id, or explicitly marks it unavailable.
 pub fn model_admission(snapshot: &BoxSnapshot, model_id: &str) -> Option<VramAdmission> {
-    if !snapshot.is_up() {
+    if !snapshot.activity_admission_open() {
         return None;
     }
     let model = snapshot.model(model_id)?;
@@ -602,7 +614,7 @@ pub fn model_admission_for_request(
     model_id: &str,
     request: &GenerateRequestJson,
 ) -> Option<VramAdmission> {
-    if !snapshot.is_up() {
+    if !snapshot.activity_admission_open() {
         return None;
     }
     let model = snapshot.model(model_id)?;
@@ -619,9 +631,9 @@ pub fn model_admission_for_request(
 // ---------------------------------------------------------------------------
 
 /// Affinity of one box for one model; higher is better, `None` = cannot
-/// serve it (box down, model unknown/unavailable there, or errored).
+/// serve it (box down, machine-use admission closed, or model unavailable).
 pub fn affinity(snapshot: &BoxSnapshot, model_id: &str) -> Option<u32> {
-    if !snapshot.is_up() {
+    if !snapshot.activity_admission_open() {
         return None;
     }
     let model = snapshot.model(model_id)?;
@@ -883,6 +895,8 @@ pub fn eta_breakdown_label(inputs: &EtaInputs) -> String {
 /// includes a sufficiently large node that is temporarily waiting for free
 /// VRAM; dispatchers must use [`pick_box_admitted_scored`], while capability
 /// and queue planners use this function. Returns an index into `snapshots`.
+/// Machine-use admission applies to every picker; raw snapshots retain the
+/// hardware/model facts while a person is using the PC.
 pub fn pick_box(snapshots: &[BoxSnapshot], model_id: &str) -> Option<usize> {
     pick_box_scored(snapshots, model_id).map(|(i, _)| i)
 }
@@ -1026,6 +1040,28 @@ fn candidate_admission(
     )
 }
 
+fn has_compatible_real_backend(
+    snapshots: &[BoxSnapshot],
+    domain: &str,
+    request: Option<&GenerateRequestJson>,
+) -> bool {
+    snapshots.iter().any(|snapshot| {
+        snapshot.is_up()
+            && role_allows(&snapshot.base_url, domain)
+            && snapshot.models.iter().any(|model| {
+                // Temporary local-use/disk-space refusals preserve the real
+                // capability; neither may enable a synthetic fallback.
+                let capable = model.available || model.unavailable_reason.as_deref()
+                    .is_some_and(|reason| reason.starts_with("local-use:") || reason.starts_with("disk-space:"));
+                model.domain == domain
+                    && !is_synthetic_fallback(model)
+                    && !is_explicit_only(model)
+                    && capable
+                    && candidate_admission(snapshot, model, request).is_hardware_compatible()
+            })
+    })
+}
+
 /// Apply the common dispatch gates for automatic domain routing. The legacy
 /// admitted picker retains its synthetic-only fallback; ETA placement never
 /// returns a synthetic backend.
@@ -1035,20 +1071,10 @@ fn admitted_domain_candidates<'a>(
     request: Option<&GenerateRequestJson>,
     allow_synthetic_fallback: bool,
 ) -> Vec<AdmittedDomainCandidate<'a>> {
-    let has_compatible_real = snapshots.iter().any(|snapshot| {
-        snapshot.is_up()
-            && role_allows(&snapshot.base_url, domain)
-            && snapshot.models.iter().any(|model| {
-                model.domain == domain
-                    && !is_synthetic_fallback(model)
-                    && !is_explicit_only(model)
-                    && affinity_of_model(model).is_some()
-                    && candidate_admission(snapshot, model, request).is_hardware_compatible()
-            })
-    });
+    let has_compatible_real = has_compatible_real_backend(snapshots, domain, request);
     let mut candidates = Vec::new();
     for (index, snapshot) in snapshots.iter().enumerate() {
-        if !snapshot.is_up() || !role_allows(&snapshot.base_url, domain) {
+        if !snapshot.activity_admission_open() || !role_allows(&snapshot.base_url, domain) {
             continue;
         }
         for model in &snapshot.models {
@@ -1083,12 +1109,16 @@ pub fn pick_for_domain_scored(
     domain: &str,
 ) -> Option<(usize, String, u32)> {
     let mut best: Option<(bool, bool, u32, u32, u64, usize, &str)> = None;
+    let has_compatible_real = has_compatible_real_backend(snapshots, domain, None);
     for (i, snap) in snapshots.iter().enumerate() {
-        if !snap.is_up() || !role_allows(&snap.base_url, domain) {
+        if !snap.activity_admission_open() || !role_allows(&snap.base_url, domain) {
             continue;
         }
         for model in &snap.models {
             if model.domain != domain || is_explicit_only(model) {
+                continue;
+            }
+            if has_compatible_real && is_synthetic_fallback(model) {
                 continue;
             }
             if !vram_admission_for_model(snap, model).is_hardware_compatible() {
@@ -1137,7 +1167,7 @@ fn domain_admission_inner(
     domain: &str,
     request: Option<&GenerateRequestJson>,
 ) -> Option<VramAdmission> {
-    if !snapshot.is_up() || !role_allows(&snapshot.base_url, domain) {
+    if !snapshot.activity_admission_open() || !role_allows(&snapshot.base_url, domain) {
         return None;
     }
     let mut best_real: Option<VramAdmission> = None;
@@ -1317,7 +1347,7 @@ pub fn pick_for_model_eta(
 ) -> Option<(usize, u64)> {
     let mut best: Option<(u64, u32, u32, u64, usize)> = None;
     for (index, snapshot) in snapshots.iter().enumerate() {
-        if !snapshot.is_up() {
+        if !snapshot.activity_admission_open() {
             continue;
         }
         let Some(model) = snapshot.model(model_id) else {
@@ -1455,6 +1485,14 @@ pub fn unroutable_request_error(
                 reasons.push(format!("{node}: not responding; restore it or retry discovery"));
                 continue;
             }
+            if !snapshot.activity_admission_open() {
+                let reason = snapshot.health.as_ref()
+                    .and_then(|health| health.activity.as_ref())
+                    .map(|activity| activity.reason.as_str())
+                    .unwrap_or("machine activity is unknown");
+                reasons.push(format!("{node}: yielding to local use ({reason}); waiting for idle"));
+                continue;
+            }
             if !role_allows(&snapshot.base_url, &model.domain) {
                 reasons.push(format!(
                     "{node}: its role excludes {}; choose a permitted node or update fleet roles",
@@ -1527,6 +1565,127 @@ mod tests {
     use crate::protocol::*;
 
     // ------------------------------------------------------------ box roles
+
+    fn with_activity(mut snapshot: BoxSnapshot, state: &str, open: bool) -> BoxSnapshot {
+        snapshot.health.as_mut().unwrap().activity = Some(ActivityJson {
+            version: 1,
+            enabled: true,
+            state: state.to_string(),
+            reason: "recent_input".to_string(),
+            admission_open: open,
+            idle_threshold_seconds: 300,
+            quiet_seconds: 20,
+            gpu_threshold_percent: 5.0,
+            ..Default::default()
+        });
+        snapshot
+    }
+
+    #[test]
+    fn activity_busy_and_unknown_have_no_picker_fallback() {
+        for (state, open) in [("busy", false), ("unknown", false), ("idle", false),
+            ("busy", true), ("unknown", true), ("future_state", true)] {
+            let mut node = snap("http://local-use", 32 * 1024, 32 * 1024);
+            node.models = vec![m("real", "image", MODEL_STATE_LOADED, 8.0)];
+            let nodes = vec![with_activity(node, state, open)];
+            let request = GenerateRequestJson { model: "real".into(), ..Default::default() };
+            assert!(nodes[0].is_up());
+            assert!(nodes[0].models[0].available);
+            assert!(vram_admission_for_model(&nodes[0], &nodes[0].models[0]).is_admitted());
+            assert_eq!(affinity(&nodes[0], "real"), None);
+            assert_eq!(model_admission(&nodes[0], "real"), None);
+            assert_eq!(model_admission_for_request(&nodes[0], "real", &request), None);
+            assert_eq!(domain_admission(&nodes[0], "image"), None);
+            assert_eq!(domain_admission_for_request(&nodes[0], "image", &request), None);
+            assert_eq!(pick_box(&nodes, "real"), None);
+            assert_eq!(pick_box_scored(&nodes, "real"), None);
+            assert_eq!(pick_box_admitted(&nodes, "real"), None);
+            assert_eq!(pick_box_admitted_scored(&nodes, "real"), None);
+            assert_eq!(pick_for_domain(&nodes, "image"), None);
+            assert_eq!(pick_for_domain_scored(&nodes, "image"), None);
+            assert_eq!(pick_for_domain_admitted(&nodes, "image"), None);
+            assert_eq!(pick_for_domain_admitted_scored(&nodes, "image"), None);
+            assert_eq!(pick_for_model_eta(&nodes, "real", &request), None);
+            assert_eq!(pick_for_domain_eta(&nodes, "image", 1000.0), None);
+            assert_eq!(pick_for_domain_eta_label(&nodes, "image", 1000.0), None);
+            assert_eq!(pick_for_domain_eta_request(&nodes, "image", &request), None);
+            assert_eq!(pick_for_domain_eta_request_label(&nodes, "image", &request), None);
+            assert!(unroutable_request_error(&nodes, "image", &request).contains("recent_input"));
+        }
+    }
+
+    #[test]
+    fn activity_routes_to_idle_cold_node_and_preserves_legacy_and_disabled_nodes() {
+        let busy = with_activity(snapshot("http://busy", 0,
+            vec![model("real", "image", MODEL_STATE_LOADED, true)]), "busy", false);
+        for state in [None, Some("idle"), Some("disabled"), Some("unsupported")] {
+            let cold = snapshot("http://available", 0,
+                vec![model("real", "image", MODEL_STATE_READY, true)]);
+            let cold = state.map_or(cold.clone(), |state| with_activity(cold, state, true));
+            let nodes = vec![busy.clone(), cold];
+            let request = GenerateRequestJson { model: "real".into(), ..Default::default() };
+            assert_eq!(pick_box(&nodes, "real"), Some(1));
+            assert_eq!(pick_box_admitted(&nodes, "real"), Some(1));
+            assert_eq!(pick_for_domain(&nodes, "image"), Some((1, "real".into())));
+            assert_eq!(pick_for_domain_admitted(&nodes, "image"), Some((1, "real".into())));
+            assert_eq!(pick_for_model_eta(&nodes, "real", &request).map(|v| v.0), Some(1));
+            assert_eq!(pick_for_domain_eta_request(&nodes, "image", &request).map(|v| v.0), Some(1));
+        }
+    }
+
+    #[test]
+    fn activity_busy_real_backend_prevents_admitted_synthetic_fallback() {
+        let mut busy = with_activity(snapshot("http://busy", 0,
+            vec![model("real", "image", MODEL_STATE_LOADED, true)]), "busy", false);
+        let mut synthetic = model("test", "image", MODEL_STATE_LOADED, true);
+        synthetic.backend = "testpattern".into();
+        let test_node = snapshot("http://test", 0, vec![synthetic]);
+        for legacy_unavailable in [false, true] {
+            busy.models[0].available = !legacy_unavailable;
+            busy.models[0].unavailable_reason = legacy_unavailable.then(|| "local-use: recent_input".into());
+            let nodes = vec![busy.clone(), test_node.clone()];
+            assert_eq!(pick_for_domain(&nodes, "image"), None);
+            assert_eq!(pick_for_domain_scored(&nodes, "image"), None);
+            assert_eq!(pick_for_domain_admitted(&nodes, "image"), None);
+            assert_eq!(pick_for_domain_eta(&nodes, "image", 1000.0), None);
+        }
+    }
+
+    #[test]
+    fn disk_full_node_is_skipped_and_recovers_after_space_is_freed() {
+        let mut full = snapshot("http://full", 0,
+            vec![model("real", "image", MODEL_STATE_ABSENT, false)]);
+        full.models[0].unavailable_reason = Some("disk-space: insufficient on C:".into());
+        let mut synthetic = model("test", "image", MODEL_STATE_READY, true);
+        synthetic.backend = "testpattern".into();
+        let mut nodes = vec![full, snapshot("http://test", 0, vec![synthetic])];
+        assert_eq!(pick_box(&nodes, "real"), None);
+        assert_eq!(pick_for_domain_admitted(&nodes, "image"), None);
+        nodes.push(snapshot("http://room", 0, vec![model("real", "image", MODEL_STATE_ABSENT, true)]));
+        assert_eq!(pick_box_admitted(&nodes, "real"), Some(2));
+        nodes.pop();
+        nodes[0].models[0].available = true;
+        nodes[0].models[0].unavailable_reason = None;
+        assert_eq!(pick_box_admitted(&nodes, "real"), Some(0));
+    }
+
+    #[test]
+    fn activity_health_wire_is_additive_and_round_trips() {
+        use makepad_micro_serde::{DeJson, SerJson};
+        let old_json = r#"{"service":"hub","version":"old","models_loaded":[]}"#;
+        let old = HealthJson::deserialize_json(old_json).unwrap();
+        assert!(old.activity.is_none());
+        let mut node = snapshot("http://new", 0, vec![]);
+        node.health = Some(old);
+        let node = with_activity(node, "unknown", false);
+        let parsed = HealthJson::deserialize_json(&node.health.unwrap().serialize_json()).unwrap();
+        let activity = parsed.activity.unwrap();
+        assert_eq!(activity.version, 1);
+        assert_eq!(activity.state, "unknown");
+        assert!(!activity.admission_open);
+        assert_eq!(activity.idle_threshold_seconds, 300);
+        assert_eq!(activity.foreign_gpu_percent, None);
+    }
 
     #[test]
     fn a_role_names_the_domains_a_box_may_serve() {
@@ -1735,6 +1894,7 @@ mod tests {
                 fleet: None,
                 realtime: None,
                 lanes: None,
+                activity: None,
             }),
             models: Vec::new(),
         }
@@ -1787,6 +1947,7 @@ mod tests {
                 fleet: None,
                 realtime: None,
                 lanes: None,
+                activity: None,
             }),
             models,
         }

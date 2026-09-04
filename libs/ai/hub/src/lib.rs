@@ -31,6 +31,7 @@
 //!                              upgrade) streams input/output video frames + live control —
 //!                              see `protocol.rs`'s wire doc block and `crate::realtime`.
 
+pub mod activity;
 pub mod backend;
 #[cfg(feature = "beats-native")]
 pub mod beats_backend;
@@ -44,6 +45,8 @@ mod child_process;
 pub mod control_image;
 pub mod depth_backend;
 pub mod download;
+mod disk_space;
+mod disk_volume;
 pub mod error;
 pub mod fabric;
 pub mod fleet;

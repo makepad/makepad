@@ -164,6 +164,7 @@ impl Downloader {
             )));
         }
         let part = part_path(&dest);
+        crate::disk_space::check_download(&part, file.size)?;
 
         // Peer-assisted phase: try the coordinator-provided source boxes
         // before Hugging Face. On success the `.part` holds the complete,
@@ -282,6 +283,7 @@ impl Downloader {
         }
 
         if download_body {
+            crate::disk_space::check_download(&part, total)?;
             let mut out = fs::OpenOptions::new()
                 .create(true)
                 .write(true)
@@ -312,6 +314,7 @@ impl Downloader {
                 since_heartbeat += n as u64;
                 if since_heartbeat >= 64 * 1024 * 1024 {
                     artifact_lock.heartbeat()?;
+                    crate::disk_space::check_download(&part, total)?;
                     since_heartbeat = 0;
                 }
                 progress(DownloadProgress {
