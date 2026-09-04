@@ -1189,12 +1189,18 @@ impl Widget for MenuBar {
 impl MenuBarRef {
     /// The entry that fired this frame, by click or by keyboard shortcut.
     pub fn selected(&self, actions: &Actions) -> Option<LiveId> {
-        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            if let MenuBarAction::Selected(id) = item.cast() {
-                return Some(id);
-            }
-        }
-        None
+        // The bar publishes `Closed` in the same frame as `Selected` (an
+        // entry closes the menu as it fires), so the first action from the
+        // bar is not the one that matters: look for the selection itself.
+        let uid = self.widget_uid();
+        actions
+            .iter()
+            .filter_map(|action| action.as_widget_action())
+            .filter(|action| action.widget_uid == uid)
+            .find_map(|action| match action.cast::<MenuBarAction>() {
+                MenuBarAction::Selected(id) => Some(id),
+                _ => None,
+            })
     }
 
     pub fn set_menus(&self, cx: &mut Cx, menus: Vec<MenuDef>) {

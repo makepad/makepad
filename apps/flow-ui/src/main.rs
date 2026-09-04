@@ -3536,6 +3536,31 @@ impl App {
         self.auto_opened = false;
     }
 
+    /// An open menu is modal: its panel is drawn above whatever it overlaps,
+    /// but the bar sits early in the widget tree, so the panels beneath the
+    /// popup claimed the press first and an entry never fired. The bar takes
+    /// pointer and key input before the tree while a menu is open; a press
+    /// outside closes the menu and still belongs to what lies beneath it.
+    fn route_open_menu_input(&mut self, cx: &mut Cx, event: &Event) -> bool {
+        let bar = self.ui.menu_bar(cx, ids!(menu_bar));
+        if !bar.is_open() {
+            return false;
+        }
+        let pointer = matches!(
+            event,
+            Event::MouseDown(_) | Event::MouseMove(_) | Event::MouseUp(_) | Event::Scroll(_)
+        );
+        let key = matches!(event, Event::KeyDown(_) | Event::KeyUp(_) | Event::TextInput(_));
+        if !pointer && !key {
+            return false;
+        }
+        bar.handle_event(cx, event, &mut Scope::empty());
+        if matches!(event, Event::MouseDown(_)) && !bar.is_open() {
+            return false;
+        }
+        true
+    }
+
     fn handle_menu(&mut self, cx: &mut Cx, id: LiveId) {
         match id {
             id if id == live_id!(new_from_template) => self.show_templates(cx, true),
@@ -4623,6 +4648,9 @@ impl AppMain for App {
         // The full-window viewer is modal. Route user input directly to it
         // before selection, faces, the ordinary widget tree, and shortcuts.
         if self.route_viewer_modal_input(cx, event) {
+            return;
+        }
+        if self.route_open_menu_input(cx, event) {
             return;
         }
         if matches!(event, Event::KeyDown(e) if e.key_code == KeyCode::Escape)
