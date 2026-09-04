@@ -79,6 +79,13 @@ fn parse_config() -> FlowServerConfig {
         }
     }
     let mut config = FlowServerConfig::new(root.unwrap_or_else(default_root));
+    config.asset.token = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../local/asset-ui/asset-server/admin-token"),
+    )
+    .ok()
+    .map(|token| token.trim().to_string())
+    .filter(|token| !token.is_empty());
     config.control_addr = SocketAddr::new(bind, control_port).to_string();
     config.data_addr = SocketAddr::new(bind, data_port).to_string();
     config
@@ -88,7 +95,7 @@ fn main() {
     let config = parse_config();
     let root = config.root.clone();
     install_signal_handlers();
-    let mut server = match FlowServer::start(config) {
+    let server = match FlowServer::start(config) {
         Ok(server) => server,
         Err(error) => {
             eprintln!("makepad-flow-server: failed to start: {error}");

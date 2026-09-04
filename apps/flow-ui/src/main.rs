@@ -12,17 +12,16 @@ mod services;
 use crate::services::{BridgeContext, FlowServices, FlowUiAction};
 pub use makepad_widgets;
 
-mod canvas;
 mod faces;
 mod graph_edit;
+mod graph_view;
 mod panels;
+mod queue;
 mod testpattern;
 mod theme;
 mod values;
 mod viewer;
-mod wire_route;
 
-use canvas::{CanvasEdit, FlowCanvas, FlowCanvasAction, NodeStatus, Selection};
 use faces::{model_choices, BridgeCall, FaceBridgeCall, FaceHost, ModelChoice};
 use makepad_flow::client::{
     ClientError, FlowClient, FlowSubscriber, FlowSubscriberConfig, SessionConfig,
@@ -32,18 +31,22 @@ use makepad_flow::embed::{default_root, resolve, EmbedPolicy, Resolved};
 use makepad_flow::engine::{FixedGen, HubChat, HubHttp, Seams};
 use makepad_flow::host::{FlowServer, FlowServerConfig};
 use makepad_flow::{
-    CreateInstanceRequest, CreateInstanceResponse, CreateRunResponse, Event as FlowEvent,
-    FlowDefinition, FlowSummary, Graph, InstanceRow, Literal, ModelsResponse, NodeTypeCatalog,
-    NodeState, NodesResponse, PortType, PutFlowResponse, RunRowDto, RunState, TemplateSummary,
-    ValueRef,
+    AssetsResponse, CreateBatchRequest, CreateBatchResponse, CreateInstanceRequest, CreateRunResponse,
+    Event as FlowEvent, FlowDefinition, FlowSummary,
+    Graph, InstanceRow, Literal, ModelsResponse, NodeTypeCatalog, NodeState, NodesResponse,
+    ParallelismResponse, PortType, PutFlowResponse, RunRowDto, RunState, TemplateSummary, ValueRef,
 };
 use makepad_widgets::makepad_draw::text::selection::Cursor;
 use makepad_widgets::makepad_platform::thread::SignalToUI;
 use makepad_widgets::*;
-use panels::{
-    AppView, FlowList, Inspector, InspectorAction, Palette, PaletteAction, RunBar, RunningAction,
-    RunningList, TemplatePicker,
+use makepad_flowgraph::{
+    CanvasEdit, FlowCanvas, FlowCanvasAction, NodeFacesScope, NodeStatus, Selection, FIRST_AT,
 };
+use makepad_flowgraph::wire_route::WireMode;
+use panels::{
+    AppView, FlowList, Inspector, InspectorAction, Palette, PaletteAction, RunBar, TemplatePicker,
+};
+use queue::{QueueAction, QueueList};
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -56,6 +59,34 @@ app_main!(App);
 const FIRST_TEMPLATE: &str = "prompt-to-image";
 /// How often the hub's model lists are refreshed while a flow with generators is open.
 const MODELS_REFRESH_SECS: f64 = 10.0;
+
+const TEMPLATES_MENU: &str = "Templates";
+
+/// The menu id of a template's entry; the name is the server's, so it is
+/// stable across list refreshes.
+fn template_menu_id(name: &str) -> LiveId {
+    LiveId::from_str(&format!("template:{name}"))
+}
+
+fn set_wire_menu_checks(menus: &mut [MenuDef], mode: WireMode) {
+    for entry in menus.iter_mut().flat_map(|menu| &mut menu.items) {
+        if entry.id == live_id!(wires_routed) {
+            entry.label = if mode == WireMode::Routed {
+                "  ✓ Routed"
+            } else {
+                "    Routed"
+            }
+            .to_string();
+        } else if entry.id == live_id!(wires_bezier) {
+            entry.label = if mode == WireMode::Bezier {
+                "  ✓ Bezier"
+            } else {
+                "    Bezier"
+            }
+            .to_string();
+        }
+    }
+}
 
 fn is_focus_routed_input(event: &Event) -> bool {
     matches!(
@@ -110,6 +141,68 @@ The flow server runs embedded in this window unless another one already serves t
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
+
+    let FlowCanvas = mod.widgets.FlowCanvas{
+        draw_bg +: {
+            color_a: theme.flow_grid_a
+            color_b: theme.flow_grid_b
+        }
+        draw_card +: {shadow_color: theme.flow_shadow}
+        draw_title +: {color: theme.flow_text}
+        draw_meta +: {color: theme.flow_text_muted}
+        draw_port +: {color: theme.flow_text_port}
+        draw_chip +: {color: theme.flow_text_chip}
+        draw_error +: {color: theme.flow_error}
+        card_color: theme.flow_surface
+        card_color_hover: theme.flow_surface_hover
+        card_edge_color: theme.flow_edge
+        accent_color: theme.flow_accent
+        highlight_color: theme.flow_highlight
+        color_input: theme.flow_input
+        color_output: theme.flow_success
+        color_chat: theme.flow_chat
+        color_gen: theme.flow_generation
+        color_fn: theme.flow_function
+        color_http: theme.flow_http
+        color_ask: theme.flow_waiting
+        color_flow: theme.flow_text_port
+        color_port_text: theme.flow_port_text
+        color_port_image: theme.flow_port_image
+        color_port_audio: theme.flow_port_audio
+        color_port_video: theme.flow_port_video
+        color_port_mesh: theme.flow_port_mesh
+        color_port_json: theme.flow_port_json
+        color_port_list: theme.flow_port_list
+        color_port_bytes: theme.flow_port_bytes
+        color_state_running: theme.flow_state_running
+        color_state_done: theme.flow_success
+        color_state_failed: theme.flow_error
+        color_state_waiting: theme.flow_waiting
+        color_state_inactive: theme.flow_text_muted
+        color_state_idle: theme.flow_state_idle
+        color_port_label_connected: theme.flow_text_port_connected
+        color_port_label_open: theme.flow_text_port_open
+
+        styles +: {
+            FlowNodeStyle{kind: "input" color: theme.flow_input icon: crate_resource("self:resources/icons/input.svg")}
+            FlowNodeStyle{kind: "output" color: theme.flow_success icon: crate_resource("self:resources/icons/output.svg")}
+            FlowNodeStyle{kind: "chat" color: theme.flow_chat icon: crate_resource("self:resources/icons/chat.svg")}
+            FlowNodeStyle{kind: "gen" color: theme.flow_generation icon: crate_resource("self:resources/icons/gen.svg")}
+            FlowNodeStyle{kind: "fn" color: theme.flow_function icon: crate_resource("self:resources/icons/fn.svg")}
+            FlowNodeStyle{kind: "http" color: theme.flow_http icon: crate_resource("self:resources/icons/http.svg")}
+            FlowNodeStyle{kind: "ask" color: theme.flow_waiting icon: crate_resource("self:resources/icons/ask.svg")}
+            FlowNodeStyle{kind: "flow" color: theme.flow_text_port icon: crate_resource("self:resources/icons/flow.svg")}
+
+            FlowPortStyle{kind: "text" color: theme.flow_port_text icon: crate_resource("self:resources/icons/text.svg")}
+            FlowPortStyle{kind: "image" color: theme.flow_port_image icon: crate_resource("self:resources/icons/image.svg")}
+            FlowPortStyle{kind: "audio" color: theme.flow_port_audio icon: crate_resource("self:resources/icons/audio.svg")}
+            FlowPortStyle{kind: "video" color: theme.flow_port_video icon: crate_resource("self:resources/icons/video.svg")}
+            FlowPortStyle{kind: "mesh" color: theme.flow_port_mesh icon: crate_resource("self:resources/icons/mesh.svg")}
+            FlowPortStyle{kind: "json" color: theme.flow_port_json icon: crate_resource("self:resources/icons/json.svg")}
+            FlowPortStyle{kind: "list" color: theme.flow_port_list icon: crate_resource("self:resources/icons/json.svg")}
+            FlowPortStyle{kind: "bytes" color: theme.flow_port_bytes icon: crate_resource("self:resources/icons/bytes.svg")}
+        }
+    }
 
     let SectionTitle = Label{
         width: Fill
@@ -226,6 +319,10 @@ script_mod! {
                                 {id: @zoom_out label: "Zoom out" shortcut: "Cmd+Minus"}
                                 {id: @zoom_fit label: "Fit" shortcut: "Home"}
                                 {id: @zoom_100 label: "100 %" shortcut: "Cmd+0"}
+                                {sep: true}
+                                {id: @wires_heading label: "Wires" enabled: false}
+                                {id: @wires_routed label: "  ✓ Routed"}
+                                {id: @wires_bezier label: "    Bezier"}
                             ]}
                             {label: "Run" items: [
                                 {id: @run label: "Run" shortcut: "Cmd+R"}
@@ -305,8 +402,14 @@ script_mod! {
                                     }
                                 }
                                 instance_chip := ToolText{}
+                                design_btn := ButtonFlat{text: "Design" visible: false}
                                 View{width: 10 height: 1}
                                 run_btn := Button{text: "▶ Run"}
+                                parallel := ComboBox{
+                                    width: 86
+                                    height: 28
+                                    labels: ["1", "max · 1"]
+                                }
                                 cancel_btn := ButtonFlat{text: "Cancel"}
                                 clear_btn := ButtonFlat{text: "Clear"}
                                 run_bar := RunBar{width: 220 height: 6 margin: Inset{left: 6 right: 6}}
@@ -352,8 +455,8 @@ script_mod! {
                                                     min_horizontal: 100.0
                                                     max_horizontal: 104.0
                                                     a: Panel{
-                                                        SectionTitle{text: "RUNNING"}
-                                                        running := RunningList{}
+                                                        SectionTitle{text: "QUEUE"}
+                                                        running := QueueList{}
                                                     }
                                                     b: Panel{
                                                         SectionTitle{text: "PALETTE"}
@@ -399,7 +502,6 @@ script_mod! {
                                                     max_horizontal: 84.0
                                                     a: Panel{
                                                         spacing: theme.space_1
-                                                        SectionTitle{text: "INSPECTOR"}
                                                         inspector := Inspector{}
                                                     }
                                                     b: View{
@@ -612,10 +714,19 @@ enum IoResult {
         domain: String,
         result: Result<ModelsResponse, ClientError>,
     },
-    InstanceCreated {
+    Parallelism {
         flow: String,
+        result: Result<ParallelismResponse, ClientError>,
+    },
+    BatchCreated {
+        flow: String,
+        planned_nodes: Vec<String>,
+        revision: u64,
+        result: Result<CreateBatchResponse, ClientError>,
+    },
+    QueueRows {
         generation: u64,
-        result: Result<CreateInstanceResponse, ClientError>,
+        result: Result<Vec<RunRowDto>, ClientError>,
     },
     InstanceRunStarted {
         flow: String,
@@ -630,14 +741,6 @@ enum IoResult {
         instance: String,
         generation: u64,
         result: Result<InstanceRow, ClientError>,
-    },
-    RunStarted {
-        instance: String,
-        generation: u64,
-        request_generation: u64,
-        planned_nodes: Vec<String>,
-        journal: InputJournal,
-        result: Result<CreateRunResponse, ClientError>,
     },
     InputsPut {
         instance: String,
@@ -655,6 +758,11 @@ enum IoResult {
         instance: String,
         generation: u64,
         result: Result<(), ClientError>,
+    },
+    Assets(Result<AssetsResponse, ClientError>),
+    AssetThumbnail {
+        alias: String,
+        result: Result<makepad_flow::ValueBytes, ClientError>,
     },
     Done(Result<(), ClientError>),
 }
@@ -674,6 +782,8 @@ struct IoMailbox {
     fetching_flows: bool,
     fetching_instances: bool,
     fetching_models: HashSet<String>,
+    fetching_parallelism: bool,
+    fetching_queue: bool,
 }
 
 impl IoMailbox {
@@ -722,6 +832,14 @@ pub struct App {
     #[rust]
     models_fetched_at: f64,
     #[rust]
+    parallel_max: u64,
+    #[rust]
+    parallel_use_max: bool,
+    #[rust]
+    queue_generation: u64,
+    #[rust]
+    queue_refresh_after_stale: bool,
+    #[rust]
     selected: Option<String>,
     #[rust]
     definition: Option<FlowDefinition>,
@@ -742,6 +860,8 @@ pub struct App {
     #[rust]
     instances: Vec<InstanceRow>,
     #[rust]
+    run_ordinals: HashMap<String, u64>,
+    #[rust]
     faces: Option<FaceHost>,
     #[rust]
     values: ValueCache,
@@ -759,9 +879,6 @@ pub struct App {
     embedded: bool,
     #[rust]
     auto_opened: bool,
-    /// An instance create for the open flow is in flight.
-    #[rust]
-    binding: bool,
     #[rust]
     warned_custom: HashSet<String>,
     #[rust]
@@ -772,6 +889,8 @@ pub struct App {
     input_flush_in_flight: bool,
     #[rust]
     deferred_run: Option<RunRequest>,
+    #[rust]
+    deferred_batch: bool,
     #[rust]
     deferred_flow_reload: bool,
     #[rust]
@@ -786,6 +905,8 @@ pub struct App {
     source_mode: bool,
     #[rust]
     left_hidden: bool,
+    #[rust]
+    wire_mode: WireMode,
     #[rust]
     preview_digest: Option<(String, String)>,
     #[rust]
@@ -827,6 +948,13 @@ impl App {
         let (hint, token) = match resolve(policy, &root, None) {
             Resolved::Host => {
                 let mut config = FlowServerConfig::new(root.clone());
+                config.asset.token = std::fs::read_to_string(
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../local/asset-ui/asset-server/admin-token"),
+                )
+                .ok()
+                .map(|token| token.trim().to_string())
+                .filter(|token| !token.is_empty());
                 config.control_addr = "127.0.0.1:0".to_string();
                 config.data_addr = "127.0.0.1:0".to_string();
                 // Dev-only: `FLOW_GEN_BASE_URL=<url>` points every gen node at
@@ -893,7 +1021,24 @@ impl App {
             ..SessionConfig::default()
         }));
         self.update_connection(cx);
+        self.set_wire_mode(cx, self.wire_mode);
         self.set_modes(cx);
+    }
+
+    fn set_wire_mode(&mut self, cx: &mut Cx, mode: WireMode) {
+        self.wire_mode = mode;
+        if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
+            canvas.set_wire_mode(cx, mode);
+        }
+
+        let menu = self.ui.menu_bar(cx, ids!(menu_bar));
+        let Some(inner) = menu.borrow() else {
+            return;
+        };
+        let mut defs = inner.menus().to_vec();
+        drop(inner);
+        set_wire_menu_checks(&mut defs, mode);
+        menu.set_menus(cx, defs);
     }
 
     fn client(&self) -> Option<Arc<Mutex<FlowClient>>> {
@@ -949,6 +1094,7 @@ impl App {
         self.pending_inputs.clear();
         self.input_flush_in_flight = false;
         self.deferred_run = None;
+        self.update_attachment_lock(cx);
     }
 
     /// The sole instance ownership transition. Old isolate roots are removed
@@ -958,13 +1104,42 @@ impl App {
             if mount && self.faces.is_none() {
                 self.remount_faces(cx);
             }
+            self.update_attachment_lock(cx);
             return;
         }
         self.clear_attachment(cx);
         self.instance = instance;
-        if mount && self.instance.is_some() && self.definition.is_some() {
+        if mount && self.definition.is_some() {
             self.remount_faces(cx);
         }
+        self.update_attachment_lock(cx);
+    }
+
+    fn update_attachment_lock(&mut self, cx: &mut Cx) {
+        let locked = self.instance.is_some();
+        self.ui.button(cx, ids!(design_btn)).set_visible(cx, locked);
+        self.ui
+            .text_input(cx, ids!(source))
+            .set_is_read_only(cx, locked);
+        if let Some(faces) = self.faces.as_mut() {
+            faces.set_locked(cx, locked);
+        }
+        if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
+            canvas.set_faces_locked(cx, locked);
+        }
+        if let Some(mut inspector) = self.ui.widget(cx, ids!(inspector)).borrow_mut::<Inspector>() {
+            inspector.set_locked(cx, locked);
+        }
+        if locked {
+            self.ui
+                .label(cx, ids!(instance_chip))
+                .set_text(cx, "viewing a run · locked");
+        } else {
+            self.ui
+                .label(cx, ids!(instance_chip))
+                .set_text(cx, "design");
+        }
+        self.ui.redraw(cx);
     }
 
     fn focus_instance(&mut self, cx: &mut Cx, instance: String, flow: Option<String>) {
@@ -973,6 +1148,7 @@ impl App {
         } else {
             self.clear_attachment(cx);
             self.instance = Some(instance);
+            self.update_attachment_lock(cx);
             self.definition = None;
             if let Some(flow) = flow {
                 self.selected = Some(flow.clone());
@@ -1046,6 +1222,7 @@ impl App {
                     self.io(|client| IoResult::Catalog(client.nodes_catalog()));
                     self.io(|client| IoResult::Templates(client.templates()));
                     self.refresh_instances();
+                    self.refresh_queue();
                 }
             }
         } else if self.connected_server.take().is_some() {
@@ -1070,6 +1247,83 @@ impl App {
         self.io(|client| IoResult::Instances(client.instances(None, false)));
     }
 
+    fn refresh_assets(&mut self, cx: &mut Cx) {
+        let request = self
+            .ui
+            .widget(cx, ids!(inspector))
+            .borrow_mut::<Inspector>()
+            .map(|mut inspector| inspector.asset_request(self.time));
+        let Some((query, namespace, limit)) = request else { return };
+        self.io(move |client| {
+            IoResult::Assets(client.assets(&query, namespace.as_deref(), limit))
+        });
+    }
+
+    fn fetch_asset_thumbnail(&mut self, alias: String) {
+        self.io(move |client| IoResult::AssetThumbnail {
+            result: client.asset_thumbnail(&alias),
+            alias,
+        });
+    }
+
+    fn open_asset(&mut self, cx: &mut Cx, asset: makepad_flow::FlowAsset) {
+        let thumbnail = asset.alias.as_deref().and_then(|alias| {
+            self.ui
+                .widget(cx, ids!(inspector))
+                .borrow::<Inspector>()
+                .and_then(|inspector| inspector.asset_thumbnail(alias))
+        });
+        if asset.kind == "texture" {
+            if let Some(bytes) = thumbnail {
+                self.preview_digest = Some((asset.id.clone(), asset.title.clone()));
+                self.show_image_viewer(cx, &asset.id, "asset", &bytes);
+                return;
+            }
+        }
+        let json = makepad_strict_json::Value::Obj(vec![
+            ("id".into(), makepad_strict_json::Value::Str(asset.id.clone())),
+            ("alias".into(), asset.alias.clone().map(makepad_strict_json::Value::Str).unwrap_or(makepad_strict_json::Value::Null)),
+            ("namespace".into(), makepad_strict_json::Value::Str(asset.namespace)),
+            ("title".into(), makepad_strict_json::Value::Str(asset.title.clone())),
+            ("kind".into(), makepad_strict_json::Value::Str(asset.kind)),
+            ("tags".into(), makepad_strict_json::Value::Arr(asset.tags.into_iter().map(makepad_strict_json::Value::Str).collect())),
+            ("created_ms".into(), makepad_strict_json::Value::Int(asset.created_ms as i64)),
+        ]).to_json();
+        let bytes = makepad_flow::ValueBytes {
+            digest: asset.id.clone(),
+            content_type: "application/json".to_string(),
+            bytes: std::sync::Arc::from(json.into_bytes()),
+        };
+        self.preview_digest = Some((asset.id, asset.title));
+        self.show_preview(cx, &bytes);
+    }
+
+    fn refresh_queue(&mut self) {
+        if self.io.fetching_queue || self.client().is_none() {
+            return;
+        }
+        self.io.fetching_queue = true;
+        let generation = self.queue_generation;
+        self.io(move |client| IoResult::QueueRows {
+            generation,
+            result: client.runs(None),
+        });
+    }
+
+    fn refresh_parallelism(&mut self) {
+        if self.io.fetching_parallelism || self.client().is_none() {
+            return;
+        }
+        let Some(flow) = self.selected.clone() else {
+            return;
+        };
+        self.io.fetching_parallelism = true;
+        self.io(move |client| IoResult::Parallelism {
+            result: client.parallelism(&flow),
+            flow,
+        });
+    }
+
     /// The hub's models for every domain the open graph uses (the pickers
     /// in the faces and the inspector fill from them).
     fn refresh_models(&mut self, force: bool) {
@@ -1086,10 +1340,8 @@ impl App {
             .collect();
         domains.sort();
         domains.dedup();
-        if domains.is_empty() {
-            return;
-        }
         self.models_fetched_at = self.time;
+        self.refresh_parallelism();
         for domain in domains {
             if !self.io.fetching_models.insert(domain.clone()) {
                 continue;
@@ -1126,6 +1378,9 @@ impl App {
     }
 
     fn save_source(&mut self, name: String, source: String) {
+        if self.instance.is_some() {
+            return;
+        }
         self.io(move |client| {
             let result = client.put_source(&name, &source);
             IoResult::Saved {
@@ -1134,6 +1389,41 @@ impl App {
                 result,
             }
         });
+    }
+
+    /// The Templates menu lists every template the server serves, one entry
+    /// each, alphabetical; choosing one creates a flow from it and opens it.
+    /// Rebuilt whenever the template list arrives.
+    fn refresh_templates_menu(&mut self, cx: &mut Cx) {
+        let menu_bar = self.ui.menu_bar(cx, ids!(menu_bar));
+        let mut menus: Vec<MenuDef> = menu_bar
+            .borrow()
+            .map(|bar| bar.menus().to_vec())
+            .unwrap_or_default();
+        if menus.is_empty() {
+            return;
+        }
+        menus.retain(|menu| menu.label != TEMPLATES_MENU);
+        let mut templates = self.templates.clone();
+        templates.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+        let items: Vec<makepad_widgets::menu_bar::MenuEntry> = templates
+            .iter()
+            .map(|template| {
+                makepad_widgets::menu_bar::MenuEntry::item(
+                    template_menu_id(&template.name),
+                    template.label.as_str(),
+                    None,
+                )
+            })
+            .collect();
+        if items.is_empty() {
+            menu_bar.set_menus(cx, menus);
+            return;
+        }
+        // Second on the bar, right after File: the place a new flow starts.
+        let at = menus.len().min(1);
+        menus.insert(at, MenuDef::new(TEMPLATES_MENU, items));
+        menu_bar.set_menus(cx, menus);
     }
 
     fn create_from_template(&mut self, template: &str) {
@@ -1155,7 +1445,6 @@ impl App {
         self.revisions.clear();
         self.redo.clear();
         self.ui.label(cx, ids!(flow_name)).set_text(cx, &name);
-        self.ui.label(cx, ids!(instance_chip)).set_text(cx, "");
         self.set_error(cx, "");
         if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
             canvas.clear_run(cx);
@@ -1164,38 +1453,6 @@ impl App {
         self.update_run_bar(cx);
         self.show_flow_list(cx);
         self.load_flow(name);
-    }
-
-    /// Bind the open flow to an instance: the newest live one of its own,
-    /// else a fresh one — so the faces fill and Run is one click.
-    fn bind_instance(&mut self, cx: &mut Cx) {
-        if self.instance.is_some() || self.binding {
-            return;
-        }
-        let Some(flow) = self.selected.clone() else {
-            return;
-        };
-        let existing = self
-            .instances
-            .iter()
-            .filter(|row| row.flow == flow && row.live && row.owner == "tab")
-            .max_by_key(|row| row.last_activity_ms)
-            .map(|row| row.instance.clone());
-        if let Some(id) = existing {
-            self.attach_instance(cx, Some(id), true);
-            self.fetch_instance();
-            return;
-        }
-        self.binding = true;
-        let generation = self.attachment_generation;
-        self.io(move |client| {
-            let result = client.create_instance(&flow, &CreateInstanceRequest::default());
-            IoResult::InstanceCreated {
-                flow,
-                generation,
-                result,
-            }
-        });
     }
 
     /// Nothing open yet: the newest live instance's flow, else the
@@ -1232,6 +1489,16 @@ impl App {
     /// Every canvas / inspector / face edit ends here: the new graph goes to
     /// the server, the file is rewritten, and `flow.changed` redraws.
     fn put_graph(&mut self, cx: &mut Cx, graph: Graph) {
+        self.put_graph_with(cx, graph, false);
+    }
+
+    /// A run view is a locked snapshot of the design's meaning, but the
+    /// cards' layout stays the reader's: moving, sizing and flipping a card
+    /// (`layout_only`) writes the file there too, as it does in design.
+    fn put_graph_with(&mut self, cx: &mut Cx, graph: Graph, layout_only: bool) {
+        if self.instance.is_some() && !layout_only {
+            return;
+        }
         let Some(name) = self.selected.clone() else {
             return;
         };
@@ -1255,8 +1522,11 @@ impl App {
             .is_none_or(|old| graph_edit::needs_face_remount(old, &graph));
         if let Some(definition) = self.definition.as_mut() {
             // The canvas draws the edit at once; the server's re-evaluation
-            // confirms or corrects it through flow.changed.
+            // confirms or corrects it through flow.changed. The file text
+            // follows the graph the way the server rewrites it, so a remount
+            // mounts against a `Flow{}` that already lists a dropped node.
             definition.graph = Some(graph.clone());
+            definition.source = makepad_flow::graph::write(&graph);
         }
         self.show_graph(cx);
         if remount {
@@ -1277,6 +1547,13 @@ impl App {
     }
 
     fn apply_edit(&mut self, cx: &mut Cx, edit: CanvasEdit) {
+        let layout_only = matches!(
+            edit,
+            CanvasEdit::Move { .. } | CanvasEdit::Resize { .. } | CanvasEdit::Flip { .. }
+        );
+        if self.instance.is_some() && !layout_only {
+            return;
+        }
         let Some(graph) = self.current_graph() else {
             return;
         };
@@ -1319,10 +1596,13 @@ impl App {
                 graph_edit::add_node(&graph, entry, at).0
             }
         };
-        self.put_graph(cx, next);
+        self.put_graph_with(cx, next, layout_only);
     }
 
     fn duplicate_selected(&mut self, cx: &mut Cx) {
+        if self.instance.is_some() {
+            return;
+        }
         let (Some(graph), Some(selected)) = (self.current_graph(), self.selected_node.clone()) else {
             return;
         };
@@ -1332,7 +1612,7 @@ impl App {
         let Some(entry) = self.catalog.iter().find(|entry| entry.type_name == node.type_name) else {
             return;
         };
-        let at = node.at.unwrap_or(graph_edit::FIRST_AT);
+        let at = node.at.unwrap_or(FIRST_AT);
         let (mut next, id) = graph_edit::add_node(&graph, entry, (at.0 + 40.0, at.1 + 60.0));
         if let Some(copy) = next.nodes.iter_mut().find(|n| n.id == id) {
             copy.params = node.params.clone();
@@ -1376,7 +1656,6 @@ impl App {
                     match result {
                         Ok(definition) => {
                             self.show_flow(cx, definition);
-                            self.bind_instance(cx);
                             self.refresh_models(true);
                         }
                         Err(error) => self.show_error(cx, &error),
@@ -1413,8 +1692,10 @@ impl App {
                 },
                 IoResult::GraphPut { name, result } => {
                     self.pending_graph = false;
+                    let mut graph_saved = false;
                     match result {
                         Ok(mut response) => {
+                            graph_saved = true;
                             for (id, flip) in &self.pending_auto_flips {
                                 if let Some(node) =
                                     response.graph.nodes.iter_mut().find(|node| node.id == *id)
@@ -1443,12 +1724,21 @@ impl App {
                             }
                             self.refresh_flows();
                             self.services.refresh_definitions();
+                            if std::mem::take(&mut self.deferred_batch) {
+                                self.queue_run(cx);
+                            }
                         }
                         Err(error) => {
+                            self.deferred_batch = false;
                             self.show_error(cx, &error);
                             if let Some(name) = self.selected.clone() {
                                 self.load_flow(name);
                             }
+                        }
+                    }
+                    if graph_saved {
+                        if let Some(request) = self.deferred_run.take() {
+                            self.start_run(request.outputs);
                         }
                     }
                 }
@@ -1476,6 +1766,7 @@ impl App {
                         {
                             picker.set_templates(cx, self.templates.clone());
                         }
+                        self.refresh_templates_menu(cx);
                     }
                     Err(error) => self.show_error(cx, &error),
                 },
@@ -1493,26 +1784,95 @@ impl App {
                         }
                     }
                 }
-                IoResult::InstanceCreated {
-                    flow,
-                    generation,
-                    result,
-                } => {
-                    self.binding = false;
-                    if self.selected.as_deref() != Some(&flow)
-                        || generation != self.attachment_generation
-                    {
+                IoResult::Parallelism { flow, result } => {
+                    self.io.fetching_parallelism = false;
+                    if self.selected.as_deref() != Some(flow.as_str()) {
+                        self.refresh_parallelism();
                         continue;
                     }
                     match result {
                         Ok(response) => {
-                            self.attach_instance(cx, Some(response.instance), true);
-                            self.fetch_instance();
-                            self.refresh_instances();
+                            self.parallel_max = response.max.max(1);
+                            let combo = self.ui.combo_box(cx, ids!(parallel));
+                            combo.set_labels(
+                                cx,
+                                vec!["1".to_string(), format!("max · {}", self.parallel_max)],
+                            );
+                            combo.set_selected_item(cx, usize::from(self.parallel_use_max));
                         }
-                        Err(error) => {
-                            self.set_error(cx, &format!("no instance: {error}"));
+                        Err(error) => log!("flow-ui: parallelism for {flow}: {error}"),
+                    }
+                }
+                IoResult::BatchCreated {
+                    flow,
+                    planned_nodes,
+                    revision,
+                    result,
+                } => match result {
+                    Ok(response) => {
+                        self.queue_generation = self.queue_generation.wrapping_add(1);
+                        self.queue_refresh_after_stale = true;
+                        let first = response.runs.first().cloned();
+                        if let Some(mut queue) =
+                            self.ui.widget(cx, ids!(running)).borrow_mut::<QueueList>()
+                        {
+                            queue.add_batch(
+                                cx,
+                                &flow,
+                                response,
+                                &planned_nodes,
+                                revision,
+                                wall_clock_ms(),
+                            );
                         }
+                        if self.selected.as_deref() == Some(flow.as_str()) {
+                            if let Some(first) = first {
+                                self.focus_instance(cx, first.instance, Some(flow));
+                                self.display_run(
+                                    cx,
+                                    RunInfo {
+                                        run_id: first.run_id.clone(),
+                                        state: "queued".into(),
+                                        started: self.time,
+                                        finished_secs: None,
+                                        revision: self
+                                            .definition
+                                            .as_ref()
+                                            .map_or(0, |definition| definition.revision),
+                                        planned_nodes,
+                                    },
+                                );
+                                if let Some(mut queue) =
+                                    self.ui.widget(cx, ids!(running)).borrow_mut::<QueueList>()
+                                {
+                                    queue.select(cx, &first.run_id);
+                                }
+                                self.fetch_run_snapshot();
+                            }
+                        }
+                        self.refresh_instances();
+                        self.refresh_queue();
+                    }
+                    Err(error) => self.show_error(cx, &error),
+                },
+                IoResult::QueueRows { generation, result } => {
+                    self.io.fetching_queue = false;
+                    if generation != self.queue_generation {
+                        if std::mem::take(&mut self.queue_refresh_after_stale) {
+                            self.refresh_queue();
+                        }
+                        continue;
+                    }
+                    self.queue_refresh_after_stale = false;
+                    match result {
+                        Ok(rows) => {
+                            if let Some(mut queue) =
+                                self.ui.widget(cx, ids!(running)).borrow_mut::<QueueList>()
+                            {
+                                queue.set_rows(cx, rows);
+                            }
+                        }
+                        Err(error) => log!("flow-ui: queue snapshot: {error}"),
                     }
                 }
                 IoResult::InstanceRunStarted {
@@ -1565,6 +1925,7 @@ impl App {
                             self.fetch_instance();
                             self.fetch_run_snapshot();
                             self.refresh_instances();
+                            self.refresh_queue();
                         }
                         Err(error) => {
                             merge_failed_input_journal(&mut self.pending_inputs, journal);
@@ -1586,12 +1947,18 @@ impl App {
                             }
                         }
                         self.instances = rows.clone();
-                        if let Some(mut list) =
-                            self.ui.widget(cx, ids!(running)).borrow_mut::<RunningList>()
+                        if let Some(mut queue) =
+                            self.ui.widget(cx, ids!(running)).borrow_mut::<QueueList>()
                         {
-                            list.set_rows(cx, rows, self.instance.clone());
+                            queue.set_labels(
+                                cx,
+                                rows.iter()
+                                    .filter_map(|row| {
+                                        row.label.clone().map(|label| (row.instance.clone(), label))
+                                    })
+                                    .collect(),
+                            );
                         }
-                        self.refresh_running_thumbnails(cx);
                         self.maybe_auto_open(cx);
                     }
                 }
@@ -1615,18 +1982,11 @@ impl App {
                                 let instance = row.instance.clone();
                                 self.focus_instance(cx, instance, Some(row.flow.clone()));
                             }
-                            let chip = format!(
-                                "{} · {}{}",
-                                row.label
-                                    .clone()
-                                    .unwrap_or_else(|| row.instance.chars().take(8).collect()),
-                                row.state,
-                                if self.cleared_instances.contains(&row.instance) {
-                                    " · cleared"
-                                } else {
-                                    ""
-                                }
-                            );
+                            let label = row
+                                .label
+                                .clone()
+                                .unwrap_or_else(|| row.instance.chars().take(8).collect());
+                            let chip = format!("viewing {label} · locked");
                             self.ui.label(cx, ids!(instance_chip)).set_text(cx, &chip);
                             let recover_run = !self.run_is_active()
                                 && row.run.as_ref().is_some_and(|run_id| {
@@ -1676,61 +2036,6 @@ impl App {
                         }
                     }
                     Err(error) => self.show_error(cx, &error),
-                    }
-                }
-                IoResult::RunStarted {
-                    instance,
-                    generation,
-                    request_generation,
-                    planned_nodes,
-                    journal,
-                    result,
-                } => {
-                    if !attachment_matches(
-                        self.instance.as_deref(),
-                        self.attachment_generation,
-                        &instance,
-                        generation,
-                    ) {
-                        continue;
-                    }
-                    if !request_generation_matches(
-                        self.run_request_generation,
-                        request_generation,
-                    ) {
-                        if result.is_err() {
-                            merge_failed_input_journal(&mut self.pending_inputs, journal);
-                        }
-                        continue;
-                    }
-                    self.run_start_in_flight = false;
-                    let deferred = self.deferred_run.take();
-                    match result {
-                        Ok(response) => {
-                            self.display_run(cx, RunInfo {
-                                run_id: response.run_id,
-                                state: if response.queued == 0 {
-                                    "running".into()
-                                } else {
-                                    "queued".into()
-                                },
-                                started: self.time,
-                                finished_secs: None,
-                                revision: self
-                                    .definition
-                                    .as_ref()
-                                    .map_or(0, |definition| definition.revision),
-                                planned_nodes,
-                            });
-                            self.fetch_run_snapshot();
-                        }
-                        Err(error) => {
-                            merge_failed_input_journal(&mut self.pending_inputs, journal);
-                            self.show_error(cx, &error);
-                        }
-                    }
-                    if let Some(request) = deferred {
-                        self.start_run(request.outputs);
                     }
                 }
                 IoResult::InputsPut {
@@ -1801,6 +2106,40 @@ impl App {
                         Err(error) => self.show_error(cx, &error),
                     }
                 }
+                IoResult::Assets(result) => match result {
+                    Ok(response) => {
+                        let missing = self
+                            .ui
+                            .widget(cx, ids!(inspector))
+                            .borrow_mut::<Inspector>()
+                            .map(|mut inspector| inspector.set_assets(cx, response.assets))
+                            .unwrap_or_default();
+                        for alias in missing {
+                            self.fetch_asset_thumbnail(alias);
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(mut inspector) = self
+                            .ui
+                            .widget(cx, ids!(inspector))
+                            .borrow_mut::<Inspector>()
+                        {
+                            inspector.set_assets_error(cx, &error.to_string());
+                        }
+                    }
+                },
+                IoResult::AssetThumbnail { alias, result } => match result {
+                    Ok(bytes) => {
+                        if let Some(mut inspector) = self
+                            .ui
+                            .widget(cx, ids!(inspector))
+                            .borrow_mut::<Inspector>()
+                        {
+                            inspector.set_asset_thumbnail(cx, alias, bytes);
+                        }
+                    }
+                    Err(error) => log!("flow-ui: asset thumbnail: {error}"),
+                },
                 IoResult::Done(result) => {
                     if let Err(error) = result {
                         self.show_error(cx, &error);
@@ -1866,7 +2205,13 @@ impl App {
     fn show_graph(&mut self, cx: &mut Cx) {
         let graph = self.current_graph();
         if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
-            canvas.set_graph(cx, graph.clone());
+            canvas.set_compatible_ports(
+                graph
+                    .as_ref()
+                    .map(graph_view::compatibility_of)
+                    .unwrap_or_default(),
+            );
+            canvas.set_graph(cx, graph.as_ref().map(graph_view::view_of));
         }
         if let Some(mut app_view) = self.ui.widget(cx, ids!(app_view)).borrow_mut::<AppView>() {
             app_view.set_graph(cx, graph.clone());
@@ -2017,6 +2362,7 @@ impl App {
         if let Some(row) = self.instance_row.as_ref() {
             faces.fill_inputs(cx, row);
         }
+        faces.set_locked(cx, self.instance.is_some());
         // Outputs the run already produced land in the fresh faces too.
         let outputs = self.outputs.clone();
         for (node, ports) in &outputs {
@@ -2081,6 +2427,21 @@ impl App {
 
     /// Exact §3 progress: `(done + running_fraction) / planned_nodes`.
     /// Terminal color is selected independently by `RunBar` from `state`.
+    /// The shown run and everything it painted go: node chips and bars on
+    /// the cards, streamed text, the toolbar bar.
+    fn clear_run_view(&mut self, cx: &mut Cx) {
+        self.run = None;
+        self.current_node = None;
+        self.outputs.clear();
+        if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
+            canvas.clear_run(cx);
+        }
+        if let Some(faces) = self.faces.as_mut() {
+            faces.reset_run();
+        }
+        self.update_run_bar(cx);
+    }
+
     fn update_run_bar(&mut self, cx: &mut Cx) {
         let (fraction, done, total) = {
             let canvas = self.ui.widget(cx, ids!(canvas));
@@ -2162,11 +2523,13 @@ impl App {
                 SubscriptionEvent::Ready => {
                     self.refresh_flows();
                     self.refresh_instances();
+                    self.refresh_queue();
                     self.fetch_instance();
                 }
                 SubscriptionEvent::ResyncRequired => {
                     self.refresh_flows();
                     self.refresh_instances();
+                    self.refresh_queue();
                     self.fetch_instance();
                     self.fetch_run_snapshot();
                 }
@@ -2182,6 +2545,19 @@ impl App {
     }
 
     fn handle_flow_event(&mut self, cx: &mut Cx, event: FlowEvent) {
+        if event.run_id.is_some() {
+            // A run the queue has not seen (a Play run, or one another client
+            // started) is fetched with its row rather than guessed at.
+            let known = self
+                .ui
+                .widget(cx, ids!(running))
+                .borrow_mut::<QueueList>()
+                .map(|mut queue| queue.apply_event(cx, &event, wall_clock_ms()))
+                .unwrap_or(true);
+            if !known {
+                self.refresh_queue();
+            }
+        }
         match event.kind.as_str() {
             "flow.changed" => {
                 self.refresh_flows();
@@ -2286,6 +2662,13 @@ impl App {
                     self.record_value(cx, &node, &port, value);
                 }
                 self.request_wanted_values(cx);
+                if self.current_graph().is_some_and(|graph| {
+                    graph.nodes.iter().any(|candidate| {
+                        candidate.id == node && candidate.kind == "publish"
+                    })
+                }) {
+                    self.refresh_assets(cx);
+                }
                 if self
                     .ui
                     .widget(cx, ids!(canvas))
@@ -2309,6 +2692,23 @@ impl App {
             }
             "run.finished" => {
                 let state = event.state_text().unwrap_or_else(|| "done".into());
+                if state == "cancelled" {
+                    // A cancelled run leaves nothing on the canvas: cards,
+                    // bars and the toolbar clear as if Clear had been pressed.
+                    self.clear_run_view(cx);
+                    if let Some(faces) = self.faces.as_mut() {
+                        faces.push_state(cx, "run", &state);
+                    }
+                    self.refresh_instances();
+                    self.fetch_instance();
+                    if self.deferred_flow_reload {
+                        self.deferred_flow_reload = false;
+                        if let Some(name) = self.selected.clone() {
+                            self.load_flow(name);
+                        }
+                    }
+                    return;
+                }
                 // Output nodes get no node.* events of their own: the run's
                 // outputs are their values, so they finish with the run.
                 for (output_node, value) in event.output_values() {
@@ -2461,6 +2861,7 @@ impl App {
             && !self.pending_graph
         {
             if let Some(mut graph) = self.current_graph() {
+                let layout_only = self.pending_params.is_empty();
                 let pending = std::mem::take(&mut self.pending_params);
                 for ((node, key), value) in pending {
                     graph = graph_edit::set_param(&graph, &node, &key, value);
@@ -2470,12 +2871,52 @@ impl App {
                         node.flip = *flip;
                     }
                 }
-                self.put_graph(cx, graph);
+                self.put_graph_with(cx, graph, layout_only);
             } else {
                 self.pending_params.clear();
                 self.pending_auto_flips.clear();
             }
         }
+    }
+
+    /// The single design-vs-run decision for face commits. In design, bound
+    /// values become graph literals (`Input.value` for input nodes); an
+    /// attached run is a locked snapshot and refuses every face write.
+    fn route_face_commits(
+        &mut self,
+        binds: Vec<(String, String, String)>,
+        params: Vec<(String, String, Literal)>,
+    ) {
+        if self.instance.is_some() {
+            return;
+        }
+        let graph = self.current_graph();
+        for (node_id, port, text) in binds {
+            let Some(node) = graph
+                .as_ref()
+                .and_then(|graph| graph.nodes.iter().find(|node| node.id == node_id))
+            else {
+                continue;
+            };
+            let key = if node.kind == "input" {
+                "value"
+            } else if node.inputs.iter().any(|input| input.port == port) {
+                port.as_str()
+            } else {
+                continue;
+            };
+            let ty = instance_input_type(graph.as_ref().unwrap(), &node_id, &port)
+                .unwrap_or(PortType::Text);
+            self.pending_params.insert(
+                (node_id, key.to_string()),
+                face_text_literal(ty, text),
+            );
+        }
+        self.pending_params.extend(
+            params
+                .into_iter()
+                .map(|(node, key, value)| ((node, key), value)),
+        );
     }
 
     fn handle_bridge_call(&mut self, call: FaceBridgeCall) {
@@ -2494,7 +2935,7 @@ impl App {
                     .ok()
                     .and_then(|value| value.as_str().map(str::to_string))
                     .unwrap_or(value_json);
-                self.pending_inputs.insert((node, port), text);
+                self.route_face_commits(vec![(node, port, text)], Vec::new());
             }
             BridgeCall::Run { outputs } => self.start_run(outputs),
             BridgeCall::Cancel => self.cancel_run(),
@@ -2510,55 +2951,95 @@ impl App {
                     Ok(makepad_strict_json::Value::Bool(value)) => Literal::Bool(value),
                     _ => Literal::Str(value_json),
                 };
-                self.pending_params.insert((node, key), literal);
+                self.route_face_commits(Vec::new(), vec![(node, key, literal)]);
             }
         }
     }
 
+    /// Run at the toolbar's parallelism: `1` is one design run (a numbered,
+    /// locked instance, as Play always was); `max · N` queues a batch of N
+    /// slices and the canvas follows the first.
+    fn queue_run(&mut self, cx: &mut Cx) {
+        if self.client().is_none() {
+            return;
+        }
+        let parallel = if self.parallel_use_max {
+            self.parallel_max.max(1)
+        } else {
+            1
+        };
+        if parallel == 1 {
+            self.start_run(None);
+            return;
+        }
+        if self.pending_graph {
+            self.deferred_batch = true;
+            return;
+        }
+        if !self.pending_params.is_empty() || !self.pending_auto_flips.is_empty() {
+            let Some(mut graph) = self.current_graph() else {
+                return;
+            };
+            for ((node, key), value) in std::mem::take(&mut self.pending_params) {
+                graph = graph_edit::set_param(&graph, &node, &key, value);
+            }
+            for (id, flip) in &self.pending_auto_flips {
+                if let Some(node) = graph.nodes.iter_mut().find(|node| node.id == *id) {
+                    node.flip = *flip;
+                }
+            }
+            self.deferred_batch = true;
+            self.put_graph(cx, graph);
+            return;
+        }
+        let Some(flow) = self.selected.clone() else {
+            return;
+        };
+        // Every slice reads the design values from the file; nothing is
+        // overridden per batch.
+        let request = CreateBatchRequest {
+            parallel,
+            inputs: None,
+        };
+        let planned_nodes = planned_nodes_for(self.current_graph().as_ref(), None);
+        let revision = self
+            .definition
+            .as_ref()
+            .map_or(0, |definition| definition.revision);
+        self.io(move |client| IoResult::BatchCreated {
+            result: client.create_batch(&flow, &request),
+            flow,
+            planned_nodes,
+            revision,
+        });
+    }
+
     fn start_run(&mut self, outputs: Option<Vec<String>>) {
-        if self.input_flush_in_flight || self.run_start_in_flight {
+        if !self.pending_params.is_empty()
+            || self.pending_graph
+            || self.input_flush_in_flight
+            || self.run_start_in_flight
+        {
             self.deferred_run = Some(RunRequest { outputs });
             return;
         }
         if self.client().is_none() {
             return;
         }
-        let journal = std::mem::take(&mut self.pending_inputs);
-        let input_body = (!journal.is_empty())
-            .then(|| input_journal_body(self.current_graph().as_ref(), &journal));
         let planned_nodes = planned_nodes_for(self.current_graph().as_ref(), outputs.as_deref());
         let generation = self.attachment_generation;
         self.run_request_generation = self.run_request_generation.wrapping_add(1);
         let request_generation = self.run_request_generation;
         self.run_start_in_flight = true;
-        if let Some(instance) = self.instance.clone() {
-            self.io(move |client| {
-                let result = (|| {
-                    if let Some(inputs) = input_body.as_ref() {
-                        client.put_inputs(&instance, "tab", inputs)?;
-                    }
-                    client.start_run(&instance, outputs.as_deref())
-                })();
-                IoResult::RunStarted {
-                    instance,
-                    generation,
-                    request_generation,
-                    planned_nodes,
-                    journal,
-                    result,
-                }
-            });
-            return;
-        }
         let Some(flow) = self.selected.clone() else {
+            self.run_start_in_flight = false;
             return;
         };
+        let label = self.next_run_label(&flow);
         self.io(move |client| {
             let result = (|| {
-                let created = client.create_instance(&flow, &CreateInstanceRequest::default())?;
-                if let Some(inputs) = input_body.as_ref() {
-                    client.put_inputs(&created.instance, "tab", inputs)?;
-                }
+                let request = fresh_run_instance_request(label);
+                let created = client.create_instance(&flow, &request)?;
                 let started = client.start_run(&created.instance, outputs.as_deref())?;
                 Ok((created.instance, started))
             })();
@@ -2567,10 +3048,23 @@ impl App {
                 generation,
                 request_generation,
                 planned_nodes,
-                journal,
+                journal: HashMap::new(),
                 result,
             }
         });
+    }
+
+    fn next_run_label(&mut self, flow: &str) -> String {
+        let listed = self
+            .instances
+            .iter()
+            .filter(|row| row.flow == flow)
+            .filter_map(|row| row.label.as_deref().and_then(run_label_ordinal))
+            .max()
+            .unwrap_or(0);
+        let ordinal = self.run_ordinals.entry(flow.to_string()).or_insert(listed);
+        *ordinal = (*ordinal).max(listed) + 1;
+        format!("run #{}", *ordinal)
     }
 
     fn fetch_run_snapshot(&self) {
@@ -2671,13 +3165,24 @@ impl App {
 
     fn clear_instance(&mut self, cx: &mut Cx) {
         if self.instance.is_none() {
+            self.clear_run_view(cx);
             return;
         }
         if self.run_is_active() {
             self.ui.modal(cx, ids!(clear_confirm)).open(cx);
         } else {
-            self.request_clear_instance(false);
+            self.leave_run_view(cx);
         }
+    }
+
+    /// Clear on a shown run: the canvas comes clean and returns to the
+    /// design, editable; the run keeps its queue row, just no longer chosen.
+    fn leave_run_view(&mut self, cx: &mut Cx) {
+        self.clear_run_view(cx);
+        if let Some(mut queue) = self.ui.widget(cx, ids!(running)).borrow_mut::<QueueList>() {
+            queue.deselect(cx);
+        }
+        self.attach_instance(cx, None, true);
     }
 
     fn request_clear_instance(&self, cancel_first: bool) {
@@ -2754,9 +3259,6 @@ impl App {
         // generated widget to its declared empty state; fill_inputs below
         // immediately restores the preserved instance inputs.
         self.remount_faces(cx);
-        if let Some(mut list) = self.ui.widget(cx, ids!(running)).borrow_mut::<RunningList>() {
-            list.set_rows(cx, self.instances.clone(), self.instance.clone());
-        }
         self.update_run_bar(cx);
         self.ui
             .label(cx, ids!(run_state))
@@ -2766,6 +3268,9 @@ impl App {
     }
 
     fn undo(&mut self) {
+        if self.instance.is_some() {
+            return;
+        }
         if self.revisions.len() < 2 {
             return;
         }
@@ -2776,6 +3281,9 @@ impl App {
     }
 
     fn redo(&mut self) {
+        if self.instance.is_some() {
+            return;
+        }
         let Some(revision) = self.redo.pop() else {
             return;
         };
@@ -2784,6 +3292,9 @@ impl App {
     }
 
     fn revert_to(&mut self, revision: u64) {
+        if self.instance.is_some() {
+            return;
+        }
         if let Some(name) = self.selected.clone() {
             self.io(move |client| {
                 let result = client.revert(&name, revision);
@@ -3076,6 +3587,8 @@ impl App {
                 self.refresh_inspector(cx);
             }
             id if id == live_id!(duplicate) => self.duplicate_selected(cx),
+            id if id == live_id!(wires_routed) => self.set_wire_mode(cx, WireMode::Routed),
+            id if id == live_id!(wires_bezier) => self.set_wire_mode(cx, WireMode::Bezier),
             id if id == live_id!(view_canvas) => {
                 self.app_mode = false;
                 self.set_modes(cx);
@@ -3118,7 +3631,16 @@ impl App {
                 self.show_help(cx, "The flow language", makepad_flow::AUTHORING_BRIEF)
             }
             id if id == live_id!(help_about) => self.show_help(cx, "About Flow", HELP_ABOUT),
-            _ => {}
+            id => {
+                let template = self
+                    .templates
+                    .iter()
+                    .find(|template| template_menu_id(&template.name) == id)
+                    .map(|template| template.name.clone());
+                if let Some(template) = template {
+                    self.create_from_template(&template);
+                }
+            }
         }
     }
 
@@ -3186,7 +3708,7 @@ impl App {
         self.source_mode = false;
         self.set_modes(cx);
         match self.values.get(&value.digest) {
-            Some(bytes) if value.content_type.starts_with("image/") => {
+            Some(bytes) if is_viewable_media(&bytes) => {
                 self.show_image_viewer(cx, node, port, &bytes)
             }
             Some(bytes) => self.show_preview(cx, &bytes),
@@ -3293,7 +3815,7 @@ impl MatchEvent for App {
                 ImageViewerAction::Step(direction) => self.step_image_viewer(cx, direction),
             }
         }
-        if self.ui.button(cx, ids!(save_btn)).clicked(actions) {
+        if self.instance.is_none() && self.ui.button(cx, ids!(save_btn)).clicked(actions) {
             if let Some(name) = self.selected.clone() {
                 let source = self.ui.text_input(cx, ids!(source)).text();
                 self.save_source(name, source);
@@ -3302,8 +3824,14 @@ impl MatchEvent for App {
         if self.ui.text_input(cx, ids!(source)).changed(actions).is_some() {
             self.unsaved = true;
         }
+        if let Some(selected) = self.ui.combo_box(cx, ids!(parallel)).changed(actions) {
+            self.parallel_use_max = selected == 1;
+        }
         if self.ui.button(cx, ids!(run_btn)).clicked(actions) {
-            self.start_run(None);
+            self.queue_run(cx);
+        }
+        if self.ui.button(cx, ids!(design_btn)).clicked(actions) {
+            self.attach_instance(cx, None, true);
         }
         if self.ui.button(cx, ids!(cancel_btn)).clicked(actions) {
             self.cancel_run();
@@ -3319,6 +3847,7 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(clear_confirm_btn)).clicked(actions) {
             self.ui.modal(cx, ids!(clear_confirm)).close(cx);
             self.request_clear_instance(true);
+            self.leave_run_view(cx);
         }
         if self.ui.button(cx, ids!(fit_btn)).clicked(actions) {
             self.with_canvas(cx, |cx, canvas| canvas.fit(cx));
@@ -3396,6 +3925,9 @@ impl MatchEvent for App {
                     from_port,
                     ty,
                 } => {
+                    let Some(ty) = graph_edit::port_type_from_name(&ty) else {
+                        continue;
+                    };
                     let compatible: Vec<NodeTypeCatalog> =
                         graph_edit::types_with_compatible_input(&self.catalog, ty)
                             .into_iter()
@@ -3499,6 +4031,9 @@ impl MatchEvent for App {
             .map(|mut inspector| inspector.changes(cx, actions))
             .unwrap_or_default();
         for action in inspector_actions {
+            if self.instance.is_some() && inspector_action_edits(&action) {
+                continue;
+            }
             match action {
                 InspectorAction::None => {}
                 InspectorAction::SetParam { node, key, value } => {
@@ -3602,85 +4137,115 @@ impl MatchEvent for App {
                 }
                 InspectorAction::CopyDigest(digest) => cx.copy_to_clipboard(&digest),
                 InspectorAction::OpenValue { node, port } => self.open_value(cx, &node, &port),
+                InspectorAction::RefreshAssets => self.refresh_assets(cx),
+                InspectorAction::OpenAsset(asset) => self.open_asset(cx, asset),
             }
         }
 
-        // Running.
+        // Queue.
         let running_actions = self
             .ui
             .widget(cx, ids!(running))
-            .borrow::<RunningList>()
-            .map(|list| list.actions(cx, actions))
+            .borrow_mut::<QueueList>()
+            .map(|mut list| list.actions(cx, actions))
             .unwrap_or_default();
         for action in running_actions {
             match action {
-                RunningAction::None => {}
-                RunningAction::Attach(id) => {
-                    let flow = self
-                        .instances
-                        .iter()
-                        .find(|row| row.instance == id)
-                        .map(|row| row.flow.clone());
-                    self.focus_instance(cx, id, flow);
+                QueueAction::Select {
+                    run_id,
+                    instance,
+                    flow,
+                    revision,
+                    state,
+                    planned_nodes,
+                    started_ms,
+                    finished_ms,
+                } => {
+                    self.focus_instance(cx, instance, Some(flow));
+                    let now_ms = wall_clock_ms();
+                    self.display_run(
+                        cx,
+                        RunInfo {
+                            run_id,
+                            state: run_state_name(state).into(),
+                            started: self.time
+                                - now_ms.saturating_sub(started_ms) as f64 / 1000.0,
+                            finished_secs: finished_ms
+                                .map(|finished| finished.saturating_sub(started_ms) as f64 / 1000.0),
+                            revision,
+                            planned_nodes,
+                        },
+                    );
+                    self.fetch_run_snapshot();
                 }
-                RunningAction::Stop(id) => {
-                    let target = id.clone();
-                    self.io(move |client| IoResult::Done(client.delete_instance(&target)));
-                    if self.instance.as_deref() == Some(id.as_str()) {
-                        self.attach_instance(cx, None, false);
+                QueueAction::CancelRun {
+                    run_id,
+                    instance,
+                    batch,
+                } => {
+                    if self.run.as_ref().is_some_and(|run| run.run_id == run_id) {
+                        self.clear_run_view(cx);
+                    }
+                    if batch {
+                        self.io(move |client| IoResult::Done(client.cancel_run(&run_id)));
+                    } else {
+                        // A single run's x is Stop: the run goes, its instance
+                        // goes, and the canvas returns to the design.
+                        let target = instance.clone();
+                        self.io(move |client| {
+                            let _ = client.cancel_run(&run_id);
+                            IoResult::Done(client.delete_instance(&target))
+                        });
+                        if self.instance.as_deref() == Some(instance.as_str()) {
+                            self.attach_instance(cx, None, true);
+                        }
                     }
                 }
-                RunningAction::Duplicate(id) => {
-                    let flow = self
-                        .instances
-                        .iter()
-                        .find(|row| row.instance == id)
-                        .map(|row| row.flow.clone());
-                    if let Some(flow) = flow {
-                        let generation = self.attachment_generation;
+                QueueAction::CancelBatch(batch) => {
+                    self.io(move |client| {
+                        IoResult::Done(client.cancel_batch(&batch).map(|_| ()))
+                    });
+                }
+                QueueAction::ClearAll(plan) => {
+                    self.queue_generation = self.queue_generation.wrapping_add(1);
+                    self.queue_refresh_after_stale = false;
+                    for batch in plan.batches {
                         self.io(move |client| {
-                            let request = CreateInstanceRequest {
-                                label: Some("copy".to_string()),
-                                ..CreateInstanceRequest::default()
-                            };
-                            let result = client.create_instance(&flow, &request);
-                            IoResult::InstanceCreated {
-                                flow,
-                                generation,
-                                result,
-                            }
+                            IoResult::Done(client.clear_batch(&batch).map(|_| ()))
                         });
                     }
-                }
-                RunningAction::CopyId(id) => cx.copy_to_clipboard(&id),
-                RunningAction::OpenImage {
-                    instance,
-                    label,
-                    digest,
-                } => {
-                    self.preview_digest = Some((digest.clone(), format!("{instance}.{label}")));
-                    self.preview_bytes = None;
-                    if let Some(bytes) = self.values.get(&digest) {
-                        self.show_image_viewer(cx, &instance, &label, &bytes);
-                    } else if let Some(client) = self.client() {
-                        self.values.request(&digest, client);
+                    let mut detach = false;
+                    for (run_id, instance) in plan.singles {
+                        detach |= self.instance.as_deref() == Some(instance.as_str());
+                        self.io(move |client| {
+                            let _ = client.cancel_run(&run_id);
+                            IoResult::Done(client.delete_instance(&instance))
+                        });
                     }
+                    if detach {
+                        self.attach_instance(cx, None, true);
+                    }
+                    self.clear_run_view(cx);
+                }
+                QueueAction::OpenAsset(asset) => {
+                    if let Some(mut inspector) =
+                        self.ui.widget(cx, ids!(inspector)).borrow_mut::<Inspector>()
+                    {
+                        inspector.show_asset(cx, &asset);
+                    }
+                    self.refresh_assets(cx);
                 }
             }
         }
 
-        // Faces: bound widgets → instance inputs / graph params; pictures → open.
+        // Faces: the centralized router commits only in editable design mode.
         let mut opens = Vec::new();
         if let Some(faces) = self.faces.as_mut() {
-            for (node, port, text) in faces.bind_changes(cx, actions) {
-                self.pending_inputs.insert((node, port), text);
-            }
+            let binds = faces.bind_changes(cx, actions);
             let mut params = faces.param_changes(cx, actions);
             params.extend(faces.model_changes(cx, actions));
-            for (node, key, value) in params {
-                self.pending_params.insert((node, key), value);
-            }
             opens = faces.open_requests(actions);
+            self.route_face_commits(binds, params);
         }
         for (node, port) in opens {
             self.open_value(cx, &node, &port);
@@ -3847,30 +4412,6 @@ impl App {
         self.refresh_inspector(cx);
     }
 
-    fn refresh_running_thumbnails(&mut self, cx: &mut Cx) {
-        let pictures: Vec<String> = self
-            .instances
-            .iter()
-            .flat_map(|row| row.outputs.values())
-            .filter(|value| value.content_type.starts_with("image/"))
-            .map(|value| value.digest.clone())
-            .collect();
-        let client = self.client();
-        for digest in pictures {
-            if let Some(bytes) = self.values.get(&digest) {
-                if let Some(mut list) = self
-                    .ui
-                    .widget(cx, ids!(running))
-                    .borrow_mut::<RunningList>()
-                {
-                    list.set_thumbnail(cx, bytes);
-                }
-            } else if let Some(client) = client.as_ref() {
-                self.values.request(&digest, client.clone());
-            }
-        }
-    }
-
     fn step_image_viewer(&mut self, cx: &mut Cx, direction: i32) {
         let current_digest = self.preview_digest.as_ref().map(|(digest, _)| digest.as_str());
         let running_pictures = current_digest.and_then(|digest| {
@@ -3880,7 +4421,16 @@ impl App {
                 .map(|row| {
                     row.outputs
                         .iter()
-                        .filter(|(_, value)| value.content_type.starts_with("image/"))
+                        .filter(|(_, value)| {
+                            matches!(
+                                makepad_media_view::media_kind(&value.content_type, &[]),
+                                makepad_media_view::MediaKind::Image
+                                    | makepad_media_view::MediaKind::Video
+                                    | makepad_media_view::MediaKind::Audio
+                                    | makepad_media_view::MediaKind::Mesh
+                                    | makepad_media_view::MediaKind::Splat
+                            )
+                        })
                         .map(|(label, value)| {
                             (row.instance.clone(), label.clone(), value.digest.clone())
                         })
@@ -3893,7 +4443,15 @@ impl App {
                 .iter()
                 .flat_map(|(node, ports)| {
                     ports.iter().filter_map(move |(port, value)| {
-                        value.content_type.starts_with("image/").then(|| {
+                        matches!(
+                            makepad_media_view::media_kind(&value.content_type, &[]),
+                            makepad_media_view::MediaKind::Image
+                                | makepad_media_view::MediaKind::Video
+                                | makepad_media_view::MediaKind::Audio
+                                | makepad_media_view::MediaKind::Mesh
+                                | makepad_media_view::MediaKind::Splat
+                        )
+                        .then(|| {
                             (node.clone(), port.clone(), value.digest.clone())
                         })
                     })
@@ -3930,17 +4488,6 @@ impl App {
                     if let Some(faces) = self.faces.as_mut() {
                         faces.deliver_bytes(cx, &mut self.values, &digest);
                     }
-                    if let Some(bytes) = self.values.get(&digest) {
-                        if bytes.content_type.starts_with("image/") {
-                            if let Some(mut list) = self
-                                .ui
-                                .widget(cx, ids!(running))
-                                .borrow_mut::<RunningList>()
-                            {
-                                list.set_thumbnail(cx, bytes);
-                            }
-                        }
-                    }
                     if self
                         .preview_digest
                         .as_ref()
@@ -3952,7 +4499,7 @@ impl App {
                                 .as_ref()
                                 .map(|(_, label)| label.clone())
                                 .unwrap_or_default();
-                            if bytes.content_type.starts_with("image/") {
+                            if is_viewable_media(&bytes) {
                                 let (node, port) = label
                                     .split_once('.')
                                     .unwrap_or((label.as_str(), "image"));
@@ -3988,6 +4535,17 @@ fn value_file_extension(content_type: &str) -> &'static str {
         "text/plain" | "text/markdown" => "txt",
         _ => "bin",
     }
+}
+
+fn is_viewable_media(value: &makepad_flow::ValueBytes) -> bool {
+    matches!(
+        values::media_kind(value),
+        makepad_media_view::MediaKind::Image
+            | makepad_media_view::MediaKind::Video
+            | makepad_media_view::MediaKind::Audio
+            | makepad_media_view::MediaKind::Mesh
+            | makepad_media_view::MediaKind::Splat
+    )
 }
 
 fn valid_node_id(id: &str) -> bool {
@@ -4040,10 +4598,11 @@ impl AppMain for App {
         makepad_widgets::script_mod(vm);
         makepad_code_editor::script_mod(vm);
         makepad_aichat::script_mod(vm);
+        makepad_flowgraph::script_mod(vm);
         theme::script_mod(vm);
         faces::register_host_widgets(vm);
-        canvas::script_mod(vm);
         panels::script_mod(vm);
+        queue::script_mod(vm);
         viewer::script_mod(vm);
         self::script_mod(vm)
     }
@@ -4054,6 +4613,12 @@ impl AppMain for App {
         }
         if let Event::NextFrame(nf) = event {
             self.time = nf.time;
+        }
+        if is_queue_shortcut(event, widget_tree_has_text_focus(&self.ui, cx)) {
+            self.queue_run(cx);
+            // Do not pass Enter to a focused field; its text remains exactly
+            // the settings that were submitted with this batch.
+            return;
         }
         // The full-window viewer is modal. Route user input directly to it
         // before selection, faces, the ordinary widget tree, and shortcuts.
@@ -4130,7 +4695,8 @@ impl AppMain for App {
         if !(face_owns_key_focus && is_focus_routed_input(event)) {
             match self.faces.as_mut() {
                 Some(faces) => {
-                    let mut scope = Scope::with_data(faces);
+                    let mut faces = NodeFacesScope::new(faces);
+                    let mut scope = Scope::with_data(&mut faces);
                     self.ui.handle_event(cx, event, &mut scope);
                 }
                 None => self.ui.handle_event(cx, event, &mut Scope::empty()),
@@ -4152,13 +4718,94 @@ impl AppMain for App {
             if self.run_is_active() {
                 self.update_run_bar(cx);
             }
+            if let Some(mut queue) = self.ui.widget(cx, ids!(running)).borrow_mut::<QueueList>() {
+                queue.set_now(cx, wall_clock_ms());
+            }
             self.refresh_models(false);
+            let refresh_assets = self
+                .ui
+                .widget(cx, ids!(inspector))
+                .borrow_mut::<Inspector>()
+                .is_some_and(|mut inspector| inspector.refresh_assets_due(self.time));
+            if refresh_assets {
+                self.refresh_assets(cx);
+            }
         }
         self.refresh_ai_context();
         if let Event::Shutdown = event {
             self.shutdown(cx);
         }
     }
+}
+
+fn inspector_action_edits(action: &InspectorAction) -> bool {
+    matches!(
+        action,
+        InspectorAction::SetParam { .. }
+            | InspectorAction::SetFnSrc { .. }
+            | InspectorAction::SetFaceSrc { .. }
+            | InspectorAction::FlipCard { .. }
+            | InspectorAction::RenameNode { .. }
+            | InspectorAction::SetNodeDoc { .. }
+            | InspectorAction::SetNodeMeta { .. }
+            | InspectorAction::Disconnect { .. }
+    )
+}
+
+fn face_text_literal(ty: PortType, text: String) -> Literal {
+    if matches!(ty, PortType::Json | PortType::List) {
+        if let Ok(value) = makepad_strict_json::parse_depth(text.as_bytes(), 32) {
+            return strict_json_literal(value);
+        }
+    }
+    Literal::Str(text)
+}
+
+fn strict_json_literal(value: makepad_strict_json::Value) -> Literal {
+    use makepad_strict_json::Value as Json;
+    match value {
+        Json::Null => Literal::Null,
+        Json::Bool(value) => Literal::Bool(value),
+        Json::Int(value) => Literal::Num(value as f64),
+        Json::F64(value) => Literal::Num(value),
+        Json::Str(value) => Literal::Str(value),
+        Json::Arr(values) => Literal::Arr(values.into_iter().map(strict_json_literal).collect()),
+        Json::Obj(values) => Literal::Obj(
+            values
+                .into_iter()
+                .map(|(name, value)| (name, strict_json_literal(value)))
+                .collect(),
+        ),
+    }
+}
+
+fn run_label_ordinal(label: &str) -> Option<u64> {
+    label
+        .strip_prefix("run #")?
+        .split(|character: char| !character.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
+}
+
+fn fresh_run_instance_request(label: String) -> CreateInstanceRequest {
+    CreateInstanceRequest {
+        label: Some(label),
+        ..CreateInstanceRequest::default()
+    }
+}
+
+fn is_queue_shortcut(event: &Event, _text_field_has_focus: bool) -> bool {
+    matches!(
+        event,
+        Event::KeyDown(key)
+            if !key.is_repeat
+                && matches!(key.key_code, KeyCode::ReturnKey | KeyCode::NumpadEnter)
+                && key.modifiers.control
+                && !key.modifiers.shift
+                && !key.modifiers.alt
+                && !key.modifiers.logo
+    )
 }
 
 fn widget_tree_has_text_focus(root: &WidgetRef, cx: &Cx) -> bool {
@@ -4242,13 +4889,13 @@ fn planned_nodes_for(graph: Option<&Graph>, outputs: Option<&[String]>) -> Vec<S
             graph
                 .nodes
                 .iter()
-                .filter(|node| node.kind == "output")
+                .filter(|node| matches!(node.kind.as_str(), "output" | "publish"))
                 .map(|node| node.id.clone())
                 .collect()
         },
         |outputs| outputs.to_vec(),
     );
-    let index = graph_edit::GraphIndex::new(&graph);
+    let index = graph_edit::graph_index(&graph);
     let mut planned = HashSet::new();
     for node in requested {
         planned.insert(node.clone());
@@ -4262,6 +4909,13 @@ fn planned_nodes_for(graph: Option<&Graph>, outputs: Option<&[String]>) -> Vec<S
     let mut planned: Vec<String> = planned.into_iter().collect();
     planned.sort();
     planned
+}
+
+fn wall_clock_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn total_progress(
@@ -4316,6 +4970,19 @@ mod layout_tests {
     use makepad_flow::NodeRowDto;
     use makepad_widgets::makepad_platform::event::{ScrollEvent, ScrollPhase};
     use std::cell::Cell;
+
+    fn menu_label(app: &App, cx: &Cx, id: LiveId) -> String {
+        let menu = app.ui.menu_bar(cx, ids!(menu_bar));
+        let inner = menu.borrow().unwrap();
+        inner
+            .menus()
+            .iter()
+            .flat_map(|menu| &menu.items)
+            .find(|entry| entry.id == id)
+            .unwrap()
+            .label
+            .clone()
+    }
 
     fn draw_canvas_and_viewer(
         cx: &mut Cx,
@@ -4374,7 +5041,7 @@ mod layout_tests {
         assert!(app
             .ui
             .widget(&cx, ids!(running))
-            .borrow::<RunningList>()
+            .borrow::<QueueList>()
             .is_some());
         assert!(app.ui.widget(&cx, ids!(palette)).borrow::<Palette>().is_some());
         assert!(app
@@ -4392,6 +5059,218 @@ mod layout_tests {
             .widget(&cx, ids!(preview_value))
             .borrow::<faces::ValueView>()
             .is_some());
+    }
+
+    #[test]
+    fn the_templates_menu_lists_every_template_and_opens_one() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let mut app = cx.with_vm(|vm| App::from_script_mod(vm, <App as AppMain>::script_mod));
+        let template = |name: &str, label: &str| TemplateSummary {
+            name: name.into(),
+            label: label.into(),
+            brief: String::new(),
+            node_count: 3,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        };
+        app.templates = vec![
+            template("text-to-video", "Text to video"),
+            template("prompt-to-image", "Prompt to image"),
+        ];
+        app.refresh_templates_menu(&mut cx);
+        let labels: Vec<String> = app
+            .ui
+            .menu_bar(&cx, ids!(menu_bar))
+            .borrow()
+            .unwrap()
+            .menus()
+            .iter()
+            .map(|menu| menu.label.clone())
+            .collect();
+        assert_eq!(labels[1], "Templates", "{labels:?}");
+        assert_eq!(menu_label(&app, &cx, template_menu_id("text-to-video")), "Text to video");
+        // Alphabetical: the picture template comes before the video one.
+        let entries: Vec<String> = app
+            .ui
+            .menu_bar(&cx, ids!(menu_bar))
+            .borrow()
+            .unwrap()
+            .menus()[1]
+            .items
+            .iter()
+            .map(|entry| entry.label.clone())
+            .collect();
+        assert_eq!(entries, vec!["Prompt to image", "Text to video"]);
+        // A refresh replaces the menu instead of stacking a second one.
+        app.refresh_templates_menu(&mut cx);
+        let count = app
+            .ui
+            .menu_bar(&cx, ids!(menu_bar))
+            .borrow()
+            .unwrap()
+            .menus()
+            .iter()
+            .filter(|menu| menu.label == "Templates")
+            .count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn a_cancelled_run_clears_the_canvas_and_the_bar() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let mut app = cx.with_vm(|vm| App::from_script_mod(vm, <App as AppMain>::script_mod));
+        app.run = Some(RunInfo {
+            run_id: "run-c".into(),
+            state: "running".into(),
+            started: 0.0,
+            finished_secs: None,
+            revision: 1,
+            planned_nodes: vec!["image".into()],
+        });
+        app.set_node_status(&mut cx, "image", "running", 500, true, "denoise", None);
+        app.handle_flow_event(
+            &mut cx,
+            FlowEvent {
+                topic: "run".into(),
+                kind: "run.finished".into(),
+                run_id: Some("run-c".into()),
+                state: Some(makepad_widgets::makepad_micro_serde::JsonValue::String(
+                    "cancelled".into(),
+                )),
+                ..FlowEvent::default()
+            },
+        );
+        assert!(app.run.is_none());
+        assert!(app
+            .ui
+            .widget(&cx, ids!(canvas))
+            .borrow::<FlowCanvas>()
+            .unwrap()
+            .statuses
+            .is_empty());
+    }
+
+    #[test]
+    fn control_enter_reaches_queue_even_with_text_focus() {
+        let event = Event::KeyDown(KeyEvent {
+            key_code: KeyCode::ReturnKey,
+            modifiers: KeyModifiers {
+                control: true,
+                ..KeyModifiers::default()
+            },
+            ..KeyEvent::default()
+        });
+        assert!(is_queue_shortcut(&event, false));
+        assert!(is_queue_shortcut(&event, true));
+
+        let plain = Event::KeyDown(KeyEvent {
+            key_code: KeyCode::ReturnKey,
+            ..KeyEvent::default()
+        });
+        assert!(!is_queue_shortcut(&plain, true));
+    }
+
+    #[test]
+    fn wire_menu_toggles_canvas_mode_and_checked_item() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let mut app = cx.with_vm(|vm| App::from_script_mod(vm, <App as AppMain>::script_mod));
+
+        assert_eq!(app.wire_mode, WireMode::Routed);
+        assert!(menu_label(&app, &cx, live_id!(wires_routed)).contains('✓'));
+        app.handle_menu(&mut cx, live_id!(wires_bezier));
+        assert_eq!(app.wire_mode, WireMode::Bezier);
+        assert!(menu_label(&app, &cx, live_id!(wires_bezier)).contains('✓'));
+        assert!(!menu_label(&app, &cx, live_id!(wires_routed)).contains('✓'));
+        assert_eq!(
+            app.ui
+                .widget(&cx, ids!(canvas))
+                .borrow::<FlowCanvas>()
+                .unwrap()
+                .wire_mode(),
+            WireMode::Bezier
+        );
+
+        app.handle_menu(&mut cx, live_id!(wires_routed));
+        assert_eq!(app.wire_mode, WireMode::Routed);
+        assert!(menu_label(&app, &cx, live_id!(wires_routed)).contains('✓'));
+    }
+
+    #[test]
+    fn design_face_commits_persist_graph_values_and_run_views_refuse_them() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let mut app = cx.with_vm(|vm| App::from_script_mod(vm, <App as AppMain>::script_mod));
+        let source = "use mod.flow.*\nlet prompt = Input{value: \"from file\"}\nlet expand = Llm{prompt: \"literal\"}\nFlow{prompt expand}\n";
+        let graph = makepad_flow::graph::evaluate(source, "design.splash").unwrap();
+        app.definition = Some(FlowDefinition {
+            source: source.to_string(),
+            revision: 1,
+            graph: Some(graph),
+            tools: Default::default(),
+            error: None,
+        });
+
+        app.route_face_commits(
+            vec![
+                ("prompt".into(), "text".into(), "edited design".into()),
+                ("expand".into(), "prompt".into(), "edited literal".into()),
+            ],
+            Vec::new(),
+        );
+        assert_eq!(
+            app.pending_params.get(&("prompt".into(), "value".into())),
+            Some(&Literal::Str("edited design".into()))
+        );
+        assert_eq!(
+            app.pending_params.get(&("expand".into(), "prompt".into())),
+            Some(&Literal::Str("edited literal".into()))
+        );
+
+        app.instance = Some("run-1".into());
+        app.route_face_commits(
+            vec![("prompt".into(), "text".into(), "must be ignored".into())],
+            vec![("prompt".into(), "value".into(), Literal::Str("ignored".into()))],
+        );
+        assert_eq!(
+            app.pending_params.get(&("prompt".into(), "value".into())),
+            Some(&Literal::Str("edited design".into()))
+        );
+    }
+
+    #[test]
+    fn run_attachment_is_locked_and_design_detach_restores_source_editing() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let mut app = cx.with_vm(|vm| App::from_script_mod(vm, <App as AppMain>::script_mod));
+
+        app.attach_instance(&mut cx, Some("run-1".into()), false);
+        assert_eq!(app.instance.as_deref(), Some("run-1"));
+        assert!(app.ui.widget(&cx, ids!(design_btn)).visible());
+        assert!(app.ui.text_input(&cx, ids!(source)).is_read_only());
+
+        app.attach_instance(&mut cx, None, false);
+        assert!(app.instance.is_none());
+        assert!(!app.ui.widget(&cx, ids!(design_btn)).visible());
+        assert!(!app.ui.text_input(&cx, ids!(source)).is_read_only());
+    }
+
+    #[test]
+    fn every_play_gets_a_fresh_unoverridden_numbered_instance_request() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let mut app = cx.with_vm(|vm| App::from_script_mod(vm, <App as AppMain>::script_mod));
+
+        for expected in 1..=6 {
+            let label = app.next_run_label("demo");
+            assert_eq!(label, format!("run #{expected}"));
+            let request = fresh_run_instance_request(label.clone());
+            assert_eq!(request.label.as_deref(), Some(label.as_str()));
+            assert!(request.inputs.is_none());
+            assert!(request.pin.is_none());
+        }
     }
 
     #[test]
@@ -4628,6 +5507,8 @@ mod layout_tests {
                 run_id: "run-a".into(),
                 instance: "instance-a".into(),
                 flow: "demo".into(),
+                batch: None,
+                batch_index: None,
                 revision: 7,
                 state: RunState::Failed,
                 planned_nodes: vec!["running".into(), "failed".into()],

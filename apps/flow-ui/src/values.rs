@@ -4,12 +4,19 @@
 
 use makepad_flow::client::{ClientError, FlowClient};
 use makepad_flow::ValueBytes;
+pub use makepad_media_view::MediaKind;
 use makepad_widgets::makepad_platform::thread::SignalToUI;
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 
 pub const DEFAULT_BUDGET: usize = 64 * 1024 * 1024;
+
+/// One content-type seam for cards and the modal viewer. Magic bytes recover
+/// mesh/splat values when a server had to label them as octet-stream.
+pub fn media_kind(value: &ValueBytes) -> MediaKind {
+    makepad_media_view::media_kind(&value.content_type, &value.bytes)
+}
 
 pub enum ValueArrival {
     Ready(ValueBytes),
@@ -143,6 +150,37 @@ mod tests {
             content_type: "application/octet-stream".into(),
             bytes: vec![0u8; size].into(),
         }
+    }
+
+    #[test]
+    fn value_media_kind_maps_every_viewer() {
+        for (content_type, bytes, expected) in [
+            ("image/png", b"png".as_slice(), MediaKind::Image),
+            ("video/mp4", b"mp4".as_slice(), MediaKind::Video),
+            ("audio/wav", b"wav".as_slice(), MediaKind::Audio),
+            ("model/gltf-binary", b"glb".as_slice(), MediaKind::Mesh),
+            ("application/x-ply", b"ply".as_slice(), MediaKind::Splat),
+            ("text/plain", b"hello".as_slice(), MediaKind::Text),
+        ] {
+            let value = ValueBytes {
+                digest: "kind".into(),
+                content_type: content_type.into(),
+                bytes: bytes.to_vec().into(),
+            };
+            assert_eq!(media_kind(&value), expected, "{content_type}");
+        }
+    }
+
+    #[test]
+    fn value_media_kind_uses_glb_and_ply_magic() {
+        let mut value = ValueBytes {
+            digest: "magic".into(),
+            content_type: "application/octet-stream".into(),
+            bytes: b"glTF\x02\0\0\0\x10\0\0\0".to_vec().into(),
+        };
+        assert_eq!(media_kind(&value), MediaKind::Mesh);
+        value.bytes = b"ply\nformat ascii 1.0\n".to_vec().into();
+        assert_eq!(media_kind(&value), MediaKind::Splat);
     }
 
     #[test]

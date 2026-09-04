@@ -135,6 +135,17 @@ impl SttConfig {
             ..Self::default()
         }
     }
+
+    /// In-process Whisper only: no LAN, no OS recognizer. The window voice
+    /// button and search-field mics use this so a machine with hub STT
+    /// weights talks to Whisper here, on the default microphone.
+    pub fn local_whisper() -> Self {
+        Self {
+            engine: SttEngine::Whisper,
+            reach: SpeechReach::Local,
+            ..Self::live_dictation()
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -489,6 +500,14 @@ mod tests {
         assert_eq!(cfg.max_tokens, 48);
         assert_eq!(cfg.silence_threshold, Some(0.65));
         assert!(!cfg.timestamps);
+    }
+
+    #[test]
+    fn local_whisper_stays_in_process() {
+        let cfg = SttConfig::local_whisper();
+        assert_eq!(cfg.engine, SttEngine::Whisper);
+        assert_eq!(cfg.reach, SpeechReach::Local);
+        assert!(cfg.single_segment);
     }
 
     #[test]

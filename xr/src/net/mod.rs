@@ -1,5 +1,4 @@
 use crate::prelude::*;
-use crate::util::clock::Instant;
 use makepad_widgets::makepad_platform::makepad_micro_serde::*;
 use std::{
     io,

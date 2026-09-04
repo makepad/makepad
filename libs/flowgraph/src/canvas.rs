@@ -21,13 +21,16 @@
 //!   inside that root.
 //! * `Event::hits` compares the raw pointer position with those local rects,
 //!   so the faces receive a cloned event whose positions went through the
-//!   inverse camera ([`Camera::remap_event`] in `faces.rs`); the canvas's own
+//!   inverse camera (the host uses [`Camera`] to remap face events); the canvas's own
 //!   hit tests (ports, cards) convert the other way. No platform change.
 
-use crate::faces::FaceHost;
-use crate::graph_edit::{self, GraphIndex, NODE_WIDTH};
-use crate::wire_route::{self, Obstacle, Point, PortSide, RouteKind, RouteStyle, WireRoute};
-use makepad_flow::{Graph, Literal, Node, NodeInputValue, PortType};
+use crate::model::{
+    CanvasStyles, CompatiblePorts, GraphView as Graph, NodeFacesScope, NodeStyle,
+    NodeView as Node, PortStyle, FIRST_AT, NODE_WIDTH,
+};
+use crate::wire_route::{
+    self, Obstacle, Point, PortSide, RouteKind, RouteStyle, WireMode, WireRoute,
+};
 use makepad_widgets::fab_controls::FabValueInput;
 use makepad_widgets::makepad_draw::DrawSvg;
 use makepad_widgets::makepad_platform::event::TouchState;
@@ -52,6 +55,21 @@ const LABEL_H: f64 = 26.0;
 const CARD_HEADER_H: f64 = 14.0;
 const PORT_ROW_H: f64 = 24.0;
 const PORT_R: f64 = 11.0;
+/// The disc is a slight oval along the flow axis (`PORT_RX` across,
+/// `PORT_R` tall) so the type icon reads centred beside the point.
+const PORT_RX: f64 = 13.0;
+/// The label starts this far past the oval's edge.
+const PORT_LABEL_GAP: f64 = 7.0;
+/// An output disc ends in a point on its cable side, an input disc has a
+/// small notch the point would fit into: the shape reads the flow direction.
+const PORT_TIP: f64 = 4.5;
+const PORT_TIP_HALF_ANGLE: f64 = 0.72;
+const PORT_DENT: f64 = 3.0;
+const PORT_NOTCH_HALF_ANGLE: f64 = 0.40;
+/// The type icon shifts a little toward the point (outputs) or away from
+/// the notch (inputs) so it sits visually centred in the shape.
+const PORT_ICON_SHIFT_OUT: f64 = 1.5;
+const PORT_ICON_SHIFT_IN: f64 = -0.75;
 const PORT_HIT_R: f64 = 16.0;
 const WIRE_HIT_PX: f64 = 6.0;
 const CARD_PAD: f64 = 14.0;
@@ -154,65 +172,54 @@ fn clamp_card_size(size: DVec2, full_bleed: bool, port_rows: usize) -> DVec2 {
     )
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PortIcon {
-    Text,
-    Image,
-    Audio,
-    Video,
-    Mesh,
-    Json,
-    Bytes,
-}
-
-impl PortIcon {
-    pub(crate) fn for_type(ty: PortType) -> Self {
-        match ty {
-            PortType::Text => Self::Text,
-            PortType::Image => Self::Image,
-            PortType::Audio => Self::Audio,
-            PortType::Video => Self::Video,
-            PortType::Mesh => Self::Mesh,
-            PortType::Json | PortType::List => Self::Json,
-            PortType::Bytes => Self::Bytes,
-        }
-    }
-
-    #[cfg(test)]
-    fn path(self) -> &'static str {
-        match self {
-            Self::Text => "resources/icons/text.svg",
-            Self::Image => "resources/icons/image.svg",
-            Self::Audio => "resources/icons/audio.svg",
-            Self::Video => "resources/icons/video.svg",
-            Self::Mesh => "resources/icons/mesh.svg",
-            Self::Json => "resources/icons/json.svg",
-            Self::Bytes => "resources/icons/bytes.svg",
-        }
-    }
-}
-
-pub(crate) fn declared_output_type(node: &Node) -> Option<PortType> {
+fn declared_output_kind(node: &Node) -> Option<&str> {
     if node.type_name != "Output" {
         return None;
     }
     node.params
         .iter()
-        .find_map(|(name, value)| {
-            if name != "type" {
-                return None;
-            }
-            match value {
-                Literal::Id(name) | Literal::Str(name) => PortType::from_str(name),
-                _ => None,
-            }
-        })
-        .or_else(|| node.inputs.first().map(|input| input.ty))
+        .find_map(|(name, value)| (name == "type").then_some(value.as_str()))
+        .or_else(|| node.inputs.first().map(|input| input.kind.as_str()))
 }
 
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
+
+    // Standalone consumers get the standard theme through these fallbacks.
+    // A host may replace the flow tokens before defining its canvas style.
+    mod.theme.flow_grid_a = theme.color_bg_app
+    mod.theme.flow_grid_b = theme.color_bg_container
+    mod.theme.flow_surface = theme.color_bg_container
+    mod.theme.flow_surface_hover = theme.color_bg_highlight
+    mod.theme.flow_edge = theme.color_bevel
+    mod.theme.flow_shadow = theme.color_shadow
+    mod.theme.flow_text = theme.color_text
+    mod.theme.flow_text_muted = theme.color_text_meta
+    mod.theme.flow_text_port = theme.color_label_outer
+    mod.theme.flow_text_chip = theme.color_text
+    mod.theme.flow_error = theme.color_error
+    mod.theme.flow_accent = theme.color_highlight
+    mod.theme.flow_highlight = theme.color_highlight
+    mod.theme.flow_input = theme.color_highlight
+    mod.theme.flow_success = theme.color_highlight
+    mod.theme.flow_chat = theme.color_highlight
+    mod.theme.flow_generation = theme.color_highlight
+    mod.theme.flow_function = theme.color_highlight
+    mod.theme.flow_http = theme.color_highlight
+    mod.theme.flow_waiting = theme.color_highlight
+    mod.theme.flow_port_text = theme.color_label_outer
+    mod.theme.flow_port_image = theme.color_label_outer
+    mod.theme.flow_port_audio = theme.color_label_outer
+    mod.theme.flow_port_video = theme.color_label_outer
+    mod.theme.flow_port_mesh = theme.color_label_outer
+    mod.theme.flow_port_json = theme.color_label_outer
+    mod.theme.flow_port_list = theme.color_label_outer
+    mod.theme.flow_port_bytes = theme.color_label_outer
+    mod.theme.flow_state_running = theme.color_highlight
+    mod.theme.flow_state_idle = theme.color_text_meta
+    mod.theme.flow_text_port_connected = theme.color_label_outer
+    mod.theme.flow_text_port_open = theme.color_text_meta
 
     set_type_default() do #(DrawFlowGrid::script_shader(vm)){
         ..mod.draw.DrawQuad
@@ -289,10 +296,15 @@ script_mod! {
 
     let KindIcon = mod.draw.DrawSvg{}
 
+    mod.widgets.FlowPortStyle = #(PortStyle::script_component(vm))
+    mod.widgets.FlowNodeStyle = #(NodeStyle::script_component(vm))
+    mod.widgets.FlowCanvasStyles = #(CanvasStyles::script_component(vm))
+
     mod.widgets.FlowCanvasBase = #(FlowCanvas::register_widget(vm))
     mod.widgets.FlowCanvas = set_type_default() do mod.widgets.FlowCanvasBase{
         width: Fill
         height: Fill
+        styles: mod.widgets.FlowCanvasStyles{}
         draw_bg +: {
             cell: 24.0
             origin: vec2(32768.0, 32768.0)
@@ -350,23 +362,6 @@ script_mod! {
         color_state_idle: theme.flow_state_idle
         color_port_label_connected: theme.flow_text_port_connected
         color_port_label_open: theme.flow_text_port_open
-
-        icon_input: KindIcon{ color: theme.flow_input svg: crate_resource("self:resources/icons/input.svg") }
-        icon_output: KindIcon{ color: theme.flow_success svg: crate_resource("self:resources/icons/output.svg") }
-        icon_chat: KindIcon{ color: theme.flow_chat svg: crate_resource("self:resources/icons/chat.svg") }
-        icon_gen: KindIcon{ color: theme.flow_generation svg: crate_resource("self:resources/icons/gen.svg") }
-        icon_fn: KindIcon{ color: theme.flow_function svg: crate_resource("self:resources/icons/fn.svg") }
-        icon_http: KindIcon{ color: theme.flow_http svg: crate_resource("self:resources/icons/http.svg") }
-        icon_ask: KindIcon{ color: theme.flow_waiting svg: crate_resource("self:resources/icons/ask.svg") }
-        icon_flow: KindIcon{ color: theme.flow_text_port svg: crate_resource("self:resources/icons/flow.svg") }
-
-        icon_text: KindIcon{ color: theme.flow_port_text svg: crate_resource("self:resources/icons/text.svg") }
-        icon_image: KindIcon{ color: theme.flow_port_image svg: crate_resource("self:resources/icons/image.svg") }
-        icon_audio: KindIcon{ color: theme.flow_port_audio svg: crate_resource("self:resources/icons/audio.svg") }
-        icon_video: KindIcon{ color: theme.flow_port_video svg: crate_resource("self:resources/icons/video.svg") }
-        icon_mesh: KindIcon{ color: theme.flow_port_mesh svg: crate_resource("self:resources/icons/mesh.svg") }
-        icon_json: KindIcon{ color: theme.flow_port_json svg: crate_resource("self:resources/icons/json.svg") }
-        icon_bytes: KindIcon{ color: theme.flow_port_bytes svg: crate_resource("self:resources/icons/bytes.svg") }
 
         icon_check: KindIcon{ color: theme.flow_success svg: crate_resource("self:resources/icons/check.svg") }
         icon_alert: KindIcon{ color: theme.flow_error svg: crate_resource("self:resources/icons/alert.svg") }
@@ -482,7 +477,7 @@ pub enum FlowCanvasAction {
         at: (f64, f64),
         from_node: String,
         from_port: String,
-        ty: PortType,
+        ty: String,
     },
     /// The camera moved (pan or zoom); the app mirrors it in the toolbar.
     Camera {
@@ -514,7 +509,7 @@ enum Drag {
     Wire {
         from: usize,
         from_port: usize,
-        ty: PortType,
+        ty: String,
         pos: DVec2,
         target: Option<(usize, usize)>,
     },
@@ -753,36 +748,6 @@ pub struct FlowCanvas {
     #[live]
     color_port_label_open: Vec4f,
     #[live]
-    icon_input: DrawSvg,
-    #[live]
-    icon_output: DrawSvg,
-    #[live]
-    icon_chat: DrawSvg,
-    #[live]
-    icon_gen: DrawSvg,
-    #[live]
-    icon_fn: DrawSvg,
-    #[live]
-    icon_http: DrawSvg,
-    #[live]
-    icon_ask: DrawSvg,
-    #[live]
-    icon_flow: DrawSvg,
-    #[live]
-    icon_text: DrawSvg,
-    #[live]
-    icon_image: DrawSvg,
-    #[live]
-    icon_audio: DrawSvg,
-    #[live]
-    icon_video: DrawSvg,
-    #[live]
-    icon_mesh: DrawSvg,
-    #[live]
-    icon_json: DrawSvg,
-    #[live]
-    icon_bytes: DrawSvg,
-    #[live]
     icon_check: DrawSvg,
     #[live]
     icon_alert: DrawSvg,
@@ -817,7 +782,9 @@ pub struct FlowCanvas {
     #[rust]
     node_index: HashMap<String, usize>,
     #[rust]
-    graph_index: GraphIndex,
+    compatible_ports: CompatiblePorts,
+    #[live]
+    styles: CanvasStyles,
     /// Back-to-front card order; the back of this vector is screen-front.
     #[rust]
     z_order: Vec<String>,
@@ -843,6 +810,8 @@ pub struct FlowCanvas {
     wire_cache: Vec<Option<CachedWire>>,
     #[rust]
     wire_cache_dirty: bool,
+    #[rust]
+    wire_mode: WireMode,
     #[rust]
     parallel_offsets: Vec<f64>,
     #[rust]
@@ -872,6 +841,10 @@ pub struct FlowCanvas {
     cursor: DVec2,
     #[rust]
     face_roots: Vec<(LiveId, WidgetRef)>,
+    /// A run attachment keeps the face visible beneath a subtle lock veil;
+    /// the host separately disables the mounted controls.
+    #[rust]
+    faces_locked: bool,
     #[rust]
     next_frame: NextFrame,
     #[rust]
@@ -975,6 +948,39 @@ fn routing_cost(subjects: &[usize], routes: &[WireRoute]) -> f64 {
 impl FlowCanvas {
     // -- the app's view of the canvas ------------------------------------------
 
+    pub fn wire_mode(&self) -> WireMode {
+        self.wire_mode
+    }
+
+    pub fn set_wire_mode(&mut self, cx: &mut Cx, mode: WireMode) {
+        if self.wire_mode == mode {
+            return;
+        }
+        self.wire_mode = mode;
+        self.wire_cache.iter_mut().for_each(|cached| *cached = None);
+        self.wire_cache_dirty = true;
+        self.auto_flip_pending = mode == WireMode::Routed && self.graph.is_some();
+        if self.auto_flip_pending {
+            self.auto_flip_settle_until = self.time + AUTO_FLIP_SETTLE_SECONDS;
+            self.next_frame = cx.new_next_frame();
+        }
+        self.redraw(cx);
+    }
+
+    pub fn set_node_styles(&mut self, cx: &mut Cx, styles: HashMap<String, NodeStyle>) {
+        cx.with_vm(|vm| self.styles.set_nodes(vm, styles));
+        self.redraw(cx);
+    }
+
+    pub fn set_port_styles(&mut self, cx: &mut Cx, styles: HashMap<String, PortStyle>) {
+        cx.with_vm(|vm| self.styles.set_ports(vm, styles));
+        self.redraw(cx);
+    }
+
+    pub fn set_compatible_ports(&mut self, compatible: CompatiblePorts) {
+        self.compatible_ports = compatible;
+    }
+
     /// The face roots the app mounted for the bound instance; cleared before
     /// the app frees that isolate.
     pub fn set_face_roots(&mut self, cx: &mut Cx, roots: Vec<(LiveId, WidgetRef)>) {
@@ -983,11 +989,14 @@ impl FlowCanvas {
         self.redraw(cx);
     }
 
-    pub fn set_graph(&mut self, cx: &mut Cx, graph: Option<Graph>) {
-        let mut graph = graph;
-        if let Some(graph) = graph.as_mut() {
-            graph_edit::auto_place(graph);
+    pub fn set_faces_locked(&mut self, cx: &mut Cx, locked: bool) {
+        if self.faces_locked != locked {
+            self.faces_locked = locked;
+            self.redraw(cx);
         }
+    }
+
+    pub fn set_graph(&mut self, cx: &mut Cx, graph: Option<Graph>) {
         // Keep the measured heights of the nodes that survive.
         let old = self.graph.take();
         let old_edges = std::mem::take(&mut self.edges);
@@ -1031,8 +1040,8 @@ impl FlowCanvas {
                 );
             }
             for edge in &next.edges {
-                let from = node_index.get(&edge.from_node).copied();
-                let to = node_index.get(&edge.to_node).copied();
+                let from = node_index.get(&edge.from).copied();
+                let to = node_index.get(&edge.to).copied();
                 let (Some(from), Some(to)) = (from, to) else {
                     continue;
                 };
@@ -1043,7 +1052,7 @@ impl FlowCanvas {
                 let to_port = next.nodes[to]
                     .inputs
                     .iter()
-                    .position(|p| p.port == edge.to_port);
+                    .position(|p| p.name == edge.to_port);
                 if let (Some(from_port), Some(to_port)) = (from_port, to_port) {
                     edges.push(EdgeIndex {
                         from,
@@ -1088,10 +1097,6 @@ impl FlowCanvas {
         self.edges = edges;
         self.card_draw_lists = card_draw_lists;
         self.node_index = node_index;
-        self.graph_index = graph
-            .as_ref()
-            .map(graph_edit::GraphIndex::new)
-            .unwrap_or_default();
         self.graph = graph;
         self.flip_lock.retain(|id| self.node_index.contains_key(id));
         self.auto_flip_pending = self.graph.is_some();
@@ -1167,10 +1172,27 @@ impl FlowCanvas {
         raise_to_front(&mut self.z_order, node);
     }
 
-    fn compatible_for(&self, graph: &Graph, from: usize, from_port: usize) -> Vec<(usize, usize)> {
+    fn compatible_for(
+        &self,
+        graph: &Graph,
+        from: usize,
+        from_port: usize,
+    ) -> Vec<(usize, usize)> {
         let from_id = &graph.nodes[from].id;
         let port_name = &graph.nodes[from].outputs[from_port].name;
-        self.graph_index.compatible_inputs(graph, from_id, port_name)
+        self.compatible_ports
+            .get(&(from_id.clone(), port_name.clone()))
+            .into_iter()
+            .flatten()
+            .filter_map(|(node, port)| {
+                let node = self.node_index.get(node).copied()?;
+                let port = graph.nodes[node]
+                    .inputs
+                    .iter()
+                    .position(|input| input.name == *port)?;
+                Some((node, port))
+            })
+            .collect()
     }
 
     pub fn is_resize_handle_at(&self, abs: DVec2) -> bool {
@@ -1272,8 +1294,7 @@ impl FlowCanvas {
         self.camera
     }
 
-    #[cfg(test)]
-    pub(crate) fn zoom(&self) -> f64 {
+    pub fn zoom(&self) -> f64 {
         self.target_scale
     }
 
@@ -1318,7 +1339,7 @@ impl FlowCanvas {
         let mut min = dvec2(f64::MAX, f64::MAX);
         let mut max = dvec2(f64::MIN, f64::MIN);
         for (index, node) in graph.nodes.iter().enumerate() {
-            let (x, y) = node.at.unwrap_or(graph_edit::FIRST_AT);
+            let (x, y) = node.at;
             let size = self.node_size(graph, index);
             min.x = min.x.min(x);
             min.y = min.y.min(y - LABEL_H);
@@ -1374,9 +1395,9 @@ impl FlowCanvas {
                 to_port,
             } => self.graph.as_ref().is_some_and(|graph| {
                 graph.edges.iter().any(|edge| {
-                    edge.from_node == *from_node
+                    edge.from == *from_node
                         && edge.from_port == *from_port
-                        && edge.to_node == *to_node
+                        && edge.to == *to_node
                         && edge.to_port == *to_port
                 })
             }),
@@ -1388,7 +1409,7 @@ impl FlowCanvas {
     /// The node's world position, with a live drag applied.
     fn node_at(&self, graph: &Graph, index: usize) -> (f64, f64) {
         let node = &graph.nodes[index];
-        let mut at = node.at.unwrap_or(graph_edit::FIRST_AT);
+        let mut at = node.at;
         if let Some(Drag::Node {
             index: dragged,
             origin,
@@ -1462,21 +1483,14 @@ impl FlowCanvas {
     }
 
     fn full_bleed(node: &Node) -> bool {
-        match node.kind.as_str() {
-            "output" => declared_output_type(node)
-                .or_else(|| node.inputs.first().map(|input| input.ty))
-                == Some(PortType::Image),
-            "input" => node.outputs.first().is_some_and(|port| port.ty == PortType::Image),
-            "gen" => node.outputs.first().is_some_and(|port| port.ty == PortType::Image),
-            _ => false,
-        }
+        node.full_bleed
     }
 
-    fn input_type(node: &Node, port: usize) -> PortType {
+    fn input_kind(node: &Node, port: usize) -> &str {
         if port == 0 {
-            declared_output_type(node).unwrap_or(node.inputs[port].ty)
+            declared_output_kind(node).unwrap_or(&node.inputs[port].kind)
         } else {
-            node.inputs[port].ty
+            &node.inputs[port].kind
         }
     }
 
@@ -1500,6 +1514,40 @@ impl FlowCanvas {
         let y = rect.pos.y + CARD_HEADER_H + (port as f64 + 0.5) * PORT_ROW_H;
         let side = if output { 1.0 - flip } else { flip };
         dvec2(rect.pos.x + rect.size.x * side, y)
+    }
+
+    /// Where a wire meets the port: the tip of an output's point, the apex
+    /// of an input's notch — never the disc centre, so a wire visibly leaves
+    /// the point along its axis.
+    fn wire_anchor_at_flip(
+        &self,
+        graph: &Graph,
+        index: usize,
+        port: usize,
+        output: bool,
+        flip: f64,
+    ) -> DVec2 {
+        let p = self.port_local_at_flip(graph, index, port, output, flip);
+        let direction = if Self::port_side_at_flip(true, flip) == PortSide::Right {
+            1.0
+        } else {
+            -1.0
+        };
+        let offset = if output {
+            direction * (PORT_RX + PORT_TIP)
+        } else {
+            -direction * (PORT_RX - PORT_DENT)
+        };
+        dvec2(p.x + offset, p.y)
+    }
+
+    fn wire_anchor(&self, graph: &Graph, index: usize, port: usize, output: bool) -> DVec2 {
+        let flip = self
+            .flip_positions
+            .get(index)
+            .copied()
+            .unwrap_or(if graph.nodes[index].flip { 1.0 } else { 0.0 });
+        self.wire_anchor_at_flip(graph, index, port, output, flip)
     }
 
     fn port_local(&self, graph: &Graph, index: usize, port: usize, output: bool) -> DVec2 {
@@ -1598,7 +1646,7 @@ impl FlowCanvas {
             from_node: graph.nodes.get(edge.from)?.id.clone(),
             from_port: graph.nodes.get(edge.from)?.outputs.get(edge.from_port)?.name.clone(),
             to_node: graph.nodes.get(edge.to)?.id.clone(),
-            to_port: graph.nodes.get(edge.to)?.inputs.get(edge.to_port)?.port.clone(),
+            to_port: graph.nodes.get(edge.to)?.inputs.get(edge.to_port)?.name.clone(),
         })
     }
 
@@ -1609,20 +1657,27 @@ impl FlowCanvas {
         })
     }
 
-    fn port_color(&self, ty: PortType) -> Vec4f {
-        match ty {
-            PortType::Text => self.color_port_text,
-            PortType::Image => self.color_port_image,
-            PortType::Audio => self.color_port_audio,
-            PortType::Video => self.color_port_video,
-            PortType::Mesh => self.color_port_mesh,
-            PortType::Json => self.color_port_json,
-            PortType::List => self.color_port_list,
-            PortType::Bytes => self.color_port_bytes,
+    fn port_color(&self, kind: &str) -> Vec4f {
+        if let Some(color) = self.styles.port_color(kind) {
+            return color;
+        }
+        match kind {
+            "text" => self.color_port_text,
+            "image" => self.color_port_image,
+            "audio" => self.color_port_audio,
+            "video" => self.color_port_video,
+            "mesh" => self.color_port_mesh,
+            "json" => self.color_port_json,
+            "list" => self.color_port_list,
+            "bytes" => self.color_port_bytes,
+            _ => self.color_flow,
         }
     }
 
     fn kind_color(&self, kind: &str) -> Vec4f {
+        if let Some(color) = self.styles.node_color(kind) {
+            return color;
+        }
         match kind {
             "input" => self.color_input,
             "output" => self.color_output,
@@ -1708,6 +1763,41 @@ impl FlowCanvas {
         }
     }
 
+    /// A port disc whose cable side carries the flow direction: an output
+    /// ends in a sharp `>` point, an input has a small `>` notch the point
+    /// would fit into. `grow` widens the oval (hover, the selected halo);
+    /// `direction` is the card's flow direction (+1 left-to-right).
+    fn shaped_port(v: &mut DrawVector, centre: Point, grow: f64, direction: f64, input: bool) {
+        let rx = PORT_RX + grow;
+        let ry = PORT_R + grow;
+        let cable_side = if input { -direction } else { direction };
+        let (apex_r, half_angle) = if input {
+            (rx - PORT_DENT, PORT_NOTCH_HALF_ANGLE)
+        } else {
+            (rx + PORT_TIP, PORT_TIP_HALF_ANGLE)
+        };
+        let base = if cable_side < 0.0 {
+            std::f64::consts::PI
+        } else {
+            0.0
+        };
+        let steps = 40;
+        let start = base + half_angle;
+        let sweep = std::f64::consts::TAU - 2.0 * half_angle;
+        for step in 0..=steps {
+            let angle = start + sweep * step as f64 / steps as f64;
+            let x = (centre.x + rx * angle.cos()) as f32;
+            let y = (centre.y + ry * angle.sin()) as f32;
+            if step == 0 {
+                v.move_to(x, y);
+            } else {
+                v.line_to(x, y);
+            }
+        }
+        v.line_to((centre.x + cable_side * apex_r) as f32, centre.y as f32);
+        v.close();
+    }
+
     fn draw_points(v: &mut DrawVector, points: &[Point]) {
         let Some(first) = points.first() else {
             return;
@@ -1788,18 +1878,22 @@ impl FlowCanvas {
             .collect();
         for index in 0..self.edges.len() {
             let edge = self.edges[index];
-            let from = Self::route_point(self.port_local(graph, edge.from, edge.from_port, true));
-            let to = Self::route_point(self.port_local(graph, edge.to, edge.to_port, false));
+            let from = Self::route_point(self.wire_anchor(graph, edge.from, edge.from_port, true));
+            let to = Self::route_point(self.wire_anchor(graph, edge.to, edge.to_port, false));
             let source_side = self.port_side(graph, edge.from, true);
             let target_side = self.port_side(graph, edge.to, false);
             let offset = self.parallel_offsets.get(index).copied().unwrap_or(0.0);
             let style = RouteStyle::default();
-            let obstacles = wire_route::obstacles_in_corridor(
-                from,
-                to,
-                &all_obstacles,
-                style.port_stub + style.corner_radius * 2.0 + offset.abs(),
-            );
+            let obstacles = if self.wire_mode == WireMode::Routed {
+                wire_route::obstacles_in_corridor(
+                    from,
+                    to,
+                    &all_obstacles,
+                    style.port_stub + style.corner_radius * 2.0 + offset.abs(),
+                )
+            } else {
+                Vec::new()
+            };
             let key = Self::route_cache_key(
                 edge,
                 from,
@@ -1816,7 +1910,8 @@ impl FlowCanvas {
             let previous = self.wire_cache[index]
                 .as_ref()
                 .map(|cached| &cached.route);
-            let route = wire_route::route_wire_sticky(
+            let route = wire_route::route_wire_sticky_in_mode(
+                self.wire_mode,
                 from,
                 source_side,
                 to,
@@ -1853,14 +1948,14 @@ impl FlowCanvas {
             .map(|(edge_index, edge)| {
                 let from_flip = if facings[edge.from] { 1.0 } else { 0.0 };
                 let to_flip = if facings[edge.to] { 1.0 } else { 0.0 };
-                let from = Self::route_point(self.port_local_at_flip(
+                let from = Self::route_point(self.wire_anchor_at_flip(
                     graph,
                     edge.from,
                     edge.from_port,
                     true,
                     from_flip,
                 ));
-                let to = Self::route_point(self.port_local_at_flip(
+                let to = Self::route_point(self.wire_anchor_at_flip(
                     graph,
                     edge.to,
                     edge.to_port,
@@ -1893,7 +1988,7 @@ impl FlowCanvas {
             let side = Self::port_side_at_flip(output, flip);
             let direction = if side == PortSide::Right { 1.0 } else { -1.0 };
             for port in 0..count {
-                let from = Self::route_point(self.port_local_at_flip(
+                let from = Self::route_point(self.wire_anchor_at_flip(
                     graph,
                     node_index,
                     port,
@@ -1961,14 +2056,14 @@ impl FlowCanvas {
             }
             let from_flip = if candidate_facings[edge.from] { 1.0 } else { 0.0 };
             let to_flip = if candidate_facings[edge.to] { 1.0 } else { 0.0 };
-            let from = Self::route_point(self.port_local_at_flip(
+            let from = Self::route_point(self.wire_anchor_at_flip(
                 graph,
                 edge.from,
                 edge.from_port,
                 true,
                 from_flip,
             ));
-            let to = Self::route_point(self.port_local_at_flip(
+            let to = Self::route_point(self.wire_anchor_at_flip(
                 graph,
                 edge.to,
                 edge.to_port,
@@ -2001,6 +2096,10 @@ impl FlowCanvas {
     /// Evaluate settled geometry in bounded whole-graph passes. A pass uses
     /// one route snapshot so cards cannot observe a half-applied result.
     fn maybe_auto_flip(&mut self, cx: &mut Cx, graph: &mut Graph) {
+        if self.wire_mode == WireMode::Bezier {
+            self.auto_flip_pending = false;
+            return;
+        }
         if !self.auto_flip_pending
             || self.time < self.auto_flip_settle_until
             || self.drag.is_some()
@@ -2077,25 +2176,30 @@ impl FlowCanvas {
         target: Option<(usize, usize)>,
     ) -> WireRoute {
         const CARD_CLEARANCE: f64 = 12.0;
-        let from = Self::route_point(self.port_local(graph, from_index, from_port, true));
+        let from = Self::route_point(self.wire_anchor(graph, from_index, from_port, true));
         let source_side = self.port_side(graph, from_index, true);
         let (to, target_side) = target.map_or(
             (Self::route_point(pointer), PortSide::Left),
             |(node, port)| {
                 (
-                    Self::route_point(self.port_local(graph, node, port, false)),
+                    Self::route_point(self.wire_anchor(graph, node, port, false)),
                     self.port_side(graph, node, false),
                 )
             },
         );
-        let obstacles: Vec<Obstacle> = (0..graph.nodes.len())
-            .map(|index| {
-                let rect = self.card_rect(graph, index);
-                Obstacle::from_xywh(rect.pos.x, rect.pos.y, rect.size.x, rect.size.y)
-                    .inflate(CARD_CLEARANCE)
-            })
-            .collect();
-        wire_route::route_wire(
+        let obstacles: Vec<Obstacle> = if self.wire_mode == WireMode::Routed {
+            (0..graph.nodes.len())
+                .map(|index| {
+                    let rect = self.card_rect(graph, index);
+                    Obstacle::from_xywh(rect.pos.x, rect.pos.y, rect.size.x, rect.size.y)
+                        .inflate(CARD_CLEARANCE)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        wire_route::route_wire_in_mode(
+            self.wire_mode,
             from,
             source_side,
             to,
@@ -2135,8 +2239,8 @@ impl FlowCanvas {
         self.draw_vec.begin();
         // Wires, under the cards.
         for (index, edge) in self.edges.iter().copied().enumerate() {
-            let ty = graph.nodes[edge.from].outputs[edge.from_port].ty;
-            let color = self.port_color(ty);
+            let kind = &graph.nodes[edge.from].outputs[edge.from_port].kind;
+            let color = self.port_color(kind);
             let node = &graph.nodes[edge.from].id;
             let streaming = self.streaming.contains(node);
             let carrying = self.carrying.contains(node);
@@ -2246,11 +2350,11 @@ impl FlowCanvas {
             pos,
             target,
             ..
-        }) = self.drag
+        }) = &self.drag
         {
-            let b = self.camera.screen_to_local(pos);
+            let b = self.camera.screen_to_local(*pos);
             let color = self.port_color(ty);
-            let route = self.preview_route(graph, from, from_port, b, target);
+            let route = self.preview_route(graph, *from, *from_port, b, *target);
             Self::set_color(&mut self.draw_vec, color, 1.0);
             Self::draw_route(&mut self.draw_vec, &route);
             self.draw_vec.stroke(3.0);
@@ -2306,29 +2410,12 @@ impl FlowCanvas {
         }
     }
 
-    fn kind_icon(&mut self, kind: &str) -> &mut DrawSvg {
-        match kind {
-            "input" => &mut self.icon_input,
-            "output" => &mut self.icon_output,
-            "chat" => &mut self.icon_chat,
-            "gen" => &mut self.icon_gen,
-            "fn" => &mut self.icon_fn,
-            "http" => &mut self.icon_http,
-            "ask" => &mut self.icon_ask,
-            _ => &mut self.icon_flow,
-        }
+    fn kind_icon(&mut self, kind: &str) -> Option<&mut DrawSvg> {
+        self.styles.node_icon(kind)
     }
 
-    fn port_icon(&mut self, ty: PortType) -> &mut DrawSvg {
-        match PortIcon::for_type(ty) {
-            PortIcon::Text => &mut self.icon_text,
-            PortIcon::Image => &mut self.icon_image,
-            PortIcon::Audio => &mut self.icon_audio,
-            PortIcon::Video => &mut self.icon_video,
-            PortIcon::Mesh => &mut self.icon_mesh,
-            PortIcon::Json => &mut self.icon_json,
-            PortIcon::Bytes => &mut self.icon_bytes,
-        }
+    fn port_icon(&mut self, kind: &str) -> Option<&mut DrawSvg> {
+        self.styles.port_icon(kind)
     }
 
     /// Labels above the cards, port names, error lines.
@@ -2344,14 +2431,16 @@ impl FlowCanvas {
                 pos: dvec2(r.pos.x + 2.0, label_y + 5.0),
                 size: dvec2(15.0, 15.0),
             };
-            if let Some(ty) = declared_output_type(node) {
-                self.port_icon(ty).draw_abs(cx, icon_rect);
-            } else {
-                self.kind_icon(&node.kind).draw_abs(cx, icon_rect);
+            if let Some(kind) = declared_output_kind(node) {
+                if let Some(icon) = self.port_icon(kind) {
+                    icon.draw_abs(cx, icon_rect);
+                }
+            } else if let Some(icon) = self.kind_icon(&node.kind) {
+                icon.draw_abs(cx, icon_rect);
             }
-            let id_w = self.text_width(cx, &self.draw_title, &node.id);
+            let id_w = self.text_width(cx, &self.draw_title, &node.title);
             self.draw_title
-                .draw_abs(cx, dvec2(r.pos.x + 23.0, label_y + 6.0), &node.id);
+                .draw_abs(cx, dvec2(r.pos.x + 23.0, label_y + 6.0), &node.title);
             self.draw_meta
                 .draw_abs(cx, dvec2(r.pos.x + 29.0 + id_w, label_y + 7.0), &node.type_name);
             // State chip at the right of the label row.
@@ -2390,26 +2479,25 @@ impl FlowCanvas {
             if !Self::full_bleed(node) {
                 for (port, input) in node.inputs.iter().enumerate() {
                     let p = self.port_local(graph, index, port, false);
-                    let connected = matches!(input.value, NodeInputValue::Edge(_));
-                    self.draw_port.color = if connected {
+                    self.draw_port.color = if input.connected {
                         self.color_port_label_connected
                     } else {
                         self.color_port_label_open
                     };
-                    let w = self.text_width(cx, &self.draw_port, &input.port);
+                    let w = self.text_width(cx, &self.draw_port, &input.name);
                     let x = match self.port_side(graph, index, false) {
-                        PortSide::Left => p.x + PORT_R + 8.0,
-                        PortSide::Right => p.x - PORT_R - 8.0 - w,
+                        PortSide::Left => p.x + PORT_RX + PORT_LABEL_GAP,
+                        PortSide::Right => p.x - PORT_RX - PORT_LABEL_GAP - w,
                     };
-                    self.draw_port.draw_abs(cx, dvec2(x, p.y - 6.0), &input.port);
+                    self.draw_port.draw_abs(cx, dvec2(x, p.y - 6.0), &input.name);
                 }
                 for (port, output) in node.outputs.iter().enumerate() {
                     let p = self.port_local(graph, index, port, true);
                     let w = self.text_width(cx, &self.draw_port, &output.name);
                     self.draw_port.color = self.color_port_label_connected;
                     let x = match self.port_side(graph, index, true) {
-                        PortSide::Left => p.x + PORT_R + 8.0,
-                        PortSide::Right => p.x - PORT_R - 8.0 - w,
+                        PortSide::Left => p.x + PORT_RX + PORT_LABEL_GAP,
+                        PortSide::Right => p.x - PORT_RX - PORT_LABEL_GAP - w,
                     };
                     self.draw_port.draw_abs(cx, dvec2(x, p.y - 6.0), &output.name);
                 }
@@ -2445,8 +2533,10 @@ impl FlowCanvas {
         indices: &[usize],
     ) -> bool {
         let mut changed = false;
-        if let Some(faces) = scope.data.get_mut::<FaceHost>() {
-            faces.set_popup_anchor_transform(cx, Some(self.camera.popup_anchor_transform()));
+        if let Some(faces) = scope.data.get_mut::<NodeFacesScope>() {
+            faces
+                .faces()
+                .set_popup_anchor_transform(cx, Some(self.camera.popup_anchor_transform()));
         }
         for index in indices.iter().copied() {
             let node = &graph.nodes[index];
@@ -2485,8 +2575,8 @@ impl FlowCanvas {
                     ..Layout::default()
                 },
             );
-            if let Some(faces) = scope.data.get_mut::<FaceHost>() {
-                faces.draw_face(
+            if let Some(faces) = scope.data.get_mut::<NodeFacesScope>() {
+                faces.faces().draw_face(
                     cx,
                     &node.id,
                     if fixed_height.is_some() {
@@ -2512,6 +2602,29 @@ impl FlowCanvas {
         changed
     }
 
+    fn draw_locked_face_overlay(&mut self, cx: &mut Cx2d, graph: &Graph, indices: &[usize]) {
+        if !self.faces_locked {
+            return;
+        }
+        self.draw_over.begin();
+        self.draw_over.set_color(0.0, 0.0, 0.0, 0.06);
+        for index in indices.iter().copied() {
+            let node = &graph.nodes[index];
+            let card = self.card_rect(graph, index);
+            let content =
+                card_content_rect(card, Self::full_bleed(node), Self::port_rows(node));
+            self.draw_over.rounded_rect(
+                content.rect.pos.x as f32,
+                content.rect.pos.y as f32,
+                content.rect.size.x as f32,
+                content.rect.size.y as f32,
+                4.0,
+            );
+            self.draw_over.fill();
+        }
+        self.draw_over.end(cx);
+    }
+
     /// Ports and progress bars: the second batch, above the faces (a picture
     /// fills its card to the edges the ports sit on).
     fn draw_overlays(&mut self, cx: &mut Cx2d, graph: &Graph, indices: &[usize]) {
@@ -2535,9 +2648,13 @@ impl FlowCanvas {
                     || (matches!(state, "done" | "failed") && status.shown < 1.0 - 1e-6)
                     || matches!(state, "done" | "failed");
                 if show {
-                    let bx = r.pos.x as f32 + 12.0;
-                    let by = r.pos.y as f32 + 8.0;
-                    let bw = r.size.x as f32 - 24.0;
+                    // Inset well past the card's 16 px corners so the bar
+                    // sits inside the rounded box, and centred in the header
+                    // strip between the label row and the first port row.
+                    let inset = CARD_RADIUS + 8.0;
+                    let bx = r.pos.x as f32 + inset;
+                    let by = (r.pos.y + (CARD_HEADER_H - PROGRESS_H) * 0.5) as f32;
+                    let bw = r.size.x as f32 - 2.0 * inset;
                     self.draw_over.set_color(1.0, 1.0, 1.0, 0.08);
                     self.draw_over
                         .rounded_rect(bx, by, bw, PROGRESS_H as f32, 2.0);
@@ -2576,41 +2693,46 @@ impl FlowCanvas {
                     }
                 }
             }
-            // Ports: a dark disc with a ring in the port-type colour.
+            // Ports: a dark disc with a ring in the port-type colour. The
+            // disc's cable side is shaped: outputs point, inputs are dimpled.
+            let direction = if self.port_side(graph, index, true) == PortSide::Right {
+                1.0
+            } else {
+                -1.0
+            };
             for port in 0..node.inputs.len() {
                 let p = self.port_local(graph, index, port, false);
+                let centre = Point::new(p.x, p.y);
                 let ok = !compatible_active || self.compatible.contains(&(index, port));
                 let hot = wire_target == Some((index, port));
-                let radius = if hot { PORT_R + 3.0 } else { PORT_R } as f32;
+                let grow = if hot { 3.0 } else { 0.0 };
                 if selected_edge.is_some_and(|edge| edge.to == index && edge.to_port == port) {
                     Self::set_color(&mut self.draw_over, self.accent_color, 1.0);
-                    self.draw_over
-                        .circle(p.x as f32, p.y as f32, (PORT_R + 4.0) as f32);
+                    Self::shaped_port(&mut self.draw_over, centre, 4.0, direction, true);
                     self.draw_over.stroke(2.0);
                 }
                 Self::set_color(&mut self.draw_over, self.card_color, 1.0);
-                self.draw_over.circle(p.x as f32, p.y as f32, radius);
+                Self::shaped_port(&mut self.draw_over, centre, grow, direction, true);
                 self.draw_over.fill();
-                let color = self.port_color(Self::input_type(node, port));
+                let color = self.port_color(Self::input_kind(node, port));
                 Self::set_color(&mut self.draw_over, color, if ok { 1.0 } else { 0.25 });
-                self.draw_over.circle(p.x as f32, p.y as f32, radius - 1.0);
+                Self::shaped_port(&mut self.draw_over, centre, grow - 1.0, direction, true);
                 self.draw_over.stroke(if hot { 3.0 } else { 2.0 });
             }
             for (port, output) in node.outputs.iter().enumerate() {
                 let p = self.port_local(graph, index, port, true);
+                let centre = Point::new(p.x, p.y);
                 if selected_edge.is_some_and(|edge| edge.from == index && edge.from_port == port) {
                     Self::set_color(&mut self.draw_over, self.accent_color, 1.0);
-                    self.draw_over
-                        .circle(p.x as f32, p.y as f32, (PORT_R + 4.0) as f32);
+                    Self::shaped_port(&mut self.draw_over, centre, 4.0, direction, false);
                     self.draw_over.stroke(2.0);
                 }
                 Self::set_color(&mut self.draw_over, self.card_color, 1.0);
-                self.draw_over.circle(p.x as f32, p.y as f32, PORT_R as f32);
+                Self::shaped_port(&mut self.draw_over, centre, 0.0, direction, false);
                 self.draw_over.fill();
-                let color = self.port_color(output.ty);
+                let color = self.port_color(&output.kind);
                 Self::set_color(&mut self.draw_over, color, 1.0);
-                self.draw_over
-                    .circle(p.x as f32, p.y as f32, (PORT_R - 1.0) as f32);
+                Self::shaped_port(&mut self.draw_over, centre, -1.0, direction, false);
                 self.draw_over.stroke(2.0);
             }
         }
@@ -2626,59 +2748,24 @@ impl FlowCanvas {
             for port in 0..node.inputs.len() {
                 let p = self.port_local(graph, index, port, false);
                 let rect = Rect {
-                    pos: p + dvec2(-direction * 2.25 - 4.75, -4.75),
+                    pos: p + dvec2(-direction * PORT_ICON_SHIFT_IN - 4.75, -4.75),
                     size: dvec2(9.5, 9.5),
                 };
-                self.port_icon(Self::input_type(node, port)).draw_abs(cx, rect);
+                if let Some(icon) = self.port_icon(Self::input_kind(node, port)) {
+                    icon.draw_abs(cx, rect);
+                }
             }
             for (port, output) in node.outputs.iter().enumerate() {
                 let p = self.port_local(graph, index, port, true);
                 let rect = Rect {
-                    pos: p + dvec2(-direction * 2.25 - 4.75, -4.75),
+                    pos: p + dvec2(direction * PORT_ICON_SHIFT_OUT - 4.75, -4.75),
                     size: dvec2(9.5, 9.5),
                 };
-                self.port_icon(output.ty).draw_abs(cx, rect);
+                if let Some(icon) = self.port_icon(&output.kind) {
+                    icon.draw_abs(cx, rect);
+                }
             }
         }
-        // A small flow chevron shares each disc with its type icon. Inputs
-        // place it toward the card, outputs toward the cable; both therefore
-        // point in the card's current left-to-right (or flipped) direction.
-        self.draw_over.begin();
-        for index in indices.iter().copied() {
-            let node = &graph.nodes[index];
-            let direction = if self.port_side(graph, index, true) == PortSide::Right {
-                1.0
-            } else {
-                -1.0
-            };
-            let tangent = Point::new(direction, 0.0);
-            for port in 0..node.inputs.len() {
-                let p = self.port_local(graph, index, port, false);
-                let ok = !compatible_active || self.compatible.contains(&(index, port));
-                let color = self.port_color(Self::input_type(node, port));
-                Self::set_color(&mut self.draw_over, color, if ok { 0.6 } else { 0.15 });
-                Self::draw_chevron(
-                    &mut self.draw_over,
-                    Point::new(p.x + direction * 4.0, p.y),
-                    tangent,
-                    7.0,
-                );
-                self.draw_over.stroke(1.1);
-            }
-            for (port, output) in node.outputs.iter().enumerate() {
-                let p = self.port_local(graph, index, port, true);
-                let color = self.port_color(output.ty);
-                Self::set_color(&mut self.draw_over, color, 0.6);
-                Self::draw_chevron(
-                    &mut self.draw_over,
-                    Point::new(p.x + direction * 4.0, p.y),
-                    tangent,
-                    7.0,
-                );
-                self.draw_over.stroke(1.1);
-            }
-        }
-        self.draw_over.end(cx);
         // The grip is last inside the body: shadow/body/face/ports/icons/grip.
         self.draw_over.begin();
         Self::set_color(&mut self.draw_over, self.draw_meta.color, 0.55);
@@ -2736,7 +2823,7 @@ impl FlowCanvas {
         let from_port = graph.nodes[from].outputs[from_port].name.clone();
         if let Some((to, to_port)) = target {
             let to_node = graph.nodes[to].id.clone();
-            let to_port = graph.nodes[to].inputs[to_port].port.clone();
+            let to_port = graph.nodes[to].inputs[to_port].name.clone();
             cx.widget_action(
                 self.uid,
                 FlowCanvasAction::Edit(CanvasEdit::Connect {
@@ -2781,30 +2868,6 @@ impl FlowCanvas {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_port_type_icon_exists() {
-        let types = [
-            PortType::Text,
-            PortType::Image,
-            PortType::Audio,
-            PortType::Video,
-            PortType::Mesh,
-            PortType::Json,
-            PortType::List,
-            PortType::Bytes,
-        ];
-        for ty in types {
-            let path = PortIcon::for_type(ty).path();
-            assert!(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join(path)
-                    .is_file(),
-                "missing icon for {}: {path}",
-                ty.as_str()
-            );
-        }
-    }
 
     #[test]
     fn card_selection_moves_the_whole_retained_card_to_the_front() {
@@ -2921,7 +2984,7 @@ mod tests {
     }
 
     #[test]
-    fn crossed_expand_geometry_scores_an_unflip() {
+    fn routed_expand_geometry_respects_auto_flip_hysteresis() {
         let style = RouteStyle::default();
         let obstacles = [
             Obstacle::from_xywh(590.0, 110.0, 440.0, 230.0).inflate(12.0),
@@ -2975,7 +3038,7 @@ mod tests {
         assert!(current[0].crossings_with(&current[1]) > 0);
         assert_eq!(unflipped[0].crossings_with(&unflipped[1]), 0);
         assert!(
-            should_auto_flip(current_cost, unflipped_cost, 2, false),
+            !should_auto_flip(current_cost, unflipped_cost, 2, false),
             "current={current_cost} unflipped={unflipped_cost}"
         );
     }
@@ -3042,8 +3105,8 @@ impl Widget for FlowCanvas {
         if let Some(mut graph) = self.graph.take() {
             self.draw_wires(cx, &graph);
             let z_order = std::mem::take(&mut self.z_order);
-            if let Some(faces) = scope.data.get_mut::<FaceHost>() {
-                faces.set_z_order(&z_order);
+            if let Some(faces) = scope.data.get_mut::<NodeFacesScope>() {
+                faces.faces().set_z_order(&z_order);
             }
             for id in &z_order {
                 let Some(index) = self.node_index.get(id).copied() else {
@@ -3060,6 +3123,7 @@ impl Widget for FlowCanvas {
                 // emitted last and remains above the complete card.
                 self.draw_card(cx, &graph, one);
                 heights_changed |= self.draw_faces(cx, scope, &graph, one);
+                self.draw_locked_face_overlay(cx, &graph, one);
                 self.draw_overlays(cx, &graph, one);
                 self.draw_labels(cx, &graph, one);
                 card_list.end(cx);
@@ -3255,7 +3319,7 @@ impl Widget for FlowCanvas {
                         self.drag = Some(Drag::Wire {
                             from: hit.node,
                             from_port: hit.port,
-                            ty: node.outputs[hit.port].ty,
+                            ty: node.outputs[hit.port].kind.clone(),
                             pos: fd.abs,
                             target: None,
                         });
@@ -3264,19 +3328,17 @@ impl Widget for FlowCanvas {
                         // An input with a wire: pick the wire up again from
                         // its source; a bare one does nothing.
                         let input = &node.inputs[hit.port];
-                        if let NodeInputValue::Edge(edge) = &input.value {
-                            let from = self.node_index.get(&edge.from_node).copied();
-                            let from_port = from.and_then(|from| {
-                                graph.nodes[from]
-                                    .outputs
-                                    .iter()
-                                    .position(|p| p.name == edge.from_port)
-                            });
-                            if let (Some(from), Some(from_port)) = (from, from_port) {
-                                let ty = graph.nodes[from].outputs[from_port].ty;
+                        if input.connected {
+                            let source = self
+                                .edges
+                                .iter()
+                                .find(|edge| edge.to == hit.node && edge.to_port == hit.port)
+                                .map(|edge| (edge.from, edge.from_port));
+                            if let Some((from, from_port)) = source {
+                                let ty = graph.nodes[from].outputs[from_port].kind.clone();
                                 let compatible = self.compatible_for(graph, from, from_port);
                                 let to_node = node.id.clone();
-                                let to_port = input.port.clone();
+                                let to_port = input.name.clone();
                                 cx.widget_action(
                                     self.uid,
                                     FlowCanvasAction::Edit(CanvasEdit::Disconnect { to_node, to_port }),
@@ -3313,7 +3375,7 @@ impl Widget for FlowCanvas {
                     let graph = self.graph.as_ref().unwrap();
                     let node = &graph.nodes[index];
                     let id = node.id.clone();
-                    let origin = node.at.unwrap_or(graph_edit::FIRST_AT);
+                    let origin = node.at;
                     self.raise_node(&id);
                     let selection = Selection::Node(id.clone());
                     if self.selected.as_ref() != Some(&selection) {
@@ -3371,8 +3433,8 @@ impl Widget for FlowCanvas {
                             .graph
                             .as_ref()
                             .and_then(|graph| graph.nodes.get(index))
-                            .and_then(|node| node.at)
-                            .unwrap_or(graph_edit::FIRST_AT);
+                            .map(|node| node.at)
+                            .unwrap_or(FIRST_AT);
                         let origin = if moved {
                             (graph_at.0 + delta.x / s, graph_at.1 + delta.y / s)
                         } else {

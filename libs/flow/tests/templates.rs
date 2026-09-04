@@ -55,9 +55,9 @@ fn every_recipe_template_evaluates_and_round_trips() {
         let outputs: Vec<_> = graph
             .nodes
             .iter()
-            .filter(|node| node.kind == "output")
+            .filter(|node| matches!(node.kind.as_str(), "output" | "publish"))
             .collect();
-        assert!(!outputs.is_empty(), "{name}: template has no Output node");
+        assert!(!outputs.is_empty(), "{name}: template has no terminal node");
         for output in outputs {
             assert!(
                 reachable.contains(output.id.as_str()),

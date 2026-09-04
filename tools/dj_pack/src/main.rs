@@ -26,7 +26,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const STEM_OGG_NAMES: [&str; 4] = ["drums.ogg", "bass.ogg", "vocals.ogg", "other.ogg"];
 const DJ_ANALYSIS_NAME: &str = "analysis.wave";
 const DJ_LOOP_SPLAT_NAME: &str = "loop-splat.bin";
-const MAX_STEMS_JOB_FRAMES: usize = SAMPLE_RATE as usize * 60 * 20;
+// Keep each raw eight-channel f32 result comfortably below LocalService's
+// 1 GiB artifact-response ceiling. Long tracks are stitched with one chunk
+// of overlap below, so this does not limit input duration.
+const MAX_STEMS_JOB_FRAMES: usize = SAMPLE_RATE as usize * 60 * 10;
 
 fn usage() -> &'static str {
     "makepad-dj-pack — bake web-DJ tracks through the AI hub and export a static store\n\

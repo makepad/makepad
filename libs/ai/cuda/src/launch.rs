@@ -4060,6 +4060,33 @@ mod imp {
         CONV_SCRATCH.with(|cell| *cell.borrow_mut() = [None, None]);
     }
 
+    /// Release every idle allocator-pool block on this thread and return the
+    /// number of device bytes handed to `cudaFree`. Unlike
+    /// [`gpu_pool_clear`], this lifecycle trim also drops the grow-to-max
+    /// cuDNN workspace; phase-boundary clears keep that workspace warm.
+    pub fn gpu_pool_trim() -> usize {
+        let pooled_before = GPU_TENSOR_POOL_BYTES.with(|total| total.get());
+        let conv_before = CONV_SCRATCH.with(|cell| {
+            cell.borrow()
+                .iter()
+                .flatten()
+                .map(|buffer| buffer.size_bytes)
+                .sum::<usize>()
+        });
+        gpu_pool_clear();
+        let pooled_after = GPU_TENSOR_POOL_BYTES.with(|total| total.get());
+        let cudnn_workspace = CUDNN_WS.with(|cell| {
+            cell.borrow_mut()
+                .take()
+                .map(|buffer| buffer.size_bytes)
+                .unwrap_or(0)
+        });
+        pooled_before
+            .saturating_sub(pooled_after)
+            .saturating_add(conv_before)
+            .saturating_add(cudnn_workspace)
+    }
+
     /// A captured denoise-step graph: replaying it re-runs the step's whole
     /// kernel sequence with one launch. Dropping it unpins the pool buffers
     /// it references.
@@ -9852,33 +9879,66 @@ mod imp {
         })
     }
 
-    /// Synchronize the already-created dense CUDA runtime and release its
-    /// reusable activation/scratch buffers on this thread. Model-specific
-    /// weight caches are left alone; callers evict their namespaces first.
-    /// Like the conditional eviction helper, this is a no-op when the thread
-    /// has never initialized the dense backend.
-    pub fn gpu_runtime_trim() -> Result<(), String> {
+    /// Synchronize the already-created dense CUDA runtime and release every
+    /// reusable device allocation on this thread. Model-specific weight
+    /// caches are left alone; callers evict their namespaces first. Returns
+    /// the allocator-reported bytes released and is a no-op when this thread
+    /// has never initialized CUDA.
+    pub fn gpu_release_cached() -> Result<usize, String> {
+        let mut released = 0usize;
         let result = DENSE_LINEAR_BACKEND.with(|slot| {
             let mut slot = slot.borrow_mut();
             let Some(backend) = slot.as_mut() else {
                 return Ok(());
             };
             backend.prepare_device()?;
-            let sync = crate::synchronize_stream(backend.stream)
-                .map_err(|error| error.to_string());
+            let mut sync_error = None;
+            if let Some(ring) = backend.stream_ring.as_ref() {
+                if let Err(error) = crate::synchronize_stream(ring.copy_stream) {
+                    sync_error = Some(error.to_string());
+                }
+                for slot in &ring.slots {
+                    released = released.saturating_add(
+                        slot.iter().map(|buffer| buffer.size_bytes).sum::<usize>(),
+                    );
+                }
+            }
+            if let Err(error) = crate::synchronize_stream(backend.stream) {
+                sync_error.get_or_insert_with(|| error.to_string());
+            }
+            if let Some(ring) = backend.stream_ring.as_mut() {
+                ring.slots = [Vec::new(), Vec::new()];
+                ring.resident = [-1, -1];
+                ring.upload_waited = [true, true];
+            }
             // cudaFree provides the final release barrier even when the
             // explicit stream sync reported an error. Clear every reusable
             // dense buffer before returning either result.
+            released = released
+                .saturating_add(backend.input_f32.as_ref().map_or(0, |b| b.size_bytes))
+                .saturating_add(backend.input_half.as_ref().map_or(0, |b| b.size_bytes))
+                .saturating_add(backend.output_f32.as_ref().map_or(0, |b| b.size_bytes))
+                .saturating_add(backend.dequant_bf16.as_ref().map_or(0, |b| b.size_bytes));
             backend.input_f32 = None;
             backend.input_f32_capacity_bytes = 0;
             backend.input_half = None;
             backend.input_half_capacity_bytes = 0;
             backend.output_f32 = None;
             backend.output_f32_capacity = 0;
-            sync
+            backend.dequant_bf16 = None;
+            backend.dequant_bf16_capacity_bytes = 0;
+            match sync_error {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
         });
-        gpu_pool_clear();
-        result
+        released = released.saturating_add(gpu_pool_trim());
+        result.map(|()| released)
+    }
+
+    /// Compatibility wrapper for callers that only need success/failure.
+    pub fn gpu_runtime_trim() -> Result<(), String> {
+        gpu_release_cached().map(|_| ())
     }
 
     /// f16-accumulate dense gemms (CUBLAS_COMPUTE_16F): consumer GeForce runs

@@ -1,8 +1,9 @@
 use super::http::{HttpClient, Method};
 use crate::{
+    AssetsResponse, BatchMutationResponse, CreateBatchRequest, CreateBatchResponse,
     CreateFromTemplateRequest, CreateInstanceRequest, CreateInstanceResponse, CreateRunResponse,
     EvalError, EventsPage, FlowDefinition, FlowSummary, Graph, Health, InstanceRow, NodesResponse,
-    ModelsResponse, PutFlowResponse, RunRowDto, SetInputsResponse, TemplateResponse,
+    ModelsResponse, ParallelismResponse, PutFlowResponse, RunRowDto, SetInputsResponse, TemplateResponse,
     TemplateSummary, ValueBytes,
 };
 use makepad_micro_serde::{DeJson, SerJson};
@@ -172,9 +173,71 @@ impl FlowClient {
         decode(&body, "model list")
     }
 
+    pub fn parallelism(&self, name: &str) -> ClientResult<ParallelismResponse> {
+        let target = format!("/v1/flows/{}/parallelism", flow_name(name)?);
+        let body = self.call(Method::Get, &target, None, true, None)?;
+        decode(&body, "parallelism estimate")
+    }
+
     pub fn flows(&self) -> ClientResult<Vec<FlowSummary>> {
         let body = self.call(Method::Get, "/v1/flows", None, true, None)?;
         decode(&body, "flow list")
+    }
+
+    pub fn assets(
+        &self,
+        query: &str,
+        namespace: Option<&str>,
+        limit: u32,
+    ) -> ClientResult<AssetsResponse> {
+        if limit == 0 || limit > 100 {
+            return Err(ClientError::Protocol("asset limit is out of range".into()));
+        }
+        let namespace = namespace.unwrap_or("*");
+        if namespace != "*"
+            && (namespace.is_empty()
+                || !namespace
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte)))
+        {
+            return Err(ClientError::Protocol("invalid asset namespace".into()));
+        }
+        let target = format!(
+            "/v1/assets?q={}&ns={namespace}&limit={limit}",
+            query_component(query)
+        );
+        let body = self.call(Method::Get, &target, None, true, None)?;
+        decode(&body, "asset list")
+    }
+
+    pub fn asset_thumbnail(&self, alias: &str) -> ClientResult<ValueBytes> {
+        if alias.is_empty()
+            || alias.len() > 128
+            || !alias
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"/_-".contains(&byte))
+        {
+            return Err(ClientError::Protocol("invalid asset alias".into()));
+        }
+        let target = format!("/v1/assets/thumb/{alias}");
+        let response = self.control.call(
+            Method::Get,
+            &target,
+            Some(self.token.as_str()),
+            None,
+            None,
+        )?;
+        match response.status {
+            200..=299 => Ok(ValueBytes {
+                digest: alias.to_string(),
+                content_type: response
+                    .content_type
+                    .unwrap_or_else(|| "application/octet-stream".to_string()),
+                bytes: response.body.into(),
+            }),
+            401 => Err(ClientError::Unauthorized),
+            status => Err(http_error(status, &response.body)),
+        }
     }
 
     pub fn flow(&self, name: &str) -> ClientResult<FlowDefinition> {
@@ -260,6 +323,29 @@ impl FlowClient {
         let body = request.serialize_json().into_bytes();
         let response = self.call(Method::Post, &target, Some(&body), true, None)?;
         decode(&response, "create instance response")
+    }
+
+    pub fn create_batch(
+        &self,
+        name: &str,
+        request: &CreateBatchRequest,
+    ) -> ClientResult<CreateBatchResponse> {
+        let target = format!("/v1/flows/{}/batches", flow_name(name)?);
+        let body = request.serialize_json().into_bytes();
+        let response = self.call(Method::Post, &target, Some(&body), true, None)?;
+        decode(&response, "create batch response")
+    }
+
+    pub fn cancel_batch(&self, id: &str) -> ClientResult<BatchMutationResponse> {
+        let target = format!("/v1/batches/{}/cancel", route_id(id, "batch")?);
+        let response = self.call(Method::Post, &target, None, true, None)?;
+        decode(&response, "cancel batch response")
+    }
+
+    pub fn clear_batch(&self, id: &str) -> ClientResult<BatchMutationResponse> {
+        let target = format!("/v1/batches/{}", route_id(id, "batch")?);
+        let response = self.call(Method::Delete, &target, None, true, None)?;
+        decode(&response, "clear batch response")
     }
 
     pub fn create_instance_json(&self, name: &str, request: &Value) -> ClientResult<Value> {
@@ -558,6 +644,20 @@ fn flow_name(name: &str) -> ClientResult<&str> {
         return Err(ClientError::Protocol("invalid flow name".into()));
     }
     Ok(name)
+}
+
+fn query_component(value: &str) -> String {
+    value
+        .chars()
+        .take(256)
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || "._-".contains(character) {
+                character
+            } else {
+                '+'
+            }
+        })
+        .collect()
 }
 
 fn model_domain(domain: &str) -> ClientResult<&str> {

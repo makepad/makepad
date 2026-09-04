@@ -77,10 +77,16 @@ fn write_node(
     match node.type_name.as_str() {
         "Input" | "Text" => {
             write_param(out, node, "type", false);
-            write_param(out, node, "default", false);
+            write_param(out, node, "value", false);
         }
         "Output" => {
             write_param(out, node, "type", false);
+            write_input(out, node, "value", true, by_id);
+        }
+        "Publish" => {
+            for name in ["title", "namespace", "tags", "description", "alias"] {
+                write_param(out, node, name, false);
+            }
             write_input(out, node, "value", true, by_id);
         }
         "Llm" => {
@@ -451,6 +457,28 @@ Flow{prompt}
         assert!(at < size);
         let reparsed = evaluate(&written, "<size-round-trip-written>").unwrap();
         assert_eq!(reparsed.nodes[0].size, graph.nodes[0].size);
+    }
+
+    #[test]
+    fn input_value_round_trips_multiline_text() {
+        let source = "use mod.flow.*\nlet prompt = Input{value: \"first\\nsecond \\\"quoted\\\"\"}\nFlow{prompt}\n";
+        let graph = evaluate(source, "<input-value>").unwrap();
+        let written = write(&graph);
+        assert!(written.contains("    value: \"first\\nsecond \\\"quoted\\\"\"\n"));
+        let reparsed = evaluate(&written, "<input-value-written>").unwrap();
+        assert_eq!(reparsed.nodes[0].params, graph.nodes[0].params);
+    }
+
+    #[test]
+    fn legacy_input_default_is_written_as_value() {
+        let graph = evaluate(
+            "use mod.flow.*\nlet prompt = Text{default: \"legacy\"}\nFlow{prompt}\n",
+            "<legacy-input-default>",
+        )
+        .unwrap();
+        let written = write(&graph);
+        assert!(written.contains("    value: \"legacy\"\n"));
+        assert!(!written.contains("    default:"));
     }
 
     #[test]

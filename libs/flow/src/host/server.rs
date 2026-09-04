@@ -5,6 +5,7 @@ use super::state::{spawn_state, RunRegistration, StateHandle};
 use super::util::{atomic_write, from_hex_16, log, random_16, random_32, random_u64, to_hex, write_secret_file};
 use super::watcher::spawn_watcher;
 use crate::engine;
+use crate::engine::executors::publish::AssetWorker;
 use makepad_bounded_http::{Conn, HeadError, Method, Resp};
 use std::fs::File;
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -35,6 +36,7 @@ pub enum ServerError {
     Io { op: &'static str, kind: std::io::ErrorKind },
     Prelude(crate::EvalError),
     StateUnavailable,
+    Asset(String),
 }
 
 impl ServerError {
@@ -52,6 +54,7 @@ impl std::fmt::Display for ServerError {
             Self::Io { op, kind } => write!(formatter, "{op}: {kind:?}"),
             Self::Prelude(error) => write!(formatter, "flow prelude: {error}"),
             Self::StateUnavailable => write!(formatter, "flow state thread unavailable"),
+            Self::Asset(error) => write!(formatter, "flow asset worker: {error}"),
         }
     }
 }
@@ -67,6 +70,7 @@ pub struct FlowServer {
     janitor: Option<(mpsc::Sender<()>, JoinHandle<()>)>,
     state: Option<StateHandle>,
     state_join: Option<JoinHandle<()>>,
+    asset_worker: Option<AssetWorker>,
     events: Arc<EventHub>,
     config: SharedConfig,
     _root_lock: File,
@@ -100,11 +104,20 @@ impl FlowServer {
             .map_err(|error| ServerError::io("read data address", error))?;
         write_listen(&config, control_addr, data_addr)?;
 
+        let asset_worker = AssetWorker::start(config.asset.clone()).map_err(ServerError::Asset)?;
+        let asset_handle = asset_worker.handle();
         let config = Arc::new(config);
         let origin = (to_hex(&server_id), epoch);
         let (run_register_tx, run_register_rx) = mpsc::channel::<RunRegistration>();
         let (state, state_join) =
-            spawn_state(config.clone(), events.clone(), epoch, origin, run_register_tx)?;
+            spawn_state(
+                config.clone(),
+                events.clone(),
+                epoch,
+                origin,
+                run_register_tx,
+                asset_handle.clone(),
+            )?;
         let run_events = spawn_run_events(run_register_rx, state.clone());
         let janitor = spawn_janitor(&config, state.clone());
         let stop = Arc::new(AtomicBool::new(false));
@@ -114,6 +127,7 @@ impl FlowServer {
             server_id,
             token: token.clone(),
             events: events.clone(),
+            assets: asset_handle,
         };
         let mut watcher = match spawn_watcher(config.clone(), state.clone()) {
             Ok(watcher) => Some(watcher),
@@ -177,6 +191,7 @@ impl FlowServer {
             janitor: Some(janitor),
             state: Some(state),
             state_join: Some(state_join),
+            asset_worker: Some(asset_worker),
             events,
             config,
             _root_lock: root_lock,
@@ -213,8 +228,11 @@ impl FlowServer {
         drop(self.state.take());
         if let Some(join) = self.state_join.take() {
             let _ = join.join();
-            log(&self.config, "stopped");
         }
+        if let Some(mut worker) = self.asset_worker.take() {
+            worker.stop();
+        }
+        log(&self.config, "stopped");
     }
 }
 

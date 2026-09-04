@@ -143,6 +143,7 @@ pub struct Request {
     body: Vec<u8>,
     limits: Limits,
     cancel: CancelToken,
+    body_progress: Option<Arc<dyn Fn(u64, Option<u64>) + Send + Sync>>,
 }
 
 #[derive(Clone, Copy)]
@@ -210,6 +211,7 @@ impl Request {
             body: Vec::new(),
             limits: Limits::default(),
             cancel: CancelToken::new(),
+            body_progress: None,
         }
     }
 
@@ -252,6 +254,20 @@ impl Request {
     pub fn cancel_token(mut self, token: CancelToken) -> Request {
         self.cancel = token;
         self
+    }
+
+    pub fn on_body_progress(
+        mut self,
+        f: impl Fn(u64, Option<u64>) + Send + Sync + 'static,
+    ) -> Request {
+        self.body_progress = Some(Arc::new(f));
+        self
+    }
+
+    fn report_body(&self, loaded: u64, total: Option<u64>) {
+        if let Some(cb) = &self.body_progress {
+            cb(loaded, total);
+        }
     }
 }
 
@@ -475,6 +491,10 @@ fn is_token_byte(b: u8) -> bool {
     )
 }
 
+fn header_names_contain(headers: &[(String, String)], name: &str) -> bool {
+    headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(name))
+}
+
 fn is_reserved_header(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     matches!(
@@ -485,7 +505,6 @@ fn is_reserved_header(name: &str) -> bool {
             | "connection"
             | "user-agent"
             | "accept-encoding"
-            | "accept"
             | "expect"
             | "te"
             | "trailer"
@@ -1433,7 +1452,10 @@ fn write_request(
     head.push_str(&host_header(url));
     head.push_str("\r\nUser-Agent: ");
     head.push_str(USER_AGENT);
-    head.push_str("\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n");
+    head.push_str("\r\nAccept-Encoding: identity\r\nConnection: close\r\n");
+    if !header_names_contain(&req.headers, "accept") {
+        head.push_str("Accept: */*\r\n");
+    }
     for (name, value) in &req.headers {
         head.push_str(name);
         head.push_str(": ");
@@ -1572,6 +1594,7 @@ fn read_sized(
         return Err(Error::InvalidResponse);
     }
     body.extend_from_slice(&prefix);
+    req.report_body(body.len() as u64, Some(len));
     let mut tmp = [0u8; 8192];
     while body.len() < want {
         let take = (want - body.len()).min(tmp.len());
@@ -1584,6 +1607,7 @@ fn read_sized(
             return Err(Error::ResponseTooLarge);
         }
         body.extend_from_slice(&tmp[..n]);
+        req.report_body(body.len() as u64, Some(len));
     }
     Ok(body)
 }
@@ -1616,6 +1640,7 @@ fn read_until_close(
             body.reserve_exact(n);
         }
         body.extend_from_slice(&tmp[..n]);
+        req.report_body(body.len() as u64, None);
     }
     Ok(body)
 }
@@ -2149,7 +2174,10 @@ fn winhttp_fetch(req: &Request, url: &ParsedUrl, deadline: Instant) -> Result<Re
     {
         return Err(Error::Io);
     }
-    let mut header_block = String::from("Accept: */*\r\nAccept-Encoding: identity\r\n");
+    let mut header_block = String::from("Accept-Encoding: identity\r\n");
+    if !header_names_contain(&req.headers, "accept") {
+        header_block.push_str("Accept: */*\r\n");
+    }
     for (name, value) in &req.headers {
         header_block.push_str(name);
         header_block.push_str(": ");
@@ -2208,8 +2236,14 @@ fn winhttp_fetch(req: &Request, url: &ParsedUrl, deadline: Instant) -> Result<Re
     let body = if no_body {
         Vec::new()
     } else {
-        let body =
-            winhttp_read_body(&request, &req.cancel, deadline, req.limits.max_body_bytes)?;
+        let body = winhttp_read_body(
+            &request,
+            &req.cancel,
+            deadline,
+            req.limits.max_body_bytes,
+            content_length,
+            req.body_progress.as_ref(),
+        )?;
         if request.load().is_null() {
             return Err(fail());
         }
@@ -2415,6 +2449,8 @@ fn winhttp_read_body(
     cancel: &CancelToken,
     deadline: Instant,
     max_body: usize,
+    total: Option<u64>,
+    progress: Option<&Arc<dyn Fn(u64, Option<u64>) + Send + Sync>>,
 ) -> Result<Vec<u8>, Error> {
     let mut body = Vec::new();
     let mut buf = [0u8; 8192];
@@ -2434,6 +2470,9 @@ fn winhttp_read_body(
             return Err(request.classify(cancel, deadline));
         }
         if read == 0 {
+            if let Some(cb) = progress {
+                cb(body.len() as u64, total);
+            }
             return Ok(body);
         }
         let n = read as usize;
@@ -2445,6 +2484,9 @@ fn winhttp_read_body(
             body.reserve_exact(n);
         }
         body.extend_from_slice(&buf[..n]);
+        if let Some(cb) = progress {
+            cb(body.len() as u64, total);
+        }
     }
 }
 

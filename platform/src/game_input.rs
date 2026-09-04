@@ -28,6 +28,23 @@ pub trait CxGameInputApi {
     ) -> Option<crate::event::game_input::GameInputOutput> {
         None
     }
+    /// Haptic actuator capabilities for a controller. Raw-HID wheel output
+    /// uses `game_input_output` instead and can run at the same time.
+    fn gamepad_haptic_capabilities(
+        &mut self,
+        _id: crate::makepad_live_id::LiveId,
+    ) -> crate::event::game_input::GamepadHapticCapabilities {
+        Default::default()
+    }
+    /// Queue one short haptic sample. Implementations must not block the UI
+    /// thread; unsupported devices simply return false.
+    fn gamepad_haptic_pulse(
+        &mut self,
+        _id: crate::makepad_live_id::LiveId,
+        _pulse: crate::event::game_input::GamepadHapticPulse,
+    ) -> bool {
+        false
+    }
 }
 
 #[cfg(any(

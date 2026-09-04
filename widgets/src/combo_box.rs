@@ -58,6 +58,7 @@
 
 use crate::{
     animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+    drop_down::PopupAnchorTransform,
     makepad_derive_widget::*,
     makepad_draw::*,
     scroll_bar::{ScrollAxis, ScrollBar, ScrollBarAction},
@@ -708,6 +709,10 @@ pub struct ComboBox {
     /// it follows a Fill sibling, so the popup cannot be placed from it.
     #[rust]
     aligned_rect: Option<Rect>,
+    /// Optional mapping from a transformed parent draw list into the
+    /// window-space overlay where the popup is drawn and hit-tested.
+    #[rust]
+    popup_anchor_transform: Option<PopupAnchorTransform>,
     #[action_data]
     #[rust]
     action_data: WidgetActionData,
@@ -743,6 +748,16 @@ impl ComboBox {
         let label = self.selected_label().to_string();
         if self.input.text() != label {
             self.input.set_text(cx, &label);
+            // A closed control shows the START of a long label, not the tail
+            // the text field would scroll to after a set_text.
+            self.input.set_cursor(
+                cx,
+                crate::makepad_draw::text::selection::Cursor {
+                    index: 0,
+                    prefer_next_row: false,
+                },
+                false,
+            );
         }
     }
 
@@ -1184,9 +1199,13 @@ impl Widget for ComboBox {
         //    seeing these, so the geometry hit test below is authoritative.
         let mut dismissed = false;
         if self.is_open {
+            let popup_event = self
+                .popup_anchor_transform
+                .and_then(|transform| transform_combo_popup_event(event, transform));
+            let popup_event = popup_event.as_ref().unwrap_or(event);
             let inside = self
                 .geom
-                .is_some_and(|g| pointer_pos(event).is_some_and(|p| g.popup_rect().contains(p)));
+                .is_some_and(|g| pointer_pos(popup_event).is_some_and(|p| g.popup_rect().contains(p)));
             if inside {
                 // The scrollbar hit-tests with its own area and would be
                 // refused by our sweep lock; lend it the lock for one dispatch.
@@ -1194,7 +1213,7 @@ impl Widget for ComboBox {
                     cx.sweep_unlock(self.draw_bg.area());
                     let mut scrolled = None;
                     self.scroll_bar
-                        .handle_event_with(cx, event, &mut |_cx, action| {
+                        .handle_event_with(cx, popup_event, &mut |_cx, action| {
                             if let ScrollBarAction::Scroll { scroll_pos, .. } = action {
                                 scrolled = Some(scroll_pos);
                             }
@@ -1211,18 +1230,18 @@ impl Widget for ComboBox {
                         return;
                     }
                 }
-                self.handle_popup_pointer(cx, event);
+                self.handle_popup_pointer(cx, popup_event);
                 return;
             }
             // Anything pressed outside the popup dismisses it and restores the
             // committed label (macOS: the text field itself counts as
             // "outside"). `dismissed` keeps the press from re-opening the list
             // further down — a click on the arrow must toggle, not cycle.
-            if matches!(event, Event::MouseDown(_) | Event::TouchUpdate(_)) {
+            if matches!(popup_event, Event::MouseDown(_) | Event::TouchUpdate(_)) {
                 self.revert(cx);
                 dismissed = true;
             } else {
-                self.handle_popup_pointer(cx, event);
+                self.handle_popup_pointer(cx, popup_event);
             }
         }
 
@@ -1327,6 +1346,10 @@ impl Widget for ComboBox {
             let trigger = self
                 .aligned_rect
                 .unwrap_or_else(|| self.draw_bg.area().rect(cx));
+            let trigger = self
+                .popup_anchor_transform
+                .map(|transform| transform.rect(trigger))
+                .unwrap_or(trigger);
             self.draw_popup(cx, trigger);
         }
         DrawStep::done()
@@ -1369,6 +1392,12 @@ impl ComboBoxRef {
         self.selected(actions)
     }
 
+    /// The label committed by this action batch, if any.
+    pub fn changed_label(&self, actions: &Actions) -> Option<String> {
+        let index = self.selected(actions)?;
+        self.borrow()?.labels.get(index).cloned()
+    }
+
     pub fn set_selected_item(&self, cx: &mut Cx, item: usize) {
         if let Some(mut inner) = self.borrow_mut() {
             let new_selected = if inner.labels.is_empty() {
@@ -1395,6 +1424,30 @@ impl ComboBoxRef {
         self.borrow()
             .map(|inner| inner.selected_label().to_string())
             .unwrap_or_default()
+    }
+
+    /// Selects the first item whose complete label equals `label`.
+    pub fn set_selected_by_label(&self, label: &str, cx: &mut Cx) {
+        let index = self
+            .borrow()
+            .and_then(|inner| inner.labels.iter().position(|item| item == label));
+        if let Some(index) = index {
+            self.set_selected_item(cx, index);
+        }
+    }
+
+    pub fn set_popup_anchor_transform(
+        &self,
+        cx: &mut Cx,
+        transform: Option<PopupAnchorTransform>,
+    ) {
+        if let Some(mut inner) = self.borrow_mut() {
+            if inner.popup_anchor_transform != transform {
+                inner.popup_anchor_transform = transform;
+                inner.draw_bg.redraw(cx);
+                inner.draw_list.redraw(cx);
+            }
+        }
     }
 
     /// Drops the full list open (headless captures, programmatic reveal).
@@ -1434,9 +1487,62 @@ fn pointer_pos(event: &Event) -> Option<Vec2d> {
     }
 }
 
+fn transform_combo_popup_event(event: &Event, transform: PopupAnchorTransform) -> Option<Event> {
+    let point = |point: DVec2| transform.rect(Rect { pos: point, size: dvec2(0.0, 0.0) }).pos;
+    Some(match event {
+        Event::MouseDown(e) => {
+            let mut e = e.clone();
+            e.abs = point(e.abs);
+            Event::MouseDown(e)
+        }
+        Event::MouseMove(e) => {
+            let mut e = e.clone();
+            e.abs = point(e.abs);
+            e.lock_delta *= transform.scale;
+            Event::MouseMove(e)
+        }
+        Event::MouseUp(e) => {
+            let mut e = e.clone();
+            e.abs = point(e.abs);
+            Event::MouseUp(e)
+        }
+        Event::MouseLeave(e) => {
+            let mut e = e.clone();
+            e.abs = point(e.abs);
+            Event::MouseLeave(e)
+        }
+        Event::Scroll(e) => {
+            let mut e = e.clone();
+            e.abs = point(e.abs);
+            e.scroll *= transform.scale;
+            Event::Scroll(e)
+        }
+        Event::LongPress(e) => {
+            let mut e = e.clone();
+            e.abs = point(e.abs);
+            Event::LongPress(e)
+        }
+        Event::TouchUpdate(e) => {
+            let mut e = e.clone();
+            for touch in &mut e.touches {
+                touch.abs = point(touch.abs);
+                touch.radius *= transform.scale;
+            }
+            Event::TouchUpdate(e)
+        }
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    fn combo_ref(cx: &mut Cx) -> ComboBoxRef {
+        let combo = cx.with_vm(ComboBox::script_new_with_default);
+        WidgetRef::new_with_inner(Box::new(combo)).as_combo_box()
+    }
 
     fn labels() -> Vec<String> {
         [
@@ -1447,11 +1553,67 @@ mod tests {
         .collect()
     }
 
+    #[test]
+    fn ref_selects_an_item_by_its_complete_label() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let combo = combo_ref(&mut cx);
+        combo.set_labels(&mut cx, labels());
+
+        combo.set_selected_by_label("music-hd", &mut cx);
+        assert_eq!(combo.selected_item(), 2);
+        assert_eq!(combo.selected_label(), "music-hd");
+
+        combo.set_selected_by_label("missing", &mut cx);
+        assert_eq!(combo.selected_item(), 2);
+    }
+
+    #[test]
+    fn ref_reports_the_label_selected_by_an_action() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let combo = combo_ref(&mut cx);
+        combo.set_labels(&mut cx, labels());
+        let actions: ActionsBuf = vec![Box::new(WidgetAction {
+            data: None,
+            action: Box::new(ComboBoxAction::Select(4)),
+            widget_uid: combo.widget_uid(),
+            group: None,
+        })];
+
+        assert_eq!(combo.changed_label(&actions).as_deref(), Some("matte"));
+    }
+
     fn trigger(x: f64, y: f64, w: f64, h: f64) -> Rect {
         Rect {
             pos: dvec2(x, y),
             size: dvec2(w, h),
         }
+    }
+
+    #[test]
+    fn popup_anchor_transform_maps_canvas_geometry_and_pointer_input() {
+        let transform = PopupAnchorTransform {
+            scale: 0.5,
+            translation: dvec2(20.0, -5.0),
+        };
+        assert_eq!(
+            transform.rect(trigger(100.0, 80.0, 200.0, 26.0)),
+            trigger(70.0, 35.0, 100.0, 13.0)
+        );
+
+        let event = Event::MouseDown(MouseDownEvent {
+            abs: dvec2(120.0, 100.0),
+            button: MouseButton::PRIMARY,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 0.0,
+        });
+        assert!(matches!(
+            transform_combo_popup_event(&event, transform),
+            Some(Event::MouseDown(event)) if event.abs == dvec2(80.0, 45.0)
+        ));
     }
 
     // -- filtering -----------------------------------------------------------

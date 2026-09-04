@@ -30,7 +30,7 @@ An input port is a field on the node.
 Its value is either a literal or another node's output reference.
 An output port is selected with `node.port()`.
 Use `node.out(@port)` when a generic Gen input shadows a named method.
-Input nodes expose values supplied by an instance or tool caller.
+Input nodes keep their design setting in `value:`; an instance or tool caller may override it for one run.
 Output nodes name the results returned by the flow.
 Set an Input or Output `type:` to a supported port type.
 The supported types are text, image, audio, video, mesh, json, list and bytes.

@@ -1,9 +1,11 @@
 use super::config::{FlowServerConfig, SharedConfig};
 use super::events::EventHub;
 use super::models::FleetSnapshot;
+use super::batches::BatchRecord;
 use super::util::{atomic_write, log};
 use super::ServerError;
 use crate::engine::{self, HttpLogEntry, NetPolicy, RunEvent, RunHandle, RunId, RunInput, Seams};
+use crate::engine::executors::publish::AssetWorkerHandle;
 use crate::instance::{InputEffect, Instance, InstanceId, Owner, RunDecision};
 use crate::values::{Value, ValueStore};
 use crate::{
@@ -67,6 +69,8 @@ const MAX_DELTA_TEXT: usize = 16 * 1024;
 pub struct RunRow {
     pub instance: InstanceId,
     pub flow: String,
+    pub batch: Option<String>,
+    pub batch_index: Option<u64>,
     pub revision: u64,
     pub state: RunState,
     pub planned_nodes: Vec<String>,
@@ -99,10 +103,12 @@ pub struct FlowState {
     pub(crate) fleet: FleetSnapshot,
     pub instances: BTreeMap<InstanceId, Instance>,
     pub runs: BTreeMap<RunId, RunRow>,
+    pub(crate) batches: BTreeMap<String, BatchRecord>,
     pub values: ValueStore,
     pub(crate) seams: Seams,
     pub(crate) net: NetPolicy,
     pub(crate) origin: (String, u64),
+    pub(crate) assets: AssetWorkerHandle,
     config: SharedConfig,
     root: PathBuf,
     revision_ring: usize,
@@ -171,6 +177,7 @@ impl FlowState {
         epoch: u64,
         origin: (String, u64),
         run_register_tx: mpsc::Sender<RunRegistration>,
+        assets: AssetWorkerHandle,
     ) -> Result<Self, ServerError> {
         let catalog = graph::prelude_catalog().map_err(ServerError::Prelude)?;
         let mut values = ValueStore::new(config.root.join("values"));
@@ -184,10 +191,12 @@ impl FlowState {
             fleet: FleetSnapshot::default(),
             instances: BTreeMap::new(),
             runs: BTreeMap::new(),
+            batches: BTreeMap::new(),
             values,
             seams: build_seams(config),
             net: config.net.clone(),
             origin,
+            assets,
             config: config.clone(),
             root: config.root.clone(),
             revision_ring: config.revision_ring,
@@ -700,6 +709,18 @@ impl FlowState {
                     row.http_log = http_log.clone();
                     row.finished_ms = Some(now);
                     row.handle = None;
+                    // A cancelled run's live nodes were cancelled with it;
+                    // the row must not keep showing them mid-denoise.
+                    if *state == RunState::Cancelled {
+                        for node in row.nodes.values_mut() {
+                            if matches!(
+                                node.state,
+                                NodeState::Pending | NodeState::Running | NodeState::Waiting
+                            ) {
+                                node.state = NodeState::Cancelled;
+                            }
+                        }
+                    }
                 }
                 if let Some(instance) = self.instances.get_mut(&instance_id) {
                     instance.active.retain(|active| active != &run_id);
@@ -824,7 +845,13 @@ impl FlowState {
             outputs,
             origin: self.origin.clone(),
         };
-        let handle = engine::spawn_run_with_policy(input, self.seams.clone(), tx, self.net.clone());
+        let handle = engine::spawn_run_with_policy_and_assets(
+            input,
+            self.seams.clone(),
+            tx,
+            self.net.clone(),
+            Some(self.assets.clone()),
+        );
         let now = engine::unix_ms();
         use std::collections::btree_map::Entry;
         match self.runs.entry(run_id.clone()) {
@@ -838,6 +865,8 @@ impl FlowState {
                 vacant.insert(RunRow {
                     instance: instance_id.clone(),
                     flow: flow.clone(),
+                    batch: None,
+                    batch_index: None,
                     revision,
                     state: RunState::Running,
                     planned_nodes,
@@ -1063,6 +1092,8 @@ impl FlowState {
                     RunRow {
                         instance: id.clone(),
                         flow,
+                        batch: None,
+                        batch_index: None,
                         revision: graph.revision,
                         state: RunState::Queued,
                         planned_nodes,
@@ -1131,6 +1162,18 @@ impl FlowState {
     pub(crate) fn janitor_sweep(&mut self) {
         let now_ms = engine::unix_ms();
         let now = SystemTime::now();
+        let batch_run_ids: HashSet<RunId> = self
+            .batches
+            .values()
+            .flat_map(|batch| &batch.runs)
+            .map(|run| RunId(run.run_id.clone()))
+            .collect();
+        let batch_instances: HashSet<InstanceId> = self
+            .batches
+            .values()
+            .flat_map(|batch| &batch.runs)
+            .map(|run| InstanceId(run.instance.clone()))
+            .collect();
 
         let mut live_digests: HashSet<[u8; 32]> = HashSet::new();
         for instance in self.instances.values() {
@@ -1155,9 +1198,11 @@ impl FlowState {
         }
         self.values.expire(now, &live_digests);
 
-        self.runs.retain(|_, row| {
-            row.finished_ms
-                .is_none_or(|finished| now_ms.saturating_sub(finished) < RUN_RETENTION_MS)
+        self.runs.retain(|run_id, row| {
+            batch_run_ids.contains(run_id)
+                || row
+                    .finished_ms
+                    .is_none_or(|finished| now_ms.saturating_sub(finished) < RUN_RETENTION_MS)
         });
 
         let ttl_ms = self.instance_ttl.as_millis() as u64;
@@ -1166,6 +1211,7 @@ impl FlowState {
             .iter()
             .filter(|(_, instance)| {
                 !matches!(instance.owner, Owner::Auto)
+                    && !batch_instances.contains(&instance.id)
                     && instance.waiting.is_none()
                     && instance.active.is_empty()
                     && now_ms.saturating_sub(instance.last_activity_ms) >= ttl_ms
@@ -1255,6 +1301,8 @@ fn run_row_dto(run_id: &RunId, row: &RunRow) -> RunRowDto {
         run_id: run_id.0.clone(),
         instance: row.instance.0.clone(),
         flow: row.flow.clone(),
+        batch: row.batch.clone(),
+        batch_index: row.batch_index,
         revision: row.revision,
         state: row.state,
         planned_nodes: row.planned_nodes.clone(),
@@ -1391,6 +1439,7 @@ pub(crate) fn spawn_state(
     epoch: u64,
     origin: (String, u64),
     run_register_tx: mpsc::Sender<RunRegistration>,
+    assets: AssetWorkerHandle,
 ) -> Result<(StateHandle, std::thread::JoinHandle<()>), ServerError> {
     let (tx, rx) = mpsc::channel::<Task>();
     let (ready_tx, ready_rx) = mpsc::channel();
@@ -1405,6 +1454,7 @@ pub(crate) fn spawn_state(
                 epoch,
                 origin.clone(),
                 run_register_tx.clone(),
+                assets.clone(),
             ) {
                 Ok(state) => {
                     let _ = ready_tx.send(Ok(()));
@@ -1429,6 +1479,7 @@ pub(crate) fn spawn_state(
                         epoch,
                         origin.clone(),
                         run_register_tx.clone(),
+                        assets.clone(),
                     ) {
                         Ok(rebuilt) => state = rebuilt,
                         Err(error) => {

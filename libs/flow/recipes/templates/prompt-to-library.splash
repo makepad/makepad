@@ -1,0 +1,31 @@
+use mod.flow.*
+
+/** What to paint and publish. */
+let prompt = Input{ type: @text  default: "a lighthouse at dusk"  at: vec2(40, 120) }
+
+let expand = Llm{
+    system: "Rewrite the prompt as one vivid paragraph for an image model.
+             Keep the subject. Add light, lens, material, mood. No lists."
+    prompt: prompt.text()
+    at: vec2(360, 120)
+}
+
+let image = Image{
+    prompt: expand.text()
+    width: 1024  height: 1024  steps: 8
+    at: vec2(680, 120)
+}
+
+/** Write the finished picture directly into the flow asset library. */
+let published = Publish{
+    value: image.image()
+    namespace: "flows"
+    tags: ["flow", "prompt-to-library"]
+    at: vec2(1000, 120)
+}
+
+Flow{
+    label: "Prompt to library"
+    brief: "Expands a prompt, paints a picture, and publishes it into the asset library."
+    prompt, expand, image, published
+}

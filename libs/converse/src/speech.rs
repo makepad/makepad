@@ -11,7 +11,7 @@
 //! ([`makepad_ai_hub::speech`]); this file only plays what comes back.
 
 #[cfg(feature = "tts")]
-use makepad_ai_hub::speech::{TtsConfig, TtsEvent, TtsHandle, TtsSession};
+use makepad_ai_hub::speech::{TtsConfig, TtsEngine, TtsEvent, TtsHandle, TtsSession};
 use makepad_widgets::makepad_draw::audio::AudioBuffer;
 use makepad_widgets::makepad_draw::thread::{ThreadOptions, ThreadSpawner};
 #[cfg(feature = "tts")]
@@ -75,6 +75,10 @@ const MIN_SPOKEN_CHARS: usize = 16;
 pub struct SpeechOutput {
     /// Kokoro voice pack name (or any [`makepad_ai_hub::speech::Voice`] id).
     voice: String,
+    /// Auto keeps the general conversation fallback; a feature that promises
+    /// Kokoro can opt out of silently becoming a system voice.
+    #[cfg(feature = "tts")]
+    engine: TtsEngine,
     /// Started on the FIRST utterance, not at construction: Kokoro is ~327 MB
     /// resident and an app that never speaks (text tier, muted, a session
     /// where nobody triggers a reply) must not pay for it.
@@ -99,6 +103,8 @@ impl SpeechOutput {
         Self {
             voice: voice.strip_suffix(".mkvoice").unwrap_or(voice).to_string(),
             #[cfg(feature = "tts")]
+            engine: TtsEngine::Auto,
+            #[cfg(feature = "tts")]
             session: OnceLock::new(),
             #[cfg(feature = "tts")]
             spawner,
@@ -107,6 +113,17 @@ impl SpeechOutput {
             pending: String::new(),
             hushed: false,
         }
+    }
+
+    /// Create a Kokoro-only output. If Kokoro is unavailable, the session
+    /// reports failure instead of substituting an unrelated system voice.
+    pub fn new_kokoro(voice: &str, spawner: ThreadSpawner) -> Self {
+        let mut output = Self::new(voice, spawner);
+        #[cfg(feature = "tts")]
+        {
+            output.engine = TtsEngine::Kokoro;
+        }
+        output
     }
 
     /// The shared playback buffer, for apps that mix speech into their own
@@ -199,6 +216,7 @@ impl SpeechOutput {
                 .get_or_init(|| {
                     Self::start_session(
                         &self.voice,
+                        self.engine,
                         self.playback.clone(),
                         self.spawner.clone(),
                     )
@@ -218,10 +236,12 @@ impl SpeechOutput {
     #[cfg(feature = "tts")]
     fn start_session(
         voice: &str,
+        engine: TtsEngine,
         playback: Arc<Mutex<Playback>>,
         spawner: ThreadSpawner,
     ) -> TtsHandle {
         let (handle, events) = TtsSession::start(TtsConfig {
+            engine,
             voice: Some(voice.to_string()),
             ..TtsConfig::default()
         })
@@ -348,6 +368,15 @@ mod tests {
         assert!(start.elapsed() < std::time::Duration::from_millis(250));
     }
 
+    #[cfg(feature = "tts")]
+    #[test]
+    fn kokoro_only_output_cannot_fall_back_to_a_system_voice() {
+        let cx = makepad_widgets::Cx::new(Box::new(|_, _| {}));
+        let speech = SpeechOutput::new_kokoro("af_heart", cx.thread_spawner());
+        assert_eq!(speech.engine, TtsEngine::Kokoro);
+        assert!(speech.session.get().is_none());
+    }
+
     #[test]
     fn spoken_text_drops_code_and_markup() {
         let text = "Here **you** go:\n```rust\nfn x() {}\n```\nDone → ok.";
@@ -367,7 +396,7 @@ mod tests {
     #[ignore = "starts a real hub TTS session; needs weights or an OS voice"]
     fn lazily_started_session_still_produces_audio() {
         let cx = makepad_widgets::Cx::new(Box::new(|_, _| {}));
-        let mut speech = SpeechOutput::new("bm_fable.mkvoice", cx.thread_spawner());
+        let speech = SpeechOutput::new("bm_fable.mkvoice", cx.thread_spawner());
         speech.enqueue("Testing the lazy speech path.");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         while std::time::Instant::now() < deadline {
