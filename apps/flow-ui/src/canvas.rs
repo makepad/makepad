@@ -52,11 +52,13 @@ const LABEL_H: f64 = 26.0;
 const CARD_HEADER_H: f64 = 14.0;
 const PORT_ROW_H: f64 = 24.0;
 const PORT_R: f64 = 11.0;
-/// The label starts this far past the disc edge; the chevron centres in
-/// that gap.
-const PORT_LABEL_GAP: f64 = 19.0;
-const PORT_CHEVRON_GAP: f64 = 8.0;
-const PORT_CHEVRON_SIZE: f64 = 6.0;
+/// The label starts this far past the disc edge.
+const PORT_LABEL_GAP: f64 = 9.0;
+/// An output disc ends in a point on its cable side, an input disc has a
+/// matching dimple: the shape itself reads the flow direction.
+const PORT_TIP: f64 = 4.0;
+const PORT_DENT: f64 = 4.0;
+const PORT_NOTCH_HALF_ANGLE: f64 = 0.72;
 const PORT_HIT_R: f64 = 16.0;
 const WIRE_HIT_PX: f64 = 6.0;
 const CARD_PAD: f64 = 14.0;
@@ -1713,6 +1715,38 @@ impl FlowCanvas {
         }
     }
 
+    /// A port disc whose cable side carries the flow direction: an output
+    /// ends in a sharp `>` point, an input has a `>` dimple the point would
+    /// fit into. `direction` is the card's flow direction (+1 left-to-right).
+    fn shaped_port(v: &mut DrawVector, centre: Point, radius: f64, direction: f64, input: bool) {
+        let cable_side = if input { -direction } else { direction };
+        let apex_r = if input {
+            radius - PORT_DENT
+        } else {
+            radius + PORT_TIP
+        };
+        let base = if cable_side < 0.0 {
+            std::f64::consts::PI
+        } else {
+            0.0
+        };
+        let steps = 40;
+        let start = base + PORT_NOTCH_HALF_ANGLE;
+        let sweep = std::f64::consts::TAU - 2.0 * PORT_NOTCH_HALF_ANGLE;
+        for step in 0..=steps {
+            let angle = start + sweep * step as f64 / steps as f64;
+            let x = (centre.x + radius * angle.cos()) as f32;
+            let y = (centre.y + radius * angle.sin()) as f32;
+            if step == 0 {
+                v.move_to(x, y);
+            } else {
+                v.line_to(x, y);
+            }
+        }
+        v.line_to((centre.x + cable_side * apex_r) as f32, centre.y as f32);
+        v.close();
+    }
+
     fn draw_points(v: &mut DrawVector, points: &[Point]) {
         let Some(first) = points.first() else {
             return;
@@ -2581,41 +2615,46 @@ impl FlowCanvas {
                     }
                 }
             }
-            // Ports: a dark disc with a ring in the port-type colour.
+            // Ports: a dark disc with a ring in the port-type colour. The
+            // disc's cable side is shaped: outputs point, inputs are dimpled.
+            let direction = if self.port_side(graph, index, true) == PortSide::Right {
+                1.0
+            } else {
+                -1.0
+            };
             for port in 0..node.inputs.len() {
                 let p = self.port_local(graph, index, port, false);
+                let centre = Point::new(p.x, p.y);
                 let ok = !compatible_active || self.compatible.contains(&(index, port));
                 let hot = wire_target == Some((index, port));
-                let radius = if hot { PORT_R + 3.0 } else { PORT_R } as f32;
+                let radius = if hot { PORT_R + 3.0 } else { PORT_R };
                 if selected_edge.is_some_and(|edge| edge.to == index && edge.to_port == port) {
                     Self::set_color(&mut self.draw_over, self.accent_color, 1.0);
-                    self.draw_over
-                        .circle(p.x as f32, p.y as f32, (PORT_R + 4.0) as f32);
+                    Self::shaped_port(&mut self.draw_over, centre, PORT_R + 4.0, direction, true);
                     self.draw_over.stroke(2.0);
                 }
                 Self::set_color(&mut self.draw_over, self.card_color, 1.0);
-                self.draw_over.circle(p.x as f32, p.y as f32, radius);
+                Self::shaped_port(&mut self.draw_over, centre, radius, direction, true);
                 self.draw_over.fill();
                 let color = self.port_color(Self::input_type(node, port));
                 Self::set_color(&mut self.draw_over, color, if ok { 1.0 } else { 0.25 });
-                self.draw_over.circle(p.x as f32, p.y as f32, radius - 1.0);
+                Self::shaped_port(&mut self.draw_over, centre, radius - 1.0, direction, true);
                 self.draw_over.stroke(if hot { 3.0 } else { 2.0 });
             }
             for (port, output) in node.outputs.iter().enumerate() {
                 let p = self.port_local(graph, index, port, true);
+                let centre = Point::new(p.x, p.y);
                 if selected_edge.is_some_and(|edge| edge.from == index && edge.from_port == port) {
                     Self::set_color(&mut self.draw_over, self.accent_color, 1.0);
-                    self.draw_over
-                        .circle(p.x as f32, p.y as f32, (PORT_R + 4.0) as f32);
+                    Self::shaped_port(&mut self.draw_over, centre, PORT_R + 4.0, direction, false);
                     self.draw_over.stroke(2.0);
                 }
                 Self::set_color(&mut self.draw_over, self.card_color, 1.0);
-                self.draw_over.circle(p.x as f32, p.y as f32, PORT_R as f32);
+                Self::shaped_port(&mut self.draw_over, centre, PORT_R, direction, false);
                 self.draw_over.fill();
                 let color = self.port_color(output.ty);
                 Self::set_color(&mut self.draw_over, color, 1.0);
-                self.draw_over
-                    .circle(p.x as f32, p.y as f32, (PORT_R - 1.0) as f32);
+                Self::shaped_port(&mut self.draw_over, centre, PORT_R - 1.0, direction, false);
                 self.draw_over.stroke(2.0);
             }
         }
@@ -2623,11 +2662,6 @@ impl FlowCanvas {
         // The port-type icons inside the discs.
         for index in indices.iter().copied() {
             let node = &graph.nodes[index];
-            let direction = if self.port_side(graph, index, true) == PortSide::Right {
-                1.0
-            } else {
-                -1.0
-            };
             for port in 0..node.inputs.len() {
                 let p = self.port_local(graph, index, port, false);
                 let rect = Rect {
@@ -2645,53 +2679,6 @@ impl FlowCanvas {
                 self.port_icon(output.ty).draw_abs(cx, rect);
             }
         }
-        // A small flow chevron sits in the gap between each disc and its
-        // label, never inside the disc (the type icon owns that). It points
-        // in the card's current left-to-right (or flipped) direction, so an
-        // input reads "disc > label" (into the card) and an output
-        // "label > disc" (out to the cable).
-        self.draw_over.begin();
-        for index in indices.iter().copied() {
-            let node = &graph.nodes[index];
-            let direction = if self.port_side(graph, index, true) == PortSide::Right {
-                1.0
-            } else {
-                -1.0
-            };
-            let tangent = Point::new(direction, 0.0);
-            let toward_label = |side: PortSide| match side {
-                PortSide::Left => 1.0,
-                PortSide::Right => -1.0,
-            };
-            for port in 0..node.inputs.len() {
-                let p = self.port_local(graph, index, port, false);
-                let ok = !compatible_active || self.compatible.contains(&(index, port));
-                let color = self.port_color(Self::input_type(node, port));
-                Self::set_color(&mut self.draw_over, color, if ok { 0.5 } else { 0.15 });
-                let side = toward_label(self.port_side(graph, index, false));
-                Self::draw_chevron(
-                    &mut self.draw_over,
-                    Point::new(p.x + side * (PORT_R + PORT_CHEVRON_GAP), p.y),
-                    tangent,
-                    PORT_CHEVRON_SIZE,
-                );
-                self.draw_over.stroke(1.1);
-            }
-            for (port, output) in node.outputs.iter().enumerate() {
-                let p = self.port_local(graph, index, port, true);
-                let color = self.port_color(output.ty);
-                Self::set_color(&mut self.draw_over, color, 0.5);
-                let side = toward_label(self.port_side(graph, index, true));
-                Self::draw_chevron(
-                    &mut self.draw_over,
-                    Point::new(p.x + side * (PORT_R + PORT_CHEVRON_GAP), p.y),
-                    tangent,
-                    PORT_CHEVRON_SIZE,
-                );
-                self.draw_over.stroke(1.1);
-            }
-        }
-        self.draw_over.end(cx);
         // The grip is last inside the body: shadow/body/face/ports/icons/grip.
         self.draw_over.begin();
         Self::set_color(&mut self.draw_over, self.draw_meta.color, 0.55);
