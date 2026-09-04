@@ -372,6 +372,24 @@ pub struct NodesResponse {
     pub brief: String,
 }
 
+/// One asset projected through the flow server. Keeping this DTO here lets
+/// flow-ui and tool callers browse without linking the asset store client.
+#[derive(Clone, Debug, PartialEq, Eq, SerJson, DeJson)]
+pub struct FlowAsset {
+    pub id: String,
+    pub alias: Option<String>,
+    pub namespace: String,
+    pub title: String,
+    pub kind: String,
+    pub tags: Vec<String>,
+    pub created_ms: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, SerJson, DeJson)]
+pub struct AssetsResponse {
+    pub assets: Vec<FlowAsset>,
+}
+
 #[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
 pub struct FleetNodeDto {
     pub base_url: String,

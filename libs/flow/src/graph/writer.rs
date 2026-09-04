@@ -83,6 +83,12 @@ fn write_node(
             write_param(out, node, "type", false);
             write_input(out, node, "value", true, by_id);
         }
+        "Publish" => {
+            for name in ["title", "namespace", "tags", "description", "alias"] {
+                write_param(out, node, name, false);
+            }
+            write_input(out, node, "value", true, by_id);
+        }
         "Llm" => {
             write_param(out, node, "system", false);
             write_input(out, node, "prompt", false, by_id);

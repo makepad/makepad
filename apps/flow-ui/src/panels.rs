@@ -5,7 +5,7 @@
 
 use crate::faces::{format_preset_name, param_text, snap_stepped_value, FaceHost, ModelChoice};
 use makepad_flow::{
-    FlowSummary, Graph, InstanceRow, Literal, Node, NodeInputValue, NodeTypeCatalog,
+    FlowAsset, FlowSummary, Graph, InstanceRow, Literal, Node, NodeInputValue, NodeTypeCatalog,
     TemplateSummary, ValueBytes, ValueRef,
 };
 use makepad_widgets::fab_controls::*;
@@ -316,6 +316,14 @@ script_mod! {
         width: Fill
         height: Fill
         flow: Down
+        tabs := View{
+            width: Fill
+            height: Fit
+            flow: Right
+            spacing: theme.space_1
+            inspector_tab := ButtonFlat{width: Fill text: "Inspector" enabled: false}
+            assets_tab := ButtonFlat{width: Fill text: "Assets"}
+        }
         list := PortalList{
             width: Fill
             height: Fill
@@ -546,6 +554,62 @@ script_mod! {
                 width: Fill
                 height: Fit
                 hint := EmptyHint{margin: Inset{top: 2}}
+            }
+        }
+        assets_view := View{
+            visible: false
+            width: Fill
+            height: Fill
+            flow: Down
+            spacing: theme.space_2
+            tools := View{
+                width: Fill
+                height: Fit
+                flow: Right
+                spacing: theme.space_1
+                align: Align{y: 0.5}
+                search := TextInput{width: Fill height: 28 empty_text: "Search assets"}
+                all_assets := Toggle{width: Fit text: "all assets"}
+            }
+            asset_status := MetaText{text: "Open Assets to browse flow results."}
+            asset_list := PortalList{
+                width: Fill
+                height: Fill
+                scroll_bar: ScrollBar{}
+                Asset := RoundedView{
+                    width: Fill
+                    height: 76
+                    flow: Right
+                    spacing: theme.space_2
+                    padding: Inset{left: 6 right: 6 top: 6 bottom: 6}
+                    cursor: MouseCursor.Hand
+                    show_bg: true
+                    draw_bg +: {
+                        color: theme.flow_surface
+                        border_radius: 8
+                    }
+                    thumb := RoundedView{
+                        width: 64
+                        height: 64
+                        flow: Overlay
+                        show_bg: true
+                        draw_bg +: {color: theme.flow_surface_raised border_radius: 6}
+                        image := Image{visible: false width: Fill height: Fill fit: ImageFit.Smallest}
+                    }
+                    info := View{
+                        width: Fill
+                        height: Fill
+                        flow: Down
+                        spacing: 2
+                        title := Label{
+                            width: Fill height: Fit text: ""
+                            draw_text +: {text_style: theme.font_bold{font_size: 10} color: theme.flow_text}
+                        }
+                        kind_time := MetaText{}
+                        labels := MetaText{}
+                    }
+                    marker := Label{visible: false}
+                }
             }
         }
     }
@@ -779,6 +843,64 @@ pub enum InspectorAction {
         node: String,
         port: String,
     },
+    RefreshAssets,
+    OpenAsset(FlowAsset),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InspectorTab {
+    #[default]
+    Inspector,
+    Assets,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AssetListModel {
+    pub rows: Vec<FlowAsset>,
+    pub search: String,
+    pub all_assets: bool,
+}
+
+impl AssetListModel {
+    pub fn namespace(&self) -> Option<&str> {
+        (!self.all_assets).then_some("flows")
+    }
+
+    pub fn set_rows(&mut self, mut rows: Vec<FlowAsset>) {
+        let needle = self.search.trim().to_ascii_lowercase();
+        rows.retain(|row| {
+            let in_scope = self.all_assets
+                || row.namespace == "flows"
+                || row.tags.iter().any(|tag| tag == "flow");
+            let matches_search = needle.is_empty()
+                || row.title.to_ascii_lowercase().contains(&needle)
+                || row.kind.to_ascii_lowercase().contains(&needle)
+                || row.namespace.to_ascii_lowercase().contains(&needle)
+                || row.tags.iter().any(|tag| tag.to_ascii_lowercase().contains(&needle))
+                || row.alias.as_ref().is_some_and(|alias| {
+                    alias.to_ascii_lowercase().contains(&needle)
+                });
+            in_scope && matches_search
+        });
+        rows.sort_by(|left, right| {
+            right
+                .created_ms
+                .cmp(&left.created_ms)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        self.rows = rows;
+    }
+}
+
+pub fn relative_time(now_ms: u64, created_ms: u64) -> String {
+    let seconds = now_ms.saturating_sub(created_ms) / 1_000;
+    match seconds {
+        0..=9 => "just now".to_string(),
+        10..=59 => format!("{seconds} sec ago"),
+        60..=3_599 => format!("{} min ago", seconds / 60),
+        3_600..=86_399 => format!("{} hr ago", seconds / 3_600),
+        _ => format!("{} days ago", seconds / 86_400),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1142,7 +1264,7 @@ fn port_icon_svg(ty: makepad_flow::PortType) -> &'static str {
 fn kind_icon_svg(kind: &str) -> &'static str {
     match kind {
         "input" => include_str!("../resources/icons/input.svg"),
-        "output" => include_str!("../resources/icons/output.svg"),
+        "output" | "publish" => include_str!("../resources/icons/output.svg"),
         "chat" => include_str!("../resources/icons/chat.svg"),
         "gen" => include_str!("../resources/icons/gen.svg"),
         "fn" => include_str!("../resources/icons/fn.svg"),
@@ -1195,9 +1317,96 @@ pub struct Inspector {
     advanced_rows: Vec<Row>,
     #[rust]
     advanced_open: bool,
+    #[rust]
+    tab: InspectorTab,
+    #[rust]
+    assets: AssetListModel,
+    #[rust]
+    asset_thumbnails: HashMap<String, ValueBytes>,
+    #[rust]
+    last_asset_refresh: f64,
+    #[rust]
+    asset_now_ms: u64,
 }
 
 impl Inspector {
+    fn set_tab(&mut self, cx: &mut Cx, tab: InspectorTab) {
+        self.tab = tab;
+        self.view
+            .portal_list(cx, ids!(list))
+            .set_visible(cx, tab == InspectorTab::Inspector);
+        self.view
+            .view(cx, ids!(assets_view))
+            .set_visible(cx, tab == InspectorTab::Assets);
+        self.view
+            .button(cx, ids!(tabs.inspector_tab))
+            .set_enabled(cx, tab != InspectorTab::Inspector);
+        self.view
+            .button(cx, ids!(tabs.assets_tab))
+            .set_enabled(cx, tab != InspectorTab::Assets);
+        self.redraw(cx);
+    }
+
+    pub fn assets_visible(&self) -> bool {
+        self.tab == InspectorTab::Assets
+    }
+
+    pub fn asset_request(&mut self, now: f64) -> (String, Option<String>, u32) {
+        self.last_asset_refresh = now;
+        (
+            self.assets.search.clone(),
+            self.assets.namespace().map(str::to_string),
+            50,
+        )
+    }
+
+    pub fn refresh_assets_due(&mut self, now: f64) -> bool {
+        if self.assets_visible() && now - self.last_asset_refresh >= 10.0 {
+            self.last_asset_refresh = now;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn set_assets(&mut self, cx: &mut Cx, rows: Vec<FlowAsset>) -> Vec<String> {
+        self.assets.set_rows(rows);
+        self.asset_now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let message = if self.assets.rows.is_empty() {
+            "No flow assets yet.".to_string()
+        } else {
+            format!("{} assets · newest first", self.assets.rows.len())
+        };
+        self.view.label(cx, ids!(assets_view.asset_status)).set_text(cx, &message);
+        let missing = self
+            .assets
+            .rows
+            .iter()
+            .filter_map(|row| row.alias.as_ref())
+            .filter(|alias| !self.asset_thumbnails.contains_key(*alias))
+            .cloned()
+            .collect();
+        self.redraw(cx);
+        missing
+    }
+
+    pub fn set_assets_error(&mut self, cx: &mut Cx, error: &str) {
+        self.view.label(cx, ids!(assets_view.asset_status)).set_text(cx, error);
+        self.redraw(cx);
+    }
+
+    pub fn set_asset_thumbnail(&mut self, cx: &mut Cx, alias: String, bytes: ValueBytes) {
+        self.asset_thumbnails.insert(alias, bytes);
+        self.redraw(cx);
+    }
+
+    pub fn asset_thumbnail(&self, alias: &str) -> Option<ValueBytes> {
+        self.asset_thumbnails.get(alias).cloned()
+    }
+
     pub fn show_edge(
         &mut self,
         cx: &mut Cx,
@@ -1411,6 +1620,41 @@ impl Inspector {
     pub fn changes(&mut self, cx: &mut Cx, actions: &Actions) -> Vec<InspectorAction> {
         let mut out = Vec::new();
         let mut toggle_advanced = false;
+        if self.view.button(cx, ids!(tabs.inspector_tab)).clicked(actions) {
+            self.set_tab(cx, InspectorTab::Inspector);
+        }
+        if self.view.button(cx, ids!(tabs.assets_tab)).clicked(actions) {
+            self.set_tab(cx, InspectorTab::Assets);
+            out.push(InspectorAction::RefreshAssets);
+        }
+        if let Some((text, _)) = self
+            .view
+            .text_input(cx, ids!(assets_view.tools.search))
+            .returned(actions)
+        {
+            self.assets.search = text;
+            out.push(InspectorAction::RefreshAssets);
+        }
+        if let Some(value) = self
+            .view
+            .check_box(cx, ids!(assets_view.tools.all_assets))
+            .changed(actions)
+        {
+            self.assets.all_assets = value;
+            out.push(InspectorAction::RefreshAssets);
+        }
+        let asset_list = self.view.portal_list(cx, ids!(assets_view.asset_list));
+        for (index, item) in asset_list.items_with_actions(actions) {
+            if item
+                .as_view()
+                .finger_up(actions)
+                .is_some_and(|up| up.is_over)
+            {
+                if let Some(asset) = self.assets.rows.get(index) {
+                    out.push(InspectorAction::OpenAsset(asset.clone()));
+                }
+            }
+        }
         let Some(node) = self.node.clone() else {
             return out;
         };
@@ -1449,7 +1693,15 @@ impl Inspector {
                     key, id, number, default, ..
                 } => {
                     if let Some((text, _)) = item.text_input(cx, ids!(value)).returned(actions) {
-                        let value = if *number {
+                        let value = if key == "tags" {
+                            Literal::Arr(
+                                text.split(',')
+                                    .map(str::trim)
+                                    .filter(|value| !value.is_empty())
+                                    .map(|value| Literal::Str(value.to_string()))
+                                    .collect(),
+                            )
+                        } else if *number {
                             text.trim()
                                 .parse::<f64>()
                                 .map(Literal::Num)
@@ -1631,6 +1883,41 @@ impl Widget for Inspector {
             let Some(mut list) = list_ref.borrow_mut() else {
                 continue;
             };
+            if self.tab == InspectorTab::Assets {
+                list.set_item_range(cx, 0, self.assets.rows.len());
+                while let Some(index) = list.next_visible_item(cx) {
+                    let Some(row) = self.assets.rows.get(index) else { continue };
+                    let (item, existed) = list.item_with_existed(cx, index, id!(Asset));
+                    item.label(cx, ids!(title)).set_text(cx, &row.title);
+                    item.label(cx, ids!(kind_time)).set_text(
+                        cx,
+                        &format!("{} · {}", row.kind, relative_time(self.asset_now_ms, row.created_ms)),
+                    );
+                    let mut labels = row.namespace.clone();
+                    if !row.tags.is_empty() {
+                        labels.push_str(" · ");
+                        labels.push_str(&row.tags.join(", "));
+                    }
+                    item.label(cx, ids!(labels)).set_text(cx, &labels);
+                    let image = item.image(cx, ids!(thumb.image));
+                    if let Some(alias) = row.alias.as_ref() {
+                        let marker = item.label(cx, ids!(marker));
+                        let bytes = self.asset_thumbnails.get(alias);
+                        let needs_load = !existed || marker.text() != *alias || !image.has_content();
+                        marker.set_text(cx, alias);
+                        if needs_load {
+                            let loaded = bytes.is_some_and(|bytes| {
+                                image.load_image_from_data(cx, &bytes.bytes).is_ok()
+                            });
+                            image.set_visible(cx, loaded);
+                        }
+                    } else {
+                        image.set_visible(cx, false);
+                    }
+                    item.draw_all_unscoped(cx);
+                }
+                continue;
+            }
             list.set_item_range(cx, 0, self.rows.len());
             while let Some(index) = list.next_visible_item(cx) {
                 let Some(row) = self.rows.get(index) else {
@@ -2558,7 +2845,12 @@ impl Widget for AppView {
             for node in graph.nodes.iter().filter(|node| node.kind == "input").cloned() {
                 self.draw_node_face(cx, scope, &node);
             }
-            for node in graph.nodes.iter().filter(|node| node.kind == "output").cloned() {
+            for node in graph
+                .nodes
+                .iter()
+                .filter(|node| matches!(node.kind.as_str(), "output" | "publish"))
+                .cloned()
+            {
                 self.draw_node_face(cx, scope, &node);
             }
         }
@@ -2572,8 +2864,11 @@ impl Widget for AppView {
 
 #[cfg(test)]
 mod tests {
-    use super::{inspector_combo_choice, inspector_commit_number, inspector_setting_names};
-    use makepad_flow::Literal;
+    use super::{
+        inspector_combo_choice, inspector_commit_number, inspector_setting_names, relative_time,
+        AssetListModel, InspectorTab,
+    };
+    use makepad_flow::{FlowAsset, Literal};
     use makepad_widgets::*;
 
     #[test]
@@ -2635,5 +2930,52 @@ mod tests {
             inspector_setting_names("Http", &params),
             vec!["width", "height", "model", "system", "temperature"]
         );
+    }
+
+    #[test]
+    fn assets_default_to_flow_scope_and_sort_newest_first() {
+        let mut model = AssetListModel::default();
+        assert_eq!(model.namespace(), Some("flows"));
+        model.set_rows(vec![asset("old", 10), asset("new", 30), asset("middle", 20)]);
+        assert_eq!(model.rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(), vec!["new", "middle", "old"]);
+        let mut tagged = asset("tagged", 50);
+        tagged.namespace = "archive".into();
+        let mut hidden = asset("hidden", 60);
+        hidden.namespace = "archive".into();
+        hidden.tags = vec!["other".into()];
+        model.set_rows(vec![tagged.clone(), hidden.clone()]);
+        assert_eq!(model.rows[0].id, "tagged");
+        model.search = "SKY".into();
+        let mut sky = asset("sky", 40);
+        sky.title = "Evening sky".into();
+        model.set_rows(vec![sky, tagged, hidden]);
+        assert_eq!(model.rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(), vec!["sky"]);
+        model.all_assets = true;
+        assert_eq!(model.namespace(), None);
+    }
+
+    #[test]
+    fn relative_times_and_tab_state_are_stable() {
+        assert_eq!(relative_time(100_000, 99_000), "just now");
+        assert_eq!(relative_time(180_000, 0), "3 min ago");
+        assert_eq!(relative_time(7_200_000, 0), "2 hr ago");
+        let mut tab = InspectorTab::default();
+        assert_eq!(tab, InspectorTab::Inspector);
+        tab = InspectorTab::Assets;
+        assert_eq!(tab, InspectorTab::Assets);
+        tab = InspectorTab::Inspector;
+        assert_eq!(tab, InspectorTab::Inspector);
+    }
+
+    fn asset(id: &str, created_ms: u64) -> FlowAsset {
+        FlowAsset {
+            id: id.into(),
+            alias: None,
+            namespace: "flows".into(),
+            title: id.into(),
+            kind: "texture".into(),
+            tags: vec!["flow".into()],
+            created_ms,
+        }
     }
 }

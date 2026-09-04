@@ -30,7 +30,7 @@ use makepad_flow::embed::{default_root, resolve, EmbedPolicy, Resolved};
 use makepad_flow::engine::{FixedGen, HubChat, HubHttp, Seams};
 use makepad_flow::host::{FlowServer, FlowServerConfig};
 use makepad_flow::{
-    CreateInstanceRequest, CreateInstanceResponse, CreateRunResponse, Event as FlowEvent,
+    AssetsResponse, CreateInstanceRequest, CreateInstanceResponse, CreateRunResponse, Event as FlowEvent,
     FlowDefinition, FlowSummary, Graph, InstanceRow, Literal, ModelsResponse, NodeTypeCatalog,
     NodeState, NodesResponse, PortType, PutFlowResponse, RunRowDto, RunState, TemplateSummary,
     ValueRef,
@@ -487,7 +487,6 @@ script_mod! {
                                                     max_horizontal: 84.0
                                                     a: Panel{
                                                         spacing: theme.space_1
-                                                        SectionTitle{text: "INSPECTOR"}
                                                         inspector := Inspector{}
                                                     }
                                                     b: View{
@@ -744,6 +743,11 @@ enum IoResult {
         generation: u64,
         result: Result<(), ClientError>,
     },
+    Assets(Result<AssetsResponse, ClientError>),
+    AssetThumbnail {
+        alias: String,
+        result: Result<makepad_flow::ValueBytes, ClientError>,
+    },
     Done(Result<(), ClientError>),
 }
 
@@ -917,6 +921,13 @@ impl App {
         let (hint, token) = match resolve(policy, &root, None) {
             Resolved::Host => {
                 let mut config = FlowServerConfig::new(root.clone());
+                config.asset.token = std::fs::read_to_string(
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../local/asset-ui/asset-server/admin-token"),
+                )
+                .ok()
+                .map(|token| token.trim().to_string())
+                .filter(|token| !token.is_empty());
                 config.control_addr = "127.0.0.1:0".to_string();
                 config.data_addr = "127.0.0.1:0".to_string();
                 // Dev-only: `FLOW_GEN_BASE_URL=<url>` points every gen node at
@@ -1175,6 +1186,57 @@ impl App {
         }
         self.io.fetching_instances = true;
         self.io(|client| IoResult::Instances(client.instances(None, false)));
+    }
+
+    fn refresh_assets(&mut self, cx: &mut Cx) {
+        let request = self
+            .ui
+            .widget(cx, ids!(inspector))
+            .borrow_mut::<Inspector>()
+            .map(|mut inspector| inspector.asset_request(self.time));
+        let Some((query, namespace, limit)) = request else { return };
+        self.io(move |client| {
+            IoResult::Assets(client.assets(&query, namespace.as_deref(), limit))
+        });
+    }
+
+    fn fetch_asset_thumbnail(&mut self, alias: String) {
+        self.io(move |client| IoResult::AssetThumbnail {
+            result: client.asset_thumbnail(&alias),
+            alias,
+        });
+    }
+
+    fn open_asset(&mut self, cx: &mut Cx, asset: makepad_flow::FlowAsset) {
+        let thumbnail = asset.alias.as_deref().and_then(|alias| {
+            self.ui
+                .widget(cx, ids!(inspector))
+                .borrow::<Inspector>()
+                .and_then(|inspector| inspector.asset_thumbnail(alias))
+        });
+        if asset.kind == "texture" {
+            if let Some(bytes) = thumbnail {
+                self.preview_digest = Some((asset.id.clone(), asset.title.clone()));
+                self.show_image_viewer(cx, &asset.id, "asset", &bytes);
+                return;
+            }
+        }
+        let json = makepad_strict_json::Value::Obj(vec![
+            ("id".into(), makepad_strict_json::Value::Str(asset.id.clone())),
+            ("alias".into(), asset.alias.clone().map(makepad_strict_json::Value::Str).unwrap_or(makepad_strict_json::Value::Null)),
+            ("namespace".into(), makepad_strict_json::Value::Str(asset.namespace)),
+            ("title".into(), makepad_strict_json::Value::Str(asset.title.clone())),
+            ("kind".into(), makepad_strict_json::Value::Str(asset.kind)),
+            ("tags".into(), makepad_strict_json::Value::Arr(asset.tags.into_iter().map(makepad_strict_json::Value::Str).collect())),
+            ("created_ms".into(), makepad_strict_json::Value::Int(asset.created_ms as i64)),
+        ]).to_json();
+        let bytes = makepad_flow::ValueBytes {
+            digest: asset.id.clone(),
+            content_type: "application/json".to_string(),
+            bytes: std::sync::Arc::from(json.into_bytes()),
+        };
+        self.preview_digest = Some((asset.id, asset.title));
+        self.show_preview(cx, &bytes);
     }
 
     /// The hub's models for every domain the open graph uses (the pickers
@@ -1908,6 +1970,40 @@ impl App {
                         Err(error) => self.show_error(cx, &error),
                     }
                 }
+                IoResult::Assets(result) => match result {
+                    Ok(response) => {
+                        let missing = self
+                            .ui
+                            .widget(cx, ids!(inspector))
+                            .borrow_mut::<Inspector>()
+                            .map(|mut inspector| inspector.set_assets(cx, response.assets))
+                            .unwrap_or_default();
+                        for alias in missing {
+                            self.fetch_asset_thumbnail(alias);
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(mut inspector) = self
+                            .ui
+                            .widget(cx, ids!(inspector))
+                            .borrow_mut::<Inspector>()
+                        {
+                            inspector.set_assets_error(cx, &error.to_string());
+                        }
+                    }
+                },
+                IoResult::AssetThumbnail { alias, result } => match result {
+                    Ok(bytes) => {
+                        if let Some(mut inspector) = self
+                            .ui
+                            .widget(cx, ids!(inspector))
+                            .borrow_mut::<Inspector>()
+                        {
+                            inspector.set_asset_thumbnail(cx, alias, bytes);
+                        }
+                    }
+                    Err(error) => log!("flow-ui: asset thumbnail: {error}"),
+                },
                 IoResult::Done(result) => {
                     if let Err(error) = result {
                         self.show_error(cx, &error);
@@ -2399,6 +2495,13 @@ impl App {
                     self.record_value(cx, &node, &port, value);
                 }
                 self.request_wanted_values(cx);
+                if self.current_graph().is_some_and(|graph| {
+                    graph.nodes.iter().any(|candidate| {
+                        candidate.id == node && candidate.kind == "publish"
+                    })
+                }) {
+                    self.refresh_assets(cx);
+                }
                 if self
                     .ui
                     .widget(cx, ids!(canvas))
@@ -3720,6 +3823,8 @@ impl MatchEvent for App {
                 }
                 InspectorAction::CopyDigest(digest) => cx.copy_to_clipboard(&digest),
                 InspectorAction::OpenValue { node, port } => self.open_value(cx, &node, &port),
+                InspectorAction::RefreshAssets => self.refresh_assets(cx),
+                InspectorAction::OpenAsset(asset) => self.open_asset(cx, asset),
             }
         }
 
@@ -4272,6 +4377,14 @@ impl AppMain for App {
                 self.update_run_bar(cx);
             }
             self.refresh_models(false);
+            let refresh_assets = self
+                .ui
+                .widget(cx, ids!(inspector))
+                .borrow_mut::<Inspector>()
+                .is_some_and(|mut inspector| inspector.refresh_assets_due(self.time));
+            if refresh_assets {
+                self.refresh_assets(cx);
+            }
         }
         self.refresh_ai_context();
         if let Event::Shutdown = event {
@@ -4361,7 +4474,7 @@ fn planned_nodes_for(graph: Option<&Graph>, outputs: Option<&[String]>) -> Vec<S
             graph
                 .nodes
                 .iter()
-                .filter(|node| node.kind == "output")
+                .filter(|node| matches!(node.kind.as_str(), "output" | "publish"))
                 .map(|node| node.id.clone())
                 .collect()
         },

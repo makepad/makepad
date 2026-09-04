@@ -41,7 +41,11 @@ pub fn tool_schema(graph: &Graph) -> ToolSchema {
             .iter()
             .filter_map(|output_id| {
                 let node = graph.nodes.iter().find(|node| &node.id == output_id)?;
-                let ty = node.inputs.first().map(|input| input.ty)?;
+                let ty = if node.kind == "publish" {
+                    node.outputs.first().map(|output| output.ty)?
+                } else {
+                    node.inputs.first().map(|input| input.ty)?
+                };
                 Some((node.id.clone(), ty))
             })
             .collect();

@@ -2729,7 +2729,18 @@ impl FaceHost {
                     // Its dropdown is read by `model_changes`.
                 } else if widget.borrow::<TextInput>().is_some() {
                     if let Some(text) = widget.as_text_input().changed(actions) {
-                        out.push((node.clone(), key.clone(), Literal::Str(text)));
+                        let value = if key == "tags" {
+                            Literal::Arr(
+                                text.split(',')
+                                    .map(str::trim)
+                                    .filter(|value| !value.is_empty())
+                                    .map(|value| Literal::Str(value.to_string()))
+                                    .collect(),
+                            )
+                        } else {
+                            Literal::Str(text)
+                        };
+                        out.push((node.clone(), key.clone(), value));
                     }
                 } else if widget.borrow::<ComboBox>().is_some() {
                     if let Some(label) = widget.as_combo_box().changed_label(actions) {
@@ -2792,6 +2803,11 @@ impl FaceHost {
             .map(|bytes| String::from_utf8_lossy(&bytes.bytes).into_owned())
             .or_else(|| preview_text(value))
             .unwrap_or_else(|| format!("{} · {}", value.content_type, size_text(value.bytes)));
+        let text = if port == "asset" {
+            published_summary(&text).unwrap_or(text)
+        } else {
+            text
+        };
         let mut hooks = Vec::new();
         for (id, face) in self.faces.iter().chain(
             self.flow_face
@@ -3128,6 +3144,15 @@ fn set_widget_text(cx: &mut Cx, widget: &WidgetRef, text: &str) {
         return;
     }
     widget.set_text(cx, text);
+}
+
+fn published_summary(text: &str) -> Option<String> {
+    let value = makepad_strict_json::parse(text.as_bytes()).ok()?;
+    let name = value
+        .get("alias")
+        .and_then(|value| value.as_str())
+        .or_else(|| value.get("id").and_then(|value| value.as_str()))?;
+    Some(format!("published · {name}"))
 }
 
 // ---------------------------------------------------------------------------

@@ -292,8 +292,9 @@ pub fn would_cycle(graph: &Graph, from: &str, to: &str) -> bool {
 }
 
 /// Every input port an output can legally be wired to: same type, not the
-/// same node, no cycle. `Fn` inputs are flexible (any type re-types the
-/// port) and `Http.body`/`Http.headers` accept anything as well.
+/// same node, no cycle. `Fn` and `Publish.value` inputs are flexible (any
+/// type re-types the port) and `Http.body`/`Http.headers` accept anything as
+/// well.
 pub fn compatible_inputs(graph: &Graph, from_node: &str, from_port: &str) -> Vec<(String, String)> {
     let index = graph_index(graph);
     let Some(from) = index.node(from_node) else {
@@ -315,6 +316,7 @@ pub fn compatible_inputs(graph: &Graph, from_node: &str, from_port: &str) -> Vec
         }
         for input in &node.inputs {
             let flexible = node.type_name == "Fn"
+                || (node.type_name == "Publish" && input.port == "value")
                 || (node.type_name == "Http"
                     && (input.port == "body" || input.port == "headers"))
                 || (node.type_name == "Output" && input.port == "value");
@@ -361,7 +363,7 @@ pub fn connect(
         from_node: from_node.to_string(),
         from_port: from_port.to_string(),
     });
-    if node.type_name == "Fn" || node.type_name == "Output" {
+    if matches!(node.type_name.as_str(), "Fn" | "Output" | "Publish") {
         input.ty = ty;
     }
     if node.type_name == "Output" {
@@ -639,8 +641,7 @@ pub fn types_with_compatible_input<'a>(
     catalog
         .iter()
         .filter(|entry| {
-            entry.type_name == "Fn"
-                || entry.type_name == "Output"
+            matches!(entry.type_name.as_str(), "Fn" | "Output" | "Publish")
                 || entry.ports._in.iter().any(|port| port.ty == ty)
         })
         .collect()
@@ -763,6 +764,23 @@ mod tests {
             g.nodes[1].inputs.iter().find(|i| i.port == "prompt").unwrap().value,
             NodeInputValue::Literal(Literal::Str(ref value)) if value.is_empty()
         ));
+    }
+
+    #[test]
+    fn publish_value_accepts_and_retypes_non_image_outputs() {
+        let input = catalog("Input", "input", &[], &[("text", PortType::Text)]);
+        let publish = catalog(
+            "Publish",
+            "publish",
+            &[("value", PortType::Image)],
+            &[("asset", PortType::Json)],
+        );
+        let (graph, source) = add_node(&empty(), &input, (0.0, 0.0));
+        let (graph, target) = add_node(&graph, &publish, (300.0, 0.0));
+        assert!(compatible_inputs(&graph, &source, "text")
+            .contains(&(target.clone(), "value".to_string())));
+        let graph = connect(&graph, &source, "text", &target, "value").unwrap();
+        assert_eq!(graph.nodes[1].inputs[0].ty, PortType::Text);
     }
 
     #[test]

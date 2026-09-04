@@ -225,6 +225,13 @@ const OUTPUT_PARAMS: &[ParamSpec] = &[ParamSpec::new(
     ParamType::PortTypeWithBytes,
     DefaultValue::Id("text"),
 )];
+const PUBLISH_PARAMS: &[ParamSpec] = &[
+    ParamSpec::new("title", ParamType::String, DefaultValue::Str("")),
+    ParamSpec::new("namespace", ParamType::String, DefaultValue::Str("flows")),
+    ParamSpec::new("tags", ParamType::LiteralArray, DefaultValue::Arr),
+    ParamSpec::new("description", ParamType::String, DefaultValue::Str("")),
+    ParamSpec::new("alias", ParamType::String, DefaultValue::Str("")),
+];
 const LLM_PARAMS: &[ParamSpec] = &[
     ParamSpec::new("system", ParamType::String, DefaultValue::Str("")),
     ParamSpec::new("model", ParamType::String, DefaultValue::Str("")),
@@ -285,6 +292,11 @@ const OUTPUT_INPUTS: &[InputSpec] = &[InputSpec::new(
     PortType::Text,
     DefaultValue::Null,
 )];
+const PUBLISH_INPUTS: &[InputSpec] = &[InputSpec::flexible(
+    "value",
+    PortType::Image,
+    DefaultValue::Null,
+)];
 const HTTP_INPUTS: &[InputSpec] = &[
     InputSpec::new("url", PortType::Text, DefaultValue::Str("")),
     InputSpec::new("headers", PortType::Json, DefaultValue::Obj),
@@ -343,6 +355,12 @@ fn type_spec(type_name: &str) -> Option<TypeSpec> {
             kind: "output",
             params: OUTPUT_PARAMS,
             inputs: OUTPUT_INPUTS,
+        },
+        "Publish" => TypeSpec {
+            type_name: "Publish",
+            kind: "publish",
+            params: PUBLISH_PARAMS,
+            inputs: PUBLISH_INPUTS,
         },
         "Llm" => TypeSpec {
             type_name: "Llm",
@@ -569,7 +587,7 @@ pub fn prelude_catalog() -> Result<Vec<NodeTypeCatalog>, EvalError> {
         let kind = deep_value(&vm, obj, "kind").and_then(value_id).unwrap_or_default();
         if !matches!(
             kind.as_str(),
-            "input" | "output" | "chat" | "fn" | "http" | "ask" | "gen"
+            "input" | "output" | "publish" | "chat" | "fn" | "http" | "ask" | "gen"
         ) {
             continue;
         }
@@ -753,6 +771,10 @@ fn catalog_outputs(type_name: &str) -> Vec<Port> {
             Port { name: "value".to_string(), ty: PortType::Text },
             Port { name: "meta".to_string(), ty: PortType::Json },
         ],
+        "Publish" => vec![Port {
+            name: "asset".to_string(),
+            ty: PortType::Json,
+        }],
         "Image" | "Upscale" => vec![Port {
             name: "image".to_string(),
             ty: PortType::Image,
@@ -1014,8 +1036,8 @@ impl PreludePrototypes {
             .ok_or_else(|| at(PRELUDE_FILE, 1, 1, "prelude module is missing"))?;
         let mut entries = Vec::new();
         for name in [
-            "Text", "Image", "Upscale", "Input", "Output", "Llm", "Fn", "Http", "Ask",
-            "Gen", "Flow",
+            "Text", "Image", "Upscale", "Input", "Output", "Publish", "Llm", "Fn", "Http",
+            "Ask", "Gen", "Flow",
         ] {
             let value = own_value(vm, module, name).ok_or_else(|| {
                 at(
@@ -1039,6 +1061,7 @@ impl PreludePrototypes {
                 "Upscale" => "Upscale",
                 "Input" => "Input",
                 "Output" => "Output",
+                "Publish" => "Publish",
                 "Llm" => "Llm",
                 "Fn" => "Fn",
                 "Http" => "Http",
@@ -1626,6 +1649,10 @@ fn outputs_for(
             ty: param_port_type(params, "type").unwrap(),
         }],
         "Output" => vec![],
+        "Publish" => vec![Port {
+            name: "asset".to_string(),
+            ty: PortType::Json,
+        }],
         "Llm" => vec![Port {
             name: "text".to_string(),
             ty: PortType::Text,
@@ -1812,7 +1839,9 @@ fn resolve_flexible_input_types(nodes: &mut [Node]) {
         .collect();
     for node in nodes {
         for input in &mut node.inputs {
-            let flexible = node.kind == "fn" || (node.kind == "http" && input.port == "body");
+            let flexible = node.kind == "fn"
+                || node.kind == "publish"
+                || (node.kind == "http" && input.port == "body");
             if !flexible {
                 continue;
             }
@@ -1850,7 +1879,9 @@ fn validate_edges(nodes: &[Node], edges: &[Edge], file_name: &str) -> Result<(),
             .iter()
             .find(|port| port.port == edge.to_port)
             .unwrap();
-        let flexible = to.kind == "fn" || (to.kind == "http" && input.port == "body");
+        let flexible = to.kind == "fn"
+            || to.kind == "publish"
+            || (to.kind == "http" && input.port == "body");
         if !flexible && output.ty != input.ty {
             return Err(at(
                 file_name,
@@ -1929,7 +1960,7 @@ fn extract_tools(
         .collect();
     let output_ids: Vec<String> = nodes
         .iter()
-        .filter(|node| node.kind == "output")
+        .filter(|node| matches!(node.kind.as_str(), "output" | "publish"))
         .map(|node| node.id.clone())
         .collect();
     let mut tools = vec![ToolEntry {
@@ -1997,7 +2028,7 @@ fn extract_tools(
             )
         })?;
         let outputs =
-            tool_node_array(vm, entry, "out", &node_by_obj, "output").map_err(|msg| {
+            tool_terminal_node_array(vm, entry, "out", &node_by_obj).map_err(|msg| {
                 field_error(
                     source,
                     flow_span,
@@ -2046,6 +2077,36 @@ fn tool_node_array(
         if node.kind != expected_kind {
             return Err(format!(
                 "tool.{field} node `{}` must be an {expected_kind} node",
+                node.id
+            ));
+        }
+        ids.push(node.id.clone());
+    }
+    Ok(ids)
+}
+
+fn tool_terminal_node_array(
+    vm: &ScriptVm<'_>,
+    entry: ScriptObject,
+    field: &str,
+    node_by_obj: &HashMap<ScriptObject, &Node>,
+) -> Result<Vec<String>, String> {
+    let value = deep_value(vm, entry, field).ok_or_else(|| format!("tool.{field} is missing"))?;
+    let array = value
+        .as_array()
+        .ok_or_else(|| format!("tool.{field} must be an array of nodes"))?;
+    let mut ids = Vec::new();
+    for index in 0..vm.bx.heap.array_len(array) {
+        let value = vm.bx.heap.array_index_unchecked(array, index);
+        let obj = value
+            .as_object()
+            .ok_or_else(|| format!("tool.{field} entry is not a node"))?;
+        let node = node_by_obj
+            .get(&obj)
+            .ok_or_else(|| "node not in flow".to_string())?;
+        if !matches!(node.kind.as_str(), "output" | "publish") {
+            return Err(format!(
+                "tool.{field} node `{}` must be an output or Publish node",
                 node.id
             ));
         }

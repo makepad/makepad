@@ -905,6 +905,7 @@ pub fn flows_manifest() -> ServiceManifest {
         .with_tool(tool("list", "List flow definitions with state, canonical status, and live instance counts.", empty_schema(), Risk::Read))
         .with_tool(tool("templates", "List flow templates with labels, briefs, inputs, and outputs.", empty_schema(), Risk::Read))
         .with_tool(tool("models", "List the live fleet's models, optionally restricted to one generation domain.", r#"{"type":"object","properties":{"domain":{"type":"string"}},"additionalProperties":false}"#, Risk::Read))
+        .with_tool(tool("assets", "List assets written by flows, newest first; set ns to * to widen beyond flow assets.", r#"{"type":"object","properties":{"q":{"type":"string"},"ns":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100}},"additionalProperties":false}"#, Risk::Read))
         .with_tool(tool("create", "Create and evaluate a named flow definition from a built-in template.", r#"{"type":"object","properties":{"name":{"type":"string"},"template":{"type":"string"}},"required":["name","template"],"additionalProperties":false}"#, Risk::Act))
         .with_tool(tool("nodes", "Read runnable flow node types, ports, defaults, docs, and range hints before authoring unfamiliar nodes.", empty_schema(), Risk::Read))
         .with_tool(tool("read", "Read one flow's splash source, graph node summary, and last evaluation error.", one_string_schema("name", "flow definition name"), Risk::Read))
@@ -1053,6 +1054,47 @@ fn run_flows_call(
                     format!("{} fleet models", models.models.len()),
                 )
                 .with_data(models.serialize_json()),
+                Err(error) => client_error_result(&call.call_id, error),
+            }
+        }
+        "assets" => {
+            let fields = match call_fields(call) {
+                Ok(fields) => fields,
+                Err(result) => return result,
+            };
+            let query = string_field(&fields, "q").unwrap_or("").to_string();
+            let namespace = string_field(&fields, "ns").unwrap_or("flows").to_string();
+            let limit = field(&fields, "limit")
+                .and_then(Json::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or(50);
+            match call_client(client, |client| client.assets(&query, Some(&namespace), limit)) {
+                Ok(response) => {
+                    let text = if response.assets.is_empty() {
+                        "No matching assets.".to_string()
+                    } else {
+                        response
+                            .assets
+                            .iter()
+                            .map(|asset| {
+                                format!(
+                                    "{} · {} · {} · {}",
+                                    asset.title,
+                                    asset.kind,
+                                    asset.namespace,
+                                    asset.alias.as_deref().unwrap_or(&asset.id)
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    };
+                    ToolResult::ok(
+                        &call.call_id,
+                        text,
+                        format!("{} assets", response.assets.len()),
+                    )
+                    .with_data(response.serialize_json())
+                }
                 Err(error) => client_error_result(&call.call_id, error),
             }
         }
@@ -2701,13 +2743,14 @@ mod tests {
         }
         let flows = flows_manifest();
         flows.validate().unwrap();
-        assert_eq!(flows.tools.len(), 21);
+        assert_eq!(flows.tools.len(), 22);
         assert_eq!(flows.topics.len(), 3);
         assert!(flows.topic("flows").is_some());
         assert!(flows.topic("instance").is_some());
         assert!(flows.topic("run").is_some());
         assert_eq!(flows.tool("templates").unwrap().risk, Risk::Read);
         assert_eq!(flows.tool("models").unwrap().risk, Risk::Read);
+        assert_eq!(flows.tool("assets").unwrap().risk, Risk::Read);
         assert_eq!(flows.tool("create").unwrap().risk, Risk::Act);
         assert_eq!(flows.tool("watch").unwrap().risk, Risk::Act);
         assert_eq!(flows.tool("delete").unwrap().risk, Risk::Destructive);

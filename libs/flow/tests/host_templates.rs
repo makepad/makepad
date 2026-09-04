@@ -61,12 +61,21 @@ fn host_lists_and_creates_templates() {
     let client = FlowClient::connect(client_endpoints, endpoints.token.clone(), None).unwrap();
 
     let templates = client.templates().unwrap();
-    assert_eq!(templates.len(), 18);
+    assert_eq!(templates.len(), 19);
     assert!(templates.windows(2).all(|pair| pair[0].name < pair[1].name));
     assert!(templates.iter().all(|template| !template.brief.is_empty()));
     let dream = templates.iter().find(|template| template.name == "dream").unwrap();
     assert_eq!(dream.inputs, [("prompt".to_string(), "text".to_string())]);
     assert_eq!(dream.outputs, [("movie".to_string(), "video".to_string())]);
+    let publish = templates
+        .iter()
+        .find(|template| template.name == "prompt-to-library")
+        .unwrap();
+    assert_eq!(publish.inputs, [("prompt".to_string(), "text".to_string())]);
+    assert_eq!(
+        publish.outputs,
+        [("published".to_string(), "json".to_string())]
+    );
 
     let detail = client.template("dream").unwrap();
     assert_eq!(detail.name, "dream");
