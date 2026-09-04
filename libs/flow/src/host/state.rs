@@ -709,6 +709,18 @@ impl FlowState {
                     row.http_log = http_log.clone();
                     row.finished_ms = Some(now);
                     row.handle = None;
+                    // A cancelled run's live nodes were cancelled with it;
+                    // the row must not keep showing them mid-denoise.
+                    if *state == RunState::Cancelled {
+                        for node in row.nodes.values_mut() {
+                            if matches!(
+                                node.state,
+                                NodeState::Pending | NodeState::Running | NodeState::Waiting
+                            ) {
+                                node.state = NodeState::Cancelled;
+                            }
+                        }
+                    }
                 }
                 if let Some(instance) = self.instances.get_mut(&instance_id) {
                     instance.active.retain(|active| active != &run_id);

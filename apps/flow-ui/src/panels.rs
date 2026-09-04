@@ -2535,6 +2535,10 @@ pub struct RunBar {
     #[redraw]
     #[live]
     draw_bar: DrawVector,
+    /// The strip's height when it should sit centred inside a taller walk
+    /// (a queue row); zero fills the walk, as the toolbar bar does.
+    #[live(0.0)]
+    thickness: f64,
     #[rust]
     area: Area,
     #[rust]
@@ -2569,7 +2573,15 @@ impl Widget for RunBar {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         let rect = cx.walk_turtle(walk);
         cx.add_rect_area(&mut self.area, rect);
-        let (x, y, w, h) = (rect.pos.x as f32, rect.pos.y as f32, rect.size.x as f32, rect.size.y as f32);
+        let strip = if self.thickness > 0.0 && self.thickness < rect.size.y {
+            Rect {
+                pos: dvec2(rect.pos.x, rect.pos.y + (rect.size.y - self.thickness) * 0.5),
+                size: dvec2(rect.size.x, self.thickness),
+            }
+        } else {
+            rect
+        };
+        let (x, y, w, h) = (strip.pos.x as f32, strip.pos.y as f32, strip.size.x as f32, strip.size.y as f32);
         self.draw_bar.begin();
         self.draw_bar.set_color(1.0, 1.0, 1.0, 0.08);
         self.draw_bar.rounded_rect(x, y, w, h, h * 0.5);

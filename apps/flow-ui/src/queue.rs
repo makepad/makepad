@@ -42,76 +42,70 @@ script_mod! {
             scroll_bar: ScrollBar{}
             Header := View{
                 width: Fill
-                height: 25
+                height: 22
                 flow: Right
                 align: Align{y: 0.5}
-                padding: Inset{left: 2 right: 2}
-                spacing: theme.space_1
+                padding: Inset{left: 6 right: 2}
+                spacing: 6
                 title := Label{
                     width: Fill
                     height: Fit
                     draw_text +: {
                         color: theme.flow_text_muted
-                        text_style: theme.font_bold{font_size: 8.5}
+                        text_style: theme.font_bold{font_size: 8}
                     }
                 }
                 cancel_batch := ButtonFlatter{
-                    width: 22 height: 22 text: ""
+                    width: 18 height: 18 text: ""
+                    padding: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                    icon_walk: Walk{width: 8 height: 8}
                     draw_icon +: {
                         svg: crate_resource("self:resources/icons/close.svg")
                         color: theme.flow_text_muted
                     }
                 }
             }
+            // One run: its name, a thin strip in the state's colour, the
+            // state and time in words, then its x. Everything sits on one
+            // centre line.
             Run := RoundedView{
                 width: Fill
-                height: 30
+                height: 26
                 flow: Right
                 align: Align{y: 0.5}
-                padding: Inset{left: 3 right: 2 top: 2 bottom: 2}
-                spacing: theme.space_1
+                padding: Inset{left: 4 right: 4}
+                spacing: 8
                 show_bg: true
-                draw_bg +: {color: theme.flow_surface border_radius: 5}
+                draw_bg +: {color: theme.flow_surface border_radius: 6}
                 select := ButtonFlatter{
-                    width: Fit height: 22 text: "#1"
-                    padding: Inset{left: 3 right: 3 top: 1 bottom: 1}
+                    width: 56 height: 20 text: "#1"
+                    padding: Inset{left: 2 right: 2 top: 0 bottom: 0}
+                    align: Align{x: 0.0 y: 0.5}
                     draw_text +: {
                         color: theme.flow_text
                         text_style: theme.font_bold{font_size: 8.5}
                     }
                 }
-                chip := RoundedView{
-                    width: 47
-                    height: 16
-                    align: Align{x: 0.5 y: 0.5}
-                    show_bg: true
-                    draw_bg +: {color: theme.flow_state_idle border_radius: 8}
-                    state := Label{
-                        width: Fit height: Fit text: "queued"
-                        draw_text +: {
-                            color: theme.flow_text_white
-                            text_style: theme.font_bold{font_size: 7.5}
-                        }
-                    }
-                }
-                progress := RunBar{width: Fill height: 3}
-                elapsed := Label{
-                    width: 35 height: Fit text: "0s"
+                progress := RunBar{width: Fill height: Fill thickness: 4}
+                meta := Label{
+                    width: 80 height: Fit text: "queued"
                     draw_text +: {
                         color: theme.flow_text_muted
                         text_style: theme.font_regular{font_size: 8}
                     }
                 }
                 asset := ButtonFlatter{
-                    width: Fit height: 20 text: "→ asset" visible: false
-                    padding: Inset{left: 2 right: 2 top: 1 bottom: 1}
+                    width: Fit height: 18 text: "asset" visible: false
+                    padding: Inset{left: 2 right: 2 top: 0 bottom: 0}
                     draw_text +: {
                         color: theme.flow_highlight
                         text_style: theme.font_regular{font_size: 8}
                     }
                 }
                 cancel_run := ButtonFlatter{
-                    width: 21 height: 21 text: ""
+                    width: 18 height: 18 text: ""
+                    padding: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                    icon_walk: Walk{width: 8 height: 8}
                     draw_icon +: {
                         svg: crate_resource("self:resources/icons/close.svg")
                         color: theme.flow_text_muted
@@ -635,18 +629,16 @@ impl Widget for QueueList {
                             &format!("{}{name}", if selected { "› " } else { "" }),
                         );
                         let state = state_name(run.state);
-                        item.label(cx, ids!(state)).set_text(cx, state);
-                        let mut chip = item.view(cx, ids!(chip));
-                        let color = crate::theme::state_color(state);
-                        script_apply_eval!(cx, chip, {draw_bg +: {color: #(color)}});
                         if let Some(mut bar) = item.widget(cx, ids!(progress)).borrow_mut::<RunBar>() {
                             bar.set_progress(cx, f64::from(run.permille()) / 1000.0, state);
                         }
                         let end = run.finished_ms.unwrap_or(self.now_ms);
-                        item.label(cx, ids!(elapsed)).set_text(
-                            cx,
-                            &format_elapsed(end.saturating_sub(run.started_ms)),
-                        );
+                        let elapsed = format_elapsed(end.saturating_sub(run.started_ms));
+                        let meta = match run.state {
+                            RunState::Queued | RunState::Waiting => state.to_string(),
+                            _ => format!("{state} · {elapsed}"),
+                        };
+                        item.label(cx, ids!(meta)).set_text(cx, &meta);
                         item.button(cx, ids!(asset))
                             .set_visible(cx, run.asset.is_some() && run.terminal());
                         // A batch slice's x cancels it, so it goes quiet once

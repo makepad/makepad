@@ -17,7 +17,7 @@ use makepad_flow::host::{FlowServer, FlowServerConfig};
 use makepad_flow::{
     BatchMutationResponse, CreateBatchRequest, CreateBatchResponse, CreateInstanceRequest,
     CreateInstanceResponse, CreateRunRequest, CreateRunResponse, EventsResponse, InputValueDto,
-    InstanceRow, PortType, PutSourceRequest, PutValueResponse, RunRowDto, RunState, Seams,
+    InstanceRow, NodeState, PortType, PutSourceRequest, PutValueResponse, RunRowDto, RunState, Seams,
     SetInputsResponse,
 };
 use makepad_micro_serde::{DeJson, JsonValue, SerJson};
@@ -1322,4 +1322,68 @@ fn wait_run_state(
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[test]
+fn a_cancelled_run_marks_its_live_nodes_cancelled() {
+    let root = TempRoot::new("cancel-marks-nodes");
+    let mut stalled = FakeChat::done("unused");
+    stalled.pending = true;
+    let server = start(
+        &root.0,
+        seams(stalled, FakeGen::done(), FakeHttp::json(200, "{}")),
+    );
+    let endpoints = server.endpoints();
+    put_flow(endpoints.control, &endpoints.token, "stalled", STALLED_FLOW);
+    let created = request(
+        endpoints.control,
+        "POST",
+        "/v1/flows/stalled/instances",
+        Some(&endpoints.token),
+        &CreateInstanceRequest::default().serialize_json(),
+    );
+    assert_eq!(created.status, 201, "{}", created.body);
+    let instance = CreateInstanceResponse::deserialize_json(&created.body)
+        .unwrap()
+        .instance;
+    let run_cursor = cursor(endpoints.control, &endpoints.token, "run");
+    let started = request(
+        endpoints.control,
+        "POST",
+        &format!("/v1/instances/{instance}/runs"),
+        Some(&endpoints.token),
+        &CreateRunRequest::default().serialize_json(),
+    );
+    assert_eq!(started.status, 202, "{}", started.body);
+    let run_id = CreateRunResponse::deserialize_json(&started.body)
+        .unwrap()
+        .run_id;
+    poll_events_until(
+        endpoints.control,
+        &endpoints.token,
+        "run",
+        run_cursor,
+        |event| event_kind(event) == "node.started" && event_str(event, "node") == Some("expand"),
+    );
+    let cancelled = request(
+        endpoints.control,
+        "POST",
+        &format!("/v1/runs/{run_id}/cancel"),
+        Some(&endpoints.token),
+        "",
+    );
+    assert_eq!(cancelled.status, 200, "{}", cancelled.body);
+    let row = wait_run_state(
+        endpoints.control,
+        &endpoints.token,
+        &run_id,
+        RunState::Cancelled,
+    );
+    // The stalled chat node was mid-flight; the row must not keep it Running.
+    assert_eq!(row.nodes["expand"].state, NodeState::Cancelled);
+    assert!(row.nodes.values().all(|node| !matches!(
+        node.state,
+        NodeState::Pending | NodeState::Running | NodeState::Waiting
+    )));
+    server.shutdown();
 }
