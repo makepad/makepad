@@ -1189,10 +1189,15 @@ impl Widget for FabValueInput {
             let fs = self.draw_text.text_style.font_size as f64;
             let value_reserve = (self.format().chars().count() as f64 + 0.5) * fs * 0.72 + 6.0;
             let label_w = (row - pad - value_reserve).max(0.0);
-            let mut label_walk = Walk::fit();
-            label_walk.width = Size::Fixed(label_w);
-            self.draw_text
-                .draw_walk(cx, label_walk, Align::default(), &self.label);
+            // A label that cannot fit is not drawn at all: a crushed "w"
+            // renders as a stray dot beside the number.
+            let needed = self.label.chars().count() as f64 * fs * 0.62 + 2.0;
+            if label_w >= needed {
+                let mut label_walk = Walk::fit();
+                label_walk.width = Size::Fixed(label_w);
+                self.draw_text
+                    .draw_walk(cx, label_walk, Align::default(), &self.label);
+            }
         }
         let iw = self.text_input.walk(cx);
         let _ = self.text_input.draw_walk(cx, &mut Scope::empty(), iw);
