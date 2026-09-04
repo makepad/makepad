@@ -254,7 +254,7 @@ pub fn stem_color_killed() -> Vec4f {
 
 /// Zoom limits, seconds of audio across the full lane width.
 pub const ZOOM_MIN_SECS: f64 = 1.5;
-pub const ZOOM_MAX_SECS: f64 = 32.0;
+pub const ZOOM_MAX_SECS: f64 = 10.0;
 pub const ZOOM_DEFAULT_SECS: f64 = 8.0;
 /// A pointer that has not moved for this long is holding the record still.
 const SCRATCH_IDLE_SECS: f64 = 0.045;
