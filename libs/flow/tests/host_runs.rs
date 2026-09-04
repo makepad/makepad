@@ -186,7 +186,7 @@ fn one_input(node: &str, port: &str, value: InputValueDto) -> HashMap<String, Ha
 }
 
 const ECHO_FLOW: &str = r#"use mod.flow.*
-let prompt = Input{type: @text default: "x"}
+let prompt = Input{type: @text value: "x"}
 let echo = Fn{in: {text: prompt.text()} out: [@text] run: |i| {{text: i.text}}}
 let result = Output{type: @text value: echo.text()}
 Flow{prompt, echo, result}
@@ -214,6 +214,106 @@ let picture = Input{type: @image default: nil}
 let result = Output{type: @image value: picture.image()}
 Flow{picture, result}
 "#;
+
+#[test]
+fn design_value_defaults_and_external_overrides_never_rewrite_the_file() {
+    let root = TempRoot::new("design-value-override");
+    let server = start(
+        &root.0,
+        seams(
+            FakeChat::done("unused"),
+            FakeGen::done(),
+            FakeHttp::json(200, "{}"),
+        ),
+    );
+    let endpoints = server.endpoints();
+    put_flow(endpoints.control, &endpoints.token, "echo", ECHO_FLOW);
+    let path = root.0.join("flows/echo.splash");
+    let before = std::fs::read_to_string(&path).unwrap();
+    assert!(before.contains("value: \"x\""));
+
+    let design = request(
+        endpoints.control,
+        "POST",
+        "/v1/flows/echo/instances",
+        Some(&endpoints.token),
+        &CreateInstanceRequest::default().serialize_json(),
+    );
+    assert_eq!(design.status, 201, "{}", design.body);
+    let design_id = CreateInstanceResponse::deserialize_json(&design.body)
+        .unwrap()
+        .instance;
+    let design_row = request(
+        endpoints.control,
+        "GET",
+        &format!("/v1/instances/{design_id}"),
+        Some(&endpoints.token),
+        "",
+    );
+    assert_eq!(
+        InstanceRow::deserialize_json(&design_row.body)
+            .unwrap()
+            .input_text("prompt", "text")
+            .as_deref(),
+        Some("x")
+    );
+
+    let external = request(
+        endpoints.control,
+        "POST",
+        "/v1/flows/echo/instances",
+        Some(&endpoints.token),
+        &CreateInstanceRequest {
+            inputs: Some(one_input("prompt", "text", text_input("external"))),
+            ..CreateInstanceRequest::default()
+        }
+        .serialize_json(),
+    );
+    assert_eq!(external.status, 201, "{}", external.body);
+    let external_id = CreateInstanceResponse::deserialize_json(&external.body)
+        .unwrap()
+        .instance;
+    let external_row = request(
+        endpoints.control,
+        "GET",
+        &format!("/v1/instances/{external_id}"),
+        Some(&endpoints.token),
+        "",
+    );
+    assert_eq!(
+        InstanceRow::deserialize_json(&external_row.body)
+            .unwrap()
+            .input_text("prompt", "text")
+            .as_deref(),
+        Some("external")
+    );
+
+    let run_cursor = cursor(endpoints.control, &endpoints.token, "run");
+    let started = request(
+        endpoints.control,
+        "POST",
+        &format!("/v1/instances/{external_id}/runs"),
+        Some(&endpoints.token),
+        &CreateRunRequest::default().serialize_json(),
+    );
+    assert_eq!(started.status, 202, "{}", started.body);
+    let run_id = CreateRunResponse::deserialize_json(&started.body)
+        .unwrap()
+        .run_id;
+    poll_events_until(
+        endpoints.control,
+        &endpoints.token,
+        "run",
+        run_cursor,
+        |event| {
+            event_kind(event) == "run.finished"
+                && event_str(event, "run_id") == Some(run_id.as_str())
+        },
+    );
+
+    assert_eq!(std::fs::read_to_string(path).unwrap(), before);
+    server.shutdown();
+}
 
 // ---------------------------------------------------------------------------
 // 1. §12 headless acceptance: the full instance/run/value pipeline

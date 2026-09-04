@@ -16,7 +16,7 @@ impl Executor for InputExecutor {
             .iter()
             .find_map(|(port, value)| (port == &output.name).then_some(value.clone()))
             .or_else(|| {
-                let default = param(node, "default")?;
+                let default = param(node, "value").or_else(|| param(node, "default"))?;
                 (!matches!(default, Literal::Null))
                     .then(|| Value::from_literal(output.ty, default))
                     .transpose()

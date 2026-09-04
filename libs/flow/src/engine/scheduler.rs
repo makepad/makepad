@@ -514,7 +514,9 @@ fn fail_node(
 fn fallback_outputs(node: &Node) -> Vec<(String, Value)> {
     let mut out = Vec::new();
     for port in &node.outputs {
-        let candidate = if matches!(node.kind.as_str(), "input" | "ask") {
+        let candidate = if node.kind == "input" {
+            param(node, "value").or_else(|| param(node, "default"))
+        } else if node.kind == "ask" {
             param(node, "default")
         } else {
             param(node, &port.name).or_else(|| {

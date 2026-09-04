@@ -54,7 +54,10 @@ mod.flow.Input = mod.flow.Node{
     type_name: "Input"
     /** Value type: text, image, audio, video, mesh, json, or list. */
     type: @text
-    /** Value used when the caller omits this input. */
+    /** Design value from the file, overridable per run by the caller. */
+    value: ""
+    // Read compatibility for flow files written before `value` became the
+    // canonical design setting. The graph evaluator folds this into `value`.
     default: ""
     ui: mod.flow.ui.InputFace
     text: fn() { self.out(@text) }

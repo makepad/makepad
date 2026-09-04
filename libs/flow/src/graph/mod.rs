@@ -218,7 +218,7 @@ enum DefaultValue {
 
 const INPUT_PARAMS: &[ParamSpec] = &[
     ParamSpec::new("type", ParamType::PortTypeNoBytes, DefaultValue::Id("text")),
-    ParamSpec::new("default", ParamType::Literal, DefaultValue::Str("")),
+    ParamSpec::new("value", ParamType::Literal, DefaultValue::Str("")),
 ];
 const OUTPUT_PARAMS: &[ParamSpec] = &[ParamSpec::new(
     "type",
@@ -1111,11 +1111,24 @@ fn extract_node(
     let context = format!("node `{id}`");
     let mut params = Vec::new();
     for param in spec.params {
-        let value = deep_value(vm, obj, param.name).unwrap_or(NIL);
-        let field_source = fields
+        let mut field_source = fields
             .get(param.name)
             .copied()
             .or_else(|| source_field_in_chain(vm, obj, source, file_name, param.name));
+        let value = if spec.kind == "input" && param.name == "value" && field_source.is_none() {
+            let legacy_source = fields
+                .get("default")
+                .copied()
+                .or_else(|| source_field_in_chain(vm, obj, source, file_name, "default"));
+            if legacy_source.is_some() {
+                field_source = legacy_source;
+                deep_value(vm, obj, "default").unwrap_or(NIL)
+            } else {
+                deep_value(vm, obj, param.name).unwrap_or(NIL)
+            }
+        } else {
+            deep_value(vm, obj, param.name).unwrap_or(NIL)
+        };
         let mut literal = literal_from_value(vm, value)
             .map_err(|message| source_range_error(source, field_source, file_name, message, &loc))?;
         validate_param(param, &literal)

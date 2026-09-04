@@ -1226,7 +1226,10 @@ fn setting_row(
                 };
             }
         }
-        if matches!(key, "system" | "prompt" | "question" | "negative" | "default" | "brief")
+        if matches!(
+            key,
+            "system" | "prompt" | "question" | "negative" | "value" | "default" | "brief"
+        )
             || text.contains('\n')
         {
             return Row::Multiline {
@@ -1327,9 +1330,18 @@ pub struct Inspector {
     last_asset_refresh: f64,
     #[rust]
     asset_now_ms: u64,
+    #[rust]
+    locked: bool,
 }
 
 impl Inspector {
+    pub fn set_locked(&mut self, cx: &mut Cx, locked: bool) {
+        if self.locked != locked {
+            self.locked = locked;
+            self.redraw(cx);
+        }
+    }
+
     fn set_tab(&mut self, cx: &mut Cx, tab: InspectorTab) {
         self.tab = tab;
         self.view
@@ -1619,6 +1631,9 @@ impl Inspector {
     /// Edits made in the rows, as actions for the app.
     pub fn changes(&mut self, cx: &mut Cx, actions: &Actions) -> Vec<InspectorAction> {
         let mut out = Vec::new();
+        if self.locked {
+            return out;
+        }
         let mut toggle_advanced = false;
         if self.view.button(cx, ids!(tabs.inspector_tab)).clicked(actions) {
             self.set_tab(cx, InspectorTab::Inspector);
@@ -1982,8 +1997,12 @@ impl Widget for Inspector {
                     } => {
                         item.label(cx, ids!(name)).set_text(cx, key);
                         item.label(cx, ids!(help)).set_text(cx, help);
-                        if !existed {
-                            item.text_input(cx, ids!(value)).set_text(cx, value);
+                        // The row follows the graph (a face edits the same
+                        // param) unless the user is typing in it.
+                        let input = item.text_input(cx, ids!(value));
+                        if !existed || (!cx.has_key_focus(input.area()) && input.text() != *value)
+                        {
+                            input.set_text(cx, value);
                         }
                         let reset = item.button(cx, ids!(reset));
                         reset.set_visible(cx, default.is_some());
@@ -2217,6 +2236,19 @@ impl Widget for Inspector {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.locked
+            && (crate::is_focus_routed_input(event)
+                || matches!(
+                    event,
+                    Event::MouseDown(_)
+                        | Event::MouseMove(_)
+                        | Event::MouseUp(_)
+                        | Event::LongPress(_)
+                        | Event::TouchUpdate(_)
+                ))
+        {
+            return;
+        }
         self.view.handle_event(cx, event, scope);
     }
 }
@@ -2813,7 +2845,7 @@ impl AppView {
         if let Some(faces) = scope.data.get_mut::<FaceHost>() {
             faces.draw_face(cx, &node.id, Walk::fill_fit(), false);
         } else {
-            let text = param_text(node, "default");
+            let text = param_text(node, "value");
             let rect = cx.walk_turtle(Walk::fixed(width - 24.0, 20.0));
             self.draw_text.draw_abs(cx, rect.pos, &text);
         }

@@ -841,6 +841,10 @@ pub struct FlowCanvas {
     cursor: DVec2,
     #[rust]
     face_roots: Vec<(LiveId, WidgetRef)>,
+    /// A run attachment keeps the face visible beneath a subtle lock veil;
+    /// the host separately disables the mounted controls.
+    #[rust]
+    faces_locked: bool,
     #[rust]
     next_frame: NextFrame,
     #[rust]
@@ -983,6 +987,13 @@ impl FlowCanvas {
         self.face_roots = roots;
         cx.widget_tree_mark_dirty(self.uid);
         self.redraw(cx);
+    }
+
+    pub fn set_faces_locked(&mut self, cx: &mut Cx, locked: bool) {
+        if self.faces_locked != locked {
+            self.faces_locked = locked;
+            self.redraw(cx);
+        }
     }
 
     pub fn set_graph(&mut self, cx: &mut Cx, graph: Option<Graph>) {
@@ -2591,6 +2602,29 @@ impl FlowCanvas {
         changed
     }
 
+    fn draw_locked_face_overlay(&mut self, cx: &mut Cx2d, graph: &Graph, indices: &[usize]) {
+        if !self.faces_locked {
+            return;
+        }
+        self.draw_over.begin();
+        self.draw_over.set_color(0.0, 0.0, 0.0, 0.06);
+        for index in indices.iter().copied() {
+            let node = &graph.nodes[index];
+            let card = self.card_rect(graph, index);
+            let content =
+                card_content_rect(card, Self::full_bleed(node), Self::port_rows(node));
+            self.draw_over.rounded_rect(
+                content.rect.pos.x as f32,
+                content.rect.pos.y as f32,
+                content.rect.size.x as f32,
+                content.rect.size.y as f32,
+                4.0,
+            );
+            self.draw_over.fill();
+        }
+        self.draw_over.end(cx);
+    }
+
     /// Ports and progress bars: the second batch, above the faces (a picture
     /// fills its card to the edges the ports sit on).
     fn draw_overlays(&mut self, cx: &mut Cx2d, graph: &Graph, indices: &[usize]) {
@@ -3089,6 +3123,7 @@ impl Widget for FlowCanvas {
                 // emitted last and remains above the complete card.
                 self.draw_card(cx, &graph, one);
                 heights_changed |= self.draw_faces(cx, scope, &graph, one);
+                self.draw_locked_face_overlay(cx, &graph, one);
                 self.draw_overlays(cx, &graph, one);
                 self.draw_labels(cx, &graph, one);
                 card_list.end(cx);
