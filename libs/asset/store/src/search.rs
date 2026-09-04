@@ -449,7 +449,8 @@ pub struct SearchFilters<'a> {
 #[derive(Clone, Copy, Debug)]
 pub struct SearchQuery<'a> {
     /// Lexical query text. Empty text is browse mode: filters only, ordered
-    /// by asset_id. Non-empty text must yield at least one term.
+    /// by alias unless newest is set. Non-empty text must yield at least one
+    /// term.
     pub text: &'a str,
     pub filters: SearchFilters<'a>,
     pub page_size: u32,
@@ -459,6 +460,8 @@ pub struct SearchQuery<'a> {
     /// is the escape hatch for a caller that means the literal words it typed
     /// (the HTTP routes spell it `exact=1`).
     pub expand: bool,
+    /// In empty-text browse mode, order by newest indexed timestamp first.
+    pub newest: bool,
     /// How many facet rows to return with the page; 0 asks for none.
     ///
     /// Facets ride the page rather than a route of their own so they are
@@ -830,9 +833,9 @@ fn build_snippet(title: &str, description: &str, terms: &[String], max_bytes: us
 // before ANY index mutation refuses as stale rather than skipping or
 // duplicating rows under a changed total order.
 
-const CURSOR_VERSION: u8 = 2;
+const CURSOR_VERSION: u8 = 3;
 /// Everything except the variable alias bytes.
-const CURSOR_FIXED_LEN: usize = 1 + 8 + 32 + 8 + 2 + 16 + 8;
+const CURSOR_FIXED_LEN: usize = 1 + 8 + 32 + 8 + 8 + 2 + 16 + 8;
 const CURSOR_CHECK_LEN: usize = 8;
 /// Longest encoded search cursor: the fixed frame plus a maximal alias.
 /// The HTTP routes decode cursors against THIS bound — a smaller one turned
@@ -843,6 +846,7 @@ pub const MAX_SEARCH_CURSOR_BYTES: usize = CURSOR_FIXED_LEN + MAX_ALIAS_BYTES;
 /// total order `score DESC, canon_alias ASC, asset_id ASC`.
 struct Keyset {
     generation: u64,
+    updated_ms: u64,
     score: u64,
     alias: String,
     asset: [u8; 16],
@@ -857,6 +861,7 @@ fn cursor_check(body: &[u8]) -> [u8; CURSOR_CHECK_LEN] {
 fn encode_cursor(
     generation: u64,
     fp: &[u8; 32],
+    updated_ms: u64,
     score: u64,
     alias: &str,
     asset: &AssetId,
@@ -865,6 +870,7 @@ fn encode_cursor(
     out.push(CURSOR_VERSION);
     out.extend_from_slice(&generation.to_be_bytes());
     out.extend_from_slice(fp);
+    out.extend_from_slice(&updated_ms.to_be_bytes());
     out.extend_from_slice(&score.to_be_bytes());
     // Alias length always fits u16: the catalog admits at most
     // MAX_ALIAS_BYTES (128) bytes per alias.
@@ -885,7 +891,7 @@ fn decode_cursor(bytes: &[u8], expect_fp: &[u8; 32]) -> ServerResult<Keyset> {
         return Err(malformed);
     }
     let mut n = [0u8; 2];
-    n.copy_from_slice(&bytes[49..51]);
+    n.copy_from_slice(&bytes[57..59]);
     let n = u16::from_be_bytes(n) as usize;
     if n > MAX_ALIAS_BYTES || bytes.len() != CURSOR_FIXED_LEN + n {
         return Err(malformed);
@@ -900,15 +906,18 @@ fn decode_cursor(bytes: &[u8], expect_fp: &[u8; 32]) -> ServerResult<Keyset> {
     let mut generation = [0u8; 8];
     generation.copy_from_slice(&bytes[1..9]);
     let mut score = [0u8; 8];
-    score.copy_from_slice(&bytes[41..49]);
+    score.copy_from_slice(&bytes[49..57]);
     // The check passed, so these are bytes we encoded: the alias is valid
     // UTF-8 by construction. Refuse (not panic) on the impossible case.
     let alias =
-        String::from_utf8(bytes[51..51 + n].to_vec()).map_err(|_| malformed)?;
+        String::from_utf8(bytes[59..59 + n].to_vec()).map_err(|_| malformed)?;
     let mut asset = [0u8; 16];
-    asset.copy_from_slice(&bytes[51 + n..51 + n + 16]);
+    asset.copy_from_slice(&bytes[59 + n..59 + n + 16]);
+    let mut updated_ms = [0u8; 8];
+    updated_ms.copy_from_slice(&bytes[41..49]);
     Ok(Keyset {
         generation: u64::from_be_bytes(generation),
+        updated_ms: u64::from_be_bytes(updated_ms),
         score: u64::from_be_bytes(score),
         alias,
         asset,
@@ -1624,7 +1633,15 @@ impl<'a> Search<'a> {
             groups.iter().flat_map(|g| g.all().cloned()).collect();
 
         // -- fingerprint the full query shape for cursor binding -------------
-        let fp = fingerprint(&groups, browse, f, viewer, &scope_namespaces, query.page_size);
+        let fp = fingerprint(
+            &groups,
+            browse,
+            query.newest,
+            f,
+            viewer,
+            &scope_namespaces,
+            query.page_size,
+        );
         let keyset = match cursor {
             None => None,
             Some(bytes) => Some(decode_cursor(bytes, &fp)?),
@@ -1641,7 +1658,16 @@ impl<'a> Search<'a> {
                 }
             }
             let (count_sql, count_binds) =
-                build_sql(&groups, browse, f, &viewer.principal, &scope_namespaces, None, None);
+                build_sql(
+                    &groups,
+                    browse,
+                    query.newest,
+                    f,
+                    &viewer.principal,
+                    &scope_namespaces,
+                    None,
+                    None,
+                );
             let mut s = db.prepare("search count", &count_sql)?;
             apply_binds(&mut s, &count_binds)?;
             s.step()?;
@@ -1653,6 +1679,7 @@ impl<'a> Search<'a> {
             let (page_sql, page_binds) = build_sql(
                 &groups,
                 browse,
+                query.newest,
                 f,
                 &viewer.principal,
                 &scope_namespaces,
@@ -1715,6 +1742,7 @@ impl<'a> Search<'a> {
                 Some(encode_cursor(
                     generation,
                     &fp,
+                    last.updated_ms,
                     last.score,
                     last.alias.as_deref().unwrap_or(""),
                     &last.asset_id,
@@ -1763,6 +1791,7 @@ impl<'a> Search<'a> {
 fn fingerprint(
     groups: &[TermGroup],
     browse: bool,
+    newest: bool,
     f: &SearchFilters<'_>,
     viewer: &SearchViewer<'_>,
     scope: &Option<Vec<&str>>,
@@ -1771,6 +1800,7 @@ fn fingerprint(
     let mut buf = Vec::new();
     buf.push(CURSOR_VERSION);
     buf.push(browse as u8);
+    buf.push(newest as u8);
     // Groups, not bare terms: two queries that read the same but expand
     // differently (`exact=1`, a changed table) are different shapes, and a
     // cursor from one refuses against the other.
@@ -1935,7 +1965,7 @@ mod tests {
     #[test]
     fn longest_cursor_fits_the_route_bound() {
         let alias = "a".repeat(MAX_ALIAS_BYTES);
-        let bytes = encode_cursor(7, &[3u8; 32], 9, &alias, &AssetId::from_bytes([1u8; 16]));
+        let bytes = encode_cursor(7, &[3u8; 32], 0, 9, &alias, &AssetId::from_bytes([1u8; 16]));
         assert_eq!(bytes.len(), MAX_SEARCH_CURSOR_BYTES);
         assert!(
             decode_cursor(&bytes, &[3u8; 32]).is_ok(),
@@ -1945,7 +1975,7 @@ mod tests {
         // 53-byte alias room and must round-trip too.
         let long = "kenney/modular-dungeon-kit/wall-doorway-round-cracked-narrow";
         assert!(long.len() > 53);
-        let bytes = encode_cursor(1, &[0u8; 32], 1, long, &AssetId::from_bytes([2u8; 16]));
+        let bytes = encode_cursor(1, &[0u8; 32], 0, 1, long, &AssetId::from_bytes([2u8; 16]));
         assert!(bytes.len() > 128, "this cursor exceeds the old bound");
         assert!(bytes.len() <= MAX_SEARCH_CURSOR_BYTES);
         assert!(decode_cursor(&bytes, &[0u8; 32]).is_ok());
@@ -2037,6 +2067,7 @@ fn build_facet_sql(
 fn build_sql(
     groups: &[TermGroup],
     browse: bool,
+    newest: bool,
     f: &SearchFilters<'_>,
     principal: &Option<PrincipalId>,
     scope: &Option<Vec<&str>>,
@@ -2045,11 +2076,14 @@ fn build_sql(
 ) -> (String, Vec<Bind>) {
     let counting = limit.is_none();
     let (mut sql, mut binds) = build_candidate_sql(groups, browse, f, principal, scope);
-    // Keyset: resume strictly after (score DESC, canon_alias ASC, asset ASC).
-    // In browse mode every score is 0, so the score comparison degenerates
-    // and only the (alias, asset) tail remains.
+    // Keyset: resume strictly after the selected total order.
     if let Some(k) = keyset {
-        if browse {
+        if browse && newest {
+            sql.push_str(" AND (a.updated_ms < ? OR (a.updated_ms = ? AND a.asset_id > ?))");
+            binds.push(Bind::U64(k.updated_ms));
+            binds.push(Bind::U64(k.updated_ms));
+            binds.push(Bind::Blob(k.asset.to_vec()));
+        } else if browse {
             sql.push_str(" AND (a.canon_alias > ? OR (a.canon_alias = ? AND a.asset_id > ?))");
             binds.push(Bind::Text(k.alias.clone()));
             binds.push(Bind::Text(k.alias.clone()));
@@ -2069,7 +2103,9 @@ fn build_sql(
         sql.insert_str(0, "SELECT COUNT(*) FROM (");
         sql.push(')');
     } else {
-        if browse {
+        if browse && newest {
+            sql.push_str(" ORDER BY a.updated_ms DESC, a.asset_id ASC");
+        } else if browse {
             sql.push_str(" ORDER BY a.canon_alias ASC, a.asset_id ASC");
         } else {
             sql.push_str(" ORDER BY score DESC, a.canon_alias ASC, a.asset_id ASC");

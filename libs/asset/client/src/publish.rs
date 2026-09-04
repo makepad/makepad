@@ -38,7 +38,7 @@ use makepad_asset_data::{
     Anchor, AssetAlias, AssetFile, AssetId, AssetKind, AssetManifest, AssetRevisionId,
     AssetRevisionRef, Axis, BlobId, Bounds, Capabilities, CoordinateSystem, DerivativePolicy,
     DeviceTier, FileRole, ImageDims, MediaType, Metrics, Pivot, Provenance, Redistribution,
-    Rights, ThumbnailMedia, ThumbnailMeta, ThumbnailView, Vec3,
+    Rights, SpawnRecipe, ThumbnailMedia, ThumbnailMeta, ThumbnailView, Vec3,
 };
 
 /// The playable media file being published.
@@ -585,6 +585,8 @@ pub struct PublishBundle {
     pub coordinate_system: CoordinateSystem,
     pub anchors: Vec<Anchor>,
     pub capabilities: Capabilities,
+    /// Bounded data-only spawn contract; required when spawnable is true.
+    pub spawn_recipe: Option<SpawnRecipe>,
     /// Playback length in ms when the bundle carries timed media.
     pub media_millis: u32,
     pub categories: Vec<String>,
@@ -654,6 +656,7 @@ impl PublishBundle {
                 loopable: matches!(kind, AssetKind::Audio | AssetKind::Video),
                 ..Capabilities::default()
             },
+            spawn_recipe: None,
             media_millis: 0,
             categories: Vec::new(),
             tags: Vec::new(),
@@ -871,7 +874,7 @@ impl PublishBundle {
             bounds: self.bounds,
             anchors: self.anchors.clone(),
             capabilities: self.capabilities,
-            spawn_recipe: None,
+            spawn_recipe: self.spawn_recipe.clone(),
             provenance: self.manifest_provenance.as_ref().map(|p| Provenance {
                 generator: p.generator.clone(),
                 model: p.model.clone(),
@@ -1872,6 +1875,30 @@ mod tests {
         let mut b = bundle();
         b.stats.triangles = 0;
         assert!(manifest_of(&b, AssetId::from_bytes([1; 16])).is_err());
+    }
+
+    #[test]
+    fn bundle_spawn_recipe_roundtrips_and_keeps_the_contract_fail_closed() {
+        let mut b = bundle();
+        let asset = AssetId::from_bytes([1; 16]);
+        b.capabilities.spawnable = true;
+        assert!(
+            manifest_of(&b, asset).is_err(),
+            "missing recipe must still refuse"
+        );
+        b.spawn_recipe = Some(SpawnRecipe {
+            class: makepad_asset_data::PrefabClass::Prop,
+            params: vec![],
+        });
+        let (bytes, _, _) = manifest_of(&b, asset).unwrap();
+        let manifest = AssetManifest::from_canonical_bytes(&bytes).unwrap();
+        assert_eq!(manifest.spawn_recipe, b.spawn_recipe);
+        assert!(manifest.capabilities.spawnable);
+        b.capabilities.spawnable = false;
+        assert!(
+            manifest_of(&b, asset).is_err(),
+            "recipe and capability must agree"
+        );
     }
 
     #[test]

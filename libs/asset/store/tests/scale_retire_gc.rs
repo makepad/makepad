@@ -179,6 +179,7 @@ fn browse(core: &AssetServerCore, text: &str) -> (usize, u64, Duration) {
                 filters: SearchFilters::default(),
                 expand: false,
                 page_size: 100,
+                newest: false,
                 facets: 0,
             },
             &SearchViewer { principal: None, scope: ViewerScope::All },

@@ -26,6 +26,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(test)]
+#[path = "runner_submission_tests.rs"]
+mod submission_tests;
+
 /// Rough job cost for compatibility callers that use the original fleet ETA
 /// API instead of supplying a translated request.
 pub fn stage_cost(domain: &str) -> f64 {
@@ -97,6 +101,7 @@ pub struct Generated {
     /// `Some` when the kind publishes a catalog row.
     pub asset_id: Option<String>,
     pub revision: Option<String>,
+    pub alias: Option<String>,
     /// Text answer, for text kinds (`text.expand`, vision).
     pub text: Option<String>,
 }
@@ -110,18 +115,7 @@ pub struct PublishTarget {
 }
 
 fn domain_of(name: &str) -> Option<Domain> {
-    Some(match name {
-        "image" => Domain::Image,
-        "video" => Domain::Video,
-        "audio" => Domain::Audio,
-        "mesh" => Domain::Mesh,
-        "text" => Domain::Text,
-        "speech" => Domain::Speech,
-        "world" => Domain::World,
-        "matte" => Domain::Matte,
-        "depth" => Domain::Depth,
-        _ => return None,
-    })
+    Domain::parse(name)
 }
 
 /// Translate one store-vocabulary job body into the typed fleet request.
@@ -151,6 +145,8 @@ pub struct GeneratedBytes {
     pub text: Option<String>,
     /// The node's base url, for a card that says where it ran.
     pub node: String,
+    /// The remote job this invocation owns, after a successful submission.
+    pub job_id: String,
 }
 
 /// Generate one thing and hand back what came out — no catalog, no store.
@@ -169,64 +165,136 @@ pub fn generate_bytes(
     Err("asset creator LAN fleet is unavailable on wasm".to_string())
 }
 
-// LAN fleet discovery and its polling loop are native-only.
+/// Cancellation is queried directly, even between progress messages.
+pub trait Cancellation {
+    fn cancelled(&self) -> bool;
+}
+impl Cancellation for Arc<AtomicBool> {
+    fn cancelled(&self) -> bool { self.load(Ordering::Relaxed) }
+}
+impl Cancellation for makepad_asset_chat::session::CancelFlag {
+    fn cancelled(&self) -> bool { self.is_cancelled() }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CreateError {
+    Unavailable(String),
+    Failed(String),
+    Cancelled,
+}
+impl std::fmt::Display for CreateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable(s) => write!(f, "unavailable: {s}"),
+            Self::Failed(s) => f.write_str(s),
+            Self::Cancelled => f.write_str("cancelled"),
+        }
+    }
+}
+impl From<AssetAiError> for CreateError {
+    fn from(error: AssetAiError) -> Self {
+        match error {
+            AssetAiError::Cancelled => Self::Cancelled,
+            AssetAiError::Unavailable(s) => Self::Unavailable(s),
+            other => Self::Failed(other.to_string()),
+        }
+    }
+}
+pub fn check_cancel(cancel: &dyn Cancellation) -> Result<(), CreateError> {
+    if cancel.cancelled() { Err(CreateError::Cancelled) } else { Ok(()) }
+}
+
+pub struct RoutedProvider {
+    pub provider: Box<dyn ContentProvider>,
+    pub model: String,
+    pub node: String,
+}
+
+/// The shipping executor's routing seam. Tests inject transports here; the
+/// native implementation always uses the ordinary live capability/ETA gate.
+pub trait GenerationTransport {
+    fn route(&self, domain: &str, request: &GenerateRequestJson) -> Result<RoutedProvider, CreateError>;
+}
+pub struct FleetTransport;
+impl GenerationTransport for FleetTransport {
+    fn route(&self, domain: &str, request: &GenerateRequestJson) -> Result<RoutedProvider, CreateError> {
+        #[cfg(target_arch = "wasm32")]
+        { let _ = (domain, request); Err(CreateError::Unavailable("LAN fleet unavailable on wasm".into())) }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (provider, model) = pick_node_for_request(domain, request)?;
+            let node = provider.base_url().to_string();
+            Ok(RoutedProvider { provider: Box::new(provider), model, node })
+        }
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn generate_bytes(
-    kind_name: &str,
-    body: &Value,
-    seed_fallback: u64,
-    cancel: &Arc<AtomicBool>,
-    progress: &mut dyn FnMut(&str, u16),
+    kind_name: &str, body: &Value, seed_fallback: u64,
+    cancel: &Arc<AtomicBool>, progress: &mut dyn FnMut(&str, u16),
 ) -> Result<GeneratedBytes, String> {
-    let (kind, request, mut wire) = translate(kind_name, body, seed_fallback)?;
-    let domain = kind.domain;
-    let parsed_domain =
-        domain_of(domain).ok_or_else(|| format!("unroutable domain {domain}"))?;
-    let (service, picked_model) =
-        pick_node_for_request(domain, &wire).map_err(|e| e.to_string())?;
-    if wire.model.is_empty() {
-        wire.model = picked_model;
-    }
-    let node = service.base_url().to_string();
-    let remote = service
-        .request(parsed_domain, &wire)
-        .map_err(|e| e.to_string())?;
-    progress("queued-on-fleet", 0);
+    let (_, request, wire) = translate(kind_name, body, seed_fallback)?;
+    generate_request(request, wire, &FleetTransport, cancel, progress, Duration::from_millis(500))
+        .map_err(|e| e.to_string())
+}
 
-    use makepad_ai_hub::protocol::{JOB_STATE_CANCELLED, JOB_STATE_DONE, JOB_STATE_ERROR};
-    let (artifact_ref, text) = loop {
-        if cancel.load(Ordering::Relaxed) {
-            let _ = service.cancel(&remote);
-            return Err("cancelled".to_string());
-        }
-        let status = service.poll(&remote).map_err(|e| e.to_string())?;
-        match status.state.as_str() {
-            JOB_STATE_DONE => break (status.artifacts.first().cloned(), status.text),
-            JOB_STATE_ERROR => {
-                return Err(status.error.unwrap_or_else(|| "job error".to_string()))
-            }
-            JOB_STATE_CANCELLED => return Err("cancelled".to_string()),
-            _ => {
-                progress(
-                    status.stage.as_deref().unwrap_or(""),
-                    (status.progress.unwrap_or(0.0).clamp(0.0, 1.0) * 1000.0) as u16,
-                );
-            }
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        std::thread::sleep(Duration::from_millis(500));
-        #[cfg(target_arch = "wasm32")]
-        std::hint::spin_loop();
-    };
-
-    if kind.catalog().is_none() {
-        return Ok(GeneratedBytes { kind, request, artifact: None, text, node });
+/// Submit, own, poll and fetch ONE real job. Every early exit after submit
+/// relinquishes that job. No UI thread, per-job thread, or progress-driven
+/// cancellation bridge is involved.
+pub fn generate_request(
+    mut request: GenRequest, mut wire: GenerateRequestJson,
+    transport: &dyn GenerationTransport, cancel: &dyn Cancellation,
+    progress: &mut dyn FnMut(&str, u16), poll_interval: Duration,
+) -> Result<GeneratedBytes, CreateError> {
+    check_cancel(cancel)?;
+    let kind = request.kind;
+    let domain = domain_of(kind.domain)
+        .ok_or_else(|| CreateError::Unavailable(format!("unroutable domain {}", kind.domain)))?;
+    if kind.input != makepad_asset_importer::gen_kinds::InputNeed::None
+        && wire.input_b64.is_none() && wire.inputs.is_none() {
+        return Err(CreateError::Failed(format!("{} requires {} input bytes", kind.kind, kind.input.content_type())));
     }
-    let artifact_ref = artifact_ref.ok_or("the job finished without an artifact")?;
-    let bytes = service
-        .fetch_artifact(&artifact_ref.id)
-        .map_err(|e| format!("artifact fetch: {e}"))?;
-    Ok(GeneratedBytes { kind, request, artifact: Some(bytes), text, node })
+    let routed = transport.route(kind.domain, &wire)?;
+    if wire.model.is_empty() { wire.model = routed.model; }
+    request.model = wire.model.clone();
+    request.seed = wire.seed;
+    check_cancel(cancel)?;
+    let service = routed.provider;
+    let remote = service.request_pending(domain, &wire, &|| cancel.cancelled(),
+        &mut |note| progress(note, 0))?;
+    progress(&format!("job {} on {}", remote, routed.node), 0);
+    let result = (|| {
+        use makepad_ai_hub::protocol::{JOB_STATE_CANCELLED, JOB_STATE_DONE, JOB_STATE_ERROR};
+        let status = loop {
+            check_cancel(cancel)?;
+            let status = service.poll(&remote)?;
+            match status.state.as_str() {
+                JOB_STATE_DONE => break status,
+                JOB_STATE_ERROR => return Err(CreateError::Failed(status.error.unwrap_or_else(|| "job error".into()))),
+                JOB_STATE_CANCELLED => return Err(CreateError::Cancelled),
+                _ => progress(status.stage.as_deref().unwrap_or("running"),
+                    (status.progress.unwrap_or(0.0).clamp(0.0, 1.0) * 1000.0) as u16),
+            }
+            service.keepalive(&remote)?;
+            std::thread::sleep(poll_interval);
+        };
+        check_cancel(cancel)?;
+        let artifact = if let Some(shape) = kind.catalog() {
+            let reference = status.artifacts.first()
+                .ok_or_else(|| CreateError::Failed("job finished without an artifact".into()))?;
+            let bytes = service.fetch_artifact(&reference.id)?;
+            check_cancel(cancel)?;
+            makepad_ai_hub::client::verify_artifact_bytes(&bytes.bytes, reference)?;
+            if !shape.content_types.contains(&bytes.content_type.as_str()) {
+                return Err(CreateError::Failed(format!("{} returned {}", kind.kind, bytes.content_type)));
+            }
+            Some(bytes)
+        } else { None };
+        Ok(GeneratedBytes { kind, request, artifact, text: status.text, node: routed.node, job_id: remote.clone() })
+    })();
+    if result.is_err() { let _ = service.cancel(&remote); }
+    result
 }
 
 /// Generate one thing and, when its kind publishes, put it in the catalog.
@@ -240,9 +308,17 @@ pub fn generate_and_publish(
     progress: &mut dyn FnMut(&str, u16),
 ) -> Result<Generated, String> {
     let generated = generate_bytes(kind_name, body, seed_fallback, cancel, progress)?;
+    publish_generated(generated, seed_fallback, target, cancel, progress)
+}
+
+pub fn publish_generated(
+    generated: GeneratedBytes, seed_fallback: u64, target: &PublishTarget,
+    cancel: &dyn Cancellation, progress: &mut dyn FnMut(&str, u16),
+) -> Result<Generated, String> {
+    check_cancel(cancel).map_err(|e| e.to_string())?;
     let GeneratedBytes { kind, request, artifact, text, .. } = generated;
     let Some(bytes) = artifact else {
-        return Ok(Generated { asset_id: None, revision: None, text });
+        return Ok(Generated { asset_id: None, revision: None, alias: None, text });
     };
     progress("publishing", 950);
 
@@ -256,7 +332,14 @@ pub fn generate_and_publish(
         target.namespace,
         seed_fallback ^ 0x5EED_CAFE_F00D_D00D
     );
-    let publish = dress_generated_publish(
+    let character = if matches!(kind.domain, "rig" | "motion") {
+        let facts = crate::character::inspect_character(&bytes.bytes)?;
+        if !facts.skinned || kind.domain == "motion" && facts.clips.is_empty() {
+            return Err("character output lacks a skin or required motion clips".into());
+        }
+        Some(facts)
+    } else { None };
+    let mut publish = dress_generated_publish(
         kind,
         &target.namespace,
         &request,
@@ -270,12 +353,19 @@ pub fn generate_and_publish(
         String::new(),
         PublishRights::generated_cc0(),
     )?;
+    if let Some(facts) = character {
+        if facts.playable { publish.tags.push("playable".into()); }
+        publish.description.push_str(&format!(" Skin: skinned GLB. Clips: {}. Playable locomotion set: {}.",
+            facts.clips.join(", "), facts.playable));
+    }
+    check_cancel(cancel).map_err(|e| e.to_string())?;
     let published = client
         .publish_artifact(&publish)
         .map_err(|e| format!("publish: {e}"))?;
     Ok(Generated {
         asset_id: Some(published.asset_id.to_string()),
         revision: Some(published.revision.to_string()),
+        alias: Some(alias_text),
         text,
     })
 }

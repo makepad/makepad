@@ -42,6 +42,7 @@ fn main() {
             filters: SearchFilters::default(),
             expand: false,
             page_size: 100,
+            newest: false,
             facets: 0,
         };
     let t = Instant::now();

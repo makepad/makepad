@@ -117,8 +117,8 @@ pub struct WorldNav {
     pub eye_height: Option<f32>,
     /// Doors the exporter turned into animated `door_N` nodes.
     pub doors: Vec<NavDoor>,
-    /// Lifts, same shape as doors: `closed_y` is the UP floor it rests at,
-    /// `open_y` the DOWN floor it travels to (so travel is negative).
+    /// Lifts, same shape as doors: `closed_y` is the authored starting
+    /// floor and `open_y` the activated destination (travel may rise or fall).
     pub lifts: Vec<NavDoor>,
     /// Teleport pads and where they land.
     pub teleports: Vec<NavTeleport>,

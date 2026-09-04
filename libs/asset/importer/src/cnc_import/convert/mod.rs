@@ -130,6 +130,30 @@ pub struct SpriteState {
     pub fps: u8,
 }
 
+/// TD/RA walls store N/E/S/W adjacency in the low four frame bits, not
+/// animation steps. Keep an indexed bank for the map and a still for the
+/// library preview. TD/RA's final 16-frame bank contains destroyed remnants
+/// (its isolated-wall frame is empty), not a live damaged wall. Sandbags
+/// have 32 frames and no live damage bank; cyclone/brick have 48/64.
+/// See EA's TIBERIANDAWN CELL.CPP Wall_Update and ODATA.CPP damage levels.
+pub fn wall_states(frame_count: usize) -> Vec<SpriteState> {
+    if frame_count == 0 {
+        return Vec::new();
+    }
+    let still = |name, first, last| SpriteState {
+        name, first, last, looping: false, fps: 1,
+    };
+    let mut states = vec![
+        still("idle", 0, 1),
+        still("adjacency", 0, frame_count.min(16)),
+    ];
+    if frame_count >= 48 {
+        states.push(still("damaged", 16, 17));
+        states.push(still("damaged_adjacency", 16, 32));
+    }
+    states
+}
+
 #[derive(Clone, Debug)]
 pub struct UnitSpec {
     /// Contract-exact `unit`, `weapon`, and `sound` lines.
@@ -784,6 +808,89 @@ fn make_parent(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wall_preview_is_static_and_complete_banks_remain_indexable() {
+        assert!(wall_states(0).is_empty());
+        for count in [1, 16, 17, 32, 33, 48, 49, 64] {
+            let states = wall_states(count);
+            assert_eq!((states[0].name, states[0].first, states[0].last), ("idle", 0, 1));
+            assert_eq!((states[1].first, states[1].last), (0, count.min(16)));
+            assert_eq!(states.len(), if count >= 48 { 4 } else { 2 });
+            for state in &states {
+                assert!(!state.looping);
+                assert!(state.first < state.last && state.last <= count);
+            }
+            if count >= 48 {
+                assert_eq!((states[3].name, states[3].first, states[3].last), ("damaged_adjacency", 16, 32));
+            }
+        }
+    }
+
+    /// Read the real local packs without exporting/reimporting any assets.
+    /// CNC_PACKS_ROOT may point at a read-only checkout's local/packs.
+    #[test]
+    #[ignore = "requires the local TD/RA game archives"]
+    fn real_td_ra_wall_metadata_preserves_adjacency_and_damage_banks() {
+        use crate::cnc_import::{mix::MixFile, shp::Shp};
+        let packs = std::env::var_os("CNC_PACKS_ROOT").map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                let mut root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+                loop {
+                    let candidate = root.join("local/packs");
+                    if candidate.is_dir() { break candidate; }
+                    assert!(root.pop(), "set CNC_PACKS_ROOT to local/packs");
+                }
+            });
+        let mut checked = 0;
+        for game in ["cnc", "ra"] {
+            let bytes = std::fs::read(packs.join(game).join("conquer.mix")).expect("conquer.mix");
+            let mix = MixFile::parse(&bytes).expect("valid MIX");
+            for key in ["sbag", "cycl", "brik", "barb", "wood", "fenc"] {
+                if game == "cnc" && key == "fenc" { continue; }
+                let filename = format!("{}.SHP", key.to_ascii_uppercase());
+                let raw = mix.by_name(&filename).unwrap_or_else(|| panic!("{game}/{filename}"));
+                let shp = Shp::parse(raw).expect("valid real wall SHP");
+                let count = shp.frames().len();
+                let expected = match key { "cycl" => 48, "brik" => 64, _ => 32 };
+                assert_eq!(count, expected, "{game}/{key}");
+                assert!(shp.frames()[0].iter().any(|&pixel| pixel != 0), "healthy isolated wall is visible");
+                assert!(shp.frames()[count - 16].iter().all(|&pixel| pixel == 0), "final isolated-wall remnant is empty");
+                let states = wall_states(count);
+                assert_eq!(states.iter().any(|s| s.name == "damaged_adjacency"), count >= 48,
+                    "a 32-frame sandbag must never use its empty remnant as a live damaged wall");
+                let mut sheet = StatefulBillboard::default();
+                sheet.prefix = key.into();
+                sheet.preview = "idle".into();
+                sheet.facings = 1;
+                sheet.frames = shp.frames().iter().enumerate().map(|(i, pixels)| {
+                    assert_eq!(pixels.len(), usize::from(shp.width()) * usize::from(shp.height()));
+                    SpriteFrame { letter: 'A', rot: 0, w: shp.width().into(), h: shp.height().into(),
+                        file: format!("{key}-{i}.png"), flip: false, cell: None }
+                }).collect();
+                sheet.states = states.iter().map(|state| AnimState {
+                    name: state.name.into(), first: state.first, last: state.last,
+                    r#loop: state.looping, fps: state.fps,
+                }).collect();
+                let parsed = StatefulBillboard::parse(&sheet.to_text()).expect("wall manifest roundtrip");
+                assert_eq!(parsed.frames.len(), count, "damage drawings retained");
+                assert_eq!(parsed.preview_frames().len(), 1);
+                assert!(parsed.states.iter().all(|state| !state.r#loop));
+                for (bank, first) in [("adjacency", 0), ("damaged_adjacency", 16)] {
+                    if first == 16 && count < 48 { continue; }
+                    let frames = parsed.frames_for_state_facing(bank, 0);
+                    assert_eq!(frames.len(), 16);
+                    for mask in 0..16 {
+                        assert_eq!(frames[mask].frame.file, format!("{key}-{}.png", first + mask));
+                    }
+                }
+                println!("WALL_REAL {game}/{key} {}x{} frames={count} healthy=16 damaged={} preview=1 loop=false",
+                    shp.width(), shp.height(), if count >= 48 { 16 } else { 0 });
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 11);
+    }
 
     #[test]
     fn cnc_import_cell_metres_respects_playable_origin() {

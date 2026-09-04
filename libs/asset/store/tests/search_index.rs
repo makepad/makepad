@@ -43,6 +43,7 @@ fn q(text: &str) -> SearchQuery<'_> {
         filters: SearchFilters::default(),
         expand: false,
         page_size: 10,
+        newest: false,
         facets: 0,
     }
 }
@@ -300,10 +301,10 @@ fn cursor_tampering_and_hostile_bytes_fail_closed() {
     malformed(search.search(&one, &ANYONE, Some(b"")).unwrap_err());
     malformed(search.search(&one, &ANYONE, Some(&vec![0u8; 10_000])).unwrap_err());
     let mut bad = cursor.clone();
-    bad[49..51].copy_from_slice(&200u16.to_be_bytes());
+    bad[57..59].copy_from_slice(&200u16.to_be_bytes());
     malformed(search.search(&one, &ANYONE, Some(&bad)).unwrap_err());
     let mut bad = cursor.clone();
-    bad[49..51].copy_from_slice(&5u16.to_be_bytes());
+    bad[57..59].copy_from_slice(&5u16.to_be_bytes());
     malformed(search.search(&one, &ANYONE, Some(&bad)).unwrap_err());
 
     // The genuine cursor still works after all hostile traffic.
@@ -342,11 +343,11 @@ fn cursor_tampering_and_hostile_bytes_fail_closed() {
     let cursor = page.cursor.expect("third hit remains");
     // Flip a byte inside the alias region.
     let mut bad = cursor.clone();
-    bad[55] ^= 1;
+    bad[60] ^= 1;
     tampered(search.search(&two, &ANYONE, Some(&bad)).unwrap_err());
     // Forge the alias length on an alias-carrying cursor.
     let mut bad = cursor.clone();
-    bad[49..51].copy_from_slice(&0u16.to_be_bytes());
+    bad[57..59].copy_from_slice(&0u16.to_be_bytes());
     malformed(search.search(&two, &ANYONE, Some(&bad)).unwrap_err());
     let page = search.search(&two, &ANYONE, Some(&cursor)).unwrap();
     assert_eq!(

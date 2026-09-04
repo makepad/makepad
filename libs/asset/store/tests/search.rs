@@ -48,6 +48,7 @@ fn q<'a>(text: &'a str) -> SearchQuery<'a> {
         filters: SearchFilters::default(),
         expand: false,
         page_size: 10,
+        newest: false,
         facets: 0,
     }
 }
@@ -360,6 +361,32 @@ fn exclude_tag_is_applied_server_side_and_composes() {
     without.page_size = 1;
     assert!(matches!(
         search.search(&without, &ANYONE, Some(&first)).unwrap_err(),
+        ServerError::InvalidInput { what: "stale search cursor" }
+    ));
+}
+
+#[test]
+fn newest_browse_pages_are_keyset_stable_and_ordered() {
+    let (_root, core) = open_core("newest_browse");
+    for (n, title) in [(1, "old"), (2, "newest"), (3, "middle")] {
+        let id = reg(&core, n, "flows");
+        core.search()
+            .set_annotation(&id, &ann(title), NOW + u64::from(n))
+            .unwrap();
+    }
+    let search = core.search();
+    let query = SearchQuery { newest: true, page_size: 2, ..q("") };
+    let first = search.search(&query, &ANYONE, None).unwrap();
+    assert_eq!(
+        first.hits.iter().map(|hit| hit.title.as_str()).collect::<Vec<_>>(),
+        vec!["middle", "newest"]
+    );
+    let cursor = first.cursor.clone().expect("second page");
+    let second = search.search(&query, &ANYONE, Some(&cursor)).unwrap();
+    assert_eq!(second.hits.iter().map(|hit| hit.title.as_str()).collect::<Vec<_>>(), vec!["old"]);
+    assert!(second.cursor.is_none());
+    assert!(matches!(
+        search.search(&q(""), &ANYONE, Some(&cursor)).unwrap_err(),
         ServerError::InvalidInput { what: "stale search cursor" }
     ));
 }

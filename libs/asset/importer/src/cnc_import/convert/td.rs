@@ -903,13 +903,16 @@ fn emit_sprites(
             continue;
         };
         if is_wall(key) {
-            let count = shp.frames().len().min(16);
+            let count = shp.frames().len();
+            if count == 0 {
+                continue;
+            }
             let frames = frame_range(&shp, 0, count, palette, |_| 0);
             let mut lines = unit_lines(key, archives, &remap);
             lines.push("footprint 1 1".into());
             emit_spec(emitter, report, SpriteSpec {
                 key: key.into(), role: "structure", facings: 1, frames,
-                states: vec![SpriteState { name: "idle", first: 0, last: count, looping: true, fps: 6 }],
+                states: super::wall_states(count),
                 unit: Some(UnitSpec { manifest_lines: lines }),
                 manifest_lines: Vec::new(), tags: vec!["cnc", "structure", "wall"],
             })?;

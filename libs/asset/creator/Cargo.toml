@@ -14,6 +14,9 @@ makepad-strict-json = { path = "../../strict_json" }
 makepad-asset-chat = { path = "../chat" }
 makepad-asset-client = { path = "../client" }
 makepad-asset-data = { path = "../data" }
+makepad-gltf = { path = "../../gltf" }
+makepad-render = { path = "../../render" }
+makepad-draw = { path = "../../../draw" }
 # The worker's own product builder + kind table, until P7 retires the rest.
 makepad-asset-importer = { path = "../importer", default-features = false }
 
