@@ -2894,11 +2894,21 @@ const PLATE_REVERB_DAMP: f32 = 0.2;
 const PLATE_REVERB_FEEDBACK_MIN: f32 = 0.6;
 const PLATE_REVERB_FEEDBACK_MAX: f32 = 0.97;
 /// Below this peak the tail is treated as fully decayed -- the same
-/// threshold and the same reason `DeckEcho`'s own `quiet` tracking uses
-/// one: once wet is at zero AND the tank has actually rung out, the
-/// lines stop being touched at all rather than being asked to keep
-/// circulating silence forever.
+/// threshold `DeckEcho`'s own `quiet` tracking uses: once wet is at
+/// zero AND the tank has actually rung out, the lines stop being
+/// touched at all rather than being asked to keep circulating silence
+/// forever.
 const PLATE_REVERB_QUIET: f32 = 1e-5;
+/// How often the accumulated peak is checked against [`PLATE_REVERB_QUIET`],
+/// rather than testing one raw sample every call: a comb/allpass tank's
+/// release-phase output is a decaying but OSCILLATING signal -- sparse
+/// and gappy, not a smooth envelope -- so a single sample can land on a
+/// zero-crossing long before the tail has genuinely decayed, freezing
+/// the tank there and chopping off real, if declining, tail content.
+/// Longer than the longest comb's delay (44.9ms) so every tap gets at
+/// least one full cycle inside each window, mirroring `DeckEcho`'s own
+/// `tail_peak`/`period_left` windowing over its tap period exactly.
+const PLATE_REVERB_QUIET_PERIOD_MS: f32 = 50.0;
 
 #[inline]
 fn ms_to_frames(ms: f32, sample_rate: f32) -> usize {
@@ -3030,9 +3040,18 @@ pub struct PlateReverb {
     sample_rate: f32,
     wet: ParamRamp,
     size: ParamRamp,
-    /// Set once the tank has genuinely rung out after `wet` reached
-    /// zero, so a long-released tail keeps decaying through the lines
-    /// instead of being cut the moment the engage ramp finishes.
+    /// The tank's output peak accumulated over the current
+    /// [`PLATE_REVERB_QUIET_PERIOD_MS`] window -- checked against
+    /// [`PLATE_REVERB_QUIET`] only once the window elapses, never from
+    /// a single sample.
+    tail_peak: f32,
+    /// Frames left in the current peak-accumulation window.
+    period_left: u32,
+    /// Set once a full window's accumulated peak has genuinely decayed
+    /// below the quiet threshold after `wet` reached zero, so a
+    /// long-released tail keeps decaying through the lines instead of
+    /// being cut the moment the engage ramp finishes -- or, worse, the
+    /// moment any one sample happens to cross zero.
     quiet: bool,
 }
 
@@ -3045,6 +3064,8 @@ impl PlateReverb {
             sample_rate,
             wet: ParamRamp::at(0.0),
             size: ParamRamp::at(PLATE_REVERB_SIZE_DEFAULT),
+            tail_peak: 0.0,
+            period_left: 0,
             quiet: true,
         }
     }
@@ -3065,13 +3086,29 @@ impl PlateReverb {
         self.sample_rate = sample_rate;
         self.tank_l = ReverbTank::new(PLATE_REVERB_COMB_MS_L, sample_rate);
         self.tank_r = ReverbTank::new(PLATE_REVERB_COMB_MS_R, sample_rate);
+        self.tail_peak = 0.0;
+        self.period_left = 0;
         self.quiet = true;
     }
 
     /// The on/off switch.
     pub fn set_wet(&mut self, wet: f32) {
         if let Some(wet) = knob(wet, 0.0, 1.0) {
+            let engaging = wet > 0.0;
             self.wet.slew(wet, EQ_ENGAGE_SECS);
+            if engaging {
+                // A fresh engagement is never quiet, even if the last
+                // one ended that way: `quiet` otherwise stays
+                // stale-true from the last time the tail actually rang
+                // out, and a re-engage-then-disengage cycle faster than
+                // one `PLATE_REVERB_QUIET_PERIOD_MS` window (so the
+                // periodic check in `process` never runs to correct it)
+                // would bypass on that stale flag with fresh, un-decayed
+                // energy still sitting in the tank -- the same fix
+                // `Flanger::set_wet` and `DeckEcho::set_fraction` apply
+                // for the identical reason.
+                self.quiet = false;
+            }
         }
     }
 
@@ -3086,13 +3123,19 @@ impl PlateReverb {
         self.wet.target() > 0.0
     }
 
-    /// Drop the tank's stored energy directly rather than freeing it --
-    /// the lines are a few hundred samples each, so a fixed-size clear
-    /// is cheap enough for the audio thread, matching [`DeckEcho::silence`]
-    /// and [`Flanger::silence`]'s reasoning exactly.
+    /// Drop the tank's stored energy directly rather than freeing it.
+    /// A different technique from [`DeckEcho::silence`] and
+    /// [`Flanger::silence`]'s watermark trick (advancing a mark so
+    /// stale content merely reads as silence, since memsetting THEIR
+    /// multi-thousand-frame lines from the callback would be a
+    /// real-time violation) -- but a reasonable one here, since the
+    /// longest comb line is only ~1-2 thousand samples (44.9ms at
+    /// 48kHz), cheap enough to clear directly.
     pub fn silence(&mut self) {
         self.tank_l.silence();
         self.tank_r.silence();
+        self.tail_peak = 0.0;
+        self.period_left = 0;
         self.quiet = true;
     }
 
@@ -3116,10 +3159,21 @@ impl PlateReverb {
         let mono_in = (frame[0] + frame[1]) * 0.5 * wet;
         let wet_l = self.tank_l.process(mono_in, feedback);
         let wet_r = self.tank_r.process(mono_in, feedback);
-        if wet == 0.0 && self.wet.target() == 0.0 {
-            self.quiet = wet_l.abs().max(wet_r.abs()) < PLATE_REVERB_QUIET;
-        } else {
-            self.quiet = false;
+        // Accumulate the peak across a full window rather than testing
+        // one raw sample: the tank's release-phase output oscillates as
+        // it decays, so any single sample can land on a zero-crossing
+        // long before the true envelope has actually decayed away.
+        self.tail_peak = self.tail_peak.max(wet_l.abs()).max(wet_r.abs());
+        if self.period_left == 0 {
+            self.period_left =
+                ms_to_frames(PLATE_REVERB_QUIET_PERIOD_MS, device_rate.max(1.0)) as u32;
+        }
+        self.period_left -= 1;
+        if self.period_left == 0 {
+            if wet == 0.0 && self.wet.target() == 0.0 && self.tail_peak < PLATE_REVERB_QUIET {
+                self.quiet = true;
+            }
+            self.tail_peak = 0.0;
         }
         [frame[0] + wet_l, frame[1] + wet_r]
     }
@@ -6103,9 +6157,12 @@ mod tests {
             }
         }
         assert!(still_ringing, "the tail was cut the instant the ramp finished");
-        // Long enough for even the harsher feedback settings this test
-        // does not use to fall under the quiet threshold.
-        for _ in 0..(rate as usize * 3) {
+        // Long enough for this test's own size=0.9 (feedback ~0.93) to
+        // genuinely fall under the quiet threshold, now that `quiet`
+        // reflects a full window's peak rather than one lucky sample --
+        // the honest version takes noticeably longer than the bug it
+        // replaced did, which is the whole point of the fix.
+        for _ in 0..(rate as usize * 6) {
             pr.process([0.0, 0.0], rate);
         }
         for i in 0..1_000 {
@@ -6116,6 +6173,105 @@ mod tests {
                 "a bit-exact bypass once the tail has actually rung out"
             );
         }
+    }
+
+    /// Regression: `quiet` used to be re-derived from a single raw
+    /// sample every call. A comb/allpass tank's release-phase output
+    /// oscillates as it decays -- sparse and gappy, not a smooth
+    /// envelope -- so individual samples routinely dip under
+    /// [`PLATE_REVERB_QUIET`] long before the true (windowed) envelope
+    /// has. This proves `quiet` survives at least one such dip: it
+    /// must still be `false` on some frame whose own raw output is
+    /// already under threshold, since latching on that frame alone
+    /// would freeze the tank mid-decay and chop off real tail content.
+    #[test]
+    fn quiet_survives_a_raw_sample_dipping_under_threshold() {
+        let rate = 48_000.0f32;
+        let mut pr = PlateReverb::new(rate);
+        pr.set_size(0.9);
+        pr.set_wet(1.0);
+        for _ in 0..1_000 {
+            pr.process([0.0, 0.0], rate);
+        }
+        pr.process([1.0, 1.0], rate);
+        for _ in 0..3_000 {
+            pr.process([0.0, 0.0], rate);
+        }
+        pr.set_wet(0.0);
+        let ramp_frames = (EQ_ENGAGE_SECS * rate) as usize + 8;
+        for _ in 0..ramp_frames {
+            pr.process([0.0, 0.0], rate);
+        }
+        assert!(!pr.engaged());
+        let mut saw_undercross_while_still_not_quiet = false;
+        for _ in 0..4_000 {
+            let out = pr.process([0.0, 0.0], rate);
+            let raw_under = out[0].abs() < PLATE_REVERB_QUIET && out[1].abs() < PLATE_REVERB_QUIET;
+            if raw_under && !pr.quiet {
+                saw_undercross_while_still_not_quiet = true;
+            }
+            if pr.quiet {
+                break;
+            }
+        }
+        assert!(
+            saw_undercross_while_still_not_quiet,
+            "no frame had a raw under-threshold sample while quiet was still false -- \
+             either this scenario never dips that low within the window (weak test \
+             setup) or quiet is latching on the very first such sample, the bug this \
+             test targets"
+        );
+    }
+
+    /// Regression: `quiet` must not stay stale-true across a brief
+    /// re-engage. A press-release-press-release cycle faster than one
+    /// [`PLATE_REVERB_QUIET_PERIOD_MS`] window never gives the periodic
+    /// check in `process` a chance to run, so `set_wet` has to clear a
+    /// stale flag itself the moment it engages -- otherwise fresh,
+    /// un-decayed energy from the second engagement would bypass
+    /// immediately on the flag left over from the first release.
+    #[test]
+    fn a_brief_re_engage_clears_a_stale_quiet_flag() {
+        let rate = 48_000.0f32;
+        let mut pr = PlateReverb::new(rate);
+        pr.set_size(0.9);
+        // Reach genuine, fully-decayed quiet first -- no impulse fed
+        // in, so this settles almost immediately.
+        pr.set_wet(1.0);
+        for _ in 0..1_000 {
+            pr.process([0.0, 0.0], rate);
+        }
+        pr.set_wet(0.0);
+        for _ in 0..rate as usize {
+            pr.process([0.0, 0.0], rate);
+        }
+        assert!(pr.quiet, "test setup: the tank should have genuinely quieted by now");
+
+        // Re-engage and feed an impulse, then hold long enough for
+        // every comb tap to have read it back at least once (longer
+        // than the longest comb's ~45ms/~2155-frame delay) before
+        // disengaging again -- still comfortably under one
+        // quiet-period window, since the point is a brief engagement,
+        // not a long one.
+        pr.set_wet(1.0);
+        pr.process([1.0, 1.0], rate);
+        for _ in 0..3_000 {
+            pr.process([0.0, 0.0], rate);
+        }
+        pr.set_wet(0.0);
+        let ramp_frames = (EQ_ENGAGE_SECS * rate) as usize + 8;
+        for _ in 0..ramp_frames {
+            pr.process([0.0, 0.0], rate);
+        }
+        assert!(!pr.engaged());
+        let mut still_ringing = false;
+        for _ in 0..500 {
+            let out = pr.process([0.0, 0.0], rate);
+            if out[0].abs() > 1e-4 || out[1].abs() > 1e-4 {
+                still_ringing = true;
+            }
+        }
+        assert!(still_ringing, "a stale quiet flag from before the re-engage froze the fresh tail");
     }
 
     /// `silence` drops the tank's content directly, without waiting for
