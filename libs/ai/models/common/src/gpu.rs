@@ -3174,6 +3174,10 @@ mod imp {
         Ok(())
     }
 
+    pub fn gpu_release_cached() -> Result<usize, String> {
+        Ok(0)
+    }
+
     pub fn gpu_attention_packed_causal(
         _q: &GpuTensor,
         _k: &GpuTensor,
@@ -4377,6 +4381,10 @@ mod imp {
     }
 
     pub fn gpu_pool_clear() {}
+
+    pub fn gpu_pool_trim() -> usize {
+        0
+    }
 
     pub fn gpu_pool_cap_override(_bytes: Option<usize>) {}
 }
