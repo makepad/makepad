@@ -27,7 +27,7 @@ use crate::loop_splat::{
 use crate::wave_analysis::{DeckClock, TrackGrid};
 use crate::music_dsp::{
     audible, knob, knob64,
-    DeckEcho, DeckEq, FrameSource, Freeze, MotorEnd, ParamRamp, RateReader, ScratchRamp,
+    DeckEcho, DeckEq, Flanger, FrameSource, Freeze, MotorEnd, ParamRamp, RateReader, ScratchRamp,
     Stretcher, STEM_COUNT,
     STRETCH_BYPASS_EPSILON, STRETCH_RATIO_MAX, STRETCH_RATIO_MIN, WSOLA_WINDOW,
     BRAKE_SECS, CENSOR_FLIP_SECS, CENSOR_RATE, CENSOR_RETURN_SECS, SOFT_START_SECS,
@@ -894,6 +894,7 @@ enum EffectKind {
     Eq(DeckEq),
     Freeze(Freeze),
     Echo(DeckEcho),
+    Flanger(Flanger),
 }
 
 impl EffectKind {
@@ -903,11 +904,12 @@ impl EffectKind {
             EffectKind::Eq(eq) => eq.process(frame, device_rate),
             EffectKind::Freeze(freeze) => freeze.process(frame, device_rate),
             EffectKind::Echo(echo) => echo.process(frame, device_rate),
+            EffectKind::Flanger(flanger) => flanger.process(frame, device_rate),
         }
     }
 }
 
-const DECK_CHAIN_SLOTS: usize = 3;
+const DECK_CHAIN_SLOTS: usize = 4;
 
 /// A deck's pre-fader tone chain: a fixed list of slots, walked in order.
 /// Not a `Vec` -- sized once, at compile time, never resized. Today's
@@ -925,6 +927,7 @@ impl DeckChain {
                 EffectKind::Eq(DeckEq::new(sample_rate)),
                 EffectKind::Freeze(Freeze::new()),
                 EffectKind::Echo(DeckEcho::new()),
+                EffectKind::Flanger(Flanger::new()),
             ],
         }
     }
@@ -957,6 +960,12 @@ impl DeckChain {
     fn echo_mut(&mut self) -> &mut DeckEcho {
         match &mut self.slots[2] {
             EffectKind::Echo(echo) => echo,
+            _ => unreachable!(),
+        }
+    }
+    fn flanger_mut(&mut self) -> &mut Flanger {
+        match &mut self.slots[3] {
+            EffectKind::Flanger(flanger) => flanger,
             _ => unreachable!(),
         }
     }
@@ -1139,6 +1148,7 @@ impl DeckVoice {
         self.chain.eq_mut().reset();
         self.chain.echo_mut().silence();
         self.chain.freeze_mut().reset();
+        self.chain.flanger_mut().silence();
         self.reset_blend();
         if load.play {
             self.transport.slew(1.0, LOAD_SWAP_SECS);
@@ -2186,6 +2196,7 @@ impl Mixer {
                 d.chain.eq_mut().reset();
                 d.chain.echo_mut().silence();
                 d.chain.freeze_mut().reset();
+                d.chain.flanger_mut().silence();
                 d.reset_blend();
             } else {
                 d.pending = Some(PendingLoad { pcm, play: keep_playing, grid: None });
@@ -2235,6 +2246,7 @@ impl Mixer {
         d.seek_frames(0.0);
         d.chain.echo_mut().silence();
         d.chain.freeze_mut().reset();
+        d.chain.flanger_mut().silence();
         d.reset_blend();
         self.publish_deck(&s, deck.index());
         drop(s);
@@ -2511,6 +2523,30 @@ impl Mixer {
     pub fn set_deck_echo_pingpong(&self, deck: DeckId, on: bool) {
         let mut s = self.state.lock().unwrap();
         s.decks[deck.index()].chain.echo_mut().set_pingpong(on);
+    }
+
+    /// The flanger's on/off switch.
+    pub fn set_deck_flanger(&self, deck: DeckId, on: bool) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.flanger_mut().set_wet(if on { 1.0 } else { 0.0 });
+    }
+
+    /// The flanger LFO's sweep speed, in Hz.
+    pub fn set_deck_flanger_rate(&self, deck: DeckId, hz: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.flanger_mut().set_rate(hz);
+    }
+
+    /// How far the flanger's sweep reaches from its centre delay.
+    pub fn set_deck_flanger_depth(&self, deck: DeckId, depth: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.flanger_mut().set_depth(depth);
+    }
+
+    /// How much of the flanger's delayed tap feeds back into its line.
+    pub fn set_deck_flanger_feedback(&self, deck: DeckId, feedback: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.flanger_mut().set_feedback(feedback);
     }
 
     /// Momentary FREEZE: while held, the deck repeats a beat-sized
@@ -2910,6 +2946,7 @@ impl Mixer {
         // own hold state is not the source's to inherit, but a stale
         // ring must not carry forward into the record that just landed.
         dst.chain.freeze_mut().reset();
+        dst.chain.flanger_mut().silence();
         let to_index = to.index();
         self.publish_deck(&s, to_index);
     }

@@ -374,6 +374,24 @@ fn golden_freeze_glitch() {
     assert_golden("freeze_glitch", &left, &right);
 }
 
+/// 233 Hz: shares no whole number of cycles with the flanger's swept
+/// delay (which never sits still long enough to matter, but a round
+/// multiple of the CENTRE delay would still land some windows on a
+/// coincidence), so the sweep's comb-filtering actually shows up in
+/// every window rather than a phase-aligned few of them.
+#[test]
+fn golden_flanger_sweep() {
+    let mixer = deck_a(tone_pcm(233.0, 48_000, 3.0));
+    mixer.set_deck_flanger(DeckId::A, true);
+    mixer.set_deck_flanger_rate(DeckId::A, 1.5);
+    mixer.set_deck_flanger_depth(DeckId::A, 0.8);
+    mixer.set_deck_flanger_feedback(DeckId::A, 0.4);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let (left, right) = capture(&mixer, CAPTURE, |_| {});
+    assert_golden("flanger_sweep", &left, &right);
+}
+
 // ---------------------------------------------------------------------------
 // clicks
 // ---------------------------------------------------------------------------
@@ -552,6 +570,19 @@ fn engaging_and_releasing_the_echo_are_click_free() {
         _ => {}
     });
     assert!(worst < CLICK, "engaging or releasing the echo must ramp, biggest step {worst}");
+}
+
+#[test]
+fn engaging_and_releasing_the_flanger_are_click_free() {
+    let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| match index {
+        8 => mixer.set_deck_flanger(DeckId::A, true),
+        24 => mixer.set_deck_flanger(DeckId::A, false),
+        _ => {}
+    });
+    assert!(worst < CLICK, "engaging or releasing the flanger must ramp, biggest step {worst}");
 }
 
 #[test]

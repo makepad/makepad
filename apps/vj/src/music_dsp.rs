@@ -1998,6 +1998,210 @@ impl Freeze {
     }
 }
 
+/// Frames the flanger's short delay line holds -- generous for the LFO's
+/// full sweep at up to 192 kHz, with margin for a fed-back tail to decay
+/// below [`FLANGER_QUIET`] before the drain check gives up watching it.
+const FLANGER_MAX_FRAMES: usize = 2048;
+const FLANGER_MASK: usize = FLANGER_MAX_FRAMES - 1;
+/// Centre and swing of the modulated delay, in milliseconds -- the classic
+/// flange range (roughly half a millisecond to five and a half), deep
+/// enough for the swept-comb whoosh without wandering into slapback echo.
+const FLANGER_CENTER_MS: f32 = 3.0;
+const FLANGER_DEPTH_MS: f32 = 2.5;
+pub(crate) const FLANGER_RATE_MIN: f32 = 0.02;
+pub(crate) const FLANGER_RATE_MAX: f32 = 8.0;
+pub(crate) const FLANGER_RATE_DEFAULT: f32 = 0.25;
+pub(crate) const FLANGER_DEPTH_DEFAULT: f32 = 0.7;
+pub(crate) const FLANGER_FEEDBACK_MAX: f32 = 0.9;
+pub(crate) const FLANGER_FEEDBACK_DEFAULT: f32 = 0.25;
+/// Below a 16-bit step: past here a fed-back tail is inaudible.
+const FLANGER_QUIET: f32 = 1e-5;
+
+/// One deck's flanger: a short stereo delay line whose read tap is swept
+/// by a sine LFO, fed back through [`pade_tanh`] so cranked regeneration
+/// saturates instead of runs away.
+///
+/// No discrete retune/handover machinery like the echo's rung: the delay
+/// here is CONTINUOUSLY modulated, so every frame's tap position is
+/// already a smooth function of the LFO phase, and the fractional-sample
+/// interpolated read (`crate::dsp_math::lerp_frame`) is what keeps that
+/// click-free -- there is never a jump to hand over.
+pub struct Flanger {
+    line: Box<[[f32; 2]]>,
+    write: usize,
+    written: u64,
+    silence_mark: u64,
+    phase: f32,
+    wet: ParamRamp,
+    rate: ParamRamp,
+    depth: ParamRamp,
+    feedback: ParamRamp,
+    tail_peak: f32,
+    period_left: u32,
+    /// Nothing to do here: wet is at zero and the fed-back tail has
+    /// decayed away. `process` uses this to skip the line entirely.
+    quiet: bool,
+}
+
+impl Flanger {
+    pub fn new() -> Flanger {
+        Flanger {
+            line: vec![[0.0f32; 2]; FLANGER_MAX_FRAMES].into_boxed_slice(),
+            write: 0,
+            written: 0,
+            silence_mark: 0,
+            phase: 0.0,
+            wet: ParamRamp::at(0.0),
+            rate: ParamRamp::at(FLANGER_RATE_DEFAULT),
+            depth: ParamRamp::at(FLANGER_DEPTH_DEFAULT),
+            feedback: ParamRamp::at(FLANGER_FEEDBACK_DEFAULT),
+            tail_peak: 0.0,
+            period_left: 0,
+            quiet: true,
+        }
+    }
+
+    /// Forget whatever the line was carrying. Safe on any thread, the
+    /// audio callback's own included: nothing here writes to `line` --
+    /// moving the mark past everything written so far does the memset's
+    /// job without touching it, the same reason [`DeckEcho::silence`]
+    /// works this way. The operator's own rate/depth/feedback are the
+    /// STRIP's, not the record's, so they are left exactly as they stand.
+    pub fn silence(&mut self) {
+        self.silence_mark = self.written;
+        self.quiet = self.wet.target() <= 0.0;
+    }
+
+    /// The on/off switch, ramped like every other engage here rather than
+    /// snapped, so switching it off lets the swept comb ring out instead
+    /// of cutting it.
+    pub fn set_wet(&mut self, wet: f32) {
+        if let Some(wet) = knob(wet, 0.0, 1.0) {
+            let engaging = wet > 0.0;
+            self.wet.slew(wet, EQ_ENGAGE_SECS);
+            if engaging {
+                self.quiet = false;
+            }
+        }
+    }
+
+    /// The LFO's sweep speed, in Hz.
+    pub fn set_rate(&mut self, hz: f32) {
+        if let Some(hz) = knob(hz, FLANGER_RATE_MIN, FLANGER_RATE_MAX) {
+            self.rate.slew(hz, EQ_ENGAGE_SECS);
+        }
+    }
+
+    /// How far the sweep reaches from the centre delay, 0..1 of the full
+    /// swing.
+    pub fn set_depth(&mut self, depth: f32) {
+        if let Some(depth) = knob(depth, 0.0, 1.0) {
+            self.depth.slew(depth, EQ_ENGAGE_SECS);
+        }
+    }
+
+    /// How much of the delayed tap feeds back into the line.
+    pub fn set_feedback(&mut self, feedback: f32) {
+        if let Some(feedback) = knob(feedback, 0.0, FLANGER_FEEDBACK_MAX) {
+            self.feedback.slew(feedback, EQ_ENGAGE_SECS);
+        }
+    }
+
+    pub fn engaged(&self) -> bool {
+        self.wet.target() > 0.0
+    }
+
+    #[cfg(test)]
+    fn raw_write(&self) -> usize {
+        self.write
+    }
+
+    #[cfg(test)]
+    fn raw_at(&self, frames_ago: usize) -> [f32; 2] {
+        self.line[(self.write + FLANGER_MAX_FRAMES - frames_ago.min(FLANGER_MAX_FRAMES))
+            & FLANGER_MASK]
+    }
+
+    /// The delayed tap at a fractional frame count, linearly interpolated
+    /// between the two neighboring integer taps -- unlike the echo's
+    /// integer-frame `tap_at`, this one moves every sample, so a
+    /// non-interpolated read would zipper audibly as the LFO sweeps.
+    #[inline]
+    fn tap_at(&self, delay_frac: f32) -> [f32; 2] {
+        let d0 = delay_frac.floor().max(0.0) as u64;
+        let d1 = d0 + 1;
+        if self.written < d1 || self.written - d1 < self.silence_mark {
+            return [0.0, 0.0];
+        }
+        let frac = delay_frac - d0 as f32;
+        let idx0 =
+            (self.write + FLANGER_MAX_FRAMES - (d0 as usize).min(FLANGER_MAX_FRAMES)) & FLANGER_MASK;
+        let idx1 =
+            (self.write + FLANGER_MAX_FRAMES - (d1 as usize).min(FLANGER_MAX_FRAMES)) & FLANGER_MASK;
+        crate::dsp_math::lerp_frame(self.line[idx0], self.line[idx1], frac)
+    }
+
+    /// Process one stereo frame.
+    #[inline]
+    pub fn process(&mut self, frame: [f32; 2], device_rate: f32) -> [f32; 2] {
+        let wet = self.wet.tick(device_rate);
+        if self.quiet && wet == 0.0 && self.wet.target() == 0.0 {
+            // Nothing engaged and nothing ringing: the line is not
+            // touched at all, and the frame is the input exactly.
+            return frame;
+        }
+        let rate_hz = self.rate.tick(device_rate);
+        let depth = self.depth.tick(device_rate);
+        let feedback = self.feedback.tick(device_rate);
+
+        self.phase += std::f32::consts::TAU * rate_hz / device_rate.max(1.0);
+        if self.phase >= std::f32::consts::TAU {
+            self.phase -= std::f32::consts::TAU;
+        }
+
+        let center = FLANGER_CENTER_MS * 0.001 * device_rate;
+        let swing = FLANGER_DEPTH_MS * 0.001 * device_rate * depth;
+        let delay = (center + swing * self.phase.sin()).max(1.0);
+
+        let tap = self.tap_at(delay);
+        let out = [frame[0] + tap[0] * wet, frame[1] + tap[1] * wet];
+        // The dry share entering the line is scaled by `wet` too, not
+        // just the output blend -- otherwise the line fills with
+        // full-amplitude content from the first frame of an engage,
+        // and once that content ages past the (short) delay it surfaces
+        // all at once at whatever `wet` has ramped to by then, rather
+        // than a content level that grew in step with the ramp. Echo's
+        // `send` gates its own write the same way and for the same
+        // reason; a beat-length delay simply outlasts the ramp so the
+        // effect is invisible there, but a flange delay is short enough
+        // to land the mismatch inside the very ramp meant to hide it.
+        let written = [
+            frame[0] * wet + pade_tanh(tap[0] * feedback),
+            frame[1] * wet + pade_tanh(tap[1] * feedback),
+        ];
+        self.line[self.write] = written;
+        self.write = (self.write + 1) & FLANGER_MASK;
+        self.written += 1;
+
+        // Drain bookkeeping, once a sweep period, mirroring the echo's:
+        // watches what is WRITTEN, not what is read back, for the same
+        // reason -- a tap lags its write by a whole delay.
+        self.tail_peak = self.tail_peak.max(written[0].abs()).max(written[1].abs());
+        if self.period_left == 0 {
+            self.period_left = delay.round().max(1.0) as u32;
+        }
+        self.period_left -= 1;
+        if self.period_left == 0 {
+            if wet == 0.0 && self.wet.target() == 0.0 && self.tail_peak < FLANGER_QUIET {
+                self.quiet = true;
+                self.silence_mark = self.written;
+            }
+            self.tail_peak = 0.0;
+        }
+        out
+    }
+}
+
 // ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
@@ -3769,4 +3973,169 @@ mod tests {
         assert!((eq.blend_current(0) - 1.0).abs() < 1e-6, "landed");
     }
 
+    /// Off, a fresh unit is exactly its input -- the whole line untouched,
+    /// same requirement as the echo's and for the same reason: every
+    /// golden reference depends on this stage being invisible unengaged.
+    #[test]
+    fn a_flanger_that_was_never_engaged_is_bit_transparent() {
+        let rate = 48_000.0f32;
+        let mut flanger = Flanger::new();
+        let mut phase = 0.0f32;
+        for _ in 0..4_000 {
+            phase += 2.0 * PI * 37.0 / rate;
+            let x = phase.sin() * 0.6;
+            assert_eq!(flanger.process([x, -x], rate), [x, -x]);
+        }
+    }
+
+    /// Engaged, an impulse's reflection lands within the documented sweep
+    /// range (centre +/- the full depth) and nowhere else -- the tap
+    /// really is bounded to what the manifest promises, not merely
+    /// "somewhere".
+    #[test]
+    fn an_engaged_flanger_reflects_within_its_documented_sweep() {
+        let rate = 48_000.0f32;
+        let mut flanger = Flanger::new();
+        flanger.set_wet(1.0);
+        flanger.set_depth(1.0);
+        flanger.set_feedback(0.0);
+        for _ in 0..SETTLE_FRAMES {
+            flanger.process([0.0, 0.0], rate);
+        }
+        let min_frames = ((FLANGER_CENTER_MS - FLANGER_DEPTH_MS) * 0.001 * rate).floor() as usize;
+        let max_frames = ((FLANGER_CENTER_MS + FLANGER_DEPTH_MS) * 0.001 * rate).ceil() as usize;
+        // One impulse, then silence long enough to see every reflection
+        // across several full LFO sweeps (the rate defaults slow, so this
+        // covers less than one cycle -- fine, the bound must hold at
+        // every phase the sweep actually reaches within that span).
+        let mut out = vec![flanger.process([1.0, 1.0], rate)[0]];
+        for _ in 1..(max_frames + 4_000) {
+            out.push(flanger.process([0.0, 0.0], rate)[0]);
+        }
+        assert!(out[0] == 1.0, "the dry input passes through untouched");
+        for (index, &value) in out.iter().enumerate().skip(1) {
+            if value.abs() < 1e-4 {
+                continue;
+            }
+            assert!(
+                index >= min_frames.saturating_sub(2) && index <= max_frames + 2,
+                "reflection at {index} outside the documented {min_frames}..{max_frames} sweep: {value}"
+            );
+        }
+    }
+
+    /// Cranked past any sane setting, the feedback clamp keeps the line
+    /// bounded rather than climbing without end -- the same property the
+    /// echo's feedback is held to, through the same [`pade_tanh`] clamp.
+    #[test]
+    fn cranked_flanger_feedback_saturates_instead_of_running_away() {
+        let rate = 48_000.0f32;
+        let mut flanger = Flanger::new();
+        flanger.set_wet(1.0);
+        flanger.set_feedback(40.0);
+        assert!(
+            (flanger.feedback.target() - FLANGER_FEEDBACK_MAX).abs() < 1e-6,
+            "the setter itself clamps: {}",
+            flanger.feedback.target()
+        );
+        for _ in 0..SETTLE_FRAMES {
+            flanger.process([0.0, 0.0], rate);
+        }
+        let mut out = Vec::with_capacity(200_000);
+        for i in 0..200_000usize {
+            let x = if i % 4_000 == 0 { 1.0 } else { 0.0 };
+            out.push(flanger.process([x, x], rate)[0]);
+        }
+        assert!(out.iter().all(|v| v.is_finite() && v.abs() < 3.0), "unbounded output");
+    }
+
+    /// Switching off does not cut the fed-back tail; it rings out, and
+    /// only once it has genuinely decayed does the unit go back to a
+    /// bit-exact bypass -- the same contract the echo's off switch keeps.
+    #[test]
+    fn switching_the_flanger_off_lets_the_tail_ring_out_then_goes_transparent() {
+        let rate = 48_000.0f32;
+        let mut flanger = Flanger::new();
+        flanger.set_wet(1.0);
+        flanger.set_feedback(0.7);
+        for _ in 0..SETTLE_FRAMES {
+            flanger.process([0.0, 0.0], rate);
+        }
+        let mut out = vec![flanger.process([1.0, 1.0], rate)[0]];
+        for i in 1..400_000usize {
+            if i == 100 {
+                flanger.set_wet(0.0);
+            }
+            out.push(flanger.process([0.0, 0.0], rate)[0]);
+        }
+        assert!(!flanger.engaged(), "the operator's ask flips at once");
+        let tail = &out[out.len() - 1_000..];
+        assert!(tail.iter().all(|&v| v == 0.0), "silent, once the tail has actually decayed");
+        for i in 0..1_000 {
+            let x = (i as f32 * 0.037).sin() * 0.5;
+            assert_eq!(
+                flanger.process([x, -x], rate),
+                [x, -x],
+                "a bit-exact bypass, not merely quiet"
+            );
+        }
+    }
+
+    /// `silence`, unlike a hypothetical reset, is safe from the audio
+    /// thread precisely because it never writes to the line -- the same
+    /// reason [`DeckEcho::silence`] is shaped this way. Prove it two
+    /// ways: the raw memory is untouched, and yet nothing before the
+    /// mark can be read back.
+    #[test]
+    fn flanger_silence_never_touches_the_line_only_the_reach_of_it() {
+        let rate = 48_000.0f32;
+        let mut flanger = Flanger::new();
+        flanger.set_wet(1.0);
+        flanger.set_feedback(0.0);
+        for _ in 0..SETTLE_FRAMES {
+            flanger.process([0.0, 0.0], rate);
+        }
+        flanger.process([0.8, -0.8], rate);
+        let write_before = flanger.raw_write();
+        let raw_before = flanger.raw_at(1);
+        assert!(raw_before[0].abs() > 0.1, "a real value is there to protect: {raw_before:?}");
+        flanger.silence();
+        assert_eq!(flanger.raw_write(), write_before, "silence must not move the write cursor");
+        assert_eq!(flanger.raw_at(1), raw_before, "and must not have memset the line either");
+        // The setting the operator asked for is the strip's and stands.
+        assert!(flanger.engaged());
+        // But the record changed underneath it: for as long as the delay
+        // would still be looking at the old content, nothing comes back.
+        for _ in 0..500 {
+            assert_eq!(
+                flanger.process([0.0, 0.0], rate),
+                [0.0, 0.0],
+                "stale content must not resurface"
+            );
+        }
+    }
+
+    /// Every setter refuses a non-finite value and clamps everything else
+    /// to its documented range -- the same [`knob`] contract every other
+    /// per-deck control in this file relies on.
+    #[test]
+    fn flanger_setters_clamp_to_their_documented_ranges() {
+        let mut flanger = Flanger::new();
+        flanger.set_wet(f32::NAN);
+        assert_eq!(flanger.wet.target(), 0.0, "a bad value moves nothing");
+        flanger.set_wet(5.0);
+        assert_eq!(flanger.wet.target(), 1.0);
+        flanger.set_wet(-5.0);
+        assert_eq!(flanger.wet.target(), 0.0);
+        flanger.set_rate(f32::INFINITY);
+        assert_eq!(flanger.rate.target(), FLANGER_RATE_DEFAULT, "unmoved by a bad value");
+        flanger.set_rate(100.0);
+        assert_eq!(flanger.rate.target(), FLANGER_RATE_MAX);
+        flanger.set_rate(-1.0);
+        assert_eq!(flanger.rate.target(), FLANGER_RATE_MIN);
+        flanger.set_depth(2.0);
+        assert_eq!(flanger.depth.target(), 1.0);
+        flanger.set_depth(-1.0);
+        assert_eq!(flanger.depth.target(), 0.0);
+    }
 }

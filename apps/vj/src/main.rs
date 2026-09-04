@@ -2442,12 +2442,12 @@ script_mod! {
                                     sfx_stop := ChromeButton{text: "stop pad"}
                                     sfx_stop_all := ChromeButton{text: "stop all"}
                                 }
-                                // Deck FX: the echo's feedback has no home
-                                // on the deck header (the FILTER row is
-                                // already three chips wide) and the
-                                // accordion is fixed at three panels, so it
-                                // lives here instead. A / B picks a deck;
-                                // MIX writes both at once.
+                                // Deck FX: parameters with no home on the
+                                // deck header (the FILTER row is already
+                                // three chips wide) and the accordion is
+                                // fixed at three panels, so they live here
+                                // instead. A / B picks a deck; MIX writes
+                                // both at once.
                                 View{
                                     width: Fill
                                     height: Fit
@@ -2464,6 +2464,21 @@ script_mod! {
                                         min: 0.0
                                         max: 0.95
                                         default: 0.55
+                                    }
+                                }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    sfx_fx_flanger := PillButton{width: 78 text: "FLANGER"}
+                                    sfx_fx_flanger_rate := Slider{
+                                        width: 170
+                                        text: "flanger rate"
+                                        min: 0.02
+                                        max: 8.0
+                                        default: 0.25
                                     }
                                 }
                             }
@@ -14019,6 +14034,16 @@ p2 {}
                 DeckCmd::SetEchoFeedback { deck, feedback } => {
                     self.mixer.set_deck_echo_feedback(deck, feedback)
                 }
+                DeckCmd::SetFlanger { deck, on } => self.mixer.set_deck_flanger(deck, on),
+                DeckCmd::SetFlangerRate { deck, hz } => {
+                    self.mixer.set_deck_flanger_rate(deck, hz)
+                }
+                DeckCmd::SetFlangerDepth { deck, depth } => {
+                    self.mixer.set_deck_flanger_depth(deck, depth)
+                }
+                DeckCmd::SetFlangerFeedback { deck, feedback } => {
+                    self.mixer.set_deck_flanger_feedback(deck, feedback)
+                }
                 DeckCmd::SetStemGain { deck, stem, gain } => {
                     self.mixer.set_deck_stem_gain(deck, stem, gain)
                 }
@@ -14158,14 +14183,18 @@ p2 {}
         }
     }
 
-    /// Put the A/B/MIX chips and the feedback slider back in step with
-    /// `self.sfx_fx_target` and the deck(s) it points at.
+    /// Put the A/B/MIX chips and the feedback/flanger controls back in
+    /// step with `self.sfx_fx_target` and the deck(s) it points at.
     fn sync_sfx_fx_ui(&mut self, cx: &mut Cx) {
         self.paint_chip(cx, ids!(sfx_fx_a), self.sfx_fx_target == FxTarget::A, None);
         self.paint_chip(cx, ids!(sfx_fx_b), self.sfx_fx_target == FxTarget::B, None);
         self.paint_chip(cx, ids!(sfx_fx_mix), self.sfx_fx_target == FxTarget::Mix, None);
-        let feedback = self.decks.deck(self.sfx_fx_deck()).echo_feedback as f64;
+        let deck = self.decks.deck(self.sfx_fx_deck());
+        let (feedback, flanger_on, flanger_rate) =
+            (deck.echo_feedback as f64, deck.flanger_on, deck.flanger_rate as f64);
         self.ui.slider(cx, ids!(sfx_fx_feedback)).set_value(cx, feedback);
+        self.paint_chip(cx, ids!(sfx_fx_flanger), flanger_on, None);
+        self.ui.slider(cx, ids!(sfx_fx_flanger_rate)).set_value(cx, flanger_rate);
     }
 
     /// Push a deck's tone/stem knob positions back onto the surface, so the
@@ -28992,6 +29021,36 @@ impl MatchEvent for App {
                 FxTarget::Mix => {
                     let mut cmds = self.decks.set_echo_feedback(DeckId::A, v as f32);
                     cmds.extend(self.decks.set_echo_feedback(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        if self.ui.button(cx, ids!(sfx_fx_flanger)).clicked(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.toggle_flanger(DeckId::A),
+                FxTarget::B => self.decks.toggle_flanger(DeckId::B),
+                FxTarget::Mix => {
+                    // Both land on the SAME new side of the switch, not
+                    // each flip its own -- the pair could otherwise start
+                    // this press on opposite sides and end on opposite
+                    // sides too.
+                    let on = !self.decks.deck(DeckId::A).flanger_on;
+                    let mut cmds = self.decks.set_flanger(DeckId::A, on);
+                    cmds.extend(self.decks.set_flanger(DeckId::B, on));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+            self.sync_sfx_fx_ui(cx);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_flanger_rate)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_flanger_rate(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_flanger_rate(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_flanger_rate(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_flanger_rate(DeckId::B, v as f32));
                     cmds
                 }
             };

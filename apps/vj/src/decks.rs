@@ -1259,6 +1259,15 @@ pub struct DeckState {
     /// for a fourth knob -- so it is part of the channel strip like the
     /// rung beside it: a swap carries it and a load leaves it.
     pub echo_feedback: f32,
+    /// Whether the flanger is on. Same channel-strip treatment as the
+    /// echo: a swap carries it, a load leaves it.
+    pub flanger_on: bool,
+    /// The flanger LFO's sweep speed, in Hz.
+    pub flanger_rate: f32,
+    /// How far the flanger's sweep reaches from its centre delay, 0..1.
+    pub flanger_depth: f32,
+    /// How much of the flanger's delayed tap feeds back into its line.
+    pub flanger_feedback: f32,
     /// Per-stem gains, in [`crate::music_dsp::StemKind`] order.
     pub stem_gain: [f32; STEM_COUNT],
     pub stem_kill: [bool; STEM_COUNT],
@@ -1327,6 +1336,10 @@ impl Default for DeckState {
             echo_rung: 0,
             echo_pingpong: false,
             echo_feedback: crate::music_dsp::ECHO_FEEDBACK,
+            flanger_on: false,
+            flanger_rate: crate::music_dsp::FLANGER_RATE_DEFAULT,
+            flanger_depth: crate::music_dsp::FLANGER_DEPTH_DEFAULT,
+            flanger_feedback: crate::music_dsp::FLANGER_FEEDBACK_DEFAULT,
             stem_gain: [1.0; STEM_COUNT],
             stem_kill: [false; STEM_COUNT],
             stem_solo: [false; STEM_COUNT],
@@ -1650,6 +1663,14 @@ pub enum DeckCmd {
     SetEchoPingpong { deck: DeckId, on: bool },
     /// How much of a repeat feeds the next one.
     SetEchoFeedback { deck: DeckId, feedback: f32 },
+    /// The flanger's on/off switch.
+    SetFlanger { deck: DeckId, on: bool },
+    /// The flanger LFO's sweep speed, in Hz.
+    SetFlangerRate { deck: DeckId, hz: f32 },
+    /// How far the flanger's sweep reaches from its centre delay.
+    SetFlangerDepth { deck: DeckId, depth: f32 },
+    /// How much of the flanger's delayed tap feeds back into its line.
+    SetFlangerFeedback { deck: DeckId, feedback: f32 },
     /// One stem lane's gain, 0 = muted.
     SetStemGain { deck: DeckId, stem: usize, gain: f32 },
     SplatSet { deck: DeckId, grid: Arc<SplatGrid> },
@@ -2092,6 +2113,10 @@ impl DeckEngine {
             DeckCmd::SetEcho { deck, fraction: state.echo_fraction() },
             DeckCmd::SetEchoPingpong { deck, on: state.echo_pingpong },
             DeckCmd::SetEchoFeedback { deck, feedback: state.echo_feedback },
+            DeckCmd::SetFlanger { deck, on: state.flanger_on },
+            DeckCmd::SetFlangerRate { deck, hz: state.flanger_rate },
+            DeckCmd::SetFlangerDepth { deck, depth: state.flanger_depth },
+            DeckCmd::SetFlangerFeedback { deck, feedback: state.flanger_feedback },
         ];
         for band in 0..3 {
             cmds.push(DeckCmd::SetEqBand { deck, band, gain: state.eq_effective(band) });
@@ -4933,6 +4958,44 @@ impl DeckEngine {
         vec![DeckCmd::SetEchoFeedback { deck, feedback: state.echo_feedback }]
     }
 
+    /// The flanger's on/off switch.
+    pub fn toggle_flanger(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.flanger_on = !state.flanger_on;
+        vec![DeckCmd::SetFlanger { deck, on: state.flanger_on }]
+    }
+
+    /// Set the flanger's on/off switch to an explicit value, rather than
+    /// flipping whatever it already was -- what a MIX-linked broadcast
+    /// needs, since two decks starting on different sides of the switch
+    /// must land on the SAME side, not each flip its own.
+    pub fn set_flanger(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
+        self.deck_mut(deck).flanger_on = on;
+        vec![DeckCmd::SetFlanger { deck, on }]
+    }
+
+    /// The flanger LFO's sweep speed, in Hz.
+    pub fn set_flanger_rate(&mut self, deck: DeckId, hz: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.flanger_rate =
+            hz.clamp(crate::music_dsp::FLANGER_RATE_MIN, crate::music_dsp::FLANGER_RATE_MAX);
+        vec![DeckCmd::SetFlangerRate { deck, hz: state.flanger_rate }]
+    }
+
+    /// How far the flanger's sweep reaches from its centre delay.
+    pub fn set_flanger_depth(&mut self, deck: DeckId, depth: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.flanger_depth = depth.clamp(0.0, 1.0);
+        vec![DeckCmd::SetFlangerDepth { deck, depth: state.flanger_depth }]
+    }
+
+    /// How much of the flanger's delayed tap feeds back into its line.
+    pub fn set_flanger_feedback(&mut self, deck: DeckId, feedback: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.flanger_feedback = feedback.clamp(0.0, crate::music_dsp::FLANGER_FEEDBACK_MAX);
+        vec![DeckCmd::SetFlangerFeedback { deck, feedback: state.flanger_feedback }]
+    }
+
     /// Stem knob. Inert until the separated stems are loaded — the deck is
     /// playing the full mix and there is nothing to turn down.
     pub fn set_stem(&mut self, deck: DeckId, stem: usize, gain: f32) -> Vec<DeckCmd> {
@@ -5362,6 +5425,64 @@ mod tests {
         let (d, g) = load_gen(&e.click(item(3), DeckTarget::B));
         let cmds = e.track_ready(d, g, 20.0);
         assert!(cmds.contains(&DeckCmd::SetEchoFeedback { deck: DeckId::B, feedback: 0.8 }));
+    }
+
+    #[test]
+    fn flanger_rate_and_feedback_clamp_to_their_documented_ranges() {
+        let mut e = DeckEngine::new();
+        assert_eq!(
+            e.set_flanger_rate(DeckId::A, 100.0),
+            vec![DeckCmd::SetFlangerRate { deck: DeckId::A, hz: crate::music_dsp::FLANGER_RATE_MAX }]
+        );
+        assert_eq!(
+            e.set_flanger_rate(DeckId::A, -1.0),
+            vec![DeckCmd::SetFlangerRate { deck: DeckId::A, hz: crate::music_dsp::FLANGER_RATE_MIN }]
+        );
+        assert_eq!(
+            e.set_flanger_feedback(DeckId::A, 5.0),
+            vec![DeckCmd::SetFlangerFeedback {
+                deck: DeckId::A,
+                feedback: crate::music_dsp::FLANGER_FEEDBACK_MAX,
+            }]
+        );
+        assert_eq!(
+            e.set_flanger_depth(DeckId::A, 5.0),
+            vec![DeckCmd::SetFlangerDepth { deck: DeckId::A, depth: 1.0 }]
+        );
+    }
+
+    #[test]
+    fn toggle_flanger_flips_and_set_flanger_lands_on_an_explicit_side() {
+        let mut e = DeckEngine::new();
+        assert!(!e.deck(DeckId::A).flanger_on);
+        assert_eq!(
+            e.toggle_flanger(DeckId::A),
+            vec![DeckCmd::SetFlanger { deck: DeckId::A, on: true }]
+        );
+        assert!(e.deck(DeckId::A).flanger_on);
+        // A MIX broadcast lands both decks on the SAME explicit side
+        // rather than each toggling its own -- set_flanger is what that
+        // needs, distinct from the single-deck toggle.
+        assert_eq!(
+            e.set_flanger(DeckId::B, true),
+            vec![DeckCmd::SetFlanger { deck: DeckId::B, on: true }]
+        );
+        assert!(e.deck(DeckId::B).flanger_on);
+    }
+
+    #[test]
+    fn a_load_carries_the_operators_flanger_settings() {
+        let mut e = DeckEngine::new();
+        e.toggle_flanger(DeckId::B);
+        e.set_flanger_rate(DeckId::B, 2.0);
+        e.set_flanger_depth(DeckId::B, 0.9);
+        e.set_flanger_feedback(DeckId::B, 0.6);
+        let (d, g) = load_gen(&e.click(item(3), DeckTarget::B));
+        let cmds = e.track_ready(d, g, 20.0);
+        assert!(cmds.contains(&DeckCmd::SetFlanger { deck: DeckId::B, on: true }));
+        assert!(cmds.contains(&DeckCmd::SetFlangerRate { deck: DeckId::B, hz: 2.0 }));
+        assert!(cmds.contains(&DeckCmd::SetFlangerDepth { deck: DeckId::B, depth: 0.9 }));
+        assert!(cmds.contains(&DeckCmd::SetFlangerFeedback { deck: DeckId::B, feedback: 0.6 }));
     }
 
     // -----------------------------------------------------------------
