@@ -1446,7 +1446,14 @@ impl App {
     /// Every canvas / inspector / face edit ends here: the new graph goes to
     /// the server, the file is rewritten, and `flow.changed` redraws.
     fn put_graph(&mut self, cx: &mut Cx, graph: Graph) {
-        if self.instance.is_some() {
+        self.put_graph_with(cx, graph, false);
+    }
+
+    /// A run view is a locked snapshot of the design's meaning, but the
+    /// cards' layout stays the reader's: moving, sizing and flipping a card
+    /// (`layout_only`) writes the file there too, as it does in design.
+    fn put_graph_with(&mut self, cx: &mut Cx, graph: Graph, layout_only: bool) {
+        if self.instance.is_some() && !layout_only {
             return;
         }
         let Some(name) = self.selected.clone() else {
@@ -1497,7 +1504,11 @@ impl App {
     }
 
     fn apply_edit(&mut self, cx: &mut Cx, edit: CanvasEdit) {
-        if self.instance.is_some() {
+        let layout_only = matches!(
+            edit,
+            CanvasEdit::Move { .. } | CanvasEdit::Resize { .. } | CanvasEdit::Flip { .. }
+        );
+        if self.instance.is_some() && !layout_only {
             return;
         }
         let Some(graph) = self.current_graph() else {
@@ -1542,7 +1553,7 @@ impl App {
                 graph_edit::add_node(&graph, entry, at).0
             }
         };
-        self.put_graph(cx, next);
+        self.put_graph_with(cx, next, layout_only);
     }
 
     fn duplicate_selected(&mut self, cx: &mut Cx) {
@@ -2372,6 +2383,21 @@ impl App {
 
     /// Exact §3 progress: `(done + running_fraction) / planned_nodes`.
     /// Terminal color is selected independently by `RunBar` from `state`.
+    /// The shown run and everything it painted go: node chips and bars on
+    /// the cards, streamed text, the toolbar bar.
+    fn clear_run_view(&mut self, cx: &mut Cx) {
+        self.run = None;
+        self.current_node = None;
+        self.outputs.clear();
+        if let Some(mut canvas) = self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>() {
+            canvas.clear_run(cx);
+        }
+        if let Some(faces) = self.faces.as_mut() {
+            faces.reset_run();
+        }
+        self.update_run_bar(cx);
+    }
+
     fn update_run_bar(&mut self, cx: &mut Cx) {
         let (fraction, done, total) = {
             let canvas = self.ui.widget(cx, ids!(canvas));
@@ -2622,6 +2648,23 @@ impl App {
             }
             "run.finished" => {
                 let state = event.state_text().unwrap_or_else(|| "done".into());
+                if state == "cancelled" {
+                    // A cancelled run leaves nothing on the canvas: cards,
+                    // bars and the toolbar clear as if Clear had been pressed.
+                    self.clear_run_view(cx);
+                    if let Some(faces) = self.faces.as_mut() {
+                        faces.push_state(cx, "run", &state);
+                    }
+                    self.refresh_instances();
+                    self.fetch_instance();
+                    if self.deferred_flow_reload {
+                        self.deferred_flow_reload = false;
+                        if let Some(name) = self.selected.clone() {
+                            self.load_flow(name);
+                        }
+                    }
+                    return;
+                }
                 // Output nodes get no node.* events of their own: the run's
                 // outputs are their values, so they finish with the run.
                 for (output_node, value) in event.output_values() {
@@ -2774,6 +2817,7 @@ impl App {
             && !self.pending_graph
         {
             if let Some(mut graph) = self.current_graph() {
+                let layout_only = self.pending_params.is_empty();
                 let pending = std::mem::take(&mut self.pending_params);
                 for ((node, key), value) in pending {
                     graph = graph_edit::set_param(&graph, &node, &key, value);
@@ -2783,7 +2827,7 @@ impl App {
                         node.flip = *flip;
                     }
                 }
-                self.put_graph(cx, graph);
+                self.put_graph_with(cx, graph, layout_only);
             } else {
                 self.pending_params.clear();
                 self.pending_auto_flips.clear();
@@ -3838,9 +3882,6 @@ impl MatchEvent for App {
                         .set_text(cx, &format!("{:.0} %", scale * 100.0));
                 }
                 FlowCanvasAction::AutoFlip(changes) => {
-                    if self.instance.is_some() {
-                        continue;
-                    }
                     let Some(mut graph) = self.current_graph() else {
                         continue;
                     };
@@ -4077,6 +4118,9 @@ impl MatchEvent for App {
                     instance,
                     batch,
                 } => {
+                    if self.run.as_ref().is_some_and(|run| run.run_id == run_id) {
+                        self.clear_run_view(cx);
+                    }
                     if batch {
                         self.io(move |client| IoResult::Done(client.cancel_run(&run_id)));
                     } else {
@@ -4116,17 +4160,7 @@ impl MatchEvent for App {
                     if detach {
                         self.attach_instance(cx, None, true);
                     }
-                    self.run = None;
-                    self.outputs.clear();
-                    if let Some(mut canvas) =
-                        self.ui.widget(cx, ids!(canvas)).borrow_mut::<FlowCanvas>()
-                    {
-                        canvas.clear_run(cx);
-                    }
-                    if let Some(faces) = self.faces.as_mut() {
-                        faces.reset_run();
-                    }
-                    self.update_run_bar(cx);
+                    self.clear_run_view(cx);
                 }
                 QueueAction::OpenAsset(asset) => {
                     if let Some(mut inspector) =
@@ -4960,6 +4994,42 @@ mod layout_tests {
             .widget(&cx, ids!(preview_value))
             .borrow::<faces::ValueView>()
             .is_some());
+    }
+
+    #[test]
+    fn a_cancelled_run_clears_the_canvas_and_the_bar() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let mut app = cx.with_vm(|vm| App::from_script_mod(vm, <App as AppMain>::script_mod));
+        app.run = Some(RunInfo {
+            run_id: "run-c".into(),
+            state: "running".into(),
+            started: 0.0,
+            finished_secs: None,
+            revision: 1,
+            planned_nodes: vec!["image".into()],
+        });
+        app.set_node_status(&mut cx, "image", "running", 500, true, "denoise", None);
+        app.handle_flow_event(
+            &mut cx,
+            FlowEvent {
+                topic: "run".into(),
+                kind: "run.finished".into(),
+                run_id: Some("run-c".into()),
+                state: Some(makepad_widgets::makepad_micro_serde::JsonValue::String(
+                    "cancelled".into(),
+                )),
+                ..FlowEvent::default()
+            },
+        );
+        assert!(app.run.is_none());
+        assert!(app
+            .ui
+            .widget(&cx, ids!(canvas))
+            .borrow::<FlowCanvas>()
+            .unwrap()
+            .statuses
+            .is_empty());
     }
 
     #[test]
