@@ -444,6 +444,7 @@ pub struct ParallelismResponse {
 #[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
 pub struct TemplateSummary {
     pub name: String,
+    pub group: String,
     pub label: String,
     pub brief: String,
     pub node_count: u64,

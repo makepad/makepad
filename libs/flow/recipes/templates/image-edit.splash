@@ -1,0 +1,20 @@
+use mod.flow.*
+
+/** The edit instruction. */
+let prompt = Input{ type: @text default: "replace the background with a pine forest" }
+/** The image to edit. */
+let image = Input{ type: @image }
+let edit = ImageEdit{
+    prompt: prompt.text()
+    image: image.image()
+    strength: 1.0
+    model: "flux2-klein-4b"
+}
+/** Publish the edited picture into the flow asset library. */
+let published = Publish{ value: edit.out(@image) namespace: "flows" tags: ["flow", "edit"] }
+
+Flow{
+    label: "Edit selected image"
+    brief: "Applies a direct instruction edit to a supplied picture with FLUX.2 Klein."
+    prompt, image, edit, published
+}

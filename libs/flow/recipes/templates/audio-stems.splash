@@ -1,0 +1,13 @@
+use mod.flow.*
+
+/** The 44.1 kHz stereo song to separate. */
+let audio = Input{ type: @audio }
+let separate = Stems{ audio: audio.audio() model: "bs-roformer-4stem" }
+/** The packed drums, bass, other, and vocals stem bundle. */
+let stems = Output{ type: @bytes value: separate.stems() }
+
+Flow{
+    label: "Separate stems"
+    brief: "Separates supplied stereo music into a packed four-stem bundle."
+    audio, separate, stems
+}

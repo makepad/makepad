@@ -11,7 +11,7 @@ let video = Video{
     image: image.image()
     frames: 39
     steps: 30
-    audio: false
+    audio: true
     at: vec2(360, 160)
 }
 

@@ -903,7 +903,7 @@ pub fn flows_manifest() -> ServiceManifest {
             "One run's full event stream including progress; filter with {run_id}; final on run.finished.",
         ))
         .with_tool(tool("list", "List flow definitions with state, canonical status, and live instance counts.", empty_schema(), Risk::Read))
-        .with_tool(tool("templates", "List flow templates with labels, briefs, inputs, and outputs.", empty_schema(), Risk::Read))
+        .with_tool(tool("templates", "List flow templates grouped by Image, Video, Audio, 3D, Vision & text, and Utilities, with labels, briefs, inputs, and outputs.", empty_schema(), Risk::Read))
         .with_tool(tool("models", "List the live fleet's models, optionally restricted to one generation domain.", r#"{"type":"object","properties":{"domain":{"type":"string"}},"additionalProperties":false}"#, Risk::Read))
         .with_tool(tool("assets", "List assets written by flows, newest first; set ns to * to widen beyond flow assets.", r#"{"type":"object","properties":{"q":{"type":"string"},"ns":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100}},"additionalProperties":false}"#, Risk::Read))
         .with_tool(tool("create", "Create and evaluate a named flow definition from a built-in template.", r#"{"type":"object","properties":{"name":{"type":"string"},"template":{"type":"string"}},"required":["name","template"],"additionalProperties":false}"#, Risk::Act))
@@ -2070,32 +2070,41 @@ fn render_templates(templates: &[TemplateSummary]) -> String {
     if templates.is_empty() {
         return "no flow templates".to_string();
     }
-    templates
-        .iter()
-        .map(|template| {
-            let inputs = template
-                .inputs
-                .iter()
-                .map(|(name, ty)| format!("{name}:{ty}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let outputs = template
-                .outputs
-                .iter()
-                .map(|(name, ty)| format!("{name}:{ty}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(
-                "{} · {} · {} · inputs [{}] · outputs [{}]",
-                template.name,
-                template.label,
-                one_line(&template.brief),
-                inputs,
-                outputs
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut templates: Vec<_> = templates.iter().collect();
+    templates.sort_by(|left, right| {
+        makepad_flow::templates::group_rank(&left.group)
+            .cmp(&makepad_flow::templates::group_rank(&right.group))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    let mut lines = Vec::new();
+    let mut previous_group = "";
+    for template in templates {
+        if template.group != previous_group {
+            lines.push(format!("{}:", template.group));
+            previous_group = &template.group;
+        }
+        let inputs = template
+            .inputs
+            .iter()
+            .map(|(name, ty)| format!("{name}:{ty}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let outputs = template
+            .outputs
+            .iter()
+            .map(|(name, ty)| format!("{name}:{ty}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!(
+            "  {} · {} · {} · inputs [{}] · outputs [{}]",
+            template.name,
+            template.label,
+            one_line(&template.brief),
+            inputs,
+            outputs
+        ));
+    }
+    lines.join("\n")
 }
 
 fn render_models(response: &ModelsResponse) -> String {
@@ -2755,6 +2764,27 @@ mod tests {
         assert_eq!(flows.tool("watch").unwrap().risk, Risk::Act);
         assert_eq!(flows.tool("delete").unwrap().risk, Risk::Destructive);
         assert!(manifest.topic("run").is_some());
+    }
+
+    #[test]
+    fn templates_tool_text_is_grouped_in_wire_order() {
+        let summary = |name: &str, group: &str| TemplateSummary {
+            name: name.into(),
+            group: group.into(),
+            label: name.into(),
+            brief: "brief".into(),
+            node_count: 1,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        };
+        let text = render_templates(&[
+            summary("mesh", "3D"),
+            summary("video", "Video"),
+            summary("image", "Image"),
+        ]);
+        assert!(text.find("Image:").unwrap() < text.find("Video:").unwrap());
+        assert!(text.find("Video:").unwrap() < text.find("3D:").unwrap());
+        assert!(text.contains("  image · image"));
     }
 
     #[test]

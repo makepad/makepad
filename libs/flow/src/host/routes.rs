@@ -170,7 +170,11 @@ pub(crate) fn dispatch(
                 .iter()
                 .map(crate::templates::template_summary)
                 .collect();
-            summaries.sort_by(|left, right| left.name.cmp(&right.name));
+            summaries.sort_by(|left, right| {
+                crate::templates::group_rank(&left.group)
+                    .cmp(&crate::templates::group_rank(&right.group))
+                    .then_with(|| left.name.cmp(&right.name))
+            });
             Outcome::Resp(json(200, &summaries))
         }
         [v1, templates, name] if v1 == "v1" && templates == "templates" => {

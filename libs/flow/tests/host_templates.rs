@@ -2,7 +2,7 @@
 
 use makepad_flow::client::{ClientError, FlowClient};
 use makepad_flow::host::{FlowServer, FlowServerConfig};
-use makepad_flow::templates::TEMPLATES;
+use makepad_flow::templates::{group_rank, TEMPLATES, TEMPLATE_GROUPS};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -61,9 +61,24 @@ fn host_lists_and_creates_templates() {
     let client = FlowClient::connect(client_endpoints, endpoints.token.clone(), None).unwrap();
 
     let templates = client.templates().unwrap();
-    assert_eq!(templates.len(), 19);
-    assert!(templates.windows(2).all(|pair| pair[0].name < pair[1].name));
-    assert!(templates.iter().all(|template| !template.brief.is_empty()));
+    assert_eq!(templates.len(), 55);
+    assert!(templates.windows(2).all(|pair| {
+        group_rank(&pair[0].group) < group_rank(&pair[1].group)
+            || (pair[0].group == pair[1].group && pair[0].name < pair[1].name)
+    }));
+    assert_eq!(
+        templates
+            .iter()
+            .map(|template| template.group.as_str())
+            .collect::<std::collections::HashSet<_>>(),
+        TEMPLATE_GROUPS.iter().copied().collect()
+    );
+    assert!(templates.iter().all(|template| {
+        !template.label.is_empty()
+            && !template.brief.is_empty()
+            && !template.inputs.is_empty()
+            && !template.outputs.is_empty()
+    }));
     let dream = templates.iter().find(|template| template.name == "dream").unwrap();
     assert_eq!(dream.inputs, [("prompt".to_string(), "text".to_string())]);
     assert_eq!(dream.outputs, [("movie".to_string(), "video".to_string())]);

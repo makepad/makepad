@@ -1,0 +1,25 @@
+use mod.flow.*
+
+/** The seamless shot idea to expand, paint, and animate. */
+let prompt = Input{ type: @text default: "a lantern floating on a perfectly still night lake" }
+let expand = Llm{
+    system: "Rewrite the prompt as one seamless looping shot with a clear keyframe, continuous motion, camera, and light. No cuts or lists."
+    prompt: prompt.text()
+}
+let image = Image{ prompt: expand.text() width: 512 height: 512 }
+let video = Video{
+    prompt: expand.text()
+    image: image.image()
+    last_frame: image.image()
+    frames: 39
+    steps: 30
+    audio: true
+}
+/** Publish the closed-loop clip into the flow asset library. */
+let published = Publish{ value: video.video() namespace: "flows" tags: ["flow", "video", "loop", "expanded"] }
+
+Flow{
+    label: "Expanded prompt to video loop"
+    brief: "Expands a shot, paints its shared first and last frame, and generates an audible seamless loop."
+    prompt, expand, image, video, published
+}

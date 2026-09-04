@@ -1,0 +1,24 @@
+use mod.flow.*
+
+/** The shot idea to expand, paint, and animate. */
+let prompt = Input{ type: @text default: "a paper airship crossing a sunrise cloud bank" }
+let expand = Llm{
+    system: "Rewrite the prompt as one continuous cinematic shot with a clear first frame, steady motion, camera, and light. No cuts or lists."
+    prompt: prompt.text()
+}
+let image = Image{ prompt: expand.text() width: 512 height: 512 }
+let video = Video{
+    prompt: expand.text()
+    image: image.image()
+    frames: 39
+    steps: 30
+    audio: true
+}
+/** Publish the animated keyframe into the flow asset library. */
+let published = Publish{ value: video.video() namespace: "flows" tags: ["flow", "video"] }
+
+Flow{
+    label: "Expanded prompt to video"
+    brief: "Expands a shot idea, paints its keyframe, and animates it into an audible clip."
+    prompt, expand, image, video, published
+}

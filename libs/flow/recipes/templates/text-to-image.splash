@@ -1,0 +1,13 @@
+use mod.flow.*
+
+/** What to paint. */
+let prompt = Input{ type: @text default: "a small brass robot on a workbench" }
+let image = Image{ prompt: prompt.text() width: 512 height: 512 }
+/** Publish the generated picture into the flow asset library. */
+let published = Publish{ value: image.image() namespace: "flows" tags: ["flow", "image"] }
+
+Flow{
+    label: "Text to image"
+    brief: "Paints a 512-square image directly from the supplied prompt."
+    prompt, image, published
+}
