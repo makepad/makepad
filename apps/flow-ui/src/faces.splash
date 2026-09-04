@@ -18,7 +18,7 @@ use mod.widgets.*
 // `on_state` on the face object; every bridge call is queued to the next frame.
 //
 // The canvas pads a card's content (14 px) and draws the port strip above
-// it; a picture face (`ImageFace`, `OutputFace`) fills its card edge to edge.
+// it. Generator cards contain settings only; OutputFace owns result media.
 
 let Face = View{
     width: Fill
@@ -207,9 +207,6 @@ mod.flow.ui.ImageFace = Face{
 
 mod.flow.ui.UpscaleFace = Face{
     spacing: 0
-    preview := mod.flow.ui.ValueImage{
-        show := @self
-    }
     params := Strip{
         summary := Meta{param := @summary}
         model := mod.flow.ui.ModelPicker{
@@ -220,9 +217,6 @@ mod.flow.ui.UpscaleFace = Face{
 
 mod.flow.ui.GenFace = Face{
     domain := Meta{param := @domain}
-    out := mod.flow.ui.ValueView{
-        show := @self
-    }
     params := Strip{
         format := mod.flow.ui.FormatPicker{}
         model := mod.flow.ui.ModelPicker{

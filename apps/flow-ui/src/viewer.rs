@@ -1,7 +1,9 @@
-//! Full-window image inspection: one textured quad over a quiet checker,
-//! with an eased fit/1:1 camera. Bytes are supplied by the app's value cache.
+//! Full-window media inspection. Images keep the eased fit/1:1 camera; video,
+//! audio, mesh, and splat values use the shared viewers in the same frame.
 
+use crate::values::{media_kind, MediaKind};
 use makepad_flow::ValueBytes;
+use makepad_media_view::{AudioPlayer, MeshView, SplatView, VideoPlayer};
 use makepad_widgets::makepad_draw::event::{TouchState, TouchUpdateEvent};
 use makepad_widgets::*;
 
@@ -78,6 +80,32 @@ script_mod! {
                             return self.image_texture.sample_as_bgra(uv)
                         }
                     }
+                }
+            }
+            media_layer := View{
+                width: Fill
+                height: Fill
+                visible: false
+                flow: Overlay
+                video := mod.widgets.VideoPlayer{
+                    width: Fill
+                    height: Fill
+                    visible: false
+                }
+                audio := mod.widgets.AudioPlayer{
+                    width: Fill
+                    height: Fill
+                    visible: false
+                }
+                mesh := mod.widgets.MeshView{
+                    width: Fill
+                    height: Fill
+                    visible: false
+                }
+                splat := mod.widgets.SplatView{
+                    width: Fill
+                    height: Fill
+                    visible: false
                 }
             }
         }
@@ -249,6 +277,8 @@ pub struct ImageViewer {
     snap_to_fit: bool,
     #[rust]
     closing: bool,
+    #[rust]
+    media_kind: MediaKind,
 }
 
 /// Layout-points-per-image-pixel scale which contains the image inside the
@@ -342,20 +372,67 @@ impl ImageViewer {
     }
 
     pub fn show(&mut self, cx: &mut Cx, item: ImageViewerItem) -> Result<(), String> {
+        self.clear_media(cx);
+        let kind = media_kind(&item.bytes);
+        self.media_kind = kind;
         let image = self.view.image(cx, ids!(image));
-        image
-            .load_image_from_data(cx, &item.bytes.bytes)
-            .map_err(|error| format!("could not decode {}: {error:?}", item.bytes.content_type))?;
-        self.image_size = image
-            .size_in_pixels(cx)
-            .map(|(w, h)| dvec2(w as f64, h as f64))
-            .unwrap_or(dvec2(1.0, 1.0));
-        if let Some(mut image) = image.borrow_mut() {
-            image.draw_bg.image_dim_w = self.image_size.x as f32;
-            image.draw_bg.image_dim_h = self.image_size.y as f32;
-            image.draw_bg.rotation = 0.0;
-            image.draw_bg.sample_mode =
-                if self.pixelated { -1.0 } else { self.dpi_factor as f32 };
+        match kind {
+            MediaKind::Image => {
+                image.load_image_from_data(cx, &item.bytes.bytes).map_err(|error| {
+                    format!("could not decode {}: {error:?}", item.bytes.content_type)
+                })?;
+                self.image_size = image
+                    .size_in_pixels(cx)
+                    .map(|(w, h)| dvec2(w as f64, h as f64))
+                    .unwrap_or(dvec2(1.0, 1.0));
+                if let Some(mut image) = image.borrow_mut() {
+                    image.draw_bg.image_dim_w = self.image_size.x as f32;
+                    image.draw_bg.image_dim_h = self.image_size.y as f32;
+                    image.draw_bg.rotation = 0.0;
+                    image.draw_bg.sample_mode =
+                        if self.pixelated { -1.0 } else { self.dpi_factor as f32 };
+                }
+            }
+            MediaKind::Video => self
+                .view
+                .widget(cx, ids!(video))
+                .borrow_mut::<VideoPlayer>()
+                .ok_or_else(|| "video viewer is unavailable".to_string())?
+                .load_bytes(cx, &item.bytes.bytes, &item.bytes.content_type)?,
+            MediaKind::Audio => self
+                .view
+                .widget(cx, ids!(audio))
+                .borrow_mut::<AudioPlayer>()
+                .ok_or_else(|| "audio viewer is unavailable".to_string())?
+                .load_bytes(cx, &item.bytes.bytes, &item.bytes.content_type)?,
+            MediaKind::Mesh => self
+                .view
+                .widget(cx, ids!(mesh))
+                .borrow_mut::<MeshView>()
+                .ok_or_else(|| "mesh viewer is unavailable".to_string())?
+                .load_bytes(cx, &item.bytes.bytes, &item.bytes.content_type)?,
+            MediaKind::Splat => self
+                .view
+                .widget(cx, ids!(splat))
+                .borrow_mut::<SplatView>()
+                .ok_or_else(|| "splat viewer is unavailable".to_string())?
+                .load_bytes(cx, &item.bytes.bytes, &item.bytes.content_type)?,
+            MediaKind::Text | MediaKind::Unknown => {
+                return Err(format!("no media viewer for {}", item.bytes.content_type));
+            }
+        }
+        if kind != MediaKind::Image {
+            self.image_size = dvec2(1.0, 1.0);
+            image.set_texture(cx, None);
+            self.view.widget(cx, ids!(media_layer)).set_visible(cx, true);
+            let target = match kind {
+                MediaKind::Video => ids!(video),
+                MediaKind::Audio => ids!(audio),
+                MediaKind::Mesh => ids!(mesh),
+                MediaKind::Splat => ids!(splat),
+                _ => ids!(picture),
+            };
+            self.view.widget(cx, target).set_visible(cx, true);
         }
         self.view.label(cx, ids!(title)).set_text(
             cx,
@@ -363,7 +440,11 @@ impl ImageViewer {
         );
         self.view.label(cx, ids!(size)).set_text(
             cx,
-            &format!("{}×{}", self.image_size.x as usize, self.image_size.y as usize),
+            &if kind == MediaKind::Image {
+                format!("{}×{}", self.image_size.x as usize, self.image_size.y as usize)
+            } else {
+                format!("{} · {} bytes", item.bytes.content_type, item.bytes.bytes.len())
+            },
         );
         self.item = Some(item);
         self.zoom = 1.0;
@@ -382,6 +463,9 @@ impl ImageViewer {
         self.view
             .view(cx, ids!(picture))
             .set_visible(cx, false);
+        for id in [ids!(fit), ids!(fit_width), ids!(actual), ids!(double), ids!(pixels)] {
+            self.view.widget(cx, id).set_visible(cx, kind == MediaKind::Image);
+        }
         self.sync_control_opacity(cx);
         cx.set_key_focus(self.view.area());
         self.next_frame = cx.new_next_frame();
@@ -401,6 +485,7 @@ impl ImageViewer {
     }
 
     fn finish_close(&mut self, cx: &mut Cx) {
+        self.clear_media(cx);
         self.item = None;
         self.closing = false;
         self.view.set_visible(cx, false);
@@ -460,6 +545,10 @@ impl ImageViewer {
             self.close_button_rect = Some(close_rect);
         }
         self.sync_control_opacity(cx);
+        if self.media_kind != MediaKind::Image {
+            self.view.view(cx, ids!(picture)).set_visible(cx, false);
+            return;
+        }
         if stage.size.x <= 0.0 || stage.size.y <= 0.0 {
             self.view
                 .view(cx, ids!(picture))
@@ -595,6 +684,35 @@ impl ImageViewer {
         } else {
             self.fit(cx);
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn media_kind(&self) -> MediaKind {
+        self.media_kind
+    }
+
+    fn clear_media(&mut self, cx: &mut Cx) {
+        self.view.widget(cx, ids!(media_layer)).set_visible(cx, false);
+        let video = self.view.widget(cx, ids!(video));
+        video.set_visible(cx, false);
+        if let Some(mut video) = video.borrow_mut::<VideoPlayer>() {
+            video.clear(cx);
+        }
+        let audio = self.view.widget(cx, ids!(audio));
+        audio.set_visible(cx, false);
+        if let Some(mut audio) = audio.borrow_mut::<AudioPlayer>() {
+            audio.clear(cx);
+        }
+        let mesh = self.view.widget(cx, ids!(mesh));
+        mesh.set_visible(cx, false);
+        if let Some(mut mesh) = mesh.borrow_mut::<MeshView>() {
+            mesh.clear(cx);
+        }
+        let splat = self.view.widget(cx, ids!(splat));
+        splat.set_visible(cx, false);
+        if let Some(mut splat) = splat.borrow_mut::<SplatView>() {
+            splat.clear(cx);
+        };
     }
 
     fn handle_touch(&mut self, cx: &mut Cx, event: &TouchUpdateEvent) {
@@ -741,9 +859,9 @@ impl Widget for ImageViewer {
                 KeyCode::Escape => {
                     cx.widget_action(self.view.widget_uid(), ImageViewerAction::Close)
                 }
-                KeyCode::Key0 => self.fit(cx),
-                KeyCode::Key1 => self.actual(cx),
-                KeyCode::Key2 => self.double(cx),
+                KeyCode::Key0 if self.media_kind == MediaKind::Image => self.fit(cx),
+                KeyCode::Key1 if self.media_kind == MediaKind::Image => self.actual(cx),
+                KeyCode::Key2 if self.media_kind == MediaKind::Image => self.double(cx),
                 KeyCode::ArrowLeft => {
                     cx.widget_action(self.view.widget_uid(), ImageViewerAction::Step(-1))
                 }
@@ -755,11 +873,16 @@ impl Widget for ImageViewer {
         }
         match event.hits(cx, self.view.area()) {
             Hit::FingerScroll(event) => {
-                let zoom = scroll_zoom(self.target_zoom, event.scroll.y, wheel_notch());
-                self.zoom_at(cx, event.abs, zoom);
+                if self.media_kind == MediaKind::Image {
+                    let zoom = scroll_zoom(self.target_zoom, event.scroll.y, wheel_notch());
+                    self.zoom_at(cx, event.abs, zoom);
+                }
             }
             Hit::FingerDown(event) => {
                 cx.set_key_focus(self.view.area());
+                if self.media_kind != MediaKind::Image {
+                    return;
+                }
                 let picture = self.view.view(cx, ids!(picture)).area().rect(cx);
                 let bar = self.view.view(cx, ids!(bar)).area().rect(cx);
                 let top_close = self.view.view(cx, ids!(top_close)).area().rect(cx);
@@ -920,6 +1043,7 @@ mod tests {
         let mut viewer = cx.with_vm(|vm| {
             makepad_widgets::script_mod(vm);
             crate::theme::script_mod(vm);
+            makepad_media_view::script_mod(vm);
             super::script_mod(vm);
             ImageViewer::script_new_with_default(vm)
         });
@@ -990,6 +1114,69 @@ mod tests {
             pan = zoom_pan_at_cursor(pan, anchor, zoom, next);
             zoom = next;
             assert!((point * zoom + pan - anchor).length() < 1e-9);
+        }
+    }
+
+    fn tiny_wav() -> Vec<u8> {
+        let mut wav = b"RIFF".to_vec();
+        wav.extend_from_slice(&38u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&8_000u32.to_le_bytes());
+        wav.extend_from_slice(&16_000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&2u32.to_le_bytes());
+        wav.extend_from_slice(&0i16.to_le_bytes());
+        wav
+    }
+
+    #[test]
+    fn modal_routes_each_media_kind_to_its_widget() {
+        let cases = [
+            ("video/mp4", b"video".to_vec(), MediaKind::Video, live_id!(video)),
+            ("audio/wav", tiny_wav(), MediaKind::Audio, live_id!(audio)),
+            (
+                "model/gltf-binary",
+                b"glTF\x02\0\0\0\x10\0\0\0".to_vec(),
+                MediaKind::Mesh,
+                live_id!(mesh),
+            ),
+            (
+                "application/x-ply",
+                b"ply\nformat ascii 1.0\nend_header\n".to_vec(),
+                MediaKind::Splat,
+                live_id!(splat),
+            ),
+        ];
+        for (content_type, bytes, expected, child) in cases {
+            let mut cx = Cx::new(Box::new(|_, _| {}));
+            let mut viewer = cx.with_vm(|vm| {
+                makepad_widgets::script_mod(vm);
+                crate::theme::script_mod(vm);
+                makepad_media_view::script_mod(vm);
+                super::script_mod(vm);
+                ImageViewer::script_new_with_default(vm)
+            });
+            viewer
+                .show(
+                    &mut cx,
+                    ImageViewerItem {
+                        node: "output".into(),
+                        port: "value".into(),
+                        bytes: ValueBytes {
+                            digest: content_type.into(),
+                            content_type: content_type.into(),
+                            bytes: bytes.into(),
+                        },
+                    },
+                )
+                .unwrap();
+            assert_eq!(viewer.media_kind(), expected);
+            assert!(viewer.view.widget(&mut cx, &[child]).visible());
         }
     }
 }

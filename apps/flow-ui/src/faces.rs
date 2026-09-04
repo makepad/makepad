@@ -9,7 +9,7 @@
 //! next event dispatch.
 
 use crate::graph_view::{declared_output_type, PortIcon};
-use crate::values::ValueCache;
+use crate::values::{media_kind, MediaKind, ValueCache};
 use makepad_code_editor::code_view::CodeView;
 use makepad_flow::{
     Graph, InstanceRow, Literal, ModelsResponse, Node, NodeTypeCatalog, PortType, ValueBytes,
@@ -23,6 +23,7 @@ use makepad_widgets::widget_async::{enter_isolate, leave_isolate, CxSplashVmExt,
 use makepad_widgets::widget_tree::CxWidgetExt;
 use makepad_widgets::*;
 use makepad_flowgraph::{Camera, NodeFaces};
+use makepad_media_view::{AudioPlayer, MeshView, SplatView, VideoPlayer};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
@@ -504,6 +505,22 @@ script_mod! {
         image := RoundedPicture{
             visible: false
         }
+        video := mod.widgets.VideoPlayer{
+            visible: false
+            height: 180
+        }
+        audio := mod.widgets.AudioPlayer{
+            visible: false
+            height: 150
+        }
+        mesh := mod.widgets.MeshView{
+            visible: false
+            height: 180
+        }
+        splat := mod.widgets.SplatView{
+            visible: false
+            height: 180
+        }
         text_scroll := mod.flow.ui.TextScroll{
             visible: false
             text := Label{
@@ -829,8 +846,8 @@ impl ValueText {
     }
 }
 
-/// Shows whatever arrives: an image as a picture, text and json inline,
-/// anything else as its content type and byte count.
+/// Shows whatever arrives with the shared image/video/audio/mesh/splat
+/// viewers, and falls back to bounded inline text for non-media values.
 #[derive(Script, ScriptHook, Widget)]
 pub struct ValueView {
     #[deref]
@@ -841,6 +858,8 @@ pub struct ValueView {
     loaded: bool,
     #[rust]
     card_sized: bool,
+    #[rust]
+    media_kind: MediaKind,
 }
 
 impl Widget for ValueView {
@@ -853,7 +872,13 @@ impl Widget for ValueView {
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
         self.value = v.to_string();
         self.loaded = false;
+        self.media_kind = if v.is_empty() {
+            MediaKind::Unknown
+        } else {
+            MediaKind::Text
+        };
         self.view.image(cx, ids!(image)).set_visible(cx, false);
+        self.hide_media(cx);
         self.view
             .view(cx, ids!(text_scroll))
             .set_visible(cx, !v.is_empty());
@@ -876,6 +901,39 @@ impl ValueView {
         self.card_sized = sized;
         self.view.walk.height = card_height(sized);
         set_image_card_layout(&self.view.image(cx, ids!(image)), cx, sized);
+        let media_height = if sized {
+            Size::fill()
+        } else {
+            Size::Fixed(180.0)
+        };
+        if let Some(mut video) = self
+            .view
+            .widget(cx, ids!(video))
+            .borrow_mut::<VideoPlayer>()
+        {
+            video.set_size(cx, Size::fill(), media_height);
+        }
+        if let Some(mut audio) = self
+            .view
+            .widget(cx, ids!(audio))
+            .borrow_mut::<AudioPlayer>()
+        {
+            audio.set_size(cx, Size::fill(), media_height);
+        }
+        if let Some(mut mesh) = self
+            .view
+            .widget(cx, ids!(mesh))
+            .borrow_mut::<MeshView>()
+        {
+            mesh.set_size(cx, Size::fill(), media_height);
+        }
+        if let Some(mut splat) = self
+            .view
+            .widget(cx, ids!(splat))
+            .borrow_mut::<SplatView>()
+        {
+            splat.set_size(cx, Size::fill(), media_height);
+        }
         set_view_ref_height(
             &self.view.view(cx, ids!(empty)),
             cx,
@@ -898,6 +956,12 @@ impl ValueView {
     }
 
     pub fn set_image(&mut self, cx: &mut Cx, value: &ValueBytes) {
+        if self.loaded && self.media_kind == MediaKind::Image && self.value == value.digest {
+            return;
+        }
+        self.value = value.digest.clone();
+        self.hide_media(cx);
+        self.media_kind = MediaKind::Image;
         let image = self.view.image(cx, ids!(image));
         let loaded = if value.content_type.contains("jpeg") || value.content_type.contains("jpg") {
             image.load_jpg_from_data(cx, &value.bytes)
@@ -917,6 +981,7 @@ impl ValueView {
             Err(error) => {
                 image.set_visible(cx, false);
                 self.set_text(cx, &format!("{} · {:?}", value.content_type, error));
+                self.media_kind = MediaKind::Image;
             }
         }
         self.view.redraw(cx);
@@ -924,6 +989,98 @@ impl ValueView {
 
     pub fn is_loaded(&self) -> bool {
         self.loaded
+    }
+
+    #[cfg(test)]
+    pub(crate) fn media_kind(&self) -> MediaKind {
+        self.media_kind
+    }
+
+    /// Route bytes to the viewer selected by their content type/magic.
+    pub fn set_value(&mut self, cx: &mut Cx, value: &ValueBytes) {
+        let kind = media_kind(value);
+        if self.loaded && self.media_kind == kind && self.value == value.digest {
+            return;
+        }
+        if kind == MediaKind::Image {
+            self.set_image(cx, value);
+            return;
+        }
+        self.view.image(cx, ids!(image)).set_visible(cx, false);
+        self.hide_media(cx);
+        self.view.view(cx, ids!(text_scroll)).set_visible(cx, false);
+        self.view.label(cx, ids!(text)).set_visible(cx, false);
+        self.view.view(cx, ids!(empty)).set_visible(cx, false);
+        self.value = value.digest.clone();
+        self.media_kind = kind;
+        let result = match kind {
+            MediaKind::Video => self
+                .view
+                .widget(cx, ids!(video))
+                .borrow_mut::<VideoPlayer>()
+                .ok_or_else(|| "video viewer is unavailable".to_string())
+                .and_then(|mut viewer| viewer.load_bytes(cx, &value.bytes, &value.content_type))
+                .map(|_| self.view.widget(cx, ids!(video)).set_visible(cx, true)),
+            MediaKind::Audio => self
+                .view
+                .widget(cx, ids!(audio))
+                .borrow_mut::<AudioPlayer>()
+                .ok_or_else(|| "audio viewer is unavailable".to_string())
+                .and_then(|mut viewer| viewer.load_bytes(cx, &value.bytes, &value.content_type))
+                .map(|_| self.view.widget(cx, ids!(audio)).set_visible(cx, true)),
+            MediaKind::Mesh => self
+                .view
+                .widget(cx, ids!(mesh))
+                .borrow_mut::<MeshView>()
+                .ok_or_else(|| "mesh viewer is unavailable".to_string())
+                .and_then(|mut viewer| viewer.load_bytes(cx, &value.bytes, &value.content_type))
+                .map(|_| self.view.widget(cx, ids!(mesh)).set_visible(cx, true)),
+            MediaKind::Splat => self
+                .view
+                .widget(cx, ids!(splat))
+                .borrow_mut::<SplatView>()
+                .ok_or_else(|| "splat viewer is unavailable".to_string())
+                .and_then(|mut viewer| viewer.load_bytes(cx, &value.bytes, &value.content_type))
+                .map(|_| self.view.widget(cx, ids!(splat)).set_visible(cx, true)),
+            MediaKind::Text | MediaKind::Unknown => {
+                self.set_text(cx, &String::from_utf8_lossy(&value.bytes));
+                return;
+            }
+            MediaKind::Image => unreachable!(),
+        };
+        match result {
+            Ok(()) => self.loaded = true,
+            Err(error) => {
+                self.loaded = false;
+                self.view.view(cx, ids!(text_scroll)).set_visible(cx, true);
+                self.view.label(cx, ids!(text)).set_visible(cx, true);
+                self.view.label(cx, ids!(text)).set_text(cx, &error);
+            }
+        }
+        self.view.redraw(cx);
+    }
+
+    fn hide_media(&mut self, cx: &mut Cx) {
+        let video = self.view.widget(cx, ids!(video));
+        video.set_visible(cx, false);
+        if let Some(mut video) = video.borrow_mut::<VideoPlayer>() {
+            video.clear(cx);
+        }
+        let audio = self.view.widget(cx, ids!(audio));
+        audio.set_visible(cx, false);
+        if let Some(mut audio) = audio.borrow_mut::<AudioPlayer>() {
+            audio.clear(cx);
+        }
+        let mesh = self.view.widget(cx, ids!(mesh));
+        mesh.set_visible(cx, false);
+        if let Some(mut mesh) = mesh.borrow_mut::<MeshView>() {
+            mesh.clear(cx);
+        }
+        let splat = self.view.widget(cx, ids!(splat));
+        splat.set_visible(cx, false);
+        if let Some(mut splat) = splat.borrow_mut::<SplatView>() {
+            splat.clear(cx);
+        };
     }
 }
 
@@ -1162,6 +1319,7 @@ impl ModelPicker {
 
 /// Registers the Rust-backed face widgets into `mod.flow.ui` of an isolate.
 pub fn register_face_widgets(vm: &mut ScriptVm) {
+    makepad_media_view::script_mod(vm);
     self::script_mod(vm);
 }
 
@@ -2859,8 +3017,17 @@ impl FaceHost {
             .insert((node.to_string(), port.to_string()), value.clone());
         self.deltas.remove(&(node.to_string(), port.to_string()));
         let mut wants_bytes = false;
+        let declared_media = value.ty.is_media()
+            || matches!(
+                makepad_media_view::media_kind(&value.content_type, &[]),
+                MediaKind::Image
+                    | MediaKind::Video
+                    | MediaKind::Audio
+                    | MediaKind::Mesh
+                    | MediaKind::Splat
+            );
         let text = bytes
-            .filter(|_| !value.ty.is_media())
+            .filter(|_| !declared_media)
             .map(|bytes| String::from_utf8_lossy(&bytes.bytes).into_owned())
             .or_else(|| preview_text(value))
             .unwrap_or_else(|| format!("{} · {}", value.content_type, size_text(value.bytes)));
@@ -2891,8 +3058,8 @@ impl FaceHost {
                     }
                 } else if let Some(mut view) = widget.borrow_mut::<ValueView>() {
                     match bytes {
-                        Some(bytes) if value.ty == PortType::Image => view.set_image(cx, bytes),
-                        _ if value.ty == PortType::Image => {
+                        Some(bytes) if declared_media => view.set_value(cx, bytes),
+                        _ if declared_media => {
                             wants_bytes = true;
                             view.set_text(cx, "loading…");
                         }
@@ -3677,6 +3844,28 @@ Flow{llm function http ask output}
     }
 
     #[test]
+    fn generator_faces_keep_media_on_the_output_card() {
+        let source = "use mod.flow.*\nlet video = Video{}\nlet upscale = Upscale{}\nlet output = Output{type: @video value: video.video()}\nFlow{video upscale output}\n";
+        let graph = makepad_flow::graph::evaluate(source, "<output-only-media>").unwrap();
+        let catalog = makepad_flow::graph::prelude_catalog().unwrap();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        let host = FaceHost::mount(
+            &mut cx,
+            WidgetUid(0),
+            "test",
+            "<output-only-media>",
+            source,
+            &graph,
+            &catalog,
+        );
+        assert!(host.faces["video"].shows.is_empty());
+        assert!(host.faces["upscale"].shows.is_empty());
+        assert_eq!(host.faces["output"].shows.len(), 1);
+        host.free(&mut cx);
+    }
+
+    #[test]
     fn card_sized_picture_uses_typed_fill_layout_without_script_eval() {
         let source = include_str!("../../../libs/flow/recipes/templates/prompt-to-image.splash");
         let graph = makepad_flow::graph::evaluate(source, "<typed-picture-size>").unwrap();
@@ -3706,11 +3895,50 @@ Flow{llm function http ask output}
         assert!(empty.walk(&mut cx).height.is_fill());
         assert!(image.walk(&mut cx).width.is_fill());
         assert!(image.walk(&mut cx).height.is_fill());
+        for id in [live_id!(video), live_id!(audio), live_id!(mesh), live_id!(splat)] {
+            assert!(preview.child(id).walk(&mut cx).height.is_fill());
+        }
         assert!(matches!(
             image.borrow::<Image>().unwrap().fit(),
             ImageFit::Smallest
         ));
         assert!(cx.with_vm(|vm| vm.take_errors()).is_empty());
+        host.free(&mut cx);
+    }
+
+    #[test]
+    fn value_view_selects_every_media_mode_before_decode() {
+        let source = "use mod.flow.*\nlet output = Output{}\nFlow{output}\n";
+        let graph = makepad_flow::graph::evaluate(source, "<value-media-modes>").unwrap();
+        let catalog = makepad_flow::graph::prelude_catalog().unwrap();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        let host = FaceHost::mount(
+            &mut cx,
+            WidgetUid(0),
+            "test",
+            "<value-media-modes>",
+            source,
+            &graph,
+            &catalog,
+        );
+        let value = host.faces["output"].root.child(live_id!(value));
+        for (content_type, expected) in [
+            ("image/png", MediaKind::Image),
+            ("video/mp4", MediaKind::Video),
+            ("audio/wav", MediaKind::Audio),
+            ("model/gltf-binary", MediaKind::Mesh),
+            ("application/x-ply", MediaKind::Splat),
+        ] {
+            let bytes = ValueBytes {
+                digest: content_type.into(),
+                content_type: content_type.into(),
+                bytes: Vec::new().into(),
+            };
+            let mut value = value.borrow_mut::<ValueView>().unwrap();
+            value.set_value(&mut cx, &bytes);
+            assert_eq!(value.media_kind(), expected, "{content_type}");
+        }
         host.free(&mut cx);
     }
 

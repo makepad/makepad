@@ -1,4 +1,4 @@
-//! Video artifact playback on one app-lifetime decoder worker.
+//! File-backed video playback on one app-lifetime decoder worker (asset-ui's player).
 //!
 //! Opens, seeks and packet decoding are commands to the worker. Frames cross
 //! to the UI through a bounded, nonblocking hand-off; playback state is
@@ -313,7 +313,7 @@ impl VideoDecoder {
         spawner
             .spawn_worker(
                 ThreadOptions {
-                    name: Some("asset-ui-video-decode".into()),
+                    name: Some("media-view-video-decode".into()),
                     ..Default::default()
                 },
                 move || decoder_worker(rx, worker_audio),
@@ -349,7 +349,7 @@ impl Drop for VideoDecoder {
 static NEXT_CLIP_EPOCH: AtomicU64 = AtomicU64::new(1);
 const FRAME_EPS_100NS: i64 = 83_000;
 
-pub struct VideoPlayer {
+pub struct FileVideoPlayer {
     pub width: u32,
     pub height: u32,
     pub duration_100ns: i64,
@@ -365,7 +365,7 @@ pub struct VideoPlayer {
     generation: u64,
 }
 
-impl VideoPlayer {
+impl FileVideoPlayer {
     pub fn new(path: &str, decoder: &VideoDecoder) -> Result<Self, String> {
         if !std::path::Path::new(path).is_file() {
             return Err(format!("video file not found: {path}"));
@@ -514,7 +514,7 @@ impl VideoPlayer {
     }
 }
 
-impl Drop for VideoPlayer {
+impl Drop for FileVideoPlayer {
     fn drop(&mut self) {
         while self.frames.pop_front().is_some() {
             self.incoming.release();
@@ -793,7 +793,7 @@ mod tests {
         let state = Arc::new(PlaybackState::default());
         let (producer, incoming) = frame_handoff();
         producer.publish(test_frame(0)).unwrap();
-        let mut player = VideoPlayer {
+        let mut player = FileVideoPlayer {
             width: 2,
             height: 2,
             duration_100ns: 0,
