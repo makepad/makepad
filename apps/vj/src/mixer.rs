@@ -884,6 +884,84 @@ struct RetiredTrack {
     splat: Option<SplatState>,
 }
 
+/// One slot's occupant. A closed, small set matched inline -- the same
+/// dispatch this file already uses for `CueMode` -- rather than a trait:
+/// nothing here needs a slot to hold a kind unknown to this crate, and a
+/// `match` lets the optimizer inline each unit's own crossfade math
+/// directly into the chain's per-sample loop instead of going through a
+/// vtable ~512 times per callback per deck.
+enum EffectKind {
+    Eq(DeckEq),
+    Freeze(Freeze),
+    Echo(DeckEcho),
+}
+
+impl EffectKind {
+    #[inline]
+    fn process(&mut self, frame: [f32; 2], device_rate: f32) -> [f32; 2] {
+        match self {
+            EffectKind::Eq(eq) => eq.process(frame, device_rate),
+            EffectKind::Freeze(freeze) => freeze.process(frame, device_rate),
+            EffectKind::Echo(echo) => echo.process(frame, device_rate),
+        }
+    }
+}
+
+const DECK_CHAIN_SLOTS: usize = 3;
+
+/// A deck's pre-fader tone chain: a fixed list of slots, walked in order.
+/// Not a `Vec` -- sized once, at compile time, never resized. Today's
+/// three slots are the whole roster and are permanently populated by
+/// construction; a slot that can stand empty, or be reassigned, is a
+/// separate decision for whenever a fourth effect actually needs one.
+struct DeckChain {
+    slots: [EffectKind; DECK_CHAIN_SLOTS],
+}
+
+impl DeckChain {
+    fn new(sample_rate: f32) -> DeckChain {
+        DeckChain {
+            slots: [
+                EffectKind::Eq(DeckEq::new(sample_rate)),
+                EffectKind::Freeze(Freeze::new()),
+                EffectKind::Echo(DeckEcho::new()),
+            ],
+        }
+    }
+
+    #[inline]
+    fn process(&mut self, frame: [f32; 2], device_rate: f32) -> [f32; 2] {
+        let mut out = frame;
+        for slot in &mut self.slots {
+            out = slot.process(out, device_rate);
+        }
+        out
+    }
+
+    // Fixed accessors. Every slot is populated with a known kind at a
+    // known index by construction, so `unreachable!()` documents that
+    // invariant rather than swallowing an error -- this stops being true
+    // only once slots become dynamically reassignable.
+    fn eq_mut(&mut self) -> &mut DeckEq {
+        match &mut self.slots[0] {
+            EffectKind::Eq(eq) => eq,
+            _ => unreachable!(),
+        }
+    }
+    fn freeze_mut(&mut self) -> &mut Freeze {
+        match &mut self.slots[1] {
+            EffectKind::Freeze(freeze) => freeze,
+            _ => unreachable!(),
+        }
+    }
+    fn echo_mut(&mut self) -> &mut DeckEcho {
+        match &mut self.slots[2] {
+            EffectKind::Echo(echo) => echo,
+            _ => unreachable!(),
+        }
+    }
+}
+
 struct DeckVoice {
     pcm: Option<Arc<TrackPcm>>,
     stems: Option<Arc<TrackStems>>,
@@ -962,13 +1040,11 @@ struct DeckVoice {
     stretch_tail: Option<(f64, f64)>,
     stretch: Box<Stretcher>,
     reader: RateReader,
-    eq: DeckEq,
-    /// The beat-quantised repeat. Retuned once per buffer from `clock`,
+    /// The tone chain: EQ, then FREEZE (ahead of the echo so a held
+    /// glitch can itself be echoed rather than the other way round), then
+    /// the beat-quantised ECHO, retuned once per buffer from `clock`
     /// beside the filter's own coefficient rebuild.
-    echo: DeckEcho,
-    /// The momentary FREEZE, ahead of the echo in the chain so a held
-    /// glitch can itself be echoed rather than the other way round.
-    freeze: Freeze,
+    chain: DeckChain,
     stem_gain: [ParamRamp; STEM_COUNT],
     /// The autopilot's blend overlay on the stem lanes: multiplies the
     /// operator's gains, never moves them. 1.0 = hands off.
@@ -1006,9 +1082,7 @@ impl DeckVoice {
             stretch_tail: None,
             stretch: Box::new(Stretcher::new()),
             reader: RateReader::default(),
-            eq: DeckEq::new(48_000.0),
-            echo: DeckEcho::new(),
-            freeze: Freeze::new(),
+            chain: DeckChain::new(48_000.0),
             stem_gain: [ParamRamp::at(1.0); STEM_COUNT],
             blend_stem: [ParamRamp::at(1.0); STEM_COUNT],
         }
@@ -1018,7 +1092,7 @@ impl DeckVoice {
     /// inherits a transition's ducking.
     fn reset_blend(&mut self) {
         self.blend_stem = [ParamRamp::at(1.0); STEM_COUNT];
-        self.eq.reset_blend();
+        self.chain.eq_mut().reset_blend();
     }
 
     fn frame_count(&self) -> usize {
@@ -1062,9 +1136,9 @@ impl DeckVoice {
         self.ended = false;
         self.playing = load.play;
         self.seek_frames(0.0);
-        self.eq.reset();
-        self.echo.silence();
-        self.freeze.reset();
+        self.chain.eq_mut().reset();
+        self.chain.echo_mut().silence();
+        self.chain.freeze_mut().reset();
         self.reset_blend();
         if load.play {
             self.transport.slew(1.0, LOAD_SWAP_SECS);
@@ -2109,9 +2183,9 @@ impl Mixer {
                 // A fresh track has nothing to fade out of: cut, not ramp.
                 d.transport = Ramp::at(0.0);
                 d.seek_frames(0.0);
-                d.eq.reset();
-                d.echo.silence();
-                d.freeze.reset();
+                d.chain.eq_mut().reset();
+                d.chain.echo_mut().silence();
+                d.chain.freeze_mut().reset();
                 d.reset_blend();
             } else {
                 d.pending = Some(PendingLoad { pcm, play: keep_playing, grid: None });
@@ -2159,8 +2233,8 @@ impl Mixer {
         // With no pcm the clamp parks the playhead at zero; this also
         // clears `ended`, so a later install re-arms end reporting.
         d.seek_frames(0.0);
-        d.echo.silence();
-        d.freeze.reset();
+        d.chain.echo_mut().silence();
+        d.chain.freeze_mut().reset();
         d.reset_blend();
         self.publish_deck(&s, deck.index());
         drop(s);
@@ -2413,7 +2487,7 @@ impl Mixer {
     /// How hard this deck's sweep rings at its corner.
     pub fn set_deck_resonance(&self, deck: DeckId, lift: f32) {
         let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].eq.set_resonance(lift);
+        s.decks[deck.index()].chain.eq_mut().set_resonance(lift);
     }
 
     /// The echo's rung: whole, half or quarter beat, or none for off. A
@@ -2424,19 +2498,19 @@ impl Mixer {
             return;
         }
         let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].echo.set_fraction(fraction);
+        s.decks[deck.index()].chain.echo_mut().set_fraction(fraction);
     }
 
     /// How much of a repeat feeds the next one.
     pub fn set_deck_echo_feedback(&self, deck: DeckId, feedback: f32) {
         let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].echo.set_feedback(feedback);
+        s.decks[deck.index()].chain.echo_mut().set_feedback(feedback);
     }
 
     /// Whether a repeat lands on the other channel from the one before it.
     pub fn set_deck_echo_pingpong(&self, deck: DeckId, on: bool) {
         let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].echo.set_pingpong(on);
+        s.decks[deck.index()].chain.echo_mut().set_pingpong(on);
     }
 
     /// Momentary FREEZE: while held, the deck repeats a beat-sized
@@ -2462,9 +2536,9 @@ impl Mixer {
                     return;
                 }
                 let Some(secs) = knob64(secs, 0.0, 60.0) else { return };
-                d.freeze.hold((secs * device) as usize, device as f32);
+                d.chain.freeze_mut().hold((secs * device) as usize, device as f32);
             }
-            None => d.freeze.release(),
+            None => d.chain.freeze_mut().release(),
         }
         self.publish_deck(&s, index);
     }
@@ -2472,7 +2546,7 @@ impl Mixer {
     /// Whether this deck's FREEZE is sounding right now -- held, or
     /// still crossfading out of one.
     pub fn deck_frozen(&self, deck: DeckId) -> bool {
-        self.state.lock().unwrap().decks[deck.index()].freeze.held()
+        self.state.lock().unwrap().decks[deck.index()].chain.freeze_mut().held()
     }
 
     /// The reverse hold: the record runs backwards while it is held, and a
@@ -2689,12 +2763,12 @@ impl Mixer {
 
     /// One tone band, 0 = kill.
     pub fn set_deck_eq_band(&self, deck: DeckId, band: usize, gain: f32) {
-        self.state.lock().unwrap().decks[deck.index()].eq.set_band(band, gain);
+        self.state.lock().unwrap().decks[deck.index()].chain.eq_mut().set_band(band, gain);
     }
 
     /// Bipolar sweep filter; 0.5 = off.
     pub fn set_deck_filter(&self, deck: DeckId, position: f32) {
-        self.state.lock().unwrap().decks[deck.index()].eq.set_filter(position);
+        self.state.lock().unwrap().decks[deck.index()].chain.eq_mut().set_filter(position);
     }
 
     /// One stem lane's gain. Ramped, so a knob move never zippers.
@@ -2831,11 +2905,11 @@ impl Mixer {
         // carrying from ITS previous record must not bleed into this
         // one, so it is silenced the same way any other record change
         // silences it.
-        dst.echo.silence();
+        dst.chain.echo_mut().silence();
         // Same reasoning, same fix, for the freeze: the destination's
         // own hold state is not the source's to inherit, but a stale
         // ring must not carry forward into the record that just landed.
-        dst.freeze.reset();
+        dst.chain.freeze_mut().reset();
         let to_index = to.index();
         self.publish_deck(&s, to_index);
     }
@@ -2861,7 +2935,7 @@ impl Mixer {
     /// The autopilot's blend overlay: multiplies the operator's values,
     /// never moves them. `clear_blend` is the whole restore.
     pub fn set_blend_band(&self, deck: DeckId, band: usize, gain: f32) {
-        self.state.lock().unwrap().decks[deck.index()].eq.set_blend_band(band, gain);
+        self.state.lock().unwrap().decks[deck.index()].chain.eq_mut().set_blend_band(band, gain);
     }
 
     pub fn set_blend_stem(&self, deck: DeckId, stem: usize, gain: f32) {
@@ -2876,13 +2950,13 @@ impl Mixer {
     /// The autopilot's hand on the sweep filter, offset from the knob.
     /// The strip's own clear_blend already lets it go with the bands.
     pub fn set_blend_filter(&self, deck: DeckId, offset: f32) {
-        self.state.lock().unwrap().decks[deck.index()].eq.set_blend_filter(offset);
+        self.state.lock().unwrap().decks[deck.index()].chain.eq_mut().set_blend_filter(offset);
     }
 
     pub fn clear_blend(&self, deck: DeckId) {
         let mut s = self.state.lock().unwrap();
         let d = &mut s.decks[deck.index()];
-        d.eq.clear_blend();
+        d.chain.eq_mut().clear_blend();
         for ramp in &mut d.blend_stem {
             ramp.slew(1.0, BLEND_SECS);
         }
@@ -3245,8 +3319,8 @@ impl Mixer {
         for voice in s.decks.iter_mut() {
             // Filter coefficients are rebuilt once per buffer — the trig is
             // the expensive part and a buffer is well under a millisecond.
-            voice.eq.set_sample_rate(rate);
-            voice.eq.prepare_block();
+            voice.chain.eq_mut().set_sample_rate(rate);
+            voice.chain.eq_mut().prepare_block();
             // The musical clock, once per buffer per deck, from the same
             // platter the snapshot reports. Travel is only promised when
             // the read path will actually read this buffer, and a splat
@@ -3291,7 +3365,7 @@ impl Mixer {
             // rule on.
             let beat_secs =
                 voice.clock.beat_len().unwrap_or(60.0 / crate::decks::COUNTED_BPM);
-            voice.echo.prepare_block(beat_secs * rate as f64);
+            voice.chain.echo_mut().prepare_block(beat_secs * rate as f64);
             // The ghost moves here, once per buffer, and not in the frame
             // loop below: its rate is latched so a buffer is one multiply,
             // and the read path has four early exits (no pcm, empty pcm,
@@ -3446,7 +3520,7 @@ impl Mixer {
                         stem_gain,
                         natural_step,
                     );
-                    let toned = d.echo.process(d.freeze.process(d.eq.process(frame, rate), rate), rate);
+                    let toned = d.chain.process(frame, rate);
                     let pre = [toned[0] * gain, toned[1] * gain];
                     deck_peaks[i] = deck_peaks[i].max(pre[0].abs()).max(pre[1].abs());
                     deck_out[i] = (pre[0] * side, pre[1] * side);
@@ -3716,7 +3790,7 @@ impl Mixer {
                     }
                     None => frame,
                 };
-                let toned = d.echo.process(d.freeze.process(d.eq.process(frame, rate), rate), rate);
+                let toned = d.chain.process(frame, rate);
                 let pre = [toned[0] * gain, toned[1] * gain];
                 deck_peaks[i] = deck_peaks[i].max(pre[0].abs()).max(pre[1].abs());
                 deck_out[i] = (pre[0] * side, pre[1] * side);
@@ -3978,6 +4052,63 @@ mod tests {
     use super::*;
     use super::fixtures::*;
     use crate::blend::EQ_VOCAL_DUCK;
+
+    /// The chain is a data-layout change, not a DSP one: driven with the
+    /// same parameters as today's hand-nested
+    /// `echo.process(freeze.process(eq.process(frame, rate), rate), rate)`,
+    /// its output must be bit-for-bit identical, every frame. A resonance
+    /// rung, a band boost, a running ping-pong echo and a held freeze are
+    /// all engaged first, so this exercises every unit's non-bypass path
+    /// and not just the identity fast path they all also have.
+    #[test]
+    fn deck_chain_matches_todays_hand_chained_order() {
+        let rate = 48_000.0f32;
+        let mut chain = DeckChain::new(rate);
+        let mut eq = DeckEq::new(rate);
+        let mut freeze = Freeze::new();
+        let mut echo = DeckEcho::new();
+
+        chain.eq_mut().set_resonance(DeckEq::RESONANCE_RUNGS[1]);
+        eq.set_resonance(DeckEq::RESONANCE_RUNGS[1]);
+        chain.eq_mut().set_band(0, 1.4);
+        eq.set_band(0, 1.4);
+        chain.echo_mut().set_fraction(Some((1, 2)));
+        echo.set_fraction(Some((1, 2)));
+        chain.echo_mut().set_feedback(0.6);
+        echo.set_feedback(0.6);
+        chain.echo_mut().set_pingpong(true);
+        echo.set_pingpong(true);
+
+        let beat_frames = 0.5 * rate as f64;
+        for buffer in 0..8u32 {
+            chain.eq_mut().set_sample_rate(rate);
+            chain.eq_mut().prepare_block();
+            eq.set_sample_rate(rate);
+            eq.prepare_block();
+            chain.echo_mut().prepare_block(beat_frames);
+            echo.prepare_block(beat_frames);
+
+            // Freeze engages partway through, identically on both sides,
+            // once there is real content behind it to hold.
+            if buffer == 4 {
+                chain.freeze_mut().hold(4096, rate);
+                freeze.hold(4096, rate);
+            }
+
+            for i in 0..512u32 {
+                let n = (buffer * 512 + i) as f32;
+                // Detuned, non-integer-cycle-count tone: a period that
+                // divides evenly into the buffer or beat length would make
+                // a divergence in slot order numerically invisible.
+                let s = (n * 443.0 / rate * std::f32::consts::TAU).sin() * 0.4;
+                let frame = [s, s * 0.8];
+
+                let want = echo.process(freeze.process(eq.process(frame, rate), rate), rate);
+                let got = chain.process(frame, rate);
+                assert_eq!(got, want, "buffer {buffer} frame {i}");
+            }
+        }
+    }
 
     fn local_drum_bank() -> Option<Arc<SampleBank>> {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -5704,18 +5835,18 @@ mod tests {
         mixer.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 8.0));
         mixer.set_deck_playing(DeckId::A, true);
         mixer.set_deck_echo(DeckId::A, Some((1, 2)));
-        assert!(mixer.state.lock().unwrap().decks[0].echo.engaged());
+        assert!(mixer.state.lock().unwrap().decks[0].chain.echo_mut().engaged());
         // Audible, so this is the parked path, not the immediate cut.
         mixer.install_deck_over(DeckId::A, tone_pcm(220.0, 48_000, 8.0), true);
         assert!(
-            mixer.state.lock().unwrap().decks[0].echo.engaged(),
+            mixer.state.lock().unwrap().decks[0].chain.echo_mut().engaged(),
             "still parked -- nothing has moved yet either way"
         );
         // Render past the outgoing track's short fade and the swap that
         // spends the parked load, on the audio thread's own next turn.
         spin_render(&mixer, 32);
         assert!(
-            mixer.state.lock().unwrap().decks[0].echo.engaged(),
+            mixer.state.lock().unwrap().decks[0].chain.echo_mut().engaged(),
             "the swap landed, and the operator's rung must have survived it"
         );
     }
@@ -5747,7 +5878,7 @@ mod tests {
         render_out(&mixer, rate, 4, 512); // let A's transport settle
         mixer.clone_deck(DeckId::A, DeckId::B);
         assert_eq!(
-            mixer.state.lock().unwrap().decks[1].echo.fraction(),
+            mixer.state.lock().unwrap().decks[1].chain.echo_mut().fraction(),
             Some((1, 1)),
             "the clone did not touch the destination's own setting"
         );
