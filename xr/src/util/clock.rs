@@ -19,10 +19,12 @@ impl Instant {
         duration(self.0 - earlier.0)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn saturating_duration_since(self, earlier: Self) -> Duration {
         self.duration_since(earlier)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn checked_sub(self, value: Duration) -> Option<Self> {
         Some(Self(self.0 - value.as_secs_f64()))
     }

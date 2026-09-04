@@ -426,6 +426,7 @@ const DEFAULT_MEMORY_BUDGET_BYTES: usize = 1536 * 1024 * 1024;
 /// Working budget for a phone-class browser tab: the wasm heap maximum there
 /// is 512 MiB and the tab dies around 1 GiB total, so elastic caches must
 /// stop well below the heap ceiling.
+#[allow(dead_code)]
 pub const PHONE_WEB_MEMORY_BUDGET_BYTES: usize = 320 * 1024 * 1024;
 #[allow(dead_code)]
 const LOW_MEMORY_DEVICE_BYTES: u64 = 8 * 1024 * 1024 * 1024;

@@ -1,5 +1,4 @@
 use crate::prelude::*;
-use crate::util::clock::Instant;
 use crate::scene::{
     arm_pair_metrics, flat_head_forward, hand_closed_fist_contact_point_geometry_only,
 };
