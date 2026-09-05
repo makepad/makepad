@@ -51,6 +51,7 @@ pub mod radio_button;
 
 pub mod adaptive_view;
 pub mod alert;
+pub mod divider;
 pub mod desktop_button;
 pub mod gauss_view;
 pub mod keyboard_view;
@@ -155,6 +156,7 @@ pub mod screen_cap;
 pub use crate::{
     adaptive_view::*,
     alert::*,
+    divider::*,
     animated_image_gif::*,
     badge::*,
     placeholder::*,
@@ -553,6 +555,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::link_label::script_mod(vm);
     crate::button::script_mod(vm);
     crate::alert::script_mod(vm);
+    crate::divider::script_mod(vm);
     #[cfg(feature = "cef")]
     crate::browser::script_mod(vm);
     crate::check_box::script_mod(vm);
