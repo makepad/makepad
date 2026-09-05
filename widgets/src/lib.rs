@@ -37,6 +37,7 @@ pub mod view;
 pub mod view_ui;
 
 pub mod animated_image_gif;
+pub mod badge;
 pub mod browser;
 pub mod button;
 pub mod check_box;
@@ -152,6 +153,7 @@ pub mod screen_cap;
 pub use crate::{
     adaptive_view::*,
     animated_image_gif::*,
+    badge::*,
     animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
     // loading_spinner - no public exports
     bare_step::*,
@@ -593,6 +595,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
 
     crate::loading_spinner::script_mod(vm);
     crate::glass_panel::script_mod(vm);
+    crate::badge::script_mod(vm);
 
     crate::bare_step::script_mod(vm);
     crate::turtle_step::script_mod(vm);
