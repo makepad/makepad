@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 pub mod basics;
+pub mod foundations;
 pub mod welcome;
 pub mod button;
 pub mod checkbox;
@@ -42,6 +43,7 @@ pub mod video;
 pub fn script_mod(vm: &mut ScriptVm) {
     welcome::script_mod(vm);
     crate::coverage::script_mod(vm);
+    foundations::script_mod(vm);
     button::script_mod(vm);
     checkbox::script_mod(vm);
     dropdown::script_mod(vm);
@@ -79,6 +81,7 @@ pub fn tables() -> &'static [&'static [Story]] {
     &[
         welcome::STORIES,
         crate::coverage::STORIES,
+        foundations::STORIES,
         button::STORIES,
         checkbox::STORIES,
         dropdown::STORIES,
