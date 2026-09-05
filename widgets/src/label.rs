@@ -167,6 +167,46 @@ script_mod! {
         text: "H4 italic"
     }
 
+    mod.widgets.H5 = mod.widgets.H1{
+        draw_text +: {
+            text_style: theme.font_bold{
+                line_spacing: theme.font_hl_line_spacing
+                font_size: theme.font_size_5
+            }
+        }
+        text: "H5"
+    }
+
+    mod.widgets.H5italic = mod.widgets.H1{
+        draw_text +: {
+            text_style: theme.font_bold_italic{
+                line_spacing: theme.font_hl_line_spacing
+                font_size: theme.font_size_5
+            }
+        }
+        text: "H5 italic"
+    }
+
+    mod.widgets.H6 = mod.widgets.H1{
+        draw_text +: {
+            text_style: theme.font_bold{
+                line_spacing: theme.font_hl_line_spacing
+                font_size: theme.font_size_6
+            }
+        }
+        text: "H6"
+    }
+
+    mod.widgets.H6italic = mod.widgets.H1{
+        draw_text +: {
+            text_style: theme.font_bold_italic{
+                line_spacing: theme.font_hl_line_spacing
+                font_size: theme.font_size_6
+            }
+        }
+        text: "H6 italic"
+    }
+
     mod.widgets.P = mod.widgets.TextBox{
         text: "Paragraph"
     }
