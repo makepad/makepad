@@ -82,16 +82,37 @@ impl Intent {
     }
 }
 
+/// What a `ProgressRing` draws.
+#[derive(Clone, Copy, Debug, PartialEq, Default, Script, ScriptHook)]
+pub enum ProgressShape {
+    /// A closed ring, filled clockwise from the top.
+    #[pick]
+    #[default]
+    Ring,
+    /// An open arc — half a ring by default — with the label inside it.
+    Arc,
+    /// Nested rings, one per entry of `values`, outermost first.
+    Rings,
+}
+
 const DISABLED_INK: f32 = 5.0;
+/// The classic three: outer, middle, inner.
+const RING_INTENTS: [Intent; 3] = [Intent::Error, Intent::Success, Intent::Info];
+
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
 
     mod.widgets.Intent = set_type_default() do #(Intent::script_api(vm))
     mod.widgets.splat(mod.widgets.Intent)
+    mod.widgets.ProgressShape = #(ProgressShape::script_api(vm))
 
     mod.widgets.DrawProgressBarBase = #(DrawProgressBar::script_component(vm))
     set_type_default() do #(DrawProgressBar::script_shader(vm)){
+        ..mod.draw.DrawQuad
+    }
+    mod.widgets.DrawProgressRingBase = #(DrawProgressRing::script_component(vm))
+    set_type_default() do #(DrawProgressRing::script_shader(vm)){
         ..mod.draw.DrawQuad
     }
     mod.widgets.ProgressBarBase = #(ProgressBar::register_widget(vm))
@@ -264,6 +285,190 @@ script_mod! {
         }
     }
 
+    mod.widgets.ProgressRingBase = #(ProgressRing::register_widget(vm))
+    /** The flat progress ring: an arc that fills clockwise from the top,
+     * with the percentage or a label in the middle. */
+    mod.widgets.ProgressRingFlat = set_type_default() do mod.widgets.ProgressRingBase{
+        width: 48
+        height: 48
+        /** where the fill stands; anything below zero is indeterminate -1..1 step 0.01 */
+        value: 0.0
+        /** one value per nested ring, outermost first, for the Rings shape */
+        values: []
+        /** the colour role of the fill */
+        intent: mod.widgets.Intent.Primary
+        /** ring, open arc or nested rings */
+        shape: mod.widgets.ProgressShape.Ring
+        /** cut the ring into this many sections; 0 or 1 is a whole ring 0..12 step 1 */
+        sections: 0
+        /** the gap between sections, in degrees 0..30 step 1 */
+        section_gap_deg: 8.0
+        /** space between nested rings 0..12 step 0.5 */
+        ring_gap: 3.0
+        /** show the value as a percentage in the middle 0..1 step 1 */
+        show_percent: false
+        /** a fixed label in the middle; wins over the percentage */
+        text: ""
+        /** seconds a value change takes to arrive 0..2 step 0.05 */
+        ease_secs: theme.motion_medium_1
+        /** greyed and dimmed 0..1 step 1 */
+        disabled: false
+
+        draw_bg +: {
+            start: 0.0
+            end: 1.0
+            value: 0.0
+            intent: 0.0
+            track: 1.0
+            opacity: 1.0
+            inset: 0.0
+            /** stroke width of the ring 1..24 step 0.5 */
+            thickness: 5.0
+            /** the angle the whole shape covers, in radians 0.5..6.2832 step 0.01 */
+            sweep: 6.2831853
+            /** the shader angle of the start; -pi is the top 0..6.2832 step 0.01 */
+            base_angle: uniform(-3.14159265)
+            /** 1 fills clockwise, -1 the other way -1..1 step 2 */
+            direction: uniform(1.0)
+            /** the centre's height as a fraction of the walk; 1 puts it on the bottom edge 0..1 step 0.05 */
+            center_y: uniform(0.5)
+            /** round the ends of the arc 0..1 step 1 */
+            rounded_caps: uniform(1.0)
+            /** indeterminate turn: revolutions per second 0.2..3 step 0.1 */
+            sweep_speed: uniform(0.8)
+            /** the track ink */
+            track_color: uniform(theme.color_surface_container_highest)
+            color_primary: uniform(theme.color_primary)
+            color_success: uniform(theme.color_success)
+            color_warning: uniform(theme.color_warning)
+            color_error: uniform(theme.color_error)
+            color_info: uniform(theme.color_info)
+            color_disabled: uniform(theme.color_val_disabled)
+            /** bevel stroke on the track; a zero alpha draws none */
+            border_color: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+
+            fill_color: fn() -> vec4 {
+                let mut fill = self.color_primary
+                if self.intent > 0.5 { fill = self.color_success }
+                if self.intent > 1.5 { fill = self.color_warning }
+                if self.intent > 2.5 { fill = self.color_error }
+                if self.intent > 3.5 { fill = self.color_info }
+                if self.intent > 4.5 { fill = self.color_disabled }
+                return fill
+            }
+
+            // The shader angle of a fraction of the sweep. The sweep always
+            // covers the same span from `base_angle`; a negative direction
+            // MIRRORS the fraction so the fill runs from the other end,
+            // rather than negating the angle, which would put the track on
+            // the other half of the circle.
+            angle_of: fn(x: float) -> float {
+                let flip = step(self.direction, 0.0)
+                return self.base_angle + mix(x, 1.0 - x, flip) * self.sweep
+            }
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let th = self.thickness
+                let center = vec2(self.rect_size.x * 0.5, self.rect_size.y * self.center_y)
+                let radius = min(self.rect_size.x * 0.5, self.rect_size.y * self.center_y) - th * 0.5 - self.inset
+                let fill = self.fill_color()
+                let a_start = self.angle_of(self.start)
+                let a_end = self.angle_of(self.end)
+                let lo = min(a_start, a_end)
+                let hi = max(a_start, a_end)
+                // The arc is cut three times (track, fill, sweep) from the
+                // same centre; the cap style is a branch each time because
+                // the shader language cannot hand the sdf to a helper.
+                if self.track > 0.5 {
+                    if hi - lo > 0.001 {
+                        if self.rounded_caps > 0.5 {
+                            sdf.arc_round_caps(center.x, center.y, radius, lo, hi, th)
+                        } else {
+                            sdf.arc_flat_caps(center.x, center.y, radius, lo, hi, th)
+                        }
+                        // fill_KEEP only when a stroke follows to consume
+                        // the shape; a kept shape unions with the fill arc.
+                        if self.border_color.w > 0.0 {
+                            sdf.fill_keep(self.track_color)
+                            sdf.stroke(self.border_color, 1.0)
+                        } else {
+                            sdf.fill(self.track_color)
+                        }
+                    }
+                }
+                if self.value >= 0.0 {
+                    let v = clamp(self.value, self.start, self.end)
+                    if v - self.start > 0.0005 {
+                        let a_v = self.angle_of(v)
+                        let vlo = min(a_start, a_v)
+                        let vhi = max(a_start, a_v)
+                        if self.rounded_caps > 0.5 {
+                            sdf.arc_round_caps(center.x, center.y, radius, vlo, vhi, th)
+                        } else {
+                            sdf.arc_flat_caps(center.x, center.y, radius, vlo, vhi, th)
+                        }
+                        sdf.fill(fill)
+                    }
+                }
+                if self.value < 0.0 {
+                    let span = self.sweep * (self.end - self.start)
+                    let len = span * 0.25
+                    let mut a0 = lo
+                    if self.sweep > 6.0 {
+                        a0 = lo + fract(self.draw_pass.time * self.sweep_speed) * TAU
+                    } else {
+                        let tri = abs(fract(self.draw_pass.time * self.sweep_speed * 0.5) * 2.0 - 1.0)
+                        a0 = lo + tri * tri * (3.0 - 2.0 * tri) * (span - len)
+                    }
+                    if self.rounded_caps > 0.5 {
+                        sdf.arc_round_caps(center.x, center.y, radius, a0, a0 + len, th)
+                    } else {
+                        sdf.arc_flat_caps(center.x, center.y, radius, a0, a0 + len, th)
+                    }
+                    sdf.fill(fill)
+                }
+                return sdf.result * self.opacity
+            }
+        }
+        draw_text +: {
+            color: theme.color_text
+            text_style: theme.font_regular{font_size: theme.font_size_p}
+        }
+    }
+
+    /** The standard progress ring: the flat ring with the inset bevel on its track. */
+    mod.widgets.ProgressRing = mod.widgets.ProgressRingFlat{
+        draw_bg +: {
+            border_color: theme.color_bevel_inset_1
+        }
+    }
+
+    /** Half a ring, open at the bottom, filled left to right, label inside. */
+    mod.widgets.ProgressArc = mod.widgets.ProgressRingFlat{
+        width: 96
+        height: 52
+        shape: mod.widgets.ProgressShape.Arc
+        draw_bg +: {
+            sweep: 3.14159265
+            base_angle: 1.5707963
+            center_y: 1.0
+            thickness: 7.0
+        }
+    }
+
+    /** Three nested rings, one value each, outermost first. */
+    mod.widgets.ActivityRings = mod.widgets.ProgressRingFlat{
+        width: 72
+        height: 72
+        shape: mod.widgets.ProgressShape.Rings
+        values: [0.0, 0.0, 0.0]
+        draw_bg +: {
+            thickness: 7.0
+            track_color: theme.color_surface_container_high
+        }
+    }
+
 }
 
 /// The bar's shader. The instances are a piece of a bar: the fraction it
@@ -286,6 +491,35 @@ pub struct DrawProgressBar {
     track: f32,
     #[live]
     opacity: f32,
+}
+
+/// The ring's shader: the bar's instances plus `inset`, how far inside the
+/// walk this ring's outer edge sits, which is what nests the activity rings.
+/// `thickness` and `sweep` are instances rather than uniforms so the Rust
+/// side can read the geometry it lays sections and labels out against.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawProgressRing {
+    #[deref]
+    draw_super: DrawQuad,
+    #[live]
+    start: f32,
+    #[live]
+    end: f32,
+    #[live]
+    value: f32,
+    #[live]
+    intent: f32,
+    #[live]
+    track: f32,
+    #[live]
+    opacity: f32,
+    #[live]
+    inset: f32,
+    #[live(5.0)]
+    thickness: f32,
+    #[live(6.2831853)]
+    sweep: f32,
 }
 
 /// The eased journey from the value that was on screen to the one that was
@@ -650,6 +884,275 @@ impl ProgressBarRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.segments = script_numbers(segments);
             inner.draw_bg.redraw(cx);
+        }
+    }
+}
+
+/// A ring, an open arc or nested rings. Shares the bar's value contract:
+/// `value` is the target, the drawn value eases toward it, forward only.
+#[derive(Script, ScriptHook, Widget)]
+pub struct ProgressRing {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
+    #[redraw]
+    #[live]
+    draw_bg: DrawProgressRing,
+    #[live]
+    draw_text: DrawText,
+    #[live]
+    pub text: String,
+    #[live]
+    pub value: f64,
+    /// One value per nested ring, outermost first (the Rings shape).
+    #[live]
+    pub values: Vec<ScriptValue>,
+    #[live(Intent::Primary)]
+    pub intent: Intent,
+    #[live(ProgressShape::Ring)]
+    pub shape: ProgressShape,
+    #[live]
+    pub sections: usize,
+    #[live]
+    pub section_gap_deg: f64,
+    #[live]
+    pub ring_gap: f64,
+    #[live]
+    pub show_percent: bool,
+    #[live]
+    pub ease_secs: f64,
+    #[live]
+    pub disabled: bool,
+    #[rust]
+    shown: f64,
+    #[rust]
+    target: f64,
+    #[rust]
+    ease: Ease,
+    #[rust]
+    drawn: bool,
+    #[rust]
+    next_frame: NextFrame,
+}
+
+impl ProgressRing {
+    pub fn label_text(&self) -> String {
+        if !self.text.is_empty() {
+            self.text.clone()
+        } else if self.show_percent && self.shown >= 0.0 && self.shape != ProgressShape::Rings {
+            percent_label(self.shown)
+        } else {
+            String::new()
+        }
+    }
+
+    pub fn set_value(&mut self, cx: &mut Cx, value: f64) {
+        let value = if value < 0.0 { -1.0 } else { value.min(1.0) };
+        let was = self.value;
+        self.value = value;
+        self.aim(cx.seconds_since_app_start());
+        if value >= 1.0 && was < 1.0 {
+            let uid = self.widget_uid();
+            cx.widget_action(uid, ProgressAction::Completed);
+        }
+        if self.ease.running {
+            self.next_frame = cx.new_next_frame();
+        }
+        self.draw_bg.redraw(cx);
+    }
+
+    pub fn advance(&mut self, cx: &mut Cx, delta: f64) {
+        let base = if self.value < 0.0 { 0.0 } else { self.value };
+        self.set_value(cx, (base + delta).min(1.0));
+    }
+
+    /// The nested rings' values, outermost first. Rings snap: three values
+    /// arriving together should land together.
+    pub fn set_values(&mut self, cx: &mut Cx, values: &[f64]) {
+        let clamped: Vec<f64> = values.iter().map(|v| v.clamp(0.0, 1.0)).collect();
+        self.values = script_numbers(&clamped);
+        self.draw_bg.redraw(cx);
+    }
+
+    pub fn set_intent(&mut self, cx: &mut Cx, intent: Intent) {
+        if self.intent != intent {
+            self.intent = intent;
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    fn aim(&mut self, now: f64) {
+        self.target = self.value;
+        if self.value < 0.0 || self.shown < 0.0 || self.value < self.shown || !self.drawn {
+            self.shown = self.value;
+            self.ease.running = false;
+        } else if self.value > self.shown {
+            self.ease = Ease {
+                from: self.shown,
+                started: now,
+                running: true,
+            };
+        }
+    }
+
+    /// One piece of ring: the fraction it covers and where its fill stands.
+    fn piece(&mut self, cx: &mut Cx2d, rect: Rect, start: f64, end: f64, value: f64, intent: f32, inset: f64) {
+        self.draw_bg.start = start as f32;
+        self.draw_bg.end = end as f32;
+        self.draw_bg.value = value as f32;
+        self.draw_bg.intent = intent;
+        self.draw_bg.track = 1.0;
+        self.draw_bg.inset = inset as f32;
+        self.draw_bg.draw_abs(cx, rect);
+    }
+}
+
+impl Widget for ProgressRing {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.drawn || self.value != self.target {
+            let now = cx.seconds_since_app_start();
+            let first = !self.drawn;
+            self.drawn = true;
+            self.aim(now);
+            if self.ease.running {
+                self.next_frame = cx.new_next_frame();
+            }
+            if first {
+                self.ease.running = false;
+            }
+        }
+        cx.begin_turtle(walk, self.layout);
+        let rect = cx.turtle().rect();
+        let intent = if self.disabled { DISABLED_INK } else { self.intent.index() };
+        self.draw_bg.opacity = if self.disabled { 0.6 } else { 1.0 };
+        match self.shape {
+            ProgressShape::Rings => {
+                let step = self.draw_bg.thickness as f64 + self.ring_gap;
+                let values = numbers(&self.values);
+                for (index, value) in values.iter().enumerate() {
+                    let ink = if self.disabled {
+                        DISABLED_INK
+                    } else {
+                        RING_INTENTS[index % RING_INTENTS.len()].index()
+                    };
+                    self.piece(cx, rect, 0.0, 1.0, value.clamp(0.0, 1.0), ink, index as f64 * step);
+                }
+            }
+            _ => {
+                let shown = self.shown;
+                let sweep = self.draw_bg.sweep as f64;
+                if self.sections > 1 && sweep > 0.0 && shown >= 0.0 {
+                    let n = self.sections.min(64);
+                    let gap = (self.section_gap_deg.max(0.0).to_radians() / sweep).min(0.5 / n as f64);
+                    for i in 0..n {
+                        let mut s = i as f64 / n as f64;
+                        let mut e = (i + 1) as f64 / n as f64;
+                        if i > 0 {
+                            s += gap * 0.5;
+                        }
+                        if i + 1 < n {
+                            e -= gap * 0.5;
+                        }
+                        let v = shown.clamp(s, e);
+                        self.piece(cx, rect, s, e, v, intent, 0.0);
+                    }
+                } else {
+                    self.piece(cx, rect, 0.0, 1.0, shown, intent, 0.0);
+                }
+            }
+        }
+        let label = self.label_text();
+        if !label.is_empty() {
+            let align = match self.shape {
+                ProgressShape::Arc => Align { x: 0.5, y: 1.0 },
+                _ => Align { x: 0.5, y: 0.5 },
+            };
+            draw_text_in(cx, &mut self.draw_text, rect, align, &label);
+        }
+        cx.end_turtle();
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if let Some(ne) = self.next_frame.is_event(event) {
+            if let Some(shown) = self.ease.step(ne.time, self.ease_secs, self.target) {
+                self.shown = shown;
+                self.next_frame = cx.new_next_frame();
+            } else {
+                self.shown = self.target;
+            }
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    fn text(&self) -> String {
+        self.label_text()
+    }
+
+    fn set_text(&mut self, cx: &mut Cx, v: &str) {
+        if self.text != v {
+            self.text = v.to_string();
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
+        if self.disabled != disabled {
+            self.disabled = disabled;
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    fn disabled(&self, _cx: &Cx) -> bool {
+        self.disabled
+    }
+
+    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
+        Some(two_decimals(match self.shape {
+            ProgressShape::Rings => numbers(&self.values).first().copied().unwrap_or(0.0),
+            _ => self.value,
+        }))
+    }
+}
+
+impl ProgressRingRef {
+    pub fn completed(&self, actions: &Actions) -> bool {
+        matches!(
+            actions.find_widget_action(self.widget_uid()).map(|a| a.cast()),
+            Some(ProgressAction::Completed)
+        )
+    }
+
+    pub fn value(&self) -> f64 {
+        self.borrow().map(|inner| inner.value).unwrap_or(0.0)
+    }
+
+    pub fn set_value(&self, cx: &mut Cx, value: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_value(cx, value);
+        }
+    }
+
+    pub fn advance(&self, cx: &mut Cx, delta: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.advance(cx, delta);
+        }
+    }
+
+    pub fn set_values(&self, cx: &mut Cx, values: &[f64]) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_values(cx, values);
+        }
+    }
+
+    pub fn set_intent(&self, cx: &mut Cx, intent: Intent) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_intent(cx, intent);
         }
     }
 }
