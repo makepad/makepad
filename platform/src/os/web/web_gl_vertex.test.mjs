@@ -39,6 +39,10 @@ function mock_gl() {
     draws: [],
     created_vaos: [],
     deleted_vaos: [],
+    created_textures: [],
+    deleted_textures: [],
+    texture_binds: [],
+    texture_images: [],
     get_errors: 0,
     get_parameters: 0,
   };
@@ -65,6 +69,12 @@ function mock_gl() {
     CCW: 24,
     TEXTURE_2D: 25,
     TEXTURE_CUBE_MAP: 26,
+    TEXTURE_CUBE_MAP_POSITIVE_X: 27,
+    TEXTURE_CUBE_MAP_NEGATIVE_X: 28,
+    TEXTURE_CUBE_MAP_POSITIVE_Y: 29,
+    TEXTURE_CUBE_MAP_NEGATIVE_Y: 30,
+    TEXTURE_CUBE_MAP_POSITIVE_Z: 31,
+    TEXTURE_CUBE_MAP_NEGATIVE_Z: 32,
     TEXTURE0: 100,
     FRAMEBUFFER: 101,
     FRAMEBUFFER_COMPLETE: 102,
@@ -80,6 +90,7 @@ function mock_gl() {
     TEXTURE_MIN_FILTER: 109,
     TEXTURE_WRAP_S: 110,
     TEXTURE_WRAP_T: 111,
+    TEXTURE_WRAP_R: 116,
     CLAMP_TO_EDGE: 112,
     DEPTH24_STENCIL8: 113,
     DEPTH_STENCIL: 114,
@@ -99,7 +110,12 @@ function mock_gl() {
     },
     deleteVertexArray(vao) { calls.deleted_vaos.push(vao); },
     createFramebuffer() { return { id: ++object_id }; },
-    createTexture() { return { id: ++object_id }; },
+    createTexture() {
+      const texture = { id: ++object_id };
+      calls.created_textures.push(texture);
+      return texture;
+    },
+    deleteTexture(texture) { calls.deleted_textures.push(texture); },
     bindBuffer() {},
     bufferData(target, data, usage) {
       calls.buffer_data.push([target, data.byteLength, usage]);
@@ -120,7 +136,7 @@ function mock_gl() {
     },
     bindFramebuffer() {},
     texParameteri() {},
-    texImage2D() {},
+    texImage2D(...args) { calls.texture_images.push(args); },
     framebufferTexture2D() {},
     checkFramebufferStatus() { return this.FRAMEBUFFER_COMPLETE; },
     viewport() {},
@@ -140,7 +156,7 @@ function mock_gl() {
     frontFace() {},
     bindBufferBase() {},
     activeTexture() {},
-    bindTexture() {},
+    bindTexture(...args) { calls.texture_binds.push(args); },
     uniform1i() {},
     drawElementsInstanced(...args) { calls.draws.push(args); },
   };
@@ -450,31 +466,93 @@ test("active sampler feedback rejects before draw and canvas reset permits sampl
   assert.equal(s.gl.calls.draws.length, 3);
 });
 
-test("missing sampler textures defer quietly, recover, and invalid targets reject", () => {
+test("mixed text samplers use one cached fallback and recover when the atlas arrives", () => {
   const s = subject();
   const draw_shader = prepare_triangle(
     s,
     [attr(s.gl, 0, 2, 8, 0)],
     [attr(s.gl, 1, 2, 8, 0)],
   );
-  draw_shader.texture_locs = [{ name: "source", ty: "sampler2D", loc: { id: 1 } }];
+  draw_shader.texture_locs = ["curve", "band", "grayscale", "color", "msdf"]
+    .map((name, id) => ({ name, ty: "sampler2D", loc: { id } }));
   const args = draw_args();
+  const curve = { id: "curve", _texture_target: s.gl.TEXTURE_2D };
+  const band = { id: "band", _texture_target: s.gl.TEXTURE_2D };
+  s.textures[10] = curve;
+  s.textures[11] = band;
+  args.textures = [10, 11, 21, 21, 21];
 
   s.FromWasmDrawCall(args);
-  args.textures = [21];
   s.FromWasmDrawCall(args);
-  assert.equal(s.gl.calls.draws.length, 0);
+  assert.equal(s.gl.calls.draws.length, 2);
   assert.equal(s._vertex_submission_reports.size, 0);
+  assert.equal(s.gl.calls.created_textures.length, 1);
+  assert.equal(s.gl.calls.texture_images.length, 1);
+  const fallback = s._sampler_fallback_textures.get(s.gl.TEXTURE_2D);
+  assert.ok(fallback);
+  assert.deepEqual(
+    s.gl.calls.texture_binds.slice(-5).map(([, texture]) => texture),
+    [curve, band, fallback, fallback, fallback],
+  );
 
-  s.textures[21] = { id: "loaded" };
+  const loaded = { id: "loaded", _texture_target: s.gl.TEXTURE_2D };
+  s.textures[21] = loaded;
   s.FromWasmDrawCall(args);
-  assert.equal(s.gl.calls.draws.length, 1);
+  assert.equal(s.gl.calls.draws.length, 3);
+  assert.deepEqual(
+    s.gl.calls.texture_binds.slice(-5).map(([, texture]) => texture),
+    [curve, band, loaded, loaded, loaded],
+  );
+  assert.equal(s.gl.calls.created_textures.length, 1);
 
-  s.textures[21]._render_target_valid = false;
+  loaded._texture_target = s.gl.TEXTURE_CUBE_MAP;
   s.FromWasmDrawCall(args);
-  assert.equal(s.gl.calls.draws.length, 1);
+  assert.equal(s.gl.calls.draws.length, 3);
   assert.equal(s._vertex_submission_reports.size, 1);
-  assert.match([...s._vertex_submission_reports][0], /texture 21 is invalid/);
+  assert.match([...s._vertex_submission_reports][0], /wrong sampler target/);
+
+  loaded._texture_target = s.gl.TEXTURE_2D;
+  loaded._render_target_valid = false;
+  s.FromWasmDrawCall(args);
+  assert.equal(s.gl.calls.draws.length, 3);
+  assert.equal(s._vertex_submission_reports.size, 2);
+  assert.match([...s._vertex_submission_reports][1], /texture 21 is invalid/);
+
+  s.textures[21] = undefined;
+  s._invalid_texture_upload_ids = new Set([21]);
+  s.FromWasmDrawCall(args);
+  assert.equal(s.gl.calls.draws.length, 3);
+  assert.equal(s.gl.calls.created_textures.length, 1);
+  assert.equal(s._vertex_submission_reports.size, 2);
+});
+
+test("missing cube samplers get one complete six-face fallback", () => {
+  const s = subject();
+  const draw_shader = prepare_triangle(
+    s,
+    [attr(s.gl, 0, 2, 8, 0)],
+    [attr(s.gl, 1, 2, 8, 0)],
+  );
+  draw_shader.texture_locs = [{ name: "environment", ty: "samplerCube", loc: { id: 1 } }];
+  const args = draw_args();
+  args.textures = [31];
+
+  s.FromWasmDrawCall(args);
+  s.FromWasmDrawCall(args);
+
+  assert.equal(s.gl.calls.draws.length, 2);
+  assert.equal(s.gl.calls.created_textures.length, 1);
+  assert.deepEqual(
+    s.gl.calls.texture_images.map(([face]) => face),
+    [
+      s.gl.TEXTURE_CUBE_MAP_POSITIVE_X,
+      s.gl.TEXTURE_CUBE_MAP_NEGATIVE_X,
+      s.gl.TEXTURE_CUBE_MAP_POSITIVE_Y,
+      s.gl.TEXTURE_CUBE_MAP_NEGATIVE_Y,
+      s.gl.TEXTURE_CUBE_MAP_POSITIVE_Z,
+      s.gl.TEXTURE_CUBE_MAP_NEGATIVE_Z,
+    ],
+  );
 });
 
 test("bad pointers, unaligned indices, and over-limit buffers fail before allocation", () => {
