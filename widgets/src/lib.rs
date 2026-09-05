@@ -85,6 +85,7 @@ pub mod fold_header;
 
 pub mod glass_panel;
 pub mod loading_spinner;
+pub mod progress;
 
 pub mod bare_step;
 pub mod turtle_step;
@@ -200,6 +201,7 @@ pub use crate::{
     popup_notification::*,
     data_grid::*,
     portal_list::*,
+    progress::*,
     reorder_list::*,
     radio_button::*,
     reflect::*,
@@ -602,6 +604,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::fold_header::script_mod(vm);
 
     crate::loading_spinner::script_mod(vm);
+    crate::progress::script_mod(vm);
     crate::glass_panel::script_mod(vm);
     crate::badge::script_mod(vm);
     crate::placeholder::script_mod(vm);
@@ -720,3 +723,27 @@ mod animated_image_gif_registration_tests {
         assert!(lib.contains("crate::image::script_mod(vm);"));
     }
 }
+
+#[cfg(test)]
+mod progress_registration_tests {
+    /// The progress family registers as one module, after the bases it
+    /// draws with and its `Intent` enum splatted into `mod.widgets`; the
+    /// loading spinner it sits beside stays a separate module.
+    #[test]
+    fn test_progress_is_registered_after_its_bases() {
+        let lib = include_str!("lib.rs");
+        let progress = include_str!("progress.rs");
+        assert!(lib.contains("pub mod progress;"));
+        assert!(lib.contains("progress::*"));
+        let at = lib.find("crate::progress::script_mod(vm);").expect("progress registered");
+        for base in ["crate::view::script_mod(vm);", "crate::label::script_mod(vm);"] {
+            assert!(lib.find(base).expect(base) < at, "{base} must register before progress");
+        }
+        assert!(lib.contains("crate::loading_spinner::script_mod(vm);"));
+        assert!(progress.contains("mod.widgets.ProgressBarBase = #(ProgressBar::register_widget(vm))"));
+        assert!(progress.contains("mod.widgets.ProgressBarFlat = set_type_default()"));
+        assert!(progress.contains("mod.widgets.splat(mod.widgets.Intent)"));
+        assert_eq!(progress.matches("set_type_default() do mod.widgets.ProgressBarBase").count(), 1);
+    }
+}
+
