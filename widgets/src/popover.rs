@@ -42,6 +42,7 @@
 //! it; interactive content wants a click popover.
 
 use crate::{
+    button::*,
     event::TouchState,
     makepad_derive_widget::*,
     makepad_draw::*,
@@ -102,7 +103,7 @@ script_mod! {
         close_delay: 0.0
         /** a press outside the anchor and the content closes it and is consumed */
         light_dismiss: true
-        /** key focus moves into the content on open and back on close */
+        /** Tab and Shift+Tab cycle inside the content while it is open */
         trap_focus: false
         /** gap between the anchor's edge and the panel, in points 0..32 step 1 */
         offset: 4.0
@@ -243,6 +244,124 @@ script_mod! {
             border_color_2: theme.color_bevel_outset_2
         }
     }
+
+    /** The popover with a pointer to its anchor. */
+    mod.widgets.PopoverArrow = mod.widgets.Popover{
+        arrow: true
+    }
+
+    /** The hover card: opens after a short dwell on the anchor, stays while
+     * the pointer is over the anchor or the content, and closes a moment
+     * after it leaves both — the grace is what lets the pointer travel from
+     * the anchor into the card. Never takes the pointer, so a press
+     * anywhere else still lands where it was aimed. */
+    mod.widgets.PopoverHover = mod.widgets.Popover{
+        trigger: mod.widgets.Hover
+        open_delay: 0.35
+        close_delay: 0.2
+        light_dismiss: false
+    }
+
+    /** The toggletip: a click opens it and it stays until Escape or a press
+     * outside; key focus moves into the content and Tab cycles there. */
+    mod.widgets.PopoverToggle = mod.widgets.Popover{
+        trigger: mod.widgets.Click
+        trap_focus: true
+    }
+
+    mod.widgets.ConfirmPopoverBase = #(ConfirmPopover::register_widget(vm))
+
+    /** A question with two answers, hung off the control that asks it: a
+     * title and a cancel/confirm row. `danger` swaps the confirm button for
+     * one in the theme's error colour. Reports Confirmed or Cancelled and
+     * closes on either; Escape and an outside press dismiss it with no
+     * answer, like the popover it is. */
+    mod.widgets.ConfirmPopover = set_type_default() do mod.widgets.ConfirmPopoverBase{
+        ..mod.widgets.Popover,
+        arrow: true
+        trap_focus: true
+        /** the confirm button takes the theme's error colour */
+        danger: false
+        content := View{
+            width: Fit
+            height: Fit
+            flow: Down
+            spacing: theme.space_2
+            /** the question */
+            title := Label{
+                text: "Are you sure?"
+            }
+            buttons := View{
+                width: Fit
+                height: Fit
+                flow: Right
+                spacing: theme.space_2
+                cancel := Button{
+                    text: "Cancel"
+                }
+                confirm := Button{
+                    text: "OK"
+                }
+                confirm_danger := Button{
+                    visible: false
+                    text: "OK"
+                    draw_bg +: {
+                        color: theme.color_error
+                        color_hover: theme.color_error
+                        color_down: theme.color_error
+                        color_focus: theme.color_error
+                    }
+                }
+            }
+        }
+    }
+
+    /** A label with an (i) mark beside it that opens a hover card of
+     * explanation. Set `label.text` for the word and `content.info.text`
+     * for the explanation. */
+    mod.widgets.InfoLabel = mod.widgets.PopoverHover{
+        flow: Right
+        spacing: theme.space_1
+        align: Align{x: 0.0, y: 0.5}
+        /** the word */
+        label := Label{
+            text: "Label"
+        }
+        /** the (i) mark */
+        glyph := View{
+            width: 14
+            height: 14
+            show_bg: true
+            align: Center
+            draw_bg +: {
+                color: theme.color_outline
+                pixel: fn() {
+                    let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                    sdf.circle(self.rect_size.x * 0.5, self.rect_size.y * 0.5, self.rect_size.x * 0.5 - 1.0)
+                    sdf.stroke(self.color, 1.0)
+                    return sdf.result
+                }
+            }
+            mark := Label{
+                padding: 0
+                text: "i"
+                draw_text +: {
+                    color: theme.color_outline
+                    text_style: theme.font_bold{
+                        font_size: 8
+                    }
+                }
+            }
+        }
+        content := View{
+            width: Fit
+            height: Fit
+            /** the explanation */
+            info := Label{
+                text: "Information"
+            }
+        }
+    }
 }
 
 /// What opens a popover.
@@ -359,7 +478,8 @@ pub struct Popover {
     /// never consume it.
     #[live(true)]
     pub light_dismiss: bool,
-    /// Key focus moves into the content on open and back on close.
+    /// Tab and Shift+Tab cycle inside the content while it is open, and
+    /// key focus moves into the content on open.
     #[live(false)]
     pub trap_focus: bool,
     /// Gap between the anchor's edge and the panel (the arrow's tip, when
@@ -414,6 +534,13 @@ pub struct Popover {
     /// exist.
     #[rust]
     focus_pending: bool,
+    /// The sweep lock is owed but not yet taken: this opened on a press,
+    /// and the anchor's own widget must still see the release of that
+    /// press, or it stays drawn as held. The lock is taken on the release.
+    #[rust]
+    lock_pending: bool,
+    #[rust]
+    focus_trap: FocusTrap,
 }
 
 impl ScriptHook for Popover {
@@ -565,6 +692,12 @@ impl Popover {
     }
 
     pub fn open(&mut self, cx: &mut Cx) {
+        self.begin_open(cx, false);
+    }
+
+    /// Open, taking the sweep lock now or, when `from_press`, on the
+    /// release of the press that opened it.
+    fn begin_open(&mut self, cx: &mut Cx, from_press: bool) {
         if self.open {
             return;
         }
@@ -573,9 +706,14 @@ impl Popover {
         self.open = true;
         self.focus_before = cx.key_focus();
         if self.owns_pointer() {
-            cx.sweep_lock(self.view.area());
+            if from_press {
+                self.lock_pending = true;
+            } else {
+                cx.sweep_lock(self.view.area());
+            }
         }
         if self.trap_focus {
+            self.focus_trap.begin(cx, self.content.area());
             self.focus_pending = true;
         }
         self.redraw_all(cx);
@@ -607,9 +745,13 @@ impl Popover {
         self.pointer_anchor = None;
         self.focus_pending = false;
         if self.owns_pointer() {
-            cx.sweep_unlock(self.view.area());
+            if !self.lock_pending {
+                cx.sweep_unlock(self.view.area());
+            }
+            self.lock_pending = false;
             // Key focus goes back where it came from, or to the anchor when
             // nothing held it.
+            self.focus_trap.end(cx);
             let back = if self.focus_before.is_empty() {
                 self.view.area()
             } else {
@@ -676,17 +818,15 @@ impl Popover {
         }
         match self.trigger {
             PopoverTrigger::Click if primary => {
-                self.open(cx);
+                self.begin_open(cx, true);
                 true
             }
             PopoverTrigger::Context if secondary => {
-                self.open_at(
-                    cx,
-                    Rect {
-                        pos: abs,
-                        size: dvec2(1.0, 1.0),
-                    },
-                );
+                self.pointer_anchor = Some(Rect {
+                    pos: abs,
+                    size: dvec2(1.0, 1.0),
+                });
+                self.begin_open(cx, true);
                 true
             }
             _ => false,
@@ -901,8 +1041,14 @@ impl Widget for Popover {
             self.panel_rect = placed_rect;
             self.placed_side = Some(placed.side);
             if self.focus_pending {
+                // Retarget first: on a first open the trap was begun with
+                // an area the content had not drawn yet, and the stops live
+                // under the draw list this draw just filled.
                 self.focus_pending = false;
-                cx.set_key_focus(self.content.area());
+                let content_area = self.content.area();
+                self.focus_trap.retarget(content_area);
+                let first = self.focus_trap.first_stop(cx);
+                cx.set_key_focus(first.unwrap_or(content_area));
             }
             cx.end_pass_sized_turtle_with_shift(Area::Empty, placed_rect.pos - panel.pos);
         } else {
@@ -933,12 +1079,16 @@ impl Widget for Popover {
             // own lock would turn away: lift it around their dispatch. What
             // is left on the stack meanwhile is an inner overlay's — and an
             // inner overlay gets Escape and the outside press first.
-            if self.owns_pointer() {
+            let held = self.owns_pointer() && !self.lock_pending;
+            if held {
                 cx.sweep_unlock(area);
             }
             inner_held = cx.sweep_lock_area().is_some();
+            if self.trap_focus {
+                self.focus_trap.handle_event(cx, event);
+            }
             self.content.handle_event(cx, event, scope);
-            if self.owns_pointer() {
+            if held {
                 cx.sweep_lock(area);
             }
         } else if !event.requires_visibility() && !self.content.is_empty() {
@@ -975,6 +1125,13 @@ impl Widget for Popover {
             // Touch never becomes a MouseDown: without this arm a popover
             // opens on a phone and then answers nothing at all.
             Event::TouchUpdate(te) => {
+                if self.open
+                    && self.lock_pending
+                    && te.touches.iter().any(|t| t.state == TouchState::Stop)
+                {
+                    self.lock_pending = false;
+                    cx.sweep_lock(area);
+                }
                 if let Some(touch) = te.touches.iter().find(|t| t.state == TouchState::Start) {
                     if !self.open {
                         self.refresh_anchor(cx);
@@ -986,6 +1143,15 @@ impl Widget for Popover {
                     {
                         touch.handled.set(area);
                     }
+                }
+            }
+            // The release of the press that opened this: the anchor's own
+            // widget has just seen it (the lock was not held yet), so the
+            // lock owed since the press is taken now.
+            Event::MouseUp(_) => {
+                if self.open && self.lock_pending {
+                    self.lock_pending = false;
+                    cx.sweep_lock(area);
                 }
             }
             Event::MouseMove(me) => {
@@ -1066,5 +1232,277 @@ impl PopoverRef {
 
     pub fn dismissed(&self, actions: &Actions) -> bool {
         self.action(actions, PopoverAction::Dismissed)
+    }
+}
+
+/// What a confirm popover reports, besides the popover actions it also
+/// sends: which of its two answers was taken.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub enum ConfirmPopoverAction {
+    /// The confirm button was pressed; the popover has closed.
+    Confirmed,
+    /// The cancel button was pressed; the popover has closed.
+    Cancelled,
+    #[default]
+    None,
+}
+
+/// A popover whose content is a question and two buttons. It derefs the
+/// popover for everything but the answer: the buttons are found in the
+/// content by id (`confirm`, `confirm_danger`, `cancel`), `danger` decides
+/// which of the two confirm buttons is the visible one, and a press on
+/// either answer closes the popover and reports it.
+#[derive(Script, WidgetRef, WidgetSet, WidgetRegister)]
+pub struct ConfirmPopover {
+    #[source]
+    source: ScriptObjectRef,
+    #[deref]
+    popover: Popover,
+    /// The confirm button takes the theme's error colour: the answer
+    /// destroys something.
+    #[live(false)]
+    pub danger: bool,
+}
+
+impl ConfirmPopover {
+    /// Show the confirm button that matches `danger` and hide the other.
+    /// Two buttons rather than one recoloured at runtime: a colour is a
+    /// shader uniform the button owns, and a preset is the one honest way
+    /// to give it a second face.
+    fn apply_danger(&mut self, cx: &mut Cx) {
+        let danger = self.danger;
+        let content = self.popover.content();
+        content
+            .button(cx, ids!(confirm))
+            .set_visible(cx, !danger);
+        content
+            .button(cx, ids!(confirm_danger))
+            .set_visible(cx, danger);
+    }
+
+    pub fn set_danger(&mut self, cx: &mut Cx, danger: bool) {
+        if self.danger != danger {
+            self.danger = danger;
+            self.apply_danger(cx);
+        }
+    }
+}
+
+impl ScriptHook for ConfirmPopover {
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        let cx = vm.cx_mut();
+        self.apply_danger(cx);
+    }
+}
+
+impl WidgetNode for ConfirmPopover {
+    fn widget_uid(&self) -> WidgetUid {
+        self.popover.widget_uid()
+    }
+
+    fn walk(&mut self, cx: &mut Cx) -> Walk {
+        self.popover.walk(cx)
+    }
+
+    fn area(&self) -> Area {
+        self.popover.area()
+    }
+
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.popover.redraw(cx)
+    }
+
+    fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+        self.popover.children(visit)
+    }
+
+    fn find_widgets_from_point(&self, cx: &Cx, point: DVec2, found: &mut dyn FnMut(&WidgetRef)) {
+        self.popover.find_widgets_from_point(cx, point, found)
+    }
+
+    fn set_visible(&mut self, cx: &mut Cx, visible: bool) {
+        self.popover.set_visible(cx, visible)
+    }
+
+    fn visible(&self) -> bool {
+        self.popover.visible()
+    }
+
+    fn set_scroll_pos(&mut self, cx: &mut Cx, v: DVec2) {
+        self.popover.set_scroll_pos(cx, v)
+    }
+}
+
+impl Widget for ConfirmPopover {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.popover.handle_event(cx, event, scope);
+        if let Event::Actions(actions) = event {
+            let content = self.popover.content();
+            let uid = self.widget_uid();
+            if content.button(cx, ids!(confirm)).clicked(actions)
+                || content.button(cx, ids!(confirm_danger)).clicked(actions)
+            {
+                cx.widget_action(uid, ConfirmPopoverAction::Confirmed);
+                self.popover.close(cx);
+            } else if content.button(cx, ids!(cancel)).clicked(actions) {
+                cx.widget_action(uid, ConfirmPopoverAction::Cancelled);
+                self.popover.close(cx);
+            }
+        }
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.popover.draw_walk(cx, scope, walk)
+    }
+}
+
+impl ConfirmPopoverRef {
+    pub fn open(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.popover.open(cx);
+        }
+    }
+
+    pub fn open_at(&self, cx: &mut Cx, rect: Rect) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.popover.open_at(cx, rect);
+        }
+    }
+
+    pub fn close(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.popover.close(cx);
+        }
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.borrow().map(|inner| inner.popover.is_open()).unwrap_or(false)
+    }
+
+    pub fn set_danger(&self, cx: &mut Cx, danger: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_danger(cx, danger);
+        }
+    }
+
+    fn answer(&self, actions: &Actions, wanted: ConfirmPopoverAction) -> bool {
+        let uid = self.widget_uid();
+        actions.iter().any(|action| {
+            action
+                .as_widget_action()
+                .map(|wa| wa.widget_uid == uid && wa.cast::<ConfirmPopoverAction>() == wanted)
+                .unwrap_or(false)
+        })
+    }
+
+    pub fn confirmed(&self, actions: &Actions) -> bool {
+        self.answer(actions, ConfirmPopoverAction::Confirmed)
+    }
+
+    pub fn cancelled(&self, actions: &Actions) -> bool {
+        self.answer(actions, ConfirmPopoverAction::Cancelled)
+    }
+}
+
+/// Keeps Tab and Shift+Tab inside one area's draw list, and hands key
+/// focus back where it was when the trap is released.
+///
+/// The window's `NavControl` walks the nav stops of the whole pass on Tab
+/// and picks the next one before any widget sees the key. This trap runs
+/// after it in the same dispatch and picks again, this time among the
+/// stops under the trapped area's draw list only; key focus is applied
+/// after the dispatch, so the later choice is the one that lands. The cycle
+/// is a true one — Tab from the last stop lands on the first, Shift+Tab
+/// from the first on the last — because the stops are collected into a
+/// list first. Only widgets that register nav stops (text inputs, drop
+/// downs, sliders today) take part; with no stop at all Tab is still
+/// consumed, so focus cannot leave the area through it.
+#[derive(Default)]
+pub struct FocusTrap {
+    area: Area,
+    restore: Area,
+    active: bool,
+}
+
+impl FocusTrap {
+    /// Start trapping inside `area`, remembering where focus is now.
+    pub fn begin(&mut self, cx: &mut Cx, area: Area) {
+        self.restore = cx.key_focus();
+        self.area = area;
+        self.active = true;
+    }
+
+    /// Point the trap at a fresher area for the same content — the one a
+    /// later draw produced.
+    pub fn retarget(&mut self, area: Area) {
+        self.area = area;
+    }
+
+    /// Release the trap and put key focus back where `begin` found it.
+    pub fn end(&mut self, cx: &mut Cx) {
+        if !self.active {
+            return;
+        }
+        self.active = false;
+        if !self.restore.is_empty() {
+            cx.set_key_focus(self.restore);
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// Every nav stop under the trapped area's draw list, in tab order.
+    pub fn stops(&self, cx: &mut Cx) -> Vec<Area> {
+        let Some(root) = self.area.draw_list_id() else {
+            return Vec::new();
+        };
+        let mut stops = Vec::new();
+        CxDraw::iterate_nav_stops(cx, root, |_, stop| {
+            stops.push(stop.area);
+            None
+        });
+        stops
+    }
+
+    /// The first stop under the trapped area, if there is one.
+    pub fn first_stop(&self, cx: &mut Cx) -> Option<Area> {
+        self.stops(cx).into_iter().next()
+    }
+
+    /// Cycle on Tab / Shift+Tab. Returns true when the key was consumed.
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> bool {
+        if !self.active {
+            return false;
+        }
+        let Event::KeyDown(ke) = event else {
+            return false;
+        };
+        if ke.key_code != KeyCode::Tab {
+            return false;
+        }
+        let stops = self.stops(cx);
+        let focus = cx.key_focus();
+        let next = if stops.is_empty() {
+            focus
+        } else {
+            let len = stops.len();
+            let at = stops.iter().position(|a| *a == focus);
+            match (at, ke.modifiers.shift) {
+                (Some(i), false) => stops[(i + 1) % len],
+                (Some(i), true) => stops[(i + len - 1) % len],
+                (None, false) => stops[0],
+                (None, true) => stops[len - 1],
+            }
+        };
+        cx.set_key_focus(next);
+        true
     }
 }

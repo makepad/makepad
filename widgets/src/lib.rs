@@ -802,4 +802,20 @@ mod popover_registration_tests {
         assert!(popover.contains("mod.widgets.Popover = mod.widgets.PopoverFlat{"));
         assert_eq!(popover.matches("set_type_default() do mod.widgets.PopoverBase").count(), 1);
     }
+
+    /// The presets build on the bevelled popover, the confirm popover has
+    /// its own base and one default, and the hover card is what the info
+    /// label is made of.
+    #[test]
+    fn test_popover_presets_and_confirm_are_registered() {
+        let popover = include_str!("popover.rs");
+        assert!(popover.contains("mod.widgets.PopoverArrow = mod.widgets.Popover{"));
+        assert!(popover.contains("mod.widgets.PopoverHover = mod.widgets.Popover{"));
+        assert!(popover.contains("mod.widgets.PopoverToggle = mod.widgets.Popover{"));
+        assert!(popover.contains("mod.widgets.ConfirmPopoverBase = #(ConfirmPopover::register_widget(vm))"));
+        assert!(popover.contains("mod.widgets.ConfirmPopover = set_type_default() do mod.widgets.ConfirmPopoverBase{"));
+        assert_eq!(popover.matches("set_type_default() do mod.widgets.ConfirmPopoverBase").count(), 1);
+        assert!(popover.contains("mod.widgets.InfoLabel = mod.widgets.PopoverHover{"));
+        assert!(popover.contains("pub struct FocusTrap"));
+    }
 }
