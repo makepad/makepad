@@ -12,6 +12,7 @@ pub mod foundations;
 pub mod placeholder;
 pub mod button_more;
 pub mod checkbox_more;
+pub mod alert;
 pub mod welcome;
 pub mod button;
 pub mod checkbox;
@@ -83,6 +84,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     placeholder::script_mod(vm);
     checkbox_more::script_mod(vm);
     button_more::script_mod(vm);
+    alert::script_mod(vm);
 }
 
 pub fn tables() -> &'static [&'static [Story]] {
@@ -125,6 +127,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         placeholder::STORIES,
         checkbox_more::STORIES,
         button_more::STORIES,
+        alert::STORIES,
     ]
 }
 
