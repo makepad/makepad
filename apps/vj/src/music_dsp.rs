@@ -4159,6 +4159,199 @@ impl SlotLevel {
     }
 }
 
+pub(crate) const COMPRESSOR_THRESHOLD_MIN_DB: f32 = -40.0;
+pub(crate) const COMPRESSOR_THRESHOLD_MAX_DB: f32 = 0.0;
+pub(crate) const COMPRESSOR_THRESHOLD_DEFAULT_DB: f32 = -18.0;
+pub(crate) const COMPRESSOR_RATIO_MIN: f32 = 1.0;
+pub(crate) const COMPRESSOR_RATIO_MAX: f32 = 20.0;
+pub(crate) const COMPRESSOR_RATIO_DEFAULT: f32 = 4.0;
+/// How wide the bend around the threshold is, in decibels. A knee this
+/// size is the difference between a compressor that grabs and one that
+/// leans: material sitting near the threshold is eased into gain
+/// reduction rather than switched into it.
+const COMPRESSOR_KNEE_DB: f32 = 6.0;
+/// How fast it takes hold, and how slowly it lets go. Fast enough to
+/// catch a kick's front, slow enough that the release does not chew
+/// through the bar behind it.
+const COMPRESSOR_ATTACK_SECS: f32 = 0.005;
+const COMPRESSOR_RELEASE_SECS: f32 = 0.15;
+
+/// One deck's compressor: a soft-knee peak compressor with automatic
+/// makeup.
+///
+/// The makeup is derived rather than knobbed. What a compressor gives
+/// back is fixed by what it takes away -- the gain reduction at full
+/// scale is exactly what the threshold and ratio say it is -- so a
+/// makeup knob is a second control for the one number the first two
+/// already decided, and getting it wrong is how a compressor becomes a
+/// volume control by accident. This one lifts by the reduction the
+/// loudest possible input would see, so pushing the ratio up makes the
+/// quiet parts louder rather than making everything quieter.
+///
+/// Filter memory only -- two envelope followers, a few floats -- so it
+/// takes the `reset` treatment the EQ and the phaser do rather than a
+/// silence mark.
+pub struct Compressor {
+    wet: ParamRamp,
+    threshold_db: ParamRamp,
+    ratio: ParamRamp,
+    /// The envelope it is riding, in decibels, and the gain reduction in
+    /// force.
+    env_db: f32,
+    gain_db: f32,
+    /// A cheap linear peak follower kept running even while bypassed, so
+    /// that engaging starts the detector where the music actually IS.
+    ///
+    /// Without it the detector starts at silence, the reduction is zero
+    /// for the length of the attack, and the makeup -- which is a fixed
+    /// number the moment the threshold and ratio are known -- arrives
+    /// alone. At a ratio of eight that is twenty-one decibels of boost
+    /// landing before anything holds it back, which is not a click, it
+    /// is a bang.
+    idle_peak: f32,
+    /// The attack and release coefficients, and the rate they were
+    /// worked out for. Cached because they cost an `exp` each and
+    /// nothing about them changes from frame to frame.
+    attack_coeff: f32,
+    release_coeff: f32,
+    coeff_rate: f32,
+}
+
+/// Linear amplitude as decibels, floored so silence is a number.
+#[inline]
+fn amp_to_db(amp: f32) -> f32 {
+    20.0 * amp.max(1e-6).log10()
+}
+
+/// The soft-knee curve: how many decibels of OUTPUT a given input level
+/// earns, for a threshold, a ratio and the knee width above.
+#[inline]
+fn knee_curve(input_db: f32, threshold_db: f32, ratio: f32) -> f32 {
+    let over = input_db - threshold_db;
+    let half = COMPRESSOR_KNEE_DB * 0.5;
+    if over <= -half {
+        // Below the knee: untouched.
+        input_db
+    } else if over >= half {
+        // Above it: the full ratio.
+        threshold_db + over / ratio
+    } else {
+        // Inside it: a quadratic that meets both sides with the same
+        // slope, so the curve has no corner to hear.
+        let t = over + half;
+        input_db + (1.0 / ratio - 1.0) * t * t / (2.0 * COMPRESSOR_KNEE_DB)
+    }
+}
+
+impl Compressor {
+    pub fn new() -> Compressor {
+        Compressor {
+            wet: ParamRamp::at(0.0),
+            threshold_db: ParamRamp::at(COMPRESSOR_THRESHOLD_DEFAULT_DB),
+            ratio: ParamRamp::at(COMPRESSOR_RATIO_DEFAULT),
+            env_db: -120.0,
+            gain_db: 0.0,
+            idle_peak: 0.0,
+            attack_coeff: 1.0,
+            release_coeff: 1.0,
+            coeff_rate: 0.0,
+        }
+    }
+
+    /// The on/off switch.
+    pub fn set_wet(&mut self, wet: f32) {
+        if let Some(wet) = knob(wet, 0.0, 1.0) {
+            if wet > 0.0 && self.wet.target() == 0.0 {
+                // Start the detector where the music is, not at silence.
+                self.env_db = amp_to_db(self.idle_peak);
+            }
+            self.wet.slew(wet, EQ_ENGAGE_SECS);
+        }
+    }
+
+    /// Where it starts working, in decibels below full scale.
+    pub fn set_threshold_db(&mut self, db: f32) {
+        if let Some(db) = knob(db, COMPRESSOR_THRESHOLD_MIN_DB, COMPRESSOR_THRESHOLD_MAX_DB) {
+            self.threshold_db.slew(db, EQ_ENGAGE_SECS);
+        }
+    }
+
+    /// How hard it works above that.
+    pub fn set_ratio(&mut self, ratio: f32) {
+        if let Some(ratio) = knob(ratio, COMPRESSOR_RATIO_MIN, COMPRESSOR_RATIO_MAX) {
+            self.ratio.slew(ratio, EQ_ENGAGE_SECS);
+        }
+    }
+
+    pub fn engaged(&self) -> bool {
+        self.wet.target() > 0.0
+    }
+
+    /// Drop the envelope, so one record's peaks do not ride the start of
+    /// the next.
+    pub fn reset(&mut self) {
+        self.env_db = -120.0;
+        self.gain_db = 0.0;
+        self.idle_peak = 0.0;
+    }
+
+    /// The gain reduction in force, in decibels, for a meter.
+    pub fn reduction_db(&self) -> f32 {
+        self.gain_db
+    }
+
+    /// Process one stereo frame.
+    #[inline]
+    pub fn process(&mut self, frame: [f32; 2], device_rate: f32) -> [f32; 2] {
+        if (self.coeff_rate - device_rate).abs() > 0.5 {
+            self.coeff_rate = device_rate;
+            let rate = device_rate.max(1.0);
+            self.attack_coeff = 1.0 - (-1.0 / (COMPRESSOR_ATTACK_SECS * rate)).exp();
+            self.release_coeff = 1.0 - (-1.0 / (COMPRESSOR_RELEASE_SECS * rate)).exp();
+        }
+        // Both channels are detected together, or a loud left would duck
+        // only itself and walk the image about.
+        let peak = frame[0].abs().max(frame[1].abs());
+        // Kept warm even while bypassed, and cheaply -- no logarithm on a
+        // path that is not doing anything.
+        let idle_coeff = match peak > self.idle_peak {
+            true => self.attack_coeff,
+            false => self.release_coeff,
+        };
+        self.idle_peak += (peak - self.idle_peak) * idle_coeff;
+
+        let wet = self.wet.tick(device_rate);
+        if wet <= 0.0 {
+            // Two envelope followers and no line: off is exactly the
+            // input, with no tail that could still be ringing.
+            return frame;
+        }
+        let threshold_db = self.threshold_db.tick(device_rate);
+        let ratio = self.ratio.tick(device_rate).max(1.0);
+
+        let peak_db = amp_to_db(peak);
+        // Attack and release on the DETECTOR, both one-poles. Rising
+        // takes the attack, falling the release.
+        let coeff = match peak_db > self.env_db {
+            true => self.attack_coeff,
+            false => self.release_coeff,
+        };
+        self.env_db += (peak_db - self.env_db) * coeff;
+
+        self.gain_db = knee_curve(self.env_db, threshold_db, ratio) - self.env_db;
+        // The makeup: what full scale itself would lose. Derived, not
+        // knobbed -- see the note on the struct.
+        let makeup_db = -(knee_curve(0.0, threshold_db, ratio));
+        let gain = 10f32.powf((self.gain_db + makeup_db) / 20.0);
+
+        let squeezed = [frame[0] * gain, frame[1] * gain];
+        [
+            frame[0] + (squeezed[0] - frame[0]) * wet,
+            frame[1] + (squeezed[1] - frame[1]) * wet,
+        ]
+    }
+}
+
 // ---------------------------------------------------------------------------
 // the master limiter
 // ---------------------------------------------------------------------------
@@ -7246,6 +7439,148 @@ mod tests {
             prev = Some(out);
         }
         assert!(worst < 0.02, "crossing unity stepped by {worst}");
+    }
+
+    /// Off is exactly the input.
+    #[test]
+    fn a_compressor_that_was_never_engaged_is_bit_transparent() {
+        let rate = 48_000.0f32;
+        let mut comp = Compressor::new();
+        let mut phase = 0.0f32;
+        for _ in 0..4_000 {
+            phase += 2.0 * PI * 233.0 / rate;
+            let x = phase.sin() * 0.6;
+            assert_eq!(comp.process([x, -x], rate), [x, -x]);
+        }
+    }
+
+    /// The knee has no corner in it. A soft knee that does not actually
+    /// meet the two straight sections is just a hard knee with extra
+    /// arithmetic, so walk across it and check the curve stays smooth.
+    #[test]
+    fn the_compressor_knee_is_smooth_across_the_threshold() {
+        let threshold = -18.0f32;
+        let ratio = 4.0f32;
+        let mut last: Option<(f32, f32)> = None;
+        let mut worst = 0.0f32;
+        for step in 0..2_000 {
+            let input = -40.0 + step as f32 * 0.02;
+            let out = knee_curve(input, threshold, ratio);
+            if let Some((prev_in, prev_out)) = last {
+                let slope = (out - prev_out) / (input - prev_in);
+                // Below the knee the slope is 1, above it 1/ratio, and
+                // nowhere may it leave that band.
+                assert!(
+                    slope <= 1.0 + 1e-3 && slope >= 1.0 / ratio - 1e-3,
+                    "slope {slope} at {input} dB is outside the curve"
+                );
+                worst = worst.max((out - prev_out).abs());
+            }
+            last = Some((input, out));
+        }
+        // Far below and far above, the two straight sections.
+        assert!((knee_curve(-40.0, threshold, ratio) - -40.0).abs() < 1e-4);
+        let far = knee_curve(0.0, threshold, ratio);
+        assert!((far - (threshold + 18.0 / ratio)).abs() < 1e-4, "{far}");
+    }
+
+    /// It squashes the loud and leaves the quiet, which is the whole
+    /// job: a signal under the threshold comes out where it went in, one
+    /// well over it comes out closer to the threshold than it started.
+    #[test]
+    fn a_compressor_narrows_the_gap_between_loud_and_quiet() {
+        let rate = 48_000.0f32;
+        let level = |amp: f32| -> f64 {
+            let mut comp = Compressor::new();
+            comp.set_wet(1.0);
+            comp.set_threshold_db(-18.0);
+            comp.set_ratio(8.0);
+            let mut phase = 0.0f32;
+            for _ in 0..(rate as usize / 2) {
+                phase += 2.0 * PI * 220.0 / rate;
+                comp.process([phase.sin() * amp, phase.sin() * amp], rate);
+            }
+            let mut sum = 0.0f64;
+            for _ in 0..(rate as usize / 4) {
+                phase += 2.0 * PI * 220.0 / rate;
+                let out = comp.process([phase.sin() * amp, phase.sin() * amp], rate)[0];
+                sum += (out as f64) * (out as f64);
+            }
+            sum.sqrt()
+        };
+        let quiet_in = 0.02f32;
+        let loud_in = 0.8f32;
+        let ratio_in = (loud_in / quiet_in) as f64;
+        let ratio_out = level(loud_in) / level(quiet_in);
+        assert!(
+            ratio_out < ratio_in * 0.6,
+            "the gap barely moved: {ratio_in} in, {ratio_out} out"
+        );
+    }
+
+    /// Both channels duck together, or a loud left would walk the image.
+    #[test]
+    fn a_compressor_keeps_the_stereo_image_still() {
+        let rate = 48_000.0f32;
+        let mut comp = Compressor::new();
+        comp.set_wet(1.0);
+        comp.set_threshold_db(-24.0);
+        comp.set_ratio(8.0);
+        let mut phase = 0.0f32;
+        for n in 0..24_000usize {
+            phase += 2.0 * PI * 220.0 / rate;
+            let l = phase.sin() * 0.8;
+            let r = phase.sin() * 0.2;
+            let out = comp.process([l, r], rate);
+            if n > 4_000 && out[1].abs() > 1e-6 {
+                let ratio = out[0] / out[1];
+                assert!((ratio - 4.0).abs() < 1e-3, "the image moved: {ratio}");
+            }
+        }
+    }
+
+    /// Engaging and releasing it is a ramp, not a switch.
+    #[test]
+    fn engaging_the_compressor_does_not_step_the_output() {
+        let rate = 48_000.0f32;
+        let mut comp = Compressor::new();
+        comp.set_threshold_db(-24.0);
+        comp.set_ratio(8.0);
+        let mut phase = 0.0f32;
+        let mut prev: Option<f32> = None;
+        let mut worst = 0.0f32;
+        for n in 0..40_000usize {
+            if n == 8_000 {
+                comp.set_wet(1.0);
+            }
+            if n == 24_000 {
+                comp.set_wet(0.0);
+            }
+            phase += 2.0 * PI * 40.0 / rate;
+            let x = phase.sin() * 0.5;
+            let out = comp.process([x, x], rate)[0];
+            if let Some(p) = prev {
+                worst = worst.max((out - p).abs());
+            }
+            prev = Some(out);
+        }
+        assert!(worst < 0.02, "engaging the compressor stepped by {worst}");
+    }
+
+    /// Its setters clamp to their documented ranges.
+    #[test]
+    fn compressor_setters_clamp_to_their_documented_ranges() {
+        let mut comp = Compressor::new();
+        comp.set_threshold_db(20.0);
+        assert_eq!(comp.threshold_db.target(), COMPRESSOR_THRESHOLD_MAX_DB);
+        comp.set_threshold_db(-200.0);
+        assert_eq!(comp.threshold_db.target(), COMPRESSOR_THRESHOLD_MIN_DB);
+        comp.set_ratio(100.0);
+        assert_eq!(comp.ratio.target(), COMPRESSOR_RATIO_MAX);
+        comp.set_ratio(0.0);
+        assert_eq!(comp.ratio.target(), COMPRESSOR_RATIO_MIN);
+        comp.set_ratio(f32::NAN);
+        assert_eq!(comp.ratio.target(), COMPRESSOR_RATIO_MIN, "a bad value moves nothing");
     }
 
     /// The ladder is the whole set an operator can pick from: free

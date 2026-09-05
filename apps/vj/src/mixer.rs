@@ -26,7 +26,7 @@ use crate::loop_splat::{
 };
 use crate::wave_analysis::{DeckClock, TrackGrid};
 use crate::music_dsp::{
-    LevelMode, Limiter, SlotLevel,
+    Compressor, LevelMode, Limiter, SlotLevel,
     audible, knob, knob64,
     Autopan, Bitcrusher, DeckEcho, DeckEq, Distortion, Flanger, FrameSource, Freeze, MotorEnd,
     MoogLadder, ParamRamp, Phaser, PlateReverb, RateReader, ScratchRamp, StereoWidth, Tremolo,
@@ -904,6 +904,7 @@ enum EffectKind {
     StereoWidth(StereoWidth),
     PlateReverb(PlateReverb),
     MoogLadder(MoogLadder),
+    Compressor(Compressor),
 }
 
 impl EffectKind {
@@ -922,11 +923,12 @@ impl EffectKind {
             EffectKind::StereoWidth(stereo_width) => stereo_width.process(frame, device_rate),
             EffectKind::PlateReverb(plate_reverb) => plate_reverb.process(frame, device_rate),
             EffectKind::MoogLadder(moog_ladder) => moog_ladder.process(frame, device_rate),
+            EffectKind::Compressor(compressor) => compressor.process(frame, device_rate),
         }
     }
 }
 
-const DECK_CHAIN_SLOTS: usize = 12;
+const DECK_CHAIN_SLOTS: usize = 13;
 
 /// A deck's pre-fader tone chain: a fixed list of slots, walked in order.
 /// Not a `Vec` -- sized once, at compile time, never resized. Today's
@@ -961,6 +963,7 @@ impl DeckChain {
                 EffectKind::StereoWidth(StereoWidth::new()),
                 EffectKind::PlateReverb(PlateReverb::new(sample_rate)),
                 EffectKind::MoogLadder(MoogLadder::new()),
+                EffectKind::Compressor(Compressor::new()),
             ],
         }
     }
@@ -1037,6 +1040,7 @@ impl DeckChain {
             EffectKind::StereoWidth(x) => x.engaged(),
             EffectKind::PlateReverb(x) => x.engaged(),
             EffectKind::MoogLadder(x) => x.engaged(),
+            EffectKind::Compressor(x) => x.engaged(),
         }
     }
 
@@ -1125,6 +1129,13 @@ impl DeckChain {
     fn moog_ladder_mut(&mut self) -> &mut MoogLadder {
         match &mut self.slots[11] {
             EffectKind::MoogLadder(moog_ladder) => moog_ladder,
+            _ => unreachable!(),
+        }
+    }
+
+    fn compressor_mut(&mut self) -> &mut Compressor {
+        match &mut self.slots[12] {
+            EffectKind::Compressor(compressor) => compressor,
             _ => unreachable!(),
         }
     }
@@ -2866,6 +2877,24 @@ impl Mixer {
     pub fn set_deck_autopan(&self, deck: DeckId, on: bool) {
         let mut s = self.state.lock().unwrap();
         s.decks[deck.index()].chain.autopan_mut().set_wet(if on { 1.0 } else { 0.0 });
+    }
+
+    /// The compressor's on/off switch.
+    pub fn set_deck_compressor(&self, deck: DeckId, on: bool) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.compressor_mut().set_wet(if on { 1.0 } else { 0.0 });
+    }
+
+    /// Where the compressor starts working, in decibels below full scale.
+    pub fn set_deck_compressor_threshold(&self, deck: DeckId, db: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.compressor_mut().set_threshold_db(db);
+    }
+
+    /// How hard it works above that.
+    pub fn set_deck_compressor_ratio(&self, deck: DeckId, ratio: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.compressor_mut().set_ratio(ratio);
     }
 
     /// The autopan LFO's sweep speed, in Hz.

@@ -2786,6 +2786,43 @@ script_mod! {
                                         precision: 0
                                     }
                                 }
+                                // The compressor has no row in the levels
+                                // modal on purpose. Its makeup IS a level
+                                // rule -- derived from the threshold and
+                                // the ratio, so the loud parts come down
+                                // and the quiet ones come up by exactly
+                                // what those two say -- and hanging a
+                                // MATCH or a CAP off the slot as well
+                                // would be gain-staging the same signal
+                                // twice, the second stage undoing what
+                                // the first was asked for.
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    sfx_fx_compressor := PillButton{width: 70 text: "COMP"}
+                                    sfx_fx_compressor_threshold := Slider{
+                                        width: 170
+                                        text: "comp threshold"
+                                        min: -40.0
+                                        max: 0.0
+                                        default: -18.0
+                                        unit: "dB"
+                                        precision: 0
+                                    }
+                                    sfx_fx_compressor_ratio := Slider{
+                                        width: 170
+                                        text: "comp ratio"
+                                        min: 1.0
+                                        max: 20.0
+                                        default: 4.0
+                                        taper: Log
+                                        unit: ":1"
+                                        precision: 1
+                                    }
+                                }
                             }
 
                             // ============ MESH ============
@@ -14700,6 +14737,15 @@ p2 {}
                 DeckCmd::SetLevelDefault { deck, mode } => {
                     self.mixer.set_deck_level_default(deck, mode)
                 }
+                DeckCmd::SetCompressor { deck, on } => {
+                    self.mixer.set_deck_compressor(deck, on)
+                }
+                DeckCmd::SetCompressorThreshold { deck, db } => {
+                    self.mixer.set_deck_compressor_threshold(deck, db)
+                }
+                DeckCmd::SetCompressorRatio { deck, ratio } => {
+                    self.mixer.set_deck_compressor_ratio(deck, ratio)
+                }
                 DeckCmd::SetCrossovers { deck, low_hz, high_hz } => {
                     self.mixer.set_deck_crossovers(deck, low_hz, high_hz)
                 }
@@ -14884,6 +14930,11 @@ p2 {}
             (deck.stereo_width_on, deck.stereo_width_amount as f64);
         let (plate_reverb_on, plate_reverb_size) =
             (deck.plate_reverb_on, deck.plate_reverb_size as f64);
+        let (compressor_on, compressor_threshold_db, compressor_ratio) = (
+            deck.compressor_on,
+            deck.compressor_threshold_db as f64,
+            deck.compressor_ratio as f64,
+        );
         let (moog_ladder_on, moog_ladder_cutoff, moog_ladder_resonance) = (
             deck.moog_ladder_on,
             deck.moog_ladder_cutoff as f64,
@@ -14995,6 +15046,9 @@ p2 {}
         self.paint_chip(cx, ids!(sfx_fx_moog_ladder), moog_ladder_on, None);
         self.ui.slider(cx, ids!(sfx_fx_moog_ladder_cutoff)).set_value(cx, moog_ladder_cutoff);
         self.ui.slider(cx, ids!(sfx_fx_moog_ladder_resonance)).set_value(cx, moog_ladder_resonance);
+        self.paint_chip(cx, ids!(sfx_fx_compressor), compressor_on, None);
+        self.ui.slider(cx, ids!(sfx_fx_compressor_threshold)).set_value(cx, compressor_threshold_db);
+        self.ui.slider(cx, ids!(sfx_fx_compressor_ratio)).set_value(cx, compressor_ratio);
 
         // The FX levels panel, when it is open. Read together, after the
         // deck borrow above has been let go by the tuples it filled.
@@ -31132,6 +31186,44 @@ impl MatchEvent for App {
                 FxTarget::Mix => {
                     let mut cmds = self.decks.set_moog_ladder_resonance(DeckId::A, v as f32);
                     cmds.extend(self.decks.set_moog_ladder_resonance(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        if self.ui.button(cx, ids!(sfx_fx_compressor)).clicked(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.toggle_compressor(DeckId::A),
+                FxTarget::B => self.decks.toggle_compressor(DeckId::B),
+                FxTarget::Mix => {
+                    let on = !self.decks.deck(DeckId::A).compressor_on;
+                    let mut cmds = self.decks.set_compressor(DeckId::A, on);
+                    cmds.extend(self.decks.set_compressor(DeckId::B, on));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+            self.sync_sfx_fx_ui(cx);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_compressor_threshold)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_compressor_threshold(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_compressor_threshold(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_compressor_threshold(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_compressor_threshold(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_compressor_ratio)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_compressor_ratio(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_compressor_ratio(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_compressor_ratio(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_compressor_ratio(DeckId::B, v as f32));
                     cmds
                 }
             };

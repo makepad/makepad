@@ -1416,6 +1416,13 @@ pub struct DeckState {
     pub moog_ladder_ceiling: f32,
     /// The policy every effect that has not been pinned follows.
     pub level_default: crate::music_dsp::LevelMode,
+    /// Whether the compressor is on. Same channel-strip treatment as
+    /// the ladder beside it.
+    pub compressor_on: bool,
+    /// Where it starts working, in decibels below full scale.
+    pub compressor_threshold_db: f32,
+    /// How hard it works above that.
+    pub compressor_ratio: f32,
     /// Where this deck's three EQ bands are split, in Hz.
     pub eq_low_hz: f32,
     pub eq_high_hz: f32,
@@ -1561,6 +1568,9 @@ impl Default for DeckState {
             moog_ladder_level_mode: crate::music_dsp::LevelMode::Follow,
             moog_ladder_ceiling: 1.0,
             level_default: crate::music_dsp::LevelMode::Off,
+            compressor_on: false,
+            compressor_threshold_db: crate::music_dsp::COMPRESSOR_THRESHOLD_DEFAULT_DB,
+            compressor_ratio: crate::music_dsp::COMPRESSOR_RATIO_DEFAULT,
             eq_low_hz: crate::music_dsp::EQ_LOW_HZ,
             eq_high_hz: crate::music_dsp::EQ_HIGH_HZ,
             stereo_width_on: false,
@@ -1968,6 +1978,9 @@ pub enum DeckCmd {
     SetMoogLadderLevelMode { deck: DeckId, mode: crate::music_dsp::LevelMode },
     SetMoogLadderCeiling { deck: DeckId, ceiling: f32 },
     SetLevelDefault { deck: DeckId, mode: crate::music_dsp::LevelMode },
+    SetCompressor { deck: DeckId, on: bool },
+    SetCompressorThreshold { deck: DeckId, db: f32 },
+    SetCompressorRatio { deck: DeckId, ratio: f32 },
     SetCrossovers { deck: DeckId, low_hz: f32, high_hz: f32 },
     SetStereoWidth { deck: DeckId, on: bool },
     /// How far the side signal is scaled: 0 collapses to mono, 1 is the
@@ -2481,6 +2494,9 @@ impl DeckEngine {
             DeckCmd::SetMoogLadderLevelMode { deck, mode: state.moog_ladder_level_mode },
             DeckCmd::SetMoogLadderCeiling { deck, ceiling: state.moog_ladder_ceiling },
             DeckCmd::SetLevelDefault { deck, mode: state.level_default },
+            DeckCmd::SetCompressor { deck, on: state.compressor_on },
+            DeckCmd::SetCompressorThreshold { deck, db: state.compressor_threshold_db },
+            DeckCmd::SetCompressorRatio { deck, ratio: state.compressor_ratio },
             DeckCmd::SetCrossovers {
                 deck,
                 low_hz: state.eq_low_hz,
@@ -5263,6 +5279,39 @@ impl DeckEngine {
     }
 
     // ---- tone + stems -------------------------------------------------------
+
+    /// The compressor's on/off switch.
+    pub fn toggle_compressor(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.compressor_on = !state.compressor_on;
+        vec![DeckCmd::SetCompressor { deck, on: state.compressor_on }]
+    }
+
+    /// Set it to an explicit side, for a MIX-linked broadcast.
+    pub fn set_compressor(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
+        self.deck_mut(deck).compressor_on = on;
+        vec![DeckCmd::SetCompressor { deck, on }]
+    }
+
+    /// Where it starts working, in decibels below full scale.
+    pub fn set_compressor_threshold(&mut self, deck: DeckId, db: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.compressor_threshold_db = db.clamp(
+            crate::music_dsp::COMPRESSOR_THRESHOLD_MIN_DB,
+            crate::music_dsp::COMPRESSOR_THRESHOLD_MAX_DB,
+        );
+        vec![DeckCmd::SetCompressorThreshold { deck, db: state.compressor_threshold_db }]
+    }
+
+    /// How hard it works above that.
+    pub fn set_compressor_ratio(&mut self, deck: DeckId, ratio: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.compressor_ratio = ratio.clamp(
+            crate::music_dsp::COMPRESSOR_RATIO_MIN,
+            crate::music_dsp::COMPRESSOR_RATIO_MAX,
+        );
+        vec![DeckCmd::SetCompressorRatio { deck, ratio: state.compressor_ratio }]
+    }
 
     /// Where this deck's bands are split. Clamped the same way the
     /// engine clamps, so the stored value and the audible one agree, and
