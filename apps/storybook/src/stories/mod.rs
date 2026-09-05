@@ -32,6 +32,7 @@ pub mod slidesview;
 pub mod scrollbar;
 pub mod portallist;
 pub mod filetree;
+pub mod spinner;
 
 pub fn script_mod(vm: &mut ScriptVm) {
     welcome::script_mod(vm);
@@ -62,6 +63,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     scrollbar::script_mod(vm);
     portallist::script_mod(vm);
     filetree::script_mod(vm);
+    spinner::script_mod(vm);
 }
 
 pub fn tables() -> &'static [&'static [Story]] {
@@ -94,5 +96,6 @@ pub fn tables() -> &'static [&'static [Story]] {
         scrollbar::STORIES,
         portallist::STORIES,
         filetree::STORIES,
+        spinner::STORIES,
     ]
 }
