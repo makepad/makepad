@@ -15,6 +15,7 @@ pub mod checkbox_more;
 pub mod alert;
 pub mod divider;
 pub mod progress;
+pub mod spinner;
 pub mod welcome;
 pub mod button;
 pub mod checkbox;
@@ -43,7 +44,6 @@ pub mod slidesview;
 pub mod scrollbar;
 pub mod portallist;
 pub mod filetree;
-pub mod spinner;
 pub mod rotary;
 pub mod video;
 
