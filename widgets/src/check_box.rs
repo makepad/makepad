@@ -14,6 +14,8 @@ script_mod! {
     use mod.widgets.*
 
     mod.widgets.CheckBoxBase = #(CheckBox::register_widget(vm))
+    /** The three states a checkbox carries: Off, On, or Mixed for "some of the group". */
+    mod.widgets.CheckState = #(CheckState::script_api(vm))
 
     /** The flat checkbox: an inset mark box with a stroked check, plus its label. */
     mod.widgets.CheckBoxFlat = set_type_default() do mod.widgets.CheckBoxBase{
@@ -28,7 +30,8 @@ script_mod! {
             margin: theme.mspace_h_1{left: 13.}
         }
 
-        /** The mark box material: an SDF box with a stroked checkmark on top. */
+        /** The mark box material: an SDF box with a stroked checkmark on top,
+         * a dash while mixed, and the error ink over both when the intent says so. */
         draw_bg +: {
             /** disabled mix 0..1 step 0.01 */
             disabled: instance(0.0)
@@ -40,6 +43,10 @@ script_mod! {
             focus: instance(0.0)
             /** checked mix 0..1 step 0.01 */
             active: instance(0.0)
+            /** mixed (partially checked) mix 0..1 step 0.01 */
+            mixed: instance(0.0)
+            /** error intent mix 0..1 step 0.01 */
+            error: instance(0.0)
 
             /** mark box side length in pixels 8..32 step 1 */
             size: uniform(15.0)
@@ -47,6 +54,8 @@ script_mod! {
             border_size: uniform(theme.beveling)
             /** corner rounding radius, halved for the mark box 0..24 step 0.5 */
             border_radius: uniform(theme.corner_radius)
+            /** mark box at the end of the row instead of the start 0..1 step 1 */
+            mark_at_end: uniform(0.0)
 
             color: uniform(theme.color_inset)
             color_hover: uniform(theme.color_inset_hover)
@@ -61,6 +70,8 @@ script_mod! {
             border_color_active: uniform(theme.color_bevel_active)
             border_color_focus: uniform(theme.color_bevel_focus)
             border_color_disabled: uniform(theme.color_bevel_disabled)
+            /** bevel stroke under the error intent */
+            border_color_error: uniform(theme.color_error)
 
             /** checkmark size as a fraction of the mark box 0..1 step 0.05 */
             mark_size: uniform(0.65)
@@ -72,13 +83,19 @@ script_mod! {
             mark_color_active_hover: uniform(theme.color_mark_active_hover)
             mark_color_focus: uniform(theme.color_mark_focus)
             mark_color_disabled: uniform(theme.color_mark_disabled)
+            /** the dash ink while mixed */
+            mark_color_mixed: uniform(theme.color_mark_active)
+            /** the check, dash or knob ink under the error intent */
+            mark_color_error: uniform(theme.color_error)
 
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
 
                 let sz_px = self.size
                 let center_px = vec2(sz_px * 0.5, self.rect_size.y * 0.5)
-                let offset_px = vec2(0., center_px.y - sz_px * 0.5)
+                // The mark box sits at the start of the row, or at its end
+                // when the label goes first.
+                let offset_px = vec2((self.rect_size.x - sz_px) * self.mark_at_end, center_px.y - sz_px * 0.5)
 
                 //match self.check_type {
                 //    CheckType.Check => {
@@ -103,6 +120,7 @@ script_mod! {
                             .mix(self.border_color_active, self.active)
                             .mix(self.border_color_hover, self.hover)
                             .mix(self.border_color_down, self.down)
+                            .mix(self.border_color_error, self.error)
                             .mix(self.border_color_disabled, self.disabled)
 
                         sdf.fill_keep(color_fill)
@@ -110,16 +128,26 @@ script_mod! {
 
                         // Draw checkmark
                         let mark_padding = /** check inset frac 0.1..0.45 step 0.005 */ 0.275 * self.size
-                        sdf.move_to(mark_padding, center_px.y)
-                        sdf.line_to(center_px.x, center_px.y + sz_px * 0.5 - mark_padding)
-                        sdf.line_to(sz_px - mark_padding, offset_px.y + mark_padding)
+                        sdf.move_to(offset_px.x + mark_padding, center_px.y)
+                        sdf.line_to(offset_px.x + center_px.x, center_px.y + sz_px * 0.5 - mark_padding)
+                        sdf.line_to(offset_px.x + sz_px - mark_padding, offset_px.y + mark_padding)
 
                         let mark_color = self.mark_color
                             .mix(self.mark_color_hover, self.hover)
                             .mix(self.mark_color_active, self.active)
+                            .mix(self.mark_color_error, self.error * self.active)
                             .mix(self.mark_color_disabled, self.disabled)
 
                         sdf.stroke(mark_color, self.size * /** check stroke frac 0.02..0.2 step 0.005 */ 0.09)
+
+                        // Draw the mixed dash: a bar across the box, faded in by the
+                        // mixed instance. A zero-alpha stroke leaves the pixel alone.
+                        let dash_inset = /** dash inset frac 0.1..0.45 step 0.005 */ 0.25 * self.size
+                        sdf.move_to(offset_px.x + dash_inset, center_px.y)
+                        sdf.line_to(offset_px.x + sz_px - dash_inset, center_px.y)
+                        let dash_color = vec4(0., 0., 0., 0.)
+                            .mix(self.mark_color_mixed.mix(self.mark_color_error, self.error).mix(self.mark_color_disabled, self.disabled), self.mixed)
+                        sdf.stroke(dash_color, self.size * /** dash stroke frac 0.02..0.2 step 0.005 */ 0.1)
                 //    }
 
                 //    CheckType.None => {
@@ -142,6 +170,8 @@ script_mod! {
             active: instance(0.0)
             /** disabled mix 0..1 step 0.01 */
             disabled: instance(0.0)
+            /** error intent mix 0..1 step 0.01 */
+            error: instance(0.0)
 
             ink_centered: true
 
@@ -151,6 +181,8 @@ script_mod! {
             color_focus: uniform(theme.color_label_outer_focus)
             color_active: uniform(theme.color_label_outer_active)
             color_disabled: uniform(theme.color_label_outer_disabled)
+            /** label ink under the error intent */
+            color_error: uniform(theme.color_error)
 
             get_color: fn() {
                 return self.color
@@ -158,6 +190,7 @@ script_mod! {
                     .mix(self.color_active, self.active)
                     .mix(self.color_hover, self.hover)
                     .mix(self.color_down, self.down)
+                    .mix(self.color_error, self.error)
                     .mix(self.color_disabled, self.disabled)
             }
             text_style: theme.font_regular{
@@ -243,6 +276,40 @@ script_mod! {
                     }
                 }
             }
+            /** mixed track: the dash, on while the state is Mixed */
+            mixed: {
+                default: @off
+                off: AnimatorState{
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_bg: {mixed: 0.0}
+                    }
+                }
+                on: AnimatorState{
+                    from: {all: Forward {duration: 0.0}}
+                    apply: {
+                        draw_bg: {mixed: 1.0}
+                    }
+                }
+            }
+            /** error track: recolours the box, mark and label with the error ink */
+            error: {
+                default: @off
+                off: AnimatorState{
+                    from: {all: Forward {duration: 0.15}}
+                    apply: {
+                        draw_bg: {error: 0.0}
+                        draw_text: {error: 0.0}
+                    }
+                }
+                on: AnimatorState{
+                    from: {all: Forward {duration: 0.15}}
+                    apply: {
+                        draw_bg: {error: 1.0}
+                        draw_text: {error: 1.0}
+                    }
+                }
+            }
         }
     }
 
@@ -254,6 +321,15 @@ script_mod! {
             border_color_active: theme.color_bevel_inset_1_active
             border_color_focus: theme.color_bevel_inset_1_focus
             border_color_disabled: theme.color_bevel_inset_1_disabled
+        }
+    }
+
+    /** The round checkbox: the standard mark box with its corners rounded
+     * all the way, for pick-lists and avatars. */
+    mod.widgets.CheckBoxCircle = mod.widgets.CheckBox{
+        draw_bg +: {
+            /** corner rounding radius; the box clamps it to a circle 0..999 step 0.5 */
+            border_radius: theme.radius_full
         }
     }
 
@@ -276,7 +352,9 @@ script_mod! {
 
                 let sz_px = vec2(self.size * /** pill aspect 1..2.5 step 0.05 */ 1.6, self.size)
                 let center_px = vec2(sz_px.x * 0.5, self.rect_size.y * 0.5)
-                let offset_px = vec2(0., center_px.y - sz_px.y * 0.5)
+                // The pill sits at the start of the row, or at its end when
+                // the label goes first.
+                let offset_px = vec2((self.rect_size.x - sz_px.x) * self.mark_at_end, center_px.y - sz_px.y * 0.5)
 
                 // Draw background pill
                 sdf.box(
@@ -299,6 +377,7 @@ script_mod! {
                     .mix(self.border_color_active, self.active)
                     .mix(self.border_color_hover, self.hover)
                     .mix(self.border_color_down, self.down)
+                    .mix(self.border_color_error, self.error)
                     .mix(self.border_color_disabled, self.disabled)
 
                 sdf.fill_keep(color_fill)
@@ -311,16 +390,17 @@ script_mod! {
                 let mark_pos_y = sz_px.y * 0.5 + self.border_size - mark_target_y * self.active
 
                 // Draw ring when off, filled circle when on
-                sdf.circle(mark_pos_y, center_px.y, mark_size)
-                sdf.circle(mark_pos_y, center_px.y, mark_size * /** knob ring hole frac 0.1..0.9 step 0.05 */ 0.45)
+                sdf.circle(offset_px.x + mark_pos_y, center_px.y, mark_size)
+                sdf.circle(offset_px.x + mark_pos_y, center_px.y, mark_size * /** knob ring hole frac 0.1..0.9 step 0.05 */ 0.45)
                 sdf.subtract()
 
-                sdf.circle(mark_pos_y, center_px.y, mark_size)
+                sdf.circle(offset_px.x + mark_pos_y, center_px.y, mark_size)
                 sdf.blend(self.active)
 
                 let mark_color = self.mark_color
                     .mix(self.mark_color_hover, self.hover)
                     .mix(self.mark_color_active, self.active)
+                    .mix(self.mark_color_error, self.error)
                     .mix(self.mark_color_disabled, self.disabled)
 
                 sdf.fill(mark_color)
@@ -383,6 +463,18 @@ script_mod! {
     }
 }
 
+/// The three states a checkbox carries. `Mixed` is the group's "some of
+/// them" state: it draws a dash, reports as not checked, and a click on it
+/// resolves to `On`, the way a select-all box behaves.
+#[derive(Copy, Clone, Debug, PartialEq, Default, Script, ScriptHook)]
+pub enum CheckState {
+    #[pick]
+    #[default]
+    Off,
+    On,
+    Mixed,
+}
+
 #[derive(Script, Widget, Animator)]
 pub struct CheckBox {
     #[uid]
@@ -423,6 +515,19 @@ pub struct CheckBox {
     #[live(None)]
     pub active: Option<bool>,
 
+    /// The state the box starts in; `active`, when given, wins over it.
+    /// Kept in step with the animator afterwards so reflection reads true.
+    #[live]
+    pub state: CheckState,
+
+    /// The error intent: the box, mark and label take the error ink.
+    #[live]
+    pub error: bool,
+
+    /// Draw the label first and the mark box after it, at the end of the row.
+    #[live]
+    pub label_before: bool,
+
     #[live]
     on_click: ScriptFnRef,
 
@@ -435,11 +540,20 @@ pub struct CheckBox {
 
 impl ScriptHook for CheckBox {
     fn on_after_new(&mut self, vm: &mut ScriptVm) {
-        if let Some(active) = self.active.take() {
-            vm.with_cx_mut(|cx| {
-                self.animator_toggle(cx, active, Animate::No, ids!(active.on), ids!(active.off));
-            });
-        }
+        let initial = match self.active.take() {
+            Some(true) => CheckState::On,
+            Some(false) => CheckState::Off,
+            None => self.state,
+        };
+        let error = self.error;
+        vm.with_cx_mut(|cx| {
+            if initial != CheckState::Off {
+                self.set_state(cx, initial, Animate::No);
+            }
+            if error {
+                self.animator_toggle(cx, true, Animate::No, ids!(error.on), ids!(error.off));
+            }
+        });
     }
 }
 
@@ -452,12 +566,36 @@ pub enum CheckBoxAction {
 
 impl CheckBox {
     pub fn draw_check_box(&mut self, cx: &mut Cx2d, walk: Walk) -> DrawStep {
+        // The shader places the mark box from this flag; push it before the
+        // instance is emitted so a label-first box draws its mark at the end.
+        self.draw_bg.set_uniform(
+            cx,
+            live_id!(mark_at_end),
+            &[if self.label_before { 1.0 } else { 0.0 }],
+        );
         self.draw_bg.begin(cx, walk, self.layout);
 
-        self.draw_icon.draw_walk(cx, self.icon_walk);
+        if self.label_before {
+            // The label's outer margin clears the mark box; mirrored, it
+            // clears a box at the end of the row instead.
+            let margin = self.label_walk.margin;
+            let walk = Walk {
+                margin: Inset {
+                    left: margin.right,
+                    right: margin.left,
+                    ..margin
+                },
+                ..self.label_walk
+            };
+            self.draw_text
+                .draw_walk(cx, walk, self.label_align, self.text.as_ref());
+            self.draw_icon.draw_walk(cx, self.icon_walk);
+        } else {
+            self.draw_icon.draw_walk(cx, self.icon_walk);
 
-        self.draw_text
-            .draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
+            self.draw_text
+                .draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
+        }
         self.draw_bg.end(cx);
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
         DrawStep::done()
@@ -472,6 +610,7 @@ impl CheckBox {
         None
     }
 
+    /// True only while the box is `On`; a mixed box is not active.
     pub fn active(&self, cx: &Cx) -> bool {
         self.animator_in_state(cx, ids!(active.on))
     }
@@ -485,7 +624,49 @@ impl CheckBox {
     /// shader uniform stale. `Animate::No` uses `animator_cut`, which
     /// always re-merges the state's values and re-applies them.
     pub fn set_active(&mut self, cx: &mut Cx, value: bool, animate: Animate) {
-        self.animator_toggle(cx, value, animate, ids!(active.on), ids!(active.off));
+        self.set_state(cx, if value { CheckState::On } else { CheckState::Off }, animate);
+    }
+
+    /// The state the box is in, read from the animator.
+    pub fn state(&self, cx: &Cx) -> CheckState {
+        if self.animator_in_state(cx, ids!(mixed.on)) {
+            CheckState::Mixed
+        } else if self.animator_in_state(cx, ids!(active.on)) {
+            CheckState::On
+        } else {
+            CheckState::Off
+        }
+    }
+
+    /// Sets the state. `Mixed` shows the dash and reports as not active;
+    /// see [`CheckBox::set_active()`] for what `animate` means.
+    pub fn set_state(&mut self, cx: &mut Cx, state: CheckState, animate: Animate) {
+        self.state = state;
+        self.animator_toggle(
+            cx,
+            state == CheckState::On,
+            animate,
+            ids!(active.on),
+            ids!(active.off),
+        );
+        self.animator_toggle(
+            cx,
+            state == CheckState::Mixed,
+            animate,
+            ids!(mixed.on),
+            ids!(mixed.off),
+        );
+    }
+
+    /// Whether the box shows the error intent.
+    pub fn error(&self, cx: &Cx) -> bool {
+        self.animator_in_state(cx, ids!(error.on))
+    }
+
+    /// Turns the error intent on or off.
+    pub fn set_error(&mut self, cx: &mut Cx, error: bool) {
+        self.error = error;
+        self.animator_toggle(cx, error, Animate::Yes, ids!(error.on), ids!(error.off));
     }
 
     pub fn debug_dump_animator(&self, heap: &ScriptHeap) -> String {
@@ -548,6 +729,11 @@ impl Widget for CheckBox {
             }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 self.set_key_focus(cx);
+                // A mixed box resolves to On: it is not active, so the
+                // flip below lands there; only the dash needs clearing.
+                if self.animator_in_state(cx, ids!(mixed.on)) {
+                    self.animator_play(cx, ids!(mixed.off));
+                }
                 let new_active = if self.animator_in_state(cx, ids!(active.on)) {
                     self.animator_play(cx, ids!(active.off));
                     cx.widget_action_with_data(
@@ -565,6 +751,7 @@ impl Widget for CheckBox {
                     );
                     true
                 };
+                self.state = if new_active { CheckState::On } else { CheckState::Off };
                 cx.widget_to_script_call(
                     uid,
                     NIL,
@@ -621,6 +808,30 @@ impl CheckBoxRef {
     pub fn set_active(&self, cx: &mut Cx, value: bool, animate: Animate) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_active(cx, value, animate);
+        }
+    }
+
+    /// See [`CheckBox::state()`].
+    pub fn state(&self, cx: &Cx) -> CheckState {
+        self.borrow().map_or(CheckState::Off, |inner| inner.state(cx))
+    }
+
+    /// See [`CheckBox::set_state()`].
+    pub fn set_state(&self, cx: &mut Cx, state: CheckState, animate: Animate) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_state(cx, state, animate);
+        }
+    }
+
+    /// See [`CheckBox::error()`].
+    pub fn error(&self, cx: &Cx) -> bool {
+        self.borrow().is_some_and(|inner| inner.error(cx))
+    }
+
+    /// See [`CheckBox::set_error()`].
+    pub fn set_error(&self, cx: &mut Cx, error: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_error(cx, error);
         }
     }
 
