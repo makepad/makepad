@@ -2567,7 +2567,7 @@ impl FlowCanvas {
                     margin: Inset::default(),
                     width: Size::Fixed(content.rect.size.x),
                     height: fixed_height.map(Size::Fixed).unwrap_or_else(Size::fit),
-                    metrics: Metrics::default(),
+                    ..Default::default()
                 },
                 Layout {
                     flow: Flow::Down,

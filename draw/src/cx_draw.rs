@@ -202,6 +202,32 @@ impl<'a> CxDraw<'a> {
             .unwrap_or(dvec2(0.0, 0.0))
     }
 
+    /// Returns the owning window's inner size in layout points. Texture and
+    /// cache passes deliberately walk through their parent-pass chain instead
+    /// of exposing their render-target size as viewport units. A pass tree
+    /// without a window uses its root pass rectangle.
+    pub fn owning_window_or_root_pass_size(&self) -> Vec2d {
+        let Some(stack_item) = self.pass_stack.last() else {
+            return dvec2(f64::NAN, f64::NAN);
+        };
+        let mut pass_id = stack_item.pass_id;
+        for _ in 0..25 {
+            match self.passes[pass_id].parent {
+                CxDrawPassParent::Window(window_id) => {
+                    return self.windows[window_id].get_inner_size();
+                }
+                CxDrawPassParent::DrawPass(parent) => pass_id = parent,
+                _ => {
+                    return self
+                        .get_pass_rect(pass_id, self.current_dpi_factor())
+                        .map(|rect| rect.size)
+                        .unwrap_or(dvec2(f64::NAN, f64::NAN));
+                }
+            }
+        }
+        dvec2(f64::NAN, f64::NAN)
+    }
+
     /// The paint-order depth the current pass adds per draw call: what a
     /// drawer that splits one call into several must take back off through
     /// `draw_depth` for its later calls to keep the depth of the one call.

@@ -35,6 +35,7 @@ pub mod scroll_bars;
 pub mod scroll_motion;
 pub mod view;
 pub mod view_ui;
+pub mod grid;
 
 pub mod animated_image_gif;
 pub mod browser;
@@ -172,6 +173,7 @@ pub use crate::{
     fold_header::*,
     gauss_view::*,
     glass_panel::*,
+    grid::*,
 
     icon::*,
 
@@ -337,6 +339,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::scroll_bars::script_mod(vm);
     crate::view::script_mod(vm);
     crate::view_ui::script_mod(vm);
+    crate::grid::script_mod(vm);
     crate::rubber_view::script_mod(vm);
 
     crate::label::script_mod(vm);

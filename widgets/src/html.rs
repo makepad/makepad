@@ -813,7 +813,7 @@ impl Widget for Html {
                                     top: font_size * 0.25,
                                     bottom: 0.0,
                                 },
-                                metrics: Metrics::default(),
+                                ..Default::default()
                             };
                             // One borrow for all FoldButton mutations: seed
                             // the animator state on first sight (so the

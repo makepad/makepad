@@ -10843,6 +10843,7 @@ impl MapView {
                 height: Size::Fixed(rect.size.y),
                 margin: Inset::default(),
                 metrics: Metrics::default(),
+                ..Default::default()
             },
             Layout {
                 clip_x: true,
