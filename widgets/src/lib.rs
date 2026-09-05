@@ -605,6 +605,9 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::slider::script_mod(vm);
     crate::drop_slider::script_mod(vm);
     crate::drop_toggles::script_mod(vm);
+    // The badge first: it owns the role palette and the intent names, and
+    // the tooltip, the chip and the segmented control all read them.
+    crate::badge::script_mod(vm);
     crate::tip::script_mod(vm);
     crate::popover::script_mod(vm);
     crate::value_input::script_mod(vm);
@@ -620,7 +623,6 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::progress::script_mod(vm);
     crate::spinner::script_mod(vm);
     crate::glass_panel::script_mod(vm);
-    crate::badge::script_mod(vm);
     crate::chip::script_mod(vm);
     // The menu first: the group's split and menu buttons carry a
     // `MenuPlace`, and a block's `use` only sees what already exists.
