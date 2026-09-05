@@ -9,7 +9,8 @@
 //! description, an optional action and an optional close cross, on a face
 //! whose colour says how urgent it is. The dressings are presets of the
 //! same widget: `Alert` for a message inside content, `Banner` for the full
-//! width strip under a toolbar; the guide tip and the callout follow.
+//! width strip under a toolbar, `InlineTip` for guidance that can be sent
+//! away for good, `Callout` for the card-shaped nudge with an accent bar.
 //!
 //! The intent is a PROPERTY, not a preset. The shaders carry the four intent
 //! palettes and pick one at draw time, so an app can turn a green "saved"
@@ -40,7 +41,9 @@
 //! `LinkLabel` as a rule. The alert watches for their `Clicked` and raises
 //! [`AlertAction::Action`] so a host that only wants to know "the action was
 //! taken" can listen in one place; a host that fills both slots reads the
-//! buttons directly to tell them apart.
+//! buttons directly to tell them apart. A tip with a `dismiss_key` raises
+//! [`AlertAction::Dismissed`] with that key when closed; persisting it is
+//! the host's job, this widget only promises never to close silently.
 
 use crate::{
     animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
@@ -57,6 +60,9 @@ pub enum AlertAction {
     Closed,
     /// The widget in an action slot was clicked.
     Action,
+    /// Closed while carrying a `dismiss_key`; the host stores the key so
+    /// the tip stays away. Raised after `Closed`.
+    Dismissed(String),
     #[default]
     None,
 }
@@ -126,6 +132,8 @@ script_mod! {
         title: ""
         /** the description under, or beside, the title */
         description: ""
+        /** longer guidance folded under a Show more link; empty means none */
+        guidance: ""
         /** how urgent the message is: Info, Success, Warning or Error */
         intent: mod.widgets.AlertIntent.Info
         /** Light tints the face, Filled paints it solid, Outline strokes it */
@@ -136,10 +144,20 @@ script_mod! {
         closable: false
         /** keep title, description and actions on one line while they fit */
         single_line: true
+        /** the guidance starts unfolded */
+        expanded: false
+        /** a key the host persists when this is closed, so it stays away */
+        dismiss_key: ""
+        /** the fold link's label while the guidance is folded */
+        more_text: "Show more"
+        /** the fold link's label while the guidance is open */
+        less_text: "Show less"
         /** the intent icon's box */
         icon_walk: Walk{width: 16., height: 16.}
         /** the close cross's box */
         close_walk: Walk{width: 12., height: 12., margin: Inset{left: theme.space_1, right: 0., top: 0., bottom: 0.}}
+        /** the fold chevron's box */
+        more_walk: Walk{width: 10., height: 10., margin: Inset{right: theme.space_1, left: 0., top: 0., bottom: 0.}}
         /** how far the alert is unfolded 0..1 step 0.01; the open track drives it */
         shown: 1.0
         /** how far the alert is dimmed 0..1 step 0.01; the disabled track drives it */
@@ -395,6 +413,58 @@ script_mod! {
             }
         }
 
+        /** The fold chevron beside the Show more link: down while folded,
+         * up while open. */
+        draw_more +: {
+            /** the ink on a Light Info face */
+            color_on_info_container: uniform(theme.color_on_info_container)
+            /** the ink on a Light Success face */
+            color_on_success_container: uniform(theme.color_on_success_container)
+            /** the ink on a Light Warning face */
+            color_on_warning_container: uniform(theme.color_on_warning_container)
+            /** the ink on a Light Error face */
+            color_on_error_container: uniform(theme.color_on_error_container)
+            /** the ink on a Filled Info face */
+            color_on_info: uniform(theme.color_on_info)
+            /** the ink on a Filled Success face */
+            color_on_success: uniform(theme.color_on_success)
+            /** the ink on a Filled Warning face */
+            color_on_warning: uniform(theme.color_on_warning)
+            /** the ink on a Filled Error face */
+            color_on_error: uniform(theme.color_on_error)
+            /** the ink on an Outline face */
+            color_text: uniform(theme.color_text)
+            /** the alpha everything settles to while disabled 0..1 step 0.01 */
+            disabled_alpha: uniform(theme.state_disabled_content_opacity)
+
+            intent_ink: fn() -> vec4 {
+                let mut c = self.color_on_info_container
+                if self.intent > 0.5 { c = self.color_on_success_container }
+                if self.intent > 1.5 { c = self.color_on_warning_container }
+                if self.intent > 2.5 { c = self.color_on_error_container }
+                let mut f = self.color_on_info
+                if self.intent > 0.5 { f = self.color_on_success }
+                if self.intent > 1.5 { f = self.color_on_warning }
+                if self.intent > 2.5 { f = self.color_on_error }
+                if self.appearance > 0.5 { c = f }
+                if self.appearance > 1.5 { c = self.color_text }
+                return c
+            }
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let s = self.rect_size.x
+                let top = mix(s * 0.35, s * 0.65, self.open)
+                let bottom = mix(s * 0.65, s * 0.35, self.open)
+                sdf.move_to(s * 0.2, top)
+                sdf.line_to(s * 0.5, bottom)
+                sdf.line_to(s * 0.8, top)
+                let ink = self.intent_ink()
+                let alpha = (0.7 + 0.3 * self.hover) * self.shown * mix(1.0, self.disabled_alpha, self.dim)
+                sdf.stroke(vec4(ink.xyz, ink.w * alpha), 1.2)
+                return sdf.result
+            }
+        }
+
         /** The title ink: bold, in the face's on-colour. */
         draw_title +: {
             /** the title typeface */
@@ -444,6 +514,50 @@ script_mod! {
             text_style: theme.font_regular{
                 /** description type size in points 6..32 step 0.5 */
                 font_size: theme.font_size_p
+            }
+            /** the ink on a Light Info face */
+            color_on_info_container: uniform(theme.color_on_info_container)
+            /** the ink on a Light Success face */
+            color_on_success_container: uniform(theme.color_on_success_container)
+            /** the ink on a Light Warning face */
+            color_on_warning_container: uniform(theme.color_on_warning_container)
+            /** the ink on a Light Error face */
+            color_on_error_container: uniform(theme.color_on_error_container)
+            /** the ink on a Filled Info face */
+            color_on_info: uniform(theme.color_on_info)
+            /** the ink on a Filled Success face */
+            color_on_success: uniform(theme.color_on_success)
+            /** the ink on a Filled Warning face */
+            color_on_warning: uniform(theme.color_on_warning)
+            /** the ink on a Filled Error face */
+            color_on_error: uniform(theme.color_on_error)
+            /** the ink on an Outline face */
+            color_text: uniform(theme.color_text)
+            /** the alpha everything settles to while disabled 0..1 step 0.01 */
+            disabled_alpha: uniform(theme.state_disabled_content_opacity)
+
+            get_color: fn() {
+                let mut c = self.color_on_info_container
+                if self.intent > 0.5 { c = self.color_on_success_container }
+                if self.intent > 1.5 { c = self.color_on_warning_container }
+                if self.intent > 2.5 { c = self.color_on_error_container }
+                let mut f = self.color_on_info
+                if self.intent > 0.5 { f = self.color_on_success }
+                if self.intent > 1.5 { f = self.color_on_warning }
+                if self.intent > 2.5 { f = self.color_on_error }
+                if self.appearance > 0.5 { c = f }
+                if self.appearance > 1.5 { c = self.color_text }
+                return vec4(c.xyz, c.w * self.shown * mix(1.0, self.disabled_alpha, self.dim))
+            }
+        }
+
+        /** The Show more link's ink: a small bold label in the on-colour,
+         * brighter under the pointer. */
+        draw_link +: {
+            /** the link typeface */
+            text_style: theme.font_bold{
+                /** link type size in points 6..32 step 0.5 */
+                font_size: theme.type_label_m_size
             }
             /** the ink on a Light Info face */
             color_on_info_container: uniform(theme.color_on_info_container)
@@ -547,6 +661,33 @@ script_mod! {
         }
     }
 
+    /** The inline tip: a guide banner with folded guidance and a media slot,
+     * closable, on a low surface with the intent's stroke. */
+    mod.widgets.InlineTip = mod.widgets.AlertFlat{
+        appearance: mod.widgets.AlertAppearance.Outline
+        closable: true
+        single_line: false
+        padding: Inset{left: theme.space_3, right: theme.space_3, top: theme.space_3, bottom: theme.space_3}
+        draw_bg +: {
+            color_fill_outline: theme.color_surface_container_low
+        }
+    }
+
+    /** The callout: the card nudge, an accent bar down the left of a raised
+     * card, a title, an action and a close cross. */
+    mod.widgets.Callout = mod.widgets.AlertFlat{
+        appearance: mod.widgets.AlertAppearance.Outline
+        closable: true
+        show_icon: false
+        single_line: false
+        padding: Inset{left: theme.space_3 + 4., right: theme.space_3, top: theme.space_3, bottom: theme.space_3}
+        draw_bg +: {
+            color_fill_outline: theme.color_surface_container_high
+            border_size: 0.0
+            accent_size: 3.0
+        }
+    }
+
     mod.widgets.BannerHostBase = #(BannerHost::register_widget(vm))
 
     /** A place under a toolbar for the one banner that matters now. It holds
@@ -612,7 +753,7 @@ pub struct DrawAlertText {
     dim: f32,
 }
 
-/// The message-in-the-page widget behind Alert and Banner.
+/// The message-in-the-page widget behind Alert, Banner, InlineTip and Callout.
 #[derive(Script, ScriptHook, WidgetRef, WidgetSet, WidgetRegister, Animator)]
 pub struct Alert {
     #[uid]
@@ -636,9 +777,13 @@ pub struct Alert {
     #[live]
     draw_close: DrawAlertGlyph,
     #[live]
+    draw_more: DrawAlertGlyph,
+    #[live]
     draw_title: DrawAlertText,
     #[live]
     draw_text: DrawAlertText,
+    #[live]
+    draw_link: DrawAlertText,
 
     /// The action slot: a Button or a LinkLabel the app puts here.
     #[live]
@@ -646,16 +791,23 @@ pub struct Alert {
     /// A second action, for a banner that offers two.
     #[live]
     secondary: WidgetRef,
+    /// A picture beside the text, for a tip.
+    #[live]
+    media: WidgetRef,
 
     #[live]
     icon_walk: Walk,
     #[live]
     close_walk: Walk,
+    #[live]
+    more_walk: Walk,
 
     #[live]
     pub title: String,
     #[live]
     pub description: String,
+    #[live]
+    pub guidance: String,
     #[live]
     pub intent: AlertIntent,
     #[live]
@@ -666,6 +818,14 @@ pub struct Alert {
     pub closable: bool,
     #[live(true)]
     pub single_line: bool,
+    #[live]
+    pub expanded: bool,
+    #[live]
+    pub dismiss_key: String,
+    #[live]
+    more_text: String,
+    #[live]
+    less_text: String,
 
     /// 1 unfolded, 0 folded away; the open track eases it.
     #[live(1.0)]
@@ -686,6 +846,12 @@ pub struct Alert {
     closing: bool,
     #[rust]
     close_hover: bool,
+    #[rust]
+    more_hover: bool,
+    /// The row layout the last draw settled on, so a hit test on the fold
+    /// link can trust the link's area was drawn this frame.
+    #[rust]
+    has_link: bool,
 
     #[rust]
     action_data: WidgetActionData,
@@ -727,14 +893,16 @@ impl Alert {
         let appearance = self.appearance_index();
         let shown = self.shown.clamp(0.0, 1.0) as f32;
         let dim = self.dim.clamp(0.0, 1.0) as f32;
-        for glyph in [&mut self.draw_icon, &mut self.draw_close] {
+        for glyph in [&mut self.draw_icon, &mut self.draw_close, &mut self.draw_more] {
             glyph.intent = intent;
             glyph.appearance = appearance;
             glyph.shown = shown;
             glyph.dim = dim;
         }
         self.draw_close.hover = if self.close_hover { 1.0 } else { 0.0 };
-        for text in [&mut self.draw_title, &mut self.draw_text] {
+        self.draw_more.hover = if self.more_hover { 1.0 } else { 0.0 };
+        self.draw_more.open = if self.expanded { 1.0 } else { 0.0 };
+        for text in [&mut self.draw_title, &mut self.draw_text, &mut self.draw_link] {
             text.intent = intent;
             text.appearance = appearance;
             text.shown = shown;
@@ -771,6 +939,11 @@ impl Alert {
         }
     }
 
+    /// Whether the guidance fold link is drawn at all.
+    fn shows_link(&self) -> bool {
+        !self.guidance.is_empty()
+    }
+
     /// Settle the fold when nothing is animating it: an ease can end shy of
     /// its keyframe and a lost frame can freeze a fraction, so a settled
     /// track's STATE is the truth, not the last number it wrote.
@@ -805,7 +978,7 @@ impl Alert {
         }
     }
 
-    /// Fold away. Raises `Closed`.
+    /// Fold away. Raises `Closed`, and `Dismissed(key)` when a dismiss key is set.
     pub fn close(&mut self, cx: &mut Cx) {
         if !self.visible || self.closing {
             return;
@@ -814,6 +987,13 @@ impl Alert {
         self.animator_play(cx, ids!(open.off));
         let uid = self.widget_uid();
         cx.widget_action_with_data(&self.action_data, uid, AlertAction::Closed);
+        if !self.dismiss_key.is_empty() {
+            cx.widget_action_with_data(
+                &self.action_data,
+                uid,
+                AlertAction::Dismissed(self.dismiss_key.clone()),
+            );
+        }
         self.draw_bg.redraw(cx);
     }
 
@@ -846,6 +1026,14 @@ impl Alert {
     pub fn set_appearance(&mut self, cx: &mut Cx, appearance: AlertAppearance) {
         if self.appearance != appearance {
             self.appearance = appearance;
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    /// Unfold or fold the guidance under the description.
+    pub fn set_expanded(&mut self, cx: &mut Cx, expanded: bool) {
+        if self.expanded != expanded {
+            self.expanded = expanded;
             self.draw_bg.redraw(cx);
         }
     }
@@ -898,6 +1086,7 @@ impl WidgetNode for Alert {
         for (id, slot) in [
             (live_id!(action), &self.action),
             (live_id!(secondary), &self.secondary),
+            (live_id!(media), &self.media),
         ] {
             if !slot.is_empty() {
                 visit(id, slot.clone());
@@ -906,7 +1095,7 @@ impl WidgetNode for Alert {
     }
 
     fn find_widgets_from_point(&self, cx: &Cx, point: DVec2, found: &mut dyn FnMut(&WidgetRef)) {
-        for slot in [&self.action, &self.secondary] {
+        for slot in [&self.action, &self.secondary, &self.media] {
             slot.find_widgets_from_point(cx, point, found);
         }
     }
@@ -916,8 +1105,10 @@ impl WidgetNode for Alert {
             ("draw_bg", self.draw_bg.area()),
             ("draw_icon", self.draw_icon.area()),
             ("draw_close", self.draw_close.area()),
+            ("draw_more", self.draw_more.area()),
             ("draw_title", self.draw_title.area()),
             ("draw_text", self.draw_text.area()),
+            ("draw_link", self.draw_link.area()),
         ]
     }
 
@@ -958,12 +1149,6 @@ impl Widget for Alert {
             self.closing = false;
             return DrawStep::done();
         }
-        // The rect of the last draw is the whole alert while it is unfolded,
-        // which is the only time it is worth remembering.
-        let last = self.draw_bg.area().rect(cx).size.y;
-        if self.shown >= 1.0 && last > 0.0 {
-            self.full_height = last;
-        }
         let folding = self.shown < 1.0 && self.full_height > 0.0;
         let mut walk = walk;
         let mut layout = self.layout;
@@ -995,7 +1180,7 @@ impl Widget for Alert {
         } else {
             0.0
         };
-        let plain = self.single_line;
+        let plain = self.single_line && !self.shows_link() && self.media.is_empty();
         // A Fit-width alert has no width to reflow against: one line it is.
         let inline = plain
             && (inner.is_nan()
@@ -1004,10 +1189,15 @@ impl Widget for Alert {
             x: 0.0,
             y: if inline { 0.5 } else { 0.0 },
         };
+        self.has_link = false;
 
         self.draw_bg.begin(cx, walk, layout);
         if self.show_icon {
             self.draw_icon.draw_walk(cx, self.icon_walk);
+        }
+        if !self.media.is_empty() && self.media.visible() {
+            let media_walk = self.media.walk(cx);
+            self.media.draw_walk_all(cx, scope, media_walk);
         }
         if inline {
             if !self.title.is_empty() {
@@ -1046,7 +1236,17 @@ impl Widget for Alert {
             let column_w = if inner.is_nan() {
                 Size::fit()
             } else {
-                Size::Fixed((inner - icon_w - close_w).max(1.0))
+                let media_w = if self.media.is_empty() || !self.media.visible() {
+                    0.0
+                } else {
+                    let w = self.media.area().rect(cx).size.x;
+                    if w > 0.0 {
+                        w + spacing
+                    } else {
+                        0.0
+                    }
+                };
+                Size::Fixed((inner - icon_w - media_w - close_w).max(1.0))
             };
             cx.begin_turtle(
                 Walk {
@@ -1066,6 +1266,28 @@ impl Widget for Alert {
             if !self.description.is_empty() {
                 Self::draw_wrapped(cx, &mut self.draw_text, &self.description);
             }
+            if self.shows_link() {
+                if self.expanded {
+                    Self::draw_wrapped(cx, &mut self.draw_text, &self.guidance);
+                }
+                cx.begin_turtle(
+                    Walk::fill_fit(),
+                    Layout {
+                        align: Align { x: 0.0, y: 0.5 },
+                        ..Layout::flow_right()
+                    },
+                );
+                self.draw_more.draw_walk(cx, self.more_walk);
+                let label = if self.expanded {
+                    &self.less_text
+                } else {
+                    &self.more_text
+                };
+                self.draw_link
+                    .draw_walk(cx, Walk::fit(), Align::default(), label);
+                cx.end_turtle();
+                self.has_link = true;
+            }
             if !self.action.is_empty() || !self.secondary.is_empty() {
                 cx.begin_turtle(
                     Walk::fill_fit(),
@@ -1084,6 +1306,16 @@ impl Widget for Alert {
             }
         }
         self.draw_bg.end(cx);
+        // The height of a whole draw is what the fold scales. It is read
+        // here, straight after the face has closed its turtle, because at
+        // the top of a draw the face's area still points into the draw list
+        // this frame has just cleared and reports nothing.
+        if !folding {
+            let height = self.draw_bg.area().rect(cx).size.y;
+            if height > 0.0 {
+                self.full_height = height;
+            }
+        }
         DrawStep::done()
     }
 
@@ -1100,7 +1332,7 @@ impl Widget for Alert {
         if !self.visible {
             return;
         }
-        for slot in [&self.action, &self.secondary] {
+        for slot in [&self.action, &self.secondary, &self.media] {
             if !slot.is_empty() {
                 slot.handle_event(cx, event, scope);
             }
@@ -1132,6 +1364,24 @@ impl Widget for Alert {
                 Hit::FingerDown(fe) if fe.is_primary_hit() => {
                     self.close_hover = false;
                     self.close(cx);
+                }
+                _ => {}
+            }
+        }
+        if self.has_link {
+            match event.hits(cx, self.draw_link.area()) {
+                Hit::FingerHoverIn(_) => {
+                    self.more_hover = true;
+                    cx.set_cursor(MouseCursor::Hand);
+                    self.draw_bg.redraw(cx);
+                }
+                Hit::FingerHoverOut(_) => {
+                    self.more_hover = false;
+                    self.draw_bg.redraw(cx);
+                }
+                Hit::FingerDown(fe) if fe.is_primary_hit() => {
+                    let expanded = !self.expanded;
+                    self.set_expanded(cx, expanded);
                 }
                 _ => {}
             }
@@ -1181,6 +1431,16 @@ impl AlertRef {
             .any(|a| matches!(a.cast(), AlertAction::Action))
     }
 
+    /// The dismiss key, when this pass closed a tip that carries one.
+    pub fn dismissed(&self, actions: &Actions) -> Option<String> {
+        for action in actions.filter_widget_actions(self.widget_uid()) {
+            if let AlertAction::Dismissed(key) = action.cast() {
+                return Some(key);
+            }
+        }
+        None
+    }
+
     pub fn open(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.open(cx);
@@ -1221,6 +1481,11 @@ impl AlertRef {
         }
     }
 
+    pub fn set_expanded(&self, cx: &mut Cx, expanded: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_expanded(cx, expanded);
+        }
+    }
 }
 
 /// The one-at-a-time home for a banner.
