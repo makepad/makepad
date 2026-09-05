@@ -27,8 +27,22 @@
 //! value in a half whose colour follows the value's MAGNITUDE between `min`
 //! and `max`, so a row of them can be scanned for the one that is running
 //! hot without reading a single digit.
+//!
+//! A `BadgeAnchor` wraps any widget and draws its badge over a corner of it
+//! on the OVERLAY draw list (the `TipLayer` idiom), shifted from the host's
+//! final rect, so the host keeps exactly the size it had and the badge
+//! floats over whatever neighbours crowd the corner. It hides while the
+//! badge has nothing to say, because an "unread" mark that is always there
+//! is a mark nobody reads.
+//!
+//! A `Marker` is the same anchor placed by RELATIVE coordinates, 0..1 across
+//! and down its content, numbered, answering a click with
+//! [`MarkerAction::Clicked`]; laid over a picture with `flow: Overlay` it
+//! turns the picture into a legend. The pin is hit-tested before the content
+//! under it is handed the event, so a pin over a button is a pin, not a
+//! button.
 
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::{makepad_derive_widget::*, makepad_draw::*, view::View, widget::*};
 
 /// What a mark means. The colours come from the theme's role tokens, so
 /// the meaning survives a theme change.
@@ -126,6 +140,25 @@ impl StatusKind {
     }
 }
 
+/// Which corner of the wrapped widget an anchored badge sits on.
+#[derive(Clone, Copy, Debug, PartialEq, Script, ScriptHook)]
+#[repr(u32)]
+pub enum BadgeCorner {
+    #[pick]
+    TopRight = 0,
+    TopLeft = 1,
+    BottomRight = 2,
+    BottomLeft = 3,
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
+pub enum MarkerAction {
+    /// The pin was pressed and released.
+    Clicked,
+    #[default]
+    None,
+}
+
 script_mod! {
     use mod.prelude.widgets_internal.*
 
@@ -144,6 +177,8 @@ script_mod! {
     // qualified: `status: StatusKind.Warning`.
     let StatusKind = set_type_default() do #(StatusKind::script_api(vm))
     mod.widgets.StatusKind = StatusKind
+    let BadgeCorner = set_type_default() do #(BadgeCorner::script_api(vm))
+    mod.widgets.BadgeCorner = BadgeCorner
     mod.widgets.BadgePalette = set_type_default() do #(BadgePalette::script_api(vm))
 
     use mod.widgets.*
@@ -249,8 +284,10 @@ script_mod! {
                 if self.border_size > 0.0 {
                     sdf.stroke_keep(self.border_color, self.border_size)
                 }
+                // The bevel follows the fill's alpha: a ghost or an outline
+                // badge has no face to bevel.
                 if self.bevel > 0.0 {
-                    sdf.stroke_keep(mix(self.color_bevel_1, self.color_bevel_2, self.pos.y) * self.bevel, 1.0)
+                    sdf.stroke_keep(mix(self.color_bevel_1, self.color_bevel_2, self.pos.y) * self.bevel * self.color.a, 1.0)
                 }
                 return sdf.result
             }
@@ -266,6 +303,42 @@ script_mod! {
         draw_bg +: {
             bevel: 1.0
         }
+    }
+
+    mod.widgets.BadgeAnchorBase = #(BadgeAnchor::register_widget(vm))
+    /** Wraps one widget and draws a badge over its corner on the overlay,
+     * so the wrapped widget keeps its size. Hidden while the badge has
+     * nothing to say: no count, no word, no dot asked for. */
+    mod.widgets.BadgeAnchor = set_type_default() do mod.widgets.BadgeAnchorBase{
+        width: Fit
+        height: Fit
+        /** BadgeCorner.TopRight TopLeft BottomRight BottomLeft */
+        corner: BadgeCorner.TopRight
+        /** nudge along x, positive moves right -20..20 step 0.5 */
+        offset_x: 0.0
+        /** nudge along y, positive moves down -20..20 step 0.5 */
+        offset_y: 0.0
+        /** how much of the badge hangs outside the corner 0..1 step 0.05 */
+        overhang: 0.5
+        /** the badge itself; `badge +: {count: 3 intent: Error}` at a call site */
+        badge: mod.widgets.Badge{intent: Primary size: Small}
+    }
+
+    mod.widgets.MarkerBase = #(Marker::register_widget(vm))
+    /** A numbered pin at a relative position over the content it wraps, or
+     * over whatever it is laid over with `flow: Overlay`; a click on the pin
+     * raises Clicked. */
+    mod.widgets.Marker = set_type_default() do mod.widgets.MarkerBase{
+        width: Fit
+        height: Fit
+        /** pin centre across the content 0..1 step 0.01 */
+        x: 0.5
+        /** pin centre down the content 0..1 step 0.01 */
+        y: 0.5
+        /** the number on the pin; 0 is a dot 0..999 step 1 */
+        number: 0
+        /** the pin itself; `badge +: {intent: Error}` at a call site */
+        badge: mod.widgets.Badge{intent: Primary}
     }
 
     mod.widgets.StatusDotBase = #(StatusDot::register_widget(vm))
@@ -717,14 +790,20 @@ fn dimmed(color: Vec4f, opacity: f32) -> Vec4f {
     Vec4f { w: color.w * opacity, ..color }
 }
 
-/// The width of one line of `text` in this text style, measured, with a
-/// per-character estimate only for text the layout engine returns no row
-/// for.
+/// What a drawn run overhangs its measured advance by, in layout points:
+/// the last glyph's side bearing and the anti-alias pad. Without it a word
+/// pill clips its final letter.
+const TEXT_SLACK: f64 = 2.0;
+
+/// The width of one line of `text` in this text style, measured, plus the
+/// slack a drawn run needs; a per-character estimate only for text the
+/// layout engine returns no row for.
 fn measure(draw_text: &DrawText, cx: &mut Cx2d, text: &str) -> f64 {
     draw_text
         .prepare_single_line_run(cx, text)
         .map(|run| run.width_in_lpxs as f64)
         .unwrap_or_else(|| text.chars().count() as f64 * draw_text.text_style.font_size as f64 * 0.62)
+        + TEXT_SLACK
 }
 
 #[derive(Script, ScriptHook, Widget)]
@@ -886,6 +965,10 @@ impl Badge {
         let font_rest = self.draw_text.text_style.font_size;
         self.draw_text.color = colors.ink;
         self.draw_text.text_style.font_size = font_rest * metrics.font_scale;
+        // The CONTAINER centres the text. The align handed to the text
+        // itself stays left: the layouter would otherwise centre the row
+        // inside the container's width as well, and the two shifts add up
+        // to a word pushed against the pill's right edge.
         self.draw_bg.begin(
             cx,
             walk,
@@ -895,7 +978,7 @@ impl Badge {
             },
         );
         self.draw_text
-            .draw_walk(cx, Walk::fit(), Align { x: 0.5, y: 0.5 }, &text);
+            .draw_walk(cx, Walk::fit(), Align::default(), &text);
         self.draw_bg.end(cx);
         self.draw_text.color = ink_rest;
         self.draw_text.text_style.font_size = font_rest;
@@ -1278,6 +1361,323 @@ impl LabelValueRef {
     }
 }
 
+/// Where the badge's top-left goes, relative to the host's top-left, for
+/// a badge of `badge` size on a host of `host` size: pulled into the corner
+/// and hung `overhang` of its own size outside it.
+pub fn corner_offset(corner: BadgeCorner, host: DVec2, badge: DVec2, overhang: f64) -> DVec2 {
+    let out = badge * overhang;
+    match corner {
+        BadgeCorner::TopRight => dvec2(host.x - badge.x + out.x, -out.y),
+        BadgeCorner::TopLeft => dvec2(-out.x, -out.y),
+        BadgeCorner::BottomRight => dvec2(host.x - badge.x + out.x, host.y - badge.y + out.y),
+        BadgeCorner::BottomLeft => dvec2(-out.x, host.y - badge.y + out.y),
+    }
+}
+
+/// Where a pin's top-left goes so that its centre lands at (`x`, `y`) of
+/// the content, both 0..1.
+pub fn pin_offset(x: f64, y: f64, host: DVec2, badge: DVec2) -> DVec2 {
+    dvec2(
+        x.clamp(0.0, 1.0) * host.x - badge.x * 0.5,
+        y.clamp(0.0, 1.0) * host.y - badge.y * 0.5,
+    )
+}
+
+#[derive(Script, Widget)]
+pub struct BadgeAnchor {
+    #[deref]
+    view: View,
+    /// The badge drawn over the corner.
+    #[live]
+    pub badge: Badge,
+    #[live]
+    pub corner: BadgeCorner,
+    /// Nudge along x, positive moves right.
+    #[live]
+    pub offset_x: f64,
+    /// Nudge along y, positive moves down.
+    #[live]
+    pub offset_y: f64,
+    /// How much of the badge hangs outside the corner, 0..1.
+    #[live(0.5)]
+    pub overhang: f64,
+    #[rust]
+    draw_list: Option<DrawList2d>,
+}
+
+impl ScriptHook for BadgeAnchor {
+    fn on_after_new(&mut self, vm: &mut ScriptVm) {
+        self.draw_list = Some(DrawList2d::script_new(vm));
+    }
+}
+
+/// The overlay list draws inside the host's draw pass, so the host's own
+/// area has to be dirtied along with the list, or a count that changed in
+/// a resting window would wait for the next unrelated redraw.
+fn redraw_overlay(cx: &mut Cx, view: &mut View, draw_list: &Option<DrawList2d>) {
+    if let Some(draw_list) = draw_list {
+        draw_list.redraw(cx);
+    }
+    view.redraw(cx);
+}
+
+/// Draw `badge` on `draw_list` at `offset` from the top-left of `anchor`'s
+/// final rect. The list is begun and ended even when there is nothing to
+/// draw, so a badge that has just gone quiet is cleared rather than left
+/// on screen from the previous frame.
+fn draw_badge_overlay(
+    cx: &mut Cx2d,
+    draw_list: &mut DrawList2d,
+    anchor: Area,
+    badge: &mut Badge,
+    show: bool,
+    offset: impl FnOnce(DVec2) -> DVec2,
+) {
+    // The PROVEN popup idiom (PopupMenu, TipLayer): the badge as turtle
+    // content at the overlay root, then the whole list SHIFTED to the host's
+    // final rect. A draw_abs into a bare overlay list renders nothing.
+    draw_list.begin_overlay_reuse(cx);
+    let pass = cx.current_pass_size();
+    cx.begin_root_turtle(pass, Layout::flow_down());
+    let shift = if show {
+        let rect = badge.draw_badge(cx, Walk::fit());
+        offset(rect.size)
+    } else {
+        DVec2::default()
+    };
+    cx.end_pass_sized_turtle_with_shift(anchor, shift);
+    draw_list.end(cx);
+}
+
+impl BadgeAnchor {
+    pub fn set_count(&mut self, cx: &mut Cx, count: usize) {
+        if self.badge.count != count {
+            self.badge.count = count;
+            redraw_overlay(cx, &mut self.view, &self.draw_list);
+        }
+    }
+
+    pub fn set_dot(&mut self, cx: &mut Cx, dot: bool) {
+        if self.badge.dot != dot {
+            self.badge.dot = dot;
+            redraw_overlay(cx, &mut self.view, &self.draw_list);
+        }
+    }
+
+    pub fn set_intent(&mut self, cx: &mut Cx, intent: BadgeIntent) {
+        if self.badge.intent != intent {
+            self.badge.intent = intent;
+            redraw_overlay(cx, &mut self.view, &self.draw_list);
+        }
+    }
+}
+
+impl Widget for BadgeAnchor {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let step = self.view.draw_walk(cx, scope, walk);
+        if !step.is_done() {
+            return step;
+        }
+        let Some(draw_list) = self.draw_list.as_mut() else {
+            return DrawStep::done();
+        };
+        // Sizes are honest at draw time, positions are not: the offset is
+        // worked out from the host's SIZE and applied to its FINAL rect by
+        // the shift.
+        let host = self.view.area().rect(cx).size;
+        let show = !self.badge.is_empty();
+        let (corner, overhang, nudge) =
+            (self.corner, self.overhang, dvec2(self.offset_x, self.offset_y));
+        draw_badge_overlay(cx, draw_list, self.view.area(), &mut self.badge, show, |size| {
+            corner_offset(corner, host, size, overhang) + nudge
+        });
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+
+    /// The badge's text: the word or the capped count.
+    fn text(&self) -> String {
+        self.badge.display_text()
+    }
+
+    fn set_text(&mut self, cx: &mut Cx, v: &str) {
+        self.badge.set_text(cx, v);
+        redraw_overlay(cx, &mut self.view, &self.draw_list);
+    }
+
+    fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
+        self.badge.set_disabled(cx, disabled);
+        self.view.set_disabled(cx, disabled);
+        redraw_overlay(cx, &mut self.view, &self.draw_list);
+    }
+
+    fn disabled(&self, cx: &Cx) -> bool {
+        self.badge.disabled(cx)
+    }
+
+    fn snapshot_value(&self, cx: &Cx) -> Option<String> {
+        self.badge.snapshot_value(cx)
+    }
+}
+
+impl BadgeAnchorRef {
+    pub fn set_count(&self, cx: &mut Cx, count: usize) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_count(cx, count);
+        }
+    }
+
+    pub fn count(&self) -> usize {
+        self.borrow().map(|inner| inner.badge.count).unwrap_or(0)
+    }
+
+    pub fn set_dot(&self, cx: &mut Cx, dot: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_dot(cx, dot);
+        }
+    }
+
+    pub fn set_intent(&self, cx: &mut Cx, intent: BadgeIntent) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_intent(cx, intent);
+        }
+    }
+}
+
+#[derive(Script, Widget)]
+pub struct Marker {
+    #[deref]
+    view: View,
+    /// The pin.
+    #[live]
+    pub badge: Badge,
+    /// Pin centre across the content, 0..1.
+    #[live(0.5)]
+    pub x: f64,
+    /// Pin centre down the content, 0..1.
+    #[live(0.5)]
+    pub y: f64,
+    /// The number on the pin; 0 is a dot.
+    #[live]
+    pub number: usize,
+    #[rust]
+    draw_list: Option<DrawList2d>,
+}
+
+impl ScriptHook for Marker {
+    fn on_after_new(&mut self, vm: &mut ScriptVm) {
+        self.draw_list = Some(DrawList2d::script_new(vm));
+    }
+}
+
+impl Marker {
+    pub fn set_number(&mut self, cx: &mut Cx, number: usize) {
+        if self.number != number {
+            self.number = number;
+            redraw_overlay(cx, &mut self.view, &self.draw_list);
+        }
+    }
+
+    pub fn set_position(&mut self, cx: &mut Cx, x: f64, y: f64) {
+        if self.x != x || self.y != y {
+            self.x = x;
+            self.y = y;
+            redraw_overlay(cx, &mut self.view, &self.draw_list);
+        }
+    }
+}
+
+impl Widget for Marker {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let step = self.view.draw_walk(cx, scope, walk);
+        if !step.is_done() {
+            return step;
+        }
+        let Some(draw_list) = self.draw_list.as_mut() else {
+            return DrawStep::done();
+        };
+        // The number is the pin's count; a dot pin is a badge with nothing
+        // to say, asked for explicitly so the anchor's hide rule stays out
+        // of it.
+        self.badge.count = self.number;
+        self.badge.dot = self.number == 0;
+        let host = self.view.area().rect(cx).size;
+        let (x, y) = (self.x, self.y);
+        draw_badge_overlay(cx, draw_list, self.view.area(), &mut self.badge, true, |size| {
+            pin_offset(x, y, host, size)
+        });
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        // The pin first: its area is the badge's quad on the overlay list,
+        // and a press it takes is marked handled before the content under
+        // it is walked.
+        match event.hits(cx, self.badge.draw_bg.area()) {
+            Hit::FingerHoverIn(_) => cx.set_cursor(MouseCursor::Hand),
+            Hit::FingerHoverOut(_) => cx.set_cursor(MouseCursor::Default),
+            Hit::FingerUp(fe) if fe.is_over && fe.is_primary_hit() && fe.was_tap() => {
+                cx.widget_action(self.widget_uid(), MarkerAction::Clicked);
+            }
+            _ => {}
+        }
+        self.view.handle_event(cx, event, scope);
+    }
+
+    /// The pin's number, "" for a dot.
+    fn text(&self) -> String {
+        self.badge.display_text()
+    }
+
+    /// A number sets the pin's number.
+    fn set_text(&mut self, cx: &mut Cx, v: &str) {
+        if let Ok(number) = v.trim().parse::<usize>() {
+            self.set_number(cx, number);
+        }
+    }
+
+    fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
+        self.badge.set_disabled(cx, disabled);
+        redraw_overlay(cx, &mut self.view, &self.draw_list);
+    }
+
+    fn disabled(&self, cx: &Cx) -> bool {
+        self.badge.disabled(cx)
+    }
+
+    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
+        Some(self.number.to_string())
+    }
+}
+
+impl MarkerRef {
+    pub fn clicked(&self, actions: &Actions) -> bool {
+        if let Some(action) = actions.find_widget_action(self.widget_uid()) {
+            return matches!(action.cast::<MarkerAction>(), MarkerAction::Clicked);
+        }
+        false
+    }
+
+    pub fn number(&self) -> usize {
+        self.borrow().map(|inner| inner.number).unwrap_or(0)
+    }
+
+    pub fn set_number(&self, cx: &mut Cx, number: usize) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_number(cx, number);
+        }
+    }
+
+    pub fn set_position(&self, cx: &mut Cx, x: f64, y: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_position(cx, x, y);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1293,6 +1693,11 @@ mod tests {
         assert!(badge.contains("mod.widgets.BadgeFlat = set_type_default()"));
         assert!(badge.contains("mod.widgets.StatusDotBase = #(StatusDot::register_widget(vm))"));
         assert!(badge.contains("mod.widgets.LabelValueBase = #(LabelValue::register_widget(vm))"));
+        assert!(badge.contains("mod.widgets.BadgeAnchorBase = #(BadgeAnchor::register_widget(vm))"));
+        assert!(badge.contains("mod.widgets.MarkerBase = #(Marker::register_widget(vm))"));
+        // The anchor and the marker deref View, which registers first.
+        let view = lib.find("crate::view::script_mod(vm);").unwrap();
+        assert!(view < lib.find("crate::badge::script_mod(vm);").unwrap());
         // Badge registers after the label module its text draws with.
         let label = lib.find("crate::label::script_mod(vm);").unwrap();
         let badge_at = lib.find("crate::badge::script_mod(vm);").unwrap();
@@ -1332,6 +1737,27 @@ mod tests {
         assert_eq!(magnitude(5.0, 0.0, 1.0), 1.0);
         assert_eq!(magnitude(0.5, 1.0, 0.0), 0.0);
         assert_eq!(magnitude(75.0, 50.0, 100.0), 0.5);
+    }
+
+    #[test]
+    fn corners_hang_the_badge_outside() {
+        let host = dvec2(100.0, 40.0);
+        let badge = dvec2(20.0, 16.0);
+        assert_eq!(corner_offset(BadgeCorner::TopRight, host, badge, 0.5), dvec2(90.0, -8.0));
+        assert_eq!(corner_offset(BadgeCorner::TopLeft, host, badge, 0.5), dvec2(-10.0, -8.0));
+        assert_eq!(corner_offset(BadgeCorner::BottomRight, host, badge, 0.5), dvec2(90.0, 32.0));
+        assert_eq!(corner_offset(BadgeCorner::BottomLeft, host, badge, 0.5), dvec2(-10.0, 32.0));
+        // No overhang: flush inside the corner.
+        assert_eq!(corner_offset(BadgeCorner::TopRight, host, badge, 0.0), dvec2(80.0, 0.0));
+    }
+
+    #[test]
+    fn pins_centre_on_their_point() {
+        let host = dvec2(200.0, 100.0);
+        let badge = dvec2(20.0, 20.0);
+        assert_eq!(pin_offset(0.5, 0.5, host, badge), dvec2(90.0, 40.0));
+        assert_eq!(pin_offset(0.0, 0.0, host, badge), dvec2(-10.0, -10.0));
+        assert_eq!(pin_offset(2.0, -1.0, host, badge), dvec2(190.0, -10.0));
     }
 
     #[test]
