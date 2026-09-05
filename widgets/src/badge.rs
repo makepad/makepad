@@ -179,7 +179,43 @@ script_mod! {
     mod.widgets.StatusKind = StatusKind
     let BadgeCorner = set_type_default() do #(BadgeCorner::script_api(vm))
     mod.widgets.BadgeCorner = BadgeCorner
-    mod.widgets.BadgePalette = set_type_default() do #(BadgePalette::script_api(vm))
+    /** The colour of every role: base, ink on the base, container, ink on
+     * the container. Every small mark that speaks a role reads these, so a
+     * chip and a badge that both mean "error" are the same red. */
+    mod.widgets.BadgePalette = set_type_default() do #(BadgePalette::script_api(vm)){
+        neutral: theme.color_opaque_u_4
+        on_neutral: theme.color_opaque_d_5
+        neutral_container: theme.color_opaque_u_1
+        on_neutral_container: theme.color_text
+        primary: theme.color_primary
+        on_primary: theme.color_on_primary
+        primary_container: theme.color_primary_container
+        on_primary_container: theme.color_on_primary_container
+        secondary: theme.color_secondary
+        on_secondary: theme.color_on_secondary
+        secondary_container: theme.color_secondary_container
+        on_secondary_container: theme.color_on_secondary_container
+        tertiary: theme.color_tertiary
+        on_tertiary: theme.color_on_tertiary
+        tertiary_container: theme.color_tertiary_container
+        on_tertiary_container: theme.color_on_tertiary_container
+        error: theme.color_error
+        on_error: theme.color_on_error
+        error_container: theme.color_error_container
+        on_error_container: theme.color_on_error_container
+        warning: theme.color_warning
+        on_warning: theme.color_on_warning
+        warning_container: theme.color_warning_container
+        on_warning_container: theme.color_on_warning_container
+        success: theme.color_success
+        on_success: theme.color_on_success
+        success_container: theme.color_success_container
+        on_success_container: theme.color_on_success_container
+        info: theme.color_info
+        on_info: theme.color_on_info
+        info_container: theme.color_info_container
+        on_info_container: theme.color_on_info_container
+    }
 
     use mod.widgets.*
 
@@ -230,40 +266,9 @@ script_mod! {
         /** The colour of every intent: base, ink on the base, container,
          * ink on the container. Filled uses the first pair, Tint the second,
          * Ghost and Outline draw the base as ink. */
-        palette: mod.widgets.BadgePalette{
-            neutral: theme.color_opaque_u_4
-            on_neutral: theme.color_opaque_d_5
-            neutral_container: theme.color_opaque_u_1
-            on_neutral_container: theme.color_text
-            primary: theme.color_primary
-            on_primary: theme.color_on_primary
-            primary_container: theme.color_primary_container
-            on_primary_container: theme.color_on_primary_container
-            secondary: theme.color_secondary
-            on_secondary: theme.color_on_secondary
-            secondary_container: theme.color_secondary_container
-            on_secondary_container: theme.color_on_secondary_container
-            tertiary: theme.color_tertiary
-            on_tertiary: theme.color_on_tertiary
-            tertiary_container: theme.color_tertiary_container
-            on_tertiary_container: theme.color_on_tertiary_container
-            error: theme.color_error
-            on_error: theme.color_on_error
-            error_container: theme.color_error_container
-            on_error_container: theme.color_on_error_container
-            warning: theme.color_warning
-            on_warning: theme.color_on_warning
-            warning_container: theme.color_warning_container
-            on_warning_container: theme.color_on_warning_container
-            success: theme.color_success
-            on_success: theme.color_on_success
-            success_container: theme.color_success_container
-            on_success_container: theme.color_on_success_container
-            info: theme.color_info
-            on_info: theme.color_on_info
-            info_container: theme.color_info_container
-            on_info_container: theme.color_on_info_container
-        }
+        /** The colour of every intent, inherited from the shared palette
+         * so a badge and a chip that mean the same thing look the same. */
+        palette: mod.widgets.BadgePalette{}
         // The fill, the stroke, its width and the corner radius are the
         // INSTANCES, set by the widget every draw from intent, appearance
         // and shape; they ride in the struct, so every other prop here is a
@@ -776,7 +781,7 @@ pub fn count_text(count: usize, max: usize) -> String {
 
 /// A `Fit` walk becomes the size the widget worked out; a fixed one is the
 /// call site's business and is left alone.
-fn sized(mut walk: Walk, w: f64, h: f64) -> Walk {
+pub(crate) fn sized(mut walk: Walk, w: f64, h: f64) -> Walk {
     if matches!(walk.width, Size::Fit { .. }) {
         walk.width = Size::Fixed(w);
     }
@@ -798,7 +803,7 @@ const TEXT_SLACK: f64 = 2.0;
 /// The width of one line of `text` in this text style, measured, plus the
 /// slack a drawn run needs; a per-character estimate only for text the
 /// layout engine returns no row for.
-fn measure(draw_text: &DrawText, cx: &mut Cx2d, text: &str) -> f64 {
+pub(crate) fn measure(draw_text: &DrawText, cx: &mut Cx2d, text: &str) -> f64 {
     draw_text
         .prepare_single_line_run(cx, text)
         .map(|run| run.width_in_lpxs as f64)
