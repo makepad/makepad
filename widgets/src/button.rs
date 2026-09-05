@@ -730,6 +730,243 @@ script_mod! {
             color: theme.color_on_surface_variant
         }
     }
+
+    /** The close button: a standalone cross drawn in the face shader, with
+     * a round state layer under the pointer. Dialogs, toasts and drawers
+     * take one as their close control. */
+    mod.widgets.CloseButton = mod.widgets.ButtonFlatterIcon{
+        /** the square the cross sits in, in pixels 10..48 step 1 */
+        width: 20.
+        height: 20.
+        padding: 0.
+        margin: 0.
+        draw_bg +: {
+            border_radius: theme.radius_full
+            layer_color: theme.color_on_surface
+            /** cross span as a fraction of the shorter side 0.1..0.9 step 0.05 */
+            cross_size: uniform(0.42)
+            /** cross stroke in pixels 0.5..4 step 0.25 */
+            cross_stroke: uniform(1.25)
+            /** cross ink at rest */
+            cross_color: uniform(theme.color_label_inner)
+            /** cross ink under the pointer */
+            cross_color_hover: uniform(theme.color_label_inner_hover)
+            /** cross ink when disabled */
+            cross_color_disabled: uniform(theme.color_label_inner_disabled)
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(
+                    self.border_size
+                    self.border_size
+                    self.rect_size.x - self.border_size * 2.
+                    self.rect_size.y - self.border_size * 2.
+                    self.border_radius
+                )
+                sdf.fill_keep(self.face_fill())
+                sdf.stroke(self.face_stroke(), self.border_size)
+
+                let mid = self.rect_size * 0.5
+                let half = min(self.rect_size.x, self.rect_size.y) * self.cross_size * 0.5
+                sdf.move_to(mid.x - half, mid.y - half)
+                sdf.line_to(mid.x + half, mid.y + half)
+                sdf.move_to(mid.x - half, mid.y + half)
+                sdf.line_to(mid.x + half, mid.y - half)
+                let ink = self.cross_color
+                    .mix(self.cross_color_hover, self.hover)
+                    .mix(self.cross_color_disabled, self.disabled)
+                sdf.stroke(ink, self.cross_stroke)
+                return sdf.result
+            }
+        }
+    }
+
+    /** The small close button, for chips and dense rows. */
+    mod.widgets.CloseButtonSm = mod.widgets.CloseButton{
+        width: 16.
+        height: 16.
+        draw_bg.cross_stroke: 1.0
+    }
+
+    /** The large close button, for dialogs and full-screen panels. */
+    mod.widgets.CloseButtonLg = mod.widgets.CloseButton{
+        width: 28.
+        height: 28.
+        draw_bg.cross_stroke: 1.5
+    }
+
+    /** The copy button: a click copies text_to_copy to the clipboard, the
+     * two sheets at the start of the face give way to a check, and the
+     * label reads copied_text for copied_secs. */
+    mod.widgets.CopyButton = mod.widgets.ButtonFlat{
+        text: "Copy"
+        /** the label shown after a copy */
+        copied_text: "Copied"
+        /** the face's left padding leaves room for the glyph */
+        padding: theme.mspace_1{left: theme.space_2 + 16., right: theme.space_2}
+        draw_bg +: {
+            /** copied mix: sheets out, check in 0..1 step 0.01 */
+            copied: instance(0.0)
+            /** glyph side in pixels 6..24 step 0.5 */
+            glyph_size: uniform(11.0)
+            /** glyph inset from the face's left edge in pixels 0..24 step 0.5 */
+            glyph_inset: uniform(theme.space_2)
+            /** glyph ink at rest */
+            glyph_color: uniform(theme.color_label_inner)
+            /** glyph ink under the pointer */
+            glyph_color_hover: uniform(theme.color_label_inner_hover)
+            /** glyph ink when disabled */
+            glyph_color_disabled: uniform(theme.color_label_inner_disabled)
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(
+                    self.border_size
+                    self.border_size
+                    self.rect_size.x - self.border_size * 2.
+                    self.rect_size.y - self.border_size * 2.
+                    self.border_radius
+                )
+                let face = self.face_fill()
+                sdf.fill_keep(face)
+                sdf.stroke(self.face_stroke(), self.border_size)
+
+                // The glyph zone: two stacked sheets at rest, the front one
+                // filled with the face so it hides the back one's edges.
+                let g = self.glyph_size
+                let gx = self.glyph_inset
+                let gy = (self.rect_size.y - g) * 0.5
+                let ink = self.glyph_color
+                    .mix(self.glyph_color_hover, self.hover)
+                    .mix(self.glyph_color_disabled, self.disabled)
+                let sheet = g * 0.66
+                let sheet_ink = vec4(ink.rgb, ink.a * (1.0 - self.copied))
+                sdf.box(gx + g - sheet, gy, sheet, sheet, 1.0)
+                sdf.stroke(sheet_ink, 1.0)
+                sdf.box(gx, gy + g - sheet, sheet, sheet, 1.0)
+                sdf.fill_keep(vec4(face.rgb, face.a * (1.0 - self.copied)))
+                sdf.stroke(sheet_ink, 1.0)
+
+                // The check, faded in once copied.
+                sdf.move_to(gx + g * 0.12, gy + g * 0.55)
+                sdf.line_to(gx + g * 0.4, gy + g * 0.82)
+                sdf.line_to(gx + g * 0.9, gy + g * 0.2)
+                sdf.stroke(vec4(ink.rgb, ink.a * self.copied), 1.5)
+                return sdf.result
+            }
+        }
+        animator +: {
+            /** copied track: sheets out and the check in, and back */
+            copied: {
+                default: @off
+                off: AnimatorState{
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {copied: 0.0}
+                    }
+                }
+                on: AnimatorState{
+                    from: {all: Forward {duration: 0.15}}
+                    apply: {
+                        draw_bg: {copied: 1.0}
+                    }
+                }
+            }
+        }
+    }
+
+    /** The burger button: three bars that turn into a cross as open goes
+     * to 1, for a drawer or a collapsed navigation. */
+    mod.widgets.BurgerButton = mod.widgets.ButtonFlatterIcon{
+        /** the square the bars sit in, in pixels 16..48 step 1 */
+        width: 28.
+        height: 28.
+        padding: 0.
+        draw_bg +: {
+            border_radius: theme.radius_s
+            layer_color: theme.color_on_surface
+            /** 0 draws three bars, 1 a cross; the open track drives it 0..1 step 0.01 */
+            open: instance(0.0)
+            /** bar span as a fraction of the shorter side 0.1..0.9 step 0.05 */
+            bar_size: uniform(0.55)
+            /** bar stroke in pixels 0.5..4 step 0.25 */
+            bar_stroke: uniform(1.5)
+            /** gap between the bars as a fraction of half the span 0.1..1 step 0.05 */
+            bar_gap: uniform(0.6)
+            /** bar ink at rest */
+            bar_color: uniform(theme.color_label_inner)
+            /** bar ink under the pointer */
+            bar_color_hover: uniform(theme.color_label_inner_hover)
+            /** bar ink when disabled */
+            bar_color_disabled: uniform(theme.color_label_inner_disabled)
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(
+                    self.border_size
+                    self.border_size
+                    self.rect_size.x - self.border_size * 2.
+                    self.rect_size.y - self.border_size * 2.
+                    self.border_radius
+                )
+                sdf.fill_keep(self.face_fill())
+                sdf.stroke(self.face_stroke(), self.border_size)
+
+                let mid = self.rect_size * 0.5
+                let half = min(self.rect_size.x, self.rect_size.y) * self.bar_size * 0.5
+                let gap = half * self.bar_gap * (1.0 - self.open)
+                let ink = self.bar_color
+                    .mix(self.bar_color_hover, self.hover)
+                    .mix(self.bar_color_disabled, self.disabled)
+
+                // The outer bars close on the middle and turn to the
+                // diagonals; the middle bar shrinks away.
+                let angle = self.open * PI * 0.25
+                sdf.rotate(angle, mid.x, mid.y)
+                sdf.move_to(mid.x - half, mid.y - gap)
+                sdf.line_to(mid.x + half, mid.y - gap)
+                sdf.stroke(ink, self.bar_stroke)
+                sdf.rotate(-2.0 * angle, mid.x, mid.y)
+                sdf.move_to(mid.x - half, mid.y + gap)
+                sdf.line_to(mid.x + half, mid.y + gap)
+                sdf.stroke(ink, self.bar_stroke)
+                sdf.rotate(angle, mid.x, mid.y)
+                let middle = half * (1.0 - self.open)
+                sdf.move_to(mid.x - middle, mid.y)
+                sdf.line_to(mid.x + middle, mid.y)
+                sdf.stroke(vec4(ink.rgb, ink.a * (1.0 - self.open)), self.bar_stroke)
+                return sdf.result
+            }
+        }
+        animator +: {
+            /** open track: bars to cross and back */
+            open: {
+                default: @off
+                off: AnimatorState{
+                    ease: OutQuad
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {open: 0.0}
+                    }
+                }
+                on: AnimatorState{
+                    ease: OutQuad
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {open: 1.0}
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Raised by a copy button once the text is on the clipboard.
+#[derive(Clone, Debug, Default)]
+pub enum CopyButtonAction {
+    #[default]
+    None,
+    Copied,
 }
 
 /// Actions emitted by a button widget, including the key modifiers
@@ -793,6 +1030,26 @@ pub struct Button {
     /// clicks are ignored until it is cleared.
     #[live]
     pub loading: bool,
+
+    /// Text a click puts on the clipboard; set, it makes this a copy button
+    /// that shows `copied_text` for `copied_secs` and raises
+    /// `CopyButtonAction::Copied`.
+    #[live]
+    pub text_to_copy: String,
+    /// The label shown after a copy; empty keeps `text`.
+    #[live]
+    pub copied_text: String,
+    /// How long the copied label and check stay, in seconds.
+    #[live(1.5)]
+    pub copied_secs: f64,
+    #[rust]
+    copied: bool,
+    #[rust]
+    copied_timer: Timer,
+
+    /// The burger button's state: bars while closed, a cross while open.
+    #[live]
+    pub open: bool,
 
     #[layout]
     layout: Layout,
@@ -862,8 +1119,9 @@ pub struct Button {
 
 impl ScriptHook for Button {
     /// Every apply that is not an animation frame may have set `loading`
-    /// from the script side; bring the animator in line with it. A new or
-    /// reloaded button cuts to the state, an edit animates into it.
+    /// or `open` from the script side; bring the animator in line with
+    /// them. A new or reloaded button cuts to the state, an edit animates
+    /// into it.
     fn on_after_apply(
         &mut self,
         vm: &mut ScriptVm,
@@ -877,6 +1135,7 @@ impl ScriptHook for Button {
         let animate = if apply.is_eval() { Animate::Yes } else { Animate::No };
         vm.with_cx_mut(|cx| {
             self.sync_loading(cx, animate);
+            self.sync_open(cx, animate);
         });
     }
 }
@@ -949,6 +1208,12 @@ impl Widget for Button {
 
         if let Event::ClearHover = event {
             self.animator_cut(cx, ids!(hover.off));
+        }
+
+        if self.copied_timer.is_event(event).is_some() {
+            self.copied = false;
+            self.animator_play(cx, ids!(copied.off));
+            self.draw_bg.redraw(cx);
         }
 
         // The button only handles hits when it's visible and enabled.
@@ -1024,6 +1289,9 @@ impl Widget for Button {
                             &[],
                         );
                     }
+                    if !self.text_to_copy.is_empty() {
+                        self.copy_now(cx);
+                    }
                     if self.reset_hover_on_click {
                         self.animator_cut(cx, ids!(hover.off));
                     } else if fe.has_hovers() {
@@ -1058,8 +1326,9 @@ impl Widget for Button {
         DrawStep::done()
     }
 
+    /// The label as shown: the copied text while a copy is fresh, else `text`.
     fn text(&self) -> String {
-        self.text.as_ref().to_string()
+        self.shown_label().to_string()
     }
 
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
@@ -1070,6 +1339,61 @@ impl Widget for Button {
 }
 
 impl Button {
+    /// The label the face shows right now.
+    fn shown_label(&self) -> &str {
+        if self.copied && !self.copied_text.is_empty() {
+            &self.copied_text
+        } else {
+            self.text.as_ref()
+        }
+    }
+
+    /// Puts `text_to_copy` on the clipboard and starts the copied moment.
+    fn copy_now(&mut self, cx: &mut Cx) {
+        let uid = self.widget_uid();
+        cx.copy_to_clipboard(&self.text_to_copy);
+        self.copied = true;
+        cx.stop_timer(self.copied_timer);
+        self.copied_timer = cx.start_timeout(self.copied_secs.max(0.1));
+        self.animator_play(cx, ids!(copied.on));
+        cx.widget_action_with_data(&self.action_data, uid, CopyButtonAction::Copied);
+        self.draw_bg.redraw(cx);
+    }
+
+    /// Returns `true` if this copy button put its text on the clipboard.
+    pub fn copied(&self, actions: &Actions) -> bool {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            matches!(item.cast(), CopyButtonAction::Copied)
+        } else {
+            false
+        }
+    }
+
+    /// Whether a burger button shows the cross.
+    pub fn open(&self) -> bool {
+        self.open
+    }
+
+    /// Turns a burger button's bars into the cross, or back.
+    pub fn set_open(&mut self, cx: &mut Cx, open: bool) {
+        if self.open == open {
+            return;
+        }
+        self.open = open;
+        self.sync_open(cx, Animate::Yes);
+        self.draw_bg.redraw(cx);
+    }
+
+    /// Brings the open track in line with the `open` prop; a button whose
+    /// animator has no such track, or already agrees, is left alone.
+    fn sync_open(&mut self, cx: &mut Cx, animate: Animate) {
+        let open = self.open;
+        if open == self.animator_in_state(cx, ids!(open.on)) {
+            return;
+        }
+        self.animator_toggle(cx, open, animate, ids!(open.on), ids!(open.off));
+    }
+
     pub fn draw_button(&mut self, cx: &mut Cx2d, label: &str) {
         self.draw_bg.begin(cx, self.walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
@@ -1081,9 +1405,14 @@ impl Button {
     /// The label, alone or stacked over the description in its own column
     /// when there is one.
     fn draw_label(&mut self, cx: &mut Cx2d) {
+        let label: &str = if self.copied && !self.copied_text.is_empty() {
+            &self.copied_text
+        } else {
+            self.text.as_ref()
+        };
         if self.description.is_empty() {
             self.draw_text
-                .draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
+                .draw_walk(cx, self.label_walk, Align::default(), label);
             return;
         }
         cx.begin_turtle(
@@ -1096,7 +1425,7 @@ impl Button {
             },
         );
         self.draw_text
-            .draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
+            .draw_walk(cx, self.label_walk, Align::default(), label);
         self.draw_description
             .draw_walk(cx, self.description_walk, Align::default(), &self.description);
         cx.end_turtle();
@@ -1273,6 +1602,23 @@ impl ButtonRef {
     pub fn set_loading(&self, cx: &mut Cx, loading: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_loading(cx, loading);
+        }
+    }
+
+    /// See [`Button::copied()`].
+    pub fn copied(&self, actions: &Actions) -> bool {
+        self.borrow().is_some_and(|inner| inner.copied(actions))
+    }
+
+    /// See [`Button::open()`].
+    pub fn open(&self) -> bool {
+        self.borrow().is_some_and(|inner| inner.open())
+    }
+
+    /// See [`Button::set_open()`].
+    pub fn set_open(&self, cx: &mut Cx, open: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_open(cx, open);
         }
     }
 
