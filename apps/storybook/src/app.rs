@@ -6,6 +6,7 @@ use crate::docs::*;
 use crate::makepad_widgets::*;
 use crate::navigator::*;
 use crate::registry;
+use crate::remote;
 use crate::settings;
 use crate::theme;
 
@@ -142,7 +143,22 @@ impl App {
             .label(cx, ids!(story_title))
             .set_text(cx, &format!("{} / {}", story.component, story.name));
         settings::set(settings::LAST_STORY, story.key);
+        remote::set_current(story.key);
         log!("storybook: story {}", story.key);
+    }
+
+    fn drain_requests(&mut self, cx: &mut Cx) {
+        for request in remote::take_requests() {
+            match request {
+                remote::Request::Open(key) => self.open_story(cx, &key),
+                remote::Request::Theme(index) => theme::select(cx, index),
+                remote::Request::Reset => {
+                    self.ui.story_canvas(cx, ids!(canvas)).reset(cx);
+                    self.ui.controls_panel(cx, ids!(controls)).reset(cx);
+                    self.ui.actions_panel(cx, ids!(actions)).clear(cx);
+                }
+            }
+        }
     }
 
     fn refresh_new_count(&self, cx: &mut Cx) {
@@ -193,6 +209,7 @@ impl MatchEvent for App {
             _ => "overview/welcome/welcome".to_string(),
         };
         self.open_story(cx, &key);
+        remote::install(cx);
         log!("storybook: {} stories registered", registry::all().count());
     }
 
@@ -272,7 +289,9 @@ impl AppMain for App {
         if let Event::LiveEdit = event {
             let choice = theme::choice();
             self.ui.drop_down(cx, ids!(theme_select)).set_selected_item(cx, choice);
+            remote::install(cx);
         }
+        self.drain_requests(cx);
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
         if let Event::LiveEdit = event {
