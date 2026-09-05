@@ -812,6 +812,9 @@ impl Cx {
             if self.need_redrawing() {
                 self.call_draw_event(time);
             }
+            // Draw-event teardown may have freed passes/lists/resources. Drain
+            // them before computing and encoding this frame's pass graph.
+            self.retire_webgl_resources();
             self.handle_repaint(time);
         }
 
@@ -828,11 +831,15 @@ impl Cx {
 
         self.handle_platform_ops();
         self.handle_media_signals();
+        // Non-animation events can also drop the last owning handles. This is
+        // a cheap empty-queue check and bounded when work is pending.
+        self.retire_webgl_resources();
 
         if self.any_passes_dirty()
             || self.need_redrawing()
             || self.new_next_frames.len() != 0
             || self.demo_time_repaint
+            || self.has_pending_webgl_resource_retirements()
         {
             self.os.from_wasm(FromWasmRequestAnimationFrame {});
         }
@@ -1422,6 +1429,7 @@ impl CxOsApi for Cx {
             FromWasmAllocArrayBuffer::to_js_code(),
             FromWasmAllocIndexBuffer::to_js_code(),
             FromWasmAllocVao::to_js_code(),
+            FromWasmFreeWebGLResources::to_js_code(),
             FromWasmAllocTextureImage2D_BGRAu8_32::to_js_code(),
             FromWasmAllocTextureImage2D_Ru8::to_js_code(),
             FromWasmAllocTextureImage2D_RGBAf32::to_js_code(),

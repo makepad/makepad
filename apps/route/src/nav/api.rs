@@ -6,12 +6,16 @@
 use crate::{
     assistant::{AssistantController, AssistantService},
     clock,
-    nav_api::{ApiOperation, NavApi, NavApiEvent, RadarManifest, RouteRequestContext},
+    nav_api::{
+        radar_png_header_matches, ApiOperation, NavApi, NavApiEvent, RadarManifest,
+        RouteRequestContext,
+    },
     overlays::{self, OverlaySelection, TerrainLayer},
     provisioner::MapProvisioner,
     side_panel::{PanelAction, PanelController},
-    ChatEntry, ChatState, EntryKind, AMSTERDAM_CENTER,
-    ThemePreference,
+    location_error_status, show_location_status, ChatEntry, ChatState, EntryKind, LocationClick,
+    LocationFix, LocationState, ThemePreference, AMSTERDAM_CENTER,
+    LOCATION_FIX_TIMEOUT_SECONDS,
 };
 use makepad_map_nav::{
     geo::LonLat,
@@ -20,7 +24,7 @@ use makepad_map_nav::{
     search::SearchResult,
 };
 use makepad_widgets::*;
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 /// Common navigation-service surface. The native implementation is backed by
 /// the filesystem data plane; this implementation forwards to the site API.
@@ -150,6 +154,10 @@ pub struct App {
     #[rust]
     had_first_fix: bool,
     #[rust]
+    location_state: LocationState,
+    #[rust]
+    location_timeout: Timer,
+    #[rust]
     route: Option<Route>,
     #[rust]
     nav_session: Option<NavSession>,
@@ -160,7 +168,7 @@ pub struct App {
     #[rust]
     radar_manifest: Option<RadarManifest>,
     #[rust]
-    radar_frames: BTreeMap<i64, Vec<u32>>,
+    radar_frame_minutes: BTreeSet<i64>,
     #[rust]
     radar_hires_stamp: Option<String>,
     #[rust]
@@ -188,11 +196,46 @@ impl App {
         self.assistant.configure_ui(cx, &self.ui);
         self.set_status(cx, crate::assistant::UNAVAILABLE_REPLY);
         self.apply_layers(cx);
-        cx.start_location_updates();
     }
 
     fn set_status(&self, cx: &mut Cx, text: &str) {
         self.ui.label(cx, ids!(status_label)).set_text(cx, text);
+    }
+
+    fn cancel_location_timeout(&mut self, cx: &mut Cx) {
+        if !self.location_timeout.is_empty() {
+            cx.stop_timer(self.location_timeout);
+            self.location_timeout = Timer::empty();
+        }
+    }
+
+    fn handle_location_click(&mut self, cx: &mut Cx) {
+        match self.location_state.clicked() {
+            LocationClick::Start => {
+                show_location_status(cx, &self.ui, "Locating…");
+                cx.start_location_updates();
+                self.location_timeout = cx.start_timeout(LOCATION_FIX_TIMEOUT_SECONDS);
+            }
+            LocationClick::Recenter => {
+                if let Some(fix) = &self.position {
+                    self.ui
+                        .map_view(cx, ids!(map))
+                        .fly_to(cx, fix.lon, fix.lat, 14.0);
+                    show_location_status(cx, &self.ui, "Location found");
+                }
+            }
+            LocationClick::Ignore => {}
+        }
+    }
+
+    fn fail_location(&mut self, cx: &mut Cx, status: &str) {
+        if !self.location_state.failed() {
+            return;
+        }
+        self.cancel_location_timeout(cx);
+        cx.stop_location_updates();
+        show_location_status(cx, &self.ui, status);
+        self.set_status(cx, status);
     }
 
     fn push_entry(&mut self, cx: &mut Cx, kind: EntryKind, text: &str) {
@@ -310,9 +353,10 @@ impl App {
             self.api.cancel_rain(cx);
             cx.stop_timer(self.radar_timer);
             self.radar_timer = Timer::empty();
-            self.radar_frames.clear();
+            self.radar_frame_minutes.clear();
             self.radar_hires_stamp = None;
             let bbox = self.radar_manifest.as_ref().map(|m| m.bbox).unwrap_or_default();
+            self.radar_manifest = None;
             let map = self.ui.map_view(cx, ids!(map));
             map.set_rain_frames(cx, Vec::new(), 0, 0, bbox);
             map.set_rain_now_hires(cx, None);
@@ -406,14 +450,25 @@ impl App {
         if !self.layers.rain {
             return;
         }
-        let new_stamp = self.radar_manifest.as_ref().is_none_or(|old| old.stamp != manifest.stamp);
-        if new_stamp {
+        let new_sequence = self.radar_manifest.as_ref() != Some(&manifest);
+        if new_sequence {
+            let hires_size = manifest.minutes.contains(&0).then_some(manifest.hires_now);
+            if !self.ui.map_view(cx, ids!(map)).set_rain_sequence(
+                cx,
+                manifest.minutes.clone(),
+                manifest.display.0,
+                manifest.display.1,
+                hires_size,
+                manifest.bbox,
+            ) {
+                return;
+            }
             self.api.cancel_radar_frames(cx);
-            self.radar_frames.clear();
+            self.radar_frame_minutes.clear();
             self.radar_hires_stamp = None;
         }
         for minute in manifest.minutes.iter().copied() {
-            if !self.radar_frames.contains_key(&minute) {
+            if !self.radar_frame_minutes.contains(&minute) {
                 self.api.radar_frame(cx, &manifest.stamp, minute, false);
             }
         }
@@ -429,26 +484,23 @@ impl App {
         }) else {
             return;
         };
+        let expected = if hires { manifest.hires_now } else { manifest.display };
+        if !radar_png_header_matches(&png, expected) {
+            return;
+        }
         let Ok(image) = ImageBuffer::from_png(&png) else {
             return;
         };
-        let expected = if hires { manifest.hires_now } else { manifest.display };
         if (image.width, image.height) != expected {
             return;
         }
         let map = self.ui.map_view(cx, ids!(map));
         if hires {
-            map.set_rain_now_hires(cx, Some((image.data, image.width, image.height)));
-            self.radar_hires_stamp = Some(stamp);
-        } else {
-            self.radar_frames.insert(minute, image.data);
-            map.set_rain_frames(
-                cx,
-                self.radar_frames.values().cloned().collect(),
-                manifest.display.0,
-                manifest.display.1,
-                manifest.bbox,
-            );
+            if map.set_rain_now_hires(cx, Some((image.data, image.width, image.height))) {
+                self.radar_hires_stamp = Some(stamp);
+            }
+        } else if map.set_rain_frame(cx, minute, image.data) {
+            self.radar_frame_minutes.insert(minute);
         }
     }
 }
@@ -462,6 +514,9 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(layers_button)).clicked(actions) {
             self.layers_panel_open = !self.layers_panel_open;
             self.ui.widget(cx, ids!(layers_panel)).set_visible(cx, self.layers_panel_open);
+        }
+        if self.ui.button(cx, ids!(location_button)).clicked(actions) {
+            self.handle_location_click(cx);
         }
         if self.ui.button(cx, ids!(assistant_button)).clicked(actions) {
             self.assistant_panel_open = !self.assistant_panel_open;
@@ -533,29 +588,58 @@ impl AppMain for App {
         for api_event in self.api.handle_event(cx, event) {
             self.handle_api_event(cx, api_event);
         }
-        if let Event::LocationUpdate(fix) = event {
-            self.position = Some(fix.clone());
-            let map = self.ui.map_view(cx, ids!(map));
-            map.set_puck(
-                cx,
-                Some(MapPuck::new(fix.lon, fix.lat, fix.heading_deg, fix.accuracy_m)),
-            );
-            if !self.had_first_fix {
-                self.had_first_fix = true;
-                map.fly_to(cx, fix.lon, fix.lat, 14.0);
-                self.set_status(cx, &format!("gps: fix acquired (±{:.0}m)", fix.accuracy_m));
+        match event {
+            Event::LocationUpdate(fix) => {
+                let location_fix = self.location_state.received_fix();
+                if location_fix != LocationFix::Ignore {
+                    if location_fix == LocationFix::First {
+                        self.cancel_location_timeout(cx);
+                        show_location_status(cx, &self.ui, "Location found");
+                    }
+                    self.position = Some(fix.clone());
+                    let map = self.ui.map_view(cx, ids!(map));
+                    map.set_puck(
+                        cx,
+                        Some(MapPuck::new(fix.lon, fix.lat, fix.heading_deg, fix.accuracy_m)),
+                    );
+                    if location_fix == LocationFix::First || !self.had_first_fix {
+                        self.had_first_fix = true;
+                        map.fly_to(cx, fix.lon, fix.lat, 14.0);
+                        self.set_status(
+                            cx,
+                            &format!("gps: fix acquired (±{:.0}m)", fix.accuracy_m),
+                        );
+                    }
+                    if let (Some(session), Some(started)) = (&mut self.nav_session, self.nav_started)
+                    {
+                        let status = session.update(
+                            LonLat::new(fix.lon, fix.lat),
+                            (clock::monotonic_now(cx) - started).max(0.0),
+                        );
+                        let progress = session
+                            .route()
+                            .cum_dist_m
+                            .partition_point(|distance| *distance < status.progress_m);
+                        map.set_route_progress(cx, progress);
+                    }
+                }
             }
-            if let (Some(session), Some(started)) = (&mut self.nav_session, self.nav_started) {
-                let status = session.update(
-                    LonLat::new(fix.lon, fix.lat),
-                    (clock::monotonic_now(cx) - started).max(0.0),
-                );
-                let progress = session
-                    .route()
-                    .cum_dist_m
-                    .partition_point(|distance| *distance < status.progress_m);
-                map.set_route_progress(cx, progress);
+            Event::LocationError(error) => {
+                self.fail_location(cx, location_error_status(error));
             }
+            Event::Shutdown => {
+                self.cancel_location_timeout(cx);
+                if self.location_state.stop() {
+                    cx.stop_location_updates();
+                }
+            }
+            _ if self.location_timeout.is_event(event).is_some()
+                && self.location_state.is_waiting() =>
+            {
+                self.location_timeout = Timer::empty();
+                self.fail_location(cx, "Location timed out — tap to retry");
+            }
+            _ => {}
         }
         if let Event::KeyDown(key) = event {
             if key.key_code == KeyCode::Escape && self.assistant_panel_open {

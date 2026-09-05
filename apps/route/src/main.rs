@@ -94,6 +94,87 @@ pub(crate) const AMSTERDAM_CENTER: (f64, f64) = (4.8952, 52.3702);
 
 const THEME_STORAGE: &str = "route";
 const THEME_KEY: &str = "theme";
+const LOCATION_FIX_TIMEOUT_SECONDS: f64 = 20.0;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum LocationState {
+    #[default]
+    Idle,
+    Waiting,
+    Active,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LocationClick {
+    Start,
+    Recenter,
+    Ignore,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LocationFix {
+    First,
+    Update,
+    Ignore,
+}
+
+impl LocationState {
+    pub(crate) fn clicked(&mut self) -> LocationClick {
+        match self {
+            Self::Idle => {
+                *self = Self::Waiting;
+                LocationClick::Start
+            }
+            Self::Waiting => LocationClick::Ignore,
+            Self::Active => LocationClick::Recenter,
+        }
+    }
+
+    pub(crate) fn received_fix(&mut self) -> LocationFix {
+        match self {
+            Self::Idle => LocationFix::Ignore,
+            Self::Waiting => {
+                *self = Self::Active;
+                LocationFix::First
+            }
+            Self::Active => LocationFix::Update,
+        }
+    }
+
+    pub(crate) fn failed(&mut self) -> bool {
+        if *self == Self::Idle {
+            return false;
+        }
+        *self = Self::Idle;
+        true
+    }
+
+    pub(crate) fn is_waiting(self) -> bool {
+        self == Self::Waiting
+    }
+
+    pub(crate) fn stop(&mut self) -> bool {
+        self.failed()
+    }
+}
+
+pub(crate) fn show_location_status(cx: &mut Cx, ui: &WidgetRef, text: &str) {
+    ui.label(cx, ids!(location_status_text)).set_text(cx, text);
+    ui.widget(cx, ids!(location_status)).set_visible(cx, true);
+}
+
+pub(crate) fn location_error_status(error: &LocationErrorEvent) -> &'static str {
+    match error {
+        LocationErrorEvent::PermissionDenied => "Permission denied — tap to retry",
+        LocationErrorEvent::Unavailable(message)
+            if message.to_ascii_lowercase().contains("timeout")
+                || message.to_ascii_lowercase().contains("timed out") =>
+        {
+            "Location timed out — tap to retry"
+        }
+        LocationErrorEvent::Unavailable(_) => "Location unavailable — tap to retry",
+    }
+}
 
 #[derive(Default)]
 struct ThemePreference {
@@ -443,10 +524,37 @@ script_mod! {
                                 theme_night := LayerCheck{text: "Night theme"}
                                 theme_circuit := LayerCheck{text: "Circuit City"}
                             }
-                            layers_button := AppButton{
+                            location_status := RoundedView{
+                                visible: false
+                                width: Fit
+                                height: Fit
+                                margin: Inset{left: 14, bottom: 6}
+                                padding: Inset{left: 12, right: 12, top: 7, bottom: 7}
+                                draw_bg +: {
+                                    color: #xf8fbfff0
+                                    border_radius: 8.0
+                                }
+                                location_status_text := Label{
+                                    draw_text +: {
+                                        color: #x223038
+                                        text_style: theme.font_regular{font_size: 10}
+                                    }
+                                }
+                            }
+                            location_controls := View{
+                                width: Fit
+                                height: Fit
+                                flow: Right
+                                spacing: 8
                                 margin: Inset{left: 14, bottom: 16}
-                                padding: Inset{left: 16, right: 16, top: 12, bottom: 12}
-                                text: "▤"
+                                layers_button := AppButton{
+                                    padding: Inset{left: 16, right: 16, top: 12, bottom: 12}
+                                    text: "▤"
+                                }
+                                location_button := AppButton{
+                                    padding: Inset{left: 14, right: 14, top: 12, bottom: 12}
+                                    text: "Fetch current location"
+                                }
                             }
                         }
 
@@ -804,6 +912,10 @@ pub struct App {
     #[rust]
     had_first_fix: bool,
     #[rust]
+    location_state: LocationState,
+    #[rust]
+    location_timeout: Timer,
+    #[rust]
     layers: LayerState,
     #[rust]
     layers_panel_open: bool,
@@ -919,7 +1031,6 @@ impl App {
             cx.task_pool(),
             self.radar_rx.sender(),
         );
-        cx.start_location_updates();
         // Kokoro af_heart when weights are in reach (this process, the machine
         // node, a LAN box), else the OS voice — the hub decides.
         let speech = SpeechOutput::new("af_heart", cx.thread_spawner());
@@ -1151,6 +1262,41 @@ impl App {
 
     fn set_status(&mut self, cx: &mut Cx, text: &str) {
         self.ui.label(cx, ids!(status_label)).set_text(cx, text);
+    }
+
+    fn cancel_location_timeout(&mut self, cx: &mut Cx) {
+        if !self.location_timeout.is_empty() {
+            cx.stop_timer(self.location_timeout);
+            self.location_timeout = Timer::empty();
+        }
+    }
+
+    fn handle_location_click(&mut self, cx: &mut Cx) {
+        match self.location_state.clicked() {
+            LocationClick::Start => {
+                show_location_status(cx, &self.ui, "Locating…");
+                cx.start_location_updates();
+                self.location_timeout = cx.start_timeout(LOCATION_FIX_TIMEOUT_SECONDS);
+            }
+            LocationClick::Recenter => {
+                if let Some(fix) = &self.position {
+                    self.ui
+                        .map_view(cx, ids!(map))
+                        .fly_to(cx, fix.lon, fix.lat, 14.0);
+                    show_location_status(cx, &self.ui, "Location found");
+                }
+            }
+            LocationClick::Ignore => {}
+        }
+    }
+
+    fn fail_location(&mut self, cx: &mut Cx, status: &str) {
+        if !self.location_state.failed() {
+            return;
+        }
+        self.cancel_location_timeout(cx);
+        cx.stop_location_updates();
+        show_location_status(cx, &self.ui, status);
     }
 
     fn render_transcript(&mut self, cx: &mut Cx) {
@@ -2135,6 +2281,9 @@ impl MatchEvent for App {
                 .widget(cx, ids!(layers_panel))
                 .set_visible(cx, self.layers_panel_open);
         }
+        if self.ui.button(cx, ids!(location_button)).clicked(actions) {
+            self.handle_location_click(cx);
+        }
         if self.ui.button(cx, ids!(assistant_button)).clicked(actions) {
             self.assistant_panel_open = !self.assistant_panel_open;
             self.ui
@@ -2267,6 +2416,10 @@ impl AppMain for App {
         }
         match event {
             Event::Shutdown => {
+                self.cancel_location_timeout(cx);
+                if self.location_state.stop() {
+                    cx.stop_location_updates();
+                }
                 self.drive_log.close();
             }
             Event::AudioDevices(devices) => {
@@ -2275,41 +2428,48 @@ impl AppMain for App {
                 cx.use_audio_outputs(&devices.default_output());
             }
             Event::LocationUpdate(fix) => {
-                self.drive_log.log_fix(fix);
-                let map = self.ui.map_view(cx, ids!(map));
-                map.set_puck(
-                    cx,
-                    Some(MapPuck::new(fix.lon, fix.lat, fix.heading_deg, fix.accuracy_m)),
-                );
-                if !self.had_first_fix {
-                    self.had_first_fix = true;
-                    map.fly_to(cx, fix.lon, fix.lat, 14.0);
-                    self.push_line(
-                        cx,
-                        &format!("gps: fix acquired (±{:.0}m)", fix.accuracy_m),
-                    );
-                }
-                self.position = Some(fix.clone());
-                // Live turn-by-turn: feed the fix into the session.
-                let tick = self.active_nav.as_mut().and_then(|nav| {
-                    if nav.simulate {
-                        return None;
+                let location_fix = self.location_state.received_fix();
+                if location_fix != LocationFix::Ignore {
+                    if location_fix == LocationFix::First {
+                        self.cancel_location_timeout(cx);
+                        show_location_status(cx, &self.ui, "Location found");
                     }
-                    let now = Cx::monotonic_now();
-                    let dt = nav
-                        .sim_last_tick
-                        .map(|last| now - last)
-                        .unwrap_or(1.0)
-                        .clamp(0.05, 5.0);
-                    nav.sim_last_tick = Some(now);
-                    let pos = makepad_map_nav::geo::LonLat {
-                        lon: fix.lon,
-                        lat: fix.lat,
-                    };
-                    Some(nav.feed(pos, fix.heading_deg, dt))
-                });
-                if let Some(tick) = tick {
-                    self.apply_nav_tick(cx, tick);
+                    self.drive_log.log_fix(fix);
+                    let map = self.ui.map_view(cx, ids!(map));
+                    map.set_puck(
+                        cx,
+                        Some(MapPuck::new(fix.lon, fix.lat, fix.heading_deg, fix.accuracy_m)),
+                    );
+                    if location_fix == LocationFix::First || !self.had_first_fix {
+                        self.had_first_fix = true;
+                        map.fly_to(cx, fix.lon, fix.lat, 14.0);
+                        self.push_line(
+                            cx,
+                            &format!("gps: fix acquired (±{:.0}m)", fix.accuracy_m),
+                        );
+                    }
+                    self.position = Some(fix.clone());
+                    // Live turn-by-turn: feed the fix into the session.
+                    let tick = self.active_nav.as_mut().and_then(|nav| {
+                        if nav.simulate {
+                            return None;
+                        }
+                        let now = Cx::monotonic_now();
+                        let dt = nav
+                            .sim_last_tick
+                            .map(|last| now - last)
+                            .unwrap_or(1.0)
+                            .clamp(0.05, 5.0);
+                        nav.sim_last_tick = Some(now);
+                        let pos = makepad_map_nav::geo::LonLat {
+                            lon: fix.lon,
+                            lat: fix.lat,
+                        };
+                        Some(nav.feed(pos, fix.heading_deg, dt))
+                    });
+                    if let Some(tick) = tick {
+                        self.apply_nav_tick(cx, tick);
+                    }
                 }
             }
             Event::NetworkResponses(responses) => {
@@ -2328,7 +2488,14 @@ impl AppMain for App {
                     }
                     LocationErrorEvent::Unavailable(msg) => format!("gps: unavailable ({msg})"),
                 };
+                self.fail_location(cx, location_error_status(error));
                 self.push_line(cx, &text);
+            }
+            _ if self.location_timeout.is_event(event).is_some()
+                && self.location_state.is_waiting() =>
+            {
+                self.location_timeout = Timer::empty();
+                self.fail_location(cx, "Location timed out — tap to retry");
             }
             _ => (),
         }
@@ -2443,6 +2610,10 @@ mod ui_parity_tests {
             ids!(tilt_shift),
             ids!(layers_panel),
             ids!(layers_button),
+            ids!(location_status),
+            ids!(location_status_text),
+            ids!(location_controls),
+            ids!(location_button),
             ids!(tilt_check),
             ids!(layer_rain),
             ids!(layer_wind),
@@ -2458,6 +2629,38 @@ mod ui_parity_tests {
         ] {
             assert!(!ui.widget(&cx, id).is_empty(), "missing shared UI id {id:?}");
         }
+        assert_eq!(
+            ui.button(&cx, ids!(location_button)).text(),
+            "Fetch current location"
+        );
+    }
+
+    #[test]
+    fn location_is_opt_in_and_deduplicates_the_live_watch() {
+        let mut state = LocationState::default();
+        assert_eq!(state, LocationState::Idle);
+        assert_eq!(state.clicked(), LocationClick::Start);
+        assert_eq!(state.clicked(), LocationClick::Ignore);
+        assert_eq!(state.received_fix(), LocationFix::First);
+        assert_eq!(state.received_fix(), LocationFix::Update);
+        assert_eq!(state.clicked(), LocationClick::Recenter);
+    }
+
+    #[test]
+    fn location_failure_resets_for_explicit_retry() {
+        let mut state = LocationState::default();
+        assert!(!state.failed());
+        assert_eq!(state.clicked(), LocationClick::Start);
+        assert!(state.failed());
+        assert_eq!(state, LocationState::Idle);
+        assert_eq!(state.clicked(), LocationClick::Start);
+    }
+
+    #[test]
+    fn unrelated_events_cannot_start_location() {
+        let mut state = LocationState::default();
+        assert_eq!(state, LocationState::Idle);
+        assert_eq!(state.received_fix(), LocationFix::Ignore);
     }
 }
 

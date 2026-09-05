@@ -309,6 +309,18 @@ pub struct FromWasmAllocVao {
     pub inst_vb_id: usize,
 }
 
+/// Deletes WebGL objects whose owning Rust pool slots are genuinely free.
+/// Each list contains the exact JavaScript table ids; the consumer also
+/// invalidates VAOs which depend on a retired vertex/index buffer.
+#[derive(FromWasm)]
+pub struct FromWasmFreeWebGLResources {
+    pub array_buffer_ids: Vec<usize>,
+    pub index_buffer_ids: Vec<usize>,
+    pub vao_ids: Vec<usize>,
+    pub texture_ids: Vec<usize>,
+    pub framebuffer_ids: Vec<usize>,
+}
+
 #[derive(FromWasm, Default)]
 pub struct WColor {
     pub r: f32,

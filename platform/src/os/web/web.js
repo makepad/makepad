@@ -1,5 +1,83 @@
 import { WasmBridge } from "../makepad_wasm_bridge/wasm_bridge.js"
 
+export const MAKEPAD_WEBGL_PIXEL_BUDGET = 2 * 1024 * 1024;
+export const MAKEPAD_WEBGL_DPR_CEILING = 1.5;
+export const MAKEPAD_WEBGL_PHONE_DPR_CEILING = 1.0;
+
+function makepad_positive_number(value, fallback) {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+export function makepad_device_pixel_ratio(value) {
+    return makepad_positive_number(value, 1.0);
+}
+
+// Computes one uniform scale for both axes. CSS dimensions stay untouched;
+// only the drawable is reduced to fit the shared pixel and hardware limits.
+export function makepad_compute_webgl_size(
+    width,
+    height,
+    scale_ceiling,
+    limits = {},
+    pixel_budget = MAKEPAD_WEBGL_PIXEL_BUDGET,
+) {
+    const logical_width = Number.isFinite(Number(width)) && Number(width) > 0
+        ? Number(width)
+        : 0;
+    const logical_height = Number.isFinite(Number(height)) && Number(height) > 0
+        ? Number(height)
+        : 0;
+    const max_width = makepad_positive_number(limits.max_width, Number.MAX_SAFE_INTEGER);
+    const max_height = makepad_positive_number(limits.max_height, Number.MAX_SAFE_INTEGER);
+    const budget = makepad_positive_number(pixel_budget, MAKEPAD_WEBGL_PIXEL_BUDGET);
+    let scale = makepad_positive_number(scale_ceiling, 1.0);
+
+    if (logical_width === 0 || logical_height === 0) {
+        return {
+            logical_width,
+            logical_height,
+            width: 0,
+            height: 0,
+            scale,
+        };
+    }
+
+    // Dividing the square roots avoids overflowing width * height for hostile
+    // or accidentally enormous inputs.
+    const budget_scale = Math.sqrt(budget)
+        / Math.sqrt(logical_width)
+        / Math.sqrt(logical_height);
+    scale = Math.min(
+        scale,
+        budget_scale,
+        max_width / logical_width,
+        max_height / logical_height,
+    );
+    if (!Number.isFinite(scale) || scale <= 0) {
+        return {
+            logical_width,
+            logical_height,
+            width: 0,
+            height: 0,
+            scale: 0,
+        };
+    }
+
+    // Flooring keeps rounding from crossing either the pixel or dimension
+    // ceiling. A visible dimension is kept drawable even for extreme aspect
+    // ratios, where exact aspect preservation is impossible at integer size.
+    const physical_width = Math.max(1, Math.min(max_width, Math.floor(logical_width * scale)));
+    const physical_height = Math.max(1, Math.min(max_height, Math.floor(logical_height * scale)));
+    return {
+        logical_width,
+        logical_height,
+        width: physical_width,
+        height: physical_height,
+        scale,
+    };
+}
+
 const MAKEPAD_CRASH_MAX_REPORTS = 20;
 const MAKEPAD_CRASH_POST_BYTES = 64 * 1024;
 const MAKEPAD_CRASH_GET_BYTES = 8 * 1024;
@@ -445,9 +523,13 @@ export class WasmWebBrowser extends WasmBridge {
         // The app owns all gestures over its drawable, including pinch and
         // two-finger pan; never hand them to page zoom/scroll.
         this.canvas.style.touchAction = 'none';
+        const browser = this;
         this.handlers = new Proxy({}, {
             set(target, property, value) {
                 target[property] = typeof value === "function" ? (...args) => {
+                    if (browser.webgl_context_lost) {
+                        return;
+                    }
                     if (makepad_crash_reporter.is_wasm_dead()) {
                         makepad_crash_reporter.suppress_followup();
                         return;
@@ -463,8 +545,12 @@ export class WasmWebBrowser extends WasmBridge {
         this.network_web_sockets = {};
         this.network_http_requests = new Map();
         this.network_http_hosts = new Map();
+        this.legacy_http_requests = new Set();
         this.storage_db_promise = null;
         this.window_info = {}
+        this.physical_device_dpi = makepad_device_pixel_ratio(window.devicePixelRatio);
+        this.render_quality = null;
+        this.webgl_context_lost = false;
         this.xr_capabilities = {
             vr_supported: false,
             ar_supported: false
@@ -491,6 +577,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.audio_worklet = null;
         this.audio_callback_started = false;
         this.audio_callback_watchdog = null;
+        this.audio_startup_cancel = null;
 
         this.dispatch_first_msg();
     }
@@ -504,6 +591,9 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     js_wake_ui() {
+        if (this.webgl_context_lost) {
+            return;
+        }
         if (makepad_crash_reporter.is_wasm_dead()) {
             makepad_crash_reporter.suppress_followup();
             return;
@@ -514,6 +604,9 @@ export class WasmWebBrowser extends WasmBridge {
         this.ui_wake_queued = true;
         queueMicrotask(() => {
             this.ui_wake_queued = false;
+            if (this.webgl_context_lost) {
+                return;
+            }
             if (makepad_crash_reporter.is_wasm_dead()) {
                 makepad_crash_reporter.suppress_followup();
                 return;
@@ -527,12 +620,91 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     js_spawn_thread(request_id, context_ptr, stack_size, name_ptr, name_len) {
-        if (!this.wasm._has_thread_support) {
+        if (this.webgl_context_lost || !this.wasm._has_thread_support) {
             return 0;
         }
         const name = this.u8_to_string(name_ptr, name_len);
         this.create_thread({ request_id, context_ptr, stack_size, name });
         return 1;
+    }
+
+    stop_terminal_web_runtime() {
+        if (this._terminal_web_runtime_stopped) {
+            return;
+        }
+        this._terminal_web_runtime_stopped = true;
+        this.ui_wake_queued = false;
+        const safely = (name, cleanup) => {
+            try {
+                cleanup();
+            } catch (error) {
+                console.error(`makepad: terminal ${name} cleanup failed: ${error}`);
+            }
+        };
+
+        // Terminal context loss abandons worker heaps. Calling the ordinary
+        // shutdown path here could enter Wasm or deallocate a stack while a
+        // terminated worker still owns allocator state.
+        for (const record of this.workers || []) {
+            const worker_record = record[1];
+            worker_record.closed = true;
+            worker_record.worker.onmessage = null;
+            worker_record.worker.onerror = null;
+            worker_record.worker.onmessageerror = null;
+            safely("worker", () => worker_record.worker.terminate());
+        }
+        if (this.workers) {
+            this.workers.clear();
+        }
+        if (this.thread_stack_arena) {
+            this.thread_stack_arena.length = 0;
+        }
+
+        for (const entry of this.network_http_requests || []) {
+            const request = entry[1];
+            request.state = "terminal";
+            if (request.stall_timer !== null) {
+                window.clearTimeout(request.stall_timer);
+                request.stall_timer = null;
+            }
+            if (request.controller) {
+                safely("fetch", () => request.controller.abort("WebGL context lost"));
+            }
+        }
+        if (this.network_http_requests) {
+            this.network_http_requests.clear();
+        }
+        if (this.network_http_hosts) {
+            this.network_http_hosts.clear();
+        }
+        for (const request of this.legacy_http_requests || []) {
+            safely("XHR", () => request.abort());
+        }
+        if (this.legacy_http_requests) {
+            this.legacy_http_requests.clear();
+        }
+
+        for (const socket of Object.values(this.network_web_sockets || {})) {
+            socket.onopen = null;
+            socket.onmessage = null;
+            socket.onerror = null;
+            socket.onclose = null;
+            safely("WebSocket", () => socket.close());
+        }
+        this.network_web_sockets = {};
+
+        for (const input of this.midi_inputs || []) {
+            if (input.port) {
+                input.port.onmidimessage = null;
+            }
+        }
+        this.reload_midi_ports = null;
+        if (this.geo_watch_id !== undefined && navigator.geolocation) {
+            const watch_id = this.geo_watch_id;
+            this.geo_watch_id = undefined;
+            safely("geolocation", () => navigator.geolocation.clearWatch(watch_id));
+        }
+        safely("audio", () => this.stop_audio_output());
     }
 
     shutdown_thread_runtime() {
@@ -559,6 +731,9 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     emit_app_lifecycle(state) {
+        if (this.webgl_context_lost) {
+            return;
+        }
         this.to_wasm.ToWasmAppLifecycle({ state });
     }
 
@@ -594,6 +769,9 @@ export class WasmWebBrowser extends WasmBridge {
         this.lifecycle_shutdown_sent = false;
 
         document.addEventListener("visibilitychange", () => {
+            if (this.webgl_context_lost) {
+                return;
+            }
             if (document.hidden) {
                 this.emit_app_inactive();
             } else {
@@ -603,6 +781,9 @@ export class WasmWebBrowser extends WasmBridge {
         });
 
         window.addEventListener("pagehide", (event) => {
+            if (this.webgl_context_lost) {
+                return;
+            }
             this.emit_app_inactive();
             if (!event.persisted) {
                 this.emit_app_shutdown();
@@ -614,6 +795,9 @@ export class WasmWebBrowser extends WasmBridge {
         });
 
         window.addEventListener("pageshow", (event) => {
+            if (this.webgl_context_lost) {
+                return;
+            }
             if (event.persisted) {
                 this.emit_app_active();
                 this.do_wasm_pump();
@@ -623,6 +807,9 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     emit_location_change() {
+        if (this.webgl_context_lost) {
+            return;
+        }
         this.to_wasm.ToWasmLocationChange({
             pathname: location.pathname + "",
             search: location.search + "",
@@ -632,6 +819,9 @@ export class WasmWebBrowser extends WasmBridge {
 
     install_live_reload_bridge() {
         window.makepad_wasm_live_file_change = (file_name, content) => {
+            if (this.webgl_context_lost) {
+                return;
+            }
             this.to_wasm.ToWasmLiveFileChange({file_name, content});
             this.do_wasm_pump();
         };
@@ -648,6 +838,9 @@ export class WasmWebBrowser extends WasmBridge {
         this.install_live_reload_bridge();
 
         await this.query_xr_capabilities();
+        if (this.webgl_context_lost) {
+            return;
+        }
         this.update_window_info();
 
         const hardware_concurrency = Number.isFinite(navigator.hardwareConcurrency)
@@ -821,7 +1014,16 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     FromWasmStartTimer(args) {
+        if (this.webgl_context_lost) {
+            return;
+        }
         let timer_id = args.timer_id;
+        const interval_seconds = Number(args.interval);
+        if (!Number.isFinite(interval_seconds) || interval_seconds < 0) {
+            console.error(`Invalid timer interval for ${timer_id}: ${args.interval}`);
+            return;
+        }
+        const interval_ms = Math.min(interval_seconds * 1000.0, 2147483647);
 
         for (let i = 0; i < this.timers.length; i++) {
             if (this.timers[i].timer_id == timer_id) {
@@ -833,12 +1035,18 @@ export class WasmWebBrowser extends WasmBridge {
         if (args.repeats === true) {
 
             timer.sys_id = window.setInterval(e => {
+                if (this.webgl_context_lost) {
+                    return;
+                }
                 this.to_wasm.ToWasmTimerFired({ timer_id });
                 this.do_wasm_pump();
-            }, args.interval * 1000.0);
+            }, Math.max(4, interval_ms));
         }
         else {
             timer.sys_id = window.setTimeout(e => {
+                if (this.webgl_context_lost) {
+                    return;
+                }
                 for (let i = 0; i < this.timers.length; i++) {
                     let timer = this.timers[i];
                     if (timer.timer_id == timer_id) {
@@ -848,7 +1056,7 @@ export class WasmWebBrowser extends WasmBridge {
                 }
                 this.to_wasm.ToWasmTimerFired({ timer_id });
                 this.do_wasm_pump();
-            }, args.interval * 1000.0);
+            }, interval_ms);
         }
         this.timers.push(timer)
     }
@@ -870,6 +1078,9 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     FromWasmStartLocationUpdates() {
+        if (this.webgl_context_lost) {
+            return;
+        }
         if (this.geo_watch_id !== undefined) {
             return; // already watching
         }
@@ -880,6 +1091,9 @@ export class WasmWebBrowser extends WasmBridge {
         }
         this.geo_watch_id = navigator.geolocation.watchPosition(
             (pos) => {
+                if (this.webgl_context_lost) {
+                    return;
+                }
                 let c = pos.coords;
                 // Option<f64> encodes as undefined; browser nulls must convert
                 this.to_wasm.ToWasmLocationUpdate({
@@ -894,6 +1108,9 @@ export class WasmWebBrowser extends WasmBridge {
                 this.do_wasm_pump();
             },
             (err) => {
+                if (this.webgl_context_lost) {
+                    return;
+                }
                 this.to_wasm.ToWasmLocationError({ code: err.code, message: err.message });
                 this.do_wasm_pump();
             },
@@ -944,14 +1161,14 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     FromWasmRequestAnimationFrame() {
-        if (this.xr !== undefined || this.req_anim_frame_id) {
+        if (this.webgl_context_lost || this.xr !== undefined || this.req_anim_frame_id) {
             return;
         }
         this.req_anim_frame_id = window.requestAnimationFrame(time => {
-            if (this.wasm == null) {
+            this.req_anim_frame_id = 0;
+            if (this.wasm == null || this.webgl_context_lost) {
                 return
             }
-            this.req_anim_frame_id = 0;
             if (this.xr !== undefined) {
                 return
             }
@@ -1009,6 +1226,9 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     storage_send_result(args, op, result = {}) {
+        if (this.webgl_context_lost) {
+            return;
+        }
         this.to_wasm.ToWasmStorageResult({
             request_id_lo: args.request_id_lo,
             request_id_hi: args.request_id_hi,
@@ -1239,27 +1459,57 @@ export class WasmWebBrowser extends WasmBridge {
         this.free_data_u8(args.data);
     }
 
-    FromWasmStopAudioOutput(args) {
-        if (!this.audio_context) {
-            return
+    dispose_audio_worklet(audio_worklet) {
+        if (!audio_worklet) {
+            return;
         }
+        if (audio_worklet.port) {
+            audio_worklet.port.onmessage = null;
+        }
+        audio_worklet.onprocessorerror = null;
+        try {
+            audio_worklet.disconnect();
+        } catch (_error) {
+        }
+    }
+
+    stop_audio_output() {
+        this.audio_start_args = null;
         if (this.audio_callback_watchdog !== null) {
             clearTimeout(this.audio_callback_watchdog);
             this.audio_callback_watchdog = null;
         }
+        if (this.audio_startup_cancel) {
+            this.audio_startup_cancel();
+            this.audio_startup_cancel = null;
+        }
         if (this.audio_worklet) {
-            this.audio_worklet.disconnect();
+            this.dispose_audio_worklet(this.audio_worklet);
             this.audio_worklet = null;
         }
         const audio_context = this.audio_context;
         this.audio_context = null;
-        audio_context.close().catch(error => {
-            console.error(`web audio: close failed: ${error}`);
-        });
+        if (audio_context) {
+            try {
+                const closing = audio_context.close();
+                if (closing && typeof closing.catch === "function") {
+                    closing.catch(error => {
+                        console.error(`web audio: close failed: ${error}`);
+                    });
+                }
+            } catch (error) {
+                console.error(`web audio: close failed: ${error}`);
+            }
+        }
+    }
+
+    FromWasmStopAudioOutput(_args) {
+        this.stop_audio_output();
     }
 
     watch_audio_callback(audio_context) {
-        if (!this.audio_worklet
+        if (this.webgl_context_lost
+            || !this.audio_worklet
             || this.audio_callback_started
             || this.audio_callback_watchdog !== null) {
             return;
@@ -1275,6 +1525,9 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     resume_audio_from_gesture() {
+        if (this.webgl_context_lost) {
+            return;
+        }
         this.had_user_gesture = true;
         if (!this.audio_context && this.audio_start_args) {
             const args = this.audio_start_args;
@@ -1315,7 +1568,7 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     FromWasmStartAudioOutput(args) {
-        if (this.audio_context) {
+        if (this.webgl_context_lost || this.audio_context) {
             return
         }
         // The web's rule: an output is created inside a user gesture. The wasm asks at
@@ -1328,7 +1581,7 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     start_audio_output(args, attempt) {
-        if (this.audio_context) {
+        if (this.webgl_context_lost || this.audio_context) {
             return
         }
         let audio_context;
@@ -1344,8 +1597,16 @@ export class WasmWebBrowser extends WasmBridge {
         this.audio_callback_started = false;
 
         const start_worklet = async () => {
+            let cancel_startup;
+            const cancelled = new Promise((_, reject) => {
+                cancel_startup = () => reject(new Error("audio startup cancelled"));
+            });
+            this.audio_startup_cancel = cancel_startup;
             if (this.wasm._secondary_ready) {
-                await this.wasm._secondary_ready;
+                await Promise.race([this.wasm._secondary_ready, cancelled]);
+            }
+            if (this.webgl_context_lost || this.audio_context !== audio_context) {
+                throw new Error("audio startup cancelled");
             }
             if (!this.wasm._has_thread_support) {
                 throw new Error("wasm threading support is unavailable");
@@ -1361,10 +1622,26 @@ export class WasmWebBrowser extends WasmBridge {
             // A stalled module load (seen: it never settles until a second context exists)
             // is not waited on forever — the deadline fails this attempt, and the retry below
             // starts over on a fresh context.
-            await Promise.race([
-                audio_context.audioWorklet.addModule("./makepad_platform/audio_worklet.js", { credentials: 'omit' }),
-                new Promise((_, reject) => setTimeout(() => reject(new Error("worklet module load stalled")), 4000)),
-            ]);
+            let load_timeout = null;
+            try {
+                await Promise.race([
+                    audio_context.audioWorklet.addModule("./makepad_platform/audio_worklet.js", { credentials: 'omit' }),
+                    new Promise((_, reject) => {
+                        load_timeout = setTimeout(() => reject(new Error("worklet module load stalled")), 4000);
+                    }),
+                    cancelled,
+                ]);
+            } finally {
+                if (load_timeout !== null) {
+                    clearTimeout(load_timeout);
+                }
+                if (this.audio_startup_cancel === cancel_startup) {
+                    this.audio_startup_cancel = null;
+                }
+            }
+            if (this.webgl_context_lost || this.audio_context !== audio_context) {
+                throw new Error("audio startup cancelled");
+            }
 
             const audio_worklet = new AudioWorkletNode(audio_context, 'audio-worklet', {
                 numberOfInputs: 0,
@@ -1374,6 +1651,9 @@ export class WasmWebBrowser extends WasmBridge {
             });
 
             audio_worklet.port.onmessage = (e) => {
+                if (this.webgl_context_lost || this.audio_context !== audio_context) {
+                    return;
+                }
                 let data = e.data;
                 switch (data.message_type) {
                     case "console_log":
@@ -1410,8 +1690,8 @@ export class WasmWebBrowser extends WasmBridge {
         };
 
         start_worklet().then(audio_worklet => {
-            if (this.audio_context !== audio_context) {
-                audio_worklet.disconnect();
+            if (this.webgl_context_lost || this.audio_context !== audio_context) {
+                this.dispose_audio_worklet(audio_worklet);
                 return;
             }
             this.audio_worklet = audio_worklet;
@@ -1419,10 +1699,10 @@ export class WasmWebBrowser extends WasmBridge {
                 this.watch_audio_callback(audio_context);
             }
         }).catch(error => {
-            console.error(`web audio: start failed (attempt ${attempt}): ${error}`);
-            if (this.audio_context !== audio_context) {
+            if (this.webgl_context_lost || this.audio_context !== audio_context) {
                 return;
             }
+            console.error(`web audio: start failed (attempt ${attempt}): ${error}`);
             this.audio_context = null;
             audio_context.close().catch(() => {});
             if (attempt < 3) {
@@ -1432,7 +1712,13 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     FromWasmQueryAudioDevices(args) {
+        if (this.webgl_context_lost) {
+            return;
+        }
         const publish_devices = (devices_enum) => {
+            if (this.webgl_context_lost) {
+                return;
+            }
             let devices = []
             for (let device of devices_enum) {
                 if (device.kind == "audioinput") {
@@ -1464,17 +1750,26 @@ export class WasmWebBrowser extends WasmBridge {
             return;
         }
         query.then(publish_devices).catch(error => {
+            if (this.webgl_context_lost) {
+                return;
+            }
             console.warn(`web audio: device enumeration failed; using browser default: ${error}`);
             publish_devices([]);
         });
     }
 
     FromWasmUseMidiInputs(args) {
+        if (this.webgl_context_lost) {
+            return;
+        }
         outer:
         for (let input of this.midi_inputs) {
             for (let uid of args.input_uids) {
                 if (input.uid == uid) {
                     input.port.onmidimessage = (e) => {
+                        if (this.webgl_context_lost) {
+                            return;
+                        }
                         let data = e.data;
                         this.to_wasm.ToWasmMidiInputData({
                             uid,
@@ -1498,12 +1793,22 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     FromWasmQueryMidiPorts() {
+        if (this.webgl_context_lost) {
+            return;
+        }
         if (this.reload_midi_ports) {
             return this.reload_midi_ports();
         }
         if (navigator.requestMIDIAccess) {
             navigator.requestMIDIAccess().then((midi) => {
+                if (this.webgl_context_lost) {
+                    midi.onstatechange = null;
+                    return;
+                }
                 this.reload_midi_ports = () => {
+                    if (this.webgl_context_lost) {
+                        return;
+                    }
                     this.midi_inputs.length = 0;
                     this.midi_outputs.length = 0;
                     let ports = [];
@@ -1609,10 +1914,16 @@ export class WasmWebBrowser extends WasmBridge {
     // example build command:
     // RUSTFLAGS="-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--export=__stack_pointer" cargo build -p thing_to_compile --target=wasm32-unknown-unknown -Z build-std=panic_abort,std
     create_thread(args) {
+        if (this.webgl_context_lost) {
+            return;
+        }
         let allocated_thread_info = null;
         (async () => {
             if (this.wasm._secondary_ready) {
                 await this.wasm._secondary_ready;
+            }
+            if (this.webgl_context_lost) {
+                return;
             }
             if (!this.wasm._has_thread_support) {
                 throw new Error("wasm file was not compiled with threading support");
@@ -1640,6 +1951,9 @@ export class WasmWebBrowser extends WasmBridge {
                 }
             };
             worker.onmessage = event => {
+                if (record.closed || this.webgl_context_lost) {
+                    return;
+                }
                 const message = event.data || {};
                 const message_kind = message.kind || message.type;
                 if (message_kind === 'breadcrumb') {
@@ -1744,6 +2058,9 @@ export class WasmWebBrowser extends WasmBridge {
             });
             worker.postMessage(thread_info);
         })().catch(err => {
+            if (this.webgl_context_lost) {
+                return;
+            }
             console.error(err);
             report_browser_issue("worker.error", {
                 worker_index: args.request_id,
@@ -1769,8 +2086,11 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     start_signal_poll() {
+        if (this.webgl_context_lost) {
+            return;
+        }
         this.poll_timer = window.setInterval(e => {
-            if (makepad_crash_reporter.is_wasm_dead()) {
+            if (this.webgl_context_lost || makepad_crash_reporter.is_wasm_dead()) {
                 return;
             }
             let flags = this.exports.wasm_check_signal();
@@ -1834,6 +2154,9 @@ export class WasmWebBrowser extends WasmBridge {
         max_body_lo,
         max_body_hi
     ) {
+        if (this.webgl_context_lost) {
+            return;
+        }
         let url = this.u8_to_string(url_ptr, url_len);
         let method = this.u8_to_string(method_ptr, method_len);
         let headers_raw = this.u8_to_string(headers_ptr, headers_len);
@@ -1921,6 +2244,9 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     network_http_pump(host_key) {
+        if (this.webgl_context_lost) {
+            return;
+        }
         const host = this.network_http_hosts.get(host_key);
         if (!host) {
             return;
@@ -1936,6 +2262,9 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     network_http_dispatch(entry) {
+        if (this.webgl_context_lost || entry.state === "terminal") {
+            return;
+        }
         entry.state = "active";
         entry.controller = new AbortController();
         entry.started_at = performance.now();
@@ -1957,6 +2286,9 @@ export class WasmWebBrowser extends WasmBridge {
             }
         }
         const arm_stall_timer = () => {
+            if (this.webgl_context_lost || entry.state === "terminal") {
+                return;
+            }
             if (entry.stall_timer !== null) {
                 window.clearTimeout(entry.stall_timer);
             }
@@ -1978,6 +2310,9 @@ export class WasmWebBrowser extends WasmBridge {
             signal: entry.controller.signal,
             redirect: "manual",
         }).then(async response => {
+            if (this.webgl_context_lost || entry.state === "terminal") {
+                return;
+            }
             arm_stall_timer();
             let response_headers = "";
             response.headers.forEach((value, key) => {
@@ -1994,6 +2329,9 @@ export class WasmWebBrowser extends WasmBridge {
                 const reader = response.body.getReader();
                 for (;;) {
                     const item = await reader.read();
+                    if (this.webgl_context_lost || entry.state === "terminal") {
+                        return;
+                    }
                     if (item.done) {
                         break;
                     }
@@ -2011,6 +2349,9 @@ export class WasmWebBrowser extends WasmBridge {
             for (const chunk of chunks) {
                 response_body.set(chunk, body_at);
                 body_at += chunk.byteLength;
+            }
+            if (this.webgl_context_lost || entry.state === "terminal") {
+                return;
             }
             let headers_u8 = this.string_to_u8(response_headers);
             let body_u8 = this.array_to_u8(response_body);
@@ -2030,6 +2371,9 @@ export class WasmWebBrowser extends WasmBridge {
                 body_u8.len
             );
         }).catch(error => {
+            if (this.webgl_context_lost || entry.state === "terminal") {
+                return;
+            }
             console.error(
                 "[makepad][http][err]",
                 entry.method,
@@ -2060,6 +2404,9 @@ export class WasmWebBrowser extends WasmBridge {
             this.network_http_requests.delete(entry.request_key);
         }
         entry.state = "done";
+        if (this.webgl_context_lost) {
+            return;
+        }
         if (!entry.is_archive) {
             return;
         }
@@ -2122,16 +2469,25 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     js_network_ws_open(socket_id_lo, socket_id_hi, url_ptr, url_len, _headers_ptr, _headers_len) {
+        if (this.webgl_context_lost) {
+            return;
+        }
         let socket_key = this.id_to_key(socket_id_lo, socket_id_hi);
         let url = this.u8_to_string(url_ptr, url_len);
         let web_socket = new WebSocket(url);
         web_socket.binaryType = "arraybuffer";
         this.network_web_sockets[socket_key] = web_socket;
         web_socket.onclose = _e => {
+            if (this.webgl_context_lost) {
+                return;
+            }
             this.exports.wasm_network_ws_closed(socket_id_lo, socket_id_hi);
             delete this.network_web_sockets[socket_key];
         };
         web_socket.onerror = e => {
+            if (this.webgl_context_lost) {
+                return;
+            }
             let message = this.string_to_u8("" + e);
             this.exports.wasm_network_ws_error(
                 socket_id_lo,
@@ -2141,6 +2497,9 @@ export class WasmWebBrowser extends WasmBridge {
             );
         };
         web_socket.onmessage = e => {
+            if (this.webgl_context_lost) {
+                return;
+            }
             if (typeof e.data == "string") {
                 let data = this.string_to_u8("" + e.data);
                 this.exports.wasm_network_ws_text(
@@ -2161,6 +2520,9 @@ export class WasmWebBrowser extends WasmBridge {
             }
         };
         web_socket.onopen = _e => {
+            if (this.webgl_context_lost) {
+                return;
+            }
             this.exports.wasm_network_ws_opened(socket_id_lo, socket_id_hi);
         };
     }
@@ -2189,16 +2551,21 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     FromWasmHTTPRequest(args) {
+        if (this.webgl_context_lost) {
+            return;
+        }
         const req = new XMLHttpRequest();
+        this.legacy_http_requests.add(req);
         req.open(args.method, args.url);
         req.responseType = "arraybuffer";
         this.parse_and_set_headers(req, args.headers);
 
-        // TODO decode in appropiate format
-        const decoder = new TextDecoder('UTF-8', { fatal: true });
-        let body = decoder.decode(this.clone_data_u8(args.body));
+        const body = this.clone_data_u8(args.body);
 
         req.addEventListener("load", event => {
+            if (this.webgl_context_lost) {
+                return;
+            }
             let responseEvent = event.target;
             if (responseEvent.status < 200 || responseEvent.status >= 300) {
                 report_browser_issue("xhr.http_error", {
@@ -2221,6 +2588,9 @@ export class WasmWebBrowser extends WasmBridge {
         });
 
         req.addEventListener("error", event => {
+            if (this.webgl_context_lost) {
+                return;
+            }
             let errorMessage = "An error occurred with the HTTP request.";
             if (!navigator.onLine) {
                 errorMessage = "The browser is offline.";
@@ -2240,6 +2610,9 @@ export class WasmWebBrowser extends WasmBridge {
         });
 
         req.addEventListener("timeout", event => {
+            if (this.webgl_context_lost) {
+                return;
+            }
             report_browser_issue("xhr.timeout", {
                 method: args.method,
                 url: args.url,
@@ -2253,6 +2626,9 @@ export class WasmWebBrowser extends WasmBridge {
         });
 
         req.addEventListener("abort", event => {
+            if (this.webgl_context_lost) {
+                return;
+            }
             report_browser_issue("xhr.abort", {
                 method: args.method,
                 url: args.url,
@@ -2266,6 +2642,9 @@ export class WasmWebBrowser extends WasmBridge {
         });
 
         req.addEventListener("progress", event => {
+            if (this.webgl_context_lost) {
+                return;
+            }
             if (event.lengthComputable) {
                 this.to_wasm.ToWasmHttpResponseProgress({
                     request_id_lo: args.request_id_lo,
@@ -2278,6 +2657,9 @@ export class WasmWebBrowser extends WasmBridge {
         });
 
         req.upload.addEventListener("progress", (event) => {
+            if (this.webgl_context_lost) {
+                return;
+            }
             if (event.lengthComputable) {
                 this.to_wasm.ToWasmHttpUploadProgress({
                     request_id_lo: args.request_id_lo,
@@ -2288,9 +2670,15 @@ export class WasmWebBrowser extends WasmBridge {
                 this.do_wasm_pump();
             }
         });
+        req.addEventListener("loadend", () => {
+            this.legacy_http_requests.delete(req);
+        });
 
-        req.send(body);
-        this.free_data_u8(args.body);
+        try {
+            req.send(body);
+        } finally {
+            this.free_data_u8(args.body);
+        }
     }
 
     FromWasmCancelHTTPRequest(args) {
@@ -2343,6 +2731,9 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     FromWasmSelectFileDialog(args) {
+        if (this.webgl_context_lost) {
+            return;
+        }
         const input = document.createElement('input');
         input.type = 'file';
         input.style.display = 'none';
@@ -2368,6 +2759,9 @@ export class WasmWebBrowser extends WasmBridge {
             }
             settled = true;
             cleanup();
+            if (this.webgl_context_lost) {
+                return;
+            }
             this.to_wasm.ToWasmFileDialogResult({
                 id_lo: args.id_lo,
                 id_hi: args.id_hi,
@@ -2420,11 +2814,17 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     async FromWasmCheckPermission(args) {
+        if (this.webgl_context_lost) {
+            return;
+        }
         try {
             if (args.permission === 'microphone' || args.permission === 'camera' || args.permission === 'geolocation') {
                 // Check if Permissions API is available
                 if (navigator.permissions && navigator.permissions.query) {
                     const result = await navigator.permissions.query({ name: args.permission });
+                    if (this.webgl_context_lost) {
+                        return;
+                    }
                     let status;
                     switch (result.state) {
                         case 'granted':
@@ -2455,6 +2855,9 @@ export class WasmWebBrowser extends WasmBridge {
                     const kind = args.permission === 'microphone' ? 'audioinput' : 'videoinput';
                     try {
                         const devices = await navigator.mediaDevices.enumerateDevices();
+                        if (this.webgl_context_lost) {
+                            return;
+                        }
                         const hasDevice = devices.some(device => device.kind === kind && device.label !== '');
                         this.to_wasm.ToWasmPermissionResult({
                             permission: args.permission,
@@ -2462,6 +2865,9 @@ export class WasmWebBrowser extends WasmBridge {
                             status: hasDevice ? 1 : 0 // Granted if we see labels, NotDetermined otherwise
                         });
                     } catch {
+                        if (this.webgl_context_lost) {
+                            return;
+                        }
                         // Can't determine, assume not determined
                         this.to_wasm.ToWasmPermissionResult({
                             permission: args.permission,
@@ -2479,6 +2885,9 @@ export class WasmWebBrowser extends WasmBridge {
                 });
             }
         } catch (error) {
+            if (this.webgl_context_lost) {
+                return;
+            }
             console.error('Permission check failed:', error);
             this.to_wasm.ToWasmPermissionResult({
                 permission: args.permission,
@@ -2490,6 +2899,9 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     async FromWasmRequestPermission(args) {
+        if (this.webgl_context_lost) {
+            return;
+        }
         try {
             if (args.permission === 'microphone' || args.permission === 'camera') {
                 try {
@@ -2498,6 +2910,9 @@ export class WasmWebBrowser extends WasmBridge {
                     const stream = await navigator.mediaDevices.getUserMedia(constraints);
                     // Successfully got permission, close the stream immediately
                     stream.getTracks().forEach(track => track.stop());
+                    if (this.webgl_context_lost) {
+                        return;
+                    }
 
                     this.to_wasm.ToWasmPermissionResult({
                         permission: args.permission,
@@ -2505,6 +2920,9 @@ export class WasmWebBrowser extends WasmBridge {
                         status: 1 // Granted
                     });
                 } catch (error) {
+                    if (this.webgl_context_lost) {
+                        return;
+                    }
                     // Permission was denied or error occurred
                     let status = 3; // DeniedPermanent (default)
 
@@ -2530,6 +2948,9 @@ export class WasmWebBrowser extends WasmBridge {
                 // callbacks pump for themselves.
                 navigator.geolocation.getCurrentPosition(
                     (_pos) => {
+                        if (this.webgl_context_lost) {
+                            return;
+                        }
                         this.to_wasm.ToWasmPermissionResult({
                             permission: args.permission,
                             request_id: args.request_id,
@@ -2538,6 +2959,9 @@ export class WasmWebBrowser extends WasmBridge {
                         this.do_wasm_pump();
                     },
                     (err) => {
+                        if (this.webgl_context_lost) {
+                            return;
+                        }
                         this.to_wasm.ToWasmPermissionResult({
                             permission: args.permission,
                             request_id: args.request_id,
@@ -2557,6 +2981,9 @@ export class WasmWebBrowser extends WasmBridge {
                 });
             }
         } catch (error) {
+            if (this.webgl_context_lost) {
+                return;
+            }
             console.error('Permission request failed:', error);
             this.to_wasm.ToWasmPermissionResult({
                 permission: args.permission,
@@ -2589,6 +3016,9 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     do_wasm_pump() {
+        if (this.webgl_context_lost) {
+            return;
+        }
         if (makepad_crash_reporter.is_wasm_dead()) {
             makepad_crash_reporter.suppress_followup();
             return;
@@ -2603,6 +3033,19 @@ export class WasmWebBrowser extends WasmBridge {
             from_wasm.free();
             this.update_startup_loader(performance.now() - started);
         } catch (error) {
+            let context_lost = this.webgl_context_lost;
+            if (!context_lost && this.gl && typeof this.gl.isContextLost === "function") {
+                try {
+                    context_lost = this.gl.isContextLost();
+                } catch (_query_error) {
+                }
+            }
+            if (context_lost) {
+                if (typeof this.handle_webgl_context_lost === "function") {
+                    this.handle_webgl_context_lost();
+                }
+                return;
+            }
             makepad_crash_reporter.mark_wasm_dead(error);
             void makepad_crash_reporter.report("window.error", {
                 message: error && error.message ? String(error.message) : String(error),
@@ -2647,8 +3090,28 @@ export class WasmWebBrowser extends WasmBridge {
         this.detect.is_add_to_homescreen_safari = this.is_mobile_safari && navigator.standalone
     }
 
+    ensure_render_quality() {
+        if (this.render_quality !== null) {
+            return this.render_quality;
+        }
+        const canvas = this.canvas;
+        const read_number = (name, fallback) => {
+            const attribute = canvas.getAttribute(name);
+            return makepad_positive_number(attribute, fallback);
+        };
+        const phone_ceiling = WasmBridge.is_phone()
+            ? MAKEPAD_WEBGL_PHONE_DPR_CEILING
+            : MAKEPAD_WEBGL_DPR_CEILING;
+        // These optional attributes are escape hatches for deliberately
+        // quality-tuned embeds; conservative defaults protect ordinary apps.
+        this.render_quality = {
+            pixel_budget: read_number("renderpixelbudget", MAKEPAD_WEBGL_PIXEL_BUDGET),
+            dpr_ceiling: read_number("maxdpr", phone_ceiling),
+        };
+        return this.render_quality;
+    }
+
     update_window_info() {
-        var dpi_factor = window.devicePixelRatio;
         var w;
         var h;
         var canvas = this.canvas;
@@ -2673,14 +3136,31 @@ export class WasmWebBrowser extends WasmBridge {
             w = canvas.offsetWidth;
             h = canvas.offsetHeight;
         }
-        var sw = canvas.width = w * dpi_factor;
-        var sh = canvas.height = h * dpi_factor;
+        const physical_device_dpi = makepad_device_pixel_ratio(window.devicePixelRatio);
+        this.physical_device_dpi = physical_device_dpi;
+        const quality = this.ensure_render_quality();
+        const size = makepad_compute_webgl_size(
+            w,
+            h,
+            Math.min(physical_device_dpi, quality.dpr_ceiling),
+            this.webgl_limits,
+            quality.pixel_budget,
+        );
+        if (canvas.width !== size.width) {
+            canvas.width = size.width;
+        }
+        if (canvas.height !== size.height) {
+            canvas.height = size.height;
+        }
 
-        this.gl.viewport(0, 0, sw, sh);
+        if (this.gl && !this.webgl_context_lost) {
+            this.gl.viewport(0, 0, size.width, size.height);
+        }
 
-        this.window_info.dpi_factor = dpi_factor;
-        this.window_info.inner_width = canvas.offsetWidth;
-        this.window_info.inner_height = canvas.offsetHeight;
+        this.dpi_factor = size.scale;
+        this.window_info.dpi_factor = size.scale;
+        this.window_info.inner_width = size.logical_width;
+        this.window_info.inner_height = size.logical_height;
         this.window_info.is_fullscreen = is_fullscreen();
         this.window_info.can_fullscreen = can_fullscreen();
     }
@@ -2691,6 +3171,9 @@ export class WasmWebBrowser extends WasmBridge {
 
     bind_screen_resize() {
         this.handlers.on_screen_resize = () => {
+            if (this.webgl_context_lost) {
+                return;
+            }
             this.update_window_info();
             if (this.to_wasm !== undefined) {
                 this.to_wasm.ToWasmResizeWindow({ window_info: this.window_info });
@@ -3004,6 +3487,9 @@ export class WasmWebBrowser extends WasmBridge {
             };
         };
         const emit_drag = (event, left) => {
+            if (this.webgl_context_lost) {
+                return;
+            }
             const pos = position(event);
             this.to_wasm.ToWasmFileDrag({
                 x: pos.x,
@@ -3032,6 +3518,9 @@ export class WasmWebBrowser extends WasmBridge {
         });
         canvas.addEventListener('drop', event => {
             event.preventDefault();
+            if (this.webgl_context_lost) {
+                return;
+            }
             const pos = position(event);
             const modifiers = pack_key_modifier(event);
             this.read_virtual_files(
@@ -3039,6 +3528,9 @@ export class WasmWebBrowser extends WasmBridge {
                 this.virtual_file_max_size,
                 this.virtual_file_max_total_size,
             ).then(files => {
+                if (this.webgl_context_lost) {
+                    return;
+                }
                 this.to_wasm.ToWasmFileDrop({
                     x: pos.x,
                     y: pos.y,
@@ -3047,6 +3539,9 @@ export class WasmWebBrowser extends WasmBridge {
                 });
                 this.do_wasm_pump();
             }).catch(error => {
+                if (this.webgl_context_lost) {
+                    return;
+                }
                 this.to_wasm.ToWasmFileDropError({error: "" + error});
                 this.do_wasm_pump();
             });
@@ -3194,7 +3689,7 @@ export class WasmWebBrowser extends WasmBridge {
             is_composing = false;
 
             // send final IME input result
-            if (e.data && e.data !== '\n') {
+            if (!this.webgl_context_lost && e.data && e.data !== '\n') {
                 this.to_wasm.ToWasmTextInput({
                     was_paste: false,
                     input: e.data,
