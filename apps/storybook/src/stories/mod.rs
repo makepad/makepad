@@ -8,12 +8,14 @@ pub mod welcome;
 pub mod button;
 pub mod checkbox;
 pub mod dropdown;
+pub mod label;
 
 pub fn script_mod(vm: &mut ScriptVm) {
     welcome::script_mod(vm);
     button::script_mod(vm);
     checkbox::script_mod(vm);
     dropdown::script_mod(vm);
+    label::script_mod(vm);
 }
 
 pub fn tables() -> &'static [&'static [Story]] {
@@ -22,5 +24,6 @@ pub fn tables() -> &'static [&'static [Story]] {
         button::STORIES,
         checkbox::STORIES,
         dropdown::STORIES,
+        label::STORIES,
     ]
 }
