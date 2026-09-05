@@ -44,6 +44,8 @@
 
 use crate::{
     animator::{Animator, AnimatorAction, AnimatorImpl, Play},
+    link_label::LinkLabelWidgetRefExt,
+    view::View,
     badge::{measure, sized, BadgeIntent, BadgePalette, IntentColors},
     makepad_derive_widget::*,
     makepad_draw::*,
@@ -102,6 +104,32 @@ impl ChipSize {
             ChipSize::Large => ChipMetrics { height: 34.0, pad_x: 14.0, gap: 6.0, mark: 14.0, font_scale: 1.1 },
         }
     }
+}
+
+/// How many chips in a group may be chosen at once.
+#[derive(Clone, Copy, Debug, PartialEq, Script, ScriptHook)]
+#[repr(u32)]
+pub enum ChipSelection {
+    /// The group coordinates nothing; each chip is on its own.
+    Any = 0,
+    /// Choosing one puts every other one back.
+    Single = 1,
+    /// Any number at once.
+    #[pick]
+    Multi = 2,
+}
+
+/// What a group reports, on top of what its chips report themselves.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub enum ChipGroupAction {
+    /// The set of chosen chips changed, by a press or by the group putting
+    /// another one back.
+    Changed,
+    /// Every chip was asked to go, by the "clear all" a `FilterSummary`
+    /// carries.
+    Cleared,
+    #[default]
+    None,
 }
 
 /// What a chip reports. The host owns the list behind the chips, so the
@@ -239,6 +267,8 @@ script_mod! {
     mod.widgets.splat(mod.widgets.ChipAppearance)
     mod.widgets.ChipSize = set_type_default() do #(ChipSize::script_api(vm))
     mod.widgets.splat(mod.widgets.ChipSize)
+    mod.widgets.ChipSelection = set_type_default() do #(ChipSelection::script_api(vm))
+    mod.widgets.splat(mod.widgets.ChipSelection)
 
     use mod.widgets.*
 
@@ -419,6 +449,26 @@ script_mod! {
         /** icon only: the label is empty */
         text: ""
         icon_walk: Walk{width: 14., height: Fit}
+    }
+
+    mod.widgets.ChipGroupBase = #(ChipGroup::register_widget(vm))
+    /** A row of chips that agree on what "chosen" means, wrapping when the
+     * row runs out and moving the keyboard focus along itself. */
+    mod.widgets.ChipGroup = set_type_default() do mod.widgets.ChipGroupBase{
+        width: Fill
+        height: Fit
+        flow: Right{wrap: true}
+        spacing: theme.space_1
+        /** how many chips may be chosen at once: Any Single Multi */
+        selection: Multi
+        /** Delete or Backspace on a focused removable chip asks for its removal */
+        remove_on_delete: true
+    }
+
+    /** The chips a filter is currently made of, with a way to drop them all. */
+    mod.widgets.FilterSummary = mod.widgets.ChipGroup{
+        align: Align{y: 0.5}
+        clear := LinkLabel{text: "Clear all"}
     }
 
     /** A label on a record: it states a fact and answers nothing, so it
@@ -772,6 +822,247 @@ impl ChipRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_selected(cx, selected);
         }
+    }
+}
+
+/// A row of chips that agree on what "chosen" means.
+///
+/// The group owns exactly two things a chip cannot own by itself: the RULE
+/// (choosing one may put the others back) and the keyboard's PLACE in the
+/// row. Everything else stays with the chip, so a chip outside a group
+/// behaves exactly as one inside it.
+///
+/// The row is ONE tab stop, not one per chip: Tab reaches the group, then
+/// the arrows walk it. That is what a row of filters should be — someone
+/// working by keyboard who wants the next control should not have to press
+/// Tab nine times to get past nine filters.
+#[derive(Script, ScriptHook, Widget)]
+pub struct ChipGroup {
+    #[deref]
+    view: View,
+    /// How many chips may be chosen at once.
+    #[live]
+    pub selection: ChipSelection,
+    /// Delete or Backspace on the focused chip asks for its removal.
+    #[live(true)]
+    pub remove_on_delete: bool,
+    /// Which chip the keyboard is on, as an index into the chips the group
+    /// can see.
+    #[rust]
+    focused: usize,
+}
+
+impl ChipGroup {
+    /// The chips under this group, in layout order. Only direct children
+    /// count: a chip inside a nested view belongs to that view's own group,
+    /// if it has one.
+    fn chips(&self) -> Vec<WidgetRef> {
+        let mut found = Vec::new();
+        self.view.children(&mut |_id, child| {
+            if child.borrow::<Chip>().is_some() {
+                found.push(child);
+            }
+        });
+        found
+    }
+
+    /// Put every chip but `keep` back. Answers whether anything moved, so
+    /// the group only reports a change that actually happened.
+    fn put_the_others_back(&mut self, cx: &mut Cx, keep: WidgetUid) -> bool {
+        let mut changed = false;
+        for chip in self.chips() {
+            let Some(mut inner) = chip.borrow_mut::<Chip>() else {
+                continue;
+            };
+            if inner.widget_uid() != keep && inner.selected {
+                inner.set_selected(cx, false);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn move_focus(&mut self, cx: &mut Cx, delta: isize) {
+        let count = self.chips().len();
+        if count == 0 {
+            return;
+        }
+        let len = count as isize;
+        self.focused = (((self.focused as isize + delta) % len + len) % len) as usize;
+        self.view.redraw(cx);
+    }
+
+    /// The labels of the chips that are chosen.
+    pub fn chosen(&self) -> Vec<String> {
+        self.chips()
+            .iter()
+            .filter_map(|chip| chip.borrow::<Chip>())
+            .filter(|chip| chip.selected)
+            .map(|chip| chip.text.clone())
+            .collect()
+    }
+
+    /// Ask every removable chip to go. Each reports its own removal, so a
+    /// host that already listens for the cross needs no second path.
+    fn ask_all_to_go(&mut self, cx: &mut Cx) {
+        for chip in self.chips() {
+            let Some(inner) = chip.borrow::<Chip>() else {
+                continue;
+            };
+            let (removable, chip_uid) = (inner.removable, inner.widget_uid());
+            drop(inner);
+            if removable {
+                cx.widget_action(chip_uid, ChipAction::Removed);
+            }
+        }
+    }
+
+    fn toggle_focused(&mut self, cx: &mut Cx) -> bool {
+        let Some(chip) = self.chips().get(self.focused).cloned() else {
+            return false;
+        };
+        let Some(mut inner) = chip.borrow_mut::<Chip>() else {
+            return false;
+        };
+        if !inner.selectable {
+            return false;
+        }
+        let on = !inner.selected;
+        inner.set_selected(cx, on);
+        let keep = inner.widget_uid();
+        drop(inner);
+        if on && self.selection == ChipSelection::Single {
+            self.put_the_others_back(cx, keep);
+        }
+        true
+    }
+
+    /// Which chip this round's actions came from, if any.
+    fn pressed_index(&self, actions: &Actions) -> Option<usize> {
+        self.chips().iter().position(|chip| {
+            chip.borrow::<Chip>()
+                .map(|inner| actions.find_widget_action(inner.widget_uid()).is_some())
+                .unwrap_or(false)
+        })
+    }
+
+    fn remove_focused(&mut self, cx: &mut Cx) {
+        let Some(chip) = self.chips().get(self.focused).cloned() else {
+            return;
+        };
+        let Some(inner) = chip.borrow::<Chip>() else {
+            return;
+        };
+        let (removable, chip_uid) = (inner.removable, inner.widget_uid());
+        drop(inner);
+        if removable {
+            cx.widget_action(chip_uid, ChipAction::Removed);
+        }
+    }
+}
+
+impl Widget for ChipGroup {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.view.draw_walk(cx, scope, walk)
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        let uid = self.widget_uid();
+        // The group deliberately does NOT hit-test its own area: that area
+        // covers its chips, and taking the hit would capture the pointer
+        // before a chip ever saw it. Keys are read straight off the event
+        // instead, and only while the row holds the key focus.
+        if let Event::KeyDown(ke) = event {
+            if cx.has_key_focus(self.view.area()) {
+                match ke.key_code {
+                    KeyCode::ArrowRight | KeyCode::ArrowDown => self.move_focus(cx, 1),
+                    KeyCode::ArrowLeft | KeyCode::ArrowUp => self.move_focus(cx, -1),
+                    KeyCode::Home => {
+                        self.focused = 0;
+                        self.view.redraw(cx);
+                    }
+                    KeyCode::End => {
+                        self.focused = self.chips().len().saturating_sub(1);
+                        self.view.redraw(cx);
+                    }
+                    KeyCode::ReturnKey | KeyCode::Space => {
+                        if self.toggle_focused(cx) {
+                            cx.widget_action(uid, ChipGroupAction::Changed);
+                        }
+                    }
+                    KeyCode::Delete | KeyCode::Backspace if self.remove_on_delete => {
+                        self.remove_focused(cx);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        self.view.handle_event(cx, event, scope);
+
+        if let Event::Actions(actions) = event {
+            let mut changed = false;
+            for chip in self.chips() {
+                let Some(inner) = chip.borrow::<Chip>() else {
+                    continue;
+                };
+                let chip_uid = inner.widget_uid();
+                let selected = inner.selected;
+                drop(inner);
+                let Some(action) = actions.find_widget_action(chip_uid) else {
+                    continue;
+                };
+                if let ChipAction::Toggled(_) = action.cast::<ChipAction>() {
+                    changed = true;
+                    if selected && self.selection == ChipSelection::Single {
+                        self.put_the_others_back(cx, chip_uid);
+                    }
+                }
+            }
+            if changed {
+                // A press moves the keyboard's place to the chip that was
+                // pressed, so the arrows carry on from where the hand left
+                // off rather than from wherever they were.
+                if let Some(index) = self.pressed_index(actions) {
+                    self.focused = index;
+                }
+                cx.set_key_focus(self.view.area());
+                cx.widget_action(uid, ChipGroupAction::Changed);
+            }
+            // The clear link is found by name rather than by type: a host
+            // may put any widget there, and only its click matters.
+            let clear = self.view.widget(cx, ids!(clear));
+            if !clear.is_empty() && clear.as_link_label().clicked(actions) {
+                self.ask_all_to_go(cx);
+                cx.widget_action(uid, ChipGroupAction::Cleared);
+            }
+        }
+    }
+
+    /// The chosen chips, comma separated: what the row is filtering by, in
+    /// one line a test can wait on.
+    fn text(&self) -> String {
+        self.chosen().join(", ")
+    }
+}
+
+impl ChipGroupRef {
+    /// The labels of the chips that are chosen.
+    pub fn chosen(&self) -> Vec<String> {
+        self.borrow().map(|inner| inner.chosen()).unwrap_or_default()
+    }
+
+    pub fn changed(&self, actions: &Actions) -> bool {
+        if let Some(action) = actions.find_widget_action(self.widget_uid()) {
+            return matches!(action.cast::<ChipGroupAction>(), ChipGroupAction::Changed);
+        }
+        false
+    }
+
+    pub fn cleared(&self, actions: &Actions) -> bool {
+        if let Some(action) = actions.find_widget_action(self.widget_uid()) {
+            return matches!(action.cast::<ChipGroupAction>(), ChipGroupAction::Cleared);
+        }
+        false
     }
 }
 
