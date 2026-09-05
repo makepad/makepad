@@ -69,6 +69,34 @@ script_mod! {
             removed := Label{text: "nothing removed yet"}
         }
 
+        StoryHeading{text: "Groups"}
+        StoryNote{text: "A group is one tab stop: the arrows walk it, Return chooses, Delete asks a removable chip to go. A Single group puts the others back when one is chosen."}
+        StoryRow{
+            single := ChipGroup{
+                width: Fit
+                selection: Single
+                ChipFlat{text: "Day" selectable: true selected: true appearance: Outline}
+                ChipFlat{text: "Week" selectable: true appearance: Outline}
+                ChipFlat{text: "Month" selectable: true appearance: Outline}
+            }
+        }
+        StoryRow{
+            single_note := Label{text: "period: Day"}
+        }
+        StoryNote{text: "A filter summary holds what a filter is currently made of, and drops the lot."}
+        StoryRow{
+            summary := FilterSummary{
+                width: Fit
+                f_status := ChipFlat{text: "status: open" removable: true}
+                f_owner := ChipFlat{text: "owner: me" removable: true}
+                f_label := ChipFlat{text: "label: bug" removable: true}
+                clear := LinkLabel{text: "Clear all"}
+            }
+        }
+        StoryRow{
+            summary_note := Label{text: "three filters"}
+        }
+
         StoryHeading{text: "Tags"}
         StoryNote{text: "A tag states a fact and answers nothing: no hover, no press, no focus."}
         StoryRow{
@@ -122,6 +150,35 @@ fn chip_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
             format!("on: {}", on.join(", "))
         };
         root.label(cx, ids!(chosen)).set_text(cx, &text);
+    }
+    let single = root.chip_group(cx, ids!(single));
+    if single.changed(actions) {
+        let chosen = single.chosen();
+        let text = chosen.first().map(|s| format!("period: {s}")).unwrap_or_else(|| "period: none".to_string());
+        root.label(cx, ids!(single_note)).set_text(cx, &text);
+    }
+    // Each filter reports its own removal, whether it was the cross, the
+    // Delete key or the clear link that asked, so one loop covers all three.
+    let filters_in_summary = [ids!(f_status), ids!(f_owner), ids!(f_label)];
+    let mut any_removed = false;
+    for id in filters_in_summary {
+        let chip = root.chip(cx, id);
+        if chip.removed(actions) {
+            chip.set_visible(cx, false);
+            any_removed = true;
+        }
+    }
+    if any_removed {
+        let left = filters_in_summary
+            .iter()
+            .filter(|id| root.chip(cx, **id).visible())
+            .count();
+        let text = match left {
+            0 => "no filters".to_string(),
+            1 => "one filter".to_string(),
+            n => format!("{n} filters"),
+        };
+        root.label(cx, ids!(summary_note)).set_text(cx, &text);
     }
     for (id, name) in [(ids!(recipient), "ada@example.com"), (ids!(recipient_2), "grace@example.com")] {
         let chip = root.chip(cx, id);
