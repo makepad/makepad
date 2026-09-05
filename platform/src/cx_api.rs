@@ -1235,6 +1235,11 @@ impl Cx {
         }
     }
 
+    /// Take the sweep lock for `value`: until it is released, `Event::hits`
+    /// answers nothing to any area whose sweep area is not `value`. Locks
+    /// nest — an overlay opened over a locked one takes the lock for itself
+    /// and hands it back when it unlocks; an owner locking twice holds one
+    /// entry.
     pub fn sweep_lock(&mut self, value: Area) {
         self.fingers.sweep_lock(value);
     }
@@ -1256,8 +1261,15 @@ impl Cx {
         self.fingers.promote_capture_over(over)
     }
 
+    /// Release the sweep lock held by `value`, wherever it sits in the nest.
+    /// A lock held by another area is untouched.
     pub fn sweep_unlock(&mut self, value: Area) {
         self.fingers.sweep_unlock(value);
+    }
+
+    /// The area holding the sweep lock right now (the innermost owner), if any.
+    pub fn sweep_lock_area(&self) -> Option<Area> {
+        self.fingers.sweep_lock_area()
     }
 
     /// Returns whether scrolling is currently allowed within the given `area`.
@@ -1270,6 +1282,10 @@ impl Cx {
 
     /// Blocks scrolling events/hits in the app *EXCEPT* for within the given `scrollable_area`.
     ///
+    /// Blocks nest: a second owner (a modal over a modal) takes over until it
+    /// releases its own block, and the first owner's block then applies again.
+    /// The same owner may call this every draw and keeps its single entry.
+    ///
     /// ***NOTE***: this must be re-invoked every time the area changes, which is upon every draw pass.
     ///
     /// If you want to block scrolling everywhere, pass in `Area::Empty`.
@@ -1278,12 +1294,20 @@ impl Cx {
             .block_scrolling_within_area(Some(scrollable_area));
     }
 
-    /// Fully unblocks scrolling, allowing scrolling to occur anywhere across the entire app.
-    ///
-    /// This effectively restores the default behavior, e.g., after a previous call to
-    /// [`Cx::block_scrolling_except_within()`].
+    /// Releases the innermost scroll block — the most recent
+    /// [`Cx::block_scrolling_except_within()`] whose owner has not released
+    /// it. With a single owner this restores the default, scrolling anywhere.
+    /// An owner that knows its area should call
+    /// [`Cx::unblock_scrolling_within_area()`] instead, so it never pops a
+    /// block another owner pushed over it.
     pub fn unblock_scrolling(&mut self) {
         self.fingers.block_scrolling_within_area(None);
+    }
+
+    /// Releases the scroll block that `scrollable_area` owns, wherever it
+    /// sits in the nest; blocks held by other owners are untouched.
+    pub fn unblock_scrolling_within_area(&mut self, scrollable_area: Area) {
+        self.fingers.unblock_scrolling_within_area(scrollable_area);
     }
 
     pub fn start_timeout(&mut self, delay: f64) -> Timer {
@@ -2108,5 +2132,36 @@ mod tests {
         assert!(matches!(first, CxOsOp::CreateWindow(_)));
         assert!(matches!(second, CxOsOp::SetTopmost(_, true)));
         assert!(platform_ops.is_empty());
+    }
+
+    #[test]
+    fn nested_overlay_locks_unwind_one_level_at_a_time() {
+        let mut cx = Cx::new(Box::new(|_cx: &mut Cx, _event: &Event| {}));
+        let list = cx.draw_lists.alloc();
+        let area = |rect_id| {
+            Area::Rect(crate::area::RectArea {
+                draw_list_id: list.id(),
+                rect_id,
+                redraw_id: 0,
+            })
+        };
+        let (dialog, popover) = (area(0), area(1));
+
+        cx.sweep_lock(dialog);
+        cx.block_scrolling_except_within(dialog);
+        cx.sweep_lock(popover);
+        cx.block_scrolling_except_within(popover);
+        assert_eq!(cx.sweep_lock_area(), Some(popover));
+        assert_eq!(cx.fingers.blocked_scrolling_exception_area(), Some(popover));
+
+        cx.sweep_unlock(popover);
+        cx.unblock_scrolling_within_area(popover);
+        assert_eq!(cx.sweep_lock_area(), Some(dialog));
+        assert_eq!(cx.fingers.blocked_scrolling_exception_area(), Some(dialog));
+
+        cx.sweep_unlock(dialog);
+        cx.unblock_scrolling();
+        assert_eq!(cx.sweep_lock_area(), None);
+        assert_eq!(cx.fingers.blocked_scrolling_exception_area(), None);
     }
 }

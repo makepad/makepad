@@ -238,7 +238,10 @@ impl Modal {
         }
         self.draw_bg.redraw(cx);
         cx.revert_key_focus();
-        cx.unblock_scrolling();
+        // Release only this modal's block. A modal closed under another one
+        // (the platform nests these) must leave the other's block in place;
+        // the plain `unblock_scrolling` pops whichever block is innermost.
+        cx.unblock_scrolling_within_area(content.area());
     }
 
     pub fn dismissed(&self, actions: &Actions) -> bool {
