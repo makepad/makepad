@@ -16,12 +16,14 @@
 //! GameWorld below is the live parity-oracle sim.
 
 pub mod decal;
+pub mod deck;
 pub mod dynamics;
 pub mod entity;
 pub mod heading;
 pub mod hud;
 pub mod landform;
 pub mod level_solid;
+pub mod meshfloor;
 pub mod nav;
 pub mod particles;
 pub mod player;
@@ -36,6 +38,7 @@ pub mod water;
 pub mod world;
 
 pub use decal::*;
+pub use deck::*;
 pub use dynamics::*;
 pub use entity::*;
 pub use heading::*;

@@ -108,13 +108,7 @@ pub fn build_raster(
     }
     writer.set_metadata(
         "geodata_built_unix",
-        format!(
-            "{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0)
-        ),
+        crate::clock::now_unix().to_string(),
     );
     for (_, (zoom, x, y, data)) in tiles {
         writer

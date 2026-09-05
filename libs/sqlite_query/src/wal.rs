@@ -15,11 +15,11 @@
 //! recovers on its own.
 
 use crate::error::{Error, Result};
+use crate::storage::{PageStore, PageStoreSet, StoreKind, StoreOpenOptions};
 use crate::value::be_u32;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub const WAL_HEADER_SIZE: usize = 32;
 pub const WAL_FRAME_HEADER_SIZE: usize = 24;
@@ -71,7 +71,8 @@ pub fn shm_path(db_path: &Path) -> PathBuf {
 
 /// One consistent view of a `-wal` file plus everything needed to append to it.
 pub struct Wal {
-    file: File,
+    file: Arc<dyn PageStore>,
+    stores: Arc<dyn PageStoreSet>,
     path: PathBuf,
     page_size: usize,
     big_endian_cksum: bool,
@@ -97,24 +98,35 @@ impl Wal {
     /// Open an existing log and validate it up to the last commit. Returns
     /// `Ok(None)` when there is nothing usable: absent, empty, a foreign
     /// format, or a header that fails its own checksum.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open(db_path: &Path, page_size: u32, writable: bool) -> Result<Option<Wal>> {
-        let path = wal_path(db_path);
-        let mut file = match File::options()
-            .read(true)
-            .write(writable)
-            .open(&path)
-        {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(Error::Io(e)),
+        let stores: Arc<dyn PageStoreSet> = Arc::new(crate::storage::FileStoreSet::new(db_path));
+        Self::open_with(stores, page_size, writable)
+    }
+
+    pub(crate) fn open_with(
+        stores: Arc<dyn PageStoreSet>,
+        page_size: u32,
+        writable: bool,
+    ) -> Result<Option<Wal>> {
+        let path = stores
+            .path(StoreKind::Wal)
+            .unwrap_or_else(|| PathBuf::from(":memory:-wal"));
+        let options = if writable {
+            StoreOpenOptions::READ_WRITE
+        } else {
+            StoreOpenOptions::READ_ONLY
         };
-        let len = file.metadata()?.len();
+        let file = match stores.open(StoreKind::Wal, options)? {
+            Some(file) => file,
+            None => return Ok(None),
+        };
+        let len = file.len()?;
         if len < WAL_HEADER_SIZE as u64 {
             return Ok(None);
         }
         let mut hdr = [0u8; WAL_HEADER_SIZE];
-        file.seek(SeekFrom::Start(0))?;
-        file.read_exact(&mut hdr)?;
+        file.read_at(0, &mut hdr)?;
         let magic = be_u32(&hdr, 0)?;
         let big_endian_cksum = match magic {
             WAL_MAGIC_LE_CKSUM => false,
@@ -143,6 +155,7 @@ impl Wal {
 
         let mut wal = Wal {
             file,
+            stores,
             path,
             page_size: page_size as usize,
             big_endian_cksum,
@@ -167,16 +180,27 @@ impl Wal {
     }
 
     /// Create a fresh log for `db_path` (or overwrite an unusable one).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn create(db_path: &Path, page_size: u32, seq: u32, salt: (u32, u32)) -> Result<Wal> {
-        let path = wal_path(db_path);
-        let file = File::options()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(true)
-            .open(&path)?;
+        let stores: Arc<dyn PageStoreSet> = Arc::new(crate::storage::FileStoreSet::new(db_path));
+        Self::create_with(stores, page_size, seq, salt)
+    }
+
+    pub(crate) fn create_with(
+        stores: Arc<dyn PageStoreSet>,
+        page_size: u32,
+        seq: u32,
+        salt: (u32, u32),
+    ) -> Result<Wal> {
+        let path = stores
+            .path(StoreKind::Wal)
+            .unwrap_or_else(|| PathBuf::from(":memory:-wal"));
+        let file = stores
+            .open(StoreKind::Wal, StoreOpenOptions::CREATE_TRUNCATE)?
+            .expect("create always returns a store");
         let mut wal = Wal {
             file,
+            stores,
             path,
             page_size: page_size as usize,
             big_endian_cksum: false,
@@ -211,9 +235,8 @@ impl Wal {
         let cks = checksum(&hdr[..24], (0, 0), self.big_endian_cksum);
         hdr[24..28].copy_from_slice(&cks.0.to_be_bytes());
         hdr[28..32].copy_from_slice(&cks.1.to_be_bytes());
-        self.file.seek(SeekFrom::Start(0))?;
-        self.file.write_all(&hdr)?;
-        crate::sync::sync(&self.file)?;
+        self.file.write_at(0, &hdr)?;
+        self.file.sync()?;
         self.running = cks;
         self.pending_running = cks;
         self.frames = 0;
@@ -239,9 +262,9 @@ impl Wal {
         let mut frame_hdr = [0u8; WAL_FRAME_HEADER_SIZE];
         let mut page = vec![0u8; self.page_size];
         while offset + frame_size <= len {
-            self.file.seek(SeekFrom::Start(offset))?;
-            self.file.read_exact(&mut frame_hdr)?;
-            self.file.read_exact(&mut page)?;
+            self.file.read_at(offset, &mut frame_hdr)?;
+            self.file
+                .read_at(offset + WAL_FRAME_HEADER_SIZE as u64, &mut page)?;
             let pgno = be_u32(&frame_hdr, 0)?;
             let truncate = be_u32(&frame_hdr, 4)?;
             let fsalt = (be_u32(&frame_hdr, 8)?, be_u32(&frame_hdr, 12)?);
@@ -279,7 +302,7 @@ impl Wal {
     /// re-read, because a reset keeps the file long but changes the salts, and
     /// trusting the length alone would leave us reading a previous generation.
     pub fn refresh(&mut self) -> Result<()> {
-        let len = self.file.metadata()?.len();
+        let len = self.file.len()?;
         if len < WAL_HEADER_SIZE as u64 {
             self.index.clear();
             self.frames = 0;
@@ -290,8 +313,7 @@ impl Wal {
             return Ok(());
         }
         let mut hdr = [0u8; WAL_HEADER_SIZE];
-        self.file.seek(SeekFrom::Start(0))?;
-        self.file.read_exact(&mut hdr)?;
+        self.file.read_at(0, &mut hdr)?;
         let salt = (be_u32(&hdr, 16)?, be_u32(&hdr, 20)?);
         let seq = be_u32(&hdr, 12)?;
         let generation_changed = salt != self.salt || seq != self.checkpoint_seq;
@@ -337,9 +359,9 @@ impl Wal {
         let mut frame_hdr = [0u8; WAL_FRAME_HEADER_SIZE];
         let mut page = vec![0u8; self.page_size];
         while offset + frame_size <= len {
-            self.file.seek(SeekFrom::Start(offset))?;
-            self.file.read_exact(&mut frame_hdr)?;
-            self.file.read_exact(&mut page)?;
+            self.file.read_at(offset, &mut frame_hdr)?;
+            self.file
+                .read_at(offset + WAL_FRAME_HEADER_SIZE as u64, &mut page)?;
             let pgno = be_u32(&frame_hdr, 0)?;
             let truncate = be_u32(&frame_hdr, 4)?;
             let fsalt = (be_u32(&frame_hdr, 8)?, be_u32(&frame_hdr, 12)?);
@@ -414,8 +436,7 @@ impl Wal {
         // page, decoded as this one.
         let header_at = offset.saturating_sub(WAL_FRAME_HEADER_SIZE as u64);
         let mut hdr = [0u8; WAL_FRAME_HEADER_SIZE];
-        self.file.seek(SeekFrom::Start(header_at))?;
-        match self.file.read_exact(&mut hdr) {
+        match self.file.read_at(header_at, &mut hdr) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Err(snapshot_gone()),
             Err(e) => return Err(Error::Io(e)),
@@ -426,8 +447,7 @@ impl Wal {
         {
             return Err(snapshot_gone());
         }
-        // The header read left the cursor exactly on the frame's page data.
-        match self.file.read_exact(out) {
+        match self.file.read_at(offset, out) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Err(snapshot_gone()),
             Err(e) => return Err(Error::Io(e)),
@@ -452,9 +472,9 @@ impl Wal {
         let s = checksum(data, s, self.big_endian_cksum);
         hdr[16..20].copy_from_slice(&s.0.to_be_bytes());
         hdr[20..24].copy_from_slice(&s.1.to_be_bytes());
-        self.file.seek(SeekFrom::Start(offset))?;
-        self.file.write_all(&hdr)?;
-        self.file.write_all(data)?;
+        self.file.write_at(offset, &hdr)?;
+        self.file
+            .write_at(offset + WAL_FRAME_HEADER_SIZE as u64, data)?;
         self.pending_running = s;
         self.pending_frames += 1;
         self.pending
@@ -466,7 +486,7 @@ impl Wal {
     /// Make every appended frame durable and part of the snapshot. The caller
     /// has already written the commit frame (the one carrying `db_size`).
     pub fn commit(&mut self, db_size: u32) -> Result<()> {
-        crate::sync::sync(&self.file)?;
+        self.file.sync()?;
         for (pgno, off) in std::mem::take(&mut self.pending) {
             self.index.insert(pgno, off);
         }
@@ -474,7 +494,7 @@ impl Wal {
         self.pending_frames = 0;
         self.running = self.pending_running;
         self.db_size_pages = db_size;
-        self.scanned_len = self.file.metadata()?.len();
+        self.scanned_len = self.file.len()?;
         crate::pager::journal_write_step();
         Ok(())
     }
@@ -490,7 +510,7 @@ impl Wal {
 
     /// Fold every committed frame into the database file and start the log
     /// over. The caller must hold exclusive access.
-    pub fn checkpoint(&mut self, db: &mut File) -> Result<u32> {
+    pub fn checkpoint(&mut self, db: &dyn PageStore) -> Result<u32> {
         if self.frames == 0 {
             return Ok(0);
         }
@@ -498,26 +518,24 @@ impl Wal {
         pages.sort_unstable();
         let mut buf = vec![0u8; self.page_size];
         for (pgno, offset) in &pages {
-            self.file.seek(SeekFrom::Start(*offset))?;
-            self.file.read_exact(&mut buf)?;
-            db.seek(SeekFrom::Start((*pgno as u64 - 1) * self.page_size as u64))?;
-            db.write_all(&buf)?;
+            self.file.read_at(*offset, &mut buf)?;
+            db.write_at((*pgno as u64 - 1) * self.page_size as u64, &buf)?;
             // Crash-injection step: a fold interrupted here leaves a torn
             // database file UNDER an intact log, and recovery replays the
             // same frames over it (see the checkpoint crash sweep).
             crate::pager::journal_write_step();
         }
         if self.db_size_pages > 0 {
-            db.set_len(self.db_size_pages as u64 * self.page_size as u64)?;
+            db.truncate(self.db_size_pages as u64 * self.page_size as u64)?;
         }
-        crate::sync::sync(db)?;
+        db.sync()?;
         crate::pager::journal_write_step();
         let moved = pages.len() as u32;
         // Reset: a new generation so any stale frame fails the salt check.
         self.checkpoint_seq = self.checkpoint_seq.wrapping_add(1);
         self.salt.0 = self.salt.0.wrapping_add(1);
         self.salt.1 = self.salt.1.wrapping_mul(2_654_435_761).wrapping_add(1);
-        self.file.set_len(0)?;
+        self.file.truncate(0)?;
         crate::pager::journal_write_step();
         self.write_header()?;
         Ok(moved)
@@ -526,13 +544,9 @@ impl Wal {
     /// Remove the log entirely (after a checkpoint, when closing a database
     /// that no one else is using).
     pub fn remove(self) -> Result<()> {
-        let path = self.path.clone();
-        drop(self.file);
-        match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(Error::Io(e)),
-        }
+        let Wal { file, stores, .. } = self;
+        drop(file);
+        stores.remove(StoreKind::Wal).map_err(Error::Io)
     }
 }
 
@@ -549,7 +563,7 @@ pub const SHM_LOCK_COUNT: u64 = 8;
 
 /// Keeps the `-shm` locking bytes for as long as this engine owns the log.
 pub struct ShmGuard {
-    file: File,
+    file: Arc<dyn PageStore>,
     #[allow(dead_code)]
     path: PathBuf,
     held: bool,
@@ -560,21 +574,28 @@ impl ShmGuard {
     /// Try to take the WAL locking bytes: shared for a reader (several may
     /// hold them), exclusive for a writer. `Ok(None)` means another process is
     /// using the log right now.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn acquire(db_path: &Path, exclusive: bool) -> Result<Option<ShmGuard>> {
-        let path = shm_path(db_path);
-        let file = match File::options()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open(&path)
-        {
-            Ok(f) => f,
+        let stores: Arc<dyn PageStoreSet> = Arc::new(crate::storage::FileStoreSet::new(db_path));
+        Self::acquire_with(stores, exclusive)
+    }
+
+    pub(crate) fn acquire_with(
+        stores: Arc<dyn PageStoreSet>,
+        exclusive: bool,
+    ) -> Result<Option<ShmGuard>> {
+        let path = stores
+            .path(StoreKind::Shm)
+            .unwrap_or_else(|| PathBuf::from(":memory:-shm"));
+        let file = match stores.open(StoreKind::Shm, StoreOpenOptions::CREATE) {
+            Ok(Some(file)) => file,
+            Ok(None) => unreachable!("create always returns a store"),
             // A read-only directory or file: fall back to reading the log
             // without the lock, which is still checksum-safe.
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(None),
-            Err(e) => return Err(Error::Io(e)),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return Ok(None),
+            Err(error) => return Err(Error::Io(error)),
         };
-        let got = crate::lock::try_lock_range(&file, SHM_LOCK_FIRST, SHM_LOCK_COUNT, exclusive)?;
+        let got = crate::lock::try_lock_range(file.as_ref(), SHM_LOCK_FIRST, SHM_LOCK_COUNT, exclusive)?;
         if !got {
             return Ok(None);
         }
@@ -599,17 +620,16 @@ impl ShmGuard {
         if self.exclusive {
             let _ = self.invalidate_index();
         }
-        let _ = crate::lock::unlock_range(&self.file, SHM_LOCK_FIRST, SHM_LOCK_COUNT);
+        let _ = crate::lock::unlock_range(self.file.as_ref(), SHM_LOCK_FIRST, SHM_LOCK_COUNT);
         self.held = false;
     }
 
-    fn invalidate_index(&mut self) -> std::io::Result<()> {
+    fn invalidate_index(&mut self) -> Result<()> {
         // The two header copies live in the first 96 bytes; the locking bytes
         // start at 120 and are never touched here.
         let zeros = [0u8; 96];
-        self.file.seek(SeekFrom::Start(0))?;
-        self.file.write_all(&zeros)?;
-        self.file.sync_data()?;
+        self.file.write_at(0, &zeros)?;
+        self.file.sync()?;
         Ok(())
     }
 }

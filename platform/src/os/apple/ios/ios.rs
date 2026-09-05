@@ -63,6 +63,18 @@ use {
     },
 };
 
+pub(crate) fn wake_ui_event_loop() {
+    unsafe {
+        let main_thread_block = objc_block!(move || {});
+        let main_queue: ObjcId = msg_send![class!(NSOperationQueue), mainQueue];
+        let operation: ObjcId = msg_send![
+            class!(NSBlockOperation),
+            blockOperationWithBlock: &main_thread_block
+        ];
+        let () = msg_send![main_queue, addOperation: operation];
+    }
+}
+
 pub(crate) struct IosCameraPlayer {
     video_id: LiveId,
     tex_y_id: TextureId,
@@ -526,7 +538,9 @@ impl Cx {
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for draw_pass_id in &passes_todo {
-            self.passes[*draw_pass_id].set_time(with_ios_app(|app| app.time_now() as f32));
+            let uniforms_gen = self.next_uniform_gen();
+            self.passes[*draw_pass_id]
+                .set_time(with_ios_app(|app| app.time_now() as f32), uniforms_gen);
             match self.passes[*draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(window_id) => {
@@ -1798,13 +1812,6 @@ impl CxOsApi for Cx {
         self.native_load_dependencies();
         #[cfg(not(apple_sim))]
         self.apple_bundle_load_dependencies();
-    }
-
-    fn spawn_thread<F>(&mut self, f: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        std::thread::spawn(f);
     }
 
     fn seconds_since_app_start(&self) -> f64 {

@@ -1,6 +1,20 @@
 //#![cfg_attr(all(unix), feature(unix_socket_ancillary_data))]
 pub mod gl_render_bridge;
+pub mod home;
+pub mod archive_cache;
 pub mod os;
+
+#[cfg(any(
+    test,
+    all(target_arch = "wasm32", target_feature = "atomics")
+))]
+#[path = "os/web/alloc.rs"]
+mod web_alloc;
+
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+#[global_allocator]
+static WEB_GLOBAL_ALLOCATOR: web_alloc::ThreadCachingAllocator =
+    web_alloc::ThreadCachingAllocator::new();
 
 #[macro_use]
 pub mod log;
@@ -13,11 +27,13 @@ mod shared_bytes;
 
 pub mod action;
 pub mod game_input;
+pub mod frame_trace;
 
 pub mod audio;
 pub mod midi;
 pub mod script;
 pub mod thread;
+pub mod storage;
 pub mod video;
 pub mod gpu_texture;
 
@@ -74,6 +90,7 @@ mod video_session;
 pub mod ui_runner;
 
 pub mod display_context;
+pub mod font_policy;
 
 #[macro_use]
 mod app_main;
@@ -83,8 +100,10 @@ pub mod screen_capture;
 pub mod audio_output_tap;
 pub mod log_ring;
 pub mod shader_error;
-pub use crate::app_main::{resolve_studio_http, should_run_stdin_loop_from_env};
-// Working-tree startup instrumentation (MAKEPAD_STARTUP_TRACE=1).
+pub use crate::app_main::{
+    new_cx_with_font_set, resolve_studio_http, should_run_stdin_loop_from_env,
+};
+// Working-tree startup instrumentation (`MAKEPAD_TRACE=startup`).
 pub use crate::cx::{
     startup_acc, startup_since_exec_ms, startup_trace, startup_trace_enabled, startup_trace_flush,
 };
@@ -121,9 +140,15 @@ pub use {
         audio::*,
         component::{ComponentInfo, ComponentRegistries, ComponentRegistry},
         cursor::MouseCursor,
-        cx::{Cx, CxRef, LinuxWindowParams, OsType},
+        cx::{Cx, CxMemoryReport, CxRef, LinuxWindowParams, OsType},
         cx_api::{AccessibilityUpdatePayload, CxOsApi, CxOsOp, CxThreadPriority, OpenUrlInPlace},
         display_context::{DisplayContext, SystemBarAppearance},
+        font_policy::{
+            extend_font_asset_manifest, font_asset_manifest_len, FontAsset, FontChain, FontPolicy,
+            FontRole, FontSet, LazyFontAsset, LazyFontFamily, FONT_ASSET_MANIFEST_SECTION,
+            INTERNATIONAL_FONT_ASSET_MANIFEST, LATIN_FONT_ASSET_MANIFEST,
+            LATIN_FONT_ASSET_PACKAGE_MANIFEST, MATH_VIEW_FONT_ASSET, UI_SYMBOL_FALLBACK,
+        },
         draw_list::{CxDrawCall, CxDrawItem, CxDrawListPool, CxRectArea, DrawList, DrawListId},
         draw_matrix::DrawMatrix,
         draw_pass::{
@@ -169,6 +194,7 @@ pub use {
             MouseMoveEvent,
             MouseUpEvent,
             NetworkResponsesEvent,
+            StorageResponsesEvent,
             NextFrame,
             NextFrameEvent,
             QuitReason,
@@ -199,9 +225,13 @@ pub use {
             XrState,
             XrUpdateEvent,
         },
-        file_dialogs::{FileDialog, FileDialogAction},
+        file_dialogs::{
+            FileDialog, FileDialogAction, VirtualFile, VirtualFileLimits,
+            DEFAULT_VIRTUAL_FILE_SIZE_LIMIT,
+        },
         game_input::*,
-        geometry::{Geometry, GeometryId},
+        geometry::{CxGeometry, Geometry, GeometryId, IndexData, VertexData},
+        draw_shader::{DrawShaderAttrFormat, DrawShaderInputPacking, DrawShaderInputs},
         gpu_info::GpuPerformance,
         ime::{
             AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, SoftKeyboardConfig,
@@ -229,6 +259,11 @@ pub use {
         script::vm::*,
         screen::{fit_window_rect_to_screens, ScreenGeom, MIN_WINDOW_SIZE},
         shared_bytes::{MappedBytes, SharedBytes, SharedBytesStats},
+        storage::{
+            StorageError, StorageHandle, StorageList, StorageOp, StorageRequestId,
+            StorageEstimate, StorageResponse, StorageResult, StorageStat, DEFAULT_STORAGE_VALUE_CAP,
+            MAX_STORAGE_KEY_BYTES, MAX_STORAGE_LIST_LIMIT, MAX_STORAGE_NAMESPACE_BYTES,
+        },
         texture::{
             image_cache_use_mipmaps, Texture, TextureAnimation, TextureFormat, TextureId,
             TextureSize, TextureUpdated, TextureWrap,

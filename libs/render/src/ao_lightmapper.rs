@@ -956,6 +956,32 @@ pub fn bake_ao(
     height: usize,
     params: &LightmapParams,
 ) -> LightmapBake {
+    bake_ao_inner(positions, normals, uvs, indices, width, height, params, None)
+}
+
+pub fn bake_ao_with_pool(
+    pool: &makepad_draw::makepad_platform::thread::TaskPool,
+    positions: &[Vec3f],
+    normals: Option<&[Vec3f]>,
+    uvs: &[[f32; 2]],
+    indices: &[u32],
+    width: usize,
+    height: usize,
+    params: &LightmapParams,
+) -> LightmapBake {
+    bake_ao_inner(positions, normals, uvs, indices, width, height, params, Some(pool))
+}
+
+pub(crate) fn bake_ao_inner(
+    positions: &[Vec3f],
+    normals: Option<&[Vec3f]>,
+    uvs: &[[f32; 2]],
+    indices: &[u32],
+    width: usize,
+    height: usize,
+    params: &LightmapParams,
+    pool: Option<&makepad_draw::makepad_platform::thread::TaskPool>,
+) -> LightmapBake {
     assert!(params.hemisphere_size.is_power_of_two() && (16..=512).contains(&params.hemisphere_size));
     assert!(params.z_near < params.z_far && params.z_near > 0.0);
     assert!(params.camera_to_surface_distance_modifier >= -1.0);
@@ -1034,44 +1060,40 @@ pub fn bake_ao(
         stats.hemicubes_rendered += queue.len();
         let results: Vec<(f32, f32)> = {
             let mut out = vec![(0.0f32, 0.0f32); queue.len()];
-            let threads = std::thread::available_parallelism()
-                .map_or(8, |n| n.get())
+            let threads = pool
+                .map_or(1, |pool| pool.heavy_workers().saturating_add(1))
                 .min(queue.len().max(1));
-            let cursor = std::sync::atomic::AtomicUsize::new(0);
             let queue = &queue;
             let tris = &tris;
             let weights = &weights;
-            std::thread::scope(|scope| {
-                let mut handles = Vec::with_capacity(threads);
-                for _ in 0..threads {
-                    handles.push(scope.spawn(|| {
-                        let mut renderer = HemiRenderer::new(
-                            params.hemisphere_size,
-                            params.z_near,
-                            params.z_far,
-                            params.clear_color,
-                            weights,
-                            tris,
-                        );
-                        let mut mine: Vec<(usize, (f32, f32))> = Vec::new();
-                        loop {
-                            let i = cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            if i >= queue.len() {
-                                break;
-                            }
-                            mine.push((i, renderer.render(&queue[i])));
-                        }
-                        mine
-                    }));
+            let (tx, rx) = std::sync::mpsc::channel();
+            let work = |worker: usize| {
+                let mut renderer = HemiRenderer::new(
+                    params.hemisphere_size,
+                    params.z_near,
+                    params.z_far,
+                    params.clear_color,
+                    weights,
+                    tris,
+                );
+                let mut i = worker;
+                while i < queue.len() {
+                    let _ = tx.send((i, renderer.render(&queue[i])));
+                    i += threads;
                 }
-                let mut collected = Vec::new();
-                for h in handles {
-                    collected.extend(h.join().unwrap_or_default());
-                }
-                for (i, r) in collected {
-                    out[i] = r;
-                }
-            });
+            };
+            match pool {
+                Some(pool) => pool.fan_out(
+                    makepad_draw::makepad_platform::thread::Lane::Heavy,
+                    threads,
+                    work,
+                ),
+                None => (0..threads).for_each(work),
+            }
+            drop(tx);
+            for (i, result) in rx {
+                out[i] = result;
+            }
             out
         };
 

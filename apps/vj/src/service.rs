@@ -17,11 +17,17 @@
 //!   and the token all sit under it. Default is the checkout's
 //!   `local/vj`. See `data_root`.
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::lanes;
-use makepad_asset_client::{ApiEndpoints, SessionConfig};
+use makepad_asset_client::SessionConfig;
+#[cfg(not(target_arch = "wasm32"))]
+use makepad_asset_client::ApiEndpoints;
+#[cfg(not(target_arch = "wasm32"))]
 use std::net::{IpAddr, SocketAddr};
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
 
+#[cfg(not(target_arch = "wasm32"))]
 fn from_hex16(text: &str) -> Option<[u8; 16]> {
     let bytes = text.as_bytes();
     if bytes.len() != 32 {
@@ -39,6 +45,7 @@ fn from_hex16(text: &str) -> Option<[u8; 16]> {
     Some(out)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_server_spec(spec: &str) -> Option<ApiEndpoints> {
     let mut parts = spec.trim().split(':');
     let ip: IpAddr = parts.next()?.parse().ok()?;
@@ -53,6 +60,7 @@ fn parse_server_spec(spec: &str) -> Option<ApiEndpoints> {
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn read_trimmed(path: &Path) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     let text = text.trim().to_string();
@@ -62,12 +70,14 @@ fn read_trimmed(path: &Path) -> Option<String> {
 /// A local Asset Server already running under asset-ui / ai-content.
 /// Token + listen come from the same catalog root so we never pair a
 /// leftover `~/.makepad-vj` token with a newer server.
+#[cfg(not(target_arch = "wasm32"))]
 struct LocalAssetDb {
     endpoints: Option<ApiEndpoints>,
     server_id: Option<[u8; 16]>,
     token: Option<String>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn attach_local_asset_db(home: &Path) -> Option<LocalAssetDb> {
     // Checkout-local Asset UI first; leftover $HOME trees are a fallback
     // for checkouts that never moved.
@@ -119,6 +129,7 @@ pub fn data_root_from(chosen: Option<&str>) -> PathBuf {
 }
 
 /// The VJ's session config from environment conventions.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn session_config_from_env() -> SessionConfig {
     let home = std::env::var("HOME")
         .map(PathBuf::from)
@@ -164,6 +175,21 @@ pub fn session_config_from_env() -> SessionConfig {
         })
         .or_else(|| local.as_ref().and_then(|db| db.token.clone()))
         .or_else(|| read_trimmed(&cache_parent.join("asset-server.token")));
+    config
+}
+
+/// Browser sessions have no environment, home directory, or filesystem
+/// cache. The static store keeps fetched content in memory; durable local
+/// imports are owned separately by the app's `cx.storage`-backed store.
+#[cfg(target_arch = "wasm32")]
+pub fn session_config_from_env() -> SessionConfig {
+    let base = makepad_asset_client::BaseUrl::parse("https://makepad.nl/vj/store/")
+        .expect("valid built-in VJ static-store URL");
+    let mut config = SessionConfig::static_site(base);
+    // Keep the same lane indices as the native VJ. In particular, deck
+    // audio is hard-routed to AUDIO_LANE (2); StaticSite's generic one-lane
+    // default cannot service that request.
+    config.media_lanes = crate::lanes::lane_leaves();
     config
 }
 

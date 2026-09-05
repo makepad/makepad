@@ -1040,13 +1040,10 @@ fn corridor_deck_overrides(
     if q.corridors.is_empty() || anchors.len() < 2 || verts.len() != anchors.len() {
         return None;
     }
-    // MAKEPAD_CORRIDOR_BRUTE=1: the pre-grid full scan, kept as the
-    // bit-identity oracle. MAKEPAD_CORRIDOR_VERIFY=1: run BOTH paths per
-    // vertex and panic on any bit difference.
-    static BRUTE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let brute = *BRUTE.get_or_init(|| std::env::var_os("MAKEPAD_CORRIDOR_BRUTE").is_some());
-    static VERIFY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let verify = *VERIFY.get_or_init(|| std::env::var_os("MAKEPAD_CORRIDOR_VERIFY").is_some());
+    // With `map.corridor_verify`, use the pre-grid full scan as the result,
+    // run the grid path too, and panic on any bit difference.
+    let brute = crate::makepad_platform::makepad_error_log::trace_enabled("map.corridor_verify");
+    let verify = brute;
     let mut deck_max = 0.0f32;
     let mut out: Vec<f32> = Vec::with_capacity(verts.len());
     let mut prev: Option<(usize, f32)> = None;
@@ -1094,6 +1091,26 @@ fn corridor_deck_overrides(
                         deck = d;
                     }
                 }
+            }
+            if verify {
+                let mut grid_deck = 0.0f32;
+                for &(ci, si) in q.grid.entries(a[0], a[1]) {
+                    let d = probe_corridor_segment(
+                        &q.corridors[ci as usize],
+                        si as usize,
+                        a,
+                        dx,
+                        dy,
+                        dl,
+                    );
+                    if d > grid_deck {
+                        grid_deck = d;
+                    }
+                }
+                assert!(
+                    deck.to_bits() == grid_deck.to_bits(),
+                    "corridor grid mismatch at anchor {a:?}: grid {grid_deck} vs brute {deck}"
+                );
             }
         } else {
             for &(ci, si) in q.grid.entries(a[0], a[1]) {
@@ -1164,7 +1181,13 @@ pub fn road_ribbon_rings(
                     continue;
                 }
                 ring.push(point);
-                ring_dz.push(ribbon.dz.map_or(0.0, |dz| dz[index]));
+                ring_dz.push(
+                    ribbon
+                        .dz
+                        .and_then(|dz| dz.get(index))
+                        .copied()
+                        .unwrap_or(0.0),
+                );
             }
             if ring.len() >= 2 && ring.first() == ring.last() {
                 ring.pop();
@@ -1185,7 +1208,13 @@ pub fn road_ribbon_rings(
                 continue;
             }
             center.push(point);
-            center_dz.push(ribbon.dz.map_or(0.0, |dz| dz[index]));
+            center_dz.push(
+                ribbon
+                    .dz
+                    .and_then(|dz| dz.get(index))
+                    .copied()
+                    .unwrap_or(0.0),
+            );
         }
         if center.len() < 2 {
             continue;
@@ -1395,7 +1424,7 @@ pub fn append_stroke_pass(
     // and no corridor matching.
     let deck_possible = pass.deck_m > 0.0
         || (pass.deck_m == 0.0 && corridors.is_some_and(|q| !q.corridors.is_empty()));
-    let clock = std::time::Instant::now();
+    let clock = Cx::monotonic_now();
     let mut dense: Vec<(f32, f32)> = Vec::new();
     let points = if deck_possible && points.len() >= 2 {
         const MAX_SEG: f32 = 3.0;
@@ -1414,8 +1443,8 @@ pub fn append_stroke_pass(
     } else {
         points
     };
-    let t_densify = clock.elapsed().as_secs_f64() * 1000.0;
-    let clock = std::time::Instant::now();
+    let t_densify = (Cx::monotonic_now() - clock) * 1000.0;
+    let clock = Cx::monotonic_now();
     emit_path(path, points, closed);
     STROKE_ANCHORS.with(|anchors| {
         let mut anchors = anchors.borrow_mut();
@@ -1433,15 +1462,15 @@ pub fn append_stroke_pass(
             aa,
             tolerance,
         );
-        let t_tess = clock.elapsed().as_secs_f64() * 1000.0;
-        let clock = std::time::Instant::now();
+        let t_tess = (Cx::monotonic_now() - clock) * 1000.0;
+        let clock = Cx::monotonic_now();
         let deck_override = if pass.deck_m == 0.0 {
             corridors.and_then(|q| corridor_deck_overrides(tess_verts, &anchors, q))
         } else {
             None
         };
-        let t_deck = clock.elapsed().as_secs_f64() * 1000.0;
-        let clock = std::time::Instant::now();
+        let t_deck = (Cx::monotonic_now() - clock) * 1000.0;
+        let clock = Cx::monotonic_now();
         append_expanded_stroke_geometry(
             tess_verts,
             &anchors,
@@ -1464,7 +1493,7 @@ pub fn append_stroke_pass(
             p.densify_ms += t_densify;
             p.tess_ms += t_tess;
             p.deck_ms += t_deck;
-            p.expand_ms += clock.elapsed().as_secs_f64() * 1000.0;
+            p.expand_ms += (Cx::monotonic_now() - clock) * 1000.0;
             p.calls += 1;
             p.verts += vert_count;
         });
@@ -1659,22 +1688,44 @@ pub fn road_endpoint_is_clip_cut(point: (f32, f32), clip: GeoBounds) -> bool {
 
 // --- Shared tag helpers ---
 
-pub fn tag_is(tags: &HashMap<String, String>, key: &str, value: &str) -> bool {
+/// Read-only tag access shared by owned JSON maps and the MVT layer arena.
+/// Keeping consumers generic lets the tile decoder retain one copy of each
+/// layer string instead of materialising a `HashMap<String, String>` for
+/// every feature.
+pub trait TagLookup {
+    fn get(&self, key: &str) -> Option<&str>;
+
+    fn contains_key(&self, key: &str) -> bool {
+        self.get(key).is_some()
+    }
+}
+
+impl TagLookup for HashMap<String, String> {
+    fn get(&self, key: &str) -> Option<&str> {
+        HashMap::get(self, key).map(String::as_str)
+    }
+
+    fn contains_key(&self, key: &str) -> bool {
+        HashMap::contains_key(self, key)
+    }
+}
+
+pub fn tag_is(tags: &impl TagLookup, key: &str, value: &str) -> bool {
     tags.get(key).is_some_and(|v| v == value)
 }
 
-pub fn tag_is_truthy(tags: &HashMap<String, String>, key: &str) -> bool {
+pub fn tag_is_truthy(tags: &impl TagLookup, key: &str) -> bool {
     let Some(value) = tags.get(key) else {
         return false;
     };
-    !matches!(value.as_str(), "" | "0" | "false" | "False" | "no")
+    !matches!(value, "" | "0" | "false" | "False" | "no")
 }
 
 pub fn is_road_polygon_layer(layer: &str) -> bool {
     matches!(layer, "street_polygons" | "streets_polygons_labels")
 }
 
-pub fn select_label_text(tags: &HashMap<String, String>) -> Option<String> {
+pub fn select_label_text(tags: &impl TagLookup) -> Option<String> {
     for key in ["name", "name:latin", "name:en", "name_int"] {
         if let Some(value) = tags.get(key) {
             let trimmed = value.trim();
@@ -2042,10 +2093,9 @@ pub fn compute_visible_regions(groups: &[PaintGroup]) -> Vec<VisibleRegions> {
     use i_overlay::float::single::SingleFloatOverlay;
     type Shapes = Vec<Vec<Vec<[f64; 2]>>>;
 
-    // Env-gated sub-stage timing (MAKEPAD_TILE_STAGES / MP_TILE_PROFILE):
+    // Topic-gated sub-stage timing:
     // where the "boolean" lap actually goes.
-    let prof_on = std::env::var_os("MAKEPAD_TILE_STAGES").is_some()
-        || std::env::var_os("MP_TILE_PROFILE").is_some();
+    let prof_on = crate::makepad_platform::makepad_error_log::trace_enabled("map.tile_profile");
     let prof_dissolve: f64;
     let prof_cascade: f64;
 
@@ -2222,7 +2272,7 @@ pub fn compute_visible_regions(groups: &[PaintGroup]) -> Vec<VisibleRegions> {
             .collect();
         (shapes, flat)
     };
-    let prof_t_dissolve = std::time::Instant::now();
+    let prof_t_dissolve = Cx::monotonic_now();
     let outlines: Vec<GroupOutline> = groups
         .iter()
         .map(|group| {
@@ -2291,8 +2341,8 @@ pub fn compute_visible_regions(groups: &[PaintGroup]) -> Vec<VisibleRegions> {
         })
         .collect();
 
-    prof_dissolve = prof_t_dissolve.elapsed().as_secs_f64() * 1e3;
-    let prof_t_cascade = std::time::Instant::now();
+    prof_dissolve = (Cx::monotonic_now() - prof_t_dissolve) * 1e3;
+    let prof_t_cascade = Cx::monotonic_now();
     // Incremental cascade per level, all operands dissolved outlines.
     // LIFTED content never enters an accumulated cover: two decks at
     // different heights (a viaduct over a bridge) must not cut each other
@@ -2427,10 +2477,11 @@ pub fn compute_visible_regions(groups: &[PaintGroup]) -> Vec<VisibleRegions> {
         }
     }
 
-    prof_cascade = prof_t_cascade.elapsed().as_secs_f64() * 1e3;
+    prof_cascade = (Cx::monotonic_now() - prof_t_cascade) * 1e3;
     if prof_on {
-        eprintln!(
-            "MPPROF boolean-split dissolve {prof_dissolve:.1}ms cascade {prof_cascade:.1}ms groups={}",
+        trace!(
+            "map.tile_profile",
+            "boolean-split dissolve {prof_dissolve:.1}ms cascade {prof_cascade:.1}ms groups={}",
             groups.len()
         );
     }
@@ -2508,9 +2559,8 @@ pub fn build_paint_faces(
     tolerance: f32,
     aa: f32,
 ) -> Vec<PaintFace> {
-    let prof_on = std::env::var_os("MAKEPAD_TILE_STAGES").is_some()
-        || std::env::var_os("MP_TILE_PROFILE").is_some();
-    let prof_t_facetess = std::time::Instant::now();
+    let prof_on = crate::makepad_platform::makepad_error_log::trace_enabled("map.tile_profile");
+    let prof_t_facetess = Cx::monotonic_now();
     let mut faces = Vec::new();
     let mut path = VectorPath::new();
     let mut tess_verts: Vec<VVertex> = Vec::new();
@@ -2703,9 +2753,10 @@ pub fn build_paint_faces(
         }
     }
     if prof_on {
-        eprintln!(
-            "MPPROF facetess {:.1}ms faces={}",
-            prof_t_facetess.elapsed().as_secs_f64() * 1e3,
+        trace!(
+            "map.tile_profile",
+            "facetess {:.1}ms faces={}",
+            (Cx::monotonic_now() - prof_t_facetess) * 1e3,
             faces.len()
         );
     }
@@ -3176,6 +3227,56 @@ mod overlay_tests {
     }
 
     #[test]
+    fn malformed_short_deck_profile_falls_back_instead_of_panicking() {
+        // A damaged/degenerate overlay can collapse its deck samples while
+        // leaving the source line intact. This was the only unchecked index
+        // in the face-bake road-ring path.
+        let points = [(0.0, 0.0), (10.0, 0.0), (20.0, 0.0)];
+        let short_deck = [4.0];
+        let ribbon = [RoadRibbon {
+            points: &points,
+            dz: Some(&short_deck),
+            closed_ring: false,
+            start_disc: false,
+            end_disc: false,
+        }];
+        let rings = road_ribbon_rings(
+            &ribbon,
+            1.0,
+            GeoBounds {
+                min: GeoPoint { x: -5.0, y: -5.0 },
+                max: GeoPoint { x: 25.0, y: 5.0 },
+            },
+        );
+        assert_eq!(rings.len(), 1);
+        assert_eq!(rings[0].0.len(), rings[0].1.len());
+        assert!(rings[0].1.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn empty_and_degenerate_rings_never_reach_the_face_boolean() {
+        assert!(normalize_polygon_ring(&[]).is_none());
+        assert!(normalize_polygon_ring(&[(1.0, 1.0), (1.0, 1.0), (1.0, 1.0)]).is_none());
+        let group = PaintGroup {
+            color: [1.0; 4],
+            emissive: 0.0,
+            phase: 0,
+            rank: 0,
+            depth_micro: 0.0,
+            field: 0,
+            skirt_joints: Vec::new(),
+            half_width: 1.0,
+            rings: vec![(Vec::new(), 0.0, 0.0), (vec![(0.0, 0.0); 3], 0.0, 0.0)],
+        };
+        let regions = compute_visible_regions(&[group]);
+        assert!(regions.iter().all(|region| {
+            region.main.is_empty()
+                && region.sunk.is_empty()
+                && region.lifted_outlines.is_empty()
+        }));
+    }
+
+    #[test]
     fn fringe_carrier_runs_from_boundary_to_unfilled_side() {
         let outer_ccw = [
             [0.0, 0.0],
@@ -3547,9 +3648,11 @@ mod overlay_tests {
 
 #[cfg(test)]
 mod boolean_repro_tests {
+    use crate::makepad_platform::Cx;
+
     /// Replay a hang capture from /tmp/mp_boolean_last_*.txt (written when
     /// /tmp/mp_boolean_debug exists). Run manually:
-    ///   MP_REPRO=/tmp/mp_boolean_last_ThreadId(7).txt cargo test -p \
+    ///   MAKEPAD_REPRO=/tmp/mp_boolean_last_ThreadId(7).txt cargo test -p \
     ///   makepad-widgets --features maps --release boolean_repro -- \
     ///   --ignored --nocapture
     #[test]
@@ -3559,7 +3662,7 @@ mod boolean_repro_tests {
         use i_overlay::core::overlay_rule::OverlayRule;
         use i_overlay::float::simplify::SimplifyShape;
         use i_overlay::float::single::SingleFloatOverlay;
-        let path = std::env::var("MP_REPRO").expect("set MP_REPRO to a capture file");
+        let path = std::env::var("MAKEPAD_REPRO").expect("set MAKEPAD_REPRO to a capture file");
         let text = std::fs::read_to_string(&path).unwrap();
         let mut tag = String::new();
         let mut rings: Vec<Vec<[f64; 2]>> = Vec::new();
@@ -3580,7 +3683,7 @@ mod boolean_repro_tests {
             }
         }
         println!("repro: tag={} rings={}", tag, rings.len());
-        let clock = std::time::Instant::now();
+        let clock = Cx::monotonic_now();
         let result = match tag.as_str() {
             "simplify" => {
                 // Mirror production chunking (DISSOLVE_CHUNK).
@@ -3616,7 +3719,7 @@ mod boolean_repro_tests {
         };
         println!(
             "repro: done in {:.1}ms, {} shapes",
-            clock.elapsed().as_secs_f64() * 1000.0,
+            (Cx::monotonic_now() - clock) * 1000.0,
             result.len()
         );
     }

@@ -5,6 +5,7 @@
 // what a real re-struck string does, and means there is no voice stealing to
 // mistune.
 
+use crate::calibration::{CalibrationNote, CALIBRATION_PARTIALS};
 use crate::hammer::Hammer;
 use crate::keys::{velocity_to_speed, KeyDesign, PH_MODES};
 use crate::modal::{run_modes, run_modes_c, KernelPath, MAX_CHUNK};
@@ -199,6 +200,11 @@ pub struct Voice {
     pub zi: Vec<f32>,
     pub eff_cr: Vec<f32>,
     pub eff_ci: Vec<f32>,
+    /// Immutable pitch-interpolated table, owned by this key's voice.
+    pub(crate) calibration: Option<CalibrationNote>,
+    /// Excitation only: changing velocity must never rescale ringing state
+    /// or its output residues. Allocated once, rebuilt only at note-on.
+    eff_gin: Vec<f32>,
     pub acc: [f32; MAX_CHUNK],
     pub noise_buf: [f32; MAX_CHUNK],
     /// Structure-borne case noise (key-bottom thump, action click, damper
@@ -252,7 +258,7 @@ pub struct Voice {
 }
 
 impl Voice {
-    pub fn new(key_idx: usize, key: &KeyDesign) -> Self {
+    pub fn new(key_idx: usize, key: &KeyDesign, calibration: Option<CalibrationNote>) -> Self {
         let n = key.total_modes;
         let mut v = Self {
             key_idx,
@@ -265,6 +271,8 @@ impl Voice {
             zi: vec![0.0; n],
             eff_cr: vec![0.0; n],
             eff_ci: vec![0.0; n],
+            calibration,
+            eff_gin: key.gin.clone(),
             acc: [0.0; MAX_CHUNK],
             noise_buf: [0.0; MAX_CHUNK],
             case_buf: [0.0; MAX_CHUNK],
@@ -321,6 +329,16 @@ impl Voice {
 
     /// Strike this key. Modal state is kept (re-strike hits ringing strings).
     pub fn note_on(&mut self, key: &KeyDesign, vel: u8, soft_pedal: bool, sample_rate: f64, vc: &Voicing) {
+        if let Some(note) = &self.calibration {
+            for m in 0..key.modes_per_osc.min(CALIBRATION_PARTIALS + 15) {
+                let db = note.gain_at(m, vel);
+                let gain = 10.0f32.powf(db / 20.0);
+                for osc in 0..key.n_osc {
+                    let i = osc * key.modes_padded + m;
+                    self.eff_gin[i] = key.gin[i] * gain;
+                }
+            }
+        }
         self.active = true;
         self.held = true;
         self.strike_count = self.strike_count.wrapping_add(1);
@@ -496,6 +514,9 @@ impl Voice {
             }
         }
         let mp = key.modes_padded;
+        // Raw instruments read the original table directly, preserving exact
+        // identity and the existing diagnostic shaping path.
+        let gin = if self.calibration.is_some() { &self.eff_gin } else { &key.gin };
         for osc in 0..key.n_osc {
             let a = osc * mp;
             let b = a + mp;
@@ -505,7 +526,7 @@ impl Voice {
                 &mut self.zi[a..b],
                 &self.eff_cr[a..b],
                 &self.eff_ci[a..b],
-                &key.gin[a..b],
+                &gin[a..b],
                 &key.gout[a..b],
                 &key.gout_re[a..b],
                 &self.force[..n],
@@ -580,5 +601,121 @@ impl Voice {
         self.power = 0.0;
         self.quiet_ticks = 0;
         self.hammer.active = false;
+    }
+}
+
+#[cfg(test)]
+mod calibration_tests {
+    use super::*;
+    use crate::{keys::build_key, DesignParams};
+
+    fn note(key: u8) -> CalibrationNote {
+        let mut note = CalibrationNote {
+            key,
+            gain_db: [[-12.0; CALIBRATION_PARTIALS], [0.0; CALIBRATION_PARTIALS], [12.0; CALIBRATION_PARTIALS]],
+            decay_scale: [1.0; CALIBRATION_PARTIALS],
+        };
+        for gains in &mut note.gain_db {
+            gains[7] -= 3.0;
+            gains[CALIBRATION_PARTIALS - 1] -= 5.0;
+        }
+        note
+    }
+
+    #[test]
+    fn excitation_interpolates_velocity_and_partial_tail_for_every_oscillator() {
+        for midi in [21, 36, 60, 108] {
+            let key = build_key(midi, 48000.0, &DesignParams::default());
+            let mut voice = Voice::new((midi - 21) as usize, &key, Some(note(midi)));
+            // Endpoints, exact knots and halfway between knots, including
+            // velocities outside MIDI's range (the existing event path allows them).
+            for (vel, db) in [(1, -12.0), (28, -12.0), (48, -6.0), (68, 0.0), (90, 6.0), (112, 12.0), (127, 12.0), (255, 12.0)] {
+                voice.note_on(&key, vel, false, 48000.0, &Voicing::default());
+                for osc in 0..key.n_osc {
+                    for m in 0..key.modes_padded {
+                        let i = osc * key.modes_padded + m;
+                        let weight = if m < CALIBRATION_PARTIALS { 1.0 }
+                            else { (CALIBRATION_PARTIALS + 15).saturating_sub(m) as f32 / 16.0 };
+                        let offset = if m == 7 { -3.0 } else if m >= CALIBRATION_PARTIALS - 1 { -5.0 } else { 0.0 };
+                        let expected = key.gin[i] * 10.0f32.powf((db + offset) * weight / 20.0);
+                        assert_eq!(voice.eff_gin[i].to_bits(), expected.to_bits(), "key={midi}, velocity={vel}, mode={i}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_a0_mode_receives_its_own_excitation_and_decay_correction() {
+        let raw = build_key(21, 48000.0, &DesignParams::default());
+        assert_eq!(raw.modes_per_osc, CALIBRATION_PARTIALS);
+        let mut calibration = note(21);
+        for m in 0..CALIBRATION_PARTIALS {
+            for v in 0..3 {
+                calibration.gain_db[v][m] = -1.0 - m as f32 / 16.0 - v as f32;
+            }
+            calibration.decay_scale[m] = 0.5 + m as f32 / 128.0;
+        }
+        let mut key = build_key(21, 48000.0, &DesignParams::default());
+        calibration.apply_decay(&mut key);
+        let mut voice = Voice::new(0, &key, Some(calibration.clone()));
+        for (v, vel) in crate::calibration::CALIBRATION_VELOCITIES.into_iter().enumerate() {
+            voice.note_on(&key, vel, false, 48000.0, &Voicing::default());
+            for osc in 0..key.n_osc {
+                for m in 0..key.modes_per_osc {
+                    let i = osc * key.modes_padded + m;
+                    assert_ne!(raw.gin[i], 0.0, "A0 mode {i} must be active");
+                    let expected = raw.gin[i] * 10.0f32.powf(calibration.gain_db[v][m] / 20.0);
+                    assert_eq!(voice.eff_gin[i].to_bits(), expected.to_bits(), "velocity={vel}, mode={i}");
+                    assert_ne!(voice.eff_gin[i].to_bits(), raw.gin[i].to_bits());
+                    let radius = (raw.cr_sus[i] as f64).hypot(raw.ci_sus[i] as f64);
+                    let corrected = (key.cr_sus[i] as f64).hypot(key.ci_sus[i] as f64);
+                    assert!(radius > 0.0);
+                    assert!((corrected - radius.powf(calibration.decay_scale[m] as f64)).abs() < 8e-8,
+                        "A0 mode {i} must use its own decay correction");
+                    if calibration.decay_scale[m] != 1.0 {
+                        assert_ne!((key.cr_sus[i], key.ci_sus[i]), (raw.cr_sus[i], raw.ci_sus[i]));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn restrike_gain_update_leaves_zero_input_ringing_unchanged() {
+        let key = build_key(36, 48000.0, &DesignParams::default());
+        for path in [KernelPath::Scalar, KernelPath::Simd4] {
+            let mut control = Voice::new(15, &key, Some(note(36)));
+            let mut restruck = Voice::new(15, &key, Some(note(36)));
+            for voice in [&mut control, &mut restruck] {
+                voice.note_on(&key, 28, false, 48000.0, &Voicing::default());
+                voice.rebuild(&key, 0.0);
+                for _ in 0..64 {
+                    voice.render(&key, path, MAX_CHUNK);
+                }
+            }
+            let before_r = restruck.zr.clone();
+            let before_i = restruck.zi.clone();
+            let before_gin = restruck.eff_gin.clone();
+            restruck.note_on(&key, 112, false, 48000.0, &Voicing::default());
+            assert_ne!(restruck.eff_gin, before_gin);
+            assert_eq!(restruck.zr, before_r);
+            assert_eq!(restruck.zi, before_i);
+            assert!(before_r.iter().any(|x| x.abs() > 0.0));
+            // Isolate the already-ringing strings by removing fresh excitation.
+            // Both voices retain the same phantom/case histories; acc contains
+            // the string output whose residues must not change at the restrike.
+            for voice in [&mut control, &mut restruck] {
+                voice.hammer.active = false;
+                voice.body_tap.amp = 0.0;
+            }
+            for _ in 0..8 {
+                control.render(&key, path, MAX_CHUNK);
+                restruck.render(&key, path, MAX_CHUNK);
+                assert_eq!(control.acc, restruck.acc);
+                assert_eq!(control.zr, restruck.zr);
+                assert_eq!(control.zi, restruck.zi);
+            }
+        }
     }
 }

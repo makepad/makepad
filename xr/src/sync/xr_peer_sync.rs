@@ -6,7 +6,7 @@ use makepad_widgets::event::{XrSyncAnchor, XrSyncAnchorExtrema};
 use std::{
     collections::{HashMap, VecDeque},
     sync::{mpsc::TryRecvError, Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 #[path = "alignment.rs"]

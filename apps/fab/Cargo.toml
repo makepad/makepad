@@ -18,7 +18,7 @@ gltf = ["dep:makepad-fab-loader-gltf"]
 makepad-widgets = { path = "../../widgets", version = "2.0.0" }
 makepad-fab-shell = { path = "../../libs/fab", version = "0.1.0" }
 makepad-fab-loader-gltf = { path = "loaders/gltf", version = "0.1.0", optional = true }
-makepad-video = { path = "../../platform/video", version = "1.0.0" }
+makepad-video = { package = "makepad-platform-video", path = "../../platform/video", version = "1.0.0" }
 makepad-zune-png = { path = "../../libs/zune/zune-png", version = "0.5.2" }
 
 [dev-dependencies]

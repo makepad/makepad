@@ -1,4 +1,4 @@
-use crate::{task, ScriptStd};
+use crate::task;
 use makepad_script::*;
 use std::any::Any;
 use std::cell::Cell;
@@ -61,31 +61,20 @@ pub trait ScriptVmStdExt {
 
 impl<'a> ScriptVmStdExt for ScriptVm<'a> {
     fn std_ref<T: Any>(&mut self) -> &T {
-        self.std.downcast_ref().unwrap()
+        self.host.script_std().downcast_ref().unwrap()
     }
 
     fn std_mut<T: Any>(&mut self) -> &mut T {
-        self.std.downcast_mut().unwrap()
+        self.host.script_std().downcast_mut().unwrap()
     }
 }
 
-impl ScriptVmStdExt for &mut dyn Any {
-    fn std_ref<T: Any>(&mut self) -> &T {
-        self.downcast_ref().unwrap()
-    }
-
-    fn std_mut<T: Any>(&mut self) -> &mut T {
-        self.downcast_mut().unwrap()
-    }
-}
-
-pub fn with_vm_and_async<H: Any, F: FnOnce(&mut ScriptVm) -> R, R>(
-    host: &mut H,
-    std: &mut ScriptStd,
-    script_vm: &mut Option<Box<ScriptVmBase>>,
+pub fn with_vm_and_async<F: FnOnce(&mut ScriptVm) -> R, R>(
+    host: &mut dyn ScriptHost,
     f: F,
 ) -> R {
-    let mut bx = script_vm
+    let mut bx = host
+        .script_vm_slot()
         .take()
         .expect(
             "re-entrant script VM access: the VM is already `take()`n (swapped off) by an \
@@ -95,22 +84,18 @@ pub fn with_vm_and_async<H: Any, F: FnOnce(&mut ScriptVm) -> R, R>(
     bx.threads.set_current_to_first_unpaused_thread();
 
     let (out, bx) = {
-        let mut vm = ScriptVm { host, std, bx };
+        let mut vm = ScriptVm { host, bx };
         let out = f(&mut vm);
         (out, vm.bx)
     };
-    *script_vm = Some(bx);
-    task::handle_script_tasks(host, std, script_vm);
+    *host.script_vm_slot() = Some(bx);
+    task::handle_script_tasks(host);
     out
 }
 
-pub fn with_vm<H: Any, F: FnOnce(&mut ScriptVm) -> R, R>(
-    host: &mut H,
-    std: &mut ScriptStd,
-    script_vm: &mut Option<Box<ScriptVmBase>>,
-    f: F,
-) -> R {
-    let mut bx = script_vm
+pub fn with_vm<F: FnOnce(&mut ScriptVm) -> R, R>(host: &mut dyn ScriptHost, f: F) -> R {
+    let mut bx = host
+        .script_vm_slot()
         .take()
         .expect(
             "re-entrant script VM access: the VM is already `take()`n (swapped off) by an \
@@ -120,12 +105,12 @@ pub fn with_vm<H: Any, F: FnOnce(&mut ScriptVm) -> R, R>(
     bx.threads.set_current_to_first_unpaused_thread();
 
     let (out, bx) = {
-        let mut vm = ScriptVm { host, std, bx };
+        let mut vm = ScriptVm { host, bx };
         let out = f(&mut vm);
         vm.drain_errors();
         (out, vm.bx)
     };
-    *script_vm = Some(bx);
+    *host.script_vm_slot() = Some(bx);
     out
 }
 
@@ -133,33 +118,30 @@ pub fn with_vm<H: Any, F: FnOnce(&mut ScriptVm) -> R, R>(
 /// already held (swapped off) by an enclosing `with_vm`/`eval`. Use this for
 /// call sites that can correctly degrade — e.g. defer to a later frame — when
 /// invoked re-entrantly, rather than aborting.
-pub fn try_with_vm<H: Any, F: FnOnce(&mut ScriptVm) -> R, R>(
-    host: &mut H,
-    std: &mut ScriptStd,
-    script_vm: &mut Option<Box<ScriptVmBase>>,
+pub fn try_with_vm<F: FnOnce(&mut ScriptVm) -> R, R>(
+    host: &mut dyn ScriptHost,
     f: F,
 ) -> Option<R> {
-    let mut bx = script_vm.take()?;
+    let mut bx = host.script_vm_slot().take()?;
     bx.threads.set_current_to_first_unpaused_thread();
 
     let (out, bx) = {
-        let mut vm = ScriptVm { host, std, bx };
+        let mut vm = ScriptVm { host, bx };
         let out = f(&mut vm);
         vm.drain_errors();
         (out, vm.bx)
     };
-    *script_vm = Some(bx);
+    *host.script_vm_slot() = Some(bx);
     Some(out)
 }
 
-pub fn with_vm_thread<H: Any, F: FnOnce(&mut ScriptVm) -> R, R>(
-    host: &mut H,
-    std: &mut ScriptStd,
-    script_vm: &mut Option<Box<ScriptVmBase>>,
+pub fn with_vm_thread<F: FnOnce(&mut ScriptVm) -> R, R>(
+    host: &mut dyn ScriptHost,
     thread_id: ScriptThreadId,
     f: F,
 ) -> R {
-    let mut bx = script_vm
+    let mut bx = host
+        .script_vm_slot()
         .take()
         .expect(
             "re-entrant script VM access: the VM is already `take()`n (swapped off) by an \
@@ -169,19 +151,14 @@ pub fn with_vm_thread<H: Any, F: FnOnce(&mut ScriptVm) -> R, R>(
     bx.threads.set_current_thread_id(thread_id);
 
     let (out, bx) = {
-        let mut vm = ScriptVm { host, std, bx };
+        let mut vm = ScriptVm { host, bx };
         let out = f(&mut vm);
         (out, vm.bx)
     };
-    *script_vm = Some(bx);
+    *host.script_vm_slot() = Some(bx);
     out
 }
 
-pub fn eval<H: Any>(
-    host: &mut H,
-    std: &mut ScriptStd,
-    script_vm: &mut Option<Box<ScriptVmBase>>,
-    script_mod: ScriptMod,
-) -> ScriptValue {
-    with_vm_and_async(host, std, script_vm, |vm| vm.eval(script_mod))
+pub fn eval(host: &mut dyn ScriptHost, script_mod: ScriptMod) -> ScriptValue {
+    with_vm_and_async(host, |vm| vm.eval(script_mod))
 }

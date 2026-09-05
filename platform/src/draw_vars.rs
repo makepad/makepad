@@ -262,6 +262,7 @@ impl DrawVars {
     ) {
         if let Some(draw_shader_id) = self.draw_shader_id {
             if let Some(inst) = self.area.valid_instance(cx) {
+                let uniforms_gen = cx.next_uniform_gen();
                 let sh = &cx.draw_shaders[draw_shader_id.index];
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
                 let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
@@ -281,7 +282,7 @@ impl DrawVars {
                 }
 
                 if any_updated {
-                    draw_call.uniforms_dirty = true;
+                    draw_call.mark_uniforms_dirty(uniforms_gen);
                     cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
                     self.area.redraw(cx);
                 }
@@ -466,26 +467,144 @@ impl DrawVars {
             // Find the uniform input
             if let Some(input) = sh.mapping.dyn_uniforms.inputs.iter().find(|i| i.id == id) {
                 let slots = input.slots.min(value.len());
+                let offset = input.offset;
 
                 // Update local dyn_uniforms
                 for i in 0..slots {
-                    self.dyn_uniforms[input.offset + i] = value[i];
+                    self.dyn_uniforms[offset + i] = value[i];
                 }
 
                 // Update the draw call if we have a valid area
                 if let Some(inst) = self.area.valid_instance(cx) {
+                    let uniforms_gen = cx.next_uniform_gen();
                     let draw_list = &mut cx.draw_lists[inst.draw_list_id];
                     let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
                     let draw_call = draw_item.kind.draw_call_mut().unwrap();
 
                     for i in 0..slots {
-                        draw_call.dyn_uniforms[input.offset + i] = value[i];
+                        draw_call.dyn_uniforms[offset + i] = value[i];
                     }
-                    draw_call.uniforms_dirty = true;
+                    draw_call.mark_uniforms_dirty(uniforms_gen);
                     cx.passes[draw_list.draw_pass_id.unwrap()].paint_dirty = true;
                 }
             }
         }
+    }
+
+    /// Writes one uniform onto the retained draw call behind `area` — any
+    /// draw call of this shader, not only the one this `DrawVars` last
+    /// emitted — and marks its pass for repaint. A clock or camera value
+    /// shared by every call a widget keeps resident moves this way, with no
+    /// redraw and no instance upload. `false` (nothing written) when the
+    /// area is stale, another shader's, or the shader has no such uniform.
+    pub fn set_uniform_on_draw_call(
+        &self,
+        cx: &mut Cx,
+        area: Area,
+        id: LiveId,
+        value: &[f32],
+    ) -> bool {
+        let Some(draw_shader_id) = self.draw_shader_id else {
+            return false;
+        };
+        let Some(inst) = area.valid_instance(cx).copied() else {
+            return false;
+        };
+        let sh = &cx.draw_shaders[draw_shader_id.index];
+        let Some(input) = sh.mapping.dyn_uniforms.inputs.iter().find(|i| i.id == id) else {
+            return false;
+        };
+        let (offset, slots) = (input.offset, input.slots.min(value.len()));
+        let uniforms_gen = cx.next_uniform_gen();
+        let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+        let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
+        let Some(draw_call) = draw_item.kind.draw_call_mut() else {
+            return false;
+        };
+        if draw_call.draw_shader_id != draw_shader_id {
+            return false;
+        }
+        draw_call.dyn_uniforms[offset..offset + slots].copy_from_slice(&value[..slots]);
+        draw_call.mark_uniforms_dirty(uniforms_gen);
+        if let Some(pass_id) = draw_list.draw_pass_id {
+            cx.passes[pass_id].paint_dirty = true;
+        }
+        true
+    }
+
+    /// Pushes every dyn uniform and texture slot this `DrawVars` holds onto
+    /// the retained draw call behind `area`, and marks its pass for repaint.
+    /// The whole-block twin of `set_uniform_on_area`: a widget that keeps
+    /// its draw lists across frames re-stamps its staging copy per call
+    /// (`set_uniform`, `set_texture`) and hands the result over in one
+    /// copy, so a camera move touches uniforms only and never the resident
+    /// instance buffers. `false` when the area is stale or belongs to
+    /// another shader; nothing is written then.
+    pub fn update_uniforms_on_area(&self, cx: &mut Cx, area: Area) -> bool {
+        let Some(draw_shader_id) = self.draw_shader_id else {
+            return false;
+        };
+        let Some(inst) = area.valid_instance(cx).copied() else {
+            return false;
+        };
+        let uniforms_gen = cx.next_uniform_gen();
+        let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+        let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
+        let Some(draw_call) = draw_item.kind.draw_call_mut() else {
+            return false;
+        };
+        if draw_call.draw_shader_id != draw_shader_id {
+            return false;
+        }
+        draw_call.dyn_uniforms = self.dyn_uniforms;
+        draw_call.texture_slots = self.texture_slots.clone();
+        draw_call.uniform_buffer_slots = self.uniform_buffer_slots.clone();
+        draw_call.mark_uniforms_dirty(uniforms_gen);
+        if let Some(pass_id) = draw_list.draw_pass_id {
+            cx.passes[pass_id].paint_dirty = true;
+        }
+        true
+    }
+
+    /// Pushes every dyn uniform and texture slot this `DrawVars` holds onto
+    /// EVERY retained draw call of this shader in the draw list `list`, and
+    /// marks its pass for repaint: the list-wide twin of
+    /// `update_uniforms_on_area`, for a batch a widget recorded once and
+    /// re-presents under this frame's camera. `false` when no call took it.
+    pub fn update_uniforms_on_draw_list(
+        &self,
+        cx: &mut Cx,
+        list: crate::draw_list::DrawListId,
+    ) -> bool {
+        let Some(draw_shader_id) = self.draw_shader_id else {
+            return false;
+        };
+        let Some(draw_list) = cx.draw_lists.checked_index(list) else {
+            return false;
+        };
+        let pass_id = draw_list.draw_pass_id;
+        let uniform_gen = &mut cx.uniform_gen;
+        let draw_list = &mut cx.draw_lists[list];
+        let mut touched = false;
+        for item in 0..draw_list.draw_items.len() {
+            let Some(draw_call) = draw_list.draw_items[item].kind.draw_call_mut() else {
+                continue;
+            };
+            if draw_call.draw_shader_id != draw_shader_id {
+                continue;
+            }
+            draw_call.dyn_uniforms = self.dyn_uniforms;
+            draw_call.texture_slots = self.texture_slots.clone();
+            draw_call.uniform_buffer_slots = self.uniform_buffer_slots.clone();
+            draw_call.mark_uniforms_dirty(Cx::next_uniform_gen_from(uniform_gen));
+            touched = true;
+        }
+        if touched {
+            if let Some(pass_id) = pass_id {
+                cx.passes[pass_id].paint_dirty = true;
+            }
+        }
+        touched
     }
 
     /// Writes one uniform into EVERY retained draw call of this shader in
@@ -503,6 +622,7 @@ impl DrawVars {
         for i in 0..slots {
             self.dyn_uniforms[offset + i] = value[i];
         }
+        let uniform_gen = &mut cx.uniform_gen;
         let draw_list = &mut cx.draw_lists[draw_list_id];
         let mut touched = false;
         for item in 0..draw_list.draw_items.len() {
@@ -514,7 +634,7 @@ impl DrawVars {
             for i in 0..slots {
                 draw_call.dyn_uniforms[offset + i] = value[i];
             }
-            draw_call.uniforms_dirty = true;
+            draw_call.mark_uniforms_dirty(Cx::next_uniform_gen_from(uniform_gen));
             touched = true;
         }
         if touched {
@@ -680,10 +800,10 @@ impl DrawVars {
     ) {
         // Try f64 first (most common for abstract numbers)
         if let Some(v) = value.as_f64() {
-            let v = match attr_format {
-                DrawShaderAttrFormat::Float => v as f32,
-                DrawShaderAttrFormat::UInt => f32::from_bits(v as u32),
-                DrawShaderAttrFormat::SInt => f32::from_bits(v as i32 as u32),
+            let v = match attr_format.f32_write_kind() {
+                DrawShaderF32WriteKind::Float => v as f32,
+                DrawShaderF32WriteKind::UInt => f32::from_bits(v as u32),
+                DrawShaderF32WriteKind::SInt => f32::from_bits(v as i32 as u32),
             };
             for i in 0..slots {
                 output[offset + i] = v;
@@ -693,10 +813,10 @@ impl DrawVars {
 
         // Try u40 (common integer format in script)
         if let Some(v) = value.as_u40() {
-            let v = match attr_format {
-                DrawShaderAttrFormat::Float => v as f32,
-                DrawShaderAttrFormat::UInt => f32::from_bits(v as u32),
-                DrawShaderAttrFormat::SInt => f32::from_bits(v as i32 as u32),
+            let v = match attr_format.f32_write_kind() {
+                DrawShaderF32WriteKind::Float => v as f32,
+                DrawShaderF32WriteKind::UInt => f32::from_bits(v as u32),
+                DrawShaderF32WriteKind::SInt => f32::from_bits(v as i32 as u32),
             };
             for i in 0..slots {
                 output[offset + i] = v;
@@ -706,10 +826,10 @@ impl DrawVars {
 
         // Try f32
         if let Some(v) = value.as_f32() {
-            let v = match attr_format {
-                DrawShaderAttrFormat::Float => v,
-                DrawShaderAttrFormat::UInt => f32::from_bits(v as u32),
-                DrawShaderAttrFormat::SInt => f32::from_bits(v as i32 as u32),
+            let v = match attr_format.f32_write_kind() {
+                DrawShaderF32WriteKind::Float => v,
+                DrawShaderF32WriteKind::UInt => f32::from_bits(v as u32),
+                DrawShaderF32WriteKind::SInt => f32::from_bits(v as i32 as u32),
             };
             for i in 0..slots {
                 output[offset + i] = v;
@@ -719,10 +839,10 @@ impl DrawVars {
 
         // Try f16
         if let Some(v) = value.as_f16() {
-            let v = match attr_format {
-                DrawShaderAttrFormat::Float => v,
-                DrawShaderAttrFormat::UInt => f32::from_bits(v as u32),
-                DrawShaderAttrFormat::SInt => f32::from_bits(v as i32 as u32),
+            let v = match attr_format.f32_write_kind() {
+                DrawShaderF32WriteKind::Float => v,
+                DrawShaderF32WriteKind::UInt => f32::from_bits(v as u32),
+                DrawShaderF32WriteKind::SInt => f32::from_bits(v as i32 as u32),
             };
             for i in 0..slots {
                 output[offset + i] = v;
@@ -732,9 +852,9 @@ impl DrawVars {
 
         // Try u32/i32
         if let Some(v) = value.as_u32() {
-            let v = match attr_format {
-                DrawShaderAttrFormat::Float => v as f32,
-                DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => f32::from_bits(v),
+            let v = match attr_format.f32_write_kind() {
+                DrawShaderF32WriteKind::Float => v as f32,
+                DrawShaderF32WriteKind::UInt | DrawShaderF32WriteKind::SInt => f32::from_bits(v),
             };
             for i in 0..slots {
                 output[offset + i] = v;
@@ -742,9 +862,11 @@ impl DrawVars {
             return;
         }
         if let Some(v) = value.as_i32() {
-            let v = match attr_format {
-                DrawShaderAttrFormat::Float => v as f32,
-                DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => f32::from_bits(v as u32),
+            let v = match attr_format.f32_write_kind() {
+                DrawShaderF32WriteKind::Float => v as f32,
+                DrawShaderF32WriteKind::UInt | DrawShaderF32WriteKind::SInt => {
+                    f32::from_bits(v as u32)
+                }
             };
             for i in 0..slots {
                 output[offset + i] = v;
@@ -754,15 +876,15 @@ impl DrawVars {
 
         // Try bool
         if let Some(v) = value.as_bool() {
-            let v = match attr_format {
-                DrawShaderAttrFormat::Float => {
+            let v = match attr_format.f32_write_kind() {
+                DrawShaderF32WriteKind::Float => {
                     if v {
                         1.0
                     } else {
                         0.0
                     }
                 }
-                DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => {
+                DrawShaderF32WriteKind::UInt | DrawShaderF32WriteKind::SInt => {
                     f32::from_bits(if v { 1 } else { 0 })
                 }
             };
@@ -795,10 +917,10 @@ impl DrawVars {
         if let Some(obj) = value.as_object() {
             let enum_value = heap.value(obj, live_id!(_repr_u32_enum_value).into(), NoTrap);
             if let Some(v) = enum_value.as_f64() {
-                let v = match attr_format {
-                    DrawShaderAttrFormat::Float => v as f32,
-                    DrawShaderAttrFormat::UInt => f32::from_bits(v as u32),
-                    DrawShaderAttrFormat::SInt => f32::from_bits(v as i32 as u32),
+                let v = match attr_format.f32_write_kind() {
+                    DrawShaderF32WriteKind::Float => v as f32,
+                    DrawShaderF32WriteKind::UInt => f32::from_bits(v as u32),
+                    DrawShaderF32WriteKind::SInt => f32::from_bits(v as i32 as u32),
                 };
                 for i in 0..slots {
                     output[offset + i] = v;
@@ -806,9 +928,9 @@ impl DrawVars {
                 return;
             }
             if let Some(v) = enum_value.as_u32() {
-                let v = match attr_format {
-                    DrawShaderAttrFormat::Float => v as f32,
-                    DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => f32::from_bits(v),
+                let v = match attr_format.f32_write_kind() {
+                    DrawShaderF32WriteKind::Float => v as f32,
+                    DrawShaderF32WriteKind::UInt | DrawShaderF32WriteKind::SInt => f32::from_bits(v),
                 };
                 for i in 0..slots {
                     output[offset + i] = v;
@@ -823,12 +945,12 @@ impl DrawVars {
 
             match &pod_type.ty {
                 ScriptPodTy::F32 => {
-                    let v = match attr_format {
-                        DrawShaderAttrFormat::Float => f32::from_bits(data[0]),
-                        DrawShaderAttrFormat::UInt => {
+                    let v = match attr_format.f32_write_kind() {
+                        DrawShaderF32WriteKind::Float => f32::from_bits(data[0]),
+                        DrawShaderF32WriteKind::UInt => {
                             f32::from_bits(f32::from_bits(data[0]) as u32)
                         }
-                        DrawShaderAttrFormat::SInt => {
+                        DrawShaderF32WriteKind::SInt => {
                             f32::from_bits(f32::from_bits(data[0]) as i32 as u32)
                         }
                     };
@@ -838,19 +960,19 @@ impl DrawVars {
                 }
                 ScriptPodTy::F16 => {
                     let v = pod_heap::f16_to_f32(data[0] as u16);
-                    let v = match attr_format {
-                        DrawShaderAttrFormat::Float => v,
-                        DrawShaderAttrFormat::UInt => f32::from_bits(v as u32),
-                        DrawShaderAttrFormat::SInt => f32::from_bits(v as i32 as u32),
+                    let v = match attr_format.f32_write_kind() {
+                        DrawShaderF32WriteKind::Float => v,
+                        DrawShaderF32WriteKind::UInt => f32::from_bits(v as u32),
+                        DrawShaderF32WriteKind::SInt => f32::from_bits(v as i32 as u32),
                     };
                     for i in 0..slots {
                         output[offset + i] = v;
                     }
                 }
                 ScriptPodTy::U32 | ScriptPodTy::AtomicU32 => {
-                    let v = match attr_format {
-                        DrawShaderAttrFormat::Float => data[0] as f32,
-                        DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => {
+                    let v = match attr_format.f32_write_kind() {
+                        DrawShaderF32WriteKind::Float => data[0] as f32,
+                        DrawShaderF32WriteKind::UInt | DrawShaderF32WriteKind::SInt => {
                             f32::from_bits(data[0])
                         }
                     };
@@ -859,9 +981,9 @@ impl DrawVars {
                     }
                 }
                 ScriptPodTy::I32 | ScriptPodTy::AtomicI32 => {
-                    let v = match attr_format {
-                        DrawShaderAttrFormat::Float => data[0] as i32 as f32,
-                        DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => {
+                    let v = match attr_format.f32_write_kind() {
+                        DrawShaderF32WriteKind::Float => data[0] as i32 as f32,
+                        DrawShaderF32WriteKind::UInt | DrawShaderF32WriteKind::SInt => {
                             f32::from_bits(data[0])
                         }
                     };
@@ -870,15 +992,15 @@ impl DrawVars {
                     }
                 }
                 ScriptPodTy::Bool => {
-                    let v = match attr_format {
-                        DrawShaderAttrFormat::Float => {
+                    let v = match attr_format.f32_write_kind() {
+                        DrawShaderF32WriteKind::Float => {
                             if data[0] != 0 {
                                 1.0
                             } else {
                                 0.0
                             }
                         }
-                        DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => {
+                        DrawShaderF32WriteKind::UInt | DrawShaderF32WriteKind::SInt => {
                             f32::from_bits(if data[0] != 0 { 1 } else { 0 })
                         }
                     };
@@ -906,9 +1028,9 @@ impl DrawVars {
                         }
                         ScriptPodVec::Vec2u | ScriptPodVec::Vec3u | ScriptPodVec::Vec4u => {
                             for i in 0..dims.min(slots) {
-                                output[offset + i] = match attr_format {
-                                    DrawShaderAttrFormat::Float => data[i] as f32,
-                                    DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => {
+                                output[offset + i] = match attr_format.f32_write_kind() {
+                                    DrawShaderF32WriteKind::Float => data[i] as f32,
+                                    DrawShaderF32WriteKind::UInt | DrawShaderF32WriteKind::SInt => {
                                         f32::from_bits(data[i])
                                     }
                                 };
@@ -916,9 +1038,9 @@ impl DrawVars {
                         }
                         ScriptPodVec::Vec2i | ScriptPodVec::Vec3i | ScriptPodVec::Vec4i => {
                             for i in 0..dims.min(slots) {
-                                output[offset + i] = match attr_format {
-                                    DrawShaderAttrFormat::Float => data[i] as i32 as f32,
-                                    DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => {
+                                output[offset + i] = match attr_format.f32_write_kind() {
+                                    DrawShaderF32WriteKind::Float => data[i] as i32 as f32,
+                                    DrawShaderF32WriteKind::UInt | DrawShaderF32WriteKind::SInt => {
                                         f32::from_bits(data[i])
                                     }
                                 };
@@ -926,15 +1048,15 @@ impl DrawVars {
                         }
                         ScriptPodVec::Vec2b | ScriptPodVec::Vec3b | ScriptPodVec::Vec4b => {
                             for i in 0..dims.min(slots) {
-                                output[offset + i] = match attr_format {
-                                    DrawShaderAttrFormat::Float => {
+                                output[offset + i] = match attr_format.f32_write_kind() {
+                                    DrawShaderF32WriteKind::Float => {
                                         if data[i] != 0 {
                                             1.0
                                         } else {
                                             0.0
                                         }
                                     }
-                                    DrawShaderAttrFormat::UInt | DrawShaderAttrFormat::SInt => {
+                                    DrawShaderF32WriteKind::UInt | DrawShaderF32WriteKind::SInt => {
                                         f32::from_bits(if data[i] != 0 { 1 } else { 0 })
                                     }
                                 };
@@ -968,9 +1090,13 @@ impl DrawVars {
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn compile_shader(&mut self, vm: &mut ScriptVm, _apply: &Apply, value: ScriptValue) {
         if let Some(io_self) = value.as_object() {
+            // The object cache is keyed by HEAP as well as object: a splash
+            // isolate has its own heap, and an object index there says
+            // nothing about the same index in the app heap.
+            let heap_key = vm.bx.heap.heap_key();
             {
                 let cx = vm.host.cx();
-                if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&io_self) {
+                if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&(heap_key, io_self)) {
                     self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
@@ -983,7 +1109,7 @@ impl DrawVars {
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders
                         .cache_object_id_to_shader
-                        .insert(io_self, shader_id);
+                        .insert((heap_key, io_self), shader_id);
                     self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
@@ -1054,7 +1180,7 @@ impl DrawVars {
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders
                         .cache_object_id_to_shader
-                        .insert(io_self, shader_id);
+                        .insert((heap_key, io_self), shader_id);
                     cx.draw_shaders
                         .cache_functions_to_shader
                         .insert(fnhash, shader_id);
@@ -1094,6 +1220,7 @@ impl DrawVars {
             self.dyn_instance_slots = mapping.instances.total_slots;
 
             let cx = vm.host.cx_mut();
+            mapping.scope_uniforms_gen = cx.next_uniform_gen();
             let index = cx.draw_shaders.shaders.len();
             cx.draw_shaders.shaders.push(CxDrawShader {
                 debug_id: LiveId(0),
@@ -1104,7 +1231,7 @@ impl DrawVars {
             let shader_id = DrawShaderId { index };
             cx.draw_shaders
                 .cache_object_id_to_shader
-                .insert(io_self, shader_id);
+                .insert((heap_key, io_self), shader_id);
             cx.draw_shaders
                 .cache_functions_to_shader
                 .insert(fnhash, shader_id);

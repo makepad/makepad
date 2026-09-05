@@ -131,6 +131,16 @@ pub struct WaterVolume {
     /// The hidden sensor slab spawned alongside (touch reports keep the old
     /// `on_touch` water contract). 0 = none.
     pub entity: u64,
+    /// Does the renderer draw this volume's sheet? False makes the volume
+    /// PHYSICS ONLY — buoyancy, swimming and the touch sensor stay, and
+    /// something else draws the surface (a river's channel-following ribbon).
+    ///
+    /// A "fully transparent" sheet is NOT a substitute: the scene blends
+    /// premultiplied (source factor ONE, destination ONE_MINUS_SRC_ALPHA), so
+    /// an alpha-0 sheet does not vanish — it ADDS its colour to whatever is
+    /// behind it. That is exactly how a river's axis-aligned physics boxes
+    /// came out as bright stepped rectangles over the meadow.
+    pub draw_sheet: bool,
 }
 
 impl WaterVolume {
@@ -445,6 +455,7 @@ mod tests {
             waves: vec![a, b],
             color: vec4(0.25, 0.55, 0.85, 0.6),
             entity: 0,
+            draw_sheet: true,
         }
     }
 
@@ -556,6 +567,7 @@ mod tests {
                 waves: Vec::new(),
                 color: vec4(0.25, 0.55, 0.85, 0.6),
                 entity: 0,
+                draw_sheet: true,
             }],
             rev: 1,
             applied: Vec::new(),
@@ -682,6 +694,7 @@ mod tests {
                         waves: vec![WaterWave::new(1.0, 0.0, 0.5, 10.0, 3.0)],
                         color: vec4(0.25, 0.55, 0.85, 0.6),
                         entity: 0,
+                        draw_sheet: true,
                     }],
                     rev: 1,
                     applied: Vec::new(),

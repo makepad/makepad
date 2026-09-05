@@ -1,3 +1,7 @@
+// Shader-language constants intentionally preserve their published numeric
+// spellings rather than depending on Rust's host-side constants.
+#![allow(clippy::approx_constant)]
+
 pub use makepad_error_log;
 pub use makepad_live_id;
 pub use makepad_live_id::makepad_live_id_macros;
@@ -14,6 +18,7 @@ macro_rules! script_eval {
 }
 
 pub mod colorhex;
+mod clock;
 pub mod docs;
 pub mod gen_index;
 pub mod heap;

@@ -6,6 +6,8 @@ license = "MIT OR Apache-2.0"
 description = "Fabric: a photo in, a fitted sewing pattern out — body model, measurements, draft, cut sheet"
 
 [dependencies]
+# The window manager's vocabulary: the bar's title and the polite close.
+makepad-wm-api = { path = "../../libs/wm_api" }
 makepad-widgets = { path = "../../widgets" }
 makepad-fabric-measure = { path = "../../libs/fabric/measure" }
 makepad-fabric-draft = { path = "../../libs/fabric/draft" }

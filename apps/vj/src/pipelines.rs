@@ -45,6 +45,7 @@ use makepad_asset_importer::gen_publish::{
 use makepad_asset_importer::gen_kinds::kind_of;
 use makepad_asset_importer::gen_profiles::build_profiles;
 use makepad_asset_client::PipelineStageSpec;
+use makepad_widgets::makepad_platform::thread::{Lane, TaskPool, ThreadOptions, ThreadSpawner};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -123,16 +124,28 @@ pub struct Pipelines {
     done_tx: Sender<PipeDone>,
     done_rx: Receiver<PipeDone>,
     queued: usize,
+    spawner: Option<ThreadSpawner>,
+    pool: Option<TaskPool>,
 }
 
 impl Default for Pipelines {
     fn default() -> Self {
         let (done_tx, done_rx) = channel();
-        Pipelines { tx: None, done_tx, done_rx, queued: 0 }
+        Pipelines { tx: None, done_tx, done_rx, queued: 0, spawner: None, pool: None }
     }
 }
 
 impl Pipelines {
+    /// The spawner makes the worker and one event pump per run; every
+    /// engine and fleet job runs on `pool`'s heavy lane.
+    pub fn set_spawner(&mut self, spawner: ThreadSpawner) {
+        self.spawner = Some(spawner);
+    }
+
+    pub fn set_task_pool(&mut self, pool: TaskPool) {
+        self.pool = Some(pool);
+    }
+
     /// (Re)point the transport at a verified session. The endpoints/token
     /// are for PUBLISHING results into the same store as ever; the runs
     /// themselves execute against the fleet directly. Live runs survive a
@@ -141,10 +154,24 @@ impl Pipelines {
     pub fn connect(&mut self, endpoints: ApiEndpoints, token: Option<String>) {
         let (tx, rx) = channel::<PipeReq>();
         let done = self.done_tx.clone();
-        let spawned = std::thread::Builder::new()
-            .name("vj-pipelines".to_string())
-            .spawn(move || worker(endpoints, token, rx, done));
-        self.tx = spawned.is_ok().then_some(tx);
+        let spawned = self.spawner.as_ref().zip(self.pool.as_ref()).and_then(|(spawner, pool)| {
+            let worker_spawner = spawner.clone();
+            let worker_pool = pool.clone();
+            let options = ThreadOptions { name: Some("vj-pipelines".into()), ..Default::default() };
+            match spawner.spawn_worker(options, move || {
+                worker(endpoints, token, rx, done, worker_spawner, worker_pool)
+            }) {
+                Ok(handle) => {
+                    handle.detach();
+                    Some(())
+                }
+                Err(error) => {
+                    makepad_widgets::log!("vj pipeline worker unavailable: {error}");
+                    None
+                }
+            }
+        });
+        self.tx = spawned.map(|()| tx);
         self.queued = 0;
     }
 
@@ -233,10 +260,7 @@ struct JobHandle {
 type JobRegistry = Arc<Mutex<HashMap<[u8; 16], Arc<JobHandle>>>>;
 
 fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    (makepad_widgets::Cx::time_now().max(0.0) * 1000.0) as u64
 }
 
 /// 16 identity bytes from time + tag + a counter. Ids are local to this
@@ -258,6 +282,8 @@ fn worker(
     token: Option<String>,
     rx: Receiver<PipeReq>,
     done: Sender<PipeDone>,
+    spawner: ThreadSpawner,
+    pool: TaskPool,
 ) {
     // The registry outlives any one worker: a reconnect must keep answering
     // for runs the previous worker spawned.
@@ -281,6 +307,8 @@ fn worker(
                     title,
                     prompt,
                     stages,
+                    &spawner,
+                    &pool,
                 );
                 PipeDone::Created { tag, result }
             }
@@ -294,7 +322,16 @@ fn worker(
                 PipeDone::Detail { pipeline, result }
             }
             PipeReq::EnqueueJob { tag, namespace, kind, body } => {
-                let result = spawn_job(&jobs, &endpoints, token.clone(), tag, namespace, kind, body);
+                let result = spawn_job(
+                    &jobs,
+                    &endpoints,
+                    token.clone(),
+                    tag,
+                    namespace,
+                    kind,
+                    body,
+                    &pool,
+                );
                 PipeDone::JobQueued { tag, result }
             }
             PipeReq::JobStatus { job } => {
@@ -384,6 +421,8 @@ fn spawn_run(
     title: String,
     prompt: String,
     stages: Vec<PipelineStageSpec>,
+    spawner: &ThreadSpawner,
+    pool: &TaskPool,
 ) -> Result<PipelineCreatedDto, String> {
     // Translate every declared stage before anything runs: a refusal here
     // is the whole declaration refusing, exactly like the server's 400.
@@ -472,12 +511,17 @@ fn spawn_run(
     registry.lock().unwrap().insert(pipeline.0, handle.clone());
 
     let endpoints = endpoints.clone();
-    let spawn = std::thread::Builder::new()
-        .name(format!("vj-dream-{tag}"))
-        .spawn(move || run_thread(handle, spec, orders, endpoints, token, namespace, prompt));
-    if spawn.is_err() {
-        return Err("could not spawn the run thread".to_string());
-    }
+    let run_pool = pool.clone();
+    // One dedicated event pump per run (it publishes each finished stage
+    // and waits for the engine, which a pool job must never do); the engine
+    // itself is a heavy pool job.
+    let options = ThreadOptions { name: Some("vj-pipeline-run".into()), ..Default::default() };
+    spawner
+        .spawn_worker(options, move || {
+            run_thread(handle, spec, orders, endpoints, token, namespace, prompt, run_pool)
+        })
+        .map(|handle| handle.detach())
+        .map_err(|error| format!("could not spawn the run thread: {error}"))?;
     Ok(PipelineCreatedDto { pipeline, stages: created_jobs })
 }
 
@@ -562,13 +606,12 @@ fn run_thread(
     token: Option<String>,
     namespace: String,
     typed_prompt: String,
+    pool: TaskPool,
 ) {
     let (events_tx, events_rx) = channel();
     let cancel = handle.cancel.clone();
     let engine_spec = spec.clone();
-    let engine = std::thread::Builder::new()
-        .name("vj-dream-engine".to_string())
-        .spawn(move || {
+    let engine = pool.submit(Lane::Heavy, move || {
             engine::run(
                 &engine_spec,
                 &orders,
@@ -582,7 +625,7 @@ fn run_thread(
         let mut record = handle.record.lock().unwrap();
         for stage in &mut record.stages {
             stage.state = StageState::Failed;
-            stage.error = Some("could not spawn the engine".to_string());
+            stage.error = Some("could not queue the engine".to_string());
         }
         record.finished_ms = Some(now_ms());
         return;
@@ -763,8 +806,9 @@ fn spawn_job(
     namespace: String,
     kind_name: String,
     body: Value,
+    pool: &TaskPool,
 ) -> Result<JobId, String> {
-    // Validate at enqueue so a typo refuses before any thread spawns.
+    // Validate at enqueue so a typo refuses before any job is queued.
     let _ = makepad_asset_creator::runner::translate(&kind_name, &body, tag)?;
     let job = JobId(mint_id(tag ^ 0x00B5));
     let handle = Arc::new(JobHandle {
@@ -782,15 +826,17 @@ fn spawn_job(
     });
     jobs.lock().unwrap().insert(job.0, handle.clone());
     let endpoints = endpoints.clone();
-    std::thread::Builder::new()
-        .name(format!("vj-gen-{tag}"))
-        .spawn(move || job_thread(handle, endpoints, token, namespace, kind_name, body, tag))
-        .map_err(|_| "could not spawn the job thread".to_string())?;
+    pool.submit(Lane::Heavy, move || {
+            job_thread(job, handle, endpoints, token, namespace, kind_name, body, tag)
+        })
+        .map(|handle| handle.detach())
+        .map_err(|error| format!("could not queue the job: {error}"))?;
     Ok(job)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn job_thread(
+    job: JobId,
     handle: Arc<JobHandle>,
     endpoints: ApiEndpoints,
     token: Option<String>,
@@ -802,7 +848,12 @@ fn job_thread(
     let target = PublishTarget { endpoints, token, namespace };
     let cancel = handle.cancel.clone();
     let progress_handle = handle.clone();
+    let mut node = "not reported".to_string();
     let mut progress = |note: &str, permille: u16| {
+        if let Some(endpoint) = note.strip_prefix("waiting for ").and_then(|s| s.split_once(" admission").map(|p| p.0))
+            .or_else(|| note.strip_prefix("job ").and_then(|s| s.split_once(" on ").map(|p| p.1))) {
+            node = endpoint.chars().take(160).collect();
+        }
         let mut view = progress_handle.view.lock().unwrap();
         if view.state == StageState::Pending {
             view.state = StageState::Running;
@@ -832,12 +883,34 @@ fn job_thread(
                 view.state = StageState::Cancelled;
                 view.outcome = Some("cancelled".to_string());
             } else {
+                makepad_widgets::log!("vj generation failed kind={} localjob={} node={} error={}",
+                    kind_name, job, node, bounded_job_error(&error, &body));
                 view.state = StageState::Failed;
                 view.outcome = Some("failed".to_string());
                 view.note = error;
             }
         }
     }
+}
+
+/// Only the error is logged, never the request document. Backends can echo
+/// input text, so remove request strings before bounding the one-line log.
+fn bounded_job_error(error: &str, body: &Value) -> String {
+    fn redact(out: &mut String, value: &Value) {
+        match value {
+            Value::Str(text) if !text.is_empty() => *out = out.replace(text, "[request value]"),
+            Value::Obj(fields) => for (key, value) in fields {
+                if !matches!(key.as_str(), "model" | "domain" | "kind") { redact(out, value); }
+            },
+            Value::Arr(items) => for value in items { redact(out, value); },
+            _ => {}
+        }
+    }
+    let mut safe = error.to_string();
+    redact(&mut safe, body);
+    let mut out: String = safe.chars().take(768).map(|c| if c.is_control() { ' ' } else { c }).collect();
+    if safe.chars().count() > 768 { out.push('…'); }
+    out
 }
 
 /// The registry key a handle was inserted under is not stored on it; jobs
@@ -992,4 +1065,40 @@ fn terminal_result(view: &StageView) -> Option<JobResultDto> {
         recorded_ms: now_ms(),
         body,
     })
+}
+
+#[cfg(test)]
+mod job_error_tests {
+    use super::*;
+
+    #[test]
+    fn failed_dto_keeps_classification_and_original_error() {
+        let reason = "http://node:8765/generate: http 503: queue full";
+        let handle = Arc::new(JobHandle {
+            view: Mutex::new(JobView { namespace: "gen".into(), kind: "video.generate".into(),
+                created_ms: 1, state: StageState::Failed, note: reason.into(), permille: 0,
+                outcome: Some("failed".into()), published: None }),
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+        let dto = synthesize_job_status(JobId([7; 16]), &handle);
+        assert_eq!(dto.state, JobStateDto::Failed);
+        assert_eq!(dto.outcome.as_deref(), Some("failed"));
+        assert_eq!(dto.progress, Some((0, reason.into())));
+    }
+
+    #[test]
+    fn failure_log_redacts_nested_request_text_and_payloads_and_is_bounded() {
+        let body = makepad_asset_client::json::obj(vec![
+            ("prompt", makepad_asset_client::json::s("private prompt")),
+            ("inputs", Value::Arr(vec![makepad_asset_client::json::obj(vec![
+                ("data_b64", makepad_asset_client::json::s("cHJpdmF0ZSBwYXlsb2Fk")),
+            ])])),
+        ]);
+        let error = format!("http://node:8765: backend error: private prompt cHJpdmF0ZSBwYXlsb2Fk\n{}", "é".repeat(2000));
+        let safe = bounded_job_error(&error, &body);
+        assert!(safe.contains("http://node:8765: backend error:"));
+        assert!(!safe.contains("private prompt") && !safe.contains("cHJpdmF0"));
+        assert!(!safe.contains('\n'));
+        assert!(safe.chars().count() <= 769);
+    }
 }

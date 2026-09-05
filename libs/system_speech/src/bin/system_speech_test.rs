@@ -8,6 +8,13 @@
 //! system-speech-test listen [--lang en] [--seconds 8]     # mic-owning engines
 //! ```
 
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+// This diagnostic drives native OS speech engines; it is not a wasm runtime target.
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
+
 use makepad_system_speech::{stt, tts, wav, SttEvent, SttOptions, TtsOptions, STT_SAMPLE_RATE};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -16,7 +23,7 @@ fn arg_value(args: &[String], flag: &str) -> Option<String> {
     args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1).cloned())
 }
 
-fn main() {
+pub(super) fn run() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("info") | None => {
@@ -130,4 +137,11 @@ fn main() {
             std::process::exit(2);
         }
     }
+}
+
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn main() {
+    native::run();
 }

@@ -4,6 +4,7 @@
 //! `world.render_rev`; dynamics re-pack every frame.
 
 use makepad_draw::*;
+use crate::custom_material::DrawSceneCustom;
 use makepad_game_sim::{
     entity_index_sorted, BodyKind, ChunkKey, Entity, GameWorld, Part, Shape, Terrain, TerrainMaterials,
     VoxelField, WaterState, WaterVolume, MAX_WAVES,
@@ -198,10 +199,12 @@ pub struct Renderer {
     /// Per-frame visibility scratch, index-aligned with `static_chunks`;
     /// reused so a steady scene does not reallocate.
     chunk_visible: Vec<bool>,
-    /// `(world.render_rev, bake.generation())` — the slabs carry baked light
-    /// in their colours, so a rebake invalidates them exactly like a world
-    /// edit does.
-    slab_key: Option<(u64, u64)>,
+    /// [`static_slab_key`] — the slabs carry the entities' colours AND the
+    /// baked light in those colours, so a repaint (`paint_rev`) and a
+    /// rebake invalidate them exactly like a world edit does. The light
+    /// bake itself keys on [`lightmap_world_key`], which a repaint never
+    /// moves.
+    slab_key: Option<(u64, u64, u64)>,
     slab_instance_count: u64,
     /// GPU mesh for the smooth terrain, rebuilt when the revision changes.
     terrain_tiles: Vec<TerrainTile>,
@@ -337,6 +340,7 @@ pub struct Renderer {
     /// out of `self` for the duration of the draw so the loop can still
     /// borrow the model tables.
     pbr_draw: Option<Box<DrawScenePbr>>,
+    custom_draws: std::collections::BTreeMap<String, Box<DrawSceneCustom>>,
     /// Whether shiny loaded models use the PBR material lane. Enabled by
     /// default so existing hosts keep their rendering unchanged; CAD-style
     /// views can temporarily request the diffuse textured lane instead.
@@ -453,6 +457,7 @@ pub struct Renderer {
     /// own — UNLESS it moved the lamps' daylight-headroom scale, which is
     /// baked into the atlas RGB and cannot follow anything per frame.
     lm_kick_key: Option<(u64, u64, u32)>,
+    lm_kick_sun: Option<Vec3f>,
     shadow_geometry: Option<Geometry>,
     last_dynamic_shadow_tris: usize,
     shadow_points: Vec<Vec3f>,
@@ -840,6 +845,7 @@ struct LayerMaterial {
 enum ModelDraw<'a> {
     Diffuse(&'a mut DrawSceneSkinned),
     Pbr(&'a mut DrawScenePbr),
+    Custom(&'a str, &'a mut DrawSceneCustom),
 }
 
 impl ModelDraw<'_> {
@@ -847,6 +853,7 @@ impl ModelDraw<'_> {
         match self {
             ModelDraw::Diffuse(d) => d,
             ModelDraw::Pbr(d) => &mut d.skinned,
+            ModelDraw::Custom(_, d) => &mut d.skinned,
         }
     }
 
@@ -1213,6 +1220,8 @@ pub struct AnimPartBox {
 #[derive(Clone)]
 pub struct ModelInstance {
     pub model: String,
+    /// Visual-only opt-in; absent or failed custom shader uses the stock lane.
+    pub custom_material: Option<CustomMaterialInstance>,
     pub transform: Mat4f,
     /// Per-copy albedo multiplier. White preserves the authored material.
     pub tint: Vec4f,
@@ -1232,6 +1241,12 @@ pub struct ModelInstance {
     /// keyed by their source-neutral connection name. Missing entries sit in
     /// the authored rest pose, so generic viewers need no special handling.
     pub part_poses: Vec<ModelPartPose>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CustomMaterialInstance {
+    pub name: String,
+    pub params: Vec4f,
 }
 
 #[derive(Clone)]
@@ -1326,6 +1341,31 @@ fn world_boxes(m: &Mat4f, boxes: &[(Vec3f, Vec3f)]) -> (Vec<(Vec3f, Vec3f)>, Vec
     }
 }
 
+/// What the packed static slabs are valid for: the static geometry, its
+/// paint, and the light baked into its colours. A repaint (`paint_rev`)
+/// repacks the slabs and nothing else.
+fn static_slab_key(world: &GameWorld, bake_generation: u64) -> (u64, u64, u64) {
+    (world.render_rev, world.paint_rev, bake_generation)
+}
+
+/// What a GPU lightmap job is valid for: the static geometry — never its
+/// paint — the placed models and the daylight quantum. A lamp turning red
+/// must not re-bake a town (Crossroads, 2026-09-02: 68 bakes a minute).
+fn lightmap_world_key(world: &GameWorld, models_rev: u64, day_key: u32) -> (u64, u64, u32) {
+    (world.render_rev, models_rev, day_key)
+}
+
+/// Only a baked sun-visibility consumer needs angle updates. Below the
+/// horizon every region has the same no-direct-sun result: the clock moving
+/// through midnight must not continually replace a town's lighting atlas.
+fn lightmap_sun_changed(previous: Option<Vec3f>, dir: Vec3f, mode: crate::gpu_lightmap::GpuLightmapMode) -> bool {
+    if mode != crate::gpu_lightmap::GpuLightmapMode::OnChange { return false; }
+    let Some(previous) = previous else { return true; };
+    let was_up = previous.y > 0.02;
+    let is_up = dir.y > 0.02;
+    was_up != is_up || (is_up && previous.normalize().dot(dir.normalize()) < 0.03_f32.cos())
+}
+
 fn placed_scene_signature(instances: &[ModelInstance]) -> u64 {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -1353,6 +1393,24 @@ fn placed_scene_signature(instances: &[ModelInstance]) -> u64 {
 }
 
 impl ModelInstance {
+    /// Explicit authored metre-space attachment. Unlike `on_body`, this
+    /// never measures/recentres/fits the mesh: `origin` lands on body origin.
+    /// +Z front becomes engine -Z and the full rigid frame carries bank/pitch.
+    /// Callers validate finite bounded scale/origin at the authoring boundary.
+    pub fn on_body_authored(model: String, scale: f32, origin: Vec3f, frame: &Mat4f) -> Self {
+        let mut local = Mat4f::identity();
+        local.v[0] = -scale;
+        local.v[5] = scale;
+        local.v[10] = -scale;
+        local.v[12] = origin.x * scale;
+        local.v[13] = -origin.y * scale;
+        local.v[14] = origin.z * scale;
+        Self {
+            model, transform: Mat4f::mul(frame, &local),
+            tint: vec4(1.0, 1.0, 1.0, 1.0), color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
+            dynamic: true, depth_order: 0.0, part_poses: Vec::new(), custom_material: None,
+        }
+    }
     /// Hang a model off a moving body, anchored by the MODEL's own measured
     /// bounds rather than by the body's collision box.
     ///
@@ -1415,6 +1473,7 @@ impl ModelInstance {
             color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
             dynamic: true,
             depth_order: 0.0,
+            custom_material: None,
             part_poses: Vec::new(),
         }
     }
@@ -1424,14 +1483,19 @@ impl ModelInstance {
         self
     }
 
+    pub fn with_custom_material(mut self, material: Option<CustomMaterialInstance>) -> Self {
+        self.custom_material = material;
+        self
+    }
+
     pub fn with_color_adjust(mut self, color_adjust: Vec4f) -> Self {
         self.color_adjust = color_adjust;
         self
     }
 }
 
-fn perf_us(t0: std::time::Instant) -> u64 {
-    t0.elapsed().as_micros() as u64
+fn perf_us(t0: f64) -> u64 {
+    ((Cx::monotonic_now() - t0) * 1_000_000.0) as u64
 }
 
 /// Fold a baked shade multiplier into an instance colour.
@@ -1801,7 +1865,7 @@ fn primitive_bucket(entity: &Entity) -> Option<PrimitiveBucket> {
 /// platforms, a dragged kinematic) pays ONE refresh once the world has been
 /// still this long — "only re-render the shadows when an object stops
 /// moving" — instead of one per mutation.
-const SHADOW_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
+const SHADOW_SETTLE: f64 = 0.2;
 
 /// Coalescing debounce for the settle work. Pure state machine — the caller
 /// supplies the clock — so the burst behaviour is testable without threads
@@ -1814,7 +1878,7 @@ struct ShadowRebuildGate {
     /// The key the current chunks were built for. None = never built.
     built: Option<(u64, u64, u64, u32)>,
     /// Latest key seen since `built`, and when it last CHANGED.
-    pending: Option<((u64, u64, u64, u32), std::time::Instant)>,
+    pending: Option<((u64, u64, u64, u32), f64)>,
 }
 
 impl ShadowRebuildGate {
@@ -1823,8 +1887,8 @@ impl ShadowRebuildGate {
     fn should_rebuild(
         &mut self,
         key: (u64, u64, u64, u32),
-        now: std::time::Instant,
-        settle: std::time::Duration,
+        now: f64,
+        settle: f64,
     ) -> bool {
         if self.built == Some(key) {
             self.pending = None;
@@ -1834,7 +1898,9 @@ impl ShadowRebuildGate {
             return true;
         }
         match self.pending {
-            Some((k, since)) if k == key => now.duration_since(since) >= settle,
+            // A hair of slack: `t + 0.2 - t` is a few ulps under 0.2 in f64,
+            // and a settle that never fires is a rebuild that never comes.
+            Some((k, since)) if k == key => now - since + 1.0e-9 >= settle,
             // New key (first change, or changed again mid-wait): the settle
             // clock restarts — the world is still being edited.
             _ => {
@@ -2174,6 +2240,7 @@ impl Default for Renderer {
             detail_fallback: None,
             orm_fallback: None,
             pbr_draw: None,
+            custom_draws: Default::default(),
             pbr_materials_enabled: true,
             ssao: None,
             lm_remaps: Vec::new(),
@@ -2221,6 +2288,7 @@ impl Default for Renderer {
             model_sdf_bytes: std::collections::HashMap::new(),
             sdf_baked_sun_len: 0.0,
             lm_kick_key: None,
+            lm_kick_sun: None,
             shadow_geometry: None,
             last_dynamic_shadow_tris: 0,
             shadow_points: Vec::new(),
@@ -2345,6 +2413,7 @@ impl Renderer {
     /// and pass pools, stage policy, bake settings, shadow budget, and the
     /// adaptive-quality history owned by this device.
     pub fn enter_realm(&mut self) {
+        self.custom_draws.clear();
         self.static_chunks.clear();
         self.chunk_visible.clear();
         self.slab_key = None;
@@ -2397,6 +2466,7 @@ impl Renderer {
         self.world_attachment_ground.clear();
         self.sdf_instances.clear();
         self.lm_kick_key = None;
+        self.lm_kick_sun = None;
 
         // Keep the counter monotonic even though all its consumers above
         // were cleared; this prevents a future cache from reintroducing the
@@ -2703,6 +2773,39 @@ impl Renderer {
         }
     }
 
+    /// Install only a successfully frontend-compiled material. Failure keeps
+    /// the previous draw (or the stock fallback), never a blank model.
+    pub fn install_custom_material(&mut self, name: String, draw: DrawSceneCustom) -> bool {
+        if !draw.draw_vars.can_instance() { return false; }
+        self.custom_draws.insert(name, Box::new(draw));
+        true
+    }
+
+    pub fn retain_custom_materials(&mut self, names: &[String]) {
+        self.custom_draws.retain(|name, _| names.contains(name));
+    }
+
+    pub fn custom_material_shader(&self, name: &str) -> Option<DrawShaderId> {
+        self.custom_draws.get(name).and_then(|draw| draw.draw_shader_id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_custom_models(
+        &mut self, cx: &mut Cx3d, eye: Vec3f, instances: &[ModelInstance],
+        lane: WorldModelLane, fog: (Vec3f, f32), sun: &SunLight,
+        frustum: Option<&Frustum>, stats: &mut RenderStats,
+    ) {
+        let names: Vec<String> = self.custom_draws.keys().filter(|name| {
+            instances.iter().any(|i| i.custom_material.as_ref().is_some_and(|m| &m.name == *name))
+        }).cloned().collect();
+        for name in names {
+            let Some(mut draw) = self.custom_draws.remove(&name) else { continue; };
+            self.draw_models_inner(cx, ModelDraw::Custom(&name, &mut draw), eye,
+                instances, lane, fog, sun, frustum, stats);
+            self.custom_draws.insert(name, draw);
+        }
+    }
+
     /// Hand this frame's actor-attached world props to the renderer.
     ///
     /// Attachments receive ordinary world depth, fog, sunlight, AO and
@@ -2888,6 +2991,14 @@ impl Renderer {
         self.water_tiles.clear();
         if let Some(water) = water {
             for volume in &water.volumes {
+                // A physics-only volume draws NOTHING (`WaterVolume::draw_sheet`
+                // documents why a transparent sheet is not the same thing: this
+                // pass blends premultiplied, so alpha 0 adds instead of hides).
+                // A river's chain of axis-aligned boxes takes this branch; its
+                // channel-following ribbon is the visible surface.
+                if !volume.draw_sheet {
+                    continue;
+                }
                 let (vertices, indices, min, max) = water_sheet_data(volume);
                 if indices.is_empty() {
                     continue;
@@ -3001,7 +3112,10 @@ impl Renderer {
                 return m;
             }
         }
-        if e.kind == BodyKind::Rigid {
+        // A rigid body's orientation comes from box3d; a kinematic RIDE body
+        // (a coaster car halfway round a loop) writes its own. Either way a
+        // set quaternion is the pose — only an unset one falls back to yaw.
+        if e.kind == BodyKind::Rigid || e.orient != Quat::default() {
             let (x, y, z, w) = (e.orient.x, e.orient.y, e.orient.z, e.orient.w);
             let mut m = Mat4f::identity();
             m.v[0] = 1.0 - 2.0 * (y * y + z * z);
@@ -4315,6 +4429,7 @@ impl Renderer {
         // The snapshot becomes render passes on the next frame
         // (gpu_lightmap.rs); delivery is a texture handle swap, no upload.
         self.gpu_baker.schedule(crate::gpu_lightmap::GpuBakeJob {
+            world_revision: (world.render_rev, self.models_rev),
             scene,
             mesh_geometry,
             mesh_map,
@@ -4412,6 +4527,10 @@ impl Renderer {
     /// Takes effect immediately: Realtime -> OnChange re-dirties every
     /// region so mover shadows stamped into the tiles are baked away.
     pub fn set_gpu_lightmap_mode(&mut self, mode: crate::gpu_lightmap::GpuLightmapMode) {
+        if self.gpu_baker.mode() != mode {
+            self.shadow_gate = ShadowRebuildGate::default();
+            self.lm_kick_sun = None;
+        }
         self.gpu_baker.set_mode(mode);
     }
 
@@ -4828,6 +4947,11 @@ impl Renderer {
             eye,
             csm_scene_bounds,
         ) {
+            // Geometry can change during the settle debounce while an older
+            // atlas finishes. Its remaps index the old model list.
+            if d.world_revision != (world.render_rev, self.models_rev) {
+                return;
+            }
             self.lightmap = Some(d.atlas);
             self.lm_remaps = vec![Vec4f::default(); self.placed_models.len()];
             for (k, pi) in d.mesh_map.iter().enumerate() {
@@ -5404,6 +5528,10 @@ impl Renderer {
             return;
         }
         let pbr_lane = draw.is_pbr();
+        let custom_name = match &draw {
+            ModelDraw::Custom(name, _) => Some((*name).to_string()),
+            _ => None,
+        };
         {
             let draw = draw.base();
             sun.write_into(
@@ -5529,7 +5657,16 @@ impl Renderer {
             // they must not be renumbered — and each takes only the models
             // its shader owns.
             let uses_pbr_lane = self.pbr_materials_enabled && loaded.1.wants_pbr;
-            if uses_pbr_lane != pbr_lane {
+            let wanted_custom = inst.custom_material.as_ref().filter(|m| {
+                custom_name.as_deref() == Some(m.name.as_str())
+                    || self.custom_draws.get(&m.name).is_some_and(|d| d.draw_vars.can_instance())
+            });
+            if let Some(name) = custom_name.as_deref() {
+                if wanted_custom.map(|m| m.name.as_str()) != Some(name) { continue; }
+                if let (ModelDraw::Custom(_, d), Some(material)) = (&mut draw, wanted_custom) {
+                    d.params = material.params;
+                }
+            } else if wanted_custom.is_some() || uses_pbr_lane != pbr_lane {
                 continue;
             }
             // Hoisted: `loaded` borrows self, and the per-instance light
@@ -6870,9 +7007,9 @@ impl Renderer {
 
         let vars_ready = draws.cube.cube.draw_vars.can_instance()
             && draws.alpha.cube.cube.draw_vars.can_instance();
-        let slab_key = (world.render_rev, self.bake.generation());
+        let slab_key = static_slab_key(world, self.bake.generation());
         if vars_ready && self.slab_key != Some(slab_key) {
-            let t0 = std::time::Instant::now();
+            let t0 = Cx::monotonic_now();
             self.rebuild_static_slabs(draws, world);
             stats.slab_us += perf_us(t0);
             stats.slab_rebuilds += 1;
@@ -6937,7 +7074,7 @@ impl Renderer {
             );
             if self
                 .shadow_gate
-                .should_rebuild(key, std::time::Instant::now(), SHADOW_SETTLE)
+                .should_rebuild(key, Cx::monotonic_now(), SHADOW_SETTLE)
             {
                 self.refresh_shadow_receivers(world);
                 // Same settle cadence: the light bake becomes GPU render
@@ -6946,9 +7083,9 @@ impl Renderer {
                 // only a WORLD change (or a sun change that moves the lamps)
                 // re-schedules the whole job; OnChange re-kicks on every
                 // settle, sun changes included.
-                let world_key = (world.render_rev, self.models_rev, day_key);
+                let world_key = lightmap_world_key(world, self.models_rev, day_key);
                 if self.lm_kick_key != Some(world_key)
-                    || self.gpu_baker.mode() == crate::gpu_lightmap::GpuLightmapMode::OnChange
+                    || lightmap_sun_changed(self.lm_kick_sun, sun.dir, self.gpu_baker.mode())
                 {
                     // Name the cause in the bake's own log line: a blowout
                     // that pops in has to be attributable to the run that
@@ -6961,6 +7098,7 @@ impl Renderer {
                         Some(_) => crate::gpu_lightmap::BakeTrigger::SunChange,
                     };
                     self.lm_kick_key = Some(world_key);
+                    self.lm_kick_sun = Some(sun.dir);
                     self.kick_lightmap_bake(world, &sun, trigger);
                 }
                 self.shadow_gate.mark_built(key);
@@ -7196,7 +7334,7 @@ impl Renderer {
             // with no loadable sidecar (or a host with no SDF shader).
             // Realtime draws NONE of this — characters are in the tiles.
             if shadow_mesh_enabled {
-                let t0 = std::time::Instant::now();
+                let t0 = Cx::monotonic_now();
                 let ground = world
                     .terrain
                     .as_ref()
@@ -7360,7 +7498,7 @@ impl Renderer {
         // plain blob, as does any instance whose model has no sidecar.
         // Realtime draws none of this — the cars are in the tiles.
         if shadow_mesh_enabled {
-            let t0 = std::time::Instant::now();
+            let t0 = Cx::monotonic_now();
             let instances = std::mem::take(&mut self.placed_models);
             for inst in &instances {
                 if !inst.dynamic {
@@ -7532,6 +7670,8 @@ impl Renderer {
                 frustum,
                 &mut stats,
             );
+            self.draw_custom_models(cx, camera_pos, &instances, WorldModelLane::Placed,
+                (fog_color, fog_density), &sun, frustum, &mut stats);
             self.placed_models = instances;
 
             // Actor-attached props share the world material/depth pass, but
@@ -7578,6 +7718,8 @@ impl Renderer {
                 frustum,
                 &mut stats,
             );
+            self.draw_custom_models(cx, camera_pos, &attachments, WorldModelLane::Attachment,
+                (fog_color, fog_density), &sun, frustum, &mut stats);
             self.world_attachments = attachments;
         }
 
@@ -7838,7 +7980,7 @@ impl Renderer {
         // depth write off means overlapping shadows can never fight for the
         // buffer.
         if let Some(shadow) = draws.shadow.as_deref_mut() {
-            let t0 = std::time::Instant::now();
+            let t0 = Cx::monotonic_now();
             self.last_dynamic_shadow_tris = self.shadow_mesh.triangle_count();
             if !self.shadow_mesh.is_empty() {
                 let geometry = self.shadow_geometry.get_or_insert_with(|| Geometry::new(cx.cx));
@@ -7863,7 +8005,7 @@ impl Renderer {
         // shares a draw item — the atlas bind is what splits items.
         if let Some(sd) = draws.shadow_sdf.as_deref_mut() {
             if !self.sdf_instances.is_empty() {
-                let t0 = std::time::Instant::now();
+                let t0 = Cx::monotonic_now();
                 let geometry_id = self.ensure_flare_geometry(cx.cx);
                 sd.draw_vars.geometry_id = Some(geometry_id);
                 sd.depth_clip = 1.0;
@@ -8150,6 +8292,7 @@ mod realm_lifecycle_tests {
             color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
             dynamic,
             depth_order,
+            custom_material: None,
             part_poses: Vec::new(),
         }
     }
@@ -8187,6 +8330,79 @@ mod realm_lifecycle_tests {
         assert!(renderer.pbr_materials_enabled());
         renderer.set_pbr_materials_enabled(false);
         assert!(!renderer.pbr_materials_enabled());
+    }
+
+    #[test]
+    fn a_repaint_repacks_the_slabs_but_never_rekicks_the_bake() {
+        let mut world = GameWorld::new();
+        let slab = static_slab_key(&world, 1);
+        let bake = lightmap_world_key(&world, 3, 6);
+        world.mark_paint_dirty();
+        assert_ne!(static_slab_key(&world, 1), slab, "a repainted lamp must reach the screen");
+        assert_eq!(lightmap_world_key(&world, 3, 6), bake, "a repaint is not a world edit");
+        world.mark_render_dirty();
+        assert_ne!(lightmap_world_key(&world, 3, 6), bake, "geometry still re-kicks the bake");
+        assert_ne!(static_slab_key(&world, 2), static_slab_key(&world, 1), "a rebake still repacks");
+    }
+
+    #[test]
+    fn a_night_clock_does_not_rekick_baked_sun_visibility() {
+        use crate::gpu_lightmap::GpuLightmapMode::{OnChange, Realtime};
+        let midnight = SunLight::from_time_of_day(0.0, 52.0).dir;
+        for i in 0..120 {
+            let dir = SunLight::from_time_of_day(i as f32 / 60.0, 52.0).dir;
+            assert!(!lightmap_sun_changed(Some(midnight), dir, OnChange));
+        }
+        let noon = SunLight::from_time_of_day(12.0, 52.0).dir;
+        assert!(lightmap_sun_changed(Some(midnight), noon, OnChange));
+        assert!(lightmap_sun_changed(Some(noon), midnight, OnChange));
+        assert!(!lightmap_sun_changed(Some(noon), noon, OnChange));
+        assert!(lightmap_sun_changed(Some(noon), SunLight::from_time_of_day(13.0, 52.0).dir, OnChange));
+        assert!(!lightmap_sun_changed(Some(midnight), noon, Realtime));
+    }
+
+    #[test]
+    fn sun_presentation_changes_preserve_layout_but_invalidate_baked_daylight() {
+        use crate::gpu_lightmap::GpuLightmapMode::{OnChange, Realtime};
+        let mut world = GameWorld::new();
+        world.sun = makepad_game_sim::SunConfig {
+            dir: Some(vec3f(0.0, 1.0, 0.0)),
+            color: Some(vec3f(0.05, 0.05, 0.05)),
+            ambient: Some(vec3f(0.05, 0.05, 0.05)),
+            ..Default::default()
+        };
+        let dim = crate::sun::resolve_sun(&world.sun);
+        let models_rev = 9;
+        let geometry = (world.render_rev, models_rev);
+        let old_key = lightmap_world_key(&world, models_rev, Renderer::lamp_daylight_key(&dim));
+        // Color and ambient affect baked lamp headroom even when direction
+        // is identical. They must reach the daylight key, not geometry.
+        for ambient_only in [false, true] {
+            world.sun.color = Some(if ambient_only { vec3f(0.05, 0.05, 0.05) } else { vec3f(1.0, 1.0, 1.0) });
+            world.sun.ambient = Some(if ambient_only { vec3f(1.0, 1.0, 1.0) } else { vec3f(0.05, 0.05, 0.05) });
+            let sun = crate::sun::resolve_sun(&world.sun);
+            let key = lightmap_world_key(&world, models_rev, Renderer::lamp_daylight_key(&sun));
+            assert_eq!((key.0, key.1), geometry);
+            assert_ne!(key.2, old_key.2, "baked lamp headroom must refresh");
+            assert!(!lightmap_sun_changed(Some(dim.dir), sun.dir, OnChange));
+            assert!(!lightmap_sun_changed(Some(dim.dir), sun.dir, Realtime));
+        }
+        let lit = crate::sun::resolve_sun(&world.sun);
+        let lit_key = lightmap_world_key(&world, models_rev, Renderer::lamp_daylight_key(&lit));
+        world.sun.shadow_alpha = Some(0.17);
+        let softer = crate::sun::resolve_sun(&world.sun);
+        assert_eq!(softer.shadow_alpha, 0.17);
+        assert_eq!(lightmap_world_key(&world, models_rev, Renderer::lamp_daylight_key(&softer)), lit_key,
+            "shadow opacity is analytic, not an atlas contribution");
+
+        // A directional change refreshes baked visibility in OnChange,
+        // while Realtime gets the new direction through its per-frame CSM.
+        world.sun.dir = Some(vec3f(1.0, 1.0, 0.0));
+        let moved = crate::sun::resolve_sun(&world.sun);
+        assert!(lightmap_sun_changed(Some(lit.dir), moved.dir, OnChange));
+        assert!(!lightmap_sun_changed(Some(lit.dir), moved.dir, Realtime));
+        assert_eq!((world.render_rev, models_rev), geometry,
+            "an in-flight atlas still has a valid layout after sun updates");
     }
 
     #[test]
@@ -8291,7 +8507,7 @@ mod realm_lifecycle_tests {
         settings.max_probes = 19;
         renderer.set_bake_settings(settings);
 
-        renderer.slab_key = Some((1, 1));
+        renderer.slab_key = Some((1, 1, 1));
         renderer.slab_instance_count = 23;
         renderer.terrain_revision = 1;
         renderer.water_rev = Some(1);
@@ -8630,9 +8846,8 @@ mod chunk_tests {
     /// moving keeps the rebuild parked.
     #[test]
     fn shadow_gate_coalesces_an_edit_burst() {
-        use std::time::{Duration, Instant};
-        let settle = Duration::from_millis(200);
-        let t0 = Instant::now();
+        let settle = 0.2;
+        let t0 = 10.0;
         let mut gate = ShadowRebuildGate::default();
         // First sight builds immediately.
         assert!(gate.should_rebuild((1, 0, 0, 0), t0, settle));
@@ -8641,17 +8856,17 @@ mod chunk_tests {
         // Burst: five mutations in quick succession — no rebuild during it,
         // and the settle clock restarts on every change.
         for i in 2..7u64 {
-            let now = t0 + Duration::from_millis(10 * i);
+            let now = t0 + 0.01 * i as f64;
             assert!(!gate.should_rebuild((i, 0, 0, 0), now, settle));
         }
         // Still pending just before the window closes...
-        let last_change = t0 + Duration::from_millis(60);
-        assert!(!gate.should_rebuild((6, 0, 0, 0), last_change + Duration::from_millis(199), settle));
+        let last_change = t0 + 0.06;
+        assert!(!gate.should_rebuild((6, 0, 0, 0), last_change + 0.199, settle));
         // ...and exactly one rebuild once it has.
-        let at_rest = last_change + Duration::from_millis(200);
+        let at_rest = last_change + 0.2;
         assert!(gate.should_rebuild((6, 0, 0, 0), at_rest, settle));
         gate.mark_built((6, 0, 0, 0));
-        assert!(!gate.should_rebuild((6, 0, 0, 0), at_rest + Duration::from_millis(1000), settle));
+        assert!(!gate.should_rebuild((6, 0, 0, 0), at_rest + 1.0, settle));
     }
 
     /// Tiling must regroup the terrain mesh, not change it: the union of
@@ -9173,6 +9388,7 @@ mod water_sheet_tests {
             waves: vec![wave],
             color: vec4(0.2, 0.5, 0.8, 0.6),
             entity: 0,
+            draw_sheet: true,
         }
     }
 
@@ -9535,6 +9751,7 @@ mod anim_part_tests {
             color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
             dynamic: false,
             depth_order: 0.0,
+            custom_material: None,
             part_poses: Vec::new(),
         }]);
         assert!(renderer
@@ -9560,6 +9777,26 @@ mod anim_part_tests {
         assert_eq!(blue.tint, vec4(0.2, 0.5, 1.0, 1.0));
         assert_eq!(blue.color_adjust, vec4(210.0, 1.1, 0.9, 0.0));
         assert_eq!(neutral.tint, vec4(1.0, 1.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn authored_model_origin_and_front_follow_full_bank_pitch_frame() {
+        let origin = vec3f(0.3, -0.7, 1.2);
+        for angles in [vec3f(0.0,0.0,0.0), vec3f(0.31,1.1,-0.64)] {
+            let mut frame = Mat4f::rotation(angles);
+            frame.v[12] = 17.0; frame.v[13] = 28.0; frame.v[14] = -9.0;
+            let instance = ModelInstance::on_body_authored("trainer".into(), 2.0, origin, &frame);
+            for (model_point, body_point) in [
+                (origin, vec3f(0.0,0.0,0.0)),
+                (origin + vec3f(0.0,0.0,1.0),vec3f(0.0,0.0,-2.0)),
+                (origin + vec3f(1.0,0.0,0.0),vec3f(-2.0,0.0,0.0)),
+                (origin + vec3f(0.0,1.0,0.0),vec3f(0.0,2.0,0.0)),
+            ] {
+                let got = instance.transform.transform_vec4(vec4(model_point.x,model_point.y,model_point.z,1.0));
+                let expected = frame.transform_vec4(vec4(body_point.x,body_point.y,body_point.z,1.0));
+                assert!((got.x-expected.x).abs()<1e-5 && (got.y-expected.y).abs()<1e-5 && (got.z-expected.z).abs()<1e-5);
+            }
+        }
     }
 
     #[test]

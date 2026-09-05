@@ -1,20 +1,27 @@
 workspace.members = [
     # === app ===
-    "apps/mpbrowser",
-    "apps/mpterm",
-    "apps/mpwm",
+    "apps/browser",
+    "apps/terminal",
+    "apps/wm",
+    "apps/aichat",
     "apps/finance",
-    "apps/mpsheets",
-    "libs/mp_theme",
-    "libs/mp_wm_api",
-    "apps/mptask",
-    "apps/mpimage",
-    "apps/mpvideo",
-    "apps/mppdf",
-    "apps/mpfiles",
+    "apps/sheets",
+    "apps/photos",
+    "libs/wm_theme",
+    "libs/wm_api",
+    "libs/app_module",
+    "apps/task",
+    "apps/image",
+    "apps/video",
+    "apps/pdf",
+    "apps/files",
     "apps/route",
     "apps/asset-ui",
     "apps/asset-server",
+    "apps/flow-server",
+    "apps/flow-ui",
+    "libs/flowgraph",
+    "libs/media_view",
     "apps/ai-hub",
     "apps/vj",
     "apps/mixer",
@@ -29,6 +36,7 @@ workspace.members = [
     "libs/asset/chat",
     "libs/chat_ui",
     "libs/ai/hub_ui",
+    "libs/ai/services",
     "libs/asset/annotate",
     "libs/render",
     "libs/raytrace",
@@ -39,6 +47,8 @@ workspace.members = [
     "libs/sim/math",
     "libs/show_control",
     "libs/asset/creator",
+    "libs/bounded_http",
+    "libs/flow",
     "libs/strict_json",
     # === remesh (FaithC port) / xatlas (jpcy port) ===
     "libs/remesh",
@@ -119,6 +129,7 @@ workspace.members = [
     "libs/audio_lyrics",
     # === stems + lyrics side-channel bake/publish (asset-ui + VJ) ===
     "libs/audio_sidechannels",
+    "libs/vj_analysis",
     "libs/teamtalk",
     # === pictures of audio (spectrogram, wave strip, composite) ===
     "libs/audio_picture",
@@ -140,11 +151,13 @@ workspace.members = [
     # === necessary tools ===
     "platform/video",
     "tools/cargo_makepad",
+    "tools/makepad_loader",
     # === OSM PBF -> tile archive + nav artifact bake passes (CLI + in-app) ===
     "libs/map_build",
     "tools/map_tiles",
     "tools/map_bake",
     "tools/remote",
+    "tools/dj_pack",
     "libs/system_speech",
     # === tests ===
     "platform/script/test",
@@ -279,6 +292,9 @@ strip = true
 [profile.profile]
 inherits = "release"
 debug = true
+
+[profile.test.package.makepad-stitch]
+opt-level = 1
 
 #[profile.dev.package.makepad-live-tokenizer]
 #opt-level = 3

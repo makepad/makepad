@@ -15,6 +15,7 @@ use {
             CxDragDrop, CxFingers, CxKeyboard, DrawEvent, Event, NextFrame, Trigger,
             WindowGeomChangeEvent,
         },
+        file_dialogs::FileDialogState,
         geometry::CxGeometryPool,
         gpu_info::GpuInfo,
         os::CxOs,
@@ -22,6 +23,7 @@ use {
         performance_stats::PerformanceStats,
         script::script::CxScriptData,
         sploded::SplodedView,
+        storage::StorageState,
         texture::{CxTexturePool, Texture, TextureFormat, TextureUpdated},
         thread::{SignalToUI, ToUIReceiver},
         uniform_buffer::CxUniformBufferPool,
@@ -38,7 +40,7 @@ use {
     },
     std::{
         any::{Any, TypeId},
-        cell::RefCell,
+        cell::{Cell, RefCell, UnsafeCell},
         collections::{HashMap, HashSet, VecDeque},
         rc::Rc,
         sync::Arc,
@@ -63,6 +65,8 @@ pub struct Cx {
     pub script_vm: Option<Box<ScriptVmBase>>,
     pub script_data: CxScriptData,
     pub package_root: Option<String>,
+    pub(crate) font_set: crate::font_policy::FontSet,
+    pub(crate) font_set_frozen: bool,
 
     pub debug_trace_active: bool,
 
@@ -77,6 +81,14 @@ pub struct Cx {
     pub(crate) gpu_info: GpuInfo,
     pub(crate) xr_capabilities: XrCapabilities,
     pub(crate) cpu_cores: usize,
+    /// Process memory envelope available to subsystems with large, elastic
+    /// caches. Web startup replaces the native default with the shared wasm
+    /// memory limit reported by the JS bridge.
+    pub(crate) memory_budget_bytes: usize,
+    pub(crate) memory_budget_initialized: bool,
+    pub(crate) thread_spawner: crate::thread::ThreadSpawner,
+    /// The runtime's warm background executor; see `Cx::task_pool`.
+    pub(crate) task_pool: std::cell::OnceCell<crate::thread::TaskPool>,
     pub null_texture: Texture,
     pub null_cube_texture: Texture,
     pub windows: CxWindowPool,
@@ -93,17 +105,24 @@ pub struct Cx {
 
     pub redraw_id: u64,
 
+    /// Process-wide source of uniform block generations. A generation is
+    /// issued once and never reused, so pooled draw/pass/list slots cannot
+    /// compare equal to a previous occupant's cached upload generation.
+    pub(crate) uniform_gen: u64,
+
     pub(crate) repaint_id: u64,
     pub(crate) event_id: u64,
     pub(crate) timer_id: u64,
     pub(crate) next_frame_id: u64,
     pub(crate) permissions_request_id: i32,
+    pub(crate) storage_state: StorageState,
 
     pub keyboard: CxKeyboard,
     pub fingers: CxFingers,
     pub(crate) ime_area: Area,
     pub keyboard_shift: f64,
     pub(crate) drag_drop: CxDragDrop,
+    pub(crate) file_dialogs: FileDialogState,
 
     pub(crate) platform_ops: VecDeque<CxOsOp>,
     pub(crate) pending_camera_playbacks: Vec<PendingCameraPlayback>,
@@ -123,7 +142,8 @@ pub struct Cx {
 
     pub os: CxOs,
     // (cratethis cuts the compiletime of an end-user application in half
-    pub(crate) event_handler: Option<Box<dyn FnMut(&mut Cx, &Event)>>,
+    pub(crate) event_handler: Rc<UnsafeCell<Box<dyn FnMut(&mut Cx, &Event)>>>,
+    pub(crate) event_handler_dispatch_active: Rc<Cell<bool>>,
 
     pub(crate) globals: Vec<(TypeId, Box<dyn Any>)>,
 
@@ -170,7 +190,7 @@ pub struct Cx {
     pub performance_stats: PerformanceStats,
     /// Frame monitor behind the PerfGraph widget; off until the widget enables it.
     pub perf_monitor: PerfMonitor,
-    /// The F10 exploded z-layer inspection view. Inert while off.
+    /// The exploded z-layer inspection view. Inert while off.
     pub sploded: SplodedView,
     /// How many `WidgetRef` draw scopes deep the current draw is — the turtle
     /// nesting AS COMPONENTS SEE IT. Maintained by `WidgetRef::draw_walk` and
@@ -212,6 +232,10 @@ pub struct Cx {
     /// tree callbacks above; the /tweak routes in remote.rs delegate here so
     /// platform never depends on widgets. `(op, query/body params) -> JSON`.
     pub tweak_callback: Option<fn(&mut Cx, &str, &[(String, String)]) -> Result<String, String>>,
+    /// The AI chat overlay's remote dispatcher (`/ai`, `/ai/transcript`):
+    /// registered by the aichat crate when an app links it, the same way
+    /// the widgets crate registers the tweaker's. `(op, params) -> JSON`.
+    pub ai_callback: Option<fn(&mut Cx, &str, &[(String, String)]) -> Result<String, String>>,
 
     pub net: Arc<NetworkRuntime>,
 }
@@ -282,8 +306,10 @@ pub struct WebParams {
     pub search: String,
     #[live]
     pub hash: String,
+    /// Phone-class browser (see `WasmBridge.is_phone`): the memory budget is
+    /// `PHONE_WEB_MEMORY_BUDGET_BYTES` and the wasm heap maximum is 512 MiB.
     #[live]
-    pub small_font_aliases: bool,
+    pub is_phone: bool,
 }
 
 #[derive(Clone, Debug, Default, Script, ScriptHook)]
@@ -318,6 +344,10 @@ pub struct XrCapabilities {
 }
 
 impl OsType {
+    /// The platform has ONE window. A second `Window` is not created there
+    /// (the web reports it once and never paints its pass; the canvas is
+    /// window zero's), so an app that wants a second surface — a projector
+    /// output, say — hosts it in-page when this is true.
     pub fn is_single_window(&self) -> bool {
         match self {
             OsType::Web(_) => true,
@@ -392,10 +422,349 @@ impl OsType {
     }
 }
 
+const DEFAULT_MEMORY_BUDGET_BYTES: usize = 1536 * 1024 * 1024;
+/// Working budget for a phone-class browser tab: the wasm heap maximum there
+/// is 512 MiB and the tab dies around 1 GiB total, so elastic caches must
+/// stop well below the heap ceiling.
+#[allow(dead_code)]
+pub const PHONE_WEB_MEMORY_BUDGET_BYTES: usize = 320 * 1024 * 1024;
+#[allow(dead_code)]
+const LOW_MEMORY_DEVICE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+#[allow(dead_code)]
+const MIN_MOBILE_MEMORY_BUDGET_BYTES: u64 = 384 * 1024 * 1024;
+#[allow(dead_code)]
+const MAX_MOBILE_MEMORY_BUDGET_BYTES: u64 = 1536 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+enum MemoryBudgetPolicy {
+    Desktop,
+    Mobile,
+}
+
+/// Turns the platform's one physical-memory measurement into the process
+/// envelope used by elastic subsystems. Device discovery stays platform
+/// specific; all policy lives here.
+#[allow(dead_code)]
+fn memory_budget_from_physical_memory(
+    physical_memory_bytes: u64,
+    policy: MemoryBudgetPolicy,
+) -> usize {
+    let budget = match policy {
+        MemoryBudgetPolicy::Desktop if physical_memory_bytes < LOW_MEMORY_DEVICE_BYTES => {
+            physical_memory_bytes / 4
+        }
+        MemoryBudgetPolicy::Desktop => DEFAULT_MEMORY_BUDGET_BYTES as u64,
+        MemoryBudgetPolicy::Mobile => (physical_memory_bytes / 4).clamp(
+            MIN_MOBILE_MEMORY_BUDGET_BYTES,
+            MAX_MOBILE_MEMORY_BUDGET_BYTES,
+        ),
+    };
+    budget.min(usize::MAX as u64) as usize
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn apple_physical_memory_bytes() -> Option<u64> {
+    use makepad_objc_sys::{class, msg_send, runtime::Object, sel, sel_impl};
+
+    unsafe {
+        let process_info: *mut Object = msg_send![class!(NSProcessInfo), processInfo];
+        if process_info.is_null() {
+            None
+        } else {
+            let bytes: u64 = msg_send![process_info, physicalMemory];
+            (bytes != 0).then_some(bytes)
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+fn linux_physical_memory_bytes() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = meminfo.lines().find(|line| {
+        line.split_once(':')
+            .is_some_and(|(name, _)| name.trim() == "MemTotal")
+    })?;
+    let mut fields = line.split_once(':')?.1.split_whitespace();
+    let kib = fields.next()?.parse::<u64>().ok()?;
+    (fields.next() == Some("kB"))
+        .then(|| kib.checked_mul(1024))
+        .flatten()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_physical_memory_bytes() -> Option<u64> {
+    #[allow(non_snake_case)]
+    #[repr(C)]
+    struct MemoryStatusEx {
+        dwLength: u32,
+        dwMemoryLoad: u32,
+        ullTotalPhys: u64,
+        ullAvailPhys: u64,
+        ullTotalPageFile: u64,
+        ullAvailPageFile: u64,
+        ullTotalVirtual: u64,
+        ullAvailVirtual: u64,
+        ullAvailExtendedVirtual: u64,
+    }
+
+    windows_core::link!("kernel32.dll" "system" fn GlobalMemoryStatusEx(
+        status: *mut MemoryStatusEx
+    ) -> windows_core::BOOL);
+
+    let mut status = MemoryStatusEx {
+        dwLength: std::mem::size_of::<MemoryStatusEx>() as u32,
+        dwMemoryLoad: 0,
+        ullTotalPhys: 0,
+        ullAvailPhys: 0,
+        ullTotalPageFile: 0,
+        ullAvailPageFile: 0,
+        ullTotalVirtual: 0,
+        ullAvailVirtual: 0,
+        ullAvailExtendedVirtual: 0,
+    };
+    unsafe {
+        (GlobalMemoryStatusEx(&mut status).0 != 0 && status.ullTotalPhys != 0)
+            .then_some(status.ullTotalPhys)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn platform_memory_budget(web_memory_bytes: usize) -> (usize, &'static str) {
+    if web_memory_bytes == PHONE_WEB_MEMORY_BUDGET_BYTES {
+        (web_memory_bytes, "phone web policy")
+    } else {
+        (web_memory_bytes, "wasm memory maximum")
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn platform_memory_budget(default: usize) -> (usize, &'static str) {
+    apple_physical_memory_bytes()
+        .map(|bytes| {
+            (
+                memory_budget_from_physical_memory(bytes, MemoryBudgetPolicy::Desktop),
+                "ProcessInfo.processInfo.physicalMemory",
+            )
+        })
+        .unwrap_or((default, "default"))
+}
+
+#[cfg(target_os = "ios")]
+fn platform_memory_budget(default: usize) -> (usize, &'static str) {
+    apple_physical_memory_bytes()
+        .map(|bytes| {
+            (
+                memory_budget_from_physical_memory(bytes, MemoryBudgetPolicy::Mobile),
+                "ProcessInfo.processInfo.physicalMemory",
+            )
+        })
+        .unwrap_or((default, "default"))
+}
+
+#[cfg(target_os = "android")]
+fn platform_memory_budget(default: usize) -> (usize, &'static str) {
+    crate::os::linux::android::android_jni::physical_memory_bytes()
+        .map(|bytes| {
+            (
+                memory_budget_from_physical_memory(bytes, MemoryBudgetPolicy::Mobile),
+                "ActivityManager.MemoryInfo.totalMem",
+            )
+        })
+        .unwrap_or((default, "default"))
+}
+
+#[cfg(target_os = "windows")]
+fn platform_memory_budget(default: usize) -> (usize, &'static str) {
+    windows_physical_memory_bytes()
+        .map(|bytes| {
+            (
+                memory_budget_from_physical_memory(bytes, MemoryBudgetPolicy::Desktop),
+                "GlobalMemoryStatusEx",
+            )
+        })
+        .unwrap_or((default, "default"))
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+fn platform_memory_budget(default: usize) -> (usize, &'static str) {
+    linux_physical_memory_bytes()
+        .map(|bytes| {
+            (
+                memory_budget_from_physical_memory(bytes, MemoryBudgetPolicy::Desktop),
+                "/proc/meminfo MemTotal",
+            )
+        })
+        .unwrap_or((default, "default"))
+}
+
+#[cfg(not(any(
+    target_arch = "wasm32",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "android",
+    target_os = "windows",
+    all(target_os = "linux", not(target_env = "ohos")),
+)))]
+fn platform_memory_budget(default: usize) -> (usize, &'static str) {
+    (default, "default")
+}
+
+/// Owner breakdown of the process memory the platform itself holds: CPU-side
+/// geometry staging, draw-list instance buffers, texture data, script
+/// resources (font files) and, on wasm, what the allocator holds from the
+/// linear memory. Walks the pools once; read it from a slow timer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CxMemoryReport {
+    /// Linear memory size on wasm; 0 elsewhere.
+    pub wasm_memory_bytes: usize,
+    /// Live direct (above the size classes) allocations on wasm; 0 elsewhere.
+    pub alloc_large_bytes: usize,
+    pub alloc_large_count: usize,
+    /// Live 64 KiB size-class chunks on wasm; 0 elsewhere.
+    pub alloc_chunk_bytes: usize,
+    /// CPU vertex/index staging still held by geometry slots (free slots included).
+    pub geometry_cpu_bytes: usize,
+    pub geometry_slots: usize,
+    /// CPU instance buffers held by draw items across every draw-list slot.
+    pub instance_cpu_bytes: usize,
+    pub draw_list_slots: usize,
+    /// CPU pixel data held by texture slots.
+    pub texture_cpu_bytes: usize,
+    /// Loaded script resource bytes (font files and other crate resources).
+    pub resource_bytes: usize,
+}
+
 impl Cx {
+    /// Issue the next nonzero, process-wide uniform generation.
+    #[inline]
+    pub fn next_uniform_gen(&mut self) -> u64 {
+        Self::next_uniform_gen_from(&mut self.uniform_gen)
+    }
+
+    #[inline]
+    pub(crate) fn next_uniform_gen_from(uniform_gen: &mut u64) -> u64 {
+        let next = *uniform_gen;
+        *uniform_gen = uniform_gen
+            .checked_add(1)
+            .expect("uniform generation counter exhausted");
+        next
+    }
+
+    /// A conservative process-wide memory envelope for cache/batch budgets.
+    /// Native keeps a generous fixed ceiling; web reports the shared wasm
+    /// browser memory envelope through `ToWasmInit` before `Event::Startup`.
+    pub fn memory_budget_bytes(&self) -> usize {
+        self.memory_budget_bytes
+    }
+
+    pub(crate) fn initialize_memory_budget(&mut self) {
+        if self.memory_budget_initialized {
+            return;
+        }
+        self.memory_budget_initialized = true;
+        let (budget, source) = platform_memory_budget(self.memory_budget_bytes);
+        self.memory_budget_bytes = budget;
+        crate::log!(
+            "memory budget: {} MiB ({})",
+            budget / (1024 * 1024),
+            source
+        );
+    }
+
+    pub fn memory_report(&self) -> CxMemoryReport {
+        let mut report = CxMemoryReport::default();
+        #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+        {
+            let stats = crate::web_alloc::stats();
+            report.wasm_memory_bytes = crate::web_alloc::wasm_memory_bytes();
+            report.alloc_large_bytes = stats.large_bytes;
+            report.alloc_large_count = stats.large_count;
+            report.alloc_chunk_bytes = stats.chunk_bytes;
+        }
+        for slot in &self.geometries.0.pool {
+            report.geometry_slots += 1;
+            report.geometry_cpu_bytes = report
+                .geometry_cpu_bytes
+                .saturating_add(slot.item.vertices.capacity_bytes())
+                .saturating_add(slot.item.indices.capacity_bytes());
+        }
+        for slot in &self.draw_lists.0.pool {
+            report.draw_list_slots += 1;
+            for item in &slot.item.draw_items.buffer {
+                if let Some(instances) = &item.instances {
+                    report.instance_cpu_bytes = report
+                        .instance_cpu_bytes
+                        .saturating_add(instances.capacity().saturating_mul(4));
+                }
+            }
+        }
+        for slot in &self.textures.0.pool {
+            report.texture_cpu_bytes = report
+                .texture_cpu_bytes
+                .saturating_add(slot.item.format.cpu_data_bytes());
+        }
+        report.resource_bytes = self
+            .script_data
+            .resources
+            .resources
+            .borrow()
+            .iter()
+            .map(|resource| resource.loaded_len())
+            .fold(0usize, usize::saturating_add);
+        report
+    }
+
+    /// Direct allocations of 4 MiB or more since the previous call, oldest
+    /// first, as `(bytes, linear memory bytes at that moment)`. Empty outside
+    /// wasm. Names the requests that grew the heap between two reports.
+    pub fn take_big_allocation_events(&self) -> Vec<(usize, usize)> {
+        #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+        {
+            crate::web_alloc::take_big_events()
+        }
+        #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
+        {
+            Vec::new()
+        }
+    }
+
+    /// Select the application's font policy before script/theme registration.
+    /// Once startup begins the choice is immutable because compiled package
+    /// metadata and registered resource handles must continue to agree.
+    pub fn set_font_set(&mut self, font_set: crate::font_policy::FontSet) -> bool {
+        if self.font_set_frozen {
+            crate::error!(
+                "font set is immutable after script registration (kept {}, rejected {})",
+                self.font_set.as_str(),
+                font_set.as_str()
+            );
+            return false;
+        }
+        self.font_set = font_set;
+        true
+    }
+
+    pub fn font_set(&self) -> crate::font_policy::FontSet {
+        self.font_set
+    }
+
+    #[doc(hidden)]
+    pub fn freeze_font_set(&mut self) {
+        self.font_set_frozen = true;
+    }
+
+    pub fn is_font_set_frozen(&self) -> bool {
+        self.font_set_frozen
+    }
+
     pub fn new(event_handler: Box<dyn FnMut(&mut Cx, &Event)>) -> Self {
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         crate::os::termination_signal::install();
+
+        makepad_network::install_ui_waker(Some(makepad_network::UiWaker::new(|| {
+            crate::thread::wake_ui_event_loop();
+        })));
 
         //#[cfg(any(target_arch = "wasm32", target_os = "android"))]
         //crate::makepad_error_log::set_panic_hook();
@@ -432,25 +801,25 @@ impl Cx {
             SignalToUI::set_ui_signal();
         })));
 
-        let mut script_std = makepad_script_std::ScriptStd::with_network_runtime(net.clone());
-        let mut script_host = 0;
-        let mut vm = ScriptVm {
-            host: &mut script_host,
-            std: &mut script_std,
-            bx: Box::new(ScriptVmBase::new()),
-        };
+        let script_std = makepad_script_std::ScriptStd::with_network_runtime(net.clone());
+        let script_vm = Box::new(ScriptVmBase::new());
+        let crate_manifests = script_vm.code.crate_manifests.clone();
+        let script_mod_overrides = script_vm.code.script_mod_overrides.clone();
 
-        //todo!();
-        crate::script::script_mod(&mut vm);
-        let script_vm = std::mem::replace(&mut vm.bx, Box::new(ScriptVmBase::empty()));
-        drop(vm);
-
-        Self {
+        let mut cx = Self {
             package_root: None,
+            font_set: crate::font_policy::FontSet::target_default(),
+            font_set_frozen: false,
             demo_time_repaint: false,
             null_texture,
             null_cube_texture,
-            cpu_cores: 8,
+            cpu_cores: crate::thread::available_parallelism().get(),
+            memory_budget_bytes: DEFAULT_MEMORY_BUDGET_BYTES,
+            memory_budget_initialized: false,
+            thread_spawner: crate::thread::ThreadSpawner::for_current_thread(
+                crate::thread::available_parallelism().get(),
+            ),
+            task_pool: std::cell::OnceCell::new(),
             in_makepad_studio: false,
             game_input_remote: Vec::new(),
             in_draw_event: false,
@@ -472,15 +841,18 @@ impl Cx {
             new_actions: Default::default(),
 
             redraw_id: 1,
+            uniform_gen: 1,
             event_id: 1,
             repaint_id: 1,
             timer_id: 1,
             next_frame_id: 1,
             permissions_request_id: 0,
+            storage_state: StorageState::default(),
 
             keyboard: Default::default(),
             fingers: Default::default(),
             drag_drop: Default::default(),
+            file_dialogs: Default::default(),
             ime_area: Default::default(),
             keyboard_shift: 0.0,
             platform_ops: Default::default(),
@@ -502,7 +874,8 @@ impl Cx {
 
             os: CxOs::default(),
 
-            event_handler: Some(event_handler),
+            event_handler: Rc::new(UnsafeCell::new(event_handler)),
+            event_handler_dispatch_active: Rc::new(Cell::new(false)),
 
             debug: Default::default(),
 
@@ -536,69 +909,76 @@ impl Cx {
             widget_query_callback: None,
             widget_snapshot_callback: None,
             tweak_callback: None,
+            ai_callback: None,
             net,
 
             script_data: CxScriptData {
                 std: script_std,
-                crate_manifests: script_vm.code.crate_manifests.clone(),
+                crate_manifests,
                 live_reload: crate::live_reload::CxLiveReloadState {
-                    script_mod_overrides: script_vm.code.script_mod_overrides.clone(),
+                    script_mod_overrides,
                     ..Default::default()
                 },
                 ..Default::default()
             },
             script_vm: Some(script_vm),
-        }
+        };
+
+        //todo!();
+        cx.with_vm(crate::script::script_mod);
+        cx
     }
 }
 
 // ---------------------------------------------------------------------------
-// Startup trace — working-tree instrumentation, gated on MAKEPAD_STARTUP_TRACE.
+// Startup trace — working-tree instrumentation, gated on the `startup` topic.
 //
 // Prints `[startup] <phase> +<ms>` where <ms> is measured from process exec
 // when a launcher exported MAKEPAD_STARTUP_T0 (epoch seconds, f64) just
 // before exec — that is the only way to see the pre-`main` dyld / Gatekeeper
 // window. Without it the clock starts at the first call.
 //
-// Costs nothing when the var is unset: one relaxed atomic load per call.
+// MAKEPAD_STARTUP_T0 remains launcher-supplied and is read only when enabled.
 // ---------------------------------------------------------------------------
 
-static STARTUP_TRACE_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-static STARTUP_T0: std::sync::OnceLock<std::time::SystemTime> = std::sync::OnceLock::new();
+static STARTUP_T0: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
 static STARTUP_ACC: std::sync::Mutex<Vec<(&'static str, f64, u32)>> =
     std::sync::Mutex::new(Vec::new());
 
 #[inline]
 pub fn startup_trace_enabled() -> bool {
-    *STARTUP_TRACE_ON.get_or_init(|| std::env::var_os("MAKEPAD_STARTUP_TRACE").is_some())
+    crate::makepad_error_log::trace_enabled("startup")
 }
 
-fn startup_t0() -> std::time::SystemTime {
+fn startup_t0() -> f64 {
     *STARTUP_T0.get_or_init(|| {
         std::env::var("MAKEPAD_STARTUP_T0")
             .ok()
             .and_then(|v| v.trim().parse::<f64>().ok())
-            .map(|secs| {
-                std::time::UNIX_EPOCH + std::time::Duration::from_secs_f64(secs)
-            })
-            .unwrap_or_else(std::time::SystemTime::now)
+            .unwrap_or_else(Cx::time_now)
     })
 }
 
 /// Milliseconds since exec (or since the first trace call).
 pub fn startup_since_exec_ms() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(startup_t0())
-        .map(|d| d.as_secs_f64() * 1000.0)
-        .unwrap_or(0.0)
+    if !startup_trace_enabled() {
+        return 0.0;
+    }
+    startup_since_exec_ms_enabled()
+}
+
+fn startup_since_exec_ms_enabled() -> f64 {
+    (Cx::time_now() - startup_t0()).max(0.0) * 1000.0
 }
 
 /// Mark a startup phase.
 pub fn startup_trace(phase: &str) {
-    if !startup_trace_enabled() {
-        return;
-    }
-    eprintln!("[startup] {:<28} +{:9.2} ms", phase, startup_since_exec_ms());
+    crate::trace!(
+        "startup",
+        "{:<28} +{:9.2} ms",
+        phase,
+        startup_since_exec_ms_enabled()
+    );
 }
 
 /// Accumulate a repeated sub-cost (shader compiles, font loads, …) under a
@@ -623,9 +1003,84 @@ pub fn startup_trace_flush(phase: &str) {
     }
     let rows = std::mem::take(&mut *STARTUP_ACC.lock().unwrap());
     for (bucket, ms, n) in rows {
-        eprintln!(
-            "[startup] {:<28}  {:8.2} ms total over {} ({})",
+        crate::trace!(
+            "startup",
+            "{:<28}  {:8.2} ms total over {} ({})",
             bucket, ms, n, phase
         );
+    }
+}
+
+#[cfg(test)]
+mod memory_budget_tests {
+    use super::*;
+
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+
+    #[test]
+    fn uniform_generation_counter_starts_at_one_and_is_monotonic() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        assert_eq!(cx.next_uniform_gen(), 1);
+        assert_eq!(cx.next_uniform_gen(), 2);
+        assert_eq!(cx.next_uniform_gen(), 3);
+    }
+
+    #[test]
+    fn low_memory_desktop_uses_one_quarter_of_physical_ram() {
+        assert_eq!(
+            memory_budget_from_physical_memory(4 * GIB, MemoryBudgetPolicy::Desktop),
+            (1 * GIB) as usize
+        );
+    }
+
+    #[test]
+    fn desktop_at_threshold_keeps_the_default_budget() {
+        assert_eq!(
+            memory_budget_from_physical_memory(8 * GIB, MemoryBudgetPolicy::Desktop),
+            DEFAULT_MEMORY_BUDGET_BYTES
+        );
+    }
+
+    #[test]
+    fn small_mobile_is_clamped_to_the_minimum() {
+        assert_eq!(
+            memory_budget_from_physical_memory(1 * GIB, MemoryBudgetPolicy::Mobile),
+            (384 * MIB) as usize
+        );
+    }
+
+    #[test]
+    fn mid_sized_mobile_uses_one_quarter_of_physical_ram() {
+        assert_eq!(
+            memory_budget_from_physical_memory(4 * GIB, MemoryBudgetPolicy::Mobile),
+            (1 * GIB) as usize
+        );
+    }
+
+    #[test]
+    fn large_mobile_is_clamped_to_the_maximum() {
+        assert_eq!(
+            memory_budget_from_physical_memory(8 * GIB, MemoryBudgetPolicy::Mobile),
+            DEFAULT_MEMORY_BUDGET_BYTES
+        );
+    }
+}
+
+impl Cx {
+    /// True while the platform is still compiling draw shaders it was handed
+    /// and is therefore dropping (WebGL) their draw calls. Native backends
+    /// build pipelines inside the paint that first uses them and never
+    /// answer true. An offscreen bake that captures pixels polls this before
+    /// trusting a frame: a capture drawn while its program links is black.
+    pub fn draw_shaders_pending(&self) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.os.webgl_shaders_pending > 0
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            false
+        }
     }
 }

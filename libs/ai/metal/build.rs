@@ -1,6 +1,5 @@
 use std::env;
 use std::fs;
-use std::path::Path;
 use std::process::Command;
 
 // The metallib build for THE Metal shader store (aiarch.md §1 + §8b ring 1,
@@ -78,14 +77,9 @@ fn build_metallib() {
     let metal_src = format!("{}/ggml-metal.metal", metal_dir);
     let common_h = format!("{}/ggml-common.h", metal_dir);
     let impl_h = format!("{}/ggml-metal-impl.h", metal_dir);
-    let mlx_dir = format!("{}/shaders/mlx_qmm", manifest_dir);
-    let steel_src = format!("{}/steel_qmm.metal", mlx_dir);
-
     println!("cargo:rerun-if-changed={}", metal_src);
     println!("cargo:rerun-if-changed={}", common_h);
     println!("cargo:rerun-if-changed={}", impl_h);
-    println!("cargo:rerun-if-changed={}", steel_src);
-    rerun_if_changed_tree(Path::new(&mlx_dir));
 
     // links-metadata handshake: flows to immediate dependents (libs/ggml)
     // as DEP_MAKEPAD_AI_METAL_SHADER_DIR=<metal_dir>. Emitted unconditionally
@@ -108,7 +102,6 @@ fn build_metallib() {
     let out_dir = env::var("OUT_DIR").unwrap();
     let _ = fs::create_dir_all(&out_dir);
     let air_path = format!("{}/ggml-metal.air", out_dir);
-    let steel_air_path = format!("{}/steel_qmm.air", out_dir);
     let metallib_path = format!("{}/ggml-default.metallib", out_dir);
 
     if !precompile_enabled {
@@ -147,53 +140,8 @@ fn build_metallib() {
         return;
     }
 
-    let steel_output = Command::new("xcrun")
-        .args([
-            "--sdk",
-            "macosx",
-            "metal",
-            "-O3",
-            "-fno-fast-math",
-            "-c",
-            &steel_src,
-            "-I",
-            &mlx_dir,
-            "-o",
-            &steel_air_path,
-        ])
-        .output();
-
-    let steel_ok = match &steel_output {
-        Ok(output) if output.status.success() => true,
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.trim().is_empty() {
-                println!(
-                    "cargo:warning=failed to compile steel_qmm.metal (status {:?})",
-                    output.status
-                );
-            } else {
-                for line in stderr.lines() {
-                    println!("cargo:warning=steel qmm: {line}");
-                }
-            }
-            false
-        }
-        Err(err) => {
-            println!("cargo:warning=failed to invoke metal for steel_qmm.metal: {err}");
-            false
-        }
-    };
-
     let mut metallib = Command::new("xcrun");
     metallib.args(["--sdk", "macosx", "metallib", &air_path]);
-    if steel_ok {
-        metallib.arg(&steel_air_path);
-    } else {
-        println!(
-            "cargo:warning=steel affine_qmm_t not in metallib; MAKEPAD_METAL_AFFINE_QMM will fall back"
-        );
-    }
     let metallib_status = metallib.arg("-o").arg(&metallib_path).status();
 
     let ok = metallib_status.as_ref().is_ok_and(|s| s.success());
@@ -215,19 +163,4 @@ fn emit_metallib_env(metallib_path: &str) {
     // links-metadata handshake: flows to immediate dependents (libs/ggml)
     // as DEP_MAKEPAD_AI_METAL_METALLIB=<metallib_path>.
     println!("cargo:metallib={}", metallib_path);
-}
-
-fn rerun_if_changed_tree(path: &Path) {
-    println!("cargo:rerun-if-changed={}", path.display());
-    let Ok(entries) = fs::read_dir(path) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let child = entry.path();
-        if child.is_dir() {
-            rerun_if_changed_tree(&child);
-        } else {
-            println!("cargo:rerun-if-changed={}", child.display());
-        }
-    }
 }

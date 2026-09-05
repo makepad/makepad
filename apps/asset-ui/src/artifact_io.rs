@@ -13,12 +13,11 @@
 //! - gallery preview decodes run on a small worker pool (2..=8 threads)
 //!   pulling a last-in-first-out stack, capped so old off-screen work drops.
 
-use makepad_widgets::makepad_platform::thread::SignalToUI;
+use makepad_widgets::makepad_platform::thread::{SignalToUI, ThreadOptions, ThreadSpawner};
 use makepad_widgets::{decode_image_from_data, ImageBuffer};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Condvar, Mutex};
 
 /// What one background read is for.
 pub enum IoPurpose {
@@ -164,35 +163,39 @@ pub enum IoDone {
 pub struct ArtifactIo {
     tx: Sender<IoRequest>,
     rx: Receiver<IoDone>,
-    gallery: Arc<GalleryStack>,
 }
 
 impl ArtifactIo {
-    pub fn start() -> Self {
+    pub fn start(spawner: ThreadSpawner) -> Self {
         let (request_tx, request_rx) = channel::<IoRequest>();
         let (done_tx, done_rx) = channel::<IoDone>();
-        let gallery = Arc::new(GalleryStack::new());
-        std::thread::Builder::new()
-            .name("asset-ui-artifact-io".into())
-            .spawn({
-                let done_tx = done_tx.clone();
-                let gallery = Arc::clone(&gallery);
-                move || dispatch_loop(request_rx, done_tx, gallery)
-            })
-            .expect("artifact io dispatcher");
-        let n = gallery_worker_count();
-        for i in 0..n {
-            let done_tx = done_tx.clone();
-            let gallery = Arc::clone(&gallery);
-            std::thread::Builder::new()
-                .name(format!("asset-ui-preview-{i}"))
-                .spawn(move || gallery_loop(gallery, done_tx))
-                .expect("gallery decode worker");
-        }
+        let (gallery_tx, gallery_rx) = channel::<IoRequest>();
+        spawner
+            .spawn_worker(
+                ThreadOptions {
+                    name: Some("asset-ui-artifact-io".into()),
+                    ..Default::default()
+                },
+                {
+                    let done_tx = done_tx.clone();
+                    move || dispatch_loop(request_rx, done_tx, gallery_tx)
+                },
+            )
+            .expect("artifact io dispatcher")
+            .detach();
+        spawner
+            .spawn_worker(
+                ThreadOptions {
+                    name: Some("asset-ui-preview".into()),
+                    ..Default::default()
+                },
+                move || gallery_loop(gallery_rx, done_tx),
+            )
+            .expect("gallery decode worker")
+            .detach();
         Self {
             tx: request_tx,
             rx: done_rx,
-            gallery,
         }
     }
 
@@ -206,12 +209,6 @@ impl ArtifactIo {
     }
 }
 
-impl Drop for ArtifactIo {
-    fn drop(&mut self) {
-        self.gallery.shutdown();
-    }
-}
-
 fn is_gallery(purpose: &IoPurpose) -> bool {
     matches!(
         purpose,
@@ -221,13 +218,13 @@ fn is_gallery(purpose: &IoPurpose) -> bool {
     )
 }
 
-fn dispatch_loop(rx: Receiver<IoRequest>, tx: Sender<IoDone>, gallery: Arc<GalleryStack>) {
+fn dispatch_loop(rx: Receiver<IoRequest>, tx: Sender<IoDone>, gallery: Sender<IoRequest>) {
     // One connected client per session, reused across opens: against the
     // local server a fresh connect costs more than the payload.
     let mut store: Option<(crate::import::ServerSession, makepad_asset_client::AssetClient)> = None;
     while let Ok(request) = rx.recv() {
         if is_gallery(&request.purpose) {
-            gallery.push_latest(request);
+            let _ = gallery.send(request);
             continue;
         }
         let done = process_with_store(request, &mut store);
@@ -236,18 +233,27 @@ fn dispatch_loop(rx: Receiver<IoRequest>, tx: Sender<IoDone>, gallery: Arc<Galle
         }
         SignalToUI::set_ui_signal();
     }
-    gallery.shutdown();
 }
 
-fn gallery_loop(gallery: Arc<GalleryStack>, tx: Sender<IoDone>) {
-    while let Some(request) = gallery.pop_latest() {
-        let file = request.file.clone();
-        let done = process(request);
-        gallery.finish(&file);
-        if tx.send(done).is_err() {
-            return;
+fn gallery_loop(rx: Receiver<IoRequest>, tx: Sender<IoDone>) {
+    let mut gallery = GalleryStack::new();
+    while let Ok(request) = rx.recv() {
+        gallery.push_latest(request);
+        for request in rx.try_iter() {
+            gallery.push_latest(request);
         }
-        SignalToUI::set_ui_signal();
+        while let Some(request) = gallery.pop_latest() {
+            let file = request.file.clone();
+            let done = process(request);
+            gallery.finish(&file);
+            if tx.send(done).is_err() {
+                return;
+            }
+            SignalToUI::set_ui_signal();
+            for request in rx.try_iter() {
+                gallery.push_latest(request);
+            }
+        }
     }
 }
 
@@ -264,24 +270,22 @@ struct GalleryInner {
 }
 
 struct GalleryStack {
-    inner: Mutex<GalleryInner>,
-    cv: Condvar,
+    inner: GalleryInner,
 }
 
 impl GalleryStack {
     fn new() -> Self {
         Self {
-            inner: Mutex::new(GalleryInner {
+            inner: GalleryInner {
                 stack: Vec::new(),
                 decoding: HashSet::new(),
                 shutdown: false,
-            }),
-            cv: Condvar::new(),
+            },
         }
     }
 
-    fn push_latest(&self, request: IoRequest) {
-        let mut g = self.inner.lock().expect("gallery stack");
+    fn push_latest(&mut self, request: IoRequest) {
+        let g = &mut self.inner;
         if g.shutdown {
             return;
         }
@@ -294,41 +298,28 @@ impl GalleryStack {
             let drop_n = g.stack.len() - GALLERY_STACK_CAP;
             g.stack.drain(0..drop_n);
         }
-        self.cv.notify_one();
     }
 
-    fn pop_latest(&self) -> Option<IoRequest> {
-        let mut g = self.inner.lock().expect("gallery stack");
-        loop {
-            if g.shutdown {
-                return None;
-            }
-            while let Some(request) = g.stack.pop() {
-                if g.decoding.insert(request.file.clone()) {
-                    return Some(request);
-                }
-            }
-            g = self.cv.wait(g).expect("gallery stack");
+    fn pop_latest(&mut self) -> Option<IoRequest> {
+        let g = &mut self.inner;
+        if g.shutdown {
+            return None;
         }
+        while let Some(request) = g.stack.pop() {
+            if g.decoding.insert(request.file.clone()) {
+                return Some(request);
+            }
+        }
+        None
     }
 
-    fn finish(&self, file: &str) {
-        let mut g = self.inner.lock().expect("gallery stack");
-        g.decoding.remove(file);
+    fn finish(&mut self, file: &str) {
+        self.inner.decoding.remove(file);
     }
 
-    fn shutdown(&self) {
-        let mut g = self.inner.lock().expect("gallery stack");
-        g.shutdown = true;
-        self.cv.notify_all();
+    fn shutdown(&mut self) {
+        self.inner.shutdown = true;
     }
-}
-
-fn gallery_worker_count() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .clamp(2, 8)
 }
 
 /// A read whose bytes may come from the store. Everything past the fetch is
@@ -865,7 +856,8 @@ mod tests {
         std::fs::write(&payload, b"mp4-bytes").unwrap();
         let copy = dir.join("viewer-open.mp4");
 
-        let io = ArtifactIo::start();
+        let cx = makepad_widgets::Cx::new(Box::new(|_, _| {}));
+        let io = ArtifactIo::start(cx.thread_spawner());
         io.request(IoRequest {
             file: "clip.mp4".into(),
             path: payload.clone(),
@@ -1143,7 +1135,7 @@ mod tests {
 
     #[test]
     fn gallery_stack_is_last_requested_first_and_rebumps() {
-        let stack = GalleryStack::new();
+        let mut stack = GalleryStack::new();
         let mk = |file: &str| IoRequest {
             file: file.into(),
             path: PathBuf::from(file),
@@ -1168,7 +1160,7 @@ mod tests {
 
     #[test]
     fn gallery_stack_drops_oldest_when_capped() {
-        let stack = GalleryStack::new();
+        let mut stack = GalleryStack::new();
         for i in 0..(GALLERY_STACK_CAP + 10) {
             stack.push_latest(IoRequest {
                 file: format!("f{i}"),

@@ -5,27 +5,79 @@ use {
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
         event::{
-            Event, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NetworkResponse, ScrollEvent,
-            TextClipboardEvent, TimerEvent, ToWasmMsgEvent, TouchUpdateEvent,
+            DragEvent, DragItem, DragResponse, DropEvent, Event, KeyModifiers, MouseDownEvent,
+            MouseMoveEvent, MouseUpEvent, NetworkResponse, ScrollEvent, TextClipboardEvent,
+            TimerEvent, ToWasmMsgEvent, TouchUpdateEvent,
             VideoDecodingErrorEvent, VideoPlaybackCompletedEvent, VideoPlaybackPreparedEvent,
             VideoPlaybackResourcesReleasedEvent, VideoSource, VideoTextureUpdatedEvent, WindowGeom,
-            WindowGeomChangeEvent,
+        },
+        file_dialogs::{
+            assemble_virtual_files, FileDialog, FileDialogAction, VirtualFileData,
         },
         makepad_live_id::*,
         makepad_wasm_bridge::{FromWasm, FromWasmMsg, ToWasm, ToWasmMsg, WasmDataU8},
         permission::{Permission, PermissionResult, PermissionStatus},
-        thread::SignalToUI,
-        window::CxWindowPool,
+        storage::{
+            StorageError, StorageEstimate, StorageList, StorageOp, StorageRequestId,
+            StorageRequestKind, StorageResult, StorageStat,
+        },
+        thread::{lock_from_ui, SignalToUI},
         HttpError, HttpProgress, HttpResponse, Vec2d,
     },
-    std::cell::RefCell,
-    std::panic,
-    std::rc::Rc,
+    std::{
+        cell::RefCell,
+        panic,
+        rc::Rc,
+        sync::{Arc, Mutex},
+    },
 };
 
 impl Cx {
-    /// WebGL cannot blit a private render target to CPU without an extra
-    /// readPixels path that this backend does not expose yet.
+    fn web_key_modifiers(modifiers: u32) -> KeyModifiers {
+        KeyModifiers {
+            shift: modifiers & 1 != 0,
+            control: modifiers & 2 != 0,
+            alt: modifiers & 4 != 0,
+            logo: modifiers & 8 != 0,
+        }
+    }
+
+    fn web_virtual_files(
+        files: Vec<WVirtualFile>,
+        limits: crate::VirtualFileLimits,
+    ) -> Result<Vec<crate::VirtualFile>, String> {
+        assemble_virtual_files(
+            files
+                .into_iter()
+                .map(|file| VirtualFileData {
+                    name: file.name,
+                    mime: file.mime,
+                    bytes: file.bytes.into_vec_u8(),
+                })
+                .collect(),
+            limits,
+        )
+    }
+
+    fn web_file_dialog_accept(dialog: &FileDialog) -> String {
+        let mut accept = Vec::<String>::new();
+        for filter in &dialog.filters {
+            for extension in &filter.extensions {
+                let extension = extension.trim().trim_start_matches('*').trim_start_matches('.');
+                if extension.is_empty() {
+                    return String::new();
+                }
+                let extension = format!(".{extension}");
+                if !accept.iter().any(|item| item.eq_ignore_ascii_case(&extension)) {
+                    accept.push(extension);
+                }
+            }
+        }
+        accept.join(",")
+    }
+
+    /// The direct path stays unavailable: WebGL readback must not synchronously
+    /// stall the browser's UI thread. Use `request_render_texture_capture`.
     pub fn debug_read_render_texture(
         &mut self,
         _texture: &crate::texture::Texture,
@@ -33,17 +85,25 @@ impl Cx {
         None
     }
 
-    /// Renderer-owned texture capture (see the metal backend): not
-    /// implemented here — callers fall back to `debug_read_render_texture`.
-    pub fn request_render_texture_capture(&mut self, _texture: &crate::texture::Texture) -> bool {
-        false
+    /// Queue a WebGL2 PBO/fence readback. The bridge polls the fence on later
+    /// animation frames and returns raw RGBA8 bytes without blocking this call.
+    pub fn request_render_texture_capture(&mut self, texture: &crate::texture::Texture) -> bool {
+        let tid = texture.texture_id();
+        let Some(alloc) = self.textures[tid].alloc.as_ref() else { return false };
+        if alloc.width == 0 || alloc.height == 0 {
+            return false;
+        }
+        self.os.from_wasm(FromWasmRequestRenderTextureCapture {
+            texture_id: tid.0,
+        });
+        true
     }
 
     #[allow(clippy::type_complexity)]
     pub fn take_render_texture_captures(
         &mut self,
     ) -> Vec<(crate::texture::TextureId, usize, usize, Vec<u8>)> {
-        Vec::new()
+        std::mem::take(&mut self.os.render_texture_captures)
     }
 
     fn normalize_web_pathname(pathname: &str) -> String {
@@ -103,8 +163,12 @@ impl Cx {
     // incoming to_wasm. There is absolutely no other entrypoint
     // to general rust codeflow than this function. Only the allocators and init
     pub fn process_to_wasm(&mut self, msg_ptr: u32) -> u32 {
+        // A panic=abort trap cannot run dispatch guards. Every JS ingress is
+        // a fresh top-level dispatch, so clear the bookkeeping it may leave.
+        self.reset_event_dispatch_state();
         let mut to_wasm_msg = ToWasmMsg::take_ownership(msg_ptr);
         let mut network_responses = Vec::new();
+        let mut storage_responses = Vec::new();
         self.os.from_wasm = Some(FromWasmMsg::new());
         let mut to_wasm = to_wasm_msg.as_ref();
         let mut is_animation_frame = None;
@@ -114,7 +178,21 @@ impl Cx {
             match block_id {
                 live_id!(ToWasmInit) => {
                     let tw = ToWasmInit::read_to_wasm(&mut to_wasm);
-                    self.cpu_cores = tw.cpu_cores as usize;
+                    #[cfg(target_feature = "atomics")]
+                    crate::web_alloc::prefill_main_thread_cache();
+                    self.cpu_cores = (tw.cpu_cores as usize).max(1);
+                    // A browser may accept a 4 GiB wasm maximum, but elastic
+                    // caches must still target the 1 GiB deployment class; a
+                    // phone gets the fixed phone budget regardless of what the
+                    // bridge could reserve.
+                    self.memory_budget_bytes = if tw.browser_info.is_phone {
+                        crate::cx::PHONE_WEB_MEMORY_BUDGET_BYTES
+                    } else {
+                        (tw.wasm_memory_max_pages as usize)
+                            .saturating_mul(64 * 1024)
+                            .clamp(64 * 1024 * 1024, 1024 * 1024 * 1024)
+                    };
+                    crate::thread::set_web_available_parallelism(self.cpu_cores);
                     self.gpu_info.init_from_info(
                         tw.gpu_info.min_uniform_vectors,
                         tw.gpu_info.vendor,
@@ -122,41 +200,30 @@ impl Cx {
                     );
                     self.os_type = tw.browser_info.into();
                     self.xr_capabilities = tw.xr_capabilities.into();
-                    let id_zero = CxWindowPool::id_zero();
                     let mut new_geom: WindowGeom = tw.window_info.into();
-                    {
+                    self.os.native_window_geom = new_geom.clone();
+                    if let Some(id_zero) = self.windows.current_id_zero() {
                         let window = &mut self.windows[id_zero];
                         window.os_dpi_factor = Some(new_geom.dpi_factor);
                         new_geom = window.native_window_geom_to_layout(new_geom);
+                        window.window_geom = new_geom.clone();
                     }
-                    self.os.window_geom = new_geom.clone();
-                    self.windows[id_zero].window_geom = new_geom;
+                    self.os.window_geom = new_geom;
                     //self.default_inner_window_size = self.os.window_geom.inner_size;
 
                     self.set_physical_keyboard_state(true);
                     self.call_event_handler(&Event::Startup);
                     self.redraw_all();
-                    //self.platform.from_wasm(FromWasmCreateThread{thread_id:1});
                 }
 
                 live_id!(ToWasmResizeWindow) => {
                     let tw = ToWasmResizeWindow::read_to_wasm(&mut to_wasm);
-                    let old_geom = self.os.window_geom.clone();
-                    let mut new_geom: WindowGeom = tw.window_info.into();
-                    let id_zero = CxWindowPool::id_zero();
-                    {
-                        let window = &mut self.windows[id_zero];
-                        window.os_dpi_factor = Some(new_geom.dpi_factor);
-                        new_geom = window.native_window_geom_to_layout(new_geom);
-                    }
-                    if old_geom != new_geom {
-                        self.os.window_geom = new_geom.clone();
-                        self.windows[id_zero].window_geom = new_geom.clone();
-                        self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
-                            window_id: id_zero,
-                            old_geom: old_geom,
-                            new_geom: new_geom,
-                        }));
+                    if let Some(event) = self.windows.web_resize_window_geom(
+                        &mut self.os.native_window_geom,
+                        &mut self.os.window_geom,
+                        tw.window_info.into(),
+                    ) {
+                        self.call_event_handler(&Event::WindowGeomChange(event));
                         self.redraw_all();
                     }
                 }
@@ -245,6 +312,83 @@ impl Cx {
                     }
                 }
 
+                live_id!(ToWasmStorageResult) => {
+                    let tw = ToWasmStorageResult::read_to_wasm(&mut to_wasm);
+                    let request_id = StorageRequestId(
+                        tw.request_id_lo as u64 | ((tw.request_id_hi as u64) << 32),
+                    );
+                    let Some(op) = StorageOp::from_u32(tw.op) else {
+                        if let Some(response) = self.finish_web_storage_protocol_error(
+                            request_id,
+                            format!("storage response had unknown operation {}", tw.op),
+                        ) {
+                            storage_responses.push(response);
+                        }
+                        to_wasm.block_skip(skip);
+                        continue;
+                    };
+                    let result = if !tw.error.is_empty() {
+                        Err(if tw.error_kind == 1 {
+                            StorageError::QuotaExceeded(tw.error)
+                        } else {
+                            StorageError::Backend(tw.error)
+                        })
+                    } else {
+                        Ok(match op {
+                            StorageOp::Get | StorageOp::GetRange => StorageResult::Value(
+                                tw.found.then(|| tw.value.into_vec_u8()),
+                            ),
+                            StorageOp::Set | StorageOp::Delete => StorageResult::Unit,
+                            StorageOp::List => StorageResult::List(StorageList {
+                                keys: tw.keys,
+                                next_cursor: tw.has_next.then_some(tw.next),
+                            }),
+                            StorageOp::Stat => StorageResult::Stat(tw.found.then_some(
+                                StorageStat {
+                                    len: tw.length_lo as u64
+                                        | ((tw.length_hi as u64) << 32),
+                                },
+                            )),
+                            StorageOp::Estimate => StorageResult::Estimate(StorageEstimate {
+                                usage: tw.usage_lo as u64 | ((tw.usage_hi as u64) << 32),
+                                quota: tw.quota_lo as u64 | ((tw.quota_hi as u64) << 32),
+                            }),
+                        })
+                    };
+                    if let Some(response) =
+                        self.finish_web_storage_request(request_id, op, result)
+                    {
+                        storage_responses.push(response);
+                    }
+                }
+                live_id!(ToWasmRenderTextureCapture) => {
+                    let tw = ToWasmRenderTextureCapture::read_to_wasm(&mut to_wasm);
+                    if tw.error.is_empty() {
+                        if let Some(texture_id) = self.textures.id_at_index(tw.texture_id) {
+                            self.os.render_texture_captures.push((
+                                texture_id,
+                                tw.width,
+                                tw.height,
+                                tw.data.into_vec_u8(),
+                            ));
+                            self.redraw_all();
+                        }
+                    } else {
+                        crate::error!("web render texture capture failed: {}", tw.error);
+                        if let Some(texture_id) = self.textures.id_at_index(tw.texture_id) {
+                            // Wake the waiting owner immediately. Zero geometry is
+                            // the existing capture tuple's unambiguous failure form.
+                            self.os.render_texture_captures.push((
+                                texture_id,
+                                0,
+                                0,
+                                Vec::new(),
+                            ));
+                            self.redraw_all();
+                        }
+                    }
+                }
+
                 live_id!(ToWasmSignal) => {
                     let tw = ToWasmSignal::read_to_wasm(&mut to_wasm);
                     if tw.flags & 1 != 0 {
@@ -277,6 +421,8 @@ impl Cx {
                         }
                         4 => {
                             self.call_event_handler(&Event::Shutdown);
+                            self.close_task_pool();
+                            self.thread_spawner.close_runtime();
                         }
                         _ => {}
                     }
@@ -293,22 +439,29 @@ impl Cx {
                 }
 
                 live_id!(ToWasmWindowGotFocus) => {
-                    let window_id = CxWindowPool::id_zero();
-                    self.call_event_handler(&Event::WindowGotFocus(window_id));
+                    self.call_window_zero_focus_event(true);
                 }
 
                 live_id!(ToWasmWindowLostFocus) => {
-                    let window_id = CxWindowPool::id_zero();
-                    self.call_event_handler(&Event::WindowLostFocus(window_id));
+                    self.call_window_zero_focus_event(false);
                 }
 
                 live_id!(ToWasmRedrawAll) => {
                     self.redraw_all();
                 }
 
+                live_id!(ToWasmWebGLShadersDone) => {
+                    let tw = ToWasmWebGLShadersDone::read_to_wasm(&mut to_wasm);
+                    self.os.webgl_shaders_pending =
+                        self.os.webgl_shaders_pending.saturating_sub(tw.count);
+                }
+
                 live_id!(ToWasmPaintDirty) => {
-                    let main_pass_id = self.windows[CxWindowPool::id_zero()].main_pass_id.unwrap();
-                    self.passes[main_pass_id].paint_dirty = true;
+                    if let Some(window_id) = self.windows.current_id_zero() {
+                        if let Some(main_pass_id) = self.windows[window_id].main_pass_id {
+                            self.passes[main_pass_id].paint_dirty = true;
+                        }
+                    }
                 }
 
                 live_id!(ToWasmLiveFileChange) => {
@@ -323,6 +476,103 @@ impl Cx {
                     if self.update_web_location_state(tw.pathname, tw.search, tw.hash) {
                         self.call_event_handler(&Event::Signal);
                     }
+                }
+
+                live_id!(ToWasmFileDrag) => {
+                    let tw = ToWasmFileDrag::read_to_wasm(&mut to_wasm);
+                    let mut abs = if tw.left {
+                        crate::dvec2(-100000.0, -100000.0)
+                    } else {
+                        crate::dvec2(tw.x, tw.y)
+                    };
+                    if let Some(window_id) = self.windows.current_id_zero() {
+                        self.dpi_override_scale(&mut abs, window_id);
+                    }
+                    let items = (0..tw.file_count)
+                        .map(|_| {
+                            DragItem::VirtualFile(crate::VirtualFile {
+                                name: String::new(),
+                                mime: String::new(),
+                                bytes: Arc::from(Vec::<u8>::new()),
+                                size: 0,
+                            })
+                        })
+                        .collect();
+                    self.call_event_handler(&Event::Drag(DragEvent {
+                        modifiers: Self::web_key_modifiers(tw.modifiers),
+                        handled: Arc::new(Mutex::new(false)),
+                        abs,
+                        items: Arc::new(items),
+                        response: Arc::new(Mutex::new(DragResponse::None)),
+                    }));
+                    self.drag_drop.cycle_drag();
+                    if tw.left {
+                        self.call_event_handler(&Event::DragEnd);
+                        self.drag_drop.cycle_drag();
+                    }
+                }
+
+                live_id!(ToWasmFileDrop) => {
+                    let tw = ToWasmFileDrop::read_to_wasm(&mut to_wasm);
+                    match Self::web_virtual_files(tw.files, self.file_dialogs.limits()) {
+                        Ok(files) => {
+                            let mut abs = crate::dvec2(tw.x, tw.y);
+                            if let Some(window_id) = self.windows.current_id_zero() {
+                                self.dpi_override_scale(&mut abs, window_id);
+                            }
+                            self.call_event_handler(&Event::Drop(DropEvent {
+                                modifiers: Self::web_key_modifiers(tw.modifiers),
+                                handled: Arc::new(Mutex::new(false)),
+                                abs,
+                                items: Arc::new(
+                                    files.into_iter().map(DragItem::VirtualFile).collect(),
+                                ),
+                            }));
+                            self.drag_drop.cycle_drag();
+                        }
+                        Err(error) => crate::error!("web file drop rejected: {error}"),
+                    }
+                    self.call_event_handler(&Event::DragEnd);
+                    self.drag_drop.cycle_drag();
+                }
+
+                live_id!(ToWasmFileDropError) => {
+                    let tw = ToWasmFileDropError::read_to_wasm(&mut to_wasm);
+                    crate::error!("web file drop rejected: {}", tw.error);
+                    self.call_event_handler(&Event::DragEnd);
+                    self.drag_drop.cycle_drag();
+                }
+
+                live_id!(ToWasmFileDialogResult) => {
+                    let tw = ToWasmFileDialogResult::read_to_wasm(&mut to_wasm);
+                    let id = LiveId::from_lo_hi(tw.id_lo, tw.id_hi);
+                    let pending = self.file_dialogs.finish(id);
+                    let limits = pending
+                        .as_ref()
+                        .map(|pending| pending.limits)
+                        .unwrap_or_else(|| self.file_dialogs.limits());
+                    if pending.is_none() {
+                        crate::error!("web file dialog returned unknown id {:?}", id);
+                    }
+                    let action = if tw.cancelled || !tw.error.is_empty() {
+                        if !tw.error.is_empty() {
+                            crate::error!("web file dialog failed: {}", tw.error);
+                        }
+                        FileDialogAction::FileCancelled { id }
+                    } else {
+                        match Self::web_virtual_files(tw.files, limits) {
+                            Ok(files) if !files.is_empty() => {
+                                FileDialogAction::FileLoaded { id, files }
+                            }
+                            Ok(_) => FileDialogAction::FileCancelled { id },
+                            Err(error) => {
+                                crate::error!("web file dialog rejected: {error}");
+                                FileDialogAction::FileCancelled { id }
+                            }
+                        }
+                    };
+                    self.action(action);
+                    self.handle_actions();
                 }
 
                 live_id!(ToWasmHTTPResponse) => {
@@ -518,11 +768,7 @@ impl Cx {
 
                 live_id!(ToWasmAudioDeviceList) => {
                     let tw = ToWasmAudioDeviceList::read_to_wasm(&mut to_wasm);
-                    self.os
-                        .web_audio()
-                        .lock()
-                        .unwrap()
-                        .to_wasm_audio_device_list(tw);
+                    lock_from_ui(&self.os.web_audio()).to_wasm_audio_device_list(tw);
                 }
                 live_id!(ToWasmMidiPortList) => {
                     let tw = ToWasmMidiPortList::read_to_wasm(&mut to_wasm);
@@ -565,8 +811,10 @@ impl Cx {
         if let Some(time) = is_animation_frame {
             if self.need_redrawing() {
                 self.call_draw_event(time);
-                self.webgl_compile_shaders();
             }
+            // Draw-event teardown may have freed passes/lists/resources. Drain
+            // them before computing and encoding this frame's pass graph.
+            self.retire_webgl_resources();
             self.handle_repaint(time);
         }
 
@@ -575,15 +823,23 @@ impl Cx {
             self.call_event_handler(&Event::NetworkResponses(network_responses));
         }
 
+        if !storage_responses.is_empty() {
+            self.call_event_handler(&Event::Storage(storage_responses));
+        }
+
         self.run_live_edit_if_needed("web");
 
         self.handle_platform_ops();
         self.handle_media_signals();
+        // Non-animation events can also drop the last owning handles. This is
+        // a cheap empty-queue check and bounded when work is pending.
+        self.retire_webgl_resources();
 
         if self.any_passes_dirty()
             || self.need_redrawing()
             || self.new_next_frames.len() != 0
             || self.demo_time_repaint
+            || self.has_pending_webgl_resource_retirements()
         {
             self.os.from_wasm(FromWasmRequestAnimationFrame {});
         }
@@ -598,12 +854,20 @@ impl Cx {
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for draw_pass_id in &passes_todo {
-            self.passes[*draw_pass_id].set_time(time as f32);
+            let uniforms_gen = self.next_uniform_gen();
+            self.passes[*draw_pass_id].set_time(time as f32, uniforms_gen);
             match self.passes[*draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
-                CxDrawPassParent::Window(_) => {
-                    //et dpi_factor = self.os.window_geom.dpi_factor;
-                    self.draw_pass_to_canvas(*draw_pass_id);
+                CxDrawPassParent::Window(window_id) => {
+                    // ONE canvas: only window zero paints. A second window's
+                    // pass is recorded but never presented (see CreateWindow
+                    // below) — settled here, so it neither errors nor keeps
+                    // requesting frames.
+                    if self.windows.current_id_zero() == Some(window_id) {
+                        self.draw_pass_to_canvas(*draw_pass_id);
+                    } else {
+                        self.passes[*draw_pass_id].paint_dirty = false;
+                    }
                 }
                 CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
@@ -631,25 +895,31 @@ impl Cx {
                         let window = &mut self.windows[window_id];
                         window.create_title.clone()
                     };
+                    // The browser gives an app one canvas, so the platform
+                    // has one window: a second `Window` is NOT created — it
+                    // never becomes `is_created`, its pass never paints —
+                    // and that is said once. `OsType::is_single_window` says
+                    // it up front, so an app hosts that surface in-page
+                    // instead of asking.
+                    if self.windows.current_id_zero().is_some_and(|zero| zero != window_id) {
+                        if !self.os.second_window_reported {
+                            self.os.second_window_reported = true;
+                            crate::log!(
+                                "web: one canvas, one window — {:?} {title:?} is not created (OsType::is_single_window)",
+                                window_id
+                            );
+                        }
+                        continue;
+                    }
 
                     self.os.from_wasm(FromWasmSetDocumentTitle { title });
 
-                    // Inherit the OS-reported scale factor recorded by
-                    // ToWasmGetInfo / ToWasmResizeWindow on id_zero so the
-                    // freshly-created window's `dpi_override` machinery has
-                    // a baseline.
-                    let id_zero_os_dpi = self.windows[CxWindowPool::id_zero()].os_dpi_factor;
-                    {
-                        let window = &mut self.windows[window_id];
-                        window.os_dpi_factor = id_zero_os_dpi;
-                        window.window_geom = self.os.window_geom.clone();
-                    }
-
-                    self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
+                    let event = self.windows.web_create_window_geom(
                         window_id,
-                        old_geom: self.os.window_geom.clone(),
-                        new_geom: self.os.window_geom.clone(),
-                    }));
+                        &self.os.native_window_geom,
+                        &mut self.os.window_geom,
+                    );
+                    self.call_event_handler(&Event::WindowGeomChange(event));
 
                     self.windows[window_id].is_created = true;
                     self.redraw_all();
@@ -697,7 +967,13 @@ impl Cx {
                     // Bottom of the caret line (matches the pre-rect point); the
                     // hidden-textarea IME anchor only takes a point.
                     let pos = area.clipped_rect(self).pos + cursor_rect.pos + cursor_rect.size;
-                    let window_id = self.get_window_id_of(&area).unwrap_or(CxWindowPool::id_zero());
+                    let Some(window_id) = self
+                        .get_window_id_of(&area)
+                        .filter(|window_id| self.windows.is_valid(*window_id))
+                        .or_else(|| self.windows.current_id_zero())
+                    else {
+                        continue;
+                    };
                     let pos = self.windows[window_id].layout_vec2d_to_native_points(pos);
                     self.os
                         .from_wasm(FromWasmShowTextIME { x: pos.x, y: pos.y });
@@ -713,6 +989,9 @@ impl Cx {
                 CxOsOp::UpdateSelectionHandles { .. } => {}
                 CxOsOp::HideSelectionHandles => {}
                 CxOsOp::AccessibilityUpdate(_) => {}
+                CxOsOp::StartDragging(items) => {
+                    self.drag_drop.start_internal_drag(items);
+                }
                 CxOsOp::StartExternalDragging { .. } => {
                     crate::error!("external file dragging is not implemented on Web");
                     self.call_event_handler(&Event::DragEnd);
@@ -763,6 +1042,95 @@ impl Cx {
                         request_id_lo: request_id.lo(),
                         request_id_hi: request_id.hi(),
                     });
+                }
+                CxOsOp::StorageRequest(request) => {
+                    let request_id_lo = request.request_id.0 as u32;
+                    let request_id_hi = (request.request_id.0 >> 32) as u32;
+                    let namespace = request.namespace;
+                    match request.kind {
+                        StorageRequestKind::Get { key } => {
+                            self.os.from_wasm(FromWasmStorageGet {
+                                request_id_lo,
+                                request_id_hi,
+                                namespace,
+                                key,
+                            });
+                        }
+                        StorageRequestKind::Set { key, value } => {
+                            self.os.from_wasm(FromWasmStorageSet {
+                                request_id_lo,
+                                request_id_hi,
+                                namespace,
+                                key,
+                                value: WasmDataU8::from_vec_u8(value),
+                            });
+                        }
+                        StorageRequestKind::Delete { key } => {
+                            self.os.from_wasm(FromWasmStorageDelete {
+                                request_id_lo,
+                                request_id_hi,
+                                namespace,
+                                key,
+                            });
+                        }
+                        StorageRequestKind::List {
+                            prefix,
+                            after,
+                            limit,
+                        } => {
+                            let has_after = after.is_some();
+                            self.os.from_wasm(FromWasmStorageList {
+                                request_id_lo,
+                                request_id_hi,
+                                namespace,
+                                prefix,
+                                after: after.unwrap_or_default(),
+                                has_after,
+                                limit,
+                            });
+                        }
+                        StorageRequestKind::GetRange {
+                            key,
+                            offset,
+                            len,
+                        } => {
+                            self.os.from_wasm(FromWasmStorageGetRange {
+                                request_id_lo,
+                                request_id_hi,
+                                namespace,
+                                key,
+                                offset_lo: offset as u32,
+                                offset_hi: (offset >> 32) as u32,
+                                len,
+                            });
+                        }
+                        StorageRequestKind::Stat { key } => {
+                            self.os.from_wasm(FromWasmStorageStat {
+                                request_id_lo,
+                                request_id_hi,
+                                namespace,
+                                key,
+                            });
+                        }
+                        StorageRequestKind::Estimate => {
+                            self.os.from_wasm(FromWasmStorageEstimate {
+                                request_id_lo,
+                                request_id_hi,
+                                namespace,
+                            });
+                        }
+                    }
+                }
+                CxOsOp::StorageRequestError {
+                    request_id,
+                    op,
+                    error,
+                } => {
+                    if let Some(response) =
+                        self.finish_web_storage_request(request_id, op, Err(error))
+                    {
+                        self.call_event_handler(&Event::Storage(vec![response]));
+                    }
                 }
                 CxOsOp::CheckPermission {
                     permission,
@@ -916,6 +1284,27 @@ impl Cx {
                 CxOsOp::PrepareAudioPlayback(_, _, _, _) => {}
                 // Track selection is currently implemented on Linux GStreamer only.
                 CxOsOp::SelectVideoTrack(_, _) | CxOsOp::SelectAudioTrack(_, _) => {}
+                CxOsOp::SelectFileDialog(dialog) => {
+                    if !dialog.want_bytes {
+                        crate::log!(
+                            "web file dialog has no filesystem paths; returning FileLoaded bytes"
+                        );
+                    }
+                    let limits = self.file_dialogs.limits();
+                    self.os.from_wasm(FromWasmSelectFileDialog {
+                        id_lo: dialog.id.lo(),
+                        id_hi: dialog.id.hi(),
+                        accept: Self::web_file_dialog_accept(&dialog),
+                        multiple: dialog.multiple,
+                        max_file_size: limits.max_file_size as f64,
+                        max_total_size: limits.max_total_size as f64,
+                    });
+                }
+                CxOsOp::SaveFileDialog(dialog) => {
+                    crate::error!("web save file dialogs are not supported; download support is pending");
+                    self.action(FileDialogAction::FileCancelled { id: dialog.id });
+                    self.handle_actions();
+                }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 } /*
@@ -953,6 +1342,7 @@ impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         super::web_network::install_network_backend_shim();
         self.package_root = Some(String::new());
+        self.os.start_time = Self::monotonic_now();
 
         self.os.append_to_wasm_js(&[
             ToWasmInit::to_js_code(),
@@ -967,9 +1357,12 @@ impl CxOsApi for Cx {
             ToWasmKeyUp::to_js_code(),
             ToWasmTextInput::to_js_code(),
             ToWasmTextCopy::to_js_code(),
+            ToWasmStorageResult::to_js_code(),
+            ToWasmRenderTextureCapture::to_js_code(),
             ToWasmTimerFired::to_js_code(),
             ToWasmPaintDirty::to_js_code(),
             ToWasmRedrawAll::to_js_code(),
+            ToWasmWebGLShadersDone::to_js_code(),
             ToWasmLiveFileChange::to_js_code(),
             ToWasmLocationChange::to_js_code(),
             ToWasmWindowGotFocus::to_js_code(),
@@ -981,6 +1374,10 @@ impl CxOsApi for Cx {
             ToWasmPermissionResult::to_js_code(),
             ToWasmLocationUpdate::to_js_code(),
             ToWasmLocationError::to_js_code(),
+            ToWasmFileDrag::to_js_code(),
+            ToWasmFileDrop::to_js_code(),
+            ToWasmFileDropError::to_js_code(),
+            ToWasmFileDialogResult::to_js_code(),
             /*ToWasmWebSocketOpen::to_js_code(),
             ToWasmWebSocketClose::to_js_code(),
             ToWasmWebSocketError::to_js_code(),
@@ -1006,8 +1403,17 @@ impl CxOsApi for Cx {
             FromWasmSetDocumentTitle::to_js_code(),
             FromWasmSetMouseCursor::to_js_code(),
             FromWasmTextCopyResponse::to_js_code(),
+            FromWasmStorageGet::to_js_code(),
+            FromWasmStorageSet::to_js_code(),
+            FromWasmStorageDelete::to_js_code(),
+            FromWasmStorageList::to_js_code(),
+            FromWasmStorageGetRange::to_js_code(),
+            FromWasmStorageStat::to_js_code(),
+            FromWasmStorageEstimate::to_js_code(),
             FromWasmShowTextIME::to_js_code(),
             FromWasmHideTextIME::to_js_code(),
+            FromWasmSetVirtualFileLimits::to_js_code(),
+            FromWasmSelectFileDialog::to_js_code(),
             FromWasmHTTPRequest::to_js_code(),
             FromWasmCancelHTTPRequest::to_js_code(),
             FromWasmCheckPermission::to_js_code(),
@@ -1023,11 +1429,13 @@ impl CxOsApi for Cx {
             FromWasmAllocArrayBuffer::to_js_code(),
             FromWasmAllocIndexBuffer::to_js_code(),
             FromWasmAllocVao::to_js_code(),
+            FromWasmFreeWebGLResources::to_js_code(),
             FromWasmAllocTextureImage2D_BGRAu8_32::to_js_code(),
             FromWasmAllocTextureImage2D_Ru8::to_js_code(),
             FromWasmAllocTextureImage2D_RGBAf32::to_js_code(),
             FromWasmAllocTextureCube_BGRAu8_32::to_js_code(),
             FromWasmBeginRenderTexture::to_js_code(),
+            FromWasmRequestRenderTextureCapture::to_js_code(),
             FromWasmBeginRenderCanvas::to_js_code(),
             FromWasmSetDefaultDepthAndBlendMode::to_js_code(),
             FromWasmDrawCall::to_js_code(),
@@ -1049,33 +1457,10 @@ impl CxOsApi for Cx {
             FromWasmSeekVideoPlayback::to_js_code(),
             FromWasmCleanupVideoPlaybackResources::to_js_code(),
         ]);
-        #[cfg(target_feature = "atomics")]
-        self.os
-            .append_from_wasm_js(&[FromWasmCreateThread::to_js_code()]);
     }
 
     fn seconds_since_app_start(&self) -> f64 {
-        0.0
-    }
-
-    #[cfg(target_feature = "atomics")]
-    fn spawn_thread<F>(&mut self, f: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        let closure_box: Box<dyn FnOnce() + Send + 'static> = Box::new(f);
-        let context_ptr = Box::into_raw(Box::new(closure_box));
-        self.os.from_wasm(FromWasmCreateThread {
-            context_ptr: context_ptr as u32,
-            timer: 0,
-        });
-    }
-
-    #[cfg(not(target_feature = "atomics"))]
-    fn spawn_thread<F>(&mut self, _f: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
+        (Self::monotonic_now() - self.os.start_time).max(0.0)
     }
 
     fn open_url(&mut self, url: &str, in_place: OpenUrlInPlace) {
@@ -1127,93 +1512,68 @@ impl CxOsApi for Cx {
 }
 
 impl Cx {
-    #[cfg(target_feature = "atomics")]
-    #[allow(dead_code)]
-    pub(crate) fn spawn_timer_thread<F>(&mut self, timer: u32, f: F)
-    where
-        F: Fn() + Send + 'static,
-    {
-        let closure_box: Box<dyn Fn() + Send + 'static> = Box::new(f);
-        let context_ptr = Box::into_raw(Box::new(closure_box));
-        self.os.from_wasm(FromWasmCreateThread {
-            context_ptr: context_ptr as u32,
-            timer,
-        });
-    }
-
-    #[cfg(not(target_feature = "atomics"))]
-    #[allow(dead_code)]
-    pub(crate) fn spawn_timer_thread<F>(&mut self, _timer: u32, _f: F)
-    where
-        F: Fn() + Send + 'static,
-    {
-    }
-
     pub fn time_now() -> f64 {
         unsafe { js_time_now() }
+    }
+
+    pub fn monotonic_now() -> f64 {
+        unsafe { js_monotonic_now() }
     }
 }
 
 #[link(wasm_import_module = "env")]
 extern "C" {
     pub fn js_time_now() -> f64;
-}
-
-#[export_name = "wasm_thread_entrypoint"]
-#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
-pub unsafe extern "C" fn wasm_thread_entrypoint(closure_ptr: u32) {
-    let closure = Box::from_raw(closure_ptr as *mut Box<dyn FnOnce() + Send + 'static>);
-    closure();
-}
-
-#[export_name = "wasm_thread_timer_entrypoint"]
-#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
-pub unsafe extern "C" fn wasm_thread_timer_entrypoint(closure_ptr: u32) {
-    let closure = Box::from_raw(closure_ptr as *mut Box<dyn Fn() + Send + 'static>);
-    closure();
-    let _ = Box::into_raw(closure);
-}
-
-#[export_name = "wasm_thread_alloc_tls_and_stack"]
-#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
-pub unsafe extern "C" fn wasm_thread_alloc_tls_and_stack(tls_size: u32) -> u32 {
-    let mut v = Vec::<u64>::new();
-    v.reserve_exact(tls_size as usize);
-    let mut v = std::mem::ManuallyDrop::new(v);
-    v.as_mut_ptr() as u32
+    pub fn js_monotonic_now() -> f64;
 }
 
 // storage buffers for graphics API related platform
 pub struct CxOs {
     pub(crate) window_geom: WindowGeom,
+    pub(crate) native_window_geom: WindowGeom,
+    pub(crate) start_time: f64,
 
     pub from_wasm: Option<FromWasmMsg>,
 
     pub(crate) vertex_buffers: usize,
     pub(crate) index_buffers: usize,
     pub(crate) vaos: usize,
+    /// WebGL programs queued for compile that JavaScript has not yet reported
+    /// linked or failed (`ToWasmWebGLShadersDone`). While non-zero, draw calls
+    /// on those programs are dropped by the browser side.
+    pub(crate) webgl_shaders_pending: usize,
 
     pub(crate) to_wasm_js: Vec<String>,
     pub(crate) from_wasm_js: Vec<String>,
 
     pub(crate) media: CxWebMedia,
+    pub(crate) render_texture_captures:
+        Vec<(crate::texture::TextureId, usize, usize, Vec<u8>)>,
+    /// The one-line notice that a second window maps to nothing has been
+    /// given (`CxOsOp::CreateWindow`).
+    pub(crate) second_window_reported: bool,
 }
 
 impl Default for CxOs {
     fn default() -> Self {
         Self {
             window_geom: WindowGeom::default(),
+            native_window_geom: WindowGeom::default(),
+            start_time: 0.0,
 
             from_wasm: Some(FromWasmMsg::new()),
 
             vertex_buffers: 0,
             index_buffers: 0,
             vaos: 0,
+            webgl_shaders_pending: 0,
 
             to_wasm_js: Vec::new(),
             from_wasm_js: Vec::new(),
 
             media: CxWebMedia::default(),
+            render_texture_captures: Vec::new(),
+            second_window_reported: false,
         }
     }
 }
@@ -1271,6 +1631,16 @@ pub unsafe extern "C" fn wasm_check_signal() -> u32 {
 #[export_name = "wasm_init_panic_hook"]
 pub unsafe extern "C" fn init_panic_hook() {
     pub fn panic_hook(info: &panic::PanicHookInfo) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            #[link(wasm_import_module = "env")]
+            extern "C" {
+                fn js_console_error(u8_ptr: u32, len: u32);
+            }
+            let message = format!("__MAKEPAD_WASM_PANIC__:{}", info);
+            unsafe { js_console_error(message.as_ptr() as u32, message.len() as u32) };
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         crate::error!("{}", info)
     }
     panic::set_hook(Box::new(panic_hook));

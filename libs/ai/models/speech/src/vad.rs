@@ -8,8 +8,7 @@
 //! chunk (32 ms) in, one speech probability out. Costs ~0.3 MFLOP per chunk —
 //! microseconds on any CPU, so it can gate audio packets in real time.
 //!
-//! The model resolves like the other voice models: `MAKEPAD_VAD_MODEL` env var
-//! first, else `silero_vad.onnx` in the working directory.
+//! The model resolves as `silero_vad.onnx` in the working directory.
 //!
 //! Validated against onnxruntime output; see `tests/silero_vad.rs`.
 
@@ -34,16 +33,10 @@ const STFT_HOP: usize = 128;
 const STFT_FRAMES: usize = (PADDED_LEN - STFT_KERNEL) / STFT_HOP + 1; // 4
 const HIDDEN: usize = 128;
 
-const MODEL_PATH_ENV: &str = "MAKEPAD_VAD_MODEL";
 const DEFAULT_MODEL_PATH: &str = "silero_vad.onnx";
 
 /// The model path, if the file actually exists.
 pub fn vad_model_path_if_present() -> Option<String> {
-    if let Ok(path) = std::env::var(MODEL_PATH_ENV) {
-        if std::path::Path::new(&path).is_file() {
-            return Some(path);
-        }
-    }
     if std::path::Path::new(DEFAULT_MODEL_PATH).is_file() {
         return Some(DEFAULT_MODEL_PATH.to_string());
     }
@@ -130,7 +123,7 @@ impl SileroVad {
     pub fn from_makepad_env() -> Result<Self, VadError> {
         let path = vad_model_path_if_present().ok_or_else(|| {
             VadError::Io(format!(
-                "no VAD model: set {MODEL_PATH_ENV} or put {DEFAULT_MODEL_PATH} in the working directory"
+                "no VAD model: put {DEFAULT_MODEL_PATH} in the working directory"
             ))
         })?;
         Self::load(&path)

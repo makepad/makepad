@@ -1145,7 +1145,7 @@ impl App {
         }
         match &items[0] {
             DragItem::FilePath { internal_id, .. } => *internal_id,
-            DragItem::String { .. } => None,
+            DragItem::String { .. } | DragItem::VirtualFile(_) => None,
         }
     }
 

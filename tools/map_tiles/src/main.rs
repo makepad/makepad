@@ -23,12 +23,12 @@ const USAGE: &str = "\
 Usage:
   makepad-map-tiles versatiles <source.versatiles> <output.mbtiles> [options]
   makepad-map-tiles pbf-detail <source.osm.pbf> <output.mbtiles> --store <directory> [options]
-  makepad-map-tiles pbf-base <source.osm.pbf> <output.mbtiles> --store <directory> [options]
+  makepad-map-tiles pbf-base <source.osm.pbf> <output.mbtiles> --store <directory> [options] [--full]
   makepad-map-tiles ocean-tiles <simplified.shp> <full.shp> <out-low.mbtiles> <out-high.mbtiles>
   makepad-map-tiles inspect-pbf <source.osm.pbf>
   makepad-map-tiles audit-pbf <source.osm.pbf>
   makepad-map-tiles probe-mbtiles <source.mbtiles> <z/x/y>
-  makepad-map-tiles testmap [--dir DIR] [--name NAME] [--url URL] [--keep-store]
+  makepad-map-tiles testmap [--dir DIR] [--name NAME] [--url URL] [--keep-store] [--full]
   makepad-map-tiles nav-build <source.osm.pbf> <basename> [--bbox w,s,e,n] [--skip-addresses]
   makepad-map-tiles nav-probe <basename> search <query...> [--near lon,lat]
   makepad-map-tiles nav-probe <basename> route <lon,lat> <lon,lat> [--mode car|bike|foot]
@@ -75,9 +75,10 @@ PBF detail options:
   --store DIRECTORY              Required bounded-memory scratch directory
   --zoom N                       Detail tile zoom (default: 14)
   --sort-memory-mib N            Per-block external-sort memory (default: 256)
+  --full                         Preserve all source tags and provenance
 
 PBF base options (reuses a completed pbf-detail store; emits base layers
-z0..=14 plus the all-tag detail layers at z14 into ONE brotli archive):
+z0..=14 plus renderer-consumed detail layers at z14 into ONE brotli archive):
   --store DIRECTORY              Required completed pbf-detail store
   --bbox w,s,e,n                 Geographic extract (default: whole store)
   --brotli-quality N             Brotli quality 0-11 (default: 11)
@@ -85,6 +86,7 @@ z0..=14 plus the all-tag detail layers at z14 into ONE brotli archive):
   --threads N                    Worker threads (default: all cores)
   --max-zoom N                   Top zoom (default: 14; below 14 skips detail)
   --sort-memory-mib N            Per-block external-sort memory (default: 128)
+  --full                         Preserve all source tags and provenance
 
 General:
   -h, --help                     Show this help
@@ -284,6 +286,7 @@ fn parse_detail_options(args: &[String]) -> Result<native::DetailOptions, String
     let mut zoom = None;
     let mut sort_memory_mib = None;
     let mut no_tiles = false;
+    let mut full = false;
     let mut index = 3;
     while index < args.len() {
         match args[index].as_str() {
@@ -321,6 +324,10 @@ fn parse_detail_options(args: &[String]) -> Result<native::DetailOptions, String
                 no_tiles = true;
                 index += 1;
             }
+            "--full" => {
+                full = true;
+                index += 1;
+            }
             value => return Err(format!("unknown pbf-detail argument '{value}'\n\n{USAGE}")),
         }
     }
@@ -333,6 +340,7 @@ fn parse_detail_options(args: &[String]) -> Result<native::DetailOptions, String
         options.sort_memory_mib = sort_memory_mib;
     }
     options.no_tiles = no_tiles;
+    options.full = full;
     Ok(options)
 }
 
@@ -350,6 +358,7 @@ fn parse_base_options(args: &[String]) -> Result<native::BaseOptions, String> {
     let mut max_zoom = None;
     let mut sort_memory_mib = None;
     let mut baseline = None;
+    let mut full = false;
     let mut index = 3;
     while index < args.len() {
         let take_value = |name: &str, index: usize| -> Result<&String, String> {
@@ -381,6 +390,10 @@ fn parse_base_options(args: &[String]) -> Result<native::BaseOptions, String> {
             }
             "--dict" => {
                 use_dict = true;
+                index += 1;
+            }
+            "--full" => {
+                full = true;
                 index += 1;
             }
             "--threads" => {
@@ -424,6 +437,7 @@ fn parse_base_options(args: &[String]) -> Result<native::BaseOptions, String> {
     let mut options = native::default_base_options(source, output, store);
     options.bbox = bbox;
     options.use_dict = use_dict;
+    options.full = full;
     if let Some(quality) = brotli_quality {
         options.brotli_quality = quality;
     }

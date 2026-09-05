@@ -77,33 +77,56 @@ fn read_wav_pcm_f32(path: &str) -> Vec<f32> {
 }
 
 fn main() {
-    let model_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "ggml-large-v3-turbo.bin".into());
-    let wav_path = std::env::args()
-        .nth(2)
-        .unwrap_or_else(|| "local/whisper.cpp/samples/jfk.wav".into());
+    let mut model_path = None;
+    let mut wav_path = None;
+    let mut max_sec = 0.0;
+    let mut max_tokens = None;
+    let mut bench_repeat = 1usize;
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--max-seconds" => {
+                max_sec = args
+                    .next()
+                    .expect("--max-seconds requires a value")
+                    .parse()
+                    .expect("invalid --max-seconds value");
+            }
+            "--max-tokens" => {
+                max_tokens = Some(
+                    args.next()
+                        .expect("--max-tokens requires a value")
+                        .parse()
+                        .expect("invalid --max-tokens value"),
+                );
+            }
+            "--bench-repeat" => {
+                bench_repeat = args
+                    .next()
+                    .expect("--bench-repeat requires a value")
+                    .parse::<usize>()
+                    .expect("invalid --bench-repeat value")
+                    .max(1);
+            }
+            "--help" | "-h" => {
+                eprintln!(
+                    "usage: whisper-test [model.bin] [clip.wav] \
+                     [--max-seconds N] [--max-tokens N] [--bench-repeat N]"
+                );
+                return;
+            }
+            _ if model_path.is_none() => model_path = Some(arg),
+            _ if wav_path.is_none() => wav_path = Some(arg),
+            _ => panic!("unexpected argument: {arg}"),
+        }
+    }
+    let model_path = model_path.unwrap_or_else(|| "ggml-large-v3-turbo.bin".into());
+    let wav_path = wav_path.unwrap_or_else(|| "local/whisper.cpp/samples/jfk.wav".into());
 
     eprintln!("loading model: {}", model_path);
-    if let Ok(threads) = std::env::var("MAKEPAD_VOICE_THREADS") {
-        eprintln!("using MAKEPAD_VOICE_THREADS={}", threads);
-    }
     let t0 = std::time::Instant::now();
     let model = WhisperModel::load_file(&model_path).expect("failed to load model");
     eprintln!("model loaded in {:.1}s", t0.elapsed().as_secs_f64());
-
-    let max_sec: f64 = std::env::args()
-        .nth(3)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0.0);
-    let max_tokens: Option<usize> = std::env::args()
-        .nth(4)
-        .and_then(|s| s.parse().ok())
-        .or_else(|| {
-            std::env::var("MAKEPAD_VOICE_MAX_TOKENS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-        });
 
     eprintln!("loading audio: {}", wav_path);
     let mut samples = read_wav_pcm_f32(&wav_path);
@@ -119,18 +142,8 @@ fn main() {
         eprintln!("using max_tokens={}", max_tokens);
     }
 
-    let bench_repeat = std::env::args()
-        .nth(5)
-        .and_then(|s| s.parse::<usize>().ok())
-        .or_else(|| {
-            std::env::var("MAKEPAD_VOICE_BENCH_REPEAT")
-                .ok()
-                .and_then(|s| s.parse::<usize>().ok())
-        })
-        .unwrap_or(1)
-        .max(1);
     if bench_repeat > 1 {
-        eprintln!("using MAKEPAD_VOICE_BENCH_REPEAT={}", bench_repeat);
+        eprintln!("using bench_repeat={}", bench_repeat);
     }
 
     for run in 0..bench_repeat {

@@ -424,11 +424,12 @@ impl CodeEditor {
         self.scroll_bars.begin(cx, walk, Layout::default());
         let turtle_rect = cx.turtle().rect();
 
-        // When the height is `Fit` with a max value, use that max for the viewport.
+        // A Fit editor uses the current turtle's combined content-box bound,
+        // covering both the legacy Size::Fit max and Walk::max_height.
         let height_is_fit = walk.height.is_fit();
         const MAX_HEIGHT: f64 = 10_000.0;
-        let fit_height = if let Size::Fit { max: Some(fb), .. } = walk.height {
-            fb.eval_height(cx).unwrap_or(MAX_HEIGHT)
+        let fit_height = if height_is_fit {
+            cx.current_turtle_max_height().unwrap_or(MAX_HEIGHT)
         } else {
             MAX_HEIGHT
         };

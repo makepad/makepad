@@ -330,6 +330,47 @@ pub struct ShaderFn {
 }
 
 impl ShaderOutput {
+    pub fn validate_vertex_fetch_io(
+        &mut self,
+        heap: &ScriptHeap,
+        kind: &ShaderIoKind,
+        name: LiveId,
+        ty: ScriptPodType,
+    ) {
+        let pod_ty = &heap.pod_type_ref(ty).ty;
+        let message = match kind {
+            ShaderIoKind::DynInstance | ShaderIoKind::RustInstance
+                if pod_ty.has_compact_format() =>
+            {
+                Some(format!(
+                    "compact vertex format in instance field `{name}` is unsupported; instance buffers are f32-backed"
+                ))
+            }
+            ShaderIoKind::VertexBuffer if !pod_ty.vertex_layout_supported() => {
+                Some(format!(
+                    "vertex format in `{name}` cannot contain nested structs, arrays, matrices, or non-float vectors"
+                ))
+            }
+            _ => None,
+        };
+        if let Some(message) = message {
+            if !self.errors.iter().any(|error| error == &message) {
+                self.push_error(message);
+            }
+        }
+    }
+
+    fn validate_collected_vertex_fetch_io(&mut self, heap: &ScriptHeap) {
+        let io: Vec<_> = self
+            .io
+            .iter()
+            .map(|io| (io.kind.clone(), io.name, io.ty))
+            .collect();
+        for (kind, name, ty) in io {
+            self.validate_vertex_fetch_io(heap, &kind, name, ty);
+        }
+    }
+
     pub fn next_rust_tmp_id(&mut self) -> usize {
         let id = self.rust_tmp_counter;
         self.rust_tmp_counter = self.rust_tmp_counter.wrapping_add(1);
@@ -404,6 +445,7 @@ impl ShaderOutput {
                 vm.bx.heap.pod_type_name_if_not_set(io.ty, io.name);
             }
         }
+        self.validate_collected_vertex_fetch_io(&vm.bx.heap);
     }
 
     fn pre_collect_shader_io_recursive(&mut self, vm: &ScriptVm, obj: ScriptObject) {
@@ -526,7 +568,8 @@ impl ShaderOutput {
 
     pub fn create_struct_defs(&mut self, vm: &ScriptVm, out: &mut String) {
         let mut plain_structs = self.structs.clone();
-        let mut packed_structs = BTreeSet::new();
+        let mut raw_logical_structs = BTreeSet::new();
+        let mut packed_only_structs = BTreeSet::new();
 
         for io in &self.io {
             let ty = io.ty;
@@ -534,31 +577,42 @@ impl ShaderOutput {
                 continue;
             }
 
-            if matches!(self.backend, ShaderBackend::Metal)
-                && matches!(
-                    io.kind,
+            if matches!(self.backend, ShaderBackend::Metal) {
+                match io.kind {
                     ShaderIoKind::UniformBuffer
-                        | ShaderIoKind::VertexBuffer
-                        | ShaderIoKind::RustInstance
-                        | ShaderIoKind::DynInstance
-                )
-            {
-                packed_structs.insert(ty);
+                    | ShaderIoKind::RustInstance
+                    | ShaderIoKind::DynInstance => {
+                        packed_only_structs.insert(ty);
+                    }
+                    ShaderIoKind::VertexBuffer => {
+                        raw_logical_structs.insert(ty);
+                    }
+                    _ => {
+                        plain_structs.insert(ty);
+                    }
+                }
             } else {
                 plain_structs.insert(ty);
             }
         }
 
-        for ty in &packed_structs {
+        // Metal fetches packed bytes into `*Raw` structs, then decodes into
+        // distinct logical structs used by shader expressions.
+        plain_structs.extend(raw_logical_structs.iter().copied());
+        packed_only_structs.retain(|ty| !raw_logical_structs.contains(ty));
+        for ty in &packed_only_structs {
             plain_structs.remove(ty);
         }
 
         self.structs.extend(plain_structs.iter().copied());
-        self.structs.extend(packed_structs.iter().copied());
+        self.structs.extend(raw_logical_structs.iter().copied());
+        self.structs.extend(packed_only_structs.iter().copied());
 
         if matches!(self.backend, ShaderBackend::Metal) {
             self.backend
-                .pod_struct_defs_mixed(&vm.bx.heap, &plain_structs, &packed_structs, out);
+                .pod_struct_defs_packed(&vm.bx.heap, &packed_only_structs, out);
+            self.backend
+                .pod_struct_defs_mixed(&vm.bx.heap, &plain_structs, &raw_logical_structs, out);
         } else {
             self.backend
                 .pod_struct_defs(&vm.bx.heap, &self.structs, out);

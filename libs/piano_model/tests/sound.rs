@@ -274,15 +274,17 @@ fn high_partials_alive_at_100ms() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. The high treble speaks with its upper partials: partial 2 of C7 within
-//    20 dB of partial 1 at onset. (Old: the smooth symmetric force pulse had
-//    a spectral sidelobe null there — p2 sat 37 dB down and C7 was a dull
-//    sine blip.)
+// 5. Historical raw-model treble regression. The old FluidR3 comparison is
+//    retained verbatim for the uncalibrated model, not as a native C7 oracle.
 // ---------------------------------------------------------------------------
 #[test]
-fn treble_speaks_with_upper_partials() {
-    let m = note(96, 96, 0.5);
-    let p = Piano::new(FS);
+fn raw_c7_treble_speaks_with_upper_partials() {
+    let mut p = Piano::new_uncalibrated(FS);
+    p.set_reverb_mix(0.0);
+    p.set_early_reflection_level(0.0);
+    p.set_soft_clip(false);
+    let (l, r) = render(&mut p, &[ev(0.010, NoteOn { key: 96, velocity: 96 })], (0.5 * FS) as usize, 256);
+    let m = mono(&l, &r);
     let info = p.key_info(96).unwrap();
     let f0 = info.f0 as f64;
     let b = info.b_coeff as f64;
@@ -291,15 +293,60 @@ fn treble_speaks_with_upper_partials() {
     let m1 = peak_near(win, f0, 30.0).1;
     let m2 = peak_near(win, f2, 60.0).1;
     let rel = 20.0 * (m2 / m1.max(1e-30)).log10();
-    println!("C7 v96 partial 2 rel partial 1 at onset: {rel:.1} dB");
+    println!("raw C7 v96 historical peak-amplitude p2/p1: {rel:.9} dB");
     assert!(rel > -22.0, "C7 second partial buried ({rel:.1} dB rel p1): dull treble");
-    // Reference C7 has p2 at -7.7 dB rel p1 at onset. The shipped
-    // instrument currently overshoots to ~+7 dB in the first 90 ms (its
-    // worst remaining ladder residual, see tests/reference.rs); the gate
-    // marks the boundary of that known residual so it cannot silently
-    // worsen, and should be tightened toward the reference value when the
-    // C7 onset balance is next revisited.
+    // The old FluidR3 C7 reference was -7.7 dB; this historical upper bound
+    // covered a then-known ~+7 dB model overshoot (see tests/reference.rs).
+    // Preserve both numerical assertions as raw-model regression history.
     assert!(rel < 9.0, "C7 second partial at {rel:.1} dB rel p1 (reference: -7.7)");
+}
+
+// Native reference: SalamanderGrandPianoV3_48khz24bit/48khz24bit/C7v12.wav,
+// native MIDI 96, SFZ velocities 89..96, PCM24 stereo 48 kHz.
+// SHA256: 0ed31dcc916b83e7283aacb8c219b6d017fa9329b4a791a4243fb6ad1d485a34
+// Independent L/R power, first 1 ms block above -40 dB of the first-0.5s
+// peak, onset+12..92 ms, periodic Hann, next-power-of-two (4096) FFT,
+// stiff-string partial bands +/-0.2*f0 from the model's own key_info(96).
+#[test]
+fn default_c7_partial_balance_matches_native_reference() {
+    const REFERENCE_DB: f64 = -28.519671637366027;
+    const TOLERANCE_DB: f64 = 6.0;
+    let measure = |mut piano: Piano| {
+        let info = piano.key_info(96).unwrap();
+        let (f0, b) = (info.f0 as f64, info.b_coeff as f64);
+        piano.set_reverb_mix(0.0);
+        piano.set_early_reflection_level(0.0);
+        piano.set_soft_clip(false);
+        let (l, r) = render(&mut piano, &[ev(0.010, NoteOn { key: 96, velocity: 96 })], (0.5 * FS) as usize, 256);
+        let frame = (0.001 * FS as f64).round() as usize;
+        let powers = l.chunks_exact(frame).zip(r.chunks_exact(frame)).map(|(l, r)| {
+            l.iter().zip(r).map(|(&a, &b)| 0.5 * ((a as f64).powi(2) + (b as f64).powi(2))).sum::<f64>()
+        }).collect::<Vec<_>>();
+        let peak = powers.iter().copied().fold(0.0, f64::max);
+        assert!(peak > 0.0, "silent first 0.5s; cannot align C7 onset");
+        let onset = powers.iter().position(|&power| power > peak * 1e-4).unwrap() * frame;
+        let start = onset + (0.012 * FS as f64).round() as usize;
+        let end = onset + (0.092 * FS as f64).round() as usize;
+        let (bin, left) = power_spectrum(&l[start..end]);
+        let (_, right) = power_spectrum(&r[start..end]);
+        assert_eq!(left.len() * 2, 4096);
+        let partial_power = |partial: f64| {
+            let center = partial * f0 * (1.0 + b * partial * partial).sqrt();
+            left.iter().zip(&right).enumerate().filter(|(k, _)| {
+                let hz = *k as f64 * bin;
+                hz >= center - 0.2 * f0 && hz < center + 0.2 * f0
+            }).map(|(_, (l, r))| 0.5 * (l + r)).sum::<f64>()
+        };
+        // Window normalization cancels in the ratio; never sum channels
+        // before the FFT, since that would cancel antiphase partials.
+        10.0 * (partial_power(2.0) / partial_power(1.0)).log10()
+    };
+    let default = measure(Piano::new(FS));
+    let raw = measure(Piano::new_uncalibrated(FS));
+    let error = (default - REFERENCE_DB).abs();
+    println!("C7 v96 stereo-power p2/p1: native={REFERENCE_DB:.9} default={default:.9} raw={raw:.9} dB; error={error:.9}, margin={:.9} dB", TOLERANCE_DB - error);
+    assert!(error <= TOLERANCE_DB,
+        "default C7 p2/p1 {default:.9} dB differs from native {REFERENCE_DB:.9} dB by {error:.9} dB (limit {TOLERANCE_DB})");
 }
 
 // ---------------------------------------------------------------------------

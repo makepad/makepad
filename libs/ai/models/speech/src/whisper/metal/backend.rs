@@ -1,13 +1,6 @@
-/// Metal backend debug breadcrumbs (init, dispatch choices). Off by default —
-/// set GGML_METAL_TRACE=1 to enable.
-fn log_metal_trace() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("GGML_METAL_TRACE").is_some())
-}
-
 #[allow(dead_code)]
 fn log_mul_mat_requested() -> bool {
-    crate::whisper::settings::LOG_METAL_MUL_MAT || log_metal_trace()
+    crate::whisper::settings::LOG_METAL_MUL_MAT
 }
 
 fn metal_requested() -> bool {
@@ -774,7 +767,6 @@ mod imp {
     use std::collections::HashMap;
     use std::ffi::{c_char, c_void, CStr};
     use std::ptr::NonNull;
-    use std::sync::OnceLock;
 
     const UTF8_ENCODING: u64 = 4;
     const MTL_RESOURCE_STORAGE_MODE_SHARED: u64 = 0;
@@ -1727,10 +1719,6 @@ mod imp {
                 }
             };
 
-            if super::log_metal_trace() {
-                eprintln!("[voice][metal] backend initialized (ggml kernels)");
-            }
-
             Ok(Self {
                 device,
                 command_queue,
@@ -2651,11 +2639,6 @@ mod imp {
             ne0: i32,
             ne1: i32,
         ) -> Result<(), String> {
-            static LOG_ONCE: OnceLock<()> = OnceLock::new();
-            if super::log_metal_trace() && LOG_ONCE.set(()).is_ok() {
-                eprintln!("[voice][metal] mul_mat dispatch: mul_mv_ext");
-            }
-
             let nsg = 2i32;
             let nxpsg = if ne00 % 256 == 0 && ne11 < 3 {
                 16i32
@@ -2765,11 +2748,6 @@ mod imp {
             ne0: i32,
             ne1: i32,
         ) -> Result<(), String> {
-            static LOG_ONCE: OnceLock<()> = OnceLock::new();
-            if super::log_metal_trace() && LOG_ONCE.set(()).is_ok() {
-                eprintln!("[voice][metal] mul_mat dispatch: mul_mm");
-            }
-
             let bc_inp = ne00 % 32 != 0;
             let bc_out = ne0 % 64 != 0 || ne1 % 32 != 0;
 
@@ -2867,11 +2845,6 @@ mod imp {
             ne0: i32,
             ne1: i32,
         ) -> Result<(), String> {
-            static LOG_ONCE: OnceLock<()> = OnceLock::new();
-            if super::log_metal_trace() && LOG_ONCE.set(()).is_ok() {
-                eprintln!("[voice][metal] mul_mat dispatch: mul_mv");
-            }
-
             let (nsg, nr0, nr1, smem, suffix) = match src0 {
                 Src0Type::F32 | Src0Type::F16 => {
                     if ne00 < 32 {

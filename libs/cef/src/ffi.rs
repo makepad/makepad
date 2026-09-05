@@ -91,11 +91,25 @@ pub struct cef_accelerated_paint_info_common_t {
 /// `cef_accelerated_paint_info_t` for macOS (include/internal/cef_types_mac.h):
 /// the shared texture handle is an `IOSurfaceRef` out of CEF's pool. It is
 /// only valid for the duration of `on_accelerated_paint`.
+#[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct cef_accelerated_paint_info_t {
     pub size: usize,
     pub shared_texture_io_surface: *mut c_void,
+    pub format: cef_color_type_t,
+    pub extra: cef_accelerated_paint_info_common_t,
+}
+
+/// `cef_accelerated_paint_info_t` for Windows (include/internal/cef_types_win.h):
+/// a D3D11 shared-texture `HANDLE`. Unused — Windows browsers paint in
+/// software.
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct cef_accelerated_paint_info_t {
+    pub size: usize,
+    pub shared_texture_handle: *mut c_void,
     pub format: cef_color_type_t,
     pub extra: cef_accelerated_paint_info_common_t,
 }
@@ -214,11 +228,21 @@ pub struct cef_command_line_t {
     >,
 }
 
+#[cfg(unix)]
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct cef_main_args_t {
     pub argc: c_int,
     pub argv: *mut *mut c_char,
+}
+
+/// `cef_main_args_t` for Windows (include/internal/cef_types_win.h): the
+/// module handle; CEF reads the command line from the process itself.
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct cef_main_args_t {
+    pub instance: *mut c_void,
 }
 
 #[repr(C)]
@@ -282,8 +306,6 @@ pub struct cef_settings_t {
     pub chrome_policy_id: cef_string_t,
     pub chrome_app_icon_id: c_int,
     pub disable_signal_handlers: c_int,
-    #[cfg(makepad_cef_api_ge_14600)]
-    pub use_views_default_popup: c_int,
 }
 
 #[repr(C)]
@@ -319,6 +341,7 @@ pub struct cef_browser_settings_t {
     pub chrome_zoom_bubble: cef_state_t,
 }
 
+#[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct cef_window_info_t {
@@ -331,6 +354,26 @@ pub struct cef_window_info_t {
     pub shared_texture_enabled: c_int,
     pub external_begin_frame_enabled: c_int,
     pub view: cef_window_handle_t,
+    pub runtime_style: cef_runtime_style_t,
+}
+
+/// `cef_window_info_t` for Windows (include/internal/cef_types_win.h): the
+/// `CreateWindowEx` parameters first, then the windowless flags.
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct cef_window_info_t {
+    pub size: usize,
+    pub ex_style: u32,
+    pub window_name: cef_string_t,
+    pub style: u32,
+    pub bounds: cef_rect_t,
+    pub parent_window: cef_window_handle_t,
+    pub menu: *mut c_void,
+    pub windowless_rendering_enabled: c_int,
+    pub shared_texture_enabled: c_int,
+    pub external_begin_frame_enabled: c_int,
+    pub window: cef_window_handle_t,
     pub runtime_style: cef_runtime_style_t,
 }
 

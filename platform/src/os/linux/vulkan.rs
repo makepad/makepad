@@ -2559,13 +2559,15 @@ impl CxVulkan {
             return Ok(false);
         }
 
+        let ortho_uniforms_gen = cx.next_uniform_gen();
+        let dpi_uniforms_gen = cx.next_uniform_gen();
         {
             let pass = &mut cx.passes[draw_pass_id];
             pass.paint_dirty = false;
             if !pass.keep_camera_matrix {
-                pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
+                pass.set_ortho_matrix(pass_rect.pos, pass_rect.size, ortho_uniforms_gen);
             }
-            pass.set_dpi_factor(dpi_factor);
+            pass.set_dpi_factor(dpi_factor, dpi_uniforms_gen);
         }
 
         let clear_color = if cx.passes[draw_pass_id].color_textures.is_empty() {
@@ -3120,13 +3122,15 @@ impl CxVulkan {
             return Ok(());
         }
 
+        let ortho_uniforms_gen = cx.next_uniform_gen();
+        let dpi_uniforms_gen = cx.next_uniform_gen();
         {
             let pass = &mut cx.passes[draw_pass_id];
             pass.paint_dirty = false;
             if !pass.keep_camera_matrix {
-                pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
+                pass.set_ortho_matrix(pass_rect.pos, pass_rect.size, ortho_uniforms_gen);
             }
-            pass.set_dpi_factor(dpi_factor);
+            pass.set_dpi_factor(dpi_factor, dpi_uniforms_gen);
         }
 
         let target_width = (dpi_factor * pass_rect.size.x).max(1.0) as usize;
@@ -5440,6 +5444,7 @@ impl CxVulkan {
         // Exploded z-layer view: z is the call's nesting depth, not paint order.
         let sploded = cx.passes[draw_pass_id].sploded.is_some_and(|p| p.depth_layers);
         for order_index in 0..draw_order_len {
+            let uniforms_gen = cx.next_uniform_gen();
             let Some(draw_item_id) =
                 cx.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
             else {
@@ -5452,6 +5457,12 @@ impl CxVulkan {
                 .kind
                 .sub_list()
             {
+                // A retained sub-list its owner dropped between the parent's
+                // last record and this paint: the slot may already hold
+                // another widget's list. Nothing to draw here.
+                if cx.draw_lists.is_id_freed(sub_list_id) {
+                    continue;
+                }
                 let child_resets_zbias = cx.draw_lists[sub_list_id].reset_zbias;
                 let mut own_zbias = 0.0f32;
                 let child_zbias = if child_resets_zbias {
@@ -5462,16 +5473,34 @@ impl CxVulkan {
                 // An overlay list carries a depth floor: this is what makes it
                 // composite above body content that uses `draw_depth`.
                 cx.draw_lists[sub_list_id].raise_zbias_to_floor(child_zbias);
-                self.record_draw_list(
-                    cx,
-                    draw_pass_id,
-                    sub_list_id,
-                    render_pass_key,
-                    child_zbias,
-                    zbias_step,
-                    draw_stats,
-                    xr_depth_view,
-                )?;
+                // A retained list is one unit of paint order: its calls all
+                // take the counter at entry, it advances by the layers the
+                // list reported. See `CxDrawList::zbias_hold`.
+                if let Some(steps) = cx.draw_lists[sub_list_id].zbias_hold {
+                    let mut held = *child_zbias;
+                    self.record_draw_list(
+                        cx,
+                        draw_pass_id,
+                        sub_list_id,
+                        render_pass_key,
+                        &mut held,
+                        0.0,
+                        draw_stats,
+                        xr_depth_view,
+                    )?;
+                    *child_zbias += steps as f32 * zbias_step;
+                } else {
+                    self.record_draw_list(
+                        cx,
+                        draw_pass_id,
+                        sub_list_id,
+                        render_pass_key,
+                        child_zbias,
+                        zbias_step,
+                        draw_stats,
+                        xr_depth_view,
+                    )?;
+                }
                 continue;
             }
 
@@ -5536,7 +5565,7 @@ impl CxVulkan {
                     cx.demo_time_repaint = true;
                 }
 
-                draw_call.resolve_zbias(*zbias, sploded);
+                draw_call.resolve_zbias(*zbias, sploded, uniforms_gen);
                 *zbias += zbias_step;
                 draw_call.instance_dirty = false;
                 draw_call.uniforms_dirty = false;
@@ -5586,8 +5615,22 @@ impl CxVulkan {
                 }
             };
 
+            let shader_layout = cx.draw_shaders.shaders[packet.shader_index]
+                .mapping
+                .geometries
+                .clone();
             let geometry = &mut cx.geometries[packet.geometry_id];
-            if geometry.indices.is_empty() || geometry.vertices.is_empty() {
+            if !crate::geometry::geometry_backend_supports_typed(
+                geometry,
+                "vulkan",
+                shader_layout.has_compact(),
+            ) {
+                continue;
+            }
+            if !crate::geometry::geometry_layout_matches_shader(geometry, &shader_layout) {
+                continue;
+            }
+            if geometry.index_count == 0 || geometry.vertex_count == 0 {
                 draw_stats.skipped_empty_geometry += 1;
                 continue;
             }
@@ -5602,7 +5645,7 @@ impl CxVulkan {
                         packet.geometry_id
                     )
                 })?;
-            let index_count = geometry.indices.len() as u32;
+            let index_count = geometry.index_count as u32;
             draw_stats.indices += index_count as u64;
             let pass_uniforms = cx.passes[draw_pass_id].pass_uniforms.as_slice().to_vec();
             let draw_list_uniforms = cx.draw_lists[draw_list_id]
@@ -6379,23 +6422,43 @@ impl CxVulkan {
     }
 
     fn collect_attribute_chunk_formats(total_slots: usize) -> Vec<DrawShaderAttrFormat> {
-        vec![DrawShaderAttrFormat::Float; (total_slots + 3) / 4]
+        vec![DrawShaderAttrFormat::F32x4; (total_slots + 3) / 4]
     }
 
     fn vk_vertex_format(attr_format: DrawShaderAttrFormat, components: usize) -> vk::Format {
         match (attr_format, components.max(1).min(4)) {
-            (DrawShaderAttrFormat::Float, 1) => vk::Format::R32_SFLOAT,
-            (DrawShaderAttrFormat::Float, 2) => vk::Format::R32G32_SFLOAT,
-            (DrawShaderAttrFormat::Float, 3) => vk::Format::R32G32B32_SFLOAT,
-            (DrawShaderAttrFormat::Float, _) => vk::Format::R32G32B32A32_SFLOAT,
-            (DrawShaderAttrFormat::UInt, 1) => vk::Format::R32_UINT,
-            (DrawShaderAttrFormat::UInt, 2) => vk::Format::R32G32_UINT,
-            (DrawShaderAttrFormat::UInt, 3) => vk::Format::R32G32B32_UINT,
-            (DrawShaderAttrFormat::UInt, _) => vk::Format::R32G32B32A32_UINT,
-            (DrawShaderAttrFormat::SInt, 1) => vk::Format::R32_SINT,
-            (DrawShaderAttrFormat::SInt, 2) => vk::Format::R32G32_SINT,
-            (DrawShaderAttrFormat::SInt, 3) => vk::Format::R32G32B32_SINT,
-            (DrawShaderAttrFormat::SInt, _) => vk::Format::R32G32B32A32_SINT,
+            (DrawShaderAttrFormat::F32x1, 1)
+            | (DrawShaderAttrFormat::F32x2, 1)
+            | (DrawShaderAttrFormat::F32x3, 1)
+            | (DrawShaderAttrFormat::F32x4, 1) => vk::Format::R32_SFLOAT,
+            (DrawShaderAttrFormat::F32x1, 2)
+            | (DrawShaderAttrFormat::F32x2, 2)
+            | (DrawShaderAttrFormat::F32x3, 2)
+            | (DrawShaderAttrFormat::F32x4, 2) => vk::Format::R32G32_SFLOAT,
+            (DrawShaderAttrFormat::F32x1, 3)
+            | (DrawShaderAttrFormat::F32x2, 3)
+            | (DrawShaderAttrFormat::F32x3, 3)
+            | (DrawShaderAttrFormat::F32x4, 3) => vk::Format::R32G32B32_SFLOAT,
+            (DrawShaderAttrFormat::F32x1, _)
+            | (DrawShaderAttrFormat::F32x2, _)
+            | (DrawShaderAttrFormat::F32x3, _)
+            | (DrawShaderAttrFormat::F32x4, _) => vk::Format::R32G32B32A32_SFLOAT,
+            (DrawShaderAttrFormat::U32x1, 1) => vk::Format::R32_UINT,
+            (DrawShaderAttrFormat::U32x1, 2) => vk::Format::R32G32_UINT,
+            (DrawShaderAttrFormat::U32x1, 3) => vk::Format::R32G32B32_UINT,
+            (DrawShaderAttrFormat::U32x1, _) => vk::Format::R32G32B32A32_UINT,
+            (DrawShaderAttrFormat::I32x1, 1) => vk::Format::R32_SINT,
+            (DrawShaderAttrFormat::I32x1, 2) => vk::Format::R32G32_SINT,
+            (DrawShaderAttrFormat::I32x1, 3) => vk::Format::R32G32B32_SINT,
+            (DrawShaderAttrFormat::I32x1, _) => vk::Format::R32G32B32A32_SINT,
+            (DrawShaderAttrFormat::F16x2, _) => vk::Format::R16G16_SFLOAT,
+            (DrawShaderAttrFormat::F16x4, _) => vk::Format::R16G16B16A16_SFLOAT,
+            (DrawShaderAttrFormat::U16x2, _) => vk::Format::R16G16_UINT,
+            (DrawShaderAttrFormat::I16x2, _) => vk::Format::R16G16_SINT,
+            (DrawShaderAttrFormat::U16x2Norm, _) => vk::Format::R16G16_UNORM,
+            (DrawShaderAttrFormat::I16x2Norm, _) => vk::Format::R16G16_SNORM,
+            (DrawShaderAttrFormat::U8x4Norm, _) => vk::Format::R8G8B8A8_UNORM,
+            (DrawShaderAttrFormat::I8x4Norm, _) => vk::Format::R8G8B8A8_SNORM,
         }
     }
 
@@ -6479,7 +6542,7 @@ impl CxVulkan {
         geometry_id: GeometryId,
         geometry: &mut crate::geometry::CxGeometry,
     ) -> Result<(), String> {
-        if geometry.vertices.is_empty() || geometry.indices.is_empty() {
+        if geometry.vertex_count == 0 || geometry.index_count == 0 {
             if let Some(old) = self.geometries.remove(&geometry_id) {
                 self.destroy_geometry_resource(old);
             }
@@ -6494,24 +6557,29 @@ impl CxVulkan {
         let index_needs_upload = existing.is_none() || geometry.dirty_indices;
 
         let new_vertex_buffer = if vertex_needs_upload {
+            let vertices = geometry.vertices.as_f32().ok_or_else(|| {
+                "vulkan: compact vertex formats are not implemented".to_string()
+            })?;
             let buffer = self.create_host_buffer_with_data(
                 vk::BufferUsageFlags::VERTEX_BUFFER,
-                &geometry.vertices,
+                vertices,
             )?;
             self.xr_geometry_upload_bytes_this_frame +=
-                std::mem::size_of_val(geometry.vertices.as_slice()) as u64;
+                std::mem::size_of_val(vertices) as u64;
             Some(buffer)
         } else {
             None
         };
 
         let new_index_buffer = if index_needs_upload {
-            match self
-                .create_host_buffer_with_data(vk::BufferUsageFlags::INDEX_BUFFER, &geometry.indices)
-            {
+            let indices = match geometry.indices.as_u32() {
+                Some(i) => i,
+                None => return Err("vulkan: u16 index buffers are not implemented".to_string()),
+            };
+            match self.create_host_buffer_with_data(vk::BufferUsageFlags::INDEX_BUFFER, indices) {
                 Ok(buffer) => {
                     self.xr_geometry_upload_bytes_this_frame +=
-                        std::mem::size_of_val(geometry.indices.as_slice()) as u64;
+                        std::mem::size_of_val(indices) as u64;
                     Some(buffer)
                 }
                 Err(err) => {

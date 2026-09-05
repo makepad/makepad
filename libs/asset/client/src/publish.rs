@@ -23,8 +23,10 @@
 //! extra notification path exists or is needed.
 
 use crate::api::AnnotationUpload;
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 use crate::client::AssetClient;
 use std::path::PathBuf;
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 use crate::dto::CandidateStateDto;
 use crate::error::{ClientError, ClientResult};
 use crate::wire;
@@ -36,7 +38,7 @@ use makepad_asset_data::{
     Anchor, AssetAlias, AssetFile, AssetId, AssetKind, AssetManifest, AssetRevisionId,
     AssetRevisionRef, Axis, BlobId, Bounds, Capabilities, CoordinateSystem, DerivativePolicy,
     DeviceTier, FileRole, ImageDims, MediaType, Metrics, Pivot, Provenance, Redistribution,
-    Rights, ThumbnailMedia, ThumbnailMeta, ThumbnailView, Vec3,
+    Rights, SpawnRecipe, ThumbnailMedia, ThumbnailMeta, ThumbnailView, Vec3,
 };
 
 /// The playable media file being published.
@@ -274,6 +276,12 @@ pub struct PublishRequest {
     pub categories: Vec<String>,
     pub tags: Vec<String>,
     pub creator: String,
+    pub artist: String,
+    pub artist_url: String,
+    pub album: String,
+    pub source_url: String,
+    pub license: String,
+    pub license_url: String,
     pub generator: String,
     pub backend: String,
     pub model: String,
@@ -313,6 +321,12 @@ impl PublishRequest {
             categories: Vec::new(),
             tags: Vec::new(),
             creator: String::new(),
+            artist: String::new(),
+            artist_url: String::new(),
+            album: String::new(),
+            source_url: String::new(),
+            license: String::new(),
+            license_url: String::new(),
             generator: String::new(),
             backend: String::new(),
             model: String::new(),
@@ -449,6 +463,12 @@ impl PublishRequest {
             categories: self.categories.clone(),
             tags: self.tags.clone(),
             creator: self.creator.clone(),
+            artist: self.artist.clone(),
+            artist_url: self.artist_url.clone(),
+            album: self.album.clone(),
+            source_url: self.source_url.clone(),
+            license: self.license.clone(),
+            license_url: self.license_url.clone(),
             generator: self.generator.clone(),
             backend: self.backend.clone(),
             model: self.model.clone(),
@@ -565,12 +585,20 @@ pub struct PublishBundle {
     pub coordinate_system: CoordinateSystem,
     pub anchors: Vec<Anchor>,
     pub capabilities: Capabilities,
+    /// Bounded data-only spawn contract; required when spawnable is true.
+    pub spawn_recipe: Option<SpawnRecipe>,
     /// Playback length in ms when the bundle carries timed media.
     pub media_millis: u32,
     pub categories: Vec<String>,
     pub tags: Vec<String>,
     /// Catalog annotation fields (searchable, mutable control-plane text).
     pub creator: String,
+    pub artist: String,
+    pub artist_url: String,
+    pub album: String,
+    pub source_url: String,
+    pub license: String,
+    pub license_url: String,
     pub generator: String,
     pub backend: String,
     pub model: String,
@@ -628,10 +656,17 @@ impl PublishBundle {
                 loopable: matches!(kind, AssetKind::Audio | AssetKind::Video),
                 ..Capabilities::default()
             },
+            spawn_recipe: None,
             media_millis: 0,
             categories: Vec::new(),
             tags: Vec::new(),
             creator: String::new(),
+            artist: String::new(),
+            artist_url: String::new(),
+            album: String::new(),
+            source_url: String::new(),
+            license: String::new(),
+            license_url: String::new(),
             generator: String::new(),
             backend: String::new(),
             model: String::new(),
@@ -839,7 +874,7 @@ impl PublishBundle {
             bounds: self.bounds,
             anchors: self.anchors.clone(),
             capabilities: self.capabilities,
-            spawn_recipe: None,
+            spawn_recipe: self.spawn_recipe.clone(),
             provenance: self.manifest_provenance.as_ref().map(|p| Provenance {
                 generator: p.generator.clone(),
                 model: p.model.clone(),
@@ -868,6 +903,12 @@ impl PublishBundle {
             categories: self.categories.clone(),
             tags: self.tags.clone(),
             creator: self.creator.clone(),
+            artist: self.artist.clone(),
+            artist_url: self.artist_url.clone(),
+            album: self.album.clone(),
+            source_url: self.source_url.clone(),
+            license: self.license.clone(),
+            license_url: self.license_url.clone(),
             generator: self.generator.clone(),
             backend: self.backend.clone(),
             model: self.model.clone(),
@@ -942,6 +983,7 @@ pub struct PublishedBundle {
     pub thumbnail_blob: BlobId,
 }
 
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 impl AssetClient {
     /// Rights immutability per asset: a publication that would change the
     /// license/credits/source of an ALREADY PUBLISHED asset refuses with
@@ -1413,10 +1455,7 @@ fn mint_asset_id() -> AssetId {
     use std::hash::{BuildHasher, Hasher};
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nonce = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
+    let now = makepad_platform::Cx::time_now().to_bits();
     let mut bytes = [0u8; 16];
     for (i, chunk) in bytes.chunks_mut(8).enumerate() {
         let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
@@ -1836,6 +1875,30 @@ mod tests {
         let mut b = bundle();
         b.stats.triangles = 0;
         assert!(manifest_of(&b, AssetId::from_bytes([1; 16])).is_err());
+    }
+
+    #[test]
+    fn bundle_spawn_recipe_roundtrips_and_keeps_the_contract_fail_closed() {
+        let mut b = bundle();
+        let asset = AssetId::from_bytes([1; 16]);
+        b.capabilities.spawnable = true;
+        assert!(
+            manifest_of(&b, asset).is_err(),
+            "missing recipe must still refuse"
+        );
+        b.spawn_recipe = Some(SpawnRecipe {
+            class: makepad_asset_data::PrefabClass::Prop,
+            params: vec![],
+        });
+        let (bytes, _, _) = manifest_of(&b, asset).unwrap();
+        let manifest = AssetManifest::from_canonical_bytes(&bytes).unwrap();
+        assert_eq!(manifest.spawn_recipe, b.spawn_recipe);
+        assert!(manifest.capabilities.spawnable);
+        b.capabilities.spawnable = false;
+        assert!(
+            manifest_of(&b, asset).is_err(),
+            "recipe and capability must agree"
+        );
     }
 
     #[test]

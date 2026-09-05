@@ -448,9 +448,9 @@ impl MetaballsEngine {
         for _ in 0..blobs {
             freqs.push(vec3f(rng.range(0.4, 1.1), rng.range(0.4, 1.1), rng.range(0.4, 1.1)));
             phases.push(vec3f(
-                rng.range(0.0, 6.28),
-                rng.range(0.0, 6.28),
-                rng.range(0.0, 6.28),
+                rng.range(0.0, std::f32::consts::TAU),
+                rng.range(0.0, std::f32::consts::TAU),
+                rng.range(0.0, std::f32::consts::TAU),
             ));
             hues.push(rng.next_f32());
         }

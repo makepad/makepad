@@ -3,6 +3,7 @@ use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
     widget::*,
+    widget_async::CxSplashVmExt,
     widget_tree::CxWidgetExt,
 };
 
@@ -588,6 +589,22 @@ impl Widget for PopupMenuItem {
 }
 
 impl PopupMenu {
+    fn item(&mut self, cx: &mut Cx, item_id: PopupMenuItemId) -> WidgetRef {
+        let menu_item = self.menu_item;
+        // `menu_item` is an object index in the popup's heap. A popup owned by a
+        // Splash isolate must install that VM on Cx before the template is applied.
+        let Some(vm_id) = cx.script_ref_vm_id(&self.source) else {
+            return WidgetRef::empty();
+        };
+        self.menu_items
+            .get_or_insert(cx, item_id, |cx| {
+                cx.with_script_vm_id(vm_id, |vm| {
+                    WidgetRef::script_from_value(vm, menu_item)
+                })
+            })
+            .clone()
+    }
+
     pub fn menu_contains_pos(&self, cx: &mut Cx, pos: Vec2d) -> bool {
         self.draw_bg.area().clipped_rect(cx).contains(pos)
     }
@@ -618,12 +635,10 @@ impl PopupMenu {
     }
 
     pub fn draw_item(&mut self, cx: &mut Cx2d, item_id: PopupMenuItemId, label: &str) {
-        self.draw_item_with_icon(cx, item_id, label, None)
+        self.draw_item_full(cx, item_id, label, None, false)
     }
 
-    /// As `draw_item`, plus the icon to draw in front of the label. Kept as a
-    /// second entry point so every caller that has no icons keeps the old
-    /// signature — and, with `None`, the old pixels.
+    /// As `draw_item`, plus the icon to draw in front of the label.
     pub fn draw_item_with_icon(
         &mut self,
         cx: &mut Cx2d,
@@ -631,19 +646,50 @@ impl PopupMenu {
         label: &str,
         icon: Option<&ScriptHandleRef>,
     ) {
+        self.draw_item_full(cx, item_id, label, icon, false)
+    }
+
+    /// Draw a selectable item using the disabled palette. This is visual
+    /// metadata only: dimmed entries still receive pointer and keyboard input.
+    pub fn draw_item_dimmed(
+        &mut self,
+        cx: &mut Cx2d,
+        item_id: PopupMenuItemId,
+        label: &str,
+        dimmed: bool,
+    ) {
+        self.draw_item_full(cx, item_id, label, None, dimmed)
+    }
+
+    /// Both at once: an icon in front of the label, and the disabled
+    /// palette over the whole row.
+    ///
+    /// The three above are kept as their own entry points so no caller had
+    /// to change: each names the one thing it cares about and takes the
+    /// default for the other.
+    pub fn draw_item_full(
+        &mut self,
+        cx: &mut Cx2d,
+        item_id: PopupMenuItemId,
+        label: &str,
+        icon: Option<&ScriptHandleRef>,
+        dimmed: bool,
+    ) {
         self.count += 1;
 
-        let menu_item = self.menu_item;
-        let item = self
-            .menu_items
-            .get_or_insert(cx, item_id, |cx| {
-                cx.with_vm(|vm| WidgetRef::script_from_value(vm, menu_item))
-            })
-            .clone();
+        let item = self.item(cx, item_id);
         if let Some(mut menu_item) = item.borrow_mut::<PopupMenuItem>() {
             menu_item.label = label.to_string();
             menu_item.set_icon(icon);
             menu_item.reserve_icon = self.icon_column;
+            menu_item.animator_cut(
+                cx,
+                if dimmed {
+                    ids!(disabled.on)
+                } else {
+                    ids!(disabled.off)
+                },
+            );
         }
         // Re-seat on every draw: one menu instance is shared by every dropdown
         // that uses the same template, so the items belong to whichever
@@ -719,5 +765,26 @@ impl PopupMenu {
                 _ => (),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn popup_item_is_instantiated_in_the_popup_owners_vm() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let vm_id = cx.alloc_splash_vm();
+        let mut popup = cx.with_script_vm_id(vm_id, PopupMenu::script_new_with_default);
+        let popup_heap = popup.source.heap_key();
+
+        let item = popup.item(&mut cx, PopupMenuItemId(LiveId(1)));
+        let item = item
+            .borrow::<PopupMenuItem>()
+            .expect("popup template should instantiate a PopupMenuItem");
+
+        assert_eq!(item.source.heap_key(), popup_heap);
     }
 }

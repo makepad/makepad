@@ -95,7 +95,7 @@ pub struct RifeJob {
     pub height: usize,
     /// A prefetched pair that did not finish before its boundary is shed;
     /// the classical producer owns that traversal from its first frame.
-    pub deadline: std::time::Instant,
+    pub deadline: f64,
 }
 
 pub struct RifeField {
@@ -240,6 +240,7 @@ impl RifeProduct {
 impl RifeService {
     /// Spawn with the checkpoint at `model_path`. Fails soft: a missing
     /// or bad checkpoint returns Err and the caller stays classical.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn start(model_path: &std::path::Path) -> Result<Self, String> {
         use makepad_ai_rife::rife::{
             Rife, RifeBackendKind, RifeFramePair, RifeScale, RifeWeights,
@@ -277,7 +278,7 @@ impl RifeService {
                         }
                     }
                     let _busy = BusyGuard(&worker_busy);
-                    if std::time::Instant::now() >= job.deadline {
+                    if Cx::monotonic_now() >= job.deadline {
                         continue;
                     }
                     let (rgb0, rgb1) = match &job.frames {
@@ -330,11 +331,11 @@ impl RifeService {
                             ) else {
                                 continue;
                             };
-                            let t0 = std::time::Instant::now();
+                            let t0 = Cx::monotonic_now();
                             let Ok(field) = rife.flow_field_rgb8(pair, 0.5, None) else {
                                 continue;
                             };
-                            synth_elapsed = t0.elapsed().as_secs_f64();
+                            synth_elapsed = Cx::monotonic_now() - t0;
                             record_latency(synth_elapsed);
                             // AI1 is the shipped path: preserve its exact
                             // planar-to-interleaved repack and warp inputs.
@@ -362,11 +363,11 @@ impl RifeService {
                             ) else {
                                 continue;
                             };
-                            let t0 = std::time::Instant::now();
+                            let t0 = Cx::monotonic_now();
                             let Ok(rgb) = rife.interpolate_rgb8_controlled(pair, 0.5, None) else {
                                 continue;
                             };
-                            synth_elapsed = t0.elapsed().as_secs_f64();
+                            synth_elapsed = Cx::monotonic_now() - t0;
                             record_latency(synth_elapsed);
                             RifeProduct::Midpoint(RifeMidpoint {
                                 generation: job.generation,
@@ -392,7 +393,7 @@ impl RifeService {
                             'levels: for level in 1..=depth {
                                 let stride = 1usize << (3 - level);
                                 for center in (stride..8).step_by(stride * 2) {
-                                    if std::time::Instant::now() >= job.deadline {
+                                    if Cx::monotonic_now() >= job.deadline {
                                         break 'levels;
                                     }
                                     let left = center - stride;
@@ -411,13 +412,13 @@ impl RifeService {
                                     ) else {
                                         break 'levels;
                                     };
-                                    let t0 = std::time::Instant::now();
+                                    let t0 = Cx::monotonic_now();
                                     let Ok(rgb) =
                                         rife.interpolate_rgb8_controlled(pair, 0.5, None)
                                     else {
                                         break 'levels;
                                     };
-                                    let elapsed = t0.elapsed().as_secs_f64();
+                                    let elapsed = Cx::monotonic_now() - t0;
                                     record_latency(elapsed);
                                     grid[center] = Some(rgb.clone());
                                     ladder.frames[center - 1] = Some(RifeMidpoint {
@@ -464,6 +465,11 @@ impl RifeService {
             })
             .map_err(|e| e.to_string())?;
         Ok(Self { tx, result, busy, latency })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn start(_model_path: &std::path::Path) -> Result<Self, String> {
+        Err("RIFE frame synthesis is unavailable on web".to_string())
     }
 
     /// Offer a pair; a busy worker skips it (classical covers the gap). The

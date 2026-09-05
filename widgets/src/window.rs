@@ -28,6 +28,7 @@ script_mod! {
     use mod.widgets.NavControl
     use mod.widgets.ScreenCap
     use mod.widgets.Tweaker
+    use mod.widgets.AiChatSlot
     use mod.widgets.VoiceWave
     use mod.widgets.MenuItem
     use mod.draw.KeyCode
@@ -136,7 +137,7 @@ script_mod! {
         pass +: { clear_color: theme.color_bg_app }
         flow: Down
         nav_control: NavControl {}
-        // SHIFT+F12 records this window to local/screencap/*.mp4, picture and
+        // CTRL+F10 records this window to local/screencap/*.mp4, picture and
         // sound (widgets/src/screen_cap.rs). Hardcoded like the caption bar:
         // inert and free until the key is pressed.
         screen_cap: ScreenCap {}
@@ -255,6 +256,10 @@ script_mod! {
             width: Fill height: Fill
             keyboard_min_shift: 30
         }
+        // The AI chat overlay (widgets/src/ai_slot.rs): F10 in every
+        // standalone app, filled by name from the aichat crate when the
+        // app links it, inert under the window manager, zero cost while off.
+        ai_chat := AiChatSlot {}
         // The design-feedback overlay (widgets/src/tweaker.rs): hardcoded
         // like the caption bar, inert unless --remote, zero cost while off.
         tweaker := Tweaker {}
@@ -294,7 +299,7 @@ script_mod! {
 
 }
 
-#[derive(Script, ScriptHook, Widget)]
+#[derive(Script, Widget)]
 pub struct Window {
     #[source]
     source: ScriptObjectRef,
@@ -307,6 +312,13 @@ pub struct Window {
     demo: bool,
     #[live]
     show_caption_bar: bool,
+    /// Whether this widget should create its native surface during initial
+    /// construction. The stable window id and widget tree still exist when
+    /// false, so the owner can explicitly create the surface later.
+    #[live(true)]
+    create_on_start: bool,
+    #[rust]
+    initial_create_policy_applied: bool,
     #[rust]
     demo_next_frame: NextFrame,
     #[live]
@@ -317,7 +329,7 @@ pub struct Window {
     //#[live] performance_view: PerformanceView,
     #[live]
     nav_control: NavControl,
-    /// Shift+F12 screen recorder. Hardcoded here so every app can record
+    /// Ctrl+F10 screen recorder. Hardcoded here so every app can record
     /// itself; Window owns it so the capture sink can be bound to THIS
     /// window rather than whichever one presents first.
     #[live]
@@ -400,6 +412,29 @@ pub struct Window {
     draw_state: DrawStateWrap<DrawState>,
     #[rust]
     initialized: bool,
+}
+
+fn apply_initial_create_policy(
+    cx: &mut Cx,
+    window: &WindowHandle,
+    create_on_start: bool,
+) -> bool {
+    !create_on_start && window.cancel_initial_create(cx)
+}
+
+impl ScriptHook for Window {
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        if !self.create_on_start && !self.initial_create_policy_applied {
+            apply_initial_create_policy(vm.cx_mut(), &self.window.handle, false);
+            self.initial_create_policy_applied = true;
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -840,7 +875,8 @@ impl SplodedStack {
         let pass_id = self.scene_pass.draw_pass_id();
         let params = cx.sploded_params(size);
         cx.passes[pass_id].sploded = params;
-        cx.passes[pass_id].set_ortho_matrix(dvec2(0.0, 0.0), size);
+        let uniforms_gen = cx.next_uniform_gen();
+        cx.passes[pass_id].set_ortho_matrix(dvec2(0.0, 0.0), size, uniforms_gen);
         self.scene_draw_list.begin_always(cx);
         let pass_size = cx.current_pass_size();
         cx.begin_root_turtle(pass_size, Layout::flow_overlay());
@@ -1363,6 +1399,16 @@ mod tests {
             1.0
         );
     }
+
+    #[test]
+    fn window_can_defer_its_initial_native_surface() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let window = WindowHandle::new(&mut cx);
+
+        assert!(!apply_initial_create_policy(&mut cx, &window, true));
+        assert!(apply_initial_create_policy(&mut cx, &window, false));
+        assert!(!apply_initial_create_policy(&mut cx, &window, false));
+    }
 }
 
 impl WindowRef {
@@ -1419,6 +1465,21 @@ impl WindowRef {
     pub fn restore(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.window.handle.restore(cx);
+        }
+    }
+
+    /// Minimize the window (the platform's own animation, if any).
+    pub fn minimize(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.window.handle.minimize(cx);
+        }
+    }
+
+    /// Close the window through the platform, the way its own caption
+    /// button does — the app sees the ordinary window-close path.
+    pub fn close(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.window.handle.close(cx);
         }
     }
     /// See `WindowHandle::set_chromeless_when_maximized` (Windows only;
@@ -1505,7 +1566,7 @@ impl Widget for Window {
         self.nav_control
             .handle_event(cx, event, self.main_draw_list.draw_list_id());
         self.overlay.handle_event(cx, event);
-        // The recorder is fed the raw event before focus routing, so Shift+F12
+        // The recorder is fed the raw event before focus routing, so Ctrl+F10
         // works while a text input holds the caret, and is told which window
         // it is recording so its capture sink follows THIS window.
         self.screen_cap.set_window_id(self.window.window_id().id());
@@ -1679,7 +1740,11 @@ impl Widget for Window {
             // Tweak mode swallows pointer events over the body before
             // ordinary dispatch (picking must never fire a Button); all the
             // logic lives in widgets/src/tweaker.rs.
-            if !crate::tweaker::window_intercept(cx, event, &mut self.view, self.window.window_id())
+            // The AI overlay does the same for F10 and for the pointer over
+            // its open pane (widgets/src/ai_slot.rs).
+            let window_id = self.window.window_id();
+            if !crate::tweaker::window_intercept(cx, event, &mut self.view, window_id)
+                && !crate::ai_slot::window_intercept(cx, event, &mut self.view, window_id)
             {
                 self.view.handle_event(cx, event, scope);
             }
@@ -1735,6 +1800,16 @@ impl Widget for Window {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        // A deferred window has no drawable yet. In particular, web has one
+        // canvas for all window passes, so submitting this pass before an
+        // explicit create would paint an uncreated secondary window over the
+        // primary canvas.
+        let window_id = self.window.handle.window_id();
+        if !self.create_on_start
+            && (!cx.windows.is_valid(window_id) || !cx.windows[window_id].is_created)
+        {
+            return DrawStep::done();
+        }
         if self.draw_state.begin(cx, DrawState::Drawing) {
             if self.begin(cx).is_not_redrawing() {
                 self.draw_state.end();

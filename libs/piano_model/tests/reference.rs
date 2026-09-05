@@ -1,3 +1,7 @@
+// RETIRED from normal acceptance: both tests below are opt-in historical
+// FluidR3 regressions only, including the C5 row. All old data and thresholds
+// remain unchanged. Use acoustic_reference.rs for native-recording diagnostics.
+// The remaining commentary records the historical table's evolution.
 // Reference-recording comparison tests — GENERATED, do not hand-edit the
 // tables. EXCEPTION, 2026-08-30: the A0/C1 noise_hi and hi_ratio LOWER
 // bracket edges were widened by hand after the listener chose the tight
@@ -280,6 +284,7 @@ fn render_note(key: u8, secs: f64) -> Vec<f32> {
 }
 
 #[test]
+#[ignore = "historical FluidR3 regression only: obsolete perceptual authority (including C5); use acoustic_reference during voicing"]
 fn partial_ladders_match_the_reference_recordings() {
     let mut failures = Vec::new();
     for rn in NOTES {
@@ -309,6 +314,7 @@ fn partial_ladders_match_the_reference_recordings() {
 }
 
 #[test]
+#[ignore = "historical FluidR3 regression only: obsolete perceptual authority; use acoustic_reference during voicing"]
 fn envelopes_and_attack_match_the_reference_recordings() {
     let mut failures = Vec::new();
     for rn in NOTES {

@@ -2,7 +2,7 @@ use crate::{
     cx::Cx,
     cx_api::CxOsOp,
     draw_pass::{CxDrawPassColorTexture, CxDrawPassParent, DrawPassClearColor},
-    event::{Event, WindowGeom, WindowGeomChangeEvent},
+    event::{Event, WindowGeom},
     gl_sys,
     makepad_math::*,
     makepad_micro_serde::*,
@@ -39,7 +39,8 @@ impl Cx {
 
         let time_now = self.os.stdin_timers.time_now();
         for &draw_pass_id in &passes_todo {
-            self.passes[draw_pass_id].set_time(time_now as f32);
+            let uniforms_gen = self.next_uniform_gen();
+            self.passes[draw_pass_id].set_time(time_now as f32, uniforms_gen);
             match self.passes[draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(window_id) => {
@@ -68,7 +69,7 @@ impl Cx {
                             height: (pass_rect.size.y * dpi_factor) as u32,
                         };
 
-                        if std::env::var_os("MAKEPAD_RUNVIEW_DPI_TRACE").is_some() {
+                        if crate::makepad_error_log::trace_enabled("runview.dpi") {
                             let trace_draw = (
                                 presentable_draw.width,
                                 presentable_draw.height,
@@ -79,7 +80,8 @@ impl Cx {
                             let should_log = window.last_trace_draw != Some(trace_draw);
                             window.last_trace_draw = Some(trace_draw);
                             if should_log {
-                                crate::log!(
+                                crate::trace!(
+                                    "runview.dpi",
                                     "runview child draw window={} logical=({}, {}) dpi={} frame_px=({}, {}) swapchain_alloc=({}, {})",
                                     window_id.id(),
                                     pass_rect.size.x,
@@ -345,8 +347,9 @@ impl Cx {
                 let geom_changed = old_geom.dpi_factor != new_geom.dpi_factor
                     || old_geom.inner_size != new_geom.inner_size
                     || old_geom.position != new_geom.position;
-                if geom_changed && std::env::var_os("MAKEPAD_RUNVIEW_DPI_TRACE").is_some() {
-                    crate::log!(
+                if geom_changed && crate::makepad_error_log::trace_enabled("runview.dpi") {
+                    crate::trace!(
+                        "runview.dpi",
                         "runview child geom window={} logical=({}, {}) dpi={} px=({}, {}) old_logical=({}, {}) old_dpi={}",
                         window_id.id(),
                         width,
@@ -359,14 +362,10 @@ impl Cx {
                         old_geom.dpi_factor
                     );
                 }
-                self.windows[window_id].window_geom = new_geom.clone();
-                if geom_changed {
+                let re = self.windows.stdin_apply_native_geom(window_id, new_geom);
+                if geom_changed || re.old_geom != re.new_geom {
                     self.redraw_all();
-                    self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
-                        window_id,
-                        new_geom,
-                        old_geom,
-                    }));
+                    self.call_event_handler(&Event::WindowGeomChange(re));
                 }
                 let _ = Self::stdin_aux_chan_endpoint(aux_chan_client_endpoint);
             }

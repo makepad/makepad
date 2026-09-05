@@ -863,6 +863,70 @@ fn provider_slugs_are_stable() {
 }
 
 #[test]
+fn codex_json_fixture_runs_world_tool_continuation_and_stays_map_scoped() {
+    struct GameRecorder(Recorder);
+    impl ToolExecutor for GameRecorder {
+        fn capability_doc(&mut self) -> String { "Village world tools".into() }
+        fn tool_definitions(&mut self) -> Vec<makepad_asset_chat::tools::ToolDef> {
+            makepad_asset_chat::tools::sandbox_definitions()
+        }
+        fn client_executes(&mut self, call: &ContentToolCall) -> bool {
+            matches!(call, ContentToolCall::WorldGetPlan)
+        }
+        fn execute(&mut self, _: &ContentToolCall, _: &ExecCtx,
+            _: &mut dyn FnMut(u16, &str), _: &CancelFlag) -> ToolOutcome {
+            panic!("world tools belong to the game client");
+        }
+    }
+    // Real Codex JSON parser -> ordinary Session -> ordinary typed world
+    // tool execution. Only the external model and game result are fixtures.
+    fn reply(text: &str) -> Vec<ProviderEvent> {
+        use makepad_asset_chat::codex_cli::{parse_line, ParseState};
+        let item = json::obj(vec![("type", json::s("item.completed")),
+            ("item", json::obj(vec![("type", json::s("agent_message")), ("text", json::s(text))]))]);
+        let mut state = ParseState::default();
+        let (mut events, _) = parse_line(&item, &mut state);
+        events.extend(parse_line(&json::obj(vec![("type", json::s("turn.completed"))]), &mut state).0);
+        events
+    }
+    let mut provider = Scripted::new(vec![
+        reply(&tool_line("world.get_plan", Value::Obj(vec![]))),
+        reply("The village plan is revision 17."),
+        vec![ProviderEvent::Delta("working".into())],
+    ]);
+    provider.kind = ProviderKind::CodexCli;
+    let turns = provider.turns.clone();
+    let cancelled = provider.cancelled.clone();
+    let mut exec = GameRecorder(Recorder::new(ToolOutcome::Ok {
+        value: json::obj(vec![("revision", Value::Int(17)), ("title", json::s("Village"))]),
+    }));
+    let mut session = Session::new("village", Box::new(provider));
+    session.send("inspect Village", &[], &mut exec).unwrap();
+    session.pump(&mut exec);
+    assert!(session.drain_events().iter().any(|event| matches!(
+        &event.body, ChatEventBody::ToolCall { name, .. } if name == "world.get_plan")));
+    session.provide_client_outcome("tc_1_1", exec.0.outcome.clone(), &mut exec).unwrap();
+    session.pump(&mut exec);
+    assert!(session.is_idle());
+    assert!(exec.0.calls.borrow().is_empty());
+    assert_eq!(turns.borrow().len(), 2);
+    assert!(turns.borrow()[1].messages.iter().any(|message|
+        message.text.contains("revision") && message.text.contains("17")));
+    session.send("continue Village", &[], &mut exec).unwrap();
+    session.cancel();
+    assert!(session.is_idle());
+    assert_eq!(*cancelled.borrow(), 1);
+
+    let mut next = Scripted::new(vec![reply("Desert is a new map.")]);
+    next.kind = ProviderKind::CodexCli;
+    let next_turns = next.turns.clone();
+    let mut next_session = Session::new("desert", Box::new(next));
+    next_session.send("inspect Desert", &[], &mut exec).unwrap();
+    next_session.pump(&mut exec);
+    assert!(next_turns.borrow()[0].messages.iter().all(|message| !message.text.contains("Village")));
+}
+
+#[test]
 fn progress_callbacks_are_bounded() {
     let provider = Scripted::new(vec![
         vec![ProviderEvent::Done {

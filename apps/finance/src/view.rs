@@ -15,17 +15,12 @@
 
 use crate::chart::{FinanceChartWidgetExt, MeterWidgetRefExt};
 use crate::date::{self, DateRange, Day, MonthKey};
-use crate::db::Db;
 use crate::model::*;
 use crate::money::{format_compact, format_minor, format_money, Currency};
 use crate::report;
+use crate::runtime::{Backend, ImportState, Runtime};
 use crate::theme;
-use makepad_widgets::makepad_platform::file_dialogs::{FileDialog, FileDialogAction};
 use makepad_widgets::*;
-
-/// The dialog that picks a statement, so its answer is not confused with
-/// any other file dialog the app might grow.
-const PICK_STATEMENT: LiveId = live_id!(finance_pick_statement);
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -765,9 +760,11 @@ pub struct Finance {
     view: View,
 
     #[rust]
-    db: Option<Db>,
+    backend: Backend,
     #[rust]
     ledger: Ledger,
+    #[rust]
+    today: Day,
     #[rust(Screen::Overview)]
     screen: Screen,
     #[rust(Layout::Wide)]
@@ -796,50 +793,28 @@ pub struct Finance {
     import: Option<ImportState>,
 }
 
-struct ImportState {
-    path: String,
-    csv: crate::csv::Csv,
-    mapping: crate::import::Mapping,
-    plan: crate::import::Plan,
-    account: Id,
-    ask_date_order: bool,
-}
-
 impl Finance {
     fn currency(&self) -> Currency {
         self.ledger.base_currency
     }
 
-    /// Open the file, generating a demo household if it is empty, and load
-    /// it into memory.
+    /// Load either the generated demo household or the native database.
     fn start(&mut self, cx: &mut Cx) {
         if self.started {
             return;
         }
         self.started = true;
-        let path = std::path::PathBuf::from("local/finance/finance.db");
-        let mut db = match Db::open(&path) {
-            Ok(db) => db,
-            Err(error) => {
-                self.status = format!("cannot open {}: {error}", path.display());
-                error!("finance: {}", self.status);
-                return;
-            }
-        };
-        match db.is_empty() {
-            Ok(true) => match crate::seed::populate(&mut db, crate::seed::DEFAULT_YEARS) {
-                Ok(summary) => self.status = format!("Demo file created: {summary}"),
-                Err(error) => self.status = format!("demo data failed: {error}"),
-            },
-            Ok(false) => {}
-            Err(error) => self.status = format!("cannot read {}: {error}", path.display()),
-        }
-        match db.load() {
-            Ok(ledger) => self.ledger = ledger,
-            Err(error) => self.status = format!("load failed: {error}"),
-        }
-        self.db = Some(db);
-        self.budget_month = date::month_key(date::today());
+
+        let started = self.backend.start();
+        self.today = started.today;
+        self.ledger = started.ledger;
+        self.status = started.status;
+        let has_import = self.backend.has_import();
+        self.widget(cx, ids!(nav_import)).set_visible(cx, has_import);
+        self.widget(cx, ids!(tab_import)).set_visible(cx, has_import);
+        self.view(cx, ids!(import)).set_visible(cx, false);
+
+        self.budget_month = date::month_key(self.today);
         self.rebuild_rows();
         self.show_only_current_screen(cx);
         self.chrome_synced = false;
@@ -900,11 +875,11 @@ impl Finance {
             .iter()
             .map(|t| t.date)
             .min()
-            .unwrap_or_else(date::today)
+            .unwrap_or(self.today)
     }
 
     fn range(&self) -> DateRange {
-        self.range.resolve(date::today(), self.earliest())
+        self.range.resolve(self.today, self.earliest())
     }
 
     /// Show the screen, and make the chrome agree with it.
@@ -920,7 +895,11 @@ impl Finance {
     fn show_only_current_screen(&mut self, cx: &mut Cx) {
         for screen in Screen::ALL {
             self.view(cx, screen.view_id())
-                .set_visible(cx, screen == self.screen);
+                .set_visible(
+                    cx,
+                    screen == self.screen
+                        && (screen != Screen::Import || self.backend.has_import()),
+                );
         }
     }
 
@@ -948,7 +927,7 @@ impl Finance {
     /// something changed, rather than tracking what.
     fn sync_chrome(&mut self, cx: &mut Cx) {
         let currency = self.currency();
-        let today = date::today();
+        let today = self.today;
         let range = self.range();
 
         self.label(cx, ids!(screen_title)).set_text(cx, self.screen.title());
@@ -1208,72 +1187,13 @@ impl Finance {
         self.chrome_synced = true;
     }
 
-    fn open_statement(&mut self, cx: &mut Cx) {
-        let dialog = FileDialog::new()
-            .set_id(PICK_STATEMENT)
-            .set_title("Choose a statement".to_string())
-            .add_filter("Comma-separated values".to_string(), vec!["csv".to_string()])
-            .add_filter("Text".to_string(), vec!["txt".to_string()])
-            .add_filter("All Files".to_string(), vec!["*".to_string()]);
-        cx.open_select_file_dialog(dialog);
-    }
-
-    /// Read a chosen file and build the plan, without writing anything.
-    fn prepare_import(&mut self, cx: &mut Cx, path: &std::path::Path) {
-        let text = match std::fs::read(path) {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-            Err(error) => {
-                self.status = format!("cannot read {}: {error}", path.display());
-                self.chrome_synced = false;
-                self.redraw(cx);
-                return;
-            }
-        };
-        let csv = crate::csv::parse(&text);
-        let guess = crate::import::Mapping::guess(&csv);
-        let account = self
-            .account_filter
-            .or_else(|| self.ledger.accounts.first().map(|a| a.id))
-            .unwrap_or(0);
-        let Some(account_ref) = self.ledger.account(account).cloned() else {
-            self.status = "no account to import into".to_string();
-            return;
-        };
-        let known = self
-            .db
-            .as_mut()
-            .and_then(|db| db.known_fingerprints().ok())
-            .unwrap_or_default();
-        let plan = crate::import::plan(&csv, &guess.mapping, &account_ref, &self.ledger.rules, &known);
-        self.import = Some(ImportState {
-            path: path.display().to_string(),
-            csv,
-            mapping: guess.mapping,
-            plan,
-            account,
-            ask_date_order: guess.ask_date_order,
-        });
-        self.set_screen(cx, Screen::Import);
-    }
-
     /// Write the plan. Everything or nothing.
     fn commit_import(&mut self, cx: &mut Cx) {
         let Some(state) = self.import.take() else { return };
-        let Some(db) = self.db.as_mut() else { return };
-        let rows: Vec<Transaction> = state.plan.to_import().cloned().collect();
-        let count = rows.len();
-        let result = db.transact(|conn| {
-            for txn in &rows {
-                crate::db::insert_transaction_on(conn, txn)?;
-            }
-            Ok(())
-        });
-        match result {
-            Ok(()) => {
-                self.status = format!("Imported {count} transactions from {}", state.path);
-                if let Ok(ledger) = db.load() {
-                    self.ledger = ledger;
-                }
+        match self.backend.commit_import(state) {
+            Ok((ledger, status)) => {
+                self.status = status;
+                self.ledger = ledger;
                 self.rebuild_rows();
                 self.set_screen(cx, Screen::Ledger);
             }
@@ -1576,11 +1496,16 @@ impl WidgetMatchEvent for Finance {
             (Screen::Ledger, ids!(nav_ledger), ids!(tab_ledger)),
             (Screen::Budget, ids!(nav_budget), ids!(tab_budget)),
             (Screen::Reports, ids!(nav_reports), ids!(tab_reports)),
-            (Screen::Import, ids!(nav_import), ids!(tab_import)),
         ] {
             if self.button(cx, nav).clicked(actions) || self.button(cx, tab).clicked(actions) {
                 self.set_screen(cx, screen);
             }
+        }
+        if self.backend.has_import()
+            && (self.button(cx, ids!(nav_import)).clicked(actions)
+                || self.button(cx, ids!(tab_import)).clicked(actions))
+        {
+            self.set_screen(cx, Screen::Import);
         }
 
         for (range, id) in [
@@ -1607,10 +1532,10 @@ impl WidgetMatchEvent for Finance {
             self.redraw(cx);
         }
 
-        if self.button(cx, ids!(import_pick)).clicked(actions) {
-            self.open_statement(cx);
+        if self.backend.has_import() && self.button(cx, ids!(import_pick)).clicked(actions) {
+            self.backend.pick_statement(cx);
         }
-        if self.button(cx, ids!(import_apply)).clicked(actions) {
+        if self.backend.has_import() && self.button(cx, ids!(import_apply)).clicked(actions) {
             self.commit_import(cx);
         }
         if self.button(cx, ids!(import_cancel)).clicked(actions) {
@@ -1645,12 +1570,18 @@ impl WidgetMatchEvent for Finance {
             }
         }
 
-        for action in actions {
-            if let Some(picked) = action.downcast_ref::<FileDialogAction>() {
-                if picked.id() == PICK_STATEMENT {
-                    if let Some(path) = picked.path().cloned() {
-                        self.prepare_import(cx, &path);
-                    }
+        if let Some(prepared) =
+            self.backend.prepare_from_actions(actions, &self.ledger, self.account_filter)
+        {
+            match prepared {
+                Ok(state) => {
+                    self.import = Some(state);
+                    self.set_screen(cx, Screen::Import);
+                }
+                Err(error) => {
+                    self.status = error;
+                    self.chrome_synced = false;
+                    self.redraw(cx);
                 }
             }
         }

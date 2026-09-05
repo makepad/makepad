@@ -3,70 +3,70 @@
 //! one-shot SFX voices, summed through a master gain with a hard safety
 //! clamp.
 //!
-//! Threading contract:
-//! - the device callback calls [`Mixer::render`]; it `try_lock`s the state
-//!   and leaves the (pre-zeroed) buffer silent on contention — it never
-//!   blocks on the UI,
-//! - UI/engine threads mutate through short-lock methods; every audible
-//!   parameter change goes through a [`Ramp`] (a few ms of slew), so gain
-//!   moves, mutes, crossfades and slot fades are click-free,
-//! - video decode threads push PCM into per-slot queues and read back the
-//!   buffered depth for pacing; closing a slot just flushes and mutes it —
-//!   nobody joins anybody.
+//! Threading contract — no lock anywhere, on any thread:
+//! - the device callback owns the mix state outright ([`MixEngine`]) and
+//!   calls [`MixEngine::render`]; it drains a lock-free command ring, mixes,
+//!   and publishes a `Copy` snapshot through a seqlock. It never waits on
+//!   the UI, never allocates and never frees a payload,
+//! - the UI holds a [`Mixer`] handle: every mutation is a [`MixCmd`] moved
+//!   into the ring (a full ring backs up on the UI side and re-sends next
+//!   frame), every read is the last snapshot or the handle's own shadow of
+//!   what it sent. What a command replaces comes back to the UI as a
+//!   [`Retired`] payload and is dropped there. Every audible parameter
+//!   change goes through a [`Ramp`] (a few ms of slew), so gain moves,
+//!   mutes, crossfades and slot fades are click-free,
+//! - video decode threads push PCM into per-slot lock-free rings and read
+//!   back the buffered depth for pacing; closing a slot just flushes and
+//!   mutes it — nobody joins anybody.
 //!
 //! The device clock is the position truth: deck playheads and end-of-track
 //! flags advance only inside `render`.
 
 use crate::cue::SlotId;
-use crate::dsp_math::{lerp, lerp_frame};
-use crate::verify_or;
-use crate::decks::{crossfader_gains, DeckId, FadeCurve, ScratchMotion, SpinMotion};
+use crate::decks::{crossfader_gains, DeckId, FadeCurve, ScratchMotion};
 use crate::loop_splat::{
     SplatGrid, SplatPart, SplatRow, SplatSnapshot, SPLAT_COLS, SPLAT_ROWS,
 };
-use crate::wave_analysis::{DeckClock, TrackGrid};
 use crate::music_dsp::{
-    Compressor, LevelMode, Limiter, SlotLevel,
-    audible, knob, knob64,
-    Autopan, Bitcrusher, DeckEcho, DeckEq, Distortion, Flanger, FrameSource, Freeze, MotorEnd,
-    MoogLadder, ParamRamp, Phaser, PlateReverb, RateReader, ScratchRamp, StereoWidth, Tremolo,
-    Stretcher, STEM_COUNT,
-    STRETCH_BYPASS_EPSILON, STRETCH_RATIO_MAX, STRETCH_RATIO_MIN, WSOLA_WINDOW,
-    BRAKE_SECS, CENSOR_FLIP_SECS, CENSOR_RATE, CENSOR_RETURN_SECS, SOFT_START_SECS,
-    SPINBACK_FALL_SECS, SPINBACK_PEAK, SPINBACK_THROW_SECS,
+    DeckEq, FrameSource, ParamRamp, RateReader, ScratchRamp, Stretcher, STEM_COUNT,
+    STRETCH_BYPASS_EPSILON, STRETCH_ENGAGE_EPSILON, STRETCH_RATIO_MAX, STRETCH_RATIO_MIN,
+    WSOLA_WINDOW,
 };
 use crate::pads::{PadKey, VoiceAlloc, VoiceId};
-use crate::published::Published;
 use crate::score_preview::{PreviewEvent, PreviewSequence};
+use crate::program_mix::{
+    MasterParam, MasterParams, MasterSnapshot, ProgramMix, StripId, StripSnapshot, STRIP_COUNT,
+};
+use crate::synth::{
+    IronfishParam, IronfishPatch, RackSnapshot, StepPattern, SynthClock, SynthEngines, SynthRack,
+    SynthTrack,
+};
 use makepad_drumkit::{DrumKit, SampleBank};
 use makepad_piano_model::{Piano, PianoEvent, TimedEvent as PianoTimedEvent};
 use makepad_widgets::makepad_platform::audio::AudioBuffer;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use crate::spsc::{OnceSlot, SeqCell, SpscRing, UiCell};
+use std::sync::Arc;
 
 /// Q32.32 fixed-point source-frame cursor.
 const FP_ONE: u64 = 1 << 32;
 /// Default parameter slew, seconds — fast enough to feel instant, slow
 /// enough to never click.
 const SLEW_SECS: f32 = 0.008;
-
-/// How long the separated lanes take to replace the mixed file. Long
-/// enough that the change of TIMBRE is a fade and not an event, short
-/// enough that a deck loaded mid-set is on its lanes within a bar.
-const STEM_SEAM_SECS: f32 = 0.12;
 /// Autopilot blend moves: fast enough to read as a cut on the bar, slow
 /// enough never to click.
 const BLEND_SECS: f32 = 0.08;
-/// How long the outgoing track takes to leave when a load lands on a deck
-/// that is already playing. Deliberately longer than the transport's own
-/// slew: this is a record being lifted off under the room, and anything
-/// much shorter reads as a dropout rather than a hand-over.
-const LOAD_SWAP_SECS: f32 = 0.040;
 /// Cap on queued video-slot audio, frames (~2s at 48k): a stalled consumer
 /// can never grow a queue without bound.
 const MAX_SLOT_QUEUE_FRAMES: usize = 96_000;
 /// Master safety clamp.
+const CLAMP: f32 = 1.0;
+/// Width of the blend when separated stems first take over from the mixed
+/// file on a playing deck, seconds. At unity gains the two are the same
+/// signal and the blend is inaudible; under a knob already turned it is
+/// what keeps the swap from being a step.
+const STEM_SWAP_SECS: f32 = 0.020;
 /// Width of the crossfade at a deck loop's wrap, seconds. The tail of the
 /// loop blends into the run-up to IN over this window, so the seam is a
 /// mix of two pieces of programme rather than a gain treatment — long
@@ -249,6 +249,58 @@ impl TransitionAtomics {
         self.rendered_frame.store(frame, Ordering::Relaxed);
         self.sequence.fetch_add(1, Ordering::Release);
     }
+
+    /// A consistent read. `None` until a schedule has ever been published.
+    fn snapshot(&self) -> Option<VideoTransitionSnapshot> {
+        let (phase, id, rendered_frame, target_frame, fade_frames, raw_start, from, to) = loop {
+            let before = self.sequence.load(Ordering::Acquire);
+            if before & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let values = (
+                VideoTransitionPhase::from_u32(self.phase.load(Ordering::Relaxed)),
+                self.id.load(Ordering::Relaxed),
+                self.rendered_frame.load(Ordering::Relaxed),
+                self.target_frame.load(Ordering::Relaxed),
+                self.fade_frames.load(Ordering::Relaxed),
+                self.start_frame.load(Ordering::Relaxed),
+                self.from.load(Ordering::Relaxed),
+                self.to.load(Ordering::Relaxed),
+            );
+            let after = self.sequence.load(Ordering::Acquire);
+            if before == after {
+                break values;
+            }
+        };
+        if phase == VideoTransitionPhase::Idle || id == 0 {
+            return None;
+        }
+        let start_frame = (raw_start != u64::MAX).then_some(raw_start);
+        let progress = match phase {
+            VideoTransitionPhase::Completed => 1.0,
+            VideoTransitionPhase::Started => {
+                if fade_frames == 0 {
+                    1.0
+                } else {
+                    rendered_frame.saturating_sub(raw_start) as f32 / fade_frames as f32
+                }
+            }
+            _ => 0.0,
+        }
+        .clamp(0.0, 1.0);
+        Some(VideoTransitionSnapshot {
+            id,
+            phase,
+            from: Self::decode_slot(from),
+            to: Self::decode_slot(to).unwrap_or(SlotId::A),
+            target_frame,
+            start_frame,
+            fade_frames,
+            rendered_frame,
+            progress,
+        })
+    }
 }
 
 /// A fully decoded, immutable PCM clip (interleaved stereo i16).
@@ -270,6 +322,160 @@ impl TrackPcm {
         match self.frames.get(index) {
             Some(frame) => [frame[0] as f32 / 32768.0, frame[1] as f32 / 32768.0],
             None => [0.0, 0.0],
+        }
+    }
+}
+
+/// Frames per streamed chunk. A power of two, so the per-sample chunk
+/// lookup on the audio thread is a shift and a mask: ~2.7 s at 48 kHz,
+/// ~3 s at 44.1 kHz.
+pub const STREAM_CHUNK_SHIFT: u32 = 17;
+pub const STREAM_CHUNK_FRAMES: usize = 1 << STREAM_CHUNK_SHIFT;
+
+/// A track still coming out of the decoder: whole chunks in order, every
+/// one [`STREAM_CHUNK_FRAMES`] long except the last.
+///
+/// The table is an immutable snapshot. A new chunk makes a NEW table that
+/// shares every earlier chunk (`with_chunk` clones a vector of pointers,
+/// never audio), and the UI thread swaps it in under the state lock as one
+/// pointer move — so the callback never sees a table mid-growth, never
+/// waits, and never allocates to read it.
+pub struct StreamPcm {
+    pub sample_rate: u32,
+    pub chunks: Vec<Arc<Vec<[i16; 2]>>>,
+    /// Frames decoded so far: the sum of the chunk lengths.
+    pub len: usize,
+    /// The length the decoder expects the track to have (its container's
+    /// duration), never less than `len`. What the strip and the time
+    /// display are scaled to while the file is still arriving.
+    pub expected: usize,
+    /// The decoder reported the end: `len` is the whole track.
+    pub complete: bool,
+}
+
+impl StreamPcm {
+    pub fn new(sample_rate: u32, expected: Option<usize>) -> StreamPcm {
+        let capacity = expected.map_or(0, |frames| frames.div_ceil(STREAM_CHUNK_FRAMES) + 1);
+        StreamPcm {
+            sample_rate,
+            chunks: Vec::with_capacity(capacity),
+            len: 0,
+            expected: expected.unwrap_or(0),
+            complete: false,
+        }
+    }
+
+    /// This table plus one more chunk. The chunk before it must have been
+    /// full — the read path relies on every chunk but the last being
+    /// exactly [`STREAM_CHUNK_FRAMES`] — and an empty chunk only marks the
+    /// end.
+    pub fn with_chunk(&self, chunk: Arc<Vec<[i16; 2]>>, last: bool) -> StreamPcm {
+        debug_assert!(
+            self.chunks.last().map_or(true, |previous| previous.len() == STREAM_CHUNK_FRAMES),
+            "a streamed chunk may only follow a full one"
+        );
+        debug_assert!(!self.complete, "no chunk follows the end of a stream");
+        let mut chunks = Vec::with_capacity(self.chunks.capacity().max(self.chunks.len() + 1));
+        chunks.extend(self.chunks.iter().cloned());
+        let mut len = self.len;
+        if !chunk.is_empty() {
+            len += chunk.len();
+            chunks.push(chunk);
+        }
+        let expected = if last { len } else { self.expected.max(len) };
+        StreamPcm { sample_rate: self.sample_rate, chunks, len, expected, complete: last }
+    }
+
+    pub fn seconds(&self) -> f64 {
+        self.len as f64 / self.sample_rate.max(1) as f64
+    }
+
+    pub fn expected_seconds(&self) -> f64 {
+        self.expected.max(self.len) as f64 / self.sample_rate.max(1) as f64
+    }
+
+    #[inline]
+    fn frame_f32(&self, index: usize) -> [f32; 2] {
+        if index >= self.len {
+            return [0.0, 0.0];
+        }
+        let chunk = index >> STREAM_CHUNK_SHIFT;
+        let offset = index & (STREAM_CHUNK_FRAMES - 1);
+        match self.chunks.get(chunk).and_then(|chunk| chunk.get(offset)) {
+            Some(frame) => [frame[0] as f32 / 32768.0, frame[1] as f32 / 32768.0],
+            None => [0.0, 0.0],
+        }
+    }
+}
+
+/// What a deck voice reads from: the whole file once it is decoded, or the
+/// growing chunk table while it is being decoded. Same timeline, same
+/// samples; the swap from one to the other at the end of the decode is a
+/// pointer move at the playhead and cannot be heard.
+#[derive(Clone)]
+pub enum DeckPcm {
+    Whole(Arc<TrackPcm>),
+    Stream(Arc<StreamPcm>),
+}
+
+impl DeckPcm {
+    /// Frames that can be read right now.
+    #[inline]
+    pub fn len(&self) -> usize {
+        match self {
+            DeckPcm::Whole(pcm) => pcm.frames.len(),
+            DeckPcm::Stream(stream) => stream.len,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        match self {
+            DeckPcm::Whole(pcm) => pcm.sample_rate,
+            DeckPcm::Stream(stream) => stream.sample_rate,
+        }
+    }
+
+    /// The track's length as far as anyone knows: exact once decoded, the
+    /// decoder's expectation before that.
+    pub fn expected_seconds(&self) -> f64 {
+        match self {
+            DeckPcm::Whole(pcm) => pcm.seconds(),
+            DeckPcm::Stream(stream) => stream.expected_seconds(),
+        }
+    }
+
+    pub fn expected_len(&self) -> usize {
+        match self {
+            DeckPcm::Whole(pcm) => pcm.frames.len(),
+            DeckPcm::Stream(stream) => stream.expected.max(stream.len),
+        }
+    }
+
+    /// False while the decoder is still delivering: a playhead at `len`
+    /// is waiting at the edge, not at the end of the track.
+    pub fn complete(&self) -> bool {
+        match self {
+            DeckPcm::Whole(_) => true,
+            DeckPcm::Stream(stream) => stream.complete,
+        }
+    }
+
+    pub fn whole(&self) -> Option<&TrackPcm> {
+        match self {
+            DeckPcm::Whole(pcm) => Some(pcm),
+            DeckPcm::Stream(_) => None,
+        }
+    }
+
+    #[inline]
+    fn frame_f32(&self, index: usize) -> [f32; 2] {
+        match self {
+            DeckPcm::Whole(pcm) => pcm.frame_f32(index),
+            DeckPcm::Stream(stream) => stream.frame_f32(index),
         }
     }
 }
@@ -364,193 +570,12 @@ pub struct SplatFrames {
     pub cells: [[Option<SplatFrameCell>; SPLAT_COLS]; SPLAT_ROWS],
 }
 
-/// What the audio callback has to say about the machine it is running on.
-///
-/// The two failure classes stay apart on purpose. `contended` counts whole
-/// buffers this app silenced by holding the state lock against its own
-/// callback — something the operator can act on by closing a panel.
-/// `render_nanos` against `buffer_frames` and `device_rate` is what the
-/// render actually cost as a fraction of the time it had, which is the
-/// number that says whether the machine is keeping up at all. The lifetime
-/// worst is kept beside it, because a stall that happened once still
-/// happened; but it cannot stand in for the live figure, which is what
-/// having only a high-water meant.
-/// The ghost playhead SLIP keeps running while the record is elsewhere.
-///
-/// Latched when slip is armed and advanced once per buffer at its own
-/// rate, whatever the real head is doing -- paused, scratched, jumped,
-/// looping or run off the end. Letting slip go lands the deck on it, so
-/// the track carries on as if the detour never happened.
-#[derive(Clone, Copy, Debug)]
-struct Ghost {
-    /// Where it has got to, in source frames.
-    pos: f64,
-    /// Source frames per device frame, latched at arm time: a buffer is one
-    /// multiply, and the ghost does not chase a tempo the hand is moving.
-    step: f64,
-    /// The span the ghost wraps through, if one was running when slip was
-    /// armed. A loop engaged AFTER arming -- the roll being slipped over --
-    /// deliberately does not catch it.
-    span: Option<(f64, f64)>,
-}
-
-/// How many rolls can be held over one another.
-///
-/// Four, because the gesture is one hand on one row of buttons and four
-/// is more than that hand can hold down at once. A fixed array rather
-/// than a growing one: the callback walks it every buffer.
-pub const ROLL_STACK_CAP: usize = 4;
-
-/// The ghosts a stack of rolls is keeping, newest last.
-///
-/// Each level latches the span that was running when THAT level engaged,
-/// so releasing level two lands where level one's playback would have
-/// been, and releasing level one lands where the record would have been.
-#[derive(Clone, Copy, Default)]
-struct RollGhosts {
-    ghosts: [Option<Ghost>; ROLL_STACK_CAP],
-    len: usize,
-}
-
-impl RollGhosts {
-    fn push(&mut self, ghost: Ghost) -> bool {
-        if self.len >= ROLL_STACK_CAP {
-            return false;
-        }
-        self.ghosts[self.len] = Some(ghost);
-        self.len += 1;
-        true
-    }
-
-    fn pop(&mut self) -> Option<Ghost> {
-        if self.len == 0 {
-            return None;
-        }
-        self.len -= 1;
-        self.ghosts[self.len].take()
-    }
-
-    fn clear(&mut self) {
-        *self = RollGhosts::default();
-    }
-
-    /// Advance every level. Once per deck per buffer, never per frame.
-    fn advance(&mut self, frames: f64) {
-        for ghost in self.ghosts.iter_mut().take(self.len).flatten() {
-            ghost.pos += ghost.step * frames;
-            if let Some((start, end)) = ghost.span {
-                if ghost.pos >= end {
-                    ghost.pos = wrapped_into_span(ghost.pos, start, end);
-                }
-            }
-        }
-    }
-}
-
-/// Fold a playhead back inside a span, keeping the overshoot.
-///
-/// Modulo rather than a reset to IN: resetting discards up to a step per
-/// lap, so a held loop walks audibly early, and it is also what catches a
-/// playhead stranded past OUT by a live resize -- modulo continues the
-/// subdivision in phase instead of re-triggering the downbeat at IN.
-///
-/// One function because there are three callers now: the render's wrap,
-/// the resize that catches a paused deck, and slip's ghost, which has to
-/// wrap exactly the way the real head does or the two land apart.
-pub(crate) fn wrapped_into_span(pos: f64, start: f64, end: f64) -> f64 {
-    let len = (end - start).max(1.0);
-    start + (pos - start).rem_euclid(len)
-}
-
-/// The source-seconds-per-output-second this voice is turning at right
-/// now: a running splat owns it outright (1.0, whatever the fader says),
-/// a hand or a motor owns it next, the fader otherwise -- and a deck with
-/// nothing to play, or a record with nothing IN it, turns at nothing.
-/// Shared by the render prelude and by every setter that has to answer
-/// the same question between callbacks, so the two can never disagree.
-fn deck_platter(voice: &DeckVoice) -> f64 {
-    let has_frames = voice.pcm.as_ref().is_some_and(|pcm| !pcm.frames.is_empty());
-    if !has_frames {
-        0.0
-    } else if voice.splat.as_ref().is_some_and(|splat| splat.active) {
-        1.0
-    } else if voice.scratch.active() {
-        voice.scratch.rate() as f64
-    } else {
-        voice.rate.current() as f64
-    }
-}
-
-/// Where one callback's time went, in nanoseconds.
-///
-/// Three phases, not five: the render is one frame loop with setup before
-/// it and bookkeeping after, and there is no sequential per-source block to
-/// time. Timing sources would mean a clock read per source per SAMPLE --
-/// at 48 kHz that costs more than the work it measures, and would cause
-/// the very dropouts it was added to explain. What this does answer is the
-/// question that matters when the budget climbs: is it the mixing, or is
-/// it the per-buffer overhead around it?
-#[derive(Clone, Copy, Default, PartialEq, Debug)]
-pub struct StageNanos {
-    /// Ramps, filter coefficients, lifting the deck sources out of the loop.
-    pub setup: u64,
-    /// The frame loop, which is nearly all of it.
-    pub mix: u64,
-    /// Meters, the cue publish, the per-deck snapshots, reaping.
-    pub publish: u64,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct AudioHealth {
-    /// Whole buffers silenced by lock contention, since the app started.
-    pub contended: u64,
-    /// Callbacks that found the lock poisoned by a panic elsewhere and took
-    /// it over, since the app started. These buffers were heard.
-    pub poisoned: u64,
-    /// Buffers the monitor could not fill from the cue ring, since the app
-    /// started. Priming a fresh or re-opened phones device does not count.
-    pub phones_starved: u64,
-    /// What the last rendered buffer cost.
-    pub render_nanos: u64,
-    /// The worst any buffer has cost since the app started.
-    pub render_max_nanos: u64,
-    /// Frames in the last rendered buffer, and the rate it plays at: the
-    /// denominator of the budget.
-    pub buffer_frames: u64,
-    pub device_rate: f64,
-    /// Where the last buffer's time went.
-    pub stages: StageNanos,
-}
-
-impl AudioHealth {
-    /// The share of the last buffer's own playing time that rendering it
-    /// took. Above one the render cannot keep up. `None` before the first
-    /// buffer, or from a device that reports no rate.
-    pub fn budget_used(&self) -> Option<f64> {
-        if self.buffer_frames == 0 || !(self.device_rate > 0.0) {
-            return None;
-        }
-        let available_nanos = self.buffer_frames as f64 / self.device_rate * 1e9;
-        (available_nanos > 0.0).then(|| self.render_nanos as f64 / available_nanos)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DeckSnapshot {
     pub position_secs: f64,
     pub duration_secs: f64,
     pub playing: bool,
     pub scratching: bool,
-    /// What the platter is turning at, as a multiple of the track's own
-    /// tempo: the deck's rate normally, the scratch ramp's own settled
-    /// output while a hand or a motor owns the record -- negative under a
-    /// reverse hold, zero at the bottom of a brake. A deck with no track
-    /// publishes 0.0, which is also what `Default` gives before the first
-    /// buffer: nothing is turning either way.
-    pub platter_rate: f64,
-    /// The beat as the last rendered buffer saw it. Default before the
-    /// first buffer and on a deck with no grid; `has_grid` says which.
-    pub clock: DeckClock,
     pub splat: Option<SplatSnapshot>,
 }
 
@@ -608,21 +633,66 @@ struct SplatRowVoice {
 
 struct SplatState {
     grid: Arc<SplatGrid>,
-    frames: SplatFrames,
+    /// Boxed so a replaced grid's frames go back to the UI whole, and the
+    /// state never frees them on the audio thread.
+    frames: Box<SplatFrames>,
     active: bool,
     master_frames: f64,
+    phase_fade: Option<SplatPhaseFade>,
     rows: [SplatRowVoice; SPLAT_ROWS],
+    /// The cell the picture follows: the one launched last. The deck's
+    /// reported playhead cycles inside it, so the waveform stays on the
+    /// segment that is sounding instead of walking off through the track
+    /// with the master clock.
+    view: Option<RowCell>,
 }
 
 impl SplatState {
-    fn new(grid: Arc<SplatGrid>, frames: SplatFrames, master_frames: f64) -> Self {
+    fn new(grid: Arc<SplatGrid>, frames: Box<SplatFrames>, master_frames: f64) -> Self {
         Self {
             grid,
             frames,
             active: false,
             master_frames,
+            phase_fade: None,
             rows: [SplatRowVoice::default(); SPLAT_ROWS],
+            view: None,
         }
+    }
+
+    /// Where the ear is: inside the cell the picture follows, else on the
+    /// master clock.
+    fn playhead_frames(&self) -> f64 {
+        match self.view {
+            Some(cell) if self.master_frames >= cell.anchor_frames => {
+                cell.start_frames
+                    + (self.master_frames - cell.anchor_frames).rem_euclid(cell.len_frames.max(1.0))
+            }
+            Some(cell) => cell.start_frames,
+            None => self.master_frames,
+        }
+    }
+
+    /// Nothing sounding and nothing waiting to.
+    fn idle(&self) -> bool {
+        self.rows.iter().all(|row| row.cell.is_none() && row.queued.is_none())
+    }
+
+    /// The cell a row is sounding, or the one it is about to.
+    fn row_slot(voice: &SplatRowVoice) -> Option<RowCell> {
+        voice.queued.and_then(|queued| queued.cell).or(voice.cell)
+    }
+
+    /// A launch or a stop just landed: the picture keeps following its
+    /// cell while that cell sounds, moves to a row that is still sounding
+    /// when its own row stopped, and goes back to the master clock when
+    /// every row has.
+    fn revalidate_view(&mut self) {
+        let Some(view) = self.view else { return };
+        if self.rows.iter().any(|voice| Self::row_slot(voice) == Some(view)) {
+            return;
+        }
+        self.view = self.rows.iter().find_map(Self::row_slot);
     }
 
     fn bar_start_at_or_before(&self, master: f64) -> f64 {
@@ -646,24 +716,81 @@ impl SplatState {
         }
     }
 
-    fn queue_cell(&mut self, row: SplatRow, col: usize, part: SplatPart) {
-        if !self.active || col >= SPLAT_COLS || !part.is_valid() {
+    /// The source span a slot names on the CURRENT frames: the cell's
+    /// bars, or the `part` of them, as `(start, len)` in source frames.
+    /// One derivation for a launch and for a re-launch on a replaced grid,
+    /// so the same slot always means the same samples.
+    fn slot_frames(&self, row: SplatRow, col: usize, part: SplatPart) -> Option<(f64, f64)> {
+        if col >= SPLAT_COLS || !part.is_valid() {
+            return None;
+        }
+        let cell = self.frames.cells[row.index()][col]?;
+        let part_len = cell.len_frames / f64::from(part.den);
+        Some((cell.start_frames + f64::from(part.num) * part_len, part_len.max(1.0)))
+    }
+
+    fn queue_cell(&mut self, row: SplatRow, col: usize, part: SplatPart, sync_locked: bool) {
+        if !self.active {
             return;
         }
-        let at_frames = self.next_bar_after(self.master_frames);
-        let Some(cell) = self.frames.cells[row.index()][col] else { return };
-        let denominator = f64::from(part.den);
-        let part_len = cell.len_frames / denominator;
-        self.rows[row.index()].queued = Some(Queued {
-            cell: Some(RowCell {
-                col: cell.col,
-                part,
-                start_frames: cell.start_frames + f64::from(part.num) * part_len,
-                len_frames: part_len.max(1.0),
-                anchor_frames: at_frames,
-            }),
-            at_frames,
-        });
+        let Some((start_frames, len_frames)) = self.slot_frames(row, col, part) else { return };
+        // The first FREE launch into a silent grid starts NOW, and the master
+        // clock is re-seated on the cell so the grid's bars and the loop's
+        // bars are the same bars from here: the click plays exactly the
+        // segment it named, at once. Later launches join on the next bar,
+        // in phase with what is already running. A synced grid preserves
+        // its clock even on the first launch and joins on its next bar.
+        let at_frames = if self.idle() && !sync_locked {
+            self.master_frames = start_frames;
+            start_frames
+        } else {
+            self.next_bar_after(self.master_frames)
+        };
+        let launched = RowCell {
+            col: col as u8,
+            part,
+            start_frames,
+            len_frames,
+            anchor_frames: at_frames,
+        };
+        self.rows[row.index()].queued = Some(Queued { cell: Some(launched), at_frames });
+        self.view = Some(launched);
+    }
+
+    /// The frames were replaced under a running grid — the refined grid
+    /// landed once the stems were in. Every row that is sounding or waiting
+    /// re-launches the SAME slot on the new frames at the next bar, through
+    /// the ordinary crossfade, and a slot the new grid no longer has stops
+    /// there. What is heard is always what the grid on screen says, so a
+    /// click on a cell lands on the boundaries it shows however many grids
+    /// have come and gone; a slot whose span did not change is left alone.
+    fn rebase_rows(&mut self) {
+        let view = self.view;
+        let mut rebased_view = None;
+        for row in SplatRow::ALL {
+            let voice = self.rows[row.index()];
+            // A pending stop stands; a pending launch moves to the new
+            // frames like a sounding one.
+            if matches!(voice.queued, Some(Queued { cell: None, .. })) {
+                continue;
+            }
+            let Some(old) = Self::row_slot(&voice) else { continue };
+            let follows_view = view == Some(old);
+            match self.slot_frames(row, usize::from(old.col), old.part) {
+                Some((start_frames, len_frames))
+                    if start_frames == old.start_frames && len_frames == old.len_frames => {}
+                Some(_) => {
+                    self.queue_cell(row, usize::from(old.col), old.part, true);
+                    if follows_view {
+                        rebased_view = self.rows[row.index()].queued.and_then(|queued| queued.cell);
+                    }
+                }
+                None => self.queue_stop(row, true),
+            }
+        }
+        // Re-launching set the picture to whichever row went last; it
+        // follows the row it followed before.
+        self.view = rebased_view.or(view);
     }
 
     /// A plain stop is immediate: the loop goes quiet on the next rendered
@@ -689,6 +816,7 @@ impl SplatState {
         };
         let mut snapshot = SplatSnapshot {
             active: self.active,
+            clock_secs: self.master_frames * self.grid.bar_secs / self.frames.bar_frames.max(1.0),
             bar_index: bar.floor() as i64,
             bar_phase: bar.rem_euclid(1.0) as f32,
             ..SplatSnapshot::default()
@@ -711,27 +839,23 @@ impl SplatState {
 /// What a deck's DSP chain reads from: the full mix, or the stem lanes
 /// summed under their current gains.
 struct DeckSource<'a> {
-    pcm: &'a TrackPcm,
+    pcm: &'a DeckPcm,
     stems: Option<&'a TrackStems>,
+    /// The stem chunk the last read fell in, `(chunk, first frame)`: reads
+    /// run sequentially, so the division that finds a chunk happens once
+    /// per chunk instead of once per sample.
+    stem_chunk: std::cell::Cell<(usize, usize)>,
     stem_gain: [f32; STEM_COUNT],
-    /// How far the lanes have taken over from the mixed file, 0..1.
-    ///
-    /// A separation arrives chunk by chunk while the record plays, so the
-    /// moment the frontier reaches the playhead the source flips -- at
-    /// whatever sample the message happened to be pumped in at. This is
-    /// what softens that edge.
-    ///
-    /// It follows TIME, not position, and deliberately so: with key lock
-    /// engaged the stretcher reads nowhere near the playhead, and the loop
-    /// wrap's crossfade reads at a third place again, so a weight worked
-    /// out from the read index would jump about under all three.
-    seam: f32,
+    /// How far the stem lanes have taken over from the mixed file: 1.0 once
+    /// the swap-in blend has run its few milliseconds (see
+    /// [`STEM_SWAP_SECS`]).
+    stem_blend: f32,
 }
 
 impl FrameSource for DeckSource<'_> {
     #[inline]
     fn frame_count(&self) -> usize {
-        self.pcm.frames.len()
+        self.pcm.len()
     }
 
     #[inline]
@@ -739,11 +863,13 @@ impl FrameSource for DeckSource<'_> {
         let Some(stems) = self.stems else {
             return self.pcm.frame_f32(index);
         };
-        if self.seam <= 0.0 {
-            return self.pcm.frame_f32(index);
+        let (mut chunk, mut start) = self.stem_chunk.get();
+        if index < start || index - start >= stems.chunk_frames {
+            chunk = index / stems.chunk_frames;
+            start = chunk * stems.chunk_frames;
+            self.stem_chunk.set((chunk, start));
         }
-        let chunk = index / stems.chunk_frames;
-        let offset = index - chunk * stems.chunk_frames;
+        let offset = index - start;
         let mut out = [0.0f32; 2];
         let mut separated = false;
         for (lane, gain) in stems.lanes.iter().zip(self.stem_gain) {
@@ -764,17 +890,16 @@ impl FrameSource for DeckSource<'_> {
         if !separated {
             return self.pcm.frame_f32(index);
         }
-        if self.seam >= 1.0 {
-            return out;
+        // The swap-in: the stem sum IS the mixed file, so at unity gains
+        // this blend is a no-op — it only softens a swap that lands under
+        // knobs already turned, where the two really differ.
+        if self.stem_blend < 1.0 {
+            let mixed = self.pcm.frame_f32(index);
+            let t = self.stem_blend.max(0.0);
+            out[0] = mixed[0] + (out[0] - mixed[0]) * t;
+            out[1] = mixed[1] + (out[1] - mixed[1]) * t;
         }
-        // LINEAR, not equal power: at unity gains the lane sum IS the mixed
-        // file, and an equal-power blend of a signal with itself bulges
-        // 3 dB. The loop wrap's crossfade carries the same reasoning.
-        let mixed = self.pcm.frame_f32(index);
-        [
-            lerp(mixed[0], out[0], self.seam),
-            lerp(mixed[1], out[1], self.seam),
-        ]
+        out
     }
 }
 
@@ -794,13 +919,7 @@ impl Ramp {
 
     /// Move to `target` over `secs` — the whole move takes `secs` no matter
     /// how far it travels. `step` stores the rate in units/second.
-    ///
-    /// A target that is not a number is refused, for the reason spelled out
-    /// on `ParamRamp::slew`: it would never settle again.
     fn slew(&mut self, target: f32, secs: f32) {
-        if !target.is_finite() {
-            return;
-        }
         self.target = target;
         let distance = (target - self.current).abs();
         self.step = if secs <= 0.0 { f32::MAX } else { (distance / secs).max(1e-6) };
@@ -821,34 +940,21 @@ impl Ramp {
     }
 }
 
+/// The callback's per-slot cursor over the slot ring, and the slot's
+/// fade gain. Everything else about a slot (open, paused, rates, the
+/// audio itself) lives in [`SlotShared`], lock-free between the threads.
 struct VideoBus {
-    open: bool,
-    paused: bool,
-    queue: VecDeque<(f32, f32)>,
-    source_rate: f64,
+    /// Fractional read position past the ring's consumed edge.
     cursor: f64,
-    playback_rate: f64,
     gain: Ramp,
 }
 
 impl VideoBus {
     fn new() -> VideoBus {
-        VideoBus {
-            open: false,
-            paused: false,
-            queue: VecDeque::new(),
-            source_rate: 0.0,
-            cursor: 0.0,
-            playback_rate: 1.0,
-            gain: Ramp::at(0.0),
-        }
-    }
-
-    fn flush(&mut self) {
-        self.queue.clear();
-        self.cursor = 0.0;
+        VideoBus { cursor: 0.0, gain: Ramp::at(0.0) }
     }
 }
+
 
 /// A few milliseconds of the outgoing stream kept alive after a commanded
 /// jump, so the seek lands as a blend instead of a splice. `left/total` is
@@ -859,300 +965,25 @@ struct SeekFade {
     total: f64,
 }
 
-/// A track waiting for the deck it is aimed at to fall silent.
-///
-/// The swap cannot happen on the caller thread while the deck is audible:
-/// the outgoing track would end mid-sample. So the incoming one waits here
-/// while the transport ramps down, and the callback spends it at the TOP of
-/// a buffer once the ramp has landed.
-struct PendingLoad {
-    pcm: Arc<TrackPcm>,
-    /// Whether the deck comes straight back up on the new track.
-    play: bool,
-    /// The new record's grid, when it arrived before the swap was spent:
-    /// a fast sidecar lands the analysis while the old track is still
-    /// fading, and a grid written onto the OLD voice would be nulled by
-    /// the swap it was meant to survive.
-    grid: Option<TrackGrid>,
-}
-
-/// What a swap took off a deck, kept alive until a caller thread can drop
-/// it. Every one of these owns heap the audio thread must never free.
-#[derive(Default)]
-struct RetiredTrack {
-    pcm: Option<Arc<TrackPcm>>,
-    stems: Option<Arc<TrackStems>>,
-    splat: Option<SplatState>,
-}
-
-/// One slot's occupant. A closed, small set matched inline -- the same
-/// dispatch this file already uses for `CueMode` -- rather than a trait:
-/// nothing here needs a slot to hold a kind unknown to this crate, and a
-/// `match` lets the optimizer inline each unit's own crossfade math
-/// directly into the chain's per-sample loop instead of going through a
-/// vtable ~512 times per callback per deck.
-enum EffectKind {
-    Eq(DeckEq),
-    Freeze(Freeze),
-    Echo(DeckEcho),
-    Flanger(Flanger),
-    Bitcrusher(Bitcrusher),
-    Tremolo(Tremolo),
-    Distortion(Distortion),
-    Phaser(Phaser),
-    Autopan(Autopan),
-    StereoWidth(StereoWidth),
-    PlateReverb(PlateReverb),
-    MoogLadder(MoogLadder),
-    Compressor(Compressor),
-}
-
-impl EffectKind {
-    #[inline]
-    fn process(&mut self, frame: [f32; 2], device_rate: f32) -> [f32; 2] {
-        match self {
-            EffectKind::Eq(eq) => eq.process(frame, device_rate),
-            EffectKind::Freeze(freeze) => freeze.process(frame, device_rate),
-            EffectKind::Echo(echo) => echo.process(frame, device_rate),
-            EffectKind::Flanger(flanger) => flanger.process(frame, device_rate),
-            EffectKind::Bitcrusher(bitcrusher) => bitcrusher.process(frame, device_rate),
-            EffectKind::Tremolo(tremolo) => tremolo.process(frame, device_rate),
-            EffectKind::Distortion(distortion) => distortion.process(frame, device_rate),
-            EffectKind::Phaser(phaser) => phaser.process(frame, device_rate),
-            EffectKind::Autopan(autopan) => autopan.process(frame, device_rate),
-            EffectKind::StereoWidth(stereo_width) => stereo_width.process(frame, device_rate),
-            EffectKind::PlateReverb(plate_reverb) => plate_reverb.process(frame, device_rate),
-            EffectKind::MoogLadder(moog_ladder) => moog_ladder.process(frame, device_rate),
-            EffectKind::Compressor(compressor) => compressor.process(frame, device_rate),
-        }
-    }
-}
-
-const DECK_CHAIN_SLOTS: usize = 13;
-
-/// A deck's pre-fader tone chain: a fixed list of slots, walked in order.
-/// Not a `Vec` -- sized once, at compile time, never resized. Today's
-/// twelve slots are the whole roster and are permanently populated by
-/// construction; a slot that can stand empty, or be reassigned, is a
-/// separate decision for whenever growing the roster again asks for one.
-struct DeckChain {
-    slots: [EffectKind; DECK_CHAIN_SLOTS],
-    /// One per slot, in the same order: the wet/dry mix and what,
-    /// if anything, is done about the level that slot returns.
-    levels: [SlotLevel; DECK_CHAIN_SLOTS],
-    /// The policy a slot follows unless it has been pinned to one
-    /// of its own. Off, so nothing changes until it is asked for.
-    level_default: LevelMode,
-}
-
-impl DeckChain {
-    fn new(sample_rate: f32) -> DeckChain {
-        DeckChain {
-            levels: std::array::from_fn(|_| SlotLevel::new()),
-            level_default: LevelMode::Off,
-            slots: [
-                EffectKind::Eq(DeckEq::new(sample_rate)),
-                EffectKind::Freeze(Freeze::new()),
-                EffectKind::Echo(DeckEcho::new()),
-                EffectKind::Flanger(Flanger::new()),
-                EffectKind::Bitcrusher(Bitcrusher::new()),
-                EffectKind::Tremolo(Tremolo::new()),
-                EffectKind::Distortion(Distortion::new()),
-                EffectKind::Phaser(Phaser::new()),
-                EffectKind::Autopan(Autopan::new()),
-                EffectKind::StereoWidth(StereoWidth::new()),
-                EffectKind::PlateReverb(PlateReverb::new(sample_rate)),
-                EffectKind::MoogLadder(MoogLadder::new()),
-                EffectKind::Compressor(Compressor::new()),
-            ],
-        }
-    }
-
-    #[inline]
-    fn process(&mut self, frame: [f32; 2], device_rate: f32) -> [f32; 2] {
-        let mut out = frame;
-        for (slot, level) in self.slots.iter_mut().zip(&mut self.levels) {
-            // What went in and what came back, so the slot's own policy
-            // can blend them and, if it is asked to, correct the level.
-            let dry = out;
-            let wet = slot.process(dry, device_rate);
-            out = level.apply(dry, wet, device_rate, self.level_default);
-        }
-        out
-    }
-
-    /// Everything this chain wants doing once a device buffer: rebuild
-    /// what depends on the sample rate, and hand the musical clock to
-    /// the stages that follow it.
-    ///
-    /// One method rather than a list at each call site. There are two
-    /// chains now -- a deck's and the mix's -- and two hand-written
-    /// lists of the same calls is how one of them quietly stops getting
-    /// a new effect's preparation.
-    fn prepare_block(
-        &mut self,
-        clock: &crate::wave_analysis::DeckClock,
-        device_rate: f32,
-        buffer_frames: usize,
-    ) {
-        // Filter coefficients are rebuilt once per buffer -- the trig is
-        // the expensive part and a buffer is well under a millisecond.
-        self.eq_mut().set_sample_rate(device_rate);
-        self.eq_mut().prepare_block();
-        // The reverb's tank lines are fixed lengths in FRAMES, not
-        // musical time, so they take the same cheap rate compare.
-        self.plate_reverb_mut().set_sample_rate(device_rate);
-        // Ungridded or stopped, the counted beat -- the same default a
-        // loop or a jump takes with no grid to rule on.
-        let beat_secs = clock.beat_len().unwrap_or(60.0 / crate::decks::COUNTED_BPM);
-        // The echo wants its beat in device FRAMES; the LFOs want the
-        // whole clock, because a locked one has to know WHICH beat it is
-        // on to sit right in a cycle that spans several.
-        self.echo_mut().prepare_block(beat_secs * device_rate as f64);
-        let buffer_secs = buffer_frames as f32 / device_rate;
-        self.tremolo_mut().prepare_block(clock, buffer_secs);
-        self.autopan_mut().prepare_block(clock, buffer_secs);
-        self.flanger_mut().prepare_block(clock, buffer_secs);
-        self.phaser_mut().prepare_block(clock, buffer_secs);
-    }
-
-    /// The policy the slots that have not been pinned follow.
-    fn set_level_default(&mut self, mode: LevelMode) {
-        self.level_default = mode;
-    }
-
-    fn level_default(&self) -> LevelMode {
-        self.level_default
-    }
-
-    #[cfg(test)]
-    fn slot_engaged(&mut self, slot: usize) -> bool {
-        match &self.slots[slot] {
-            EffectKind::Eq(eq) => !eq.at_unity(),
-            EffectKind::Freeze(freeze) => freeze.held(),
-            EffectKind::Echo(echo) => echo.engaged(),
-            EffectKind::Flanger(x) => x.engaged(),
-            EffectKind::Bitcrusher(x) => x.engaged(),
-            EffectKind::Tremolo(x) => x.engaged(),
-            EffectKind::Distortion(x) => x.engaged(),
-            EffectKind::Phaser(x) => x.engaged(),
-            EffectKind::Autopan(x) => x.engaged(),
-            EffectKind::StereoWidth(x) => x.engaged(),
-            EffectKind::PlateReverb(x) => x.engaged(),
-            EffectKind::MoogLadder(x) => x.engaged(),
-            EffectKind::Compressor(x) => x.engaged(),
-        }
-    }
-
-    fn level_mut(&mut self, slot: usize) -> &mut SlotLevel {
-        &mut self.levels[slot]
-    }
-
-    /// Drop every slot's measurement, so one record's levels are not
-    /// carried into the next.
-    fn reset_levels(&mut self) {
-        for level in &mut self.levels {
-            level.reset();
-        }
-    }
-
-    // Fixed accessors. Every slot is populated with a known kind at a
-    // known index by construction, so `unreachable!()` documents that
-    // invariant rather than swallowing an error -- this stops being true
-    // only once slots become dynamically reassignable.
-    fn eq_mut(&mut self) -> &mut DeckEq {
-        match &mut self.slots[0] {
-            EffectKind::Eq(eq) => eq,
-            _ => unreachable!(),
-        }
-    }
-    fn freeze_mut(&mut self) -> &mut Freeze {
-        match &mut self.slots[1] {
-            EffectKind::Freeze(freeze) => freeze,
-            _ => unreachable!(),
-        }
-    }
-    fn echo_mut(&mut self) -> &mut DeckEcho {
-        match &mut self.slots[2] {
-            EffectKind::Echo(echo) => echo,
-            _ => unreachable!(),
-        }
-    }
-    fn flanger_mut(&mut self) -> &mut Flanger {
-        match &mut self.slots[3] {
-            EffectKind::Flanger(flanger) => flanger,
-            _ => unreachable!(),
-        }
-    }
-    fn bitcrusher_mut(&mut self) -> &mut Bitcrusher {
-        match &mut self.slots[4] {
-            EffectKind::Bitcrusher(bitcrusher) => bitcrusher,
-            _ => unreachable!(),
-        }
-    }
-    fn tremolo_mut(&mut self) -> &mut Tremolo {
-        match &mut self.slots[5] {
-            EffectKind::Tremolo(tremolo) => tremolo,
-            _ => unreachable!(),
-        }
-    }
-    fn distortion_mut(&mut self) -> &mut Distortion {
-        match &mut self.slots[6] {
-            EffectKind::Distortion(distortion) => distortion,
-            _ => unreachable!(),
-        }
-    }
-    fn phaser_mut(&mut self) -> &mut Phaser {
-        match &mut self.slots[7] {
-            EffectKind::Phaser(phaser) => phaser,
-            _ => unreachable!(),
-        }
-    }
-    fn autopan_mut(&mut self) -> &mut Autopan {
-        match &mut self.slots[8] {
-            EffectKind::Autopan(autopan) => autopan,
-            _ => unreachable!(),
-        }
-    }
-    fn stereo_width_mut(&mut self) -> &mut StereoWidth {
-        match &mut self.slots[9] {
-            EffectKind::StereoWidth(stereo_width) => stereo_width,
-            _ => unreachable!(),
-        }
-    }
-    fn plate_reverb_mut(&mut self) -> &mut PlateReverb {
-        match &mut self.slots[10] {
-            EffectKind::PlateReverb(plate_reverb) => plate_reverb,
-            _ => unreachable!(),
-        }
-    }
-    fn moog_ladder_mut(&mut self) -> &mut MoogLadder {
-        match &mut self.slots[11] {
-            EffectKind::MoogLadder(moog_ladder) => moog_ladder,
-            _ => unreachable!(),
-        }
-    }
-
-    fn compressor_mut(&mut self) -> &mut Compressor {
-        match &mut self.slots[12] {
-            EffectKind::Compressor(compressor) => compressor,
-            _ => unreachable!(),
-        }
-    }
+/// Fixed-size copy of the outgoing sample voices for a clock correction.
+/// Keeping their active fades avoids a splice when a correction crosses
+/// a queued launch or stop.
+struct SplatPhaseFade {
+    pos: f64,
+    left: f64,
+    total: f64,
+    rows: [SplatRowVoice; SPLAT_ROWS],
 }
 
 struct DeckVoice {
-    pcm: Option<Arc<TrackPcm>>,
+    pcm: Option<DeckPcm>,
+    sync_locked: bool,
     stems: Option<Arc<TrackStems>>,
+    /// The stem swap-in blend: 0.0 when a table first lands on a track that
+    /// had none, ramping to 1.0 over [`STEM_SWAP_SECS`]. See
+    /// [`DeckSource::frame`].
+    stem_blend: ParamRamp,
     splat: Option<SplatState>,
-    /// The record's published beat grid, sent by the engine wherever it
-    /// writes its own. `Copy`, so the callback never frees one; written
-    /// from a caller thread only, and parked with a pending load.
-    grid: Option<TrackGrid>,
-    /// The beat as this buffer sees it: worked out ONCE per callback in
-    /// the prelude and read by every stage that counts. Never written
-    /// from the frame loop.
-    clock: DeckClock,
     /// Playhead in SOURCE frames. Fractional, and free to run backwards
     /// under a hand on the waveform.
     pos: f64,
@@ -1165,38 +996,6 @@ struct DeckVoice {
     seek_fade: Option<SeekFade>,
     gain: Ramp,
     mute: Ramp,
-    /// Play and pause as a RAMP rather than a switch. The deck used to stop
-    /// contributing on the instant the flag changed, which on anything but
-    /// silence is a step straight to zero -- half full scale on a
-    /// half-scale signal, and the loudest click in the transport. The flag
-    /// above stays the operator's intent; this is what the room hears, and
-    /// the deck keeps reading and fading for as long as it is above zero.
-    transport: Ramp,
-    /// How far the separated lanes have taken over from the mixed file.
-    ///
-    /// Slewed rather than switched: the separation lands chunk by chunk
-    /// while the record plays, and the flip used to happen at whatever
-    /// sample the pump delivered it on.
-    stem_seam: Ramp,
-    /// The ghost SLIP is keeping, if it is armed.
-    slip: Option<Ghost>,
-    /// The ghosts a stack of momentary rolls is keeping. A SECOND field
-    /// rather than one general stack: SLIP and the reverse hold have an
-    /// ownership dance between them, and sharing a stack would force an
-    /// ordering puzzle on every combination of the three.
-    rolls: RollGhosts,
-    /// The reverse hold armed the ghost itself, so letting go puts it away
-    /// again. False when SLIP was already latched by hand — then only SLIP
-    /// retires it, and a censor must not take the operator's ghost with it.
-    censor_owns_slip: bool,
-    /// Where the playhead was when the operator pressed pause. The fade-out
-    /// keeps reading, so without this a pause would eat the few
-    /// milliseconds it sounded and every pause would walk the track on.
-    pause_at: Option<f64>,
-    /// A load waiting out this deck's fade. See `PendingLoad`.
-    pending: Option<PendingLoad>,
-    /// What the last swap took off, waiting for a thread that may free it.
-    retired: RetiredTrack,
     ended: bool,
     /// Tempo multiplier from the tempo slider / sync.
     rate: ParamRamp,
@@ -1209,21 +1008,9 @@ struct DeckVoice {
     scratch: ScratchRamp,
     /// True while the time stretcher owns the playhead.
     stretching: bool,
-    /// Frames left of the stretcher's own tail, and how long that tail is.
-    ///
-    /// Leaving the stretcher is the one handover in the transport that the
-    /// seek blend cannot hide: both sides of THAT blend are the direct
-    /// read, and what differs here is the overlap-add's own phase, which
-    /// the source knows nothing about. So the stretcher keeps sounding, at
-    /// its own place, while the direct read comes up underneath it.
-    stretch_tail: Option<(f64, f64)>,
     stretch: Box<Stretcher>,
     reader: RateReader,
-    /// The tone chain: EQ, then FREEZE (ahead of the echo so a held
-    /// glitch can itself be echoed rather than the other way round), then
-    /// the beat-quantised ECHO, retuned once per buffer from `clock`
-    /// beside the filter's own coefficient rebuild.
-    chain: DeckChain,
+    eq: DeckEq,
     stem_gain: [ParamRamp; STEM_COUNT],
     /// The autopilot's blend overlay on the stem lanes: multiplies the
     /// operator's gains, never moves them. 1.0 = hands off.
@@ -1234,34 +1021,25 @@ impl DeckVoice {
     fn new() -> DeckVoice {
         DeckVoice {
             pcm: None,
+            sync_locked: false,
             stems: None,
+            stem_blend: ParamRamp::at(1.0),
             splat: None,
-            grid: None,
-            clock: DeckClock::default(),
             pos: 0.0,
             playing: false,
             loop_span: None,
             seek_fade: None,
             gain: Ramp::at(1.0),
             mute: Ramp::at(1.0),
-            transport: Ramp::at(0.0),
-            stem_seam: Ramp::at(0.0),
-            slip: None,
-            rolls: RollGhosts::default(),
-            censor_owns_slip: false,
-            pause_at: None,
-            pending: None,
-            retired: RetiredTrack::default(),
             ended: false,
             rate: ParamRamp::at(1.0),
             key_ratio: ParamRamp::at(1.0),
             keylock: true,
             scratch: ScratchRamp::default(),
             stretching: false,
-            stretch_tail: None,
             stretch: Box::new(Stretcher::new()),
             reader: RateReader::default(),
-            chain: DeckChain::new(48_000.0),
+            eq: DeckEq::new(48_000.0),
             stem_gain: [ParamRamp::at(1.0); STEM_COUNT],
             blend_stem: [ParamRamp::at(1.0); STEM_COUNT],
         }
@@ -1271,78 +1049,13 @@ impl DeckVoice {
     /// inherits a transition's ducking.
     fn reset_blend(&mut self) {
         self.blend_stem = [ParamRamp::at(1.0); STEM_COUNT];
-        self.chain.eq_mut().reset_blend();
+        self.eq.reset_blend();
     }
 
+    /// Frames the voice can read right now — the decoded edge while a
+    /// track is still streaming in, which is what seeks clamp to.
     fn frame_count(&self) -> usize {
-        self.pcm.as_ref().map(|pcm| pcm.frames.len()).unwrap_or(0)
-    }
-
-    /// The callback's half of a load over a playing deck: put the waiting
-    /// track on once the outgoing one has finished leaving.
-    ///
-    /// Every call here is already proven callback-safe — `seek_frames` runs
-    /// from the callback on every loop wrap — and nothing is FREED: what
-    /// comes off the deck moves into `retired` for a caller thread to drop.
-    fn spend_pending_load(&mut self) {
-        if self.transport.current > 0.0 || self.pending.is_none() {
-            return;
-        }
-        // The caller thread empties this slot; if it has not yet, the swap
-        // waits a buffer rather than freeing a decoded track here.
-        if self.retired.pcm.is_some() {
-            return;
-        }
-        let Some(load) = self.pending.take() else { return };
-        self.retired.pcm = self.pcm.replace(load.pcm);
-        // The grid is the record's: the one that was parked with the load,
-        // or nothing until the new record's analysis lands. A `Copy`
-        // write, so nothing is freed here.
-        self.grid = load.grid;
-        self.clock = DeckClock::default();
-        self.retired.stems = self.stems.take();
-        self.retired.splat = self.splat.take();
-        self.stem_seam = Ramp::at(0.0);
-        // A pause position measured against the OUTGOING track would undo
-        // the seek below and walk the new one on; a blend armed against the
-        // old track would index the new one's samples.
-        self.pause_at = None;
-        self.seek_fade = None;
-        self.slip = None;
-        self.rolls.clear();
-        self.censor_owns_slip = false;
-        self.loop_span = None;
-        self.ended = false;
-        self.playing = load.play;
-        self.seek_frames(0.0);
-        self.chain.eq_mut().reset();
-        self.chain.echo_mut().silence();
-        self.chain.freeze_mut().reset();
-        self.chain.flanger_mut().silence();
-        self.chain.bitcrusher_mut().silence();
-        self.chain.phaser_mut().reset();
-        self.chain.plate_reverb_mut().silence();
-        self.chain.moog_ladder_mut().reset();
-        // No call for the tremolo, the distortion, the autopan or the
-        // stereo width here or at the other three record-change sites,
-        // on purpose: none of them holds audio content, only an LFO
-        // phase or a pure `ParamRamp`, so there is nothing from the old
-        // record for a stale line to leak -- and forcibly resetting a
-        // phase would itself be a discontinuity if the effect is
-        // already engaged (say under a MIX target spanning both decks)
-        // when a load lands on just one of them. The plate reverb's
-        // tank DOES hold audio content, so it gets the same silence()
-        // call the echo, the flanger and the bitcrusher get; the Moog
-        // ladder's own filter memory is small and fixed-size, so it
-        // gets reset() instead, the EQ and phaser's shape.
-        self.reset_blend();
-        if load.play {
-            self.transport.slew(1.0, LOAD_SWAP_SECS);
-        }
-    }
-
-    fn take_retired(&mut self) -> RetiredTrack {
-        std::mem::take(&mut self.retired)
+        self.pcm.as_ref().map(DeckPcm::len).unwrap_or(0)
     }
 
     /// Move the playhead and drop every bit of streaming state that was
@@ -1352,19 +1065,17 @@ impl DeckVoice {
         self.pos = frames.clamp(0.0, len);
         if let Some(splat) = self.splat.as_mut().filter(|splat| splat.active) {
             splat.master_frames = self.pos;
+            splat.phase_fade = None;
         }
         self.stretch.reset_to(self.pos);
         self.reader.reset();
-        // A tail belongs to the place it was leaving; after a jump it would
-        // be the old place blended under the new one.
-        self.stretch_tail = None;
         self.ended = false;
     }
 
     /// Where the playhead really is, whichever path is driving it.
     fn playhead_frames(&self) -> f64 {
         if let Some(splat) = self.splat.as_ref().filter(|splat| splat.active) {
-            return splat.master_frames;
+            return splat.playhead_frames();
         }
         if self.stretching {
             self.stretch.position()
@@ -1381,7 +1092,7 @@ impl DeckVoice {
             return;
         }
         let Some(pcm) = self.pcm.as_ref() else { return };
-        let total = (SEEK_XFADE_SECS * pcm.sample_rate.max(1) as f64).max(1.0);
+        let total = (SEEK_XFADE_SECS * pcm.sample_rate().max(1) as f64).max(1.0);
         self.seek_fade = Some(SeekFade { pos: from, left: total, total });
     }
 }
@@ -1402,7 +1113,7 @@ fn splat_cell_frame(
     row: SplatRow,
     cell: RowCell,
     master_frames: f64,
-    pcm: &TrackPcm,
+    pcm: &DeckPcm,
     stems: Option<&TrackStems>,
     stem_gain: [f32; STEM_COUNT],
 ) -> [f32; 2] {
@@ -1424,7 +1135,10 @@ fn splat_cell_frame(
     };
     let a = read(index);
     let b = read(next);
-    lerp_frame(a, b, fraction)
+    [
+        a[0] + (b[0] - a[0]) * fraction,
+        a[1] + (b[1] - a[1]) * fraction,
+    ]
 }
 
 /// Splat reads bypass the stretcher and rate reader: every source position is
@@ -1432,14 +1146,15 @@ fn splat_cell_frame(
 /// loops to a stateful monotonic reader would weaken the phase guarantee.
 fn render_splat_source(
     splat: &mut SplatState,
-    pcm: &TrackPcm,
+    pcm: &DeckPcm,
     stems: Option<&TrackStems>,
     stem_gain: [f32; STEM_COUNT],
     source_step: f64,
 ) -> [f32; 2] {
     let master = splat.master_frames;
-    let fade_frames = (SPLAT_XFADE_SECS * pcm.sample_rate.max(1) as f64).max(1.0);
+    let fade_frames = (SPLAT_XFADE_SECS * pcm.sample_rate().max(1) as f64).max(1.0);
     let mut sum = [0.0f32; 2];
+    let mut landed = false;
     for row in SplatRow::ALL {
         let voice = &mut splat.rows[row.index()];
         if let Some(queued) = voice.queued.filter(|queued| master >= queued.at_frames) {
@@ -1451,8 +1166,9 @@ fn render_splat_source(
                 len_frames: fade_frames,
             });
             voice.cell = queued.cell;
+            landed = true;
         }
-        let frame = if let Some(fade) = voice.fade {
+        let mut frame = if let Some(fade) = voice.fade {
             let phase = ((master - fade.start_frames) / fade.len_frames).clamp(0.0, 1.0) as f32;
             let outgoing = fade.outgoing.map_or([0.0, 0.0], |cell| {
                 splat_cell_frame(row, cell, master, pcm, stems, stem_gain)
@@ -1475,10 +1191,38 @@ fn render_splat_source(
                 splat_cell_frame(row, cell, master, pcm, stems, stem_gain)
             })
         };
+        if let Some(fade) = &splat.phase_fade {
+            let old_voice = fade.rows[row.index()];
+            let read = |cell| splat_cell_frame(row, cell, fade.pos, pcm, stems, stem_gain);
+            let old = if let Some(row_fade) = old_voice.fade {
+                let phase = ((fade.pos - row_fade.start_frames) / row_fade.len_frames)
+                    .clamp(0.0, 1.0) as f32;
+                let angle = phase * std::f32::consts::FRAC_PI_2;
+                let outgoing = row_fade.outgoing.map_or([0.0; 2], read);
+                let incoming = row_fade.incoming.map_or([0.0; 2], read);
+                std::array::from_fn(|i| outgoing[i] * angle.cos() + incoming[i] * angle.sin())
+            } else {
+                old_voice.cell.map_or([0.0; 2], read)
+            };
+            let old_gain = (fade.left / fade.total).clamp(0.0, 1.0) as f32;
+            for channel in 0..2 {
+                frame[channel] = old[channel] * old_gain + frame[channel] * (1.0 - old_gain);
+            }
+        }
         sum[0] += frame[0];
         sum[1] += frame[1];
     }
     splat.master_frames += source_step;
+    if let Some(fade) = &mut splat.phase_fade {
+        fade.pos += source_step;
+        fade.left -= source_step.abs();
+        if fade.left <= 0.0 {
+            splat.phase_fade = None;
+        }
+    }
+    if landed {
+        splat.revalidate_view();
+    }
     sum
 }
 
@@ -1705,8 +1449,6 @@ impl ScorePreviewVoice {
 /// (in [`CueRing::consume`]) absorbs both the nominal mismatch and the
 /// drift.
 pub struct CueRing {
-    /// Buffers the monitor could not fill. Priming is not starvation.
-    starved: AtomicU64,
     /// L,R f32 bit patterns packed into one word: a frame is one atomic,
     /// so a frame can never tear.
     buf: Box<[AtomicU64]>,
@@ -1724,7 +1466,6 @@ pub struct CueRing {
 impl CueRing {
     fn new() -> CueRing {
         CueRing {
-            starved: AtomicU64::new(0),
             buf: (0..CUE_RING_FRAMES).map(|_| AtomicU64::new(0)).collect(),
             write_pos: AtomicU64::new(0),
             main_rate_bits: AtomicU64::new(0),
@@ -1733,14 +1474,9 @@ impl CueRing {
         }
     }
 
-    /// Publish one frame. The samples pass the same guard the master sum
-    /// does: this bus ends at an operator's ears, and a value that is not a
-    /// number would sit in the ring for its whole depth of history and go on
-    /// poisoning the consumer's smoothed volume after that.
     #[inline]
     fn push(&self, pos: u64, left: f32, right: f32) {
-        let packed =
-            (audible(left).to_bits() as u64) | ((audible(right).to_bits() as u64) << 32);
+        let packed = (left.to_bits() as u64) | ((right.to_bits() as u64) << 32);
         self.buf[(pos as usize) & (CUE_RING_FRAMES - 1)].store(packed, Ordering::Relaxed);
     }
 
@@ -1799,10 +1535,7 @@ impl CueRing {
             let index = state.cursor_fp >> 32;
             if index + 1 >= wp {
                 // Ran dry: the rest of the buffer stays silent and the
-                // next callback re-primes at depth. Counted, because this is
-                // a dropout the operator hears in the cans and would
-                // otherwise have no name for.
-                self.starved.fetch_add(1, Ordering::Relaxed);
+                // next callback re-primes at depth.
                 state.priming = true;
                 break;
             }
@@ -1810,8 +1543,8 @@ impl CueRing {
             let (bl, br) = self.frame_at(index + 1);
             let fraction = (state.cursor_fp & (FP_ONE - 1)) as f32 / FP_ONE as f32;
             state.volume += (target_volume - state.volume) * volume_pole;
-            let l = lerp(al, bl, fraction) * state.volume;
-            let r = lerp(ar, br, fraction) * state.volume;
+            let l = (al + (bl - al) * fraction) * state.volume;
+            let r = (ar + (br - ar) * fraction) * state.volume;
             for channel in 0..channels {
                 output.channel_mut(channel)[frame] = if channel == 0 { l } else { r };
             }
@@ -1837,8 +1570,10 @@ impl Default for CueReadState {
     }
 }
 
-#[derive(Clone, Copy)]
-struct ScheduledVideoTransition {
+/// A video transition as armed: carried in a command, then owned by the
+/// callback's clock.
+#[derive(Clone, Copy, Debug)]
+pub struct ScheduledVideoTransition {
     id: VideoTransitionId,
     from: Option<SlotId>,
     to: SlotId,
@@ -1858,28 +1593,6 @@ struct MixState {
     curve: FadeCurve,
     sfx: Vec<SfxVoice>,
     master: Ramp,
-    /// The whole mix's own effect chain, run on the sum before the
-    /// limiter.
-    ///
-    /// The same twelve slots a deck has, and the same level policy, so
-    /// nothing here is a second implementation of anything. What it is
-    /// FOR is the difference a deck chain cannot express: one reverb fed
-    /// the mix rings on across a transition, where a reverb on each deck
-    /// is two tanks that each stop when their own deck does.
-    master_chain: DeckChain,
-    /// Which deck's grid the master's beat-locked effects follow. There
-    /// is no such thing as the mix's own tempo, so it borrows one.
-    master_clock_deck: usize,
-    /// The master bus's limiter, in place of the hard clamp the sum used
-    /// to end on.
-    limiter: Limiter,
-    /// The cue bus gets its own, on the same settings. Two instances and
-    /// not one because they carry different signals -- but they must
-    /// behave alike, or the headphones stop telling the truth about what
-    /// the room is getting.
-    cue_limiter: Limiter,
-    ended_decks: Vec<DeckId>,
-    ended_voices: Vec<VoiceId>,
     rendered_frames: u64,
     scheduled_video: Option<ScheduledVideoTransition>,
     /// Per-SLOT headphone cue toggles: the cue button belongs to the
@@ -1888,6 +1601,30 @@ struct MixState {
     cue_mode: CueMode,
     preview: PreviewVoice,
     score_preview: ScorePreviewVoice,
+    synth: SynthRack,
+    program_mix: ProgramMix,
+}
+
+impl MixState {
+    fn new() -> MixState {
+        MixState {
+            video: [VideoBus::new(), VideoBus::new()],
+            video_mute: Ramp::at(1.0),
+            decks: [DeckVoice::new(), DeckVoice::new()],
+            fader: Ramp::at(0.0),
+            curve: FadeCurve::EqualPower,
+            sfx: Vec::with_capacity(MAX_SFX_VOICES),
+            master: Ramp::at(0.9),
+            rendered_frames: 0,
+            scheduled_video: None,
+            cue_deck: [false; 2],
+            cue_mode: CueMode::default(),
+            preview: PreviewVoice::new(),
+            score_preview: ScorePreviewVoice::new(48_000),
+            synth: SynthRack::new(48_000),
+            program_mix: ProgramMix::new(),
+        }
+    }
 }
 
 /// Peak meters (f32 bits): master, video, deck A, deck B, sfx.
@@ -1897,51 +1634,300 @@ pub const METER_DECK_A: usize = 2;
 pub const METER_DECK_B: usize = 3;
 pub const METER_SFX: usize = 4;
 
-#[derive(Clone)]
-pub struct Mixer {
-    state: Arc<Mutex<MixState>>,
-    meters: Arc<[AtomicU32; 5]>,
+/// Commands queued in one go before the callback drains them. Every UI
+/// frame drains the events and re-sends what did not fit, so this only
+/// has to cover a burst between two frames.
+const CMD_RING_SLOTS: usize = 1024;
+/// Ended decks and voices plus retired payloads, in the other direction.
+const EVENT_RING_SLOTS: usize = 1024;
+/// SFX voice storage is reserved once, so a voice start never grows the
+/// vector on the audio thread.
+const MAX_SFX_VOICES: usize = 64;
+
+/// Every change the UI can ask of the audio state. Payloads are moved in
+/// whole; the audio thread never allocates for one and never frees one —
+/// what a command replaces comes back to the UI as a [`Retired`] payload.
+pub enum MixCmd {
+    OpenSlot(SlotId),
+    CloseSlot(SlotId),
+    FadeSlots { from: Option<SlotId>, to: SlotId, secs: f32 },
+    SetVideoMix(f32),
+    SetVideoMuted(bool),
+    ScheduleVideo(ScheduledVideoTransition),
+    CancelVideo(VideoTransitionId),
+    InstallDeck { deck: DeckId, pcm: DeckPcm },
+    GrowStream { deck: DeckId, stream: Arc<StreamPcm> },
+    CompleteDeck { deck: DeckId, pcm: Arc<TrackPcm> },
+    ClearDeck(DeckId),
+    InstallStems { deck: DeckId, stems: Arc<TrackStems> },
+    ClearStems(DeckId),
+    SetPlaying { deck: DeckId, playing: bool },
+    SetSplat { deck: DeckId, grid: Arc<SplatGrid>, frames: Box<SplatFrames> },
+    SetSplatEnabled { deck: DeckId, on: bool },
+    SplatLaunch { deck: DeckId, row: SplatRow, col: u8, part: SplatPart },
+    SplatStopRow { deck: DeckId, row: SplatRow, timed: bool },
+    SplatLaunchScene { deck: DeckId, col: u8 },
+    SplatStopAll { deck: DeckId, timed: bool },
+    SeekFraction { deck: DeckId, fraction: f64 },
+    SeekSeconds { deck: DeckId, secs: f64 },
+    /// Move by `delta_secs` from the playhead AS IT IS when this lands.
+    SeekRelative { deck: DeckId, delta_secs: f64 },
+    SetRate { deck: DeckId, rate: f32 },
+    SetSyncLock { deck: DeckId, on: bool },
+    SetKeyRatio { deck: DeckId, ratio: f32 },
+    SetKeylock { deck: DeckId, on: bool },
+    Scratch { deck: DeckId, motion: ScratchMotion },
+    SetEqBand { deck: DeckId, band: usize, gain: f32 },
+    SetFilter { deck: DeckId, position: f32 },
+    SetStemGain { deck: DeckId, stem: usize, gain: f32 },
+    SetLoopSpan { deck: DeckId, span: Option<(f64, f64)> },
+    SetMute { deck: DeckId, muted: bool },
+    SetGain { deck: DeckId, gain: f32 },
+    SwapDecks,
+    SetCrossfader { position: f32, secs: f32 },
+    SetBlendBand { deck: DeckId, band: usize, gain: f32 },
+    SetBlendStem { deck: DeckId, stem: usize, gain: f32 },
+    ClearBlend(DeckId),
+    SetCurve(FadeCurve),
+    SetMaster(f32),
+    StartVoice { alloc: VoiceAlloc, pcm: Arc<TrackPcm> },
+    StopVoice(VoiceId),
+    SetPadVoicesGain { pad: PadKey, gain: f32 },
+    SetDeckCue { deck: DeckId, on: bool },
+    SetCueMode(CueMode),
+    InstallPreview { pcm: Arc<TrackPcm>, autoplay: bool },
+    ClearPreview,
+    SetPreviewPlaying(bool),
+    SeekPreviewFraction(f64),
+    SetDrumBank(Arc<SampleBank>),
+    ScorePreviewPlay {
+        sequence: Arc<PreviewSequence>,
+        piano: Option<Box<Piano>>,
+        events: Option<Vec<PianoTimedEvent>>,
+    },
+    ScorePreviewStop,
+    SetSynthClock(SynthClock),
+    SetSynthPlaying(bool),
+    SetSynthPattern { track: SynthTrack, pattern: StepPattern },
+    SetIronfishPatch(IronfishPatch),
+    SetIronfishParam { param: IronfishParam, value: f32 },
+    ReplaceSynthEngines(Box<SynthEngines>),
+    SetStripGain { strip: StripId, gain: f32 },
+    SetStripMuted { strip: StripId, muted: bool },
+    SetStripSoloed { strip: StripId, soloed: bool },
+    SetMasterDynamics(MasterParams),
+    SetMasterDynamicsParam { param: MasterParam, value: f32 },
+    SetMasterDynamicsBypass(bool),
+}
+
+/// A payload the audio thread no longer holds, handed back so the UI
+/// thread does the freeing: the last reference to a track is megabytes,
+/// and a free that size has no place in a callback.
+pub enum Retired {
+    Pcm(DeckPcm),
+    Stems(Arc<TrackStems>),
+    Splat(Arc<SplatGrid>, Box<SplatFrames>),
+    Track(Arc<TrackPcm>),
+    Sequence(Arc<PreviewSequence>),
+    Piano(Box<Piano>),
+    Events(Vec<PianoTimedEvent>),
+    Bank(Arc<SampleBank>),
+    SynthEngines(Box<SynthEngines>),
+}
+
+/// What the callback reports back, other than the snapshot.
+enum MixEvent {
+    DeckEnded(DeckId),
+    VoiceEnded(VoiceId),
+    Retired(Retired),
+}
+
+/// One deck as the callback last saw it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DeckSnap {
+    /// Playhead in source frames, whichever path is driving it.
+    pub playhead_frames: f64,
+    pub sample_rate: u32,
+    pub playing: bool,
+    pub scratching: bool,
+    pub ended: bool,
+    pub rate_current: f32,
+    pub splat: Option<SplatSnapshot>,
+}
+
+/// Everything the UI reads from the audio state, published once per
+/// callback through a seqlock. `Copy`, so a read is a memcpy — never a
+/// lock, never a wait on the callback.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MixSnapshot {
+    pub decks: [DeckSnap; 2],
+    pub fader_current: f32,
+    pub preview_installed: bool,
+    pub preview_position_secs: f64,
+    pub preview_duration_secs: f64,
+    pub preview_playing: bool,
+    pub preview_ended: bool,
+    pub score_playing: bool,
+    pub score_pos: u64,
+    pub synth: RackSnapshot,
+    pub strips: [StripSnapshot; STRIP_COUNT],
+    pub master_fx: MasterSnapshot,
+    /// Callbacks rendered so far: how the UI tells a fresh snapshot from
+    /// one published before the last command went in.
+    pub serial: u64,
+}
+
+/// Frames of a video slot's audio ring. A power of two past the pacing
+/// cap, so an index is a mask.
+const SLOT_RING_FRAMES: usize = 1 << 17;
+
+/// One video slot's audio, on its way from the decode thread to the
+/// callback: a lock-free ring of packed stereo frames plus the flags both
+/// sides read without a lock. The decode thread is the one producer, the
+/// callback the one consumer; the UI only flips flags.
+pub struct SlotShared {
+    buf: Box<[AtomicU64]>,
+    /// Absolute frames written, published by the producer per push.
+    write_pos: AtomicU64,
+    /// Absolute frames consumed, published by the callback per buffer.
+    read_pos: AtomicU64,
+    /// A flush discards everything written before `flush_at`; bumping
+    /// `flush_gen` tells the callback one happened.
+    flush_at: AtomicU64,
+    flush_gen: AtomicU32,
+    open: AtomicBool,
+    paused: AtomicBool,
+    playback_rate_bits: AtomicU64,
+    source_rate_bits: AtomicU64,
+}
+
+impl SlotShared {
+    fn new() -> SlotShared {
+        SlotShared {
+            buf: (0..SLOT_RING_FRAMES).map(|_| AtomicU64::new(0)).collect(),
+            write_pos: AtomicU64::new(0),
+            read_pos: AtomicU64::new(0),
+            flush_at: AtomicU64::new(0),
+            flush_gen: AtomicU32::new(0),
+            open: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
+            playback_rate_bits: AtomicU64::new(1.0f64.to_bits()),
+            source_rate_bits: AtomicU64::new(0.0f64.to_bits()),
+        }
+    }
+
+    #[inline]
+    fn frame_at(&self, pos: u64) -> (f32, f32) {
+        let packed = self.buf[(pos as usize) & (SLOT_RING_FRAMES - 1)].load(Ordering::Relaxed);
+        (f32::from_bits(packed as u32), f32::from_bits((packed >> 32) as u32))
+    }
+
+    /// Frames queued and not yet consumed.
+    fn buffered_frames(&self) -> u64 {
+        self.write_pos
+            .load(Ordering::Acquire)
+            .saturating_sub(self.read_pos.load(Ordering::Acquire))
+    }
+
+    /// Discard what is queued as of now; frames pushed after this stand.
+    fn flush(&self) {
+        self.flush_at.store(self.write_pos.load(Ordering::Acquire), Ordering::Release);
+        self.flush_gen.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn playback_rate(&self) -> f64 {
+        f64::from_bits(self.playback_rate_bits.load(Ordering::Relaxed))
+    }
+}
+
+/// The callback's view of a slot for one buffer.
+#[derive(Clone, Copy)]
+struct SlotView {
+    paused: bool,
+    source_rate: f64,
+    playback_rate: f64,
+    base: u64,
+    avail: usize,
+}
+
+/// What the UI handle and the audio engine share: only rings, atomics and
+/// the snapshot cell. No mutex anywhere in it.
+struct Shared {
+    cmds: SpscRing<MixCmd>,
+    events: SpscRing<MixEvent>,
+    snapshot: SeqCell<MixSnapshot>,
+    meters: [AtomicU32; 5],
     /// Pre-fader deck peaks, for the channel VU meters.
-    deck_meters: Arc<[AtomicU32; 2]>,
-    transition: Arc<TransitionAtomics>,
-    device_frames: Arc<AtomicU64>,
-    device_rate_bits: Arc<AtomicU64>,
-    /// Callbacks that found the state lock held and went out SILENT — every
-    /// count here is an audible gap in the programme. The pump reports
-    /// growth, so a dropout heard in the room can be told apart from a
-    /// device-level glitch by whether this moved.
-    contended_callbacks: Arc<AtomicU64>,
-    /// Callbacks that found the state lock POISONED, took it over and
-    /// carried on. Not a gap in the programme — the buffer still played —
-    /// but every count is a panic that happened somewhere else in the app,
-    /// and the operator deserves to be told which of the two it was.
-    poisoned_callbacks: Arc<AtomicU64>,
-    /// High-water render time, nanoseconds, for the other failure class: a
-    /// render that outruns its buffer starves the device with the lock
-    /// UNCONTENDED.
-    render_max_nanos: Arc<AtomicU64>,
-    /// What the LAST buffer cost, its length, and the monitor's own dropout
-    /// count: the live half of [`AudioHealth`], which a lifetime high-water
-    /// cannot give.
-    render_nanos: Arc<AtomicU64>,
-    buffer_frames: Arc<AtomicU64>,
+    deck_meters: [AtomicU32; 2],
+    transition: TransitionAtomics,
+    device_frames: AtomicU64,
+    device_rate_bits: AtomicU64,
+    /// One-shot proof that transport, PCM and the output callback met.
+    first_non_silent: AtomicBool,
+    /// Callbacks whose render outran its own buffer period: the device
+    /// starves and a gap is heard. Nothing else can silence a buffer now,
+    /// so this is THE dropout counter the pump reports.
+    overrun_callbacks: AtomicU64,
+    /// High-water render time, nanoseconds.
+    render_max_nanos: AtomicU64,
     /// The headphone cue bus, written by `render`, drained by the phones
     /// device callback (slot 1).
     cue_ring: Arc<CueRing>,
-    /// What each deck's transport looked like at the end of the last
-    /// callback, or the last change the UI made to it: read by the UI every
-    /// frame without touching the state lock. Written only from under that
-    /// lock, which is what keeps it to one writer at a time.
-    deck_snapshots: Arc<[Published<DeckSnapshot>; 2]>,
-    /// The last buffer's phase split, published by the callback and read by
-    /// the UI without ever taking the state lock.
-    stage_nanos: Arc<Published<StageNanos>>,
+    video: [SlotShared; 2],
 }
 
-/// Infrequent UI-to-audio-state handoffs that carry prepared immutable
-/// resources rather than scalar deck controls.
-pub enum MixCmd {
-    SetDrumBank(Arc<SampleBank>),
+/// The UI thread's own bookkeeping behind the handle: what it last asked
+/// for, so a value it set reads back at once instead of a callback later,
+/// and the commands a full ring handed back.
+struct UiShadow {
+    backlog: VecDeque<MixCmd>,
+    cue_deck: [bool; 2],
+    cue_mode: CueMode,
+    deck: [DeckShadow; 2],
+    /// A transition sent but not yet seen in the callback's atomics:
+    /// reported as `Armed` under its own id until then, so the cue engine
+    /// never mistakes the previous transition's `Completed` for this one.
+    pending_arm: Option<ScheduledVideoTransition>,
+    ended_decks: Vec<DeckId>,
+    ended_voices: Vec<VoiceId>,
+    score_rate: u32,
+    score_event_capacity: usize,
+    synth_rate: u32,
+    drum_bank: Option<Arc<SampleBank>>,
+    /// Snapshot serial the last drain saw, so events are not re-read.
+    backlog_reported: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct DeckShadow {
+    sample_rate: u32,
+    expected_len: usize,
+    has_pcm: bool,
+    streaming: bool,
+    rate: f64,
+    sync_locked: bool,
+}
+
+/// The UI-side handle. `Clone`, cheap, and never blocks: every mutation is
+/// a command moved into a lock-free ring, every read is a copy of the
+/// callback's last snapshot or the handle's own shadow of what it sent.
+#[derive(Clone)]
+pub struct Mixer {
+    shared: Arc<Shared>,
+    ui: Arc<UiCell<UiShadow>>,
+    engine: Arc<OnceSlot<MixEngine>>,
+}
+
+/// The audio thread's side: owns the whole mix state outright. Built by
+/// [`Mixer::new`], handed to the device callback by
+/// [`Mixer::take_engine`], and from then on nothing but the callback
+/// touches it.
+pub struct MixEngine {
+    state: MixState,
+    shared: Arc<Shared>,
+    slot_flush_seen: [u32; 2],
+    /// Buffers rendered, for the snapshot serial.
+    serial: u64,
 }
 
 impl Default for Mixer {
@@ -1950,143 +1936,189 @@ impl Default for Mixer {
     }
 }
 
+/// Hand a retired payload to the UI for dropping; a full ring (the UI has
+/// not drained in a long while) drops it here instead, which is the one
+/// free the callback still risks.
+fn retire(shared: &Shared, retired: Retired) {
+    if let Err(MixEvent::Retired(retired)) = shared.events.push(MixEvent::Retired(retired)) {
+        drop(retired);
+    }
+}
+
+fn push_event(shared: &Shared, event: MixEvent) {
+    let _ = shared.events.push(event);
+}
+
 impl Mixer {
     pub fn new() -> Mixer {
+        let shared = Arc::new(Shared {
+            cmds: SpscRing::new(CMD_RING_SLOTS),
+            events: SpscRing::new(EVENT_RING_SLOTS),
+            snapshot: SeqCell::new(MixSnapshot::default()),
+            meters: [
+                AtomicU32::new(0),
+                AtomicU32::new(0),
+                AtomicU32::new(0),
+                AtomicU32::new(0),
+                AtomicU32::new(0),
+            ],
+            deck_meters: [AtomicU32::new(0), AtomicU32::new(0)],
+            transition: TransitionAtomics::new(),
+            device_frames: AtomicU64::new(0),
+            device_rate_bits: AtomicU64::new(0),
+            first_non_silent: AtomicBool::new(false),
+            overrun_callbacks: AtomicU64::new(0),
+            render_max_nanos: AtomicU64::new(0),
+            cue_ring: Arc::new(CueRing::new()),
+            video: [SlotShared::new(), SlotShared::new()],
+        });
+        let engine = MixEngine {
+            state: MixState::new(),
+            shared: shared.clone(),
+            slot_flush_seen: [0; 2],
+            serial: 0,
+        };
         Mixer {
-            state: Arc::new(Mutex::new(MixState {
-                video: [VideoBus::new(), VideoBus::new()],
-                video_mute: Ramp::at(1.0),
-                decks: [DeckVoice::new(), DeckVoice::new()],
-                fader: Ramp::at(0.0),
-                curve: FadeCurve::EqualPower,
-                sfx: Vec::new(),
-                master: Ramp::at(0.9),
-                master_chain: DeckChain::new(48_000.0),
-                master_clock_deck: 0,
-                limiter: Limiter::new(0.0),
-                cue_limiter: Limiter::new(0.0),
-                ended_decks: Vec::new(),
-                ended_voices: Vec::new(),
-                rendered_frames: 0,
-                scheduled_video: None,
+            shared,
+            ui: Arc::new(UiCell::new(UiShadow {
+                backlog: VecDeque::new(),
                 cue_deck: [false; 2],
                 cue_mode: CueMode::default(),
-                preview: PreviewVoice::new(),
-                score_preview: ScorePreviewVoice::new(48_000),
+                deck: [DeckShadow::default(); 2],
+                pending_arm: None,
+                ended_decks: Vec::new(),
+                ended_voices: Vec::new(),
+                score_rate: 48_000,
+                score_event_capacity: 0,
+                synth_rate: 48_000,
+                drum_bank: None,
+                backlog_reported: false,
             })),
-            meters: Arc::new([
-                AtomicU32::new(0),
-                AtomicU32::new(0),
-                AtomicU32::new(0),
-                AtomicU32::new(0),
-                AtomicU32::new(0),
-            ]),
-            deck_meters: Arc::new([AtomicU32::new(0), AtomicU32::new(0)]),
-            transition: Arc::new(TransitionAtomics::new()),
-            device_frames: Arc::new(AtomicU64::new(0)),
-            device_rate_bits: Arc::new(AtomicU64::new(0)),
-            contended_callbacks: Arc::new(AtomicU64::new(0)),
-            poisoned_callbacks: Arc::new(AtomicU64::new(0)),
-            render_max_nanos: Arc::new(AtomicU64::new(0)),
-            render_nanos: Arc::new(AtomicU64::new(0)),
-            buffer_frames: Arc::new(AtomicU64::new(0)),
-            cue_ring: Arc::new(CueRing::new()),
-            stage_nanos: Arc::new(Published::new(StageNanos::default())),
-            deck_snapshots: Arc::new([
-                Published::new(DeckSnapshot::default()),
-                Published::new(DeckSnapshot::default()),
-            ]),
+            engine: Arc::new(OnceSlot::new(engine)),
         }
     }
 
-    /// Publish a deck's transport for the lock-free readers. Called with the
-    /// state lock held, by the callback and by every setter that moves the
-    /// transport, so a seek shows before the next buffer.
-    fn publish_deck(&self, s: &MixState, index: usize) {
-        let d = &s.decks[index];
-        let snapshot = match &d.pcm {
-            None => DeckSnapshot {
-                scratching: d.scratch.active(),
-                clock: d.clock,
-                ..DeckSnapshot::default()
-            },
-            Some(pcm) => DeckSnapshot {
-                position_secs: d.playhead_frames() / pcm.sample_rate.max(1) as f64,
-                duration_secs: pcm.seconds(),
-                playing: d.playing,
-                scratching: d.scratch.active(),
-                // The ramp's own settled output, not the finger's raw
-                // velocity: the scratch is a closed loop and this is the
-                // number the render actually read the record at.
-                platter_rate: match d.scratch.active() {
-                    true => d.scratch.rate() as f64,
-                    false => d.rate.current() as f64,
-                },
-                clock: d.clock,
-                splat: d.splat.as_ref().map(SplatState::snapshot),
-            },
-        };
-        self.deck_snapshots[index].publish(snapshot);
+    /// The audio-owned engine, exactly once: move it into the device
+    /// callback. `None` if a callback already has it.
+    pub fn take_engine(&self) -> Option<MixEngine> {
+        self.engine.take()
     }
 
-    /// What the callback has to say about this machine, for the pump to
-    /// report and the console to show.
-    pub fn audio_health(&self) -> AudioHealth {
-        AudioHealth {
-            contended: self.contended_callbacks.load(Ordering::Relaxed),
-            stages: self.stage_nanos.read(),
-            poisoned: self.poisoned_callbacks.load(Ordering::Relaxed),
-            // The monitor counts its own: the ring is the only thing that
-            // knows it could not fill a buffer.
-            phones_starved: self.cue_ring.starved.load(Ordering::Relaxed),
-            render_nanos: self.render_nanos.load(Ordering::Relaxed),
-            render_max_nanos: self.render_max_nanos.load(Ordering::Relaxed),
-            buffer_frames: self.buffer_frames.load(Ordering::Relaxed),
-            device_rate: f64::from_bits(self.device_rate_bits.load(Ordering::Relaxed)),
+    /// `(overrun callbacks, high-water render nanos)` — a render that
+    /// outran its buffer is the one way a buffer is still lost, for the
+    /// pump to report.
+    pub fn audio_health(&self) -> (u64, u64) {
+        (
+            self.shared.overrun_callbacks.load(Ordering::Relaxed),
+            self.shared.render_max_nanos.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Queue a command for the callback. Never waits: a full ring parks
+    /// the command in the UI-side backlog, which `pump` re-sends in order.
+    pub fn run_cmd(&self, cmd: MixCmd) {
+        self.ui.with(|ui| Self::send_in(&self.shared, ui, cmd));
+    }
+
+    fn send_in(shared: &Shared, ui: &mut UiShadow, cmd: MixCmd) {
+        // Order is the whole contract: once anything is backlogged, every
+        // later command queues behind it.
+        if !ui.backlog.is_empty() {
+            ui.backlog.push_back(cmd);
+            return;
         }
+        if let Err(cmd) = shared.cmds.push(cmd) {
+            ui.backlog.push_back(cmd);
+        }
+    }
+
+    /// Once per UI frame: re-send what a full ring refused, and take the
+    /// callback's events — ended decks and voices for the next drains,
+    /// retired payloads to be dropped here, on this thread.
+    pub fn pump(&self) {
+        let mut dropped: Vec<Retired> = Vec::new();
+        self.ui.with(|ui| {
+            while let Some(cmd) = ui.backlog.pop_front() {
+                if let Err(cmd) = self.shared.cmds.push(cmd) {
+                    ui.backlog.push_front(cmd);
+                    break;
+                }
+            }
+            let backlogged = !ui.backlog.is_empty();
+            if backlogged && !ui.backlog_reported {
+                ui.backlog_reported = true;
+                crate::log!(
+                    "audio: command ring full ({} queued on the UI side); the device callback is not draining",
+                    ui.backlog.len()
+                );
+            } else if !backlogged {
+                ui.backlog_reported = false;
+            }
+            while let Some(event) = self.shared.events.pop() {
+                match event {
+                    MixEvent::DeckEnded(deck) => ui.ended_decks.push(deck),
+                    MixEvent::VoiceEnded(id) => ui.ended_voices.push(id),
+                    MixEvent::Retired(retired) => dropped.push(retired),
+                }
+            }
+        });
+        drop(dropped);
+    }
+
+    /// Retired payloads the callback handed back, for a test to inspect
+    /// instead of dropping.
+    #[cfg(test)]
+    pub fn drain_retired(&self) -> Vec<Retired> {
+        let mut retired = Vec::new();
+        self.ui.with(|ui| {
+            while let Some(event) = self.shared.events.pop() {
+                match event {
+                    MixEvent::DeckEnded(deck) => ui.ended_decks.push(deck),
+                    MixEvent::VoiceEnded(id) => ui.ended_voices.push(id),
+                    MixEvent::Retired(payload) => retired.push(payload),
+                }
+            }
+        });
+        retired
+    }
+
+    /// Commands parked because the ring was full, right now.
+    pub fn backlog_len(&self) -> usize {
+        self.ui.with(|ui| ui.backlog.len())
+    }
+
+    fn snapshot(&self) -> MixSnapshot {
+        self.shared.snapshot.read()
     }
 
     // ---- video slot buses --------------------------------------------------
 
     /// (Re)open a slot bus, silent, empty, unpaused.
     pub fn open_slot(&self, slot: SlotId) {
-        let mut s = self.state.lock().unwrap();
-        let bus = &mut s.video[slot.index()];
-        bus.flush();
-        bus.open = true;
-        bus.paused = false;
-        bus.playback_rate = 1.0;
-        bus.gain = Ramp::at(0.0);
+        let shared = &self.shared.video[slot.index()];
+        shared.flush();
+        shared.playback_rate_bits.store(1.0f64.to_bits(), Ordering::Relaxed);
+        shared.paused.store(false, Ordering::Relaxed);
+        shared.open.store(true, Ordering::Release);
+        self.run_cmd(MixCmd::OpenSlot(slot));
     }
 
     /// Close = mute-and-flush; the decode thread just stops feeding it.
     pub fn close_slot(&self, slot: SlotId) {
-        let mut s = self.state.lock().unwrap();
-        if let Some(scheduled) = s.scheduled_video.filter(|scheduled| scheduled.to == slot) {
-            s.scheduled_video = None;
-            // The device may have crossed the target just before the UI
-            // observed `Started`. If latest-click-wins closes that still-
-            // armed destination, restore the previous program atomically
-            // instead of leaving a half-faded silence.
-            if scheduled.started {
-                if let Some(from) = scheduled.from {
-                    s.video[from.index()].gain = Ramp::at(1.0);
-                }
+        let shared = &self.shared.video[slot.index()];
+        shared.open.store(false, Ordering::Release);
+        shared.flush();
+        self.ui.with(|ui| {
+            if ui.pending_arm.is_some_and(|pending| pending.to == slot) {
+                ui.pending_arm = None;
             }
-            self.transition.publish_phase(
-                VideoTransitionPhase::Cancelled,
-                self.device_frames.load(Ordering::Acquire),
-            );
-            debug_assert_eq!(scheduled.to, slot);
-        }
-        let bus = &mut s.video[slot.index()];
-        bus.open = false;
-        bus.flush();
-        bus.gain = Ramp::at(0.0);
+            Self::send_in(&self.shared, ui, MixCmd::CloseSlot(slot));
+        });
     }
 
     /// Decode-thread entry: append interleaved i16 PCM. Returns false when
-    /// the slot is closed (the producer should stop).
+    /// the slot is closed (the producer should stop). Lock-free: the ring
+    /// is this thread's to write and the callback's to read.
     pub fn push_slot_audio(
         &self,
         slot: SlotId,
@@ -2094,41 +2126,50 @@ impl Mixer {
         channels: u16,
         rate: u32,
     ) -> bool {
-        let mut s = self.state.lock().unwrap();
-        let bus = &mut s.video[slot.index()];
-        if !bus.open {
+        let shared = &self.shared.video[slot.index()];
+        if !shared.open.load(Ordering::Acquire) {
             return false;
         }
-        bus.source_rate = rate as f64;
+        shared.source_rate_bits.store((rate as f64).to_bits(), Ordering::Relaxed);
         let ch = channels.max(1) as usize;
+        let read = shared.read_pos.load(Ordering::Acquire);
+        let mut write = shared.write_pos.load(Ordering::Relaxed);
         for frame in samples.chunks_exact(ch) {
-            if bus.queue.len() >= MAX_SLOT_QUEUE_FRAMES {
+            if write.saturating_sub(read) >= MAX_SLOT_QUEUE_FRAMES as u64 {
                 break;
             }
             let l = frame[0] as f32 / 32768.0;
             let r = frame[ch - 1] as f32 / 32768.0;
-            bus.queue.push_back((l, r));
+            let packed = (l.to_bits() as u64) | ((r.to_bits() as u64) << 32);
+            shared.buf[(write as usize) & (SLOT_RING_FRAMES - 1)].store(packed, Ordering::Relaxed);
+            write += 1;
         }
+        shared.write_pos.store(write, Ordering::Release);
         true
     }
 
     /// Buffered seconds on a slot bus (decode-thread pacing).
     pub fn slot_buffered_secs(&self, slot: SlotId) -> f64 {
-        let s = self.state.lock().unwrap();
-        let bus = &s.video[slot.index()];
-        if bus.source_rate <= 0.0 {
+        let shared = &self.shared.video[slot.index()];
+        let source_rate = f64::from_bits(shared.source_rate_bits.load(Ordering::Relaxed));
+        if source_rate <= 0.0 {
             return 0.0;
         }
-        (bus.queue.len() as f64 - bus.cursor).max(0.0)
-            / (bus.source_rate * bus.playback_rate.max(MIN_VIDEO_PLAYBACK_RATE))
+        shared.buffered_frames() as f64
+            / (source_rate * shared.playback_rate().max(MIN_VIDEO_PLAYBACK_RATE))
     }
 
     pub fn flush_slot_audio(&self, slot: SlotId) {
-        self.state.lock().unwrap().video[slot.index()].flush();
+        self.shared.video[slot.index()].flush();
+    }
+
+    /// Decode-worker half of [`Self::flush_slot_audio`].
+    pub fn flush_slot_audio_from_worker(&self, slot: SlotId) {
+        self.shared.video[slot.index()].flush();
     }
 
     pub fn set_slot_paused(&self, slot: SlotId, paused: bool) {
-        self.state.lock().unwrap().video[slot.index()].paused = paused;
+        self.shared.video[slot.index()].paused.store(paused, Ordering::Relaxed);
     }
 
     /// Audio resampling rate for a video slot. The bounded range is small on
@@ -2136,23 +2177,29 @@ impl Mixer {
     /// remaining perceptually safe. Deck and SFX cursors are unrelated.
     pub fn set_slot_playback_rate(&self, slot: SlotId, rate: f64) -> f64 {
         let rate = rate.clamp(MIN_VIDEO_PLAYBACK_RATE, MAX_VIDEO_PLAYBACK_RATE);
-        self.state.lock().unwrap().video[slot.index()].playback_rate = rate;
+        self.shared.video[slot.index()]
+            .playback_rate_bits
+            .store(rate.to_bits(), Ordering::Relaxed);
         rate
     }
 
     pub fn slot_playback_rate(&self, slot: SlotId) -> f64 {
-        self.state.lock().unwrap().video[slot.index()].playback_rate
+        self.shared.video[slot.index()].playback_rate()
     }
 
     /// Number of output frames rendered by this mixer. This is the same
     /// clock used to trigger scheduled video transitions.
     pub fn rendered_output_frames(&self) -> u64 {
-        self.device_frames.load(Ordering::Acquire)
+        self.shared.device_frames.load(Ordering::Acquire)
     }
 
     pub fn output_sample_rate(&self) -> Option<f64> {
-        let rate = f64::from_bits(self.device_rate_bits.load(Ordering::Acquire));
+        let rate = f64::from_bits(self.shared.device_rate_bits.load(Ordering::Acquire));
         (rate.is_finite() && rate > 0.0).then_some(rate)
+    }
+
+    pub fn has_produced_non_silent(&self) -> bool {
+        self.shared.first_non_silent.load(Ordering::Acquire)
     }
 
     /// Arm a video transition at an absolute audio-device output frame.
@@ -2166,44 +2213,22 @@ impl Mixer {
         target_frame: u64,
         fade_frames: u64,
     ) -> Result<u64, VideoTransitionError> {
-        let mut state = self.state.lock().unwrap();
-        self.schedule_video_transition_locked(
-            &mut state,
-            id,
-            from,
-            to,
-            target_frame,
-            fade_frames,
-        )
-    }
-
-    fn schedule_video_transition_locked(
-        &self,
-        state: &mut MixState,
-        id: VideoTransitionId,
-        from: Option<SlotId>,
-        to: SlotId,
-        target_frame: u64,
-        fade_frames: u64,
-    ) -> Result<u64, VideoTransitionError> {
         if id == 0 {
             return Err(VideoTransitionError::ZeroId);
         }
         if from == Some(to) {
             return Err(VideoTransitionError::SameSlot);
         }
-        if !state.video[to.index()].open {
+        if !self.shared.video[to.index()].open.load(Ordering::Acquire) {
             return Err(VideoTransitionError::DestinationClosed);
         }
-        if state.scheduled_video.is_some_and(|scheduled| scheduled.started) {
+        if self
+            .video_transition_snapshot()
+            .is_some_and(|snapshot| snapshot.phase == VideoTransitionPhase::Started)
+        {
             return Err(VideoTransitionError::TransitionAlreadyStarted);
         }
-        if let Some(old) = state.scheduled_video.take() {
-            let old_bus = &mut state.video[old.to.index()];
-            old_bus.paused = true;
-            old_bus.gain = Ramp::at(0.0);
-        }
-        let now = self.device_frames.load(Ordering::Acquire);
+        let now = self.shared.device_frames.load(Ordering::Acquire);
         let target_frame = target_frame.max(now);
         let scheduled = ScheduledVideoTransition {
             id,
@@ -2213,11 +2238,11 @@ impl Mixer {
             fade_frames,
             started: false,
         };
-        let to_bus = &mut state.video[to.index()];
-        to_bus.paused = true;
-        to_bus.gain = Ramp::at(0.0);
-        state.scheduled_video = Some(scheduled);
-        self.transition.publish_arm(scheduled, now);
+        self.shared.video[to.index()].paused.store(true, Ordering::Relaxed);
+        self.ui.with(|ui| {
+            ui.pending_arm = Some(scheduled);
+            Self::send_in(&self.shared, ui, MixCmd::ScheduleVideo(scheduled));
+        });
         Ok(target_frame)
     }
 
@@ -2231,138 +2256,83 @@ impl Mixer {
         delay_frames: u64,
         fade_frames: u64,
     ) -> Result<u64, VideoTransitionError> {
-        let mut state = self.state.lock().unwrap();
         let target = self
+            .shared
             .device_frames
             .load(Ordering::Acquire)
             .saturating_add(delay_frames);
-        self.schedule_video_transition_locked(&mut state, id, from, to, target, fade_frames)
+        self.schedule_video_transition_at(id, from, to, target, fade_frames)
     }
 
     /// Cancel only while still armed. A started transition is owned by the
     /// device clock and must run to completion; callers cannot rewind it from
     /// the UI thread.
     pub fn cancel_video_transition(&self, id: VideoTransitionId) -> bool {
-        let mut state = self.state.lock().unwrap();
-        let Some(scheduled) = state.scheduled_video else { return false };
-        if scheduled.id != id || scheduled.started {
+        let Some(snapshot) = self.video_transition_snapshot() else { return false };
+        if snapshot.id != id || snapshot.phase != VideoTransitionPhase::Armed {
             return false;
         }
-        state.scheduled_video = None;
-        let bus = &mut state.video[scheduled.to.index()];
-        bus.paused = true;
-        bus.gain = Ramp::at(0.0);
-        self.transition.publish_phase(
-            VideoTransitionPhase::Cancelled,
-            self.device_frames.load(Ordering::Acquire),
-        );
+        self.shared.video[snapshot.to.index()].paused.store(true, Ordering::Relaxed);
+        self.ui.with(|ui| {
+            if ui.pending_arm.is_some_and(|pending| pending.id == id) {
+                ui.pending_arm = None;
+            }
+            Self::send_in(&self.shared, ui, MixCmd::CancelVideo(id));
+        });
         true
     }
 
     /// Nonblocking transition state for picture pacing, lights, and cue
     /// cleanup. `None` means no schedule has ever been published.
     pub fn video_transition_snapshot(&self) -> Option<VideoTransitionSnapshot> {
-        let (phase, id, rendered_frame, target_frame, fade_frames, raw_start, from, to) = loop {
-            let before = self.transition.sequence.load(Ordering::Acquire);
-            if before & 1 != 0 {
-                std::hint::spin_loop();
-                continue;
-            }
-            let values = (
-                VideoTransitionPhase::from_u32(self.transition.phase.load(Ordering::Relaxed)),
-                self.transition.id.load(Ordering::Relaxed),
-                self.transition.rendered_frame.load(Ordering::Relaxed),
-                self.transition.target_frame.load(Ordering::Relaxed),
-                self.transition.fade_frames.load(Ordering::Relaxed),
-                self.transition.start_frame.load(Ordering::Relaxed),
-                self.transition.from.load(Ordering::Relaxed),
-                self.transition.to.load(Ordering::Relaxed),
-            );
-            let after = self.transition.sequence.load(Ordering::Acquire);
-            if before == after {
-                break values;
-            }
-        };
-        if phase == VideoTransitionPhase::Idle || id == 0 {
-            return None;
-        }
-        let start_frame = (raw_start != u64::MAX).then_some(raw_start);
-        let progress = match phase {
-            VideoTransitionPhase::Completed => 1.0,
-            VideoTransitionPhase::Started => {
-                if fade_frames == 0 {
-                    1.0
-                } else {
-                    rendered_frame.saturating_sub(raw_start) as f32 / fade_frames as f32
+        let published = self.shared.transition.snapshot();
+        // A schedule the callback has not applied yet is armed as far as
+        // the UI is concerned; once its id shows up in the atomics the
+        // callback's word replaces this.
+        let pending = self.ui.with(|ui| {
+            if let Some(pending) = ui.pending_arm {
+                if published.is_some_and(|snapshot| snapshot.id == pending.id) {
+                    ui.pending_arm = None;
+                    return None;
                 }
+                return Some(pending);
             }
-            _ => 0.0,
+            None
+        });
+        if let Some(pending) = pending {
+            return Some(VideoTransitionSnapshot {
+                id: pending.id,
+                phase: VideoTransitionPhase::Armed,
+                from: pending.from,
+                to: pending.to,
+                target_frame: pending.target_frame,
+                start_frame: None,
+                fade_frames: pending.fade_frames,
+                rendered_frame: self.shared.device_frames.load(Ordering::Acquire),
+                progress: 0.0,
+            });
         }
-        .clamp(0.0, 1.0);
-        Some(VideoTransitionSnapshot {
-            id,
-            phase,
-            from: TransitionAtomics::decode_slot(from),
-            to: TransitionAtomics::decode_slot(to).unwrap_or(SlotId::A),
-            target_frame,
-            start_frame,
-            fade_frames,
-            rendered_frame,
-            progress,
-        })
+        published
     }
 
     /// The timed A/V crossfade: `to` ramps to 1, `from` ramps to 0. The
     /// program mute is a separate multiplier and is never touched here.
     pub fn fade_slots(&self, from: Option<SlotId>, to: SlotId, secs: f32) {
-        let mut s = self.state.lock().unwrap();
-        if let Some(scheduled) = s.scheduled_video.take() {
-            if scheduled.started {
-                // The audio clock owns a started transition. Legacy UI code
-                // may observe `Started` and call this immediate helper; do
-                // not restart its ramp or destroy its completion snapshot.
-                s.scheduled_video = Some(scheduled);
-                return;
-            }
-            self.transition.publish_phase(
-                VideoTransitionPhase::Cancelled,
-                self.device_frames.load(Ordering::Acquire),
-            );
-            if scheduled.to != to {
-                let bus = &mut s.video[scheduled.to.index()];
-                bus.paused = true;
-                bus.gain = Ramp::at(0.0);
-            }
-        }
-        let secs = secs.max(SLEW_SECS);
-        if let Some(from) = from {
-            s.video[from.index()].gain.slew(0.0, secs);
-        }
-        s.video[to.index()].gain.slew(1.0, secs);
+        self.run_cmd(MixCmd::FadeSlots { from, to, secs });
+    }
+
+    /// Operator crossfader: equal-power A/B bus gains, slewed over a few ms
+    /// so a fast hand never zippers. Ignored while a scheduled transition
+    /// owns the gains (it lands them itself).
+    pub fn set_video_mix(&self, mix: f32) {
+        self.run_cmd(MixCmd::SetVideoMix(mix));
     }
 
     /// Mute/unmute the whole video program (video-slot audio only). A ramp
     /// on the summed bus: per-slot fade targets are preserved exactly, so
     /// an unmute after any sequence of cues restores the intended level.
-    /// Operator crossfader: equal-power A/B bus gains, slewed over a few ms
-    /// so a fast hand never zippers. Ignored while a scheduled transition
-    /// owns the gains (it lands them itself).
-    pub fn set_video_mix(&self, mix: f32) {
-        let mut s = self.state.lock().unwrap();
-        if s.scheduled_video.is_some() {
-            return;
-        }
-        let (a, b) = crate::decks::crossfader_gains(mix, crate::decks::FadeCurve::EqualPower);
-        s.video[0].gain.slew(a, 0.015);
-        s.video[1].gain.slew(b, 0.015);
-    }
-
     pub fn set_video_muted(&self, muted: bool) {
-        self.state
-            .lock()
-            .unwrap()
-            .video_mute
-            .slew(if muted { 0.0 } else { 1.0 }, SLEW_SECS * 4.0);
+        self.run_cmd(MixCmd::SetVideoMuted(muted));
     }
 
     // ---- decks -------------------------------------------------------------
@@ -2370,1116 +2340,198 @@ impl Mixer {
     /// Install a decoded track, paused at zero. Any stems from a previous
     /// track go with it; the tone chain is reset but its settings stand.
     pub fn install_deck(&self, deck: DeckId, pcm: Arc<TrackPcm>) {
-        self.install_deck_over(deck, pcm, false);
+        self.install_deck_pcm(deck, DeckPcm::Whole(pcm));
     }
 
-    /// The same install, told whether the deck may carry on playing.
-    ///
-    /// On a SILENT deck this is the cut it always was: a fresh track has
-    /// nothing to fade out of, and every existing call site takes this
-    /// branch. On an AUDIBLE one the track cannot be swapped here at all —
-    /// the outgoing one would end mid-sample — so it is parked, the
-    /// transport is slewed down, and the callback spends the park at the
-    /// top of a buffer once the fade has landed.
-    pub fn install_deck_over(&self, deck: DeckId, pcm: Arc<TrackPcm>, keep_playing: bool) {
-        // What comes off the deck is freed HERE, after the lock: the last
-        // swap's leavings and any load that never got its turn. Taking both
-        // is also what guarantees the callback's hand-back slot is empty,
-        // and it is latest-wins for two loads inside one fade.
-        let retired = {
-            let mut s = self.state.lock().unwrap();
-            let d = &mut s.decks[deck.index()];
-            let retired = (d.take_retired(), d.pending.take());
-            if d.transport.current <= 0.0 {
-                d.pcm = Some(pcm);
-                d.stems = None;
-                d.splat = None;
-                // A fresh record has no grid until its analysis lands.
-                d.grid = None;
-                d.clock = DeckClock::default();
-                d.playing = false;
-                d.pause_at = None;
-                d.stem_seam = Ramp::at(0.0);
-                // A fresh track has nothing to fade out of: cut, not ramp.
-                d.transport = Ramp::at(0.0);
-                d.seek_frames(0.0);
-                d.chain.eq_mut().reset();
-                d.chain.echo_mut().silence();
-                d.chain.freeze_mut().reset();
-                d.chain.flanger_mut().silence();
-                d.chain.bitcrusher_mut().silence();
-                d.chain.phaser_mut().reset();
-                d.chain.plate_reverb_mut().silence();
-                d.chain.moog_ladder_mut().reset();
-                d.reset_blend();
-            } else {
-                d.pending = Some(PendingLoad { pcm, play: keep_playing, grid: None });
-                // The give-back belongs to the track that is leaving, and
-                // that track is about to be gone.
-                d.pause_at = None;
-                // The flag is the operator's intent and it can be answered
-                // now; the render guard keeps a deck reading and fading for
-                // as long as its transport is above zero, so a Stop load
-                // leaves exactly the way a pause does. Setting it here also
-                // keeps the engine's own mirror, which is re-read from this
-                // snapshot every pump, from undoing the policy.
-                d.playing = keep_playing;
-                d.transport.slew(0.0, LOAD_SWAP_SECS);
+    /// Install a track that is still being decoded, paused at zero: the
+    /// deck plays what has arrived and waits at the decoded edge for the
+    /// rest. Everything else is `install_deck`.
+    pub fn install_deck_stream(&self, deck: DeckId, stream: Arc<StreamPcm>) {
+        self.install_deck_pcm(deck, DeckPcm::Stream(stream));
+    }
+
+    fn install_deck_pcm(&self, deck: DeckId, pcm: DeckPcm) {
+        self.ui.with(|ui| {
+            ui.deck[deck.index()] = DeckShadow {
+                sample_rate: pcm.sample_rate(),
+                expected_len: pcm.expected_len(),
+                has_pcm: true,
+                streaming: matches!(pcm, DeckPcm::Stream(_)),
+                rate: ui.deck[deck.index()].rate,
+                sync_locked: ui.deck[deck.index()].sync_locked,
+            };
+            Self::send_in(&self.shared, ui, MixCmd::InstallDeck { deck, pcm });
+        });
+    }
+
+    /// More of a streaming track arrived: swap the grown table in. One
+    /// pointer move — the chunks are shared with the table already
+    /// playing, so nothing is copied and nothing the callback is reading
+    /// moves. A deck that is not streaming (the whole file landed, or
+    /// another track took the deck) ignores it.
+    pub fn grow_deck_stream(&self, deck: DeckId, stream: Arc<StreamPcm>) {
+        self.ui.with(|ui| {
+            let shadow = &mut ui.deck[deck.index()];
+            if !shadow.streaming {
+                return;
             }
-            self.publish_deck(&s, deck.index());
-            retired
-        };
-        drop(retired);
+            shadow.expected_len = stream.expected.max(stream.len);
+            Self::send_in(&self.shared, ui, MixCmd::GrowStream { deck, stream });
+        });
+    }
+
+    /// The decoder finished: the whole file takes over from the chunk
+    /// table at the playhead. Same samples on the same timeline, so the
+    /// transport, the stretcher and any loop keep exactly their place; a
+    /// deck parked at the decoded edge simply continues.
+    pub fn complete_deck(&self, deck: DeckId, pcm: Arc<TrackPcm>) {
+        self.ui.with(|ui| {
+            let shadow = &mut ui.deck[deck.index()];
+            if !shadow.streaming {
+                return;
+            }
+            shadow.streaming = false;
+            shadow.expected_len = pcm.frames.len();
+            Self::send_in(&self.shared, ui, MixCmd::CompleteDeck { deck, pcm });
+        });
+    }
+
+    /// Whether the deck is playing a track that is still being decoded.
+    pub fn deck_is_streaming(&self, deck: DeckId) -> bool {
+        self.ui.with(|ui| ui.deck[deck.index()].streaming)
     }
 
     /// Drop the deck's track entirely: the voice renders silence until the
     /// next install. Settings (gain, EQ, keylock) stand, like install_deck.
     pub fn clear_deck(&self, deck: DeckId) {
-        let mut s = self.state.lock().unwrap();
-        let d = &mut s.decks[deck.index()];
-        // An unload during a fade must not let a parked load resurrect a
-        // track on an emptied deck. Both go out with the lock, below.
-        let retired = (d.take_retired(), d.pending.take());
-        d.pcm = None;
-        d.stems = None;
-        d.splat = None;
-        d.grid = None;
-        d.clock = DeckClock::default();
-        d.playing = false;
-        d.transport = Ramp::at(0.0);
-        // The gestures go with the track they were made on. A reverse hold
-        // running when a deck is unloaded would otherwise leave a ghost on
-        // an empty voice, and the next hold would refuse to arm because it
-        // found one already there.
-        d.slip = None;
-        d.rolls.clear();
-        d.censor_owns_slip = false;
-        d.scratch = ScratchRamp::default();
-        // With no pcm the clamp parks the playhead at zero; this also
-        // clears `ended`, so a later install re-arms end reporting.
-        d.seek_frames(0.0);
-        d.chain.echo_mut().silence();
-        d.chain.freeze_mut().reset();
-        d.chain.flanger_mut().silence();
-        d.chain.bitcrusher_mut().silence();
-        d.chain.phaser_mut().reset();
-        d.chain.plate_reverb_mut().silence();
-        d.chain.moog_ladder_mut().reset();
-        d.reset_blend();
-        self.publish_deck(&s, deck.index());
-        drop(s);
-        drop(retired);
+        self.ui.with(|ui| {
+            let rate = ui.deck[deck.index()].rate;
+            ui.deck[deck.index()] = DeckShadow { rate, ..DeckShadow::default() };
+            Self::send_in(&self.shared, ui, MixCmd::ClearDeck(deck));
+        });
     }
 
     /// Attach separated stems to the track already on the deck. They must be
     /// the same timeline as the mixed file; the deck keeps playing.
     pub fn install_deck_stems(&self, deck: DeckId, stems: Arc<TrackStems>) {
-        let mut s = self.state.lock().unwrap();
-        let d = &mut s.decks[deck.index()];
-        if d.pcm.is_none() || stems.is_empty() {
-            return;
-        }
-        d.stems = Some(stems);
-        // Fade the lanes in rather than cutting to them. The separated sum
-        // is close to the mixed file but not identical, so a hard swap is
-        // heard on the phase difference between them -- and the swap used
-        // to land on whatever sample the pump happened to deliver it at.
-        d.stem_seam.slew(1.0, STEM_SEAM_SECS);
+        self.run_cmd(MixCmd::InstallStems { deck, stems });
     }
 
     pub fn clear_deck_stems(&self, deck: DeckId) {
-        let mut s = self.state.lock().unwrap();
-        let d = &mut s.decks[deck.index()];
-        d.stems = None;
-        // Nothing to fade out of: the lanes are gone this instant, so the
-        // weight goes with them rather than ramping down over a source that
-        // no longer exists.
-        d.stem_seam = Ramp::at(0.0);
+        self.run_cmd(MixCmd::ClearStems(deck));
     }
 
     pub fn set_deck_playing(&self, deck: DeckId, playing: bool) {
-        let mut s = self.state.lock().unwrap();
-        let d = &mut s.decks[deck.index()];
-        // PLAY pressed during a load's fade must not slew the transport
-        // back up on the track that is leaving. It re-aims the load, which
-        // is what the operator meant by it.
-        if let Some(pending) = d.pending.as_mut() {
-            pending.play = playing;
-            d.playing = playing;
-            self.publish_deck(&s, deck.index());
-            return;
-        }
-        if playing {
-            // Playing from the end restarts.
-            if d.playhead_frames() >= d.frame_count() as f64
-                && !d.splat.as_ref().is_some_and(|splat| splat.active)
-            {
-                d.seek_frames(0.0);
-            }
-            d.ended = false;
-        }
-        d.pause_at = if playing { None } else { Some(d.playhead_frames()) };
-        d.playing = playing;
-        d.transport.slew(if playing { 1.0 } else { 0.0 }, SLEW_SECS);
-        self.publish_deck(&s, deck.index());
+        self.run_cmd(MixCmd::SetPlaying { deck, playing });
     }
 
     /// Install or replace a grid. Frame conversion is deliberately done
     /// here, on the caller thread, before the callback sees the state.
     pub fn set_deck_splat(&self, deck: DeckId, grid: Arc<SplatGrid>) {
-        let mut state = self.state.lock().unwrap();
-        let voice = &mut state.decks[deck.index()];
-        let Some(pcm) = voice.pcm.as_ref() else { return };
-        let frames = SplatFrames::from_grid(&grid, pcm.sample_rate.max(1) as f64);
-        match voice.splat.as_mut() {
-            Some(splat) => {
-                splat.grid = grid;
-                splat.frames = frames;
+        self.ui.with(|ui| {
+            let shadow = ui.deck[deck.index()];
+            if !shadow.has_pcm {
+                return;
             }
-            None => voice.splat = Some(SplatState::new(grid, frames, voice.pos)),
-        }
-        self.publish_deck(&state, deck.index());
+            let frames = Box::new(SplatFrames::from_grid(&grid, shadow.sample_rate.max(1) as f64));
+            Self::send_in(&self.shared, ui, MixCmd::SetSplat { deck, grid, frames });
+        });
     }
 
     pub fn set_deck_splat_enabled(&self, deck: DeckId, on: bool) {
-        let mut state = self.state.lock().unwrap();
-        let voice = &mut state.decks[deck.index()];
-        let frame_count = voice.frame_count() as f64;
-        let Some(splat) = voice.splat.as_mut() else { return };
-        if on == splat.active {
-            return;
-        }
-        if on {
-            splat.master_frames = splat.bar_start_at_or_before(voice.pos).clamp(0.0, frame_count);
-            splat.active = true;
-            voice.stretching = false;
-            voice.reader.reset();
-        } else {
-            let master = splat.master_frames.clamp(0.0, frame_count);
-            splat.active = false;
-            voice.seek_frames(master);
-        }
-        self.publish_deck(&state, deck.index());
+        self.run_cmd(MixCmd::SetSplatEnabled { deck, on });
     }
 
     pub fn splat_launch(&self, deck: DeckId, row: SplatRow, col: u8, part: SplatPart) {
-        let mut state = self.state.lock().unwrap();
-        if let Some(splat) = state.decks[deck.index()].splat.as_mut() {
-            splat.queue_cell(row, col as usize, part);
-        }
-        self.publish_deck(&state, deck.index());
+        self.run_cmd(MixCmd::SplatLaunch { deck, row, col, part });
     }
 
     pub fn splat_stop_row(&self, deck: DeckId, row: SplatRow, timed: bool) {
-        let mut state = self.state.lock().unwrap();
-        if let Some(splat) = state.decks[deck.index()].splat.as_mut() {
-            splat.queue_stop(row, timed);
-        }
-        self.publish_deck(&state, deck.index());
+        self.run_cmd(MixCmd::SplatStopRow { deck, row, timed });
     }
 
     /// Launch a whole section: every STEM row of the column. The mix row is
     /// the undemixed track and never plays under its own stems.
     pub fn splat_launch_scene(&self, deck: DeckId, col: u8) {
-        let mut state = self.state.lock().unwrap();
-        if let Some(splat) = state.decks[deck.index()].splat.as_mut() {
-            for row in SplatRow::ALL {
-                if row == SplatRow::Mix {
-                    continue;
-                }
-                splat.queue_cell(row, col as usize, SplatPart::WHOLE);
-            }
-        }
-        self.publish_deck(&state, deck.index());
+        self.run_cmd(MixCmd::SplatLaunchScene { deck, col });
     }
 
     pub fn splat_stop_all(&self, deck: DeckId, timed: bool) {
-        let mut state = self.state.lock().unwrap();
-        if let Some(splat) = state.decks[deck.index()].splat.as_mut() {
-            for row in SplatRow::ALL {
-                splat.queue_stop(row, timed);
-            }
-        }
-        self.publish_deck(&state, deck.index());
+        self.run_cmd(MixCmd::SplatStopAll { deck, timed });
     }
 
+    /// A fraction of the track as the strip shows it — its EXPECTED length
+    /// while it is still decoding — clamped by the callback to what has
+    /// arrived, so a jump past the decoded edge waits there.
     pub fn seek_deck_fraction(&self, deck: DeckId, fraction: f64) {
-        let Some(fraction) = knob64(fraction, 0.0, 1.0) else { return };
-        let mut s = self.state.lock().unwrap();
-        let d = &mut s.decks[deck.index()];
-        let len = d.frame_count() as f64;
-        if len > 0.0 {
-            let from = d.playhead_frames();
-            d.seek_frames(fraction * len);
-            d.arm_seek_fade(from);
-        }
-        self.publish_deck(&s, deck.index());
+        self.run_cmd(MixCmd::SeekFraction { deck, fraction });
     }
 
     /// Absolute seek in source seconds.
     pub fn seek_deck_seconds(&self, deck: DeckId, secs: f64) {
-        let mut s = self.state.lock().unwrap();
-        let d = &mut s.decks[deck.index()];
-        let Some(pcm) = d.pcm.as_ref() else { return };
-        let Some(secs) = knob64(secs, 0.0, f64::from(u32::MAX)) else { return };
-        let frames = secs * pcm.sample_rate.max(1) as f64;
-        let from = d.playhead_frames();
-        d.seek_frames(frames);
-        // A deliberate move cancels the promise a pause made to put the
-        // playhead back where the button was pressed. Without this a seek
-        // arriving while a pause is still fading -- CUE returning to its
-        // mark is exactly that -- is undone the moment the fade lands.
-        d.pause_at = None;
-        d.arm_seek_fade(from);
-        self.publish_deck(&s, deck.index());
-    }
-
-    /// Arm or release SLIP.
-    ///
-    /// Arming latches a ghost at the playhead with the rate it is running
-    /// at; releasing lands the deck on wherever the ghost got to, unless
-    /// the operator asked to keep what they scratched. The landing goes
-    /// through the ordinary seek, so it takes the same 5 ms blend every
-    /// commanded jump does and cannot click.
-    pub fn set_deck_slip(&self, deck: DeckId, on: bool, adopt: bool) {
-        let mut s = self.state.lock().unwrap();
-        let d = &mut s.decks[deck.index()];
-        if on {
-            if !self.arm_ghost(d) {
-                return;
-            }
-            self.publish_deck(&s, deck.index());
-            return;
-        }
-        let Some(ghost) = d.slip.take() else { return };
-        if !adopt {
-            let from = d.playhead_frames();
-            d.seek_frames(ghost.pos);
-            d.pause_at = None;
-            d.arm_seek_fade(from);
-        }
-        self.publish_deck(&s, deck.index());
-    }
-
-    /// Latch a ghost at the playhead with the rate it is running at.
-    ///
-    /// One ghost, two ways to arm it: the SLIP latch and the reverse hold.
-    /// Returns whether THIS call armed one — false when a ghost was
-    /// already there, and false when there is nothing to latch.
-    fn arm_ghost(&self, d: &mut DeckVoice) -> bool {
-        if d.slip.is_some() {
-            return false;
-        }
-        let Some(pcm) = d.pcm.as_ref() else { return false };
-        let device = f64::from_bits(self.device_rate_bits.load(Ordering::Acquire));
-        // Before the first callback there is no device rate to latch a step
-        // from, and a ghost that cannot move is worse than none.
-        if !(device > 0.0) {
-            return false;
-        }
-        let natural = pcm.sample_rate as f64 / device;
-        d.slip = Some(Ghost {
-            pos: d.playhead_frames(),
-            step: natural * d.rate.current() as f64,
-            span: d.loop_span,
-        });
-        true
-    }
-
-    /// The record's published beat grid, or none. Stored as given: the
-    /// engine sends its own `true_grid`, so a synthetic grid with no
-    /// beats never reaches here and the filter lives in one place.
-    ///
-    /// While a load is parked the grid is parked with it, because it
-    /// belongs to the record on its way IN and the swap would otherwise
-    /// throw it away. The snapshot is republished so the clock is honest
-    /// in the same tick rather than one buffer later.
-    pub fn set_deck_grid(&self, deck: DeckId, grid: Option<TrackGrid>) {
-        let mut s = self.state.lock().unwrap();
-        let index = deck.index();
-        let d = &mut s.decks[index];
-        match d.pending.as_mut() {
-            Some(load) => load.grid = grid,
-            None => {
-                d.grid = grid;
-                let platter = deck_platter(d);
-                let pos_secs = d
-                    .pcm
-                    .as_ref()
-                    .map(|pcm| d.playhead_frames() / pcm.sample_rate.max(1) as f64)
-                    .unwrap_or(0.0);
-                d.clock = DeckClock::at(d.grid.as_ref(), pos_secs, platter, 0.0);
-            }
-        }
-        self.publish_deck(&s, index);
-    }
-
-    /// How hard this deck's sweep rings at its corner.
-    pub fn set_deck_resonance(&self, deck: DeckId, lift: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.eq_mut().set_resonance(lift);
-    }
-
-    /// The echo's rung: whole, half or quarter beat, or none for off. A
-    /// bad fraction (either side zero) is refused rather than let through
-    /// to divide by it.
-    pub fn set_deck_echo(&self, deck: DeckId, fraction: Option<(u32, u32)>) {
-        if fraction.is_some_and(|(num, den)| num == 0 || den == 0) {
-            return;
-        }
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.echo_mut().set_fraction(fraction);
-    }
-
-    /// How much of a repeat feeds the next one.
-    pub fn set_deck_echo_feedback(&self, deck: DeckId, feedback: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.echo_mut().set_feedback(feedback);
-    }
-
-    /// Whether a repeat lands on the other channel from the one before it.
-    pub fn set_deck_echo_pingpong(&self, deck: DeckId, on: bool) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.echo_mut().set_pingpong(on);
-    }
-
-    /// The flanger's on/off switch.
-    pub fn set_deck_flanger(&self, deck: DeckId, on: bool) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.flanger_mut().set_wet(if on { 1.0 } else { 0.0 });
-    }
-
-    /// The flanger LFO's sweep speed, in Hz.
-    pub fn set_deck_flanger_rate(&self, deck: DeckId, hz: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.flanger_mut().set_rate(hz);
-    }
-
-    /// How far the flanger's sweep reaches from its centre delay.
-    pub fn set_deck_flanger_depth(&self, deck: DeckId, depth: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.flanger_mut().set_depth(depth);
-    }
-
-    /// How much of the flanger's delayed tap feeds back into its line.
-    pub fn set_deck_flanger_feedback(&self, deck: DeckId, feedback: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.flanger_mut().set_feedback(feedback);
-    }
-
-    /// Which rung of the sync ladder the flanger sweep runs on: free-running,
-    /// or eighths of a cycle per beat.
-    pub fn set_deck_flanger_sync_units(&self, deck: DeckId, units: u32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.flanger_mut().set_sync_units(units);
-    }
-
-    /// Where in the cycle the flanger sweep starts when it engages, 0..1.
-    pub fn set_deck_flanger_beat_offset(&self, deck: DeckId, offset: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.flanger_mut().set_beat_offset(offset);
-    }
-
-    /// The bitcrusher's on/off switch.
-    pub fn set_deck_bitcrusher(&self, deck: DeckId, on: bool) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.bitcrusher_mut().set_wet(if on { 1.0 } else { 0.0 });
-    }
-
-    /// How often the bitcrusher's hold captures a fresh sample, in Hz.
-    pub fn set_deck_bitcrusher_rate(&self, deck: DeckId, hz: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.bitcrusher_mut().set_rate(hz);
-    }
-
-    /// The bitcrusher's quantizer bit depth.
-    pub fn set_deck_bitcrusher_bits(&self, deck: DeckId, bits: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.bitcrusher_mut().set_bits(bits);
-    }
-
-    /// The tremolo's on/off switch.
-    pub fn set_deck_tremolo(&self, deck: DeckId, on: bool) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.tremolo_mut().set_wet(if on { 1.0 } else { 0.0 });
-    }
-
-    /// The tremolo LFO's speed, in Hz.
-    pub fn set_deck_tremolo_rate(&self, deck: DeckId, hz: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.tremolo_mut().set_rate(hz);
-    }
-
-    /// The tremolo LFO's swing.
-    pub fn set_deck_tremolo_depth(&self, deck: DeckId, depth: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.tremolo_mut().set_depth(depth);
-    }
-
-    /// Which rung of the sync ladder the tremolo runs on: free-running,
-    /// or eighths of a cycle per beat.
-    pub fn set_deck_tremolo_sync_units(&self, deck: DeckId, units: u32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.tremolo_mut().set_sync_units(units);
-    }
-
-    /// Where in the cycle the tremolo starts when it engages, 0..1.
-    pub fn set_deck_tremolo_beat_offset(&self, deck: DeckId, offset: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.tremolo_mut().set_beat_offset(offset);
-    }
-
-    /// The distortion's on/off switch.
-    pub fn set_deck_distortion(&self, deck: DeckId, on: bool) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.distortion_mut().set_wet(if on { 1.0 } else { 0.0 });
-    }
-
-    /// The distortion's pre-gain into the soft clip.
-    pub fn set_deck_distortion_drive(&self, deck: DeckId, drive: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.distortion_mut().set_drive(drive);
-    }
-
-    /// The phaser's on/off switch.
-    pub fn set_deck_phaser(&self, deck: DeckId, on: bool) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.phaser_mut().set_wet(if on { 1.0 } else { 0.0 });
-    }
-
-    /// The phaser LFO's sweep speed, in Hz.
-    pub fn set_deck_phaser_rate(&self, deck: DeckId, hz: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.phaser_mut().set_rate(hz);
-    }
-
-    /// How much of the phaser's own output feeds back into its first
-    /// stage.
-    pub fn set_deck_phaser_feedback(&self, deck: DeckId, feedback: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.phaser_mut().set_feedback(feedback);
-    }
-
-    /// Which rung of the sync ladder the phaser sweep runs on: free-running,
-    /// or eighths of a cycle per beat.
-    pub fn set_deck_phaser_sync_units(&self, deck: DeckId, units: u32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.phaser_mut().set_sync_units(units);
-    }
-
-    /// Where in the cycle the phaser sweep starts when it engages, 0..1.
-    pub fn set_deck_phaser_beat_offset(&self, deck: DeckId, offset: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.phaser_mut().set_beat_offset(offset);
-    }
-
-    /// The autopan's on/off switch.
-    pub fn set_deck_autopan(&self, deck: DeckId, on: bool) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.autopan_mut().set_wet(if on { 1.0 } else { 0.0 });
-    }
-
-    /// The compressor's on/off switch.
-    pub fn set_deck_compressor(&self, deck: DeckId, on: bool) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.compressor_mut().set_wet(if on { 1.0 } else { 0.0 });
-    }
-
-    /// Where the compressor starts working, in decibels below full scale.
-    pub fn set_deck_compressor_threshold(&self, deck: DeckId, db: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.compressor_mut().set_threshold_db(db);
-    }
-
-    /// How hard it works above that.
-    pub fn set_deck_compressor_ratio(&self, deck: DeckId, ratio: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.compressor_mut().set_ratio(ratio);
-    }
-
-    /// The autopan LFO's sweep speed, in Hz.
-    pub fn set_deck_autopan_rate(&self, deck: DeckId, hz: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.autopan_mut().set_rate(hz);
-    }
-
-
-    /// The echo's wet/dry mix, 0 = inaudible, 1 = all of it.
-    pub fn set_deck_echo_mix(&self, deck: DeckId, mix: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(2).set_mix(mix);
-    }
-
-    /// What the echo's slot does about the level it returns.
-    pub fn set_deck_echo_level_mode(&self, deck: DeckId, mode: LevelMode) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(2).set_mode(mode);
-    }
-
-    /// The amplitude the echo's slot holds under when it is on Ceiling.
-    pub fn set_deck_echo_ceiling(&self, deck: DeckId, ceiling: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(2).set_ceiling(ceiling);
-    }
-    /// The flanger's wet/dry mix, 0 = inaudible, 1 = all of it.
-    pub fn set_deck_flanger_mix(&self, deck: DeckId, mix: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(3).set_mix(mix);
-    }
-
-    /// What the flanger's slot does about the level it returns.
-    pub fn set_deck_flanger_level_mode(&self, deck: DeckId, mode: LevelMode) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(3).set_mode(mode);
-    }
-
-    /// The amplitude the flanger's slot holds under when it is on Ceiling.
-    pub fn set_deck_flanger_ceiling(&self, deck: DeckId, ceiling: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(3).set_ceiling(ceiling);
-    }
-    /// The bitcrusher's wet/dry mix, 0 = inaudible, 1 = all of it.
-    pub fn set_deck_bitcrusher_mix(&self, deck: DeckId, mix: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(4).set_mix(mix);
-    }
-
-    /// What the bitcrusher's slot does about the level it returns.
-    pub fn set_deck_bitcrusher_level_mode(&self, deck: DeckId, mode: LevelMode) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(4).set_mode(mode);
-    }
-
-    /// The amplitude the bitcrusher's slot holds under when it is on Ceiling.
-    pub fn set_deck_bitcrusher_ceiling(&self, deck: DeckId, ceiling: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(4).set_ceiling(ceiling);
-    }
-    /// The tremolo's wet/dry mix, 0 = inaudible, 1 = all of it.
-    pub fn set_deck_tremolo_mix(&self, deck: DeckId, mix: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(5).set_mix(mix);
-    }
-
-    /// What the tremolo's slot does about the level it returns.
-    pub fn set_deck_tremolo_level_mode(&self, deck: DeckId, mode: LevelMode) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(5).set_mode(mode);
-    }
-
-    /// The amplitude the tremolo's slot holds under when it is on Ceiling.
-    pub fn set_deck_tremolo_ceiling(&self, deck: DeckId, ceiling: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(5).set_ceiling(ceiling);
-    }
-    /// The distortion's wet/dry mix, 0 = inaudible, 1 = all of it.
-    pub fn set_deck_distortion_mix(&self, deck: DeckId, mix: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(6).set_mix(mix);
-    }
-
-    /// What the distortion's slot does about the level it returns.
-    pub fn set_deck_distortion_level_mode(&self, deck: DeckId, mode: LevelMode) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(6).set_mode(mode);
-    }
-
-    /// The amplitude the distortion's slot holds under when it is on Ceiling.
-    pub fn set_deck_distortion_ceiling(&self, deck: DeckId, ceiling: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(6).set_ceiling(ceiling);
-    }
-    /// The phaser's wet/dry mix, 0 = inaudible, 1 = all of it.
-    pub fn set_deck_phaser_mix(&self, deck: DeckId, mix: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(7).set_mix(mix);
-    }
-
-    /// What the phaser's slot does about the level it returns.
-    pub fn set_deck_phaser_level_mode(&self, deck: DeckId, mode: LevelMode) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(7).set_mode(mode);
-    }
-
-    /// The amplitude the phaser's slot holds under when it is on Ceiling.
-    pub fn set_deck_phaser_ceiling(&self, deck: DeckId, ceiling: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(7).set_ceiling(ceiling);
-    }
-    /// The autopan's wet/dry mix, 0 = inaudible, 1 = all of it.
-    pub fn set_deck_autopan_mix(&self, deck: DeckId, mix: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(8).set_mix(mix);
-    }
-
-    /// What the autopan's slot does about the level it returns.
-    pub fn set_deck_autopan_level_mode(&self, deck: DeckId, mode: LevelMode) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(8).set_mode(mode);
-    }
-
-    /// The amplitude the autopan's slot holds under when it is on Ceiling.
-    pub fn set_deck_autopan_ceiling(&self, deck: DeckId, ceiling: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(8).set_ceiling(ceiling);
-    }
-    /// The stereo width's wet/dry mix, 0 = inaudible, 1 = all of it.
-    pub fn set_deck_stereo_width_mix(&self, deck: DeckId, mix: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(9).set_mix(mix);
-    }
-
-    /// What the stereo width's slot does about the level it returns.
-    pub fn set_deck_stereo_width_level_mode(&self, deck: DeckId, mode: LevelMode) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(9).set_mode(mode);
-    }
-
-    /// The amplitude the stereo width's slot holds under when it is on Ceiling.
-    pub fn set_deck_stereo_width_ceiling(&self, deck: DeckId, ceiling: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(9).set_ceiling(ceiling);
-    }
-    /// The plate reverb's wet/dry mix, 0 = inaudible, 1 = all of it.
-    pub fn set_deck_plate_reverb_mix(&self, deck: DeckId, mix: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(10).set_mix(mix);
-    }
-
-    /// What the plate reverb's slot does about the level it returns.
-    pub fn set_deck_plate_reverb_level_mode(&self, deck: DeckId, mode: LevelMode) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(10).set_mode(mode);
-    }
-
-    /// The amplitude the plate reverb's slot holds under when it is on Ceiling.
-    pub fn set_deck_plate_reverb_ceiling(&self, deck: DeckId, ceiling: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(10).set_ceiling(ceiling);
-    }
-    /// The ladder filter's wet/dry mix, 0 = inaudible, 1 = all of it.
-    pub fn set_deck_moog_ladder_mix(&self, deck: DeckId, mix: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(11).set_mix(mix);
-    }
-
-    /// What the ladder filter's slot does about the level it returns.
-    pub fn set_deck_moog_ladder_level_mode(&self, deck: DeckId, mode: LevelMode) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(11).set_mode(mode);
-    }
-
-    /// The amplitude the ladder filter's slot holds under when it is on Ceiling.
-    pub fn set_deck_moog_ladder_ceiling(&self, deck: DeckId, ceiling: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.level_mut(11).set_ceiling(ceiling);
-    }
-    /// The policy every slot that has not been pinned follows.
-    pub fn set_deck_level_default(&self, deck: DeckId, mode: LevelMode) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.set_level_default(mode);
-    }
-    /// Which rung of the sync ladder the autopan swing runs on: free-running,
-    /// or eighths of a cycle per beat.
-    pub fn set_deck_autopan_sync_units(&self, deck: DeckId, units: u32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.autopan_mut().set_sync_units(units);
-    }
-
-    /// Where in the cycle the autopan swing starts when it engages, 0..1.
-    pub fn set_deck_autopan_beat_offset(&self, deck: DeckId, offset: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.autopan_mut().set_beat_offset(offset);
-    }
-
-    /// The stereo width's on/off switch.
-    pub fn set_deck_stereo_width(&self, deck: DeckId, on: bool) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.stereo_width_mut().set_wet(if on { 1.0 } else { 0.0 });
-    }
-
-    /// How far the side signal is scaled: 0 collapses to mono, 1 is the
-    /// original image, above 1 widens further.
-    pub fn set_deck_stereo_width_amount(&self, deck: DeckId, width: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.stereo_width_mut().set_width(width);
-    }
-
-    /// The plate reverb's on/off switch.
-    pub fn set_deck_plate_reverb(&self, deck: DeckId, on: bool) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.plate_reverb_mut().set_wet(if on { 1.0 } else { 0.0 });
-    }
-
-    /// How long the reverb tank's tail rings.
-    pub fn set_deck_plate_reverb_size(&self, deck: DeckId, size: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.plate_reverb_mut().set_size(size);
-    }
-
-    /// The Moog ladder's on/off switch.
-    pub fn set_deck_moog_ladder(&self, deck: DeckId, on: bool) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.moog_ladder_mut().set_wet(if on { 1.0 } else { 0.0 });
-    }
-
-    /// Where the ladder starts rolling off, in Hz.
-    pub fn set_deck_moog_ladder_cutoff(&self, deck: DeckId, hz: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.moog_ladder_mut().set_cutoff(hz);
-    }
-
-    /// How much of the last stage feeds back into the first.
-    pub fn set_deck_moog_ladder_resonance(&self, deck: DeckId, resonance: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.moog_ladder_mut().set_resonance(resonance);
-    }
-
-    /// Momentary FREEZE: while held, the deck repeats a beat-sized
-    /// capture of what it just played, post-filter, while the record
-    /// itself keeps running underneath. `secs` is at the DEVICE --
-    /// already the engine's heard-beat seconds -- and `None` releases.
-    ///
-    /// Refuses on an empty or stopped deck (nothing worth repeating)
-    /// and before any callback has run, the same two guards `arm_ghost`
-    /// checks for its own latch: there is no device rate yet to turn a
-    /// seconds value into a ring length.
-    pub fn set_deck_freeze(&self, deck: DeckId, secs: Option<f64>) {
-        let mut s = self.state.lock().unwrap();
-        let index = deck.index();
-        let d = &mut s.decks[index];
-        match secs {
-            Some(secs) => {
-                if d.pcm.is_none() || !d.playing {
-                    return;
-                }
-                let device = f64::from_bits(self.device_rate_bits.load(Ordering::Acquire));
-                if !(device > 0.0) {
-                    return;
-                }
-                let Some(source_secs) = knob64(secs, 0.0, 60.0) else { return };
-                // Source seconds become output seconds through the
-                // platter's OWN rate, off the clock the callback keeps:
-                // under a hand, a motor or a reverse hold that is the
-                // number that matters, and the tempo fader is not it. A
-                // stopped platter has no beat arriving to be the size of,
-                // so it falls back to unity rather than dividing by zero.
-                let platter = d.clock.platter_rate.abs();
-                let secs = match platter > 1e-6 {
-                    true => source_secs / platter,
-                    false => source_secs,
-                };
-                let Some(secs) = knob64(secs, 0.0, 60.0) else { return };
-                d.chain.freeze_mut().hold((secs * device) as usize, device as f32);
-            }
-            None => d.chain.freeze_mut().release(),
-        }
-        self.publish_deck(&s, index);
-    }
-
-    /// Which deck's grid the master chain's beat-locked effects follow.
-    /// The mix has no tempo of its own, so it borrows one.
-    pub fn set_master_clock_deck(&self, deck: DeckId) {
-        self.state.lock().unwrap().master_clock_deck = deck.index();
-    }
-
-    /// The master chain's on/off for one effect, by the same slot index
-    /// the deck chains use.
-    pub fn set_master_effect(&self, slot: usize, on: bool) {
-        let mut s = self.state.lock().unwrap();
-        let wet = if on { 1.0 } else { 0.0 };
-        match slot {
-            // The echo has no wet of its own: its fraction IS its
-            // switch, off being no fraction at all.
-            2 => s.master_chain.echo_mut().set_fraction(on.then_some((1, 2))),
-            3 => s.master_chain.flanger_mut().set_wet(wet),
-            5 => s.master_chain.tremolo_mut().set_wet(wet),
-            6 => s.master_chain.distortion_mut().set_wet(wet),
-            7 => s.master_chain.phaser_mut().set_wet(wet),
-            8 => s.master_chain.autopan_mut().set_wet(wet),
-            9 => s.master_chain.stereo_width_mut().set_wet(wet),
-            10 => s.master_chain.plate_reverb_mut().set_wet(wet),
-            11 => s.master_chain.moog_ladder_mut().set_wet(wet),
-            _ => {}
-        }
-    }
-
-    /// One master slot's wet/dry mix.
-    pub fn set_master_mix(&self, slot: usize, mix: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.master_chain.level_mut(slot.min(DECK_CHAIN_SLOTS - 1)).set_mix(mix);
-    }
-
-    /// What one master slot does about the level it returns.
-    pub fn set_master_level_mode(&self, slot: usize, mode: LevelMode) {
-        let mut s = self.state.lock().unwrap();
-        s.master_chain.level_mut(slot.min(DECK_CHAIN_SLOTS - 1)).set_mode(mode);
-    }
-
-    /// Whether any master effect is sounding at all.
-    #[cfg(test)]
-    pub fn master_chain_engaged(&self) -> bool {
-        let mut s = self.state.lock().unwrap();
-        (0..DECK_CHAIN_SLOTS).any(|slot| s.master_chain.slot_engaged(slot))
-    }
-
-    /// How far the master and the cue busses run behind the mix, in
-    /// frames: the limiter's look-ahead, which it spends being already
-    /// ducked when a peak arrives rather than ducking on top of it.
-    ///
-    /// Anything lining the output up against what went into it has to
-    /// allow for this -- the tests below do, and a DAC-referenced
-    /// playhead would have to as well.
-    pub fn output_latency_frames(&self) -> usize {
-        self.state.lock().unwrap().limiter.latency_frames()
-    }
-
-    /// Whether this deck's FREEZE is sounding right now -- held, or
-    /// still crossfading out of one.
-    pub fn deck_frozen(&self, deck: DeckId) -> bool {
-        self.state.lock().unwrap().decks[deck.index()].chain.freeze_mut().held()
-    }
-
-    /// How long the lap it is holding actually came out, in frames.
-    #[cfg(test)]
-    pub fn deck_freeze_lap(&self, deck: DeckId) -> Option<usize> {
-        self.state.lock().unwrap().decks[deck.index()].chain.freeze_mut().lap_frames()
-    }
-
-    /// The reverse hold: the record runs backwards while it is held, and a
-    /// ghost keeps the place it should have reached.
-    ///
-    /// Letting go lands the deck on the ghost through the ordinary seek, so
-    /// it takes the same blend every commanded jump does. The hand-back is
-    /// deliberately shorter than that blend, so no tail of reversed audio
-    /// pokes out past the landing.
-    pub fn set_deck_censor(&self, deck: DeckId, on: bool) {
-        let mut s = self.state.lock().unwrap();
-        let d = &mut s.decks[deck.index()];
-        if on {
-            // A hand on the record outranks a motor.
-            if d.scratch.held() {
-                return;
-            }
-            // Armed ONCE: asking twice would arm a ghost and then report
-            // that it had not, and every hold would leak the one it made.
-            let armed = self.arm_ghost(d);
-            // With nothing to return to, a reverse hold is just a scratch.
-            if !armed && d.slip.is_none() {
-                return;
-            }
-            d.censor_owns_slip = armed;
-            d.scratch.motor(
-                d.rate.current(),
-                CENSOR_RATE,
-                CENSOR_FLIP_SECS,
-                MotorEnd::Hold,
-            );
-            self.publish_deck(&s, deck.index());
-            return;
-        }
-        if !d.scratch.motoring() {
-            return;
-        }
-        d.scratch.release_over(d.rate.current(), CENSOR_RETURN_SECS);
-        // The same three lines the slip release uses: land on the ghost
-        // under the seek blend.
-        if let Some(ghost) = d.slip.as_ref().map(|g| g.pos) {
-            let from = d.playhead_frames();
-            d.seek_frames(ghost);
-            d.pause_at = None;
-            d.arm_seek_fade(from);
-        }
-        if d.censor_owns_slip {
-            d.slip = None;
-            d.censor_owns_slip = false;
-        }
-        self.publish_deck(&s, deck.index());
-    }
-
-    /// A motor gesture on the platter: the deck stops or starts like a
-    /// record rather than like a switch.
-    pub fn spin_deck(&self, deck: DeckId, motion: SpinMotion) {
-        let mut s = self.state.lock().unwrap();
-        let d = &mut s.decks[deck.index()];
-        // A load waiting out a fade re-aims rather than being fought, the
-        // same way a plain play does.
-        if let Some(pending) = d.pending.as_mut() {
-            pending.play = matches!(motion, SpinMotion::SoftStart);
-            d.playing = pending.play;
-            self.publish_deck(&s, deck.index());
-            return;
-        }
-        let deck_rate = d.rate.current();
-        match motion {
-            SpinMotion::Brake | SpinMotion::SpinBack => {
-                d.playing = false;
-                // CLEARING THIS IS THE POINT. A stop normally hands back
-                // the frames its fade sounded, so the playhead stays where
-                // the button was pressed. A brake is the opposite: the
-                // record travelled while it wound down, and it stays where
-                // it stopped.
-                d.pause_at = None;
-                d.ended = false;
-                let (target, secs, end, total) = match motion {
-                    SpinMotion::SpinBack => (
-                        SPINBACK_PEAK,
-                        SPINBACK_THROW_SECS,
-                        MotorEnd::Then(0.0, SPINBACK_FALL_SECS),
-                        SPINBACK_THROW_SECS + SPINBACK_FALL_SECS,
-                    ),
-                    _ => (0.0, BRAKE_SECS, MotorEnd::Retire, BRAKE_SECS),
-                };
-                d.scratch.motor(deck_rate, target, secs, end);
-                // The gain falls as the pitch does, so the record is silent
-                // exactly when it has stopped rather than before it.
-                d.transport.slew(0.0, total);
-            }
-            SpinMotion::SoftStart => {
-                d.playing = true;
-                d.ended = false;
-                d.pause_at = None;
-                d.scratch.spin_up_from(0.0, deck_rate, SOFT_START_SECS);
-                d.transport.slew(1.0, SLEW_SECS);
-            }
-        }
-        self.publish_deck(&s, deck.index());
-    }
-
-    /// Latch a ghost for a roll about to engage.
-    ///
-    /// The ghost wraps through whatever span was running when this level
-    /// engaged, so a roll held over another returns into the one beneath
-    /// it rather than to where the record was before either.
-    pub fn push_deck_roll(&self, deck: DeckId) -> bool {
-        let mut s = self.state.lock().unwrap();
-        let d = &mut s.decks[deck.index()];
-        let Some(pcm) = d.pcm.as_ref() else { return false };
-        let device = f64::from_bits(self.device_rate_bits.load(Ordering::Acquire));
-        // Before the first callback there is no device rate to latch a step
-        // from, and a ghost that cannot move is worse than none.
-        if !(device > 0.0) {
-            return false;
-        }
-        let natural = pcm.sample_rate as f64 / device;
-        let ghost = Ghost {
-            pos: d.playhead_frames(),
-            step: natural * d.rate.current() as f64,
-            span: d.loop_span,
-        };
-        let pushed = d.rolls.push(ghost);
-        self.publish_deck(&s, deck.index());
-        pushed
-    }
-
-    /// Let one level of roll go: put the parent span back and land on the
-    /// ghost, in ONE lock.
-    ///
-    /// The two cannot be separate calls: either order leaves a buffer of
-    /// the wrong audio between them. The landing goes through the ordinary
-    /// seek blend, so the return cannot click.
-    pub fn pop_deck_roll(&self, deck: DeckId, parent: Option<(f64, f64)>, adopt: bool) {
-        let mut s = self.state.lock().unwrap();
-        let d = &mut s.decks[deck.index()];
-        if adopt {
-            // The loop now sounding is the deck's: every level under it
-            // stands down, and nothing goes back.
-            d.rolls.clear();
-            self.publish_deck(&s, deck.index());
-            return;
-        }
-        let Some(ghost) = d.rolls.pop() else { return };
-        let Some(pcm) = d.pcm.as_ref() else { return };
-        let rate = pcm.sample_rate.max(1) as f64;
-        let frames = pcm.frames.len() as f64;
-        d.loop_span =
-            parent.map(|(start, end)| (start.max(0.0) * rate, (end.max(0.0) * rate).min(frames)));
-        let from = d.playhead_frames();
-        d.seek_frames(ghost.pos);
-        d.pause_at = None;
-        d.arm_seek_fade(from);
-        self.publish_deck(&s, deck.index());
-    }
-
-    /// How many rolls this deck is holding.
-    pub fn deck_rolls(&self, deck: DeckId) -> usize {
-        self.state.lock().unwrap().decks[deck.index()].rolls.len
-    }
-
-    /// Whether SLIP is holding a ghost on this deck.
-    pub fn deck_slipping(&self, deck: DeckId) -> bool {
-        self.state.lock().unwrap().decks[deck.index()].slip.is_some()
+        self.run_cmd(MixCmd::SeekSeconds { deck, secs });
+    }
+
+    /// Relative seek: `delta_secs` from wherever the playhead is when the
+    /// command reaches the audio thread. The right shape for a phase
+    /// correction measured against a snapshot — the error survives the
+    /// trip, an absolute target does not.
+    pub fn nudge_deck_seconds(&self, deck: DeckId, delta_secs: f64) {
+        self.run_cmd(MixCmd::SeekRelative { deck, delta_secs });
     }
 
     /// Tempo multiplier. With key lock on the pitch is preserved; with it
     /// off the deck simply plays faster or slower.
     pub fn set_deck_rate(&self, deck: DeckId, rate: f64) {
-        let Some(rate) = knob64(rate, crate::decks::RATE_MIN, crate::decks::RATE_MAX) else {
-            return;
-        };
-        let rate = rate as f32;
-        // A short ramp so a sync landing mid-phrase does not step the pitch.
-        self.state.lock().unwrap().decks[deck.index()].rate.slew(rate, SLEW_SECS * 4.0);
+        let rate = rate.clamp(crate::decks::RATE_MIN, crate::decks::RATE_MAX);
+        self.ui.with(|ui| {
+            ui.deck[deck.index()].rate = rate;
+            Self::send_in(&self.shared, ui, MixCmd::SetRate { deck, rate: rate as f32 });
+        });
     }
 
+    /// A synced grid's first launch joins its running clock instead of
+    /// resetting it to the selected source cell.
+    pub fn set_deck_sync_lock(&self, deck: DeckId, on: bool) {
+        self.ui.with(|ui| {
+            if ui.deck[deck.index()].sync_locked != on {
+                ui.deck[deck.index()].sync_locked = on;
+                Self::send_in(&self.shared, ui, MixCmd::SetSyncLock { deck, on });
+            }
+        });
+    }
+
+    /// The tempo last asked for.
     pub fn deck_rate(&self, deck: DeckId) -> f64 {
-        self.state.lock().unwrap().decks[deck.index()].rate.target() as f64
+        self.ui.with(|ui| ui.deck[deck.index()].rate)
     }
 
     /// Key shift in SEMITONES: pitch without tempo. Stored as the frequency
     /// ratio it stands for, because the render loop wants a multiplier and
     /// an exp2 per frame would be a waste.
     pub fn set_deck_key_shift(&self, deck: DeckId, semitones: f64) {
-        let Some(semitones) =
-            knob64(semitones, -crate::decks::KEY_SHIFT_MAX, crate::decks::KEY_SHIFT_MAX)
-        else {
-            return;
-        };
+        let semitones = semitones.clamp(-crate::decks::KEY_SHIFT_MAX, crate::decks::KEY_SHIFT_MAX);
         let ratio = (semitones / 12.0).exp2() as f32;
-        // Same ramp as the tempo: a stepped semitone glides instead of
-        // clicking, and the stretcher sees a ratio that never jumps.
-        self.state.lock().unwrap().decks[deck.index()].key_ratio.slew(ratio, SLEW_SECS * 4.0);
+        self.run_cmd(MixCmd::SetKeyRatio { deck, ratio });
     }
 
     pub fn set_deck_keylock(&self, deck: DeckId, on: bool) {
-        self.state.lock().unwrap().decks[deck.index()].keylock = on;
+        self.run_cmd(MixCmd::SetKeylock { deck, on });
     }
 
     /// Vinyl-style pointer control over the playhead.
     pub fn scratch_deck(&self, deck: DeckId, motion: ScratchMotion) {
-        let mut s = self.state.lock().unwrap();
-        let d = &mut s.decks[deck.index()];
-        let deck_rate = d.rate.current();
-        match motion {
-            ScratchMotion::Grab => d.scratch.grab(deck_rate),
-            ScratchMotion::Move { secs, rate } => d.scratch.drag(secs, rate),
-            ScratchMotion::Release => d.scratch.release(deck_rate),
-        }
-        self.publish_deck(&s, deck.index());
+        self.run_cmd(MixCmd::Scratch { deck, motion });
     }
 
     /// One tone band, 0 = kill.
-    /// Where this deck's three bands are split. The corners glide to
-    /// where they are sent rather than jumping, so this can be moved
-    /// under a playing record.
-    pub fn set_deck_crossovers(&self, deck: DeckId, low_hz: f32, high_hz: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.eq_mut().set_crossovers(low_hz, high_hz);
-    }
-
-    /// And the same for the mix's own chain.
-    pub fn set_master_crossovers(&self, low_hz: f32, high_hz: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.master_chain.eq_mut().set_crossovers(low_hz, high_hz);
-    }
-
     pub fn set_deck_eq_band(&self, deck: DeckId, band: usize, gain: f32) {
-        self.state.lock().unwrap().decks[deck.index()].chain.eq_mut().set_band(band, gain);
+        self.run_cmd(MixCmd::SetEqBand { deck, band, gain });
     }
 
     /// Bipolar sweep filter; 0.5 = off.
     pub fn set_deck_filter(&self, deck: DeckId, position: f32) {
-        self.state.lock().unwrap().decks[deck.index()].chain.eq_mut().set_filter(position);
+        self.run_cmd(MixCmd::SetFilter { deck, position });
     }
 
     /// One stem lane's gain. Ramped, so a knob move never zippers.
@@ -3487,217 +2539,112 @@ impl Mixer {
         if stem >= STEM_COUNT {
             return;
         }
-        let Some(gain) = knob(gain, 0.0, crate::music_dsp::EQ_MAX_GAIN) else { return };
-        self.state.lock().unwrap().decks[deck.index()].stem_gain[stem]
-            .slew(gain, SLEW_SECS * 2.0);
+        self.run_cmd(MixCmd::SetStemGain { deck, stem, gain: gain.max(0.0) });
     }
 
-    /// The deck's loop in source SECONDS, converted here against the
+    /// The deck's loop in source SECONDS; the callback converts against the
     /// track's own rate so the render path only ever deals in frames.
-    /// Install a loop span, and do what the gesture MEANT for the playhead.
-    ///
-    /// The engine decides the intent from a position mirror the UI pump
-    /// refreshes twenty times a second; the head here is the real one,
-    /// sample by sample, so the decision is made against the truth rather
-    /// than guessed from a bare span.
-    pub fn set_deck_loop_span(
-        &self,
-        deck: DeckId,
-        span: Option<(f64, f64)>,
-        seek: crate::decks::LoopSeek,
-    ) {
-        let mut s = self.state.lock().unwrap();
-        let d = &mut s.decks[deck.index()];
-        let Some(pcm) = d.pcm.as_ref() else {
-            d.loop_span = None;
-            return;
-        };
-        let rate = pcm.sample_rate.max(1) as f64;
-        // Clamp OUT to the real frame count: the seconds->frames round trip
-        // can land a hair ABOVE it, and an OUT past the last frame lets the
-        // end-of-track check win over the wrap — a dead deck with LOOP lit.
-        let frames = pcm.frames.len() as f64;
-        // The span the head belonged to, taken before it is replaced.
-        let was = d.loop_span;
-        d.loop_span = span.map(|(start, end)| {
-            (start.max(0.0) * rate, (end.max(0.0) * rate).min(frames))
-        });
-        // A playhead stranded past the new OUT lands modulo NOW. The render
-        // wrap would catch it on the next callback anyway, but a PAUSED
-        // deck never renders — without this, a resize on a paused deck
-        // parks the playhead outside the span until play is pressed.
-        if let Some((start, end)) = d.loop_span {
-            let from = d.playhead_frames();
-            // Behind IN is folded forward only when the head BELONGED to
-            // the span that just changed. A head sitting behind a loop it
-            // was never in is playing its way into it, deliberately and
-            // audibly, and folding it would teleport it over the run-up --
-            // which is a rule this tab has and tests.
-            let belonged = matches!(seek, crate::decks::LoopSeek::Changed)
-                && was.is_some_and(|(old_start, old_end)| from >= old_start && from < old_end);
-            if from >= end || (belonged && from < start) {
-                d.seek_frames(wrapped_into_span(from, start, end));
-                // A live resize yanking a playing playhead is a jump like
-                // any other and gets the same blend.
-                d.arm_seek_fade(from);
-            }
-        }
-        self.publish_deck(&s, deck.index());
+    pub fn set_deck_loop_span(&self, deck: DeckId, span: Option<(f64, f64)>) {
+        self.run_cmd(MixCmd::SetLoopSpan { deck, span });
     }
 
     pub fn set_deck_mute(&self, deck: DeckId, muted: bool) {
-        self.state.lock().unwrap().decks[deck.index()]
-            .mute
-            .slew(if muted { 0.0 } else { 1.0 }, SLEW_SECS);
+        self.run_cmd(MixCmd::SetMute { deck, muted });
     }
 
     pub fn set_deck_gain(&self, deck: DeckId, gain: f32) {
-        self.state.lock().unwrap().decks[deck.index()].gain.slew(gain, SLEW_SECS);
+        self.run_cmd(MixCmd::SetGain { deck, gain });
     }
 
     pub fn swap_decks(&self) {
-        let mut s = self.state.lock().unwrap();
-        s.decks.swap(0, 1);
-        self.publish_deck(&s, 0);
-        self.publish_deck(&s, 1);
-    }
-
-    /// Put the record on `from` onto `to` as well, on the same sample.
-    ///
-    /// The playhead is read INSIDE the lock, which is the whole point: the
-    /// callback advances it while holding that lock, and any gap between
-    /// reading it and writing it is exactly what a flanged double sounds
-    /// like. The stretcher's overlap-add state travels for the same reason
-    /// -- a double is normally taken on a synced deck, so the stretcher is
-    /// live, and grain streams that start at different points in their
-    /// overlap beat against each other.
-    ///
-    /// The RECORD travels; the channel strip does not. The fader, the tone,
-    /// the filter and the stem knobs belong to the slot, not the track.
-    pub fn clone_deck(&self, from: DeckId, to: DeckId) {
-        if from == to {
-            return;
-        }
-        let mut s = self.state.lock().unwrap();
-        let (first, rest) = s.decks.split_at_mut(1);
-        let (src, dst) = if from.index() == 0 {
-            (&first[0], &mut rest[0])
-        } else {
-            (&rest[0], &mut first[0])
-        };
-        if src.pcm.is_none() {
-            return;
-        }
-        let at = src.playhead_frames();
-        dst.pcm = src.pcm.clone();
-        dst.stems = src.stems.clone();
-        dst.stem_seam = src.stem_seam;
-        // A splat grid is the other deck's launch state, not the record.
-        dst.splat = None;
-        // The beat grid IS the record's, and comes with it -- a double onto
-        // a deck with no grid would otherwise silence the double's clock.
-        dst.grid = src.grid;
-        dst.clock = src.clock;
-        dst.loop_span = src.loop_span;
-        dst.slip = None;
-        dst.pause_at = None;
-        dst.ended = false;
-        dst.playing = src.playing;
-        dst.transport = src.transport;
-        dst.rate = src.rate;
-        dst.key_ratio = src.key_ratio;
-        dst.keylock = src.keylock;
-        dst.seek_fade = None;
-        dst.seek_frames(at);
-        dst.stretch.copy_state_from(&src.stretch);
-        dst.stretching = src.stretching;
-        // The echo is the destination's own, like the EQ beside it, and
-        // is not copied -- but whatever the destination's line was still
-        // carrying from ITS previous record must not bleed into this
-        // one, so it is silenced the same way any other record change
-        // silences it.
-        dst.chain.echo_mut().silence();
-        // Same reasoning, same fix, for the freeze: the destination's
-        // own hold state is not the source's to inherit, but a stale
-        // ring must not carry forward into the record that just landed.
-        dst.chain.freeze_mut().reset();
-        dst.chain.flanger_mut().silence();
-        dst.chain.bitcrusher_mut().silence();
-        dst.chain.phaser_mut().reset();
-        dst.chain.plate_reverb_mut().silence();
-        dst.chain.moog_ladder_mut().reset();
-        let to_index = to.index();
-        self.publish_deck(&s, to_index);
+        self.ui.with(|ui| {
+            ui.deck.swap(0, 1);
+            Self::send_in(&self.shared, ui, MixCmd::SwapDecks);
+        });
     }
 
     pub fn set_crossfader(&self, position: f32) {
-        let Some(position) = knob(position, 0.0, 1.0) else { return };
-        self.state.lock().unwrap().fader.slew(position, SLEW_SECS);
+        self.run_cmd(MixCmd::SetCrossfader { position: position.clamp(0.0, 1.0), secs: SLEW_SECS });
     }
 
     pub fn fade_crossfader(&self, position: f32, secs: f32) {
-        let Some(position) = knob(position, 0.0, 1.0) else { return };
-        let Some(secs) = knob(secs, SLEW_SECS, 60.0) else { return };
-        self.state.lock().unwrap().fader.slew(position, secs);
+        self.run_cmd(MixCmd::SetCrossfader {
+            position: position.clamp(0.0, 1.0),
+            secs: secs.max(SLEW_SECS),
+        });
     }
 
     /// Where the crossfader actually is right now, mid-ramp included. The
     /// deck surface mirrors this while a timed fade runs, so the on-screen
     /// fader travels with the audio instead of teleporting to the target.
     pub fn crossfader_position(&self) -> f32 {
-        self.state.lock().unwrap().fader.current
+        self.snapshot().fader_current
     }
 
     /// The autopilot's blend overlay: multiplies the operator's values,
     /// never moves them. `clear_blend` is the whole restore.
     pub fn set_blend_band(&self, deck: DeckId, band: usize, gain: f32) {
-        self.state.lock().unwrap().decks[deck.index()].chain.eq_mut().set_blend_band(band, gain);
+        self.run_cmd(MixCmd::SetBlendBand { deck, band, gain });
     }
 
     pub fn set_blend_stem(&self, deck: DeckId, stem: usize, gain: f32) {
-        let Some(gain) = knob(gain, 0.0, 1.0) else { return };
         if stem >= STEM_COUNT {
             return;
         }
-        self.state.lock().unwrap().decks[deck.index()].blend_stem[stem]
-            .slew(gain, BLEND_SECS);
-    }
-
-    /// The autopilot's hand on the sweep filter, offset from the knob.
-    /// The strip's own clear_blend already lets it go with the bands.
-    pub fn set_blend_filter(&self, deck: DeckId, offset: f32) {
-        self.state.lock().unwrap().decks[deck.index()].chain.eq_mut().set_blend_filter(offset);
+        self.run_cmd(MixCmd::SetBlendStem { deck, stem, gain: gain.clamp(0.0, 1.0) });
     }
 
     pub fn clear_blend(&self, deck: DeckId) {
-        let mut s = self.state.lock().unwrap();
-        let d = &mut s.decks[deck.index()];
-        d.chain.eq_mut().clear_blend();
-        for ramp in &mut d.blend_stem {
-            ramp.slew(1.0, BLEND_SECS);
-        }
+        self.run_cmd(MixCmd::ClearBlend(deck));
     }
 
     pub fn set_curve(&self, curve: FadeCurve) {
-        self.state.lock().unwrap().curve = curve;
+        self.run_cmd(MixCmd::SetCurve(curve));
     }
 
     pub fn set_master(&self, gain: f32) {
-        let Some(gain) = knob(gain, 0.0, 1.2) else { return };
-        self.state.lock().unwrap().master.slew(gain, SLEW_SECS);
+        self.run_cmd(MixCmd::SetMaster(gain.clamp(0.0, 1.2)));
     }
 
     /// `(position_secs, duration_secs, playing)` from the device clock.
     pub fn deck_position(&self, deck: DeckId) -> (f64, f64, bool) {
-        let snapshot = self.deck_snapshots[deck.index()].read();
+        let snapshot = self.deck_snapshot(deck);
         (snapshot.position_secs, snapshot.duration_secs, snapshot.playing)
     }
 
-    /// Position, transport and splat state as of the last callback or the
-    /// last transport change, without the state lock: the per-frame UI path
-    /// never competes with the callback's `try_lock`.
+    /// Position, transport and splat state in one read. The duration is
+    /// the handle's own word (exact the moment a track installs); the
+    /// rest is the callback's last snapshot.
     pub fn deck_snapshot(&self, deck: DeckId) -> DeckSnapshot {
-        self.deck_snapshots[deck.index()].read()
+        self.deck_snapshots()[deck.index()]
+    }
+
+    /// Both playheads from one callback. Separate reads can straddle an
+    /// audio buffer and manufacture a phase error between aligned decks.
+    pub fn deck_snapshots(&self) -> [DeckSnapshot; 2] {
+        let shadows = self.ui.with(|ui| ui.deck);
+        let snapshot = self.snapshot();
+        std::array::from_fn(|i| Self::deck_snapshot_from(shadows[i], snapshot.decks[i]))
+    }
+
+    fn deck_snapshot_from(shadow: DeckShadow, snap: DeckSnap) -> DeckSnapshot {
+        if !shadow.has_pcm {
+            return DeckSnapshot {
+                position_secs: 0.0,
+                duration_secs: 0.0,
+                playing: false,
+                scratching: snap.scratching,
+                splat: None,
+            };
+        }
+        let rate = shadow.sample_rate.max(1) as f64;
+        DeckSnapshot {
+            position_secs: snap.playhead_frames / rate,
+            duration_secs: shadow.expected_len as f64 / rate,
+            playing: snap.playing,
+            scratching: snap.scratching,
+            splat: snap.splat,
+        }
     }
 
     /// Pre-fader peak levels for the two deck VU meters. `meters()` reports
@@ -3705,77 +2652,46 @@ impl Mixer {
     /// which is what an operator sets gain against.
     pub fn deck_levels(&self) -> [f32; 2] {
         [
-            f32::from_bits(self.deck_meters[0].load(Ordering::Relaxed)),
-            f32::from_bits(self.deck_meters[1].load(Ordering::Relaxed)),
+            f32::from_bits(self.shared.deck_meters[0].load(Ordering::Relaxed)),
+            f32::from_bits(self.shared.deck_meters[1].load(Ordering::Relaxed)),
         ]
     }
 
     /// True while a hand (or its release ramp) owns a deck's playhead.
     pub fn deck_scratching(&self, deck: DeckId) -> bool {
-        self.deck_snapshots[deck.index()].read().scratching
+        self.snapshot().decks[deck.index()].scratching
     }
 
     /// Decks that ran off their end (loop off) since the last drain.
     pub fn drain_ended_decks(&self) -> Vec<DeckId> {
-        std::mem::take(&mut self.state.lock().unwrap().ended_decks)
-    }
-
-    /// Free whatever a swap took off the decks.
-    ///
-    /// The other half of the callback's contract: the callback moves a
-    /// finished track out of the voice, and this is the thread that drops
-    /// it. Load-bearing — until it runs, the next swap on that deck waits
-    /// rather than freeing a decoded track on the audio thread.
-    pub fn reap_retired(&self) {
-        let retired = {
-            let mut s = self.state.lock().unwrap();
-            [s.decks[0].take_retired(), s.decks[1].take_retired()]
-        };
-        drop(retired);
+        self.pump();
+        self.ui.with(|ui| std::mem::take(&mut ui.ended_decks))
     }
 
     // ---- sfx voices ---------------------------------------------------------
 
     pub fn start_voice(&self, alloc: VoiceAlloc, pcm: Arc<TrackPcm>) {
-        let mut s = self.state.lock().unwrap();
-        s.sfx.push(SfxVoice {
-            id: alloc.id,
-            pad: alloc.pad,
-            pcm,
-            cursor_fp: 0,
-            loop_on: alloc.loop_on,
-            gain: Ramp::at(alloc.gain),
-            done: false,
-        });
+        self.run_cmd(MixCmd::StartVoice { alloc, pcm });
     }
 
     pub fn stop_voice(&self, id: VoiceId) {
-        let mut s = self.state.lock().unwrap();
-        // Fast declick: a stopped voice ramps out over one slew and is
-        // reaped by the render pass.
-        for v in s.sfx.iter_mut().filter(|v| v.id == id) {
-            v.loop_on = false;
-            v.gain.slew(0.0, SLEW_SECS);
-            v.done = true;
-        }
+        self.run_cmd(MixCmd::StopVoice(id));
     }
 
     pub fn set_pad_voices_gain(&self, pad: PadKey, gain: f32) {
-        let mut s = self.state.lock().unwrap();
-        for v in s.sfx.iter_mut().filter(|v| v.pad == pad && !v.done) {
-            v.gain.slew(gain, SLEW_SECS);
-        }
+        self.run_cmd(MixCmd::SetPadVoicesGain { pad, gain });
     }
 
     /// Voices that finished naturally (ran off the end, loop off).
     pub fn drain_ended_voices(&self) -> Vec<VoiceId> {
-        std::mem::take(&mut self.state.lock().unwrap().ended_voices)
+        self.pump();
+        self.ui.with(|ui| std::mem::take(&mut ui.ended_voices))
     }
 
     /// Current peak meters: `[master, video, deck_a, deck_b, sfx]`.
     pub fn meters(&self) -> [f32; 5] {
         let mut out = [0.0f32; 5];
-        for (i, m) in self.meters.iter().enumerate() {
+        for (i, m) in self.shared.meters.iter().enumerate() {
             out[i] = f32::from_bits(m.load(Ordering::Relaxed));
         }
         out
@@ -3784,207 +2700,804 @@ impl Mixer {
     // ---- the headphone cue bus ----------------------------------------------
 
     /// The ring the slot-1 (phones) callback drains. The callback holds
-    /// ONLY this — never the mix state, whose lock belongs to the program.
+    /// ONLY this — never the mix state, which belongs to the program.
     pub fn cue_ring(&self) -> Arc<CueRing> {
-        self.cue_ring.clone()
+        self.shared.cue_ring.clone()
     }
 
     /// Armed while a phones device is actually requested at slot 1: gates
     /// the producer, and an unarmed consumer outputs silence.
     pub fn set_cue_armed(&self, armed: bool) {
-        self.cue_ring.armed.store(armed, Ordering::Relaxed);
+        self.shared.cue_ring.armed.store(armed, Ordering::Relaxed);
     }
 
     pub fn set_phones_volume(&self, volume: f32) {
-        let Some(volume) = knob(volume, 0.0, 1.0) else { return };
-        self.cue_ring
+        self.shared
+            .cue_ring
             .volume_bits
-            .store(volume.to_bits(), Ordering::Relaxed);
+            .store(volume.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     }
 
     /// Route a deck into the phones. Cue follows the deck SLOT (the channel
     /// strip), not the record: `swap_decks` deliberately leaves it alone.
     pub fn set_deck_cue(&self, deck: DeckId, on: bool) {
-        self.state.lock().unwrap().cue_deck[deck.index()] = on;
+        self.ui.with(|ui| {
+            ui.cue_deck[deck.index()] = on;
+            Self::send_in(&self.shared, ui, MixCmd::SetDeckCue { deck, on });
+        });
     }
 
     pub fn deck_cue(&self, deck: DeckId) -> bool {
-        self.state.lock().unwrap().cue_deck[deck.index()]
+        self.ui.with(|ui| ui.cue_deck[deck.index()])
     }
 
     /// Which point of the chain the cue listens to. A hard switch, like
     /// the monitor-select toggle on hardware.
     pub fn set_cue_mode(&self, mode: CueMode) {
-        self.state.lock().unwrap().cue_mode = mode;
+        self.ui.with(|ui| {
+            ui.cue_mode = mode;
+            Self::send_in(&self.shared, ui, MixCmd::SetCueMode(mode));
+        });
     }
 
     pub fn cue_mode(&self) -> CueMode {
-        self.state.lock().unwrap().cue_mode
+        self.ui.with(|ui| ui.cue_mode)
     }
 
     /// Install (and by default start) the pre-listen player.
     pub fn install_preview(&self, pcm: Arc<TrackPcm>, autoplay: bool) {
-        let mut s = self.state.lock().unwrap();
-        s.preview.pcm = Some(pcm);
-        s.preview.cursor_fp = 0;
-        s.preview.ended = false;
-        s.preview.playing = autoplay;
-        s.preview.gain = Ramp::at(0.0);
-        if autoplay {
-            s.preview.gain.slew(1.0, SLEW_SECS);
-        }
+        self.run_cmd(MixCmd::InstallPreview { pcm, autoplay });
     }
 
-    /// Take the preview down and HAND BACK the pcm, so the (possibly huge)
-    /// buffer is dropped by the caller, outside this lock.
-    pub fn clear_preview(&self) -> Option<Arc<TrackPcm>> {
-        let mut s = self.state.lock().unwrap();
-        s.preview.playing = false;
-        s.preview.ended = false;
-        s.preview.cursor_fp = 0;
-        s.preview.gain = Ramp::at(0.0);
-        s.preview.pcm.take()
+    /// Take the preview down. The (possibly huge) buffer comes back through
+    /// the retired-payload path and is dropped on the UI thread.
+    pub fn clear_preview(&self) {
+        self.run_cmd(MixCmd::ClearPreview);
     }
 
     pub fn set_preview_playing(&self, playing: bool) {
-        let mut s = self.state.lock().unwrap();
-        if s.preview.pcm.is_none() {
-            return;
-        }
-        // Play on a parked player starts the track over — the player's one
-        // transport button should never be a dead end.
-        if playing && s.preview.ended {
-            s.preview.cursor_fp = 0;
-            s.preview.ended = false;
-        }
-        s.preview.playing = playing;
-        s.preview.gain.slew(if playing { 1.0 } else { 0.0 }, SLEW_SECS);
+        self.run_cmd(MixCmd::SetPreviewPlaying(playing));
     }
 
     pub fn seek_preview_fraction(&self, fraction: f64) {
-        let mut s = self.state.lock().unwrap();
-        let Some(pcm) = s.preview.pcm.as_ref() else { return };
-        let len = pcm.frames.len() as f64;
-        let frame = (fraction.clamp(0.0, 1.0) * len).clamp(0.0, (len - 1.0).max(0.0));
-        s.preview.cursor_fp = (frame * FP_ONE as f64) as u64;
-        s.preview.ended = false;
+        self.run_cmd(MixCmd::SeekPreviewFraction(fraction));
     }
 
     /// `(position_secs, duration_secs, playing, ended)` — the pre-listen
     /// mirror of `deck_position`. `None` while no preview is installed.
     pub fn preview_position(&self) -> Option<(f64, f64, bool, bool)> {
-        let s = self.state.lock().unwrap();
-        let p = &s.preview;
-        let pcm = p.pcm.as_ref()?;
-        let position =
-            p.cursor_fp as f64 / FP_ONE as f64 / pcm.sample_rate.max(1) as f64;
-        Some((position, pcm.seconds(), p.playing, p.ended))
+        let snapshot = self.snapshot();
+        snapshot.preview_installed.then_some((
+            snapshot.preview_position_secs,
+            snapshot.preview_duration_secs,
+            snapshot.preview_playing,
+            snapshot.preview_ended,
+        ))
+    }
+
+    // ---- clocked instrument rack + program mix ---------------------------
+
+    /// Keep the rack's modelled instruments on the physical device rate.
+    /// Construction happens here, on the UI thread; the callback only swaps
+    /// the completed box and returns the old one for UI-thread destruction.
+    pub fn ensure_synth_rate(&self, sample_rate: u32, patch: IronfishPatch) {
+        let sample_rate = sample_rate.clamp(8_000, 384_000);
+        let bank = self.ui.with(|ui| {
+            if ui.synth_rate == sample_rate {
+                return None;
+            }
+            ui.synth_rate = sample_rate;
+            Some(ui.drum_bank.clone())
+        });
+        if let Some(bank) = bank {
+            self.run_cmd(MixCmd::ReplaceSynthEngines(Box::new(SynthEngines::new(
+                sample_rate,
+                patch,
+                bank,
+            ))));
+        }
+    }
+
+    pub fn set_drum_bank(&self, bank: Arc<SampleBank>) {
+        self.ui.with(|ui| {
+            ui.drum_bank = Some(bank.clone());
+            Self::send_in(&self.shared, ui, MixCmd::SetDrumBank(bank));
+        });
+    }
+
+    pub fn set_synth_clock(&self, clock: SynthClock) {
+        self.run_cmd(MixCmd::SetSynthClock(clock));
+    }
+
+    pub fn set_synth_playing(&self, playing: bool) {
+        self.run_cmd(MixCmd::SetSynthPlaying(playing));
+    }
+
+    pub fn set_synth_pattern(&self, track: SynthTrack, pattern: StepPattern) {
+        self.run_cmd(MixCmd::SetSynthPattern { track, pattern });
+    }
+
+    pub fn set_ironfish_patch(&self, patch: IronfishPatch) {
+        self.run_cmd(MixCmd::SetIronfishPatch(patch));
+    }
+
+    pub fn set_ironfish_param(&self, param: IronfishParam, value: f32) {
+        self.run_cmd(MixCmd::SetIronfishParam { param, value });
+    }
+
+    pub fn set_strip_gain(&self, strip: StripId, gain: f32) {
+        self.run_cmd(MixCmd::SetStripGain { strip, gain });
+    }
+
+    pub fn set_strip_muted(&self, strip: StripId, muted: bool) {
+        self.run_cmd(MixCmd::SetStripMuted { strip, muted });
+    }
+
+    pub fn set_strip_soloed(&self, strip: StripId, soloed: bool) {
+        self.run_cmd(MixCmd::SetStripSoloed { strip, soloed });
+    }
+
+    pub fn set_master_dynamics(&self, params: MasterParams) {
+        self.run_cmd(MixCmd::SetMasterDynamics(params));
+    }
+
+    pub fn set_master_dynamics_param(&self, param: MasterParam, value: f32) {
+        self.run_cmd(MixCmd::SetMasterDynamicsParam { param, value });
+    }
+
+    pub fn set_master_dynamics_bypass(&self, bypass: bool) {
+        self.run_cmd(MixCmd::SetMasterDynamicsBypass(bypass));
+    }
+
+    pub fn synth_snapshot(&self) -> RackSnapshot {
+        self.snapshot().synth
+    }
+
+    pub fn program_mix_snapshot(
+        &self,
+    ) -> ([StripSnapshot; STRIP_COUNT], MasterSnapshot) {
+        let snapshot = self.snapshot();
+        (snapshot.strips, snapshot.master_fx)
     }
 
     // ---- loop-score preview ------------------------------------------------
 
-    /// Deliver a prepared resource to the state owned by the audio callback.
-    /// The short mutex handoff is the same path used by deck commands; the
-    /// callback itself still only `try_lock`s and never blocks.
-    pub fn run_cmd(&self, command: MixCmd) {
-        let retired = {
-            let mut state = self.state.lock().unwrap();
-            match command {
-                MixCmd::SetDrumBank(bank) => state.score_preview.set_drum_bank(bank),
-            }
-        };
-        // A replaced sample bank may own large buffers. Release its last Arc
-        // outside the shared audio-state lock.
-        drop(retired);
-    }
-
     /// Install and start a score preview. Instrument construction and event
-    /// capacity growth happen here on the caller/UI thread, never in render.
+    /// capacity growth happen here on the caller/UI thread, never in render;
+    /// what they replace comes back here to be dropped.
     pub fn score_preview_play(&self, sequence: Arc<PreviewSequence>) {
         let sample_rate = sequence.sample_rate.max(1);
         let needed = ScorePreviewVoice::required_event_capacity(&sequence);
-        let (rebuild, grow_events) = {
-            let state = self.state.lock().unwrap();
-            (
-                state.score_preview.sample_rate != sample_rate,
-                state.score_preview.piano_events.capacity() < needed,
-            )
-        };
-        let piano = rebuild.then(|| Box::new(Piano::new(sample_rate as f32)));
-        let events = grow_events.then(|| Vec::with_capacity(needed));
-        let mut state = self.state.lock().unwrap();
-        let retired_piano = piano.map(|piano| {
-            state.score_preview.replace_instruments(piano, sample_rate)
+        self.ui.with(|ui| {
+            let piano = (ui.score_rate != sample_rate).then(|| Box::new(Piano::new(sample_rate as f32)));
+            let events = (ui.score_event_capacity < needed).then(|| Vec::with_capacity(needed));
+            ui.score_rate = sample_rate;
+            if let Some(events) = &events {
+                ui.score_event_capacity = events.capacity();
+            }
+            Self::send_in(&self.shared, ui, MixCmd::ScorePreviewPlay { sequence, piano, events });
         });
-        let retired_events = events.map(|events| {
-            std::mem::replace(&mut state.score_preview.piano_events, events)
-        });
-        let retired_sequence = state.score_preview.play(sequence);
-        drop(state);
-        drop(retired_piano);
-        drop(retired_events);
-        drop(retired_sequence);
     }
 
     pub fn score_preview_stop(&self) {
-        self.state.lock().unwrap().score_preview.stop(true);
+        self.run_cmd(MixCmd::ScorePreviewStop);
     }
 
     pub fn score_preview_state(&self) -> (bool, u64) {
-        let state = self.state.lock().unwrap();
-        (state.score_preview.playing, state.score_preview.pos)
+        let snapshot = self.snapshot();
+        (snapshot.score_playing, snapshot.score_pos)
+    }
+}
+
+impl MixEngine {
+    /// Apply every command queued since the last buffer. Bounded by the
+    /// ring, allocation-free, and every payload it replaces goes back to
+    /// the UI through the events ring.
+    fn drain_commands(&mut self) {
+        while let Some(cmd) = self.shared.cmds.pop() {
+            self.apply(cmd);
+        }
+    }
+
+    /// Commands applied and a snapshot published, without rendering. The
+    /// test harness's way of asking "what would the callback see now".
+    #[cfg(test)]
+    pub fn sync(&mut self) {
+        self.drain_commands();
+        Self::publish_snapshot(&self.state, &self.shared, self.serial);
+    }
+
+    #[cfg(test)]
+    fn state_mut(&mut self) -> &mut MixState {
+        &mut self.state
+    }
+
+    fn apply(&mut self, cmd: MixCmd) {
+        let shared = &*self.shared;
+        let s = &mut self.state;
+        match cmd {
+            MixCmd::OpenSlot(slot) => {
+                let bus = &mut s.video[slot.index()];
+                bus.cursor = 0.0;
+                bus.gain = Ramp::at(0.0);
+            }
+            MixCmd::CloseSlot(slot) => {
+                if let Some(scheduled) = s.scheduled_video.filter(|scheduled| scheduled.to == slot) {
+                    s.scheduled_video = None;
+                    // The device may have crossed the target just before
+                    // the UI observed `Started`. If latest-click-wins closes
+                    // that still-armed destination, restore the previous
+                    // program instead of leaving a half-faded silence.
+                    if scheduled.started {
+                        if let Some(from) = scheduled.from {
+                            s.video[from.index()].gain = Ramp::at(1.0);
+                        }
+                    }
+                    shared.transition.publish_phase(
+                        VideoTransitionPhase::Cancelled,
+                        shared.device_frames.load(Ordering::Acquire),
+                    );
+                }
+                let bus = &mut s.video[slot.index()];
+                bus.cursor = 0.0;
+                bus.gain = Ramp::at(0.0);
+            }
+            MixCmd::FadeSlots { from, to, secs } => {
+                if let Some(scheduled) = s.scheduled_video.take() {
+                    if scheduled.started {
+                        // The audio clock owns a started transition: do not
+                        // restart its ramp or destroy its completion.
+                        s.scheduled_video = Some(scheduled);
+                        return;
+                    }
+                    shared.transition.publish_phase(
+                        VideoTransitionPhase::Cancelled,
+                        shared.device_frames.load(Ordering::Acquire),
+                    );
+                    if scheduled.to != to {
+                        shared.video[scheduled.to.index()].paused.store(true, Ordering::Relaxed);
+                        s.video[scheduled.to.index()].gain = Ramp::at(0.0);
+                    }
+                }
+                let secs = secs.max(SLEW_SECS);
+                if let Some(from) = from {
+                    s.video[from.index()].gain.slew(0.0, secs);
+                }
+                s.video[to.index()].gain.slew(1.0, secs);
+            }
+            MixCmd::SetVideoMix(mix) => {
+                if s.scheduled_video.is_some() {
+                    return;
+                }
+                let (a, b) = crossfader_gains(mix, FadeCurve::EqualPower);
+                s.video[0].gain.slew(a, 0.015);
+                s.video[1].gain.slew(b, 0.015);
+            }
+            MixCmd::SetVideoMuted(muted) => {
+                s.video_mute.slew(if muted { 0.0 } else { 1.0 }, SLEW_SECS * 4.0);
+            }
+            MixCmd::ScheduleVideo(mut scheduled) => {
+                if s.scheduled_video.is_some_and(|scheduled| scheduled.started) {
+                    return;
+                }
+                if let Some(old) = s.scheduled_video.take() {
+                    shared.video[old.to.index()].paused.store(true, Ordering::Relaxed);
+                    s.video[old.to.index()].gain = Ramp::at(0.0);
+                }
+                let now = shared.device_frames.load(Ordering::Acquire);
+                scheduled.target_frame = scheduled.target_frame.max(now);
+                scheduled.started = false;
+                shared.video[scheduled.to.index()].paused.store(true, Ordering::Relaxed);
+                s.video[scheduled.to.index()].gain = Ramp::at(0.0);
+                s.scheduled_video = Some(scheduled);
+                shared.transition.publish_arm(scheduled, now);
+            }
+            MixCmd::CancelVideo(id) => {
+                let Some(scheduled) = s.scheduled_video else { return };
+                if scheduled.id != id || scheduled.started {
+                    return;
+                }
+                s.scheduled_video = None;
+                shared.video[scheduled.to.index()].paused.store(true, Ordering::Relaxed);
+                s.video[scheduled.to.index()].gain = Ramp::at(0.0);
+                shared.transition.publish_phase(
+                    VideoTransitionPhase::Cancelled,
+                    shared.device_frames.load(Ordering::Acquire),
+                );
+            }
+            MixCmd::InstallDeck { deck, pcm } => {
+                let d = &mut s.decks[deck.index()];
+                Self::retire_deck_media(shared, d);
+                d.pcm = Some(pcm);
+                d.stem_blend = ParamRamp::at(1.0);
+                d.playing = false;
+                d.seek_frames(0.0);
+                d.eq.reset();
+                d.reset_blend();
+            }
+            MixCmd::GrowStream { deck, stream } => {
+                let d = &mut s.decks[deck.index()];
+                if matches!(d.pcm, Some(DeckPcm::Stream(_))) {
+                    if let Some(old) = d.pcm.replace(DeckPcm::Stream(stream)) {
+                        retire(shared, Retired::Pcm(old));
+                    }
+                } else {
+                    retire(shared, Retired::Pcm(DeckPcm::Stream(stream)));
+                }
+            }
+            MixCmd::CompleteDeck { deck, pcm } => {
+                let d = &mut s.decks[deck.index()];
+                if matches!(d.pcm, Some(DeckPcm::Stream(_))) {
+                    if let Some(old) = d.pcm.replace(DeckPcm::Whole(pcm)) {
+                        retire(shared, Retired::Pcm(old));
+                    }
+                } else {
+                    retire(shared, Retired::Track(pcm));
+                }
+            }
+            MixCmd::ClearDeck(deck) => {
+                let d = &mut s.decks[deck.index()];
+                d.sync_locked = false;
+                Self::retire_deck_media(shared, d);
+                d.playing = false;
+                // With no pcm the clamp parks the playhead at zero; this
+                // also clears `ended`, so a later install re-arms end
+                // reporting.
+                d.seek_frames(0.0);
+                d.reset_blend();
+            }
+            MixCmd::InstallStems { deck, stems } => {
+                let d = &mut s.decks[deck.index()];
+                if d.pcm.is_none() || stems.is_empty() {
+                    retire(shared, Retired::Stems(stems));
+                    return;
+                }
+                // The first table on this track is the swap from the mixed
+                // file to its stems: blend it in. Later tables are the same
+                // stems with more chunks and need no blend.
+                if d.stems.is_none() {
+                    d.stem_blend = ParamRamp::at(0.0);
+                    d.stem_blend.slew(1.0, STEM_SWAP_SECS);
+                }
+                if let Some(old) = d.stems.replace(stems) {
+                    retire(shared, Retired::Stems(old));
+                }
+            }
+            MixCmd::ClearStems(deck) => {
+                if let Some(old) = s.decks[deck.index()].stems.take() {
+                    retire(shared, Retired::Stems(old));
+                }
+            }
+            MixCmd::SetPlaying { deck, playing } => {
+                let d = &mut s.decks[deck.index()];
+                if playing {
+                    // Playing from the end restarts. A playhead at the
+                    // DECODED edge of a streaming track is not at the end:
+                    // it waits there.
+                    if d.playhead_frames() >= d.frame_count() as f64
+                        && d.pcm.as_ref().is_some_and(DeckPcm::complete)
+                        && !d.splat.as_ref().is_some_and(|splat| splat.active)
+                    {
+                        d.seek_frames(0.0);
+                    }
+                    d.ended = false;
+                }
+                d.playing = playing;
+            }
+            MixCmd::SetSplat { deck, grid, frames } => {
+                let voice = &mut s.decks[deck.index()];
+                if voice.pcm.is_none() {
+                    retire(shared, Retired::Splat(grid, frames));
+                    return;
+                }
+                match voice.splat.as_mut() {
+                    Some(splat) => {
+                        let old_grid = std::mem::replace(&mut splat.grid, grid);
+                        let old_frames = std::mem::replace(&mut splat.frames, frames);
+                        retire(shared, Retired::Splat(old_grid, old_frames));
+                        splat.rebase_rows();
+                    }
+                    None => voice.splat = Some(SplatState::new(grid, frames, voice.pos)),
+                }
+            }
+            MixCmd::SetSplatEnabled { deck, on } => {
+                let voice = &mut s.decks[deck.index()];
+                let frame_count = voice.frame_count() as f64;
+                // Where the ear is on the plain transport, before the grid
+                // takes the clock: the master starts exactly there. It is
+                // NOT pulled back to a bar start — launches quantise
+                // against the grid's own bars whatever the master reads,
+                // and a paused deck must not be seen to move (a fresh load
+                // sat at the first bar, not at zero, with the grid on).
+                let heard = voice.playhead_frames().clamp(0.0, frame_count);
+                let Some(splat) = voice.splat.as_mut() else { return };
+                if on == splat.active {
+                    return;
+                }
+                if on {
+                    splat.master_frames = heard;
+                    splat.view = None;
+                    splat.active = true;
+                    voice.pos = heard;
+                    voice.stretching = false;
+                    voice.reader.reset();
+                } else {
+                    // Leave the grid where the ear was: inside the cell the
+                    // picture followed, not wherever the master clock got to.
+                    let heard = splat.playhead_frames().clamp(0.0, frame_count);
+                    splat.active = false;
+                    splat.view = None;
+                    voice.seek_frames(heard);
+                }
+            }
+            MixCmd::SplatLaunch { deck, row, col, part } => {
+                let voice = &mut s.decks[deck.index()];
+                if let Some(splat) = voice.splat.as_mut() {
+                    splat.queue_cell(row, col as usize, part, voice.sync_locked);
+                }
+            }
+            MixCmd::SplatStopRow { deck, row, timed } => {
+                if let Some(splat) = s.decks[deck.index()].splat.as_mut() {
+                    splat.queue_stop(row, timed);
+                }
+            }
+            MixCmd::SplatLaunchScene { deck, col } => {
+                let voice = &mut s.decks[deck.index()];
+                if let Some(splat) = voice.splat.as_mut() {
+                    for row in SplatRow::ALL {
+                        if row == SplatRow::Mix {
+                            continue;
+                        }
+                        splat.queue_cell(row, col as usize, SplatPart::WHOLE, voice.sync_locked);
+                    }
+                }
+            }
+            MixCmd::SplatStopAll { deck, timed } => {
+                if let Some(splat) = s.decks[deck.index()].splat.as_mut() {
+                    for row in SplatRow::ALL {
+                        splat.queue_stop(row, timed);
+                    }
+                }
+            }
+            MixCmd::SeekFraction { deck, fraction } => {
+                let d = &mut s.decks[deck.index()];
+                let len = d.pcm.as_ref().map_or(0.0, |pcm| pcm.expected_len() as f64);
+                if len > 0.0 && d.frame_count() > 0 {
+                    let from = d.playhead_frames();
+                    d.seek_frames(fraction.clamp(0.0, 1.0) * len);
+                    d.arm_seek_fade(from);
+                }
+            }
+            MixCmd::SeekSeconds { deck, secs } => {
+                let d = &mut s.decks[deck.index()];
+                let Some(pcm) = d.pcm.as_ref() else { return };
+                let frames = secs.max(0.0) * pcm.sample_rate().max(1) as f64;
+                let from = d.playhead_frames();
+                d.seek_frames(frames);
+                d.arm_seek_fade(from);
+            }
+            MixCmd::SeekRelative { deck, delta_secs } => {
+                let d = &mut s.decks[deck.index()];
+                let Some(pcm) = d.pcm.as_ref() else { return };
+                if let Some(splat) = d.splat.as_mut().filter(|splat| splat.active) {
+                    let total = (SEEK_XFADE_SECS * pcm.sample_rate().max(1) as f64).max(1.0);
+                    splat.phase_fade = d.playing.then_some(SplatPhaseFade {
+                        pos: splat.master_frames, left: total, total, rows: splat.rows,
+                    });
+                    // This clock can run beyond the file and must not be
+                    // clamped or replaced by the cell's wrapped playhead.
+                    splat.master_frames += delta_secs * pcm.sample_rate().max(1) as f64;
+                    return;
+                }
+                let from = d.playhead_frames();
+                let frames = from + delta_secs * pcm.sample_rate().max(1) as f64;
+                d.seek_frames(frames);
+                d.arm_seek_fade(from);
+            }
+            MixCmd::SetRate { deck, rate } => {
+                // A short ramp so a sync landing mid-phrase does not step
+                // the pitch.
+                s.decks[deck.index()].rate.slew(rate, SLEW_SECS * 4.0);
+            }
+            MixCmd::SetSyncLock { deck, on } => s.decks[deck.index()].sync_locked = on,
+            MixCmd::SetKeyRatio { deck, ratio } => {
+                // Same ramp as the tempo: a stepped semitone glides instead
+                // of clicking, and the stretcher sees a ratio that never
+                // jumps.
+                s.decks[deck.index()].key_ratio.slew(ratio, SLEW_SECS * 4.0);
+            }
+            MixCmd::SetKeylock { deck, on } => s.decks[deck.index()].keylock = on,
+            MixCmd::Scratch { deck, motion } => {
+                let d = &mut s.decks[deck.index()];
+                let deck_rate = d.rate.current();
+                match motion {
+                    ScratchMotion::Grab => d.scratch.grab(deck_rate),
+                    ScratchMotion::Move { rate } => d.scratch.drag(rate),
+                    ScratchMotion::Release => d.scratch.release(deck_rate),
+                }
+            }
+            MixCmd::SetEqBand { deck, band, gain } => s.decks[deck.index()].eq.set_band(band, gain),
+            MixCmd::SetFilter { deck, position } => s.decks[deck.index()].eq.set_filter(position),
+            MixCmd::SetStemGain { deck, stem, gain } => {
+                s.decks[deck.index()].stem_gain[stem].slew(gain, SLEW_SECS * 2.0);
+            }
+            MixCmd::SetLoopSpan { deck, span } => {
+                let d = &mut s.decks[deck.index()];
+                let Some(pcm) = d.pcm.as_ref() else {
+                    d.loop_span = None;
+                    return;
+                };
+                let rate = pcm.sample_rate().max(1) as f64;
+                // Clamp OUT to the real frame count: the seconds->frames
+                // round trip can land a hair ABOVE it, and an OUT past the
+                // last frame lets the end-of-track check win over the wrap
+                // — a dead deck with LOOP lit. (On a streaming track that
+                // is the expected length: a span past the decoded edge
+                // waits there like any other read.)
+                let frames = pcm.expected_len() as f64;
+                d.loop_span = span.map(|(start, end)| {
+                    (start.max(0.0) * rate, (end.max(0.0) * rate).min(frames))
+                });
+                // A playhead stranded past the new OUT lands modulo NOW.
+                // The render wrap would catch it on the next callback
+                // anyway, but a PAUSED deck never renders — without this,
+                // a resize on a paused deck parks the playhead outside the
+                // span until play is pressed.
+                if let Some((start, end)) = d.loop_span {
+                    let len = (end - start).max(1.0);
+                    if d.playhead_frames() >= end {
+                        let from = d.playhead_frames();
+                        let over = (from - start).rem_euclid(len);
+                        d.seek_frames(start + over);
+                        // A live resize yanking a playing playhead is a
+                        // jump like any other and gets the same blend.
+                        d.arm_seek_fade(from);
+                    }
+                }
+            }
+            MixCmd::SetMute { deck, muted } => {
+                s.decks[deck.index()].mute.slew(if muted { 0.0 } else { 1.0 }, SLEW_SECS);
+            }
+            MixCmd::SetGain { deck, gain } => s.decks[deck.index()].gain.slew(gain, SLEW_SECS),
+            MixCmd::SwapDecks => s.decks.swap(0, 1),
+            MixCmd::SetCrossfader { position, secs } => s.fader.slew(position, secs),
+            MixCmd::SetBlendBand { deck, band, gain } => {
+                s.decks[deck.index()].eq.set_blend_band(band, gain);
+            }
+            MixCmd::SetBlendStem { deck, stem, gain } => {
+                s.decks[deck.index()].blend_stem[stem].slew(gain, BLEND_SECS);
+            }
+            MixCmd::ClearBlend(deck) => {
+                let d = &mut s.decks[deck.index()];
+                d.eq.clear_blend();
+                for ramp in &mut d.blend_stem {
+                    ramp.slew(1.0, BLEND_SECS);
+                }
+            }
+            MixCmd::SetCurve(curve) => s.curve = curve,
+            MixCmd::SetMaster(gain) => s.master.slew(gain, SLEW_SECS),
+            MixCmd::StartVoice { alloc, pcm } => {
+                if s.sfx.len() >= MAX_SFX_VOICES {
+                    // The pool is full: the oldest voice makes room, and
+                    // its buffer goes back to the UI like any other.
+                    let oldest = s.sfx.remove(0);
+                    retire(shared, Retired::Track(oldest.pcm));
+                }
+                s.sfx.push(SfxVoice {
+                    id: alloc.id,
+                    pad: alloc.pad,
+                    pcm,
+                    cursor_fp: 0,
+                    loop_on: alloc.loop_on,
+                    gain: Ramp::at(alloc.gain),
+                    done: false,
+                });
+            }
+            MixCmd::StopVoice(id) => {
+                // Fast declick: a stopped voice ramps out over one slew and
+                // is reaped by the render pass.
+                for v in s.sfx.iter_mut().filter(|v| v.id == id) {
+                    v.loop_on = false;
+                    v.gain.slew(0.0, SLEW_SECS);
+                    v.done = true;
+                }
+            }
+            MixCmd::SetPadVoicesGain { pad, gain } => {
+                for v in s.sfx.iter_mut().filter(|v| v.pad == pad && !v.done) {
+                    v.gain.slew(gain, SLEW_SECS);
+                }
+            }
+            MixCmd::SetDeckCue { deck, on } => s.cue_deck[deck.index()] = on,
+            MixCmd::SetCueMode(mode) => s.cue_mode = mode,
+            MixCmd::InstallPreview { pcm, autoplay } => {
+                if let Some(old) = s.preview.pcm.replace(pcm) {
+                    retire(shared, Retired::Track(old));
+                }
+                s.preview.cursor_fp = 0;
+                s.preview.ended = false;
+                s.preview.playing = autoplay;
+                s.preview.gain = Ramp::at(0.0);
+                if autoplay {
+                    s.preview.gain.slew(1.0, SLEW_SECS);
+                }
+            }
+            MixCmd::ClearPreview => {
+                s.preview.playing = false;
+                s.preview.ended = false;
+                s.preview.cursor_fp = 0;
+                s.preview.gain = Ramp::at(0.0);
+                if let Some(old) = s.preview.pcm.take() {
+                    retire(shared, Retired::Track(old));
+                }
+            }
+            MixCmd::SetPreviewPlaying(playing) => {
+                if s.preview.pcm.is_none() {
+                    return;
+                }
+                // Play on a parked player starts the track over — the
+                // player's one transport button should never be a dead end.
+                if playing && s.preview.ended {
+                    s.preview.cursor_fp = 0;
+                    s.preview.ended = false;
+                }
+                s.preview.playing = playing;
+                s.preview.gain.slew(if playing { 1.0 } else { 0.0 }, SLEW_SECS);
+            }
+            MixCmd::SeekPreviewFraction(fraction) => {
+                let Some(pcm) = s.preview.pcm.as_ref() else { return };
+                let len = pcm.frames.len() as f64;
+                let frame = (fraction.clamp(0.0, 1.0) * len).clamp(0.0, (len - 1.0).max(0.0));
+                s.preview.cursor_fp = (frame * FP_ONE as f64) as u64;
+                s.preview.ended = false;
+            }
+            MixCmd::SetDrumBank(bank) => {
+                if let Some(old) = s.score_preview.set_drum_bank(bank.clone()) {
+                    retire(shared, Retired::Bank(old));
+                }
+                if let Some(old) = s.synth.set_drum_bank(bank) {
+                    retire(shared, Retired::Bank(old));
+                }
+            }
+            MixCmd::ScorePreviewPlay { sequence, piano, events } => {
+                let sample_rate = sequence.sample_rate.max(1);
+                if let Some(piano) = piano {
+                    let old = s.score_preview.replace_instruments(piano, sample_rate);
+                    retire(shared, Retired::Piano(old));
+                }
+                if let Some(events) = events {
+                    let old = std::mem::replace(&mut s.score_preview.piano_events, events);
+                    retire(shared, Retired::Events(old));
+                }
+                if let Some(old) = s.score_preview.play(sequence) {
+                    retire(shared, Retired::Sequence(old));
+                }
+            }
+            MixCmd::ScorePreviewStop => s.score_preview.stop(true),
+            MixCmd::SetSynthClock(clock) => s.synth.set_clock(clock),
+            MixCmd::SetSynthPlaying(playing) => s.synth.set_playing(playing),
+            MixCmd::SetSynthPattern { track, pattern } => s.synth.set_pattern(track, pattern),
+            MixCmd::SetIronfishPatch(patch) => s.synth.set_patch(patch),
+            MixCmd::SetIronfishParam { param, value } => s.synth.set_param(param, value),
+            MixCmd::ReplaceSynthEngines(engines) => {
+                let old = s.synth.replace_engines(engines);
+                retire(shared, Retired::SynthEngines(old));
+            }
+            MixCmd::SetStripGain { strip, gain } => s.program_mix.set_gain(strip, gain),
+            MixCmd::SetStripMuted { strip, muted } => s.program_mix.set_muted(strip, muted),
+            MixCmd::SetStripSoloed { strip, soloed } => s.program_mix.set_soloed(strip, soloed),
+            MixCmd::SetMasterDynamics(params) => s.program_mix.set_master_params(params),
+            MixCmd::SetMasterDynamicsParam { param, value } => {
+                s.program_mix.set_master_param(param, value)
+            }
+            MixCmd::SetMasterDynamicsBypass(bypass) => {
+                s.program_mix.set_master_bypass(bypass)
+            }
+        }
+    }
+
+    /// Everything a deck holds that is worth handing back: the track, its
+    /// stems and its splat grid.
+    fn retire_deck_media(shared: &Shared, d: &mut DeckVoice) {
+        if let Some(pcm) = d.pcm.take() {
+            retire(shared, Retired::Pcm(pcm));
+        }
+        if let Some(stems) = d.stems.take() {
+            retire(shared, Retired::Stems(stems));
+        }
+        if let Some(splat) = d.splat.take() {
+            retire(shared, Retired::Splat(splat.grid, splat.frames));
+        }
+    }
+
+    fn publish_snapshot(s: &MixState, shared: &Shared, serial: u64) {
+        let mut snapshot = MixSnapshot {
+            fader_current: s.fader.current,
+            preview_installed: s.preview.pcm.is_some(),
+            preview_playing: s.preview.playing,
+            preview_ended: s.preview.ended,
+            score_playing: s.score_preview.playing,
+            score_pos: s.score_preview.pos,
+            synth: s.synth.snapshot(),
+            strips: s.program_mix.strip_snapshots(),
+            master_fx: s.program_mix.master_snapshot(),
+            serial,
+            ..MixSnapshot::default()
+        };
+        if let Some(pcm) = &s.preview.pcm {
+            snapshot.preview_position_secs =
+                s.preview.cursor_fp as f64 / FP_ONE as f64 / pcm.sample_rate.max(1) as f64;
+            snapshot.preview_duration_secs = pcm.seconds();
+        }
+        for (i, d) in s.decks.iter().enumerate() {
+            snapshot.decks[i] = DeckSnap {
+                playhead_frames: d.playhead_frames(),
+                sample_rate: d.pcm.as_ref().map_or(0, DeckPcm::sample_rate),
+                playing: d.playing,
+                scratching: d.scratch.active(),
+                ended: d.ended,
+                rate_current: d.rate.current(),
+                splat: d.splat.as_ref().map(SplatState::snapshot),
+            };
+        }
+        shared.snapshot.write(snapshot);
     }
 
     // ---- the device callback ------------------------------------------------
 
-    /// Mix one device buffer. The buffer must already be zeroed; on lock
-    /// contention it stays silent rather than ever blocking the device.
-    pub fn render(&self, device_rate: f64, output: &mut AudioBuffer) {
-        // Every buffer, not once: the flag is per thread and some hosts reset
-        // it between callbacks. See `music_dsp::flush_denormals_to_zero`.
-        crate::music_dsp::flush_denormals_to_zero();
+    /// Mix one device buffer. The buffer must already be zeroed. Nothing
+    /// here waits on anyone: the commands are drained from a ring, the
+    /// slot audio is read from rings, and the state is this engine's own.
+    pub fn render(&mut self, device_rate: f64, output: &mut AudioBuffer) {
         if device_rate <= 0.0 {
             return;
         }
+        let render_started = crate::clock::Instant::now();
+        self.drain_commands();
         let frames = output.frame_count();
-        self.device_rate_bits.store(device_rate.to_bits(), Ordering::Release);
-        // Advance the physical device clock even when the realtime state is
-        // contended and this buffer must remain silent. That lets a later
-        // callback mark an exact deadline Missed instead of firing it late.
-        let buffer_start = self.device_frames.fetch_add(frames as u64, Ordering::AcqRel);
-        // Contention is one silent buffer; POISON is every buffer for the
-        // rest of the set, and it used to arrive wearing contention's name.
-        // A panic on any thread that held this lock left `try_lock` failing
-        // forever, and the only sign was the contention count climbing once
-        // a buffer. So the two are told apart: contention still yields the
-        // buffer, and poison is taken over and cleared, because whatever the
-        // state is now, playing on with it beats silence in front of a room.
-        let mut s = match self.state.try_lock() {
-            Ok(state) => state,
-            Err(std::sync::TryLockError::WouldBlock) => {
-                self.contended_callbacks.fetch_add(1, Ordering::Relaxed);
-                return;
+        let shared = &*self.shared;
+        shared.device_rate_bits.store(device_rate.to_bits(), Ordering::Release);
+        let buffer_start = shared.device_frames.fetch_add(frames as u64, Ordering::AcqRel);
+        self.serial = self.serial.wrapping_add(1);
+
+        // The slot rings, as of this buffer: a flush the producer asked for
+        // lands here, then the window the frame loop may read is fixed.
+        let mut slots = [SlotView { paused: true, source_rate: 0.0, playback_rate: 1.0, base: 0, avail: 0 }; 2];
+        for (i, slot) in shared.video.iter().enumerate() {
+            let flush_gen = slot.flush_gen.load(Ordering::Acquire);
+            let mut read = slot.read_pos.load(Ordering::Relaxed);
+            if flush_gen != self.slot_flush_seen[i] {
+                self.slot_flush_seen[i] = flush_gen;
+                let flush_at = slot.flush_at.load(Ordering::Acquire);
+                if flush_at > read {
+                    read = flush_at;
+                    slot.read_pos.store(read, Ordering::Release);
+                }
+                self.state.video[i].cursor = 0.0;
             }
-            Err(std::sync::TryLockError::Poisoned(taken)) => {
-                self.poisoned_callbacks.fetch_add(1, Ordering::Relaxed);
-                self.state.clear_poison();
-                taken.into_inner()
-            }
-        };
-        let render_started = std::time::Instant::now();
-        let s = &mut *s;
+            let write = slot.write_pos.load(Ordering::Acquire);
+            slots[i] = SlotView {
+                paused: slot.paused.load(Ordering::Relaxed),
+                source_rate: f64::from_bits(slot.source_rate_bits.load(Ordering::Relaxed)),
+                playback_rate: slot.playback_rate(),
+                base: read,
+                avail: write.saturating_sub(read) as usize,
+            };
+        }
+
+        let s = &mut self.state;
         let rate = device_rate as f32;
         let channels = output.channel_count();
         let mut peaks = [0.0f32; 5];
         s.rendered_frames = buffer_start;
 
+
         if let Some(scheduled) = s.scheduled_video {
             if !scheduled.started && scheduled.target_frame < buffer_start {
                 s.scheduled_video = None;
-                let destination = &mut s.video[scheduled.to.index()];
-                destination.paused = true;
-                destination.gain = Ramp::at(0.0);
-                self.transition
+                shared.video[scheduled.to.index()].paused.store(true, Ordering::Relaxed);
+                slots[scheduled.to.index()].paused = true;
+                s.video[scheduled.to.index()].gain = Ramp::at(0.0);
+                shared.transition
                     .publish_phase(VideoTransitionPhase::Missed, buffer_start);
             } else if scheduled.started {
                 let end = scheduled
@@ -3996,11 +3509,11 @@ impl Mixer {
                         s.video[from.index()].gain = Ramp::at(0.0);
                     }
                     s.video[scheduled.to.index()].gain = Ramp::at(1.0);
-                    self.transition
+                    shared.transition
                         .publish_phase(VideoTransitionPhase::Completed, buffer_start);
                 } else if buffer_start > scheduled.target_frame && scheduled.fade_frames > 0 {
                     // Catch a running fade up to the physical device clock
-                    // after one or more silent contention buffers.
+                    // after a buffer the device itself skipped.
                     let elapsed = buffer_start - scheduled.target_frame;
                     let progress = (elapsed as f32 / scheduled.fade_frames as f32).clamp(0.0, 1.0);
                     let remaining = scheduled.fade_frames.saturating_sub(elapsed).max(1);
@@ -4015,115 +3528,43 @@ impl Mixer {
             }
         }
 
-        // A load parked on a deck that was playing takes over HERE, before
-        // the clone below and never inside the frame loop: the loop reads
-        // one reference per deck for the whole buffer, so a swap inside it
-        // would render the retired track at the incoming track's gain. The
-        // cost is that the swap lands on the first buffer boundary after
-        // the fade — a hand-over, not a seam.
-        for voice in s.decks.iter_mut() {
-            voice.spend_pending_load();
-        }
         // Deck sources are lifted out of the frame loop: one reference count
         // per buffer instead of one per sample, and the borrow checker can
         // then see that the voice state and its PCM are disjoint.
-        let deck_pcm: [Option<Arc<TrackPcm>>; 2] =
+        let deck_pcm: [Option<DeckPcm>; 2] =
             [s.decks[0].pcm.clone(), s.decks[1].pcm.clone()];
         let deck_stems: [Option<Arc<TrackStems>>; 2] =
             [s.decks[0].stems.clone(), s.decks[1].stems.clone()];
         let mut deck_peaks = [0.0f32; 2];
-        // The master's chain gets the same once-a-buffer preparation its
-        // decks do, and borrows a deck's clock: the mix has no tempo of
-        // its own, so a beat-locked effect on it follows whichever deck
-        // is nominated -- deck A until something asks otherwise.
-        {
-            let clock = s.decks[s.master_clock_deck.min(1)].clock;
-            s.master_chain.prepare_block(&clock, rate, frames);
-        }
         for voice in s.decks.iter_mut() {
-            // The musical clock, once per buffer per deck, from the same
-            // platter the snapshot reports. Travel is only promised when
-            // the read path will actually read this buffer, and a splat
-            // deck's read path takes ONE exit -- `!playing` -- not the
-            // ordinary four, so it is asked separately rather than folded
-            // into the same guard as everything else.
-            let platter = deck_platter(voice);
-            let sample_rate = voice.pcm.as_ref().map(|pcm| pcm.sample_rate.max(1) as f64);
-            let pos_frames = voice.playhead_frames();
-            let pos_secs = sample_rate.map(|sr| pos_frames / sr).unwrap_or(0.0);
-            let is_splat = voice.splat.as_ref().is_some_and(|splat| splat.active);
-            let reads = if is_splat {
-                voice.playing
-            } else {
-                voice.scratch.active()
-                    || !(voice.transport.current <= 0.0 && (!voice.playing || voice.ended))
-            };
-            let travel_secs = if reads { platter * frames as f64 / rate as f64 } else { 0.0 };
-            // A span owns the playhead on the read path (above, per frame);
-            // the clock's single-shot prediction folds the same way, so a
-            // roll's landing does not publish a fraction the head is about
-            // to leave behind. Two-sided, because a reversed platter can
-            // leave a span at IN.
-            let predicted_secs = match (sample_rate, voice.loop_span) {
-                (Some(sr), Some((start, end))) => {
-                    let predicted = pos_frames + travel_secs * sr;
-                    let folded = if predicted >= end || (platter < 0.0 && predicted < start) {
-                        wrapped_into_span(predicted, start, end)
-                    } else {
-                        predicted
-                    };
-                    folded / sr
-                }
-                _ => pos_secs + travel_secs,
-            };
-            voice.clock = DeckClock::at(voice.grid.as_ref(), predicted_secs, platter, 0.0);
-            let clock = voice.clock;
-            voice.chain.prepare_block(&clock, rate, frames);
-            // The ghost moves here, once per buffer, and not in the frame
-            // loop below: its rate is latched so a buffer is one multiply,
-            // and the read path has four early exits (no pcm, empty pcm,
-            // splat running, paused and faded) that the ghost must not be
-            // caught by. It runs whatever the record is doing.
-            if let Some(ghost) = voice.slip.as_mut() {
-                ghost.pos += ghost.step * frames as f64;
-                if let Some((start, end)) = ghost.span {
-                    if ghost.pos >= end {
-                        ghost.pos = wrapped_into_span(ghost.pos, start, end);
-                    }
-                }
-            }
-            // And every level of the roll stack, here for the same reason.
-            voice.rolls.advance(frames as f64);
+            // Filter coefficients are rebuilt once per buffer — the trig is
+            // the expensive part and a buffer is well under a millisecond.
+            voice.eq.set_sample_rate(rate);
+            voice.eq.prepare_block();
         }
         s.score_preview.render_block(frames, device_rate);
+        s.synth.render_block(buffer_start, frames, device_rate);
+        s.program_mix.begin_block();
 
         // The headphone cue bus. `buffer_start` keeps the ring's write
-        // position monotonic across contended-silent buffers: a skipped
-        // buffer writes nothing and the phones re-prime, exactly mirroring
-        // the silence the room heard.
-        let cue_armed = self.cue_ring.armed.load(Ordering::Relaxed);
+        // position on the device clock, so a buffer the device skipped
+        // writes nothing and the phones re-prime, exactly mirroring what
+        // the room heard.
+        let cue_armed = shared.cue_ring.armed.load(Ordering::Relaxed);
         let cue_deck_on = s.cue_deck;
         let cue_mode = s.cue_mode;
         let mut cue_pos = buffer_start;
         if cue_armed {
-            self.cue_ring.main_rate_bits.store(device_rate.to_bits(), Ordering::Relaxed);
+            shared.cue_ring.main_rate_bits.store(device_rate.to_bits(), Ordering::Relaxed);
         }
 
-        let mix_started = std::time::Instant::now();
         for frame in 0..frames {
             let output_frame = buffer_start.saturating_add(frame as u64);
             let starts_now = s.scheduled_video.is_some_and(|scheduled| {
                 !scheduled.started && output_frame >= scheduled.target_frame
             });
             if starts_now {
-                // The two ways this callback could ever unwind were these
-                // `expect`s. Both are right today, but a panic here takes
-                // the audio device down mid-set with nothing to show for
-                // it; a missed video start is a scratch nobody hears.
-                verify_or!(s.scheduled_video.is_some(), { continue });
-                // The binding the line above just guaranteed; its own `else`
-                // never runs.
-                let Some(mut scheduled) = s.scheduled_video else { continue };
+                let mut scheduled = s.scheduled_video.expect("checked above");
                 scheduled.started = true;
                 s.scheduled_video = Some(scheduled);
                 let fade_secs = if scheduled.fade_frames == 0 {
@@ -4138,33 +3579,35 @@ impl Mixer {
                         s.video[from.index()].gain.slew(0.0, fade_secs);
                     }
                 }
+                shared.video[scheduled.to.index()].paused.store(false, Ordering::Relaxed);
+                slots[scheduled.to.index()].paused = false;
                 let destination = &mut s.video[scheduled.to.index()];
-                destination.paused = false;
                 if scheduled.fade_frames == 0 {
                     destination.gain = Ramp::at(1.0);
                 } else {
                     destination.gain.slew(1.0, fade_secs);
                 }
-                self.transition.publish_phase(VideoTransitionPhase::Started, output_frame);
+                shared.transition.publish_phase(VideoTransitionPhase::Started, output_frame);
             }
 
             // Video buses (summed, then the orthogonal program mute).
             let mut video = (0.0f32, 0.0f32);
-            for bus in s.video.iter_mut() {
+            for (i, bus) in s.video.iter_mut().enumerate() {
                 let gain = bus.gain.tick(rate);
-                if bus.paused || bus.queue.len() < 2 || bus.source_rate <= 0.0 {
+                let slot = slots[i];
+                if slot.paused || slot.avail < 2 || slot.source_rate <= 0.0 {
                     continue;
                 }
                 let index = bus.cursor as usize;
-                if index + 1 >= bus.queue.len() {
+                if index + 1 >= slot.avail {
                     continue;
                 }
                 let fraction = (bus.cursor - index as f64) as f32;
-                let (al, ar) = bus.queue[index];
-                let (bl, br) = bus.queue[index + 1];
-                video.0 += lerp(al, bl, fraction) * gain;
-                video.1 += lerp(ar, br, fraction) * gain;
-                bus.cursor += (bus.source_rate / device_rate) * bus.playback_rate;
+                let (al, ar) = shared.video[i].frame_at(slot.base + index as u64);
+                let (bl, br) = shared.video[i].frame_at(slot.base + index as u64 + 1);
+                video.0 += (al + (bl - al) * fraction) * gain;
+                video.1 += (ar + (br - ar) * fraction) * gain;
+                bus.cursor += (slot.source_rate / device_rate) * slot.playback_rate;
             }
             let program_mute = s.video_mute.tick(rate);
             video.0 *= program_mute;
@@ -4176,36 +3619,12 @@ impl Mixer {
             let mut deck_out = [(0.0f32, 0.0f32); 2];
             let mut cue = (0.0f32, 0.0f32);
             for (i, d) in s.decks.iter_mut().enumerate() {
-                let transport = d.transport.tick(rate);
-                if transport <= 0.0 {
-                    if let Some(at) = d.pause_at.take() {
-                        // The fade is over and nothing is audible: give back
-                        // the frames it sounded, so pause leaves the
-                        // playhead exactly where it was pressed.
-                        d.seek_frames(at);
-                    }
-                }
-                let gain = d.gain.tick(rate) * d.mute.tick(rate) * transport;
+                let gain = d.gain.tick(rate) * d.mute.tick(rate);
                 let side = if i == 0 { fader.0 } else { fader.1 };
                 let deck_rate = d.rate.tick(rate);
                 let key_ratio = d.key_ratio.tick(rate) as f64;
-                // Where the record has actually reached, in the finger's
-                // own units, so the loop has something to close on. Read
-                // HERE, above the read path's early exits, for the same
-                // reason the slip ghost is: a ramp that stops ticking
-                // because a deck lost its track never settles, and a deck
-                // that reports a hand on it forever pins its own lane.
-                let pos_secs = d
-                    .pcm
-                    .as_ref()
-                    .map(|pcm| d.playhead_frames() / pcm.sample_rate.max(1) as f64)
-                    .unwrap_or(0.0);
-                let scratch_rate = d.scratch.tick(rate, deck_rate, pos_secs);
+                let scratch_rate = d.scratch.tick(rate, deck_rate);
                 let scratching = d.scratch.active();
-                // Which way the record is travelling. Everything gated on
-                // this is bit-identical when it is false, which is every
-                // frame the tab rendered before the reverse hold existed.
-                let reverse = scratching && scratch_rate < 0.0;
                 let mut stem_gain = [0.0f32; STEM_COUNT];
                 for ((slot, ramp), blend) in stem_gain
                     .iter_mut()
@@ -4215,14 +3634,18 @@ impl Mixer {
                     *slot = ramp.tick(rate) * blend.tick(rate);
                 }
                 let Some(pcm) = deck_pcm[i].as_ref() else { continue };
-                if pcm.frames.is_empty() {
+                if pcm.is_empty() {
                     continue;
                 }
-                let natural_step = pcm.sample_rate as f64 / device_rate;
+                let natural_step = pcm.sample_rate() as f64 / device_rate;
+                // The grid owns time on a streaming track too: a cell past
+                // the decoded edge reads silence until its audio lands,
+                // and a click means the same thing however far the decode
+                // is.
                 if let Some(splat) = d.splat.as_mut().filter(|splat| splat.active) {
-                    // Splat owns source time. Rate, key lock and scratch are
-                    // intentionally ignored; the shared master advances at
-                    // the track's natural rate and every row derives from it.
+                    // Every row derives from one source clock. Tempo acts
+                    // on that clock, so sync and pitch moves affect all rows
+                    // equally without moving their source spans.
                     if !d.playing {
                         continue;
                     }
@@ -4231,9 +3654,9 @@ impl Mixer {
                         pcm,
                         deck_stems[i].as_deref(),
                         stem_gain,
-                        natural_step,
+                        natural_step * deck_rate as f64,
                     );
-                    let toned = d.chain.process(frame, rate);
+                    let toned = d.eq.process(frame, rate);
                     let pre = [toned[0] * gain, toned[1] * gain];
                     deck_peaks[i] = deck_peaks[i].max(pre[0].abs()).max(pre[1].abs());
                     deck_out[i] = (pre[0] * side, pre[1] * side);
@@ -4249,20 +3672,18 @@ impl Mixer {
                     continue;
                 }
                 // A hand on the record plays even a paused deck; that is the
-                // whole point of scrubbing. And a deck told to stop keeps
-                // reading until its transport ramp reaches zero, so what the
-                // room hears is a fade over the track's own next few
-                // milliseconds rather than a cut.
-                if !scratching && transport <= 0.0 && (!d.playing || d.ended) {
+                // whole point of scrubbing.
+                if !scratching && (!d.playing || d.ended) {
                     continue;
                 }
                 let source = DeckSource {
                     pcm,
                     stems: deck_stems[i].as_deref(),
+                    stem_chunk: std::cell::Cell::new((0, 0)),
                     stem_gain,
-                    seam: d.stem_seam.tick(rate),
+                    stem_blend: d.stem_blend.tick(rate),
                 };
-                let length = pcm.frames.len();
+                let length = pcm.len();
 
                 // Tempo and pitch, split into the two stages that can each
                 // deliver one of them. The stretcher changes duration at
@@ -4288,31 +3709,26 @@ impl Mixer {
                 // do; scratching and a unity ratio both read the source
                 // directly, so an untouched deck is the sample the decoder
                 // produced.
+                // With hysteresis: engaged past one threshold, released
+                // below a smaller one, so a rate that hovers at unity does
+                // not flip the path every buffer.
+                let off_unity = (stretch_ratio - 1.0).abs();
                 let want_stretch = !scratching
-                    && (stretch_ratio - 1.0).abs() > STRETCH_BYPASS_EPSILON
-                    && length > WSOLA_WINDOW + 1;
+                    && length > WSOLA_WINDOW + 1
+                    && if d.stretching {
+                        off_unity > STRETCH_BYPASS_EPSILON
+                    } else {
+                        off_unity > STRETCH_ENGAGE_EPSILON
+                    };
                 if want_stretch != d.stretching {
-                    // The one jump in the transport that never blended. The
-                    // two paths hand the PLAYHEAD over exactly and disagree
-                    // on PHASE, so the splice is a step on anything but a
-                    // steady tone -- half full scale on a low one.
-                    let from = d.playhead_frames();
                     if want_stretch {
                         d.stretch.reset_to(d.pos);
                         d.reader.reset();
-                        d.stretch_tail = None;
-                        // Going IN, the outgoing stream is the direct read,
-                        // which the ordinary seek blend reproduces exactly.
-                        d.arm_seek_fade(from);
                     } else {
-                        d.pos = d.stretch.position();
-                        // Coming OUT, it is not: nothing but the stretcher
-                        // can produce the stretcher's tail, so it goes on
-                        // producing it. Its own reader comes with it,
-                        // untouched by the direct path, so the tail is a
-                        // continuation of the very stream being faded.
-                        let total = (SEEK_XFADE_SECS * pcm.sample_rate.max(1) as f64).max(1.0);
-                        d.stretch_tail = Some((total, total));
+                        // Continue from the frame the ear is at, not from
+                        // the search's ideal anchor: the two can differ by
+                        // a search width, and that difference is a skip.
+                        d.pos = d.stretch.heard_position();
                     }
                     d.stretching = want_stretch;
                 }
@@ -4320,15 +3736,7 @@ impl Mixer {
                 // A span owns the playhead, on both read paths. Wrap BEFORE
                 // the read so no frame past the out point is ever emitted.
                 if let Some((start, end)) = d.loop_span {
-                    // Two-sided, because a record running backwards leaves
-                    // a loop at IN. `wrapped_into_span` already folds a
-                    // position below the span (it is a remainder, not a
-                    // clamp), so the landing needs nothing new. The GHOST's
-                    // own wrap above stays one-sided on purpose: its step
-                    // is latched from the deck's tempo when it is armed and
-                    // never goes negative, so it only ever leaves at OUT.
-                    let head = d.playhead_frames();
-                    if head >= end || (reverse && head < start) {
+                    if d.playhead_frames() >= end {
                         // Land MODULO the length, keeping the overshoot.
                         // Resetting to IN exactly discards up to a step
                         // per lap — a held loop walks audibly early —
@@ -4336,14 +3744,9 @@ impl Mixer {
                         // stranded past OUT by a live resize: modulo
                         // continues the subdivision in phase instead of
                         // re-triggering the downbeat at IN.
-                        let landed = wrapped_into_span(d.playhead_frames(), start, end);
-                        // The finger did not come round with the record,
-                        // so its target does. Without this the error is a
-                        // whole loop wide and a hand on the record would
-                        // drive it at the clamp until it came off.
-                        let moved = landed - d.playhead_frames();
-                        d.scratch.note_wrap(moved / pcm.sample_rate.max(1) as f64);
-                        d.seek_frames(landed);
+                        let len = (end - start).max(1.0);
+                        let over = (d.playhead_frames() - start).rem_euclid(len);
+                        d.seek_frames(start + over);
                     }
                 }
                 // Where THIS frame is read from, for the wrap crossfade
@@ -4386,7 +3789,10 @@ impl Mixer {
                         let fraction = (d.pos - index as f64) as f32;
                         let a = source.frame(index.min(length - 1));
                         let b = source.frame((index + 1).min(length - 1));
-                        let out = lerp_frame(a, b, fraction);
+                        let out = [
+                            a[0] + (b[0] - a[0]) * fraction,
+                            a[1] + (b[1] - a[1]) * fraction,
+                        ];
                         // A hand on the record overrules the key shift: a
                         // scratch is pitch and tempo welded together, and
                         // that is the sound being asked for.
@@ -4400,25 +3806,6 @@ impl Mixer {
                         out
                     }
                 };
-                // The stretcher's tail, mixed under the direct read that
-                // has taken over from it.
-                let frame = match d.stretch_tail {
-                    Some((left, total)) if !d.stretching => {
-                        let old = {
-                            let stretch = &mut d.stretch;
-                            let reader = &mut d.reader;
-                            let mut pull = || stretch.next(&source, false);
-                            reader.read(natural_step * read_rate, &mut pull)
-                        };
-                        d.stretch_tail =
-                            if left > 1.0 { Some((left - 1.0, total)) } else { None };
-                        match old {
-                            Some(old) => lerp_frame(old, frame, (1.0 - left / total) as f32),
-                            None => frame,
-                        }
-                    }
-                    _ => frame,
-                };
                 if ran_out {
                     // A span must never end the deck. The stretcher's read
                     // head cannot reach the last WSOLA window of the track,
@@ -4431,16 +3818,16 @@ impl Mixer {
                         d.seek_frames(start);
                         continue;
                     }
-                    // Once, not once a frame: the deck keeps running here
-                    // until its transport ramp reaches zero, so without this
-                    // guard the end would be announced again on every frame
-                    // of the fade.
-                    if !d.ended {
-                        d.playing = false;
-                        d.transport.slew(0.0, SLEW_SECS);
-                        d.ended = true;
-                        s.ended_decks.push(if i == 0 { DeckId::A } else { DeckId::B });
+                    // The decoded edge of a track still streaming in is
+                    // not the end of the track: the deck waits there —
+                    // silent, still playing, the playhead parked — and
+                    // carries on the moment the next chunk lands.
+                    if !pcm.complete() {
+                        continue;
                     }
+                    d.playing = false;
+                    d.ended = true;
+                    push_event(shared, MixEvent::DeckEnded(if i == 0 { DeckId::A } else { DeckId::B }));
                     continue;
                 }
                 // The wrap is a crossfade, not a splice and not a duck:
@@ -4454,16 +3841,11 @@ impl Mixer {
                     // The pre-roll has to exist on the track, so a span
                     // starting at the very head plays a raw splice instead.
                     Some((start, end)) if start >= 1.0 => {
-                        let xf = (LOOP_XFADE_SECS * pcm.sample_rate as f64)
+                        let xf = (LOOP_XFADE_SECS * pcm.sample_rate() as f64)
                             .min((end - start) * 0.15)
                             .min(start)
                             .max(1.0);
-                        // Not while reversing: the blend walks TOWARDS IN
-                        // through the material running up to it, and
-                        // travelling the other way through the same window
-                        // it would mix forward pre-roll under a backwards
-                        // tail. The wrap below IN carries the seam instead.
-                        if !reverse && loop_pos >= end - xf && loop_pos < end {
+                        if loop_pos >= end - xf && loop_pos < end {
                             let u = loop_pos - (end - xf);
                             let src = start - xf + u;
                             let index = src as usize;
@@ -4471,7 +3853,10 @@ impl Mixer {
                             let a = source.frame(index.min(length - 1));
                             let b = source.frame((index + 1).min(length - 1));
                             let t = (u / xf) as f32;
-                            lerp_frame(frame, lerp_frame(a, b, fraction), t)
+                            [
+                                frame[0] + (a[0] + (b[0] - a[0]) * fraction - frame[0]) * t,
+                                frame[1] + (a[1] + (b[1] - a[1]) * fraction - frame[1]) * t,
+                            ]
                         } else {
                             frame
                         }
@@ -4491,7 +3876,10 @@ impl Mixer {
                         let a = source.frame(index.min(length - 1));
                         let b = source.frame((index + 1).min(length - 1));
                         let t = (fade.left / fade.total).clamp(0.0, 1.0) as f32;
-                        let out = lerp_frame(frame, lerp_frame(a, b, fraction), t);
+                        let out = [
+                            frame[0] + (a[0] + (b[0] - a[0]) * fraction - frame[0]) * t,
+                            frame[1] + (a[1] + (b[1] - a[1]) * fraction - frame[1]) * t,
+                        ];
                         fade.pos += natural_step * deck_rate as f64;
                         fade.left -= 1.0;
                         // An outgoing stream that runs off the track just
@@ -4503,7 +3891,7 @@ impl Mixer {
                     }
                     None => frame,
                 };
-                let toned = d.chain.process(frame, rate);
+                let toned = d.eq.process(frame, rate);
                 let pre = [toned[0] * gain, toned[1] * gain];
                 deck_peaks[i] = deck_peaks[i].max(pre[0].abs()).max(pre[1].abs());
                 deck_out[i] = (pre[0] * side, pre[1] * side);
@@ -4536,7 +3924,7 @@ impl Mixer {
                     } else {
                         if !v.done {
                             v.done = true;
-                            s.ended_voices.push(v.id);
+                            push_event(shared, MixEvent::VoiceEnded(v.id));
                         }
                         continue;
                     }
@@ -4594,33 +3982,34 @@ impl Mixer {
                         }
                     }
                 }
-                let cue = s.cue_limiter.process([audible(cue.0), audible(cue.1)]);
-                self.cue_ring.push(cue_pos, cue[0], cue[1]);
+                shared.cue_ring.push(
+                    cue_pos,
+                    cue.0.clamp(-CLAMP, CLAMP),
+                    cue.1.clamp(-CLAMP, CLAMP),
+                );
                 cue_pos = cue_pos.saturating_add(1);
             }
 
             let score = s.score_preview.scratch.get(frame).copied().unwrap_or([0.0; 2]);
+            let piano = s.synth.frame(SynthTrack::Piano, frame);
+            let ironfish = s.synth.frame(SynthTrack::Ironfish, frame);
+            let drums = s.synth.frame(SynthTrack::Drums, frame);
             let master = s.master.tick(rate);
-            s.limiter.set_sample_rate(rate as f32);
-            s.cue_limiter.set_sample_rate(rate as f32);
-            // `audible` before the limiter, because a non-finite sample
-            // would otherwise poison its level meters as well as the
-            // device buffer, and one is enough to duck the bus for good.
-            let summed = [
-                audible((video.0 + deck_out[0].0 + deck_out[1].0 + sfx.0 + score[0]) * master),
-                audible((video.1 + deck_out[0].1 + deck_out[1].1 + sfx.1 + score[1]) * master),
-            ];
-            // The mix's own chain, between the master gain and the
-            // limiter: after everything has been summed, so an effect
-            // here hears the whole room, and before the limiter, so
-            // whatever it adds is still caught.
-            let summed = s.master_chain.process(summed, rate as f32);
-            // The limiter, not a clamp. A clamp is a clipper: pushed past
-            // full scale it flat-tops every sample that got there, which
-            // is grit rather than loudness. Nothing arrives here too loud
-            // any more, because the look-ahead ducked it on the way in.
-            let limited = s.limiter.process(summed);
-            let (l, r) = (limited[0], limited[1]);
+            let mixed = s.program_mix.process_frame(
+                [
+                    [video.0, video.1],
+                    [deck_out[0].0, deck_out[0].1],
+                    [deck_out[1].0, deck_out[1].1],
+                    [sfx.0 + score[0], sfx.1 + score[1]],
+                    piano,
+                    ironfish,
+                    drums,
+                ],
+                master,
+                rate,
+            );
+            let l = mixed[0].clamp(-CLAMP, CLAMP);
+            let r = mixed[1].clamp(-CLAMP, CLAMP);
             for channel in 0..channels {
                 output.channel_mut(channel)[frame] += if channel == 0 { l } else { r };
             }
@@ -4639,232 +4028,170 @@ impl Mixer {
                         >= scheduled.target_frame.saturating_add(scheduled.fade_frames.max(1))
             });
             if completes_now {
-                verify_or!(s.scheduled_video.is_some(), { continue });
-                let Some(scheduled) = s.scheduled_video.take() else { continue };
+                let scheduled = s.scheduled_video.take().expect("checked above");
                 if let Some(from) = scheduled.from {
                     s.video[from.index()].gain = Ramp::at(0.0);
                 }
                 s.video[scheduled.to.index()].gain = Ramp::at(1.0);
-                self.transition
+                shared.transition
                     .publish_phase(VideoTransitionPhase::Completed, s.rendered_frames);
             }
         }
 
-        let mix_nanos = mix_started.elapsed().as_nanos() as u64;
         // One cue publish per buffer: the phones consumer sees whole
         // buffers or nothing.
         if cue_armed {
-            self.cue_ring.write_pos.store(cue_pos, Ordering::Release);
+            shared.cue_ring.write_pos.store(cue_pos, Ordering::Release);
         }
 
-        // Reap: consumed video queue frames + fully faded stopped voices.
-        for bus in s.video.iter_mut() {
-            let consumed = bus.cursor as usize;
+
+        // Reap: consumed slot frames + fully faded stopped voices. A
+        // reaped voice's buffer goes back to the UI to be dropped.
+        for (i, bus) in s.video.iter_mut().enumerate() {
+            let consumed = (bus.cursor as usize).min(slots[i].avail);
             if consumed > 0 {
-                bus.queue.drain(..consumed.min(bus.queue.len()));
+                shared.video[i]
+                    .read_pos
+                    .store(slots[i].base + consumed as u64, Ordering::Release);
                 bus.cursor -= consumed as f64;
             }
         }
-        s.sfx.retain(|v| {
+        let mut index = 0;
+        while index < s.sfx.len() {
+            let v = &s.sfx[index];
             let ran_off = v.cursor_fp >= (v.pcm.frames.len() as u64) << 32 && !v.loop_on;
             let faded_out = v.done && v.gain.current <= 0.0005 && v.gain.target == 0.0;
-            !(ran_off || faded_out)
-        });
+            if ran_off || faded_out {
+                let voice = s.sfx.swap_remove(index);
+                retire(shared, Retired::Track(voice.pcm));
+            } else {
+                index += 1;
+            }
+        }
 
         for (i, p) in peaks.iter().enumerate() {
-            self.meters[i].store(p.to_bits(), Ordering::Relaxed);
+            shared.meters[i].store(p.to_bits(), Ordering::Relaxed);
         }
         for (i, p) in deck_peaks.iter().enumerate() {
-            self.deck_meters[i].store(p.to_bits(), Ordering::Relaxed);
+            shared.deck_meters[i].store(p.to_bits(), Ordering::Relaxed);
         }
-        self.publish_deck(s, 0);
-        self.publish_deck(s, 1);
-        self.transition
-            .publish_rendered_frame(self.device_frames.load(Ordering::Acquire));
-        let cost = render_started.elapsed().as_nanos() as u64;
-        // Three clock reads a buffer, not three per sample: the split says
-        // whether the cost is the mixing or the per-buffer overhead around
-        // it, which is the question a climbing budget actually raises.
-        let setup_nanos = mix_started.duration_since(render_started).as_nanos() as u64;
-        self.stage_nanos.publish(StageNanos {
-            setup: setup_nanos,
-            mix: mix_nanos,
-            publish: cost.saturating_sub(setup_nanos).saturating_sub(mix_nanos),
-        });
-        self.render_nanos.store(cost, Ordering::Relaxed);
-        self.buffer_frames.store(frames as u64, Ordering::Relaxed);
-        self.render_max_nanos.fetch_max(cost, Ordering::Relaxed);
-    }
-}
-
-/// Fixtures the audio tests share: tracks with a known shape and one
-/// device callback at a time.
-#[cfg(test)]
-pub(crate) mod fixtures {
-    use super::*;
-
-    pub(crate) fn const_pcm(value: i16, frames: usize, rate: u32) -> Arc<TrackPcm> {
-        Arc::new(TrackPcm { frames: vec![[value, value]; frames], sample_rate: rate })
-    }
-
-    /// A constant, but stereo: left and right held at their own separate
-    /// levels for the whole clip. `const_pcm`'s left and right are
-    /// identical, so side (L-R) is exactly zero throughout -- fine for a
-    /// mono-summing effect's click test, but it would make a stereo-width
-    /// click test vacuous: the left channel it measures never moves no
-    /// matter what `width` does, since mid+side*width collapses to the
-    /// same constant when side is already zero.
-    pub(crate) fn const_stereo_pcm(left: i16, right: i16, frames: usize, rate: u32) -> Arc<TrackPcm> {
-        Arc::new(TrackPcm { frames: vec![[left, right]; frames], sample_rate: rate })
-    }
-
-    /// First half `a`, second half `b`: a signal a raw splice cannot hide
-    /// in, for testing that jumps land as blends.
-    pub(crate) fn split_pcm(a: i16, b: i16, frames: usize, rate: u32) -> Arc<TrackPcm> {
-        let half = frames / 2;
-        let mut all = vec![[a, a]; frames];
-        for frame in all.iter_mut().skip(half) {
-            *frame = [b, b];
+        if peaks[METER_MASTER] > f32::EPSILON
+            && shared
+                .first_non_silent
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            crate::log!(
+                "audio: mixer first non-silent buffer sample_rate={} frames={} channels={}",
+                device_rate,
+                frames,
+                channels
+            );
         }
-        Arc::new(TrackPcm { frames: all, sample_rate: rate })
-    }
-
-    /// Silent, except one full-scale frame at `at_secs`: a mark to time a
-    /// delay against.
-    pub(crate) fn click_pcm(at_secs: f64, rate: u32, seconds: f64) -> Arc<TrackPcm> {
-        let len = (rate as f64 * seconds) as usize;
-        let at = (at_secs * rate as f64).round() as usize;
-        let mut all = vec![[0i16, 0i16]; len];
-        if at < len {
-            all[at] = [i16::MAX, i16::MAX];
+        shared
+            .transition
+            .publish_rendered_frame(shared.device_frames.load(Ordering::Acquire));
+        Self::publish_snapshot(s, shared, self.serial);
+        let render_nanos = render_started.elapsed().as_nanos() as u64;
+        shared.render_max_nanos.fetch_max(render_nanos, Ordering::Relaxed);
+        let budget_nanos = (frames as f64 / device_rate * 1e9) as u64;
+        if render_nanos > budget_nanos {
+            shared.overrun_callbacks.fetch_add(1, Ordering::Relaxed);
         }
-        Arc::new(TrackPcm { frames: all, sample_rate: rate })
-    }
-
-    /// One device callback. A test thread is not an audio thread: the
-    /// callback arms flush-to-zero on whoever calls it, and a test that
-    /// runs next on this thread must not inherit that (it has its own
-    /// proof, `every_callback_arms_flush_to_zero`).
-    pub(crate) fn render(mixer: &Mixer, rate: f64, frames: usize) -> AudioBuffer {
-        let mut buffer = AudioBuffer::new_with_size(frames, 2);
-        mixer.render(rate, &mut buffer);
-        crate::music_dsp::set_flush_denormals(false);
-        buffer
-    }
-
-    /// The biggest jump between neighbouring samples in a rendered block.
-    ///
-    /// A click IS a step: the ear hears the discontinuity, not the level. Any
-    /// gain, band or lane move performed on an audible strip has to glide,
-    /// and this is how a test says so in one number. Measure it over a flat
-    /// signal and whatever comes back belongs to the move under test.
-    pub(crate) fn worst_adjacent_step(samples: &[f32]) -> f32 {
-        samples
-            .windows(2)
-            .map(|pair| (pair[1] - pair[0]).abs())
-            .fold(0.0f32, f32::max)
-    }
-
-    /// A tone at `frequency`, as a deck would hold it.
-    pub(crate) fn tone_pcm(frequency: f64, rate: u32, seconds: f64) -> Arc<TrackPcm> {
-        let len = (rate as f64 * seconds) as usize;
-        let frames = (0..len)
-            .map(|index| {
-                let value = (2.0 * std::f64::consts::PI * frequency * index as f64
-                    / rate as f64)
-                    .sin();
-                let sample = (value * 12_000.0) as i16;
-                [sample, sample]
-            })
-            .collect();
-        Arc::new(TrackPcm { frames, sample_rate: rate })
-    }
-
-    /// A genuinely stereo tone: independent left and right frequencies,
-    /// so mid and side are both nonzero throughout. `tone_pcm`'s L and R
-    /// are identical, which makes side (L-R) exactly zero and would make
-    /// a stereo-width test vacuous regardless of what the effect does --
-    /// the same "nice value hides the bug" trap the bitcrusher's click
-    /// test found in a mono constant.
-    pub(crate) fn stereo_tone_pcm(
-        freq_l: f64,
-        freq_r: f64,
-        rate: u32,
-        seconds: f64,
-    ) -> Arc<TrackPcm> {
-        let len = (rate as f64 * seconds) as usize;
-        let frames = (0..len)
-            .map(|index| {
-                let t = index as f64 / rate as f64;
-                let l = (2.0 * std::f64::consts::PI * freq_l * t).sin();
-                let r = (2.0 * std::f64::consts::PI * freq_r * t).sin();
-                [(l * 12_000.0) as i16, (r * 12_000.0) as i16]
-            })
-            .collect();
-        Arc::new(TrackPcm { frames, sample_rate: rate })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::fixtures::*;
-    use crate::blend::EQ_VOCAL_DUCK;
+    use std::cell::{RefCell, RefMut};
 
-    /// The chain is a data-layout change, not a DSP one: driven with the
-    /// same parameters as today's hand-nested
-    /// `echo.process(freeze.process(eq.process(frame, rate), rate), rate)`,
-    /// its output must be bit-for-bit identical, every frame. A resonance
-    /// rung, a band boost, a running ping-pong echo and a held freeze are
-    /// all engaged first, so this exercises every unit's non-bypass path
-    /// and not just the identity fast path they all also have.
-    #[test]
-    fn deck_chain_matches_todays_hand_chained_order() {
-        let rate = 48_000.0f32;
-        let mut chain = DeckChain::new(rate);
-        let mut eq = DeckEq::new(rate);
-        let mut freeze = Freeze::new();
-        let mut echo = DeckEcho::new();
+    /// Handle and engine together, the way the app has them on two
+    /// threads, here on one: commands go in through the handle, the
+    /// engine applies them on `render`/`sync`, and every read below
+    /// syncs first so a test sees what the callback would see.
+    struct TestMixer {
+        mixer: Mixer,
+        engine: RefCell<MixEngine>,
+    }
 
-        chain.eq_mut().set_resonance(DeckEq::RESONANCE_RUNGS[1]);
-        eq.set_resonance(DeckEq::RESONANCE_RUNGS[1]);
-        chain.eq_mut().set_band(0, 1.4);
-        eq.set_band(0, 1.4);
-        chain.echo_mut().set_fraction(Some((1, 2)));
-        echo.set_fraction(Some((1, 2)));
-        chain.echo_mut().set_feedback(0.6);
-        echo.set_feedback(0.6);
-        chain.echo_mut().set_pingpong(true);
-        echo.set_pingpong(true);
+    impl std::ops::Deref for TestMixer {
+        type Target = Mixer;
+        fn deref(&self) -> &Mixer {
+            &self.mixer
+        }
+    }
 
-        let beat_frames = 0.5 * rate as f64;
-        for buffer in 0..8u32 {
-            chain.eq_mut().set_sample_rate(rate);
-            chain.eq_mut().prepare_block();
-            eq.set_sample_rate(rate);
-            eq.prepare_block();
-            chain.echo_mut().prepare_block(beat_frames);
-            echo.prepare_block(beat_frames);
+    impl TestMixer {
+        fn new() -> TestMixer {
+            let mixer = Mixer::new();
+            let engine = mixer.take_engine().expect("fresh engine");
+            TestMixer { mixer, engine: RefCell::new(engine) }
+        }
 
-            // Freeze engages partway through, identically on both sides,
-            // once there is real content behind it to hold.
-            if buffer == 4 {
-                chain.freeze_mut().hold(4096, rate);
-                freeze.hold(4096, rate);
-            }
+        fn sync(&self) {
+            self.engine.borrow_mut().sync();
+        }
 
-            for i in 0..512u32 {
-                let n = (buffer * 512 + i) as f32;
-                // Detuned, non-integer-cycle-count tone: a period that
-                // divides evenly into the buffer or beat length would make
-                // a divergence in slot order numerically invisible.
-                let s = (n * 443.0 / rate * std::f32::consts::TAU).sin() * 0.4;
-                let frame = [s, s * 0.8];
+        /// The audio-owned state, commands applied.
+        fn state(&self) -> RefMut<'_, MixState> {
+            let mut engine = self.engine.borrow_mut();
+            engine.sync();
+            RefMut::map(engine, |engine| engine.state_mut())
+        }
 
-                let want = echo.process(freeze.process(eq.process(frame, rate), rate), rate);
-                let got = chain.process(frame, rate);
-                assert_eq!(got, want, "buffer {buffer} frame {i}");
-            }
+        fn render(&self, rate: f64, output: &mut AudioBuffer) {
+            self.engine.borrow_mut().render(rate, output);
+        }
+
+        fn deck_position(&self, deck: DeckId) -> (f64, f64, bool) {
+            self.sync();
+            self.mixer.deck_position(deck)
+        }
+
+        fn deck_snapshot(&self, deck: DeckId) -> DeckSnapshot {
+            self.sync();
+            self.mixer.deck_snapshot(deck)
+        }
+
+        fn deck_scratching(&self, deck: DeckId) -> bool {
+            self.sync();
+            self.mixer.deck_scratching(deck)
+        }
+
+        fn crossfader_position(&self) -> f32 {
+            self.sync();
+            self.mixer.crossfader_position()
+        }
+
+        fn preview_position(&self) -> Option<(f64, f64, bool, bool)> {
+            self.sync();
+            self.mixer.preview_position()
+        }
+
+        fn score_preview_state(&self) -> (bool, u64) {
+            self.sync();
+            self.mixer.score_preview_state()
+        }
+
+        fn drain_ended_decks(&self) -> Vec<DeckId> {
+            self.sync();
+            self.mixer.drain_ended_decks()
+        }
+
+        fn drain_ended_voices(&self) -> Vec<VoiceId> {
+            self.sync();
+            self.mixer.drain_ended_voices()
+        }
+
+        fn drain_retired(&self) -> Vec<Retired> {
+            self.sync();
+            self.mixer.drain_retired()
+        }
+
+        fn video_transition_snapshot(&self) -> Option<VideoTransitionSnapshot> {
+            self.sync();
+            self.mixer.video_transition_snapshot()
         }
     }
 
@@ -4878,555 +4205,33 @@ mod tests {
         Some(Arc::new(SampleBank::load(&dir).expect("load local Salamander corpus")))
     }
 
-
-
-
-
-
-
-    #[test]
-    fn a_resize_folds_a_head_that_belonged_to_the_old_span() {
-        // The engine's mirror of the playhead is a stale 20 Hz number, so
-        // it says what it MEANT and the mixer does it against the real one.
-        let mixer = spin_deck_a(16_384, 480_000);
-        mixer.set_deck_loop_span(
-            DeckId::A,
-            Some((2.0, 6.0)),
-            crate::decks::LoopSeek::MovedOut,
-        );
-        mixer.seek_deck_seconds(DeckId::A, 5.5);
-        // Halve it from IN: the head is now past the new OUT.
-        mixer.set_deck_loop_span(
-            DeckId::A,
-            Some((2.0, 4.0)),
-            crate::decks::LoopSeek::Changed,
-        );
-        let at = mixer.deck_snapshot(DeckId::A).position_secs;
-        assert!(
-            (at - 3.5).abs() < 1e-6,
-            "folded by a whole length, keeping its phase, at {at}",
-        );
-
-        // And backwards: move the span forward under a head that was in it.
-        mixer.set_deck_loop_span(
-            DeckId::A,
-            Some((6.0, 8.0)),
-            crate::decks::LoopSeek::Changed,
-        );
-        let at = mixer.deck_snapshot(DeckId::A).position_secs;
-        assert!(at >= 6.0 && at < 8.0, "and into the new span, at {at}");
+    fn const_pcm(value: i16, frames: usize, rate: u32) -> Arc<TrackPcm> {
+        Arc::new(TrackPcm { frames: vec![[value, value]; frames], sample_rate: rate })
     }
 
-    #[test]
-    fn a_head_that_never_belonged_to_the_span_is_left_to_play_its_way_in() {
-        // The patient rule: a deck sitting behind a loop is playing into
-        // it, deliberately and audibly. Folding it forward would teleport
-        // it over the run-up.
-        let mixer = spin_deck_a(16_384, 480_000);
-        mixer.seek_deck_seconds(DeckId::A, 2.0);
-        mixer.set_deck_loop_span(
-            DeckId::A,
-            Some((5.0, 9.0)),
-            crate::decks::LoopSeek::Changed,
-        );
-        let at = mixer.deck_snapshot(DeckId::A).position_secs;
-        assert!((at - 2.0).abs() < 1e-6, "left exactly where it was, at {at}");
-    }
-    // ---- the reverse hold, and the platter driving itself ---------------
-
-    /// Buffers of 512 frames at 48 kHz, the size the device asks for.
-    fn spin_render(mixer: &Mixer, buffers: usize) {
-        for _ in 0..buffers {
-            render(mixer, 48_000.0, 512);
+    /// First half `a`, second half `b`: a signal a raw splice cannot hide
+    /// in, for testing that jumps land as blends.
+    fn split_pcm(a: i16, b: i16, frames: usize, rate: u32) -> Arc<TrackPcm> {
+        let half = frames / 2;
+        let mut all = vec![[a, a]; frames];
+        for frame in all.iter_mut().skip(half) {
+            *frame = [b, b];
         }
+        Arc::new(TrackPcm { frames: all, sample_rate: rate })
     }
 
-    fn spin_deck_a(value: i16, frames: usize) -> Mixer {
-        let mixer = Mixer::new();
-        mixer.set_master(1.0);
-        mixer.set_crossfader(0.0);
-        mixer.install_deck(DeckId::A, const_pcm(value, frames, 48_000));
-        mixer
+    fn render(mixer: &TestMixer, rate: f64, frames: usize) -> AudioBuffer {
+        let mut buffer = AudioBuffer::new_with_size(frames, 2);
+        mixer.render(rate, &mut buffer);
+        buffer
     }
 
-    /// The published third tempo: what the record is turning at, through
-    /// every gesture that can own it.
-    #[test]
-    fn the_deck_snapshot_reports_what_the_platter_is_turning_at() {
-        let mixer = spin_deck_a(16_384, 480_000);
-        mixer.set_deck_playing(DeckId::A, true);
-        spin_render(&mixer, 8);
-        let running = mixer.deck_snapshot(DeckId::A).platter_rate;
-        assert!((running - 1.0).abs() < 1e-6, "the deck's own rate: {running}");
-
-        // A hand on the record brakes it toward a stop.
-        mixer.scratch_deck(DeckId::A, ScratchMotion::Grab);
-        spin_render(&mixer, 8);
-        let held = mixer.deck_snapshot(DeckId::A);
-        assert!(held.scratching, "the ramp owns the rate");
-        assert!(held.platter_rate < running, "slowing: {}", held.platter_rate);
-        assert!(held.platter_rate >= 0.0, "and not through zero");
-
-        // A hand outranks a motor, so let go before asking for one.
-        mixer.scratch_deck(DeckId::A, ScratchMotion::Release);
-        spin_render(&mixer, 64);
-        mixer.set_deck_censor(DeckId::A, true);
-        spin_render(&mixer, 64);
-        let reversed = mixer.deck_snapshot(DeckId::A).platter_rate;
-        assert!(reversed < 0.0, "a reverse hold turns the record back: {reversed}");
-    }
-
-    #[test]
-    fn a_censor_runs_the_record_backwards_while_it_is_held() {
-        let mixer = spin_deck_a(16_384, 480_000);
-        mixer.set_deck_playing(DeckId::A, true);
-        spin_render(&mixer, 16);
-        let at = mixer.deck_snapshot(DeckId::A).position_secs;
-        assert!(at > 0.0, "the record was running");
-
-        mixer.set_deck_censor(DeckId::A, true);
-        spin_render(&mixer, 16);
-        let back = mixer.deck_snapshot(DeckId::A).position_secs;
-        assert!(back < at, "the record runs backwards: {at} -> {back}");
-        assert!(mixer.deck_scratching(DeckId::A), "the ramp owns the rate");
-    }
-
-    #[test]
-    fn letting_go_of_a_censor_lands_on_where_the_track_would_have_been() {
-        let mixer = spin_deck_a(16_384, 480_000);
-        mixer.set_deck_playing(DeckId::A, true);
-        spin_render(&mixer, 16);
-        let armed_at = mixer.deck_snapshot(DeckId::A).position_secs;
-
-        mixer.set_deck_censor(DeckId::A, true);
-        let held = 24;
-        spin_render(&mixer, held);
-        mixer.set_deck_censor(DeckId::A, false);
-        spin_render(&mixer, 1);
-
-        let want = armed_at + (held * 512) as f64 / 48_000.0;
-        let landed = mixer.deck_snapshot(DeckId::A).position_secs;
-        assert!(
-            (landed - want).abs() < 0.02,
-            "the deck lands where the record would have got to: want {want}, got {landed}",
-        );
-    }
-
-    #[test]
-    fn a_censor_under_a_latched_slip_leaves_the_operators_ghost_running() {
-        let mixer = spin_deck_a(16_384, 480_000);
-        mixer.set_deck_playing(DeckId::A, true);
-        spin_render(&mixer, 8);
-        mixer.set_deck_slip(DeckId::A, true, false);
-        let slipped_at = mixer.deck_snapshot(DeckId::A).position_secs;
-
-        mixer.set_deck_censor(DeckId::A, true);
-        spin_render(&mixer, 16);
-        mixer.set_deck_censor(DeckId::A, false);
-        spin_render(&mixer, 1);
-        assert!(mixer.deck_slipping(DeckId::A), "the operator's ghost is still theirs");
-
-        // And it is still RUNNING: releasing SLIP some buffers later lands
-        // further on again, by exactly the time that passed.
-        let censor_landing = mixer.deck_snapshot(DeckId::A).position_secs;
-        let after = 20;
-        spin_render(&mixer, after);
-        mixer.set_deck_slip(DeckId::A, false, false);
-        spin_render(&mixer, 1);
-        let slip_landing = mixer.deck_snapshot(DeckId::A).position_secs;
-        assert!(
-            slip_landing > censor_landing,
-            "the ghost went on: {censor_landing} -> {slip_landing}",
-        );
-        let want = slipped_at + ((16 + 1 + after + 1) * 512) as f64 / 48_000.0;
-        assert!(
-            (slip_landing - want).abs() < 0.05,
-            "and by the elapsed time: want {want}, got {slip_landing}",
-        );
-    }
-
-    #[test]
-    fn a_censor_is_refused_while_a_hand_is_on_the_record() {
-        let mixer = spin_deck_a(16_384, 480_000);
-        mixer.set_deck_playing(DeckId::A, true);
-        spin_render(&mixer, 8);
-        mixer.scratch_deck(DeckId::A, ScratchMotion::Grab);
-        mixer.set_deck_censor(DeckId::A, true);
-        assert!(!mixer.deck_slipping(DeckId::A), "no ghost was armed");
-    }
-
-    #[test]
-    fn reverse_inside_a_loop_wraps_back_to_the_out_point() {
-        let mixer = spin_deck_a(16_384, 480_000);
-        mixer.set_deck_loop_span(DeckId::A, Some((4.0, 5.0)), crate::decks::LoopSeek::MovedOut);
-        mixer.seek_deck_seconds(DeckId::A, 4.5);
-        mixer.set_deck_playing(DeckId::A, true);
-        spin_render(&mixer, 8);
-        mixer.set_deck_censor(DeckId::A, true);
-        // Far longer than the span: without a two-sided wrap the record
-        // walks out at IN and off the front of the track.
-        spin_render(&mixer, 400);
-        let at = mixer.deck_snapshot(DeckId::A).position_secs;
-        assert!(at >= 4.0 && at <= 5.0, "the loop still owns the playhead, at {at}");
-    }
-
-    #[test]
-    fn a_brake_leaves_the_record_where_it_wound_down() {
-        let mixer = spin_deck_a(16_384, 480_000);
-        mixer.set_deck_playing(DeckId::A, true);
-        spin_render(&mixer, 8);
-        let began = mixer.deck_snapshot(DeckId::A).position_secs;
-
-        mixer.spin_deck(DeckId::A, SpinMotion::Brake);
-        spin_render(&mixer, (48_000.0 * BRAKE_SECS / 512.0) as usize + 8);
-        let stopped = mixer.deck_snapshot(DeckId::A).position_secs;
-        // The record TRAVELLED while it wound down. A pause hands those
-        // frames back; a brake must not.
-        assert!(stopped > began, "the platter carried on: {began} -> {stopped}");
-        assert!(!mixer.deck_scratching(DeckId::A), "and handed the rate back");
-
-        spin_render(&mixer, 8);
-        let after = mixer.deck_snapshot(DeckId::A).position_secs;
-        assert!((after - stopped).abs() < 1e-6, "and then stayed there: {stopped} -> {after}");
-    }
-
-    #[test]
-    fn a_spin_back_throws_the_record_backwards_before_it_stops() {
-        let mixer = spin_deck_a(16_384, 480_000);
-        mixer.seek_deck_seconds(DeckId::A, 5.0);
-        mixer.set_deck_playing(DeckId::A, true);
-        spin_render(&mixer, 8);
-        let began = mixer.deck_snapshot(DeckId::A).position_secs;
-
-        mixer.spin_deck(DeckId::A, SpinMotion::SpinBack);
-        let total = SPINBACK_THROW_SECS + SPINBACK_FALL_SECS;
-        spin_render(&mixer, (48_000.0 * total / 512.0) as usize + 8);
-        let stopped = mixer.deck_snapshot(DeckId::A).position_secs;
-        assert!(stopped < began, "it went backwards: {began} -> {stopped}");
-        assert!(!mixer.deck_scratching(DeckId::A));
-    }
-
-    #[test]
-    fn a_soft_start_comes_up_to_tempo_instead_of_cutting_in() {
-        let mixer = spin_deck_a(16_384, 480_000);
-        mixer.spin_deck(DeckId::A, SpinMotion::SoftStart);
-        let quarter = (48_000.0 * SOFT_START_SECS / 4.0 / 512.0) as usize;
-        spin_render(&mixer, quarter);
-        let early = mixer.deck_snapshot(DeckId::A).position_secs;
-        let real = (quarter * 512) as f64 / 48_000.0;
-        assert!(early < real * 0.6, "the platter is still winding up: {early} of {real}");
-
-        spin_render(&mixer, (48_000.0 * SOFT_START_SECS / 512.0) as usize + 8);
-        let settled = mixer.deck_snapshot(DeckId::A).position_secs;
-        spin_render(&mixer, 8);
-        let moved = mixer.deck_snapshot(DeckId::A).position_secs - settled;
-        let want = (8 * 512) as f64 / 48_000.0;
-        assert!((moved - want).abs() < 0.005, "and then runs at tempo: {moved} of {want}");
-    }
-
-    // ---- the momentary roll ---------------------------------------------
-
-    #[test]
-    fn a_roll_returns_the_deck_to_where_the_record_would_have_been() {
-        let mixer = spin_deck_a(16_384, 480_000);
-        mixer.set_deck_playing(DeckId::A, true);
-        spin_render(&mixer, 16);
-        let armed_at = mixer.deck_snapshot(DeckId::A).position_secs;
-
-        mixer.push_deck_roll(DeckId::A);
-        mixer.set_deck_loop_span(
-            DeckId::A,
-            Some((armed_at, armed_at + 0.25)),
-            crate::decks::LoopSeek::MovedOut,
-        );
-        assert_eq!(mixer.deck_rolls(DeckId::A), 1);
-        let held = 40;
-        spin_render(&mixer, held);
-        mixer.pop_deck_roll(DeckId::A, None, false);
-        spin_render(&mixer, 1);
-
-        let want = armed_at + (held * 512) as f64 / 48_000.0;
-        let landed = mixer.deck_snapshot(DeckId::A).position_secs;
-        assert!(
-            (landed - want).abs() < 0.02,
-            "the record carried on underneath: want {want}, got {landed}",
-        );
-        assert_eq!(mixer.deck_rolls(DeckId::A), 0);
-    }
-
-    #[test]
-    fn a_roll_held_over_another_returns_into_the_one_beneath_it() {
-        let mixer = spin_deck_a(16_384, 480_000);
-        mixer.set_deck_playing(DeckId::A, true);
-        spin_render(&mixer, 8);
-        let outer = (2.0, 3.0);
-
-        // The outer roll: a one-second loop.
-        mixer.push_deck_roll(DeckId::A);
-        mixer.set_deck_loop_span(
-            DeckId::A,
-            Some(outer),
-            crate::decks::LoopSeek::MovedOut,
-        );
-        // The engine sends the record into a loop it engages; here that is
-        // the caller's job.
-        mixer.seek_deck_seconds(DeckId::A, outer.0);
-        spin_render(&mixer, 8);
-        // The inner one, over it.
-        mixer.push_deck_roll(DeckId::A);
-        mixer.set_deck_loop_span(
-            DeckId::A,
-            Some((2.0, 2.125)),
-            crate::decks::LoopSeek::MovedOut,
-        );
-        assert_eq!(mixer.deck_rolls(DeckId::A), 2);
-        spin_render(&mixer, 40);
-
-        // Letting the inner one go lands INSIDE the outer one -- its ghost
-        // wrapped through the outer span, not through the whole track.
-        mixer.pop_deck_roll(DeckId::A, Some(outer), false);
-        spin_render(&mixer, 1);
-        let at = mixer.deck_snapshot(DeckId::A).position_secs;
-        assert!(at >= outer.0 && at < outer.1, "back inside the outer roll, at {at}");
-        assert_eq!(mixer.deck_rolls(DeckId::A), 1);
-    }
-
-    #[test]
-    fn adopting_a_roll_keeps_what_is_sounding_and_stands_every_level_down() {
-        let mixer = spin_deck_a(16_384, 480_000);
-        mixer.set_deck_playing(DeckId::A, true);
-        spin_render(&mixer, 8);
-        mixer.push_deck_roll(DeckId::A);
-        mixer.push_deck_roll(DeckId::A);
-        mixer.set_deck_loop_span(
-            DeckId::A,
-            Some((2.0, 2.5)),
-            crate::decks::LoopSeek::MovedOut,
-        );
-        mixer.seek_deck_seconds(DeckId::A, 2.0);
-        spin_render(&mixer, 20);
-        let at = mixer.deck_snapshot(DeckId::A).position_secs;
-
-        mixer.pop_deck_roll(DeckId::A, None, true);
-        spin_render(&mixer, 1);
-        assert_eq!(mixer.deck_rolls(DeckId::A), 0, "every level stood down");
-        let after = mixer.deck_snapshot(DeckId::A).position_secs;
-        assert!(after >= 2.0 && after < 2.5, "still in the loop it adopted, at {after}");
-        assert!((after - at).abs() < 0.05, "and it did not jump: {at} -> {after}");
-    }
-
-    #[test]
-    fn a_roll_stack_is_bounded_and_a_pop_with_nothing_on_it_does_nothing() {
-        let mixer = spin_deck_a(16_384, 480_000);
-        mixer.set_deck_playing(DeckId::A, true);
-        spin_render(&mixer, 8);
-        for _ in 0..ROLL_STACK_CAP + 3 {
-            mixer.push_deck_roll(DeckId::A);
-        }
-        assert_eq!(mixer.deck_rolls(DeckId::A), ROLL_STACK_CAP, "a fixed depth");
-        for _ in 0..ROLL_STACK_CAP {
-            mixer.pop_deck_roll(DeckId::A, None, false);
-        }
-        let at = mixer.deck_snapshot(DeckId::A).position_secs;
-        mixer.pop_deck_roll(DeckId::A, None, false);
-        spin_render(&mixer, 1);
-        assert_eq!(mixer.deck_rolls(DeckId::A), 0);
-        assert!(mixer.deck_snapshot(DeckId::A).position_secs >= at, "and nothing jumped back");
-    }
-
-    #[test]
-    fn a_roll_is_click_free_both_ways() {
-        let mixer = Mixer::new();
-        mixer.set_master(1.0);
-        mixer.set_crossfader(0.0);
-        mixer.install_deck(DeckId::A, split_pcm(16_384, -16_384, 480_000, 48_000));
-        mixer.seek_deck_seconds(DeckId::A, 7.0);
-        mixer.set_deck_playing(DeckId::A, true);
-        spin_render(&mixer, 8);
-        let mut worst = 0.0f32;
-        let mut previous: Option<f32> = None;
-        for index in 0..48 {
-            if index == 8 {
-                mixer.push_deck_roll(DeckId::A);
-                mixer.set_deck_loop_span(
-                    DeckId::A,
-                    Some((7.1, 7.35)),
-                    crate::decks::LoopSeek::MovedOut,
-                );
-            }
-            if index == 32 {
-                mixer.pop_deck_roll(DeckId::A, None, false);
-            }
-            let block = render(&mixer, 48_000.0, 512);
-            for sample in &block.channel(0)[..512] {
-                if let Some(last) = previous {
-                    worst = worst.max((sample - last).abs());
-                }
-                previous = Some(*sample);
-            }
-        }
-        assert!(worst < 0.02, "a roll must blend in and out, biggest step {worst}");
-    }
-    // ---- a load that lands on a deck that is already playing ------------
-
-    #[test]
-    fn a_load_onto_a_silent_deck_is_still_a_cut() {
-        // Why every existing golden is untouched: on a deck at rest the
-        // install happens on this thread, this instant, exactly as before.
-        let mixer = Mixer::new();
-        mixer.install_deck(DeckId::A, const_pcm(8_000, 480_000, 48_000));
-        assert!((mixer.deck_snapshot(DeckId::A).duration_secs - 10.0).abs() < 1e-6);
-        mixer.set_deck_playing(DeckId::A, true);
-        render(&mixer, 48_000.0, 4_096);
-        mixer.set_deck_playing(DeckId::A, false);
-        // Past the pause fade the deck is silent again, so it cuts again.
-        render(&mixer, 48_000.0, 4_096);
-        mixer.install_deck(DeckId::A, const_pcm(8_000, 240_000, 48_000));
-        assert!((mixer.deck_snapshot(DeckId::A).duration_secs - 5.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn a_load_over_a_playing_deck_waits_for_its_fade_before_the_swap() {
-        let mixer = Mixer::new();
-        mixer.set_master(1.0);
-        mixer.install_deck(DeckId::A, const_pcm(8_000, 480_000, 48_000));
-        mixer.set_deck_playing(DeckId::A, true);
-        render(&mixer, 48_000.0, 4_096);
-
-        mixer.install_deck_over(DeckId::A, const_pcm(4_000, 192_000, 48_000), false);
-        // Nothing has moved yet: the outgoing track is still what the room
-        // is hearing, and it is still what the snapshot reports.
-        assert!((mixer.deck_snapshot(DeckId::A).duration_secs - 10.0).abs() < 1e-6);
-        render(&mixer, 48_000.0, 512);
-        assert!((mixer.deck_snapshot(DeckId::A).duration_secs - 10.0).abs() < 1e-6);
-
-        // Past the fade plus a buffer, the swap has landed.
-        for _ in 0..8 {
-            render(&mixer, 48_000.0, 512);
-        }
-        let snap = mixer.deck_snapshot(DeckId::A);
-        assert!((snap.duration_secs - 4.0).abs() < 1e-6, "the new track is on");
-        assert!(snap.position_secs.abs() < 1e-6, "at its top");
-        assert!(!snap.playing, "and stopped, because the policy said so");
-    }
-
-    #[test]
-    fn a_load_over_a_playing_deck_hands_the_old_track_back_off_the_callback() {
-        let mixer = Mixer::new();
-        mixer.set_master(1.0);
-        let outgoing = const_pcm(8_000, 480_000, 48_000);
-        mixer.install_deck(DeckId::A, outgoing.clone());
-        mixer.set_deck_playing(DeckId::A, true);
-        render(&mixer, 48_000.0, 4_096);
-
-        mixer.install_deck_over(DeckId::A, const_pcm(4_000, 192_000, 48_000), false);
-        for _ in 0..8 {
-            render(&mixer, 48_000.0, 512);
-        }
-        // The callback moved the finished track out of the voice; it did
-        // NOT free it. Freeing a decoded track is an unbounded free and the
-        // audio thread does not do those.
-        assert_eq!(Arc::strong_count(&outgoing), 2, "the mixer is still holding it");
-        mixer.reap_retired();
-        assert_eq!(Arc::strong_count(&outgoing), 1, "and this is the thread that drops it");
-    }
-
-    #[test]
-    fn a_load_that_keeps_the_deck_running_comes_back_up_on_the_new_track() {
-        let mixer = Mixer::new();
-        mixer.set_master(1.0);
-        mixer.set_crossfader(0.0);
-        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
-        mixer.set_deck_playing(DeckId::A, true);
-        render(&mixer, 48_000.0, 4_096);
-
-        mixer.install_deck_over(DeckId::A, const_pcm(8_192, 480_000, 48_000), true);
-        for _ in 0..8 {
-            render(&mixer, 48_000.0, 512);
-        }
-        let snap = mixer.deck_snapshot(DeckId::A);
-        assert!(snap.playing, "the deck never stopped");
-        let before = snap.position_secs;
-        // Let the transport climb back to unity, then read the level.
-        for _ in 0..8 {
-            render(&mixer, 48_000.0, 512);
-        }
-        assert!(mixer.deck_snapshot(DeckId::A).position_secs > before, "and it is running");
-        let block = render(&mixer, 48_000.0, 512);
-        let level = block.channel(0)[511].abs();
-        let want = 8_192.0 / 32_768.0;
-        assert!((level - want).abs() < 0.01, "the SECOND track's level, got {level}");
-    }
-
-    #[test]
-    fn a_second_load_inside_the_fade_takes_the_later_track() {
-        let mixer = Mixer::new();
-        mixer.set_master(1.0);
-        let first = const_pcm(8_000, 480_000, 48_000);
-        mixer.install_deck(DeckId::A, first.clone());
-        mixer.set_deck_playing(DeckId::A, true);
-        render(&mixer, 48_000.0, 4_096);
-
-        let never = const_pcm(4_000, 192_000, 48_000);
-        mixer.install_deck_over(DeckId::A, never.clone(), false);
-        render(&mixer, 48_000.0, 512);
-        mixer.install_deck_over(DeckId::A, const_pcm(2_000, 96_000, 48_000), false);
-        // The second call took the first parked load with it, on this
-        // thread, before the callback ever saw it.
-        assert_eq!(Arc::strong_count(&never), 1, "the load that never got its turn");
-        for _ in 0..8 {
-            render(&mixer, 48_000.0, 512);
-        }
-        assert!((mixer.deck_snapshot(DeckId::A).duration_secs - 2.0).abs() < 1e-6);
-        assert_eq!(Arc::strong_count(&first), 2, "the original is waiting to be reaped");
-        mixer.reap_retired();
-        assert_eq!(Arc::strong_count(&first), 1);
-    }
-
-    #[test]
-    fn an_unload_during_the_fade_cancels_the_parked_load() {
-        let mixer = Mixer::new();
-        mixer.set_master(1.0);
-        mixer.install_deck(DeckId::A, const_pcm(8_000, 480_000, 48_000));
-        mixer.set_deck_playing(DeckId::A, true);
-        render(&mixer, 48_000.0, 4_096);
-
-        let parked = const_pcm(4_000, 192_000, 48_000);
-        mixer.install_deck_over(DeckId::A, parked.clone(), true);
-        mixer.clear_deck(DeckId::A);
-        assert_eq!(Arc::strong_count(&parked), 1, "the parked load went with the unload");
-        for _ in 0..8 {
-            render(&mixer, 48_000.0, 512);
-        }
-        // Nothing resurrects on an emptied deck.
-        assert!(mixer.deck_snapshot(DeckId::A).duration_secs.abs() < 1e-9);
-    }
-
-    #[test]
-    fn play_pressed_during_the_fade_re_aims_the_load_rather_than_the_old_track() {
-        let mixer = Mixer::new();
-        mixer.set_master(1.0);
-        mixer.set_crossfader(0.0);
-        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
-        mixer.set_deck_playing(DeckId::A, true);
-        render(&mixer, 48_000.0, 4_096);
-
-        // Aimed to stop, then the operator changes their mind mid-fade.
-        mixer.install_deck_over(DeckId::A, const_pcm(8_192, 480_000, 48_000), false);
-        mixer.set_deck_playing(DeckId::A, true);
-        for _ in 0..16 {
-            render(&mixer, 48_000.0, 512);
-        }
-        let snap = mixer.deck_snapshot(DeckId::A);
-        assert!(snap.playing, "the deck came up on the new track");
-        assert!((snap.duration_secs - 10.0).abs() < 1e-6);
-    }
     #[test]
     fn score_preview_enters_program_before_master_and_stops_at_end() {
         let Some(bank) = local_drum_bank() else { return };
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.run_cmd(MixCmd::SetDrumBank(bank));
-        mixer.state.lock().unwrap().master = Ramp::at(1.0);
+        mixer.state().master = Ramp::at(1.0);
         let sequence = Arc::new(PreviewSequence {
             sample_rate: 48_000,
             events: vec![(
@@ -5445,7 +4250,7 @@ mod tests {
         mixer.score_preview_stop();
         assert_eq!(mixer.score_preview_state(), (false, 0));
 
-        mixer.state.lock().unwrap().master = Ramp::at(0.0);
+        mixer.state().master = Ramp::at(0.0);
         mixer.score_preview_play(sequence);
         let muted = render(&mixer, 48_000.0, 256);
         assert!(muted.channel(0).iter().all(|sample| *sample == 0.0));
@@ -5455,9 +4260,9 @@ mod tests {
     fn score_preview_is_block_size_deterministic() {
         let Some(bank) = local_drum_bank() else { return };
         let run = |block: usize| {
-            let mixer = Mixer::new();
+            let mixer = TestMixer::new();
             mixer.run_cmd(MixCmd::SetDrumBank(bank.clone()));
-            mixer.state.lock().unwrap().master = Ramp::at(1.0);
+            mixer.state().master = Ramp::at(1.0);
             mixer.score_preview_play(Arc::new(PreviewSequence {
                 sample_rate: 48_000,
                 events: vec![
@@ -5494,8 +4299,8 @@ mod tests {
 
     #[test]
     fn score_preview_piano_receives_sample_timed_events() {
-        let mixer = Mixer::new();
-        mixer.state.lock().unwrap().master = Ramp::at(1.0);
+        let mixer = TestMixer::new();
+        mixer.state().master = Ramp::at(1.0);
         mixer.score_preview_play(Arc::new(PreviewSequence {
             sample_rate: 48_000,
             events: vec![
@@ -5514,7 +4319,7 @@ mod tests {
 
     #[test]
     fn deck_under_equal_power_midpoint_is_root_half() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         // Settle master ramp.
         render(&mixer, 48_000.0, 64);
@@ -5541,9 +4346,23 @@ mod tests {
         assert!(out.channel(0)[32].abs() < 0.01);
     }
 
+    /// A tone at `frequency`, as a deck would hold it.
+    fn tone_pcm(frequency: f64, rate: u32, seconds: f64) -> Arc<TrackPcm> {
+        let len = (rate as f64 * seconds) as usize;
+        let frames = (0..len)
+            .map(|index| {
+                let value = (2.0 * std::f64::consts::PI * frequency * index as f64
+                    / rate as f64)
+                    .sin();
+                let sample = (value * 12_000.0) as i16;
+                [sample, sample]
+            })
+            .collect();
+        Arc::new(TrackPcm { frames, sample_rate: rate })
+    }
 
     /// RMS of the mixer's left output over `frames`, after `settle` frames.
-    fn deck_rms(mixer: &Mixer, rate: f64, settle: usize, frames: usize) -> f64 {
+    fn deck_rms(mixer: &TestMixer, rate: f64, settle: usize, frames: usize) -> f64 {
         render(mixer, rate, settle);
         let out = render(mixer, rate, frames);
         let channel = out.channel(0);
@@ -5552,7 +4371,7 @@ mod tests {
     }
 
     fn decibels(ratio: f64) -> f64 {
-        crate::dsp_math::ratio_to_db_f64(ratio)
+        20.0 * ratio.max(1e-12).log10()
     }
 
     /// A separated stem peaks above full scale — the lane format has to
@@ -5583,7 +4402,7 @@ mod tests {
     /// take that long to cross, not jump and land.
     #[test]
     fn a_timed_crossfade_takes_its_duration() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         mixer.set_crossfader(0.0);
         mixer.install_deck(DeckId::A, tone_pcm(440.0, 48_000, 10.0));
@@ -5592,19 +4411,19 @@ mod tests {
         mixer.set_deck_playing(DeckId::B, true);
         // Let the initial jump to 0.0 settle before the timed move starts.
         render(&mixer, 48_000.0, 4_096);
-        assert!(mixer.state.lock().unwrap().fader.current < 1e-6);
+        assert!(mixer.state().fader.current < 1e-6);
 
         mixer.fade_crossfader(1.0, 4.0);
         // A quarter of the way through a four-second fade.
         render(&mixer, 48_000.0, 48_000);
-        let quarter = mixer.state.lock().unwrap().fader.current;
+        let quarter = mixer.state().fader.current;
         assert!(
             quarter > 0.2 && quarter < 0.3,
             "one second into a 4s fade the fader should be near 0.25: {quarter}"
         );
         // And it must actually arrive by the end.
         render(&mixer, 48_000.0, 48_000 * 4);
-        let done = mixer.state.lock().unwrap().fader.current;
+        let done = mixer.state().fader.current;
         assert!((done - 1.0).abs() < 1e-6, "the fade must land on B: {done}");
     }
 
@@ -5615,7 +4434,7 @@ mod tests {
     fn a_killed_band_is_removed_from_the_deck_output() {
         let rate = 48_000.0;
         let measure = |band: usize, frequency: f64, kill: bool| -> f64 {
-            let mixer = Mixer::new();
+            let mixer = TestMixer::new();
             mixer.set_master(1.0);
             mixer.set_crossfader(0.0);
             mixer.install_deck(DeckId::A, tone_pcm(frequency, 48_000, 6.0));
@@ -5652,71 +4471,9 @@ mod tests {
         );
     }
 
-
-    /// An idle master chain is not in the path. Twelve slots run on
-    /// every frame of the mix, so the one thing that has to be true
-    /// before any of this is worth having is that they cost the signal
-    /// nothing until one is switched on.
-    #[test]
-    fn an_idle_master_chain_leaves_the_mix_alone() {
-        let mixer = Mixer::new();
-        mixer.set_master(1.0);
-        mixer.set_crossfader(0.0);
-        let pcm = tone_pcm(1_000.0, 48_000, 1.0);
-        mixer.install_deck(DeckId::A, pcm.clone());
-        mixer.set_deck_playing(DeckId::A, true);
-        render(&mixer, 48_000.0, 4_096);
-        assert!(!mixer.master_chain_engaged());
-        let start = {
-            let state = mixer.state.lock().unwrap();
-            state.decks[0].pos as usize
-        };
-        let latency = mixer.output_latency_frames();
-        let out = render(&mixer, 48_000.0, 256 + latency);
-        for index in 0..200 {
-            let want = pcm.frames[start + index][0] as f32 / 32768.0;
-            let got = out.channel(0)[index + latency];
-            assert!(
-                (got - want).abs() < 1e-6,
-                "sample {index}: {got} vs {want} — an idle master chain must be transparent"
-            );
-        }
-    }
-
-    /// And an engaged one reaches the sum. The width sits at 1.5 by
-    /// default, which widens anything that is not already mono, so an
-    /// out-of-phase pair is the cheapest thing to hear it on.
-    #[test]
-    fn an_engaged_master_effect_reaches_the_mix() {
-        let quiet = |on: bool| -> f64 {
-            let mixer = Mixer::new();
-            mixer.set_master(1.0);
-            mixer.set_crossfader(0.0);
-            // Genuinely out of phase, so there IS a side signal for
-            // the width to widen. `split_pcm` splits over time and
-            // leaves both channels equal, which has no side at all.
-            mixer.install_deck(
-                DeckId::A,
-                const_stereo_pcm(12_000, -12_000, 96_000, 48_000),
-            );
-            mixer.set_deck_playing(DeckId::A, true);
-            if on {
-                mixer.set_master_effect(9, true); // stereo width
-            }
-            render(&mixer, 48_000.0, 8_192);
-            let out = render(&mixer, 48_000.0, 2_048);
-            out.channel(0).iter().map(|s| (*s as f64) * (*s as f64)).sum::<f64>()
-        };
-        let off = quiet(false);
-        let on = quiet(true);
-        assert!(
-            on > off * 1.2,
-            "the master width did not reach the mix: {off} then {on}"
-        );
-    }
     #[test]
     fn an_untouched_deck_plays_the_decoded_samples_unchanged() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         mixer.set_crossfader(0.0);
         let pcm = tone_pcm(1_000.0, 48_000, 1.0);
@@ -5725,31 +4482,17 @@ mod tests {
         // Settle the master/fader ramps before comparing.
         render(&mixer, 48_000.0, 4_096);
         let start = {
-            let state = mixer.state.lock().unwrap();
+            let state = mixer.state();
             state.decks[0].pos as usize
         };
-        // The master bus runs a look-ahead behind the mix, so the sample
-        // that leaves at index N went in that many frames earlier.
-        let latency = mixer.output_latency_frames();
-        let out = render(&mixer, 48_000.0, 256 + latency);
+        let out = render(&mixer, 48_000.0, 256);
         for index in 0..200 {
             let want = pcm.frames[start + index][0] as f32 / 32768.0;
-            let got = out.channel(0)[index + latency];
+            let got = out.channel(0)[index];
             assert!(
                 (got - want).abs() < 1e-6,
                 "sample {index}: {got} vs {want} — an untouched deck must be transparent"
             );
-        }
-    }
-
-    /// Render away the master bus's own latency, so what comes back next
-    /// is the audio for what just happened rather than the tail of what
-    /// happened before it. The limiter looks ahead, and looking ahead is
-    /// a delay.
-    fn flush_bus(mixer: &Mixer, rate: f64) {
-        let latency = mixer.output_latency_frames();
-        if latency > 0 {
-            render(mixer, rate, latency);
         }
     }
 
@@ -5770,7 +4513,7 @@ mod tests {
         let rate = 48_000.0;
         // An octave up at the track's own tempo: the tone doubles, the
         // playhead keeps real time.
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         mixer.set_crossfader(0.0);
         mixer.install_deck(DeckId::A, tone_pcm(500.0, 48_000, 10.0));
@@ -5798,7 +4541,7 @@ mod tests {
         // Both faders at once: 8% fast AND an octave up. The tempo is the
         // slider's, the pitch is the shift's, and neither leaks into the
         // other.
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         mixer.set_crossfader(0.0);
         mixer.install_deck(DeckId::A, tone_pcm(500.0, 48_000, 10.0));
@@ -5826,7 +4569,7 @@ mod tests {
         let rate = 48_000.0;
         // Key lock off is a turntable: the 8% already raised the pitch, and
         // the shift stacks an octave on top of THAT — 500 × 1.08 × 2.
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         mixer.set_crossfader(0.0);
         mixer.install_deck(DeckId::A, tone_pcm(500.0, 48_000, 10.0));
@@ -5853,7 +4596,7 @@ mod tests {
         let rate = 48_000.0;
         // Count zero crossings of a 500 Hz tone played 8% fast with key
         // lock on: the frequency must not move with the tempo.
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         mixer.set_crossfader(0.0);
         mixer.install_deck(DeckId::A, tone_pcm(500.0, 48_000, 10.0));
@@ -5884,41 +4627,28 @@ mod tests {
 
     #[test]
     fn scratching_moves_a_paused_deck_and_release_hands_it_back() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         mixer.set_crossfader(0.0);
         mixer.install_deck(DeckId::A, tone_pcm(440.0, 48_000, 10.0));
         // Deliberately NOT playing: a hand on the record still moves it.
-        // The finger says where it is and how fast it is going; the record
-        // follows the place, not the speed.
         mixer.scratch_deck(DeckId::A, ScratchMotion::Grab);
-        for step in 1..=24 {
-            mixer.scratch_deck(
-                DeckId::A,
-                ScratchMotion::Move { secs: step as f64 * 2.0 / 24.0, rate: 2.0 },
-            );
-            render(&mixer, 48_000.0, 1_000);
-        }
+        mixer.scratch_deck(DeckId::A, ScratchMotion::Move { rate: 2.0 });
+        render(&mixer, 48_000.0, 24_000);
         let (scrubbed, _, playing) = mixer.deck_position(DeckId::A);
         assert!(!playing, "scrubbing is not playing");
         assert!(scrubbed > 0.5, "the hand moved the record: {scrubbed:.3} s");
         assert!(mixer.deck_scratching(DeckId::A));
 
         // Backwards, too.
-        for step in 1..=12 {
-            mixer.scratch_deck(
-                DeckId::A,
-                ScratchMotion::Move { secs: scrubbed - step as f64 * 3.0 / 12.0, rate: -3.0 },
-            );
-            render(&mixer, 48_000.0, 1_000);
-        }
+        mixer.scratch_deck(DeckId::A, ScratchMotion::Move { rate: -3.0 });
+        render(&mixer, 48_000.0, 12_000);
         let (back, _, _) = mixer.deck_position(DeckId::A);
         assert!(back < scrubbed, "a backward scrub must rewind: {back:.3}");
 
-        // Letting go of a paused deck stops it dead. The hand-off grows
-        // with the momentum it was let go at, so give it its longest.
+        // Letting go of a paused deck stops it dead.
         mixer.scratch_deck(DeckId::A, ScratchMotion::Release);
-        render(&mixer, 48_000.0, 48_000 * 2);
+        render(&mixer, 48_000.0, 48_000);
         assert!(!mixer.deck_scratching(DeckId::A), "the ramp must finish");
         let (settled, _, _) = mixer.deck_position(DeckId::A);
         render(&mixer, 48_000.0, 24_000);
@@ -5965,9 +4695,192 @@ mod tests {
         Arc::new(stems)
     }
 
+    /// A constant-valued streamed chunk of `frames` frames.
+    fn stream_chunk(value: i16, frames: usize) -> Arc<Vec<[i16; 2]>> {
+        Arc::new(vec![[value, value]; frames])
+    }
+
+    /// The deck's playhead in frames, straight from the state.
+    fn deck_pos(mixer: &TestMixer, deck: DeckId) -> f64 {
+        mixer.state().decks[deck.index()].playhead_frames()
+    }
+
+    #[test]
+    fn a_streaming_deck_waits_at_the_decoded_edge_and_carries_on() {
+        let rate = 48_000u32;
+        let mixer = TestMixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        // One chunk in, three expected.
+        let table = StreamPcm::new(rate, Some(STREAM_CHUNK_FRAMES * 3));
+        let table = Arc::new(table.with_chunk(stream_chunk(8_000, STREAM_CHUNK_FRAMES), false));
+        mixer.install_deck_stream(DeckId::A, table.clone());
+        assert!(mixer.deck_is_streaming(DeckId::A));
+        let snapshot = mixer.deck_snapshot(DeckId::A);
+        assert!((snapshot.duration_secs - 3.0 * STREAM_CHUNK_FRAMES as f64 / rate as f64).abs() < 1e-9);
+        mixer.set_deck_playing(DeckId::A, true);
+
+        // Play through the chunk: audible, then silent AT the edge, still
+        // playing, the playhead parked there rather than ended.
+        let audible = deck_rms(&mixer, rate as f64, 256, 4_096);
+        assert!(audible > 0.1, "the decoded lead plays: {audible}");
+        let _ = render(&mixer, rate as f64, STREAM_CHUNK_FRAMES);
+        let parked = render(&mixer, rate as f64, 4_096);
+        assert!(parked.channel(0).iter().all(|v| *v == 0.0), "past the edge is silence");
+        assert_eq!(deck_pos(&mixer, DeckId::A), STREAM_CHUNK_FRAMES as f64);
+        assert!(mixer.deck_snapshot(DeckId::A).playing, "waiting is not ended");
+        assert!(mixer.drain_ended_decks().is_empty());
+
+        // The next chunk lands: playback resumes from the edge, no seek.
+        let table = Arc::new(table.with_chunk(stream_chunk(8_000, STREAM_CHUNK_FRAMES), false));
+        mixer.grow_deck_stream(DeckId::A, table.clone());
+        let resumed = render(&mixer, rate as f64, 4_096);
+        assert!(resumed.channel(0).iter().skip(64).all(|v| v.abs() > 0.1), "resumes on arrival");
+        assert!(deck_pos(&mixer, DeckId::A) > STREAM_CHUNK_FRAMES as f64 + 4_000.0);
+
+        // The end: the last (short) chunk, then the deck really ends.
+        let table = Arc::new(table.with_chunk(stream_chunk(8_000, 1_000), true));
+        mixer.grow_deck_stream(DeckId::A, table);
+        let _ = render(&mixer, rate as f64, STREAM_CHUNK_FRAMES + 2_000);
+        assert!(!mixer.deck_snapshot(DeckId::A).playing);
+        assert_eq!(mixer.drain_ended_decks(), vec![DeckId::A]);
+        // Play from the end restarts, now that the end is the end.
+        mixer.set_deck_playing(DeckId::A, true);
+        assert_eq!(deck_pos(&mixer, DeckId::A), 0.0);
+    }
+
+    #[test]
+    fn a_seek_past_the_decoded_edge_parks_there_and_plays_when_it_can() {
+        let rate = 48_000u32;
+        let mixer = TestMixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        let table = StreamPcm::new(rate, Some(STREAM_CHUNK_FRAMES * 4));
+        let table = Arc::new(table.with_chunk(stream_chunk(8_000, STREAM_CHUNK_FRAMES), false));
+        mixer.install_deck_stream(DeckId::A, table.clone());
+        mixer.set_deck_playing(DeckId::A, true);
+        // 90% of the EXPECTED track is far past the one chunk in hand.
+        mixer.seek_deck_fraction(DeckId::A, 0.9);
+        assert_eq!(deck_pos(&mixer, DeckId::A), STREAM_CHUNK_FRAMES as f64);
+        let parked = render(&mixer, rate as f64, 2_048);
+        assert!(parked.channel(0).iter().all(|v| *v == 0.0));
+        assert!(mixer.deck_snapshot(DeckId::A).playing);
+        // A seek in seconds past the edge parks the same way.
+        mixer.seek_deck_seconds(DeckId::A, 100.0);
+        assert_eq!(deck_pos(&mixer, DeckId::A), STREAM_CHUNK_FRAMES as f64);
+        // ...and a seek inside the decoded region plays at once.
+        mixer.seek_deck_seconds(DeckId::A, 0.5);
+        let level = deck_rms(&mixer, rate as f64, 256, 2_048);
+        assert!(level > 0.1, "{level}");
+        // The chunk arrives: from the edge the deck plays on.
+        mixer.seek_deck_fraction(DeckId::A, 0.9);
+        let table = Arc::new(table.with_chunk(stream_chunk(8_000, STREAM_CHUNK_FRAMES), false));
+        mixer.grow_deck_stream(DeckId::A, table);
+        let level = deck_rms(&mixer, rate as f64, 256, 2_048);
+        assert!(level > 0.1, "{level}");
+    }
+
+    #[test]
+    fn the_whole_file_takes_over_from_the_stream_at_the_playhead() {
+        let rate = 48_000u32;
+        let mixer = TestMixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        let whole = tone_pcm(440.0, rate, 6.0);
+        // The stream is the first chunk of the very same samples.
+        let table = StreamPcm::new(rate, Some(whole.frames.len()));
+        let first = Arc::new(whole.frames[..STREAM_CHUNK_FRAMES].to_vec());
+        let table = Arc::new(table.with_chunk(first, false));
+        mixer.install_deck_stream(DeckId::A, table);
+        mixer.set_deck_playing(DeckId::A, true);
+        let _ = render(&mixer, rate as f64, 10_000);
+        let before = deck_pos(&mixer, DeckId::A);
+        mixer.complete_deck(DeckId::A, whole.clone());
+        assert!(!mixer.deck_is_streaming(DeckId::A));
+        assert_eq!(deck_pos(&mixer, DeckId::A), before, "the swap moves nothing");
+        // What comes out after the swap is what the whole file holds there.
+        let out = render(&mixer, rate as f64, 512);
+        for (n, sample) in out.channel(0).iter().enumerate() {
+            let want = whole.frames[before as usize + n][0] as f32 / 32768.0;
+            assert!((sample - want).abs() < 1e-3, "frame {n}: {sample} vs {want}");
+        }
+        // The duration reads the exact length now.
+        assert!((mixer.deck_snapshot(DeckId::A).duration_secs - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stems_swap_in_sample_aligned_at_the_playhead() {
+        let rate = 48_000u32;
+        let mixer = TestMixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        // The mixed file numbers its frames; the stems put the SAME numbers
+        // in one lane, chunked the way the separator does.
+        let total = rate as usize * 4;
+        let frames: Vec<[i16; 2]> = (0..total).map(|i| [(i % 20_000) as i16; 2]).collect();
+        let pcm = Arc::new(TrackPcm { frames: frames.clone(), sample_rate: rate });
+        let chunk = rate as usize;
+        let mut stems = TrackStems::new(chunk, total.div_ceil(chunk));
+        for index in 0..total.div_ceil(chunk) {
+            let start = index * chunk;
+            let end = (start + chunk).min(total);
+            stems.lanes[0][index] = Some(stem_block(&frames[start..end]));
+            for lane in 1..STEM_COUNT {
+                stems.lanes[lane][index] = Some(stem_block(&vec![[0, 0]; end - start]));
+            }
+        }
+        mixer.install_deck(DeckId::A, pcm);
+        mixer.set_deck_playing(DeckId::A, true);
+        let _ = render(&mixer, rate as f64, 7_777);
+        let at = deck_pos(&mixer, DeckId::A) as usize;
+        mixer.install_deck_stems(DeckId::A, Arc::new(stems));
+        let out = render(&mixer, rate as f64, 4_096);
+        // Frame n after the swap is source frame at+n, read from the lane:
+        // the stem sum is the mix, so the blend hides nothing and the lane
+        // format's one bit of headroom is the only difference allowed.
+        for (n, sample) in out.channel(0).iter().enumerate() {
+            let want = frames[at + n][0] as f32 / 32768.0;
+            assert!((sample - want).abs() <= 2.5 / 32768.0, "frame {n}: {sample} vs {want}");
+        }
+    }
+
+    #[test]
+    fn a_stem_swap_under_a_turned_knob_is_a_blend_not_a_step() {
+        let rate = 48_000u32;
+        let mixer = TestMixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        mixer.install_deck(DeckId::A, const_pcm(8_000, rate as usize * 4, rate));
+        // Vocals killed before the stems exist: the swap will actually
+        // change the sound (the whole signal sits in the vocals lane).
+        mixer.set_deck_stem_gain(DeckId::A, 0, 0.0);
+        mixer.set_deck_playing(DeckId::A, true);
+        let _ = render(&mixer, rate as f64, 4_096);
+        let mut stems = TrackStems::new(rate as usize, 4);
+        for index in 0..4 {
+            stems.lanes[0][index] = Some(stem_block(&vec![[8_000, 8_000]; rate as usize]));
+            for lane in 1..STEM_COUNT {
+                stems.lanes[lane][index] = Some(stem_block(&vec![[0, 0]; rate as usize]));
+            }
+        }
+        mixer.install_deck_stems(DeckId::A, Arc::new(stems));
+        let out = render(&mixer, rate as f64, 4_096);
+        let left = out.channel(0);
+        let level = 8_000.0 / 32768.0;
+        // The first frame is still (nearly) the mixed file; well past the
+        // blend the vocals-only stems are silent; in between it ramps.
+        assert!(left[0] > level * 0.9, "starts on the mix: {}", left[0]);
+        assert!(left[4_000].abs() < 1e-4, "ends on the stems: {}", left[4_000]);
+        let mid = left[(STEM_SWAP_SECS * rate as f32 * 0.5) as usize];
+        assert!(mid > level * 0.25 && mid < level * 0.75, "halfway is a blend: {mid}");
+        for pair in left.windows(2) {
+            assert!((pair[1] - pair[0]).abs() < level * 0.05, "no step: {:?}", pair);
+        }
+    }
+
     #[test]
     fn stem_lanes_mix_under_their_gains() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         mixer.set_crossfader(0.0);
         // The mixed file is silence here, so anything audible is a stem.
@@ -5988,7 +4901,7 @@ mod tests {
 
     #[test]
     fn an_unseparated_stretch_plays_the_mixed_file() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         mixer.set_crossfader(0.0);
         // Audible mixed file, and stems that only cover the second half.
@@ -6026,7 +4939,7 @@ mod tests {
 
     #[test]
     fn deck_end_reports_once_and_a_span_never_ends() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.install_deck(DeckId::A, const_pcm(1000, 100, 48_000));
         mixer.set_deck_playing(DeckId::A, true);
         render(&mixer, 48_000.0, 256);
@@ -6037,7 +4950,7 @@ mod tests {
         // A deck inside a span never reaches an end to report. The mixer
         // honours any span; LOOP_MIN_SECS is enforced up in `decks`.
         mixer.install_deck(DeckId::B, const_pcm(1000, 100, 48_000));
-        mixer.set_deck_loop_span(DeckId::B, Some((0.0, 100.0 / 48_000.0)), crate::decks::LoopSeek::MovedOut);
+        mixer.set_deck_loop_span(DeckId::B, Some((0.0, 100.0 / 48_000.0)));
         mixer.set_deck_playing(DeckId::B, true);
         render(&mixer, 48_000.0, 1024);
         assert!(mixer.drain_ended_decks().is_empty());
@@ -6047,11 +4960,11 @@ mod tests {
 
     #[test]
     fn a_looping_deck_never_runs_past_its_out_point() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000)); // 10 s
         mixer.set_crossfader(0.0);
-        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)), crate::decks::LoopSeek::MovedOut);
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)));
         mixer.seek_deck_seconds(DeckId::A, 1.0);
         mixer.set_deck_playing(DeckId::A, true);
         // Four seconds of audio through a one-second loop.
@@ -6067,13 +4980,13 @@ mod tests {
 
     #[test]
     fn a_span_set_mid_play_wraps_too() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
         mixer.set_crossfader(0.0);
         mixer.set_deck_playing(DeckId::A, true);
         render(&mixer, 48_000.0, 48_000); // a second of free play first
-        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)), crate::decks::LoopSeek::MovedOut);
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)));
         for _ in 0..46 {
             render(&mixer, 48_000.0, 4096);
             let (position, _, _) = mixer.deck_position(DeckId::A);
@@ -6083,11 +4996,11 @@ mod tests {
 
     #[test]
     fn the_wrap_is_gapless_on_sustained_material() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
         mixer.set_crossfader(0.0);
-        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)), crate::decks::LoopSeek::MovedOut);
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)));
         mixer.set_deck_playing(DeckId::A, true);
         render(&mixer, 48_000.0, 4096); // settle the master and gain ramps
         let steady = render(&mixer, 48_000.0, 64).channel(0)[32].abs();
@@ -6112,11 +5025,11 @@ mod tests {
 
     #[test]
     fn a_deck_behind_its_loop_is_audible_on_the_way_in() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
         mixer.set_crossfader(0.0);
-        mixer.set_deck_loop_span(DeckId::A, Some((5.0, 6.0)), crate::decks::LoopSeek::MovedOut);
+        mixer.set_deck_loop_span(DeckId::A, Some((5.0, 6.0)));
         mixer.set_deck_playing(DeckId::A, true);
         render(&mixer, 48_000.0, 4096); // settle ramps
         // The patient rule: a playhead behind IN plays at FULL level until
@@ -6133,17 +5046,17 @@ mod tests {
 
     #[test]
     fn a_shrunk_span_catches_the_playhead_modulo_not_at_in() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
         mixer.set_crossfader(0.0);
-        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 5.0)), crate::decks::LoopSeek::MovedOut);
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 5.0)));
         mixer.seek_deck_seconds(DeckId::A, 3.5);
         mixer.set_deck_playing(DeckId::A, true);
         // Halve out from under the playhead: 3.5 is 2.5 into the old span,
         // which is 0.5 into the new one modulo its length — the subdivision
         // continues instead of re-triggering the downbeat at IN.
-        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)), crate::decks::LoopSeek::MovedOut);
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)));
         render(&mixer, 48_000.0, 256);
         let (position, _, _) = mixer.deck_position(DeckId::A);
         assert!(
@@ -6154,7 +5067,7 @@ mod tests {
 
     #[test]
     fn a_long_held_loop_does_not_drift_against_its_own_length() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         // 44.1k material on a 48k device: the natural step is fractional,
         // so a wrap that discards its overshoot loses ~half a source frame
@@ -6164,7 +5077,7 @@ mod tests {
         // A length deliberately NOT commensurate with the 44.1k -> 48k step:
         // a round 0.1 s is exactly 4800 device frames and wraps with zero
         // overshoot, which would hide the discard this test exists to catch.
-        mixer.set_deck_loop_span(DeckId::A, Some((0.5, 0.60001)), crate::decks::LoopSeek::MovedOut);
+        mixer.set_deck_loop_span(DeckId::A, Some((0.5, 0.60001)));
         mixer.seek_deck_seconds(DeckId::A, 0.5);
         mixer.set_deck_playing(DeckId::A, true);
         let step = 44_100.0 / 48_000.0;
@@ -6183,1241 +5096,12 @@ mod tests {
     }
 
     #[test]
-    fn deck_snapshot_reads_without_the_mixer_lock() {
-        // The UI asks for this every frame. If it took the state lock it
-        // would compete with the callback's try_lock and every smooth scroll
-        // could silence a buffer; it must answer while someone else holds
-        // the lock.
-        let mixer = Mixer::new();
-        mixer.install_deck(DeckId::A, const_pcm(16_384, 48_000, 48_000));
-        mixer.seek_deck_seconds(DeckId::A, 0.5);
-        let held = mixer.clone();
-        let holder = std::thread::spawn(move || {
-            let _guard = held.state.lock().unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(300));
-        });
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        let began = std::time::Instant::now();
-        let snapshot = mixer.deck_snapshot(DeckId::A);
-        assert!(
-            began.elapsed() < std::time::Duration::from_millis(100),
-            "the snapshot must not wait for the lock"
-        );
-        assert!((snapshot.position_secs - 0.5).abs() < 1e-9);
-        holder.join().unwrap();
-    }
-
-    #[test]
-    fn a_seek_shows_in_the_snapshot_before_the_next_callback() {
-        // The UI seeks and reads back in the same tick; the answer must not
-        // lag a buffer behind.
-        let mixer = Mixer::new();
-        mixer.install_deck(DeckId::A, const_pcm(16_384, 96_000, 48_000));
-        mixer.set_deck_playing(DeckId::A, true);
-        mixer.seek_deck_seconds(DeckId::A, 1.25);
-        let snapshot = mixer.deck_snapshot(DeckId::A);
-        assert!((snapshot.position_secs - 1.25).abs() < 1e-9, "{}", snapshot.position_secs);
-        assert!(snapshot.playing);
-        assert!((snapshot.duration_secs - 2.0).abs() < 1e-9);
-        let (position, duration, playing) = mixer.deck_position(DeckId::A);
-        assert!((position - 1.25).abs() < 1e-9 && (duration - 2.0).abs() < 1e-9 && playing);
-    }
-
-    #[test]
-    fn a_rendered_buffer_reports_what_it_cost_and_how_long_it_was() {
-        // A lifetime worst tells an operator nothing about the machine they
-        // are on right now: one stall while the app was starting pins it
-        // for the session. The budget wants the LAST buffer's cost against
-        // that buffer's own length.
-        let mixer = Mixer::new();
-        mixer.set_master(1.0);
-        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
-        mixer.set_deck_playing(DeckId::A, true);
-        render(&mixer, 48_000.0, 512);
-        let health = mixer.audio_health();
-        assert_eq!(health.buffer_frames, 512, "the buffer that was just rendered");
-        assert!(health.render_nanos > 0, "and what it cost");
-        assert_eq!(health.device_rate, 48_000.0);
-        assert!(health.render_max_nanos >= health.render_nanos, "the worst is still kept");
-        render(&mixer, 48_000.0, 256);
-        assert_eq!(mixer.audio_health().buffer_frames, 256, "the LAST buffer, not the worst");
-    }
-
-    /// Lanes that are present but silent: the harshest possible swap away
-    /// from the mixed file, which is what makes it a good seam test.
-    fn silent_stems(rate: u32, seconds: f64) -> Arc<TrackStems> {
-        let chunk = rate as usize;
-        let count = (rate as f64 * seconds / chunk as f64).ceil() as usize;
-        let mut stems = TrackStems::new(chunk, count.max(1));
-        for lane in stems.lanes.iter_mut() {
-            for slot in lane.iter_mut() {
-                *slot = Some(Arc::new(vec![[0i16; 2]; chunk]));
-            }
-        }
-        Arc::new(stems)
-    }
-
-    /// The loudest sample on the left channel.
-    fn peak_of(buffer: &AudioBuffer) -> f32 {
-        (0..buffer.frame_count()).map(|f| buffer.channel(0)[f].abs()).fold(0.0, f32::max)
-    }
-
-    /// The biggest step between neighbouring samples on the left channel.
-    fn worst_step(buffer: &AudioBuffer) -> f32 {
-        let left: Vec<f32> = (0..buffer.frame_count()).map(|f| buffer.channel(0)[f]).collect();
-        left.windows(2).map(|p| (p[1] - p[0]).abs()).fold(0.0, f32::max)
-    }
-
-    #[test]
-    fn the_lanes_fade_in_over_the_mixed_file_rather_than_cutting_to_it() {
-        // A separation lands chunk by chunk while the record plays, so the
-        // instant the frontier reaches the playhead the source used to flip
-        // on whatever sample the pump delivered it on. The lane sum is
-        // close to the mixed file but not identical, and a hard swap
-        // between them is heard on the phase difference.
-        // The mixed file is silence and the lanes are loud, so the output
-        // IS the weight: if it jumped, the swap was a cut.
-        let mixer = Mixer::new();
-        mixer.set_master(1.0);
-        mixer.set_crossfader(0.0);
-        mixer.install_deck(DeckId::A, const_pcm(0, 48_000 * 4, 48_000));
-        mixer.set_deck_playing(DeckId::A, true);
-        render(&mixer, 48_000.0, 4096);
-        mixer.install_deck_stems(
-            DeckId::A,
-            chunked_stems([8_000.0, 0.0, 0.0, 0.0], 48_000, 4.0),
-        );
-        let first = peak_of(&render(&mixer, 48_000.0, 512));
-        for _ in 0..24 {
-            render(&mixer, 48_000.0, 512);
-        }
-        let settled = peak_of(&render(&mixer, 48_000.0, 512));
-        assert!(settled > 0.05, "the lanes did arrive: {settled}");
-        assert!(
-            first < settled * 0.5,
-            "the lanes cut in instead of fading: {first} against a settled {settled}"
-        );
-    }
-
-    #[test]
-    fn dropping_the_lanes_takes_the_weight_with_them() {
-        let mixer = Mixer::new();
-        mixer.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 4.0));
-        mixer.install_deck_stems(DeckId::A, silent_stems(48_000, 4.0));
-        mixer.set_deck_playing(DeckId::A, true);
-        for _ in 0..16 {
-            render(&mixer, 48_000.0, 512);
-        }
-        mixer.clear_deck_stems(DeckId::A);
-        // Straight back to the mixed file: there is no lane left to fade
-        // out of.
-        let out = render(&mixer, 48_000.0, 512);
-        assert!(
-            out.data.iter().any(|s| s.abs() > 0.01),
-            "the mixed file is playing again at once"
-        );
-    }
-
-    #[test]
-    fn an_instant_double_lands_on_the_same_sample() {
-        // The whole point: the playhead is read under the same lock the
-        // callback advances it with, so the two decks are not a buffer
-        // apart -- which is what a flanged double sounds like.
-        let mixer = Mixer::new();
-        mixer.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 8.0));
-        mixer.set_deck_playing(DeckId::A, true);
-        for _ in 0..10 {
-            render(&mixer, 48_000.0, 512);
-        }
-        mixer.clone_deck(DeckId::A, DeckId::B);
-        let a = mixer.deck_snapshot(DeckId::A).position_secs;
-        let b = mixer.deck_snapshot(DeckId::B).position_secs;
-        assert!((a - b).abs() < 1e-9, "{a} against {b}");
-        assert!(mixer.deck_snapshot(DeckId::B).playing, "and it is running");
-        assert!(b > 0.0, "on the record, not at its head");
-    }
-
-    fn clock_grid(bpm: f64) -> TrackGrid {
-        TrackGrid {
-            bpm,
-            beat_secs: 60.0 / bpm,
-            first_beat_secs: 0.1,
-            downbeat_phase: 0,
-            confidence: 0.9,
-        }
-    }
-
-    /// The callback works the clock out once per buffer and the snapshot
-    /// carries it: the beat's length at the platter's speed, and the
-    /// fraction predicted for the END of the buffer, which is exactly
-    /// where the playhead then is.
-    #[test]
-    fn a_deck_publishes_its_clock_from_the_callback() {
-        let mixer = Mixer::new();
-        mixer.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 8.0));
-        assert!(!mixer.deck_snapshot(DeckId::A).clock.has_grid, "no grid yet");
-        let grid = clock_grid(120.0);
-        mixer.set_deck_grid(DeckId::A, Some(grid));
-        let fresh = mixer.deck_snapshot(DeckId::A).clock;
-        assert!(fresh.has_grid, "the setter republishes");
-        // No callback has run yet, so the setter has to work out the
-        // platter itself rather than read the last published one -- which
-        // is still `DeckClock::default()`'s zero, indistinguishable from
-        // a stopped record. A load-then-set-grid in one tick is exactly
-        // the sequence a real load takes.
-        assert_eq!(
-            fresh.beat_len(),
-            Some(0.5),
-            "before any buffer has rendered, {fresh:?}"
-        );
-        mixer.set_deck_playing(DeckId::A, true);
-        spin_render(&mixer, 8);
-        render(&mixer, 48_000.0, 512);
-        let snap = mixer.deck_snapshot(DeckId::A);
-        assert!(snap.clock.has_grid);
-        assert!((snap.clock.beat_secs_out - 0.5).abs() < 1e-9, "{}", snap.clock.beat_secs_out);
-        assert_eq!(snap.clock.beat_len(), Some(snap.clock.beat_secs_out));
-        assert_eq!(snap.clock.platter_rate, 1.0);
-        let arrived = grid.phase_at(snap.position_secs);
-        assert!(
-            (snap.clock.beat_frac_end - arrived).abs() < 1e-6,
-            "predicted {} for the buffer's end, the head arrived at {arrived}",
-            snap.clock.beat_frac_end
-        );
-    }
-
-    /// A beat is an output length: pitch the record up and it gets shorter.
-    #[test]
-    fn the_clock_follows_the_tempo_fader() {
-        let mixer = Mixer::new();
-        mixer.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 8.0));
-        mixer.set_deck_grid(DeckId::A, Some(clock_grid(120.0)));
-        mixer.set_deck_playing(DeckId::A, true);
-        mixer.set_deck_rate(DeckId::A, 1.25);
-        spin_render(&mixer, 64);
-        let clock = mixer.deck_snapshot(DeckId::A).clock;
-        assert!((clock.platter_rate - 1.25).abs() < 1e-6, "{}", clock.platter_rate);
-        assert!((clock.beat_secs_out - 0.4).abs() < 1e-6, "{}", clock.beat_secs_out);
-    }
-
-    /// Pause keeps the TEMPO -- the beat is still half a second long, so
-    /// an echo set to a beat does not collapse -- and promises no travel,
-    /// so the fraction is for where the head IS.
-    #[test]
-    fn a_paused_deck_keeps_its_tempo_and_does_not_travel() {
-        let mixer = Mixer::new();
-        mixer.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 8.0));
-        let grid = clock_grid(120.0);
-        mixer.set_deck_grid(DeckId::A, Some(grid));
-        mixer.set_deck_playing(DeckId::A, true);
-        spin_render(&mixer, 8);
-        mixer.set_deck_playing(DeckId::A, false);
-        spin_render(&mixer, 64);
-        let snap = mixer.deck_snapshot(DeckId::A);
-        assert!(!snap.playing);
-        assert!(snap.clock.has_grid);
-        assert!((snap.clock.beat_secs_out - 0.5).abs() < 1e-9, "{}", snap.clock.beat_secs_out);
-        assert_eq!(snap.clock.beat_frac_end, grid.phase_at(snap.position_secs));
-    }
-
-    /// The engine sends `true_grid`, but the mixer holds the line too: a
-    /// grid with no beats, or none at all, is no clock.
-    #[test]
-    fn a_grid_with_no_beats_is_no_grid_to_the_callback() {
-        let mixer = Mixer::new();
-        mixer.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 8.0));
-        mixer.set_deck_playing(DeckId::A, true);
-        mixer.set_deck_grid(DeckId::A, Some(TrackGrid::default()));
-        spin_render(&mixer, 4);
-        let clock = mixer.deck_snapshot(DeckId::A).clock;
-        assert!(!clock.has_grid);
-        assert_eq!(clock.beat_len(), None);
-        assert_eq!(clock.platter_rate, 1.0, "the platter is still reported");
-        mixer.set_deck_grid(DeckId::A, Some(clock_grid(120.0)));
-        spin_render(&mixer, 4);
-        assert!(mixer.deck_snapshot(DeckId::A).clock.has_grid);
-        mixer.set_deck_grid(DeckId::A, None);
-        spin_render(&mixer, 4);
-        assert!(!mixer.deck_snapshot(DeckId::A).clock.has_grid);
-    }
-
-    /// The grid is the record's: a double carries it (a different grid on
-    /// the other deck proves it was carried, not kept), a clear drops it,
-    /// a fresh load starts without one, and a grid that lands while a
-    /// load is parked belongs to the record coming IN -- the outgoing one
-    /// keeps its own beat until it is gone.
-    #[test]
-    fn the_grid_travels_with_the_record_and_leaves_with_it() {
-        let mixer = Mixer::new();
-        mixer.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 8.0));
-        mixer.install_deck(DeckId::B, tone_pcm(330.0, 48_000, 8.0));
-        mixer.set_deck_grid(DeckId::A, Some(clock_grid(120.0)));
-        mixer.set_deck_grid(DeckId::B, Some(clock_grid(126.0)));
-        mixer.set_deck_playing(DeckId::A, true);
-        mixer.set_deck_playing(DeckId::B, true);
-        spin_render(&mixer, 4);
-        assert!((mixer.deck_snapshot(DeckId::B).clock.beat_secs_out - 60.0 / 126.0).abs() < 1e-9);
-        mixer.clone_deck(DeckId::A, DeckId::B);
-        spin_render(&mixer, 4);
-        let b = mixer.deck_snapshot(DeckId::B).clock;
-        assert!((b.beat_secs_out - 0.5).abs() < 1e-9, "the double reads its record's beat: {}", b.beat_secs_out);
-        mixer.clear_deck(DeckId::B);
-        spin_render(&mixer, 4);
-        assert!(!mixer.deck_snapshot(DeckId::B).clock.has_grid, "a cleared deck has no beat");
-        // A fresh load drops whatever grid was there, which a deck with
-        // no grid at all cannot prove: put a real one back on B, let its
-        // transport fade all the way down so the load takes the
-        // immediate branch, then load over it and watch it go.
-        mixer.install_deck(DeckId::B, tone_pcm(330.0, 48_000, 8.0));
-        mixer.set_deck_grid(DeckId::B, Some(clock_grid(140.0)));
-        mixer.set_deck_playing(DeckId::B, true);
-        spin_render(&mixer, 2);
-        assert!(mixer.deck_snapshot(DeckId::B).clock.has_grid, "the grid is there to lose");
-        mixer.set_deck_playing(DeckId::B, false);
-        spin_render(&mixer, 2); // the pause fade is one buffer; two is headroom
-        mixer.install_deck(DeckId::B, tone_pcm(330.0, 48_000, 8.0));
-        spin_render(&mixer, 4);
-        assert!(!mixer.deck_snapshot(DeckId::B).clock.has_grid, "a fresh record has none until its analysis lands");
-        // A load over the playing deck A parks the new record; the grid
-        // that lands now is the new record's.
-        mixer.install_deck_over(DeckId::A, tone_pcm(440.0, 48_000, 8.0), true);
-        mixer.set_deck_grid(DeckId::A, Some(clock_grid(126.0)));
-        let outgoing = mixer.deck_snapshot(DeckId::A).clock;
-        assert!((outgoing.beat_secs_out - 0.5).abs() < 1e-9, "the outgoing record keeps its beat while it fades");
-        spin_render(&mixer, 32);
-        let incoming = mixer.deck_snapshot(DeckId::A).clock;
-        assert!(incoming.has_grid, "the parked grid came in with the record");
-        assert!(
-            (incoming.beat_secs_out - 60.0 / 126.0).abs() < 1e-9,
-            "and it is the new record's: {}",
-            incoming.beat_secs_out
-        );
-    }
-
-    /// A running splat advances at the record's own speed whatever the
-    /// tempo fader says, so its clock reports the platter at exactly one
-    /// -- and hands the fader back the moment the splat stops.
-    /// A running splat's own read path exits on `!playing` alone -- not
-    /// the four exits an ordinary deck takes -- so the clock has to be
-    /// asked separately. Missing that, a pause under a splat kept
-    /// promising travel for the length of its fade and any buffer with a
-    /// hand held on a paused splat deck promised it forever.
-    #[test]
-    fn a_paused_splat_deck_does_not_travel_either() {
-        let (mixer, rate) = splat_fixture(false);
-        let grid = clock_grid(120.0);
-        mixer.set_deck_grid(DeckId::A, Some(grid));
-        render_count(&mixer, rate, 4096, 256);
-        mixer.set_deck_playing(DeckId::A, false);
-        let before = mixer.deck_snapshot(DeckId::A).position_secs;
-        render_count(&mixer, rate, 256, 256);
-        let after = mixer.deck_snapshot(DeckId::A);
-        assert_eq!(after.position_secs, before, "a paused splat's master does not move");
-        assert_eq!(
-            after.clock.beat_frac_end,
-            grid.phase_at(after.position_secs),
-            "and the clock must not predict a buffer of travel the head never made"
-        );
-        // A hand on the very deck the splat has parked keeps `scratch`
-        // active for as long as it is held; that must not revive travel
-        // either, because the splat -- not the hand -- owns the read.
-        mixer.scratch_deck(DeckId::A, ScratchMotion::Grab);
-        mixer.scratch_deck(DeckId::A, ScratchMotion::Move { secs: 0.01, rate: 1.0 });
-        render_count(&mixer, rate, 256, 256);
-        let held = mixer.deck_snapshot(DeckId::A);
-        assert_eq!(held.position_secs, before, "the splat still owns the master, hand or no hand");
-        assert_eq!(held.clock.beat_frac_end, grid.phase_at(held.position_secs));
-    }
-
-    /// The largest sample in a window around `around_secs`, and how far
-    /// from the window's centre it landed.
-    fn peak_near(out: &[f32], rate: f64, around_secs: f64, half_window: usize) -> (f32, i64) {
-        let centre = (around_secs * rate).round() as i64;
-        let lo = (centre - half_window as i64).max(0) as usize;
-        let hi = ((centre + half_window as i64) as usize).min(out.len());
-        let mut best = (0.0f32, centre);
-        for (index, &value) in out[lo..hi].iter().enumerate() {
-            if value.abs() > best.0.abs() {
-                best = (value, lo as i64 + index as i64);
-            }
-        }
-        (best.0, best.1 - centre)
-    }
-
-    /// Render and hand back samples whose index IS the source frame.
-    ///
-    /// The master bus runs a look-ahead behind the mix, so what leaves at
-    /// index N went in `latency` frames earlier. One extra block is
-    /// rendered and that many samples dropped off the front, which puts
-    /// the two back in step -- otherwise every test that looks for a
-    /// click at a known time finds it late by exactly the look-ahead.
-    fn render_out(mixer: &Mixer, rate: f64, buffers: usize, block: usize) -> Vec<f32> {
-        let mut out = Vec::with_capacity((buffers + 1) * block);
-        for _ in 0..=buffers {
-            out.extend_from_slice(render(mixer, rate, block).channel(0));
-        }
-        // Asked for AFTER rendering, not before: the limiter only learns
-        // the device rate inside the callback, so until one buffer has
-        // been through it its look-ahead is still the one-frame default.
-        let latency = mixer.output_latency_frames();
-        out.drain(..latency.min(out.len()));
-        out
-    }
-
-    /// A half-beat echo repeats the click that much later, at the tempo
-    /// the room actually hears -- the tempo fader included.
-    #[test]
-    fn an_echo_repeats_the_deck_half_a_beat_later_at_the_heard_tempo() {
-        let rate = 48_000.0;
-        let mixer = Mixer::new();
-        mixer.set_master(1.0);
-        mixer.set_crossfader(0.0);
-        mixer.install_deck(DeckId::A, click_pcm(1.0, 48_000, 6.0));
-        mixer.set_deck_keylock(DeckId::A, false);
-        mixer.set_deck_grid(DeckId::A, Some(clock_grid(120.0))); // 0.5 s/beat
-        mixer.set_deck_echo(DeckId::A, Some((1, 2)));
-        mixer.set_deck_playing(DeckId::A, true);
-        let out = render_out(&mixer, rate, 188, 512); // ~2 s
-        // 0.25 s = 12 000 frames after the click at 1.0 s = frame 48 000.
-        let (peak, offset) = peak_near(&out, rate, 1.25, 4);
-        assert!(peak > 0.3, "{peak}");
-        for index in 48_020..59_980 {
-            assert!(out[index].abs() < 0.05, "sound before the repeat at {index}: {}", out[index]);
-        }
-        assert!(offset.abs() <= 4, "{offset}");
-
-        let mixer = Mixer::new();
-        mixer.set_master(1.0);
-        mixer.set_crossfader(0.0);
-        mixer.install_deck(DeckId::A, click_pcm(1.0, 48_000, 6.0));
-        mixer.set_deck_keylock(DeckId::A, false);
-        mixer.set_deck_grid(DeckId::A, Some(clock_grid(120.0)));
-        mixer.set_deck_rate(DeckId::A, 1.25);
-        mixer.set_deck_echo(DeckId::A, Some((1, 2)));
-        mixer.set_deck_playing(DeckId::A, true);
-        let out = render_out(&mixer, rate, 150, 512); // ~1.6 s
-        // A resampled read (rate != 1) interpolates a one-frame impulse
-        // across its neighbours, so neither the click's own peak nor its
-        // exact arrival time is the untouched 0.8 s a plain division
-        // predicts -- the rate ramp settling on its way to 1.25 pushes it
-        // a little further out. Find where the click ACTUALLY landed
-        // first, then look for the echo the fixed delay away from THAT.
-        let (click_peak, click_at) = peak_near(&out, rate, 0.8, 1_000);
-        assert!(click_peak.abs() > 0.15, "{click_peak}");
-        let click_secs = 0.8 + click_at as f64 / rate;
-        // beat_frames(0.5, 1.25, 48_000) / 2 = 9 600, in device frames --
-        // the same domain the click's own position was just measured in.
-        let (peak, offset) = peak_near(&out, rate, click_secs + 9_600.0 / rate, 4);
-        assert!(peak.abs() > 0.15, "{peak}");
-        assert!(offset.abs() <= 4, "{offset}");
-    }
-
-    /// With no grid at all, the echo still has a beat to sit on: the
-    /// counted one, the same fallback a loop takes.
-    #[test]
-    fn a_deck_without_a_grid_echoes_at_the_counted_beat() {
-        let rate = 48_000.0;
-        let mixer = Mixer::new();
-        mixer.set_master(1.0);
-        mixer.set_crossfader(0.0);
-        mixer.install_deck(DeckId::A, click_pcm(1.0, 48_000, 6.0));
-        mixer.set_deck_keylock(DeckId::A, false);
-        mixer.set_deck_echo(DeckId::A, Some((1, 2)));
-        mixer.set_deck_playing(DeckId::A, true);
-        let out = render_out(&mixer, rate, 375, 512); // ~4 s
-        // 60 / COUNTED_BPM = 1 s a beat; half of that is 24 000 frames.
-        let (peak, offset) = peak_near(&out, rate, 1.0 + 24_000.0 / rate, 4);
-        assert!(peak > 0.3, "{peak}");
-        assert!(offset.abs() <= 4, "{offset}");
-    }
-
-    /// PFL hears the echo along with everything else on the strip; RAW,
-    /// which taps ahead of the tone chain, does not.
-    #[test]
-    fn the_pfl_tap_hears_the_echo_and_the_raw_tap_does_not() {
-        let rate = 48_000.0;
-        let cue_energy = |mode: CueMode| -> f64 {
-            let mixer = Mixer::new();
-            mixer.set_master(1.0);
-            mixer.set_crossfader(0.0);
-            mixer.install_deck(DeckId::A, click_pcm(0.2, 48_000, 3.0));
-            mixer.set_deck_keylock(DeckId::A, false);
-            mixer.set_deck_grid(DeckId::A, Some(clock_grid(120.0)));
-            // A quarter beat and a hot feedback: many repeats inside a
-            // short render, so their sum comfortably outweighs the one
-            // dry click both taps carry.
-            mixer.set_deck_echo(DeckId::A, Some((1, 4)));
-            mixer.set_deck_echo_feedback(DeckId::A, 0.9);
-            mixer.set_deck_playing(DeckId::A, true);
-            mixer.set_cue_armed(true);
-            mixer.set_deck_cue(DeckId::A, true);
-            mixer.set_cue_mode(mode);
-            let mut state = CueReadState::default();
-            let mut sum = 0.0f64;
-            // Integrated over the whole span the way the existing PFL/RAW
-            // test does, so a lagged consumer cannot misalign a narrow
-            // window against it.
-            for _ in 0..200 {
-                render(&mixer, rate, 512);
-                let out = consume_cue(&mixer, &mut state, rate, 512);
-                for v in out.channel(0) {
-                    sum += (*v as f64) * (*v as f64);
-                }
-            }
-            sum
-        };
-        let pfl = cue_energy(CueMode::Pfl);
-        let raw = cue_energy(CueMode::Raw);
-        assert!(pfl > raw * 1.8, "PFL must hear the repeats RAW skips: pfl={pfl} raw={raw}");
-    }
-
-    /// A load over a playing deck takes the parked path: the OLD track
-    /// keeps sounding while it fades, and the swap itself lands later,
-    /// on the audio thread's own turn. The echo is the strip's, not
-    /// either record's, and neither side of that swap may drop it.
-    #[test]
-    fn a_load_over_a_playing_deck_keeps_the_operators_echo_setting() {
-        let mixer = Mixer::new();
-        mixer.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 8.0));
-        mixer.set_deck_playing(DeckId::A, true);
-        mixer.set_deck_echo(DeckId::A, Some((1, 2)));
-        assert!(mixer.state.lock().unwrap().decks[0].chain.echo_mut().engaged());
-        // Audible, so this is the parked path, not the immediate cut.
-        mixer.install_deck_over(DeckId::A, tone_pcm(220.0, 48_000, 8.0), true);
-        assert!(
-            mixer.state.lock().unwrap().decks[0].chain.echo_mut().engaged(),
-            "still parked -- nothing has moved yet either way"
-        );
-        // Render past the outgoing track's short fade and the swap that
-        // spends the parked load, on the audio thread's own next turn.
-        spin_render(&mixer, 32);
-        assert!(
-            mixer.state.lock().unwrap().decks[0].chain.echo_mut().engaged(),
-            "the swap landed, and the operator's rung must have survived it"
-        );
-    }
-
-    /// The destination keeps its OWN echo setting through a clone -- it
-    /// is the strip's, and a clone does not touch the strip -- but the
-    /// STALE TAIL from whatever the destination was playing before must
-    /// not bleed into the record that just landed on it.
-    #[test]
-    fn a_clone_keeps_the_destinations_own_echo_setting_and_forgets_its_tail() {
-        let rate = 48_000.0;
-        let mixer = Mixer::new();
-        mixer.set_master(1.0);
-        mixer.set_crossfader(1.0); // deck B
-        mixer.install_deck(DeckId::B, click_pcm(0.05, 48_000, 4.0));
-        mixer.set_deck_keylock(DeckId::B, false);
-        mixer.set_deck_grid(DeckId::B, Some(clock_grid(120.0)));
-        mixer.set_deck_echo(DeckId::B, Some((1, 1))); // whole beat, 24 000 frames
-        mixer.set_deck_echo_feedback(DeckId::B, 0.8);
-        mixer.set_deck_playing(DeckId::B, true);
-        // B's own click and its repeat both land: a real tail exists.
-        render_out(&mixer, rate, 100, 512);
-        // Silent, but PLAYING: a silent, paused source would clone its
-        // own paused transport onto B too, and a paused deck's frame
-        // loop never touches its echo at all -- which would hide a
-        // leak regardless of whether this fix is in place.
-        mixer.install_deck(DeckId::A, const_pcm(0, 480_000, 48_000));
-        mixer.set_deck_playing(DeckId::A, true);
-        render_out(&mixer, rate, 4, 512); // let A's transport settle
-        mixer.clone_deck(DeckId::A, DeckId::B);
-        assert_eq!(
-            mixer.state.lock().unwrap().decks[1].chain.echo_mut().fraction(),
-            Some((1, 1)),
-            "the clone did not touch the destination's own setting"
-        );
-        // Whatever B was about to repeat next -- its own earlier click,
-        // one more beat on -- must not be heard: the record under it is
-        // now silence, and the stale content must have gone with it.
-        let out = render_out(&mixer, rate, 100, 512);
-        let (peak, _) = peak_near(&out, rate, 0.5, 24_000);
-        assert!(peak.abs() < 0.05, "a stale tail bled through the clone: {peak}");
-    }
-
-    /// FREEZE repeats the SIGNAL; the playhead itself never stops.
-    /// The lap arrives in SOURCE seconds and becomes output seconds
-    /// through the platter's own rate, read at the instant it latches.
-    /// It used to be divided on the control thread by the tempo fader,
-    /// which is not the platter's rate the moment a hand is on the
-    /// record -- so a beat-sized stutter grabbed during a scratch came
-    /// out the wrong size, which is the one thing a lap has to get right.
-    #[test]
-    fn a_freeze_lap_is_measured_by_the_platter_not_the_fader() {
-        let lap_at = |rate: f64| {
-            let mixer = spin_deck_a(16_384, 480_000);
-            mixer.set_deck_playing(DeckId::A, true);
-            mixer.set_deck_rate(DeckId::A, rate);
-            // Long enough that the ring has more fresh content than
-            // either lap asks for: a hold is clamped to what has actually
-            // been written, and a clamped lap would compare equal however
-            // fast the platter was turning.
-            spin_render(&mixer, 80);
-            mixer.set_deck_freeze(DeckId::A, Some(0.2));
-            mixer.deck_freeze_lap(DeckId::A).expect("a lap")
-        };
-        // The same half-second of RECORD, with the platter turning twice
-        // as fast: half the output seconds, so half the frames.
-        let at_unity = lap_at(1.0);
-        let at_double = lap_at(2.0);
-        let ratio = at_unity as f64 / at_double as f64;
-        assert!(
-            (ratio - 2.0).abs() < 0.1,
-            "a doubled platter should halve the lap: {at_unity} against {at_double}"
-        );
-    }
-
-    #[test]
-    fn a_freeze_leaves_the_record_running_underneath() {
-        let mixer = spin_deck_a(16_384, 480_000);
-        mixer.set_deck_playing(DeckId::A, true);
-        spin_render(&mixer, 8);
-        mixer.set_deck_freeze(DeckId::A, Some(0.25));
-        assert!(mixer.deck_frozen(DeckId::A));
-        let before = mixer.deck_snapshot(DeckId::A).position_secs;
-        spin_render(&mixer, 40);
-        let advanced = mixer.deck_snapshot(DeckId::A).position_secs - before;
-        let expected = 40.0 * 512.0 / 48_000.0;
-        assert!(
-            (advanced - expected).abs() < 0.02,
-            "the record must keep running: advanced {advanced}, expected {expected}"
-        );
-        mixer.set_deck_freeze(DeckId::A, None);
-        spin_render(&mixer, 1); // past FREEZE_BLEND_SECS
-        assert!(!mixer.deck_frozen(DeckId::A));
-    }
-
-    /// The repeat is of the POST-FILTER signal, taken after the read
-    /// path but before gain and the fader -- so PFL and the master both
-    /// hear it, RAW does not, and the record itself is free to have run
-    /// on somewhere else entirely by the time it is heard again.
-    #[test]
-    fn a_freeze_repeats_the_post_eq_signal_and_the_phones_hear_it() {
-        let rate = 48_000.0;
-        let mixer = Mixer::new();
-        mixer.set_master(1.0);
-        mixer.set_crossfader(0.0);
-        mixer.install_deck(DeckId::A, split_pcm(16_384, -16_384, 480_000, 48_000));
-        mixer.set_deck_playing(DeckId::A, true);
-        spin_render(&mixer, 20); // build up real content to reach back into
-        mixer.seek_deck_seconds(DeckId::A, 4.95);
-        spin_render(&mixer, 5); // cross the split at 5.0 s by a small margin
-        mixer.set_deck_freeze(DeckId::A, Some(0.1));
-        assert!(mixer.deck_frozen(DeckId::A));
-        let out = render_out(&mixer, rate, 40, 512);
-        // The frozen lap reaches back across the split, so it carries
-        // both the +0.5 side and the -0.5 side, laps on laps.
-        assert!(out.iter().any(|&v| v > 0.3), "the lap's +0.5 side must still be there");
-        assert!(out.iter().any(|&v| v < -0.3), "the lap's -0.5 side must still be there");
-        let snap = mixer.deck_snapshot(DeckId::A);
-        assert!(snap.position_secs > 5.0, "the record itself ran on past the split: {}", snap.position_secs);
-
-        mixer.set_cue_armed(true);
-        mixer.set_deck_cue(DeckId::A, true);
-        mixer.set_cue_mode(CueMode::Pfl);
-        let mut pfl_state = CueReadState::default();
-        let mut pfl_has_positive = false;
-        // The phones consumer lags the writer by CUE_TARGET_FRAMES, so a
-        // single buffer is not enough to prove anything; drain several,
-        // the way the existing PFL/RAW test does.
-        for _ in 0..16 {
-            render(&mixer, rate, 512);
-            let pfl = consume_cue(&mixer, &mut pfl_state, rate, 512);
-            pfl_has_positive |= pfl.channel(0).iter().any(|&v| v > 0.3);
-        }
-        assert!(pfl_has_positive, "PFL must hear the frozen lap");
-
-        mixer.set_cue_mode(CueMode::Raw);
-        let mut raw_state = CueReadState::default();
-        // Drain what the ring still owes from PFL mode before trusting
-        // any of it to say what RAW actually carries now.
-        for _ in 0..16 {
-            render(&mixer, rate, 512);
-            consume_cue(&mixer, &mut raw_state, rate, 512);
-        }
-        let mut raw = Vec::new();
-        for _ in 0..16 {
-            render(&mixer, rate, 512);
-            raw.extend_from_slice(consume_cue(&mixer, &mut raw_state, rate, 512).channel(0));
-        }
-        assert!(raw.iter().all(|&v| v < -0.3), "RAW must hear the live -0.5, not the lap");
-    }
-
-    #[test]
-    fn a_freeze_on_a_stopped_or_empty_deck_does_nothing() {
-        let mixer = Mixer::new();
-        mixer.set_deck_freeze(DeckId::A, Some(0.5));
-        assert!(!mixer.deck_frozen(DeckId::A), "nothing loaded");
-        mixer.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 4.0));
-        mixer.set_deck_freeze(DeckId::A, Some(0.5));
-        assert!(!mixer.deck_frozen(DeckId::A), "loaded but not playing");
-        // No callback has ever run on this mixer: there is no device
-        // rate yet to turn a seconds value into a ring length.
-        let fresh = Mixer::new();
-        fresh.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 4.0));
-        fresh.set_deck_playing(DeckId::A, true);
-        fresh.set_deck_freeze(DeckId::A, Some(0.5));
-        assert!(!fresh.deck_frozen(DeckId::A), "no device rate latched yet");
-    }
-
-    /// A load over a playing deck, and an unload, both put a held
-    /// freeze away -- the swap on its own turn, the unload at once.
-    #[test]
-    fn a_load_and_an_unload_put_the_freeze_away() {
-        let rate = 48_000.0;
-        let mixer = Mixer::new();
-        mixer.set_master(1.0);
-        mixer.set_crossfader(0.0);
-        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
-        mixer.set_deck_playing(DeckId::A, true);
-        spin_render(&mixer, 20);
-        mixer.set_deck_freeze(DeckId::A, Some(0.1));
-        assert!(mixer.deck_frozen(DeckId::A));
-        mixer.install_deck_over(DeckId::A, const_pcm(8_192, 480_000, 48_000), true);
-        spin_render(&mixer, 8); // through the outgoing fade and the swap
-        assert!(!mixer.deck_frozen(DeckId::A), "the swap must have let it go");
-        let out = render_out(&mixer, rate, 4, 512);
-        let peak = out.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-        let expected = 8_192.0 / 32_768.0;
-        assert!((peak - expected).abs() < 0.02, "the new record must be heard, unfrozen: {peak} vs {expected}");
-
-        mixer.set_deck_freeze(DeckId::A, Some(0.1));
-        assert!(mixer.deck_frozen(DeckId::A));
-        mixer.clear_deck(DeckId::A);
-        assert!(!mixer.deck_frozen(DeckId::A), "an unload must have let it go");
-    }
-
-    /// The read path folds the playhead into an active span before every
-    /// read; the clock's single-shot prediction now folds the same
-    /// travel the same way, so a lap that wraps mid-buffer does not
-    /// publish a fraction for a beat position the head is about to
-    /// leave behind.
-    #[test]
-    fn the_clock_folds_a_loop_wrap_the_way_the_read_path_does() {
-        let mixer = Mixer::new();
-        mixer.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 8.0));
-        let grid = clock_grid(120.0);
-        mixer.set_deck_grid(DeckId::A, Some(grid));
-        mixer.set_deck_playing(DeckId::A, true);
-        // A quarter-beat span: not a whole number of beats, so a wrap
-        // that ignored it would land on the wrong beat fraction.
-        mixer.set_deck_loop_span(DeckId::A, Some((2.0, 2.125)), crate::decks::LoopSeek::MovedOut);
-        // Well inside the span, but close enough to OUT that one buffer's
-        // travel overshoots it with a clear margin, so the wrap is not
-        // riding a floating-point coin toss at the boundary.
-        let start_secs = (102_000.0 - 350.0) / 48_000.0;
-        mixer.seek_deck_seconds(DeckId::A, start_secs);
-        render(&mixer, 48_000.0, 512);
-        let snap = mixer.deck_snapshot(DeckId::A);
-        assert!(
-            snap.position_secs >= 2.0 && snap.position_secs < 2.125,
-            "the read path already wrapped the real head: {}",
-            snap.position_secs
-        );
-        assert_eq!(
-            snap.clock.beat_frac_end,
-            grid.phase_at(snap.position_secs),
-            "the clock must agree with where the head actually is"
-        );
-        let unfolded = grid.phase_at(start_secs + 512.0 / 48_000.0);
-        assert!(
-            (unfolded - snap.clock.beat_frac_end).abs() > 0.01,
-            "and that has to be a different answer from ignoring the span entirely"
-        );
-    }
-
-    #[test]
-    fn a_running_splat_keeps_the_records_own_tempo() {
-        let (mixer, rate) = splat_fixture(false);
-        mixer.set_deck_grid(DeckId::A, Some(clock_grid(120.0)));
-        mixer.set_deck_rate(DeckId::A, 1.25);
-        render_count(&mixer, rate, 4096, 256);
-        let clock = mixer.deck_snapshot(DeckId::A).clock;
-        assert_eq!(clock.platter_rate, 1.0, "the splat owns the platter");
-        assert!((clock.beat_secs_out - 0.5).abs() < 1e-9, "{}", clock.beat_secs_out);
-        mixer.set_deck_splat_enabled(DeckId::A, false);
-        render_count(&mixer, rate, 4096, 256);
-        let clock = mixer.deck_snapshot(DeckId::A).clock;
-        assert!((clock.platter_rate - 1.25).abs() < 1e-6, "{}", clock.platter_rate);
-        assert!((clock.beat_secs_out - 0.4).abs() < 1e-6, "{}", clock.beat_secs_out);
-    }
-
-    #[test]
-    fn a_double_takes_the_record_and_leaves_the_channel_strip() {
-        let mixer = Mixer::new();
-        mixer.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 8.0));
-        mixer.set_deck_gain(DeckId::A, 0.3);
-        mixer.set_deck_gain(DeckId::B, 0.9);
-        mixer.set_deck_rate(DeckId::A, 1.05);
-        mixer.set_deck_playing(DeckId::A, true);
-        render(&mixer, 48_000.0, 512);
-        mixer.clone_deck(DeckId::A, DeckId::B);
-        let s = mixer.state.lock().unwrap();
-        assert!(s.decks[1].pcm.is_some(), "the record travelled");
-        assert!(
-            (s.decks[1].rate.current() - s.decks[0].rate.current()).abs() < 1e-6,
-            "and so did the tempo it is running at"
-        );
-        assert!(
-            (s.decks[1].gain.current - 0.9).abs() < 1e-6,
-            "the fader belongs to the slot: {}",
-            s.decks[1].gain.current
-        );
-    }
-
-    #[test]
-    fn a_double_onto_itself_does_nothing() {
-        let mixer = Mixer::new();
-        mixer.install_deck(DeckId::A, tone_pcm(220.0, 48_000, 8.0));
-        mixer.set_deck_playing(DeckId::A, true);
-        render(&mixer, 48_000.0, 512);
-        let before = mixer.deck_snapshot(DeckId::A).position_secs;
-        mixer.clone_deck(DeckId::A, DeckId::A);
-        assert_eq!(mixer.deck_snapshot(DeckId::A).position_secs, before);
-    }
-
-    #[test]
-    fn a_span_folds_a_playhead_back_keeping_the_overshoot() {
-        // Modulo, not a reset to IN: resetting discards up to a step a lap
-        // and a held loop walks audibly early.
-        assert_eq!(wrapped_into_span(105.0, 100.0, 110.0), 105.0, "already inside");
-        assert_eq!(wrapped_into_span(112.0, 100.0, 110.0), 102.0, "two frames past OUT");
-        assert_eq!(wrapped_into_span(130.0, 100.0, 110.0), 100.0, "three whole laps");
-        assert_eq!(wrapped_into_span(98.0, 100.0, 110.0), 108.0, "and backwards");
-        // A span of nothing is floored at one frame rather than dividing by
-        // zero, so it parks at its own start.
-        assert_eq!(wrapped_into_span(5.0, 3.0, 3.0), 3.0);
-    }
-
-    #[test]
-    fn slip_keeps_a_ghost_running_while_the_record_is_taken_elsewhere() {
-        let mixer = Mixer::new();
-        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
-        mixer.set_deck_playing(DeckId::A, true);
-        for _ in 0..8 {
-            render(&mixer, 48_000.0, 512);
-        }
-        mixer.set_deck_slip(DeckId::A, true, false);
-        assert!(mixer.deck_slipping(DeckId::A));
-        let armed_at = mixer.deck_snapshot(DeckId::A).position_secs;
-
-        // The hand takes the record somewhere else entirely.
-        mixer.seek_deck_seconds(DeckId::A, 5.0);
-        for _ in 0..8 {
-            render(&mixer, 48_000.0, 512);
-        }
-        assert!(
-            mixer.deck_snapshot(DeckId::A).position_secs > 4.9,
-            "the real head went where it was told"
-        );
-
-        mixer.set_deck_slip(DeckId::A, false, false);
-        let landed = mixer.deck_snapshot(DeckId::A).position_secs;
-        let elapsed = 8.0 * 512.0 / 48_000.0;
-        assert!(
-            (landed - (armed_at + elapsed)).abs() < 0.01,
-            "the deck lands where the track would have got to: {landed} against {}",
-            armed_at + elapsed
-        );
-        assert!(!mixer.deck_slipping(DeckId::A));
-    }
-
-    #[test]
-    fn keeping_what_was_scratched_leaves_the_record_where_the_hand_left_it() {
-        let mixer = Mixer::new();
-        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
-        mixer.set_deck_playing(DeckId::A, true);
-        render(&mixer, 48_000.0, 512);
-        mixer.set_deck_slip(DeckId::A, true, false);
-        mixer.seek_deck_seconds(DeckId::A, 5.0);
-        render(&mixer, 48_000.0, 512);
-        mixer.set_deck_slip(DeckId::A, false, true);
-        assert!(
-            (mixer.deck_snapshot(DeckId::A).position_secs - 5.0).abs() < 0.05,
-            "adopting keeps the detour: {}",
-            mixer.deck_snapshot(DeckId::A).position_secs
-        );
-    }
-
-    #[test]
-    fn a_ghost_wraps_through_the_loop_that_was_running_when_slip_was_armed() {
-        let mixer = Mixer::new();
-        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
-        mixer.set_deck_loop_span(DeckId::A, Some((0.0, 0.1)), crate::decks::LoopSeek::MovedOut);
-        mixer.set_deck_playing(DeckId::A, true);
-        render(&mixer, 48_000.0, 512);
-        mixer.set_deck_slip(DeckId::A, true, false);
-        // Far more than the loop is long.
-        for _ in 0..40 {
-            render(&mixer, 48_000.0, 512);
-        }
-        mixer.set_deck_slip(DeckId::A, false, false);
-        let landed = mixer.deck_snapshot(DeckId::A).position_secs;
-        assert!(
-            (0.0..=0.1).contains(&landed),
-            "the ghost stayed inside the loop the operator can see: {landed}"
-        );
-    }
-
-    #[test]
-    fn a_ghost_runs_on_while_the_deck_is_paused() {
-        // "Regardless of what the real head does" is meant literally: this
-        // is what makes slip useful over a stop, not only over a scratch.
-        let mixer = Mixer::new();
-        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
-        mixer.set_deck_playing(DeckId::A, true);
-        render(&mixer, 48_000.0, 512);
-        mixer.set_deck_slip(DeckId::A, true, false);
-        let armed_at = mixer.deck_snapshot(DeckId::A).position_secs;
-        mixer.set_deck_playing(DeckId::A, false);
-        for _ in 0..16 {
-            render(&mixer, 48_000.0, 512);
-        }
-        mixer.set_deck_slip(DeckId::A, false, false);
-        assert!(
-            mixer.deck_snapshot(DeckId::A).position_secs > armed_at + 0.1,
-            "the ghost kept going while the record stood still"
-        );
-    }
-
-    #[test]
-    fn a_seek_during_a_pauses_fade_is_not_undone_by_it() {
-        // The pause promises to hand back the frames its fade sounded. A
-        // deliberate move afterwards -- CUE returning to its mark is one --
-        // means that promise no longer applies.
-        let mixer = Mixer::new();
-        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
-        mixer.set_deck_playing(DeckId::A, true);
-        for _ in 0..8 {
-            render(&mixer, 48_000.0, 512);
-        }
-        let pressed_at = mixer.deck_snapshot(DeckId::A).position_secs;
-        mixer.set_deck_playing(DeckId::A, false);
-        mixer.seek_deck_seconds(DeckId::A, 0.0);
-        for _ in 0..8 {
-            render(&mixer, 48_000.0, 512);
-        }
-        let landed = mixer.deck_snapshot(DeckId::A).position_secs;
-        // Not exactly zero: the fade goes on sounding for its own few
-        // milliseconds from the new place, which is the point of it.
-        assert!(
-            landed < 0.02,
-            "the seek stands, give or take the fade's own length: {landed}"
-        );
-        assert!(
-            pressed_at - landed > 0.05,
-            "and it is nowhere near where pause was pressed ({pressed_at})"
-        );
-    }
-
-    #[test]
-    fn pausing_leaves_the_playhead_where_it_was_pressed() {
-        let mixer = Mixer::new();
-        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
-        mixer.set_deck_playing(DeckId::A, true);
-        for _ in 0..8 {
-            render(&mixer, 48_000.0, 512);
-        }
-        let at_press = mixer.deck_snapshot(DeckId::A).position_secs;
-        mixer.set_deck_playing(DeckId::A, false);
-        // Well past the fade: the deck keeps reading while it fades, and
-        // hands those frames back when it reaches silence.
-        for _ in 0..8 {
-            render(&mixer, 48_000.0, 512);
-        }
-        let after = mixer.deck_snapshot(DeckId::A).position_secs;
-        assert!(
-            (after - at_press).abs() < 1e-9,
-            "pause moved the playhead from {at_press} to {after}"
-        );
-        // And it stays put, however long it sits there.
-        for _ in 0..20 {
-            render(&mixer, 48_000.0, 512);
-        }
-        let later = mixer.deck_snapshot(DeckId::A).position_secs;
-        assert!((later - at_press).abs() < 1e-9, "a paused deck crept to {later}");
-    }
-
-    #[test]
-    fn a_callback_says_where_its_time_went_and_the_phases_add_up() {
-        let mixer = Mixer::new();
-        mixer.install_deck(DeckId::A, const_pcm(16_384, 48_000, 48_000));
-        mixer.set_deck_playing(DeckId::A, true);
-        render(&mixer, 48_000.0, 512);
-        let health = mixer.audio_health();
-        let stages = health.stages;
-        assert!(stages.mix > 0, "the frame loop is nearly all of it");
-        let summed = stages.setup + stages.mix + stages.publish;
-        assert_eq!(
-            summed, health.render_nanos,
-            "the three phases ARE the callback, with nothing unaccounted for"
-        );
-        assert!(
-            stages.mix > stages.setup,
-            "mixing {} should outweigh the setup {} for a playing deck",
-            stages.mix,
-            stages.setup
-        );
-    }
-
-    #[test]
-    fn a_poisoned_lock_is_taken_over_rather_than_silencing_the_rest_of_the_set() {
-        let mixer = Mixer::new();
-        mixer.install_deck(DeckId::A, const_pcm(16_384, 48_000, 48_000));
-        mixer.set_deck_playing(DeckId::A, true);
-        render(&mixer, 48_000.0, 512);
-        // A panic on ANY thread that holds the state lock poisons it, and
-        // every later `try_lock` fails for good.
-        let held = mixer.clone();
-        let hush = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        let _ = std::thread::spawn(move || {
-            let _guard = held.state.lock().unwrap();
-            panic!("something went wrong on some other thread");
-        })
-        .join();
-        std::panic::set_hook(hush);
-        assert!(mixer.state.is_poisoned(), "the setup did poison it");
-
-        let before = mixer.audio_health();
-        let out = render(&mixer, 48_000.0, 512);
-        let after = mixer.audio_health();
-        assert_eq!(after.poisoned, before.poisoned + 1, "counted as what it is");
-        assert_eq!(after.contended, before.contended, "and not as contention");
-        assert!(
-            out.data.iter().any(|sample| *sample != 0.0),
-            "the room still hears the track"
-        );
-        assert!(!mixer.state.is_poisoned(), "cleared, so the next buffer is ordinary");
-    }
-
-    #[test]
-    fn a_silenced_buffer_is_counted_and_never_charged_for_time_it_did_not_spend() {
-        let mixer = Mixer::new();
-        mixer.install_deck(DeckId::A, const_pcm(16_384, 48_000, 48_000));
-        render(&mixer, 48_000.0, 512);
-        let before = mixer.audio_health();
-        let held = mixer.clone();
-        let (holding, now_held) = std::sync::mpsc::channel();
-        let holder = std::thread::spawn(move || {
-            let _guard = held.state.lock().unwrap();
-            holding.send(()).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(120));
-        });
-        // Wait for the lock to BE held, not for a stretch of time to pass:
-        // under a loaded parallel run the holder may not have been scheduled
-        // by the time a bare sleep runs out, and the callback then finds the
-        // lock free and renders after all. The word comes from inside the
-        // holder's own guard, so there is nothing left to race.
-        now_held.recv().unwrap();
-        render(&mixer, 48_000.0, 512);
-        let after = mixer.audio_health();
-        assert_eq!(after.contended, before.contended + 1, "the silence is counted");
-        assert_eq!(
-            after.render_nanos, before.render_nanos,
-            "and a callback that rendered nothing reports no cost"
-        );
-        holder.join().unwrap();
-    }
-
-    #[test]
-    fn the_phones_say_when_they_have_run_dry() {
-        // A programme dropout is counted; a monitor dropout was invisible,
-        // which is the one an operator hears first and can least explain.
-        let mixer = Mixer::new();
-        let ring = mixer.cue_ring();
-        mixer.set_cue_armed(true);
-        ring.main_rate_bits.store(48_000f64.to_bits(), Ordering::Relaxed);
-        let mut state = CueReadState::default();
-        let mut out = AudioBuffer::new_with_size(256, 2);
-        // Priming with nothing in the ring is not starvation: it is the
-        // monitor waiting to start.
-        ring.consume(&mut state, 48_000.0, &mut out);
-        assert_eq!(mixer.audio_health().phones_starved, 0, "priming is not a dropout");
-        // Now fill it and let the monitor start.
-        let filled = CUE_TARGET_FRAMES + 64;
-        for pos in 0..filled {
-            ring.push(pos, 0.5, 0.5);
-        }
-        ring.write_pos.store(filled, Ordering::Release);
-        ring.consume(&mut state, 48_000.0, &mut out);
-        assert_eq!(mixer.audio_health().phones_starved, 0, "a fed monitor is quiet about it");
-        // The programme device stalls: nothing more is pushed, and the
-        // phones device keeps asking until it has drained the ring.
-        for _ in 0..16 {
-            ring.consume(&mut state, 48_000.0, &mut out);
-        }
-        assert!(
-            mixer.audio_health().phones_starved >= 1,
-            "running out mid-buffer is a dropout, and is counted"
-        );
-    }
-
-    #[test]
-    fn the_phones_never_carry_a_sample_that_is_not_a_number() {
-        // The master sum is guarded at the mix point; the cue sum is the
-        // other bus out of this callback, and it reaches an operator's ears
-        // directly. A filter driven past stability on a cued deck must cost
-        // that deck, not the monitor for the rest of the night.
-        let ring = CueRing::new();
-        ring.armed.store(true, Ordering::Relaxed);
-        ring.main_rate_bits.store(48_000f64.to_bits(), Ordering::Relaxed);
-        let filled = CUE_TARGET_FRAMES as u64 + 2_048;
-        for pos in 0..filled {
-            let bad = pos % 37 == 0;
-            let (l, r) = if bad { (f32::NAN, f32::INFINITY) } else { (0.5, -0.5) };
-            ring.push(pos, l, r);
-        }
-        ring.write_pos.store(filled, Ordering::Release);
-        let mut state = CueReadState::default();
-        let mut out = AudioBuffer::new_with_size(1_024, 2);
-        ring.consume(&mut state, 48_000.0, &mut out);
-        assert!(
-            out.channel(0).iter().chain(out.channel(1)).all(|s| s.is_finite()),
-            "every phones sample must be one the device can carry"
-        );
-        assert!(
-            out.channel(0).iter().any(|s| s.abs() > 0.01),
-            "and the good samples still get through"
-        );
-    }
-
-    #[test]
-    fn a_deck_handed_a_number_that_is_not_one_keeps_playing() {
-        // One bad number out of a UI division by a zero-width widget, or a
-        // learned controller scale, used to take a deck out for the night.
-        let mixer = Mixer::new();
-        mixer.set_master(1.0);
-        mixer.set_crossfader(0.0);
-        mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
-        mixer.set_deck_playing(DeckId::A, true);
-        render(&mixer, 48_000.0, 4096);
-        let before = render(&mixer, 48_000.0, 256).channel(0)[128];
-        assert!(before.abs() > 0.1, "the deck is sounding to begin with");
-        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-            mixer.set_deck_gain(DeckId::A, bad);
-            mixer.set_deck_eq_band(DeckId::A, 1, bad);
-            mixer.set_deck_filter(DeckId::A, bad);
-            mixer.set_master(bad);
-            mixer.set_crossfader(bad);
-            mixer.set_deck_stem_gain(DeckId::A, 0, bad);
-            mixer.set_deck_rate(DeckId::A, bad as f64);
-            mixer.set_deck_key_shift(DeckId::A, bad as f64);
-        }
-        let out = render(&mixer, 48_000.0, 1024);
-        assert!(
-            out.channel(0).iter().chain(out.channel(1)).all(|s| s.is_finite()),
-            "the output stays finite"
-        );
-        assert!(
-            out.channel(0)[512].abs() > 0.1,
-            "and the deck is still sounding, at {}",
-            out.channel(0)[512]
-        );
-    }
-
-    #[test]
-    fn every_callback_arms_flush_to_zero() {
-        // Some hosts reset the flag behind the app's back between buffers,
-        // so the callback cannot arm it once and trust it: each render
-        // re-arms. Disarm here as such a host would, render one buffer, and
-        // the thread must be flushing again.
-        crate::music_dsp::set_flush_denormals(false);
-        let mixer = Mixer::new();
-        let mut buffer = AudioBuffer::new_with_size(64, 2);
-        mixer.render(48_000.0, &mut buffer);
-        let tiny = std::hint::black_box(f32::MIN_POSITIVE);
-        let half = std::hint::black_box(0.5f32);
-        assert_eq!(tiny * half, 0.0, "a callback must leave flush-to-zero armed");
-        crate::music_dsp::set_flush_denormals(false);
-    }
-
-    #[test]
-    fn sweeping_the_blend_filter_is_click_free() {
-        // A recipe steps the filter offset rather than dragging it, and
-        // every step rebuilds the sweep coefficients. Whether that lands a
-        // click is a measurement, not an opinion.
-        let settle = |mixer: &Mixer| {
-            mixer.set_master(1.0);
-            mixer.install_deck(DeckId::A, tone_pcm(800.0, 48_000, 10.0));
-            mixer.set_crossfader(0.0);
-            mixer.set_deck_playing(DeckId::A, true);
-        };
-
-        let control = Mixer::new();
-        settle(&control);
-        render(&control, 48_000.0, 8192);
-        let untouched = worst_adjacent_step(render(&control, 48_000.0, 8192).channel(0));
-
-        let mixer = Mixer::new();
-        settle(&mixer);
-        render(&mixer, 48_000.0, 8192);
-        // A quarter of the sweep: the size a recipe would step.
-        mixer.set_blend_filter(DeckId::A, -0.25);
-        let out = render(&mixer, 48_000.0, 8192);
-        let swept = worst_adjacent_step(out.channel(0));
-        assert!(
-            swept < untouched * 2.0,
-            "a sweep step must not crack: {swept} against {untouched} standing still"
-        );
-    }
-
-    #[test]
-    fn releasing_the_vocal_duck_is_click_free() {
-        // The EQ medium holds the incoming mid band down at prep and lets it
-        // go part-way through the fade, by which time that deck is audible.
-        // A gain move on a live strip is exactly where a click comes from,
-        // so the release has to glide.
-        //
-        // The signal has to live in the band under test — a flat one is all
-        // low band and would sail through this while hearing nothing — so a
-        // tone carries a step of its own, and the control block is what
-        // separates that from the move.
-        let settle = |mixer: &Mixer| {
-            mixer.set_master(1.0);
-            mixer.install_deck(DeckId::A, tone_pcm(800.0, 48_000, 10.0));
-            mixer.set_crossfader(0.0);
-            mixer.set_deck_playing(DeckId::A, true);
-        };
-
-        // The control sits at the gain the release LANDS on: a tone twice as
-        // loud steps twice as far all by itself, and comparing against the
-        // ducked block would read that as a click.
-        let control = Mixer::new();
-        settle(&control);
-        render(&control, 48_000.0, 8192);
-        let untouched = worst_adjacent_step(render(&control, 48_000.0, 8192).channel(0));
-
-        let mixer = Mixer::new();
-        settle(&mixer);
-        mixer.set_blend_band(DeckId::A, 1, EQ_VOCAL_DUCK);
-        render(&mixer, 48_000.0, 8192); // let the duck seat
-        mixer.set_blend_band(DeckId::A, 1, 1.0);
-        let out = render(&mixer, 48_000.0, 8192);
-        let released = worst_adjacent_step(out.channel(0));
-
-        assert!(
-            released < untouched * 1.5,
-            "the release must glide: {released} against {untouched} standing still"
-        );
-        // And it really did travel: a release that never moved would pass
-        // this for the wrong reason.
-        let quietest = out.channel(0).iter().copied().fold(f32::MAX, f32::min);
-        let loudest = out.channel(0).iter().copied().fold(f32::MIN, f32::max);
-        assert!(
-            loudest - quietest > 0.05,
-            "the mid band should climb back over the block, {quietest}..{loudest}"
-        );
-    }
-
-    #[test]
     fn crossing_into_a_loop_is_click_free() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
         mixer.set_crossfader(0.0);
-        mixer.set_deck_loop_span(DeckId::A, Some((5.0, 6.0)), crate::decks::LoopSeek::MovedOut);
+        mixer.set_deck_loop_span(DeckId::A, Some((5.0, 6.0)));
         mixer.set_deck_playing(DeckId::A, true);
         render(&mixer, 48_000.0, 4096); // settle ramps
         // Straddle the IN crossing: the run-up must hand over to the seam
@@ -7425,7 +5109,10 @@ mod tests {
         // patient rule exists for.
         mixer.seek_deck_seconds(DeckId::A, 5.0 - 512.0 / 48_000.0);
         let out = render(&mixer, 48_000.0, 1024);
-        let worst = worst_adjacent_step(out.channel(0));
+        let mut worst = 0.0f32;
+        for i in 1..1024 {
+            worst = worst.max((out.channel(0)[i] - out.channel(0)[i - 1]).abs());
+        }
         assert!(
             worst < 0.02,
             "crossing IN must be continuous, biggest adjacent step {worst}"
@@ -7434,14 +5121,14 @@ mod tests {
 
     #[test]
     fn a_span_ending_at_the_exact_track_end_never_ends_the_deck() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         // 48_003 frames: a length whose seconds->frames round trip lands a
         // hair ABOVE the frame count, so an unclamped OUT sits past the
         // last frame and the end-of-track check wins over the wrap.
         mixer.install_deck(DeckId::A, const_pcm(16_384, 48_003, 48_000));
         mixer.set_crossfader(0.0);
-        mixer.set_deck_loop_span(DeckId::A, Some((0.0, 48_003.0 / 48_000.0)), crate::decks::LoopSeek::MovedOut);
+        mixer.set_deck_loop_span(DeckId::A, Some((0.0, 48_003.0 / 48_000.0)));
         mixer.set_deck_playing(DeckId::A, true);
         for _ in 0..24 {
             render(&mixer, 48_000.0, 4096);
@@ -7454,7 +5141,7 @@ mod tests {
 
     #[test]
     fn a_keylocked_deck_wraps_a_span_at_the_track_end() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000)); // 10 s
         mixer.set_crossfader(0.0);
@@ -7463,7 +5150,7 @@ mod tests {
         // the track — so a span whose OUT hugs the end can never see
         // playhead >= end and used to die through the ran-out path.
         mixer.set_deck_rate(DeckId::A, 1.05);
-        mixer.set_deck_loop_span(DeckId::A, Some((9.0, 10.0)), crate::decks::LoopSeek::MovedOut);
+        mixer.set_deck_loop_span(DeckId::A, Some((9.0, 10.0)));
         mixer.seek_deck_seconds(DeckId::A, 9.0);
         mixer.set_deck_playing(DeckId::A, true);
         for _ in 0..24 {
@@ -7477,15 +5164,15 @@ mod tests {
 
     #[test]
     fn a_resize_on_a_paused_deck_lands_the_playhead_at_once() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
-        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 5.0)), crate::decks::LoopSeek::MovedOut);
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 5.0)));
         mixer.seek_deck_seconds(DeckId::A, 3.5);
         // Paused: the render loop skips this deck entirely, so the catch
         // has to happen when the span is SET or the playhead sits parked
         // outside the loop until play is pressed.
-        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)), crate::decks::LoopSeek::MovedOut);
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)));
         let (position, _, _) = mixer.deck_position(DeckId::A);
         assert!(
             (1.49..1.51).contains(&position),
@@ -7495,7 +5182,7 @@ mod tests {
 
     #[test]
     fn a_commanded_jump_is_a_blend_not_a_splice() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         // +0.5 for the first five seconds, −0.5 after: jumping across the
         // middle is a full-scale discontinuity unless something blends it.
@@ -7523,10 +5210,10 @@ mod tests {
 
     #[test]
     fn a_span_follows_its_voice_through_a_swap() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, const_pcm(16_384, 480_000, 48_000));
-        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)), crate::decks::LoopSeek::MovedOut);
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 2.0)));
         mixer.seek_deck_seconds(DeckId::A, 1.0);
         mixer.set_deck_playing(DeckId::A, true);
         mixer.swap_decks();
@@ -7540,7 +5227,7 @@ mod tests {
 
     #[test]
     fn sfx_voices_overlap_and_finished_voices_are_reaped() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         // Let the master ramp settle before anything audible starts.
         render(&mixer, 48_000.0, 2048);
@@ -7558,7 +5245,6 @@ mod tests {
                 pcm.clone(),
             );
         }
-        flush_bus(&mixer, 48_000.0);
         let out = render(&mixer, 48_000.0, 64);
         // Three overlapping voices sum: 3 × 0.25 × master(1.0).
         assert!((out.channel(0)[32] - 0.75).abs() < 0.02, "{}", out.channel(0)[32]);
@@ -7567,14 +5253,13 @@ mod tests {
         let mut ended = mixer.drain_ended_voices();
         ended.sort();
         assert_eq!(ended, vec![1, 2, 3]);
-        flush_bus(&mixer, 48_000.0);
         let out = render(&mixer, 48_000.0, 64);
         assert!(out.channel(0)[32].abs() < 1e-6);
     }
 
     #[test]
     fn video_slot_fade_reaches_targets_and_close_silences() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         render(&mixer, 48_000.0, 64);
         mixer.open_slot(SlotId::A);
@@ -7583,20 +5268,18 @@ mod tests {
         assert!(mixer.push_slot_audio(SlotId::A, &samples, 2, 48_000));
         mixer.fade_slots(None, SlotId::A, 0.01);
         render(&mixer, 48_000.0, 4096); // fade settles
-        flush_bus(&mixer, 48_000.0);
         let out = render(&mixer, 48_000.0, 64);
         assert!((out.channel(0)[32] - 0.5).abs() < 0.02, "{}", out.channel(0)[32]);
         // Closing flushes + refuses further pushes.
         mixer.close_slot(SlotId::A);
         assert!(!mixer.push_slot_audio(SlotId::A, &samples, 2, 48_000));
-        flush_bus(&mixer, 48_000.0);
         let out = render(&mixer, 48_000.0, 64);
         assert!(out.channel(0)[32].abs() < 1e-6);
     }
 
     #[test]
     fn video_mute_roundtrip_restores_pre_mute_level_exactly() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         render(&mixer, 48_000.0, 64);
         mixer.open_slot(SlotId::A);
@@ -7623,7 +5306,7 @@ mod tests {
 
     #[test]
     fn crossfade_completes_under_mute_and_unmute_hears_the_new_slot() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         render(&mixer, 48_000.0, 64);
         // Slot A live, then mute, then crossfade to slot B WHILE muted.
@@ -7648,7 +5331,7 @@ mod tests {
 
     #[test]
     fn paused_slot_bus_consumes_nothing_until_unpaused() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         mixer.open_slot(SlotId::A);
         // True preroll: bus paused, gain up — still silent, queue intact.
@@ -7672,7 +5355,7 @@ mod tests {
 
     #[test]
     fn deck_mute_and_gain_are_click_free_ramps_to_target() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, const_pcm(16_384, 96_000, 48_000));
         mixer.set_deck_playing(DeckId::A, true);
@@ -7691,7 +5374,7 @@ mod tests {
 
     #[test]
     fn scheduled_transition_starts_on_exact_sample_inside_buffer() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         render(&mixer, 48_000.0, 2048); // settle master
         mixer.open_slot(SlotId::A);
@@ -7701,21 +5384,9 @@ mod tests {
             .schedule_video_transition_at(41, None, SlotId::A, target, 1)
             .unwrap();
 
-        // The transition is scheduled on an exact frame of the MIX; the
-        // bus hands that frame over one look-ahead later, so the sample
-        // it lands on moves with it and the exactness is unchanged.
         let out = render(&mixer, 48_000.0, 12);
-        let latency = mixer.output_latency_frames();
-        let out = if latency > 0 {
-            let mut all = out.channel(0).to_vec();
-            all.extend_from_slice(render(&mixer, 48_000.0, latency).channel(0));
-            all.drain(..latency);
-            all
-        } else {
-            out.channel(0).to_vec()
-        };
-        assert!(out[..5].iter().all(|sample| sample.abs() < 1e-7));
-        assert!((out[5] - 0.5).abs() < 0.02, "transition was not sample exact");
+        assert!(out.channel(0)[..5].iter().all(|sample| sample.abs() < 1e-7));
+        assert!((out.channel(0)[5] - 0.5).abs() < 0.02, "transition was not sample exact");
         let snapshot = mixer.video_transition_snapshot().unwrap();
         assert_eq!(snapshot.id, 41);
         assert_eq!(snapshot.start_frame, Some(target));
@@ -7725,7 +5396,7 @@ mod tests {
 
     #[test]
     fn armed_destination_queue_is_not_consumed_before_target() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.open_slot(SlotId::B);
         assert!(mixer.push_slot_audio(SlotId::B, &vec![8_192; 2 * 4_800], 2, 48_000));
         let before = mixer.slot_buffered_secs(SlotId::B);
@@ -7739,7 +5410,7 @@ mod tests {
 
     #[test]
     fn scheduled_transition_can_cancel_and_rearm_before_start() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.open_slot(SlotId::A);
         mixer
             .schedule_video_transition_after(1, None, SlotId::A, 1_000, 64)
@@ -7763,27 +5434,8 @@ mod tests {
     }
 
     #[test]
-    fn contended_target_is_reported_missed_and_never_started_late() {
-        let mixer = Mixer::new();
-        mixer.open_slot(SlotId::A);
-        assert!(mixer.push_slot_audio(SlotId::A, &vec![16_384; 2 * 512], 2, 48_000));
-        let before = mixer.slot_buffered_secs(SlotId::A);
-        mixer
-            .schedule_video_transition_after(88, None, SlotId::A, 4, 16)
-            .unwrap();
-        let guard = mixer.state.lock().unwrap();
-        let silent = render(&mixer, 48_000.0, 8);
-        assert!(silent.channel(0).iter().all(|sample| sample.abs() < 1e-7));
-        drop(guard);
-        render(&mixer, 48_000.0, 1);
-        let snapshot = mixer.video_transition_snapshot().unwrap();
-        assert_eq!(snapshot.phase, VideoTransitionPhase::Missed);
-        assert!((mixer.slot_buffered_secs(SlotId::A) - before).abs() < 1e-9);
-    }
-
-    #[test]
     fn closing_just_started_destination_restores_previous_program() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         render(&mixer, 48_000.0, 2_048);
         mixer.open_slot(SlotId::A);
@@ -7811,8 +5463,8 @@ mod tests {
 
     #[test]
     fn scheduling_video_does_not_perturb_deck_or_sfx_cursors() {
-        fn populated() -> Mixer {
-            let mixer = Mixer::new();
+        fn populated() -> TestMixer {
+            let mixer = TestMixer::new();
             mixer.install_deck(DeckId::A, const_pcm(4_000, 4_000, 48_000));
             mixer.set_deck_playing(DeckId::A, true);
             mixer.start_voice(
@@ -7837,15 +5489,15 @@ mod tests {
             .unwrap();
         render(&control, 48_000.0, 256);
         render(&scheduled, 48_000.0, 256);
-        let control = control.state.lock().unwrap();
-        let scheduled = scheduled.state.lock().unwrap();
+        let control = control.state();
+        let scheduled = scheduled.state();
         assert_eq!(scheduled.decks[0].pos, control.decks[0].pos);
         assert_eq!(scheduled.sfx[0].cursor_fp, control.sfx[0].cursor_fp);
     }
 
     #[test]
     fn video_playback_rate_is_capped_and_isolated_from_other_voices() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.open_slot(SlotId::A);
         assert_eq!(
             mixer.set_slot_playback_rate(SlotId::A, 10.0),
@@ -7863,20 +5515,20 @@ mod tests {
         assert!(mixer.push_slot_audio(SlotId::A, &vec![1_000; 2 * 4_000], 2, 48_000));
         mixer.fade_slots(None, SlotId::A, 0.008);
         render(&mixer, 48_000.0, 100);
-        let state = mixer.state.lock().unwrap();
+        let state = mixer.state();
         assert_eq!(state.decks[0].pos, 100.0);
-        let consumed = 4_000 - state.video[0].queue.len();
+        let consumed = 4_000 - mixer.shared.video[0].buffered_frames() as usize;
         assert!((107..=108).contains(&consumed));
         assert!((consumed as f64 + state.video[0].cursor - 108.0).abs() < 1e-6);
     }
     #[test]
     fn the_blend_overlay_multiplies_and_clears_without_touching_the_knobs() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         // Operator sets a stem lane to 0.8; the autopilot blends it to 0.5.
         mixer.set_deck_stem_gain(DeckId::A, 2, 0.8);
         mixer.set_blend_stem(DeckId::A, 2, 0.5);
         {
-            let s = mixer.state.lock().unwrap();
+            let s = mixer.state();
             let d = &s.decks[0];
             assert!((d.stem_gain[2].target() - 0.8).abs() < 1e-6, "the knob stands");
             assert!((d.blend_stem[2].target() - 0.5).abs() < 1e-6, "the hand is on");
@@ -7884,7 +5536,7 @@ mod tests {
         // Clear returns the overlay to unity; the operator's value stands.
         mixer.clear_blend(DeckId::A);
         {
-            let s = mixer.state.lock().unwrap();
+            let s = mixer.state();
             let d = &s.decks[0];
             assert!((d.blend_stem[2].target() - 1.0).abs() < 1e-6);
             assert!((d.stem_gain[2].target() - 0.8).abs() < 1e-6);
@@ -7893,7 +5545,7 @@ mod tests {
         mixer.set_blend_stem(DeckId::A, 0, 0.0);
         mixer.install_deck(DeckId::A, const_pcm(0, 4800, 48_000));
         {
-            let s = mixer.state.lock().unwrap();
+            let s = mixer.state();
             let d = &s.decks[0];
             assert!((d.blend_stem[0].target() - 1.0).abs() < 1e-6, "install lets go");
         }
@@ -7906,7 +5558,7 @@ mod tests {
     /// Drain the cue ring at `cue_rate` into one buffer, the way the
     /// phones-device callback does.
     fn consume_cue(
-        mixer: &Mixer,
+        mixer: &TestMixer,
         state: &mut CueReadState,
         cue_rate: f64,
         frames: usize,
@@ -7918,7 +5570,7 @@ mod tests {
 
     #[test]
     fn cue_pfl_ignores_gain_mute_and_crossfader() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, const_pcm(16_384, 48_000 * 4, 48_000)); // 0.5 amp
         mixer.set_deck_playing(DeckId::A, true);
@@ -7944,7 +5596,7 @@ mod tests {
 
     #[test]
     fn cue_postfader_follows_gain_and_crossfader() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, const_pcm(16_384, 48_000 * 8, 48_000)); // 0.5 amp
         mixer.set_deck_playing(DeckId::A, true);
@@ -7976,7 +5628,7 @@ mod tests {
     fn cue_raw_bypasses_the_eq() {
         let rate = 48_000.0;
         let cue_rms = |mode: CueMode| -> f64 {
-            let mixer = Mixer::new();
+            let mixer = TestMixer::new();
             mixer.set_master(1.0);
             mixer.set_crossfader(0.0);
             mixer.install_deck(DeckId::A, tone_pcm(60.0, 48_000, 6.0));
@@ -8011,7 +5663,7 @@ mod tests {
 
     #[test]
     fn preview_plays_only_into_the_cue_and_seeks() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         mixer.set_cue_armed(true);
         mixer.install_preview(const_pcm(16_384, 48_000 * 4, 48_000), true); // 0.5 amp
@@ -8041,13 +5693,17 @@ mod tests {
         let (_, _, playing, ended) = mixer.preview_position().expect("still installed");
         assert!(!playing && ended, "running off the end parks the preview");
 
-        assert!(mixer.clear_preview().is_some(), "the pcm comes back out");
+        mixer.clear_preview();
+        assert!(
+            mixer.drain_retired().iter().any(|retired| matches!(retired, Retired::Track(_))),
+            "the pcm comes back out, to be dropped on the UI thread"
+        );
         assert!(mixer.preview_position().is_none(), "cleared means gone");
     }
 
     #[test]
     fn cue_ring_servo_survives_mismatched_device_rates() {
-        let mixer = Mixer::new();
+        let mixer = TestMixer::new();
         mixer.set_master(1.0);
         mixer.install_deck(DeckId::A, tone_pcm(440.0, 48_000, 30.0));
         mixer.set_deck_playing(DeckId::A, true);
@@ -8083,8 +5739,45 @@ mod tests {
         );
     }
 
-    fn splat_fixture(missing_drums: bool) -> (Mixer, u32) {
+    /// The fixture's grid: a 2 s bar, one one-bar cell per column, the
+    /// first bar at `first_bar_secs`. `shift_secs` moves every cell's
+    /// window (a refined grid that chose other bars) and columns from
+    /// `keep_cols` on have no cell at all (a refined grid that lost one).
+    fn splat_grid(first_bar_secs: f64, shift_secs: f64, keep_cols: usize) -> Arc<SplatGrid> {
         use crate::loop_splat::{SplatCell, SplatSection};
+
+        let sections = (0..SPLAT_COLS)
+            .map(|col| SplatSection {
+                start_secs: col as f64 * 2.0,
+                end_secs: (col + 1) as f64 * 2.0,
+                bars: 1,
+            })
+            .collect();
+        let mut cells = [[None; SPLAT_COLS]; SPLAT_ROWS];
+        for row in SplatRow::ALL {
+            for col in 0..keep_cols.min(SPLAT_COLS) {
+                cells[row.index()][col] = Some(SplatCell {
+                    span: crate::decks::LoopSpan {
+                        start_secs: col as f64 * 2.0 + shift_secs,
+                        end_secs: (col + 1) as f64 * 2.0 + shift_secs,
+                    },
+                    bars: 1,
+                    energy: 1.0,
+                    silent: false,
+                });
+            }
+        }
+        Arc::new(SplatGrid {
+            bpm: 120.0,
+            bar_secs: 2.0,
+            first_bar_secs,
+            sections,
+            cells,
+            bars_per_col: [1; SPLAT_COLS],
+        })
+    }
+
+    fn splat_fixture(missing_drums: bool) -> (TestMixer, u32) {
 
         let rate = 1_000u32;
         let frame_count = rate as usize * 16;
@@ -8113,37 +5806,9 @@ mod tests {
                 .collect();
             stems.lanes[stem][0] = Some(Arc::new(samples));
         }
-        let sections = (0..SPLAT_COLS)
-            .map(|col| SplatSection {
-                start_secs: col as f64 * 2.0,
-                end_secs: (col + 1) as f64 * 2.0,
-                bars: 1,
-            })
-            .collect();
-        let mut cells = [[None; SPLAT_COLS]; SPLAT_ROWS];
-        for row in SplatRow::ALL {
-            for col in 0..SPLAT_COLS {
-                cells[row.index()][col] = Some(SplatCell {
-                    span: crate::decks::LoopSpan {
-                        start_secs: col as f64 * 2.0,
-                        end_secs: (col + 1) as f64 * 2.0,
-                    },
-                    bars: 1,
-                    energy: 1.0,
-                    silent: false,
-                });
-            }
-        }
-        let grid = Arc::new(SplatGrid {
-            bpm: 120.0,
-            bar_secs: 2.0,
-            first_bar_secs: 0.0,
-            sections,
-            cells,
-            bars_per_col: [1; SPLAT_COLS],
-        });
-        let mixer = Mixer::new();
-        mixer.state.lock().unwrap().master = Ramp::at(1.0);
+        let grid = splat_grid(0.0, 0.0, SPLAT_COLS);
+        let mixer = TestMixer::new();
+        mixer.state().master = Ramp::at(1.0);
         mixer.install_deck(DeckId::A, pcm);
         mixer.install_deck_stems(DeckId::A, Arc::new(stems));
         mixer.set_deck_splat(DeckId::A, grid);
@@ -8152,7 +5817,7 @@ mod tests {
         (mixer, rate)
     }
 
-    fn render_count(mixer: &Mixer, rate: u32, mut frames: usize, block: usize) -> Vec<f32> {
+    fn render_count(mixer: &TestMixer, rate: u32, mut frames: usize, block: usize) -> Vec<f32> {
         let mut samples = Vec::with_capacity(frames);
         while frames > 0 {
             let count = frames.min(block);
@@ -8163,31 +5828,228 @@ mod tests {
         samples
     }
 
+    /// The cell a row is sounding (or, before its bar, waiting to sound).
+    fn row_slot(mixer: &TestMixer, row: SplatRow) -> Option<(f64, f64)> {
+        let state = mixer.state();
+        let splat = state.decks[0].splat.as_ref().unwrap();
+        let voice = splat.rows[row.index()];
+        voice
+            .queued
+            .and_then(|queued| queued.cell)
+            .or(voice.cell)
+            .map(|cell| (cell.start_frames, cell.len_frames))
+    }
+
+    /// What the mix row reads at master frame `at`, as a source frame
+    /// index: the ramp fixture stores the index in every sample.
+    fn cell_read(mixer: &TestMixer, at: f64) -> f64 {
+        let state = mixer.state();
+        let deck = &state.decks[0];
+        let splat = deck.splat.as_ref().unwrap();
+        let cell = splat.rows[SplatRow::Mix.index()].cell.expect("a sounding mix cell");
+        let pcm = deck.pcm.as_ref().unwrap();
+        let frame = splat_cell_frame(SplatRow::Mix, cell, at, pcm, None, [1.0; STEM_COUNT]);
+        frame[0] as f64 * 32768.0
+    }
+
+    /// A freshly installed deck sits at zero until it plays or is seeked —
+    /// whatever else lands on it while it is paused: a grid (whose first
+    /// bar is past zero), the grid switched on and off, a loop span, a
+    /// rate, stems, the stream growing and completing.
+    #[test]
+    fn install_never_moves_a_paused_deck() {
+        let rate = 1_000u32;
+        let frame_count = rate as usize * 16;
+        let mixer = TestMixer::new();
+        mixer.state().master = Ramp::at(1.0);
+        let grid = splat_grid(0.5, 0.0, SPLAT_COLS);
+        let whole = const_pcm(12_000, frame_count, rate);
+
+        mixer.install_deck(DeckId::A, whole.clone());
+        mixer.install_deck_stems(DeckId::A, Arc::new(TrackStems::new(frame_count, 1)));
+        mixer.set_deck_splat(DeckId::A, grid.clone());
+        mixer.set_deck_splat_enabled(DeckId::A, true);
+        mixer.set_deck_loop_span(DeckId::A, Some((1.0, 3.0)));
+        mixer.set_deck_rate(DeckId::A, 1.05);
+        mixer.set_deck_keylock(DeckId::A, true);
+        render_count(&mixer, rate, 500, 64);
+        let snapshot = mixer.deck_snapshot(DeckId::A);
+        assert!(!snapshot.playing);
+        assert_eq!(snapshot.position_secs, 0.0, "the grid on: {snapshot:?}");
+        assert_eq!(deck_pos(&mixer, DeckId::A), 0.0);
+        mixer.set_deck_splat_enabled(DeckId::A, false);
+        render_count(&mixer, rate, 100, 64);
+        assert_eq!(deck_pos(&mixer, DeckId::A), 0.0, "the grid off again");
+        assert_eq!(mixer.deck_snapshot(DeckId::A).position_secs, 0.0);
+
+        // The same through the chunk table of a track still decoding
+        // (every chunk but the last is a full one).
+        let long = STREAM_CHUNK_FRAMES + 4_000;
+        let table = StreamPcm::new(rate, Some(long));
+        let first = Arc::new(table.with_chunk(stream_chunk(7, STREAM_CHUNK_FRAMES), false));
+        mixer.install_deck_stream(DeckId::B, first.clone());
+        mixer.set_deck_splat(DeckId::B, grid);
+        mixer.set_deck_splat_enabled(DeckId::B, true);
+        mixer.set_deck_loop_span(DeckId::B, Some((0.0, 2.0)));
+        render_count(&mixer, rate, 100, 64);
+        let grown = Arc::new(first.with_chunk(stream_chunk(7, 4_000), false));
+        mixer.grow_deck_stream(DeckId::B, grown);
+        render_count(&mixer, rate, 100, 64);
+        mixer.complete_deck(DeckId::B, const_pcm(7, long, rate));
+        render_count(&mixer, rate, 100, 64);
+        let snapshot = mixer.deck_snapshot(DeckId::B);
+        assert!(!snapshot.playing);
+        assert_eq!(snapshot.position_secs, 0.0, "{snapshot:?}");
+        assert_eq!(deck_pos(&mixer, DeckId::B), 0.0);
+        // A relative landing never reaches a paused deck from the engine,
+        // but the mixer honours one it is sent — that is a seek.
+    }
+
+    /// A click on a cell loops exactly that cell's bars: the boundaries are
+    /// the grid's bar positions in source frames, the reads walk them
+    /// sample by sample and wrap on the frame, the reported playhead cycles
+    /// inside them, and a second click on the same cell — or the same
+    /// track through the chunk table while it is still decoding — lands on
+    /// the very same frames.
+    #[test]
+    fn cell_loop_boundaries_are_sample_exact_and_stable() {
+        let rate = 1_000u32;
+        let frame_count = rate as usize * 16;
+        let ramp = Arc::new(TrackPcm {
+            frames: (0..frame_count).map(|i| [i as i16, i as i16]).collect(),
+            sample_rate: rate,
+        });
+        let grid = splat_grid(0.0, 0.0, SPLAT_COLS);
+        for streamed in [false, true] {
+            let mixer = TestMixer::new();
+            mixer.state().master = Ramp::at(1.0);
+            if streamed {
+                // Half the track decoded: the grid owns time on a stream too.
+                let table = StreamPcm::new(rate, Some(frame_count));
+                let half = Arc::new(ramp.frames[..frame_count / 2].to_vec());
+                mixer.install_deck_stream(DeckId::A, Arc::new(table.with_chunk(half, false)));
+            } else {
+                mixer.install_deck(DeckId::A, ramp.clone());
+            }
+            mixer.set_deck_splat(DeckId::A, grid.clone());
+            mixer.set_deck_splat_enabled(DeckId::A, true);
+            mixer.set_deck_playing(DeckId::A, true);
+            render_count(&mixer, rate, 300, 64);
+
+            mixer.splat_launch(DeckId::A, SplatRow::Mix, 1, SplatPart::WHOLE);
+            render_count(&mixer, rate, 1, 1);
+            let (cell, anchor) = {
+                let state = mixer.state();
+                let splat = state.decks[0].splat.as_ref().unwrap();
+                let cell = splat.rows[SplatRow::Mix.index()].cell.expect("sounding at once");
+                (cell, cell.anchor_frames)
+            };
+            assert_eq!((cell.start_frames, cell.len_frames), (2_000.0, 2_000.0), "streamed {streamed}");
+            assert_eq!(anchor, 2_000.0, "the first launch re-seats the clock on the cell");
+            for lap in 0..20 {
+                let base = anchor + lap as f64 * cell.len_frames;
+                assert_eq!(cell_read(&mixer, base), 2_000.0, "lap {lap} start");
+                assert_eq!(cell_read(&mixer, base + 1.0), 2_001.0, "lap {lap} second frame");
+                assert_eq!(cell_read(&mixer, base + 1_999.0), 3_999.0, "lap {lap} last frame");
+            }
+            // The rendered clock: one source frame per device frame here, so
+            // after every whole lap the reported playhead is back on the
+            // same frame, inside the cell, twenty laps running.
+            for lap in 0..20 {
+                render_count(&mixer, rate, 2_000, 256);
+                assert_eq!(deck_pos(&mixer, DeckId::A), 2_001.0, "lap {lap}, streamed {streamed}");
+                let secs = mixer.deck_snapshot(DeckId::A).position_secs;
+                assert!((2.0..4.0).contains(&secs), "the header cycles inside the bar: {secs}");
+            }
+            // Stop, then the same click again: the very same frames.
+            mixer.splat_stop_row(DeckId::A, SplatRow::Mix, false);
+            render_count(&mixer, rate, 700, 64);
+            assert_eq!(row_slot(&mixer, SplatRow::Mix), None);
+            mixer.splat_launch(DeckId::A, SplatRow::Mix, 1, SplatPart::WHOLE);
+            render_count(&mixer, rate, 1, 1);
+            assert_eq!(row_slot(&mixer, SplatRow::Mix), Some((2_000.0, 2_000.0)));
+            let again = mixer.state().decks[0].splat.as_ref().unwrap().rows[SplatRow::Mix.index()]
+                .cell
+                .unwrap();
+            assert_eq!(cell_read(&mixer, again.anchor_frames), 2_000.0);
+            assert_eq!(cell_read(&mixer, again.anchor_frames + 2_000.0), 2_000.0, "wraps on the frame");
+        }
+    }
+
+    /// A refined grid landing under a running loop: a slot whose bars did
+    /// not change is left alone; one whose bars moved re-launches on the
+    /// new frames at the next bar (the picture following it); one the new
+    /// grid no longer has stops there. The sound is always the grid shown.
+    #[test]
+    fn a_replaced_grid_relaunches_running_rows_on_its_own_frames() {
+        let (mixer, rate) = splat_fixture(false);
+        render_count(&mixer, rate, 300, 64);
+        mixer.splat_launch(DeckId::A, SplatRow::Drums, 1, SplatPart::WHOLE);
+        mixer.splat_launch(DeckId::A, SplatRow::Bass, 7, SplatPart::WHOLE);
+        render_count(&mixer, rate, 500, 64);
+        assert_eq!(row_slot(&mixer, SplatRow::Drums), Some((2_000.0, 2_000.0)));
+        assert_eq!(row_slot(&mixer, SplatRow::Bass), Some((14_000.0, 2_000.0)));
+
+        // The same bars again: nothing is re-launched.
+        mixer.set_deck_splat(DeckId::A, splat_grid(0.0, 0.0, SPLAT_COLS));
+        render_count(&mixer, rate, 1, 1);
+        {
+            let state = mixer.state();
+            let splat = state.decks[0].splat.as_ref().unwrap();
+            assert!(splat.rows[SplatRow::Drums.index()].queued.is_none(), "unchanged slot left alone");
+            assert!(splat.rows[SplatRow::Bass.index()].queued.is_none());
+        }
+
+        // Every window a bar later, and column 7 gone.
+        mixer.set_deck_splat(DeckId::A, splat_grid(0.0, 2.0, 7));
+        render_count(&mixer, rate, 1, 1);
+        {
+            let state = mixer.state();
+            let splat = state.decks[0].splat.as_ref().unwrap();
+            let drums = splat.rows[SplatRow::Drums.index()];
+            let queued = drums.queued.and_then(|queued| queued.cell).expect("drums re-launch queued");
+            assert_eq!((queued.start_frames, queued.len_frames), (4_000.0, 2_000.0));
+            assert_eq!(queued.anchor_frames, 4_000.0, "on the next bar");
+            assert_eq!(drums.cell.map(|cell| cell.start_frames), Some(2_000.0), "still sounding the old bars until then");
+            let bass = splat.rows[SplatRow::Bass.index()];
+            assert!(matches!(bass.queued, Some(Queued { cell: None, .. })), "a lost slot stops: {bass:?}");
+            // The picture stays on the bass (launched last) while it sounds.
+            assert_eq!(splat.view.map(|cell| cell.start_frames), Some(14_000.0));
+        }
+        render_count(&mixer, rate, 2_100, 256);
+        assert_eq!(row_slot(&mixer, SplatRow::Drums), Some((4_000.0, 2_000.0)));
+        assert_eq!(row_slot(&mixer, SplatRow::Bass), None);
+        // ...and moves to what is still sounding once the bass has stopped.
+        {
+            let state = mixer.state();
+            let splat = state.decks[0].splat.as_ref().unwrap();
+            assert_eq!(splat.view.map(|cell| cell.start_frames), Some(4_000.0), "the picture follows");
+        }
+        let secs = mixer.deck_snapshot(DeckId::A).position_secs;
+        assert!((4.0..6.0).contains(&secs), "the playhead cycles in the new bars: {secs}");
+    }
+
     #[test]
     fn splat_launch_swap_phase_stop_and_transport_return_are_quantized() {
         let (mixer, rate) = splat_fixture(false);
         render_count(&mixer, rate, 300, 64);
         mixer.splat_launch(DeckId::A, SplatRow::Drums, 0, SplatPart::WHOLE);
-        let before = render_count(&mixer, rate, 1_700, 256);
-        assert!(before.iter().all(|sample| sample.abs() < 1e-7));
-        // The equal-power fade begins on source frame 2000. Its first sample
-        // has zero incoming gain; the immediately following sample is live.
-        //
-        // Read a look-ahead late, because that is where the bus hands
-        // that pair over -- and take the same number of frames back off
-        // the settle below, so everything after this sees the timeline it
-        // would have seen anyway. The later checks read the splat's own
-        // frame counters, which move with the render and not with the
-        // limiter.
-        let latency = mixer.output_latency_frames();
-        let onset = render_count(&mixer, rate, 2 + latency, 64);
-        assert!(onset[latency].abs() < 1e-7 && onset[latency + 1].abs() > 1e-5);
+        // The first launch into a silent grid plays AT ONCE: the master
+        // clock is re-seated on the cell (frame 0), the equal-power fade
+        // starts on the first rendered sample (zero incoming gain) and the
+        // very next one is live. From here the grid's bars are the cell's.
+        let first = render_count(&mixer, rate, 1_700, 256);
+        assert!(first[0].abs() < 1e-7 && first[1].abs() > 1e-5, "the click sounds at once");
+        assert!(first[1_000].abs() > 1e-5);
+        render_count(&mixer, rate, 2, 64);
 
-        render_count(&mixer, rate, 500 - latency, 64);
+        render_count(&mixer, rate, 500, 64);
+        // A second launch into a running grid waits for the next bar
+        // (4000 on this clock), in phase with what is already playing.
         mixer.splat_launch(DeckId::A, SplatRow::Drums, 3, SplatPart::WHOLE);
-        render_count(&mixer, rate, 1_504, 256);
+        render_count(&mixer, rate, 1_804, 256);
         {
-            let state = mixer.state.lock().unwrap();
+            let state = mixer.state();
             let splat = state.decks[0].splat.as_ref().unwrap();
             let cell = splat.rows[SplatRow::Drums.index()].cell.unwrap();
             assert_eq!(cell.col, 3);
@@ -8224,6 +6086,85 @@ mod tests {
     }
 
     #[test]
+    fn splat_phase_correction_crossfades_the_old_voice_when_crossing_a_launch() {
+        let (mixer, rate) = splat_fixture(false);
+        let (reference, _) = splat_fixture(false);
+        for m in [&mixer, &reference] {
+            m.splat_launch(DeckId::A, SplatRow::Mix, 0, SplatPart::WHOLE);
+            render_count(m, rate, 1_950, 64);
+            m.splat_launch(DeckId::A, SplatRow::Mix, 3, SplatPart::WHOLE);
+        }
+        mixer.nudge_deck_seconds(DeckId::A, 0.2);
+        let corrected = render_count(&mixer, rate, 1, 1);
+        let uninterrupted = render_count(&reference, rate, 1, 1);
+        assert!((corrected[0] - uninterrupted[0]).abs() < 1e-7);
+        assert_eq!(mixer.deck_snapshot(DeckId::A).splat.unwrap().playing[SplatRow::Mix.index()],
+            Some((3, SplatPart::WHOLE)));
+    }
+
+    #[test]
+    fn a_song_and_sample_grid_keep_time_through_many_loop_wraps() {
+        let (mixer, rate) = splat_fixture(false);
+        mixer.set_deck_playing(DeckId::A, false);
+        mixer.set_deck_rate(DeckId::A, 128.0 / 120.0);
+        mixer.set_deck_sync_lock(DeckId::A, true);
+        mixer.install_deck(DeckId::B, const_pcm(4_000, rate as usize * 64, rate));
+        mixer.set_deck_keylock(DeckId::B, false);
+        render_count(&mixer, rate, 500, 64);
+        mixer.set_deck_playing(DeckId::A, true);
+        mixer.set_deck_playing(DeckId::B, true);
+        mixer.splat_launch(DeckId::A, SplatRow::Mix, 3, SplatPart::WHOLE);
+        for _ in 0..360 {
+            render_count(&mixer, rate, 100, 37);
+            let snapshots = mixer.deck_snapshots();
+            let loop_clock = snapshots[0].splat.unwrap().clock_secs;
+            let song_clock = snapshots[1].position_secs;
+            let error = loop_clock * 120.0 / 60.0 - song_clock * 128.0 / 60.0;
+            assert!(error.abs() < 1e-5, "song/sample drift: {error} beats");
+            assert!((6.0..8.0).contains(&snapshots[0].position_secs));
+        }
+    }
+
+    #[test]
+    fn splat_uses_the_matched_deck_rate_on_every_row() {
+        for streamed in [false, true] {
+            let (mixer, rate) = splat_fixture(streamed);
+            mixer.splat_launch(DeckId::A, SplatRow::Drums, 1, SplatPart::WHOLE);
+            mixer.splat_launch(DeckId::A, SplatRow::Bass, 2, SplatPart::WHOLE);
+            mixer.set_deck_rate(DeckId::A, 1.125);
+            render_count(&mixer, rate, 500, 64); // let the rate ramp settle
+            let before = mixer.deck_snapshot(DeckId::A).splat.unwrap().clock_secs;
+            render_count(&mixer, rate, 8_000, 127);
+            let after = mixer.deck_snapshot(DeckId::A).splat.unwrap();
+            assert!((after.clock_secs - before - 9.0).abs() < 1e-8, "{streamed}: {after:?}");
+            assert!((after.row_phase[SplatRow::Drums.index()] - after.row_phase[SplatRow::Bass.index()]).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn synced_first_splat_launch_waits_for_the_clock_and_preserves_its_source_span() {
+        let (mixer, rate) = splat_fixture(false);
+        mixer.set_deck_sync_lock(DeckId::A, true);
+        render_count(&mixer, rate, 300, 64);
+        mixer.splat_launch(DeckId::A, SplatRow::Mix, 3, SplatPart::WHOLE);
+        render_count(&mixer, rate, 1, 1);
+        let snap = mixer.deck_snapshot(DeckId::A).splat.unwrap();
+        assert!((snap.clock_secs - 0.301).abs() < 1e-9);
+        assert_eq!(snap.playing[SplatRow::Mix.index()], None);
+        assert_eq!(snap.queued[SplatRow::Mix.index()], Some((3, SplatPart::WHOLE)));
+        render_count(&mixer, rate, 1_700, 127);
+        assert_eq!(row_slot(&mixer, SplatRow::Mix), Some((6_000.0, 2_000.0)));
+        let before = mixer.deck_snapshot(DeckId::A).splat.unwrap().clock_secs;
+        mixer.nudge_deck_seconds(DeckId::A, 32.125);
+        mixer.sync();
+        let after = mixer.deck_snapshot(DeckId::A).splat.unwrap().clock_secs;
+        assert!((after - before - 32.125).abs() < 1e-9, "continuous clock is not clamped to file length");
+        assert_eq!(row_slot(&mixer, SplatRow::Mix), Some((6_000.0, 2_000.0)));
+        render_count(&mixer, rate, 500, 64);
+        assert!(mixer.state().decks[0].splat.as_ref().unwrap().phase_fade.is_none());
+    }
+
+    #[test]
     fn splat_render_is_identical_across_block_sizes() {
         let run = |block| {
             let (mixer, rate) = splat_fixture(false);
@@ -8253,7 +6194,7 @@ mod tests {
         mixer.splat_launch(DeckId::A, SplatRow::Drums, 0, part);
         render_count(&mixer, rate, 1, 1);
 
-        let state = mixer.state.lock().unwrap();
+        let state = mixer.state();
         let deck = &state.decks[DeckId::A.index()];
         let splat = deck.splat.as_ref().unwrap();
         let cell = splat.rows[SplatRow::Drums.index()].cell.unwrap();
@@ -8317,7 +6258,7 @@ mod tests {
             snapshot.playing[SplatRow::Drums.index()],
             Some((0, SplatPart::WHOLE))
         );
-        let state = mixer.state.lock().unwrap();
+        let state = mixer.state();
         let anchor = state.decks[0].splat.as_ref().unwrap().rows[SplatRow::Drums.index()]
             .cell
             .unwrap()
@@ -8325,4 +6266,156 @@ mod tests {
         assert_eq!(anchor, 0.0);
     }
 
+
+    // ---- the UI/audio seam ---------------------------------------------------
+
+    /// Commands land in the order they were sent, through a ring that is
+    /// too small for the burst: the overflow parks on the UI side and
+    /// re-sends in order, never dropping or reordering a command.
+    #[test]
+    fn a_burst_past_the_ring_backs_up_on_the_ui_side_in_order() {
+        let mixer = TestMixer::new();
+        let burst = CMD_RING_SLOTS + 300;
+        for step in 0..burst {
+            // Every command is a distinct gain target; the last one wins
+            // only if all of them arrive in order.
+            mixer.set_deck_gain(DeckId::A, step as f32 / burst as f32);
+        }
+        assert_eq!(mixer.backlog_len(), 300, "the ring took its capacity, the rest waited");
+        // The callback drains the ring; the next UI pump re-sends the rest.
+        mixer.sync();
+        assert_eq!(mixer.shared.cmds.len(), 0);
+        assert_eq!(mixer.backlog_len(), 300, "nothing re-sends until the UI pumps");
+        mixer.pump();
+        assert_eq!(mixer.backlog_len(), 0);
+        mixer.sync();
+        let target = mixer.state().decks[0].gain.target;
+        assert!(
+            (target - (burst - 1) as f32 / burst as f32).abs() < 1e-6,
+            "the last command applied last: {target}"
+        );
+        // Order across the seam: a command sent while the backlog stands
+        // queues BEHIND it, so an install then a seek arrive in that order.
+        for step in 0..burst {
+            mixer.set_deck_gain(DeckId::B, step as f32);
+        }
+        mixer.install_deck(DeckId::B, const_pcm(1_000, 48_000, 48_000));
+        mixer.seek_deck_seconds(DeckId::B, 0.5);
+        assert!(mixer.backlog_len() > 0);
+        mixer.sync();
+        mixer.pump();
+        mixer.sync();
+        let (position, _, _) = mixer.deck_position(DeckId::B);
+        assert!((position - 0.5).abs() < 1e-9, "the seek followed the install: {position}");
+    }
+
+    /// What a command replaces comes back to the UI thread: the last
+    /// reference to a track is never dropped by the callback.
+    #[test]
+    fn replaced_payloads_come_back_for_the_ui_to_drop() {
+        let mixer = TestMixer::new();
+        let first = const_pcm(1_000, 48_000, 48_000);
+        let second = const_pcm(2_000, 48_000, 48_000);
+        mixer.install_deck(DeckId::A, first.clone());
+        mixer.install_deck(DeckId::A, second.clone());
+        render(&mixer, 48_000.0, 64);
+        // The callback holds only the second; the first is in the events
+        // ring, still alive, waiting for the UI.
+        assert_eq!(Arc::strong_count(&first), 2, "the callback did not free it");
+        let retired = mixer.drain_retired();
+        assert!(
+            retired.iter().any(|r| matches!(r, Retired::Pcm(DeckPcm::Whole(pcm)) if Arc::ptr_eq(pcm, &first))),
+            "the replaced track came back whole"
+        );
+        drop(retired);
+        assert_eq!(Arc::strong_count(&first), 1, "and the UI dropped it");
+        assert_eq!(Arc::strong_count(&second), 2, "the playing track stays with the callback");
+
+        // A stream table grown chunk by chunk hands back every old table.
+        let stream = Arc::new(StreamPcm::new(48_000, Some(4 * STREAM_CHUNK_FRAMES)));
+        mixer.install_deck_stream(DeckId::B, stream.clone());
+        let grown = Arc::new(stream.with_chunk(stream_chunk(100, STREAM_CHUNK_FRAMES), false));
+        mixer.grow_deck_stream(DeckId::B, grown.clone());
+        let whole = const_pcm(100, STREAM_CHUNK_FRAMES, 48_000);
+        mixer.complete_deck(DeckId::B, whole.clone());
+        render(&mixer, 48_000.0, 64);
+        let retired = mixer.drain_retired();
+        let tables = retired
+            .iter()
+            .filter(|r| matches!(r, Retired::Pcm(DeckPcm::Stream(_))))
+            .count();
+        assert_eq!(tables, 2, "the empty table and the grown table both came back");
+        drop(retired);
+        assert_eq!(Arc::strong_count(&stream), 1);
+        assert_eq!(Arc::strong_count(&grown), 1);
+        assert_eq!(Arc::strong_count(&whole), 2);
+    }
+
+    /// The callback and the UI run flat out against each other and the
+    /// callback never skips a buffer: there is no lock for it to lose.
+    /// Every buffer rendered while the UI hammers commands and reads is
+    /// accounted for, and the UI's reads never wait on a render.
+    #[test]
+    fn render_never_yields_a_buffer_to_the_ui_thread() {
+        let handle = Mixer::new();
+        let mut engine = handle.take_engine().expect("fresh engine");
+        handle.install_deck(DeckId::A, const_pcm(4_000, 48_000 * 4, 48_000));
+        // Looped, because an unpaced callback runs through four seconds of
+        // track in well under the test's wall time.
+        handle.set_deck_loop_span(DeckId::A, Some((0.0, 3.0)));
+        handle.set_deck_playing(DeckId::A, true);
+        handle.set_master(1.0);
+        let stop = Arc::new(AtomicBool::new(false));
+        let audio_stop = stop.clone();
+        let audio = std::thread::spawn(move || {
+            let mut rendered = 0u64;
+            let mut non_silent = 0u64;
+            let mut buffer = AudioBuffer::new_with_size(128, 2);
+            while !audio_stop.load(Ordering::Relaxed) {
+                buffer.zero();
+                engine.render(48_000.0, &mut buffer);
+                rendered += 1;
+                if buffer.channel(0).iter().any(|s| s.abs() > 1e-6) {
+                    non_silent += 1;
+                }
+            }
+            (rendered, non_silent, engine)
+        });
+        // The UI side: commands and reads as fast as it can for a while.
+        let started = std::time::Instant::now();
+        let mut reads = 0u64;
+        while started.elapsed() < std::time::Duration::from_millis(400) {
+            handle.set_deck_gain(DeckId::A, 0.9);
+            handle.set_deck_eq_band(DeckId::A, 1, 1.1);
+            handle.set_deck_stem_gain(DeckId::A, 2, 0.8);
+            let _ = handle.deck_snapshot(DeckId::A);
+            let _ = handle.crossfader_position();
+            let _ = handle.meters();
+            handle.pump();
+            reads += 1;
+        }
+        stop.store(true, Ordering::Relaxed);
+        let (rendered, non_silent, engine) = audio.join().expect("audio thread");
+        assert!(reads > 100, "the UI side kept going: {reads}");
+        assert!(rendered > 100, "the callback kept going: {rendered}");
+        // Once the transport was applied every buffer carried audio: no
+        // buffer was skipped for anything the UI did. The first few may be
+        // silent only while the install and play commands travel.
+        assert!(
+            rendered - non_silent <= 2,
+            "silent buffers: {} of {rendered}",
+            rendered - non_silent
+        );
+        drop(engine);
+    }
+
+    /// The seam's types promise what the threads need and nothing more.
+    #[test]
+    fn handle_and_engine_cross_threads_without_a_mutex() {
+        fn send<T: Send>() {}
+        fn send_sync<T: Send + Sync>() {}
+        send::<MixEngine>();
+        send_sync::<Mixer>();
+        send_sync::<Shared>();
+    }
 }

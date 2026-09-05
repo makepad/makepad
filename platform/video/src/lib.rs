@@ -3,7 +3,7 @@
 //!
 //! This is the platform-accelerated *offline/artifact* path. It is
 //! deliberately free of `Cx` — any thread can construct and drive an encoder
-//! or decoder without a running event loop. Lives in `makepad-video` so AI
+//! or decoder without a running event loop. Lives in `makepad-platform-video` so AI
 //! content / H3 mux does not pull the full UI platform crate.
 //!
 //! Backends:
@@ -47,6 +47,7 @@
 pub mod annex_b;
 pub mod mp4_first_frame;
 pub mod nv12;
+pub mod stream_debug;
 pub mod stream_decoder;
 pub mod stream_encoder;
 

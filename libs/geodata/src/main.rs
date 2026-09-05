@@ -1,6 +1,9 @@
+#[cfg(not(target_arch = "wasm32"))]
 use makepad_geodata::{fetch_source, find_layer, registry, BuildCtx, FetchOptions};
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn usage() -> ! {
     eprintln!(
         "geodata — bulk open-geodata fetcher / overlay database builder
@@ -24,6 +27,7 @@ OPTIONS:
     std::process::exit(2);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 struct Args {
     command: String,
     target: String,
@@ -35,6 +39,7 @@ struct Args {
     limit: usize,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_args() -> Args {
     let mut args = Args {
         command: String::new(),
@@ -68,6 +73,7 @@ fn parse_args() -> Args {
     args
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     let args = parse_args();
     match args.command.as_str() {
@@ -302,6 +308,10 @@ fn main() {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn select(target: &str) -> Vec<Box<dyn makepad_geodata::Layer>> {
     if target == "all" {
         registry()

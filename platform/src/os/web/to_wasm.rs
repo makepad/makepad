@@ -32,7 +32,7 @@ pub struct WBrowserInfo {
     pub search: String,
     pub hash: String,
     pub has_thread_support: bool,
-    pub small_font_aliases: bool,
+    pub is_phone: bool,
 }
 
 impl Into<OsType> for WBrowserInfo {
@@ -44,7 +44,7 @@ impl Into<OsType> for WBrowserInfo {
             pathname: self.pathname,
             search: self.search,
             hash: self.hash,
-            small_font_aliases: self.small_font_aliases,
+            is_phone: self.is_phone,
         })
     }
 }
@@ -99,6 +99,7 @@ impl Into<XrCapabilities> for WXrCapabilities {
 pub struct ToWasmInit {
     pub gpu_info: WGpuInfo,
     pub cpu_cores: u32,
+    pub wasm_memory_max_pages: u32,
     pub xr_capabilities: WXrCapabilities,
     pub browser_info: WBrowserInfo,
     pub window_info: WWindowInfo,
@@ -154,6 +155,15 @@ pub struct ToWasmPaintDirty {}
 #[derive(ToWasm)]
 pub struct ToWasmRedrawAll {}
 
+/// `count` WebGL programs finished compiling (or failed) since the last
+/// report. Pairs with the compiles queued through `FromWasmCompileWebGLShader`
+/// so `Cx::draw_shaders_pending` can say whether draws are still being
+/// dropped for a program that has not linked yet.
+#[derive(ToWasm)]
+pub struct ToWasmWebGLShadersDone {
+    pub count: usize,
+}
+
 #[derive(ToWasm)]
 pub struct ToWasmLiveFileChange {
     pub file_name: String,
@@ -165,6 +175,44 @@ pub struct ToWasmLocationChange {
     pub pathname: String,
     pub search: String,
     pub hash: String,
+}
+
+#[derive(ToWasm)]
+pub struct WVirtualFile {
+    pub name: String,
+    pub mime: String,
+    pub bytes: WasmDataU8,
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmFileDrag {
+    pub x: f64,
+    pub y: f64,
+    pub modifiers: u32,
+    pub file_count: u32,
+    pub left: bool,
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmFileDrop {
+    pub x: f64,
+    pub y: f64,
+    pub modifiers: u32,
+    pub files: Vec<WVirtualFile>,
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmFileDropError {
+    pub error: String,
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmFileDialogResult {
+    pub id_lo: u32,
+    pub id_hi: u32,
+    pub cancelled: bool,
+    pub error: String,
+    pub files: Vec<WVirtualFile>,
 }
 
 // Touch API
@@ -512,6 +560,35 @@ impl Into<TextInputEvent> for ToWasmTextInput {
 
 #[derive(ToWasm)]
 pub struct ToWasmTextCopy {}
+
+#[derive(ToWasm)]
+pub struct ToWasmStorageResult {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+    pub op: u32,
+    pub found: bool,
+    pub value: WasmDataU8,
+    pub keys: Vec<String>,
+    pub has_next: bool,
+    pub next: String,
+    pub length_lo: u32,
+    pub length_hi: u32,
+    pub usage_lo: u32,
+    pub usage_hi: u32,
+    pub quota_lo: u32,
+    pub quota_hi: u32,
+    pub error_kind: u32,
+    pub error: String,
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmRenderTextureCapture {
+    pub texture_id: usize,
+    pub width: usize,
+    pub height: usize,
+    pub data: WasmDataU8,
+    pub error: String,
+}
 
 // Keyboard API
 

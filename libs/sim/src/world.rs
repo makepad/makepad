@@ -39,6 +39,54 @@ impl SurfaceSample {
     }
 }
 
+/// THE composed world-surface seam as a free function, so a derived system
+/// (navigation) can sample it while mutably borrowing its own cache out of
+/// [`GameWorld`]. Sources compose in this order: a loaded level's floor
+/// raster wherever it reaches (its floors are ground, its pits holes, its
+/// walls and stacked storeys `Outside` — see [`crate::meshfloor`]), then
+/// the voxel field where a chunk owns the surface, then the heightfield
+/// (a punched cell is a hole). `Outside` past all of them. Navigation,
+/// corridors, lots and spawns all read this one truth.
+pub(crate) fn composed_surface_sample_at(
+    floor: Option<&crate::meshfloor::FloorRaster>,
+    terrain: Option<&Terrain>,
+    terrain_materials: Option<&TerrainMaterials>,
+    voxel: Option<&crate::voxel::VoxelField>,
+    x: f32,
+    z: f32,
+) -> SurfaceSample {
+    if let Some(floor) = floor {
+        if let Some(sample) = floor.sample(x, z) {
+            return sample;
+        }
+    }
+    let base = terrain.and_then(|t| t.height_at(x, z));
+    if let Some(v) = voxel {
+        // No terrain = the voxel base layer's y=0 ground plane.
+        let base_h = base.unwrap_or(0.0);
+        if v.chunk_count() > 0 && v.owns_surface(x, z, base_h) {
+            return match v.surface_at(x, z, base_h) {
+                Some(h) => SurfaceSample::Surface(h),
+                None => SurfaceSample::Hole,
+            };
+        }
+    }
+    match base {
+        None => SurfaceSample::Outside,
+        Some(h) => {
+            let punched = match (terrain, terrain_materials) {
+                (Some(t), Some(m)) => m.is_hole_at(t, x, z),
+                _ => false,
+            };
+            if punched {
+                SurfaceSample::Hole
+            } else {
+                SurfaceSample::Surface(h)
+            }
+        }
+    }
+}
+
 /// Everything the script API reads/writes. Shared (Rc<RefCell>) between the
 /// widget and the native `game` handle registered into the isolate, so script
 /// calls mutate it synchronously — no async widget trampoline, deterministic
@@ -209,6 +257,18 @@ pub struct GameWorld {
     /// byte-identically. Shared by pointer across snapshots (a level is
     /// immutable while installed). See [`crate::level_solid`].
     pub level: Option<crate::level_solid::LevelSolidRef>,
+    /// A streamed level's floors rasterised to one storey per column (see
+    /// [`crate::meshfloor`]): the surface the generators drape on while a
+    /// map is installed — its floors are ground, its pits holes, its
+    /// walls `Outside`. None otherwise, so worlds without a map run every
+    /// pre-map path byte-identically. Installed and cleared with `level`;
+    /// an eval's `reset_content` keeps both.
+    pub map_floor: Option<std::sync::Arc<crate::meshfloor::FloorRaster>>,
+    /// The walk surfaces of the laid corridors (roads, rails, bridge
+    /// decks): a mover on one stands at the drawn deck height exactly —
+    /// see [`crate::deck`]. Empty in every world without corridors, so
+    /// pre-corridor content runs the floor rules byte-identically.
+    pub decks: Vec<crate::deck::DeckStrip>,
     /// Sky/fog, enabled by game.sky().
     pub sky: Option<SkyConfig>,
     /// What game.sun() asked for; the renderer resolves it (see SunConfig).
@@ -239,11 +299,17 @@ pub struct GameWorld {
     pub tick: u64,
     pub time: f64,
     pub log_pending: Vec<String>,
-    /// PERF: bumped whenever anything a STATIC entity contributes to the
-    /// screen changes (spawn/remove/restyle/sky). The renderer caches packed
-    /// instance slabs for static content keyed by this — bump it or your
-    /// static edit won't show.
+    /// PERF: bumped whenever the static GEOMETRY of the world changes —
+    /// a static entity spawned, removed, moved, resized, its parts settled,
+    /// the sky or sun restyled. The renderer keys everything derived from
+    /// static geometry on this: the packed instance slabs, the CPU
+    /// occlusion bake, the shadow receivers and the GPU lightmap kick. Bump
+    /// it (`mark_render_dirty`) or your static edit won't show.
     pub render_rev: u64,
+    /// PERF: bumped when a static entity is only REPAINTED — colour or glow,
+    /// nothing moved. Only the packed slabs key on this; a repaint never
+    /// re-bakes light. `mark_paint_dirty`.
+    pub paint_rev: u64,
 }
 
 impl GameWorld {
@@ -257,6 +323,14 @@ impl GameWorld {
     /// grounded on the terrain today grounds on a map's floor tomorrow
     /// without learning what a map is.
     pub fn ground_height_at(&self, x: f32, z: f32, near_y: f32) -> Option<f32> {
+        // Under an installed map the level's own mesh answers first: it
+        // knows which storey `near_y` is on, which the one-storey floor
+        // raster cannot (a balcony's spawn must not drop to the hall).
+        if self.map_floor.is_some() {
+            if let Some(h) = self.level.as_ref().and_then(|level| level.ground_under(x, z, near_y)) {
+                return Some(h);
+            }
+        }
         if let Some(h) = self.surface_height_at(x, z) {
             return Some(h);
         }
@@ -283,31 +357,14 @@ impl GameWorld {
     /// it (placement used to see ground over a pit) and the border is
     /// never height 0.
     pub fn surface_sample_at(&self, x: f32, z: f32) -> SurfaceSample {
-        let base = self.terrain.as_ref().and_then(|t| t.height_at(x, z));
-        if let Some(v) = self.voxel.as_deref() {
-            // No terrain = the voxel base layer's y=0 ground plane.
-            let base_h = base.unwrap_or(0.0);
-            if v.chunk_count() > 0 && v.owns_surface(x, z, base_h) {
-                return match v.surface_at(x, z, base_h) {
-                    Some(h) => SurfaceSample::Surface(h),
-                    None => SurfaceSample::Hole,
-                };
-            }
-        }
-        match base {
-            None => SurfaceSample::Outside,
-            Some(h) => {
-                let punched = match (&self.terrain, &self.terrain_materials) {
-                    (Some(t), Some(m)) => m.is_hole_at(t, x, z),
-                    _ => false,
-                };
-                if punched {
-                    SurfaceSample::Hole
-                } else {
-                    SurfaceSample::Surface(h)
-                }
-            }
-        }
+        composed_surface_sample_at(
+            self.map_floor.as_deref(),
+            self.terrain.as_ref(),
+            self.terrain_materials.as_ref(),
+            self.voxel.as_deref(),
+            x,
+            z,
+        )
     }
 
     /// A world with the canonical starting camera (the values the gamemaker
@@ -583,6 +640,16 @@ impl GameWorld {
         self.render_rev = self.render_rev.wrapping_add(1);
     }
 
+    /// See `paint_rev`. Call after restyling a static entity's colour or
+    /// glow WITHOUT moving, resizing, spawning or removing anything: the
+    /// packed slabs repaint, the light bake stays. A lamp head that turns
+    /// red every few seconds is the case this exists for — through
+    /// `mark_render_dirty` it rebaked the whole map's lightmap on every
+    /// phase change (Crossroads, 2026-09-02: 68 bakes a minute).
+    pub fn mark_paint_dirty(&mut self) {
+        self.paint_rev = self.paint_rev.wrapping_add(1);
+    }
+
     /// Bring the box3d mirror up to date for an exact query (F7): entities
     /// spawned or teleported since the last tick get their bodies before the
     /// cast runs, so `game.raycast` sees the world the script just built —
@@ -599,6 +666,7 @@ impl GameWorld {
             terrain,
             terrain_materials,
             voxel,
+            decks,
             gravity,
             ..
         } = self;
@@ -608,6 +676,7 @@ impl GameWorld {
             terrain.as_ref(),
             terrain_materials.as_ref(),
             voxel.as_deref(),
+            decks,
             *gravity,
         );
     }
@@ -640,8 +709,13 @@ impl GameWorld {
             .get_or_insert_with(|| Box::new(crate::voxel::VoxelField::new(0.5)));
         field.apply_op(op, terrain.as_ref(), true, true, log_pending);
         // A press is plan (routed into the patch inside apply_op); every
-        // other op is HISTORY and moves the epoch a solve commits against.
-        if !matches!(op, crate::voxel::VoxelOp::Press { .. }) {
+        // other op is HISTORY and moves the epoch a solve commits against —
+        // unless the op is the EVAL'S OWN (a `game.dig`/`game.tunnel` line
+        // in the level source, or persisted edits replayed by `game.terrain`
+        // mid-eval): those are what the solve is reading, not something
+        // that changed under it, and counting them refused every level
+        // that dug its own ground on its rebuild.
+        if !matches!(op, crate::voxel::VoxelOp::Press { .. }) && !self.in_plan_eval {
             self.history_revision = self.history_revision.wrapping_add(1);
         }
     }
@@ -694,6 +768,21 @@ mod id_lookup_tests {
             id,
             ..Default::default()
         }
+    }
+
+    /// The two static revisions are separate on purpose: a repaint reaches
+    /// the packed slabs and nothing else, a geometry change reaches
+    /// everything derived from static geometry (see the fields' docs).
+    #[test]
+    fn a_repaint_moves_paint_rev_and_leaves_the_geometry_revision_alone() {
+        let mut w = GameWorld::new();
+        let (render, paint) = (w.render_rev, w.paint_rev);
+        w.mark_paint_dirty();
+        assert_eq!(w.render_rev, render);
+        assert_eq!(w.paint_rev, paint.wrapping_add(1));
+        w.mark_render_dirty();
+        assert_eq!(w.render_rev, render.wrapping_add(1));
+        assert_eq!(w.paint_rev, paint.wrapping_add(1));
     }
 
     #[test]

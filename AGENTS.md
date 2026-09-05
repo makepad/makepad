@@ -7,6 +7,11 @@
 > studio websocket bridge for all agent work. Full spec: [App Remote Control](#app-remote-control---remote).
 
 ## Execution Policy
+
+- **Designs stay local.** Design documents, plans, and reports are local files
+  (`local/agent_state/<topic>/DESIGN.md`) that lanes read from disk. Never
+  publish them to the web (no Artifacts, no hosted pages); summarize in the
+  terminal instead.
 - Launch UI programs as standalone release binaries from this checkout. Do
   not use the Studio remote bridge, `ObserveMount`, `RunItem`, or any
   `cargo-makepad studio` websocket client.
@@ -31,8 +36,56 @@
   can be run directly in the shell.
 - A standalone app's built-in screenshot/capture hook is valid for visual
   inspection.
+- **System-level screenshots are FORBIDDEN.** Never run `screencapture`,
+  `CGWindowListCreateImage`/`CGDisplayCreateImage` scripts, `xcap`,
+  `import`, `scrot`, `grim`, `xwd`, PowerShell/Win32 screen grabs, or any
+  other OS screen capture — not of the display, not of a window, not
+  "just the caption". The user's screen is private. The only image of a
+  running app you may ever take is the app's own `--remote` grab (`/g`,
+  `/gq`, `/tweak/grab`), which renders the app's own drawable and nothing
+  else. If something only shows in the OS layer (native caption buttons,
+  other apps, the desktop), ask the user for a screenshot instead of
+  taking one.
 - When adding a new example crate, update both the Cargo workspace and
   `makepad.splash`.
+- **Zero locking on the UI thread, one mechanism everywhere.** The UI
+  thread never takes a `Mutex`/`RwLock`/`Condvar` that another thread can
+  hold, and never blocks on a channel. UI → workers/audio is commands over
+  a channel (bounded, non-blocking send; a full queue is reported and
+  retried next frame). Workers/audio → UI is snapshots over atomics, a
+  triple buffer, or a channel read with `try_recv`. Large payloads (PCM,
+  stems, grids, images) travel as `Arc` through the channel; a replaced
+  payload is handed back so the UI thread does the drop, never a realtime
+  thread. A realtime callback (audio) owns its state, never takes a lock
+  the UI can hold, never allocates on the hot path. This is ONE code path
+  for native and wasm — no `cfg` fork where desktop keeps shared mutexes.
+  On wasm both the browser UI thread and the AudioWorklet thread abort on
+  `Atomics.wait`, and a spinning fallback against a busy audio callback is
+  a 100 % CPU feedback loop that kills audio and frame rate together (DJ
+  web, 2026-09-03). `lock_from_ui` is only acceptable on state provably
+  touched by the UI thread alone.
+- **Standard operating flow — who does what.** The main session (Fable)
+  designs, briefs, manages and reviews; it does not write the code itself
+  except one-line fixes. **Codex writes the code**: every implementation lane
+  is a Codex lane with a precise brief (observations, files, rules, the
+  verification commands) launched through `local/tools/delegate` /
+  `local/agent_state/webdemos/tasks/queue.sh` and landed through
+  `local/tools/integrate`. **Grok does the tests and the token-heavy work**:
+  test suites, audits, surveys, log reading, conflict resolution passes,
+  reviews of large diffs (`delegate grok` / `research-grok` / `review-grok`).
+  A Fable subagent is the exception, only for a design-level change the
+  other two cannot carry (a new platform mechanism), and it stops as soon as
+  the API is fixed so Codex can do the conversions. Keep at most six lanes
+  per provider; land everything through the integrator; the user tries the
+  result — no routine captures.
+- **No temporary threads — use the pool.** Never spawn a thread for one
+  job (`std::thread::spawn` is unsupported on wasm anyway; the platform
+  spawner works everywhere). Background work goes to the platform thread
+  pool (`cx.thread_spawner()` / the pool `TaskHandle` API) or to a
+  long-lived worker created once at start-up and fed over a channel. On
+  the web a Web Worker takes hundreds of milliseconds to come up, so a
+  per-job thread is a stall; on desktop it is still churn. One mechanism
+  on both targets.
 
 ## Standalone Launch
 1. `cargo build --release -p <package>` from this checkout.
@@ -43,6 +96,22 @@
 5. `GET /gq` when you are done. Always.
 
 ## App Remote Control (`--remote`)
+
+> **Focus law.** A `--remote` app opens its window VISIBLE BUT UNFOCUSED and
+> stays that way: it never activates, never becomes key, and bridge clicks
+> never raise it. The user keeps typing wherever they were. Everything the
+> bridge does (grabs, `/m`, `/k`, `/t`, `/snap`) works without focus because
+> input is injected through the app's event loop, not the OS. Do not work
+> around this (`MAKEPAD_FOCUS=1` exists only for a run the user asks to see
+> in front); `MAKEPAD_NO_FOCUS=1` gives a non-remote launch the same manners.
+
+> **Who may open a visible window.** Subagent/lane verification runs HIDDEN:
+> launch with `MAKEPAD_HIDE_WINDOWS=1 <bin> --remote` — the window never
+> appears, grabs (`/g`), `/snap`, `/m`, `/k`, `/t` all still work offscreen.
+> Only the integrating session opens the one visible, unfocused window the
+> user watches; several look-alike windows on screen made the user "go
+> insane" (2026-08-26).
+
 
 Any makepad app launched with `--remote` runs a localhost HTTP server inside
 the process and prints one line before the UI appears:
@@ -111,6 +180,8 @@ this pattern as an executable end-to-end test across three example apps.
   `GET /gq` (or `/close` each window, then `/quit`). Never leave test windows
   on the user's screen, and never `pkill` when the protocol is available.
 - **Never touch an instance the user is running.** Launch your own.
+- **`/g` is the only camera.** No OS-level screen capture of any kind (see
+  Execution Policy) — the remote grab is what you get.
 - **A vanished window or app with `[makepad-remote] user closed …` in the log
   means the human dismissed it — it was in their way.** Do **not** treat that
   as a crash and do **not** relaunch it. The app prints
@@ -151,128 +222,58 @@ this pattern as an executable end-to-end test across three example apps.
 - **Cost when idle is zero.** The event loop only upshifts its paint clock
   while a remote request is in flight.
 
-### The F12 design overlay and the note cards (how the human talks back)
+### The TWEAKER (`/tweak/*`) — design feedback and live styling
 
-`--remote` also switches on the in-app dev overlays, and the one that matters
-for agent work is the **tweaker** — the F12 design panel. It is a two-way
-channel: the human points at the running UI, and you read what they pointed at.
+Every `--remote` app carries a design-feedback overlay (plan of record:
+repo-root `tweaker.md`; implementation: `widgets/src/tweaker.rs`). Off it
+costs nothing. On, the person (or you) points at the UI: pointer events over
+the window body are swallowed before widget dispatch — **clicking a Button in
+tweak mode outlines it and never fires it** — and the window grows a property
+sidebar next to the (compressed) app UI. Shift+F10 toggles it in-app; every edit,
+theirs or yours, lands in one shared diff log.
 
-**Selection.** F12 (or `GET /tweak?on=1`) turns it on. Hovering outlines a
-widget, clicking pins it — always the widget the outline was showing. Clicking
-the SAME SPOT again climbs to the parent, one level per click, so a container
-hidden under its children is still reachable; a click anywhere else is a fresh
-pick. The pinned selection wears a dashed ring and four corner brackets.
+| Route | Answer | Notes |
+|---|---|---|
+| `/tweak` `?on=1\|0&annotate=1\|0` | `{"on":1,"annotate":0}` | toggle the overlay / the freehand draw mode (Alt-drag draws too) |
+| `/tweak/state` | `{"on":1,"sel":{path,ty,r,band},"props":[{n,v,set}],"hover":…,"diff":[…],"ann":[…]}` | the STRUCTURE feedback: pinned selection, its real reflected properties (`set:1` = explicitly applied), the edit log, annotation strokes with the widget paths they touch |
+| `/tweak/apply` (POST) | `{"ok":1,"path":…,"changed":[{path,prop,old,new}]}` | body `{"path":"a.b.c","splash":"{padding: Inset{left: 20}}"}` or the one-property shorthand `{"path":…,"prop":"draw_bg.border_radius","value":"8"}`. Evaluates the chunk onto that ONE instance through the ordinary apply machinery (`+:` merge rules intact) and triggers a full relayout. Answers after the next drawn frame |
+| `/tweak/diff` | `{"diff":[{path,prop,old,new}…]}` | the raw edit log, in order |
+| `/tweak/clear` | `{"ok":1}` | reset diff + annotations |
+| `/tweak/final` | `{"final":[…coalesced…],"ann":[…],"drew":0\|1,"png":path?}` | **read this when tweaking is done**: per (path, prop) only the original and final value, churn collapsed. When the user drew, `png` is the composited screenshot — look at it, the strokes mean something |
+| `/tweak/grab` | like `/g` | the overlay (outlines, strokes, sidebar) draws in the window's own pass, so any grab is already composited |
 
-**You already know what is selected — always.** `GET /tweak/state` reports the
-pinned widget as `sel` (`path`, `ty`, rect) together with every editable
-property, its cascade (the `file:line` an edit would land in) and the current
-diff log. So when the human says "make this bigger" in your console with
-nothing else said, `/tweak/state` is the answer to "this". There is nothing to
-switch on beyond `--remote` and the panel being up.
+`local/tools/tweak` wraps all of this:
+`tweak PORT on`, `tweak PORT state`, `tweak PORT apply PATH PROP VALUE`,
+`tweak PORT splash PATH 'CHUNK'`, `tweak PORT final`, …
 
-The panel's footer carries the selection's identity: its type and property
-count, and under that the path, head-clipped to fit. **Clicking that path
-line copies the full path to the clipboard** — the same string `/tweak/apply`
-and `/snap` take — so a human can paste an unambiguous reference into a note,
-an issue or a prompt. That reference is a READABLE path — each segment is
-the widget's own name where it has one and its type where it does not, with
-`.1`/`.2` only where siblings would otherwise collide, and the head every
-path in the app shares (the tree root, any single-child chain under it, and
-the `Window`'s `body`) dropped, so it starts at the first thing the app
-itself put on screen: `/dock/tOverview/View/View/Label.1` — URL notation,
-so `./` is the current widget's container and `../` one out.
+**How to listen.** Sidebar edits push to you: each one emits a marked
+`TWEAK sidebar <path> <prop> <old> -> <new>` line into the app log — the
+`/log` tail is your ear; you never poll `/tweak/state` for changes. Talk back
+on `/tweak/apply` (values or whole shader chunks) to the same selected
+instance.
 
-`sel.path` still carries the raw tree path (unnamed nodes as `-`, so a run of
-them reads the same for all of them); **`sel.ref` is the one to quote and to
-feed back to `/tweak/apply`**, and it is what a note is keyed by. A shortened
-tail resolves too — `/tweak/apply` takes anything a path ends with, as long
-as it names one widget.
+**Write-back (you do this part — the overlay never writes source).** When the
+session is done, take `/tweak/final` and edit the splash source:
 
-The Props tab opens with the selection's identity: its **name**, in an
-editable field, and its type. Committing a new name does NOT rename anything
-live — the name is a `LiveId` the source assigned and every `ids!(…)` lookup
-depends on, so renaming it under a running app would break the app and leave
-the source lying. It records a request instead: the field shows the wanted
-name in amber, `/tweak/state` reports every outstanding one as
-`renames: [{ref, from, to}]`, and they are kept in `.makepad-names.txt`
-beside the notes so they survive the rebuild a rename usually needs.
-**Carrying them out in the source is your job**, and the request stays until
-you do.
+1. Resolve each entry's widget path to its DSL site: the dotted path mirrors
+   the `script_mod!` tree (`/d` shows the same ids). `-` segments are
+   anonymous containers — skip them when searching the source.
+2. Write each property at the **most specific existing site** — the widget's
+   own `name := Type{…}` block if it has one; create one only when none
+   exists.
+3. Respect the merge law: a property inside a typed sub-struct goes through
+   `+:` (`draw_bg +: { border_radius: 8 }`), never a replacing
+   `draw_bg: {…}`. Plain walk/layout values (`padding`, `margin`, `width`)
+   are set directly (`padding: Inset{left: 20}`).
+4. Values come back in source spelling (`#rrggbbaa` colors, plain numbers) —
+   paste them as-is. Mind the Rust-tokenizer hex-`e` trap in `script_mod!`:
+   `#1e1e2e` must be written `#x1e1e2e`.
+5. Rebuild and relaunch; verify the value survived with `/tweak/state` or
+   `/snap` before calling it done.
 
-A full-width line at the top of the Layout section
-shows what the layout actually produced —
-`measured 420.7 × 82.1 = 631 × 123 device px`, layout points first because
-that is the unit the size fields take — above the Fill/Fit/number controls
-that asked for it.
-
-**Note cards.** A note is the human's written instruction attached to one
-widget:
-
-| gesture | what it does |
-| --- | --- |
-| `Insert`, or `Ctrl+Shift+N` (`Cmd+Shift+N`), or the panel's `note` button | open / close the card on the selection (or, with nothing pinned, on the hovered widget) |
-| drag the header strip | move the card; a leader line in the selection colour joins its two closest points to the widget's outline, once they are more than 30pt apart |
-| drag the bottom-right grip | resize it |
-| type `@` | the hover turns **amber**: click any widget to name it into the note |
-| `Enter` / `Shift+Enter` | a new line — a note is prose |
-| `Ctrl+Enter` / the **Send** button | **send the note to you** |
-| `Tab`, or the **Pin** button | pin the note to disk so it survives the run |
-| the — button (top left), or `Esc` | put the card away, keeping the text |
-
-The card is opaque and picking cannot reach through it: nothing behind a note
-can be hovered or selected.
-
-**Reading the notes.** `/tweak/state` carries a `notes` array of
-`{path, text}`. Two extra keys matter:
-
-- `"ask": N` — the human pressed Ctrl+Enter (or the sparkle) on this note.
-  **That is a request to act, not just a note to read.** `N` rises with each
-  send, so a note you have already handled is one whose `ask` has not moved.
-  Each send also logs `TWEAK ask #N <path>: <text>`, so `/log` sees it too.
-- `"pinned": 1` — the note is stored in `.makepad-notes.txt` in the app's
-  working directory and comes back next run. That file is plain tab-separated
-  text (`path  dx  dy  w  h  text`) — readable and editable without the app.
-  A pinned note also puts a small amber pin on its widget while the overlay
-  is up; clicking that opens the note.
-- `"mentions": [...]` — every widget the note points at with `@`, resolved.
-  The card writes a mention relative to the noted widget when that is
-  shorter, read the way a path inside a file is read against that file's
-  directory: `@./Label.2` is a SIBLING, `@../Button` is one container out,
-  `@../../` two. `mentions` always carries the resolved form, so act on that.
-
-So the loop is: poll `/tweak/state`, act on any note whose `ask` count is new,
-and use `sel` for anything the human says in the console.
-
-**Arm a watcher whenever you launch an app the human is going to drive.** The
-bridge is a server inside the app — it cannot reach out and tell you anything,
-so without a watcher a sent note sits unread until they prompt you, which
-defeats the point of the card. Start a persistent `Monitor` polling `/log`
-and emitting one line per `TWEAK ask` / `TWEAK rename request`; each line
-becomes a notification, so they can instruct you from the note and you act
-without being asked twice:
-
-```python
-# poll the ring, emit one line per request, and say so if the app dies —
-# silence must never look like "nothing was asked"
-last = get("/log?n=1")["n"]
-while True:
-    page = get(f"/log?since={last}")     # the app is gone if this throws: stop
-    last = page["n"]
-    for line in page["l"]:
-        if "TWEAK ask" in line or "TWEAK rename request" in line:
-            print(line.split(" - ", 1)[-1], flush=True)
-    time.sleep(2)
-```
-
-The **Tree** tab lists the live widget hierarchy; clicking a row selects that
-widget and **reveals** it — the Dock selects the tab holding it, a closed
-FoldHeader opens, a PageFlip flips — so selecting something never leaves you
-inspecting a widget you cannot see.
-
-**Hierarchy walk.** With something selected the arrow keys walk the live tree
-the way a scene editor does — Up to the parent, Down to the first child,
-Left/Right to the previous/next sibling — and each step logs `TWEAK walk <dir> → <path>`. With
-*nothing* selected the same arrows still orbit the F10 exploded view.
+Reflection truth: `props` come from the widget's live Rust fields plus the
+type's DSL-declared shader inputs (`instance()`/`uniform()`), so the list is
+what the widget actually exposes — there is no synthetic schema to drift.
 
 ### Studio remote bridge (the older path)
 

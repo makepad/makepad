@@ -1,0 +1,14 @@
+use mod.flow.*
+
+/** The isolated subject to paint and cut out. */
+let prompt = Input{ type: @text default: "a small clockwork bird" }
+let image = Image{ prompt: prompt.text() width: 512 height: 512 }
+let matte = Matte{ image: image.image() model: "birefnet-hr" }
+/** Publish the alpha-matted subject into the flow asset library. */
+let published = Publish{ value: matte.out(@image) namespace: "flows" tags: ["flow", "cutout"] }
+
+Flow{
+    label: "Prompt to cutout"
+    brief: "Paints a subject and extracts it onto a clean soft alpha matte."
+    prompt, image, matte, published
+}

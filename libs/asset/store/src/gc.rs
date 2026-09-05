@@ -235,6 +235,31 @@ pub struct Gc<'a> {
     pub(crate) budgets: &'a Budgets,
 }
 
+/// One durable catalog intent awaiting physical CAS deletion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GcDeleteIntent {
+    pub blob_id: BlobId,
+    pub size: u64,
+}
+
+/// Physical half of GC. Native CAS unlinks immediately; E2's storage CAS
+/// starts an asynchronous delete and clears the intent only after success.
+pub trait PhysicalDelete {
+    fn delete_physical(&self, blob_id: &BlobId) -> ServerResult<bool>;
+}
+
+impl<T: Cas + ?Sized> PhysicalDelete for T {
+    fn delete_physical(&self, blob_id: &BlobId) -> ServerResult<bool> {
+        self.remove_object(blob_id)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct GcStep {
+    pub status: GcStatus,
+    pub deletes: Vec<GcDeleteIntent>,
+}
+
 // ---------------------------------------------------------------------------
 // pins: admissions that reference blobs while a run is in flight
 // ---------------------------------------------------------------------------
@@ -409,7 +434,7 @@ impl<'a> Gc<'a> {
     /// is back in the catalog was re-uploaded and deduped against the object
     /// still on disk: keep those bytes and drop the intent. Returns how many
     /// intents were resolved.
-    pub fn recover_pending(&self, cas: &Cas) -> ServerResult<u64> {
+    pub fn recover_pending(&self, delete: &dyn PhysicalDelete) -> ServerResult<u64> {
         let mut resolved = 0u64;
         loop {
             let batch = self.db.read_tx(|db| {
@@ -429,7 +454,7 @@ impl<'a> Gc<'a> {
             for blob in &batch {
                 let live = self.catalog().has_blob(blob)?;
                 if !live {
-                    cas.remove_object(blob)?;
+                    delete.delete_physical(blob)?;
                 }
                 self.db.tx(|db| {
                     let mut s = db.prepare(
@@ -444,6 +469,35 @@ impl<'a> Gc<'a> {
         }
     }
 
+    /// Read a bounded page of durable intents. Async storage executors call
+    /// this after reload before advancing the catalog state machine.
+    pub fn pending_deletes(&self, limit: u32) -> ServerResult<Vec<GcDeleteIntent>> {
+        const MAX_PENDING_PAGE: u32 = 100_000;
+        if limit == 0 || limit > MAX_PENDING_PAGE {
+            return Err(ServerError::OverBudget {
+                what: "gc pending delete page",
+                limit: MAX_PENDING_PAGE as u64,
+                found: limit as u64,
+            });
+        }
+        let mut stmt = self.db.prepare(
+            "gc pending page",
+            "SELECT blob_id, size FROM gc_pending_deletes ORDER BY blob_id LIMIT ?1",
+        )?;
+        stmt.bind_u64(1, limit as u64)?;
+        let mut intents = Vec::new();
+        while stmt.step()? {
+            intents.push(GcDeleteIntent {
+                blob_id: BlobId::from_bytes(fixed32(
+                    &stmt.column_blob(0),
+                    "gc pending delete",
+                )?),
+                size: stmt.column_u64(1),
+            });
+        }
+        Ok(intents)
+    }
+
     // ---- stepping ----------------------------------------------------------
 
     /// Run at most `max_steps` bounded steps of the active run. Returns the
@@ -451,32 +505,71 @@ impl<'a> Gc<'a> {
     /// run is active). Every step is one transaction over at most a batch of
     /// rows; callers (a route, the janitor, a test) choose how much wall
     /// clock to spend by choosing `max_steps`.
-    pub fn advance(&self, cas: &Cas, max_steps: u32, now_ms: u64) -> ServerResult<Option<GcStatus>> {
+    pub fn advance(
+        &self,
+        delete: &dyn PhysicalDelete,
+        max_steps: u32,
+        now_ms: u64,
+    ) -> ServerResult<Option<GcStatus>> {
         let mut status = self.status()?;
         for _ in 0..max_steps {
             let Some(cur) = status else { return Ok(None) };
             if !cur.phase.active() {
                 return Ok(Some(cur));
             }
-            status = Some(self.step(cas, now_ms)?);
+            status = Some(self.step(delete, now_ms)?);
         }
         Ok(status)
     }
 
     /// One bounded unit of work.
-    pub fn step(&self, cas: &Cas, now_ms: u64) -> ServerResult<GcStatus> {
+    pub fn step(
+        &self,
+        delete: &dyn PhysicalDelete,
+        now_ms: u64,
+    ) -> ServerResult<GcStatus> {
+        let step = self.step_catalog(now_ms)?;
+        for intent in &step.deletes {
+            delete.delete_physical(&intent.blob_id)?;
+            self.clear_delete_intent(&intent.blob_id)?;
+        }
+        Ok(step.status)
+    }
+
+    /// Advance only the SQL state and return durable delete intents. This is
+    /// the cooperative seam used when physical deletion completes later.
+    pub fn step_catalog(&self, now_ms: u64) -> ServerResult<GcStep> {
         let cfg_row = self.db.read_tx(|db| self.run_row(db))?;
         let Some(row) = cfg_row else {
             return Err(ServerError::NotFound { what: "gc run" });
         };
-        match row.phase {
-            GcPhase::Retain => self.retain_step(&row, now_ms)?,
-            GcPhase::Mark => self.mark_step(&row, now_ms)?,
-            GcPhase::Sweep => self.sweep_step(&row, cas, now_ms)?,
-            GcPhase::Done | GcPhase::Cancelled => {}
-        }
-        self.status()?
-            .ok_or(ServerError::InvalidState { what: "gc run", state: "vanished" })
+        let deletes = match row.phase {
+            GcPhase::Retain => {
+                self.retain_step(&row, now_ms)?;
+                Vec::new()
+            }
+            GcPhase::Mark => {
+                self.mark_step(&row, now_ms)?;
+                Vec::new()
+            }
+            GcPhase::Sweep => self.sweep_step(&row, now_ms)?,
+            GcPhase::Done | GcPhase::Cancelled => Vec::new(),
+        };
+        let status = self.status()?
+            .ok_or(ServerError::InvalidState { what: "gc run", state: "vanished" })?;
+        Ok(GcStep { status, deletes })
+    }
+
+    /// Clear one intent only after its physical delete has completed.
+    pub fn clear_delete_intent(&self, blob_id: &BlobId) -> ServerResult<()> {
+        self.db.tx(|db| {
+            let mut stmt = db.prepare(
+                "gc clear intent",
+                "DELETE FROM gc_pending_deletes WHERE blob_id=?1",
+            )?;
+            stmt.bind_blob(1, blob_id.as_bytes())?;
+            stmt.run()
+        })
     }
 
     fn run_row(&self, db: &Db) -> ServerResult<Option<RunRow>> {
@@ -749,7 +842,7 @@ impl<'a> Gc<'a> {
 
     // ---- phase 3: sweep ----------------------------------------------------
 
-    fn sweep_step(&self, row: &RunRow, cas: &Cas, now_ms: u64) -> ServerResult<()> {
+    fn sweep_step(&self, row: &RunRow, now_ms: u64) -> ServerResult<Vec<GcDeleteIntent>> {
         let batch = row.sweep_batch;
         // One transaction decides the batch AND records the delete intents;
         // the unlinks happen after it commits, and a third transaction
@@ -776,7 +869,7 @@ impl<'a> Gc<'a> {
             let mut unreferenced_bytes = 0u64;
             let mut deleted = 0u64;
             let mut deleted_bytes = 0u64;
-            let mut doomed: Vec<BlobId> = Vec::new();
+            let mut doomed: Vec<GcDeleteIntent> = Vec::new();
             for (blob_bytes, size, created_ms, last_ref) in &rows {
                 // Grace window: a blob recorded (or re-referenced by a
                 // deduped upload) after the horizon belongs to a publish
@@ -838,7 +931,7 @@ impl<'a> Gc<'a> {
                 s.bind_blob(1, blob_bytes)?;
                 s.run()?;
                 drop(s);
-                doomed.push(blob);
+                doomed.push(GcDeleteIntent { blob_id: blob, size: *size });
                 deleted += 1;
                 deleted_bytes += *size;
             }
@@ -872,23 +965,7 @@ impl<'a> Gc<'a> {
             }
             Ok(doomed)
         })?;
-        for blob in &doomed {
-            cas.remove_object(blob)?;
-        }
-        if !doomed.is_empty() {
-            self.db.tx(|db| {
-                for blob in &doomed {
-                    let mut s = db.prepare(
-                        "gc clear intent",
-                        "DELETE FROM gc_pending_deletes WHERE blob_id=?1",
-                    )?;
-                    s.bind_blob(1, blob.as_bytes())?;
-                    s.run()?;
-                }
-                Ok(())
-            })?;
-        }
-        Ok(())
+        Ok(doomed)
     }
 }
 

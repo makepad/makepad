@@ -14,6 +14,7 @@ use crate::plan::Planner;
 use crate::schema::{IndexInfo, Schema, TableInfo};
 use crate::sql::ast::*;
 use crate::sql::parse::parse;
+use crate::storage::{MemoryStoreSet, PageStore, PageStoreSet, StoreKind, StoreOpenOptions};
 use crate::value::{
     apply_affinity, compare_records, encode_record, Collation, TextMode, Value,
 };
@@ -22,6 +23,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Most prepared statements kept per connection.
@@ -50,10 +52,54 @@ pub struct Connection {
 impl Connection {
     /// Open (or create) a database for reading and writing.
     pub fn open(path: &Path, busy_timeout: Duration) -> Result<Connection> {
-        if !path.exists() || std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) == 0 {
-            create_empty_database(path)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let stores: Arc<dyn PageStoreSet> =
+                Arc::new(crate::storage::FileStoreSet::new(path));
+            return Self::open_store(stores, busy_timeout);
         }
-        let mut pager = Pager::open_rw(path, busy_timeout)?;
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (path, busy_timeout);
+            Err(Error::unsupported(
+                "filesystem databases are unavailable on wasm32; use open_memory or open_with",
+            ))
+        }
+    }
+
+    /// Open a fresh database whose main file and rollback journal are memory
+    /// backed. The returned connection owns the store set.
+    pub fn open_memory() -> Result<Connection> {
+        Self::open_with(MemoryStoreSet::new())
+    }
+
+    /// Open (or initialize) a database supplied by the caller.
+    pub fn open_with<S: PageStoreSet + 'static>(store_set: S) -> Result<Connection> {
+        Self::open_with_timeout(store_set, Duration::from_secs(5))
+    }
+
+    pub fn open_with_timeout<S: PageStoreSet + 'static>(
+        store_set: S,
+        busy_timeout: Duration,
+    ) -> Result<Connection> {
+        Self::open_store(Arc::new(store_set), busy_timeout)
+    }
+
+    fn open_store(
+        stores: Arc<dyn PageStoreSet>,
+        busy_timeout: Duration,
+    ) -> Result<Connection> {
+        let main = stores
+            .open(StoreKind::Main, StoreOpenOptions::CREATE)?
+            .expect("create always returns a store");
+        if main.len()? == 0 {
+            initialize_store(main.as_ref())?;
+        }
+        // On POSIX, closing any descriptor for an inode releases this
+        // process's fcntl locks on it. Drop the initialization handle before
+        // the pager opens and locks its long-lived main-file handle.
+        drop(main);
+        let mut pager = Pager::open_store_rw(stores, busy_timeout)?;
         pager.begin_read()?;
         let schema = Schema::load(&mut pager)?;
         let schema_cookie = pager.header().schema_cookie;
@@ -1431,6 +1477,22 @@ fn split_statements(sql: &str) -> Vec<String> {
 /// Write a fresh, empty database: a 100-byte header and page 1 as an empty
 /// `sqlite_master` leaf.
 pub fn create_empty_database(path: &Path) -> Result<()> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let stores = crate::storage::FileStoreSet::new(path);
+        let file = stores
+            .open(StoreKind::Main, StoreOpenOptions::CREATE_TRUNCATE)?
+            .expect("create always returns a store");
+        return initialize_store(file.as_ref());
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = path;
+        Err(Error::unsupported("filesystem databases are unavailable on wasm32"))
+    }
+}
+
+fn initialize_store(store: &dyn PageStore) -> Result<()> {
     let page_size: usize = 4096;
     let mut page = vec![0u8; page_size];
     page[0..16].copy_from_slice(crate::pager::MAGIC);
@@ -1454,6 +1516,7 @@ pub fn create_empty_database(path: &Path) -> Result<()> {
     let content_start = page_size as u16;
     page[105..107].copy_from_slice(&content_start.to_be_bytes());
     page[107] = 0;
-    std::fs::write(path, &page)?;
+    store.truncate(0)?;
+    store.write_at(0, &page)?;
     Ok(())
 }

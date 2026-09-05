@@ -946,6 +946,14 @@ pub struct LaneCounts {
     pub queue_depth: usize,
 }
 
+/// Diagnostic overrides for batched speculative rounds. Production uses the
+/// default so the measured cost model remains authoritative.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LaneSpeculationOptions {
+    pub forced_depth: Option<usize>,
+    pub force_round: bool,
+}
+
 /// Drives a real batched session from the scheduler's decisions.
 ///
 /// Deliberately thin: every decision lives in [`LaneScheduler`], which is
@@ -995,25 +1003,7 @@ pub struct LaneExecutor {
     /// whether a deeper batched round pays for itself.
     costs: crate::slots::StepCostModel,
     config: crate::slots::SchedulerConfig,
-    /// `MAKEPAD_LLAMA_BATCH_SPEC_DEPTH`, when set: run every batched round at
-    /// this depth instead of the modelled one.
-    ///
-    /// Here so the depth curve can be MEASURED on a box rather than modelled
-    /// from one. The cost model is a lower bound taken from a synthetic sweep;
-    /// the only way to find out what a real multi-lane round costs is to run
-    /// each rung on the hardware, and a knob that needs a rebuild per rung is a
-    /// measurement that never happens.
-    forced_depth: Option<usize>,
-    /// `MAKEPAD_LLAMA_BATCH_FORCE_ROUND`, when set: take the fused round even
-    /// at depth 0, where the executor would otherwise take the plain step.
-    ///
-    /// A diagnostic, and a pointed one. At depth 0 the two paths produce the
-    /// same tokens from the same columns and differ ONLY in which graph runs —
-    /// the plain decode graph, or the one that checkpoints the recurrent state
-    /// after every token. `.217` says the second costs 2.5x per column, and
-    /// this is the knob that says whether that is the checkpointing graph
-    /// itself or the multi-token recurrent scan it usually runs with.
-    force_round: bool,
+    speculation: LaneSpeculationOptions,
     /// Batched speculative rounds run since load, and the shape of the last
     /// one.
     ///
@@ -1107,9 +1097,6 @@ impl LaneExecutor {
         } else {
             costs
         };
-        let forced_depth = std::env::var("MAKEPAD_LLAMA_BATCH_SPEC_DEPTH")
-            .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok());
         Self {
             session,
             scheduler,
@@ -1119,12 +1106,16 @@ impl LaneExecutor {
             native_history: false,
             costs,
             config: crate::slots::SchedulerConfig::default(),
-            forced_depth,
-            force_round: std::env::var_os("MAKEPAD_LLAMA_BATCH_FORCE_ROUND").is_some(),
+            speculation: LaneSpeculationOptions::default(),
             batched_spec_rounds: 0,
             last_batched_spec: None,
             on_counts: None,
         }
+    }
+
+    pub fn with_speculation_options(mut self, options: LaneSpeculationOptions) -> Self {
+        self.speculation = options;
+        self
     }
 
     /// Batched speculative rounds this executor has run.
@@ -1230,7 +1221,11 @@ impl LaneExecutor {
             &self.config,
             &self.costs,
         );
-        let depth = self.forced_depth.unwrap_or(modelled).min(plan.draft_depth);
+        let depth = self
+            .speculation
+            .forced_depth
+            .unwrap_or(modelled)
+            .min(plan.draft_depth);
         let room = plan
             .slots
             .iter()
@@ -1482,7 +1477,9 @@ impl LaneExecutor {
                     self.native_history = false;
                 }
                 let depth = self.batched_depth(&plan);
-                if depth > 0 || (self.force_round && self.session.speculative_enabled()) {
+                if depth > 0
+                    || (self.speculation.force_round && self.session.speculative_enabled())
+                {
                     events.extend(self.speculative_batch(&plan, depth)?);
                 } else {
                     let rows = self
@@ -1832,7 +1829,6 @@ mod tests {
         );
     }
 
-    #[test]
     /// LIVE, 2026-08-21: a user's poem streamed at 45 tok/s on a box whose solo
     /// path measures 89-100. Their conversation was on lane 1, because lane 0
     /// was PARKED by an earlier one and free_slot preferred an unparked lane —

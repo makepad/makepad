@@ -312,18 +312,14 @@ mod tests {
     #[test]
     fn application_dsl_mounts_score_shell() {
         let mut cx = Cx::new(Box::new(|_cx: &mut Cx, _event: &Event| {}));
-        let mut std = ();
-        let mut vm = ScriptVm {
-            host: &mut cx,
-            std: &mut std,
-            bx: Box::new(ScriptVmBase::new()),
-        };
-        vm.bx.captured_errors = Some(Vec::new());
-        makepad_widgets::makepad_platform::script::script_mod(&mut vm);
-        makepad_widgets::script_mod(&mut vm);
-        score_ui::script_mod(&mut vm);
-        super::script_mod(&mut vm);
-        let errors = vm.take_errors();
+        let errors = cx.with_vm(|vm| {
+            vm.bx.captured_errors = Some(Vec::new());
+            makepad_widgets::makepad_platform::script::script_mod(vm);
+            makepad_widgets::script_mod(vm);
+            score_ui::script_mod(vm);
+            super::script_mod(vm);
+            vm.take_errors()
+        });
         assert!(errors.is_empty(), "score application DSL errors: {errors:#?}");
     }
 }

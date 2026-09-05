@@ -262,10 +262,12 @@ impl Cx {
             }
         }
 
+        let spawner = self.thread_spawner();
         let mut vulkan = self.os.vulkan.take();
         let result = self.os.openxr.create_session(
             self.os.display.as_ref().unwrap(),
             vulkan.as_mut(),
+            &spawner,
             self.current_android_xr_options(),
             &self.os_type,
         );
@@ -2327,7 +2329,9 @@ impl Cx {
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for draw_pass_id in &passes_todo {
-            self.passes[*draw_pass_id].set_time(self.os.timers.time_now() as f32);
+            let uniforms_gen = self.next_uniform_gen();
+            self.passes[*draw_pass_id]
+                .set_time(self.os.timers.time_now() as f32, uniforms_gen);
             match self.passes[*draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {
                     // cant happen
@@ -3117,13 +3121,6 @@ impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         super::android_network::install_network_backend_shim();
         self.package_root = Some("makepad".to_string());
-    }
-
-    fn spawn_thread<F>(&mut self, f: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        std::thread::spawn(f);
     }
 
     fn seconds_since_app_start(&self) -> f64 {

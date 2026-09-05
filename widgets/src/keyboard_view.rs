@@ -92,6 +92,13 @@ enum AnimState {
 }
 
 impl KeyboardView {
+    /// Reserve `left` px on this view's left: its walk margin, read by the
+    /// parent on every draw. The Window's AI slot pushes the body in with
+    /// it (decision 17) — the chat sits beside the body, never over it.
+    pub fn set_left_inset(&mut self, left: f64) {
+        self.view.walk.margin.left = left;
+    }
+
     /// Compute the vertical scroll required to keep the focused IME field above
     /// an on-screen keyboard of `keyboard_height` Makepad layout points.
     ///

@@ -16,5 +16,5 @@ makepad-render = { path = "../render", version = "0.1.0" }
 makepad-game-sim = { path = "../sim", version = "0.1.0" }
 makepad-raytrace = { path = "../raytrace", version = "0.1.0" }
 makepad-micro-serde = { path = "../micro_serde", version = "1.0.0" }
-makepad-video = { path = "../../platform/video", version = "1.0.0" }
+makepad-video = { package = "makepad-platform-video", path = "../../platform/video", version = "1.0.0" }
 makepad-fab-tour = { path = "../fab_tour", version = "0.1.0" }

@@ -3,7 +3,7 @@ use crate::{
     cx_api::{CxOsApi, CxOsOp},
     draw_pass::{CxDrawPassColorTexture, CxDrawPassParent, DrawPassClearColor},
     event::Event,
-    event::{WindowGeom, WindowGeomChangeEvent},
+    event::{WindowGeom},
     makepad_math::*,
     makepad_micro_serde::*,
     os::{
@@ -41,29 +41,33 @@ impl StdinWindow {
     }
 }
 
-/// Startup-order trace for the drag-stall hunt: appends timestamped lines
-/// to the file named by MAKEPAD_STUDIO_TRACE. Free when the env var is
-/// unset (one static branch).
+/// Startup-order trace for the drag-stall hunt. Appends timestamped lines
+/// under `~/.makepad/logs/studio/` when the `studio` topic is enabled.
 pub(crate) fn stdin_trace(line: &str) {
     use std::io::Write;
     use std::sync::{Mutex, OnceLock};
-    static FILE: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
-    let file = FILE.get_or_init(|| {
-        std::env::var("MAKEPAD_STUDIO_TRACE").ok().and_then(|p| {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(p)
-                .ok()
-                .map(Mutex::new)
-        })
-    });
-    let Some(file) = file else { return };
+    static FILE: OnceLock<Mutex<Option<std::fs::File>>> = OnceLock::new();
+    if !crate::makepad_error_log::trace_enabled("studio") {
+        return;
+    }
+    let file = FILE.get_or_init(|| Mutex::new(None));
+    let Ok(mut file) = file.lock() else { return };
+    if file.is_none() {
+        let dir = crate::log::trace_log_dir("studio");
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        *file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("stdin.log"))
+            .ok();
+    }
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
-    if let Ok(mut f) = file.lock() {
+    if let Some(f) = file.as_mut() {
         let _ = writeln!(f, "{:.2} C {}", ms % 1.0e7, line);
     }
 }
@@ -97,7 +101,8 @@ impl Cx {
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for &draw_pass_id in &passes_todo {
-            self.passes[draw_pass_id].set_time(time as f32);
+            let uniforms_gen = self.next_uniform_gen();
+            self.passes[draw_pass_id].set_time(time as f32, uniforms_gen);
             match self.passes[draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(window_id) => {
@@ -257,7 +262,7 @@ impl Cx {
                 let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
                 let dpi_factor = self.windows[window_id].window_geom.dpi_factor.max(1.0);
                 let tweak_ray = crate::event::TweakRayEvent {
-                    abs: dvec2(e.x - pos.x, e.y - pos.y),
+                    abs: self.stdin_pointer_abs(dvec2(e.x, e.y), pos, window_id),
                     window_id,
                     modifiers: e.modifiers.into_key_modifiers(),
                     time: e.time,
@@ -291,19 +296,15 @@ impl Cx {
             } => {
                 let window_id = CxWindowPool::from_usize(window_id);
                 if self.windows.is_valid(window_id) {
-                    let old_geom = self.windows[window_id].window_geom.clone();
-                    let new_geom = WindowGeom {
-                        position: dvec2(0.0, 0.0),
-                        dpi_factor,
-                        inner_size: dvec2(width, height),
-                        ..Default::default()
-                    };
-                    self.windows[window_id].window_geom = new_geom.clone();
-                    let re = WindowGeomChangeEvent {
+                    let re = self.windows.stdin_apply_native_geom(
                         window_id,
-                        new_geom,
-                        old_geom,
-                    };
+                        WindowGeom {
+                            position: dvec2(0.0, 0.0),
+                            dpi_factor,
+                            inner_size: dvec2(width, height),
+                            ..Default::default()
+                        },
+                    );
                     if re.old_geom.dpi_factor != re.new_geom.dpi_factor
                         || re.old_geom.inner_size != re.new_geom.inner_size
                     {

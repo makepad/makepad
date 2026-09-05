@@ -48,8 +48,9 @@ impl Cx {
                 })?;
                 &vulkan_session.render_targets as *const CxVulkanOpenXrSessionData
             };
+        let uniforms_gen = self.next_uniform_gen();
         let pass = &mut self.passes[draw_pass_id];
-        pass.set_dpi_factor(dpi_factor);
+        pass.set_dpi_factor(dpi_factor, uniforms_gen);
         pass.paint_dirty = true;
         pass.os.shader_variant = SHADER_VARIANT_XR;
         pass.pass_uniforms.camera_projection = frame.eyes[0].proj_mat;
@@ -378,6 +379,7 @@ impl CxOpenXrSession {
         system_id: XrSystemId,
         instance: XrInstance,
         vulkan: &mut CxVulkan,
+        spawner: &crate::thread::ThreadSpawner,
         options: CxOpenXrOptions,
     ) -> Result<CxOpenXrSession, String> {
         let mut graphics_requirements = XrGraphicsRequirementsVulkanKHR::default();
@@ -489,7 +491,7 @@ impl CxOpenXrSession {
                 _color_images: color_images,
                 _depth_images: depth_images,
                 render_targets,
-                depth_mesh_pipeline: CxOpenXrDepthMeshPipeline::new(),
+                depth_mesh_pipeline: CxOpenXrDepthMeshPipeline::new(spawner),
                 retired_projection_layers: Vec::new(),
             }),
             color_swap_chain,

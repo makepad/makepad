@@ -8,7 +8,11 @@
 //! Asset UI / VJ use [`PreviewLook`] + [`Renderer::draw_preview`]. Arcade
 //! still draws a full world through [`Renderer::draw_scene_full`].
 
+// Shader/live literals intentionally use their source-language spelling.
+#![allow(clippy::approx_constant)]
+
 pub mod ao;
+pub mod custom_material;
 pub mod level;
 pub mod ao_atlas;
 pub mod ao_lightmapper;
@@ -41,6 +45,7 @@ pub mod sun;
 pub mod thermometer;
 
 pub use bake::*;
+pub use custom_material::DrawSceneCustom;
 pub use gpu_lightmap::{
     dynamic_shadow_tiers, CsmConfig, DynamicShadowTiers, GpuLightmapMode, GpuLmMover,
     GpuLmSkin, DEFAULT_CSM_CONFIG,

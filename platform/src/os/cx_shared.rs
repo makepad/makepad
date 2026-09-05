@@ -21,6 +21,20 @@ use {
     std::rc::Rc,
 };
 
+struct EventDispatchGuard {
+    active: Rc<Cell<bool>>,
+    event_depth: Option<Rc<Cell<u32>>>,
+}
+
+impl Drop for EventDispatchGuard {
+    fn drop(&mut self) {
+        self.active.set(false);
+        if let Some(depth) = &self.event_depth {
+            depth.set(depth.get().saturating_sub(1));
+        }
+    }
+}
+
 /// File sinks for in-app frame captures (`Cx::capture_next_frame_to_file`).
 /// A static mutex rather than Cx state because the metal completion handler
 /// that produces the PNG runs off the main thread.
@@ -121,12 +135,28 @@ impl Cx {
     pub(crate) fn compute_pass_repaint_order(&mut self, passes_todo: &mut Vec<DrawPassId>) {
         passes_todo.clear();
 
+        // An orphaned child pass — attached by a draw list that has since
+        // been recorded without it (`Cx::pass_attachment_is_stale`) — is not
+        // painted, is neither a source nor a sink of dirtiness below, and has
+        // its flag cleared so an idle app does not keep requesting frames on
+        // its behalf. The one exception is an explicit `repaint_pass`, which
+        // paints it this once.
+        for draw_pass_id in self.passes.id_iter() {
+            let requested = std::mem::take(&mut self.passes[draw_pass_id].repaint_requested);
+            if !requested && self.pass_attachment_is_stale(draw_pass_id) {
+                self.passes[draw_pass_id].paint_dirty = false;
+            }
+        }
+
         // we need this because we don't mark the entire deptree of passes dirty every small paint
         loop {
             // loop untill we don't propagate anymore
             let mut altered = false;
             for draw_pass_id in self.passes.id_iter() {
-                if self.demo_time_repaint && self.pass_live_for_time_repaint(draw_pass_id) {
+                if self.demo_time_repaint
+                    && self.pass_live_for_time_repaint(draw_pass_id)
+                    && !self.pass_attachment_is_stale(draw_pass_id)
+                {
                     self.passes[draw_pass_id].paint_dirty = true;
                 }
                 if self.passes[draw_pass_id].paint_dirty {
@@ -147,7 +177,10 @@ impl Cx {
             // The gauss chain rides this — realtime glass — while texture
             // caches, which exist to NOT re-render, never opt in.
             for draw_pass_id in self.passes.id_iter() {
-                if self.passes[draw_pass_id].live_with_parent && !self.passes[draw_pass_id].paint_dirty {
+                if self.passes[draw_pass_id].live_with_parent
+                    && !self.passes[draw_pass_id].paint_dirty
+                    && !self.pass_attachment_is_stale(draw_pass_id)
+                {
                     if let CxDrawPassParent::DrawPass(parent_pass_id) = self.passes[draw_pass_id].parent {
                         if self.passes[parent_pass_id].paint_dirty {
                             self.passes[draw_pass_id].paint_dirty = true;
@@ -209,6 +242,7 @@ impl Cx {
     }
 
     pub(crate) fn dispatch_network_runtime_events(&mut self) {
+        self.dispatch_storage_responses();
         use crate::makepad_math::dvec2;
         use crate::window::CxWindowPool;
 
@@ -410,7 +444,7 @@ impl Cx {
         }
         self.run_view_frame_encode_in_flight = true;
         let sender = self.run_view_frame_results.sender();
-        self.spawn_thread(move || {
+        if let Ok(task) = self.task_pool().submit(crate::thread::Lane::Heavy, move || {
             let result = Cx::prepare_studio_run_view_rgba(&request, width, height, rgba).and_then(
                 |(width, height, rgba)| {
                     Cx::encode_rgba_as_png(width, height, &rgba).map(|png| RunViewFrameData {
@@ -424,7 +458,9 @@ impl Cx {
                 },
             );
             let _ = sender.send(result);
-        });
+        }) {
+            task.detach();
+        }
     }
 
     fn prepare_studio_run_view_rgba(
@@ -679,6 +715,21 @@ impl Cx {
     /// screenshot, widget dump, and kill. Returns true on Kill (caller should
     /// shut down). Callers handle stdin-specific variants (Swapchain,
     /// WindowGeomChange, Tick) before delegating here.
+    /// A host-forwarded pointer position — host logical points, relative to
+    /// the host's origin — as the app's layout sees it: relative to the
+    /// window, then through the window's dpi override (a native window's
+    /// events take the same remap in the platform callbacks).
+    pub(crate) fn stdin_pointer_abs(
+        &self,
+        host: crate::makepad_math::DVec2,
+        window_pos: crate::makepad_math::DVec2,
+        window_id: crate::window::WindowId,
+    ) -> crate::makepad_math::DVec2 {
+        let mut abs = crate::makepad_math::dvec2(host.x - window_pos.x, host.y - window_pos.y);
+        self.dpi_override_scale(&mut abs, window_id);
+        abs
+    }
+
     pub fn dispatch_studio_msg(
         &mut self,
         msg: StudioToApp,
@@ -692,7 +743,7 @@ impl Cx {
                 // must become key before its drag starts.
                 self.activate_window_on_pointer_down(window_id);
                 let event = crate::event::MouseDownEvent {
-                    abs: crate::makepad_math::dvec2(e.x - pos.x, e.y - pos.y),
+                    abs: self.stdin_pointer_abs(crate::makepad_math::dvec2(e.x, e.y), pos, window_id),
                     button: crate::event::MouseButton::from_bits_retain(e.button_raw_bits),
                     window_id,
                     modifiers: e.modifiers.into_key_modifiers(),
@@ -707,7 +758,7 @@ impl Cx {
             StudioToApp::MouseMove(e) => {
                 self.call_event_handler(&Event::MouseMove(crate::event::MouseMoveEvent {
                 lock_delta: Default::default(),
-                    abs: crate::makepad_math::dvec2(e.x - pos.x, e.y - pos.y),
+                    abs: self.stdin_pointer_abs(crate::makepad_math::dvec2(e.x, e.y), pos, window_id),
                     window_id,
                     modifiers: e.modifiers.into_key_modifiers(),
                     time: e.time,
@@ -718,7 +769,7 @@ impl Cx {
             }
             StudioToApp::MouseUp(e) => {
                 let event = crate::event::MouseUpEvent {
-                    abs: crate::makepad_math::dvec2(e.x - pos.x, e.y - pos.y),
+                    abs: self.stdin_pointer_abs(crate::makepad_math::dvec2(e.x, e.y), pos, window_id),
                     button: crate::event::MouseButton::from_bits_retain(e.button_raw_bits),
                     window_id,
                     modifiers: e.modifiers.into_key_modifiers(),
@@ -733,7 +784,7 @@ impl Cx {
             }
             StudioToApp::Scroll(e) => {
                 self.call_event_handler(&Event::Scroll(crate::event::ScrollEvent {
-                    abs: crate::makepad_math::dvec2(e.x - pos.x, e.y - pos.y),
+                    abs: self.stdin_pointer_abs(crate::makepad_math::dvec2(e.x, e.y), pos, window_id),
                     scroll: crate::makepad_math::dvec2(e.sx, e.sy),
                     window_id,
                     modifiers: e.modifiers.into_key_modifiers(),
@@ -942,24 +993,58 @@ impl Cx {
 
     // event handler wrappers
 
+    fn invoke_event_handler(&mut self, event: &Event) {
+        let event_handler = self.event_handler.clone();
+        // The active flag excludes aliasing, while the Rc keeps this stable
+        // allocation alive even if the handler mutates `Cx`.
+        unsafe {
+            (&mut *event_handler.get())(self, event);
+        }
+    }
+
+    fn event_dispatch_is_reentrant(&self, event: &Event) -> bool {
+        if self.event_handler_dispatch_active.get() {
+            crate::error!(
+                "Rejected synchronous re-entry while dispatching event {}",
+                event.name()
+            );
+            return true;
+        }
+        false
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn reset_event_dispatch_state(&mut self) {
+        self.event_handler_dispatch_active.set(false);
+        self.perf_monitor.event_depth.set(0);
+    }
+
     pub(crate) fn inner_call_event_handler(&mut self, event: &Event) {
+        if self.event_dispatch_is_reentrant(event) {
+            return;
+        }
         self.event_id += 1;
         // PerfMonitor "event" channel: time only the OUTERMOST dispatch —
         // Paint recurses into this from the Timer handler on macos.
         let perf_timing = self.perf_monitor.enabled();
         if perf_timing {
-            self.perf_monitor.event_depth += 1;
+            self.perf_monitor
+                .event_depth
+                .set(self.perf_monitor.event_depth.get() + 1);
         }
-        let perf_t0 = (perf_timing && self.perf_monitor.event_depth == 1)
-            .then(std::time::Instant::now);
+        let dispatch_guard = EventDispatchGuard {
+            active: self.event_handler_dispatch_active.clone(),
+            event_depth: perf_timing.then(|| self.perf_monitor.event_depth.clone()),
+        };
+        self.event_handler_dispatch_active.set(true);
+        let perf_t0 = (perf_timing && self.perf_monitor.event_depth.get() == 1)
+            .then(Cx::monotonic_now);
         if (Cx::has_studio_web_socket()
             && !crate::web_socket::STUDIO_STDOUT_MODE.load(std::sync::atomic::Ordering::SeqCst))
             || Cx::local_profile_capture_enabled()
         {
             let start = self.seconds_since_app_start();
-            let mut event_handler = self.event_handler.take().unwrap();
-            event_handler(self, event);
-            self.event_handler = Some(event_handler);
+            self.invoke_event_handler(event);
             let end = self.seconds_since_app_start();
             Cx::send_studio_message(AppToStudio::EventSample(EventSample {
                 event_u32: event.to_u32(),
@@ -972,16 +1057,14 @@ impl Cx {
                 end: end,
             }))
         } else {
-            let mut event_handler = self.event_handler.take().unwrap();
-            event_handler(self, event);
-            self.event_handler = Some(event_handler);
+            self.invoke_event_handler(event);
         }
+        drop(dispatch_guard);
         if perf_timing {
-            self.perf_monitor.event_depth -= 1;
             if let Some(t0) = perf_t0 {
                 self.perf_monitor.add(
                     crate::perf_monitor::PERF_CHANNEL_EVENT,
-                    t0.elapsed().as_micros() as u64,
+                    ((Cx::monotonic_now() - t0).max(0.0) * 1_000_000.0) as u64,
                 );
             }
         }
@@ -1045,8 +1128,8 @@ impl Cx {
     /// the current event dispatch (typically `Cx::set_window_dpi_override`
     /// called from a widget handler). Drained the same way as `handle_actions`
     /// — swap, dispatch each, repeat until quiescent. Each dispatch is a
-    /// fresh `inner_call_event_handler` call after the previous one's handler
-    /// has been put back, so the `event_handler.take()` is safe.
+    /// fresh `inner_call_event_handler` call after the previous dispatch has
+    /// completed, so it is not rejected as synchronous re-entry.
     pub fn handle_pending_window_geom_changes(&mut self) {
         let mut counter = 0;
         while !self.pending_window_geom_changes.is_empty() {
@@ -1080,6 +1163,34 @@ impl Cx {
     }
 
     pub(crate) fn call_event_handler(&mut self, event: &Event) {
+        if self.event_dispatch_is_reentrant(event) {
+            return;
+        }
+        #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
+        if let Some(event) = self.drag_drop.internal_drag_event(event) {
+            match event {
+                crate::event::InternalDragEvent::Drag(event) => {
+                    self.call_event_handler(&Event::Drag(event));
+                    self.drag_drop.cycle_drag();
+                }
+                crate::event::InternalDragEvent::Drop(event) => {
+                    self.call_event_handler(&Event::Drop(event));
+                    self.drag_drop.cycle_drag();
+                    self.call_event_handler(&Event::DragEnd);
+                    self.drag_drop.cycle_drag();
+                }
+            }
+            return;
+        }
+        if matches!(event, Event::Startup) {
+            self.initialize_memory_budget();
+            // The workers boot now, before the app exists, so the first job
+            // never waits for a thread (a Web Worker takes hundreds of ms).
+            self.warm_task_pool();
+        }
+        if !matches!(event, Event::Shutdown) {
+            crate::thread::service_scheduler(self, event);
+        }
         // A scrub pin listens for the button-up ITSELF: release must never
         // depend on a widget hit path. Schedule the cursor release here,
         // but do NOT clear the capture's pin flag yet — the flag must
@@ -1094,12 +1205,12 @@ impl Cx {
                     .push_back(crate::cx_api::CxOsOp::PinMousePointer(false));
             }
         }
-        // The F10 exploded z-layer view is LIVE: the intercept claims only
+        // The exploded z-layer view is LIVE: the intercept claims only
         // its own keys and the orbit drag (on raw screen coordinates), then
         // the router re-addresses every other pointer event to the plane
         // its ray lands on so ordinary dispatch — hover, wheel scrolling,
         // the tweaker's pick — works on the exploded app. (After the pin
-        // hook: a mid-drag F10 must never strand a hidden cursor.)
+        // hook: leaving mid-drag must never strand a hidden cursor.)
         if self.sploded_intercept(event) {
             return;
         }
@@ -1125,6 +1236,11 @@ impl Cx {
         self.handle_triggers();
         self.handle_actions();
         self.handle_pending_clear_hover();
+        if matches!(event, Event::Shutdown) {
+            crate::thread::service_scheduler(self, event);
+            self.close_task_pool();
+            self.thread_spawner.close_runtime();
+        }
     }
 
     #[allow(dead_code)]
@@ -1181,5 +1297,130 @@ impl Cx {
             time: time,
             frame: self.repaint_id,
         }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{draw_list::DrawList, draw_pass::DrawPass};
+    use std::{cell::Cell, rc::Rc};
+
+    #[test]
+    fn orphaned_child_pass_is_not_repainted_until_reattached() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let parent = DrawPass::new(&mut cx);
+        let child = DrawPass::new(&mut cx);
+        let list = DrawList::new(&mut cx);
+        let (parent_id, child_id) = (parent.draw_pass_id(), child.draw_pass_id());
+        let mut todo = Vec::new();
+
+        // Recorded at redraw 1, attaching the child: painted, and its
+        // liveness rides on the parent.
+        let recording_gen = cx.next_uniform_gen();
+        let uniforms_gen = cx.next_uniform_gen();
+        cx.draw_lists[list.id()].clear_draw_items(1, recording_gen, uniforms_gen);
+        cx.attach_child_pass(child_id, parent_id, Some(list.id()));
+        cx.passes[child_id].live_with_parent = true;
+        cx.passes[parent_id].paint_dirty = true;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(todo.contains(&child_id));
+        assert!(todo.contains(&parent_id));
+
+        // Recorded again at redraw 2 without the child: orphaned. Neither the
+        // parent's repaint nor a direct dirty flag paints it, and the flag is
+        // cleared so nothing keeps the frame loop awake for it.
+        let recording_gen = cx.next_uniform_gen();
+        let uniforms_gen = cx.next_uniform_gen();
+        cx.draw_lists[list.id()].clear_draw_items(2, recording_gen, uniforms_gen);
+        cx.passes[parent_id].paint_dirty = true;
+        cx.passes[child_id].paint_dirty = true;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(!todo.contains(&child_id));
+        assert!(todo.contains(&parent_id));
+        assert!(!cx.passes[child_id].paint_dirty);
+
+        // An explicit request paints an orphan this once.
+        cx.repaint_pass(child_id);
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(todo.contains(&child_id));
+        cx.passes[child_id].paint_dirty = true;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(!todo.contains(&child_id));
+
+        // Re-attached by the current recording: live again.
+        cx.attach_child_pass(child_id, parent_id, Some(list.id()));
+        cx.passes[child_id].paint_dirty = true;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(todo.contains(&child_id));
+
+        // A freed attaching list orphans too.
+        drop(list);
+        cx.passes[child_id].paint_dirty = true;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(!todo.contains(&child_id));
+    }
+
+    #[test]
+    fn platform_monotonic_time_moves_forward() {
+        let wall = Cx::time_now();
+        let start = Cx::monotonic_now();
+        assert!(wall > 0.0);
+        assert!((wall - start).abs() > 1_000_000.0);
+
+        let mut previous = start;
+        let mut later = start;
+        for _ in 0..1_000_000 {
+            std::hint::spin_loop();
+            later = Cx::monotonic_now();
+            assert!(later >= previous);
+            previous = later;
+            if later > start {
+                break;
+            }
+        }
+        assert!(later - start > 0.0);
+    }
+
+    #[test]
+    fn synchronous_event_handler_reentry_is_rejected() {
+        let calls = Rc::new(Cell::new(0));
+        let handler_calls = calls.clone();
+        let mut cx = Cx::new(Box::new(move |cx, _event| {
+            handler_calls.set(handler_calls.get() + 1);
+            cx.call_event_handler(&Event::Signal);
+        }));
+
+        cx.call_event_handler(&Event::Signal);
+        assert_eq!(calls.get(), 1);
+        assert!(!cx.event_handler_dispatch_active.get());
+
+        cx.call_event_handler(&Event::Signal);
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn panicking_event_handler_is_restored() {
+        let calls = Rc::new(Cell::new(0));
+        let panic_once = Rc::new(Cell::new(true));
+        let handler_calls = calls.clone();
+        let handler_panic_once = panic_once.clone();
+        let mut cx = Cx::new(Box::new(move |_cx, _event| {
+            handler_calls.set(handler_calls.get() + 1);
+            if handler_panic_once.replace(false) {
+                panic!("intentional event-handler panic");
+            }
+        }));
+        cx.perf_monitor.set_enabled(true);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cx.call_event_handler(&Event::Signal);
+        }));
+        assert!(result.is_err());
+        assert!(!cx.event_handler_dispatch_active.get());
+        assert_eq!(cx.perf_monitor.event_depth.get(), 0);
+
+        cx.call_event_handler(&Event::Signal);
+        assert_eq!(calls.get(), 2);
     }
 }

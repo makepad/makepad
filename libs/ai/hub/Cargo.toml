@@ -35,6 +35,7 @@ default = [
     "rig-native",
     "splat-native",
     "beats-native",
+    "stems-native",
     "notes-native",
 ]
 # Box-provisioned Python/Torch reference backends (FlashWorld, Music3,
@@ -63,7 +64,7 @@ tts = ["dep:makepad-ai-speech", "makepad-ai-speech/kokoro"]
 # Real IndexTTS-2.5 character-voice TTS via makepad-ai-speech.
 indextts = ["dep:makepad-ai-speech", "makepad-ai-speech/indextts", "dep:makepad-ai-common"]
 # Real MiniMax H3 video generation via makepad-ai-h3 plus the hardware
-# video file encoder (makepad-video). Does NOT pull the UI platform crate.
+# video file encoder (makepad-platform-video). Does NOT pull the UI platform crate.
 video = ["dep:makepad-ai-h3", "dep:makepad-ai-common", "dep:makepad-video"]
 # Native Practical-RIFE v4.26 frame interpolation as an optional post-stage
 # of the video backend (`interpolate: 2|4`). Independent of `video`: the
@@ -102,6 +103,9 @@ rig-native = ["dep:makepad-ai-rig", "dep:makepad-ai-common", "dep:makepad-gltf"]
 local = ["dep:makepad-ai-common"]
 # Native Beat This! audio -> beat/downbeat JSON analysis.
 beats-native = ["dep:makepad-ai-beats", "dep:makepad-ai-common"]
+# Native BS-RoFormer music source separation. Clients use the featureless hub
+# slice; only fleet service builds compile and load this model.
+stems-native = ["dep:makepad-ai-stems", "dep:makepad-ai-common"]
 # Native Spotify Basic Pitch audio -> notes/MIDI transcription. The model is
 # tiny and has a CPU fallback, so this lane is available without a GPU.
 notes-native = ["dep:makepad-ai-notes"]
@@ -142,9 +146,10 @@ makepad-render = { path = "../../render", optional = true }
 makepad-ai-llm = { path = "../../ai/llm", optional = true }
 makepad-ai-speech = { path = "../../ai/models/speech", default-features = false, optional = true }
 makepad-ai-beats = { path = "../../ai/models/beats", optional = true }
+makepad-ai-stems = { path = "../../ai/models/stems", optional = true }
 makepad-ai-notes = { path = "../../ai/models/notes", optional = true }
 makepad-system-speech = { path = "../../system_speech", optional = true }
-makepad-video = { path = "../../../platform/video", optional = true }
+makepad-video = { package = "makepad-platform-video", path = "../../../platform/video", optional = true }
 # The `mkfl` motion payload: ONE definition, shared with the VJ's import
 # converter (which fills the same box from a classical, model-free flow
 # field). Default features off — the enhance stage owns its own codec seam
@@ -158,7 +163,7 @@ makepad-live-id = { path = "../../live_id" }
 # Test-only: the h264 realtime round-trip test acts as its own client,
 # encoding/decoding with the same hardware codec seam the service uses
 # internally (behind the crate's own optional/default `video` feature).
-makepad-video = { path = "../../../platform/video" }
+makepad-video = { package = "makepad-platform-video", path = "../../../platform/video" }
 
 # The standing "is chat slow right now?" check. Its own code is std-only —
 # no HTTP or JSON crate — so what it measures is the box, not a client

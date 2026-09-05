@@ -25,6 +25,7 @@ use makepad_map_build::progress::{Report, SinkGuard};
 use makepad_map_build::testmap::{self, BakeOptions, NoFetch, TestMapPaths};
 use makepad_widgets::*;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// Lines kept in the popup's log pane. Enough to show the current pass and
@@ -35,22 +36,72 @@ const LOG_LINES: usize = 7;
 /// declared with). Any one of them present means this is not a first run
 /// and nothing should be offered.
 const PRODUCTION_ARCHIVES: [&str; 3] = [
-    "local/maps/world.mkmap",
-    "local/maps/europe-base-br-faces.mbtiles",
-    "local/maps/europe-shortbread.mbtiles",
+    "world.mkmap",
+    "europe-base-br-faces.mbtiles",
+    "europe-shortbread.mbtiles",
 ];
+const MAPS_ROOT_PREF: &str = "route/maps-root";
 
-/// True when this machine already has a real map to draw.
-pub fn production_archive_present() -> bool {
+/// The first production archive under this app's one resolved maps root.
+pub fn production_archive(maps_root: &Path) -> Option<PathBuf> {
     PRODUCTION_ARCHIVES
         .iter()
-        .any(|path| std::path::Path::new(path).exists())
+        .map(|name| maps_root.join(name))
+        .find(|path| path.is_file())
+}
+
+/// Resolve once at startup: a checked-out executable uses that checkout's
+/// `local/maps`; an installed/copied executable uses Makepad's per-user home.
+/// A developer override in `route/maps-root` wins over both. The process cwd
+/// is deliberately absent.
+pub fn resolve_maps_root() -> PathBuf {
+    static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| {
+        let home = makepad_widgets::makepad_platform::home::makepad_home();
+        let explicit = fs::read_to_string(home.join(MAPS_ROOT_PREF))
+            .ok()
+            .map(|value| PathBuf::from(value.trim()))
+            .filter(|path| !path.as_os_str().is_empty());
+        let executable = std::env::current_exe().unwrap_or_default();
+        resolve_maps_root_from(&executable, &home, explicit.as_deref())
+    })
+    .clone()
+}
+
+fn resolve_maps_root_from(executable: &Path, home: &Path, explicit: Option<&Path>) -> PathBuf {
+    resolve_maps_root_with(executable, home, explicit, |manifest| {
+        fs::read_to_string(manifest).is_ok_and(|text| {
+            text.lines().any(|line| {
+                let line = line.trim();
+                line == "[workspace]" || line.starts_with("workspace.members")
+            })
+        })
+    })
+}
+
+fn resolve_maps_root_with(
+    executable: &Path,
+    home: &Path,
+    explicit: Option<&Path>,
+    mut is_workspace_manifest: impl FnMut(&Path) -> bool,
+) -> PathBuf {
+    if let Some(explicit) = explicit {
+        return explicit.to_path_buf();
+    }
+    let mut directory = executable.parent();
+    while let Some(candidate) = directory {
+        if is_workspace_manifest(&candidate.join("Cargo.toml")) {
+            return candidate.join("local/maps");
+        }
+        directory = candidate.parent();
+    }
+    home.join("maps")
 }
 
 /// What the worker thread sends back.
 enum BakeMsg {
     Progress(Report),
-    Done,
+    Done { skipped: usize },
     Failed(String),
 }
 
@@ -84,7 +135,7 @@ pub struct TestMapBuild {
 impl Default for TestMapBuild {
     fn default() -> Self {
         Self {
-            paths: TestMapPaths::amsterdam(),
+            paths: TestMapPaths::in_dir(resolve_maps_root(), "amsterdam"),
             stage: Stage::Idle,
             headline: String::new(),
             log: Vec::new(),
@@ -97,6 +148,10 @@ impl Default for TestMapBuild {
 }
 
 impl TestMapBuild {
+    pub fn set_maps_root(&mut self, maps_root: &Path) {
+        self.paths = TestMapPaths::in_dir(maps_root, "amsterdam");
+    }
+
     /// True while the popup should be on screen.
     pub fn is_active(&self) -> bool {
         self.stage != Stage::Idle
@@ -130,7 +185,14 @@ impl TestMapBuild {
         self.log = vec![
             "Building an Amsterdam test map: ~143 MB download, then a couple".to_string(),
             "of minutes of baking. Tiles with baked road faces, a routing".to_string(),
-            "graph and a search index land under local/maps.".to_string(),
+            format!(
+                "graph and a search index land under {}.",
+                self.paths
+                    .archive
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .display()
+            ),
         ];
     }
 
@@ -142,7 +204,7 @@ impl TestMapBuild {
         }
         self.fraction = 0.0;
         if self.paths.pbf.is_file() {
-            self.start_bake();
+            self.start_bake(cx);
             return;
         }
         self.stage = Stage::Fetching { loaded: 0, total: testmap::AMSTERDAM_PBF_APPROX_BYTES };
@@ -195,7 +257,12 @@ impl TestMapBuild {
         true
     }
 
-    pub fn handle_http_response(&mut self, request_id: LiveId, response: &HttpResponse) -> bool {
+    pub fn handle_http_response(
+        &mut self,
+        cx: &mut Cx,
+        request_id: LiveId,
+        response: &HttpResponse,
+    ) -> bool {
         if !self.owns_request(request_id) {
             return false;
         }
@@ -227,7 +294,7 @@ impl TestMapBuild {
             return true;
         }
         self.push_log(format!("extract saved: {:.0} MB", body.len() as f64 / 1.0e6));
-        self.start_bake();
+        self.start_bake(cx);
         true
     }
 
@@ -260,11 +327,15 @@ impl TestMapBuild {
                         self.push_log(report.line);
                     }
                 }
-                BakeMsg::Done => {
+                BakeMsg::Done { skipped } => {
                     self.sink = None;
                     self.stage = Stage::Done;
                     self.fraction = 1.0;
-                    self.headline = "Test map ready".to_string();
+                    self.headline = if skipped == 0 {
+                        "Test map ready".to_string()
+                    } else {
+                        format!("Test map built, {skipped} tiles skipped")
+                    };
                 }
                 BakeMsg::Failed(error) => {
                     self.sink = None;
@@ -275,7 +346,7 @@ impl TestMapBuild {
         changed
     }
 
-    fn start_bake(&mut self) {
+    fn start_bake(&mut self, cx: &mut Cx) {
         self.stage = Stage::Baking;
         self.headline = "Baking tiles".to_string();
         let sender = Mutex::new(self.rx.sender());
@@ -293,23 +364,32 @@ impl TestMapBuild {
         let mut options = BakeOptions::amsterdam();
         options.paths = self.paths.clone();
         let done = self.rx.sender();
-        std::thread::spawn(move || {
+        let rejected = done.clone();
+        match cx.task_pool().submit(Lane::Heavy, move || {
             // NoFetch: the extract is on disk before this thread starts —
             // downloading is the window's job, where progress comes free.
             //
-            // Caught, not propagated: the face pass reports a corrupt tile
-            // by panicking inside its worker pool, and an uncaught panic
-            // here would take this thread out with the channel still open —
-            // a popup frozen at 63% forever. A failed bake must SAY so.
+            // A pass-level panic must still reach the popup with its actual
+            // payload. Tile-local face failures are caught lower down and
+            // return as successful builds with a skipped count.
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 testmap::bake(&options, &mut NoFetch)
             }))
-            .unwrap_or_else(|_| Err("bake panicked — see the log".to_string()));
+            .unwrap_or_else(|payload| {
+                Err(format!("bake panicked: {}", testmap::panic_message(payload)))
+            });
             let _ = done.send(match result {
-                Ok(()) => BakeMsg::Done,
+                Ok(stats) => BakeMsg::Done { skipped: stats.skipped_tiles },
                 Err(error) => BakeMsg::Failed(error),
             });
-        });
+        }) {
+            Ok(handle) => handle.detach(),
+            Err(error) => {
+                let _ = rejected.send(BakeMsg::Failed(format!(
+                    "test-map bake task rejected: {error}"
+                )));
+            }
+        }
     }
 
     fn fail(&mut self, error: String) {
@@ -335,10 +415,51 @@ impl TestMapBuild {
             ),
             Stage::Baking => format!("{:.0}%", self.fraction * 100.0),
             Stage::Done => format!(
-                "{:.1} GB under local/maps",
-                self.paths.bytes_on_disk() as f64 / 1.0e9
+                "{:.1} GB under {}",
+                self.paths.bytes_on_disk() as f64 / 1.0e9,
+                self.paths
+                    .archive
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .display()
             ),
             _ => String::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_root_uses_checkout_found_from_executable() {
+        let executable = Path::new("/checkout/target/release/route");
+        let root = resolve_maps_root_with(executable, Path::new("/home/.makepad"), None, |path| {
+            path == Path::new("/checkout/Cargo.toml")
+        });
+        assert_eq!(root, PathBuf::from("/checkout/local/maps"));
+    }
+
+    #[test]
+    fn maps_root_for_a_binary_copy_uses_makepad_home() {
+        let root = resolve_maps_root_with(
+            Path::new("/Applications/Makepad/route"),
+            Path::new("/home/.makepad"),
+            None,
+            |_| false,
+        );
+        assert_eq!(root, PathBuf::from("/home/.makepad/maps"));
+    }
+
+    #[test]
+    fn explicit_maps_root_wins_over_checkout() {
+        let root = resolve_maps_root_with(
+            Path::new("/checkout/target/release/route"),
+            Path::new("/home/.makepad"),
+            Some(Path::new("/data/maps")),
+            |_| true,
+        );
+        assert_eq!(root, PathBuf::from("/data/maps"));
     }
 }

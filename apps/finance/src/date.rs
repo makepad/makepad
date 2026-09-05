@@ -388,10 +388,7 @@ impl fmt::Display for DateRange {
 
 /// Today, from the system clock. The one place time enters the app.
 pub fn today() -> Day {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let secs = makepad_widgets::Cx::time_now().max(0.0) as i64;
     (secs / 86_400) as Day
 }
 

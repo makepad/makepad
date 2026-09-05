@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::fmt;
 use std::str;
 
@@ -55,7 +56,7 @@ impl HttpMethod {
 }
 
 #[cfg_attr(feature = "script", derive(Script, ScriptHook))]
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpRequest {
     #[cfg_attr(feature = "script", live)]
     pub metadata_id: LiveId,
@@ -69,6 +70,10 @@ pub struct HttpRequest {
     pub ignore_ssl_cert: bool,
     #[cfg_attr(feature = "script", live)]
     pub is_streaming: bool,
+    /// Hard allocation cap enforced by the backend while bytes arrive.
+    /// Existing callers default to `u64::MAX`; bounded clients set it lower.
+    #[cfg_attr(feature = "script", live)]
+    pub max_response_body_bytes: u64,
     #[cfg_attr(feature = "script", live)]
     pub body: Option<Vec<u8>>,
     #[cfg_attr(feature = "script", live)]
@@ -84,6 +89,7 @@ impl HttpRequest {
             headers: BTreeMap::new(),
             ignore_ssl_cert: false,
             is_streaming: false,
+            max_response_body_bytes: u64::MAX,
             body: None,
             websocket_transport: WebSocketTransport::Auto,
         }
@@ -122,6 +128,10 @@ impl HttpRequest {
 
     pub fn set_is_streaming(&mut self) {
         self.is_streaming = true;
+    }
+
+    pub fn set_max_response_body_bytes(&mut self, max_response_body_bytes: u64) {
+        self.max_response_body_bytes = max_response_body_bytes;
     }
 
     pub fn set_metadata_id(&mut self, id: LiveId) {
@@ -163,6 +173,12 @@ impl HttpRequest {
     }
 }
 
+impl Default for HttpRequest {
+    fn default() -> Self {
+        Self::new(String::new(), HttpMethod::GET)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SplitUrl<'a> {
     pub proto: &'a str,
@@ -182,7 +198,7 @@ pub struct HttpResponse {
     #[cfg_attr(feature = "script", live)]
     pub headers: BTreeMap<String, Vec<String>>,
     #[cfg_attr(feature = "script", live)]
-    pub body: Option<Vec<u8>>,
+    pub body: Option<Arc<[u8]>>,
 }
 
 impl HttpResponse {
@@ -196,7 +212,7 @@ impl HttpResponse {
             metadata_id,
             status_code,
             headers,
-            body,
+            body: body.map(Arc::from),
         }
     }
 
@@ -210,7 +226,7 @@ impl HttpResponse {
             metadata_id,
             status_code,
             headers: parse_headers(headers),
-            body,
+            body: body.map(Arc::from),
         }
     }
 
@@ -226,17 +242,17 @@ impl HttpResponse {
     pub fn body_string(&self) -> Option<String> {
         self.body
             .as_ref()
-            .and_then(|bytes| String::from_utf8(bytes.clone()).ok())
+            .and_then(|bytes| str::from_utf8(bytes).ok().map(str::to_string))
     }
 
-    pub fn get_body(&self) -> Option<&Vec<u8>> {
-        self.body.as_ref()
+    pub fn get_body(&self) -> Option<&[u8]> {
+        self.body.as_deref()
     }
 
     pub fn get_string_body(&self) -> Option<String> {
         self.body
             .as_ref()
-            .and_then(|bytes| String::from_utf8(bytes.clone()).ok())
+            .and_then(|bytes| str::from_utf8(bytes).ok().map(str::to_string))
     }
 
     pub fn get_json_body<T: DeJson>(&self) -> Result<T, DeJsonErr> {
