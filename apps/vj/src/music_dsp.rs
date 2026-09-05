@@ -1950,6 +1950,13 @@ impl Freeze {
         self.held.is_some()
     }
 
+    /// The lap's length in frames, for the tests that check what a press
+    /// asked for actually became.
+    #[cfg(test)]
+    pub fn lap_frames(&self) -> Option<usize> {
+        self.held.as_ref().map(|held| held.len)
+    }
+
     /// Process one stereo frame.
     #[inline]
     pub fn process(&mut self, live: [f32; 2], device_rate: f32) -> [f32; 2] {

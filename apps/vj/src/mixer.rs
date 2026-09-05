@@ -3052,6 +3052,18 @@ impl Mixer {
                 if !(device > 0.0) {
                     return;
                 }
+                let Some(source_secs) = knob64(secs, 0.0, 60.0) else { return };
+                // Source seconds become output seconds through the
+                // platter's OWN rate, off the clock the callback keeps:
+                // under a hand, a motor or a reverse hold that is the
+                // number that matters, and the tempo fader is not it. A
+                // stopped platter has no beat arriving to be the size of,
+                // so it falls back to unity rather than dividing by zero.
+                let platter = d.clock.platter_rate.abs();
+                let secs = match platter > 1e-6 {
+                    true => source_secs / platter,
+                    false => source_secs,
+                };
                 let Some(secs) = knob64(secs, 0.0, 60.0) else { return };
                 d.chain.freeze_mut().hold((secs * device) as usize, device as f32);
             }
@@ -3064,6 +3076,12 @@ impl Mixer {
     /// still crossfading out of one.
     pub fn deck_frozen(&self, deck: DeckId) -> bool {
         self.state.lock().unwrap().decks[deck.index()].chain.freeze_mut().held()
+    }
+
+    /// How long the lap it is holding actually came out, in frames.
+    #[cfg(test)]
+    pub fn deck_freeze_lap(&self, deck: DeckId) -> Option<usize> {
+        self.state.lock().unwrap().decks[deck.index()].chain.freeze_mut().lap_frames()
     }
 
     /// The reverse hold: the record runs backwards while it is held, and a
@@ -6467,6 +6485,37 @@ mod tests {
     }
 
     /// FREEZE repeats the SIGNAL; the playhead itself never stops.
+    /// The lap arrives in SOURCE seconds and becomes output seconds
+    /// through the platter's own rate, read at the instant it latches.
+    /// It used to be divided on the control thread by the tempo fader,
+    /// which is not the platter's rate the moment a hand is on the
+    /// record -- so a beat-sized stutter grabbed during a scratch came
+    /// out the wrong size, which is the one thing a lap has to get right.
+    #[test]
+    fn a_freeze_lap_is_measured_by_the_platter_not_the_fader() {
+        let lap_at = |rate: f64| {
+            let mixer = spin_deck_a(16_384, 480_000);
+            mixer.set_deck_playing(DeckId::A, true);
+            mixer.set_deck_rate(DeckId::A, rate);
+            // Long enough that the ring has more fresh content than
+            // either lap asks for: a hold is clamped to what has actually
+            // been written, and a clamped lap would compare equal however
+            // fast the platter was turning.
+            spin_render(&mixer, 80);
+            mixer.set_deck_freeze(DeckId::A, Some(0.2));
+            mixer.deck_freeze_lap(DeckId::A).expect("a lap")
+        };
+        // The same half-second of RECORD, with the platter turning twice
+        // as fast: half the output seconds, so half the frames.
+        let at_unity = lap_at(1.0);
+        let at_double = lap_at(2.0);
+        let ratio = at_unity as f64 / at_double as f64;
+        assert!(
+            (ratio - 2.0).abs() < 0.1,
+            "a doubled platter should halve the lap: {at_unity} against {at_double}"
+        );
+    }
+
     #[test]
     fn a_freeze_leaves_the_record_running_underneath() {
         let mixer = spin_deck_a(16_384, 480_000);

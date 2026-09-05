@@ -3607,10 +3607,9 @@ impl DeckEngine {
     ///
     /// The lap is one counted beat, or the armed loop rung when it is
     /// shorter than a beat -- so the sub-beat ladder next to CUE is also
-    /// the glitch-size selector and needs no control of its own. A
-    /// splat owns its own clock (`mixer.rs`: rate, key lock and scratch
-    /// are all ignored while it runs), so the length is left in SOURCE
-    /// beats rather than divided by a rate the splat is not using.
+    /// the glitch-size selector and needs no control of its own. It is
+    /// handed over in SOURCE seconds and turned into output seconds by
+    /// the audio thread; see the command it sends.
     pub fn freeze_press(&mut self, deck: DeckId) -> Vec<DeckCmd> {
         if self.frozen[deck.index()] {
             return Vec::new();
@@ -3626,10 +3625,15 @@ impl DeckEngine {
         if self.deck(deck).position_secs < len {
             return Vec::new();
         }
-        let splat_active = self.splat(deck).is_some_and(|splat| splat.enabled);
-        let rate = if splat_active { 1.0 } else { self.deck(deck).rate.max(1e-6) };
         self.frozen[deck.index()] = true;
-        vec![DeckCmd::Freeze { deck, secs: Some(len / rate) }]
+        // Left in SOURCE seconds: how much RECORD to hold. What that is
+        // worth in output seconds depends on how fast the platter is
+        // turning at the instant it latches, and the tempo fader is not
+        // that number the moment a hand is on the record -- only the
+        // audio thread's own clock knows it. A splat reports a platter
+        // rate of exactly one, so the case this used to special-case
+        // falls out of asking the right question.
+        vec![DeckCmd::Freeze { deck, secs: Some(len) }]
     }
 
     /// Let FREEZE go. A press that was refused released nothing, so a
@@ -6822,7 +6826,10 @@ mod tests {
         e.deck_mut(DeckId::A).rate = 1.25;
         e.deck_mut(DeckId::A).loop_ticks = 0; // MAN: no armed rung
         let cmds = e.freeze_press(DeckId::A);
-        assert_eq!(cmds, vec![DeckCmd::Freeze { deck: DeckId::A, secs: Some(0.4) }]); // 0.5 / 1.25
+        // SOURCE seconds: one counted beat of RECORD. What that is worth
+        // in output seconds is the audio thread's to work out, from the
+        // platter's own rate rather than this fader.
+        assert_eq!(cmds, vec![DeckCmd::Freeze { deck: DeckId::A, secs: Some(0.5) }]);
         assert!(e.frozen(DeckId::A));
         assert!(e.freeze_press(DeckId::A).is_empty(), "a second press while held does nothing");
         e.freeze_release(DeckId::A);
@@ -6832,16 +6839,19 @@ mod tests {
         // An eighth of a beat: the ladder below a beat is the glitch size.
         e.deck_mut(DeckId::A).loop_ticks = 4; // 4 / 32
         let cmds = e.freeze_press(DeckId::A);
-        assert_eq!(cmds, vec![DeckCmd::Freeze { deck: DeckId::A, secs: Some(0.05) }]); // (0.5 * 4/32) / 1.25
+        assert_eq!(cmds, vec![DeckCmd::Freeze { deck: DeckId::A, secs: Some(0.0625) }]); // 0.5 * 4/32
         e.freeze_release(DeckId::A);
 
         // Four beats armed is capped at one.
         e.deck_mut(DeckId::A).loop_ticks = 128; // 4 beats
         let cmds = e.freeze_press(DeckId::A);
-        assert_eq!(cmds, vec![DeckCmd::Freeze { deck: DeckId::A, secs: Some(0.4) }]);
+        assert_eq!(cmds, vec![DeckCmd::Freeze { deck: DeckId::A, secs: Some(0.5) }]);
         e.freeze_release(DeckId::A);
 
-        // A splat owns its own clock -- rate is ignored while it runs.
+        // A splat owns its own clock. Nothing special is done for it any
+        // more: the lap leaves here in source seconds either way, and the
+        // splat's platter rate of exactly one is what makes it come out
+        // the same on the other side.
         e.deck_mut(DeckId::A).loop_ticks = 0;
         e.splat_set(DeckId::A, splat_grid_fixture(120.0));
         e.splat_enable(DeckId::A, true);
