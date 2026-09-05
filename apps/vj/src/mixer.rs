@@ -987,6 +987,24 @@ impl DeckChain {
         self.level_default
     }
 
+    #[cfg(test)]
+    fn slot_engaged(&mut self, slot: usize) -> bool {
+        match &self.slots[slot] {
+            EffectKind::Eq(eq) => !eq.at_unity(),
+            EffectKind::Freeze(freeze) => freeze.held(),
+            EffectKind::Echo(echo) => echo.engaged(),
+            EffectKind::Flanger(x) => x.engaged(),
+            EffectKind::Bitcrusher(x) => x.engaged(),
+            EffectKind::Tremolo(x) => x.engaged(),
+            EffectKind::Distortion(x) => x.engaged(),
+            EffectKind::Phaser(x) => x.engaged(),
+            EffectKind::Autopan(x) => x.engaged(),
+            EffectKind::StereoWidth(x) => x.engaged(),
+            EffectKind::PlateReverb(x) => x.engaged(),
+            EffectKind::MoogLadder(x) => x.engaged(),
+        }
+    }
+
     fn level_mut(&mut self, slot: usize) -> &mut SlotLevel {
         &mut self.levels[slot]
     }
@@ -1794,6 +1812,18 @@ struct MixState {
     curve: FadeCurve,
     sfx: Vec<SfxVoice>,
     master: Ramp,
+    /// The whole mix's own effect chain, run on the sum before the
+    /// limiter.
+    ///
+    /// The same twelve slots a deck has, and the same level policy, so
+    /// nothing here is a second implementation of anything. What it is
+    /// FOR is the difference a deck chain cannot express: one reverb fed
+    /// the mix rings on across a transition, where a reverb on each deck
+    /// is two tanks that each stop when their own deck does.
+    master_chain: DeckChain,
+    /// Which deck's grid the master's beat-locked effects follow. There
+    /// is no such thing as the mix's own tempo, so it borrows one.
+    master_clock_deck: usize,
     /// The master bus's limiter, in place of the hard clamp the sum used
     /// to end on.
     limiter: Limiter,
@@ -1885,6 +1915,8 @@ impl Mixer {
                 curve: FadeCurve::EqualPower,
                 sfx: Vec::new(),
                 master: Ramp::at(0.9),
+                master_chain: DeckChain::new(48_000.0),
+                master_clock_deck: 0,
                 limiter: Limiter::new(0.0),
                 cue_limiter: Limiter::new(0.0),
                 ended_decks: Vec::new(),
@@ -3081,6 +3113,52 @@ impl Mixer {
         self.publish_deck(&s, index);
     }
 
+    /// Which deck's grid the master chain's beat-locked effects follow.
+    /// The mix has no tempo of its own, so it borrows one.
+    pub fn set_master_clock_deck(&self, deck: DeckId) {
+        self.state.lock().unwrap().master_clock_deck = deck.index();
+    }
+
+    /// The master chain's on/off for one effect, by the same slot index
+    /// the deck chains use.
+    pub fn set_master_effect(&self, slot: usize, on: bool) {
+        let mut s = self.state.lock().unwrap();
+        let wet = if on { 1.0 } else { 0.0 };
+        match slot {
+            // The echo has no wet of its own: its fraction IS its
+            // switch, off being no fraction at all.
+            2 => s.master_chain.echo_mut().set_fraction(on.then_some((1, 2))),
+            3 => s.master_chain.flanger_mut().set_wet(wet),
+            5 => s.master_chain.tremolo_mut().set_wet(wet),
+            6 => s.master_chain.distortion_mut().set_wet(wet),
+            7 => s.master_chain.phaser_mut().set_wet(wet),
+            8 => s.master_chain.autopan_mut().set_wet(wet),
+            9 => s.master_chain.stereo_width_mut().set_wet(wet),
+            10 => s.master_chain.plate_reverb_mut().set_wet(wet),
+            11 => s.master_chain.moog_ladder_mut().set_wet(wet),
+            _ => {}
+        }
+    }
+
+    /// One master slot's wet/dry mix.
+    pub fn set_master_mix(&self, slot: usize, mix: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.master_chain.level_mut(slot.min(DECK_CHAIN_SLOTS - 1)).set_mix(mix);
+    }
+
+    /// What one master slot does about the level it returns.
+    pub fn set_master_level_mode(&self, slot: usize, mode: LevelMode) {
+        let mut s = self.state.lock().unwrap();
+        s.master_chain.level_mut(slot.min(DECK_CHAIN_SLOTS - 1)).set_mode(mode);
+    }
+
+    /// Whether any master effect is sounding at all.
+    #[cfg(test)]
+    pub fn master_chain_engaged(&self) -> bool {
+        let mut s = self.state.lock().unwrap();
+        (0..DECK_CHAIN_SLOTS).any(|slot| s.master_chain.slot_engaged(slot))
+    }
+
     /// How far the master and the cue busses run behind the mix, in
     /// frames: the limiter's look-ahead, which it spends being already
     /// ducked when a peak arrives rather than ducking on top of it.
@@ -3876,6 +3954,25 @@ impl Mixer {
         let deck_stems: [Option<Arc<TrackStems>>; 2] =
             [s.decks[0].stems.clone(), s.decks[1].stems.clone()];
         let mut deck_peaks = [0.0f32; 2];
+        // The master's chain gets the same once-a-buffer preparation its
+        // decks do, and borrows a deck's clock: the mix has no tempo of
+        // its own, so a beat-locked effect on it follows whichever deck
+        // is nominated -- deck A until something asks otherwise.
+        {
+            let clock = s.decks[s.master_clock_deck.min(1)].clock;
+            let buffer_secs = frames as f32 / rate as f32;
+            let beat_frames = clock.beat_len().unwrap_or(60.0 / crate::decks::COUNTED_BPM)
+                * rate as f64;
+            let chain = &mut s.master_chain;
+            chain.eq_mut().set_sample_rate(rate);
+            chain.eq_mut().prepare_block();
+            chain.plate_reverb_mut().set_sample_rate(rate);
+            chain.echo_mut().prepare_block(beat_frames);
+            chain.tremolo_mut().prepare_block(&clock, buffer_secs);
+            chain.autopan_mut().prepare_block(&clock, buffer_secs);
+            chain.flanger_mut().prepare_block(&clock, buffer_secs);
+            chain.phaser_mut().prepare_block(&clock, buffer_secs);
+        }
         for voice in s.decks.iter_mut() {
             // Filter coefficients are rebuilt once per buffer — the trig is
             // the expensive part and a buffer is well under a millisecond.
@@ -4476,6 +4573,11 @@ impl Mixer {
                 audible((video.0 + deck_out[0].0 + deck_out[1].0 + sfx.0 + score[0]) * master),
                 audible((video.1 + deck_out[0].1 + deck_out[1].1 + sfx.1 + score[1]) * master),
             ];
+            // The mix's own chain, between the master gain and the
+            // limiter: after everything has been summed, so an effect
+            // here hears the whole room, and before the limiter, so
+            // whatever it adds is still caught.
+            let summed = s.master_chain.process(summed, rate as f32);
             // The limiter, not a clamp. A clamp is a clipper: pushed past
             // full scale it flat-tops every sample that got there, which
             // is grit rather than loudness. Nothing arrives here too loud
@@ -5513,6 +5615,68 @@ mod tests {
         );
     }
 
+
+    /// An idle master chain is not in the path. Twelve slots run on
+    /// every frame of the mix, so the one thing that has to be true
+    /// before any of this is worth having is that they cost the signal
+    /// nothing until one is switched on.
+    #[test]
+    fn an_idle_master_chain_leaves_the_mix_alone() {
+        let mixer = Mixer::new();
+        mixer.set_master(1.0);
+        mixer.set_crossfader(0.0);
+        let pcm = tone_pcm(1_000.0, 48_000, 1.0);
+        mixer.install_deck(DeckId::A, pcm.clone());
+        mixer.set_deck_playing(DeckId::A, true);
+        render(&mixer, 48_000.0, 4_096);
+        assert!(!mixer.master_chain_engaged());
+        let start = {
+            let state = mixer.state.lock().unwrap();
+            state.decks[0].pos as usize
+        };
+        let latency = mixer.output_latency_frames();
+        let out = render(&mixer, 48_000.0, 256 + latency);
+        for index in 0..200 {
+            let want = pcm.frames[start + index][0] as f32 / 32768.0;
+            let got = out.channel(0)[index + latency];
+            assert!(
+                (got - want).abs() < 1e-6,
+                "sample {index}: {got} vs {want} — an idle master chain must be transparent"
+            );
+        }
+    }
+
+    /// And an engaged one reaches the sum. The width sits at 1.5 by
+    /// default, which widens anything that is not already mono, so an
+    /// out-of-phase pair is the cheapest thing to hear it on.
+    #[test]
+    fn an_engaged_master_effect_reaches_the_mix() {
+        let quiet = |on: bool| -> f64 {
+            let mixer = Mixer::new();
+            mixer.set_master(1.0);
+            mixer.set_crossfader(0.0);
+            // Genuinely out of phase, so there IS a side signal for
+            // the width to widen. `split_pcm` splits over time and
+            // leaves both channels equal, which has no side at all.
+            mixer.install_deck(
+                DeckId::A,
+                const_stereo_pcm(12_000, -12_000, 96_000, 48_000),
+            );
+            mixer.set_deck_playing(DeckId::A, true);
+            if on {
+                mixer.set_master_effect(9, true); // stereo width
+            }
+            render(&mixer, 48_000.0, 8_192);
+            let out = render(&mixer, 48_000.0, 2_048);
+            out.channel(0).iter().map(|s| (*s as f64) * (*s as f64)).sum::<f64>()
+        };
+        let off = quiet(false);
+        let on = quiet(true);
+        assert!(
+            on > off * 1.2,
+            "the master width did not reach the mix: {off} then {on}"
+        );
+    }
     #[test]
     fn an_untouched_deck_plays_the_decoded_samples_unchanged() {
         let mixer = Mixer::new();
