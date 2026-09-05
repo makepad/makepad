@@ -26,6 +26,7 @@ pub mod markdown;
 pub mod html;
 pub mod slug;
 pub mod pageflip;
+pub mod stacknavigation;
 
 pub fn script_mod(vm: &mut ScriptVm) {
     welcome::script_mod(vm);
@@ -50,6 +51,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     html::script_mod(vm);
     slug::script_mod(vm);
     pageflip::script_mod(vm);
+    stacknavigation::script_mod(vm);
 }
 
 pub fn tables() -> &'static [&'static [Story]] {
@@ -76,5 +78,6 @@ pub fn tables() -> &'static [&'static [Story]] {
         html::STORIES,
         slug::STORIES,
         pageflip::STORIES,
+        stacknavigation::STORIES,
     ]
 }
