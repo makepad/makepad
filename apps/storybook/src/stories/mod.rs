@@ -10,6 +10,7 @@ pub mod checkbox;
 pub mod dropdown;
 pub mod label;
 pub mod slider;
+pub mod textinput;
 
 pub fn script_mod(vm: &mut ScriptVm) {
     welcome::script_mod(vm);
@@ -18,6 +19,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     dropdown::script_mod(vm);
     label::script_mod(vm);
     slider::script_mod(vm);
+    textinput::script_mod(vm);
 }
 
 pub fn tables() -> &'static [&'static [Story]] {
@@ -28,5 +30,6 @@ pub fn tables() -> &'static [&'static [Story]] {
         dropdown::STORIES,
         label::STORIES,
         slider::STORIES,
+        textinput::STORIES,
     ]
 }
