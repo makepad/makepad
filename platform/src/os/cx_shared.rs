@@ -180,7 +180,7 @@ impl Cx {
                 passes_todo.push(draw_pass_id);
             }
         }
-        let slot_cap = self.passes.id_iter().count();
+        let slot_cap = self.passes.slot_count();
         let depth_of = |start: DrawPassId| -> u64 {
             let mut depth = 0u64;
             let mut walk = start;
