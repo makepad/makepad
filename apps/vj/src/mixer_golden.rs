@@ -805,6 +805,95 @@ fn a_tremolo_depth_change_while_engaged_is_click_free() {
     assert!(worst < CLICK, "a depth change must ramp, biggest step {worst}");
 }
 
+/// Locking an LFO to the beat while it is already sounding changes the
+/// phase's future VELOCITY, never its value at any instant, so it needs
+/// no ramp of its own -- this test is the confirmation of that
+/// reasoning, not a search for a bug.
+#[test]
+fn locking_the_tremolo_to_the_beat_while_engaged_is_click_free() {
+    let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
+    mixer.set_deck_tremolo(DeckId::A, true);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| match index {
+        8 => mixer.set_deck_tremolo_beat_sync(DeckId::A, true),
+        24 => mixer.set_deck_tremolo_beat_sync(DeckId::A, false),
+        _ => {}
+    });
+    assert!(worst < CLICK, "a beat lock must not step the output, biggest step {worst}");
+}
+
+/// The same for the other three: each reads its rate from a different
+/// place once synced, and none of them may step doing it.
+#[test]
+fn locking_the_other_lfos_to_the_beat_while_engaged_is_click_free() {
+    for (name, engage, lock) in [
+        (
+            "autopan",
+            &Mixer::set_deck_autopan as &dyn Fn(&Mixer, DeckId, bool),
+            &Mixer::set_deck_autopan_beat_sync as &dyn Fn(&Mixer, DeckId, bool),
+        ),
+        (
+            "flanger",
+            &Mixer::set_deck_flanger as &dyn Fn(&Mixer, DeckId, bool),
+            &Mixer::set_deck_flanger_beat_sync as &dyn Fn(&Mixer, DeckId, bool),
+        ),
+        (
+            "phaser",
+            &Mixer::set_deck_phaser as &dyn Fn(&Mixer, DeckId, bool),
+            &Mixer::set_deck_phaser_beat_sync as &dyn Fn(&Mixer, DeckId, bool),
+        ),
+    ] {
+        let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
+        engage(&mixer, DeckId::A, true);
+        mixer.set_deck_playing(DeckId::A, true);
+        settle(&mixer, SETTLE);
+        let worst = worst_step_across(&mixer, |index| match index {
+            8 => lock(&mixer, DeckId::A, true),
+            24 => lock(&mixer, DeckId::A, false),
+            _ => {}
+        });
+        assert!(worst < CLICK, "locking the {name} stepped the output, biggest step {worst}");
+    }
+}
+
+/// A synced LFO retunes every buffer from the deck's tempo, so the
+/// division changing under it is the ordinary case, not a special one:
+/// still only a velocity change, still no step.
+#[test]
+fn a_division_change_on_a_synced_tremolo_is_click_free() {
+    let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
+    mixer.set_deck_tremolo(DeckId::A, true);
+    mixer.set_deck_tremolo_beat_sync(DeckId::A, true);
+    mixer.set_deck_tremolo_rate(DeckId::A, 1.0);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| match index {
+        8 => mixer.set_deck_tremolo_rate(DeckId::A, 8.0),
+        24 => mixer.set_deck_tremolo_rate(DeckId::A, 0.5),
+        _ => {}
+    });
+    assert!(worst < CLICK, "a division change must not step, biggest step {worst}");
+}
+
+/// Engaging a synced LFO jumps its phase to the chosen offset. That
+/// jump happens under the engage ramp, which is what keeps it silent --
+/// the same protection every other engage in this file leans on.
+#[test]
+fn engaging_a_synced_tremolo_at_an_offset_is_click_free() {
+    let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
+    mixer.set_deck_tremolo_beat_sync(DeckId::A, true);
+    mixer.set_deck_tremolo_beat_offset(DeckId::A, 0.75);
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| match index {
+        8 => mixer.set_deck_tremolo(DeckId::A, true),
+        24 => mixer.set_deck_tremolo(DeckId::A, false),
+        _ => {}
+    });
+    assert!(worst < CLICK, "an offset engage must ramp, biggest step {worst}");
+}
+
 #[test]
 fn engaging_and_releasing_the_distortion_are_click_free() {
     let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));

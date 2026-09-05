@@ -2646,6 +2646,19 @@ impl Mixer {
         s.decks[deck.index()].chain.flanger_mut().set_feedback(feedback);
     }
 
+    /// Lock the flanger sweep's rate to the beat grid, reading its rate as
+    /// cycles per beat instead of Hz.
+    pub fn set_deck_flanger_beat_sync(&self, deck: DeckId, on: bool) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.flanger_mut().set_beat_sync(on);
+    }
+
+    /// Where in the cycle the flanger sweep starts when it engages, 0..1.
+    pub fn set_deck_flanger_beat_offset(&self, deck: DeckId, offset: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.flanger_mut().set_beat_offset(offset);
+    }
+
     /// The bitcrusher's on/off switch.
     pub fn set_deck_bitcrusher(&self, deck: DeckId, on: bool) {
         let mut s = self.state.lock().unwrap();
@@ -2682,6 +2695,19 @@ impl Mixer {
         s.decks[deck.index()].chain.tremolo_mut().set_depth(depth);
     }
 
+    /// Lock the tremolo's rate to the beat grid, reading its rate as
+    /// cycles per beat instead of Hz.
+    pub fn set_deck_tremolo_beat_sync(&self, deck: DeckId, on: bool) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.tremolo_mut().set_beat_sync(on);
+    }
+
+    /// Where in the cycle the tremolo starts when it engages, 0..1.
+    pub fn set_deck_tremolo_beat_offset(&self, deck: DeckId, offset: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.tremolo_mut().set_beat_offset(offset);
+    }
+
     /// The distortion's on/off switch.
     pub fn set_deck_distortion(&self, deck: DeckId, on: bool) {
         let mut s = self.state.lock().unwrap();
@@ -2713,6 +2739,19 @@ impl Mixer {
         s.decks[deck.index()].chain.phaser_mut().set_feedback(feedback);
     }
 
+    /// Lock the phaser sweep's rate to the beat grid, reading its rate as
+    /// cycles per beat instead of Hz.
+    pub fn set_deck_phaser_beat_sync(&self, deck: DeckId, on: bool) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.phaser_mut().set_beat_sync(on);
+    }
+
+    /// Where in the cycle the phaser sweep starts when it engages, 0..1.
+    pub fn set_deck_phaser_beat_offset(&self, deck: DeckId, offset: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.phaser_mut().set_beat_offset(offset);
+    }
+
     /// The autopan's on/off switch.
     pub fn set_deck_autopan(&self, deck: DeckId, on: bool) {
         let mut s = self.state.lock().unwrap();
@@ -2723,6 +2762,19 @@ impl Mixer {
     pub fn set_deck_autopan_rate(&self, deck: DeckId, hz: f32) {
         let mut s = self.state.lock().unwrap();
         s.decks[deck.index()].chain.autopan_mut().set_rate(hz);
+    }
+
+    /// Lock the autopan swing's rate to the beat grid, reading its rate as
+    /// cycles per beat instead of Hz.
+    pub fn set_deck_autopan_beat_sync(&self, deck: DeckId, on: bool) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.autopan_mut().set_beat_sync(on);
+    }
+
+    /// Where in the cycle the autopan swing starts when it engages, 0..1.
+    pub fn set_deck_autopan_beat_offset(&self, deck: DeckId, offset: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.autopan_mut().set_beat_offset(offset);
     }
 
     /// The stereo width's on/off switch.
@@ -3631,6 +3683,15 @@ impl Mixer {
             let beat_secs =
                 voice.clock.beat_len().unwrap_or(60.0 / crate::decks::COUNTED_BPM);
             voice.chain.echo_mut().prepare_block(beat_secs * rate as f64);
+            // The four LFO effects retune from the same clock, in output
+            // seconds this time rather than frames: each divides its own
+            // cycles-per-beat by a beat's length to get the Hz its phase
+            // accumulator wants. Each is a no-op unless that effect is
+            // actually beat-synced.
+            voice.chain.tremolo_mut().prepare_block(beat_secs);
+            voice.chain.autopan_mut().prepare_block(beat_secs);
+            voice.chain.flanger_mut().prepare_block(beat_secs);
+            voice.chain.phaser_mut().prepare_block(beat_secs);
             // The ghost moves here, once per buffer, and not in the frame
             // loop below: its rate is latched so a buffer is one multiply,
             // and the read path has four early exits (no pcm, empty pcm,

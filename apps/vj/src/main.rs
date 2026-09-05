@@ -2480,6 +2480,21 @@ script_mod! {
                                         max: 8.0
                                         default: 0.25
                                     }
+                                    sfx_fx_flanger_sync := PillButton{width: 54 text: "SYNC"}
+                                    sfx_fx_flanger_division := Slider{
+                                        width: 170
+                                        text: "flanger per beat"
+                                        min: 0.125
+                                        max: 32.0
+                                        default: 1.0
+                                    }
+                                    sfx_fx_flanger_offset := Slider{
+                                        width: 120
+                                        text: "flanger offset"
+                                        min: 0.0
+                                        max: 1.0
+                                        default: 0.0
+                                    }
                                 }
                                 View{
                                     width: Fill
@@ -2509,6 +2524,21 @@ script_mod! {
                                         min: 0.1
                                         max: 20.0
                                         default: 4.0
+                                    }
+                                    sfx_fx_tremolo_sync := PillButton{width: 54 text: "SYNC"}
+                                    sfx_fx_tremolo_division := Slider{
+                                        width: 170
+                                        text: "tremolo per beat"
+                                        min: 0.125
+                                        max: 32.0
+                                        default: 1.0
+                                    }
+                                    sfx_fx_tremolo_offset := Slider{
+                                        width: 120
+                                        text: "tremolo offset"
+                                        min: 0.0
+                                        max: 1.0
+                                        default: 0.0
                                     }
                                 }
                                 View{
@@ -2547,6 +2577,21 @@ script_mod! {
                                         max: 0.9
                                         default: 0.3
                                     }
+                                    sfx_fx_phaser_sync := PillButton{width: 54 text: "SYNC"}
+                                    sfx_fx_phaser_division := Slider{
+                                        width: 170
+                                        text: "phaser per beat"
+                                        min: 0.125
+                                        max: 32.0
+                                        default: 1.0
+                                    }
+                                    sfx_fx_phaser_offset := Slider{
+                                        width: 120
+                                        text: "phaser offset"
+                                        min: 0.0
+                                        max: 1.0
+                                        default: 0.0
+                                    }
                                 }
                                 View{
                                     width: Fill
@@ -2561,6 +2606,21 @@ script_mod! {
                                         min: 0.1
                                         max: 20.0
                                         default: 1.0
+                                    }
+                                    sfx_fx_autopan_sync := PillButton{width: 54 text: "SYNC"}
+                                    sfx_fx_autopan_division := Slider{
+                                        width: 170
+                                        text: "autopan per beat"
+                                        min: 0.125
+                                        max: 32.0
+                                        default: 1.0
+                                    }
+                                    sfx_fx_autopan_offset := Slider{
+                                        width: 120
+                                        text: "autopan offset"
+                                        min: 0.0
+                                        max: 1.0
+                                        default: 0.0
                                     }
                                 }
                                 View{
@@ -14178,6 +14238,12 @@ p2 {}
                 DeckCmd::SetFlangerFeedback { deck, feedback } => {
                     self.mixer.set_deck_flanger_feedback(deck, feedback)
                 }
+                DeckCmd::SetFlangerBeatSync { deck, on } => {
+                    self.mixer.set_deck_flanger_beat_sync(deck, on)
+                }
+                DeckCmd::SetFlangerBeatOffset { deck, offset } => {
+                    self.mixer.set_deck_flanger_beat_offset(deck, offset)
+                }
                 DeckCmd::SetBitcrusher { deck, on } => self.mixer.set_deck_bitcrusher(deck, on),
                 DeckCmd::SetBitcrusherRate { deck, hz } => {
                     self.mixer.set_deck_bitcrusher_rate(deck, hz)
@@ -14192,6 +14258,12 @@ p2 {}
                 DeckCmd::SetTremoloDepth { deck, depth } => {
                     self.mixer.set_deck_tremolo_depth(deck, depth)
                 }
+                DeckCmd::SetTremoloBeatSync { deck, on } => {
+                    self.mixer.set_deck_tremolo_beat_sync(deck, on)
+                }
+                DeckCmd::SetTremoloBeatOffset { deck, offset } => {
+                    self.mixer.set_deck_tremolo_beat_offset(deck, offset)
+                }
                 DeckCmd::SetDistortion { deck, on } => self.mixer.set_deck_distortion(deck, on),
                 DeckCmd::SetDistortionDrive { deck, drive } => {
                     self.mixer.set_deck_distortion_drive(deck, drive)
@@ -14201,9 +14273,21 @@ p2 {}
                 DeckCmd::SetPhaserFeedback { deck, feedback } => {
                     self.mixer.set_deck_phaser_feedback(deck, feedback)
                 }
+                DeckCmd::SetPhaserBeatSync { deck, on } => {
+                    self.mixer.set_deck_phaser_beat_sync(deck, on)
+                }
+                DeckCmd::SetPhaserBeatOffset { deck, offset } => {
+                    self.mixer.set_deck_phaser_beat_offset(deck, offset)
+                }
                 DeckCmd::SetAutopan { deck, on } => self.mixer.set_deck_autopan(deck, on),
                 DeckCmd::SetAutopanRate { deck, hz } => {
                     self.mixer.set_deck_autopan_rate(deck, hz)
+                }
+                DeckCmd::SetAutopanBeatSync { deck, on } => {
+                    self.mixer.set_deck_autopan_beat_sync(deck, on)
+                }
+                DeckCmd::SetAutopanBeatOffset { deck, offset } => {
+                    self.mixer.set_deck_autopan_beat_offset(deck, offset)
                 }
                 DeckCmd::SetStereoWidth { deck, on } => self.mixer.set_deck_stereo_width(deck, on),
                 DeckCmd::SetStereoWidthAmount { deck, amount } => {
@@ -14391,20 +14475,58 @@ p2 {}
             deck.moog_ladder_cutoff as f64,
             deck.moog_ladder_resonance as f64,
         );
+        // The four beat-lockable LFOs, read together: each row shows
+        // EITHER its free-Hz rate slider or its per-beat division and
+        // offset pair, never both, so the sync flag drives visibility as
+        // well as the chip.
+        let beat_sync = [
+            (deck.flanger_beat_sync, deck.flanger_rate as f64, deck.flanger_beat_offset as f64),
+            (deck.tremolo_beat_sync, deck.tremolo_rate as f64, deck.tremolo_beat_offset as f64),
+            (deck.phaser_beat_sync, deck.phaser_rate as f64, deck.phaser_beat_offset as f64),
+            (deck.autopan_beat_sync, deck.autopan_rate as f64, deck.autopan_beat_offset as f64),
+        ];
         self.ui.slider(cx, ids!(sfx_fx_feedback)).set_value(cx, feedback);
         self.paint_chip(cx, ids!(sfx_fx_flanger), flanger_on, None);
         self.ui.slider(cx, ids!(sfx_fx_flanger_rate)).set_value(cx, flanger_rate);
+        let (flanger_sync, flanger_division, flanger_offset) = beat_sync[0];
+        self.paint_chip(cx, ids!(sfx_fx_flanger_sync), flanger_sync, None);
+        self.ui.slider(cx, ids!(sfx_fx_flanger_rate)).set_visible(cx, !flanger_sync);
+        self.ui.slider(cx, ids!(sfx_fx_flanger_division)).set_visible(cx, flanger_sync);
+        self.ui.slider(cx, ids!(sfx_fx_flanger_offset)).set_visible(cx, flanger_sync);
+        self.ui.slider(cx, ids!(sfx_fx_flanger_division)).set_value(cx, flanger_division);
+        self.ui.slider(cx, ids!(sfx_fx_flanger_offset)).set_value(cx, flanger_offset);
         self.paint_chip(cx, ids!(sfx_fx_bitcrusher), bitcrusher_on, None);
         self.ui.slider(cx, ids!(sfx_fx_bitcrusher_bits)).set_value(cx, bitcrusher_bits);
         self.paint_chip(cx, ids!(sfx_fx_tremolo), tremolo_on, None);
         self.ui.slider(cx, ids!(sfx_fx_tremolo_rate)).set_value(cx, tremolo_rate);
+        let (tremolo_sync, tremolo_division, tremolo_offset) = beat_sync[1];
+        self.paint_chip(cx, ids!(sfx_fx_tremolo_sync), tremolo_sync, None);
+        self.ui.slider(cx, ids!(sfx_fx_tremolo_rate)).set_visible(cx, !tremolo_sync);
+        self.ui.slider(cx, ids!(sfx_fx_tremolo_division)).set_visible(cx, tremolo_sync);
+        self.ui.slider(cx, ids!(sfx_fx_tremolo_offset)).set_visible(cx, tremolo_sync);
+        self.ui.slider(cx, ids!(sfx_fx_tremolo_division)).set_value(cx, tremolo_division);
+        self.ui.slider(cx, ids!(sfx_fx_tremolo_offset)).set_value(cx, tremolo_offset);
         self.paint_chip(cx, ids!(sfx_fx_distortion), distortion_on, None);
         self.ui.slider(cx, ids!(sfx_fx_distortion_drive)).set_value(cx, distortion_drive);
         self.paint_chip(cx, ids!(sfx_fx_phaser), phaser_on, None);
         self.ui.slider(cx, ids!(sfx_fx_phaser_rate)).set_value(cx, phaser_rate);
         self.ui.slider(cx, ids!(sfx_fx_phaser_feedback)).set_value(cx, phaser_feedback);
+        let (phaser_sync, phaser_division, phaser_offset) = beat_sync[2];
+        self.paint_chip(cx, ids!(sfx_fx_phaser_sync), phaser_sync, None);
+        self.ui.slider(cx, ids!(sfx_fx_phaser_rate)).set_visible(cx, !phaser_sync);
+        self.ui.slider(cx, ids!(sfx_fx_phaser_division)).set_visible(cx, phaser_sync);
+        self.ui.slider(cx, ids!(sfx_fx_phaser_offset)).set_visible(cx, phaser_sync);
+        self.ui.slider(cx, ids!(sfx_fx_phaser_division)).set_value(cx, phaser_division);
+        self.ui.slider(cx, ids!(sfx_fx_phaser_offset)).set_value(cx, phaser_offset);
         self.paint_chip(cx, ids!(sfx_fx_autopan), autopan_on, None);
         self.ui.slider(cx, ids!(sfx_fx_autopan_rate)).set_value(cx, autopan_rate);
+        let (autopan_sync, autopan_division, autopan_offset) = beat_sync[3];
+        self.paint_chip(cx, ids!(sfx_fx_autopan_sync), autopan_sync, None);
+        self.ui.slider(cx, ids!(sfx_fx_autopan_rate)).set_visible(cx, !autopan_sync);
+        self.ui.slider(cx, ids!(sfx_fx_autopan_division)).set_visible(cx, autopan_sync);
+        self.ui.slider(cx, ids!(sfx_fx_autopan_offset)).set_visible(cx, autopan_sync);
+        self.ui.slider(cx, ids!(sfx_fx_autopan_division)).set_value(cx, autopan_division);
+        self.ui.slider(cx, ids!(sfx_fx_autopan_offset)).set_value(cx, autopan_offset);
         self.paint_chip(cx, ids!(sfx_fx_stereo_width), stereo_width_on, None);
         self.ui.slider(cx, ids!(sfx_fx_stereo_width_amount)).set_value(cx, stereo_width_amount);
         self.paint_chip(cx, ids!(sfx_fx_plate_reverb), plate_reverb_on, None);
@@ -29273,6 +29395,49 @@ impl MatchEvent for App {
             };
             self.run_deck_cmds(cx, cmds);
         }
+        if self.ui.button(cx, ids!(sfx_fx_flanger_sync)).clicked(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.toggle_flanger_beat_sync(DeckId::A),
+                FxTarget::B => self.decks.toggle_flanger_beat_sync(DeckId::B),
+                FxTarget::Mix => {
+                    let on = !self.decks.deck(DeckId::A).flanger_beat_sync;
+                    let mut cmds = self.decks.set_flanger_beat_sync(DeckId::A, on);
+                    cmds.extend(self.decks.set_flanger_beat_sync(DeckId::B, on));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+            self.sync_sfx_fx_ui(cx);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_flanger_division)).slided(actions) {
+            // Snap the drag to a ladder rung before it becomes a rate:
+            // the same value feeds the same setter either way, read as
+            // cycles per beat once the effect is synced.
+            let v = crate::music_dsp::nearest_beat_sync_rung(v as f32);
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_flanger_rate(DeckId::A, v),
+                FxTarget::B => self.decks.set_flanger_rate(DeckId::B, v),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_flanger_rate(DeckId::A, v);
+                    cmds.extend(self.decks.set_flanger_rate(DeckId::B, v));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+            self.sync_sfx_fx_ui(cx);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_flanger_offset)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_flanger_beat_offset(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_flanger_beat_offset(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_flanger_beat_offset(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_flanger_beat_offset(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
         if self.ui.button(cx, ids!(sfx_fx_bitcrusher)).clicked(actions) {
             let cmds = match self.sfx_fx_target {
                 FxTarget::A => self.decks.toggle_bitcrusher(DeckId::A),
@@ -29320,6 +29485,49 @@ impl MatchEvent for App {
                 FxTarget::Mix => {
                     let mut cmds = self.decks.set_tremolo_rate(DeckId::A, v as f32);
                     cmds.extend(self.decks.set_tremolo_rate(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        if self.ui.button(cx, ids!(sfx_fx_tremolo_sync)).clicked(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.toggle_tremolo_beat_sync(DeckId::A),
+                FxTarget::B => self.decks.toggle_tremolo_beat_sync(DeckId::B),
+                FxTarget::Mix => {
+                    let on = !self.decks.deck(DeckId::A).tremolo_beat_sync;
+                    let mut cmds = self.decks.set_tremolo_beat_sync(DeckId::A, on);
+                    cmds.extend(self.decks.set_tremolo_beat_sync(DeckId::B, on));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+            self.sync_sfx_fx_ui(cx);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_tremolo_division)).slided(actions) {
+            // Snap the drag to a ladder rung before it becomes a rate:
+            // the same value feeds the same setter either way, read as
+            // cycles per beat once the effect is synced.
+            let v = crate::music_dsp::nearest_beat_sync_rung(v as f32);
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_tremolo_rate(DeckId::A, v),
+                FxTarget::B => self.decks.set_tremolo_rate(DeckId::B, v),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_tremolo_rate(DeckId::A, v);
+                    cmds.extend(self.decks.set_tremolo_rate(DeckId::B, v));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+            self.sync_sfx_fx_ui(cx);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_tremolo_offset)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_tremolo_beat_offset(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_tremolo_beat_offset(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_tremolo_beat_offset(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_tremolo_beat_offset(DeckId::B, v as f32));
                     cmds
                 }
             };
@@ -29377,6 +29585,49 @@ impl MatchEvent for App {
             };
             self.run_deck_cmds(cx, cmds);
         }
+        if self.ui.button(cx, ids!(sfx_fx_phaser_sync)).clicked(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.toggle_phaser_beat_sync(DeckId::A),
+                FxTarget::B => self.decks.toggle_phaser_beat_sync(DeckId::B),
+                FxTarget::Mix => {
+                    let on = !self.decks.deck(DeckId::A).phaser_beat_sync;
+                    let mut cmds = self.decks.set_phaser_beat_sync(DeckId::A, on);
+                    cmds.extend(self.decks.set_phaser_beat_sync(DeckId::B, on));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+            self.sync_sfx_fx_ui(cx);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_phaser_division)).slided(actions) {
+            // Snap the drag to a ladder rung before it becomes a rate:
+            // the same value feeds the same setter either way, read as
+            // cycles per beat once the effect is synced.
+            let v = crate::music_dsp::nearest_beat_sync_rung(v as f32);
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_phaser_rate(DeckId::A, v),
+                FxTarget::B => self.decks.set_phaser_rate(DeckId::B, v),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_phaser_rate(DeckId::A, v);
+                    cmds.extend(self.decks.set_phaser_rate(DeckId::B, v));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+            self.sync_sfx_fx_ui(cx);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_phaser_offset)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_phaser_beat_offset(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_phaser_beat_offset(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_phaser_beat_offset(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_phaser_beat_offset(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_phaser_feedback)).slided(actions) {
             let cmds = match self.sfx_fx_target {
                 FxTarget::A => self.decks.set_phaser_feedback(DeckId::A, v as f32),
@@ -29410,6 +29661,49 @@ impl MatchEvent for App {
                 FxTarget::Mix => {
                     let mut cmds = self.decks.set_autopan_rate(DeckId::A, v as f32);
                     cmds.extend(self.decks.set_autopan_rate(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        if self.ui.button(cx, ids!(sfx_fx_autopan_sync)).clicked(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.toggle_autopan_beat_sync(DeckId::A),
+                FxTarget::B => self.decks.toggle_autopan_beat_sync(DeckId::B),
+                FxTarget::Mix => {
+                    let on = !self.decks.deck(DeckId::A).autopan_beat_sync;
+                    let mut cmds = self.decks.set_autopan_beat_sync(DeckId::A, on);
+                    cmds.extend(self.decks.set_autopan_beat_sync(DeckId::B, on));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+            self.sync_sfx_fx_ui(cx);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_autopan_division)).slided(actions) {
+            // Snap the drag to a ladder rung before it becomes a rate:
+            // the same value feeds the same setter either way, read as
+            // cycles per beat once the effect is synced.
+            let v = crate::music_dsp::nearest_beat_sync_rung(v as f32);
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_autopan_rate(DeckId::A, v),
+                FxTarget::B => self.decks.set_autopan_rate(DeckId::B, v),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_autopan_rate(DeckId::A, v);
+                    cmds.extend(self.decks.set_autopan_rate(DeckId::B, v));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+            self.sync_sfx_fx_ui(cx);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_fx_autopan_offset)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_autopan_beat_offset(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_autopan_beat_offset(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_autopan_beat_offset(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_autopan_beat_offset(DeckId::B, v as f32));
                     cmds
                 }
             };
