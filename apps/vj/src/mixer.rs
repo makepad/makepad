@@ -3898,10 +3898,15 @@ impl Mixer {
             // cycles-per-beat by a beat's length to get the Hz its phase
             // accumulator wants. Each is a no-op unless that effect is
             // actually beat-synced.
-            voice.chain.tremolo_mut().prepare_block(beat_secs);
-            voice.chain.autopan_mut().prepare_block(beat_secs);
-            voice.chain.flanger_mut().prepare_block(beat_secs);
-            voice.chain.phaser_mut().prepare_block(beat_secs);
+            // The LFOs take the whole clock, not a number: a locked one
+            // has to know WHICH beat it is on to sit at the right place
+            // in a cycle that spans several of them.
+            let clock = voice.clock;
+            let buffer_secs = frames as f32 / rate as f32;
+            voice.chain.tremolo_mut().prepare_block(&clock, buffer_secs);
+            voice.chain.autopan_mut().prepare_block(&clock, buffer_secs);
+            voice.chain.flanger_mut().prepare_block(&clock, buffer_secs);
+            voice.chain.phaser_mut().prepare_block(&clock, buffer_secs);
             // The ghost moves here, once per buffer, and not in the frame
             // loop below: its rate is latched so a buffer is one multiply,
             // and the read path has four early exits (no pcm, empty pcm,

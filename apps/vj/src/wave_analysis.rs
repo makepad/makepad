@@ -237,6 +237,15 @@ pub struct DeckClock {
     /// Where in the beat, `[0, 1)`, the playhead will be at the end of
     /// this buffer. Zero without a grid.
     pub beat_frac_end: f64,
+    /// Which beat, counted from the grid's first and fractional, the
+    /// playhead will be on at the end of this buffer. Zero without a
+    /// grid, and negative before the first beat.
+    ///
+    /// The fraction above cannot stand in for this. A cycle that spans
+    /// several beats -- a sweep an eighth of a cycle per beat is one
+    /// sweep every two bars -- has to know WHICH beat it is on, not just
+    /// how far into it.
+    pub beat_at_end: f64,
     /// Source seconds per output second: the tempo fader's rate normally,
     /// the platter's under a hand or a motor, negative under a reverse
     /// hold, exactly one under a running splat, zero with no record.
@@ -268,6 +277,7 @@ impl DeckClock {
         DeckClock {
             beat_secs_out,
             beat_frac_end: grid.phase_at(pos_secs + travel),
+            beat_at_end: grid.beat_at(pos_secs + travel),
             platter_rate,
             has_grid: true,
         }

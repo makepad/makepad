@@ -2136,11 +2136,21 @@ impl Flanger {
 
     /// Recompute this buffer's beat-synced rate from the deck's current
     /// tempo; see [`Tremolo::prepare_block`] for the full reasoning.
-    pub fn prepare_block(&mut self, beat_secs: f64) {
-        if self.sync_units > 0 {
-            self.active_hz =
-                (sync_cycles_per_beat(self.sync_units) / beat_secs.max(1e-6)) as f32;
+    pub fn prepare_block(
+        &mut self,
+        clock: &crate::wave_analysis::DeckClock,
+        buffer_secs: f32,
+    ) {
+        if self.sync_units == 0 {
+            return;
         }
+        // Ungridded or stopped, the counted beat -- the same default a
+        // loop or a jump takes when nothing has measured the record.
+        let beat_secs = clock.beat_len().unwrap_or(60.0 / crate::decks::COUNTED_BPM);
+        let cycles = sync_cycles_per_beat(self.sync_units);
+        let base = (cycles / beat_secs.max(1e-6)) as f32;
+        self.active_hz =
+            lfo_locked_hz(self.phase, base, cycles, self.beat_offset, buffer_secs, clock);
     }
 
     /// How far the sweep reaches from the centre delay, 0..1 of the full
@@ -2477,6 +2487,59 @@ pub const LFO_SYNC_ROWS: [(u32, &str); 11] = [
 /// The top rung, so a setter can clamp to the ladder without walking it.
 pub const LFO_SYNC_MAX_UNITS: u32 = 512;
 
+/// How far a locked LFO may run fast or slow to close a phase error, as
+/// a share of the rate it is meant to be running at. A quarter, so the
+/// worst case -- half a cycle out -- is back in phase within about two
+/// cycles, which is quick enough to feel locked and slow enough that the
+/// catching-up is not itself the effect.
+const LFO_LOCK_TRIM: f32 = 0.25;
+/// How long the servo would take to close an error if nothing clamped
+/// it. The clamp above is what usually governs; this sets the gentleness
+/// of the last, small part of the correction.
+const LFO_LOCK_SECS: f32 = 0.5;
+
+/// The rate a locked LFO should run at this buffer: its own, plus
+/// whatever trim closes the gap between where its phase is and where the
+/// grid says it should be.
+///
+/// The correction leans on the RATE and never on the phase. Moving the
+/// phase directly would be a step in the output -- for a tremolo the
+/// gain is a function of phase, so a nudge of a tenth of a radian is a
+/// gain step of about 0.04, twice this file's click budget. Leaning on
+/// the rate cannot step anything: it only changes where the phase will
+/// be next sample, which is what a rate does anyway.
+#[inline]
+fn lfo_locked_hz(
+    phase: f32,
+    base_hz: f32,
+    cycles_per_beat: f64,
+    offset: f32,
+    buffer_secs: f32,
+    clock: &crate::wave_analysis::DeckClock,
+) -> f32 {
+    if !clock.has_grid {
+        return base_hz;
+    }
+    let want =
+        (clock.beat_at_end * cycles_per_beat + offset as f64).rem_euclid(1.0) as f32;
+    // The grid is read at the END of this buffer, so the phase has to be
+    // too: comparing where the LFO is NOW against where the beat will be
+    // THEN leaves the servo one buffer of phase short for ever, which is
+    // a standing error of about two percent of a cycle at an ordinary
+    // buffer size. Project it forward at the rate it is about to run.
+    let projected = phase / std::f32::consts::TAU + base_hz * buffer_secs;
+    let have = projected.rem_euclid(1.0);
+    // The short way round: half a cycle late is half a cycle early.
+    let mut error = want - have;
+    if error > 0.5 {
+        error -= 1.0;
+    } else if error < -0.5 {
+        error += 1.0;
+    }
+    let trim = (error / LFO_LOCK_SECS).clamp(-base_hz.abs() * LFO_LOCK_TRIM, base_hz.abs() * LFO_LOCK_TRIM);
+    base_hz + trim
+}
+
 /// A rung's cycles per beat. Zero units is free-running and has none.
 #[inline]
 fn sync_cycles_per_beat(units: u32) -> f64 {
@@ -2597,11 +2660,21 @@ impl Tremolo {
     /// self-corrects whenever the tempo or grid changes, since
     /// `beat_secs` is read fresh every buffer. Ordinary long-run phase
     /// drift is accepted, the same as free-Hz mode already has.
-    pub fn prepare_block(&mut self, beat_secs: f64) {
-        if self.sync_units > 0 {
-            self.active_hz =
-                (sync_cycles_per_beat(self.sync_units) / beat_secs.max(1e-6)) as f32;
+    pub fn prepare_block(
+        &mut self,
+        clock: &crate::wave_analysis::DeckClock,
+        buffer_secs: f32,
+    ) {
+        if self.sync_units == 0 {
+            return;
         }
+        // Ungridded or stopped, the counted beat -- the same default a
+        // loop or a jump takes when nothing has measured the record.
+        let beat_secs = clock.beat_len().unwrap_or(60.0 / crate::decks::COUNTED_BPM);
+        let cycles = sync_cycles_per_beat(self.sync_units);
+        let base = (cycles / beat_secs.max(1e-6)) as f32;
+        self.active_hz =
+            lfo_locked_hz(self.phase, base, cycles, self.beat_offset, buffer_secs, clock);
     }
 
     /// Process one stereo frame.
@@ -2892,11 +2965,21 @@ impl Phaser {
 
     /// Recompute this buffer's beat-synced rate from the deck's current
     /// tempo; see [`Tremolo::prepare_block`] for the full reasoning.
-    pub fn prepare_block(&mut self, beat_secs: f64) {
-        if self.sync_units > 0 {
-            self.active_hz =
-                (sync_cycles_per_beat(self.sync_units) / beat_secs.max(1e-6)) as f32;
+    pub fn prepare_block(
+        &mut self,
+        clock: &crate::wave_analysis::DeckClock,
+        buffer_secs: f32,
+    ) {
+        if self.sync_units == 0 {
+            return;
         }
+        // Ungridded or stopped, the counted beat -- the same default a
+        // loop or a jump takes when nothing has measured the record.
+        let beat_secs = clock.beat_len().unwrap_or(60.0 / crate::decks::COUNTED_BPM);
+        let cycles = sync_cycles_per_beat(self.sync_units);
+        let base = (cycles / beat_secs.max(1e-6)) as f32;
+        self.active_hz =
+            lfo_locked_hz(self.phase, base, cycles, self.beat_offset, buffer_secs, clock);
     }
 
 
@@ -3056,11 +3139,21 @@ impl Autopan {
 
     /// Recompute this buffer's beat-synced rate from the deck's current
     /// tempo; see [`Tremolo::prepare_block`] for the full reasoning.
-    pub fn prepare_block(&mut self, beat_secs: f64) {
-        if self.sync_units > 0 {
-            self.active_hz =
-                (sync_cycles_per_beat(self.sync_units) / beat_secs.max(1e-6)) as f32;
+    pub fn prepare_block(
+        &mut self,
+        clock: &crate::wave_analysis::DeckClock,
+        buffer_secs: f32,
+    ) {
+        if self.sync_units == 0 {
+            return;
         }
+        // Ungridded or stopped, the counted beat -- the same default a
+        // loop or a jump takes when nothing has measured the record.
+        let beat_secs = clock.beat_len().unwrap_or(60.0 / crate::decks::COUNTED_BPM);
+        let cycles = sync_cycles_per_beat(self.sync_units);
+        let base = (cycles / beat_secs.max(1e-6)) as f32;
+        self.active_hz =
+            lfo_locked_hz(self.phase, base, cycles, self.beat_offset, buffer_secs, clock);
     }
 
 
@@ -6338,6 +6431,24 @@ mod tests {
         assert_eq!(level.ceiling(), 0.01, "a bad value moves nothing");
     }
 
+    /// A clock standing still at `beat` on a grid whose beats are
+    /// `beat_secs` long, for the tests that only care about the rate a
+    /// locked LFO picks.
+    fn clock_at(beat: f64, beat_secs: f64) -> crate::wave_analysis::DeckClock {
+        crate::wave_analysis::DeckClock {
+            beat_secs_out: beat_secs,
+            beat_frac_end: beat.rem_euclid(1.0),
+            beat_at_end: beat,
+            platter_rate: 1.0,
+            has_grid: true,
+        }
+    }
+
+    /// A clock with nothing measured behind it.
+    fn clock_ungridded() -> crate::wave_analysis::DeckClock {
+        crate::wave_analysis::DeckClock::default()
+    }
+
     /// The ladder is the whole set an operator can pick from: free
     /// first, then powers of two either side of one cycle a beat.
     #[test]
@@ -6364,11 +6475,16 @@ mod tests {
         let mut trem = Tremolo::new();
         // Sixteen eighths is two cycles a beat.
         trem.set_sync_units(16);
-        trem.prepare_block(0.5);
-        assert!((trem.active_hz - 4.0).abs() < 1e-6, "{}", trem.active_hz);
-        // Half the tempo, half the rate -- it tracks, buffer to buffer.
-        trem.prepare_block(1.0);
+        // Ungridded: the rate is the division over the counted beat, with
+        // no servo to trim it, which is what this test is about.
+        trem.prepare_block(&clock_ungridded(), 512.0 / 48_000.0);
         assert!((trem.active_hz - 2.0).abs() < 1e-6, "{}", trem.active_hz);
+        // On a grid whose beat is half a second, two cycles a beat is 4Hz.
+        trem.prepare_block(&clock_at(0.0, 0.5), 512.0 / 48_000.0);
+        assert!(trem.active_hz > 3.0 && trem.active_hz < 5.0, "{}", trem.active_hz);
+        // Half the tempo, half the rate -- it tracks, buffer to buffer.
+        trem.prepare_block(&clock_at(0.0, 1.0), 512.0 / 48_000.0);
+        assert!(trem.active_hz > 1.5 && trem.active_hz < 2.5, "{}", trem.active_hz);
     }
 
     /// The whole ladder is reachable, including the rungs that sit far
@@ -6382,8 +6498,10 @@ mod tests {
             let mut ph = Phaser::new();
             ph.set_sync_units(*units);
             assert_eq!(ph.sync_units(), *units, "{label} did not survive its setter");
-            ph.prepare_block(0.5);
-            let expected = (sync_cycles_per_beat(*units) / 0.5) as f32;
+            // Ungridded, so the rate is the division over the counted
+            // beat with no servo trim on top of it.
+            ph.prepare_block(&clock_ungridded(), 512.0 / 48_000.0);
+            let expected = sync_cycles_per_beat(*units) as f32;
             assert!(
                 (ph.active_hz - expected).abs() < 1e-4,
                 "{label} landed on {} not {expected}",
@@ -6394,8 +6512,8 @@ mod tests {
         // it is passed through rather than trimmed.
         let mut ph = Phaser::new();
         ph.set_sync_units(LFO_SYNC_MAX_UNITS);
-        ph.prepare_block(0.4);
-        assert!((ph.active_hz - 160.0).abs() < 1e-3, "{}", ph.active_hz);
+        ph.prepare_block(&clock_ungridded(), 512.0 / 48_000.0);
+        assert!((ph.active_hz - 64.0).abs() < 1e-3, "{}", ph.active_hz);
     }
 
     /// Free-running, `prepare_block` leaves the rate alone: the Hz
@@ -6405,8 +6523,103 @@ mod tests {
         let mut trem = Tremolo::new();
         trem.set_rate(4.0);
         let before = trem.active_hz;
-        trem.prepare_block(0.5);
+        trem.prepare_block(&clock_at(3.0, 0.5), 512.0 / 48_000.0);
         assert_eq!(trem.active_hz, before);
+    }
+
+    /// A locked LFO does not just run at the right SPEED, it sits at the
+    /// right PLACE: the servo leans on the rate until the phase agrees
+    /// with the grid, and then stops leaning.
+    #[test]
+    fn a_locked_lfo_closes_on_the_grid_and_stays_there() {
+        let rate = 48_000.0f32;
+        let mut trem = Tremolo::new();
+        trem.set_wet(1.0);
+        // One cycle a beat, and a beat half a second long.
+        trem.set_sync_units(8);
+        let beat_secs = 0.5f64;
+        let frames_per_buffer = 512usize;
+        let secs_per_buffer = frames_per_buffer as f64 / rate as f64;
+
+        // Start deliberately out of phase and run for a few seconds of
+        // buffers, advancing the grid the same way the deck would.
+        trem.phase = std::f32::consts::PI;
+        let mut beat = 0.0f64;
+        let mut error = 1.0f32;
+        for _ in 0..400 {
+            beat += secs_per_buffer / beat_secs;
+            trem.prepare_block(&clock_at(beat, beat_secs), 512.0 / 48_000.0);
+            for _ in 0..frames_per_buffer {
+                trem.process([0.2, 0.2], rate);
+            }
+            let want = beat.rem_euclid(1.0) as f32;
+            let have = (trem.phase / std::f32::consts::TAU).rem_euclid(1.0);
+            error = (want - have).abs().min(1.0 - (want - have).abs());
+        }
+        assert!(error < 0.002, "the lock settled {error} of a cycle out");
+    }
+
+    /// The offset is where in the cycle the effect sits ON the beat, and
+    /// the lock holds it there rather than at zero.
+    #[test]
+    fn a_locked_lfo_holds_the_offset_it_was_given() {
+        let rate = 48_000.0f32;
+        let mut trem = Tremolo::new();
+        trem.set_wet(1.0);
+        trem.set_sync_units(8);
+        trem.set_beat_offset(0.25);
+        let beat_secs = 0.5f64;
+        let frames = 512usize;
+        let per_buffer = frames as f64 / rate as f64;
+        let mut beat = 0.0f64;
+        let mut error = 1.0f32;
+        for _ in 0..400 {
+            beat += per_buffer / beat_secs;
+            trem.prepare_block(&clock_at(beat, beat_secs), 512.0 / 48_000.0);
+            for _ in 0..frames {
+                trem.process([0.2, 0.2], rate);
+            }
+            let want = (beat + 0.25).rem_euclid(1.0) as f32;
+            let have = (trem.phase / std::f32::consts::TAU).rem_euclid(1.0);
+            error = (want - have).abs().min(1.0 - (want - have).abs());
+        }
+        assert!(error < 0.002, "the offset settled {error} of a cycle out");
+    }
+
+    /// Closing the lock must not step the output. The servo leans on the
+    /// rate, never on the phase, and this is what says so: a tremolo's
+    /// gain is a direct function of its phase, so a phase nudge would
+    /// show here at once.
+    #[test]
+    fn closing_the_lock_does_not_step_the_output() {
+        let rate = 48_000.0f32;
+        let mut trem = Tremolo::new();
+        trem.set_wet(1.0);
+        trem.set_sync_units(8);
+        // Half a cycle out: the worst the servo can be asked to close.
+        trem.phase = std::f32::consts::PI;
+        let beat_secs = 0.5f64;
+        let frames = 512usize;
+        let per_buffer = frames as f64 / rate as f64;
+        let mut beat = 0.0f64;
+        let mut prev: Option<f32> = None;
+        let mut worst = 0.0f32;
+        // A low tone, so its own slope does not swamp the measure.
+        let mut phase = 0.0f32;
+        for _ in 0..200 {
+            beat += per_buffer / beat_secs;
+            trem.prepare_block(&clock_at(beat, beat_secs), 512.0 / 48_000.0);
+            for _ in 0..frames {
+                phase += 2.0 * PI * 40.0 / rate;
+                let x = phase.sin() * 0.5;
+                let out = trem.process([x, x], rate)[0];
+                if let Some(p) = prev {
+                    worst = worst.max((out - p).abs());
+                }
+                prev = Some(out);
+            }
+        }
+        assert!(worst < 0.02, "closing the lock stepped by {worst}");
     }
 
     /// The offset lands on the moment of engage, not before and not
