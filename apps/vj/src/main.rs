@@ -24378,11 +24378,20 @@ p2 {}
                     if synced { " SYNC" } else { "" }
                 ),
             );
+            // Elapsed and what is LEFT, rather than elapsed and the length.
+            // The length is a fact about the record that does not change and
+            // can be read off the row; how long there is before the deck
+            // needs the next one is the number being watched, and working it
+            // out in your head at the end of a set is how dead air happens.
             self.set_label(
                 cx,
                 base + 4,
                 &refs.time,
-                &format!("{} / {}", format_time(position), format_time(duration)),
+                &format!(
+                    "{} / -{}",
+                    format_time(position),
+                    format_time((duration - position).max(0.0))
+                ),
             );
             // This deck's QUANT chip mirrors the engine every pass
             // (set_value diffs, so an unchanged unit costs nothing).
