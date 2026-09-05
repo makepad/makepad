@@ -28,6 +28,7 @@ pub mod slug;
 pub mod pageflip;
 pub mod stacknavigation;
 pub mod adaptiveview;
+pub mod slidesview;
 
 pub fn script_mod(vm: &mut ScriptVm) {
     welcome::script_mod(vm);
@@ -54,6 +55,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     pageflip::script_mod(vm);
     stacknavigation::script_mod(vm);
     adaptiveview::script_mod(vm);
+    slidesview::script_mod(vm);
 }
 
 pub fn tables() -> &'static [&'static [Story]] {
@@ -82,5 +84,6 @@ pub fn tables() -> &'static [&'static [Story]] {
         pageflip::STORIES,
         stacknavigation::STORIES,
         adaptiveview::STORIES,
+        slidesview::STORIES,
     ]
 }
