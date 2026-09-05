@@ -47,6 +47,8 @@ script_mod! {
             mixed: instance(0.0)
             /** error intent mix 0..1 step 0.01 */
             error: instance(0.0)
+            /** pointer held down mix, for the toggle's knob growth 0..1 step 0.01 */
+            pressed: instance(0.0)
 
             /** mark box side length in pixels 8..32 step 1 */
             size: uniform(15.0)
@@ -292,6 +294,24 @@ script_mod! {
                     }
                 }
             }
+            /** press track: 1 while the pointer is held on the box */
+            press: {
+                default: @off
+                off: AnimatorState{
+                    ease: OutQuad
+                    from: {all: Forward {duration: 0.15}}
+                    apply: {
+                        draw_bg: {pressed: 0.0}
+                    }
+                }
+                on: AnimatorState{
+                    ease: OutQuad
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_bg: {pressed: 1.0}
+                    }
+                }
+            }
             /** error track: recolours the box, mark and label with the error ink */
             error: {
                 default: @off
@@ -333,11 +353,16 @@ script_mod! {
         }
     }
 
-    /** The flat toggle: the checkbox retuned as a pill with a sliding knob. */
+    /** The flat toggle: the checkbox retuned as a pill with a sliding knob.
+     * The knob drags along the track, grows while pressed by knob_grow, can
+     * carry an icon per state, and the pill takes an outline while off. */
     mod.widgets.ToggleFlat = mod.widgets.CheckBoxFlat{
         label_walk +: {
             margin: theme.mspace_h_1{left: 27.}
         }
+
+        /** the knob follows the pointer, and a release past the middle commits */
+        draggable: true
 
         /** The pill material: a 1.6:1 box whose knob slides and fills on active. */
         draw_bg +: {
@@ -347,10 +372,25 @@ script_mod! {
             mark_color_active: theme.color_mark_active
             mark_color_active_hover: theme.color_mark_active_hover
 
+            /** pill width as a multiple of its height 1..2.5 step 0.05 */
+            pill_aspect: uniform(1.6)
+            /** knob inset from the pill edge in pixels 0..6 step 0.5 */
+            knob_inset: uniform(1.5)
+            /** knob growth while pressed, as a fraction of its radius 0..1 step 0.05 */
+            knob_grow: uniform(0.0)
+            /** outline stroke while off, in pixels; 0 draws none 0..4 step 0.5 */
+            outline_size: uniform(0.0)
+            /** the outline ink while off */
+            outline_color: uniform(theme.color_outline)
+            /** 1 while the knob follows the pointer, driven by the widget 0..1 step 1 */
+            drag: uniform(0.0)
+            /** knob position while dragging, driven by the widget 0..1 step 0.01 */
+            drag_pos: uniform(0.0)
+
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
 
-                let sz_px = vec2(self.size * /** pill aspect 1..2.5 step 0.05 */ 1.6, self.size)
+                let sz_px = vec2(self.size * self.pill_aspect, self.size)
                 let center_px = vec2(sz_px.x * 0.5, self.rect_size.y * 0.5)
                 // The pill sits at the start of the row, or at its end when
                 // the label goes first.
@@ -383,11 +423,25 @@ script_mod! {
                 sdf.fill_keep(color_fill)
                 sdf.stroke(color_stroke, self.border_size)
 
-                // Draw toggle mark
-                let mark_padding = /** knob inset 0..6 step 0.5 */ 1.5
-                let mark_size = sz_px.y * 0.5 - self.border_size - mark_padding
-                let mark_target_y = sz_px.y - sz_px.x + self.border_size + mark_padding
-                let mark_pos_y = sz_px.y * 0.5 + self.border_size - mark_target_y * self.active
+                // The off outline: a second stroke on the pill edge that fades
+                // out as the toggle turns on.
+                if self.outline_size > 0.0 {
+                    sdf.box(
+                        offset_px.x + self.border_size
+                        offset_px.y + self.border_size
+                        sz_px.x - self.border_size * 2.
+                        sz_px.y - self.border_size * 2.
+                        self.border_radius * self.size * 0.1
+                    )
+                    sdf.stroke(self.outline_color.mix(vec4(0., 0., 0., 0.), self.active), self.outline_size)
+                }
+
+                // Draw toggle mark. While dragging the knob follows drag_pos
+                // instead of the active mix, and it grows while pressed.
+                let knob_t = mix(self.active, self.drag_pos, self.drag)
+                let mark_size = (sz_px.y * 0.5 - self.border_size - self.knob_inset) * (1.0 + self.pressed * self.knob_grow)
+                let mark_target_y = sz_px.y - sz_px.x + self.border_size + self.knob_inset
+                let mark_pos_y = sz_px.y * 0.5 + self.border_size - mark_target_y * knob_t
 
                 // Draw ring when off, filled circle when on
                 sdf.circle(offset_px.x + mark_pos_y, center_px.y, mark_size)
@@ -528,6 +582,29 @@ pub struct CheckBox {
     #[live]
     pub label_before: bool,
 
+    /// The knob follows the pointer: a drag along the track moves it and a
+    /// release commits the side it is on. A plain click still flips on press.
+    #[live]
+    pub draggable: bool,
+
+    /// The icon drawn on the toggle's knob while it is on; leave the svg
+    /// unset for none.
+    #[live]
+    pub draw_icon_on: DrawSvg,
+    /// The icon drawn on the toggle's knob while it is off.
+    #[live]
+    pub draw_icon_off: DrawSvg,
+    /// Knob icon side as a fraction of the knob's diameter.
+    #[live(0.6)]
+    pub knob_icon_size: f64,
+
+    /// The label shown while on; empty keeps `text`.
+    #[live]
+    pub text_on: String,
+    /// The label shown while off; empty keeps `text`.
+    #[live]
+    pub text_off: String,
+
     #[live]
     on_click: ScriptFnRef,
 
@@ -536,7 +613,26 @@ pub struct CheckBox {
     #[action_data]
     #[rust]
     action_data: WidgetActionData,
+
+    #[rust]
+    drag: Option<KnobDrag>,
 }
+
+/// A drag in progress on the toggle's knob.
+#[derive(Clone, Copy, Debug)]
+struct KnobDrag {
+    /// Where the pointer was when the knob started following it.
+    start_x: f64,
+    /// The knob's position along the track at that moment.
+    start_pos: f32,
+    /// The knob's position now, 0 (off) to 1 (on).
+    pos: f32,
+    /// The pointer travelled past the slop, so the knob follows it.
+    moved: bool,
+}
+
+/// Pointer travel, in layout points, before a press becomes a drag.
+const KNOB_DRAG_SLOP: f64 = 3.0;
 
 impl ScriptHook for CheckBox {
     fn on_after_new(&mut self, vm: &mut ScriptVm) {
@@ -573,8 +669,25 @@ impl CheckBox {
             live_id!(mark_at_end),
             &[if self.label_before { 1.0 } else { 0.0 }],
         );
+        // The toggle's knob follows the drag through two uniforms the
+        // animator never touches; a plain checkbox has neither and the
+        // writes fall through.
+        let (drag, drag_pos) = match self.drag {
+            Some(drag) if drag.moved => (1.0, drag.pos),
+            _ => (0.0, 0.0),
+        };
+        self.draw_bg.set_uniform(cx, live_id!(drag), &[drag]);
+        self.draw_bg.set_uniform(cx, live_id!(drag_pos), &[drag_pos]);
         self.draw_bg.begin(cx, walk, self.layout);
 
+        let on = self.animator_in_state(cx, ids!(active.on));
+        let text: &str = if on && !self.text_on.is_empty() {
+            &self.text_on
+        } else if !on && !self.text_off.is_empty() {
+            &self.text_off
+        } else {
+            self.text.as_ref()
+        };
         if self.label_before {
             // The label's outer margin clears the mark box; mirrored, it
             // clears a box at the end of the row instead.
@@ -588,17 +701,88 @@ impl CheckBox {
                 ..self.label_walk
             };
             self.draw_text
-                .draw_walk(cx, walk, self.label_align, self.text.as_ref());
+                .draw_walk(cx, walk, self.label_align, text);
             self.draw_icon.draw_walk(cx, self.icon_walk);
         } else {
             self.draw_icon.draw_walk(cx, self.icon_walk);
 
             self.draw_text
-                .draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
+                .draw_walk(cx, self.label_walk, self.label_align, text);
         }
         self.draw_bg.end(cx);
+        self.draw_knob_icons(cx);
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
         DrawStep::done()
+    }
+
+    /// The toggle's knob icons, drawn over the pill after it: the on icon
+    /// past the middle of the travel, the off icon before it. The knob's
+    /// place is recomputed from the same uniforms the shader reads, plus the
+    /// active mix as the animator has it now, so the icon rides the knob
+    /// through its slide.
+    fn draw_knob_icons(&mut self, cx: &mut Cx2d) {
+        if self.draw_icon_on.svg.is_none() && self.draw_icon_off.svg.is_none() {
+            return;
+        }
+        let Some((center, diameter, knob_t)) = self.knob_geometry(cx) else {
+            return;
+        };
+        let side = diameter * self.knob_icon_size;
+        let rect = Rect {
+            pos: center - dvec2(side * 0.5, side * 0.5),
+            size: dvec2(side, side),
+        };
+        if knob_t > 0.5 {
+            self.draw_icon_on.draw_abs(cx, rect);
+        } else {
+            self.draw_icon_off.draw_abs(cx, rect);
+        }
+    }
+
+    /// Where the toggle's knob is: its centre in window points, its
+    /// diameter, and its position along the track. `None` for a checkbox
+    /// whose shader has no pill.
+    fn knob_geometry(&mut self, cx: &mut Cx) -> Option<(DVec2, f64, f32)> {
+        let mut aspect = [0.0f32];
+        self.draw_bg.get_uniform(cx, live_id!(pill_aspect), &mut aspect);
+        let mut size = [0.0f32];
+        self.draw_bg.get_uniform(cx, live_id!(size), &mut size);
+        if aspect[0] <= 0.0 || size[0] <= 0.0 {
+            return None;
+        }
+        let mut border = [0.0f32];
+        self.draw_bg.get_uniform(cx, live_id!(border_size), &mut border);
+        let mut inset = [0.0f32];
+        self.draw_bg.get_uniform(cx, live_id!(knob_inset), &mut inset);
+        let mut active = [0.0f32];
+        self.draw_bg.get_instance(cx, live_id!(active), &mut active);
+        let knob_t = match self.drag {
+            Some(drag) if drag.moved => drag.pos,
+            _ => active[0],
+        };
+        let rect = self.draw_bg.area().rect(cx);
+        let (size, border, inset) = (size[0] as f64, border[0] as f64, inset[0] as f64);
+        let pill = dvec2(size * aspect[0] as f64, size);
+        let radius = pill.y * 0.5 - border - inset;
+        let travel = pill.y - pill.x + border + inset;
+        let along = pill.y * 0.5 + border - travel * knob_t as f64;
+        let offset_x = if self.label_before { rect.size.x - pill.x } else { 0.0 };
+        let center = dvec2(rect.pos.x + offset_x + along, rect.pos.y + rect.size.y * 0.5);
+        Some((center, radius * 2.0, knob_t))
+    }
+
+    /// How far the knob travels between off and on, in layout points.
+    fn knob_travel(&mut self, cx: &mut Cx) -> f64 {
+        let mut aspect = [0.0f32];
+        self.draw_bg.get_uniform(cx, live_id!(pill_aspect), &mut aspect);
+        let mut size = [0.0f32];
+        self.draw_bg.get_uniform(cx, live_id!(size), &mut size);
+        let mut border = [0.0f32];
+        self.draw_bg.get_uniform(cx, live_id!(border_size), &mut border);
+        let mut inset = [0.0f32];
+        self.draw_bg.get_uniform(cx, live_id!(knob_inset), &mut inset);
+        let size = size[0] as f64;
+        (size * aspect[0] as f64 - size - border[0] as f64 - inset[0] as f64).max(1.0)
     }
 
     pub fn changed(&self, actions: &Actions) -> Option<bool> {
@@ -759,9 +943,64 @@ impl Widget for CheckBox {
                     self.on_click.clone(),
                     &[ScriptValue::from_bool(new_active)],
                 );
+                self.animator_play(cx, ids!(press.on));
+                if self.draggable {
+                    self.drag = Some(KnobDrag {
+                        start_x: fe.abs.x,
+                        start_pos: 0.0,
+                        pos: 0.0,
+                        moved: false,
+                    });
+                }
             }
-            Hit::FingerUp(_fe) => {}
-            Hit::FingerMove(_fe) => {}
+            Hit::FingerUp(_fe) => {
+                self.animator_play(cx, ids!(press.off));
+                if let Some(drag) = self.drag.take() {
+                    if drag.moved {
+                        // The side the knob was released on wins, which may
+                        // undo the flip the press made.
+                        let on = drag.pos > 0.5;
+                        if on != self.animator_in_state(cx, ids!(active.on)) {
+                            self.animator_play(cx, if on { ids!(active.on) } else { ids!(active.off) });
+                            self.state = if on { CheckState::On } else { CheckState::Off };
+                            cx.widget_action_with_data(
+                                &self.action_data,
+                                uid,
+                                CheckBoxAction::Change(on),
+                            );
+                            cx.widget_to_script_call(
+                                uid,
+                                NIL,
+                                self.source.clone(),
+                                self.on_click.clone(),
+                                &[ScriptValue::from_bool(on)],
+                            );
+                        }
+                    }
+                    self.draw_bg.redraw(cx);
+                }
+            }
+            Hit::FingerMove(fe) => {
+                if let Some(mut drag) = self.drag {
+                    if !drag.moved {
+                        if (fe.abs.x - drag.start_x).abs() < KNOB_DRAG_SLOP {
+                            return;
+                        }
+                        // The knob picks up from where the slide has taken it
+                        // so far, anchored to the pointer from here on.
+                        let mut active = [0.0f32];
+                        self.draw_bg.get_instance(cx, live_id!(active), &mut active);
+                        drag.moved = true;
+                        drag.start_pos = active[0];
+                        drag.start_x = fe.abs.x;
+                    }
+                    let travel = self.knob_travel(cx);
+                    let along = drag.start_pos as f64 + (fe.abs.x - drag.start_x) / travel;
+                    drag.pos = along.clamp(0.0, 1.0) as f32;
+                    self.drag = Some(drag);
+                    self.draw_bg.redraw(cx);
+                }
+            }
             _ => (),
         }
     }
@@ -773,8 +1012,14 @@ impl Widget for CheckBox {
         self.draw_check_box(cx, walk)
     }
 
+    /// The label as shown: the on or off text when one is set for the
+    /// current state, else `text`.
     fn text(&self) -> String {
-        self.text.as_ref().to_string()
+        match self.state {
+            CheckState::On if !self.text_on.is_empty() => self.text_on.clone(),
+            CheckState::Off if !self.text_off.is_empty() => self.text_off.clone(),
+            _ => self.text.as_ref().to_string(),
+        }
     }
 
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
