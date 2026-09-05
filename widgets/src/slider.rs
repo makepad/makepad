@@ -132,11 +132,18 @@ script_mod! {
                         .mix(self.border_color_disabled, self.disabled)
                 )
 
-                // Amount
+                // Amount. From the stop, or from the default's position
+                // when the slider asks for it -- a bipolar control wants
+                // its bar to grow out of the middle in whichever
+                // direction it was moved, not to fill from one end.
+                let lo = min(self.origin_pos, self.slide_pos)
+                let hi = max(self.origin_pos, self.slide_pos)
+                let from = mix(0.0, lo, self.arc_origin)
+                let to = mix(self.slide_pos, hi, self.arc_origin)
                 sdf.rect(
-                    0
+                    from * self.rect_size.x
                     self.offset_y
-                    self.slide_pos * self.rect_size.x
+                    max(1.0, (to - from) * self.rect_size.x)
                     slider_height
                 )
                 sdf.fill(

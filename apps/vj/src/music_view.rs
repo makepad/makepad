@@ -1672,8 +1672,17 @@ script_mod! {
                 let track_x = (self.rect_size.x - track_w) * 0.5
                 sdf.box(track_x, top, track_w, h, 3.)
                 sdf.fill(self.track_color)
-                let fill_h = max(1., h * self.slide_pos)
-                sdf.box(track_x + 1.5, top + (h - fill_h) + 1.5, track_w - 3., max(1., fill_h - 3.), 2.)
+                // From the bottom, or out of the resting point when the
+                // fader asks for it: a pitch fader pulled down should
+                // show a bar hanging BELOW centre, not a shorter bar
+                // still growing from the floor.
+                let lo = min(self.origin_pos, self.slide_pos)
+                let hi = max(self.origin_pos, self.slide_pos)
+                let from = mix(0., lo, self.arc_origin)
+                let to = mix(self.slide_pos, hi, self.arc_origin)
+                let fill_h = max(1., h * (to - from))
+                let fill_bottom = top + h - h * from
+                sdf.box(track_x + 1.5, fill_bottom - fill_h + 1.5, track_w - 3., max(1., fill_h - 3.), 2.)
                 sdf.fill(self.fill_color)
                 let cap_h = 13.
                 let cap_y = top + (h - fill_h) - cap_h * 0.5
@@ -2108,7 +2117,7 @@ script_mod! {
                                 spacing: 2
                                 align: Align{x: 0.5, y: 0.0}
                                 MusicLabel{text: "TEMPO"}
-                                deck_a_pitch := MusicFader{min: -1.0 max: 1.0 default: 0.0}
+                                deck_a_pitch := MusicFader{min: -1.0 max: 1.0 default: 0.0 arc_from_origin: true}
                                 deck_a_pitch_reset := MusicButton{width: Fill height: 14 padding: 0 align: Align{x: 0.5, y: 0.5} text: "0"}
                             }
                             View{
@@ -2897,7 +2906,7 @@ script_mod! {
                                 spacing: 2
                                 align: Align{x: 0.5, y: 0.0}
                                 MusicLabel{text: "TEMPO"}
-                                deck_b_pitch := MusicFader{min: -1.0 max: 1.0 default: 0.0}
+                                deck_b_pitch := MusicFader{min: -1.0 max: 1.0 default: 0.0 arc_from_origin: true}
                                 deck_b_pitch_reset := MusicButton{width: Fill height: 14 padding: 0 align: Align{x: 0.5, y: 0.5} text: "0"}
                             }
                         }

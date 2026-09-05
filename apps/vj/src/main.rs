@@ -2734,7 +2734,8 @@ script_mod! {
                                         text: "width"
                                         min: 0.0
                                         max: 2.0
-                                        default: 1.5
+                                        default: 1.0
+                                        arc_from_origin: true
                                         unit: "x"
                                         precision: 2
                                     }
