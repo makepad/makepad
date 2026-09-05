@@ -75,6 +75,7 @@ pub mod drop_slider;
 pub mod drop_toggles;
 pub mod overlay_place;
 pub mod tip;
+pub mod popover;
 pub mod value_input;
 pub mod fab_controls;
 
@@ -177,6 +178,7 @@ pub use crate::{
     drop_down2::*,
     drop_toggles::*,
     overlay_place::*,
+    popover::*,
     expandable_panel::*,
     file_tree::*,
     flat_list::*,
@@ -596,6 +598,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::drop_slider::script_mod(vm);
     crate::drop_toggles::script_mod(vm);
     crate::tip::script_mod(vm);
+    crate::popover::script_mod(vm);
     crate::value_input::script_mod(vm);
     crate::fab_controls::script_mod(vm);
     crate::combo_box::script_mod(vm);
@@ -775,5 +778,28 @@ mod spinner_registration_tests {
         assert!(spinner.contains("mod.widgets.SpinnerFlat = set_type_default()"));
         assert_eq!(spinner.matches("set_type_default() do mod.widgets.SpinnerBase").count(), 1);
         assert!(!spinner.contains("mod.widgets.LoadingSpinner"));
+    }
+}
+
+#[cfg(test)]
+mod popover_registration_tests {
+    /// The popover registers its base, its flat default and its bevelled
+    /// variant, after the view and tip it builds on.
+    #[test]
+    fn test_popover_is_registered_after_its_bases() {
+        let lib = include_str!("lib.rs");
+        let popover = include_str!("popover.rs");
+        assert!(lib.contains("pub mod popover;"));
+        assert!(lib.contains("popover::*"));
+        assert!(lib.contains("crate::popover::script_mod(vm);"));
+        let view_at = lib.find("crate::view::script_mod(vm);").unwrap();
+        let tip_at = lib.find("crate::tip::script_mod(vm);").unwrap();
+        let popover_at = lib.find("crate::popover::script_mod(vm);").unwrap();
+        assert!(view_at < popover_at);
+        assert!(tip_at < popover_at);
+        assert!(popover.contains("mod.widgets.PopoverBase = #(Popover::register_widget(vm))"));
+        assert!(popover.contains("mod.widgets.PopoverFlat = set_type_default() do mod.widgets.PopoverBase{"));
+        assert!(popover.contains("mod.widgets.Popover = mod.widgets.PopoverFlat{"));
+        assert_eq!(popover.matches("set_type_default() do mod.widgets.PopoverBase").count(), 1);
     }
 }
