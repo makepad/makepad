@@ -5311,6 +5311,23 @@ impl DeckEngine {
         vec![DeckCmd::SetEcho { deck, fraction: state.echo_fraction() }]
     }
 
+    /// Put the echo on an explicit rung rather than stepping to the next
+    /// one -- what a dropdown sends, and what a MIX broadcast needs so
+    /// both decks land on the same rung rather than each stepping from
+    /// wherever it happened to be.
+    pub fn set_echo_rung(&mut self, deck: DeckId, rung: usize) -> Vec<DeckCmd> {
+        let rungs = crate::music_dsp::ECHO_RUNGS.len() + 1;
+        let state = self.deck_mut(deck);
+        state.echo_rung = rung.min(rungs - 1);
+        vec![DeckCmd::SetEcho { deck, fraction: state.echo_fraction() }]
+    }
+
+    /// Set the ping-pong to an explicit side, for the same reason.
+    pub fn set_echo_pingpong(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
+        self.deck_mut(deck).echo_pingpong = on;
+        vec![DeckCmd::SetEchoPingpong { deck, on }]
+    }
+
     /// Whether the echo's repeats land on the other channel.
     pub fn toggle_echo_pingpong(&mut self, deck: DeckId) -> Vec<DeckCmd> {
         let state = self.deck_mut(deck);

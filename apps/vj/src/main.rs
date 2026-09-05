@@ -2462,6 +2462,15 @@ script_mod! {
                                     sfx_fx_b := PillButton{width: 32 text: "B"}
                                     sfx_fx_mix := PillButton{width: 44 text: "MIX"}
                                     sfx_fx_levels := PillButton{width: 70 text: "LEVELS"}
+                                }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    sfx_fx_echo := PillButton{width: 62 text: "ECHO"}
+                                    sfx_fx_echo_rung := VjBeatsDrop{width: 44 echo_rows: true}
                                     sfx_fx_feedback := Slider{
                                         width: 170
                                         text: "echo feedback"
@@ -2472,6 +2481,7 @@ script_mod! {
                                         display_scale: 100.0
                                         precision: 0
                                     }
+                                    sfx_fx_echo_ping := PillButton{width: 54 text: "PING"}
                                 }
                                 View{
                                     width: Fill
@@ -3932,7 +3942,6 @@ struct DeckRefs {
     phase_flip: ButtonRef,
     mute: ButtonRef,
     resonance: ButtonRef,
-    echo: ButtonRef,
     freeze: ButtonRef,
     sync: ButtonRef,
     slip: ButtonRef,
@@ -3991,7 +4000,6 @@ impl DeckRefs {
             phase_flip: ui.button(cx, ids.phase_flip),
             mute: ui.button(cx, ids.mute),
             resonance: ui.button(cx, ids.resonance),
-            echo: ui.button(cx, ids.echo),
             freeze: ui.button(cx, ids.freeze),
             sync: ui.button(cx, ids.sync),
             slip: ui.button(cx, ids.slip),
@@ -4108,7 +4116,6 @@ struct MusicDeckIds {
     /// The RES chip under the sweep knob: how hard the filter rings.
     resonance: &'static [LiveId],
     /// The ECHO chip beside it: the beat-quantised repeat.
-    echo: &'static [LiveId],
     /// The momentary FREEZE chip: the third of the sweep row's three.
     freeze: &'static [LiveId],
     sync: &'static [LiveId],
@@ -4170,7 +4177,6 @@ impl MusicDeckIds {
                 phase_flip: ids!(deck_a_phase_flip),
                 mute: ids!(deck_a_mute),
                 resonance: ids!(deck_a_resonance),
-                echo: ids!(deck_a_echo),
                 freeze: ids!(deck_a_freeze),
                 sync: ids!(deck_a_sync),
                 slip: ids!(deck_a_slip),
@@ -4259,7 +4265,6 @@ impl MusicDeckIds {
                 phase_flip: ids!(deck_b_phase_flip),
                 mute: ids!(deck_b_mute),
                 resonance: ids!(deck_b_resonance),
-                echo: ids!(deck_b_echo),
                 freeze: ids!(deck_b_freeze),
                 sync: ids!(deck_b_sync),
                 slip: ids!(deck_b_slip),
@@ -14854,6 +14859,7 @@ p2 {}
         );
         let deck_level_default = deck.level_default;
         let lvl_echo = (deck.echo_level_mode, deck.echo_mix as f64, deck.echo_ceiling as f64);
+        let (echo_rung, echo_pingpong) = (deck.echo_rung, deck.echo_pingpong);
         let lvl_flanger = (deck.flanger_level_mode, deck.flanger_mix as f64, deck.flanger_ceiling as f64);
         let lvl_bitcrusher = (deck.bitcrusher_level_mode, deck.bitcrusher_mix as f64, deck.bitcrusher_ceiling as f64);
         let lvl_tremolo = (deck.tremolo_level_mode, deck.tremolo_mix as f64, deck.tremolo_ceiling as f64);
@@ -14873,6 +14879,15 @@ p2 {}
             (deck.autopan_sync_units, deck.autopan_beat_offset as f64),
         ];
         self.ui.slider(cx, ids!(sfx_fx_feedback)).set_value(cx, feedback);
+        // The echo's rung reads off, 1, 1/2 or 1/4; the chip beside it
+        // lights whenever it is on at all.
+        if let Some(mut drop) =
+            self.ui.widget(cx, ids!(sfx_fx_echo_rung)).borrow_mut::<views::VjBeatsDrop>()
+        {
+            drop.set_value(cx, echo_rung as u32);
+        }
+        self.paint_chip(cx, ids!(sfx_fx_echo), echo_rung > 0, None);
+        self.paint_chip(cx, ids!(sfx_fx_echo_ping), echo_pingpong, None);
         self.paint_chip(cx, ids!(sfx_fx_flanger), flanger_on, None);
         self.ui.slider(cx, ids!(sfx_fx_flanger_rate)).set_value(cx, flanger_rate);
         let (flanger_units, flanger_offset) = sync_rungs[0];
@@ -24361,23 +24376,6 @@ p2 {}
             if refs.resonance.text() != word {
                 refs.resonance.set_text(cx, word);
             }
-            self.paint_lit(cx, ids.echo, echo_rung > 0);
-            // Two characters, matching the row's other two-character
-            // state ("R+"): the rung as its own denominator (whole,
-            // half, quarter beat), "P" prefixed while ping-pong is on,
-            // "E" otherwise.
-            let word = match (echo_rung, echo_pingpong) {
-                (0, _) => "E",
-                (1, false) => "E1",
-                (1, true) => "P1",
-                (2, false) => "E2",
-                (2, true) => "P2",
-                (_, false) => "E4",
-                (_, true) => "P4",
-            };
-            if refs.echo.text() != word {
-                refs.echo.set_text(cx, word);
-            }
             self.paint_lit(cx, ids.freeze, self.decks.frozen(deck));
             for (band, solo) in ids.eq_solos.iter().enumerate() {
                 self.paint_lit(cx, solo, eq_solo[band]);
@@ -27075,14 +27073,6 @@ p2 {}
             }
             if refs.resonance.clicked(actions) {
                 let cmds = self.decks.cycle_resonance(deck);
-                self.run_deck_cmds(cx, cmds);
-            }
-            if let Some(modifiers) = refs.echo.clicked_modifiers(actions) {
-                let cmds = if modifiers.shift {
-                    self.decks.toggle_echo_pingpong(deck)
-                } else {
-                    self.decks.cycle_echo(deck)
-                };
                 self.run_deck_cmds(cx, cmds);
             }
             if refs.freeze.pressed_modifiers(actions).is_some() {
@@ -30611,6 +30601,65 @@ impl MatchEvent for App {
             };
             self.run_deck_cmds(cx, cmds);
             self.save_fx_levels_settings();
+        }
+        if self.ui.button(cx, ids!(sfx_fx_echo)).clicked(actions) {
+            // The chip is the quick on/off the deck strip's E used to be:
+            // off when it is sounding, and back to a beat when it is not.
+            let rung = match self.decks.deck(self.sfx_fx_deck()).echo_rung {
+                0 => 1,
+                _ => 0,
+            };
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_echo_rung(DeckId::A, rung),
+                FxTarget::B => self.decks.set_echo_rung(DeckId::B, rung),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_echo_rung(DeckId::A, rung);
+                    cmds.extend(self.decks.set_echo_rung(DeckId::B, rung));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+            self.sync_sfx_fx_ui(cx);
+        }
+        {
+            let uid = self.ui.widget(cx, ids!(sfx_fx_echo_rung)).widget_uid();
+            let mut picked = None;
+            for action in actions.iter() {
+                if let Some(wa) = action.as_widget_action() {
+                    if wa.widget_uid == uid {
+                        if let views::VjBeatsDropAction::Picked(rung) = wa.cast() {
+                            picked = Some(rung as usize);
+                        }
+                    }
+                }
+            }
+            if let Some(rung) = picked {
+                let cmds = match self.sfx_fx_target {
+                    FxTarget::A => self.decks.set_echo_rung(DeckId::A, rung),
+                    FxTarget::B => self.decks.set_echo_rung(DeckId::B, rung),
+                    FxTarget::Mix => {
+                        let mut cmds = self.decks.set_echo_rung(DeckId::A, rung);
+                        cmds.extend(self.decks.set_echo_rung(DeckId::B, rung));
+                        cmds
+                    }
+                };
+                self.run_deck_cmds(cx, cmds);
+                self.sync_sfx_fx_ui(cx);
+            }
+        }
+        if self.ui.button(cx, ids!(sfx_fx_echo_ping)).clicked(actions) {
+            let on = !self.decks.deck(self.sfx_fx_deck()).echo_pingpong;
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_echo_pingpong(DeckId::A, on),
+                FxTarget::B => self.decks.set_echo_pingpong(DeckId::B, on),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_echo_pingpong(DeckId::A, on);
+                    cmds.extend(self.decks.set_echo_pingpong(DeckId::B, on));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+            self.sync_sfx_fx_ui(cx);
         }
         if self.ui.button(cx, ids!(sfx_fx_flanger)).clicked(actions) {
             let cmds = match self.sfx_fx_target {

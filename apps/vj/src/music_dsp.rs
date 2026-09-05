@@ -1554,6 +1554,12 @@ fn pade_tanh(x: f32) -> f32 {
 /// The fractions the echo chip cycles through: whole, half, quarter beat.
 pub const ECHO_RUNGS: [(u32, u32); 3] = [(1, 1), (1, 2), (1, 4)];
 
+/// The rows the echo's own dropdown serves: off, then each rung above,
+/// by the index `DeckState::echo_rung` keeps. Off is zero, matching the
+/// LFO ladder beside it on the same page.
+pub const ECHO_RUNG_ROWS: [(u32, &str); 4] =
+    [(0, "off"), (1, "1"), (2, "1/2"), (3, "1/4")];
+
 /// Frames the delay line holds — a power of two so the write index is a
 /// mask. At 48 kHz this is 5.46 seconds, a whole beat down to about
 /// 11 BPM; at 192 kHz, 1.37 seconds, down to about 44 BPM. Below that a

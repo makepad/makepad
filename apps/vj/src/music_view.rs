@@ -2208,7 +2208,6 @@ script_mod! {
                                     // way M and S already are.
                                     MSRow{
                                         deck_a_resonance := MSButton{text: "R"}
-                                        deck_a_echo := MSButton{text: "E"}
                                         deck_a_freeze := MSButton{text: "F"}
                                     }
                                 }
@@ -2720,7 +2719,6 @@ script_mod! {
                                     // way M and S already are.
                                     MSRow{
                                         deck_b_resonance := MSButton{text: "R"}
-                                        deck_b_echo := MSButton{text: "E"}
                                         deck_b_freeze := MSButton{text: "F"}
                                     }
                                 }

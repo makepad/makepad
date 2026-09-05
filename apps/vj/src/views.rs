@@ -2453,6 +2453,10 @@ pub struct VjBeatsDrop {
     /// alone, match the input, or hold under a ceiling.
     #[live]
     level_rows: bool,
+    /// Serve the echo's own ladder: off, then a beat, a half and a
+    /// quarter.
+    #[live]
+    echo_rows: bool,
     #[rust(1u32)]
     value: u32,
     /// Transient display override (the scratch hand's "—").
@@ -2470,7 +2474,9 @@ pub struct VjBeatsDrop {
 
 impl VjBeatsDrop {
     fn rows(&self) -> &'static [(u32, &'static str)] {
-        if self.level_rows {
+        if self.echo_rows {
+            &crate::music_dsp::ECHO_RUNG_ROWS
+        } else if self.level_rows {
             &crate::music_dsp::LEVEL_MODE_ROWS
         } else if self.lfo_rows {
             &crate::music_dsp::LFO_SYNC_ROWS
