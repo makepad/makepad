@@ -14671,6 +14671,9 @@ p2 {}
                 DeckCmd::SetLevelDefault { deck, mode } => {
                     self.mixer.set_deck_level_default(deck, mode)
                 }
+                DeckCmd::SetCrossovers { deck, low_hz, high_hz } => {
+                    self.mixer.set_deck_crossovers(deck, low_hz, high_hz)
+                }
                 DeckCmd::SetStereoWidth { deck, on } => self.mixer.set_deck_stereo_width(deck, on),
                 DeckCmd::SetStereoWidthAmount { deck, amount } => {
                     self.mixer.set_deck_stereo_width_amount(deck, amount)

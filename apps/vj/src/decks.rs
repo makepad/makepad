@@ -1416,6 +1416,9 @@ pub struct DeckState {
     pub moog_ladder_ceiling: f32,
     /// The policy every effect that has not been pinned follows.
     pub level_default: crate::music_dsp::LevelMode,
+    /// Where this deck's three EQ bands are split, in Hz.
+    pub eq_low_hz: f32,
+    pub eq_high_hz: f32,
     /// Whether the stereo width is on. Same channel-strip treatment as
     /// the autopan beside it.
     pub stereo_width_on: bool,
@@ -1558,6 +1561,8 @@ impl Default for DeckState {
             moog_ladder_level_mode: crate::music_dsp::LevelMode::Follow,
             moog_ladder_ceiling: 1.0,
             level_default: crate::music_dsp::LevelMode::Off,
+            eq_low_hz: crate::music_dsp::EQ_LOW_HZ,
+            eq_high_hz: crate::music_dsp::EQ_HIGH_HZ,
             stereo_width_on: false,
             stereo_width_amount: crate::music_dsp::STEREO_WIDTH_DEFAULT,
             plate_reverb_on: false,
@@ -1963,6 +1968,7 @@ pub enum DeckCmd {
     SetMoogLadderLevelMode { deck: DeckId, mode: crate::music_dsp::LevelMode },
     SetMoogLadderCeiling { deck: DeckId, ceiling: f32 },
     SetLevelDefault { deck: DeckId, mode: crate::music_dsp::LevelMode },
+    SetCrossovers { deck: DeckId, low_hz: f32, high_hz: f32 },
     SetStereoWidth { deck: DeckId, on: bool },
     /// How far the side signal is scaled: 0 collapses to mono, 1 is the
     /// original image, above 1 widens further.
@@ -2475,6 +2481,11 @@ impl DeckEngine {
             DeckCmd::SetMoogLadderLevelMode { deck, mode: state.moog_ladder_level_mode },
             DeckCmd::SetMoogLadderCeiling { deck, ceiling: state.moog_ladder_ceiling },
             DeckCmd::SetLevelDefault { deck, mode: state.level_default },
+            DeckCmd::SetCrossovers {
+                deck,
+                low_hz: state.eq_low_hz,
+                high_hz: state.eq_high_hz,
+            },
             DeckCmd::SetStereoWidth { deck, on: state.stereo_width_on },
             DeckCmd::SetStereoWidthAmount { deck, amount: state.stereo_width_amount },
             DeckCmd::SetPlateReverb { deck, on: state.plate_reverb_on },
@@ -5252,6 +5263,22 @@ impl DeckEngine {
     }
 
     // ---- tone + stems -------------------------------------------------------
+
+    /// Where this deck's bands are split. Clamped the same way the
+    /// engine clamps, so the stored value and the audible one agree, and
+    /// the gap between the corners is the engine's to keep.
+    pub fn set_crossovers(&mut self, deck: DeckId, low_hz: f32, high_hz: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.eq_low_hz = low_hz
+            .clamp(crate::music_dsp::EQ_LOW_HZ_MIN, crate::music_dsp::EQ_LOW_HZ_MAX);
+        state.eq_high_hz = high_hz
+            .clamp(crate::music_dsp::EQ_HIGH_HZ_MIN, crate::music_dsp::EQ_HIGH_HZ_MAX);
+        vec![DeckCmd::SetCrossovers {
+            deck,
+            low_hz: state.eq_low_hz,
+            high_hz: state.eq_high_hz,
+        }]
+    }
 
     pub fn set_eq(&mut self, deck: DeckId, band: usize, gain: f32) -> Vec<DeckCmd> {
         if band >= 3 {

@@ -3395,6 +3395,20 @@ impl Mixer {
     }
 
     /// One tone band, 0 = kill.
+    /// Where this deck's three bands are split. The corners glide to
+    /// where they are sent rather than jumping, so this can be moved
+    /// under a playing record.
+    pub fn set_deck_crossovers(&self, deck: DeckId, low_hz: f32, high_hz: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.eq_mut().set_crossovers(low_hz, high_hz);
+    }
+
+    /// And the same for the mix's own chain.
+    pub fn set_master_crossovers(&self, low_hz: f32, high_hz: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.master_chain.eq_mut().set_crossovers(low_hz, high_hz);
+    }
+
     pub fn set_deck_eq_band(&self, deck: DeckId, band: usize, gain: f32) {
         self.state.lock().unwrap().decks[deck.index()].chain.eq_mut().set_band(band, gain);
     }

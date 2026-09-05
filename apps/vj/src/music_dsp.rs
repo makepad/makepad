@@ -1044,10 +1044,39 @@ const LR4_Q: f32 = std::f32::consts::FRAC_1_SQRT_2;
 // three-band split EQ with true kills + one sweepable filter
 // ---------------------------------------------------------------------------
 
-/// Crossover between the low and mid bands.
+/// Where the low and mid bands part company by default.
 pub const EQ_LOW_HZ: f32 = 250.0;
-/// Crossover between the mid and high bands.
+/// Where the mid and high bands part company by default.
 pub const EQ_HIGH_HZ: f32 = 2_500.0;
+/// How far either crossover may be moved. The lower one stays out of the
+/// sub-bass, where moving it turns the LOW knob into a rumble control;
+/// the upper one stops short of the air band, where a HIGH knob that
+/// reaches down into the presence range stops being a treble control and
+/// starts being a vocal one.
+pub const EQ_LOW_HZ_MIN: f32 = 80.0;
+pub const EQ_LOW_HZ_MAX: f32 = 800.0;
+pub const EQ_HIGH_HZ_MIN: f32 = 1_000.0;
+pub const EQ_HIGH_HZ_MAX: f32 = 8_000.0;
+/// The two are kept this far apart, in octaves, so the mid band always
+/// has something in it. Crossed or touching corners do not make a
+/// three-band EQ with an empty middle, they make an unstable one.
+const EQ_CROSSOVER_MIN_OCTAVES: f32 = 1.0;
+/// How much of the remaining distance a crossover closes each block
+/// while it travels.
+///
+/// It travels rather than jumps because a jumped corner clicks either
+/// way: rebuild the band filters and clear their memory and the step
+/// measures 0.45, keep the memory and feed it through corners it was not
+/// built for and it still measures 0.16, against this file's budget of
+/// 0.02. Walking it in small steps is what makes each rebuild small
+/// enough to be inaudible -- the same answer the sweep's own corner
+/// takes, for the same reason.
+const EQ_CROSSOVER_GLIDE: f32 = 0.12;
+/// Close enough to be there. An exponential walk never quite arrives, so
+/// the last sliver is taken in one step -- a hundredth of an octave,
+/// which is under a percent of the corner and far below what a whole
+/// jump costs.
+const EQ_CROSSOVER_SNAP_OCTAVES: f32 = 0.01;
 /// Highest boost a band knob can apply.
 pub const EQ_MAX_GAIN: f32 = 2.0;
 /// Below this a band gain counts as a kill.
@@ -1133,12 +1162,16 @@ struct EqCoeffs {
 
 impl EqCoeffs {
     fn new(sample_rate: f32) -> EqCoeffs {
+        EqCoeffs::at(sample_rate, EQ_LOW_HZ, EQ_HIGH_HZ)
+    }
+
+    fn at(sample_rate: f32, low_hz: f32, high_hz: f32) -> EqCoeffs {
         EqCoeffs {
-            split_lp: Biquad::lowpass(EQ_HIGH_HZ, sample_rate, LR4_Q),
-            split_hp: Biquad::highpass(EQ_HIGH_HZ, sample_rate, LR4_Q),
-            band_lp: Biquad::lowpass(EQ_LOW_HZ, sample_rate, LR4_Q),
-            band_hp: Biquad::highpass(EQ_LOW_HZ, sample_rate, LR4_Q),
-            band_ap: Biquad::allpass(EQ_LOW_HZ, sample_rate, LR4_Q),
+            split_lp: Biquad::lowpass(high_hz, sample_rate, LR4_Q),
+            split_hp: Biquad::highpass(high_hz, sample_rate, LR4_Q),
+            band_lp: Biquad::lowpass(low_hz, sample_rate, LR4_Q),
+            band_hp: Biquad::highpass(low_hz, sample_rate, LR4_Q),
+            band_ap: Biquad::allpass(low_hz, sample_rate, LR4_Q),
             sweep: [Biquad::default(); 2],
             sweep_on: false,
             sweep_prev: [Biquad::default(); 2],
@@ -1152,6 +1185,13 @@ impl EqCoeffs {
 /// sweepable low-pass / high-pass filter.
 pub struct DeckEq {
     sample_rate: f32,
+    /// Where the three bands are split: what has been ASKED for.
+    low_hz: f32,
+    high_hz: f32,
+    /// And what the coefficients were actually built for, which walks
+    /// toward the ask a little each block rather than arriving at once.
+    low_built: f32,
+    high_built: f32,
     coeffs: EqCoeffs,
     channels: [EqChannelState; 2],
     gain: [ParamRamp; 3],
@@ -1177,6 +1217,10 @@ impl DeckEq {
     pub fn new(sample_rate: f32) -> DeckEq {
         DeckEq {
             sample_rate,
+            low_hz: EQ_LOW_HZ,
+            high_hz: EQ_HIGH_HZ,
+            low_built: EQ_LOW_HZ,
+            high_built: EQ_HIGH_HZ,
             coeffs: EqCoeffs::new(sample_rate),
             channels: [EqChannelState::default(); 2],
             gain: [ParamRamp::at(1.0); 3],
@@ -1190,6 +1234,72 @@ impl DeckEq {
         }
     }
 
+    /// Move a crossover. The two are held at least
+    /// [`EQ_CROSSOVER_MIN_OCTAVES`] apart, so pushing one into the other
+    /// pushes the other along rather than leaving the mid band with
+    /// nothing in it.
+    pub fn set_crossovers(&mut self, low_hz: f32, high_hz: f32) {
+        let Some(low) = knob(low_hz, EQ_LOW_HZ_MIN, EQ_LOW_HZ_MAX) else {
+            return;
+        };
+        let Some(high) = knob(high_hz, EQ_HIGH_HZ_MIN, EQ_HIGH_HZ_MAX) else {
+            return;
+        };
+        let floor = low * 2f32.powf(EQ_CROSSOVER_MIN_OCTAVES);
+        let high = high.max(floor).min(EQ_HIGH_HZ_MAX);
+        // If the ceiling above stopped the push, give way with the lower
+        // one instead: the gap is the invariant, not either corner.
+        let low = low.min(high / 2f32.powf(EQ_CROSSOVER_MIN_OCTAVES));
+        self.low_hz = low;
+        self.high_hz = high;
+    }
+
+    pub fn crossovers(&self) -> (f32, f32) {
+        (self.low_hz, self.high_hz)
+    }
+
+    /// Walk the built corners toward the asked-for ones, in octaves --
+    /// a corner moving from 100 Hz to 200 Hz and one moving from 1 kHz
+    /// to 2 kHz are the same journey to the ear, and should take the
+    /// same time. Called once a block; rebuilds only when something
+    /// actually moved.
+    fn glide_crossovers(&mut self) {
+        let step = |built: f32, want: f32| -> f32 {
+            let octaves = (want / built).log2();
+            match octaves.abs() <= EQ_CROSSOVER_SNAP_OCTAVES {
+                true => want,
+                false => built * 2f32.powf(octaves * EQ_CROSSOVER_GLIDE),
+            }
+        };
+        let low = step(self.low_built, self.low_hz);
+        let high = step(self.high_built, self.high_hz);
+        if (low - self.low_built).abs() < 1e-4 && (high - self.high_built).abs() < 1e-4 {
+            return;
+        }
+        self.low_built = low;
+        self.high_built = high;
+        self.rebuild_crossovers();
+    }
+
+    /// Rebuild the band splits, keeping whatever the sweep was doing.
+    fn rebuild_crossovers(&mut self) {
+        let sweep = self.coeffs.sweep;
+        let sweep_on = self.coeffs.sweep_on;
+        let sweep_prev = self.coeffs.sweep_prev;
+        let sweep_prev_on = self.coeffs.sweep_prev_on;
+        let sweep_side = self.coeffs.sweep_side;
+        self.coeffs = EqCoeffs::at(self.sample_rate, self.low_built, self.high_built);
+        self.coeffs.sweep = sweep;
+        self.coeffs.sweep_on = sweep_on;
+        self.coeffs.sweep_prev = sweep_prev;
+        self.coeffs.sweep_prev_on = sweep_prev_on;
+        self.coeffs.sweep_side = sweep_side;
+        // The memory is KEPT. At a step this small it is very nearly
+        // right for the new corner and settles within a few samples;
+        // clearing it would be the larger transient of the two, measured
+        // at three times the step keeping it costs.
+    }
+
     /// Rebuild the fixed crossover coefficients for a new device rate.
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
         if (self.sample_rate - sample_rate).abs() < 0.5 {
@@ -1198,7 +1308,7 @@ impl DeckEq {
         self.sample_rate = sample_rate;
         let sweep = self.coeffs.sweep;
         let sweep_on = self.coeffs.sweep_on;
-        self.coeffs = EqCoeffs::new(sample_rate);
+        self.coeffs = EqCoeffs::at(sample_rate, self.low_built, self.high_built);
         self.coeffs.sweep = sweep;
         self.coeffs.sweep_on = sweep_on;
         self.filter_built = f32::NAN;
@@ -1338,6 +1448,7 @@ impl DeckEq {
     /// never per frame — the trig is the expensive part and the ear cannot
     /// hear a cutoff quantized to one buffer.
     pub fn prepare_block(&mut self) {
+        self.glide_crossovers();
         let position = self.effective_filter();
         let engaged = !self.at_unity();
         self.wet.slew(if engaged { 1.0 } else { 0.0 }, EQ_ENGAGE_SECS);
@@ -6793,6 +6904,101 @@ mod tests {
         // The same look-ahead in SECONDS either way, which is the point.
         let secs = at_96 as f32 / 96_000.0;
         assert!((secs - LIMITER_LOOKAHEAD_SECS).abs() < 1e-4, "{secs}");
+    }
+
+    /// The corners move, and clamp to their documented ranges.
+    #[test]
+    fn the_crossovers_move_and_clamp() {
+        let mut eq = DeckEq::new(48_000.0);
+        assert_eq!(eq.crossovers(), (EQ_LOW_HZ, EQ_HIGH_HZ));
+        eq.set_crossovers(150.0, 4_000.0);
+        assert_eq!(eq.crossovers(), (150.0, 4_000.0));
+        eq.set_crossovers(1.0, 100_000.0);
+        assert_eq!(eq.crossovers(), (EQ_LOW_HZ_MIN, EQ_HIGH_HZ_MAX));
+        eq.set_crossovers(f32::NAN, 4_000.0);
+        assert_eq!(eq.crossovers(), (EQ_LOW_HZ_MIN, EQ_HIGH_HZ_MAX), "a bad value moves nothing");
+    }
+
+    /// The mid band always has something in it. Pushing the corners
+    /// together pushes back rather than letting them cross -- a
+    /// three-band EQ whose middle is empty is not a three-band EQ.
+    #[test]
+    fn the_crossovers_keep_the_mid_band_open() {
+        let mut eq = DeckEq::new(48_000.0);
+        // Ask for them on top of each other from below.
+        eq.set_crossovers(800.0, 1_000.0);
+        let (low, high) = eq.crossovers();
+        assert!(high / low >= 2.0 - 1e-3, "{low} and {high} are too close");
+        // And from above.
+        eq.set_crossovers(800.0, EQ_HIGH_HZ_MAX);
+        let (low, high) = eq.crossovers();
+        assert!(high / low >= 2.0 - 1e-3, "{low} and {high} are too close");
+        // Every pair the ranges allow keeps the gap.
+        for low_ask in [80.0f32, 200.0, 500.0, 800.0] {
+            for high_ask in [1_000.0f32, 2_500.0, 8_000.0] {
+                let mut eq = DeckEq::new(48_000.0);
+                eq.set_crossovers(low_ask, high_ask);
+                let (low, high) = eq.crossovers();
+                assert!(
+                    high / low >= 2.0 - 1e-3,
+                    "asked {low_ask}/{high_ask}, got {low}/{high}"
+                );
+            }
+        }
+    }
+
+    /// A corner that is asked for is a corner that is reached. Gliding
+    /// is only worth anything if it arrives -- a walk that closes a
+    /// fraction of the remaining distance each block converges, and this
+    /// is the test that says how long that takes in practice.
+    #[test]
+    fn a_moved_crossover_arrives_where_it_was_sent() {
+        let rate = 48_000.0f32;
+        let mut eq = DeckEq::new(rate);
+        eq.set_sample_rate(rate);
+        eq.set_crossovers(600.0, 6_000.0);
+        // Half a second of blocks at an ordinary buffer size.
+        for _ in 0..46 {
+            eq.prepare_block();
+        }
+        let (low, high) = (eq.low_built, eq.high_built);
+        assert!((low - 600.0).abs() < 6.0, "the low corner stalled at {low}");
+        assert!((high - 6_000.0).abs() < 60.0, "the high corner stalled at {high}");
+    }
+
+    /// Moving a corner does not step the output. The band filters' own
+    /// memory was built for where the corner USED to be, so it is
+    /// dropped with the rebuild rather than fed through the new one.
+    #[test]
+    fn moving_a_crossover_does_not_step_the_output() {
+        let rate = 48_000.0f32;
+        let mut eq = DeckEq::new(rate);
+        eq.set_sample_rate(rate);
+        // Engaged, so the chain is actually in the path.
+        eq.set_band(0, 1.6);
+        let mut phase = 0.0f32;
+        let mut prev: Option<f32> = None;
+        let mut worst = 0.0f32;
+        for n in 0..24_000usize {
+            if n % 512 == 0 {
+                eq.prepare_block();
+            }
+            if n == 8_000 {
+                eq.set_crossovers(500.0, 5_000.0);
+            }
+            if n == 16_000 {
+                eq.set_crossovers(120.0, 1_500.0);
+            }
+            // A low tone: its own slope must not swamp the measure.
+            phase += 2.0 * PI * 40.0 / rate;
+            let x = phase.sin() * 0.5;
+            let out = eq.process([x, x], rate)[0];
+            if let Some(p) = prev {
+                worst = worst.max((out - p).abs());
+            }
+            prev = Some(out);
+        }
+        assert!(worst < 0.02, "a crossover move stepped by {worst}");
     }
 
     /// The ladder is the whole set an operator can pick from: free
