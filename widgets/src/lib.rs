@@ -40,6 +40,7 @@ pub mod animated_image_gif;
 pub mod badge;
 pub mod button_group;
 pub mod chip;
+pub mod menu;
 pub mod browser;
 pub mod button;
 pub mod check_box;
@@ -167,6 +168,7 @@ pub use crate::{
     badge::*,
     button_group::*,
     chip::*,
+    menu::*,
     placeholder::*,
     animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
     // loading_spinner - no public exports
@@ -621,6 +623,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::badge::script_mod(vm);
     crate::chip::script_mod(vm);
     crate::button_group::script_mod(vm);
+    crate::menu::script_mod(vm);
     crate::placeholder::script_mod(vm);
 
     crate::bare_step::script_mod(vm);
