@@ -46,7 +46,7 @@ use crate::{
     event::TouchState,
     makepad_derive_widget::*,
     makepad_draw::*,
-    overlay_place::{place, PlaceAlign, PlaceRequest, Placement, Side},
+    overlay_place::{claim_escape, place, PlaceAlign, PlaceRequest, Placement, Side},
     view::*,
     widget::*,
     widget_tree::CxWidgetExt,
@@ -1164,7 +1164,10 @@ impl Widget for Popover {
                 self.pointer_at(cx, None);
             }
             Event::KeyDown(ke) if ke.key_code == KeyCode::Escape => {
-                if self.open && !inner_held {
+                // Nothing locked above this popover, and no other overlay
+                // has taken this press: both, or the press unwinds more
+                // than one level.
+                if self.open && !inner_held && claim_escape(cx) {
                     self.dismiss(cx);
                 }
             }

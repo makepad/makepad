@@ -29,6 +29,8 @@
 //! a negative size or an inside-out rect gives a degenerate answer, not a
 //! crash on the event thread.
 
+use crate::makepad_draw::*;
+
 use crate::makepad_draw::{dvec2, DVec2, Rect};
 
 /** Which edge of the anchor the popup hangs off. */
@@ -68,6 +70,36 @@ pub enum PlaceAlign {
     Center,
     /** The popup's high edge on the anchor's high edge (right edges, or bottom edges). */
     End,
+}
+
+/// Which event last had its Escape claimed by an overlay.
+#[derive(Default)]
+struct EscapeClaim {
+    event_id: u64,
+}
+
+/// Claim this Escape for one overlay, and answer whether the claim was
+/// won.
+///
+/// Overlays cannot decide this from the lock stack. They are dispatched in
+/// tree order, not innermost-first, and the first one to act releases its
+/// lock as it closes; the next one down then looks, sees nothing above it
+/// and closes too, so one press unwinds the whole stack. A claim keyed to
+/// the event settles it: the first overlay to ask gets the press and every
+/// other one leaves it alone until the next.
+///
+/// The dispatch order decides who asks first, so an overlay should still
+/// check that nothing is locked above it before asking — the claim stops
+/// the second closer, and the lock check stops the wrong one from being
+/// first.
+pub fn claim_escape(cx: &mut Cx) -> bool {
+    let event_id = cx.event_id();
+    let claim = cx.global::<EscapeClaim>();
+    if claim.event_id == event_id {
+        return false;
+    }
+    claim.event_id = event_id;
+    true
 }
 
 /** A side and an alignment: one of the twelve places a popup can hang. */

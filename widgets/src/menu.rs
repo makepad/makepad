@@ -40,7 +40,7 @@
 use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
-    overlay_place::{place, PlaceAlign, PlaceRequest, Placement, Side},
+    overlay_place::{claim_escape, place, PlaceAlign, PlaceRequest, Placement, Side},
     widget::*,
 };
 
@@ -910,6 +910,11 @@ impl MenuLayer {
         let last = self.levels.len() - 1;
         match ke.key_code {
             KeyCode::Escape => {
+                // One press closes one overlay: the menu asks for it, and
+                // leaves it alone if something inside it got there first.
+                if !claim_escape(cx) {
+                    return true;
+                }
                 if self.close(cx).is_some() {
                     self.unlock_input(cx);
                 }
