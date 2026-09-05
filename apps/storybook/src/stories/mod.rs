@@ -18,6 +18,7 @@ pub mod align_scroll;
 pub mod icon;
 pub mod iconset;
 pub mod image;
+pub mod imageblend;
 
 pub fn script_mod(vm: &mut ScriptVm) {
     welcome::script_mod(vm);
@@ -34,6 +35,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     icon::script_mod(vm);
     iconset::script_mod(vm);
     image::script_mod(vm);
+    imageblend::script_mod(vm);
 }
 
 pub fn tables() -> &'static [&'static [Story]] {
@@ -52,5 +54,6 @@ pub fn tables() -> &'static [&'static [Story]] {
         icon::STORIES,
         iconset::STORIES,
         image::STORIES,
+        imageblend::STORIES,
     ]
 }
