@@ -22,6 +22,7 @@ pub mod imageblend;
 pub mod rotatedimage;
 pub mod glasspanel;
 pub mod linklabel;
+pub mod markdown;
 
 pub fn script_mod(vm: &mut ScriptVm) {
     welcome::script_mod(vm);
@@ -42,6 +43,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     rotatedimage::script_mod(vm);
     glasspanel::script_mod(vm);
     linklabel::script_mod(vm);
+    markdown::script_mod(vm);
 }
 
 pub fn tables() -> &'static [&'static [Story]] {
@@ -64,5 +66,6 @@ pub fn tables() -> &'static [&'static [Story]] {
         rotatedimage::STORIES,
         glasspanel::STORIES,
         linklabel::STORIES,
+        markdown::STORIES,
     ]
 }
