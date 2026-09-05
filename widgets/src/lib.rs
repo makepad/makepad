@@ -38,6 +38,7 @@ pub mod view_ui;
 
 pub mod animated_image_gif;
 pub mod badge;
+pub mod button_group;
 pub mod chip;
 pub mod browser;
 pub mod button;
@@ -164,6 +165,7 @@ pub use crate::{
     divider::*,
     animated_image_gif::*,
     badge::*,
+    button_group::*,
     chip::*,
     placeholder::*,
     animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
@@ -618,6 +620,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::glass_panel::script_mod(vm);
     crate::badge::script_mod(vm);
     crate::chip::script_mod(vm);
+    crate::button_group::script_mod(vm);
     crate::placeholder::script_mod(vm);
 
     crate::bare_step::script_mod(vm);
@@ -762,6 +765,34 @@ mod progress_registration_tests {
         assert!(progress.contains("mod.widgets.ProgressBarFlat = set_type_default()"));
         assert!(progress.contains("mod.widgets.splat(mod.widgets.Intent)"));
         assert_eq!(progress.matches("set_type_default() do mod.widgets.ProgressBarBase").count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod button_group_registration_tests {
+    /// The group and the segmented control register after the button and
+    /// chip modules they build on, each with one type default at the flat
+    /// rung of the ladder.
+    #[test]
+    fn test_button_group_is_registered_after_its_bases() {
+        let lib = include_str!("lib.rs");
+        let group = include_str!("button_group.rs");
+        assert!(lib.contains("pub mod button_group;"));
+        assert!(lib.contains("button_group::*"));
+        let at = lib.find("crate::button_group::script_mod(vm);").expect("registered");
+        for base in [
+            "crate::view::script_mod(vm);",
+            "crate::button::script_mod(vm);",
+            "crate::chip::script_mod(vm);",
+        ] {
+            assert!(lib.find(base).expect(base) < at, "{base} must register before the group");
+        }
+        assert!(group.contains("mod.widgets.ButtonGroupBase = #(ButtonGroup::register_widget(vm))"));
+        assert!(group.contains("mod.widgets.SegmentedControlBase = #(SegmentedControl::register_widget(vm))"));
+        assert!(group.contains("mod.widgets.SegmentedControlFlat = set_type_default()"));
+        assert!(group.contains("mod.widgets.SegmentedControl = mod.widgets.SegmentedControlFlat{"));
+        assert_eq!(group.matches("set_type_default() do mod.widgets.ButtonGroupBase").count(), 1);
+        assert_eq!(group.matches("set_type_default() do mod.widgets.SegmentedControlBase").count(), 1);
     }
 }
 
