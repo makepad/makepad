@@ -3672,6 +3672,34 @@ pub enum LevelMode {
     Ceiling,
 }
 
+/// The rows a slot's level dropdown serves. Short labels: the picker is
+/// the same narrow chip the deck's own dropdowns use.
+pub const LEVEL_MODE_ROWS: [(u32, &str); 4] =
+    [(0, "FOL"), (1, "OFF"), (2, "MTCH"), (3, "CAP")];
+
+impl LevelMode {
+    /// The dropdown row this mode sits on.
+    pub fn as_row(self) -> u32 {
+        match self {
+            LevelMode::Follow => 0,
+            LevelMode::Off => 1,
+            LevelMode::MatchInput => 2,
+            LevelMode::Ceiling => 3,
+        }
+    }
+
+    /// The mode a picked row means. Anything unknown reads as Follow,
+    /// which is the harmless answer.
+    pub fn from_row(row: u32) -> LevelMode {
+        match row {
+            1 => LevelMode::Off,
+            2 => LevelMode::MatchInput,
+            3 => LevelMode::Ceiling,
+            _ => LevelMode::Follow,
+        }
+    }
+}
+
 /// One chain slot's level policy: the wet/dry mix the operator sets, and
 /// what, if anything, is done about the level the effect returns.
 ///

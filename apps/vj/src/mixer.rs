@@ -2798,6 +2798,182 @@ impl Mixer {
         s.decks[deck.index()].chain.autopan_mut().set_rate(hz);
     }
 
+
+    /// The echo's wet/dry mix, 0 = inaudible, 1 = all of it.
+    pub fn set_deck_echo_mix(&self, deck: DeckId, mix: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(2).set_mix(mix);
+    }
+
+    /// What the echo's slot does about the level it returns.
+    pub fn set_deck_echo_level_mode(&self, deck: DeckId, mode: LevelMode) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(2).set_mode(mode);
+    }
+
+    /// The amplitude the echo's slot holds under when it is on Ceiling.
+    pub fn set_deck_echo_ceiling(&self, deck: DeckId, ceiling: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(2).set_ceiling(ceiling);
+    }
+    /// The flanger's wet/dry mix, 0 = inaudible, 1 = all of it.
+    pub fn set_deck_flanger_mix(&self, deck: DeckId, mix: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(3).set_mix(mix);
+    }
+
+    /// What the flanger's slot does about the level it returns.
+    pub fn set_deck_flanger_level_mode(&self, deck: DeckId, mode: LevelMode) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(3).set_mode(mode);
+    }
+
+    /// The amplitude the flanger's slot holds under when it is on Ceiling.
+    pub fn set_deck_flanger_ceiling(&self, deck: DeckId, ceiling: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(3).set_ceiling(ceiling);
+    }
+    /// The bitcrusher's wet/dry mix, 0 = inaudible, 1 = all of it.
+    pub fn set_deck_bitcrusher_mix(&self, deck: DeckId, mix: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(4).set_mix(mix);
+    }
+
+    /// What the bitcrusher's slot does about the level it returns.
+    pub fn set_deck_bitcrusher_level_mode(&self, deck: DeckId, mode: LevelMode) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(4).set_mode(mode);
+    }
+
+    /// The amplitude the bitcrusher's slot holds under when it is on Ceiling.
+    pub fn set_deck_bitcrusher_ceiling(&self, deck: DeckId, ceiling: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(4).set_ceiling(ceiling);
+    }
+    /// The tremolo's wet/dry mix, 0 = inaudible, 1 = all of it.
+    pub fn set_deck_tremolo_mix(&self, deck: DeckId, mix: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(5).set_mix(mix);
+    }
+
+    /// What the tremolo's slot does about the level it returns.
+    pub fn set_deck_tremolo_level_mode(&self, deck: DeckId, mode: LevelMode) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(5).set_mode(mode);
+    }
+
+    /// The amplitude the tremolo's slot holds under when it is on Ceiling.
+    pub fn set_deck_tremolo_ceiling(&self, deck: DeckId, ceiling: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(5).set_ceiling(ceiling);
+    }
+    /// The distortion's wet/dry mix, 0 = inaudible, 1 = all of it.
+    pub fn set_deck_distortion_mix(&self, deck: DeckId, mix: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(6).set_mix(mix);
+    }
+
+    /// What the distortion's slot does about the level it returns.
+    pub fn set_deck_distortion_level_mode(&self, deck: DeckId, mode: LevelMode) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(6).set_mode(mode);
+    }
+
+    /// The amplitude the distortion's slot holds under when it is on Ceiling.
+    pub fn set_deck_distortion_ceiling(&self, deck: DeckId, ceiling: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(6).set_ceiling(ceiling);
+    }
+    /// The phaser's wet/dry mix, 0 = inaudible, 1 = all of it.
+    pub fn set_deck_phaser_mix(&self, deck: DeckId, mix: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(7).set_mix(mix);
+    }
+
+    /// What the phaser's slot does about the level it returns.
+    pub fn set_deck_phaser_level_mode(&self, deck: DeckId, mode: LevelMode) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(7).set_mode(mode);
+    }
+
+    /// The amplitude the phaser's slot holds under when it is on Ceiling.
+    pub fn set_deck_phaser_ceiling(&self, deck: DeckId, ceiling: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(7).set_ceiling(ceiling);
+    }
+    /// The autopan's wet/dry mix, 0 = inaudible, 1 = all of it.
+    pub fn set_deck_autopan_mix(&self, deck: DeckId, mix: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(8).set_mix(mix);
+    }
+
+    /// What the autopan's slot does about the level it returns.
+    pub fn set_deck_autopan_level_mode(&self, deck: DeckId, mode: LevelMode) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(8).set_mode(mode);
+    }
+
+    /// The amplitude the autopan's slot holds under when it is on Ceiling.
+    pub fn set_deck_autopan_ceiling(&self, deck: DeckId, ceiling: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(8).set_ceiling(ceiling);
+    }
+    /// The stereo width's wet/dry mix, 0 = inaudible, 1 = all of it.
+    pub fn set_deck_stereo_width_mix(&self, deck: DeckId, mix: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(9).set_mix(mix);
+    }
+
+    /// What the stereo width's slot does about the level it returns.
+    pub fn set_deck_stereo_width_level_mode(&self, deck: DeckId, mode: LevelMode) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(9).set_mode(mode);
+    }
+
+    /// The amplitude the stereo width's slot holds under when it is on Ceiling.
+    pub fn set_deck_stereo_width_ceiling(&self, deck: DeckId, ceiling: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(9).set_ceiling(ceiling);
+    }
+    /// The plate reverb's wet/dry mix, 0 = inaudible, 1 = all of it.
+    pub fn set_deck_plate_reverb_mix(&self, deck: DeckId, mix: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(10).set_mix(mix);
+    }
+
+    /// What the plate reverb's slot does about the level it returns.
+    pub fn set_deck_plate_reverb_level_mode(&self, deck: DeckId, mode: LevelMode) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(10).set_mode(mode);
+    }
+
+    /// The amplitude the plate reverb's slot holds under when it is on Ceiling.
+    pub fn set_deck_plate_reverb_ceiling(&self, deck: DeckId, ceiling: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(10).set_ceiling(ceiling);
+    }
+    /// The ladder filter's wet/dry mix, 0 = inaudible, 1 = all of it.
+    pub fn set_deck_moog_ladder_mix(&self, deck: DeckId, mix: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(11).set_mix(mix);
+    }
+
+    /// What the ladder filter's slot does about the level it returns.
+    pub fn set_deck_moog_ladder_level_mode(&self, deck: DeckId, mode: LevelMode) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(11).set_mode(mode);
+    }
+
+    /// The amplitude the ladder filter's slot holds under when it is on Ceiling.
+    pub fn set_deck_moog_ladder_ceiling(&self, deck: DeckId, ceiling: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.level_mut(11).set_ceiling(ceiling);
+    }
+    /// The policy every slot that has not been pinned follows.
+    pub fn set_deck_level_default(&self, deck: DeckId, mode: LevelMode) {
+        let mut s = self.state.lock().unwrap();
+        s.decks[deck.index()].chain.set_level_default(mode);
+    }
     /// Which rung of the sync ladder the autopan swing runs on: free-running,
     /// or eighths of a cycle per beat.
     pub fn set_deck_autopan_sync_units(&self, deck: DeckId, units: u32) {

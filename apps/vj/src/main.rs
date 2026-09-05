@@ -2461,6 +2461,7 @@ script_mod! {
                                     sfx_fx_a := PillButton{width: 32 text: "A"}
                                     sfx_fx_b := PillButton{width: 32 text: "B"}
                                     sfx_fx_mix := PillButton{width: 44 text: "MIX"}
+                                    sfx_fx_levels := PillButton{width: 70 text: "LEVELS"}
                                     sfx_fx_feedback := Slider{
                                         width: 170
                                         text: "echo feedback"
@@ -2745,6 +2746,212 @@ script_mod! {
                                         display_scale: 100.0
                                         precision: 0
                                     }
+                                }
+                                sfx_levels_panel := RoundedView{
+                                    visible: false
+                                    width: Fit height: Fit flow: Down spacing: 4
+                                    padding: 10
+                                    draw_bg +: {
+                                        color: #x181c23
+                                        border_color: #xffffff12
+                                        border_size: 1.0
+                                        border_radius: 5.0
+                                    }
+                                    align: Align{x: 0.0, y: 0.0}
+                                    View{
+                                        width: Fit height: Fit flow: Right spacing: 8
+                                        align: Align{x: 0.0, y: 0.5}
+                                        PanelLabel{text: "FX LEVELS"}
+                                        PanelLabel{text: "FOL follows ALL · OFF leaves it alone · MTCH matches the input · CAP holds under the cap"}
+                                    }
+                                    View{
+                                        width: Fit height: Fit flow: Right spacing: 8
+                                        align: Align{x: 0.0, y: 0.5}
+                                        PanelLabel{width: 84 text: "ALL"}
+                                        sfx_lvl_default := VjBeatsDrop{width: 48 level_rows: true}
+                                        PanelLabel{text: "what every effect on FOL does"}
+                                    }
+                                    View{
+                                        width: Fit height: Fit flow: Right spacing: 8
+                                        align: Align{x: 0.0, y: 0.5}
+                                        PanelLabel{width: 84 text: "ECHO"}
+                                        sfx_lvl_echo_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                        sfx_lvl_echo_mix := Slider{
+                                            width: 150
+                                            text: "mix"
+                                            min: 0.0 max: 1.0 default: 1.0
+                                            unit: "%" display_scale: 100.0 precision: 0
+                                        }
+                                        sfx_lvl_echo_ceiling := Slider{
+                                            width: 150
+                                            text: "cap"
+                                            min: 0.01 max: 1.0 default: 1.0
+                                            unit: "%" display_scale: 100.0 precision: 0
+                                        }
+                                    }
+                                    View{
+                                        width: Fit height: Fit flow: Right spacing: 8
+                                        align: Align{x: 0.0, y: 0.5}
+                                        PanelLabel{width: 84 text: "FLANGER"}
+                                        sfx_lvl_flanger_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                        sfx_lvl_flanger_mix := Slider{
+                                            width: 150
+                                            text: "mix"
+                                            min: 0.0 max: 1.0 default: 1.0
+                                            unit: "%" display_scale: 100.0 precision: 0
+                                        }
+                                        sfx_lvl_flanger_ceiling := Slider{
+                                            width: 150
+                                            text: "cap"
+                                            min: 0.01 max: 1.0 default: 1.0
+                                            unit: "%" display_scale: 100.0 precision: 0
+                                        }
+                                    }
+                                    View{
+                                        width: Fit height: Fit flow: Right spacing: 8
+                                        align: Align{x: 0.0, y: 0.5}
+                                        PanelLabel{width: 84 text: "BITCRUSH"}
+                                        sfx_lvl_bitcrusher_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                        sfx_lvl_bitcrusher_mix := Slider{
+                                            width: 150
+                                            text: "mix"
+                                            min: 0.0 max: 1.0 default: 1.0
+                                            unit: "%" display_scale: 100.0 precision: 0
+                                        }
+                                        sfx_lvl_bitcrusher_ceiling := Slider{
+                                            width: 150
+                                            text: "cap"
+                                            min: 0.01 max: 1.0 default: 1.0
+                                            unit: "%" display_scale: 100.0 precision: 0
+                                        }
+                                    }
+                                    View{
+                                        width: Fit height: Fit flow: Right spacing: 8
+                                        align: Align{x: 0.0, y: 0.5}
+                                        PanelLabel{width: 84 text: "TREMOLO"}
+                                        sfx_lvl_tremolo_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                        sfx_lvl_tremolo_mix := Slider{
+                                            width: 150
+                                            text: "mix"
+                                            min: 0.0 max: 1.0 default: 1.0
+                                            unit: "%" display_scale: 100.0 precision: 0
+                                        }
+                                        sfx_lvl_tremolo_ceiling := Slider{
+                                            width: 150
+                                            text: "cap"
+                                            min: 0.01 max: 1.0 default: 1.0
+                                            unit: "%" display_scale: 100.0 precision: 0
+                                        }
+                                    }
+                                    View{
+                                        width: Fit height: Fit flow: Right spacing: 8
+                                        align: Align{x: 0.0, y: 0.5}
+                                        PanelLabel{width: 84 text: "DISTORT"}
+                                        sfx_lvl_distortion_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                        sfx_lvl_distortion_mix := Slider{
+                                            width: 150
+                                            text: "mix"
+                                            min: 0.0 max: 1.0 default: 1.0
+                                            unit: "%" display_scale: 100.0 precision: 0
+                                        }
+                                        sfx_lvl_distortion_ceiling := Slider{
+                                            width: 150
+                                            text: "cap"
+                                            min: 0.01 max: 1.0 default: 1.0
+                                            unit: "%" display_scale: 100.0 precision: 0
+                                        }
+                                    }
+                                    View{
+                                        width: Fit height: Fit flow: Right spacing: 8
+                                        align: Align{x: 0.0, y: 0.5}
+                                        PanelLabel{width: 84 text: "PHASER"}
+                                        sfx_lvl_phaser_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                        sfx_lvl_phaser_mix := Slider{
+                                            width: 150
+                                            text: "mix"
+                                            min: 0.0 max: 1.0 default: 1.0
+                                            unit: "%" display_scale: 100.0 precision: 0
+                                        }
+                                        sfx_lvl_phaser_ceiling := Slider{
+                                            width: 150
+                                            text: "cap"
+                                            min: 0.01 max: 1.0 default: 1.0
+                                            unit: "%" display_scale: 100.0 precision: 0
+                                        }
+                                    }
+                                    View{
+                                        width: Fit height: Fit flow: Right spacing: 8
+                                        align: Align{x: 0.0, y: 0.5}
+                                        PanelLabel{width: 84 text: "AUTOPAN"}
+                                        sfx_lvl_autopan_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                        sfx_lvl_autopan_mix := Slider{
+                                            width: 150
+                                            text: "mix"
+                                            min: 0.0 max: 1.0 default: 1.0
+                                            unit: "%" display_scale: 100.0 precision: 0
+                                        }
+                                        sfx_lvl_autopan_ceiling := Slider{
+                                            width: 150
+                                            text: "cap"
+                                            min: 0.01 max: 1.0 default: 1.0
+                                            unit: "%" display_scale: 100.0 precision: 0
+                                        }
+                                    }
+                                    View{
+                                        width: Fit height: Fit flow: Right spacing: 8
+                                        align: Align{x: 0.0, y: 0.5}
+                                        PanelLabel{width: 84 text: "WIDTH"}
+                                        sfx_lvl_stereo_width_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                        sfx_lvl_stereo_width_mix := Slider{
+                                            width: 150
+                                            text: "mix"
+                                            min: 0.0 max: 1.0 default: 1.0
+                                            unit: "%" display_scale: 100.0 precision: 0
+                                        }
+                                        sfx_lvl_stereo_width_ceiling := Slider{
+                                            width: 150
+                                            text: "cap"
+                                            min: 0.01 max: 1.0 default: 1.0
+                                            unit: "%" display_scale: 100.0 precision: 0
+                                        }
+                                    }
+                                    View{
+                                        width: Fit height: Fit flow: Right spacing: 8
+                                        align: Align{x: 0.0, y: 0.5}
+                                        PanelLabel{width: 84 text: "REVERB"}
+                                        sfx_lvl_plate_reverb_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                        sfx_lvl_plate_reverb_mix := Slider{
+                                            width: 150
+                                            text: "mix"
+                                            min: 0.0 max: 1.0 default: 1.0
+                                            unit: "%" display_scale: 100.0 precision: 0
+                                        }
+                                        sfx_lvl_plate_reverb_ceiling := Slider{
+                                            width: 150
+                                            text: "cap"
+                                            min: 0.01 max: 1.0 default: 1.0
+                                            unit: "%" display_scale: 100.0 precision: 0
+                                        }
+                                    }
+                                    View{
+                                        width: Fit height: Fit flow: Right spacing: 8
+                                        align: Align{x: 0.0, y: 0.5}
+                                        PanelLabel{width: 84 text: "LADDER"}
+                                        sfx_lvl_moog_ladder_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                        sfx_lvl_moog_ladder_mix := Slider{
+                                            width: 150
+                                            text: "mix"
+                                            min: 0.0 max: 1.0 default: 1.0
+                                            unit: "%" display_scale: 100.0 precision: 0
+                                        }
+                                        sfx_lvl_moog_ladder_ceiling := Slider{
+                                            width: 150
+                                            text: "cap"
+                                            min: 0.01 max: 1.0 default: 1.0
+                                            unit: "%" display_scale: 100.0 precision: 0
+                                        }
+                                    }
+                                    sfx_levels_close := PillButton{width: 60 text: "CLOSE"}
                                 }
                             }
 
@@ -14360,6 +14567,99 @@ p2 {}
                 DeckCmd::SetAutopanBeatOffset { deck, offset } => {
                     self.mixer.set_deck_autopan_beat_offset(deck, offset)
                 }
+                DeckCmd::SetEchoMix { deck, mix } => {
+                    self.mixer.set_deck_echo_mix(deck, mix)
+                }
+                DeckCmd::SetEchoLevelMode { deck, mode } => {
+                    self.mixer.set_deck_echo_level_mode(deck, mode)
+                }
+                DeckCmd::SetEchoCeiling { deck, ceiling } => {
+                    self.mixer.set_deck_echo_ceiling(deck, ceiling)
+                }
+                DeckCmd::SetFlangerMix { deck, mix } => {
+                    self.mixer.set_deck_flanger_mix(deck, mix)
+                }
+                DeckCmd::SetFlangerLevelMode { deck, mode } => {
+                    self.mixer.set_deck_flanger_level_mode(deck, mode)
+                }
+                DeckCmd::SetFlangerCeiling { deck, ceiling } => {
+                    self.mixer.set_deck_flanger_ceiling(deck, ceiling)
+                }
+                DeckCmd::SetBitcrusherMix { deck, mix } => {
+                    self.mixer.set_deck_bitcrusher_mix(deck, mix)
+                }
+                DeckCmd::SetBitcrusherLevelMode { deck, mode } => {
+                    self.mixer.set_deck_bitcrusher_level_mode(deck, mode)
+                }
+                DeckCmd::SetBitcrusherCeiling { deck, ceiling } => {
+                    self.mixer.set_deck_bitcrusher_ceiling(deck, ceiling)
+                }
+                DeckCmd::SetTremoloMix { deck, mix } => {
+                    self.mixer.set_deck_tremolo_mix(deck, mix)
+                }
+                DeckCmd::SetTremoloLevelMode { deck, mode } => {
+                    self.mixer.set_deck_tremolo_level_mode(deck, mode)
+                }
+                DeckCmd::SetTremoloCeiling { deck, ceiling } => {
+                    self.mixer.set_deck_tremolo_ceiling(deck, ceiling)
+                }
+                DeckCmd::SetDistortionMix { deck, mix } => {
+                    self.mixer.set_deck_distortion_mix(deck, mix)
+                }
+                DeckCmd::SetDistortionLevelMode { deck, mode } => {
+                    self.mixer.set_deck_distortion_level_mode(deck, mode)
+                }
+                DeckCmd::SetDistortionCeiling { deck, ceiling } => {
+                    self.mixer.set_deck_distortion_ceiling(deck, ceiling)
+                }
+                DeckCmd::SetPhaserMix { deck, mix } => {
+                    self.mixer.set_deck_phaser_mix(deck, mix)
+                }
+                DeckCmd::SetPhaserLevelMode { deck, mode } => {
+                    self.mixer.set_deck_phaser_level_mode(deck, mode)
+                }
+                DeckCmd::SetPhaserCeiling { deck, ceiling } => {
+                    self.mixer.set_deck_phaser_ceiling(deck, ceiling)
+                }
+                DeckCmd::SetAutopanMix { deck, mix } => {
+                    self.mixer.set_deck_autopan_mix(deck, mix)
+                }
+                DeckCmd::SetAutopanLevelMode { deck, mode } => {
+                    self.mixer.set_deck_autopan_level_mode(deck, mode)
+                }
+                DeckCmd::SetAutopanCeiling { deck, ceiling } => {
+                    self.mixer.set_deck_autopan_ceiling(deck, ceiling)
+                }
+                DeckCmd::SetStereoWidthMix { deck, mix } => {
+                    self.mixer.set_deck_stereo_width_mix(deck, mix)
+                }
+                DeckCmd::SetStereoWidthLevelMode { deck, mode } => {
+                    self.mixer.set_deck_stereo_width_level_mode(deck, mode)
+                }
+                DeckCmd::SetStereoWidthCeiling { deck, ceiling } => {
+                    self.mixer.set_deck_stereo_width_ceiling(deck, ceiling)
+                }
+                DeckCmd::SetPlateReverbMix { deck, mix } => {
+                    self.mixer.set_deck_plate_reverb_mix(deck, mix)
+                }
+                DeckCmd::SetPlateReverbLevelMode { deck, mode } => {
+                    self.mixer.set_deck_plate_reverb_level_mode(deck, mode)
+                }
+                DeckCmd::SetPlateReverbCeiling { deck, ceiling } => {
+                    self.mixer.set_deck_plate_reverb_ceiling(deck, ceiling)
+                }
+                DeckCmd::SetMoogLadderMix { deck, mix } => {
+                    self.mixer.set_deck_moog_ladder_mix(deck, mix)
+                }
+                DeckCmd::SetMoogLadderLevelMode { deck, mode } => {
+                    self.mixer.set_deck_moog_ladder_level_mode(deck, mode)
+                }
+                DeckCmd::SetMoogLadderCeiling { deck, ceiling } => {
+                    self.mixer.set_deck_moog_ladder_ceiling(deck, ceiling)
+                }
+                DeckCmd::SetLevelDefault { deck, mode } => {
+                    self.mixer.set_deck_level_default(deck, mode)
+                }
                 DeckCmd::SetStereoWidth { deck, on } => self.mixer.set_deck_stereo_width(deck, on),
                 DeckCmd::SetStereoWidthAmount { deck, amount } => {
                     self.mixer.set_deck_stereo_width_amount(deck, amount)
@@ -14546,6 +14846,17 @@ p2 {}
             deck.moog_ladder_cutoff as f64,
             deck.moog_ladder_resonance as f64,
         );
+        let deck_level_default = deck.level_default;
+        let lvl_echo = (deck.echo_level_mode, deck.echo_mix as f64, deck.echo_ceiling as f64);
+        let lvl_flanger = (deck.flanger_level_mode, deck.flanger_mix as f64, deck.flanger_ceiling as f64);
+        let lvl_bitcrusher = (deck.bitcrusher_level_mode, deck.bitcrusher_mix as f64, deck.bitcrusher_ceiling as f64);
+        let lvl_tremolo = (deck.tremolo_level_mode, deck.tremolo_mix as f64, deck.tremolo_ceiling as f64);
+        let lvl_distortion = (deck.distortion_level_mode, deck.distortion_mix as f64, deck.distortion_ceiling as f64);
+        let lvl_phaser = (deck.phaser_level_mode, deck.phaser_mix as f64, deck.phaser_ceiling as f64);
+        let lvl_autopan = (deck.autopan_level_mode, deck.autopan_mix as f64, deck.autopan_ceiling as f64);
+        let lvl_stereo_width = (deck.stereo_width_level_mode, deck.stereo_width_mix as f64, deck.stereo_width_ceiling as f64);
+        let lvl_plate_reverb = (deck.plate_reverb_level_mode, deck.plate_reverb_mix as f64, deck.plate_reverb_ceiling as f64);
+        let lvl_moog_ladder = (deck.moog_ladder_level_mode, deck.moog_ladder_mix as f64, deck.moog_ladder_ceiling as f64);
         // The four beat-lockable LFOs, read together: each row shows
         // EITHER its free-Hz rate slider or its offset, never both, so
         // the rung the dropdown sits on drives visibility too.
@@ -14628,6 +14939,85 @@ p2 {}
         self.paint_chip(cx, ids!(sfx_fx_moog_ladder), moog_ladder_on, None);
         self.ui.slider(cx, ids!(sfx_fx_moog_ladder_cutoff)).set_value(cx, moog_ladder_cutoff);
         self.ui.slider(cx, ids!(sfx_fx_moog_ladder_resonance)).set_value(cx, moog_ladder_resonance);
+
+        // The FX levels panel, when it is open. Read together, after the
+        // deck borrow above has been let go by the tuples it filled.
+        let level_default = deck_level_default;
+        if let Some(mut drop) =
+            self.ui.widget(cx, ids!(sfx_lvl_default)).borrow_mut::<views::VjBeatsDrop>()
+        {
+            drop.set_value(cx, level_default.as_row());
+        }
+        if let Some(mut drop) =
+            self.ui.widget(cx, ids!(sfx_lvl_echo_mode)).borrow_mut::<views::VjBeatsDrop>()
+        {
+            drop.set_value(cx, lvl_echo.0.as_row());
+        }
+        self.ui.slider(cx, ids!(sfx_lvl_echo_mix)).set_value(cx, lvl_echo.1);
+        self.ui.slider(cx, ids!(sfx_lvl_echo_ceiling)).set_value(cx, lvl_echo.2);
+        if let Some(mut drop) =
+            self.ui.widget(cx, ids!(sfx_lvl_flanger_mode)).borrow_mut::<views::VjBeatsDrop>()
+        {
+            drop.set_value(cx, lvl_flanger.0.as_row());
+        }
+        self.ui.slider(cx, ids!(sfx_lvl_flanger_mix)).set_value(cx, lvl_flanger.1);
+        self.ui.slider(cx, ids!(sfx_lvl_flanger_ceiling)).set_value(cx, lvl_flanger.2);
+        if let Some(mut drop) =
+            self.ui.widget(cx, ids!(sfx_lvl_bitcrusher_mode)).borrow_mut::<views::VjBeatsDrop>()
+        {
+            drop.set_value(cx, lvl_bitcrusher.0.as_row());
+        }
+        self.ui.slider(cx, ids!(sfx_lvl_bitcrusher_mix)).set_value(cx, lvl_bitcrusher.1);
+        self.ui.slider(cx, ids!(sfx_lvl_bitcrusher_ceiling)).set_value(cx, lvl_bitcrusher.2);
+        if let Some(mut drop) =
+            self.ui.widget(cx, ids!(sfx_lvl_tremolo_mode)).borrow_mut::<views::VjBeatsDrop>()
+        {
+            drop.set_value(cx, lvl_tremolo.0.as_row());
+        }
+        self.ui.slider(cx, ids!(sfx_lvl_tremolo_mix)).set_value(cx, lvl_tremolo.1);
+        self.ui.slider(cx, ids!(sfx_lvl_tremolo_ceiling)).set_value(cx, lvl_tremolo.2);
+        if let Some(mut drop) =
+            self.ui.widget(cx, ids!(sfx_lvl_distortion_mode)).borrow_mut::<views::VjBeatsDrop>()
+        {
+            drop.set_value(cx, lvl_distortion.0.as_row());
+        }
+        self.ui.slider(cx, ids!(sfx_lvl_distortion_mix)).set_value(cx, lvl_distortion.1);
+        self.ui.slider(cx, ids!(sfx_lvl_distortion_ceiling)).set_value(cx, lvl_distortion.2);
+        if let Some(mut drop) =
+            self.ui.widget(cx, ids!(sfx_lvl_phaser_mode)).borrow_mut::<views::VjBeatsDrop>()
+        {
+            drop.set_value(cx, lvl_phaser.0.as_row());
+        }
+        self.ui.slider(cx, ids!(sfx_lvl_phaser_mix)).set_value(cx, lvl_phaser.1);
+        self.ui.slider(cx, ids!(sfx_lvl_phaser_ceiling)).set_value(cx, lvl_phaser.2);
+        if let Some(mut drop) =
+            self.ui.widget(cx, ids!(sfx_lvl_autopan_mode)).borrow_mut::<views::VjBeatsDrop>()
+        {
+            drop.set_value(cx, lvl_autopan.0.as_row());
+        }
+        self.ui.slider(cx, ids!(sfx_lvl_autopan_mix)).set_value(cx, lvl_autopan.1);
+        self.ui.slider(cx, ids!(sfx_lvl_autopan_ceiling)).set_value(cx, lvl_autopan.2);
+        if let Some(mut drop) =
+            self.ui.widget(cx, ids!(sfx_lvl_stereo_width_mode)).borrow_mut::<views::VjBeatsDrop>()
+        {
+            drop.set_value(cx, lvl_stereo_width.0.as_row());
+        }
+        self.ui.slider(cx, ids!(sfx_lvl_stereo_width_mix)).set_value(cx, lvl_stereo_width.1);
+        self.ui.slider(cx, ids!(sfx_lvl_stereo_width_ceiling)).set_value(cx, lvl_stereo_width.2);
+        if let Some(mut drop) =
+            self.ui.widget(cx, ids!(sfx_lvl_plate_reverb_mode)).borrow_mut::<views::VjBeatsDrop>()
+        {
+            drop.set_value(cx, lvl_plate_reverb.0.as_row());
+        }
+        self.ui.slider(cx, ids!(sfx_lvl_plate_reverb_mix)).set_value(cx, lvl_plate_reverb.1);
+        self.ui.slider(cx, ids!(sfx_lvl_plate_reverb_ceiling)).set_value(cx, lvl_plate_reverb.2);
+        if let Some(mut drop) =
+            self.ui.widget(cx, ids!(sfx_lvl_moog_ladder_mode)).borrow_mut::<views::VjBeatsDrop>()
+        {
+            drop.set_value(cx, lvl_moog_ladder.0.as_row());
+        }
+        self.ui.slider(cx, ids!(sfx_lvl_moog_ladder_mix)).set_value(cx, lvl_moog_ladder.1);
+        self.ui.slider(cx, ids!(sfx_lvl_moog_ladder_ceiling)).set_value(cx, lvl_moog_ladder.2);
     }
 
     /// Push a deck's tone/stem knob positions back onto the surface, so the
@@ -29454,6 +29844,543 @@ impl MatchEvent for App {
                 FxTarget::Mix => {
                     let mut cmds = self.decks.set_echo_feedback(DeckId::A, v as f32);
                     cmds.extend(self.decks.set_echo_feedback(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        if self.ui.button(cx, ids!(sfx_fx_levels)).clicked(actions) {
+            let panel = self.ui.view(cx, ids!(sfx_levels_panel));
+            let open = !panel.visible();
+            panel.set_visible(cx, open);
+            if open {
+                self.sync_sfx_fx_ui(cx);
+            }
+        }
+        if self.ui.button(cx, ids!(sfx_levels_close)).clicked(actions) {
+            self.ui.view(cx, ids!(sfx_levels_panel)).set_visible(cx, false);
+        }
+        {
+            let uid = self.ui.widget(cx, ids!(sfx_lvl_default)).widget_uid();
+            let mut picked = None;
+            for action in actions.iter() {
+                if let Some(wa) = action.as_widget_action() {
+                    if wa.widget_uid == uid {
+                        if let views::VjBeatsDropAction::Picked(row) = wa.cast() {
+                            picked = Some(crate::music_dsp::LevelMode::from_row(row));
+                        }
+                    }
+                }
+            }
+            if let Some(mode) = picked {
+                let cmds = match self.sfx_fx_target {
+                    FxTarget::A => self.decks.set_level_default(DeckId::A, mode),
+                    FxTarget::B => self.decks.set_level_default(DeckId::B, mode),
+                    FxTarget::Mix => {
+                        let mut cmds = self.decks.set_level_default(DeckId::A, mode);
+                        cmds.extend(self.decks.set_level_default(DeckId::B, mode));
+                        cmds
+                    }
+                };
+                self.run_deck_cmds(cx, cmds);
+                self.sync_sfx_fx_ui(cx);
+            }
+        }
+        {
+            let uid = self.ui.widget(cx, ids!(sfx_lvl_echo_mode)).widget_uid();
+            let mut picked = None;
+            for action in actions.iter() {
+                if let Some(wa) = action.as_widget_action() {
+                    if wa.widget_uid == uid {
+                        if let views::VjBeatsDropAction::Picked(row) = wa.cast() {
+                            picked = Some(crate::music_dsp::LevelMode::from_row(row));
+                        }
+                    }
+                }
+            }
+            if let Some(mode) = picked {
+                let cmds = match self.sfx_fx_target {
+                    FxTarget::A => self.decks.set_echo_level_mode(DeckId::A, mode),
+                    FxTarget::B => self.decks.set_echo_level_mode(DeckId::B, mode),
+                    FxTarget::Mix => {
+                        let mut cmds = self.decks.set_echo_level_mode(DeckId::A, mode);
+                        cmds.extend(self.decks.set_echo_level_mode(DeckId::B, mode));
+                        cmds
+                    }
+                };
+                self.run_deck_cmds(cx, cmds);
+                self.sync_sfx_fx_ui(cx);
+            }
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_echo_mix)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_echo_mix(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_echo_mix(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_echo_mix(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_echo_mix(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_echo_ceiling)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_echo_ceiling(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_echo_ceiling(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_echo_ceiling(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_echo_ceiling(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        {
+            let uid = self.ui.widget(cx, ids!(sfx_lvl_flanger_mode)).widget_uid();
+            let mut picked = None;
+            for action in actions.iter() {
+                if let Some(wa) = action.as_widget_action() {
+                    if wa.widget_uid == uid {
+                        if let views::VjBeatsDropAction::Picked(row) = wa.cast() {
+                            picked = Some(crate::music_dsp::LevelMode::from_row(row));
+                        }
+                    }
+                }
+            }
+            if let Some(mode) = picked {
+                let cmds = match self.sfx_fx_target {
+                    FxTarget::A => self.decks.set_flanger_level_mode(DeckId::A, mode),
+                    FxTarget::B => self.decks.set_flanger_level_mode(DeckId::B, mode),
+                    FxTarget::Mix => {
+                        let mut cmds = self.decks.set_flanger_level_mode(DeckId::A, mode);
+                        cmds.extend(self.decks.set_flanger_level_mode(DeckId::B, mode));
+                        cmds
+                    }
+                };
+                self.run_deck_cmds(cx, cmds);
+                self.sync_sfx_fx_ui(cx);
+            }
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_flanger_mix)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_flanger_mix(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_flanger_mix(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_flanger_mix(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_flanger_mix(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_flanger_ceiling)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_flanger_ceiling(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_flanger_ceiling(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_flanger_ceiling(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_flanger_ceiling(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        {
+            let uid = self.ui.widget(cx, ids!(sfx_lvl_bitcrusher_mode)).widget_uid();
+            let mut picked = None;
+            for action in actions.iter() {
+                if let Some(wa) = action.as_widget_action() {
+                    if wa.widget_uid == uid {
+                        if let views::VjBeatsDropAction::Picked(row) = wa.cast() {
+                            picked = Some(crate::music_dsp::LevelMode::from_row(row));
+                        }
+                    }
+                }
+            }
+            if let Some(mode) = picked {
+                let cmds = match self.sfx_fx_target {
+                    FxTarget::A => self.decks.set_bitcrusher_level_mode(DeckId::A, mode),
+                    FxTarget::B => self.decks.set_bitcrusher_level_mode(DeckId::B, mode),
+                    FxTarget::Mix => {
+                        let mut cmds = self.decks.set_bitcrusher_level_mode(DeckId::A, mode);
+                        cmds.extend(self.decks.set_bitcrusher_level_mode(DeckId::B, mode));
+                        cmds
+                    }
+                };
+                self.run_deck_cmds(cx, cmds);
+                self.sync_sfx_fx_ui(cx);
+            }
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_bitcrusher_mix)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_bitcrusher_mix(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_bitcrusher_mix(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_bitcrusher_mix(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_bitcrusher_mix(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_bitcrusher_ceiling)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_bitcrusher_ceiling(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_bitcrusher_ceiling(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_bitcrusher_ceiling(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_bitcrusher_ceiling(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        {
+            let uid = self.ui.widget(cx, ids!(sfx_lvl_tremolo_mode)).widget_uid();
+            let mut picked = None;
+            for action in actions.iter() {
+                if let Some(wa) = action.as_widget_action() {
+                    if wa.widget_uid == uid {
+                        if let views::VjBeatsDropAction::Picked(row) = wa.cast() {
+                            picked = Some(crate::music_dsp::LevelMode::from_row(row));
+                        }
+                    }
+                }
+            }
+            if let Some(mode) = picked {
+                let cmds = match self.sfx_fx_target {
+                    FxTarget::A => self.decks.set_tremolo_level_mode(DeckId::A, mode),
+                    FxTarget::B => self.decks.set_tremolo_level_mode(DeckId::B, mode),
+                    FxTarget::Mix => {
+                        let mut cmds = self.decks.set_tremolo_level_mode(DeckId::A, mode);
+                        cmds.extend(self.decks.set_tremolo_level_mode(DeckId::B, mode));
+                        cmds
+                    }
+                };
+                self.run_deck_cmds(cx, cmds);
+                self.sync_sfx_fx_ui(cx);
+            }
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_tremolo_mix)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_tremolo_mix(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_tremolo_mix(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_tremolo_mix(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_tremolo_mix(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_tremolo_ceiling)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_tremolo_ceiling(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_tremolo_ceiling(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_tremolo_ceiling(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_tremolo_ceiling(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        {
+            let uid = self.ui.widget(cx, ids!(sfx_lvl_distortion_mode)).widget_uid();
+            let mut picked = None;
+            for action in actions.iter() {
+                if let Some(wa) = action.as_widget_action() {
+                    if wa.widget_uid == uid {
+                        if let views::VjBeatsDropAction::Picked(row) = wa.cast() {
+                            picked = Some(crate::music_dsp::LevelMode::from_row(row));
+                        }
+                    }
+                }
+            }
+            if let Some(mode) = picked {
+                let cmds = match self.sfx_fx_target {
+                    FxTarget::A => self.decks.set_distortion_level_mode(DeckId::A, mode),
+                    FxTarget::B => self.decks.set_distortion_level_mode(DeckId::B, mode),
+                    FxTarget::Mix => {
+                        let mut cmds = self.decks.set_distortion_level_mode(DeckId::A, mode);
+                        cmds.extend(self.decks.set_distortion_level_mode(DeckId::B, mode));
+                        cmds
+                    }
+                };
+                self.run_deck_cmds(cx, cmds);
+                self.sync_sfx_fx_ui(cx);
+            }
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_distortion_mix)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_distortion_mix(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_distortion_mix(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_distortion_mix(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_distortion_mix(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_distortion_ceiling)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_distortion_ceiling(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_distortion_ceiling(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_distortion_ceiling(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_distortion_ceiling(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        {
+            let uid = self.ui.widget(cx, ids!(sfx_lvl_phaser_mode)).widget_uid();
+            let mut picked = None;
+            for action in actions.iter() {
+                if let Some(wa) = action.as_widget_action() {
+                    if wa.widget_uid == uid {
+                        if let views::VjBeatsDropAction::Picked(row) = wa.cast() {
+                            picked = Some(crate::music_dsp::LevelMode::from_row(row));
+                        }
+                    }
+                }
+            }
+            if let Some(mode) = picked {
+                let cmds = match self.sfx_fx_target {
+                    FxTarget::A => self.decks.set_phaser_level_mode(DeckId::A, mode),
+                    FxTarget::B => self.decks.set_phaser_level_mode(DeckId::B, mode),
+                    FxTarget::Mix => {
+                        let mut cmds = self.decks.set_phaser_level_mode(DeckId::A, mode);
+                        cmds.extend(self.decks.set_phaser_level_mode(DeckId::B, mode));
+                        cmds
+                    }
+                };
+                self.run_deck_cmds(cx, cmds);
+                self.sync_sfx_fx_ui(cx);
+            }
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_phaser_mix)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_phaser_mix(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_phaser_mix(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_phaser_mix(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_phaser_mix(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_phaser_ceiling)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_phaser_ceiling(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_phaser_ceiling(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_phaser_ceiling(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_phaser_ceiling(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        {
+            let uid = self.ui.widget(cx, ids!(sfx_lvl_autopan_mode)).widget_uid();
+            let mut picked = None;
+            for action in actions.iter() {
+                if let Some(wa) = action.as_widget_action() {
+                    if wa.widget_uid == uid {
+                        if let views::VjBeatsDropAction::Picked(row) = wa.cast() {
+                            picked = Some(crate::music_dsp::LevelMode::from_row(row));
+                        }
+                    }
+                }
+            }
+            if let Some(mode) = picked {
+                let cmds = match self.sfx_fx_target {
+                    FxTarget::A => self.decks.set_autopan_level_mode(DeckId::A, mode),
+                    FxTarget::B => self.decks.set_autopan_level_mode(DeckId::B, mode),
+                    FxTarget::Mix => {
+                        let mut cmds = self.decks.set_autopan_level_mode(DeckId::A, mode);
+                        cmds.extend(self.decks.set_autopan_level_mode(DeckId::B, mode));
+                        cmds
+                    }
+                };
+                self.run_deck_cmds(cx, cmds);
+                self.sync_sfx_fx_ui(cx);
+            }
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_autopan_mix)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_autopan_mix(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_autopan_mix(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_autopan_mix(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_autopan_mix(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_autopan_ceiling)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_autopan_ceiling(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_autopan_ceiling(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_autopan_ceiling(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_autopan_ceiling(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        {
+            let uid = self.ui.widget(cx, ids!(sfx_lvl_stereo_width_mode)).widget_uid();
+            let mut picked = None;
+            for action in actions.iter() {
+                if let Some(wa) = action.as_widget_action() {
+                    if wa.widget_uid == uid {
+                        if let views::VjBeatsDropAction::Picked(row) = wa.cast() {
+                            picked = Some(crate::music_dsp::LevelMode::from_row(row));
+                        }
+                    }
+                }
+            }
+            if let Some(mode) = picked {
+                let cmds = match self.sfx_fx_target {
+                    FxTarget::A => self.decks.set_stereo_width_level_mode(DeckId::A, mode),
+                    FxTarget::B => self.decks.set_stereo_width_level_mode(DeckId::B, mode),
+                    FxTarget::Mix => {
+                        let mut cmds = self.decks.set_stereo_width_level_mode(DeckId::A, mode);
+                        cmds.extend(self.decks.set_stereo_width_level_mode(DeckId::B, mode));
+                        cmds
+                    }
+                };
+                self.run_deck_cmds(cx, cmds);
+                self.sync_sfx_fx_ui(cx);
+            }
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_stereo_width_mix)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_stereo_width_mix(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_stereo_width_mix(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_stereo_width_mix(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_stereo_width_mix(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_stereo_width_ceiling)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_stereo_width_ceiling(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_stereo_width_ceiling(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_stereo_width_ceiling(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_stereo_width_ceiling(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        {
+            let uid = self.ui.widget(cx, ids!(sfx_lvl_plate_reverb_mode)).widget_uid();
+            let mut picked = None;
+            for action in actions.iter() {
+                if let Some(wa) = action.as_widget_action() {
+                    if wa.widget_uid == uid {
+                        if let views::VjBeatsDropAction::Picked(row) = wa.cast() {
+                            picked = Some(crate::music_dsp::LevelMode::from_row(row));
+                        }
+                    }
+                }
+            }
+            if let Some(mode) = picked {
+                let cmds = match self.sfx_fx_target {
+                    FxTarget::A => self.decks.set_plate_reverb_level_mode(DeckId::A, mode),
+                    FxTarget::B => self.decks.set_plate_reverb_level_mode(DeckId::B, mode),
+                    FxTarget::Mix => {
+                        let mut cmds = self.decks.set_plate_reverb_level_mode(DeckId::A, mode);
+                        cmds.extend(self.decks.set_plate_reverb_level_mode(DeckId::B, mode));
+                        cmds
+                    }
+                };
+                self.run_deck_cmds(cx, cmds);
+                self.sync_sfx_fx_ui(cx);
+            }
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_plate_reverb_mix)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_plate_reverb_mix(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_plate_reverb_mix(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_plate_reverb_mix(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_plate_reverb_mix(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_plate_reverb_ceiling)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_plate_reverb_ceiling(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_plate_reverb_ceiling(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_plate_reverb_ceiling(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_plate_reverb_ceiling(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        {
+            let uid = self.ui.widget(cx, ids!(sfx_lvl_moog_ladder_mode)).widget_uid();
+            let mut picked = None;
+            for action in actions.iter() {
+                if let Some(wa) = action.as_widget_action() {
+                    if wa.widget_uid == uid {
+                        if let views::VjBeatsDropAction::Picked(row) = wa.cast() {
+                            picked = Some(crate::music_dsp::LevelMode::from_row(row));
+                        }
+                    }
+                }
+            }
+            if let Some(mode) = picked {
+                let cmds = match self.sfx_fx_target {
+                    FxTarget::A => self.decks.set_moog_ladder_level_mode(DeckId::A, mode),
+                    FxTarget::B => self.decks.set_moog_ladder_level_mode(DeckId::B, mode),
+                    FxTarget::Mix => {
+                        let mut cmds = self.decks.set_moog_ladder_level_mode(DeckId::A, mode);
+                        cmds.extend(self.decks.set_moog_ladder_level_mode(DeckId::B, mode));
+                        cmds
+                    }
+                };
+                self.run_deck_cmds(cx, cmds);
+                self.sync_sfx_fx_ui(cx);
+            }
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_moog_ladder_mix)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_moog_ladder_mix(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_moog_ladder_mix(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_moog_ladder_mix(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_moog_ladder_mix(DeckId::B, v as f32));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+        }
+        if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_moog_ladder_ceiling)).slided(actions) {
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => self.decks.set_moog_ladder_ceiling(DeckId::A, v as f32),
+                FxTarget::B => self.decks.set_moog_ladder_ceiling(DeckId::B, v as f32),
+                FxTarget::Mix => {
+                    let mut cmds = self.decks.set_moog_ladder_ceiling(DeckId::A, v as f32);
+                    cmds.extend(self.decks.set_moog_ladder_ceiling(DeckId::B, v as f32));
                     cmds
                 }
             };

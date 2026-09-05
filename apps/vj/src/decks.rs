@@ -1324,6 +1324,98 @@ pub struct DeckState {
     pub autopan_sync_units: u32,
     /// Where in the cycle the autopan swing starts when it engages, 0..1.
     pub autopan_beat_offset: f32,
+    /// The echo's wet/dry mix, 0 = inaudible, 1 = all of it. The
+    /// effect's own on/off stays the engage; this is how much of it is
+    /// heard once it is on.
+    pub echo_mix: f32,
+    /// What the echo's slot does about the level it returns: follow the
+    /// deck, leave it alone, match the input, or hold under a ceiling.
+    pub echo_level_mode: crate::music_dsp::LevelMode,
+    /// The amplitude the echo holds under on Ceiling.
+    pub echo_ceiling: f32,
+    /// The flanger's wet/dry mix, 0 = inaudible, 1 = all of it. The
+    /// effect's own on/off stays the engage; this is how much of it is
+    /// heard once it is on.
+    pub flanger_mix: f32,
+    /// What the flanger's slot does about the level it returns: follow the
+    /// deck, leave it alone, match the input, or hold under a ceiling.
+    pub flanger_level_mode: crate::music_dsp::LevelMode,
+    /// The amplitude the flanger holds under on Ceiling.
+    pub flanger_ceiling: f32,
+    /// The bitcrusher's wet/dry mix, 0 = inaudible, 1 = all of it. The
+    /// effect's own on/off stays the engage; this is how much of it is
+    /// heard once it is on.
+    pub bitcrusher_mix: f32,
+    /// What the bitcrusher's slot does about the level it returns: follow the
+    /// deck, leave it alone, match the input, or hold under a ceiling.
+    pub bitcrusher_level_mode: crate::music_dsp::LevelMode,
+    /// The amplitude the bitcrusher holds under on Ceiling.
+    pub bitcrusher_ceiling: f32,
+    /// The tremolo's wet/dry mix, 0 = inaudible, 1 = all of it. The
+    /// effect's own on/off stays the engage; this is how much of it is
+    /// heard once it is on.
+    pub tremolo_mix: f32,
+    /// What the tremolo's slot does about the level it returns: follow the
+    /// deck, leave it alone, match the input, or hold under a ceiling.
+    pub tremolo_level_mode: crate::music_dsp::LevelMode,
+    /// The amplitude the tremolo holds under on Ceiling.
+    pub tremolo_ceiling: f32,
+    /// The distortion's wet/dry mix, 0 = inaudible, 1 = all of it. The
+    /// effect's own on/off stays the engage; this is how much of it is
+    /// heard once it is on.
+    pub distortion_mix: f32,
+    /// What the distortion's slot does about the level it returns: follow the
+    /// deck, leave it alone, match the input, or hold under a ceiling.
+    pub distortion_level_mode: crate::music_dsp::LevelMode,
+    /// The amplitude the distortion holds under on Ceiling.
+    pub distortion_ceiling: f32,
+    /// The phaser's wet/dry mix, 0 = inaudible, 1 = all of it. The
+    /// effect's own on/off stays the engage; this is how much of it is
+    /// heard once it is on.
+    pub phaser_mix: f32,
+    /// What the phaser's slot does about the level it returns: follow the
+    /// deck, leave it alone, match the input, or hold under a ceiling.
+    pub phaser_level_mode: crate::music_dsp::LevelMode,
+    /// The amplitude the phaser holds under on Ceiling.
+    pub phaser_ceiling: f32,
+    /// The autopan's wet/dry mix, 0 = inaudible, 1 = all of it. The
+    /// effect's own on/off stays the engage; this is how much of it is
+    /// heard once it is on.
+    pub autopan_mix: f32,
+    /// What the autopan's slot does about the level it returns: follow the
+    /// deck, leave it alone, match the input, or hold under a ceiling.
+    pub autopan_level_mode: crate::music_dsp::LevelMode,
+    /// The amplitude the autopan holds under on Ceiling.
+    pub autopan_ceiling: f32,
+    /// The stereo width's wet/dry mix, 0 = inaudible, 1 = all of it. The
+    /// effect's own on/off stays the engage; this is how much of it is
+    /// heard once it is on.
+    pub stereo_width_mix: f32,
+    /// What the stereo width's slot does about the level it returns: follow the
+    /// deck, leave it alone, match the input, or hold under a ceiling.
+    pub stereo_width_level_mode: crate::music_dsp::LevelMode,
+    /// The amplitude the stereo width holds under on Ceiling.
+    pub stereo_width_ceiling: f32,
+    /// The plate reverb's wet/dry mix, 0 = inaudible, 1 = all of it. The
+    /// effect's own on/off stays the engage; this is how much of it is
+    /// heard once it is on.
+    pub plate_reverb_mix: f32,
+    /// What the plate reverb's slot does about the level it returns: follow the
+    /// deck, leave it alone, match the input, or hold under a ceiling.
+    pub plate_reverb_level_mode: crate::music_dsp::LevelMode,
+    /// The amplitude the plate reverb holds under on Ceiling.
+    pub plate_reverb_ceiling: f32,
+    /// The ladder filter's wet/dry mix, 0 = inaudible, 1 = all of it. The
+    /// effect's own on/off stays the engage; this is how much of it is
+    /// heard once it is on.
+    pub moog_ladder_mix: f32,
+    /// What the ladder filter's slot does about the level it returns: follow the
+    /// deck, leave it alone, match the input, or hold under a ceiling.
+    pub moog_ladder_level_mode: crate::music_dsp::LevelMode,
+    /// The amplitude the ladder filter holds under on Ceiling.
+    pub moog_ladder_ceiling: f32,
+    /// The policy every effect that has not been pinned follows.
+    pub level_default: crate::music_dsp::LevelMode,
     /// Whether the stereo width is on. Same channel-strip treatment as
     /// the autopan beside it.
     pub stereo_width_on: bool,
@@ -1435,6 +1527,37 @@ impl Default for DeckState {
             autopan_rate: crate::music_dsp::AUTOPAN_RATE_DEFAULT,
             autopan_sync_units: crate::music_dsp::LFO_SYNC_FREE,
             autopan_beat_offset: 0.0,
+            echo_mix: 1.0,
+            echo_level_mode: crate::music_dsp::LevelMode::Follow,
+            echo_ceiling: 1.0,
+            flanger_mix: 1.0,
+            flanger_level_mode: crate::music_dsp::LevelMode::Follow,
+            flanger_ceiling: 1.0,
+            bitcrusher_mix: 1.0,
+            bitcrusher_level_mode: crate::music_dsp::LevelMode::Follow,
+            bitcrusher_ceiling: 1.0,
+            tremolo_mix: 1.0,
+            tremolo_level_mode: crate::music_dsp::LevelMode::Follow,
+            tremolo_ceiling: 1.0,
+            distortion_mix: 1.0,
+            distortion_level_mode: crate::music_dsp::LevelMode::Follow,
+            distortion_ceiling: 1.0,
+            phaser_mix: 1.0,
+            phaser_level_mode: crate::music_dsp::LevelMode::Follow,
+            phaser_ceiling: 1.0,
+            autopan_mix: 1.0,
+            autopan_level_mode: crate::music_dsp::LevelMode::Follow,
+            autopan_ceiling: 1.0,
+            stereo_width_mix: 1.0,
+            stereo_width_level_mode: crate::music_dsp::LevelMode::Follow,
+            stereo_width_ceiling: 1.0,
+            plate_reverb_mix: 1.0,
+            plate_reverb_level_mode: crate::music_dsp::LevelMode::Follow,
+            plate_reverb_ceiling: 1.0,
+            moog_ladder_mix: 1.0,
+            moog_ladder_level_mode: crate::music_dsp::LevelMode::Follow,
+            moog_ladder_ceiling: 1.0,
+            level_default: crate::music_dsp::LevelMode::Off,
             stereo_width_on: false,
             stereo_width_amount: crate::music_dsp::STEREO_WIDTH_DEFAULT,
             plate_reverb_on: false,
@@ -1809,6 +1932,37 @@ pub enum DeckCmd {
     SetAutopanSyncUnits { deck: DeckId, units: u32 },
     SetAutopanBeatOffset { deck: DeckId, offset: f32 },
     /// The stereo width's on/off switch.
+    SetEchoMix { deck: DeckId, mix: f32 },
+    SetEchoLevelMode { deck: DeckId, mode: crate::music_dsp::LevelMode },
+    SetEchoCeiling { deck: DeckId, ceiling: f32 },
+    SetFlangerMix { deck: DeckId, mix: f32 },
+    SetFlangerLevelMode { deck: DeckId, mode: crate::music_dsp::LevelMode },
+    SetFlangerCeiling { deck: DeckId, ceiling: f32 },
+    SetBitcrusherMix { deck: DeckId, mix: f32 },
+    SetBitcrusherLevelMode { deck: DeckId, mode: crate::music_dsp::LevelMode },
+    SetBitcrusherCeiling { deck: DeckId, ceiling: f32 },
+    SetTremoloMix { deck: DeckId, mix: f32 },
+    SetTremoloLevelMode { deck: DeckId, mode: crate::music_dsp::LevelMode },
+    SetTremoloCeiling { deck: DeckId, ceiling: f32 },
+    SetDistortionMix { deck: DeckId, mix: f32 },
+    SetDistortionLevelMode { deck: DeckId, mode: crate::music_dsp::LevelMode },
+    SetDistortionCeiling { deck: DeckId, ceiling: f32 },
+    SetPhaserMix { deck: DeckId, mix: f32 },
+    SetPhaserLevelMode { deck: DeckId, mode: crate::music_dsp::LevelMode },
+    SetPhaserCeiling { deck: DeckId, ceiling: f32 },
+    SetAutopanMix { deck: DeckId, mix: f32 },
+    SetAutopanLevelMode { deck: DeckId, mode: crate::music_dsp::LevelMode },
+    SetAutopanCeiling { deck: DeckId, ceiling: f32 },
+    SetStereoWidthMix { deck: DeckId, mix: f32 },
+    SetStereoWidthLevelMode { deck: DeckId, mode: crate::music_dsp::LevelMode },
+    SetStereoWidthCeiling { deck: DeckId, ceiling: f32 },
+    SetPlateReverbMix { deck: DeckId, mix: f32 },
+    SetPlateReverbLevelMode { deck: DeckId, mode: crate::music_dsp::LevelMode },
+    SetPlateReverbCeiling { deck: DeckId, ceiling: f32 },
+    SetMoogLadderMix { deck: DeckId, mix: f32 },
+    SetMoogLadderLevelMode { deck: DeckId, mode: crate::music_dsp::LevelMode },
+    SetMoogLadderCeiling { deck: DeckId, ceiling: f32 },
+    SetLevelDefault { deck: DeckId, mode: crate::music_dsp::LevelMode },
     SetStereoWidth { deck: DeckId, on: bool },
     /// How far the side signal is scaled: 0 collapses to mono, 1 is the
     /// original image, above 1 widens further.
@@ -2290,6 +2444,37 @@ impl DeckEngine {
             DeckCmd::SetAutopanRate { deck, hz: state.autopan_rate },
             DeckCmd::SetAutopanSyncUnits { deck, units: state.autopan_sync_units },
             DeckCmd::SetAutopanBeatOffset { deck, offset: state.autopan_beat_offset },
+            DeckCmd::SetEchoMix { deck, mix: state.echo_mix },
+            DeckCmd::SetEchoLevelMode { deck, mode: state.echo_level_mode },
+            DeckCmd::SetEchoCeiling { deck, ceiling: state.echo_ceiling },
+            DeckCmd::SetFlangerMix { deck, mix: state.flanger_mix },
+            DeckCmd::SetFlangerLevelMode { deck, mode: state.flanger_level_mode },
+            DeckCmd::SetFlangerCeiling { deck, ceiling: state.flanger_ceiling },
+            DeckCmd::SetBitcrusherMix { deck, mix: state.bitcrusher_mix },
+            DeckCmd::SetBitcrusherLevelMode { deck, mode: state.bitcrusher_level_mode },
+            DeckCmd::SetBitcrusherCeiling { deck, ceiling: state.bitcrusher_ceiling },
+            DeckCmd::SetTremoloMix { deck, mix: state.tremolo_mix },
+            DeckCmd::SetTremoloLevelMode { deck, mode: state.tremolo_level_mode },
+            DeckCmd::SetTremoloCeiling { deck, ceiling: state.tremolo_ceiling },
+            DeckCmd::SetDistortionMix { deck, mix: state.distortion_mix },
+            DeckCmd::SetDistortionLevelMode { deck, mode: state.distortion_level_mode },
+            DeckCmd::SetDistortionCeiling { deck, ceiling: state.distortion_ceiling },
+            DeckCmd::SetPhaserMix { deck, mix: state.phaser_mix },
+            DeckCmd::SetPhaserLevelMode { deck, mode: state.phaser_level_mode },
+            DeckCmd::SetPhaserCeiling { deck, ceiling: state.phaser_ceiling },
+            DeckCmd::SetAutopanMix { deck, mix: state.autopan_mix },
+            DeckCmd::SetAutopanLevelMode { deck, mode: state.autopan_level_mode },
+            DeckCmd::SetAutopanCeiling { deck, ceiling: state.autopan_ceiling },
+            DeckCmd::SetStereoWidthMix { deck, mix: state.stereo_width_mix },
+            DeckCmd::SetStereoWidthLevelMode { deck, mode: state.stereo_width_level_mode },
+            DeckCmd::SetStereoWidthCeiling { deck, ceiling: state.stereo_width_ceiling },
+            DeckCmd::SetPlateReverbMix { deck, mix: state.plate_reverb_mix },
+            DeckCmd::SetPlateReverbLevelMode { deck, mode: state.plate_reverb_level_mode },
+            DeckCmd::SetPlateReverbCeiling { deck, ceiling: state.plate_reverb_ceiling },
+            DeckCmd::SetMoogLadderMix { deck, mix: state.moog_ladder_mix },
+            DeckCmd::SetMoogLadderLevelMode { deck, mode: state.moog_ladder_level_mode },
+            DeckCmd::SetMoogLadderCeiling { deck, ceiling: state.moog_ladder_ceiling },
+            DeckCmd::SetLevelDefault { deck, mode: state.level_default },
             DeckCmd::SetStereoWidth { deck, on: state.stereo_width_on },
             DeckCmd::SetStereoWidthAmount { deck, amount: state.stereo_width_amount },
             DeckCmd::SetPlateReverb { deck, on: state.plate_reverb_on },
@@ -5389,6 +5574,246 @@ impl DeckEngine {
         vec![DeckCmd::SetAutopanBeatOffset { deck, offset: state.autopan_beat_offset }]
     }
 
+
+    /// How much of the echo is heard once it is engaged.
+    pub fn set_echo_mix(&mut self, deck: DeckId, mix: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.echo_mix = mix.clamp(0.0, 1.0);
+        vec![DeckCmd::SetEchoMix { deck, mix: state.echo_mix }]
+    }
+
+    /// What the echo's slot does about the level it returns.
+    pub fn set_echo_level_mode(
+        &mut self,
+        deck: DeckId,
+        mode: crate::music_dsp::LevelMode,
+    ) -> Vec<DeckCmd> {
+        self.deck_mut(deck).echo_level_mode = mode;
+        vec![DeckCmd::SetEchoLevelMode { deck, mode }]
+    }
+
+    /// The amplitude the echo holds under on Ceiling.
+    pub fn set_echo_ceiling(&mut self, deck: DeckId, ceiling: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.echo_ceiling = ceiling.clamp(0.01, 1.0);
+        vec![DeckCmd::SetEchoCeiling { deck, ceiling: state.echo_ceiling }]
+    }
+    /// How much of the flanger is heard once it is engaged.
+    pub fn set_flanger_mix(&mut self, deck: DeckId, mix: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.flanger_mix = mix.clamp(0.0, 1.0);
+        vec![DeckCmd::SetFlangerMix { deck, mix: state.flanger_mix }]
+    }
+
+    /// What the flanger's slot does about the level it returns.
+    pub fn set_flanger_level_mode(
+        &mut self,
+        deck: DeckId,
+        mode: crate::music_dsp::LevelMode,
+    ) -> Vec<DeckCmd> {
+        self.deck_mut(deck).flanger_level_mode = mode;
+        vec![DeckCmd::SetFlangerLevelMode { deck, mode }]
+    }
+
+    /// The amplitude the flanger holds under on Ceiling.
+    pub fn set_flanger_ceiling(&mut self, deck: DeckId, ceiling: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.flanger_ceiling = ceiling.clamp(0.01, 1.0);
+        vec![DeckCmd::SetFlangerCeiling { deck, ceiling: state.flanger_ceiling }]
+    }
+    /// How much of the bitcrusher is heard once it is engaged.
+    pub fn set_bitcrusher_mix(&mut self, deck: DeckId, mix: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.bitcrusher_mix = mix.clamp(0.0, 1.0);
+        vec![DeckCmd::SetBitcrusherMix { deck, mix: state.bitcrusher_mix }]
+    }
+
+    /// What the bitcrusher's slot does about the level it returns.
+    pub fn set_bitcrusher_level_mode(
+        &mut self,
+        deck: DeckId,
+        mode: crate::music_dsp::LevelMode,
+    ) -> Vec<DeckCmd> {
+        self.deck_mut(deck).bitcrusher_level_mode = mode;
+        vec![DeckCmd::SetBitcrusherLevelMode { deck, mode }]
+    }
+
+    /// The amplitude the bitcrusher holds under on Ceiling.
+    pub fn set_bitcrusher_ceiling(&mut self, deck: DeckId, ceiling: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.bitcrusher_ceiling = ceiling.clamp(0.01, 1.0);
+        vec![DeckCmd::SetBitcrusherCeiling { deck, ceiling: state.bitcrusher_ceiling }]
+    }
+    /// How much of the tremolo is heard once it is engaged.
+    pub fn set_tremolo_mix(&mut self, deck: DeckId, mix: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.tremolo_mix = mix.clamp(0.0, 1.0);
+        vec![DeckCmd::SetTremoloMix { deck, mix: state.tremolo_mix }]
+    }
+
+    /// What the tremolo's slot does about the level it returns.
+    pub fn set_tremolo_level_mode(
+        &mut self,
+        deck: DeckId,
+        mode: crate::music_dsp::LevelMode,
+    ) -> Vec<DeckCmd> {
+        self.deck_mut(deck).tremolo_level_mode = mode;
+        vec![DeckCmd::SetTremoloLevelMode { deck, mode }]
+    }
+
+    /// The amplitude the tremolo holds under on Ceiling.
+    pub fn set_tremolo_ceiling(&mut self, deck: DeckId, ceiling: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.tremolo_ceiling = ceiling.clamp(0.01, 1.0);
+        vec![DeckCmd::SetTremoloCeiling { deck, ceiling: state.tremolo_ceiling }]
+    }
+    /// How much of the distortion is heard once it is engaged.
+    pub fn set_distortion_mix(&mut self, deck: DeckId, mix: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.distortion_mix = mix.clamp(0.0, 1.0);
+        vec![DeckCmd::SetDistortionMix { deck, mix: state.distortion_mix }]
+    }
+
+    /// What the distortion's slot does about the level it returns.
+    pub fn set_distortion_level_mode(
+        &mut self,
+        deck: DeckId,
+        mode: crate::music_dsp::LevelMode,
+    ) -> Vec<DeckCmd> {
+        self.deck_mut(deck).distortion_level_mode = mode;
+        vec![DeckCmd::SetDistortionLevelMode { deck, mode }]
+    }
+
+    /// The amplitude the distortion holds under on Ceiling.
+    pub fn set_distortion_ceiling(&mut self, deck: DeckId, ceiling: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.distortion_ceiling = ceiling.clamp(0.01, 1.0);
+        vec![DeckCmd::SetDistortionCeiling { deck, ceiling: state.distortion_ceiling }]
+    }
+    /// How much of the phaser is heard once it is engaged.
+    pub fn set_phaser_mix(&mut self, deck: DeckId, mix: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.phaser_mix = mix.clamp(0.0, 1.0);
+        vec![DeckCmd::SetPhaserMix { deck, mix: state.phaser_mix }]
+    }
+
+    /// What the phaser's slot does about the level it returns.
+    pub fn set_phaser_level_mode(
+        &mut self,
+        deck: DeckId,
+        mode: crate::music_dsp::LevelMode,
+    ) -> Vec<DeckCmd> {
+        self.deck_mut(deck).phaser_level_mode = mode;
+        vec![DeckCmd::SetPhaserLevelMode { deck, mode }]
+    }
+
+    /// The amplitude the phaser holds under on Ceiling.
+    pub fn set_phaser_ceiling(&mut self, deck: DeckId, ceiling: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.phaser_ceiling = ceiling.clamp(0.01, 1.0);
+        vec![DeckCmd::SetPhaserCeiling { deck, ceiling: state.phaser_ceiling }]
+    }
+    /// How much of the autopan is heard once it is engaged.
+    pub fn set_autopan_mix(&mut self, deck: DeckId, mix: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.autopan_mix = mix.clamp(0.0, 1.0);
+        vec![DeckCmd::SetAutopanMix { deck, mix: state.autopan_mix }]
+    }
+
+    /// What the autopan's slot does about the level it returns.
+    pub fn set_autopan_level_mode(
+        &mut self,
+        deck: DeckId,
+        mode: crate::music_dsp::LevelMode,
+    ) -> Vec<DeckCmd> {
+        self.deck_mut(deck).autopan_level_mode = mode;
+        vec![DeckCmd::SetAutopanLevelMode { deck, mode }]
+    }
+
+    /// The amplitude the autopan holds under on Ceiling.
+    pub fn set_autopan_ceiling(&mut self, deck: DeckId, ceiling: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.autopan_ceiling = ceiling.clamp(0.01, 1.0);
+        vec![DeckCmd::SetAutopanCeiling { deck, ceiling: state.autopan_ceiling }]
+    }
+    /// How much of the stereo width is heard once it is engaged.
+    pub fn set_stereo_width_mix(&mut self, deck: DeckId, mix: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.stereo_width_mix = mix.clamp(0.0, 1.0);
+        vec![DeckCmd::SetStereoWidthMix { deck, mix: state.stereo_width_mix }]
+    }
+
+    /// What the stereo width's slot does about the level it returns.
+    pub fn set_stereo_width_level_mode(
+        &mut self,
+        deck: DeckId,
+        mode: crate::music_dsp::LevelMode,
+    ) -> Vec<DeckCmd> {
+        self.deck_mut(deck).stereo_width_level_mode = mode;
+        vec![DeckCmd::SetStereoWidthLevelMode { deck, mode }]
+    }
+
+    /// The amplitude the stereo width holds under on Ceiling.
+    pub fn set_stereo_width_ceiling(&mut self, deck: DeckId, ceiling: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.stereo_width_ceiling = ceiling.clamp(0.01, 1.0);
+        vec![DeckCmd::SetStereoWidthCeiling { deck, ceiling: state.stereo_width_ceiling }]
+    }
+    /// How much of the plate reverb is heard once it is engaged.
+    pub fn set_plate_reverb_mix(&mut self, deck: DeckId, mix: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.plate_reverb_mix = mix.clamp(0.0, 1.0);
+        vec![DeckCmd::SetPlateReverbMix { deck, mix: state.plate_reverb_mix }]
+    }
+
+    /// What the plate reverb's slot does about the level it returns.
+    pub fn set_plate_reverb_level_mode(
+        &mut self,
+        deck: DeckId,
+        mode: crate::music_dsp::LevelMode,
+    ) -> Vec<DeckCmd> {
+        self.deck_mut(deck).plate_reverb_level_mode = mode;
+        vec![DeckCmd::SetPlateReverbLevelMode { deck, mode }]
+    }
+
+    /// The amplitude the plate reverb holds under on Ceiling.
+    pub fn set_plate_reverb_ceiling(&mut self, deck: DeckId, ceiling: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.plate_reverb_ceiling = ceiling.clamp(0.01, 1.0);
+        vec![DeckCmd::SetPlateReverbCeiling { deck, ceiling: state.plate_reverb_ceiling }]
+    }
+    /// How much of the ladder filter is heard once it is engaged.
+    pub fn set_moog_ladder_mix(&mut self, deck: DeckId, mix: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.moog_ladder_mix = mix.clamp(0.0, 1.0);
+        vec![DeckCmd::SetMoogLadderMix { deck, mix: state.moog_ladder_mix }]
+    }
+
+    /// What the ladder filter's slot does about the level it returns.
+    pub fn set_moog_ladder_level_mode(
+        &mut self,
+        deck: DeckId,
+        mode: crate::music_dsp::LevelMode,
+    ) -> Vec<DeckCmd> {
+        self.deck_mut(deck).moog_ladder_level_mode = mode;
+        vec![DeckCmd::SetMoogLadderLevelMode { deck, mode }]
+    }
+
+    /// The amplitude the ladder filter holds under on Ceiling.
+    pub fn set_moog_ladder_ceiling(&mut self, deck: DeckId, ceiling: f32) -> Vec<DeckCmd> {
+        let state = self.deck_mut(deck);
+        state.moog_ladder_ceiling = ceiling.clamp(0.01, 1.0);
+        vec![DeckCmd::SetMoogLadderCeiling { deck, ceiling: state.moog_ladder_ceiling }]
+    }
+    /// The policy every effect that has not been pinned follows.
+    pub fn set_level_default(
+        &mut self,
+        deck: DeckId,
+        mode: crate::music_dsp::LevelMode,
+    ) -> Vec<DeckCmd> {
+        self.deck_mut(deck).level_default = mode;
+        vec![DeckCmd::SetLevelDefault { deck, mode }]
+    }
     /// The stereo width's on/off switch.
     pub fn toggle_stereo_width(&mut self, deck: DeckId) -> Vec<DeckCmd> {
         let state = self.deck_mut(deck);

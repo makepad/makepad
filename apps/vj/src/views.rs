@@ -2449,6 +2449,10 @@ pub struct VjBeatsDrop {
     /// divisions either side of one cycle a beat.
     #[live]
     lfo_rows: bool,
+    /// Serve a chain slot's level policy: follow the deck, leave it
+    /// alone, match the input, or hold under a ceiling.
+    #[live]
+    level_rows: bool,
     #[rust(1u32)]
     value: u32,
     /// Transient display override (the scratch hand's "—").
@@ -2466,7 +2470,9 @@ pub struct VjBeatsDrop {
 
 impl VjBeatsDrop {
     fn rows(&self) -> &'static [(u32, &'static str)] {
-        if self.lfo_rows {
+        if self.level_rows {
+            &crate::music_dsp::LEVEL_MODE_ROWS
+        } else if self.lfo_rows {
             &crate::music_dsp::LFO_SYNC_ROWS
         } else if self.loop_rows {
             loop_rows()
