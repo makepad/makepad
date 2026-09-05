@@ -17,6 +17,7 @@ pub mod layout;
 pub mod align_scroll;
 pub mod icon;
 pub mod iconset;
+pub mod image;
 
 pub fn script_mod(vm: &mut ScriptVm) {
     welcome::script_mod(vm);
@@ -32,6 +33,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     align_scroll::script_mod(vm);
     icon::script_mod(vm);
     iconset::script_mod(vm);
+    image::script_mod(vm);
 }
 
 pub fn tables() -> &'static [&'static [Story]] {
@@ -49,5 +51,6 @@ pub fn tables() -> &'static [&'static [Story]] {
         align_scroll::STORIES,
         icon::STORIES,
         iconset::STORIES,
+        image::STORIES,
     ]
 }
