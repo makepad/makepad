@@ -1039,7 +1039,7 @@ impl DataGrid {
                 margin: Default::default(),
                 width: Size::Fixed(cell.rect.size.x),
                 height: Size::Fixed(cell.rect.size.y),
-                metrics: Metrics::default(),
+                ..Default::default()
             },
             Layout::flow_down(),
         );
@@ -1309,7 +1309,7 @@ impl DataGrid {
                 margin: Default::default(),
                 width: Size::Fixed(rect.size.x),
                 height: Size::Fixed(rect.size.y),
-                metrics: Metrics::default(),
+                ..Default::default()
             },
             Layout::flow_down(),
         );

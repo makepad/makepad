@@ -175,6 +175,7 @@ impl DrawSvg {
         if self.svg_doc.is_none() {
             return Rect::default();
         }
+        let walk = cx.resolve_walk(walk, ResolveAt::BeforeBegin);
         let walk = self.resolve_walk(walk);
         let rect = cx.walk_turtle(walk);
         self.render_to_rect(cx, &rect, 0.0);
@@ -186,6 +187,7 @@ impl DrawSvg {
         if self.svg_doc.is_none() {
             return Rect::default();
         }
+        let walk = cx.resolve_walk(walk, ResolveAt::BeforeBegin);
         let walk = self.resolve_walk(walk);
         let rect = cx.walk_turtle(walk);
         self.render_to_rect(cx, &rect, time);

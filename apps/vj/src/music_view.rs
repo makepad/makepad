@@ -5358,7 +5358,7 @@ fn strip_walk(width: f64) -> Walk {
         margin: Inset::default(),
         width: Size::Fixed(width.max(0.0)),
         height: Size::fit(),
-        metrics: Metrics::default(),
+        ..Default::default()
     }
 }
 #[derive(Script, ScriptHook, Widget)]

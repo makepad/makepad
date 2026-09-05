@@ -1662,6 +1662,17 @@ impl Cx {
         item.1.downcast_mut().unwrap()
     }
 
+    /// Returns an immutable reference to a previously installed Cx-global.
+    ///
+    /// Unlike [`Cx::get_global`], this accessor does not require mutable access and
+    /// does not panic when the requested global has not been installed.
+    pub fn get_global_ref<T: 'static + Any>(&self) -> Option<&T> {
+        self.globals
+            .iter()
+            .find(|item| item.0 == TypeId::of::<T>())
+            .and_then(|item| item.1.downcast_ref())
+    }
+
     pub fn has_global<T: 'static + Any>(&mut self) -> bool {
         self.globals
             .iter_mut()
@@ -2031,6 +2042,14 @@ pub fn can_play_type(mime: &str) -> &'static str {
 mod stale_window_tests {
     use super::*;
     use crate::window::WindowHandle;
+
+    #[test]
+    fn immutable_global_accessor_is_optional_and_preserves_the_value() {
+        let mut cx = Cx::new(Box::new(|_cx: &mut Cx, _event: &Event| {}));
+        assert_eq!(cx.get_global_ref::<u64>(), None);
+        cx.set_global(41_u64);
+        assert_eq!(cx.get_global_ref::<u64>(), Some(&41));
+    }
 
     /// A hosted window (the host reports 930×848 points at dpi 2) whose app
     /// shrank its own dpi to 1.6: it lays out 1.25× larger, and a host

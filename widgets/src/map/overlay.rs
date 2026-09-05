@@ -605,6 +605,7 @@ pub fn draw_map_overlay(
             height: Size::Fixed(rect.size.y),
             margin: Inset::default(),
             metrics: Metrics::default(),
+            ..Default::default()
         },
         Layout {
             clip_x: true,

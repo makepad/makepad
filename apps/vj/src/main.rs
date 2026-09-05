@@ -19600,7 +19600,7 @@ p2 {}
             let gap = 6.0;
             Size::Fixed(console_scale::lists_width_points(physical.x / dpi - gap))
         } else {
-            Size::Fill { weight: 100.0, min: None, max: None }
+            Size::fill()
         };
         let column = self.ui.view(cx, ids!(lists_column));
         let mut column_ref = column.borrow_mut();
@@ -19661,7 +19661,7 @@ p2 {}
             label.walk.width = if wrapped {
                 Size::Fit { min: None, max: None }
             } else {
-                Size::Fill { weight: 100.0, min: None, max: None }
+                Size::fill()
             };
         }
         drop(label_ref);
@@ -19773,8 +19773,21 @@ p2 {}
                 Fold::Pairs => console_scale::ConsoleFold::Pairs,
                 Fold::Singles => console_scale::ConsoleFold::Singles,
             }));
-            if let Size::Fill { weight, max, .. } = view.walk.height {
-                view.walk.height = Size::Fill { weight, min, max };
+            if let Size::Fill {
+                weight,
+                basis,
+                shrink,
+                max,
+                ..
+            } = view.walk.height
+            {
+                view.walk.height = Size::Fill {
+                    weight,
+                    basis,
+                    shrink,
+                    min,
+                    max,
+                };
             }
         }
         drop(region_ref);

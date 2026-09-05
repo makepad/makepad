@@ -1758,7 +1758,7 @@ impl Widget for GlassButton {
             margin: Inset::default(),
             width: Size::Fixed(content.x),
             height: Size::Fixed(content.y),
-            metrics: Metrics::default(),
+            ..Default::default()
         });
         self.draw_bg.end(cx);
         let rect = self.draw_bg.area().rect(cx);
@@ -2367,8 +2367,7 @@ impl Widget for GlassSegmented {
                     abs_pos: Some(Vec2d { x: rect.pos.x + x, y: rect.pos.y }),
                     width: Size::Fixed(w),
                     height: Size::Fixed(rect.size.y),
-                    margin: Inset::default(),
-                    metrics: Metrics::default(),
+                    ..Default::default()
                 },
                 Layout {
                     align: Align { x: 0.5, y: 0.5 },

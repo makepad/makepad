@@ -219,6 +219,32 @@ script_mod! {
                     }
                 }
             }
+
+            Hr{}
+            H4{text: "Definite Grid"}
+            P{text: "fixed / percent / fr, minmax + repeat, named span, explicit and auto placement"}
+            Grid{
+                width: Fill height: 160.
+                padding: 6.
+                column_gap: 8. row_gap: 8.
+                columns: ["70px", "20%", "minmax(60px, 1fr)", "repeat(2, minmax(50px, 1fr))"]
+                rows: ["48px", "1fr"]
+                areas: ["hero hero . . .", ". . . . ."]
+
+                RedBox{
+                    cell: CellPlacement{area: @hero}
+                    BoxLabel{text: "named span"}
+                }
+                GreenBox{
+                    cell: CellPlacement{col: 4 row: 1}
+                    BoxLabel{text: "explicit"}
+                }
+                BlueBox{
+                    cell: CellPlacement{col_span: 2}
+                    BoxLabel{text: "auto span"}
+                }
+                Box{BoxLabel{text: "auto"}}
+            }
         }
     }
 }

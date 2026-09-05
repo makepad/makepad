@@ -78,6 +78,12 @@ pub trait ScriptHook {
         false
     }
 
+    /// Allows a type with custom scalar syntax to override the value emitted
+    /// by a derived `ScriptApply::script_to_value` implementation.
+    fn on_custom_to_value(&self, _vm: &mut ScriptVm) -> Option<ScriptValue> {
+        None
+    }
+
     // implemented by procmacro for reflection into script objects/type cchecking
     fn on_type_check(_heap: &ScriptHeap, _value: ScriptValue) -> bool {
         false

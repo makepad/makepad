@@ -517,6 +517,47 @@ impl ViewRef {
     }
 }
 
+#[cfg(test)]
+mod contextual_size_tests {
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+
+    #[test]
+    fn cached_view_re_resolves_contextual_width_after_parent_resize() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut view = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            View::script_new_with_default(vm)
+        });
+        view.view_size = Some(dvec2(17.0, 23.0));
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(&mut cx, &event);
+        let mut cx = Cx2d::new(&mut draw);
+        let declaration = Walk {
+            width: Size::Rel {
+                base: Base::Parent,
+                factor: 0.5,
+            },
+            height: Size::fit(),
+            max_width: Some(FitBound::Abs(300.0)),
+            ..Default::default()
+        };
+
+        cx.begin_root_turtle(dvec2(200.0, 100.0), Layout::default());
+        let first = view.walk_from_previous_size(&cx, declaration);
+        assert_eq!(first.width.to_fixed(), Some(100.0));
+        assert_eq!(first.height.to_fixed(), Some(23.0));
+        assert_eq!(first.max_width, declaration.max_width);
+        cx.end_turtle();
+
+        cx.begin_root_turtle(dvec2(400.0, 100.0), Layout::default());
+        let resized = view.walk_from_previous_size(&cx, declaration);
+        assert_eq!(resized.width.to_fixed(), Some(200.0));
+        assert_eq!(resized.height.to_fixed(), Some(23.0));
+        cx.end_turtle();
+    }
+}
+
 impl ViewSet {
     pub fn animator_cut(&self, cx: &mut Cx, state: &[LiveId; 2]) {
         for item in self.iter() {
@@ -943,7 +984,7 @@ impl Widget for View {
 
             match self.optimize {
                 ViewOptimize::Texture => {
-                    let walk = self.walk_from_previous_size(walk);
+                    let walk = self.walk_from_previous_size(cx, walk);
                     // A repopulate or optimize-mode flip forces one real re-render: the size-based
                     // cache check can't see content changes on a recycled/toggled view.
                     let force = std::mem::take(&mut self.force_texture_redraw);
@@ -1011,7 +1052,7 @@ impl Widget for View {
                     self.draw_list.as_mut().unwrap().begin_always(cx)
                 }
                 ViewOptimize::DrawList => {
-                    let walk = self.walk_from_previous_size(walk);
+                    let walk = self.walk_from_previous_size(cx, walk);
                     if self
                         .draw_list
                         .as_mut()
@@ -1247,7 +1288,8 @@ impl View {
         }
     }
 
-    pub fn walk_from_previous_size(&self, walk: Walk) -> Walk {
+    pub fn walk_from_previous_size(&self, cx: &Cx2d, walk: Walk) -> Walk {
+        let walk = cx.resolve_walk(walk, ResolveAt::BeforeBegin);
         // Fill and Fixed sizes are already known before drawing, so keep them live —
         // a Fixed size can be fresh truth for this frame (e.g. a deferred fill the
         // parent just resolved), and pinning it to the previous frame's measurement
@@ -1256,7 +1298,6 @@ impl View {
         // cannot be known before the children draw.
         let view_size = self.view_size.unwrap_or(Vec2d::default());
         Walk {
-            abs_pos: walk.abs_pos,
             width: if walk.width.is_fill() || walk.width.is_fixed() {
                 walk.width
             } else {
@@ -1267,8 +1308,8 @@ impl View {
             } else {
                 Size::Fixed(view_size.y)
             },
-            margin: walk.margin,
             metrics: Metrics::default(),
+            ..walk
         }
     }
 

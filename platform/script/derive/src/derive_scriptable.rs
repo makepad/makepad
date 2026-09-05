@@ -227,6 +227,8 @@ fn derive_script_impl_inner(
 
         tb.add("    fn script_to_value(&self, vm: &mut ScriptVm)->ScriptValue {");
 
+        tb.add("        if let Some(value) = <Self as ScriptHook>::on_custom_to_value(self, vm) { return value; }");
+
         tb.add("        let proto = Self::script_proto(vm).into();");
         tb.add("        let obj = vm.bx.heap.new_with_proto(proto);");
         tb.add("        self.script_to_value_props(vm, obj);");
@@ -816,6 +818,7 @@ fn derive_script_impl_inner(
         tb.add("    }");
 
         tb.add("    fn script_to_value(&self, vm:&mut ScriptVm)->ScriptValue{");
+        tb.add("        if let Some(value) = <Self as ScriptHook>::on_custom_to_value(self, vm) { return value; }");
         tb.add("        match self{");
         for item in &items {
             match &item.kind {
