@@ -2239,10 +2239,14 @@ const TEMPO_LADDER: [(f64, f64, f64); 5] = [
 ///
 /// The pivot is the beat nearest the record's centre, so the pull is
 /// anchored where the least-squares fit is most trustworthy and no end
-/// pays more than the other. Applied ONCE, at analysis time: it is not
-/// idempotent, because moving to a nearer rung can bring a coarser one
-/// inside the budget, so there is exactly one call site and a cached grid
-/// is never pulled again.
+/// pays more than the other.
+///
+/// Applied ONCE per grid, at analysis time. It is NOT idempotent --
+/// moving to a nearer rung can bring a coarser one inside the budget --
+/// so the rule every caller keeps is that its argument is a grid fresh
+/// off `estimate_grid` and never one that has already been pulled. A
+/// cached grid is not re-snapped when it is read back; a repair
+/// re-measures from the envelopes first and snaps that.
 fn snap_tempo(grid: TrackGrid, span_secs: f64) -> TrackGrid {
     if !grid.has_grid() || !span_secs.is_finite() || span_secs <= 0.0 {
         return grid;

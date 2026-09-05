@@ -2054,8 +2054,12 @@ pub struct DeckEngine {
     /// What a fresh load puts back to nothing. Off by default; see
     /// `LoadReset`.
     pub load_reset: LoadReset,
-    /// QUANT's unit in beats, 0 = off. One global value: snapping is a
-    /// property of how the operator is working, not of a deck.
+    /// QUANT's unit in beats, 0 = off, one per deck -- a deck being
+    /// beat-matched by hand wants no snapping while the one beside it
+    /// still does. Zero is what withholds sync's phase landing
+    /// (`phase_landing_allowed`), so this is not only a loop and jump
+    /// unit: it is the operator's standing answer to "may the engine
+    /// move my playhead".
     snap_beats: [u32; 2],
     /// Tracks queued for the next free deck, in play order.
     queue: Vec<TrackItem>,
