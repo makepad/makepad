@@ -1696,6 +1696,10 @@ pub enum SliderAction {
     TextSlide(f64),
     Slide(f64),
     EndSlide(f64),
+    /// The label was tapped and the control went back to its DSL
+    /// `default:`. Carried by `slided` and `end_slide` alike, so a host
+    /// that already listens for either needs no wiring for it.
+    Reset(f64),
     LabelHoverIn(Rect),
     LabelHoverOut,
     #[default]
@@ -1938,6 +1942,26 @@ impl Widget for Slider {
                     self.animator_play(cx, ids!(hover.off));
                 }
                 self.dragging = None;
+                // A TAP on the label puts the control back to its DSL
+                // default.
+                //
+                // The label was the one part of a slider that did
+                // nothing at all: a drag here is RELATIVE, so a press
+                // that lands on the text and does not move changes
+                // nothing, and there was no other gesture on it. Yet the
+                // default is exactly the value that is hard to get back
+                // to by hand and exactly the one wanted back -- an EQ's
+                // crossover corners, a width at unity, any bipolar
+                // control at rest.
+                //
+                // `was_tap` and not a bare `is_over`, so a drag that
+                // happened to BEGIN on the label ends as the drag it
+                // was. And reset before the EndSlide below, so that
+                // carries the new value rather than the old one.
+                if fe.was_tap() && self.label_area.rect(cx).contains(fe.abs_start) {
+                    self.reset_to_default(cx);
+                    cx.widget_action(uid, SliderAction::Reset(self.to_external()));
+                }
                 cx.widget_action(uid, SliderAction::EndSlide(self.to_external()));
                 cx.set_cursor(MouseCursor::Grab);
             }
@@ -2011,7 +2035,9 @@ impl SliderRef {
     pub fn slided(&self, actions: &Actions) -> Option<f64> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             match item.cast() {
-                SliderAction::TextSlide(v) | SliderAction::Slide(v) => return Some(v),
+                SliderAction::TextSlide(v) | SliderAction::Slide(v) | SliderAction::Reset(v) => {
+                    return Some(v)
+                }
                 _ => (),
             }
         }
@@ -2032,7 +2058,9 @@ impl SliderRef {
     pub fn end_slide(&self, actions: &Actions) -> Option<f64> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             match item.cast() {
-                SliderAction::EndSlide(v) | SliderAction::TextSlide(v) => return Some(v),
+                SliderAction::EndSlide(v)
+                | SliderAction::TextSlide(v)
+                | SliderAction::Reset(v) => return Some(v),
                 _ => (),
             }
         }
