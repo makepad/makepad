@@ -503,9 +503,17 @@ impl Cx {
                 // This should not happen here, as it's handled in the main loop
             }
             FromJavaMessage::BackPressed => {
-                self.call_event_handler(&Event::BackPressed {
+                let event = Event::BackPressed {
                     handled: Cell::new(false),
-                });
+                };
+                self.call_event_handler(&event);
+                if let Event::BackPressed { handled } = &event {
+                    if !handled.get() {
+                        unsafe {
+                            android_jni::to_java_finish_if_back_unhandled();
+                        }
+                    }
+                }
             }
             FromJavaMessage::SurfaceCreated { window } => {
                 #[cfg(use_vulkan)]
@@ -1278,6 +1286,14 @@ impl Cx {
                         let env = attach_jni_env();
                         android_jni::to_java_set_full_screen(env, true);
                     }
+                }
+                // Activity resume can drop a previous setRequestedOrientation.
+                unsafe {
+                    let env = attach_jni_env();
+                    android_jni::to_java_set_screen_orientation(
+                        env,
+                        android_screen_orientation_flag(self.display_context.screen_orientation),
+                    );
                 }
                 // Java may keep a cached snapshot overlay visible across any
                 // pause/resume transition, even when Android never tears down
@@ -3076,6 +3092,15 @@ impl Cx {
                         android_jni::to_java_set_full_screen(env, false);
                     }
                 }
+                CxOsOp::SetScreenOrientation(orientation) => {
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_set_screen_orientation(
+                            env,
+                            android_screen_orientation_flag(orientation),
+                        );
+                    }
+                }
                 CxOsOp::SetSystemBarDarkIcons(dark_icons) => {
                     unsafe {
                         let env = attach_jni_env();
@@ -3453,6 +3478,9 @@ impl Cx {
         unsafe {
             let env = attach_jni_env();
             let Some(bridge) = android_jni::to_java_create_oes_decode_surface(env, tex) else {
+                crate::log!(
+                    "VIDEO: MediaCodec OES bridge unavailable; software path will use YUV upload"
+                );
                 return (None, None, tex);
             };
             let Some(surface_local) =
@@ -3474,6 +3502,17 @@ impl Cx {
             crate::log!("VIDEO: MediaCodec OES surface ready tex={}", tex);
             (Some(bridge), Some(surface_global), tex)
         }
+    }
+}
+
+fn android_screen_orientation_flag(
+    orientation: crate::display_context::ScreenOrientation,
+) -> i32 {
+    // ActivityInfo.SCREEN_ORIENTATION_*
+    match orientation {
+        crate::display_context::ScreenOrientation::Auto => -1, // UNSPECIFIED
+        crate::display_context::ScreenOrientation::Portrait => 7, // SENSOR_PORTRAIT
+        crate::display_context::ScreenOrientation::Landscape => 6, // SENSOR_LANDSCAPE
     }
 }
 

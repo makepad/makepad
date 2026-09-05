@@ -11,14 +11,35 @@ macro_rules! new_object {
         let find_class = (**$env).FindClass.unwrap();
         let get_method_id = (**$env).GetMethodID.unwrap();
         let new_object = (**$env).NewObject.unwrap();
+        let exception_check = (**$env).ExceptionCheck.unwrap();
+        let exception_clear = (**$env).ExceptionClear.unwrap();
 
-        let class = std::ffi::CString::new($class).unwrap();
+        let class_name = std::ffi::CString::new($class).unwrap();
         let sig = std::ffi::CString::new($sig).unwrap();
-        let class = find_class($env, class.as_ptr() as _);
-
-        let constructor = get_method_id($env, class, b"<init>\0".as_ptr() as _, sig.as_ptr() as _);
-
-        new_object($env, class, constructor, $($args,)*)
+        // FindClass from a non-Java thread only sees the system ClassLoader and
+        // returns null for app classes (e.g. OesDecodeSurface). Never call
+        // GetMethodID on a null class — that aborts the process.
+        let class = find_class($env, class_name.as_ptr() as _);
+        if exception_check($env) != 0 {
+            exception_clear($env);
+        }
+        if class.is_null() {
+            std::ptr::null_mut()
+        } else {
+            let constructor =
+                get_method_id($env, class, b"<init>\0".as_ptr() as _, sig.as_ptr() as _);
+            if exception_check($env) != 0 {
+                exception_clear($env);
+            }
+            if constructor.is_null() {
+                (**$env).DeleteLocalRef.unwrap()($env, class);
+                std::ptr::null_mut()
+            } else {
+                let obj = new_object($env, class, constructor, $($args,)*);
+                (**$env).DeleteLocalRef.unwrap()($env, class);
+                obj
+            }
+        }
     }};
 }
 

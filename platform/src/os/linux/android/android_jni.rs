@@ -1413,6 +1413,16 @@ pub unsafe fn to_java_set_full_screen(env: *mut jni_sys::JNIEnv, fullscreen: boo
     );
 }
 
+pub unsafe fn to_java_set_screen_orientation(env: *mut jni_sys::JNIEnv, orientation: i32) {
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "setScreenOrientation",
+        "(I)V",
+        orientation
+    );
+}
+
 pub unsafe fn to_java_set_system_bar_appearance(env: *mut jni_sys::JNIEnv, dark_icons: bool) {
     ndk_utils::call_void_method!(
         env,
@@ -1441,6 +1451,11 @@ pub unsafe fn to_java_request_surface_snapshot_refresh() {
 
 pub unsafe fn to_java_switch_activity(env: *mut jni_sys::JNIEnv) {
     ndk_utils::call_void_method!(env, get_activity(), "switchActivity", "()V");
+}
+
+pub unsafe fn to_java_finish_if_back_unhandled() {
+    let env = attach_jni_env();
+    ndk_utils::call_void_method!(env, get_activity(), "finishIfBackUnhandled", "()V");
 }
 
 pub(crate) unsafe fn to_java_load_asset(filepath: &str) -> Option<Vec<u8>> {
@@ -2042,6 +2057,60 @@ pub unsafe fn to_java_cleanup_video_decoder_ref(
     (**env).DeleteGlobalRef.unwrap()(env, video_decoder_ref);
 }
 
+/// Load an app Java class from a native thread via the Activity ClassLoader.
+///
+/// [`JNIEnv::FindClass`] on Makepad's render thread only sees the bootstrap
+/// ClassLoader, so app types like `OesDecodeSurface` come back null and a
+/// subsequent `GetMethodID` aborts the process.
+unsafe fn find_app_class(env: *mut jni_sys::JNIEnv, dotted_name: &str) -> Option<jni_sys::jobject> {
+    let activity = get_activity();
+    if activity.is_null() {
+        return None;
+    }
+    let loader = ndk_utils::call_object_method!(
+        env,
+        activity,
+        "getClassLoader",
+        "()Ljava/lang/ClassLoader;"
+    );
+    if loader.is_null() {
+        return None;
+    }
+    let name = match CString::new(dotted_name) {
+        Ok(s) => s,
+        Err(_) => {
+            (**env).DeleteLocalRef.unwrap()(env, loader);
+            return None;
+        }
+    };
+    let name_j = ((**env).NewStringUTF.unwrap())(env, name.as_ptr());
+    if name_j.is_null() {
+        (**env).DeleteLocalRef.unwrap()(env, loader);
+        return None;
+    }
+    let class = ndk_utils::call_object_method!(
+        env,
+        loader,
+        "loadClass",
+        "(Ljava/lang/String;)Ljava/lang/Class;",
+        name_j
+    );
+    (**env).DeleteLocalRef.unwrap()(env, name_j);
+    (**env).DeleteLocalRef.unwrap()(env, loader);
+    if (**env).ExceptionCheck.unwrap()(env) != 0 {
+        (**env).ExceptionClear.unwrap()(env);
+        if !class.is_null() {
+            (**env).DeleteLocalRef.unwrap()(env, class);
+        }
+        return None;
+    }
+    if class.is_null() {
+        None
+    } else {
+        Some(class)
+    }
+}
+
 /// Create an [`OesDecodeSurface`] for MediaCodec zero-copy present.
 ///
 /// Returns a JNI **global** ref to the bridge object, or `None` on failure.
@@ -2053,13 +2122,68 @@ pub unsafe fn to_java_create_oes_decode_surface(
     if oes_tex_id == 0 {
         return None;
     }
-    let bridge = crate::new_object!(
+    // Prefer Activity ClassLoader — required when called from Makepad's native
+    // main loop. Fall back to FindClass (works only on threads that already
+    // have the app loader).
+    let class = match find_app_class(env, "dev.makepad.android.OesDecodeSurface") {
+        Some(c) => c,
+        None => {
+            let bridge = crate::new_object!(
+                env,
+                "dev/makepad/android/OesDecodeSurface",
+                "(I)V",
+                oes_tex_id as jni_sys::jint
+            );
+            if bridge.is_null() {
+                crate::error!(
+                    "VIDEO: OesDecodeSurface unavailable (ClassLoader/FindClass failed)"
+                );
+                return None;
+            }
+            let ready = ndk_utils::call_bool_method!(env, bridge, "isReady", "()Z");
+            if ready == 0 {
+                (**env).DeleteLocalRef.unwrap()(env, bridge);
+                return None;
+            }
+            let global = (**env).NewGlobalRef.unwrap()(env, bridge);
+            (**env).DeleteLocalRef.unwrap()(env, bridge);
+            return if global.is_null() {
+                None
+            } else {
+                Some(global)
+            };
+        }
+    };
+
+    let sig = CString::new("(I)V").unwrap();
+    let ctor = ((**env).GetMethodID.unwrap())(
         env,
-        "dev/makepad/android/OesDecodeSurface",
-        "(I)V",
-        oes_tex_id as jni_sys::jint
+        class,
+        b"<init>\0".as_ptr() as _,
+        sig.as_ptr() as _,
     );
-    if bridge.is_null() {
+    if ctor.is_null() || (**env).ExceptionCheck.unwrap()(env) != 0 {
+        if (**env).ExceptionCheck.unwrap()(env) != 0 {
+            (**env).ExceptionClear.unwrap()(env);
+        }
+        (**env).DeleteLocalRef.unwrap()(env, class);
+        crate::error!("VIDEO: OesDecodeSurface.<init> not found");
+        return None;
+    }
+    let bridge = ((**env).NewObject.unwrap())(
+        env,
+        class,
+        ctor,
+        oes_tex_id as jni_sys::jint,
+    );
+    (**env).DeleteLocalRef.unwrap()(env, class);
+    if bridge.is_null() || (**env).ExceptionCheck.unwrap()(env) != 0 {
+        if (**env).ExceptionCheck.unwrap()(env) != 0 {
+            (**env).ExceptionClear.unwrap()(env);
+        }
+        if !bridge.is_null() {
+            (**env).DeleteLocalRef.unwrap()(env, bridge);
+        }
         return None;
     }
     let ready = ndk_utils::call_bool_method!(env, bridge, "isReady", "()Z");

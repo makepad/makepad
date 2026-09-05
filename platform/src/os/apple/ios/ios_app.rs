@@ -349,6 +349,10 @@ impl IosApp {
             (*view_ctrl_obj).set_ivar::<BOOL>("_prefersHomeIndicatorAutoHidden", NO);
             // 0 = UIStatusBarStyleDefault (system-managed light/dark).
             (*view_ctrl_obj).set_ivar::<i64>("_preferredStatusBarStyle", 0);
+            // UIInterfaceOrientationMaskAllButUpsideDown
+            (*view_ctrl_obj).set_ivar::<u64>("_supportedInterfaceOrientations", 26);
+            // UIInterfaceOrientationPortrait
+            (*view_ctrl_obj).set_ivar::<i64>("_preferredInterfaceOrientation", 1);
 
             let () = msg_send![view_ctrl_obj, setView: mtk_view_obj];
 
@@ -1353,6 +1357,78 @@ impl IosApp {
             unsafe {
                 (*vc).set_ivar::<i64>("_preferredStatusBarStyle", style);
                 let () = msg_send![vc, setNeedsStatusBarAppearanceUpdate];
+            }
+        }
+    }
+
+    pub fn set_screen_orientation(orientation: crate::display_context::ScreenOrientation) {
+        // UIInterfaceOrientationMask / UIInterfaceOrientation
+        let (mask, ui_orient): (u64, i64) = match orientation {
+            crate::display_context::ScreenOrientation::Auto => (26, 0),
+            crate::display_context::ScreenOrientation::Portrait => (2, 1),
+            crate::display_context::ScreenOrientation::Landscape => (24, 4),
+        };
+        let vc = IOS_APP
+            .try_with(|app| {
+                app.try_borrow()
+                    .ok()
+                    .and_then(|app_ref| app_ref.as_ref()?.view_controller)
+            })
+            .ok()
+            .flatten();
+        let Some(vc) = vc else {
+            return;
+        };
+        unsafe {
+            (*vc).set_ivar::<u64>("_supportedInterfaceOrientations", mask);
+            if ui_orient != 0 {
+                (*vc).set_ivar::<i64>("_preferredInterfaceOrientation", ui_orient);
+            }
+            let update: BOOL =
+                msg_send![vc, respondsToSelector: sel!(setNeedsUpdateOfSupportedInterfaceOrientations)];
+            if update == YES {
+                let () = msg_send![vc, setNeedsUpdateOfSupportedInterfaceOrientations];
+            }
+
+            // iOS 16+: official scene geometry update. Older iOS falls back to
+            // attemptRotation + UIDevice KVC (the latter is private API).
+            let mut used_scene_api = false;
+            let view: ObjcId = msg_send![vc, view];
+            if view != nil {
+                let window: ObjcId = msg_send![view, window];
+                if window != nil {
+                    let has_scene: BOOL = msg_send![window, respondsToSelector: sel!(windowScene)];
+                    if has_scene == YES {
+                        let scene: ObjcId = msg_send![window, windowScene];
+                        if scene != nil {
+                            let prefs_cls: ObjcId = makepad_objc_sys::runtime::objc_getClass(
+                                b"UIWindowSceneGeometryPreferencesIOS\0".as_ptr() as *const _,
+                            ) as ObjcId;
+                            if !prefs_cls.is_null() {
+                                let prefs: ObjcId = msg_send![prefs_cls, alloc];
+                                if prefs != nil {
+                                    let prefs: ObjcId =
+                                        msg_send![prefs, initWithInterfaceOrientations: mask];
+                                    let () = msg_send![
+                                        scene,
+                                        requestGeometryUpdateWithPreferences: prefs
+                                        errorHandler: nil
+                                    ];
+                                    used_scene_api = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !used_scene_api {
+                if ui_orient != 0 {
+                    let device: ObjcId = msg_send![class!(UIDevice), currentDevice];
+                    let num: ObjcId = msg_send![class!(NSNumber), numberWithInteger: ui_orient];
+                    let key = str_to_nsstring("orientation");
+                    let () = msg_send![device, setValue: num forKey: key];
+                }
+                let () = msg_send![class!(UIViewController), attemptRotationToDeviceOrientation];
             }
         }
     }

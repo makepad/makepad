@@ -1430,6 +1430,28 @@ impl GStreamerVideoPlayer {
                 );
             }
 
+            // Pitch-preserving tempo for `gst_element_seek` rate changes.
+            // Without this, playbin rate ≠ 1.0 chipmunks / slows pitch with speed.
+            {
+                let scaletempo_type = CString::new("scaletempo").unwrap();
+                let scaletempo =
+                    (gst.gst_element_factory_make)(scaletempo_type.as_ptr(), std::ptr::null());
+                if !scaletempo.is_null() {
+                    let audio_filter = CString::new("audio-filter").unwrap();
+                    (gst.g_object_set_ptr)(
+                        pipeline,
+                        audio_filter.as_ptr(),
+                        scaletempo as *mut c_void,
+                        std::ptr::null(),
+                    );
+                    crate::log!("VIDEO: playbin audio-filter=scaletempo (pitch-preserving rate)");
+                } else {
+                    crate::log!(
+                        "VIDEO: scaletempo unavailable; playback rate will change pitch"
+                    );
+                }
+            }
+
             let video_sink = if audio_only {
                 let fakesink_type = CString::new("fakesink").unwrap();
                 let fakesink =
