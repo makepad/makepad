@@ -1012,6 +1012,21 @@ impl Biquad {
         Biquad::from_raw(b0, -(1.0 + cos_w0), b0, 1.0 + alpha, -2.0 * cos_w0, 1.0 - alpha)
     }
 
+    /// A peaking bell: `gain` above one lifts a hump at `cutoff`, below
+    /// one digs a notch, and exactly one is a straight wire.
+    pub fn peaking(cutoff: f32, sample_rate: f32, q: f32, gain: f32) -> Biquad {
+        let (cos_w0, alpha, _) = Biquad::shared(cutoff, sample_rate, q);
+        let a = gain.max(1e-4).sqrt();
+        Biquad::from_raw(
+            1.0 + alpha * a,
+            -2.0 * cos_w0,
+            1.0 - alpha * a,
+            1.0 + alpha / a,
+            -2.0 * cos_w0,
+            1.0 - alpha / a,
+        )
+    }
+
     pub fn allpass(cutoff: f32, sample_rate: f32, q: f32) -> Biquad {
         let (cos_w0, alpha, _) = Biquad::shared(cutoff, sample_rate, q);
         Biquad::from_raw(
@@ -1089,6 +1104,11 @@ pub fn eq_crossovers_for(low_hz: f32, high_hz: f32) -> Option<(f32, f32)> {
 /// enough to be inaudible -- the same answer the sweep's own corner
 /// takes, for the same reason.
 const EQ_CROSSOVER_GLIDE: f32 = 0.12;
+/// How broad a boost bell is. Under one octave wide at the half-way
+/// point: wide enough to read as "more bass" rather than as a resonance,
+/// narrow enough that lifting the low band does not drag the mids up
+/// with it.
+const EQ_BELL_Q: f32 = 0.9;
 /// Close enough to be there. An exponential walk never quite arrives, so
 /// the last sliver is taken in one step -- a hundredth of an octave,
 /// which is under a percent of the corner and far below what a whole
@@ -1137,6 +1157,14 @@ pub fn filter_corner_hz(position: f32) -> Option<(bool, f32)> {
 /// same speed.
 const BLEND_ENGAGE_SECS: f32 = 0.08;
 
+/// Where each band's bell sits, given the corners in force. The outer
+/// two have no centre of their own -- a band that runs to DC or to
+/// Nyquist has no middle -- so they take their corner shifted an octave
+/// into the band, which is where a shelf-like lift wants to sit.
+fn bell_centres(low_hz: f32, high_hz: f32) -> [f32; 3] {
+    [low_hz * 0.5, (low_hz * high_hz).sqrt(), high_hz * 2.0]
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct EqChannelState {
     /// Split at EQ_HIGH_HZ: low-pass pair then high-pass pair.
@@ -1147,6 +1175,8 @@ struct EqChannelState {
     band_hp: [BiquadState; 2],
     /// Phase compensation for the high branch.
     band_ap: BiquadState,
+    /// One bell per band, for the boost half of the knob's travel.
+    bells: [BiquadState; 3],
     /// Sweepable filter, 4th order.
     sweep: [BiquadState; 2],
     /// The same filter at its PREVIOUS setting, kept running while a
@@ -1168,6 +1198,13 @@ struct EqCoeffs {
     band_ap: Biquad,
     sweep: [Biquad; 2],
     sweep_on: bool,
+    /// One bell per band, for the BOOST half of the knob's travel. Below
+    /// unity the isolator does the work; above it these do, so a lift is
+    /// a hump inside the band rather than the whole crossover slice
+    /// turned up. `bells_on` says whether any is doing anything at all,
+    /// so the ordinary case costs one compare and no filtering.
+    bells: [Biquad; 3],
+    bells_on: bool,
     /// What the sweep was, for the frames it takes to hand over.
     sweep_prev: [Biquad; 2],
     sweep_prev_on: bool,
@@ -1189,6 +1226,8 @@ impl EqCoeffs {
             band_lp: Biquad::lowpass(low_hz, sample_rate, LR4_Q),
             band_hp: Biquad::highpass(low_hz, sample_rate, LR4_Q),
             band_ap: Biquad::allpass(low_hz, sample_rate, LR4_Q),
+            bells: [Biquad::default(); 3],
+            bells_on: false,
             sweep: [Biquad::default(); 2],
             sweep_on: false,
             sweep_prev: [Biquad::default(); 2],
@@ -1265,6 +1304,39 @@ impl DeckEq {
 
     pub fn crossovers(&self) -> (f32, f32) {
         (self.low_hz, self.high_hz)
+    }
+
+    /// Rebuild the boost bells from the gains in force.
+    ///
+    /// THE LAW. Below unity a band knob is an isolator: it scales its own
+    /// crossover slice, and zero is a true kill because the slice simply
+    /// stops being summed. That is what a DJ EQ is for and it is not
+    /// changing.
+    ///
+    /// Above unity, scaling the slice is the wrong instrument. A
+    /// crossover band is a brick with corners; turning the whole thing up
+    /// lifts everything in it equally and stacks phase at both seams,
+    /// which reads as honk rather than as more. So the boost half comes
+    /// off the isolator entirely -- the slice stays at unity -- and a
+    /// gentle bell in the middle of the band does the lifting instead.
+    ///
+    /// Nothing is crossfaded between the two because nothing needs to
+    /// be: at exactly unity the isolator is a wire and the bell is a
+    /// wire, so the two halves already meet.
+    fn build_bells(&mut self) {
+        let centres = bell_centres(self.low_built, self.high_built);
+        let mut any = false;
+        for band in 0..3 {
+            // The autopilot's blend multiplies the operator's knob, the
+            // same way it does for the cut half.
+            let boost = (self.gain[band].target() * self.blend[band].target()).max(1.0);
+            if boost > 1.0 + EQ_KILL_EPSILON {
+                any = true;
+            }
+            self.coeffs.bells[band] =
+                Biquad::peaking(centres[band], self.sample_rate, EQ_BELL_Q, boost);
+        }
+        self.coeffs.bells_on = any;
     }
 
     /// Walk the built corners toward the asked-for ones, in octaves --
@@ -1458,6 +1530,7 @@ impl DeckEq {
     /// hear a cutoff quantized to one buffer.
     pub fn prepare_block(&mut self) {
         self.glide_crossovers();
+        self.build_bells();
         let position = self.effective_filter();
         let engaged = !self.at_unity();
         self.wet.slew(if engaged { 1.0 } else { 0.0 }, EQ_ENGAGE_SECS);
@@ -1590,7 +1663,23 @@ impl DeckEq {
             // three bands stay phase-coherent and sum flat at unity.
             let high = self.coeffs.band_ap.process(&mut state.band_ap, high_branch);
 
-            let banded = low * gains[0] + mid * gains[1] + high * gains[2];
+            // The isolator half: at or below unity the band is scaled,
+            // above it the slice is left alone and the bell does the
+            // lifting.
+            let banded = low * gains[0].min(1.0)
+                + mid * gains[1].min(1.0)
+                + high * gains[2].min(1.0);
+            let banded = match self.coeffs.bells_on {
+                false => banded,
+                true => {
+                    let mut lifted = banded;
+                    for band in 0..3 {
+                        lifted = self.coeffs.bells[band]
+                            .process(&mut state.bells[band], lifted);
+                    }
+                    lifted
+                }
+            };
             let mut wet_sample = banded;
             if self.coeffs.sweep_on {
                 for index in 0..2 {
@@ -7008,6 +7097,155 @@ mod tests {
             prev = Some(out);
         }
         assert!(worst < 0.02, "a crossover move stepped by {worst}");
+    }
+
+    /// Unity is a wire. Three bells sit in the path whenever any band is
+    /// lifted, so the thing that has to be true first is that at rest
+    /// they do nothing at all.
+    #[test]
+    fn the_bells_are_a_wire_at_unity() {
+        let rate = 48_000.0f32;
+        let mut eq = DeckEq::new(rate);
+        eq.set_sample_rate(rate);
+        // Engaged through the filter, so the chain is in the path, but
+        // every band knob at unity.
+        eq.set_filter(0.3);
+        let mut plain = DeckEq::new(rate);
+        plain.set_sample_rate(rate);
+        plain.set_filter(0.3);
+        let mut phase = 0.0f32;
+        for n in 0..8_000usize {
+            if n % 512 == 0 {
+                eq.prepare_block();
+                plain.prepare_block();
+            }
+            phase += 2.0 * PI * 220.0 / rate;
+            let x = phase.sin() * 0.5;
+            let with = eq.process([x, x], rate)[0];
+            let without = plain.process([x, x], rate)[0];
+            assert_eq!(with, without, "the bells coloured a chain at unity");
+        }
+    }
+
+    /// A cut is still a kill. The isolator half is what a DJ EQ is for
+    /// and the boost law must not have touched it.
+    #[test]
+    fn a_killed_band_is_still_silent() {
+        let rate = 48_000.0f32;
+        let mut eq = DeckEq::new(rate);
+        eq.set_sample_rate(rate);
+        for band in 0..3 {
+            eq.set_band(band, 0.0);
+        }
+        let mut phase = 0.0f32;
+        // Once a BLOCK, the way the callback does it. Called every frame,
+        // `prepare_block` re-slews `wet` every frame, and a ramp whose
+        // step is recomputed from the distance still to go never arrives
+        // -- so the chain sits a hair below fully wet and leaks dry.
+        for n in 0..SETTLE_FRAMES {
+            if n % 512 == 0 {
+                eq.prepare_block();
+            }
+            phase += 2.0 * PI * 220.0 / rate;
+            eq.process([phase.sin() * 0.5, phase.sin() * 0.5], rate);
+        }
+        let mut worst = 0.0f32;
+        for n in 0..8_000usize {
+            if n % 512 == 0 {
+                eq.prepare_block();
+            }
+            phase += 2.0 * PI * 220.0 / rate;
+            let x = phase.sin() * 0.5;
+            worst = worst.max(eq.process([x, x], rate)[0].abs());
+        }
+        // Sixty decibels down, this file's own definition of silence.
+        // What is left is the engage ramp's asymptote: `prepare_block`
+        // re-slews `wet` every block, so it approaches fully-wet without
+        // arriving, and a hair of dry rides along for ever.
+        assert!(worst < 1e-3, "all three bands killed still passed {worst}");
+    }
+
+    /// A boost is a bell and not a brick: lifting the LOW band lifts a
+    /// low tone much more than a high one. Scaling the crossover slice
+    /// would lift everything inside it by the same amount and nothing
+    /// outside, which is the shape this law exists to avoid.
+    #[test]
+    fn a_boost_lifts_its_own_band_and_mostly_leaves_the_others() {
+        let rate = 48_000.0f32;
+        let level = |hz: f32, boost: f32| -> f64 {
+            let mut eq = DeckEq::new(rate);
+            eq.set_sample_rate(rate);
+            eq.set_band(0, boost);
+            let mut phase = 0.0f32;
+            for n in 0..12_000usize {
+                if n % 512 == 0 {
+                    eq.prepare_block();
+                }
+                phase += 2.0 * PI * hz / rate;
+                eq.process([phase.sin() * 0.4, phase.sin() * 0.4], rate);
+            }
+            let mut sum = 0.0f64;
+            for n in 0..12_000usize {
+                if n % 512 == 0 {
+                    eq.prepare_block();
+                }
+                phase += 2.0 * PI * hz / rate;
+                let out = eq.process([phase.sin() * 0.4, phase.sin() * 0.4], rate)[0];
+                sum += (out as f64) * (out as f64);
+            }
+            sum.sqrt()
+        };
+        // 125 Hz is the low band's bell centre at the default corners.
+        let low_lift = level(125.0, 2.0) / level(125.0, 1.0);
+        let high_lift = level(6_000.0, 2.0) / level(6_000.0, 1.0);
+        assert!(low_lift > 1.4, "the low band was not lifted: {low_lift}");
+        // The point of a bell: the far band barely moves. Scaling the
+        // crossover slice instead would leave it at exactly 1.0 but lift
+        // everything INSIDE the low band equally, corners and all --
+        // which is the shape this law exists to avoid, and is what the
+        // centre-versus-edge comparison below actually catches.
+        assert!(
+            high_lift < 1.1,
+            "the lift reached the highs: low {low_lift}, high {high_lift}"
+        );
+        // And it is a hump, not a brick: the band's own centre is lifted
+        // appreciably more than its edge.
+        let edge_lift = level(EQ_LOW_HZ, 2.0) / level(EQ_LOW_HZ, 1.0);
+        assert!(
+            edge_lift < low_lift * 0.9,
+            "the boost was flat across the band: centre {low_lift}, edge {edge_lift}"
+        );
+    }
+
+    /// Crossing unity is where the two halves meet, and it must not
+    /// step: the isolator stops scaling exactly where the bell starts
+    /// lifting, and at the crossing both are a wire.
+    #[test]
+    fn crossing_unity_does_not_step_the_output() {
+        let rate = 48_000.0f32;
+        let mut eq = DeckEq::new(rate);
+        eq.set_sample_rate(rate);
+        let mut phase = 0.0f32;
+        let mut prev: Option<f32> = None;
+        let mut worst = 0.0f32;
+        for n in 0..40_000usize {
+            if n % 512 == 0 {
+                eq.prepare_block();
+            }
+            // Walk the knob from a deep cut, through unity, to a boost.
+            if n % 400 == 0 {
+                let t = n as f32 / 40_000.0;
+                eq.set_band(0, t * 2.0);
+            }
+            phase += 2.0 * PI * 40.0 / rate;
+            let x = phase.sin() * 0.5;
+            let out = eq.process([x, x], rate)[0];
+            if let Some(p) = prev {
+                worst = worst.max((out - p).abs());
+            }
+            prev = Some(out);
+        }
+        assert!(worst < 0.02, "crossing unity stepped by {worst}");
     }
 
     /// The ladder is the whole set an operator can pick from: free
