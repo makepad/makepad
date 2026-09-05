@@ -2651,16 +2651,6 @@ script_mod! {
                                             precision: 2
                                         }
                                     }
-                                    sfx_fx_phaser_feedback := Slider{
-                                        width: 170
-                                        text: "phaser feedback"
-                                        min: 0.0
-                                        max: 0.9
-                                        default: 0.3
-                                        unit: "%"
-                                        display_scale: 100.0
-                                        precision: 0
-                                    }
                                     sfx_fx_phaser_sync := VjBeatsDrop{width: 40 lfo_rows: true}
                                     sfx_fx_phaser_locked := View{
                                         width: Fit
@@ -2679,6 +2669,16 @@ script_mod! {
                                             display_scale: 100.0
                                             precision: 0
                                         }
+                                    }
+                                    sfx_fx_phaser_feedback := Slider{
+                                        width: 170
+                                        text: "phaser feedback"
+                                        min: 0.0
+                                        max: 0.9
+                                        default: 0.3
+                                        unit: "%"
+                                        display_scale: 100.0
+                                        precision: 0
                                     }
                                 }
                                 View{
