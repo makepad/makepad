@@ -132,6 +132,28 @@ script_mod! {
         color_u_hidden: #FFFFFF00
         color_d_hidden: #00000000
 
+        // The tint ladders every other theme derives from its contrast knob,
+        // spelled out at contrast 1 so the widgets that read them evaluate
+        // here too (the code view, the text flow, the file tree's inactive
+        // face).
+        color_white: #xFFFFFFE6
+        color_u_6: #xFFFFFFCC
+        color_u_5: #xFFFFFFA6
+        color_u_4: #xFFFFFF66
+        color_u_3: #xFFFFFF33
+        color_u_2: #xFFFFFF26
+        color_u_15: #xFFFFFF1A
+        color_u_1: #xFFFFFF0D
+        color_d_025: #x0000000D
+        color_d_05: #x0000001A
+        color_d_1: #x00000026
+        color_d_2: #x00000040
+        color_d_3: #x00000066
+        color_d_4: #x00000099
+        color_d_5: #x000000BF
+        color_black: #x000000E6
+        color_outset_inactive: #x00000000
+
         color_bg_app: #D
         color_fg_app: #E
 
