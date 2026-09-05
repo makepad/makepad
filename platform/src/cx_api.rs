@@ -576,17 +576,24 @@ impl Cx {
     /// Requests a deferred `Event::LiveEdit` on the next event-loop iteration.
     /// The handler re-runs `script_mod` (re-evaluating any expressions that
     /// reference primitive heap values like `mod.widgets.SAFE_INSET_PAD_TOP`)
-    /// and then re-applies the widget tree with `Apply::Reload`.
+    /// and then re-applies the widget tree with `Apply::Rebake`, which
+    /// preserves imperative runtime state since the DSL itself is unchanged.
     ///
     /// Use this only when a primitive heap value has changed and that value
     /// is consumed by `script_mod!` block expressions — those expressions are
-    /// not re-evaluated by `Apply::ScriptReapply`. `Apply::Reload` walks
-    /// clobber runtime widget state (animator values, dynamic instance
-    /// buffers, user-typed text in widgets that don't early-return on
-    /// LiveEdit), so prefer `request_script_reapply` when the change can be
+    /// not re-evaluated by `Apply::ScriptReapply`. The re-run is still a full
+    /// tree walk, so prefer `request_script_reapply` when the change can be
     /// modeled as a shared-heap-object mutation instead.
     pub fn request_live_edit(&mut self) {
         self.pending_live_edit_request = true;
+    }
+
+    /// The `Apply` variant the currently dispatching `Event::LiveEdit` should
+    /// be re-applied with — `Reload` for a file-change hot reload, `Rebake`
+    /// for a `request_live_edit()` re-bake. `app_main!` reads this; app code
+    /// has no reason to.
+    pub fn live_edit_apply(&self) -> crate::makepad_script::Apply {
+        self.live_edit_apply.clone()
     }
 
     /// Remap an absolute coordinate from the OS-reported logical-point space
