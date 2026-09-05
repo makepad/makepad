@@ -591,6 +591,11 @@ const WSOLA_COARSE_STRIDE: usize = 8;
 const WSOLA_FINE_RADIUS: usize = WSOLA_COARSE_STRIDE - 1;
 /// Ratios inside this band are treated as "no stretch" and bypass entirely.
 pub const STRETCH_BYPASS_EPSILON: f64 = 1e-4;
+/// The ratio at which the stretcher ENGAGES; it disengages back at
+/// [`STRETCH_BYPASS_EPSILON`]. The gap is hysteresis: a sync servo trimming
+/// the rate around unity would otherwise switch the stretcher in and out
+/// many times a second, and every switch re-seats the playhead.
+pub const STRETCH_ENGAGE_EPSILON: f64 = 1e-3;
 /// Widest stretch the grain search can still track. A caller that splits a
 /// tempo between the stretcher and a resampler must clamp to the SAME pair
 /// and recover the resampler from the result, or the two disagree about the

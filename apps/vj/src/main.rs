@@ -43,6 +43,7 @@ mod billboard;
 mod catalog;
 mod chat;
 mod console_scale;
+mod clock;
 mod cue;
 mod deck_sections;
 mod deck_tabs;
@@ -77,6 +78,7 @@ mod fx_thumbs;
 mod import_ui;
 mod pipelines;
 mod gen;
+mod ironfish;
 mod lanes;
 // LIVECODING: the observed effect-document origins, and the compile answer
 // a coding agent polls after saving one. See apps/vj/LIVECODING.md.
@@ -101,8 +103,10 @@ mod midi_clock;
 mod midi_learn;
 mod mix;
 mod mixer;
+mod program_mix;
 // The lock-free hand-off across the audio thread's boundary, in either direction.
 mod spsc;
+mod synth;
 // One writer, any readers, never a lock: what the callback publishes per buffer.
 mod published;
 // The audio path pinned against what it rendered the day the reference was

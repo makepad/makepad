@@ -28,10 +28,12 @@ use crate::loop_splat::{
     SplatGrid, SplatPart, SplatRow, SplatSnapshot, SPLAT_COLS, SPLAT_ROWS,
 };
 use crate::music_dsp::{
-    DeckEq, FrameSource, ParamRamp, RateReader, ScratchRamp, Stretcher, STEM_COUNT,
-    STRETCH_BYPASS_EPSILON, STRETCH_ENGAGE_EPSILON, STRETCH_RATIO_MAX, STRETCH_RATIO_MIN,
-    WSOLA_WINDOW,
+    Autopan, Bitcrusher, Compressor, DeckEcho, DeckEq, Distortion, Flanger, FrameSource, Freeze,
+    LevelMode, MoogLadder, ParamRamp, Phaser, PlateReverb, RateReader, ScratchRamp, SlotLevel,
+    StereoWidth, Stretcher, Tremolo, STEM_COUNT, STRETCH_BYPASS_EPSILON, STRETCH_ENGAGE_EPSILON,
+    STRETCH_RATIO_MAX, STRETCH_RATIO_MIN, WSOLA_WINDOW,
 };
+use crate::wave_analysis::{DeckClock, TrackGrid};
 use crate::pads::{PadKey, VoiceAlloc, VoiceId};
 use crate::score_preview::{PreviewEvent, PreviewSequence};
 use crate::program_mix::{
@@ -975,6 +977,266 @@ struct SplatPhaseFade {
     rows: [SplatRowVoice; SPLAT_ROWS],
 }
 
+/// One slot's occupant. A closed, small set matched inline -- the same
+/// dispatch this file already uses for `CueMode` -- rather than a trait:
+/// nothing here needs a slot to hold a kind unknown to this crate, and a
+/// `match` lets the optimizer inline each unit's own crossfade math
+/// directly into the chain's per-sample loop instead of going through a
+/// vtable ~512 times per callback per deck.
+enum EffectKind {
+    Eq(DeckEq),
+    Freeze(Freeze),
+    Echo(DeckEcho),
+    Flanger(Flanger),
+    Bitcrusher(Bitcrusher),
+    Tremolo(Tremolo),
+    Distortion(Distortion),
+    Phaser(Phaser),
+    Autopan(Autopan),
+    StereoWidth(StereoWidth),
+    PlateReverb(PlateReverb),
+    MoogLadder(MoogLadder),
+    Compressor(Compressor),
+}
+
+impl EffectKind {
+    #[inline]
+    fn process(&mut self, frame: [f32; 2], device_rate: f32) -> [f32; 2] {
+        match self {
+            EffectKind::Eq(eq) => eq.process(frame, device_rate),
+            EffectKind::Freeze(freeze) => freeze.process(frame, device_rate),
+            EffectKind::Echo(echo) => echo.process(frame, device_rate),
+            EffectKind::Flanger(flanger) => flanger.process(frame, device_rate),
+            EffectKind::Bitcrusher(bitcrusher) => bitcrusher.process(frame, device_rate),
+            EffectKind::Tremolo(tremolo) => tremolo.process(frame, device_rate),
+            EffectKind::Distortion(distortion) => distortion.process(frame, device_rate),
+            EffectKind::Phaser(phaser) => phaser.process(frame, device_rate),
+            EffectKind::Autopan(autopan) => autopan.process(frame, device_rate),
+            EffectKind::StereoWidth(stereo_width) => stereo_width.process(frame, device_rate),
+            EffectKind::PlateReverb(plate_reverb) => plate_reverb.process(frame, device_rate),
+            EffectKind::MoogLadder(moog_ladder) => moog_ladder.process(frame, device_rate),
+            EffectKind::Compressor(compressor) => compressor.process(frame, device_rate),
+        }
+    }
+}
+
+/// How many loop rolls can be stacked before the oldest is dropped. A
+/// hand can hold a few at once; past that the stack is a leak.
+pub const ROLL_STACK_CAP: usize = 4;
+
+const DECK_CHAIN_SLOTS: usize = 13;
+
+/// A deck's pre-fader tone chain: a fixed list of slots, walked in order.
+/// Not a `Vec` -- sized once, at compile time, never resized. Today's
+/// twelve slots are the whole roster and are permanently populated by
+/// construction; a slot that can stand empty, or be reassigned, is a
+/// separate decision for whenever growing the roster again asks for one.
+struct DeckChain {
+    slots: [EffectKind; DECK_CHAIN_SLOTS],
+    /// One per slot, in the same order: the wet/dry mix and what,
+    /// if anything, is done about the level that slot returns.
+    levels: [SlotLevel; DECK_CHAIN_SLOTS],
+    /// The policy a slot follows unless it has been pinned to one
+    /// of its own. Off, so nothing changes until it is asked for.
+    level_default: LevelMode,
+}
+
+impl DeckChain {
+    fn new(sample_rate: f32) -> DeckChain {
+        DeckChain {
+            levels: std::array::from_fn(|_| SlotLevel::new()),
+            level_default: LevelMode::Off,
+            slots: [
+                EffectKind::Eq(DeckEq::new(sample_rate)),
+                EffectKind::Freeze(Freeze::new()),
+                EffectKind::Echo(DeckEcho::new()),
+                EffectKind::Flanger(Flanger::new()),
+                EffectKind::Bitcrusher(Bitcrusher::new()),
+                EffectKind::Tremolo(Tremolo::new()),
+                EffectKind::Distortion(Distortion::new()),
+                EffectKind::Phaser(Phaser::new()),
+                EffectKind::Autopan(Autopan::new()),
+                EffectKind::StereoWidth(StereoWidth::new()),
+                EffectKind::PlateReverb(PlateReverb::new(sample_rate)),
+                EffectKind::MoogLadder(MoogLadder::new()),
+                EffectKind::Compressor(Compressor::new()),
+            ],
+        }
+    }
+
+    #[inline]
+    fn process(&mut self, frame: [f32; 2], device_rate: f32) -> [f32; 2] {
+        let mut out = frame;
+        for (slot, level) in self.slots.iter_mut().zip(&mut self.levels) {
+            // What went in and what came back, so the slot's own policy
+            // can blend them and, if it is asked to, correct the level.
+            let dry = out;
+            let wet = slot.process(dry, device_rate);
+            out = level.apply(dry, wet, device_rate, self.level_default);
+        }
+        out
+    }
+
+    /// Everything this chain wants doing once a device buffer: rebuild
+    /// what depends on the sample rate, and hand the musical clock to
+    /// the stages that follow it.
+    ///
+    /// One method rather than a list at each call site. There are two
+    /// chains now -- a deck's and the mix's -- and two hand-written
+    /// lists of the same calls is how one of them quietly stops getting
+    /// a new effect's preparation.
+    fn prepare_block(
+        &mut self,
+        clock: &crate::wave_analysis::DeckClock,
+        device_rate: f32,
+        buffer_frames: usize,
+    ) {
+        // Filter coefficients are rebuilt once per buffer -- the trig is
+        // the expensive part and a buffer is well under a millisecond.
+        self.eq_mut().set_sample_rate(device_rate);
+        self.eq_mut().prepare_block();
+        // The reverb's tank lines are fixed lengths in FRAMES, not
+        // musical time, so they take the same cheap rate compare.
+        self.plate_reverb_mut().set_sample_rate(device_rate);
+        // Ungridded or stopped, the counted beat -- the same default a
+        // loop or a jump takes with no grid to rule on.
+        let beat_secs = clock.beat_len().unwrap_or(60.0 / crate::decks::COUNTED_BPM);
+        // The echo wants its beat in device FRAMES; the LFOs want the
+        // whole clock, because a locked one has to know WHICH beat it is
+        // on to sit right in a cycle that spans several.
+        self.echo_mut().prepare_block(beat_secs * device_rate as f64);
+        let buffer_secs = buffer_frames as f32 / device_rate;
+        self.tremolo_mut().prepare_block(clock, buffer_secs);
+        self.autopan_mut().prepare_block(clock, buffer_secs);
+        self.flanger_mut().prepare_block(clock, buffer_secs);
+        self.phaser_mut().prepare_block(clock, buffer_secs);
+    }
+
+    /// The policy the slots that have not been pinned follow.
+    fn set_level_default(&mut self, mode: LevelMode) {
+        self.level_default = mode;
+    }
+
+    fn level_default(&self) -> LevelMode {
+        self.level_default
+    }
+
+    #[cfg(test)]
+    fn slot_engaged(&mut self, slot: usize) -> bool {
+        match &self.slots[slot] {
+            EffectKind::Eq(eq) => !eq.at_unity(),
+            EffectKind::Freeze(freeze) => freeze.held(),
+            EffectKind::Echo(echo) => echo.engaged(),
+            EffectKind::Flanger(x) => x.engaged(),
+            EffectKind::Bitcrusher(x) => x.engaged(),
+            EffectKind::Tremolo(x) => x.engaged(),
+            EffectKind::Distortion(x) => x.engaged(),
+            EffectKind::Phaser(x) => x.engaged(),
+            EffectKind::Autopan(x) => x.engaged(),
+            EffectKind::StereoWidth(x) => x.engaged(),
+            EffectKind::PlateReverb(x) => x.engaged(),
+            EffectKind::MoogLadder(x) => x.engaged(),
+            EffectKind::Compressor(x) => x.engaged(),
+        }
+    }
+
+    fn level_mut(&mut self, slot: usize) -> &mut SlotLevel {
+        &mut self.levels[slot]
+    }
+
+    /// Drop every slot's measurement, so one record's levels are not
+    /// carried into the next.
+    fn reset_levels(&mut self) {
+        for level in &mut self.levels {
+            level.reset();
+        }
+    }
+
+    // Fixed accessors. Every slot is populated with a known kind at a
+    // known index by construction, so `unreachable!()` documents that
+    // invariant rather than swallowing an error -- this stops being true
+    // only once slots become dynamically reassignable.
+    fn eq_mut(&mut self) -> &mut DeckEq {
+        match &mut self.slots[0] {
+            EffectKind::Eq(eq) => eq,
+            _ => unreachable!(),
+        }
+    }
+    fn freeze_mut(&mut self) -> &mut Freeze {
+        match &mut self.slots[1] {
+            EffectKind::Freeze(freeze) => freeze,
+            _ => unreachable!(),
+        }
+    }
+    fn echo_mut(&mut self) -> &mut DeckEcho {
+        match &mut self.slots[2] {
+            EffectKind::Echo(echo) => echo,
+            _ => unreachable!(),
+        }
+    }
+    fn flanger_mut(&mut self) -> &mut Flanger {
+        match &mut self.slots[3] {
+            EffectKind::Flanger(flanger) => flanger,
+            _ => unreachable!(),
+        }
+    }
+    fn bitcrusher_mut(&mut self) -> &mut Bitcrusher {
+        match &mut self.slots[4] {
+            EffectKind::Bitcrusher(bitcrusher) => bitcrusher,
+            _ => unreachable!(),
+        }
+    }
+    fn tremolo_mut(&mut self) -> &mut Tremolo {
+        match &mut self.slots[5] {
+            EffectKind::Tremolo(tremolo) => tremolo,
+            _ => unreachable!(),
+        }
+    }
+    fn distortion_mut(&mut self) -> &mut Distortion {
+        match &mut self.slots[6] {
+            EffectKind::Distortion(distortion) => distortion,
+            _ => unreachable!(),
+        }
+    }
+    fn phaser_mut(&mut self) -> &mut Phaser {
+        match &mut self.slots[7] {
+            EffectKind::Phaser(phaser) => phaser,
+            _ => unreachable!(),
+        }
+    }
+    fn autopan_mut(&mut self) -> &mut Autopan {
+        match &mut self.slots[8] {
+            EffectKind::Autopan(autopan) => autopan,
+            _ => unreachable!(),
+        }
+    }
+    fn stereo_width_mut(&mut self) -> &mut StereoWidth {
+        match &mut self.slots[9] {
+            EffectKind::StereoWidth(stereo_width) => stereo_width,
+            _ => unreachable!(),
+        }
+    }
+    fn plate_reverb_mut(&mut self) -> &mut PlateReverb {
+        match &mut self.slots[10] {
+            EffectKind::PlateReverb(plate_reverb) => plate_reverb,
+            _ => unreachable!(),
+        }
+    }
+    fn moog_ladder_mut(&mut self) -> &mut MoogLadder {
+        match &mut self.slots[11] {
+            EffectKind::MoogLadder(moog_ladder) => moog_ladder,
+            _ => unreachable!(),
+        }
+    }
+
+    fn compressor_mut(&mut self) -> &mut Compressor {
+        match &mut self.slots[12] {
+            EffectKind::Compressor(compressor) => compressor,
+            _ => unreachable!(),
+        }
+    }
+}
+
 struct DeckVoice {
     pcm: Option<DeckPcm>,
     sync_locked: bool,
@@ -1010,7 +1272,17 @@ struct DeckVoice {
     stretching: bool,
     stretch: Box<Stretcher>,
     reader: RateReader,
-    eq: DeckEq,
+    /// The effect chain. Slot 0 IS the EQ this voice used to hold on its
+    /// own -- the chain simply walks it first and then twelve more.
+    chain: DeckChain,
+    /// The grid this record is ruled by, for the musical clock below.
+    /// `None` until an analysis lands, which is what makes every
+    /// beat-locked stage fall back to a counted beat.
+    grid: Option<TrackGrid>,
+    /// Where the beat is at the END of this buffer, worked out once per
+    /// buffer rather than per frame. The beat-locked LFOs and the echo
+    /// read it; nothing else does.
+    clock: DeckClock,
     stem_gain: [ParamRamp; STEM_COUNT],
     /// The autopilot's blend overlay on the stem lanes: multiplies the
     /// operator's gains, never moves them. 1.0 = hands off.
@@ -1039,7 +1311,9 @@ impl DeckVoice {
             stretching: false,
             stretch: Box::new(Stretcher::new()),
             reader: RateReader::default(),
-            eq: DeckEq::new(48_000.0),
+            chain: DeckChain::new(48_000.0),
+            grid: None,
+            clock: DeckClock::default(),
             stem_gain: [ParamRamp::at(1.0); STEM_COUNT],
             blend_stem: [ParamRamp::at(1.0); STEM_COUNT],
         }
@@ -1049,7 +1323,7 @@ impl DeckVoice {
     /// inherits a transition's ducking.
     fn reset_blend(&mut self) {
         self.blend_stem = [ParamRamp::at(1.0); STEM_COUNT];
-        self.eq.reset_blend();
+        self.chain.eq_mut().reset_blend();
     }
 
     /// Frames the voice can read right now — the decoded edge while a
@@ -3012,7 +3286,7 @@ impl MixEngine {
                 d.stem_blend = ParamRamp::at(1.0);
                 d.playing = false;
                 d.seek_frames(0.0);
-                d.eq.reset();
+                d.chain.eq_mut().reset();
                 d.reset_blend();
             }
             MixCmd::GrowStream { deck, stream } => {
@@ -3216,8 +3490,12 @@ impl MixEngine {
                     ScratchMotion::Release => d.scratch.release(deck_rate),
                 }
             }
-            MixCmd::SetEqBand { deck, band, gain } => s.decks[deck.index()].eq.set_band(band, gain),
-            MixCmd::SetFilter { deck, position } => s.decks[deck.index()].eq.set_filter(position),
+            MixCmd::SetEqBand { deck, band, gain } => {
+                s.decks[deck.index()].chain.eq_mut().set_band(band, gain)
+            }
+            MixCmd::SetFilter { deck, position } => {
+                s.decks[deck.index()].chain.eq_mut().set_filter(position)
+            }
             MixCmd::SetStemGain { deck, stem, gain } => {
                 s.decks[deck.index()].stem_gain[stem].slew(gain, SLEW_SECS * 2.0);
             }
@@ -3537,10 +3815,33 @@ impl MixEngine {
             [s.decks[0].stems.clone(), s.decks[1].stems.clone()];
         let mut deck_peaks = [0.0f32; 2];
         for voice in s.decks.iter_mut() {
-            // Filter coefficients are rebuilt once per buffer — the trig is
-            // the expensive part and a buffer is well under a millisecond.
-            voice.eq.set_sample_rate(rate);
-            voice.eq.prepare_block();
+            // Where the beat will be at the END of this buffer. Read at the
+            // end and not the start because that is what the locked LFOs
+            // compare their own projected phase against; at the start they
+            // would chase a beat one buffer stale.
+            let source_rate = voice.pcm.as_ref().map(|pcm| pcm.sample_rate()).unwrap_or(0.0);
+            // The platter, not the tempo fader: a hand on the record is the
+            // rate the music is actually going round at, and a stopped deck
+            // is going round at nothing.
+            let platter = if voice.scratch.active() {
+                voice.scratch.rate() as f64
+            } else if voice.playing {
+                voice.rate.current() as f64
+            } else {
+                0.0
+            };
+            let pos_secs = match source_rate > 0.0 {
+                true => voice.pos / source_rate,
+                false => 0.0,
+            };
+            let travel_secs = platter * frames as f64 / device_rate;
+            voice.clock = DeckClock::at(voice.grid.as_ref(), pos_secs, platter, travel_secs);
+            let clock = voice.clock;
+            // One call for the whole chain rather than a list per stage:
+            // there are two chains to keep fed, and two hand-written lists
+            // of the same calls is how one of them quietly stops getting a
+            // new effect's preparation.
+            voice.chain.prepare_block(&clock, rate, frames);
         }
         s.score_preview.render_block(frames, device_rate);
         s.synth.render_block(buffer_start, frames, device_rate);
@@ -3656,7 +3957,7 @@ impl MixEngine {
                         stem_gain,
                         natural_step * deck_rate as f64,
                     );
-                    let toned = d.eq.process(frame, rate);
+                    let toned = d.chain.process(frame, rate);
                     let pre = [toned[0] * gain, toned[1] * gain];
                     deck_peaks[i] = deck_peaks[i].max(pre[0].abs()).max(pre[1].abs());
                     deck_out[i] = (pre[0] * side, pre[1] * side);
@@ -3891,7 +4192,7 @@ impl MixEngine {
                     }
                     None => frame,
                 };
-                let toned = d.eq.process(frame, rate);
+                let toned = d.chain.process(frame, rate);
                 let pre = [toned[0] * gain, toned[1] * gain];
                 deck_peaks[i] = deck_peaks[i].max(pre[0].abs()).max(pre[1].abs());
                 deck_out[i] = (pre[0] * side, pre[1] * side);
