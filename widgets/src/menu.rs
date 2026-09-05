@@ -142,14 +142,16 @@ impl MenuRow {
 }
 
 /// Where a menu hangs off its anchor.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Script, ScriptHook)]
+#[repr(u32)]
 pub enum MenuPlace {
     /// Menu-bar style: below the anchor, left edges aligned.
-    Below,
+    #[pick]
+    Below = 0,
     /// Popover style: below the anchor, right edges aligned.
-    BelowRight,
+    BelowRight = 1,
     /// Context style: at the pointer, growing right and down.
-    At,
+    At = 2,
 }
 
 impl MenuPlace {
@@ -467,6 +469,12 @@ pub struct DrawMenuRow {
 
 script_mod! {
     use mod.prelude.widgets_internal.*
+
+    // Registered before the `use` below: a block's `use` is a snapshot of
+    // what exists when it runs.
+    mod.widgets.MenuPlace = set_type_default() do #(MenuPlace::script_api(vm))
+    mod.widgets.splat(mod.widgets.MenuPlace)
+
     use mod.widgets.*
 
     mod.widgets.DrawMenuRowBase = #(DrawMenuRow::script_component(vm))

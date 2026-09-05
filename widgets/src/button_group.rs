@@ -38,10 +38,12 @@
 
 use crate::{
     animator::{Animator, AnimatorAction, AnimatorImpl, Play},
+    button::ButtonWidgetRefExt,
     badge::{measure, BadgeIntent, BadgePalette},
     chip::ChipSelection,
     makepad_derive_widget::*,
     makepad_draw::*,
+    menu::{MenuAction, MenuPlace, MenuRow},
     view::View,
     widget::*,
 };
@@ -217,6 +219,18 @@ pub struct DrawSegmentedBg {
     radius: f32,
 }
 
+/// The chevron on a split button's trailing half. Drawn rather than typed:
+/// the text font carries no such glyph, and an icon file for one triangle is
+/// a resource to keep in step for no gain.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawChevron {
+    #[deref]
+    draw_super: DrawQuad,
+    #[live]
+    color: Vec4f,
+}
+
 script_mod! {
     use mod.prelude.widgets_internal.*
 
@@ -225,6 +239,22 @@ script_mod! {
     mod.widgets.GroupAxis = set_type_default() do #(GroupAxis::script_api(vm))
 
     use mod.widgets.*
+
+    mod.widgets.DrawChevronBase = #(DrawChevron::script_component(vm))
+    set_type_default() do #(DrawChevron::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        color: theme.color_text
+        pixel: fn() {
+            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+            let c = self.rect_size * 0.5
+            let w = min(self.rect_size.x, self.rect_size.y) * 0.26
+            sdf.move_to(c.x - w, c.y - w * 0.55)
+            sdf.line_to(c.x, c.y + w * 0.55)
+            sdf.line_to(c.x + w, c.y - w * 0.55)
+            sdf.stroke(self.color, max(1.0, w * 0.30))
+            return sdf.result
+        }
+    }
 
     mod.widgets.DrawSegmentedBgBase = #(DrawSegmentedBg::script_component(vm))
     set_type_default() do #(DrawSegmentedBg::script_shader(vm)){
@@ -339,6 +369,47 @@ script_mod! {
     /** Answers that can all be on at once: a set of switches sharing a shape. */
     mod.widgets.ToggleGroup = mod.widgets.SegmentedControl{
         selection: Multi
+    }
+
+    mod.widgets.SplitButtonBase = #(SplitButton::register_widget(vm))
+    /** One button that does the usual thing, beside a half that offers the
+     * rest. */
+    mod.widgets.SplitButton = set_type_default() do mod.widgets.SplitButtonBase{
+        width: Fit
+        height: Fit
+        flow: Right
+        /** where the menu hangs: Below BelowRight At */
+        place: BelowRight
+        action := Button{
+            text: "Save"
+            draw_bg +: {
+                border_radius_tr: uniform(0.)
+                border_radius_br: uniform(0.)
+            }
+        }
+        more := ButtonIcon{
+            /** the chevron is drawn over this half, not typed into it */
+            text: ""
+            width: 22.
+            draw_bg +: {
+                border_radius_tl: uniform(0.)
+                border_radius_bl: uniform(0.)
+            }
+        }
+        draw_chevron +: {
+            color: theme.color_on_surface
+        }
+    }
+
+    mod.widgets.MenuButtonBase = #(MenuButton::register_widget(vm))
+    /** A button whose whole job is to offer a menu: the label never changes
+     * to whatever was picked, because it is a verb, not a value. */
+    mod.widgets.MenuButton = set_type_default() do mod.widgets.MenuButtonBase{
+        width: Fit
+        height: Fit
+        /** where the menu hangs: Below BelowRight At */
+        place: Below
+        button := Button{text: "Actions"}
     }
 }
 
@@ -795,6 +866,207 @@ impl SegmentedControlRef {
     /// The current answer as a word.
     pub fn selected_text(&self) -> String {
         self.borrow().map(|inner| inner.selected_text()).unwrap_or_default()
+    }
+}
+
+/// One button that does the usual thing, beside a half that offers the rest.
+///
+/// The two halves are separate targets on purpose. Pressing the wide half
+/// does the thing it names, with no menu in the way; pressing the chevron
+/// opens the menu and does nothing else. A control where the main action is
+/// only reachable through a menu is a menu button, which is the widget
+/// below, and the two should never be confused: the split button promises
+/// that its label is one press away.
+#[derive(Script, ScriptHook, Widget)]
+pub struct SplitButton {
+    #[deref]
+    view: View,
+    #[live]
+    draw_chevron: DrawChevron,
+    /// Where the menu hangs off the button.
+    #[live]
+    pub place: MenuPlace,
+    /// The rows the chevron offers. A host sets these before the press, or
+    /// answers [`SplitButtonAction::MenuRequested`] and opens its own.
+    #[rust]
+    rows: Vec<MenuRow>,
+}
+
+/// What a split button reports.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub enum SplitButtonAction {
+    /// The wide half was pressed: do the thing the label names.
+    Clicked,
+    /// The chevron was pressed and this button has no rows of its own, so
+    /// the host should raise the menu it wants against `anchor`.
+    MenuRequested,
+    #[default]
+    None,
+}
+
+impl SplitButton {
+    /// The rows the chevron offers.
+    pub fn set_rows(&mut self, rows: Vec<MenuRow>) {
+        self.rows = rows;
+    }
+
+    /// The rect a menu should hang off: the whole control, so the menu
+    /// lines up with the button rather than with the chevron alone.
+    pub fn anchor(&self, cx: &Cx) -> Rect {
+        self.view.area().rect(cx)
+    }
+}
+
+impl Widget for SplitButton {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let step = self.view.draw_walk(cx, scope, walk);
+        if !step.is_done() {
+            return step;
+        }
+        // Over the trailing half, after it: the chevron belongs to the
+        // button's face, and the face has only just been drawn.
+        let more = self.view.widget(cx, ids!(more)).area().rect(cx);
+        if more.size.x > 0.0 {
+            self.draw_chevron.draw_abs(cx, more);
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+        let Event::Actions(actions) = event else {
+            return;
+        };
+        let uid = self.widget_uid();
+        if self.view.widget(cx, ids!(action)).as_button().clicked(actions) {
+            cx.widget_action(uid, SplitButtonAction::Clicked);
+        }
+        if self.view.widget(cx, ids!(more)).as_button().clicked(actions) {
+            let anchor = self.anchor(cx);
+            if self.rows.is_empty() {
+                cx.widget_action(uid, SplitButtonAction::MenuRequested);
+            } else {
+                cx.action(MenuAction::Open {
+                    owner: LiveId(uid.0),
+                    rows: self.rows.clone(),
+                    anchor,
+                    place: self.place,
+                });
+            }
+        }
+    }
+
+    /// The label of the half that acts.
+    fn text(&self) -> String {
+        String::new()
+    }
+}
+
+impl SplitButtonRef {
+    /// The rows the chevron offers.
+    pub fn set_rows(&self, rows: Vec<MenuRow>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_rows(rows);
+        }
+    }
+
+    pub fn clicked(&self, actions: &Actions) -> bool {
+        if let Some(action) = actions.find_widget_action(self.widget_uid()) {
+            return matches!(action.cast::<SplitButtonAction>(), SplitButtonAction::Clicked);
+        }
+        false
+    }
+
+    /// The anchor to open a menu against, when the host builds its own.
+    pub fn menu_requested(&self, cx: &Cx, actions: &Actions) -> Option<Rect> {
+        let action = actions.find_widget_action(self.widget_uid())?;
+        match action.cast::<SplitButtonAction>() {
+            SplitButtonAction::MenuRequested => {
+                Some(self.borrow().map(|inner| inner.anchor(cx)).unwrap_or_default())
+            }
+            _ => None,
+        }
+    }
+
+    /// The id the menu raised by this button carries, for reading its pick.
+    pub fn menu_owner(&self) -> LiveId {
+        LiveId(self.widget_uid().0)
+    }
+}
+
+/// A button whose whole job is to offer a menu.
+///
+/// Its label is a verb and stays put: a control that renames itself to
+/// whatever was last picked is a select, and a select carries a value while
+/// this carries a set of commands.
+#[derive(Script, ScriptHook, Widget)]
+pub struct MenuButton {
+    #[deref]
+    view: View,
+    #[live]
+    pub place: MenuPlace,
+    #[rust]
+    rows: Vec<MenuRow>,
+}
+
+impl MenuButton {
+    pub fn set_rows(&mut self, rows: Vec<MenuRow>) {
+        self.rows = rows;
+    }
+
+    pub fn anchor(&self, cx: &Cx) -> Rect {
+        self.view.area().rect(cx)
+    }
+}
+
+impl Widget for MenuButton {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.view.draw_walk(cx, scope, walk)
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+        let Event::Actions(actions) = event else {
+            return;
+        };
+        if self.view.widget(cx, ids!(button)).as_button().clicked(actions) {
+            let uid = self.widget_uid();
+            let anchor = self.anchor(cx);
+            if self.rows.is_empty() {
+                cx.widget_action(uid, SplitButtonAction::MenuRequested);
+            } else {
+                cx.action(MenuAction::Open {
+                    owner: LiveId(uid.0),
+                    rows: self.rows.clone(),
+                    anchor,
+                    place: self.place,
+                });
+            }
+        }
+    }
+}
+
+impl MenuButtonRef {
+    pub fn set_rows(&self, rows: Vec<MenuRow>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_rows(rows);
+        }
+    }
+
+    /// The anchor to open a menu against, when the host builds its own.
+    pub fn menu_requested(&self, cx: &Cx, actions: &Actions) -> Option<Rect> {
+        let action = actions.find_widget_action(self.widget_uid())?;
+        match action.cast::<SplitButtonAction>() {
+            SplitButtonAction::MenuRequested => {
+                Some(self.borrow().map(|inner| inner.anchor(cx)).unwrap_or_default())
+            }
+            _ => None,
+        }
+    }
+
+    /// The id the menu raised by this button carries.
+    pub fn menu_owner(&self) -> LiveId {
+        LiveId(self.widget_uid().0)
     }
 }
 

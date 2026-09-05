@@ -622,8 +622,10 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::glass_panel::script_mod(vm);
     crate::badge::script_mod(vm);
     crate::chip::script_mod(vm);
-    crate::button_group::script_mod(vm);
+    // The menu first: the group's split and menu buttons carry a
+    // `MenuPlace`, and a block's `use` only sees what already exists.
     crate::menu::script_mod(vm);
+    crate::button_group::script_mod(vm);
     crate::placeholder::script_mod(vm);
 
     crate::bare_step::script_mod(vm);
@@ -787,6 +789,7 @@ mod button_group_registration_tests {
             "crate::view::script_mod(vm);",
             "crate::button::script_mod(vm);",
             "crate::chip::script_mod(vm);",
+            "crate::menu::script_mod(vm);",
         ] {
             assert!(lib.find(base).expect(base) < at, "{base} must register before the group");
         }
