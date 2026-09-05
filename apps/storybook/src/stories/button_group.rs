@@ -83,12 +83,24 @@ script_mod! {
             style_note := Label{text: "on: nothing"}
         }
 
+        StoryHeading{text: "Offering the rest"}
+        StoryNote{text: "A split button does the thing its label names on the wide half, and offers the rest on the chevron. A menu button only offers: its label is a verb and never changes to whatever was picked."}
+        StoryRow{
+            save := SplitButton{}
+            actions_menu := MenuButton{}
+        }
+        StoryRow{
+            offered := Label{text: "nothing chosen yet"}
+        }
+
         StoryHeading{text: "Roles and disabled"}
         StoryRow{
             SegmentedControl{options: ["One" "Two"] intent: Primary}
             SegmentedControl{options: ["One" "Two"] intent: Success selected: 1}
             SegmentedControl{options: ["One" "Two"] disabled: true}
         }
+
+        menus := MenuLayer{}
     }
 
     mod.stories.SegmentedControlBasic = StoryPage{
@@ -104,7 +116,49 @@ script_mod! {
     }
 }
 
+fn share_rows() -> Vec<MenuRow> {
+    vec![
+        MenuRow::new(live_id!(save_copy), "Save a copy"),
+        MenuRow::new(live_id!(save_all), "Save all").key("Ctrl+Alt+S"),
+        MenuRow::separator(),
+        MenuRow::new(live_id!(revert), "Revert").danger(true),
+    ]
+}
+
+fn action_rows() -> Vec<MenuRow> {
+    vec![
+        MenuRow::new(live_id!(duplicate), "Duplicate"),
+        MenuRow::new(live_id!(rename), "Rename…"),
+        MenuRow::separator(),
+        MenuRow::new(live_id!(archive), "Archive"),
+    ]
+}
+
 fn group_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
+    let split = root.split_button(cx, ids!(save));
+    split.set_rows(share_rows());
+    let menu_button = root.menu_button(cx, ids!(actions_menu));
+    menu_button.set_rows(action_rows());
+    if split.clicked(actions) {
+        root.label(cx, ids!(offered)).set_text(cx, "saved");
+    }
+    for action in menu_actions(actions) {
+        if let MenuAction::Picked { owner, id } = action {
+            // The host knows its own rows, so the caption says what was
+            // chosen rather than the id it came back as.
+            let (who, rows) = if *owner == split.menu_owner() {
+                ("split", share_rows())
+            } else {
+                ("menu button", action_rows())
+            };
+            let label = rows
+                .iter()
+                .find(|row| row.id == *id)
+                .map(|row| row.label.clone())
+                .unwrap_or_default();
+            root.label(cx, ids!(offered)).set_text(cx, &format!("{who}: {label}"));
+        }
+    }
     let period = root.segmented_control(cx, ids!(period));
     if period.selected(actions).is_some() {
         let text = format!("period: {}", period.selected_text());
