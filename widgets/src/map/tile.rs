@@ -1246,54 +1246,12 @@ impl TypedStream {
                 .sum::<usize>()
     }
 
-    /// Keep a deterministic prefix of complete triangles within `limit`.
-    /// Chunk-local indices make this cheap: retaining the vertex prefix up to
-    /// the largest referenced index preserves every kept triangle without a
-    /// remap or a second full-size allocation.
-    fn truncate_to_allocated_bytes(&mut self, stride: usize, limit: usize) {
-        if self.allocated_byte_size() <= limit {
-            return;
-        }
-        let mut left = limit.saturating_sub(std::mem::size_of::<TypedStreamChunk>());
-        let mut kept_chunks = 0usize;
+    fn shrink_to_fit(&mut self) {
         for chunk in &mut self.chunks {
-            let mut kept_indices = 0usize;
-            let mut max_index = 0usize;
-            for triangle in chunk.indices.chunks_exact(3) {
-                let triangle_max = triangle.iter().copied().max().unwrap_or(0) as usize;
-                let next_max = max_index.max(triangle_max);
-                let next_indices = kept_indices + 3;
-                let bytes = (next_max + 1)
-                    .saturating_mul(stride)
-                    .saturating_add(next_indices.saturating_mul(2));
-                if bytes > left {
-                    break;
-                }
-                max_index = next_max;
-                kept_indices = next_indices;
-            }
-            if kept_indices == 0 {
-                break;
-            }
-            chunk.indices.truncate(kept_indices);
-            chunk.vertices.truncate((max_index + 1) * stride);
             chunk.indices.shrink_to_fit();
             chunk.vertices.shrink_to_fit();
-            left = left.saturating_sub(chunk.vertices.len() + chunk.indices.len() * 2);
-            kept_chunks += 1;
-            if left <= std::mem::size_of::<TypedStreamChunk>() {
-                break;
-            }
-            left -= std::mem::size_of::<TypedStreamChunk>();
         }
-        self.chunks.truncate(kept_chunks);
         self.chunks.shrink_to_fit();
-        self.source_vertex_count = self
-            .chunks
-            .iter()
-            .map(|chunk| chunk.vertices.len() / stride)
-            .sum();
-        self.duplicate_vertex_count = 0;
     }
 
     pub fn unchunked_byte_size(&self, stride: usize) -> usize {
@@ -1408,50 +1366,15 @@ pub struct TileBuffers {
     pub labels: Vec<TileLabel>,
     /// View-zoom bucket this tile's styling was built for.
     pub render_zoom: u32,
-    /// 0 for the full bake, 1 for optional-detail shedding, 2 for a hard
-    /// geometry cap. This is carried to the UI so pressure is observable and
-    /// can raise the bounded source/render LOD rather than reload forever.
+    /// 0 for the full bake, 1 for optional/metadata shedding, 2 when a whole
+    /// principal feature group was removed. This is carried to the UI so
+    /// pressure is observable and can raise the bounded source/render LOD
+    /// rather than reload forever.
     pub memory_lod: u8,
     /// Compact per-stage build timing ("stage:ms stage:ms ..."), filled for
     /// builds over ~100ms — carried into the SLOW-tile log so a slow build
     /// is replayable headlessly without re-hitting it in-app.
     pub stage_summary: String,
-}
-
-fn truncate_indexed_f32(
-    indices: &mut Vec<u32>,
-    vertices: &mut Vec<f32>,
-    stride: usize,
-    limit: usize,
-) {
-    let allocated = (indices.capacity() + vertices.capacity()).saturating_mul(4);
-    if allocated <= limit {
-        return;
-    }
-    let mut kept_indices = 0usize;
-    let mut max_index = 0usize;
-    for triangle in indices.chunks_exact(3) {
-        let triangle_max = triangle.iter().copied().max().unwrap_or(0) as usize;
-        let next_max = max_index.max(triangle_max);
-        let next_indices = kept_indices + 3;
-        let bytes = (next_max + 1)
-            .saturating_mul(stride)
-            .saturating_add(next_indices)
-            .saturating_mul(4);
-        if bytes > limit {
-            break;
-        }
-        max_index = next_max;
-        kept_indices = next_indices;
-    }
-    indices.truncate(kept_indices);
-    vertices.truncate(if kept_indices == 0 {
-        0
-    } else {
-        (max_index + 1) * stride
-    });
-    indices.shrink_to_fit();
-    vertices.shrink_to_fit();
 }
 
 impl TileBuffers {
@@ -1638,11 +1561,17 @@ impl TileBuffers {
     }
 
     /// Bound a finished tile before it crosses the worker-to-UI channel.
-    /// The first pass removes far/street decoration that is independently
-    /// gated at draw time. If that is insufficient, principal ground, road,
-    /// and 3D streams each retain a deterministic share of the budget. This
-    /// is deliberately a finite two-level fallback, not iterative rebaking.
+    /// Capacity is reclaimed before visible content. Optional decoration and
+    /// metadata are then shed in finite stages. Principal geometry is never
+    /// prefix-truncated: if complete ground/roads fit, the complete building
+    /// structural group may be omitted; otherwise the over-limit result is
+    /// left intact for the caller to defer at a coarser source/style LOD.
     pub fn degrade_to_memory_limit(&mut self, limit: usize) -> u8 {
+        if self.allocated_byte_size() <= limit {
+            return self.memory_lod;
+        }
+
+        self.shrink_memory_vectors();
         if self.allocated_byte_size() <= limit {
             return self.memory_lod;
         }
@@ -1673,63 +1602,74 @@ impl TileBuffers {
             return self.memory_lod;
         }
 
-        self.memory_lod = 2;
         // Labels and hit metadata are useful but not worth displacing the
-        // actual map under hard pressure; the next higher-detail rebake
-        // restores them after hysteresis releases the pressure level.
+        // actual map under pressure. This remains LOD 1 because no principal
+        // geometry has been removed.
         self.labels.clear();
         self.pin_hits.clear();
         self.stage_summary.clear();
         self.icon_instances.clear();
         self.icon_high_instances.clear();
+        self.icon_indices.clear();
+        self.icon_vertices.clear();
         self.road_icon_indices.clear();
         self.road_icon_vertices.clear();
         self.shrink_memory_vectors();
+        if self.allocated_byte_size() <= limit {
+            return self.memory_lod;
+        }
 
-        // Leave room for Vec/chunk headers and instance records. The shares
-        // sum to 94%; the remaining 6% absorbs those small owners.
-        let share = |percent: usize| limit.saturating_mul(percent) / 100;
-        self.fill
-            .truncate_to_allocated_bytes(FILL_TYPED_VERTEX_BYTES, share(22));
-        truncate_indexed_f32(
-            &mut self.fill_misc_indices,
-            &mut self.fill_misc_vertices,
-            VECTOR_PACKED_FLOATS_PER_VERTEX,
-            share(8),
-        );
-        self.face
-            .truncate_to_allocated_bytes(FACE_TYPED_VERTEX_BYTES, share(16));
-        self.casing
-            .truncate_to_allocated_bytes(ROAD_TYPED_VERTEX_BYTES, share(17));
-        self.stroke
-            .truncate_to_allocated_bytes(ROAD_TYPED_VERTEX_BYTES, share(13));
-        self.fill_3d
-            .truncate_to_allocated_bytes(ROOF_TYPED_VERTEX_BYTES, share(9));
-        truncate_indexed_f32(
-            &mut self.fill_3d_misc_indices,
-            &mut self.fill_3d_misc_vertices,
-            VECTOR_PACKED_FLOATS_PER_VERTEX,
-            share(2),
-        );
-        truncate_indexed_f32(
-            &mut self.wall_indices,
-            &mut self.wall_vertices,
-            VECTOR_PACKED_FLOATS_PER_VERTEX,
-            share(4),
-        );
-        truncate_indexed_f32(
-            &mut self.icon_indices,
-            &mut self.icon_vertices,
-            VECTOR_PACKED_FLOATS_PER_VERTEX,
-            share(2),
-        );
-        let wall_limit = share(1) / std::mem::size_of::<MapWallInstance>();
-        self.wall_instances.truncate(wall_limit);
-        self.shrink_memory_vectors();
+        // Use actual demand rather than fixed stream percentages. Roofs and
+        // both wall encodings are one structural feature group: retain all
+        // of it, or remove all of it when doing so admits complete ground and
+        // roads. If even ground/roads do not fit, the caller must defer the
+        // tile; emitting arbitrary triangle prefixes creates corrupt-looking
+        // roads and irreconcilable roof/wall subsets.
+        let building_bytes = self.building_structure_allocated_bytes();
+        let ground_and_roads_bytes = self
+            .allocated_byte_size()
+            .saturating_sub(building_bytes);
+        if building_bytes > 0 && ground_and_roads_bytes <= limit {
+            self.clear_building_structure();
+            self.shrink_memory_vectors();
+            self.memory_lod = 2;
+        }
         self.memory_lod
     }
 
+    fn building_structure_allocated_bytes(&self) -> usize {
+        self.fill_3d
+            .allocated_byte_size()
+            .saturating_add(
+                (self.fill_3d_misc_indices.capacity()
+                    + self.fill_3d_misc_vertices.capacity()
+                    + self.wall_indices.capacity()
+                    + self.wall_vertices.capacity())
+                    .saturating_mul(4),
+            )
+            .saturating_add(
+                self.wall_instances
+                    .capacity()
+                    .saturating_mul(MAP_WALL_INSTANCE_BYTES),
+            )
+    }
+
+    fn clear_building_structure(&mut self) {
+        self.fill_3d = TypedStream::default();
+        self.fill_3d_misc_indices.clear();
+        self.fill_3d_misc_vertices.clear();
+        self.wall_indices.clear();
+        self.wall_vertices.clear();
+        self.wall_instances.clear();
+    }
+
     fn shrink_memory_vectors(&mut self) {
+        self.fill.shrink_to_fit();
+        self.face.shrink_to_fit();
+        self.casing.shrink_to_fit();
+        self.stroke.shrink_to_fit();
+        self.fringe.shrink_to_fit();
+        self.fill_3d.shrink_to_fit();
         macro_rules! shrink {
             ($($field:ident),+ $(,)?) => {$(
                 self.$field.shrink_to_fit();
@@ -1776,6 +1716,20 @@ impl TileBuffers {
             .chain(self.icon_high_instances.iter_mut())
         {
             group.data.shrink_to_fit();
+        }
+        for label in &mut self.labels {
+            label.text.shrink_to_fit();
+            label.source_layer.shrink_to_fit();
+            label.road_kind.shrink_to_fit();
+            label.path_points.shrink_to_fit();
+            label.name_key.shrink_to_fit();
+        }
+        for pin in &mut self.pin_hits {
+            pin.info.shrink_to_fit();
+            for (key, value) in &mut pin.info {
+                key.shrink_to_fit();
+                value.shrink_to_fit();
+            }
         }
         self.stage_summary.shrink_to_fit();
     }
@@ -12273,6 +12227,140 @@ mod tag_arena_tests {
         assert!(face_records > 0);
     }
 
+    /// Opt-in admission-quality report for the complete Amsterdam start scene.
+    /// Set `MAKEPAD_MAP_QUALITY_SCENE=center` for the dense five-tile cross;
+    /// the default is the full 5x5 fixture grid.
+    #[test]
+    #[ignore]
+    fn amsterdam_complete_scene_quality_at_memory_limits() {
+        #[derive(Clone, Copy, Default)]
+        struct Quality {
+            allocated: usize,
+            bytes: usize,
+            walls: usize,
+            roofs: usize,
+            ground: usize,
+            roads: [usize; 3],
+        }
+        let assert_valid_indices = |buffers: &TileBuffers, what: &str| {
+            for (name, stream, stride) in [
+                ("fill", &buffers.fill, FILL_TYPED_VERTEX_BYTES),
+                ("face", &buffers.face, FACE_TYPED_VERTEX_BYTES),
+                ("casing", &buffers.casing, ROAD_TYPED_VERTEX_BYTES),
+                ("stroke", &buffers.stroke, ROAD_TYPED_VERTEX_BYTES),
+                ("fringe", &buffers.fringe, ROAD_TYPED_VERTEX_BYTES),
+                ("fill_3d", &buffers.fill_3d, ROOF_TYPED_VERTEX_BYTES),
+            ] {
+                for chunk in &stream.chunks {
+                    assert_eq!(chunk.vertices.len() % stride, 0, "{what} {name} stride");
+                    assert_eq!(chunk.indices.len() % 3, 0, "{what} {name} triangles");
+                    let vertices = chunk.vertices.len() / stride;
+                    assert!(chunk.indices.iter().all(|&i| (i as usize) < vertices),
+                        "{what} {name} index out of range");
+                }
+            }
+            for (name, indices, vertices, stride) in [
+                ("fill_misc", &buffers.fill_misc_indices, &buffers.fill_misc_vertices, VECTOR_PACKED_FLOATS_PER_VERTEX),
+                ("icon", &buffers.icon_indices, &buffers.icon_vertices, VECTOR_PACKED_FLOATS_PER_VERTEX),
+                ("icon_high", &buffers.icon_high_indices, &buffers.icon_high_vertices, VECTOR_PACKED_FLOATS_PER_VERTEX),
+                ("fill_3d_misc", &buffers.fill_3d_misc_indices, &buffers.fill_3d_misc_vertices, VECTOR_PACKED_FLOATS_PER_VERTEX),
+                ("wall", &buffers.wall_indices, &buffers.wall_vertices, VECTOR_PACKED_FLOATS_PER_VERTEX),
+                ("tree", &buffers.tree_indices, &buffers.tree_vertices, VECTOR_PACKED_FLOATS_PER_VERTEX),
+                ("tree_cross", &buffers.tree_cross_indices, &buffers.tree_cross_vertices, VECTOR_PACKED_FLOATS_PER_VERTEX),
+                ("tree_template", &buffers.tree_template_indices, &buffers.tree_template_vertices, VECTOR_PACKED_FLOATS_PER_VERTEX),
+                ("tree_cross_template", &buffers.tree_cross_template_indices, &buffers.tree_cross_template_vertices, VECTOR_PACKED_FLOATS_PER_VERTEX),
+                ("stalk_template", &buffers.stalk_template_indices, &buffers.stalk_template_vertices, VECTOR_PACKED_FLOATS_PER_VERTEX),
+                ("stoplight_template", &buffers.stoplight_template_indices, &buffers.stoplight_template_vertices, VECTOR_PACKED_FLOATS_PER_VERTEX),
+                ("road_icon", &buffers.road_icon_indices, &buffers.road_icon_vertices, VECTOR_FLOATS_PER_VERTEX),
+            ] {
+                assert_eq!(vertices.len() % stride, 0, "{what} {name} stride");
+                assert_eq!(indices.len() % 3, 0, "{what} {name} triangles");
+                assert!(indices.iter().all(|&i| (i as usize) < vertices.len() / stride),
+                    "{what} {name} index out of range");
+            }
+        };
+        let scene = std::env::var("MAKEPAD_MAP_QUALITY_SCENE")
+            .unwrap_or_else(|_| "full".to_string());
+        let coordinates: Vec<(i32, i32)> = match scene.as_str() {
+            "full" => (8412..=8416)
+                .flat_map(|x| (5382..=5386).map(move |y| (x, y)))
+                .collect(),
+            "center" => vec![(8414, 5384), (8413, 5384), (8415, 5384),
+                (8414, 5383), (8414, 5385)],
+            value => panic!("MAKEPAD_MAP_QUALITY_SCENE must be full or center, got {value}"),
+        };
+        let fixtures: Vec<_> = coordinates.into_iter().map(|(x, y)| {
+            let path = format!("../seed-files/amsterdam-tiles/z14-x{x}-y{y}.decoded");
+            let data = std::fs::read(&path)
+                .unwrap_or_else(|err| panic!("required quality fixture {path} is missing: {err}"));
+            (TileKey { z: 14, x, y }, path, data)
+        }).collect();
+        let theme = probe_compiled_theme();
+        let bake = |key, path: &str, data: &[u8], bucket| {
+            build_tile_buffers_from_mvt(
+                key, data, Some(data), None, false, &[], &theme, bucket,
+                true, false, true,
+            ).unwrap_or_else(|err| panic!("quality bake {path} bucket {bucket}: {err}"))
+        };
+        let measure = |buffers: &TileBuffers| Quality {
+            allocated: buffers.allocated_byte_size(),
+            bytes: buffers.byte_size(),
+            walls: buffers.wall_instances.len(),
+            roofs: buffers.fill_3d.index_count() + buffers.fill_3d_misc_indices.len(),
+            ground: buffers.fill.index_count() + buffers.fill_misc_indices.len(),
+            roads: [buffers.face.index_count(), buffers.casing.index_count(),
+                buffers.stroke.index_count()],
+        };
+        let sum = |rows: &[(TileKey, Quality)]| rows.iter().fold(Quality::default(), |mut a, (_, q)| {
+            a.allocated += q.allocated; a.bytes += q.bytes; a.walls += q.walls;
+            a.roofs += q.roofs; a.ground += q.ground;
+            for i in 0..3 { a.roads[i] += q.roads[i]; }
+            a
+        });
+        let percent = |kept: usize, total: usize| if total == 0 { 100.0 }
+            else { kept as f64 * 100.0 / total as f64 };
+
+        for bucket in [15, 16] {
+            let mut baseline = Vec::with_capacity(fixtures.len());
+            for (key, path, data) in &fixtures {
+                let buffers = bake(*key, path, data, bucket);
+                assert_valid_indices(&buffers, path);
+                let q = measure(&buffers);
+                println!("QUALITY tile z14/{}/{} bucket={bucket} baseline allocated={} bytes={} walls={} roof_idx={} ground_idx={} road_idx(face/casing/stroke)={}/{}/{}",
+                    key.x, key.y, q.allocated, q.bytes, q.walls, q.roofs, q.ground,
+                    q.roads[0], q.roads[1], q.roads[2]);
+                baseline.push((*key, q));
+            }
+            let base = sum(&baseline);
+            let base_max = baseline.iter().max_by_key(|(_, q)| q.allocated).unwrap();
+            println!("QUALITY scene={scene} tiles={} bucket={bucket} baseline allocated_sum={} allocated_max={}@z14/{}/{} bytes_sum={} walls={} roofs={}",
+                baseline.len(), base.allocated, base_max.1.allocated, base_max.0.x,
+                base_max.0.y, base.bytes, base.walls, base.roofs);
+            for limit_mib in [8usize, 16, 24, 32] {
+                let limit = limit_mib * 1024 * 1024;
+                let mut retained = Vec::with_capacity(fixtures.len());
+                for (key, path, data) in &fixtures {
+                    let mut buffers = bake(*key, path, data, bucket);
+                    let lod = buffers.degrade_to_memory_limit(limit);
+                    assert_valid_indices(&buffers, path);
+                    let q = measure(&buffers);
+                    println!("QUALITY tile z14/{}/{} bucket={bucket} limit={}MiB lod={lod} allocated={} bytes={} walls={} roof_idx={} ground_idx={} road_idx(face/casing/stroke)={}/{}/{}",
+                        key.x, key.y, limit_mib, q.allocated, q.bytes, q.walls, q.roofs,
+                        q.ground, q.roads[0], q.roads[1], q.roads[2]);
+                    retained.push((*key, q));
+                }
+                let kept = sum(&retained);
+                if limit_mib >= 16 { assert_eq!((kept.walls, kept.roofs, kept.ground, kept.roads), (base.walls, base.roofs, base.ground, base.roads), "normal desktop allowance must preserve the complete scene"); }
+                let max = retained.iter().max_by_key(|(_, q)| q.allocated).unwrap();
+                println!("QUALITY scene={scene} tiles={} bucket={bucket} limit={}MiB allocated_sum={} allocated_max={}@z14/{}/{} vs_baseline={:+.1}% bytes_sum={} walls={}/{} ({:.1}%) roofs={}/{} ({:.1}%)",
+                    retained.len(), limit_mib, kept.allocated, max.1.allocated, max.0.x,
+                    max.0.y, percent(kept.allocated, base.allocated) - 100.0, kept.bytes,
+                    kept.walls, base.walls, percent(kept.walls, base.walls),
+                    kept.roofs, base.roofs, percent(kept.roofs, base.roofs));
+            }
+        }
+    }
+
     #[test]
     #[ignore]
     fn detail_parse_merge_allocations_drop_by_at_least_100x() {
@@ -13270,15 +13358,144 @@ mod bridge_probe_tests {
         assert_eq!(buffers.road_icon_vertices, road_vertices);
     }
 
+    fn pressure_test_stream(triangles: usize, stride: usize) -> TypedStream {
+        let vertex_count = triangles * 3;
+        TypedStream::from_u32(
+            (0..vertex_count as u32).collect(),
+            vec![0u8; vertex_count * stride],
+            stride,
+        )
+    }
+
+    fn pressure_test_principal_buffers(triangles: usize) -> TileBuffers {
+        let mut buffers = TileBuffers::default();
+        buffers.fill = pressure_test_stream(triangles, FILL_TYPED_VERTEX_BYTES);
+        buffers.face = pressure_test_stream(triangles, FACE_TYPED_VERTEX_BYTES);
+        buffers.casing = pressure_test_stream(triangles, ROAD_TYPED_VERTEX_BYTES);
+        buffers.stroke = pressure_test_stream(triangles, ROAD_TYPED_VERTEX_BYTES);
+        buffers.fill_3d = pressure_test_stream(triangles, ROOF_TYPED_VERTEX_BYTES);
+        buffers.fill_3d_misc_indices = vec![0, 1, 2];
+        buffers.fill_3d_misc_vertices =
+            vec![0.0; VECTOR_PACKED_FLOATS_PER_VERTEX * 3];
+        buffers.wall_indices = vec![0, 1, 2];
+        buffers.wall_vertices = vec![0.0; VECTOR_PACKED_FLOATS_PER_VERTEX * 3];
+        buffers.wall_instances = vec![MapWallInstance::default(); triangles];
+        buffers
+    }
+
+    fn principal_record_counts(buffers: &TileBuffers) -> [usize; 15] {
+        [
+            buffers.fill.index_count(),
+            buffers.fill.vertex_count(FILL_TYPED_VERTEX_BYTES),
+            buffers.face.index_count(),
+            buffers.face.vertex_count(FACE_TYPED_VERTEX_BYTES),
+            buffers.casing.index_count(),
+            buffers.casing.vertex_count(ROAD_TYPED_VERTEX_BYTES),
+            buffers.stroke.index_count(),
+            buffers.stroke.vertex_count(ROAD_TYPED_VERTEX_BYTES),
+            buffers.fill_3d.index_count(),
+            buffers.fill_3d.vertex_count(ROOF_TYPED_VERTEX_BYTES),
+            buffers.fill_3d_misc_indices.len(),
+            buffers.fill_3d_misc_vertices.len(),
+            buffers.wall_indices.len(),
+            buffers.wall_vertices.len(),
+            buffers.wall_instances.len(),
+        ]
+    }
+
     #[test]
-    fn dense_synthetic_tile_degrades_to_a_finite_allocated_limit() {
+    fn memory_limit_reclaims_spare_capacity_before_geometry() {
+        let mut buffers = pressure_test_principal_buffers(8);
+        buffers.shrink_memory_vectors();
+        let compact_limit = buffers.allocated_byte_size();
+        let expected = principal_record_counts(&buffers);
+
+        for stream in [
+            &mut buffers.fill,
+            &mut buffers.face,
+            &mut buffers.casing,
+            &mut buffers.stroke,
+            &mut buffers.fill_3d,
+        ] {
+            stream.chunks.reserve(32);
+            for chunk in &mut stream.chunks {
+                chunk.indices.reserve(4_096);
+                chunk.vertices.reserve(64 * 1_024);
+            }
+        }
+        buffers.wall_indices.reserve(4_096);
+        buffers.wall_vertices.reserve(16 * 1_024);
+        buffers.wall_instances.reserve(4_096);
+        assert!(buffers.allocated_byte_size() > compact_limit);
+
+        assert_eq!(buffers.degrade_to_memory_limit(compact_limit), 0);
+        assert!(buffers.allocated_byte_size() <= compact_limit);
+        assert_eq!(principal_record_counts(&buffers), expected);
+    }
+
+    #[test]
+    fn metadata_trim_that_fits_preserves_all_principal_geometry() {
+        let mut buffers = pressure_test_principal_buffers(8);
+        buffers.shrink_memory_vectors();
+        let principal_limit = buffers.allocated_byte_size();
+        let expected = principal_record_counts(&buffers);
+        buffers.labels.push(TileLabel {
+            text: "label".repeat(2_048),
+            priority: 0,
+            source_layer: "synthetic".repeat(512),
+            road_kind: "residential".repeat(512),
+            color_class: 0,
+            path_points: vec![(0.0, 0.0); 1_024],
+            name_key: "name".repeat(2_048),
+            bbox: (0.0, 0.0, 1.0, 1.0),
+            lift_m: 0.0,
+        });
+        buffers.icon_indices = vec![0, 1, 2];
+        buffers.icon_vertices = vec![0.0; VECTOR_PACKED_FLOATS_PER_VERTEX * 3];
+        assert!(buffers.allocated_byte_size() > principal_limit);
+
+        assert_eq!(buffers.degrade_to_memory_limit(principal_limit), 1);
+        assert!(buffers.allocated_byte_size() <= principal_limit);
+        assert_eq!(principal_record_counts(&buffers), expected);
+        assert!(buffers.labels.is_empty());
+        assert!(buffers.icon_indices.is_empty());
+        assert!(buffers.icon_vertices.is_empty());
+    }
+
+    #[test]
+    fn hard_limit_removes_the_whole_building_structure_or_defers() {
+        let mut bounded = pressure_test_principal_buffers(64);
+        bounded.shrink_memory_vectors();
+        let complete_ground_and_roads = bounded
+            .allocated_byte_size()
+            .saturating_sub(bounded.building_structure_allocated_bytes());
+        let road_counts = principal_record_counts(&bounded)[..8].to_vec();
+        assert_eq!(bounded.degrade_to_memory_limit(complete_ground_and_roads), 2);
+        assert!(bounded.allocated_byte_size() <= complete_ground_and_roads);
+        assert_eq!(
+            &principal_record_counts(&bounded)[..8],
+            road_counts.as_slice()
+        );
+        assert!(bounded.fill_3d.is_empty());
+        assert!(bounded.fill_3d_misc_indices.is_empty());
+        assert!(bounded.fill_3d_misc_vertices.is_empty());
+        assert!(bounded.wall_indices.is_empty());
+        assert!(bounded.wall_vertices.is_empty());
+        assert!(bounded.wall_instances.is_empty());
+
+        let mut deferred = pressure_test_principal_buffers(64);
+        deferred.shrink_memory_vectors();
+        let expected = principal_record_counts(&deferred);
+        let impossible_limit = complete_ground_and_roads / 2;
+        assert_eq!(deferred.degrade_to_memory_limit(impossible_limit), 1);
+        assert!(deferred.allocated_byte_size() > impossible_limit);
+        assert_eq!(principal_record_counts(&deferred), expected);
+    }
+
+    #[test]
+    fn dense_synthetic_tile_defers_instead_of_truncating_principal_streams() {
         fn dense_stream(triangles: usize, stride: usize) -> TypedStream {
-            let vertex_count = triangles * 3;
-            TypedStream::from_u32(
-                (0..vertex_count as u32).collect(),
-                vec![0u8; vertex_count * stride],
-                stride,
-            )
+            pressure_test_stream(triangles, stride)
         }
 
         let mut buffers = TileBuffers::default();
@@ -13303,25 +13520,22 @@ mod bridge_probe_tests {
             })
             .collect();
         let before = buffers.allocated_byte_size();
+        let principal_before = principal_record_counts(&buffers);
         let limit = 192 * 1024;
         let level = buffers.degrade_to_memory_limit(limit);
 
         assert!(before > limit);
-        assert_eq!(level, 2);
-        assert!(buffers.allocated_byte_size() <= limit);
-        assert!(!buffers.fill.is_empty());
-        assert!(!buffers.face.is_empty());
-        assert!(!buffers.casing.is_empty());
-        assert!(!buffers.stroke.is_empty());
-        assert!(!buffers.fill_3d.is_empty());
+        assert_eq!(level, 1);
+        assert!(buffers.allocated_byte_size() > limit);
+        assert_eq!(principal_record_counts(&buffers), principal_before);
         assert!(buffers.fringe.is_empty());
         assert!(buffers.labels.is_empty());
 
-        // Reapplying the same policy is stable: no unbounded degradation
-        // loop and no further loss on pan/zoom/mode churn.
-        let bounded = buffers.allocated_byte_size();
-        assert_eq!(buffers.degrade_to_memory_limit(limit), 2);
-        assert_eq!(buffers.allocated_byte_size(), bounded);
+        // Reapplying the finite policy is stable while the caller defers it.
+        let deferred = buffers.allocated_byte_size();
+        assert_eq!(buffers.degrade_to_memory_limit(limit), 1);
+        assert_eq!(buffers.allocated_byte_size(), deferred);
+        assert_eq!(principal_record_counts(&buffers), principal_before);
     }
 
     #[test]
