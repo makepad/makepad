@@ -890,6 +890,7 @@ impl Cx {
             LiveEditTrigger::FileChange => {
                 self.draw_shaders.reset_for_live_reload();
                 self.pending_script_reapply = false;
+                self.live_edit_apply = crate::makepad_script::Apply::Reload;
                 self.call_event_handler(&Event::LiveEdit);
                 self.redraw_all();
                 if self.pending_script_reapply {
@@ -904,6 +905,10 @@ impl Cx {
                 // app-level handler that re-broadcasts sets a fresh flag
                 // that lands on the next tick.
                 self.pending_script_reapply = false;
+                // The DSL did not change, so re-apply with `Rebake`: the
+                // re-run only exists to pick up new `SAFE_INSET_PAD_*`
+                // values, and imperative runtime state must survive it.
+                self.live_edit_apply = crate::makepad_script::Apply::Rebake;
                 self.call_event_handler(&Event::LiveEdit);
                 self.redraw_all();
             }
