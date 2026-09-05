@@ -16,6 +16,7 @@ pub mod alert;
 pub mod divider;
 pub mod progress;
 pub mod spinner;
+pub mod button_group;
 pub mod chip;
 pub mod welcome;
 pub mod button;
@@ -88,6 +89,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     checkbox_more::script_mod(vm);
     button_more::script_mod(vm);
     chip::script_mod(vm);
+    button_group::script_mod(vm);
     alert::script_mod(vm);
     divider::script_mod(vm);
     progress::script_mod(vm);
@@ -134,6 +136,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         checkbox_more::STORIES,
         button_more::STORIES,
         chip::STORIES,
+        button_group::STORIES,
         alert::STORIES,
         divider::STORIES,
         progress::STORIES,
