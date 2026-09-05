@@ -326,6 +326,26 @@ impl ScriptHook for Animator {
             .script_ref_vm_id(&obj_ref)
             .unwrap_or(crate::widget_async::MAIN_SPLASH_VM_ID);
 
+        if apply.is_reload() {
+            // A reload hands every state a fresh `apply` object and leaves the
+            // old ones to the collector. A track that was mid-flight keeps a
+            // raw handle to its old target, so the next frame would read a
+            // freed object (a use-after-free on the second reload, when the
+            // collector has caught up). Drop the tracks and re-cut every group
+            // to the state it was in once the VM is free again: we are inside
+            // the apply walk's `with_vm` here, so `cut` itself cannot run yet.
+            self.tracks.clear();
+            for (group_id, state_id) in self.current_states.iter() {
+                self.deferred.push(DeferredImmediate {
+                    state: [*group_id, *state_id],
+                    kind: DeferredKind::Cut,
+                });
+            }
+            if !self.deferred.is_empty() {
+                vm.cx_mut().new_next_frame();
+            }
+        }
+
         let mut process_map = |vm: &mut ScriptVm, map: &mut ScriptObjectMap| {
             for (key, map_value) in map.iter() {
                 if let Some(group_id) = key.as_id() {
