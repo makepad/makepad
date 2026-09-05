@@ -430,8 +430,6 @@ script_mod! {
 
             /** handle width in pixels 4..60 step 1 */
             handle_size: uniform(20.)
-            /** draw the value line from the track centre instead of the left 0..1 step 1 */
-            bipolar: uniform(0.0)
 
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -616,11 +614,15 @@ script_mod! {
                         .mix(border_color_2_disabled, self.disabled)
                 )
 
-                // Value line
+                // Value line. From the stop, or from where the DEFAULT
+                // sits when the slider asks for it -- which is not the
+                // same as the middle of the track: a knob whose unity is
+                // at a quarter of its travel grows from the quarter.
                 let track_length = self.rect_size.x - offset_sides * 4.
                 let val_x = self.slide_pos * track_length + offset_sides * 2.
+                let origin_x = self.origin_pos * track_length + offset_sides * 2.
                 let offset_top = self.rect_size.y - (self.rect_size.y - offset_px.y) * 0.5
-                let move_x = mix(offset_sides, self.rect_size.x * 0.5, self.bipolar)
+                let move_x = mix(offset_sides, origin_x, self.arc_origin)
 
                 sdf.move_to(move_x, offset_top)
                 sdf.line_to(val_x, offset_top)
@@ -1122,6 +1124,13 @@ script_mod! {
                 let start = gap_size * 0.5
                 let outer_end = start + val_length
                 let val_end = start + val_length * self.slide_pos
+                // Where the arc BEGINS. Off the stop by default; out of
+                // the default's own angle when the slider asks, so a cut
+                // and a boost point opposite ways round the rim and the
+                // knob reads at a glance without its number.
+                let origin_end = start + val_length * self.origin_pos
+                let val_start = mix(start, min(origin_end, val_end), self.arc_origin)
+                let val_stop = mix(val_end, max(origin_end, val_end), self.arc_origin)
 
                 let label_offset_px = /** label reserve below knob 0..40 step 1 */ 20.
                 let label_offset_uv = self.rect_size.y
@@ -1278,8 +1287,8 @@ script_mod! {
                     center_px.x
                     center_px.y
                     radius_px
-                    start
-                    val_end
+                    val_start
+                    val_stop
                     inner_width
                 )
 
