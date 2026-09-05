@@ -40,7 +40,11 @@
 //! plain scrim; the pane's own spinner is a child of the pane because the
 //! glass composites above anything its parent draws after it.
 
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::{
+    button::*, gauss_view::GaussRoundedView, label::*, makepad_derive_widget::*,
+    makepad_draw::*, view::View, widget::*,
+};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// What a spinner draws inside its square.
 #[derive(Clone, Copy, Debug, PartialEq, Default, Script, ScriptHook)]
@@ -65,7 +69,67 @@ impl SpinnerFace {
     }
 }
 
+/// Where a status spinner is in its life.
+#[derive(Clone, Copy, Debug, PartialEq, Default, Script, ScriptHook)]
+pub enum SpinnerStatus {
+    /// Nothing shows; the space is kept.
+    #[pick]
+    #[default]
+    Inactive,
+    /// Turning.
+    Active,
+    /// The arc became a tick.
+    Finished,
+    /// The arc became a cross.
+    Error,
+}
+
+impl SpinnerStatus {
+    fn name(self) -> &'static str {
+        match self {
+            SpinnerStatus::Inactive => "Inactive",
+            SpinnerStatus::Active => "Active",
+            SpinnerStatus::Finished => "Finished",
+            SpinnerStatus::Error => "Error",
+        }
+    }
+}
+
+/// A status spinner's actions.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub enum StatusSpinnerAction {
+    /// The tick is fully on screen.
+    Finished,
+    /// The cross is fully on screen.
+    Failed,
+    /// The mark went quiet by itself after `auto_reset_secs`.
+    Reset,
+    #[default]
+    None,
+}
+
+/// What the saving indicator says.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum SavingState {
+    #[default]
+    Idle,
+    Saving,
+    Saved,
+    Failed,
+}
+
+/// A saving indicator's actions.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub enum SavingIndicatorAction {
+    /// The retry button after a failure was pressed.
+    Retry,
+    #[default]
+    None,
+}
+
 const FACE_STATUS_SPINNING: f32 = 0.0;
+const FACE_STATUS_FINISHED: f32 = 1.0;
+const FACE_STATUS_ERROR: f32 = 2.0;
 const DEFAULT_SIZE: f64 = 24.0;
 
 script_mod! {
@@ -73,6 +137,7 @@ script_mod! {
     use mod.widgets.*
 
     mod.widgets.SpinnerFace = #(SpinnerFace::script_api(vm))
+    mod.widgets.SpinnerStatus = #(SpinnerStatus::script_api(vm))
 
     mod.widgets.DrawSpinnerBase = #(DrawSpinner::script_component(vm))
     // The shader lives on the TYPE default, not on a widget, because three
@@ -203,6 +268,20 @@ script_mod! {
         }
     }
 
+    mod.widgets.DrawLoadingScrimBase = #(DrawLoadingScrim::script_component(vm))
+    set_type_default() do #(DrawLoadingScrim::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        alpha: 0.0
+        /** the scrim ink */
+        color: uniform(theme.color_scrim)
+        /** how dark the scrim gets 0..1 step 0.05 */
+        dim: uniform(0.45)
+        pixel: fn() {
+            let a = self.dim * self.alpha
+            return vec4(self.color.xyz * a, a)
+        }
+    }
+
     mod.widgets.SpinnerBase = #(Spinner::register_widget(vm))
     /** The flat spinner: a turning arc, sized by `size`, with an optional
      * word beside it and a delay before it shows. */
@@ -248,6 +327,109 @@ script_mod! {
         size: 40.0
     }
 
+    mod.widgets.StatusSpinnerBase = #(StatusSpinner::register_widget(vm))
+    /** A spinner that ends: Active turns, Finished becomes a tick, Error a
+     * cross, and a mark goes quiet again by itself after `auto_reset_secs`. */
+    mod.widgets.StatusSpinner = set_type_default() do mod.widgets.StatusSpinnerBase{
+        width: Fit
+        height: Fit
+        flow: Right
+        spacing: theme.space_2
+        align: Align{x: 0.0, y: 0.5}
+        /** where it is: inactive, active, finished or error */
+        status: mod.widgets.SpinnerStatus.Inactive
+        /** side of the mark in points 8..96 step 1 */
+        size: 16.0
+        /** seconds a tick or cross stays before the mark goes quiet; 0 keeps it 0..10 step 0.5 */
+        auto_reset_secs: 2.0
+        /** seconds the arc takes to become the mark 0..1 step 0.05 */
+        morph_secs: theme.motion_medium_1
+        /** the word beside the mark while active */
+        text: ""
+        /** the word once finished; empty keeps `text` */
+        text_finished: ""
+        /** the word once failed; empty keeps `text` */
+        text_error: ""
+        /** dimmed 0..1 step 1 */
+        disabled: false
+        draw_text +: {
+            color: theme.color_text
+            text_style: theme.font_regular{font_size: theme.font_size_p}
+        }
+    }
+
+    mod.widgets.SavingIndicatorBase = #(SavingIndicator::register_widget(vm))
+    /** "Saving", then "Saved at 14:05", or "Could not save" with a retry
+     * button: a status spinner and a label driven by `saving`/`saved`/
+     * `failed`, debounced so a fast save never shows the spinner. */
+    mod.widgets.SavingIndicator = set_type_default() do mod.widgets.SavingIndicatorBase{
+        width: Fit
+        height: Fit
+        flow: Right
+        spacing: theme.space_2
+        align: Align{x: 0.0, y: 0.5}
+        /** how long a save may take before "Saving" appears 0..2 step 0.05 */
+        debounce_secs: 0.3
+        /** minutes east of UTC for the clock in "Saved at" -840..840 step 15 */
+        utc_offset_minutes: 0.0
+        /** the word while a save is in flight */
+        text_saving: "Saving"
+        /** the words before the clock once saved */
+        text_saved: "Saved at"
+        /** the words after a failure */
+        text_failed: "Could not save"
+        status := mod.widgets.StatusSpinner{
+            size: 14.0
+            auto_reset_secs: 0.0
+        }
+        label := Label{
+            text: ""
+        }
+        retry := View{
+            width: Fit
+            height: Fit
+            visible: false
+            retry_button := Button{
+                text: "Retry"
+            }
+        }
+    }
+
+    mod.widgets.LoadingOverlayBase = #(LoadingOverlay::register_widget(vm))
+    /** Wraps content; while `active` it dims the content, blocks the
+     * pointer over it and centres a spinner on it, optionally through a
+     * blurred glass pane. */
+    mod.widgets.LoadingOverlay = set_type_default() do mod.widgets.LoadingOverlayBase{
+        width: Fill
+        height: Fill
+        /** on: dims and blocks the content 0..1 step 1 */
+        active: false
+        /** seconds before the overlay appears, so a quick refresh never flashes 0..3 step 0.05 */
+        delay_secs: 0.0
+        /** seconds the fade in and out take 0..1 step 0.05 */
+        fade_secs: theme.motion_short_4
+        /** blur the content through a glass pane instead of dimming it 0..1 step 1 */
+        blur: false
+        /** the word under the spinner */
+        text: ""
+        spinner: mod.widgets.SpinnerFlat{
+            size: 28.0
+        }
+        glass: GaussRoundedView{
+            width: Fill
+            height: Fill
+            align: Align{x: 0.5, y: 0.5}
+            draw_bg +: {
+                corner_radius: 0.0
+                border_alpha: 0.0
+                shadow_radius: 0.0
+                surface_alpha: 0.6
+            }
+            spinner := mod.widgets.SpinnerFlat{
+                size: 28.0
+            }
+        }
+    }
 }
 
 /// The spinner's shader. `face` picks the mark, `alpha` is the delay fade,
@@ -270,6 +452,16 @@ pub struct DrawSpinner {
     contained: f32,
 }
 
+/// The overlay's scrim: one instance, its fade.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawLoadingScrim {
+    #[deref]
+    draw_super: DrawQuad,
+    #[live]
+    alpha: f32,
+}
+
 /// The mark's alpha `now`, given when it first drew: nothing until the
 /// delay has passed, then a fade over `fade_secs`.
 fn delayed_alpha(now: f64, shown_since: f64, delay_secs: f64, fade_secs: f64) -> f64 {
@@ -281,6 +473,18 @@ fn delayed_alpha(now: f64, shown_since: f64, delay_secs: f64, fade_secs: f64) ->
     } else {
         (t / fade_secs).clamp(0.0, 1.0)
     }
+}
+
+/// HH:MM of the wall clock, shifted east of UTC by `offset_minutes`. The
+/// platform has no local-time query, so the offset is the host's to give.
+fn clock_hhmm(offset_minutes: f64) -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+        + (offset_minutes as i64) * 60;
+    let day = secs.rem_euclid(86_400);
+    format!("{:02}:{:02}", day / 3600, (day % 3600) / 60)
 }
 
 /// The turning mark, with a word beside it and a delay before it shows.
@@ -318,6 +522,9 @@ pub struct Spinner {
     /// after `restart`.
     #[rust]
     shown_since: Option<f64>,
+    /// An extra multiplier a host (the overlay) fades with.
+    #[rust(1.0)]
+    opacity: f64,
     /// The mark's alpha as last drawn, reported to the test tree.
     #[rust]
     alpha: f64,
@@ -350,12 +557,16 @@ impl Spinner {
         }
     }
 
+    fn set_opacity(&mut self, opacity: f64) {
+        self.opacity = opacity.clamp(0.0, 1.0);
+    }
+
     /// The mark's alpha this frame, and whether the delay and fade are
     /// over (after which the pass clock alone keeps the mark turning).
     fn alpha_now(&mut self, now: f64) -> (f64, bool) {
         let since = *self.shown_since.get_or_insert(now);
         let raw = delayed_alpha(now, since, self.delay_secs, self.fade_secs);
-        let mut alpha = raw;
+        let mut alpha = raw * self.opacity;
         if self.disabled {
             alpha *= 0.5;
         }
@@ -442,6 +653,629 @@ impl SpinnerRef {
     }
 }
 
+/// The eased journey of the status spinner's `morph` (0 turning, 1 mark).
+#[derive(Default)]
+struct Morph {
+    from: f64,
+    to: f64,
+    started: f64,
+    running: bool,
+}
+
+impl Morph {
+    fn at(&mut self, now: f64, secs: f64) -> f64 {
+        if !self.running {
+            return self.to;
+        }
+        let t = if secs <= 0.0 {
+            1.0
+        } else {
+            ((now - self.started) / secs).clamp(0.0, 1.0)
+        };
+        if t >= 1.0 {
+            self.running = false;
+            return self.to;
+        }
+        let e = 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t);
+        self.from + (self.to - self.from) * e
+    }
+}
+
+/// A spinner with an ending: the arc becomes a tick or a cross and then
+/// goes quiet by itself.
+#[derive(Script, ScriptHook, Widget)]
+pub struct StatusSpinner {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
+    #[redraw]
+    #[live]
+    draw_bg: DrawSpinner,
+    #[live]
+    draw_text: DrawText,
+    #[live]
+    pub text: String,
+    #[live]
+    pub text_finished: String,
+    #[live]
+    pub text_error: String,
+    #[live(SpinnerStatus::Inactive)]
+    pub status: SpinnerStatus,
+    #[live]
+    pub size: f64,
+    #[live]
+    pub auto_reset_secs: f64,
+    #[live]
+    pub morph_secs: f64,
+    #[live]
+    pub disabled: bool,
+    /// The status the transitions were last run for; a script apply that
+    /// changes `status` behind the setter's back is caught at draw time.
+    #[rust]
+    applied: SpinnerStatus,
+    #[rust]
+    morph: Morph,
+    #[rust]
+    shown_morph: f64,
+    /// Whether Finished/Failed was raised for the current mark.
+    #[rust]
+    announced: bool,
+    #[rust]
+    reset_timer: Timer,
+    #[rust]
+    next_frame: NextFrame,
+}
+
+impl StatusSpinner {
+    fn mark_size(&self) -> f64 {
+        if self.size > 0.0 {
+            self.size
+        } else {
+            16.0
+        }
+    }
+
+    /// The word for the current status: the finished or error word when
+    /// one is given, else the active word.
+    pub fn label_text(&self) -> String {
+        match self.status {
+            SpinnerStatus::Finished if !self.text_finished.is_empty() => self.text_finished.clone(),
+            SpinnerStatus::Error if !self.text_error.is_empty() => self.text_error.clone(),
+            SpinnerStatus::Inactive => String::new(),
+            _ => self.text.clone(),
+        }
+    }
+
+    pub fn status(&self) -> SpinnerStatus {
+        self.status
+    }
+
+    /// Move to `status`. Finished and Error morph the arc into their mark
+    /// and, with `auto_reset_secs` above zero, arm the timer that takes it
+    /// away again.
+    pub fn set_status(&mut self, cx: &mut Cx, status: SpinnerStatus) {
+        self.status = status;
+        self.applied = status;
+        cx.stop_timer(self.reset_timer);
+        self.reset_timer = Timer::empty();
+        let now = cx.seconds_since_app_start();
+        let target = match status {
+            SpinnerStatus::Finished | SpinnerStatus::Error => 1.0,
+            _ => 0.0,
+        };
+        if status == SpinnerStatus::Inactive {
+            self.shown_morph = 0.0;
+            self.morph = Morph::default();
+        } else if (target - self.shown_morph).abs() > f64::EPSILON {
+            self.morph = Morph {
+                from: self.shown_morph,
+                to: target,
+                started: now,
+                running: true,
+            };
+            self.next_frame = cx.new_next_frame();
+        }
+        self.announced = false;
+        if target > 0.0 && self.auto_reset_secs > 0.0 {
+            self.reset_timer = cx.start_timeout(self.auto_reset_secs);
+        }
+        self.draw_bg.redraw(cx);
+    }
+
+    /// Raise Finished/Failed once the mark is fully on screen.
+    fn announce(&mut self, cx: &mut Cx) {
+        if self.announced || self.shown_morph < 0.999 {
+            return;
+        }
+        self.announced = true;
+        let uid = self.widget_uid();
+        match self.status {
+            SpinnerStatus::Finished => cx.widget_action(uid, StatusSpinnerAction::Finished),
+            SpinnerStatus::Error => cx.widget_action(uid, StatusSpinnerAction::Failed),
+            _ => {}
+        }
+    }
+}
+
+impl Widget for StatusSpinner {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if self.status != self.applied {
+            let status = self.status;
+            self.set_status(cx, status);
+        }
+        let s = self.mark_size();
+        cx.begin_turtle(walk, self.layout);
+        let (face_status, alpha) = match self.status {
+            SpinnerStatus::Inactive => (FACE_STATUS_SPINNING, 0.0),
+            SpinnerStatus::Active => (FACE_STATUS_SPINNING, 1.0),
+            SpinnerStatus::Finished => (FACE_STATUS_FINISHED, 1.0),
+            SpinnerStatus::Error => (FACE_STATUS_ERROR, 1.0),
+        };
+        self.draw_bg.face = SpinnerFace::Arc.index();
+        self.draw_bg.alpha = if self.disabled { alpha * 0.5 } else { alpha };
+        self.draw_bg.status = face_status;
+        self.draw_bg.morph = self.shown_morph as f32;
+        self.draw_bg.contained = 0.0;
+        self.draw_bg.draw_walk(cx, Walk::fixed(s, s));
+        let label = self.label_text();
+        if !label.is_empty() {
+            self.draw_text
+                .draw_walk(cx, Walk::fit(), Align { x: 0.0, y: 0.5 }, &label);
+        }
+        cx.end_turtle();
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if let Some(ne) = self.next_frame.is_event(event) {
+            self.shown_morph = self.morph.at(ne.time, self.morph_secs);
+            if self.morph.running {
+                self.next_frame = cx.new_next_frame();
+            }
+            self.announce(cx);
+            self.draw_bg.redraw(cx);
+        }
+        if self.reset_timer.is_event(event).is_some() {
+            self.reset_timer = Timer::empty();
+            self.set_status(cx, SpinnerStatus::Inactive);
+            let uid = self.widget_uid();
+            cx.widget_action(uid, StatusSpinnerAction::Reset);
+        }
+    }
+
+    fn text(&self) -> String {
+        self.label_text()
+    }
+
+    fn set_text(&mut self, cx: &mut Cx, v: &str) {
+        if self.text != v {
+            self.text = v.to_string();
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
+        if self.disabled != disabled {
+            self.disabled = disabled;
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    fn disabled(&self, _cx: &Cx) -> bool {
+        self.disabled
+    }
+
+    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
+        Some(self.status.name().to_string())
+    }
+}
+
+impl StatusSpinnerRef {
+    pub fn finished(&self, actions: &Actions) -> bool {
+        matches!(
+            actions.find_widget_action(self.widget_uid()).map(|a| a.cast()),
+            Some(StatusSpinnerAction::Finished)
+        )
+    }
+
+    pub fn failed(&self, actions: &Actions) -> bool {
+        matches!(
+            actions.find_widget_action(self.widget_uid()).map(|a| a.cast()),
+            Some(StatusSpinnerAction::Failed)
+        )
+    }
+
+    pub fn was_reset(&self, actions: &Actions) -> bool {
+        matches!(
+            actions.find_widget_action(self.widget_uid()).map(|a| a.cast()),
+            Some(StatusSpinnerAction::Reset)
+        )
+    }
+
+    pub fn status(&self) -> SpinnerStatus {
+        self.borrow().map(|inner| inner.status()).unwrap_or_default()
+    }
+
+    pub fn set_status(&self, cx: &mut Cx, status: SpinnerStatus) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_status(cx, status);
+        }
+    }
+
+    pub fn start(&self, cx: &mut Cx) {
+        self.set_status(cx, SpinnerStatus::Active);
+    }
+
+    pub fn finish(&self, cx: &mut Cx) {
+        self.set_status(cx, SpinnerStatus::Finished);
+    }
+
+    pub fn fail(&self, cx: &mut Cx) {
+        self.set_status(cx, SpinnerStatus::Error);
+    }
+
+    pub fn reset(&self, cx: &mut Cx) {
+        self.set_status(cx, SpinnerStatus::Inactive);
+    }
+}
+
+/// "Saving" / "Saved at HH:MM" / "Could not save" + Retry, debounced.
+#[derive(Script, ScriptHook, Widget)]
+pub struct SavingIndicator {
+    #[deref]
+    view: View,
+    #[live]
+    pub debounce_secs: f64,
+    #[live]
+    pub utc_offset_minutes: f64,
+    #[live]
+    pub text_saving: String,
+    #[live]
+    pub text_saved: String,
+    #[live]
+    pub text_failed: String,
+    #[rust]
+    state: SavingState,
+    #[rust]
+    debounce: Timer,
+    #[rust]
+    label_text: String,
+}
+
+impl SavingIndicator {
+    pub fn state(&self) -> SavingState {
+        self.state
+    }
+
+    /// A save began. "Saving" appears only once `debounce_secs` have
+    /// passed with the save still in flight.
+    pub fn saving(&mut self, cx: &mut Cx) {
+        if self.state == SavingState::Saving {
+            return;
+        }
+        self.state = SavingState::Saving;
+        self.stop_debounce(cx);
+        self.show_retry(cx, false);
+        if self.debounce_secs > 0.0 {
+            self.debounce = cx.start_timeout(self.debounce_secs);
+        } else {
+            self.show_saving(cx);
+        }
+    }
+
+    /// The save landed: "Saved at HH:MM", with a tick.
+    pub fn saved(&mut self, cx: &mut Cx) {
+        self.stop_debounce(cx);
+        self.state = SavingState::Saved;
+        let text = format!("{} {}", self.text_saved, clock_hhmm(self.utc_offset_minutes));
+        self.set_label(cx, &text);
+        self.status_spinner(cx, ids!(status)).set_status(cx, SpinnerStatus::Finished);
+        self.show_retry(cx, false);
+        self.redraw(cx);
+    }
+
+    /// The save failed: the failure words, a cross, and the retry button.
+    pub fn failed(&mut self, cx: &mut Cx) {
+        self.stop_debounce(cx);
+        self.state = SavingState::Failed;
+        let text = self.text_failed.clone();
+        self.set_label(cx, &text);
+        self.status_spinner(cx, ids!(status)).set_status(cx, SpinnerStatus::Error);
+        self.show_retry(cx, true);
+        self.redraw(cx);
+    }
+
+    /// Back to nothing.
+    pub fn reset(&mut self, cx: &mut Cx) {
+        self.stop_debounce(cx);
+        self.state = SavingState::Idle;
+        self.set_label(cx, "");
+        self.status_spinner(cx, ids!(status)).set_status(cx, SpinnerStatus::Inactive);
+        self.show_retry(cx, false);
+        self.redraw(cx);
+    }
+
+    fn show_saving(&mut self, cx: &mut Cx) {
+        let text = self.text_saving.clone();
+        self.set_label(cx, &text);
+        self.status_spinner(cx, ids!(status)).set_status(cx, SpinnerStatus::Active);
+        self.redraw(cx);
+    }
+
+    fn stop_debounce(&mut self, cx: &mut Cx) {
+        cx.stop_timer(self.debounce);
+        self.debounce = Timer::empty();
+    }
+
+    fn set_label(&mut self, cx: &mut Cx, text: &str) {
+        self.label_text = text.to_string();
+        self.label(cx, ids!(label)).set_text(cx, text);
+    }
+
+    fn show_retry(&mut self, cx: &mut Cx, on: bool) {
+        self.view.widget(cx, ids!(retry)).set_visible(cx, on);
+    }
+}
+
+impl Widget for SavingIndicator {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.view.draw_walk(cx, scope, walk)
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+        if self.debounce.is_event(event).is_some() {
+            self.debounce = Timer::empty();
+            if self.state == SavingState::Saving {
+                self.show_saving(cx);
+            }
+        }
+        if let Event::Actions(actions) = event {
+            if self.button(cx, ids!(retry_button)).clicked(actions) {
+                let uid = self.widget_uid();
+                cx.widget_action(uid, SavingIndicatorAction::Retry);
+            }
+        }
+    }
+
+    fn text(&self) -> String {
+        self.label_text.clone()
+    }
+
+    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
+        Some(
+            match self.state {
+                SavingState::Idle => "Idle",
+                SavingState::Saving => "Saving",
+                SavingState::Saved => "Saved",
+                SavingState::Failed => "Failed",
+            }
+            .to_string(),
+        )
+    }
+}
+
+impl SavingIndicatorRef {
+    pub fn retry(&self, actions: &Actions) -> bool {
+        matches!(
+            actions.find_widget_action(self.widget_uid()).map(|a| a.cast()),
+            Some(SavingIndicatorAction::Retry)
+        )
+    }
+
+    pub fn state(&self) -> SavingState {
+        self.borrow().map(|inner| inner.state()).unwrap_or_default()
+    }
+
+    pub fn saving(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.saving(cx);
+        }
+    }
+
+    pub fn saved(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.saved(cx);
+        }
+    }
+
+    pub fn failed(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.failed(cx);
+        }
+    }
+
+    pub fn reset(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.reset(cx);
+        }
+    }
+}
+
+/// Dims and blocks its content while `active`, with a spinner on top.
+#[derive(Script, ScriptHook, Widget)]
+pub struct LoadingOverlay {
+    #[deref]
+    view: View,
+    #[live]
+    draw_scrim: DrawLoadingScrim,
+    #[live]
+    spinner: Spinner,
+    #[live]
+    glass: GaussRoundedView,
+    #[live]
+    pub text: String,
+    #[live]
+    pub active: bool,
+    #[live]
+    pub delay_secs: f64,
+    #[live]
+    pub fade_secs: f64,
+    #[live]
+    pub blur: bool,
+    /// The `active` the fade was last started for.
+    #[rust]
+    applied_active: bool,
+    /// The scrim's alpha on screen.
+    #[rust]
+    alpha: f64,
+    /// When `active` last flipped, and the alpha it flipped from.
+    #[rust]
+    since: f64,
+    #[rust]
+    alpha_at_flip: f64,
+    #[rust]
+    next_frame: NextFrame,
+}
+
+impl LoadingOverlay {
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// Turn the overlay on or off. On: the scrim waits out `delay_secs`
+    /// and fades in. Off: it fades out from wherever it was.
+    pub fn set_active(&mut self, cx: &mut Cx, active: bool) {
+        self.active = active;
+        if self.applied_active == active && (self.alpha > 0.0) == active {
+            return;
+        }
+        self.applied_active = active;
+        self.since = cx.seconds_since_app_start();
+        self.alpha_at_flip = self.alpha;
+        if active {
+            self.spinner.restart(cx);
+        }
+        self.next_frame = cx.new_next_frame();
+        self.redraw(cx);
+    }
+
+    /// The scrim's alpha at `now`; whether it is still moving.
+    fn alpha_at(&self, now: f64) -> (f64, bool) {
+        let fade = self.fade_secs.max(0.0);
+        if self.active {
+            let t = now - self.since - self.delay_secs.max(0.0);
+            if t < 0.0 {
+                return (0.0, true);
+            }
+            let a = if fade <= 0.0 { 1.0 } else { (t / fade).clamp(0.0, 1.0) };
+            (a.max(self.alpha_at_flip.min(1.0) * (1.0 - a)), a < 1.0)
+        } else {
+            let t = now - self.since;
+            let a = if fade <= 0.0 { 0.0 } else { self.alpha_at_flip * (1.0 - (t / fade).clamp(0.0, 1.0)) };
+            (a, a > 0.0)
+        }
+    }
+
+    fn push_text(&mut self, cx: &mut Cx) {
+        let text = self.text.clone();
+        self.spinner.set_text(cx, &text);
+        self.glass.widget(cx, ids!(spinner)).set_text(cx, &text);
+    }
+}
+
+impl Widget for LoadingOverlay {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        if self.active != self.applied_active {
+            // A script apply flipped `active` behind the setter's back.
+            let active = self.active;
+            self.set_active(cx, active);
+        }
+        let step = self.view.draw_walk(cx, scope, walk);
+        if step.is_step() {
+            return step;
+        }
+        if self.alpha <= 0.0 {
+            return DrawStep::done();
+        }
+        let rect = self.view.area().rect(cx);
+        self.push_text(cx);
+        self.draw_scrim.alpha = if self.blur { 0.0 } else { self.alpha as f32 };
+        self.draw_scrim.draw_abs(cx, rect);
+        if self.blur {
+            self.glass.draw_walk_all(
+                cx,
+                scope,
+                Walk::fixed(rect.size.x, rect.size.y).with_abs_pos(rect.pos),
+            );
+        } else {
+            self.spinner.set_opacity(self.alpha);
+            cx.begin_turtle(
+                Walk::fixed(rect.size.x, rect.size.y).with_abs_pos(rect.pos),
+                Layout {
+                    align: Align { x: 0.5, y: 0.5 },
+                    ..Layout::flow_down()
+                },
+            );
+            let _ = self.spinner.draw_walk(cx, scope, Walk::fit());
+            cx.end_turtle();
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if let Some(ne) = self.next_frame.is_event(event) {
+            let (alpha, moving) = self.alpha_at(ne.time);
+            self.alpha = alpha;
+            if moving {
+                self.next_frame = cx.new_next_frame();
+            }
+            self.redraw(cx);
+        }
+        if self.active || self.alpha > 0.0 {
+            // Claim every pointer event over the content first: this
+            // widget is asked before its children, and a hit taken here is
+            // marked handled for everyone asked after it.
+            let _ = event.hits(cx, self.draw_scrim.area());
+            if self.blur {
+                self.glass.handle_event(cx, event, scope);
+            }
+        }
+        // The spinner pumps its own fade frames; it needs its events.
+        self.spinner.handle_event(cx, event, scope);
+        self.view.handle_event(cx, event, scope);
+    }
+
+    fn text(&self) -> String {
+        self.text.clone()
+    }
+
+    fn set_text(&mut self, cx: &mut Cx, v: &str) {
+        if self.text != v {
+            self.text = v.to_string();
+            self.push_text(cx);
+            self.redraw(cx);
+        }
+    }
+
+    /// "active" or "idle" plus the scrim's alpha, so a test can wait for
+    /// the overlay to be up (or gone) rather than for a frame count.
+    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
+        Some(format!(
+            "{} {:.2}",
+            if self.active { "active" } else { "idle" },
+            self.alpha
+        ))
+    }
+}
+
+impl LoadingOverlayRef {
+    pub fn is_active(&self) -> bool {
+        self.borrow().map(|inner| inner.is_active()).unwrap_or(false)
+    }
+
+    pub fn set_active(&self, cx: &mut Cx, active: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_active(cx, active);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,5 +1288,25 @@ mod tests {
         assert!(mid > 0.4 && mid < 0.6, "{mid}");
         assert_eq!(delayed_alpha(11.0, 10.0, 0.5, 0.2), 1.0);
         assert_eq!(delayed_alpha(10.0, 10.0, 0.0, 0.0), 1.0);
+    }
+
+    #[test]
+    fn morph_eases_and_settles() {
+        let mut m = Morph { from: 0.0, to: 1.0, started: 5.0, running: true };
+        let mid = m.at(5.1, 0.25);
+        assert!(mid > 0.0 && mid < 1.0, "{mid}");
+        assert_eq!(m.at(5.3, 0.25), 1.0);
+        assert!(!m.running);
+    }
+
+    #[test]
+    fn clock_is_hh_mm_and_wraps_the_day() {
+        let s = clock_hhmm(0.0);
+        assert_eq!(s.len(), 5);
+        assert_eq!(&s[2..3], ":");
+        let h: u32 = s[..2].parse().unwrap();
+        let m: u32 = s[3..].parse().unwrap();
+        assert!(h < 24 && m < 60);
+        assert_eq!(clock_hhmm(-840.0).len(), 5);
     }
 }
