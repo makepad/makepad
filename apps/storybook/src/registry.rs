@@ -24,7 +24,12 @@ pub struct Story {
     pub name: &'static str,
     /// The template's name under `mod.stories`.
     pub dsl: &'static str,
-    /// ISO date the story was added. New when on or after the baseline.
+    /// ISO date by which the WIDGET this story documents was in the
+    /// library — not the date the story was written. A page written today
+    /// about a widget that shipped last year carries the widget's date, so
+    /// the NEW marker answers "what was added", never "what was documented".
+    /// The two catalogue pages under Overview document no widget and carry a
+    /// date before any baseline.
     pub added: &'static str,
     /// Free-form tags the search also matches ("ported", "layout", ...).
     pub tags: &'static [&'static str],
@@ -71,6 +76,8 @@ pub fn find(key: &str) -> Option<&'static Story> {
 
 /// New means added on or after the baseline. Dates are ISO, so the string
 /// order is the date order.
+/// True when the widget this story documents arrived on or after the
+/// baseline. A new story about an old widget is not new.
 pub fn is_new(story: &Story, baseline: &str) -> bool {
     story.added >= baseline
 }
@@ -130,6 +137,30 @@ mod tests {
     fn added_dates_are_iso() {
         for story in all() {
             assert!(is_iso_date(story.added), "{} has a bad date {}", story.key, story.added);
+        }
+    }
+
+    /// The two tags that make a claim about age must agree with the date,
+    /// in both directions: a story tagged "new" is about a widget this
+    /// programme added, and one tagged "ported" is about a widget the
+    /// library already had, whatever day its page was written.
+    #[test]
+    fn the_age_tags_agree_with_the_marker() {
+        for story in all() {
+            if story.tags.contains(&"new") {
+                assert!(
+                    is_new(story, DEFAULT_BASELINE),
+                    "{} is tagged new but its widget predates the baseline",
+                    story.key
+                );
+            }
+            if story.tags.contains(&"ported") {
+                assert!(
+                    !is_new(story, DEFAULT_BASELINE),
+                    "{} is tagged ported but is marked new",
+                    story.key
+                );
+            }
         }
     }
 

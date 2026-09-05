@@ -69,7 +69,7 @@ pub const STORIES: &[Story] = &[Story {
     component: "Coverage",
     name: "Coverage",
     dsl: "Coverage",
-    added: "2026-09-05",
+    added: "2025-06-01",
     tags: &["registry", "ladder"],
     doc: "# Coverage\n\nEvery declaration under the widget module, the Rust type behind it, what it derives from, its rung on the style ladder, and whether a story shows its family. The summary line is also written to the log.",
     subject: "",
