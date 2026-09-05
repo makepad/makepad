@@ -4494,7 +4494,7 @@ impl MapView {
         // Softly-stale cache is still fine to show briefly; rate-limit the
         // expensive full re-place. This covers active zooming too — labels
         // stay pinned in screen space for up to ~125ms during the gesture
-        // (pinch behavior a la Google Maps) instead of re-placing every
+        // (the pinch behaviour of the common map apps) instead of re-placing every
         // frame, which was 5-20ms/frame at label-dense zooms. Small
         // rotation deltas reuse the cache RIGIDLY rotated about the pivot —
         // that's what keeps labels from wiggling during heading-up nav —
