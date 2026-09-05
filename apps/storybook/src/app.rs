@@ -161,6 +161,24 @@ impl App {
         }
     }
 
+    /// Hand the docs panel the story's subject once the canvas has built
+    /// the story; the panel reads it once per build.
+    fn refresh_subject(&self, cx: &mut Cx) {
+        let Some(story) = self.current() else {
+            return;
+        };
+        let canvas = self.ui.story_canvas(cx, ids!(canvas));
+        let subject = canvas.shown_root().map(|root| {
+            if story.subject.is_empty() {
+                root
+            } else {
+                root.widget(cx, &id_path(story.subject))
+            }
+        });
+        let subject = subject.filter(|w| !w.is_empty());
+        self.ui.docs_panel(cx, ids!(docs)).set_subject(cx, subject.as_ref());
+    }
+
     fn refresh_new_count(&self, cx: &mut Cx) {
         let navigator = self.ui.story_navigator(cx, ids!(navigator));
         let n = navigator.new_count();
@@ -294,6 +312,10 @@ impl AppMain for App {
         self.drain_requests(cx);
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+        // After the tree has handled the event its index is current, so the
+        // subject lookup lands on the story just built rather than on what
+        // the index still held from before.
+        self.refresh_subject(cx);
         if let Event::LiveEdit = event {
             // Everything was rebuilt from its templates; the panels are plain
             // state the rebuild reset, so they get their story again.
