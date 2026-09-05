@@ -3917,6 +3917,19 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 1.0, y: 0.5}
+                        // The surgical answer, next to the blunt one. A
+                        // wrong tempo on one record is a reason to measure
+                        // that record again, not to throw away a library
+                        // that took a night to work out -- and until this
+                        // was here, CLEAR ALL DATA was the only way to ask.
+                        // No confirmation: what it forgets it immediately
+                        // sets about replacing, which is the opposite of
+                        // the button beside it.
+                        prep_rescan_picked := MusicButton{
+                            width: 150
+                            height: 22
+                            text: "RE-SCAN PICKED"
+                        }
                         prep_clear := MusicButton{
                             width: 130
                             height: 22

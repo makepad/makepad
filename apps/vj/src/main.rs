@@ -7649,6 +7649,12 @@ pub struct App {
     /// here rather than asked of it.
     #[rust]
     prep_in_flight: usize,
+    /// Rows the operator asked to have measured again, in the order they
+    /// were asked for. Taken ahead of whatever the ahead-window would have
+    /// chosen, and taken whether or not the pass is switched on: a hand on
+    /// the button is a request, not a preference.
+    #[rust]
+    prep_forced: VecDeque<TrackKey>,
     /// Bumped whenever the cache is emptied. A background decode that was
     /// already running is stamped with the generation it started under, and
     /// a result carrying a stale one is dropped rather than written back
@@ -15360,6 +15366,49 @@ p2 {}
         self.set_music_import_status(cx, &format!("measuring deck {name} again"));
     }
 
+    /// Measure the picked rows again, from nothing.
+    ///
+    /// CLEAR ALL DATA is the blunt version of this: it throws away every
+    /// track's work to fix one track's, and a library that took a night to
+    /// measure is not something to empty because one record's tempo came
+    /// out wrong. This forgets only what was picked -- the sidecar, the
+    /// memoized column answer, and the mark that says the lane has already
+    /// looked at it -- and then asks the background lane for those rows
+    /// first.
+    ///
+    /// The operator's own work is untouched, for the same reason the deck's
+    /// re-scan leaves it alone: marks and a corrected grid live outside
+    /// this cache, which is exactly why they live outside it.
+    fn rescan_rows(&mut self, cx: &mut Cx, rows: &[usize]) {
+        let keys: Vec<TrackKey> = rows
+            .iter()
+            .filter_map(|row| self.music_rows.get(*row).map(|entry| entry.key.clone()))
+            .collect();
+        if keys.is_empty() {
+            self.set_music_import_status(cx, "pick the rows to measure first");
+            return;
+        }
+        let mut asked = 0usize;
+        for key in keys {
+            // A row whose samples cannot be reached keeps what it has.
+            // Forgetting it would leave the columns blank with nothing
+            // able to fill them in again, which is worse than a stale
+            // answer and looks the same as a deletion.
+            let Some((cache_key, _)) = self.preprocess_source(&key) else { continue };
+            crate::wave_analysis::forget_cached(&crate::wave_analysis::cache_dir(), &cache_key);
+            self.track_summaries.remove(&cache_key);
+            self.prep_analysed.remove(&cache_key);
+            preprocess::push_forced(&mut self.prep_forced, key);
+            asked += 1;
+        }
+        self.music_rows_dirty = true;
+        match asked {
+            0 => self.set_music_import_status(cx, "none of those rows can be reached"),
+            1 => self.set_music_import_status(cx, "measuring one track again"),
+            n => self.set_music_import_status(cx, &format!("measuring {n} tracks again")),
+        }
+    }
+
     fn run_pad_cmds(&mut self, cmds: Vec<PadCmd>) {
         for cmd in cmds {
             match cmd {
@@ -20140,6 +20189,15 @@ p2 {}
                 FileDialog::new().set_title("Choose where cached analysis is kept".into()),
             );
         }
+        if self.ui.button(cx, ids!(prep_rescan_picked)).clicked(actions) {
+            let picked: Vec<usize> = self
+                .ui
+                .widget(cx, ids!(music_tracks))
+                .borrow::<VjTrackList>()
+                .map(|list| list.selection().to_vec())
+                .unwrap_or_default();
+            self.rescan_rows(cx, &picked);
+        }
         if self.ui.button(cx, ids!(prep_clear)).clicked(actions) {
             self.ask_preprocess_confirm(cx, PrepConfirm::ClearCache);
         }
@@ -23240,7 +23298,7 @@ p2 {}
     /// Cheap enough to run every pump: with nothing enabled it is one bool,
     /// and with everything done it is a set lookup per candidate.
     fn pump_preprocess(&mut self) {
-        if self.prep.group_off(PrepGroup::Analysis) {
+        if self.prep.group_off(PrepGroup::Analysis) && self.prep_forced.is_empty() {
             return;
         }
         // The machine belongs to the decks first. A record on its way in
@@ -23259,14 +23317,25 @@ p2 {}
             return;
         }
         self.prep_next_scan = Some(now + Duration::from_millis(PREPROCESS_SCAN_MS));
-        let (explorer, queue) = self.preprocess_sources();
-        let wanted = preprocess::work_list(
-            &self.prep,
-            PrepGroup::Analysis,
-            &explorer,
-            &queue,
-            &HashSet::new(),
-        );
+        // What the operator picked comes first, and comes even with the
+        // pass switched off. Only as many as there are free slots: the
+        // rest stay queued in order for the next pump rather than being
+        // handed out and lost at the concurrency check below.
+        let slots = self.prep.concurrency.saturating_sub(self.prep_in_flight);
+        let mut wanted = preprocess::take_forced(&mut self.prep_forced, slots);
+        if !self.prep.group_off(PrepGroup::Analysis) {
+            let (explorer, queue) = self.preprocess_sources();
+            // A picked row that the window would have reached anyway is
+            // skipped below on the `prep_analysed` mark the forced pass
+            // has already set, so it is decoded once and not twice.
+            wanted.extend(preprocess::work_list(
+                &self.prep,
+                PrepGroup::Analysis,
+                &explorer,
+                &queue,
+                &HashSet::new(),
+            ));
+        }
         for key in wanted {
             if self.prep_in_flight >= self.prep.concurrency {
                 return;

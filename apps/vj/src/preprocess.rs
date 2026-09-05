@@ -18,6 +18,7 @@
 //! worked on and in what order; the app owns the workers that do it.
 
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -330,6 +331,31 @@ pub fn work_list<T: Clone + Eq + Hash>(
         take(explorer, &mut out, &mut seen);
     }
     out
+}
+
+/// Queue a row the operator asked for by hand.
+///
+/// Queued rather than started on the spot, because a re-scan of forty
+/// picked tracks must not put forty decodes in flight at once; and queued
+/// in ORDER, so what the lane cannot take this pump is still first next
+/// pump. A key already waiting is not queued again -- pressing the button
+/// twice on the same rows is one request, not two.
+pub fn push_forced<T: Clone + Eq>(forced: &mut VecDeque<T>, key: T) {
+    if forced.iter().any(|waiting| *waiting == key) {
+        return;
+    }
+    forced.push_back(key);
+}
+
+/// Take at most `slots` of them, leaving the rest exactly where they are.
+///
+/// The leaving is the whole point. A lane already busy offers fewer slots,
+/// and the remainder has to survive to the next pump -- drop it and a hand
+/// on RE-SCAN would quietly measure the first few tracks and forget the
+/// others, which looks from the outside like the button half-working.
+pub fn take_forced<T>(forced: &mut VecDeque<T>, slots: usize) -> Vec<T> {
+    let take = slots.min(forced.len());
+    forced.drain(..take).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -650,5 +676,30 @@ mod tests {
         assert!(to.join("a-track/vocals.pcm").is_file(), "nested files come too");
         assert_eq!(std::fs::read_dir(&from).expect("read").count(), 0);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_row_asked_for_twice_is_only_measured_once() {
+        let mut forced = VecDeque::new();
+        for key in ["a", "b", "a", "b", "a"] {
+            push_forced(&mut forced, key);
+        }
+        assert_eq!(forced, VecDeque::from(vec!["a", "b"]));
+    }
+
+    #[test]
+    fn a_busy_lane_delays_the_rest_of_a_scan_rather_than_dropping_it() {
+        let mut forced = VecDeque::from(vec!["a", "b", "c", "d", "e"]);
+        // No free slot at all: nothing is taken and nothing is lost. This
+        // is the case a `drain` would have thrown away.
+        assert!(take_forced(&mut forced, 0).is_empty());
+        assert_eq!(forced.len(), 5);
+        // Two slots take the two that were asked for first, in order.
+        assert_eq!(take_forced(&mut forced, 2), vec!["a", "b"]);
+        assert_eq!(forced, VecDeque::from(vec!["c", "d", "e"]));
+        // More slots than work is not an error, and empties the queue.
+        assert_eq!(take_forced(&mut forced, 9), vec!["c", "d", "e"]);
+        assert!(forced.is_empty());
+        assert!(take_forced(&mut forced, 4).is_empty());
     }
 }
