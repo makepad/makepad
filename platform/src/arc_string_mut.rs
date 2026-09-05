@@ -92,11 +92,11 @@ impl ScriptApply for ArcStringMut {
     ) {
         // Same rationale as `String::script_apply` (see `prims.rs`):
         // text-bearing fields are canonically mutated by imperative setters
-        // (`Label::set_text`, `Button::set_text`, etc.), so a ScriptReapply
-        // walk should not clobber the runtime value with the stale DSL
-        // literal. `Apply::Reload` (LiveEdit) still applies — DSL just
-        // changed, so the new template wins.
-        if apply.is_script_reapply() {
+        // (`Label::set_text`, `Button::set_text`, etc.), so a re-walk that
+        // carries no authored change should not clobber the runtime value with
+        // the stale DSL literal. Only `Apply::Reload` gets to win, because
+        // there the DSL itself changed.
+        if apply.preserves_runtime_state() {
             return;
         }
         // Convert to owned String using the heap's cast method

@@ -23,6 +23,7 @@ pub fn derive_widget(input: TokenStream) -> TokenStream {
         area,
         event,
         visible,
+        imperative,
         action_data,
         uid,
         cast,
