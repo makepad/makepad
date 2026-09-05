@@ -107,9 +107,15 @@ impl TestConfig {
             env.insert("MAKEPAD".to_string(), "headless".to_string());
         }
         env.insert("RUST_BACKTRACE".to_string(), "1".to_string());
+        // Every headless suite builds its package with MAKEPAD=headless, a
+        // separate cfg, into the package's own target dir, so a run over many
+        // packages compiles the platform once per package. One shared dir
+        // makes that a single build; the default stays package-local.
+        let target_dir =
+            shared_target_dir_from_env().unwrap_or_else(|| manifest_dir.join("target"));
         env.insert(
             "CARGO_TARGET_DIR".to_string(),
-            manifest_dir.join("target").to_string_lossy().to_string(),
+            target_dir.to_string_lossy().to_string(),
         );
 
         Ok(Self {
@@ -382,6 +388,25 @@ impl TestApp {
         Err(TestError::new(format!(
             "timed out waiting for log containing `{needle}`"
         )))
+    }
+
+    /// Every log line the app has written so far, oldest first, so a test
+    /// can assert on startup output (a missing template, a script error)
+    /// rather than only wait for one line to appear.
+    pub fn logs(&self) -> Vec<String> {
+        match self.try_logs() {
+            Ok(lines) => lines,
+            Err(err) => panic_for_error(err),
+        }
+    }
+
+    /// The fallible form of [`Self::logs`].
+    pub fn try_logs(&self) -> TestResult<Vec<String>> {
+        Ok(self
+            .query_logs_once(None)?
+            .into_iter()
+            .map(|(_, entry)| entry.message)
+            .collect())
     }
 
     pub fn forward(&self, msgs: Vec<StudioToApp>) {
@@ -721,6 +746,30 @@ impl Locator {
         }
         Err(TestError::new(format!(
             "timed out waiting for selector `{query}` to match {expected} visible widgets"
+        )))
+    }
+
+    /// Like `wait_count`, but satisfied by `min` or more matches: for lists
+    /// whose exact length a test does not control. Same loop, same timeout
+    /// and poll interval as `wait_count`.
+    pub fn wait_count_at_least(self, min: usize) -> Self {
+        if let Err(err) = self.try_wait_count_at_least(min) {
+            panic_for_error(err);
+        }
+        self
+    }
+
+    pub fn try_wait_count_at_least(&self, min: usize) -> TestResult<()> {
+        let query = self.selector.describe();
+        let deadline = Instant::now() + self.app.action_timeout();
+        while Instant::now() < deadline {
+            if self.app.query_widgets(&self.selector, true)?.len() >= min {
+                return Ok(());
+            }
+            thread::sleep(self.app.poll_interval());
+        }
+        Err(TestError::new(format!(
+            "timed out waiting for selector `{query}` to match at least {min} visible widgets"
         )))
     }
 
@@ -1520,6 +1569,18 @@ fn studio_mount_from_env() -> String {
         .unwrap_or_else(|| DEFAULT_STUDIO_MOUNT.to_string())
 }
 
+/// `MAKEPAD_TEST_TARGET_DIR=<dir>` (any mode) builds every package under test
+/// into one shared Cargo target directory instead of `<package>/target`, so a
+/// run over many suites compiles the headless platform once. Failure
+/// artifacts stay under the package. Unset or empty, nothing changes.
+fn shared_target_dir_from_env() -> Option<PathBuf> {
+    std::env::var("MAKEPAD_TEST_TARGET_DIR")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
 fn env_truthy(name: &str) -> bool {
     std::env::var(name).is_ok_and(|value| {
         matches!(
@@ -1564,9 +1625,9 @@ fn primary_shortcut_modifiers() -> KeyModifiers {
 #[cfg(test)]
 mod tests {
     use super::{
-        env_duration_ms, primary_window_scope, sanitize_path_component, snapshot_is_visible,
-        snapshot_sort_key, studio_addr_from_env, studio_mount_from_env, visible_mode_enabled,
-        TestError, TestResult, WidgetMatch,
+        env_duration_ms, primary_window_scope, sanitize_path_component, shared_target_dir_from_env,
+        snapshot_is_visible, snapshot_sort_key, studio_addr_from_env, studio_mount_from_env,
+        visible_mode_enabled, TestError, TestResult, WidgetMatch,
     };
     use crate::{Selector, TestConfig};
     use makepad_studio_protocol::WidgetSnapshot;
@@ -1638,6 +1699,60 @@ mod tests {
                 .join("ui__test")
         );
         assert_eq!(config.env.get("MAKEPAD"), Some(&"headless".to_string()));
+    }
+
+    #[test]
+    fn config_builds_into_the_package_target_dir_by_default() {
+        let _guard = ENV_MUTEX
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let old_target = std::env::var("MAKEPAD_TEST_TARGET_DIR").ok();
+        std::env::remove_var("MAKEPAD_TEST_TARGET_DIR");
+        let config =
+            TestConfig::current_package("/tmp/example", "makepad-example", "ui::test").unwrap();
+        restore_env_var("MAKEPAD_TEST_TARGET_DIR", old_target);
+        assert_eq!(
+            config.env.get("CARGO_TARGET_DIR"),
+            Some(
+                &PathBuf::from("/tmp/example")
+                    .join("target")
+                    .to_string_lossy()
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn shared_target_dir_env_replaces_the_package_target_dir() {
+        let _guard = ENV_MUTEX
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let old_target = std::env::var("MAKEPAD_TEST_TARGET_DIR").ok();
+        std::env::set_var("MAKEPAD_TEST_TARGET_DIR", " /tmp/shared-target ");
+        assert_eq!(
+            shared_target_dir_from_env(),
+            Some(PathBuf::from("/tmp/shared-target"))
+        );
+        let config =
+            TestConfig::current_package("/tmp/example", "makepad-example", "ui::test").unwrap();
+        std::env::set_var("MAKEPAD_TEST_TARGET_DIR", "   ");
+        assert_eq!(shared_target_dir_from_env(), None);
+        restore_env_var("MAKEPAD_TEST_TARGET_DIR", old_target);
+
+        assert_eq!(
+            config.env.get("CARGO_TARGET_DIR"),
+            Some(&"/tmp/shared-target".to_string())
+        );
+        assert_eq!(
+            config.artifacts_dir,
+            PathBuf::from("/tmp/example")
+                .join("target")
+                .join("makepad_test")
+                .join("makepad-example")
+                .join("ui__test")
+        );
     }
 
     #[test]
