@@ -26,6 +26,7 @@ use crate::loop_splat::{
 };
 use crate::wave_analysis::{DeckClock, TrackGrid};
 use crate::music_dsp::{
+    LevelMode, SlotLevel,
     audible, knob, knob64,
     Autopan, Bitcrusher, DeckEcho, DeckEq, Distortion, Flanger, FrameSource, Freeze, MotorEnd,
     MoogLadder, ParamRamp, Phaser, PlateReverb, RateReader, ScratchRamp, StereoWidth, Tremolo,
@@ -935,11 +936,19 @@ const DECK_CHAIN_SLOTS: usize = 12;
 /// separate decision for whenever growing the roster again asks for one.
 struct DeckChain {
     slots: [EffectKind; DECK_CHAIN_SLOTS],
+    /// One per slot, in the same order: the wet/dry mix and what,
+    /// if anything, is done about the level that slot returns.
+    levels: [SlotLevel; DECK_CHAIN_SLOTS],
+    /// The policy a slot follows unless it has been pinned to one
+    /// of its own. Off, so nothing changes until it is asked for.
+    level_default: LevelMode,
 }
 
 impl DeckChain {
     fn new(sample_rate: f32) -> DeckChain {
         DeckChain {
+            levels: std::array::from_fn(|_| SlotLevel::new()),
+            level_default: LevelMode::Off,
             slots: [
                 EffectKind::Eq(DeckEq::new(sample_rate)),
                 EffectKind::Freeze(Freeze::new()),
@@ -960,10 +969,35 @@ impl DeckChain {
     #[inline]
     fn process(&mut self, frame: [f32; 2], device_rate: f32) -> [f32; 2] {
         let mut out = frame;
-        for slot in &mut self.slots {
-            out = slot.process(out, device_rate);
+        for (slot, level) in self.slots.iter_mut().zip(&mut self.levels) {
+            // What went in and what came back, so the slot's own policy
+            // can blend them and, if it is asked to, correct the level.
+            let dry = out;
+            let wet = slot.process(dry, device_rate);
+            out = level.apply(dry, wet, device_rate, self.level_default);
         }
         out
+    }
+
+    /// The policy the slots that have not been pinned follow.
+    fn set_level_default(&mut self, mode: LevelMode) {
+        self.level_default = mode;
+    }
+
+    fn level_default(&self) -> LevelMode {
+        self.level_default
+    }
+
+    fn level_mut(&mut self, slot: usize) -> &mut SlotLevel {
+        &mut self.levels[slot]
+    }
+
+    /// Drop every slot's measurement, so one record's levels are not
+    /// carried into the next.
+    fn reset_levels(&mut self) {
+        for level in &mut self.levels {
+            level.reset();
+        }
     }
 
     // Fixed accessors. Every slot is populated with a known kind at a

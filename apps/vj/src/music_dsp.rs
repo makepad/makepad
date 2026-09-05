@@ -3635,6 +3635,188 @@ impl MoogLadder {
 }
 
 // ---------------------------------------------------------------------------
+// what a chain slot does about its effect's level
+// ---------------------------------------------------------------------------
+
+/// How fast a slot's two level meters follow the music when it is
+/// matching. Long: this is a loudness match, not a compressor, and it
+/// must not ride the waveform.
+const SLOT_ENV_SECS: f32 = 0.3;
+/// How fast a ceiling lets go once the peak that triggered it has passed.
+const SLOT_RELEASE_SECS: f32 = 0.15;
+/// Mean square below which there is nothing to measure, about -70 dB.
+/// Under it the last good correction stands.
+const SLOT_ENV_GATE: f32 = 1e-7;
+/// How far a correction may reach, plus and minus twelve decibels. An
+/// effect that needs more than this is not being level-matched, it is
+/// being rebuilt, and the operator should hear that rather than have it
+/// hidden.
+const SLOT_GAIN_MIN: f32 = 0.25;
+const SLOT_GAIN_MAX: f32 = 4.0;
+
+/// What a slot does about the level its effect hands back.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum LevelMode {
+    /// Whatever the deck's own default says. The default for every slot,
+    /// so one setting moves the whole chain and any slot may still be
+    /// pinned on its own.
+    #[default]
+    Follow,
+    /// Leave it alone. What the deck defaults to, so nothing changes for
+    /// anyone until they ask for it.
+    Off,
+    /// Hold the effect's output at the loudness of what went in, so
+    /// engaging it changes the sound and not the volume.
+    MatchInput,
+    /// Hold the output under `ceiling`, in linear amplitude.
+    Ceiling,
+}
+
+/// One chain slot's level policy: the wet/dry mix the operator sets, and
+/// what, if anything, is done about the level the effect returns.
+///
+/// This lives at the SLOT rather than inside the effects because it then
+/// serves all twelve of them, and any future one, with no per-effect
+/// code. It composes correctly with the additive effects too: a slot
+/// blend of the reverb's `dry + send` works out as `dry + send * mix`,
+/// which is exactly "scale the send".
+///
+/// The effects keep their own `wet` ramp as the ENGAGE ramp -- zero or
+/// one, the click-free on/off each of them already tests. `mix` is a
+/// separate, operator-facing control that rides on top.
+pub struct SlotLevel {
+    mode: LevelMode,
+    mix: ParamRamp,
+    ceiling: f32,
+    in_env: f32,
+    out_env: f32,
+    /// The correction actually in force.
+    gain: f32,
+}
+
+impl SlotLevel {
+    pub fn new() -> SlotLevel {
+        SlotLevel {
+            mode: LevelMode::Follow,
+            mix: ParamRamp::at(1.0),
+            ceiling: 1.0,
+            in_env: 0.0,
+            out_env: 0.0,
+            gain: 1.0,
+        }
+    }
+
+    pub fn set_mode(&mut self, mode: LevelMode) {
+        self.mode = mode;
+    }
+
+    pub fn mode(&self) -> LevelMode {
+        self.mode
+    }
+
+    /// The wet/dry blend, 0 = the effect is inaudible, 1 = all of it.
+    pub fn set_mix(&mut self, mix: f32) {
+        if let Some(mix) = knob(mix, 0.0, 1.0) {
+            self.mix.slew(mix, EQ_ENGAGE_SECS);
+        }
+    }
+
+    pub fn mix(&self) -> f32 {
+        self.mix.target()
+    }
+
+    /// The amplitude a `Ceiling` slot holds its output under.
+    pub fn set_ceiling(&mut self, ceiling: f32) {
+        if let Some(ceiling) = knob(ceiling, 0.01, 1.0) {
+            self.ceiling = ceiling;
+        }
+    }
+
+    pub fn ceiling(&self) -> f32 {
+        self.ceiling
+    }
+
+    /// Blend and correct one frame. `dry` is what went into the effect,
+    /// `wet` what it returned, and `default` the deck's own policy for
+    /// the slots that follow it.
+    #[inline]
+    pub fn apply(
+        &mut self,
+        dry: [f32; 2],
+        wet: [f32; 2],
+        device_rate: f32,
+        default: LevelMode,
+    ) -> [f32; 2] {
+        // `Follow` resolving to `Follow` would be a loop; the deck's own
+        // default is never that, but resolve it defensively rather than
+        // trust a caller.
+        let mode = match self.mode {
+            LevelMode::Follow => match default {
+                LevelMode::Follow => LevelMode::Off,
+                resolved => resolved,
+            },
+            pinned => pinned,
+        };
+
+        match mode {
+            LevelMode::Off | LevelMode::Follow => self.gain = 1.0,
+            LevelMode::MatchInput => {
+                let coeff = (1.0 / (SLOT_ENV_SECS * device_rate.max(1.0))).min(1.0);
+                let dry_ms = (dry[0] * dry[0] + dry[1] * dry[1]) * 0.5;
+                let wet_ms = (wet[0] * wet[0] + wet[1] * wet[1]) * 0.5;
+                self.in_env += (dry_ms - self.in_env) * coeff;
+                self.out_env += (wet_ms - self.out_env) * coeff;
+                // Both envelopes carry the same smoothing, so the ratio
+                // is usable well before either has settled.
+                if self.in_env > SLOT_ENV_GATE && self.out_env > SLOT_ENV_GATE {
+                    self.gain = (self.in_env / self.out_env)
+                        .sqrt()
+                        .clamp(SLOT_GAIN_MIN, SLOT_GAIN_MAX);
+                }
+            }
+            LevelMode::Ceiling => {
+                let peak = wet[0].abs().max(wet[1].abs());
+                let target = match peak > self.ceiling {
+                    true => (self.ceiling / peak).max(SLOT_GAIN_MIN),
+                    false => 1.0,
+                };
+                // Down at once, back up slowly: a limiter has to catch
+                // the sample that overshot, and may take its time
+                // letting go.
+                if target < self.gain {
+                    self.gain = target;
+                } else {
+                    let coeff = (1.0 / (SLOT_RELEASE_SECS * device_rate.max(1.0))).min(1.0);
+                    self.gain += (target - self.gain) * coeff;
+                }
+            }
+        }
+
+        let mix = self.mix.tick(device_rate);
+        // The settled default -- no correction, all wet -- hands the
+        // effect's own output straight back. `dry + (wet - dry) * 1.0` is
+        // not bit-identical to `wet` in floating point, and every
+        // bit-transparency test in this file depends on it being so.
+        if self.gain == 1.0 && mix >= 1.0 {
+            return wet;
+        }
+        let corrected = [wet[0] * self.gain, wet[1] * self.gain];
+        [
+            dry[0] + (corrected[0] - dry[0]) * mix,
+            dry[1] + (corrected[1] - dry[1]) * mix,
+        ]
+    }
+
+    /// Drop the measurement, so a slot does not carry one record's
+    /// levels into the next.
+    pub fn reset(&mut self) {
+        self.in_env = 0.0;
+        self.out_env = 0.0;
+        self.gain = 1.0;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
 
@@ -5918,6 +6100,214 @@ mod tests {
         assert_eq!(trem.depth.target(), 1.0);
         trem.set_depth(-1.0);
         assert_eq!(trem.depth.target(), 0.0);
+    }
+
+    /// A settled slot on its default -- no correction asked for, all
+    /// wet -- hands the effect's own output back untouched. Every
+    /// bit-transparency test in this file sits downstream of this.
+    #[test]
+    fn a_default_slot_is_bit_transparent() {
+        let rate = 48_000.0f32;
+        let mut level = SlotLevel::new();
+        let mut phase = 0.0f32;
+        for _ in 0..4_000 {
+            phase += 2.0 * PI * 233.0 / rate;
+            let dry = [phase.sin() * 0.6, phase.cos() * 0.4];
+            // A "wet" that is not the dry, so a blend would show.
+            let wet = [dry[0] * 0.5 + 0.1, dry[1] * 1.5 - 0.2];
+            assert_eq!(level.apply(dry, wet, rate, LevelMode::Off), wet);
+        }
+    }
+
+    /// Mix at zero is the dry signal, whatever the effect did.
+    #[test]
+    fn a_slot_at_zero_mix_is_the_dry_signal() {
+        let rate = 48_000.0f32;
+        let mut level = SlotLevel::new();
+        level.set_mix(0.0);
+        let mut phase = 0.0f32;
+        // Past the mix ramp.
+        for _ in 0..SETTLE_FRAMES {
+            level.apply([0.0, 0.0], [0.5, 0.5], rate, LevelMode::Off);
+        }
+        for _ in 0..4_000 {
+            phase += 2.0 * PI * 233.0 / rate;
+            let dry = [phase.sin() * 0.6, phase.cos() * 0.4];
+            let wet = [dry[0] * 4.0, dry[1] * 4.0];
+            let out = level.apply(dry, wet, rate, LevelMode::Off);
+            assert!((out[0] - dry[0]).abs() < 1e-6, "{} vs {}", out[0], dry[0]);
+            assert!((out[1] - dry[1]).abs() < 1e-6, "{} vs {}", out[1], dry[1]);
+        }
+    }
+
+    /// Matching brings an effect that adds level back to what went in.
+    /// A four-times boost is well past what any of the shipped effects
+    /// does, so this is the mechanism under load, not a typical case.
+    #[test]
+    fn matching_holds_a_loud_effect_at_the_input_level() {
+        let rate = 48_000.0f32;
+        let mut level = SlotLevel::new();
+        level.set_mode(LevelMode::MatchInput);
+        let mut phase = 0.0f32;
+        let mut tone = move || {
+            phase += 2.0 * PI * 220.0 / rate;
+            phase.sin() * 0.3
+        };
+        // The envelopes are slow on purpose; give them a second.
+        for _ in 0..(rate as usize) {
+            let x = tone();
+            level.apply([x, x], [x * 4.0, x * 4.0], rate, LevelMode::Off);
+        }
+        let (mut dry_sq, mut out_sq) = (0.0f64, 0.0f64);
+        for _ in 0..(rate as usize / 2) {
+            let x = tone();
+            let out = level.apply([x, x], [x * 4.0, x * 4.0], rate, LevelMode::Off)[0];
+            dry_sq += (x as f64) * (x as f64);
+            out_sq += (out as f64) * (out as f64);
+        }
+        let db = 20.0 * (out_sq / dry_sq).sqrt().log10();
+        assert!(db.abs() < 0.5, "matching left {db:.2} dB on the table");
+    }
+
+    /// Matching leaves a slot that is already at the input level alone,
+    /// rather than finding something to correct.
+    #[test]
+    fn matching_does_not_disturb_an_effect_that_holds_its_level() {
+        let rate = 48_000.0f32;
+        let mut level = SlotLevel::new();
+        level.set_mode(LevelMode::MatchInput);
+        let mut phase = 0.0f32;
+        let mut tone = move || {
+            phase += 2.0 * PI * 220.0 / rate;
+            phase.sin() * 0.3
+        };
+        for _ in 0..(rate as usize) {
+            let x = tone();
+            level.apply([x, x], [x, x], rate, LevelMode::Off);
+        }
+        for _ in 0..1_000 {
+            let x = tone();
+            let out = level.apply([x, x], [x, x], rate, LevelMode::Off)[0];
+            assert!((out - x).abs() < 1e-3, "{out} vs {x}");
+        }
+    }
+
+    /// A ceiling holds the output under its bound and lets go again.
+    #[test]
+    fn a_ceiling_holds_the_output_under_its_bound() {
+        let rate = 48_000.0f32;
+        let mut level = SlotLevel::new();
+        level.set_mode(LevelMode::Ceiling);
+        level.set_ceiling(0.5);
+        let mut phase = 0.0f32;
+        let mut worst = 0.0f32;
+        for n in 0..(rate as usize) {
+            phase += 2.0 * PI * 220.0 / rate;
+            let x = phase.sin() * 0.3;
+            // Loud for the first half, quiet after.
+            let wet = if n < rate as usize / 2 { x * 3.0 } else { x };
+            let out = level.apply([x, x], [wet, wet], rate, LevelMode::Off)[0];
+            // Skip the first few frames: the limiter catches the sample
+            // that overshot, it cannot see it coming.
+            if n > 64 {
+                worst = worst.max(out.abs());
+            }
+        }
+        assert!(worst <= 0.55, "the ceiling let {worst} through");
+        // Once the loud passage is over the gain has come back up.
+        for _ in 0..(rate as usize) {
+            phase += 2.0 * PI * 220.0 / rate;
+            let x = phase.sin() * 0.3;
+            level.apply([x, x], [x, x], rate, LevelMode::Off);
+        }
+        phase += 2.0 * PI * 220.0 / rate;
+        let x = phase.sin() * 0.3;
+        let out = level.apply([x, x], [x, x], rate, LevelMode::Off)[0];
+        assert!((out - x).abs() < 1e-3, "the ceiling never let go: {out} vs {x}");
+    }
+
+    /// A slot on Follow takes the deck's default, and a pinned one does
+    /// not. Follow against a default of Follow resolves to Off rather
+    /// than chasing itself.
+    #[test]
+    fn a_slot_follows_the_deck_until_it_is_pinned() {
+        let rate = 48_000.0f32;
+        let loud = |level: &mut SlotLevel, default: LevelMode| {
+            let mut phase = 0.0f32;
+            let mut last = 0.0f32;
+            for _ in 0..(rate as usize) {
+                phase += 2.0 * PI * 220.0 / rate;
+                let x = phase.sin() * 0.3;
+                last = level.apply([x, x], [x * 4.0, x * 4.0], rate, default)[0];
+            }
+            last
+        };
+        // Following a deck that is matching: corrected.
+        let mut following = SlotLevel::new();
+        assert_eq!(following.mode(), LevelMode::Follow);
+        let matched = loud(&mut following, LevelMode::MatchInput);
+        // Pinned off against the same deck: untouched, four times the dry.
+        let mut pinned = SlotLevel::new();
+        pinned.set_mode(LevelMode::Off);
+        let untouched = loud(&mut pinned, LevelMode::MatchInput);
+        assert!(
+            matched.abs() < untouched.abs() * 0.5,
+            "following {matched} against pinned {untouched}"
+        );
+        // Follow with nothing to follow is Off, not a loop.
+        let mut orphan = SlotLevel::new();
+        let out = loud(&mut orphan, LevelMode::Follow);
+        assert!((out - untouched).abs() < 1e-3, "{out} vs {untouched}");
+    }
+
+    /// The mix is ramped, so moving it under a sounding deck cannot
+    /// step the output.
+    #[test]
+    fn a_mix_change_does_not_step_the_output() {
+        let rate = 48_000.0f32;
+        let mut level = SlotLevel::new();
+        let mut phase = 0.0f32;
+        let mut prev: Option<f32> = None;
+        let mut worst = 0.0f32;
+        for n in 0..12_000usize {
+            if n == 2_000 {
+                level.set_mix(0.0);
+            }
+            if n == 7_000 {
+                level.set_mix(1.0);
+            }
+            // A low tone on purpose: the measure is the biggest step
+            // between neighbouring samples, and a tone's own slope
+            // counts towards it. At 220 Hz and full scale that slope is
+            // already 0.029 a sample, which would swamp what is being
+            // looked for. At 40 Hz it is 0.005.
+            phase += 2.0 * PI * 40.0 / rate;
+            let x = phase.sin() * 0.5;
+            let out = level.apply([x, x], [x * 2.0, x * 2.0], rate, LevelMode::Off)[0];
+            if let Some(p) = prev {
+                worst = worst.max((out - p).abs());
+            }
+            prev = Some(out);
+        }
+        assert!(worst < 0.02, "a mix change stepped by {worst}");
+    }
+
+    /// Its setters clamp, and a bad number moves nothing.
+    #[test]
+    fn slot_level_setters_clamp_to_their_documented_ranges() {
+        let mut level = SlotLevel::new();
+        level.set_mix(5.0);
+        assert_eq!(level.mix(), 1.0);
+        level.set_mix(-1.0);
+        assert_eq!(level.mix(), 0.0);
+        level.set_mix(f32::NAN);
+        assert_eq!(level.mix(), 0.0, "a bad value moves nothing");
+        level.set_ceiling(9.0);
+        assert_eq!(level.ceiling(), 1.0);
+        level.set_ceiling(0.0);
+        assert_eq!(level.ceiling(), 0.01);
+        level.set_ceiling(f32::INFINITY);
+        assert_eq!(level.ceiling(), 0.01, "a bad value moves nothing");
     }
 
     /// The ladder is the whole set an operator can pick from: free
