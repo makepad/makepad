@@ -8,8 +8,9 @@ pub mod welcome;
 
 pub fn script_mod(vm: &mut ScriptVm) {
     welcome::script_mod(vm);
+    crate::coverage::script_mod(vm);
 }
 
 pub fn tables() -> &'static [&'static [Story]] {
-    &[welcome::STORIES]
+    &[welcome::STORIES, crate::coverage::STORIES]
 }

@@ -10,6 +10,7 @@ pub use makepad_widgets;
 
 pub mod app;
 pub mod canvas;
+pub mod coverage;
 pub mod navigator;
 pub mod registry;
 pub mod settings;
