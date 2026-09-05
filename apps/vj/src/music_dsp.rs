@@ -2634,6 +2634,20 @@ impl Tremolo {
     }
 }
 
+/// How fast the makeup's two level meters follow the music. Long enough
+/// that the correction is a level match and not a compressor riding the
+/// waveform, short enough that it has caught up well inside the engage
+/// ramp.
+const DISTORTION_ENV_SECS: f32 = 0.05;
+/// Mean square below which there is nothing worth measuring -- about
+/// -70 dB. Under it the last good makeup is held.
+const DISTORTION_ENV_GATE: f32 = 1e-7;
+/// How far the makeup may reach. The shaper's own gain runs to about
+/// `drive`, so the correction has to reach a twentieth; the ceiling is
+/// there so a pathological ratio cannot turn the effect into a boost.
+const DISTORTION_MAKEUP_MIN: f32 = 0.02;
+const DISTORTION_MAKEUP_MAX: f32 = 4.0;
+
 pub(crate) const DISTORTION_DRIVE_MIN: f32 = 1.0;
 pub(crate) const DISTORTION_DRIVE_MAX: f32 = 20.0;
 pub(crate) const DISTORTION_DRIVE_DEFAULT: f32 = 4.0;
@@ -2656,11 +2670,26 @@ pub(crate) const DISTORTION_DRIVE_DEFAULT: f32 = 4.0;
 pub struct Distortion {
     wet: ParamRamp,
     drive: ParamRamp,
+    /// Mean square of what goes into the shaper and of what comes out,
+    /// one-poled. Their ratio is the makeup: what the shaper did to the
+    /// level, measured on the material actually playing rather than
+    /// guessed from the drive.
+    in_env: f32,
+    out_env: f32,
+    /// The correction in force. Held through silence rather than reset,
+    /// so a gap in the music does not hand the next note full drive.
+    makeup: f32,
 }
 
 impl Distortion {
     pub fn new() -> Distortion {
-        Distortion { wet: ParamRamp::at(0.0), drive: ParamRamp::at(DISTORTION_DRIVE_DEFAULT) }
+        Distortion {
+            wet: ParamRamp::at(0.0),
+            drive: ParamRamp::at(DISTORTION_DRIVE_DEFAULT),
+            in_env: 0.0,
+            out_env: 0.0,
+            makeup: 1.0,
+        }
     }
 
     /// The on/off switch.
@@ -2693,17 +2722,30 @@ impl Distortion {
             return frame;
         }
         let drive = self.drive.tick(device_rate);
-        // The floor is not reachable today -- `drive` never leaves
-        // [DISTORTION_DRIVE_MIN, DISTORTION_DRIVE_MAX] = [1.0, 20.0],
-        // where pade_tanh(drive) is always at least pade_tanh(1.0),
-        // about 0.78, comfortably above 0.15. It stays anyway as a
-        // guard against a future, wider DRIVE_MIN reaching toward zero,
-        // where pade_tanh(drive) genuinely does approach zero and an
-        // unguarded reciprocal would spike -- found unreachable, not
-        // wrong, by an adversarial review of this effect.
-        let makeup = 1.0 / pade_tanh(drive).max(0.15);
-        let shaped =
-            [pade_tanh(frame[0] * drive) * makeup, pade_tanh(frame[1] * drive) * makeup];
+        let shaped = [pade_tanh(frame[0] * drive), pade_tanh(frame[1] * drive)];
+
+        // Makeup by measurement, not by formula. The old one divided by
+        // `pade_tanh(drive)`, which holds a FULL-SCALE input at full
+        // scale -- but real material sits well below that, where the
+        // shaper is still nearly straight with slope `drive`, so the
+        // whole pre-gain came through as volume: +1.9 dB at drive 1.0,
+        // where the effect should be transparent, and +9 dB at the
+        // default. Comparing the two levels instead makes drive a
+        // control over character, which is what it is meant to be.
+        let coeff = (1.0 / (DISTORTION_ENV_SECS * device_rate.max(1.0))).min(1.0);
+        let inp = (frame[0] * frame[0] + frame[1] * frame[1]) * 0.5;
+        let outp = (shaped[0] * shaped[0] + shaped[1] * shaped[1]) * 0.5;
+        self.in_env += (inp - self.in_env) * coeff;
+        self.out_env += (outp - self.out_env) * coeff;
+        // Both envelopes carry the same smoothing, so their ratio is
+        // usable long before either has settled. Below the gate there is
+        // nothing to measure and the last good correction stands.
+        if self.in_env > DISTORTION_ENV_GATE {
+            self.makeup = (self.in_env / self.out_env.max(1e-20))
+                .sqrt()
+                .clamp(DISTORTION_MAKEUP_MIN, DISTORTION_MAKEUP_MAX);
+        }
+        let shaped = [shaped[0] * self.makeup, shaped[1] * self.makeup];
 
         [
             frame[0] + (shaped[0] - frame[0]) * wet,
@@ -6036,12 +6078,62 @@ mod tests {
             dist.process([0.0, 0.0], rate);
         }
         let drive = 6.0f32;
-        let makeup = 1.0 / pade_tanh(drive).max(0.15);
         for i in 0..200usize {
             let x = -0.9 + 1.8 * (i as f32 / 200.0);
             let out = dist.process([x, x], rate)[0];
-            let expected = pade_tanh(x * drive) * makeup;
+            // The makeup is measured now rather than derived from the
+            // drive, so the shape is checked against the correction
+            // actually in force after that frame -- `process` updates it
+            // and then multiplies by it.
+            let expected = pade_tanh(x * drive) * dist.makeup;
             assert!((out - expected).abs() < 1e-4, "{out} vs {expected} at x={x}");
+        }
+    }
+
+    /// Drive is a control over character, not over volume. The makeup
+    /// used to be derived from the drive rather than measured, which
+    /// held a full-scale input at full scale and let the whole pre-gain
+    /// through as loudness on everything quieter -- +1.9 dB at drive
+    /// 1.0, where the effect should be transparent, and +9 dB at the
+    /// default. Across the whole range the level now holds, while the
+    /// PEAK falls as the shaper compresses the crest, which is the
+    /// saturation doing its job.
+    #[test]
+    fn distortion_drive_changes_the_character_not_the_level() {
+        let rate = 48_000.0f32;
+        for drive in [
+            DISTORTION_DRIVE_MIN,
+            2.0,
+            DISTORTION_DRIVE_DEFAULT,
+            8.0,
+            DISTORTION_DRIVE_MAX,
+        ] {
+            let mut dist = Distortion::new();
+            dist.set_wet(1.0);
+            dist.set_drive(drive);
+            let mut phase = 0.0f32;
+            let mut tone = move || {
+                phase += 2.0 * PI * 220.0 / rate;
+                phase.sin() * 0.35
+            };
+            // Let the engage ramp and the level meters settle.
+            for _ in 0..(rate as usize / 4) {
+                let x = tone();
+                dist.process([x, x], rate);
+            }
+            let (mut dry_sq, mut wet_sq) = (0.0f64, 0.0f64);
+            let frames = rate as usize / 2;
+            for _ in 0..frames {
+                let x = tone();
+                let out = dist.process([x, x], rate)[0];
+                dry_sq += (x as f64) * (x as f64);
+                wet_sq += (out as f64) * (out as f64);
+            }
+            let db = 20.0 * (wet_sq / dry_sq).sqrt().log10();
+            assert!(
+                db.abs() < 1.0,
+                "drive {drive} moved the level by {db:.2} dB"
+            );
         }
     }
 
