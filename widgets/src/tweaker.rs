@@ -6216,9 +6216,13 @@ pub struct Tweaker {
     /// The Props list's viewport (props_wrap below the scope control).
     #[rust]
     props_viewport: Option<Rect>,
-    /// The theme's colour palette (name, rgba, defined-at), read once.
+    /// The theme's colour palette (name, rgba, defined-at), read when the
+    /// sidebar is built and again after a theme edit made elsewhere.
     #[rust]
     theme_colors: Vec<(String, u32, String)>,
+    /// The session's apply generation the palette was read at.
+    #[rust]
+    palette_gen: u64,
     /// The colour being hover-pulsed app-wide (and when it started).
     #[rust]
     pulse: Option<(u32, f64)>,
@@ -6530,6 +6534,7 @@ impl Tweaker {
         }
         if self.theme_colors.is_empty() {
             self.theme_colors = theme_palette(cx);
+            self.palette_gen = session().lock().unwrap().apply_gen;
             log!("TWEAK theme palette: {} colours", self.theme_colors.len());
         }
         // The shader source view is a plain multiline TextInput, on purpose:
@@ -8247,6 +8252,7 @@ impl Tweaker {
         };
         if matches!(was, ThemeVal::Color(_)) {
             self.theme_colors = theme_palette(cx);
+            self.palette_gen = session().lock().unwrap().apply_gen;
         }
         if let Some(row) = self.rows.iter_mut().find(|r| r.prop == name) {
             row.value = applied;
@@ -12825,6 +12831,15 @@ impl Widget for Tweaker {
             self.view_zoom = 1.0;
         }
         self.was_on = on;
+        // A theme edit made outside this overlay (a tool going through
+        // `reflect::theme_set_value`) bumps the session's apply generation;
+        // the palette strip and the swatch names follow it here instead of
+        // keeping the values they were read with.
+        let apply_gen = session().lock().unwrap().apply_gen;
+        if !self.theme_colors.is_empty() && self.palette_gen != apply_gen {
+            self.theme_colors = theme_palette(cx);
+            self.palette_gen = apply_gen;
+        }
         let window_id = cx.get_current_window_id().map(|id| id.id());
         self.my_window = window_id;
         // Compress the app's UI while the sidebar is up; release it when the
