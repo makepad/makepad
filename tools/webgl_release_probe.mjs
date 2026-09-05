@@ -1,4 +1,4 @@
-// Usage: node tools/webgl_release_probe.mjs http://127.0.0.1:PORT/path [--map] [--text] [--lose-context] [--location] [--diagnostics]
+// Usage: node tools/webgl_release_probe.mjs http://127.0.0.1:PORT/path [--map] [--buildings] [--text] [--lose-context] [--location] [--diagnostics]
 // Bounded software-WebGL smoke test. It never uses a user profile, hardware GPU, or screenshots.
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -12,13 +12,14 @@ const CDP_TIMEOUT_MS = 15_000;
 const LOSS_WARNING_TIMEOUT_MS = 5_000;
 const LOSS_QUIET_MS = 3_000;
 const LOCATION_ACTION_TIMEOUT_MS = 5_000;
+const BUILDING_SETTLE_MS = 8_000;
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const RENDERER_REJECTION = /WebGL .*rejected|WebGL2 error|webgl\.compile_fail|webgl shaders:.*\bfailed\b|Missing shader|R32F render target.*unavailable|EXT_color_buffer_float unavailable/i;
 
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 
 function parseArguments(argv) {
-    const knownFlags = new Set(['--map', '--text', '--lose-context', '--location', '--diagnostics']);
+    const knownFlags = new Set(['--map', '--buildings', '--text', '--lose-context', '--location', '--diagnostics']);
     const flags = argv.filter(value => value.startsWith('--'));
     const urls = argv.filter(value => !value.startsWith('--'));
     for (const flag of flags) {
@@ -41,6 +42,7 @@ function parseArguments(argv) {
     return {
         url: parsed.href,
         map: flags.includes('--map'),
+        buildings: flags.includes('--buildings'),
         text: flags.includes('--text'),
         loseContext: flags.includes('--lose-context'),
         location: flags.includes('--location'),
@@ -68,6 +70,8 @@ function pageInstrumentation(diagnostics) {
     const stats = window.__renderProbe = {
         draws: 0,
         mapDraws: 0,
+        wallDraws: 0,
+        wallInstances: 0,
         textDraws: 0,
         glyphInstances: 0,
         textShaderAttaches: 0,
@@ -96,6 +100,8 @@ function pageInstrumentation(diagnostics) {
     const knownContexts = new WeakSet();
     const shaderIsMap = new WeakMap();
     const programIsMap = new WeakMap();
+    const shaderIsWall = new WeakMap();
+    const programIsWall = new WeakMap();
     const shaderTextSignatures = new WeakMap();
     const programShaders = new WeakMap();
     const linkedTextPrograms = new WeakSet();
@@ -224,6 +230,9 @@ function pageInstrumentation(diagnostics) {
             const shader = args[0];
             const source = String(args[1] || '');
             shaderIsMap.set(shader, /shadow_mask|terrain_lift|tile_origin/.test(source));
+            // Generated attributes are commonly prefixed (for example,
+            // rustinst_inst_heights), so deliberately use substrings here.
+            shaderIsWall.set(shader, source.includes('inst_heights') && source.includes('inst_ao'));
             const signatures = classifyTextShader(source);
             shaderTextSignatures.set(shader, signatures);
             if (diagnostics && signatures.length > 0 && textShaderInventory.length < 16) {
@@ -249,6 +258,7 @@ function pageInstrumentation(diagnostics) {
         }});
         patch(proto, 'attachShader', {before(args) {
             programIsMap.set(args[0], Boolean(programIsMap.get(args[0]) || shaderIsMap.get(args[1])));
+            programIsWall.set(args[0], Boolean(programIsWall.get(args[0]) || shaderIsWall.get(args[1])));
             let shaders = programShaders.get(args[0]);
             if (!shaders) programShaders.set(args[0], shaders = new Set());
             shaders.add(args[1]);
@@ -365,7 +375,7 @@ function pageInstrumentation(diagnostics) {
         drawElementsInstanced: [1, 3, 4],
     };
     const positive = value => Number.isFinite(Number(value)) && Number(value) > 0;
-    const instancedTextDraw = (name, args) => {
+    const instancedDraw = (name, args) => {
         if (name === 'drawArraysInstanced' || name === 'drawArraysInstancedANGLE') {
             return positive(args[2]) && positive(args[3]) ? {draws: 1, instances: Number(args[3])} : null;
         }
@@ -399,8 +409,13 @@ function pageInstrumentation(diagnostics) {
         stats.drawByMethod[name] = (stats.drawByMethod[name] || 0) + 1;
         const program = currentProgram.get(gl);
         if (programIsMap.get(program)) stats.mapDraws++;
+        const wallDraw = programIsWall.get(program) && instancedDraw(name, args);
+        if (wallDraw) {
+            stats.wallDraws += wallDraw.draws;
+            stats.wallInstances += wallDraw.instances;
+        }
         if (linkedTextPrograms.has(program)) {
-            const textDraw = instancedTextDraw(name, args);
+            const textDraw = instancedDraw(name, args);
             if (textDraw) {
                 stats.textDraws += textDraw.draws;
                 stats.glyphInstances += textDraw.instances;
@@ -586,6 +601,8 @@ function resultSummary(snapshot, mode, fonts, diagnostics, extra = {}) {
         title: snapshot.title,
         draws: stats.draws,
         mapDraws: stats.mapDraws,
+        wallDraws: stats.wallDraws,
+        wallInstances: stats.wallInstances,
         textDraws: stats.textDraws,
         glyphInstances: stats.glyphInstances,
         drawByMethod: stats.drawByMethod,
@@ -610,6 +627,7 @@ function resultSummary(snapshot, mode, fonts, diagnostics, extra = {}) {
                 textProgramUses: stats.textProgramUses,
                 textShaders: snapshot.textShaderInventory || [],
                 consoleWarnings: diagnostics.consoleWarnings,
+                memoryPressureMessages: diagnostics.memoryPressureMessages,
             },
         } : {}),
         ...extra,
@@ -632,6 +650,7 @@ async function run() {
     const fontRequests = new Map();
     const fonts = {successes: [], failures: []};
     const consoleWarnings = [];
+    const memoryPressureMessages = [];
     const closed = {value: false};
     let locationCounts;
 
@@ -657,6 +676,11 @@ async function run() {
     });
     const command = (method, params = {}) => send(method, params, pageSessionId);
     const consoleText = args => args.map(value => value.value ?? value.unserializableValue ?? value.description ?? '').join(' ');
+    const captureMemoryPressure = value => {
+        if (!options.diagnostics || !/MapView: .*memory pressure/i.test(value)
+            || memoryPressureMessages.length >= 16 || memoryPressureMessages.includes(value)) return;
+        memoryPressureMessages.push(value.slice(0, 1_000));
+    };
     const captureFetchedReport = request => {
         try {
             const requestUrl = new URL(request.url);
@@ -856,12 +880,14 @@ async function run() {
             } else if (message.method === 'Runtime.consoleAPICalled') {
                 const value = consoleText(message.params.args);
                 if (RENDERER_REJECTION.test(value)) rendererRejections.push(value);
+                captureMemoryPressure(value);
                 if (options.diagnostics && /^(?:warning|error)$/.test(message.params.type) && consoleWarnings.length < 16) {
                     consoleWarnings.push(value.slice(0, 1_000));
                 }
             } else if (message.method === 'Log.entryAdded') {
                 const value = message.params.entry.text || '';
                 if (RENDERER_REJECTION.test(value)) rendererRejections.push(value);
+                captureMemoryPressure(value);
                 if (options.diagnostics && /^(?:warning|error)$/.test(message.params.entry.level) && consoleWarnings.length < 16) {
                     consoleWarnings.push(value.slice(0, 1_000));
                 }
@@ -911,6 +937,7 @@ async function run() {
             // Cached idle maps legitimately render nine setup draws and then stop.
             const drewEnough = initial.stats.draws > 0
                 && (!options.map || initial.stats.mapDraws > 0)
+                && (!options.buildings || (initial.stats.wallDraws > 0 && initial.stats.wallInstances > 0))
                 && (!options.text || (initial.stats.textDraws > 0 && initial.stats.glyphInstances > 0));
             if (drewEnough && initial.canvases.some(isLiveWebGlCanvas)) break;
             if (allErrors(initial).length > 0) break;
@@ -918,6 +945,7 @@ async function run() {
         if (options.diagnostics && initial
             && (allErrors(initial).length > 0
                 || !initial.canvases.some(isLiveWebGlCanvas)
+                || (options.buildings && !(initial.stats.wallDraws > 0 && initial.stats.wallInstances > 0))
                 || (options.text && !(initial.stats.textDraws > 0 && initial.stats.glyphInstances > 0)))) {
             console.error(JSON.stringify({
                 status: 'DIAGNOSTICS',
@@ -927,7 +955,10 @@ async function run() {
                 textProgramLinks: initial.stats.textProgramLinks,
                 textProgramUses: initial.stats.textProgramUses,
                 textShaders: initial.textShaderInventory || [],
+                wallDraws: initial.stats.wallDraws,
+                wallInstances: initial.stats.wallInstances,
                 consoleWarnings,
+                memoryPressureMessages,
                 fonts,
             }));
         }
@@ -936,6 +967,10 @@ async function run() {
         assert(initial.canvases.some(isLiveWebGlCanvas), 'No live WebGL canvas became available within 45 seconds');
         if (options.map) {
             assert(initial.stats.mapDraws > 0, 'No map shader draws observed within 45 seconds');
+        }
+        if (options.buildings) {
+            assert(initial.stats.wallDraws > 0, 'No building wall draws observed within 45 seconds');
+            assert(initial.stats.wallInstances > 0, 'No positive-count building wall instances observed within 45 seconds');
         }
         if (options.text) {
             assert(initial.stats.textDraws > 0, 'No Makepad text shader draws observed within 45 seconds');
@@ -947,12 +982,23 @@ async function run() {
             locationCounts = await expectLocation('startup', 0, 0, 0);
         }
 
+        let wallInstancesBeforeResize = 0;
+        if (options.buildings) {
+            await sleep(BUILDING_SETTLE_MS);
+            const settled = await snapshot();
+            assertClean(settled);
+            wallInstancesBeforeResize = settled.stats.wallInstances;
+        }
         await command('Emulation.setDeviceMetricsOverride', {width: 1700, height: 1000, deviceScaleFactor: 3, mobile: false});
         await sleep(2_500);
         const resized = await snapshot();
         assertClean(resized);
         assert(resized.canvases.some(isLiveWebGlCanvas), 'WebGL canvas was no longer live after resize');
         assertPixelBudget(resized, 'large retina resize');
+        if (options.buildings) {
+            assert(resized.stats.wallInstances > wallInstancesBeforeResize,
+                `No new positive-count building wall instances after settlement/resize: ${JSON.stringify({before: wallInstancesBeforeResize, after: resized.stats.wallInstances, memoryPressureMessages})}`);
+        }
         if (options.location) {
             locationCounts = await expectLocation('resize before consent', 0, 0, 0);
 
@@ -981,9 +1027,12 @@ async function run() {
             locationCounts = await expectLocation('explicit recenter', 2, 1, 1, {settle: 500});
             assertClean(await snapshot());
         }
-        const baseMode = `${options.map ? 'map' : 'generic'}${options.text ? '+text' : ''}`;
-        const diagnostics = options.diagnostics ? {consoleWarnings} : null;
-        console.log(JSON.stringify(resultSummary(resized, baseMode, fonts, diagnostics)));
+        const baseMode = `${options.map ? 'map' : 'generic'}${options.buildings ? '+buildings' : ''}${options.text ? '+text' : ''}`;
+        const diagnostics = options.diagnostics ? {consoleWarnings, memoryPressureMessages} : null;
+        console.log(JSON.stringify(resultSummary(resized, baseMode, fonts, diagnostics, options.buildings ? {
+            redrawWallInstances: resized.stats.wallInstances - wallInstancesBeforeResize,
+            buildingSettleMs: BUILDING_SETTLE_MS,
+        } : {})));
 
         if (options.loseContext) {
             const errorsBeforeLoss = {

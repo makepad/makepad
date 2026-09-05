@@ -45,6 +45,7 @@ const WEB_PENDING_MAX_BYTES: usize = 48 * MIB_BYTES;
 const WEB_SPACE_WARP_REFINEMENT_MAX_BYTES: usize = 4 * MIB_BYTES;
 const WEB_SPACE_WARP_REFINEMENT_MAX_WORK: usize = 1_000_000;
 const WEB_SOURCE_LOD_MAX: u8 = 3;
+const COMBINED_ARCHIVE_DETAIL_MIN_ZOOM: u32 = 14;
 const MEMORY_PRESSURE_RETRY_FRAMES: u64 = 30;
 const MEMORY_PRESSURE_RELEASE_FRAMES: u64 = 300;
 const MAX_RADAR_FRAMES: usize = 64;
@@ -6804,7 +6805,23 @@ impl MapView {
         )
     }
 
+    fn visible_tiles_exceeding_payload_limit(&self, limit: usize) -> Vec<TileKey> {
+        self.visible_tiles
+            .iter()
+            .filter(|key| {
+                self.tiles
+                    .get(key)
+                    .is_some_and(|entry| entry.bytes > limit)
+            })
+            .copied()
+            .collect()
+    }
+
     fn note_memory_pressure(&mut self, cx: &mut Cx, reason: &str) {
+        self.note_memory_pressure_for_platform(cx, reason, cfg!(target_arch = "wasm32"));
+    }
+
+    fn note_memory_pressure_for_platform(&mut self, cx: &mut Cx, reason: &str, is_web: bool) {
         self.memory_pressure.events = self.memory_pressure.events.saturating_add(1);
         self.memory_pressure.last_pressure_frame = self.frame_counter;
         if (self.memory_pressure.last_level_change_frame != 0
@@ -6814,10 +6831,12 @@ impl MapView {
             return;
         }
         let old_level = self.memory_pressure.level;
-        let old_bucket = self.render_bucket();
-        let old_zoom = self.request_zoom_level();
+        let old_bucket = self.render_bucket_for_platform(is_web);
+        let old_zoom = self.request_zoom_level_for_platform(is_web);
         self.memory_pressure.level += 1;
-        if self.render_bucket() == old_bucket && self.request_zoom_level() == old_zoom {
+        if self.render_bucket_for_platform(is_web) == old_bucket
+            && self.request_zoom_level_for_platform(is_web) == old_zoom
+        {
             // At the archive floor (or on a single-zoom source) there is no
             // further policy to apply. Keep the finite effective level and
             // compact results in place instead of scheduling identical
@@ -8593,29 +8612,8 @@ impl MapView {
             }
         }
         self.visible_tiles = self.visible_tile_keys(rect);
-        if cfg!(target_arch = "wasm32") {
-            let budgets = MapMemoryBudgets::from_cx(cx);
-            if self
-                .visible_tiles
-                .len()
-                .saturating_mul(budgets.upload)
-                > self.resident_tile_budget(budgets)
-            {
-                self.note_memory_pressure(cx, "dense visible set");
-                self.visible_tiles = self.visible_tile_keys(rect);
-            }
-        }
         if let Some(per_tile_limit) = self.tile_payload_limit(cx) {
-            let oversized = self
-                .visible_tiles
-                .iter()
-                .filter(|key| {
-                    self.tiles
-                        .get(key)
-                        .is_some_and(|entry| entry.bytes > per_tile_limit)
-                })
-                .copied()
-                .collect::<Vec<_>>();
+            let oversized = self.visible_tiles_exceeding_payload_limit(per_tile_limit);
             if !oversized.is_empty() {
                 self.note_memory_pressure(cx, "visible tiles exceeded their resident shares");
                 // A pressure step may select a coarser, metadata-approved
@@ -10470,6 +10468,30 @@ impl MapView {
                     required_detail_range,
                     self.memory_pressure.level,
                 );
+                // A combined archive carries its building/detail plane in
+                // z14 tiles. Keep that plane while a close tilted 3D view
+                // needs it, but only after metadata explicitly confirms z14
+                // exists; transient unknown and narrower regional sources
+                // retain their existing clamping contract.
+                let combined_detail_floor = self
+                    .local_source_zoom_range
+                    .filter(|(min, max)| {
+                        min <= max
+                            && *max <= 30
+                            && *min <= COMBINED_ARCHIVE_DETAIL_MIN_ZOOM
+                            && COMBINED_ARCHIVE_DETAIL_MIN_ZOOM <= *max
+                    })
+                    .and_then(|_| {
+                        (self.nominal_3d_buildings_active()
+                            && self
+                                .tile_source_config
+                                .as_ref()
+                                .is_some_and(detail_matches_base))
+                        .then_some(COMBINED_ARCHIVE_DETAIL_MIN_ZOOM)
+                    });
+                if let Some(floor) = combined_detail_floor {
+                    zoom = zoom.max(floor);
+                }
             }
         }
         zoom
@@ -10499,6 +10521,16 @@ impl MapView {
         self.render_bucket_for_platform(cfg!(target_arch = "wasm32"))
     }
 
+    fn nominal_render_bucket(&self) -> u32 {
+        (self.view_zoom().round() as u32).min(18)
+    }
+
+    fn nominal_3d_buildings_active(&self) -> bool {
+        self.buildings_3d
+            && self.tilt > 0.0
+            && self.nominal_render_bucket() >= BUILDING_3D_MIN_ZOOM
+    }
+
     fn render_bucket_for_platform(&self, is_web: bool) -> u32 {
         // TWO keyframe buckets above the mid-zooms: 14 (view < 15.5) and
         // 16 (view >= 15.5, through the max zoom). Faces/strokes morph to
@@ -10511,13 +10543,18 @@ impl MapView {
         // classic vector maps; GPU-expanded strokes stay smooth through
         // the crossings and the face morph remains an opt-in experiment
         // (/tmp/mp_face_morph) rather than the shipping path.
-        let bucket = (self.view_zoom().round() as u32).min(18);
+        let bucket = self.nominal_render_bucket();
         if is_web && self.memory_pressure.level > 0 {
             // One lower styling bucket sheds the most expensive street-only
-            // detail while retaining ground, roads, and 3D volume. Further
-            // pressure levels lower source zoom only when metadata permits;
-            // a single-zoom archive stays on its sole source zoom.
-            bucket.saturating_sub(1)
+            // detail. A nominally close tilted 3D view keeps the minimum
+            // building bucket; further pressure is handled by bounded
+            // payload admission and source LOD where metadata permits.
+            let pressured = bucket.saturating_sub(1);
+            if self.nominal_3d_buildings_active() {
+                pressured.max(BUILDING_3D_MIN_ZOOM)
+            } else {
+                pressured
+            }
         } else {
             bucket
         }
@@ -12531,6 +12568,145 @@ mod tests {
             ready_tile_admission_limit(budgets, budgets.tile_cache, 25, false),
             None
         );
+    }
+
+    fn route_3d_combined_http_map(cx: &mut Cx) -> MapView {
+        let mut map = test_map(cx);
+        map.set_source_config(
+            cx,
+            TileSourceConfig::http_archive(
+                "https://tiles.invalid/world-20260903.mkmap",
+            ),
+        );
+        map.center_norm = lon_lat_to_normalized(4.9041, 52.3676);
+        map.zoom = 15.6;
+        map.tilt = 60.0;
+        map.buildings_3d = true;
+        map.local_source_zoom_range = Some((0, 14));
+        map
+    }
+
+    #[test]
+    fn web_route_3d_combined_archive_keeps_detail_and_building_floors() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = route_3d_combined_http_map(&mut cx);
+
+        for zoom in [15.6, 15.0] {
+            map.zoom = zoom;
+            for level in 0..=WEB_SOURCE_LOD_MAX {
+                map.memory_pressure.level = level;
+                assert_eq!(map.request_zoom_level_for_platform(true), 14);
+                assert!(
+                    map.render_bucket_for_platform(true) >= BUILDING_3D_MIN_ZOOM,
+                    "zoom {zoom} pressure level {level} disabled 3D buildings"
+                );
+            }
+        }
+
+        map.zoom = 15.6;
+        map.memory_pressure = MapMemoryPressure::default();
+        map.frame_counter = 1;
+        map.note_memory_pressure_for_platform(&mut cx, "test", true);
+        assert_eq!(map.memory_pressure.level, 1);
+        let settled_frame = map.memory_pressure.last_level_change_frame;
+        map.frame_counter += 1;
+        map.note_memory_pressure_for_platform(&mut cx, "test", true);
+        assert_eq!(map.memory_pressure.level, 1);
+        assert_eq!(map.memory_pressure.last_level_change_frame, settled_frame);
+
+        // At exactly z15 both floors are already effective, so pressure is
+        // recorded without scheduling an identical restyle/re-request.
+        map.zoom = 15.0;
+        map.memory_pressure = MapMemoryPressure::default();
+        map.frame_counter += 1;
+        map.note_memory_pressure_for_platform(&mut cx, "test", true);
+        assert_eq!(map.memory_pressure.level, 0);
+        assert_eq!(map.memory_pressure.last_level_change_frame, 0);
+    }
+
+    #[test]
+    fn web_3d_floors_preserve_flat_midzoom_and_archive_contracts() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = route_3d_combined_http_map(&mut cx);
+
+        // Flat and nominally mid-zoom views retain ordinary source/style
+        // coarsening even if the building layer toggle is on.
+        map.tilt = 0.0;
+        map.memory_pressure.level = 3;
+        assert_eq!(map.request_zoom_level_for_platform(true), 11);
+        assert_eq!(map.render_bucket_for_platform(true), 15);
+        map.tilt = 60.0;
+        map.zoom = 14.0;
+        assert_eq!(map.request_zoom_level_for_platform(true), 11);
+        assert_eq!(map.render_bucket_for_platform(true), 13);
+
+        // An unparsed combined root does not advertise a z14 floor, and a
+        // narrower regional archive must never be promoted to z14.
+        map.zoom = 15.6;
+        map.local_source_zoom_range = None;
+        map.memory_pressure.level = 1;
+        assert_eq!(map.request_zoom_level_for_platform(true), 13);
+        map.local_source_zoom_range = Some((0, 13));
+        assert_eq!(map.request_zoom_level_for_platform(true), 12);
+
+        // A declared single zoom remains exact under every pressure level.
+        map.local_source_zoom_range = Some((14, 14));
+        for level in 0..=WEB_SOURCE_LOD_MAX {
+            map.memory_pressure.level = level;
+            assert_eq!(map.request_zoom_level_for_platform(true), 14);
+        }
+
+        // A separate detail archive keeps its existing unknown-metadata
+        // protection; the combined-only floor does not participate.
+        map.set_source_config(
+            &mut cx,
+            TileSourceConfig::HttpArchive {
+                root_url: "https://tiles.invalid/base.mkmap".to_string(),
+                detail_root_url: "https://tiles.invalid/detail.mkmap".to_string(),
+                bridge_dz_path: String::new(),
+            },
+        );
+        map.zoom = 15.6;
+        map.tilt = 60.0;
+        map.buildings_3d = true;
+        map.local_source_zoom_range = Some((0, 14));
+        for level in 0..=WEB_SOURCE_LOD_MAX {
+            map.memory_pressure.level = level;
+            assert_eq!(map.request_zoom_level_for_platform(true), 14);
+        }
+    }
+
+    #[test]
+    fn dense_route_visible_set_without_payloads_stays_pressure_free() {
+        const MIB: usize = 1024 * 1024;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = route_3d_combined_http_map(&mut cx);
+        let rect = Rect {
+            pos: dvec2(0.0, 0.0),
+            size: dvec2(4096.0, 2160.0),
+        };
+        map.visible_tiles = map.visible_tile_keys(rect);
+
+        let budgets = MapMemoryBudgets::from_total(1024 * MIB, true);
+        let resident = map.resident_tile_budget(budgets);
+        assert!(
+            map.visible_tiles.len().saturating_mul(budgets.upload) > resident,
+            "fixture must exercise the removed hypothetical dense-set trigger"
+        );
+        let fair_share = ready_tile_admission_limit(
+            budgets,
+            resident,
+            map.visible_tiles.len(),
+            true,
+        )
+        .unwrap();
+        assert!(fair_share <= budgets.upload);
+        assert!(fair_share.saturating_mul(map.visible_tiles.len()) <= resident);
+        assert!(map
+            .visible_tiles_exceeding_payload_limit(fair_share)
+            .is_empty());
+        assert_eq!(map.memory_pressure.level, 0);
+        assert_eq!(map.memory_pressure.events, 0);
     }
 
     #[test]
