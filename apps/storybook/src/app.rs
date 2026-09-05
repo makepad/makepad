@@ -1,5 +1,8 @@
 //! The app shell: a toolbar, the navigator, the canvas and the side panels.
+use crate::actions::*;
 use crate::canvas::*;
+use crate::controls::*;
+use crate::docs::*;
 use crate::makepad_widgets::*;
 use crate::navigator::*;
 use crate::registry;
@@ -52,7 +55,7 @@ script_mod! {
             }
             b: Splitter{
                 axis: SplitterAxis.Horizontal
-                align: SplitterAlign.FromB(360.)
+                align: SplitterAlign.FromB(380.)
                 a: View{
                     width: Fill
                     height: Fill
@@ -63,8 +66,31 @@ script_mod! {
                     width: Fill
                     height: Fill
                     flow: Down
+                    spacing: theme.space_2
                     padding: theme.mspace_2
-                    side_note := Label{text: "Docs, controls and actions arrive with the next commits."}
+                    tabs := View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: theme.space_1
+                        tab_docs := RadioButtonTab{
+                            text: "Docs"
+                            animator +: {active: {default: @on}}
+                        }
+                        tab_controls := RadioButtonTab{text: "Controls"}
+                        tab_actions := RadioButtonTab{text: "Actions"}
+                    }
+                    // Every panel is built up front: the app writes into them
+                    // before they are shown, and a page that does not exist
+                    // yet swallows the write.
+                    panels := PageFlip{
+                        width: Fill
+                        height: Fill
+                        active_page: @docs
+                        docs := DocsPanel{}
+                        controls := ControlsPanel{}
+                        actions := ActionsPanel{}
+                    }
                 }
             }
         }
@@ -84,6 +110,8 @@ script_mod! {
         }
     }
 }
+
+const PANELS: &[LiveId] = &[live_id!(docs), live_id!(controls), live_id!(actions)];
 
 #[derive(Script, ScriptHook)]
 pub struct App {
@@ -107,6 +135,9 @@ impl App {
         self.current = Some(story.key.to_string());
         self.ui.story_canvas(cx, ids!(canvas)).open(cx, story.dsl);
         self.ui.story_navigator(cx, ids!(navigator)).select(cx, story.key);
+        self.ui.docs_panel(cx, ids!(docs)).set_story(cx, story);
+        self.ui.controls_panel(cx, ids!(controls)).set_story(cx, story);
+        self.ui.actions_panel(cx, ids!(actions)).clear(cx);
         self.ui
             .label(cx, ids!(story_title))
             .set_text(cx, &format!("{} / {}", story.component, story.name));
@@ -120,6 +151,28 @@ impl App {
         self.ui
             .label(cx, ids!(new_count))
             .set_text(cx, &format!("{} new since {}", n, settings::baseline()));
+    }
+
+    fn apply_control(&self, cx: &mut Cx, control: &registry::Control, value: &ControlValue) {
+        let canvas = self.ui.story_canvas(cx, ids!(canvas));
+        if let registry::ControlKind::Disabled { .. } = control.kind {
+            if let (Some(root), ControlValue::Bool(on)) = (canvas.shown_root(), value) {
+                let target = if control.target.is_empty() {
+                    root
+                } else {
+                    root.widget(cx, &id_path(control.target))
+                };
+                target.set_disabled(cx, *on);
+                target.redraw(cx);
+            }
+            return;
+        }
+        let Some(chunk) = chunk_for(control, value) else {
+            return;
+        };
+        if let Err(e) = canvas.apply(cx, control.target, prop_of(control), &chunk) {
+            log!("storybook: control {} on {}: {}", control.label, control.target, e);
+        }
     }
 }
 
@@ -162,11 +215,25 @@ impl MatchEvent for App {
         if let Some(index) = self.ui.drop_down(cx, ids!(theme_select)).selected(actions) {
             theme::select(cx, index);
         }
+        if let Some(index) = self
+            .ui
+            .radio_button_set(cx, ids_array!(tab_docs, tab_controls, tab_actions))
+            .selected(cx, actions)
+        {
+            if let Some(page) = PANELS.get(index) {
+                self.ui.page_flip(cx, ids!(panels)).set_active_page(cx, *page);
+            }
+        }
         if self.ui.button(cx, ids!(inspect)).clicked(actions) {
             crate::makepad_widgets::tweaker::set_tweak_on(cx, true);
         }
         if self.ui.button(cx, ids!(reset)).clicked(actions) {
             self.ui.story_canvas(cx, ids!(canvas)).reset(cx);
+            self.ui.controls_panel(cx, ids!(controls)).reset(cx);
+            self.ui.actions_panel(cx, ids!(actions)).clear(cx);
+        }
+        for (control, value) in self.ui.controls_panel(cx, ids!(controls)).changed(actions) {
+            self.apply_control(cx, control, &value);
         }
         if let Some(story) = self.current() {
             if let Some(on_actions) = story.on_actions {
@@ -174,6 +241,10 @@ impl MatchEvent for App {
                     on_actions(cx, &root, actions);
                 }
             }
+        }
+        let raised = self.ui.story_canvas(cx, ids!(canvas)).take_log();
+        if !raised.is_empty() {
+            self.ui.actions_panel(cx, ids!(actions)).push(cx, raised);
         }
     }
 }
@@ -190,24 +261,28 @@ impl AppMain for App {
         crate::shell::script_mod(vm);
         crate::canvas::script_mod(vm);
         crate::navigator::script_mod(vm);
+        crate::docs::script_mod(vm);
+        crate::controls::script_mod(vm);
+        crate::actions::script_mod(vm);
         crate::stories::script_mod(vm);
         self::script_mod(vm)
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if let Event::LiveEdit = event {
-            // Everything was rebuilt from its templates; the theme dropdown
-            // and the title are plain state the rebuild reset.
             let choice = theme::choice();
             self.ui.drop_down(cx, ids!(theme_select)).set_selected_item(cx, choice);
         }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
         if let Event::LiveEdit = event {
+            // Everything was rebuilt from its templates; the panels are plain
+            // state the rebuild reset, so they get their story again.
             if let Some(story) = self.current() {
                 self.ui
                     .label(cx, ids!(story_title))
                     .set_text(cx, &format!("{} / {}", story.component, story.name));
+                self.ui.docs_panel(cx, ids!(docs)).set_story(cx, story);
             }
             self.refresh_new_count(cx);
         }

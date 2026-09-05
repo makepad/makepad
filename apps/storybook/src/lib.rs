@@ -8,9 +8,12 @@
 //! canvas that instantiates one story at a time, and panels around it.
 pub use makepad_widgets;
 
+pub mod actions;
 pub mod app;
 pub mod canvas;
+pub mod controls;
 pub mod coverage;
+pub mod docs;
 pub mod navigator;
 pub mod registry;
 pub mod settings;

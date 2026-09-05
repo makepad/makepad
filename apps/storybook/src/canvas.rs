@@ -7,8 +7,16 @@
 //! remote `/snap` route and every `ids!` lookup see it. A theme reload
 //! rebuilds every widget from its template, so the canvas drops its story on
 //! `LiveEdit` and instantiates it again on the next draw.
+//!
+//! Two things ride along with the story. The controls panel's edits are
+//! script chunks applied to a widget inside the story; the canvas applies
+//! them at once and remembers them, so a story rebuilt after a reload comes
+//! back the way the user left it. And every action a widget inside the story
+//! raises is written to a ring the actions panel reads.
 use crate::makepad_widgets::makepad_script::trap::NoTrap;
+use crate::makepad_widgets::makepad_script::ScriptMod;
 use crate::makepad_widgets::*;
+use std::collections::VecDeque;
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -19,6 +27,66 @@ script_mod! {
         width: Fill
         height: Fill
     }
+}
+
+/// How many raised actions the log keeps.
+pub const LOG_CAPACITY: usize = 200;
+
+/// Apply a script chunk (`{ prop: value ... }`) to a widget the way the
+/// design overlay does: an eval-applied module whose errors come back to the
+/// caller instead of only landing in the log.
+pub fn apply_chunk(cx: &mut Cx, widget: &WidgetRef, chunk: &str) -> Result<(), String> {
+    let chunk = chunk.trim();
+    let body = if chunk.starts_with('{') {
+        chunk.to_string()
+    } else {
+        format!("{{{chunk}}}")
+    };
+    let code = format!("use mod.prelude.widgets.*\n__script_source__{body};");
+    // The call site is keyed by the chunk's own text: the shader cache hashes
+    // each fn's script address, so two different chunks must not share one.
+    let mut hash: u32 = 2166136261;
+    for b in code.bytes() {
+        hash ^= b as u32;
+        hash = hash.wrapping_mul(16777619);
+    }
+    let line = (hash % 1_000_000) as usize + 2;
+    let errors = cx.with_vm(|vm| {
+        vm.bx.captured_errors = Some(Vec::new());
+        let script_mod = ScriptMod {
+            cargo_manifest_path: String::new(),
+            module_path: "storybook".to_string(),
+            file: "story://control".to_string(),
+            line,
+            column: 1,
+            code,
+            values: Vec::new(),
+        };
+        let mut target = widget.clone();
+        use crate::makepad_widgets::makepad_script::traits::ScriptApply;
+        target.script_apply_eval(vm, script_mod);
+        vm.take_errors()
+    });
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+/// Turn a dotted id path ("subject.inner") into the ids a widget lookup takes.
+pub fn id_path(path: &str) -> Vec<LiveId> {
+    path.split('.')
+        .filter(|s| !s.is_empty())
+        .map(LiveId::from_str)
+        .collect()
+}
+
+#[derive(Clone)]
+struct Chunk {
+    target: String,
+    prop: String,
+    chunk: String,
 }
 
 #[derive(Script, ScriptHook, WidgetRef, WidgetSet, WidgetRegister)]
@@ -43,6 +111,12 @@ pub struct StoryCanvas {
     /// written once per name and not once per frame.
     #[rust]
     missing: Vec<String>,
+    /// The controls' edits, one per (target, prop), re-applied on rebuild.
+    #[rust]
+    chunks: Vec<Chunk>,
+    /// What the story raised, newest last.
+    #[rust]
+    log: VecDeque<String>,
     #[rust]
     draw_state: DrawStateWrap<Walk>,
 }
@@ -68,17 +142,28 @@ impl WidgetNode for StoryCanvas {
 }
 
 impl StoryCanvas {
-    /// Show the template with this name from the next draw on.
+    /// Show the template with this name from the next draw on. Switching
+    /// stories forgets the previous story's edits and log.
     pub fn open(&mut self, cx: &mut Cx, dsl: &str) {
         if self.wanted.as_deref() != Some(dsl) {
             self.wanted = Some(dsl.to_string());
+            self.chunks.clear();
+            self.log.clear();
             cx.widget_tree_mark_dirty(self.uid);
             self.redraw(cx);
         }
     }
 
-    /// Drop the shown story so the next draw builds it afresh.
+    /// Drop the shown story so the next draw builds it afresh, forgetting
+    /// the edits made to it.
     pub fn reset(&mut self, cx: &mut Cx) {
+        self.chunks.clear();
+        self.rebuild(cx);
+    }
+
+    /// Drop the shown story so the next draw builds it afresh, keeping the
+    /// edits to re-apply.
+    pub fn rebuild(&mut self, cx: &mut Cx) {
         self.shown = None;
         cx.widget_tree_mark_dirty(self.uid);
         self.redraw(cx);
@@ -91,6 +176,50 @@ impl StoryCanvas {
 
     pub fn shown_dsl(&self) -> Option<&str> {
         self.shown.as_ref().map(|(dsl, _)| dsl.as_str())
+    }
+
+    /// Apply one property edit to a widget inside the story, now and after
+    /// every rebuild. `target` is a dotted id path from the story root; empty
+    /// means the root. Returns the script error, if the chunk had one.
+    pub fn apply(&mut self, cx: &mut Cx, target: &str, prop: &str, chunk: &str) -> Result<(), String> {
+        self.chunks.retain(|c| !(c.target == target && c.prop == prop));
+        self.chunks.push(Chunk {
+            target: target.to_string(),
+            prop: prop.to_string(),
+            chunk: chunk.to_string(),
+        });
+        let Some((_, root)) = self.shown.clone() else {
+            return Ok(());
+        };
+        let result = Self::apply_to(cx, &root, target, chunk);
+        root.redraw(cx);
+        result
+    }
+
+    fn apply_to(cx: &mut Cx, root: &WidgetRef, target: &str, chunk: &str) -> Result<(), String> {
+        let widget = if target.is_empty() {
+            root.clone()
+        } else {
+            let w = root.widget(cx, &id_path(target));
+            if w.is_empty() {
+                return Err(format!("no widget at {target}"));
+            }
+            w
+        };
+        apply_chunk(cx, &widget, chunk)
+    }
+
+    /// Whether the story's widget at this path can be reached.
+    pub fn has_target(&self, cx: &Cx, target: &str) -> bool {
+        match &self.shown {
+            Some((_, root)) => target.is_empty() || !root.widget(cx, &id_path(target)).is_empty(),
+            None => false,
+        }
+    }
+
+    /// Drain the raised-action log.
+    pub fn take_log(&mut self) -> Vec<String> {
+        self.log.drain(..).collect()
     }
 
     fn instantiate(&mut self, cx: &mut Cx, dsl: &str) -> Option<WidgetRef> {
@@ -113,6 +242,11 @@ impl StoryCanvas {
         }
         cx.widget_tree_insert_child_deep(self.uid, id, page.clone());
         cx.widget_tree_mark_dirty(self.uid);
+        for chunk in self.chunks.clone() {
+            if let Err(e) = Self::apply_to(cx, &page, &chunk.target, &chunk.chunk) {
+                log!("storybook: re-applying {} on {}: {}", chunk.prop, chunk.target, e);
+            }
+        }
         Some(page)
     }
 }
@@ -122,12 +256,31 @@ impl Widget for StoryCanvas {
         if let Event::LiveEdit = event {
             // The whole tree is being rebuilt from its templates; the story
             // must be too, or it keeps the pre-reload objects.
-            self.reset(cx);
+            self.rebuild(cx);
         }
         if let Some((_, page)) = self.shown.clone() {
             let uid = self.uid;
             let page_uid = page.widget_uid();
-            cx.group_widget_actions(uid, page_uid, |cx| page.handle_event(cx, event, scope));
+            let mut raised: Vec<String> = Vec::new();
+            cx.map_actions(
+                |cx| {
+                    cx.group_widget_actions(uid, page_uid, |cx| page.handle_event(cx, event, scope))
+                },
+                |_cx, buf| {
+                    for a in buf.iter() {
+                        if let Some(wa) = a.downcast_ref::<WidgetAction>() {
+                            raised.push(format!("{:?}", wa.action));
+                        }
+                    }
+                    buf
+                },
+            );
+            for line in raised {
+                if self.log.len() >= LOG_CAPACITY {
+                    self.log.pop_front();
+                }
+                self.log.push_back(line);
+            }
         }
     }
 
@@ -178,5 +331,16 @@ impl StoryCanvasRef {
 
     pub fn shown_root(&self) -> Option<WidgetRef> {
         self.borrow().and_then(|inner| inner.shown_root())
+    }
+
+    pub fn apply(&self, cx: &mut Cx, target: &str, prop: &str, chunk: &str) -> Result<(), String> {
+        match self.borrow_mut() {
+            Some(mut inner) => inner.apply(cx, target, prop, chunk),
+            None => Err("no canvas".to_string()),
+        }
+    }
+
+    pub fn take_log(&self) -> Vec<String> {
+        self.borrow_mut().map(|mut inner| inner.take_log()).unwrap_or_default()
     }
 }
