@@ -136,6 +136,8 @@ export class WasmWebGL extends WasmWebBrowser {
     this._vertex_submission_reports = new Set();
     this._texture_upload_reports = new Set();
     this._invalid_texture_upload_ids = new Set();
+    this._sampler_fallback_textures = new Map();
+    this._sampler_fallback_texture_failures = new Set();
     this._webgl_shader_version = 0;
     this.pending_webgl_shader_count = 0;
     this.webgl_shader_poll_frame_id = 0;
@@ -848,6 +850,76 @@ export class WasmWebGL extends WasmWebBrowser {
     if (cube) {
       gl.texParameteri(target, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
     }
+  }
+
+  get_sampler_fallback_texture(target) {
+    const gl = this.gl;
+    if (!gl || this.webgl_context_lost) {
+      return null;
+    }
+    const textures = this._sampler_fallback_textures ||
+      (this._sampler_fallback_textures = new Map());
+    if (textures.has(target)) {
+      return textures.get(target);
+    }
+    const failures = this._sampler_fallback_texture_failures ||
+      (this._sampler_fallback_texture_failures = new Set());
+    if (failures.has(target)) {
+      return null;
+    }
+
+    let texture = null;
+    try {
+      texture = gl.createTexture();
+      if (!texture) {
+        throw new Error("WebGL sampler fallback allocation returned null");
+      }
+      const cube = target === gl.TEXTURE_CUBE_MAP;
+      gl.bindTexture(target, texture);
+      this.configure_texture_parameters(gl, target, false, cube);
+      const pixel = new Uint8Array(4);
+      const faces = cube
+        ? [
+            gl.TEXTURE_CUBE_MAP_POSITIVE_X,
+            gl.TEXTURE_CUBE_MAP_NEGATIVE_X,
+            gl.TEXTURE_CUBE_MAP_POSITIVE_Y,
+            gl.TEXTURE_CUBE_MAP_NEGATIVE_Y,
+            gl.TEXTURE_CUBE_MAP_POSITIVE_Z,
+            gl.TEXTURE_CUBE_MAP_NEGATIVE_Z,
+          ]
+        : [gl.TEXTURE_2D];
+      for (const face of faces) {
+        gl.texImage2D(
+          face,
+          0,
+          gl.RGBA,
+          1,
+          1,
+          0,
+          gl.RGBA,
+          gl.UNSIGNED_BYTE,
+          pixel,
+        );
+      }
+      const allocation_error = gl.getError();
+      if (allocation_error !== gl.NO_ERROR) {
+        throw new Error(`WebGL sampler fallback allocation error ${allocation_error}`);
+      }
+    } catch (_error) {
+      failures.add(target);
+      if (texture) {
+        try {
+          gl.deleteTexture(texture);
+        } catch (_delete_error) {
+        }
+      }
+      return null;
+    }
+
+    texture._texture_target = target;
+    texture._render_target_valid = true;
+    textures.set(target, texture);
+    return texture;
   }
 
   upload_admitted_texture(admission, upload_format, source, upload) {
@@ -1767,52 +1839,60 @@ export class WasmWebGL extends WasmWebBrowser {
     if (!Array.isArray(shader.texture_locs)) {
       return { ok: false, reason: "shader texture metadata is invalid" };
     }
+    const sampler_textures = new Array(shader.texture_locs.length);
     for (let i = 0; i < shader.texture_locs.length; i++) {
       const texture_loc = shader.texture_locs[i];
       if (!texture_loc || texture_loc.loc == null) {
         continue;
       }
       const texture_id = args.textures && args.textures[i];
-      if (texture_id === undefined) {
-        return { ok: false, not_ready: true };
-      }
-      if (!Number.isSafeInteger(texture_id) || texture_id < 0) {
-        return { ok: false, reason: `texture ${i} has an invalid id` };
-      }
-      const texture = this.textures[texture_id];
-      if (!texture) {
-        if (
-          this._invalid_texture_upload_ids &&
-          this._invalid_texture_upload_ids.has(texture_id)
-        ) {
-          return { ok: false, reason: `texture ${texture_id} is invalid` };
-        }
-        return { ok: false, not_ready: true };
-      }
-      if (texture._render_target_valid === false) {
-        return { ok: false, reason: `texture ${texture_id} is invalid` };
-      }
       const expected_target = texture_loc.ty === "samplerCube"
         ? this.gl.TEXTURE_CUBE_MAP
         : this.gl.TEXTURE_2D;
-      if (
-        texture._texture_target !== undefined &&
-        texture._texture_target !== expected_target
-      ) {
-        return {
-          ok: false,
-          reason: `texture ${texture_id} has the wrong sampler target`,
-        };
+      let texture;
+      if (texture_id === undefined) {
+        texture = this.get_sampler_fallback_texture(expected_target);
+      } else {
+        if (!Number.isSafeInteger(texture_id) || texture_id < 0) {
+          return { ok: false, reason: `texture ${i} has an invalid id` };
+        }
+        texture = this.textures[texture_id];
+        if (!texture) {
+          if (
+            this._invalid_texture_upload_ids &&
+            this._invalid_texture_upload_ids.has(texture_id)
+          ) {
+            return { ok: false, reason: `texture ${texture_id} is invalid` };
+          }
+          texture = this.get_sampler_fallback_texture(expected_target);
+        } else {
+          if (texture._render_target_valid === false) {
+            return { ok: false, reason: `texture ${texture_id} is invalid` };
+          }
+          if (
+            texture._texture_target !== undefined &&
+            texture._texture_target !== expected_target
+          ) {
+            return {
+              ok: false,
+              reason: `texture ${texture_id} has the wrong sampler target`,
+            };
+          }
+          if (
+            this.active_render_target_textures &&
+            this.active_render_target_textures.has(texture)
+          ) {
+            return {
+              ok: false,
+              reason: `texture ${texture_id} is an active render target`,
+            };
+          }
+        }
       }
-      if (
-        this.active_render_target_textures &&
-        this.active_render_target_textures.has(texture)
-      ) {
-        return {
-          ok: false,
-          reason: `texture ${texture_id} is an active render target`,
-        };
+      if (!texture) {
+        return { ok: false, reason: "sampler fallback texture allocation failed" };
       }
+      sampler_textures[i] = texture;
     }
 
     return {
@@ -1821,6 +1901,7 @@ export class WasmWebGL extends WasmWebBrowser {
       instance_buffer,
       index_buffer,
       layout,
+      sampler_textures,
       indices: index_buffer.length,
       instances,
     };
@@ -2185,17 +2266,12 @@ export class WasmWebGL extends WasmWebBrowser {
         if (!tex_loc || tex_loc.loc == null) {
           continue;
         }
-        const texture_id = args.textures && args.textures[i];
         const target = tex_loc.ty === "samplerCube"
           ? gl.TEXTURE_CUBE_MAP
           : gl.TEXTURE_2D;
         gl.activeTexture(gl.TEXTURE0 + i);
-        if (texture_id !== undefined) {
-          gl.bindTexture(target, this.textures[texture_id]);
-          gl.uniform1i(tex_loc.loc, i);
-        } else {
-          gl.bindTexture(target, null);
-        }
+        gl.bindTexture(target, preflight.sampler_textures[i]);
+        gl.uniform1i(tex_loc.loc, i);
       }
 
       const xr = this.xr;

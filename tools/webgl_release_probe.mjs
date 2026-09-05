@@ -1,4 +1,4 @@
-// Usage: node tools/webgl_release_probe.mjs http://127.0.0.1:PORT/path [--map] [--lose-context] [--location]
+// Usage: node tools/webgl_release_probe.mjs http://127.0.0.1:PORT/path [--map] [--text] [--lose-context] [--location] [--diagnostics]
 // Bounded software-WebGL smoke test. It never uses a user profile, hardware GPU, or screenshots.
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -18,7 +18,7 @@ const RENDERER_REJECTION = /WebGL .*rejected|WebGL2 error|webgl\.compile_fail|we
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 
 function parseArguments(argv) {
-    const knownFlags = new Set(['--map', '--lose-context', '--location']);
+    const knownFlags = new Set(['--map', '--text', '--lose-context', '--location', '--diagnostics']);
     const flags = argv.filter(value => value.startsWith('--'));
     const urls = argv.filter(value => !value.startsWith('--'));
     for (const flag of flags) {
@@ -41,8 +41,10 @@ function parseArguments(argv) {
     return {
         url: parsed.href,
         map: flags.includes('--map'),
+        text: flags.includes('--text'),
         loseContext: flags.includes('--lose-context'),
         location: flags.includes('--location'),
+        diagnostics: flags.includes('--diagnostics'),
     };
 }
 
@@ -59,12 +61,18 @@ async function waitForChildExit(child, closed, milliseconds) {
     return childHasExited(child, closed);
 }
 
-function pageInstrumentation() {
+function pageInstrumentation(diagnostics) {
     return String.raw`
 (() => {
+    const diagnostics = ${diagnostics ? 'true' : 'false'};
     const stats = window.__renderProbe = {
         draws: 0,
         mapDraws: 0,
+        textDraws: 0,
+        glyphInstances: 0,
+        textShaderAttaches: 0,
+        textProgramLinks: 0,
+        textProgramUses: 0,
         drawByMethod: {},
         liveBuffers: 0,
         liveTextures: 0,
@@ -88,6 +96,11 @@ function pageInstrumentation() {
     const knownContexts = new WeakSet();
     const shaderIsMap = new WeakMap();
     const programIsMap = new WeakMap();
+    const shaderTextSignatures = new WeakMap();
+    const programShaders = new WeakMap();
+    const linkedTextPrograms = new WeakSet();
+    const shaderDiagnostics = new WeakMap();
+    const textShaderInventory = [];
     const currentProgram = new WeakMap();
     const liveBuffers = new WeakSet();
     const liveTextures = new WeakSet();
@@ -117,6 +130,40 @@ function pageInstrumentation() {
         if (!gl || knownContexts.has(gl)) return;
         knownContexts.add(gl);
         contexts.push(gl);
+    };
+    const samplerInventory = source => {
+        const samplers = [];
+        const pattern = /\b(?:uniform\s+)?(?:(?:lowp|mediump|highp)\s+)?sampler(?:2D|2DArray|3D|Cube)\s+([A-Za-z_]\w*)/g;
+        for (const match of source.matchAll(pattern)) {
+            if (!samplers.includes(match[1]) && samplers.length < 16) samplers.push(match[1]);
+        }
+        return samplers;
+    };
+    const classifyTextShader = source => {
+        const signatures = [];
+        const hasFontWord = /font|glyph|draw_text/i.test(source);
+        const hasSlugWord = /slug/i.test(source);
+        const hasCurve = /curve/i.test(source);
+        const hasBand = /band/i.test(source);
+        const hasRaster = /raster/i.test(source);
+        const hasGlyph = /glyph/i.test(source);
+        const hasTextShaderName = /DrawText|draw_text/i.test(source);
+        const hasSlugAtlasFields = /font_t[12]/i.test(source)
+            && /tex_coord[12]/i.test(source)
+            && /curve|brightness/i.test(source);
+
+        // DrawText's Slug path contains curve/band coverage logic; its older
+        // atlas form exposes the paired font texture/coordinate fields.
+        if ((hasCurve && hasBand && (hasSlugWord || hasFontWord)) || hasSlugAtlasFields) {
+            signatures.push('slug-curve-band');
+        }
+        // Raster glyph shaders have explicit raster + glyph/font vocabulary.
+        // Requiring both avoids treating an unrelated sampled image as text.
+        if (hasRaster && (hasGlyph || hasFontWord)) signatures.push('raster-glyph');
+        if (hasTextShaderName && (hasGlyph || hasRaster || samplerInventory(source).length > 0)) {
+            signatures.push('draw-text');
+        }
+        return [...new Set(signatures)];
     };
     const patch = (object, name, hooks) => {
         if (!object || typeof object[name] !== 'function') return;
@@ -174,13 +221,75 @@ function pageInstrumentation() {
 
     for (const proto of prototypes) {
         patch(proto, 'shaderSource', {before(args) {
-            shaderIsMap.set(args[0], /shadow_mask|terrain_lift|tile_origin/.test(String(args[1] || '')));
+            const shader = args[0];
+            const source = String(args[1] || '');
+            shaderIsMap.set(shader, /shadow_mask|terrain_lift|tile_origin/.test(source));
+            const signatures = classifyTextShader(source);
+            shaderTextSignatures.set(shader, signatures);
+            if (diagnostics && signatures.length > 0 && textShaderInventory.length < 16) {
+                let type = 'unknown';
+                try {
+                    const shaderType = this.getShaderParameter(shader, this.SHADER_TYPE);
+                    if (shaderType === this.VERTEX_SHADER) type = 'vertex';
+                    if (shaderType === this.FRAGMENT_SHADER) type = 'fragment';
+                } catch (_) {
+                    // Shader type is diagnostic-only.
+                }
+                const entry = {
+                    id: textShaderInventory.length + 1,
+                    type,
+                    signatures,
+                    samplers: samplerInventory(source),
+                    attaches: 0,
+                    links: 0,
+                };
+                shaderDiagnostics.set(shader, entry);
+                textShaderInventory.push(entry);
+            }
         }});
         patch(proto, 'attachShader', {before(args) {
             programIsMap.set(args[0], Boolean(programIsMap.get(args[0]) || shaderIsMap.get(args[1])));
+            let shaders = programShaders.get(args[0]);
+            if (!shaders) programShaders.set(args[0], shaders = new Set());
+            shaders.add(args[1]);
+            const signatures = shaderTextSignatures.get(args[1]);
+            if (signatures?.length) {
+                stats.textShaderAttaches++;
+                const entry = shaderDiagnostics.get(args[1]);
+                if (entry) entry.attaches++;
+            }
+        }});
+        patch(proto, 'detachShader', {before(args) {
+            programShaders.get(args[0])?.delete(args[1]);
+        }});
+        patch(proto, 'linkProgram', {after(args) {
+            const program = args[0];
+            const signatures = new Set();
+            const diagnosticEntries = new Set();
+            for (const shader of programShaders.get(program) || []) {
+                for (const signature of shaderTextSignatures.get(shader) || []) signatures.add(signature);
+                const entry = shaderDiagnostics.get(shader);
+                if (entry) diagnosticEntries.add(entry);
+            }
+            let linked = false;
+            try {
+                linked = true; // Actual draws plus GL-error checks prove usability without blocking asynchronous shader compilation.
+            } catch (_) {
+                // A failed link remains ineligible for text draw accounting.
+            }
+            if (linked && signatures?.size) {
+                linkedTextPrograms.add(program);
+                stats.textProgramLinks++;
+                if (diagnostics) {
+                    for (const entry of diagnosticEntries) entry.links++;
+                }
+            } else {
+                linkedTextPrograms.delete(program);
+            }
         }});
         patch(proto, 'useProgram', {after(args) {
             currentProgram.set(this, args[0]);
+            if (linkedTextPrograms.has(args[0])) stats.textProgramUses++;
         }});
         patch(proto, 'createBuffer', {after(_args, result) {
             if (result && !liveBuffers.has(result)) {
@@ -255,10 +364,48 @@ function pageInstrumentation() {
         drawArraysInstanced: [1, 2, 3],
         drawElementsInstanced: [1, 3, 4],
     };
+    const positive = value => Number.isFinite(Number(value)) && Number(value) > 0;
+    const instancedTextDraw = (name, args) => {
+        if (name === 'drawArraysInstanced' || name === 'drawArraysInstancedANGLE') {
+            return positive(args[2]) && positive(args[3]) ? {draws: 1, instances: Number(args[3])} : null;
+        }
+        if (name === 'drawElementsInstanced' || name === 'drawElementsInstancedANGLE') {
+            return positive(args[1]) && positive(args[4]) ? {draws: 1, instances: Number(args[4])} : null;
+        }
+        const arrays = name === 'multiDrawArraysInstancedWEBGL';
+        const elements = name === 'multiDrawElementsInstancedWEBGL';
+        if (!arrays && !elements) return null;
+        const counts = args[1];
+        const countsOffset = Number(args[2]);
+        const instanceCounts = args[arrays ? 5 : 6];
+        const instanceCountsOffset = Number(args[arrays ? 6 : 7]);
+        const drawCount = Number(args[arrays ? 7 : 8]);
+        if (!counts || !instanceCounts || !Number.isInteger(countsOffset)
+            || !Number.isInteger(instanceCountsOffset) || !Number.isInteger(drawCount) || drawCount <= 0) return null;
+        let draws = 0;
+        let instances = 0;
+        for (let index = 0; index < drawCount; index++) {
+            const count = counts[countsOffset + index];
+            const instanceCount = instanceCounts[instanceCountsOffset + index];
+            if (positive(count) && positive(instanceCount)) {
+                draws++;
+                instances += Number(instanceCount);
+            }
+        }
+        return draws > 0 ? {draws, instances} : null;
+    };
     const recordDraw = (gl, name, args, numericArguments) => {
         stats.draws++;
         stats.drawByMethod[name] = (stats.drawByMethod[name] || 0) + 1;
-        if (programIsMap.get(currentProgram.get(gl))) stats.mapDraws++;
+        const program = currentProgram.get(gl);
+        if (programIsMap.get(program)) stats.mapDraws++;
+        if (linkedTextPrograms.has(program)) {
+            const textDraw = instancedTextDraw(name, args);
+            if (textDraw) {
+                stats.textDraws += textDraw.draws;
+                stats.glyphInstances += textDraw.instances;
+            }
+        }
         if (numericArguments.some(index => !Number.isFinite(args[index]))) stats.invalidDraws++;
         drainGlErrors(gl, name);
     };
@@ -304,6 +451,7 @@ function pageInstrumentation() {
             documentToken,
             title: document.title,
             stats,
+            ...(diagnostics ? {textShaderInventory} : {}),
             visibleReloads: (visibleText().match(/\breload\b/gi) || []).length,
             canvases: Array.from(document.querySelectorAll('canvas')).map(canvas => {
                 const gl = contexts.find(context => context.canvas === canvas);
@@ -430,7 +578,7 @@ function assertNoRenderWorkAfterContextLoss(snapshot, phase) {
     assert.equal(snapshot.stats.rafCallbacks, baseline.rafCallbacks, `Renderer ran requestAnimationFrame after WebGL context loss during ${phase}`);
 }
 
-function resultSummary(snapshot, mode, extra = {}) {
+function resultSummary(snapshot, mode, fonts, diagnostics, extra = {}) {
     const stats = snapshot.stats;
     return {
         status: 'PASS',
@@ -438,7 +586,10 @@ function resultSummary(snapshot, mode, extra = {}) {
         title: snapshot.title,
         draws: stats.draws,
         mapDraws: stats.mapDraws,
+        textDraws: stats.textDraws,
+        glyphInstances: stats.glyphInstances,
         drawByMethod: stats.drawByMethod,
+        fonts,
         renderers: [...new Set(snapshot.canvases.filter(canvas => canvas.hasWebgl).map(canvas => canvas.renderer))],
         buffers: {
             live: stats.liveBuffers,
@@ -452,6 +603,15 @@ function resultSummary(snapshot, mode, extra = {}) {
             deleted: stats.deletedTextures,
             maxPixels: stats.maxTexturePixels,
         },
+        ...(diagnostics ? {
+            diagnostics: {
+                textShaderAttaches: stats.textShaderAttaches,
+                textProgramLinks: stats.textProgramLinks,
+                textProgramUses: stats.textProgramUses,
+                textShaders: snapshot.textShaderInventory || [],
+                consoleWarnings: diagnostics.consoleWarnings,
+            },
+        } : {}),
         ...extra,
     };
 }
@@ -469,6 +629,9 @@ async function run() {
     const runtimeErrors = [];
     const rendererRejections = [];
     const fetchedErrorReports = [];
+    const fontRequests = new Map();
+    const fonts = {successes: [], failures: []};
+    const consoleWarnings = [];
     const closed = {value: false};
     let locationCounts;
 
@@ -509,6 +672,36 @@ async function run() {
         } catch {
             // A malformed request URL will be surfaced by the app if it matters.
         }
+    };
+    const isHttpUrl = value => /^https?:\/\//i.test(String(value || ''));
+    const isFontResource = (type, url, mimeType = '') => type === 'Font'
+        || /^font\//i.test(mimeType)
+        || /\.(?:woff2?|ttf|otf)(?:$|[?#])/i.test(String(url || ''));
+    const boundedFontUrl = value => String(value || '').slice(0, 1_000);
+    const keepUniqueFont = (array, value) => {
+        if (array.length >= 32) return;
+        if (!array.some(existing => JSON.stringify(existing) === JSON.stringify(value))) array.push(value);
+    };
+    const captureFontResponse = params => {
+        const response = params.response || {};
+        if (!isHttpUrl(response.url) || !isFontResource(params.type, response.url, response.mimeType)) return;
+        fontRequests.set(params.requestId, response.url);
+        const value = {
+            url: boundedFontUrl(response.url),
+            status: response.status,
+            mimeType: String(response.mimeType || '').slice(0, 200),
+        };
+        if (response.status >= 200 && response.status < 400) keepUniqueFont(fonts.successes, value);
+        else keepUniqueFont(fonts.failures, value);
+    };
+    const captureFontFailure = params => {
+        const url = fontRequests.get(params.requestId);
+        if (!isHttpUrl(url) && params.type !== 'Font') return;
+        keepUniqueFont(fonts.failures, {
+            url: boundedFontUrl(url || '[font URL unavailable]'),
+            error: String(params.errorText || 'loading failed').slice(0, 500),
+            canceled: Boolean(params.canceled),
+        });
     };
 
     const evaluate = async expression => {
@@ -663,11 +856,25 @@ async function run() {
             } else if (message.method === 'Runtime.consoleAPICalled') {
                 const value = consoleText(message.params.args);
                 if (RENDERER_REJECTION.test(value)) rendererRejections.push(value);
+                if (options.diagnostics && /^(?:warning|error)$/.test(message.params.type) && consoleWarnings.length < 16) {
+                    consoleWarnings.push(value.slice(0, 1_000));
+                }
             } else if (message.method === 'Log.entryAdded') {
                 const value = message.params.entry.text || '';
                 if (RENDERER_REJECTION.test(value)) rendererRejections.push(value);
+                if (options.diagnostics && /^(?:warning|error)$/.test(message.params.entry.level) && consoleWarnings.length < 16) {
+                    consoleWarnings.push(value.slice(0, 1_000));
+                }
             } else if (message.method === 'Network.requestWillBeSent') {
                 captureFetchedReport(message.params.request);
+                if (isHttpUrl(message.params.request.url)
+                    && isFontResource(message.params.type, message.params.request.url)) {
+                    fontRequests.set(message.params.requestId, message.params.request.url);
+                }
+            } else if (message.method === 'Network.responseReceived') {
+                captureFontResponse(message.params);
+            } else if (message.method === 'Network.loadingFailed') {
+                captureFontFailure(message.params);
             } else if (message.method === 'Page.frameNavigated' && !message.params.frame.parentId) {
                 mainFrameNavigations++;
             }
@@ -684,7 +891,7 @@ async function run() {
             command('Network.enable'),
             command('Log.enable'),
         ]);
-        await command('Page.addScriptToEvaluateOnNewDocument', {source: pageInstrumentation()});
+        await command('Page.addScriptToEvaluateOnNewDocument', {source: pageInstrumentation(options.diagnostics)});
         if (options.location) {
             await command('Page.addScriptToEvaluateOnNewDocument', {source: locationInstrumentation()});
         }
@@ -702,18 +909,39 @@ async function run() {
                 continue;
             }
             // Cached idle maps legitimately render nine setup draws and then stop.
-            const drewEnough = options.map ? initial.stats.mapDraws > 0 : initial.stats.draws > 0;
+            const drewEnough = initial.stats.draws > 0
+                && (!options.map || initial.stats.mapDraws > 0)
+                && (!options.text || (initial.stats.textDraws > 0 && initial.stats.glyphInstances > 0));
             if (drewEnough && initial.canvases.some(isLiveWebGlCanvas)) break;
             if (allErrors(initial).length > 0) break;
+        }
+        if (options.diagnostics && initial
+            && (allErrors(initial).length > 0
+                || !initial.canvases.some(isLiveWebGlCanvas)
+                || (options.text && !(initial.stats.textDraws > 0 && initial.stats.glyphInstances > 0)))) {
+            console.error(JSON.stringify({
+                status: 'DIAGNOSTICS',
+                textDraws: initial.stats.textDraws,
+                glyphInstances: initial.stats.glyphInstances,
+                textShaderAttaches: initial.stats.textShaderAttaches,
+                textProgramLinks: initial.stats.textProgramLinks,
+                textProgramUses: initial.stats.textProgramUses,
+                textShaders: initial.textShaderInventory || [],
+                consoleWarnings,
+                fonts,
+            }));
         }
         assert(initial, 'No instrumented app document became available within 45 seconds');
         assertClean(initial);
         assert(initial.canvases.some(isLiveWebGlCanvas), 'No live WebGL canvas became available within 45 seconds');
         if (options.map) {
             assert(initial.stats.mapDraws > 0, 'No map shader draws observed within 45 seconds');
-        } else {
-            assert(initial.stats.draws > 0, 'No WebGL draw calls observed within 45 seconds');
         }
+        if (options.text) {
+            assert(initial.stats.textDraws > 0, 'No Makepad text shader draws observed within 45 seconds');
+            assert(initial.stats.glyphInstances > 0, 'No positive-count glyph instances observed within 45 seconds');
+        }
+        assert(initial.stats.draws > 0, 'No WebGL draw calls observed within 45 seconds');
         assertPixelBudget(initial, 'retina startup');
         if (options.location) {
             locationCounts = await expectLocation('startup', 0, 0, 0);
@@ -753,7 +981,9 @@ async function run() {
             locationCounts = await expectLocation('explicit recenter', 2, 1, 1, {settle: 500});
             assertClean(await snapshot());
         }
-        console.log(JSON.stringify(resultSummary(resized, options.map ? 'map' : 'generic')));
+        const baseMode = `${options.map ? 'map' : 'generic'}${options.text ? '+text' : ''}`;
+        const diagnostics = options.diagnostics ? {consoleWarnings} : null;
+        console.log(JSON.stringify(resultSummary(resized, baseMode, fonts, diagnostics)));
 
         if (options.loseContext) {
             const errorsBeforeLoss = {
@@ -802,7 +1032,7 @@ async function run() {
                 locationCounts = await expectLocation('terminal context-loss cleanup', 2, 2, 0, {wait: true});
                 assert.deepEqual(locationCounts.clearedIds, [1, 2], 'Terminal cleanup cleared unexpected watches');
             }
-            console.log(JSON.stringify(resultSummary(quiet, options.map ? 'map+lose-context' : 'generic+lose-context', {
+            console.log(JSON.stringify(resultSummary(quiet, `${baseMode}+lose-context`, fonts, diagnostics, {
                 contextLosses: quiet.stats.contextLosses,
                 visibleReloads: quiet.visibleReloads,
                 quietMs: LOSS_QUIET_MS,
