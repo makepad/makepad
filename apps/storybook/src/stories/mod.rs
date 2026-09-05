@@ -5,11 +5,13 @@ use crate::makepad_widgets::*;
 use crate::registry::Story;
 
 pub mod welcome;
+pub mod button;
 
 pub fn script_mod(vm: &mut ScriptVm) {
     welcome::script_mod(vm);
+    button::script_mod(vm);
 }
 
 pub fn tables() -> &'static [&'static [Story]] {
-    &[welcome::STORIES]
+    &[welcome::STORIES, button::STORIES]
 }
