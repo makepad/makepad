@@ -11,7 +11,124 @@ use crate::{
 };
 use std::collections::BTreeSet;
 
+const WEBGL_RESOURCE_RETIREMENT_SLOTS_PER_SAFE_POINT: usize = 32;
+
 impl Cx {
+    pub(crate) fn has_pending_webgl_resource_retirements(&self) -> bool {
+        self.geometries.0.has_pending_retirements()
+            || self.draw_lists.0.has_pending_retirements()
+            || self.passes.0.has_pending_retirements()
+            || self.textures.0.has_pending_retirements()
+    }
+
+    /// Drain a bounded number of pool slots at an event-loop safe point. A
+    /// candidate is produced only by the last owning handle being dropped;
+    /// allocation cancels it, so no draw-age heuristic is involved.
+    pub(crate) fn retire_webgl_resources(&mut self) {
+        let mut array_buffer_ids = Vec::new();
+        let mut index_buffer_ids = Vec::new();
+        let mut vao_ids = Vec::new();
+        let mut texture_ids = Vec::new();
+        let mut framebuffer_ids = Vec::new();
+
+        for slot in self
+            .geometries
+            .0
+            .take_free_retirements(WEBGL_RESOURCE_RETIREMENT_SLOTS_PER_SAFE_POINT)
+        {
+            let geometry = &mut self.geometries.0.pool[slot].item;
+            if let Some(id) = geometry.os.vb_id {
+                array_buffer_ids.push(id);
+                geometry.os.vb_generation = geometry.os.vb_generation.wrapping_add(1);
+            }
+            if let Some(id) = geometry.os.ib_id {
+                index_buffer_ids.push(id);
+                geometry.os.ib_generation = geometry.os.ib_generation.wrapping_add(1);
+            }
+            // Keep the numeric ids for same-slot reuse, but force a complete
+            // upload before any new generation can draw them.
+            geometry.dirty = true;
+            geometry.dirty_vertices = true;
+            geometry.dirty_indices = true;
+        }
+
+        for slot in self
+            .draw_lists
+            .0
+            .take_free_retirements(WEBGL_RESOURCE_RETIREMENT_SLOTS_PER_SAFE_POINT)
+        {
+            let draw_list = &mut self.draw_lists.0.pool[slot].item;
+            for item in &mut draw_list.draw_items.buffer {
+                if let Some(id) = item.os.inst_vb_id {
+                    array_buffer_ids.push(id);
+                    item.os.inst_vb_generation = item.os.inst_vb_generation.wrapping_add(1);
+                }
+                if let Some(vao) = &mut item.os.vao {
+                    vao_ids.push(vao.vao_id);
+                    // Preserve the id high-water mark while ensuring reuse
+                    // emits FromWasmAllocVao and recreates its two UBOs.
+                    vao.shader_id = None;
+                    vao.inst_vb_id = None;
+                    vao.geom_vb_id = None;
+                    vao.geom_ib_id = None;
+                }
+                item.os.uniforms_recording_gen = None;
+                item.os.draw_call_uniforms_gen = None;
+                item.os.user_uniforms_gen = None;
+                item.kind = crate::draw_list::CxDrawKind::Empty;
+                if let Some(instances) = &mut item.instances {
+                    instances.clear();
+                }
+            }
+            draw_list.draw_items.clear();
+        }
+
+        for slot in self
+            .passes
+            .0
+            .take_free_retirements(WEBGL_RESOURCE_RETIREMENT_SLOTS_PER_SAFE_POINT)
+        {
+            framebuffer_ids.push(slot);
+            let pass = &mut self.passes.0.pool[slot].item;
+            // Release only small owning handles and stale graph edges. Large
+            // texture/geometry CPU staging remains in its own pool slot.
+            pass.color_textures.clear();
+            pass.depth_texture = None;
+            pass.main_draw_list_id = None;
+            pass.parent = crate::draw_pass::CxDrawPassParent::None;
+            pass.attached_by = None;
+            pass.paint_dirty = false;
+            pass.live_with_parent = false;
+            pass.repaint_requested = false;
+            pass.os.flipped_uniforms = None;
+        }
+
+        // Draw-list and pass cleanup above can release their final Texture Rc.
+        for slot in self
+            .textures
+            .0
+            .take_free_retirements(WEBGL_RESOURCE_RETIREMENT_SLOTS_PER_SAFE_POINT)
+        {
+            texture_ids.push(slot);
+        }
+
+        if array_buffer_ids.is_empty()
+            && index_buffer_ids.is_empty()
+            && vao_ids.is_empty()
+            && texture_ids.is_empty()
+            && framebuffer_ids.is_empty()
+        {
+            return;
+        }
+        self.os.from_wasm(FromWasmFreeWebGLResources {
+            array_buffer_ids,
+            index_buffer_ids,
+            vao_ids,
+            texture_ids,
+            framebuffer_ids,
+        });
+    }
+
     pub fn render_view(
         &mut self,
         draw_pass_id: DrawPassId,
@@ -127,7 +244,7 @@ impl Cx {
                                         texture_id: texture_id.0,
                                         width: *width,
                                         height: *height,
-                                        data: WasmPtrU32::new((*data).as_ref().unwrap()),
+                                        data: WasmPtrU32::new(match data { Some(data) => data, None => continue }),
                                     });
                                 }
                                 // VecMipBGRAu8_32: level 0 only for now (safe, no mip chain).
@@ -142,7 +259,7 @@ impl Cx {
                                         texture_id: texture_id.0,
                                         width: *width,
                                         height: *height,
-                                        data: WasmPtrU32::new((*data).as_ref().unwrap()),
+                                        data: WasmPtrU32::new(match data { Some(data) => data, None => continue }),
                                     });
                                 }
                                 TextureFormat::VecRu8 {
@@ -155,7 +272,7 @@ impl Cx {
                                         texture_id: texture_id.0,
                                         width: *width,
                                         height: *height,
-                                        data: WasmPtrU8::new((*data).as_ref().unwrap()),
+                                        data: WasmPtrU8::new(match data { Some(data) => data, None => continue }),
                                     });
                                 }
                                 TextureFormat::VecRGBAf32 {
@@ -168,7 +285,7 @@ impl Cx {
                                         texture_id: texture_id.0,
                                         width: *width,
                                         height: *height,
-                                        data: WasmPtrF32::new((*data).as_ref().unwrap()),
+                                        data: WasmPtrF32::new(match data { Some(data) => data, None => continue }),
                                     });
                                 }
                                 TextureFormat::VecCubeBGRAu8_32 {
@@ -181,7 +298,7 @@ impl Cx {
                                         texture_id: texture_id.0,
                                         width: *width,
                                         height: *height,
-                                        data: WasmPtrU32::new((*data).as_ref().unwrap()),
+                                        data: WasmPtrU32::new(match data { Some(data) => data, None => continue }),
                                     });
                                 }
                                 _ => continue,
@@ -196,7 +313,12 @@ impl Cx {
                     continue;
                 };
 
-                if self.geometries.skip_stale(geometry_id) {
+                // A freed-but-not-yet-reused slot still has the same pool
+                // generation. Web retirement may already have deleted its
+                // buffers, so retained draw ids must treat FREE as stale too.
+                if self.geometries.0.is_free(geometry_id.slot_index())
+                    || self.geometries.skip_stale(geometry_id)
+                {
                     continue;
                 }
                 let geometry = &mut self.geometries[geometry_id];
@@ -283,6 +405,9 @@ impl Cx {
                         inst_vb_id: None,
                         geom_vb_id: None,
                         geom_ib_id: None,
+                        inst_vb_generation: 0,
+                        geom_vb_generation: 0,
+                        geom_ib_generation: 0,
                     });
                     self.os.vaos += 1;
                 }
@@ -293,11 +418,17 @@ impl Cx {
                     || vao.geom_vb_id != geometry.os.vb_id
                     || vao.geom_ib_id != geometry.os.ib_id
                     || vao.shader_id != sh.os_shader_id
+                    || vao.inst_vb_generation != draw_item.os.inst_vb_generation
+                    || vao.geom_vb_generation != geometry.os.vb_generation
+                    || vao.geom_ib_generation != geometry.os.ib_generation
                 {
                     vao.shader_id = sh.os_shader_id.clone();
                     vao.inst_vb_id = draw_item.os.inst_vb_id;
                     vao.geom_vb_id = geometry.os.vb_id;
                     vao.geom_ib_id = geometry.os.ib_id;
+                    vao.inst_vb_generation = draw_item.os.inst_vb_generation;
+                    vao.geom_vb_generation = geometry.os.vb_generation;
+                    vao.geom_ib_generation = geometry.os.ib_generation;
 
                     self.os.from_wasm(FromWasmAllocVao {
                         vao_id: vao.vao_id,
@@ -480,6 +611,10 @@ impl Cx {
             crate::error!("Draw pass has no draw list!");
             return;
         };
+        if self.draw_lists.is_id_freed(draw_list_id) {
+            self.passes[draw_pass_id].paint_dirty = false;
+            return;
+        }
 
         self.webgl_compile_draw_list_shaders(draw_list_id);
 
@@ -521,6 +656,10 @@ impl Cx {
             crate::error!("Draw pass has no draw list!");
             return;
         };
+        if self.draw_lists.is_id_freed(draw_list_id) {
+            self.passes[draw_pass_id].paint_dirty = false;
+            return;
+        }
 
         self.webgl_compile_draw_list_shaders(draw_list_id);
 
@@ -827,12 +966,16 @@ pub struct CxOsDrawCallVao {
     pub inst_vb_id: Option<usize>,
     pub geom_vb_id: Option<usize>,
     pub geom_ib_id: Option<usize>,
+    pub inst_vb_generation: u64,
+    pub geom_vb_generation: u64,
+    pub geom_ib_generation: u64,
 }
 
 #[derive(Default, Clone)]
 pub struct CxOsDrawCall {
     pub vao: Option<CxOsDrawCallVao>,
     pub inst_vb_id: Option<usize>,
+    pub inst_vb_generation: u64,
     pub uniforms_recording_gen: Option<u64>,
     pub draw_call_uniforms_gen: Option<u64>,
     pub user_uniforms_gen: Option<u64>,
@@ -856,6 +999,8 @@ pub struct CxOsUniformBuffer {}
 pub struct CxOsGeometry {
     pub vb_id: Option<usize>,
     pub ib_id: Option<usize>,
+    pub vb_generation: u64,
+    pub ib_generation: u64,
 }
 
 impl CxOsDrawCall {}

@@ -208,6 +208,14 @@ pub struct TileEntry {
 }
 
 impl TileEntry {
+    /// Logical resident geometry including the outgoing generation retained
+    /// for a cross-fade. This deliberately overcounts a road-core reuse fade
+    /// rather than hiding its transient double ownership from the budget.
+    pub fn working_set_bytes(&self) -> usize {
+        self.bytes
+            .saturating_add(self.fade.as_ref().map_or(0, |fade| fade.bytes))
+    }
+
     /// The cross-fade is over: the outgoing generation leaves the draw, so
     /// every retained list is recorded again on its next frame.
     pub fn end_fade(&mut self) {
@@ -230,6 +238,7 @@ pub struct TileFade {
     /// core. They stay fully opaque and at full height while only the
     /// mode-dependent fill/icon overlay cross-fades.
     pub reuse_road_core: bool,
+    pub bytes: usize,
     pub fill_geometry: Vec<Geometry>,
     pub fill_misc_geometry: Option<Geometry>,
     pub face_geometry: Vec<Geometry>,
@@ -907,6 +916,79 @@ pub const SHADOW_DISC_INSTANCE_FLOATS: usize = 4;
 /// at the mid LOD ring), drawn once per record with the anchor added in the
 /// vertex shader.
 pub const TREE_INSTANCE_FLOATS: usize = 3;
+const WEB_TREE_EXPANDED_TRIANGLE_LIMIT: usize = 1_000_000;
+
+fn expanded_tree_triangle_count(
+    template_index_count: usize,
+    instance_float_count: usize,
+) -> Option<usize> {
+    if template_index_count % 3 != 0 || instance_float_count % TREE_INSTANCE_FLOATS != 0 {
+        return None;
+    }
+    (template_index_count / 3).checked_mul(instance_float_count / TREE_INSTANCE_FLOATS)
+}
+
+fn thin_tree_instances_evenly(instances: &mut Vec<f32>, keep: usize) {
+    if instances.len() % TREE_INSTANCE_FLOATS != 0 {
+        instances.clear();
+        return;
+    }
+    let instance_count = instances.len() / TREE_INSTANCE_FLOATS;
+    if keep >= instance_count {
+        return;
+    }
+    let Some(capacity) = keep.checked_mul(TREE_INSTANCE_FLOATS) else {
+        instances.clear();
+        return;
+    };
+    let mut thinned = Vec::with_capacity(capacity);
+    for output_index in 0..keep {
+        // Even sampling keeps the retained records spread across the tile's
+        // deterministic source order rather than clustering at its start.
+        let source_index = ((output_index as u128 * instance_count as u128) / keep as u128)
+            as usize;
+        let start = source_index * TREE_INSTANCE_FLOATS;
+        thinned.extend_from_slice(&instances[start..start + TREE_INSTANCE_FLOATS]);
+    }
+    *instances = thinned;
+}
+
+fn cap_expanded_tree_triangles_for_web(
+    is_web: bool,
+    tree_template_indices: &mut Vec<u32>,
+    tree_template_vertices: &mut Vec<f32>,
+    tree_cross_template_indices: &[u32],
+    tree_cross_template_vertices: &[f32],
+    tree_instances: &mut Vec<f32>,
+) {
+    if !is_web
+        || expanded_tree_triangle_count(tree_template_indices.len(), tree_instances.len())
+            .is_some_and(|count| count <= WEB_TREE_EXPANDED_TRIANGLE_LIMIT)
+    {
+        return;
+    }
+
+    // Keep every tree when the existing crossed-quad LOD is sufficient.
+    // Only pathological counts need deterministic whole-record thinning.
+    tree_template_indices.clear();
+    tree_template_indices.extend_from_slice(tree_cross_template_indices);
+    tree_template_vertices.clear();
+    tree_template_vertices.extend_from_slice(tree_cross_template_vertices);
+    if tree_template_indices.len() % 3 != 0
+        || tree_instances.len() % TREE_INSTANCE_FLOATS != 0
+    {
+        tree_instances.clear();
+        return;
+    }
+    let triangles_per_instance = tree_template_indices.len() / 3;
+    if triangles_per_instance == 0 {
+        return;
+    }
+    thin_tree_instances_evenly(
+        tree_instances,
+        WEB_TREE_EXPANDED_TRIANGLE_LIMIT / triangles_per_instance,
+    );
+}
 
 /// One building-wall edge. Positions use the map's 1/64-tile-unit fixed
 /// point convention and heights use unsigned centimetres (the source is
@@ -1152,6 +1234,68 @@ impl TypedStream {
             .sum()
     }
 
+    /// Allocator-live bytes held by this stream. Pending-tile pressure must
+    /// use capacities rather than lengths: builders deliberately reserve for
+    /// dense tiles, and `truncate` alone otherwise leaves the peak resident.
+    pub fn allocated_byte_size(&self) -> usize {
+        self.chunks.capacity() * std::mem::size_of::<TypedStreamChunk>()
+            + self
+                .chunks
+                .iter()
+                .map(|chunk| chunk.vertices.capacity() + chunk.indices.capacity() * 2)
+                .sum::<usize>()
+    }
+
+    /// Keep a deterministic prefix of complete triangles within `limit`.
+    /// Chunk-local indices make this cheap: retaining the vertex prefix up to
+    /// the largest referenced index preserves every kept triangle without a
+    /// remap or a second full-size allocation.
+    fn truncate_to_allocated_bytes(&mut self, stride: usize, limit: usize) {
+        if self.allocated_byte_size() <= limit {
+            return;
+        }
+        let mut left = limit.saturating_sub(std::mem::size_of::<TypedStreamChunk>());
+        let mut kept_chunks = 0usize;
+        for chunk in &mut self.chunks {
+            let mut kept_indices = 0usize;
+            let mut max_index = 0usize;
+            for triangle in chunk.indices.chunks_exact(3) {
+                let triangle_max = triangle.iter().copied().max().unwrap_or(0) as usize;
+                let next_max = max_index.max(triangle_max);
+                let next_indices = kept_indices + 3;
+                let bytes = (next_max + 1)
+                    .saturating_mul(stride)
+                    .saturating_add(next_indices.saturating_mul(2));
+                if bytes > left {
+                    break;
+                }
+                max_index = next_max;
+                kept_indices = next_indices;
+            }
+            if kept_indices == 0 {
+                break;
+            }
+            chunk.indices.truncate(kept_indices);
+            chunk.vertices.truncate((max_index + 1) * stride);
+            chunk.indices.shrink_to_fit();
+            chunk.vertices.shrink_to_fit();
+            left = left.saturating_sub(chunk.vertices.len() + chunk.indices.len() * 2);
+            kept_chunks += 1;
+            if left <= std::mem::size_of::<TypedStreamChunk>() {
+                break;
+            }
+            left -= std::mem::size_of::<TypedStreamChunk>();
+        }
+        self.chunks.truncate(kept_chunks);
+        self.chunks.shrink_to_fit();
+        self.source_vertex_count = self
+            .chunks
+            .iter()
+            .map(|chunk| chunk.vertices.len() / stride)
+            .sum();
+        self.duplicate_vertex_count = 0;
+    }
+
     pub fn unchunked_byte_size(&self, stride: usize) -> usize {
         self.source_vertex_count * stride
             + self.index_count()
@@ -1176,7 +1320,7 @@ impl TypedStream {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Default)]
 pub struct TileBuffers {
     pub pin_hits: Vec<PinHit>,
     pub fill: TypedStream,
@@ -1264,10 +1408,50 @@ pub struct TileBuffers {
     pub labels: Vec<TileLabel>,
     /// View-zoom bucket this tile's styling was built for.
     pub render_zoom: u32,
+    /// 0 for the full bake, 1 for optional-detail shedding, 2 for a hard
+    /// geometry cap. This is carried to the UI so pressure is observable and
+    /// can raise the bounded source/render LOD rather than reload forever.
+    pub memory_lod: u8,
     /// Compact per-stage build timing ("stage:ms stage:ms ..."), filled for
     /// builds over ~100ms — carried into the SLOW-tile log so a slow build
     /// is replayable headlessly without re-hitting it in-app.
     pub stage_summary: String,
+}
+
+fn truncate_indexed_f32(
+    indices: &mut Vec<u32>,
+    vertices: &mut Vec<f32>,
+    stride: usize,
+    limit: usize,
+) {
+    let allocated = (indices.capacity() + vertices.capacity()).saturating_mul(4);
+    if allocated <= limit {
+        return;
+    }
+    let mut kept_indices = 0usize;
+    let mut max_index = 0usize;
+    for triangle in indices.chunks_exact(3) {
+        let triangle_max = triangle.iter().copied().max().unwrap_or(0) as usize;
+        let next_max = max_index.max(triangle_max);
+        let next_indices = kept_indices + 3;
+        let bytes = (next_max + 1)
+            .saturating_mul(stride)
+            .saturating_add(next_indices)
+            .saturating_mul(4);
+        if bytes > limit {
+            break;
+        }
+        max_index = next_max;
+        kept_indices = next_indices;
+    }
+    indices.truncate(kept_indices);
+    vertices.truncate(if kept_indices == 0 {
+        0
+    } else {
+        (max_index + 1) * stride
+    });
+    indices.shrink_to_fit();
+    vertices.shrink_to_fit();
 }
 
 impl TileBuffers {
@@ -1364,6 +1548,236 @@ impl TileBuffers {
             + (self.stalk_instances.len() + self.stoplight_instances.len())
                 * MAP_PROP_INSTANCE_BYTES
             + self.wall_instances.len() * MAP_WALL_INSTANCE_BYTES
+    }
+
+    /// Allocator-live working set while a finished bake waits for upload.
+    /// Unlike `byte_size`, this includes spare capacity and label/pin-owned
+    /// strings, which are significant in an overzoomed city tile.
+    pub fn allocated_byte_size(&self) -> usize {
+        let vec_bytes = |len: usize, item: usize| len.saturating_mul(item);
+        let typed = self.fill.allocated_byte_size()
+            + self.face.allocated_byte_size()
+            + self.casing.allocated_byte_size()
+            + self.stroke.allocated_byte_size()
+            + self.fringe.allocated_byte_size()
+            + self.fill_3d.allocated_byte_size();
+        let u32s = self.fill_misc_indices.capacity()
+            + self.icon_indices.capacity()
+            + self.icon_high_indices.capacity()
+            + self.fill_3d_misc_indices.capacity()
+            + self.wall_indices.capacity()
+            + self.tree_indices.capacity()
+            + self.tree_cross_indices.capacity()
+            + self.tree_template_indices.capacity()
+            + self.tree_cross_template_indices.capacity()
+            + self.stalk_template_indices.capacity()
+            + self.stoplight_template_indices.capacity()
+            + self.road_icon_indices.capacity();
+        let f32s = self.fill_misc_vertices.capacity()
+            + self.icon_vertices.capacity()
+            + self.icon_high_vertices.capacity()
+            + self.shadow_disc_instances.capacity()
+            + self.fill_3d_misc_vertices.capacity()
+            + self.wall_vertices.capacity()
+            + self.tree_vertices.capacity()
+            + self.tree_cross_vertices.capacity()
+            + self.tree_template_vertices.capacity()
+            + self.tree_cross_template_vertices.capacity()
+            + self.tree_instances.capacity()
+            + self.stalk_template_vertices.capacity()
+            + self.stoplight_template_vertices.capacity()
+            + self.road_icon_vertices.capacity();
+        let icon_groups = (self.icon_instances.capacity() + self.icon_high_instances.capacity())
+            * std::mem::size_of::<IconInstances>()
+            + self
+                .icon_instances
+                .iter()
+                .chain(self.icon_high_instances.iter())
+                .map(|group| vec_bytes(group.data.capacity(), 4))
+                .sum::<usize>();
+        let labels = self.labels.capacity() * std::mem::size_of::<TileLabel>()
+            + self
+                .labels
+                .iter()
+                .map(|label| {
+                    label.text.capacity()
+                        + label.source_layer.capacity()
+                        + label.road_kind.capacity()
+                        + label.name_key.capacity()
+                        + label.path_points.capacity() * std::mem::size_of::<(f32, f32)>()
+                })
+                .sum::<usize>();
+        let pins = self.pin_hits.capacity() * std::mem::size_of::<PinHit>()
+            + self
+                .pin_hits
+                .iter()
+                .map(|pin| {
+                    pin.info.capacity() * std::mem::size_of::<(String, String)>()
+                        + pin
+                            .info
+                            .iter()
+                            .map(|(key, value)| key.capacity() + value.capacity())
+                            .sum::<usize>()
+                })
+                .sum::<usize>();
+        typed
+            .saturating_add(vec_bytes(u32s, 4))
+            .saturating_add(vec_bytes(f32s, 4))
+            .saturating_add(icon_groups)
+            .saturating_add(vec_bytes(
+                self.wall_instances.capacity(),
+                std::mem::size_of::<MapWallInstance>(),
+            ))
+            .saturating_add(vec_bytes(
+                self.stalk_instances.capacity() + self.stoplight_instances.capacity(),
+                std::mem::size_of::<MapPropInstance>(),
+            ))
+            .saturating_add(labels)
+            .saturating_add(pins)
+            .saturating_add(self.stage_summary.capacity())
+    }
+
+    /// Bound a finished tile before it crosses the worker-to-UI channel.
+    /// The first pass removes far/street decoration that is independently
+    /// gated at draw time. If that is insufficient, principal ground, road,
+    /// and 3D streams each retain a deterministic share of the budget. This
+    /// is deliberately a finite two-level fallback, not iterative rebaking.
+    pub fn degrade_to_memory_limit(&mut self, limit: usize) -> u8 {
+        if self.allocated_byte_size() <= limit {
+            return self.memory_lod;
+        }
+
+        self.memory_lod = self.memory_lod.max(1);
+        self.icon_high_indices.clear();
+        self.icon_high_vertices.clear();
+        self.icon_high_instances.clear();
+        self.fringe = TypedStream::default();
+        self.shadow_disc_instances.clear();
+        self.tree_indices.clear();
+        self.tree_vertices.clear();
+        self.tree_cross_indices.clear();
+        self.tree_cross_vertices.clear();
+        self.tree_template_indices.clear();
+        self.tree_template_vertices.clear();
+        self.tree_cross_template_indices.clear();
+        self.tree_cross_template_vertices.clear();
+        self.tree_instances.clear();
+        self.stalk_template_indices.clear();
+        self.stalk_template_vertices.clear();
+        self.stalk_instances.clear();
+        self.stoplight_template_indices.clear();
+        self.stoplight_template_vertices.clear();
+        self.stoplight_instances.clear();
+        self.shrink_memory_vectors();
+        if self.allocated_byte_size() <= limit {
+            return self.memory_lod;
+        }
+
+        self.memory_lod = 2;
+        // Labels and hit metadata are useful but not worth displacing the
+        // actual map under hard pressure; the next higher-detail rebake
+        // restores them after hysteresis releases the pressure level.
+        self.labels.clear();
+        self.pin_hits.clear();
+        self.stage_summary.clear();
+        self.icon_instances.clear();
+        self.icon_high_instances.clear();
+        self.road_icon_indices.clear();
+        self.road_icon_vertices.clear();
+        self.shrink_memory_vectors();
+
+        // Leave room for Vec/chunk headers and instance records. The shares
+        // sum to 94%; the remaining 6% absorbs those small owners.
+        let share = |percent: usize| limit.saturating_mul(percent) / 100;
+        self.fill
+            .truncate_to_allocated_bytes(FILL_TYPED_VERTEX_BYTES, share(22));
+        truncate_indexed_f32(
+            &mut self.fill_misc_indices,
+            &mut self.fill_misc_vertices,
+            VECTOR_PACKED_FLOATS_PER_VERTEX,
+            share(8),
+        );
+        self.face
+            .truncate_to_allocated_bytes(FACE_TYPED_VERTEX_BYTES, share(16));
+        self.casing
+            .truncate_to_allocated_bytes(ROAD_TYPED_VERTEX_BYTES, share(17));
+        self.stroke
+            .truncate_to_allocated_bytes(ROAD_TYPED_VERTEX_BYTES, share(13));
+        self.fill_3d
+            .truncate_to_allocated_bytes(ROOF_TYPED_VERTEX_BYTES, share(9));
+        truncate_indexed_f32(
+            &mut self.fill_3d_misc_indices,
+            &mut self.fill_3d_misc_vertices,
+            VECTOR_PACKED_FLOATS_PER_VERTEX,
+            share(2),
+        );
+        truncate_indexed_f32(
+            &mut self.wall_indices,
+            &mut self.wall_vertices,
+            VECTOR_PACKED_FLOATS_PER_VERTEX,
+            share(4),
+        );
+        truncate_indexed_f32(
+            &mut self.icon_indices,
+            &mut self.icon_vertices,
+            VECTOR_PACKED_FLOATS_PER_VERTEX,
+            share(2),
+        );
+        let wall_limit = share(1) / std::mem::size_of::<MapWallInstance>();
+        self.wall_instances.truncate(wall_limit);
+        self.shrink_memory_vectors();
+        self.memory_lod
+    }
+
+    fn shrink_memory_vectors(&mut self) {
+        macro_rules! shrink {
+            ($($field:ident),+ $(,)?) => {$(
+                self.$field.shrink_to_fit();
+            )+};
+        }
+        shrink!(
+            pin_hits,
+            fill_misc_indices,
+            fill_misc_vertices,
+            icon_indices,
+            icon_vertices,
+            icon_high_indices,
+            icon_high_vertices,
+            shadow_disc_instances,
+            icon_instances,
+            icon_high_instances,
+            fill_3d_misc_indices,
+            fill_3d_misc_vertices,
+            wall_indices,
+            wall_vertices,
+            wall_instances,
+            tree_indices,
+            tree_vertices,
+            tree_cross_indices,
+            tree_cross_vertices,
+            tree_template_indices,
+            tree_template_vertices,
+            tree_cross_template_indices,
+            tree_cross_template_vertices,
+            tree_instances,
+            stalk_template_indices,
+            stalk_template_vertices,
+            stalk_instances,
+            stoplight_template_indices,
+            stoplight_template_vertices,
+            stoplight_instances,
+            road_icon_indices,
+            road_icon_vertices,
+            labels,
+        );
+        for group in self
+            .icon_instances
+            .iter_mut()
+            .chain(self.icon_high_instances.iter_mut())
+        {
+            group.data.shrink_to_fit();
+        }
+        self.stage_summary.shrink_to_fit();
     }
 
     /// Instance floats across both icon bands.
@@ -6371,6 +6785,14 @@ fn build_tile_buffers_from_features_profiled(
             tree_template_indices = template_indices;
         }
     }
+    cap_expanded_tree_triangles_for_web(
+        cfg!(target_arch = "wasm32"),
+        &mut tree_template_indices,
+        &mut tree_template_vertices,
+        &tree_cross_template_indices,
+        &tree_cross_template_vertices,
+        &mut tree_instances,
+    );
 
     // Dynamic stalk heights: every flying marker clears the building under
     // it by ~8 m (a 100 m tower gets a 108 m pin), plus a small
@@ -7361,6 +7783,7 @@ fn build_tile_buffers_from_features_profiled(
             feature_count: 0,
             labels: Vec::new(),
             render_zoom,
+            memory_lod: 0,
             stage_summary: String::new(),
         };
     }
@@ -8432,6 +8855,7 @@ fn build_tile_buffers_from_features_profiled(
         feature_count,
         labels,
         render_zoom,
+        memory_lod: 0,
         stage_summary,
     }
 }
@@ -12688,6 +13112,104 @@ mod bridge_probe_tests {
     }
 
     #[test]
+    fn web_tree_triangle_cap_preserves_ordinary_instances_and_native_tiles() {
+        let mut near_indices = vec![0u32; 12 * 3];
+        let mut near_vertices = vec![1.0f32; 9];
+        let cross_indices = vec![0u32; 8 * 3];
+        let cross_vertices = vec![2.0f32; 6];
+        let mut instances = vec![3.0f32; 24 * TREE_INSTANCE_FLOATS];
+        let original_indices = near_indices.clone();
+        let original_vertices = near_vertices.clone();
+        let original_instances = instances.clone();
+
+        cap_expanded_tree_triangles_for_web(
+            true,
+            &mut near_indices,
+            &mut near_vertices,
+            &cross_indices,
+            &cross_vertices,
+            &mut instances,
+        );
+        assert_eq!(near_indices, original_indices);
+        assert_eq!(near_vertices, original_vertices);
+        assert_eq!(instances, original_instances);
+        assert_eq!(expanded_tree_triangle_count(near_indices.len(), instances.len()), Some(288));
+
+        near_indices = vec![0u32; 148 * 3];
+        near_vertices = vec![1.0f32; 9];
+        instances = vec![3.0f32; 7_000 * TREE_INSTANCE_FLOATS];
+        let native_indices = near_indices.clone();
+        let native_instances = instances.clone();
+        cap_expanded_tree_triangles_for_web(
+            false,
+            &mut near_indices,
+            &mut near_vertices,
+            &cross_indices,
+            &cross_vertices,
+            &mut instances,
+        );
+        assert_eq!(near_indices, native_indices);
+        assert_eq!(instances, native_instances);
+    }
+
+    #[test]
+    fn web_tree_triangle_cap_uses_crossed_lod_before_thinning() {
+        let mut near_indices = vec![0u32; 148 * 3];
+        let mut near_vertices = vec![1.0f32; 9];
+        let cross_indices = vec![0u32; 8 * 3];
+        let cross_vertices = vec![2.0f32; 6];
+        let mut instances = vec![3.0f32; 10_000 * TREE_INSTANCE_FLOATS];
+
+        cap_expanded_tree_triangles_for_web(
+            true,
+            &mut near_indices,
+            &mut near_vertices,
+            &cross_indices,
+            &cross_vertices,
+            &mut instances,
+        );
+        assert_eq!(near_indices, cross_indices);
+        assert_eq!(near_vertices, cross_vertices);
+        assert_eq!(instances.len(), 10_000 * TREE_INSTANCE_FLOATS);
+        assert_eq!(expanded_tree_triangle_count(near_indices.len(), instances.len()), Some(80_000));
+    }
+
+    #[test]
+    fn web_tree_triangle_cap_thins_complete_records_with_exact_accounting() {
+        let source_count = 130_003usize;
+        let mut near_indices = vec![0u32; 148 * 3];
+        let mut near_vertices = vec![1.0f32; 9];
+        let cross_indices = vec![0u32; 8 * 3];
+        let cross_vertices = vec![2.0f32; 6];
+        let mut instances = Vec::with_capacity(source_count * TREE_INSTANCE_FLOATS);
+        for index in 0..source_count {
+            instances.extend_from_slice(&[index as f32, 0.0, 1.0]);
+        }
+
+        cap_expanded_tree_triangles_for_web(
+            true,
+            &mut near_indices,
+            &mut near_vertices,
+            &cross_indices,
+            &cross_vertices,
+            &mut instances,
+        );
+        let kept = WEB_TREE_EXPANDED_TRIANGLE_LIMIT / 8;
+        assert_eq!(near_indices, cross_indices);
+        assert_eq!(instances.len(), kept * TREE_INSTANCE_FLOATS);
+        assert_eq!(instances.len() % TREE_INSTANCE_FLOATS, 0);
+        assert_eq!(
+            expanded_tree_triangle_count(near_indices.len(), instances.len()),
+            Some(WEB_TREE_EXPANDED_TRIANGLE_LIMIT),
+        );
+        assert_eq!(instances[0], 0.0);
+        let expected_last = (((kept - 1) as u128 * source_count as u128) / kept as u128) as f32;
+        assert_eq!(instances[(kept - 1) * TREE_INSTANCE_FLOATS], expected_last);
+        assert_eq!(expanded_tree_triangle_count(4, instances.len()), None);
+        assert_eq!(expanded_tree_triangle_count(3, instances.len() + 1), None);
+    }
+
+    #[test]
     fn mode_overlay_appends_cached_road_icons_with_rebased_indices() {
         let mut buffers = TileBuffers {
             pin_hits: Vec::new(),
@@ -12735,6 +13257,7 @@ mod bridge_probe_tests {
             feature_count: 0,
             labels: Vec::new(),
             render_zoom: 17,
+            memory_lod: 0,
         };
         let road_vertices = vec![2.0; VECTOR_FLOATS_PER_VERTEX * 2];
         buffers.append_cached_road_icons(&[0, 1], &road_vertices);
@@ -12745,6 +13268,60 @@ mod bridge_probe_tests {
         );
         assert_eq!(buffers.road_icon_indices, vec![0, 1]);
         assert_eq!(buffers.road_icon_vertices, road_vertices);
+    }
+
+    #[test]
+    fn dense_synthetic_tile_degrades_to_a_finite_allocated_limit() {
+        fn dense_stream(triangles: usize, stride: usize) -> TypedStream {
+            let vertex_count = triangles * 3;
+            TypedStream::from_u32(
+                (0..vertex_count as u32).collect(),
+                vec![0u8; vertex_count * stride],
+                stride,
+            )
+        }
+
+        let mut buffers = TileBuffers::default();
+        buffers.render_zoom = 16;
+        buffers.fill = dense_stream(3_000, FILL_TYPED_VERTEX_BYTES);
+        buffers.face = dense_stream(3_000, FACE_TYPED_VERTEX_BYTES);
+        buffers.casing = dense_stream(3_000, ROAD_TYPED_VERTEX_BYTES);
+        buffers.stroke = dense_stream(3_000, ROAD_TYPED_VERTEX_BYTES);
+        buffers.fringe = dense_stream(3_000, ROAD_TYPED_VERTEX_BYTES);
+        buffers.fill_3d = dense_stream(3_000, ROOF_TYPED_VERTEX_BYTES);
+        buffers.labels = (0..2_000)
+            .map(|index| TileLabel {
+                text: format!("dense label {index}"),
+                priority: 0,
+                source_layer: "synthetic".to_string(),
+                road_kind: "residential".to_string(),
+                color_class: 0,
+                path_points: vec![(0.0, 0.0); 8],
+                name_key: format!("dense label {index}"),
+                bbox: (0.0, 0.0, 1.0, 1.0),
+                lift_m: 0.0,
+            })
+            .collect();
+        let before = buffers.allocated_byte_size();
+        let limit = 192 * 1024;
+        let level = buffers.degrade_to_memory_limit(limit);
+
+        assert!(before > limit);
+        assert_eq!(level, 2);
+        assert!(buffers.allocated_byte_size() <= limit);
+        assert!(!buffers.fill.is_empty());
+        assert!(!buffers.face.is_empty());
+        assert!(!buffers.casing.is_empty());
+        assert!(!buffers.stroke.is_empty());
+        assert!(!buffers.fill_3d.is_empty());
+        assert!(buffers.fringe.is_empty());
+        assert!(buffers.labels.is_empty());
+
+        // Reapplying the same policy is stable: no unbounded degradation
+        // loop and no further loss on pan/zoom/mode churn.
+        let bounded = buffers.allocated_byte_size();
+        assert_eq!(buffers.degrade_to_memory_limit(limit), 2);
+        assert_eq!(buffers.allocated_byte_size(), bounded);
     }
 
     #[test]

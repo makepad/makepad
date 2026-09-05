@@ -110,12 +110,19 @@ fn backend_uploads_cpu_mip_chain() -> bool {
 /// zune's default cap; lets us reject decompression-bomb headers before
 /// allocating anything.
 const MAX_IMAGE_DIMENSION: usize = 16384;
-/// Hard upper bound on a decoded image or animation atlas in bytes (the RGBA
-/// size of a 16384x16384 image).
-const MAX_IMAGE_DECODED_BYTES: usize = 1024 * 1024 * 1024;
-/// Hard upper bound on total pixels in a decoded buffer or animation atlas
-/// (268M px = 1 GiB as RGBA u32).
-const MAX_IMAGE_PIXELS: usize = MAX_IMAGE_DECODED_BYTES / 4;
+/// Hard upper bound on a decoded image or animation atlas in bytes. Browser
+/// textures have a tighter admission limit; native retains the existing 1 GiB
+/// cap (the RGBA size of a 16384x16384 image).
+const WEB_MAX_IMAGE_DECODED_BYTES: usize = 64 * 1024 * 1024;
+const NATIVE_MAX_IMAGE_DECODED_BYTES: usize = 1024 * 1024 * 1024;
+const MAX_IMAGE_DECODED_BYTES: usize = if cfg!(target_arch = "wasm32") {
+    WEB_MAX_IMAGE_DECODED_BYTES
+} else {
+    NATIVE_MAX_IMAGE_DECODED_BYTES
+};
+const IMAGE_RGBA_BYTES_PER_PIXEL: usize = std::mem::size_of::<u32>();
+/// Hard upper bound on total pixels in a decoded buffer or animation atlas.
+const MAX_IMAGE_PIXELS: usize = MAX_IMAGE_DECODED_BYTES / IMAGE_RGBA_BYTES_PER_PIXEL;
 /// Hard upper bound on animation frames. Pixel caps alone do not account for
 /// per-frame Vec overhead, which matters for malicious tiny-frame animations.
 const MAX_IMAGE_FRAMES: usize = 4096;
@@ -131,28 +138,53 @@ fn png_decoder_options() -> DecoderOptions {
     decoder_options().png_set_strip_to_8bit(true)
 }
 
-/// Validates `width`/`height` against the caps and returns `width * height`,
-/// rejecting zero, oversized, or overflowing dimensions before any allocation.
-fn checked_pixel_count(width: usize, height: usize) -> Result<usize, ImageError> {
+fn checked_rgba_byte_len(pixel_count: usize, max_decoded_bytes: usize) -> Option<usize> {
+    pixel_count
+        .checked_mul(IMAGE_RGBA_BYTES_PER_PIXEL)
+        .filter(|&bytes| bytes <= max_decoded_bytes)
+}
+
+/// Validates `width`/`height` against the supplied decoded-byte policy and
+/// returns `width * height`, rejecting invalid dimensions before allocation.
+fn checked_pixel_count_with_limit(
+    width: usize,
+    height: usize,
+    max_decoded_bytes: usize,
+) -> Result<usize, ImageError> {
     if width == 0 || height == 0 || width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION {
         return Err(ImageError::DimensionsTooLarge { width, height });
     }
-    width
+    let pixels = width
         .checked_mul(height)
-        .filter(|&pixels| pixels <= MAX_IMAGE_PIXELS)
+        .ok_or(ImageError::DimensionsTooLarge { width, height })?;
+    checked_rgba_byte_len(pixels, max_decoded_bytes)
+        .map(|_| pixels)
         .ok_or(ImageError::DimensionsTooLarge { width, height })
+}
+
+fn checked_pixel_count(width: usize, height: usize) -> Result<usize, ImageError> {
+    checked_pixel_count_with_limit(width, height, MAX_IMAGE_DECODED_BYTES)
 }
 
 /// Computes an animation atlas's `(total_width, total_height)` for `frame_count`
 /// frames of `width`x`height`. Rejects zero-width frames (avoids divide-by-zero)
-/// and atlases exceeding [`MAX_IMAGE_PIXELS`] (avoids overflow / OOM from a
+/// and atlases exceeding the decoded-byte policy (avoids overflow / OOM from a
 /// malicious frame count).
 fn animation_atlas_layout(
     frame_count: usize,
     width: usize,
     height: usize,
 ) -> Result<(usize, usize), ImageError> {
-    checked_pixel_count(width, height)?;
+    animation_atlas_layout_with_limit(frame_count, width, height, MAX_IMAGE_DECODED_BYTES)
+}
+
+fn animation_atlas_layout_with_limit(
+    frame_count: usize,
+    width: usize,
+    height: usize,
+    max_decoded_bytes: usize,
+) -> Result<(usize, usize), ImageError> {
+    checked_pixel_count_with_limit(width, height, max_decoded_bytes)?;
     if frame_count == 0 || frame_count > MAX_IMAGE_FRAMES {
         return Err(ImageError::DimensionsTooLarge { width, height });
     }
@@ -167,7 +199,8 @@ fn animation_atlas_layout(
         .ok_or(ImageError::DimensionsTooLarge { width, height })?;
     if total_width
         .checked_mul(total_height)
-        .is_none_or(|pixels| pixels > MAX_IMAGE_PIXELS)
+        .and_then(|pixels| checked_rgba_byte_len(pixels, max_decoded_bytes))
+        .is_none()
     {
         return Err(ImageError::DimensionsTooLarge {
             width: total_width,
@@ -470,6 +503,7 @@ impl ImageBuffer {
         let frame_pixels = checked_pixel_count(width, height)?;
         let buf_size = decoder
             .output_buffer_size()
+            .filter(|&len| len <= MAX_IMAGE_DECODED_BYTES)
             .ok_or(ImageError::WebpDecode(WebpDecodeErrors::ImageTooLarge))?;
 
         if !decoder.is_animated() {
@@ -529,7 +563,7 @@ impl ImageBuffer {
         let max_frames = (MAX_IMAGE_PIXELS / frame_pixels).max(1).min(MAX_IMAGE_FRAMES);
         let mut frames = Vec::new();
         let mut frame_delays = Vec::new();
-        let mut canvas = vec![0u8; width * height * 4];
+        let mut canvas = vec![0u8; frame_pixels * IMAGE_RGBA_BYTES_PER_PIXEL];
 
         while let Some(frame) = decoder.read_next_frame().map_err(ImageError::GifDecode)? {
             if frames.len() >= max_frames {
@@ -1237,6 +1271,46 @@ mod tests {
     use super::*;
     use makepad_gif::{Encoder, Frame};
     use std::borrow::Cow;
+
+    #[test]
+    fn web_decoded_image_policy_boundaries() {
+        let boundary_pixels = 4096 * 4096;
+        assert_eq!(
+            checked_pixel_count_with_limit(4096, 4096, WEB_MAX_IMAGE_DECODED_BYTES).unwrap(),
+            boundary_pixels
+        );
+        assert!(checked_rgba_byte_len(
+            boundary_pixels + 1,
+            WEB_MAX_IMAGE_DECODED_BYTES
+        )
+        .is_none());
+        assert!(checked_rgba_byte_len(usize::MAX, WEB_MAX_IMAGE_DECODED_BYTES).is_none());
+        assert_eq!(
+            checked_pixel_count_with_limit(2048, 2560, WEB_MAX_IMAGE_DECODED_BYTES).unwrap(),
+            2048 * 2560
+        );
+
+        assert!(animation_atlas_layout_with_limit(
+            16,
+            1024,
+            1024,
+            WEB_MAX_IMAGE_DECODED_BYTES
+        )
+        .is_ok());
+        assert!(animation_atlas_layout_with_limit(
+            17,
+            1024,
+            1024,
+            WEB_MAX_IMAGE_DECODED_BYTES
+        )
+        .is_err());
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn native_decoded_image_policy_remains_one_gibibyte() {
+        assert_eq!(MAX_IMAGE_DECODED_BYTES, NATIVE_MAX_IMAGE_DECODED_BYTES);
+    }
 
     fn single_frame_gif() -> Vec<u8> {
         let palette = [0x00, 0x00, 0x00, 0xff, 0x00, 0x00];

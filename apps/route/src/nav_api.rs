@@ -20,7 +20,10 @@ const MAX_ALONG_RESULTS: usize = 30;
 const MAX_WEATHER_SAMPLES: usize = 64;
 const MAX_RADAR_FRAMES: usize = 64;
 const MAX_RADAR_DIMENSION: usize = 8_192;
-const MAX_RADAR_PIXELS: usize = 32 * 1024 * 1024;
+const MAX_RADAR_RESIDENT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_RADAR_ENCODED_BYTES: usize = 64 * 1024 * 1024;
+const RADAR_BYTES_PER_PIXEL: usize = std::mem::size_of::<u32>();
+const MAX_RADAR_PIXELS: usize = MAX_RADAR_RESIDENT_BYTES / RADAR_BYTES_PER_PIXEL;
 const MAX_WIND_DIMENSION: usize = 2_048;
 const MAX_WIND_CELLS: usize = 1024 * 1024;
 
@@ -78,7 +81,7 @@ pub struct WeatherNow {
     pub samples: Vec<WeatherSample>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RadarManifest {
     pub stamp: String,
     pub bbox: (f64, f64, f64, f64),
@@ -764,24 +767,37 @@ fn parse_weather(json: &str) -> Result<WeatherNow, String> {
 }
 
 fn parse_radar_manifest(json: &str) -> Result<RadarManifest, String> {
-    let wire = RadarManifestWire::deserialize_json(json).map_err(json_error)?;
+    let mut wire = RadarManifestWire::deserialize_json(json).map_err(json_error)?;
     let bbox = (wire.bbox[0], wire.bbox[1], wire.bbox[2], wire.bbox[3]);
     if wire.stamp.is_empty()
         || wire.stamp.len() > 64
         || !valid_bbox(bbox)
         || wire.minutes.len() > MAX_RADAR_FRAMES
         || wire.minutes.iter().any(|minute| !(0..=1440).contains(minute))
+        || wire.minutes.windows(2).any(|pair| pair[0] >= pair[1])
         || !valid_radar_size(wire.display.width, wire.display.height)
         || !valid_radar_size(wire.hires_now.width, wire.hires_now.height)
     {
-        return Err("radar manifest contains invalid bounds".to_string());
+        return Err("radar manifest contains invalid or oversized data".to_string());
+    }
+    let display = (wire.display.width, wire.display.height);
+    let hires_now = (wire.hires_now.width, wire.hires_now.height);
+    let hires_size = wire.minutes.contains(&0).then_some(hires_now);
+    let Some(frame_capacity) = radar_manifest_frame_capacity(display, hires_size) else {
+        return Err("radar manifest contains invalid or oversized data".to_string());
+    };
+    if wire.minutes.len() > frame_capacity {
+        let Some(minutes) = uniformly_select_radar_minutes(&wire.minutes, frame_capacity) else {
+            return Err("radar manifest contains invalid or oversized data".to_string());
+        };
+        wire.minutes = minutes;
     }
     Ok(RadarManifest {
         stamp: wire.stamp,
         bbox,
         minutes: wire.minutes,
-        display: (wire.display.width, wire.display.height),
-        hires_now: (wire.hires_now.width, wire.hires_now.height),
+        display,
+        hires_now,
     })
 }
 
@@ -890,6 +906,71 @@ fn valid_radar_size(width: usize, height: usize) -> bool {
         && width
             .checked_mul(height)
             .is_some_and(|pixels| pixels <= MAX_RADAR_PIXELS)
+}
+
+fn radar_manifest_resident_bytes(
+    frame_count: usize,
+    display: (usize, usize),
+    hires_now: Option<(usize, usize)>,
+) -> Option<usize> {
+    let frame_bytes = display
+        .0
+        .checked_mul(display.1)?
+        .checked_mul(RADAR_BYTES_PER_PIXEL)?;
+    let display_bytes = frame_count.checked_mul(frame_bytes)?;
+    let hires_bytes = match hires_now {
+        Some((width, height)) => width
+            .checked_mul(height)?
+            .checked_mul(RADAR_BYTES_PER_PIXEL)?,
+        None => 0,
+    };
+    display_bytes.checked_add(hires_bytes)
+}
+
+fn radar_manifest_frame_capacity(
+    display: (usize, usize),
+    hires_now: Option<(usize, usize)>,
+) -> Option<usize> {
+    let frame_bytes = radar_manifest_resident_bytes(1, display, None)?;
+    let hires_bytes = radar_manifest_resident_bytes(0, display, hires_now)?;
+    let available = MAX_RADAR_RESIDENT_BYTES.checked_sub(hires_bytes)?;
+    let capacity = (available / frame_bytes).min(MAX_RADAR_FRAMES);
+    (capacity > 0).then_some(capacity)
+}
+
+fn uniformly_select_radar_minutes(minutes: &[i64], frame_capacity: usize) -> Option<Vec<i64>> {
+    if minutes.len() <= frame_capacity {
+        return Some(minutes.to_vec());
+    }
+    if frame_capacity < 2 {
+        return None;
+    }
+    let last = minutes.len() - 1;
+    Some(
+        (0..frame_capacity)
+            .map(|slot| minutes[slot * last / (frame_capacity - 1)])
+            .collect(),
+    )
+}
+
+/// Cheap admission check used before invoking the PNG decoder. The PNG
+/// signature and first IHDR chunk are fixed-width, so this reads no payload
+/// chunks and allocates nothing.
+pub(crate) fn radar_png_header_matches(png: &[u8], expected: (usize, usize)) -> bool {
+    if !radar_png_encoded_size_admitted(png.len())
+        || &png[..8] != b"\x89PNG\r\n\x1a\n"
+        || u32::from_be_bytes([png[8], png[9], png[10], png[11]]) != 13
+        || &png[12..16] != b"IHDR"
+    {
+        return false;
+    }
+    let width = u32::from_be_bytes([png[16], png[17], png[18], png[19]]) as usize;
+    let height = u32::from_be_bytes([png[20], png[21], png[22], png[23]]) as usize;
+    (width, height) == expected && valid_radar_size(width, height)
+}
+
+fn radar_png_encoded_size_admitted(byte_len: usize) -> bool {
+    (33..=MAX_RADAR_ENCODED_BYTES).contains(&byte_len)
 }
 
 fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
@@ -1096,9 +1177,116 @@ mod tests {
         assert_eq!(weather.samples[1].class, "light");
         let radar = parse_radar_manifest(r#"{"stamp":"202609021230","bbox":[0.0,48.89,10.86,55.98],"minutes":[0,5,10,30,60,120],"display":{"width":1024,"height":1280},"hires_now":{"width":2048,"height":2560}}"#).unwrap();
         assert_eq!(radar.display, (1024, 1280));
+        assert_eq!(radar.minutes, [0, 5, 10, 30, 60, 120]);
         let wind = parse_wind(r#"{"stamp_unix":1788350400,"bbox":[2.0,48.0,9.0,56.0],"nx":2,"ny":1,"u":[-2.15,-2.05],"v":[0.01,0.03]}"#).unwrap();
         assert_eq!(wind.nx, 2);
         assert_eq!(wind.u.len(), 2);
+    }
+
+    #[test]
+    fn radar_manifest_resident_budget_is_checked_at_its_boundary() {
+        let manifest = |hires_width| {
+            format!(
+                r#"{{"stamp":"x","bbox":[0.0,48.0,10.0,56.0],"minutes":[0],"display":{{"width":8191,"height":2048}},"hires_now":{{"width":{hires_width},"height":1}}}}"#,
+            )
+        };
+
+        assert_eq!(
+            radar_manifest_resident_bytes(1, (8191, 2048), Some((2047, 1))),
+            Some(MAX_RADAR_RESIDENT_BYTES - RADAR_BYTES_PER_PIXEL),
+        );
+        assert!(parse_radar_manifest(&manifest(2047)).is_ok());
+        assert_eq!(
+            radar_manifest_resident_bytes(1, (8191, 2048), Some((2048, 1))),
+            Some(MAX_RADAR_RESIDENT_BYTES),
+        );
+        assert!(parse_radar_manifest(&manifest(2048)).is_ok());
+        assert_eq!(
+            radar_manifest_resident_bytes(1, (8191, 2048), Some((2049, 1))),
+            Some(MAX_RADAR_RESIDENT_BYTES + RADAR_BYTES_PER_PIXEL),
+        );
+        assert!(parse_radar_manifest(&manifest(2049)).is_err());
+    }
+
+    #[test]
+    fn live_radar_manifest_is_uniformly_normalized_before_fetching() {
+        let minutes = (0..=120)
+            .step_by(5)
+            .map(|minute| minute.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let radar = parse_radar_manifest(&format!(
+            r#"{{"stamp":"202609050000","minutes":[{minutes}],"display":{{"width":1024,"height":1280}},"hires_now":{{"width":2048,"height":2560}},"bbox":[0.0,48.89,10.86,55.98]}}"#,
+        ))
+        .unwrap();
+
+        assert_eq!(radar.minutes, [0, 15, 30, 50, 65, 85, 100, 120]);
+        assert_eq!(radar.minutes.first(), Some(&0));
+        assert_eq!(radar.minutes.last(), Some(&120));
+        assert!(radar.minutes.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(
+            radar_manifest_resident_bytes(
+                radar.minutes.len(),
+                radar.display,
+                Some(radar.hires_now),
+            ),
+            Some(60 * 1024 * 1024),
+        );
+    }
+
+    #[test]
+    fn radar_manifest_rejects_sequences_that_cannot_retain_a_frame() {
+        let minutes = (0..MAX_RADAR_FRAMES)
+            .map(|minute| minute.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(parse_radar_manifest(&format!(
+            r#"{{"stamp":"x","bbox":[0.0,48.0,10.0,56.0],"minutes":[{minutes}],"display":{{"width":8192,"height":8192}},"hires_now":{{"width":1,"height":1}}}}"#,
+        ))
+        .is_err());
+        assert!(parse_radar_manifest(
+            r#"{"stamp":"x","bbox":[0.0,48.0,10.0,56.0],"minutes":[0],"display":{"width":8191,"height":2048},"hires_now":{"width":2049,"height":1}}"#,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn radar_png_header_admission_checks_shape_and_encoded_bound() {
+        fn header(width: u32, height: u32) -> [u8; 33] {
+            let mut png = [0; 33];
+            png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+            png[8..12].copy_from_slice(&13u32.to_be_bytes());
+            png[12..16].copy_from_slice(b"IHDR");
+            png[16..20].copy_from_slice(&width.to_be_bytes());
+            png[20..24].copy_from_slice(&height.to_be_bytes());
+            png
+        }
+
+        let valid = header(1024, 1280);
+        assert!(radar_png_header_matches(&valid, (1024, 1280)));
+        assert!(!radar_png_header_matches(&valid, (2048, 2560)));
+        let mut malformed = valid;
+        malformed[11] = 12;
+        assert!(!radar_png_header_matches(&malformed, (1024, 1280)));
+        malformed = valid;
+        malformed[12..16].copy_from_slice(b"IDAT");
+        assert!(!radar_png_header_matches(&malformed, (1024, 1280)));
+        assert!(!radar_png_header_matches(&header(8192, 8192), (8192, 8192)));
+        assert!(radar_png_encoded_size_admitted(MAX_RADAR_ENCODED_BYTES));
+        assert!(!radar_png_encoded_size_admitted(MAX_RADAR_ENCODED_BYTES + 1));
+    }
+
+    #[test]
+    fn radar_manifest_rejects_overflowing_payload_arithmetic() {
+        assert_eq!(
+            radar_manifest_resident_bytes(usize::MAX, (usize::MAX, 2), Some((1, 1))),
+            None,
+        );
+        assert!(parse_radar_manifest(&format!(
+            r#"{{"stamp":"x","bbox":[0.0,48.0,10.0,56.0],"minutes":[5],"display":{{"width":{},"height":2}},"hires_now":{{"width":1,"height":1}}}}"#,
+            usize::MAX,
+        ))
+        .is_err());
     }
 
     #[test]

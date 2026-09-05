@@ -674,10 +674,118 @@ fn midpoint_face_record(a: &[u8], b: &[u8]) -> [u8; FACE_TYPED_VERTEX_BYTES] {
 /// space-warp mode, whose curved fold any long flat chord would slice
 /// through; the triangulator itself is untouched — this runs on its output.
 pub fn subdivide_packed_mesh(indices: &mut Vec<u32>, vertices: &mut Vec<f32>, max_edge: f32) {
+    let mut budget = SubdivisionBudget::unlimited();
     subdivide_packed_mesh_with::<VECTOR_PACKED_FLOATS_PER_VERTEX>(
         indices,
         vertices,
         max_edge,
+        &mut budget,
+        midpoint_packed_record,
+    );
+}
+
+/// A shared, consumable subdivision allowance. Passes are charged using a
+/// conservative worst case before any pass-sized allocation is attempted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SubdivisionBudget {
+    remaining_bytes: usize,
+    remaining_work: usize,
+    unlimited: bool,
+}
+
+impl SubdivisionBudget {
+    pub fn new(max_bytes: usize, max_work: usize) -> Self {
+        Self {
+            remaining_bytes: max_bytes,
+            remaining_work: max_work,
+            unlimited: false,
+        }
+    }
+
+    pub fn unlimited() -> Self {
+        Self {
+            remaining_bytes: usize::MAX,
+            remaining_work: usize::MAX,
+            unlimited: true,
+        }
+    }
+
+    pub fn remaining_bytes(&self) -> usize {
+        self.remaining_bytes
+    }
+
+    pub fn remaining_work(&self) -> usize {
+        self.remaining_work
+    }
+
+    fn can_charge(&self, bytes: usize, work: usize) -> bool {
+        self.unlimited || (bytes <= self.remaining_bytes && work <= self.remaining_work)
+    }
+
+    fn charge(&mut self, bytes: usize, work: usize) {
+        if !self.unlimited {
+            self.remaining_bytes -= bytes;
+            self.remaining_work -= work;
+        }
+    }
+}
+
+const SUBDIVISION_HASH_BYTES_PER_EDGE: usize = 32;
+
+struct SubdivisionPassEstimate {
+    max_indices: usize,
+    max_midpoints: usize,
+    bytes: usize,
+    work: usize,
+}
+
+/// Count-only worst case: four output triangles and three distinct midpoint
+/// records per input triangle. `bytes` models both sides of a realloc plus
+/// old/new index storage and deliberately generous midpoint-map overhead.
+fn subdivision_pass_estimate(
+    index_count: usize,
+    vertex_count: usize,
+    vertex_stride_bytes: usize,
+) -> Option<SubdivisionPassEstimate> {
+    let triangles = index_count / 3;
+    let max_indices = triangles.checked_mul(12)?;
+    let max_midpoints = triangles.checked_mul(3)?;
+    let max_vertices = vertex_count.checked_add(max_midpoints)?;
+    if max_vertices > u32::MAX as usize {
+        return None;
+    }
+    let old_indices = index_count.checked_mul(std::mem::size_of::<u32>())?;
+    let new_indices = max_indices.checked_mul(std::mem::size_of::<u32>())?;
+    let old_vertices = vertex_count.checked_mul(vertex_stride_bytes)?;
+    let new_vertices = max_vertices.checked_mul(vertex_stride_bytes)?;
+    let midpoint_hash = max_midpoints.checked_mul(SUBDIVISION_HASH_BYTES_PER_EDGE)?;
+    let bytes = old_indices
+        .checked_add(new_indices)?
+        .checked_add(old_vertices)?
+        .checked_add(new_vertices)?
+        .checked_add(midpoint_hash)?;
+    let work = index_count
+        .checked_add(max_indices)?
+        .checked_add(max_midpoints)?;
+    Some(SubdivisionPassEstimate {
+        max_indices,
+        max_midpoints,
+        bytes,
+        work,
+    })
+}
+
+pub fn subdivide_packed_mesh_budgeted(
+    indices: &mut Vec<u32>,
+    vertices: &mut Vec<f32>,
+    max_edge: f32,
+    budget: &mut SubdivisionBudget,
+) {
+    subdivide_packed_mesh_with::<VECTOR_PACKED_FLOATS_PER_VERTEX>(
+        indices,
+        vertices,
+        max_edge,
+        budget,
         midpoint_packed_record,
     );
 }
@@ -689,10 +797,28 @@ pub fn subdivide_fill_packed_mesh(
     vertices: &mut Vec<u8>,
     max_edge: f32,
 ) {
+    let mut budget = SubdivisionBudget::unlimited();
     subdivide_typed_mesh_with::<FILL_TYPED_VERTEX_BYTES>(
         indices,
         vertices,
         max_edge,
+        &mut budget,
+        |record| unpack_typed_position(decode_fill_vertex(record).pos),
+        midpoint_fill_typed_record,
+    );
+}
+
+pub fn subdivide_fill_packed_mesh_budgeted(
+    indices: &mut Vec<u32>,
+    vertices: &mut Vec<u8>,
+    max_edge: f32,
+    budget: &mut SubdivisionBudget,
+) {
+    subdivide_typed_mesh_with::<FILL_TYPED_VERTEX_BYTES>(
+        indices,
+        vertices,
+        max_edge,
+        budget,
         |record| unpack_typed_position(decode_fill_vertex(record).pos),
         midpoint_fill_typed_record,
     );
@@ -702,16 +828,55 @@ fn subdivide_packed_mesh_with<const S: usize>(
     indices: &mut Vec<u32>,
     vertices: &mut Vec<f32>,
     max_edge: f32,
+    budget: &mut SubdivisionBudget,
     midpoint_record: impl Fn(&[f32], &[f32]) -> [f32; S] + Copy,
 ) {
     use std::collections::HashMap;
-    if indices.is_empty() || vertices.len() < S || max_edge <= 0.0 {
+    if S < 2
+        || indices.is_empty()
+        || indices.len() % 3 != 0
+        || vertices.len() < S
+        || vertices.len() % S != 0
+        || !max_edge.is_finite()
+        || max_edge <= 0.0
+    {
+        return;
+    }
+    let vertex_count = vertices.len() / S;
+    if !indices.iter().all(|&index| (index as usize) < vertex_count) {
         return;
     }
     let max_edge_sq = max_edge * max_edge;
     for _pass in 0..12 {
+        let Some(estimate) = subdivision_pass_estimate(
+            indices.len(),
+            vertices.len() / S,
+            S.checked_mul(std::mem::size_of::<f32>()).unwrap_or(usize::MAX),
+        ) else {
+            break;
+        };
+        if !budget.can_charge(estimate.bytes, estimate.work) {
+            break;
+        }
+        let mut out: Vec<u32> = if budget.unlimited {
+            Vec::with_capacity(indices.len())
+        } else {
+            let mut out = Vec::new();
+            if out.try_reserve_exact(estimate.max_indices).is_err() {
+                break;
+            }
+            out
+        };
         let mut midpoints: HashMap<(u32, u32), u32> = HashMap::new();
-        let mut out: Vec<u32> = Vec::with_capacity(indices.len());
+        if !budget.unlimited
+            && (midpoints.try_reserve(estimate.max_midpoints).is_err()
+                || vertices
+                    .try_reserve_exact(estimate.max_midpoints.saturating_mul(S))
+                    .is_err())
+        {
+            break;
+        }
+        budget.charge(estimate.bytes, estimate.work);
         let mut split_any = false;
         let need_split = |vertices: &[f32], i: u32, j: u32| -> bool {
             let (vi, vj) = (i as usize * S, j as usize * S);
@@ -794,17 +959,54 @@ fn subdivide_typed_mesh_with<const S: usize>(
     indices: &mut Vec<u32>,
     vertices: &mut Vec<u8>,
     max_edge: f32,
+    budget: &mut SubdivisionBudget,
     position: impl Fn(&[u8]) -> (f32, f32) + Copy,
     midpoint_record: impl Fn(&[u8], &[u8]) -> [u8; S] + Copy,
 ) {
     use std::collections::HashMap;
-    if indices.is_empty() || vertices.len() < S || max_edge <= 0.0 {
+    if S < 1
+        || indices.is_empty()
+        || indices.len() % 3 != 0
+        || vertices.len() < S
+        || vertices.len() % S != 0
+        || !max_edge.is_finite()
+        || max_edge <= 0.0
+    {
+        return;
+    }
+    let vertex_count = vertices.len() / S;
+    if !indices.iter().all(|&index| (index as usize) < vertex_count) {
         return;
     }
     let max_edge_sq = max_edge * max_edge;
     for _pass in 0..12 {
+        let Some(estimate) =
+            subdivision_pass_estimate(indices.len(), vertices.len() / S, S)
+        else {
+            break;
+        };
+        if !budget.can_charge(estimate.bytes, estimate.work) {
+            break;
+        }
+        let mut out: Vec<u32> = if budget.unlimited {
+            Vec::with_capacity(indices.len())
+        } else {
+            let mut out = Vec::new();
+            if out.try_reserve_exact(estimate.max_indices).is_err() {
+                break;
+            }
+            out
+        };
         let mut midpoints: HashMap<(u32, u32), u32> = HashMap::new();
-        let mut out: Vec<u32> = Vec::with_capacity(indices.len());
+        if !budget.unlimited
+            && (midpoints.try_reserve(estimate.max_midpoints).is_err()
+                || vertices
+                    .try_reserve_exact(estimate.max_midpoints.saturating_mul(S))
+                    .is_err())
+        {
+            break;
+        }
+        budget.charge(estimate.bytes, estimate.work);
         let mut split_any = false;
         let need_split = |vertices: &[u8], i: u32, j: u32| -> bool {
             let (vi, vj) = (i as usize * S, j as usize * S);
@@ -875,10 +1077,28 @@ fn subdivide_typed_mesh_with<const S: usize>(
 /// Space-warp refinement for the typed road layout. Subdivision happens
 /// after packing; every record is decoded, interpolated and encoded again.
 pub fn subdivide_road_mesh(indices: &mut Vec<u32>, vertices: &mut Vec<u8>, max_edge: f32) {
+    let mut budget = SubdivisionBudget::unlimited();
     subdivide_typed_mesh_with::<ROAD_TYPED_VERTEX_BYTES>(
         indices,
         vertices,
         max_edge,
+        &mut budget,
+        |record| unpack_typed_position(decode_road_vertex(record).pos),
+        midpoint_road_record,
+    );
+}
+
+pub fn subdivide_road_mesh_budgeted(
+    indices: &mut Vec<u32>,
+    vertices: &mut Vec<u8>,
+    max_edge: f32,
+    budget: &mut SubdivisionBudget,
+) {
+    subdivide_typed_mesh_with::<ROAD_TYPED_VERTEX_BYTES>(
+        indices,
+        vertices,
+        max_edge,
+        budget,
         |record| unpack_typed_position(decode_road_vertex(record).pos),
         midpoint_road_record,
     );
@@ -887,10 +1107,29 @@ pub fn subdivide_road_mesh(indices: &mut Vec<u32>, vertices: &mut Vec<u8>, max_e
 /// Space-warp refinement for the typed road-union face layout; the same
 /// split rule and midpoint arithmetic as `subdivide_road_mesh`.
 pub fn subdivide_face_typed_mesh(indices: &mut Vec<u32>, vertices: &mut Vec<u8>, max_edge: f32) {
+    let mut budget = SubdivisionBudget::unlimited();
     subdivide_typed_mesh_with::<FACE_TYPED_VERTEX_BYTES>(
         indices,
         vertices,
         max_edge,
+        &mut budget,
+        |record| unpack_typed_position(decode_face_vertex(record).pos),
+        midpoint_face_record,
+    );
+}
+
+
+pub fn subdivide_face_typed_mesh_budgeted(
+    indices: &mut Vec<u32>,
+    vertices: &mut Vec<u8>,
+    max_edge: f32,
+    budget: &mut SubdivisionBudget,
+) {
+    subdivide_typed_mesh_with::<FACE_TYPED_VERTEX_BYTES>(
+        indices,
+        vertices,
+        max_edge,
+        budget,
         |record| unpack_typed_position(decode_face_vertex(record).pos),
         midpoint_face_record,
     );
@@ -1183,6 +1422,137 @@ mod road_pack_tests {
             .expect("long edge midpoint");
         assert!((midpoint.color.to_f32().0 - 0.5).abs() <= 0.5 / 255.0 + f32::EPSILON);
         assert!((midpoint.params.to_f32().1 - 0.5).abs() < 0.001);
+    }
+
+    fn packed_test_mesh(points: &[(f32, f32)]) -> Vec<f32> {
+        points
+            .iter()
+            .flat_map(|&(x, y)| {
+                let mut record = [0.0; VECTOR_PACKED_FLOATS_PER_VERTEX];
+                record[0] = x;
+                record[1] = y;
+                record
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tiny_budget_refuses_huge_packed_refinement_without_mutation() {
+        let mut indices = vec![0, 1, 2];
+        let mut vertices = packed_test_mesh(&[(0.0, 0.0), (1.0e30, 0.0), (0.0, 1.0e30)]);
+        let original_indices = indices.clone();
+        let original_vertices = vertices.clone();
+        let mut budget = SubdivisionBudget::new(1, 1);
+        subdivide_packed_mesh_budgeted(
+            &mut indices,
+            &mut vertices,
+            f32::MIN_POSITIVE,
+            &mut budget,
+        );
+        assert_eq!(indices, original_indices);
+        assert_eq!(vertices, original_vertices);
+        assert!(indices
+            .iter()
+            .all(|&index| (index as usize) < vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX));
+    }
+
+    #[test]
+    fn budgeted_normal_meshes_equal_unlimited_packed_and_typed_output() {
+        let source_indices = vec![0, 1, 2];
+        let source_packed = packed_test_mesh(&[(0.0, 0.0), (16.0, 0.0), (0.0, 16.0)]);
+        let (mut expected_indices, mut expected_packed) =
+            (source_indices.clone(), source_packed.clone());
+        subdivide_packed_mesh(&mut expected_indices, &mut expected_packed, 8.0);
+        let (mut actual_indices, mut actual_packed) = (source_indices.clone(), source_packed);
+        let mut budget = SubdivisionBudget::new(16 * 1024 * 1024, 16 * 1024 * 1024);
+        subdivide_packed_mesh_budgeted(
+            &mut actual_indices,
+            &mut actual_packed,
+            8.0,
+            &mut budget,
+        );
+        assert_eq!((actual_indices, actual_packed), (expected_indices, expected_packed));
+
+        let mut logical = Vec::new();
+        for (x, y) in [(0.0, 0.0), (16.0, 0.0), (0.0, 16.0)] {
+            let mut record = [0.0; VECTOR_FLOATS_PER_VERTEX];
+            record[0] = x;
+            record[1] = y;
+            record[8] = 1e6;
+            logical.extend_from_slice(&record);
+        }
+        let source_typed = pack_fill_vertices(&logical);
+        let (mut expected_indices, mut expected_typed) =
+            (source_indices.clone(), source_typed.clone());
+        subdivide_fill_packed_mesh(&mut expected_indices, &mut expected_typed, 8.0);
+        let (mut actual_indices, mut actual_typed) = (source_indices, source_typed);
+        let mut budget = SubdivisionBudget::new(16 * 1024 * 1024, 16 * 1024 * 1024);
+        subdivide_fill_packed_mesh_budgeted(
+            &mut actual_indices,
+            &mut actual_typed,
+            8.0,
+            &mut budget,
+        );
+        assert_eq!((actual_indices, actual_typed), (expected_indices, expected_typed));
+    }
+
+    #[test]
+    fn a_budget_boundary_keeps_shared_edges_on_one_whole_pass() {
+        let mut indices = vec![0, 1, 2, 0, 2, 3];
+        let mut vertices =
+            packed_test_mesh(&[(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0)]);
+        let estimate = subdivision_pass_estimate(
+            indices.len(),
+            vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX,
+            VECTOR_PACKED_FLOATS_PER_VERTEX * std::mem::size_of::<f32>(),
+        )
+        .unwrap();
+        let mut budget = SubdivisionBudget::new(estimate.bytes, estimate.work);
+        subdivide_packed_mesh_budgeted(&mut indices, &mut vertices, 0.1, &mut budget);
+
+        assert_eq!(indices.len(), 24);
+        assert_eq!(vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX, 9);
+        assert_eq!(
+            vertices
+                .chunks_exact(VECTOR_PACKED_FLOATS_PER_VERTEX)
+                .filter(|record| record[0] == 1.0 && record[1] == 1.0)
+                .count(),
+            1
+        );
+        assert!(indices
+            .iter()
+            .all(|&index| (index as usize) < vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX));
+        assert_eq!(budget.remaining_bytes(), 0);
+        assert_eq!(budget.remaining_work(), 0);
+    }
+
+    #[test]
+    fn invalid_thresholds_and_malformed_indices_are_noops() {
+        let source_vertices = packed_test_mesh(&[(0.0, 0.0), (2.0, 0.0), (0.0, 2.0)]);
+        for threshold in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0, -1.0] {
+            let mut indices = vec![0, 1, 2];
+            let mut vertices = source_vertices.clone();
+            subdivide_packed_mesh(&mut indices, &mut vertices, threshold);
+            assert_eq!(indices, [0, 1, 2]);
+            assert_eq!(vertices, source_vertices);
+        }
+
+        let mut indices = vec![0, 1, 9];
+        let mut vertices = source_vertices.clone();
+        subdivide_packed_mesh(&mut indices, &mut vertices, 0.5);
+        assert_eq!(indices, [0, 1, 9]);
+        assert_eq!(vertices, source_vertices);
+
+        let mut logical = vec![0.0; VECTOR_FLOATS_PER_VERTEX * 3];
+        for record in logical.chunks_exact_mut(VECTOR_FLOATS_PER_VERTEX) {
+            record[8] = 1e6;
+        }
+        let source_typed = pack_fill_vertices(&logical);
+        let mut typed_indices = vec![0, 1, u32::MAX];
+        let mut typed_vertices = source_typed.clone();
+        subdivide_fill_packed_mesh(&mut typed_indices, &mut typed_vertices, 0.5);
+        assert_eq!(typed_indices, [0, 1, u32::MAX]);
+        assert_eq!(typed_vertices, source_typed);
     }
 
     #[test]
