@@ -4316,6 +4316,48 @@ mod tests {
     /// Moving the knob replaces four biquads' coefficients while their
     /// state is mid-ring. Handed straight over, the output steps; the two
     /// filters are run side by side and blended instead.
+
+    /// A handover armed just before the chain went quiet used to sit
+    /// frozen: `process` returns before its own countdown while `wet` is
+    /// zero, and `prepare_block` refuses to rebuild while a handover is
+    /// running, so the first sweep after the filter came back played at
+    /// the OLD position until the stale counter drained.
+    #[test]
+    fn a_sweep_after_a_dry_spell_rebuilds_at_once() {
+        let rate = 48_000.0;
+        let mut eq = DeckEq::new(rate);
+        eq.set_sample_rate(rate);
+
+        // Engage and sweep: this arms a handover.
+        eq.set_filter(0.2);
+        eq.prepare_block();
+        for _ in 0..64 {
+            eq.process([0.1, 0.1], rate);
+        }
+        assert!(eq.handover > 0, "a sweep should arm a handover");
+
+        // Back to centre: the chain goes dry and `process` stops
+        // counting the handover down.
+        eq.set_filter(0.5);
+        for _ in 0..8 {
+            eq.prepare_block();
+            for _ in 0..512 {
+                eq.process([0.1, 0.1], rate);
+            }
+        }
+        let dry = eq.wet.current();
+
+        // A fresh sweep, the other way. It must take effect on this
+        // block, not once a counter nobody is decrementing runs out.
+        eq.set_filter(0.8);
+        eq.prepare_block();
+        assert_eq!(
+            eq.filter_built, 0.8,
+            "the sweep did not rebuild: wet {dry} handover {} filter_built {}",
+            eq.handover, eq.filter_built
+        );
+    }
+
     #[test]
     fn a_filter_change_hands_over_without_a_step() {
         let rate = 48_000.0f32;

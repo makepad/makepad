@@ -690,6 +690,29 @@ fn a_filter_jump_is_click_free() {
     assert!(worst < CLICK, "a filter jump must not step, biggest step {worst}");
 }
 
+/// Coming back after a long dry spell. The plan wanted a hold-off here --
+/// ramps pinned for twice the crossover's group delay so a filter could
+/// not return with a thump -- and this is the measurement that says
+/// whether this structure needs one. It does not: the band gains sit
+/// AFTER the filters, so a centred knob leaves nothing staled to thump
+/// on, and the 12ms engage ramp covers the rest.
+#[test]
+fn a_filter_re_engaged_after_a_dry_spell_is_click_free() {
+    let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
+    mixer.set_deck_playing(DeckId::A, true);
+    settle(&mixer, SETTLE);
+    let worst = worst_step_across(&mixer, |index| match index {
+        // Sweep well off centre, then back to centre and stay there long
+        // enough for the wet ramp to bottom out and the handover to
+        // drain, then come back the other way.
+        4 => mixer.set_deck_filter(DeckId::A, 0.15),
+        12 => mixer.set_deck_filter(DeckId::A, 0.5),
+        40 => mixer.set_deck_filter(DeckId::A, 0.85),
+        _ => {}
+    });
+    assert!(worst < CLICK, "a filter re-engage must not step, biggest step {worst}");
+}
+
 #[test]
 fn engaging_and_releasing_the_echo_are_click_free() {
     let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
