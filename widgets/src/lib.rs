@@ -124,6 +124,7 @@ pub mod callout_tooltip;
 pub mod file_tree;
 pub mod modal;
 pub mod page_flip;
+pub mod placeholder;
 pub mod popup_notification;
 pub mod slides_view;
 pub mod tooltip;
@@ -154,6 +155,7 @@ pub use crate::{
     adaptive_view::*,
     animated_image_gif::*,
     badge::*,
+    placeholder::*,
     animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
     // loading_spinner - no public exports
     bare_step::*,
@@ -596,6 +598,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::loading_spinner::script_mod(vm);
     crate::glass_panel::script_mod(vm);
     crate::badge::script_mod(vm);
+    crate::placeholder::script_mod(vm);
 
     crate::bare_step::script_mod(vm);
     crate::turtle_step::script_mod(vm);
