@@ -308,15 +308,33 @@ fn golden_crossfader_centre() {
     assert_golden("crossfader_centre", &left, &right);
 }
 
+/// Driven well past full scale on purpose: a loud record, the channel
+/// gain up half again and the master up a fifth on top, which asks the
+/// bus for about 1.76 of full scale.
+///
+/// What this pins is that the bus tops out AT full scale and does not
+/// run past it -- which is all a constant source can show. A constant
+/// has no waveform to ruin, so a clipper and a limiter treat it
+/// identically, and this reference reads the same either way.
+///
+/// It is left as a constant deliberately. A tone would show the real
+/// difference -- a clamp flat-tops each crest into a square while the
+/// limiter turns the whole waveform down -- but the stock tone fixture
+/// is 0.37 of full scale and the gain and master controls clamp at 2.0
+/// and 1.2, so the loudest a tone can be driven here is 0.88, which
+/// never reaches the ceiling at all. The waveform behaviour is covered
+/// where it can be driven properly: see the limiter's own tests in
+/// `music_dsp`, which hold it under its ceiling from full scale to
+/// twenty times over.
 #[test]
-fn golden_gain_and_clamp() {
+fn golden_gain_and_limit() {
     let mixer = deck_a(const_pcm(32_000, 480_000, 48_000));
     mixer.set_deck_gain(DeckId::A, 1.5);
     mixer.set_master(1.2);
     mixer.set_deck_playing(DeckId::A, true);
     settle(&mixer, SETTLE);
     let (left, right) = capture(&mixer, CAPTURE, |_| {});
-    assert_golden("gain_and_clamp", &left, &right);
+    assert_golden("gain_and_limit", &left, &right);
 }
 
 /// The whole load-over-playing gesture, pinned window by window: the

@@ -3945,6 +3945,204 @@ impl SlotLevel {
 }
 
 // ---------------------------------------------------------------------------
+// the master limiter
+// ---------------------------------------------------------------------------
+
+/// How far ahead the limiter looks. Long enough to be fully ducked by
+/// the time a transient arrives rather than ducking on top of it, short
+/// enough that the delay it costs the whole output is well under
+/// anything an operator would feel as latency.
+pub const LIMITER_LOOKAHEAD_SECS: f32 = 0.003;
+/// How long it takes to give the gain back once the loud passage has
+/// gone. Slow enough not to pump on a kick, quick enough that one stab
+/// does not duck the next bar.
+const LIMITER_RELEASE_SECS: f32 = 0.12;
+/// The most the output may reach.
+///
+/// Full scale, deliberately, and not the fraction under it a mastering
+/// limiter would take. This replaces a hard clamp at exactly this value,
+/// and the contract that clamp kept -- everything below it comes through
+/// untouched -- is worth keeping: a lower ceiling would quietly start
+/// shaving material that has been passing cleanly for the life of the
+/// app, and the tests that pin an untouched deck as transparent would
+/// all have to be loosened to allow it. What changes here is only what
+/// used to CLIP.
+///
+/// The usual argument for a lower ceiling is the inter-sample peak: a
+/// converter reconstructing a curve through samples that each sit at
+/// full scale can overshoot between them. That is real, and a reason to
+/// revisit this, but it is a different job from replacing a clipper and
+/// doing both at once would make neither possible to judge.
+pub const LIMITER_CEILING: f32 = 1.0;
+/// The line is sized once, for the highest rate this could run at, and
+/// the live look-ahead is a window inside it.
+const LIMITER_MAX_FRAMES: usize = 2048;
+/// How much of the look-ahead the attack ramp actually spends. Arriving
+/// exactly as the peak does leaves the samples just BEFORE it under a
+/// gain that has not quite finished falling -- a hair over the ceiling,
+/// measured at about a thousandth. Arriving halfway through means every
+/// sample in the second half of the window is already fully covered,
+/// and each sample in the first half has set its own target on the way
+/// in, so nothing is left leaning on a ramp that is still moving.
+const LIMITER_ATTACK_SHARE: f32 = 0.5;
+
+/// The master bus's limiter: a look-ahead peak limiter in place of the
+/// hard clamp the sum used to end on.
+///
+/// A clamp is a clipper. Pushed past full scale it flat-tops every
+/// sample that got there, which is a square wave's worth of harmonics
+/// and audible as grit rather than as loudness -- and it did happen: the
+/// distortion effect's own golden reference sat with its peaks pinned at
+/// full scale for months.
+///
+/// The attack is what makes this a limiter rather than a faster clamp.
+/// It is a LINEAR ramp that arrives in exactly the look-ahead window, so
+/// the gain that a peak needs is already in force by the time that peak
+/// reaches the output -- the output is the delayed signal, and the peak
+/// was seen when it went in. Nothing is ever clamped on the way out
+/// because nothing ever gets there too loud.
+pub struct Limiter {
+    line: Box<[[f32; 2]]>,
+    write: usize,
+    /// The live look-ahead, in frames, for the rate in force.
+    len: usize,
+    /// The rate `len` was worked out for.
+    rate: f32,
+    /// The gain in force, one being none at all.
+    gain: f32,
+    /// Where the attack ramp is heading, where it set off from, and how
+    /// many frames of it are left.
+    ///
+    /// Counted rather than accumulated, and that is not a style choice.
+    /// A sustained tone nudges the target down by a hair every cycle, so
+    /// the ramp is forever restarting with a microscopic step -- and a
+    /// step of 1.7e-9 subtracted from a gain of 0.16 is a no-op in f32,
+    /// whose ulp there is ten times larger. The gain then never reaches
+    /// its target, never leaves the attack, never reaches the release,
+    /// and the limiter stays ducked for the rest of the set. Interpolating
+    /// from a remembered start cannot stall: when the count runs out the
+    /// gain IS the target, whatever the arithmetic did on the way.
+    target: f32,
+    from: f32,
+    attack_left: usize,
+    attack_total: usize,
+    /// Frames left before the gain may start climbing again. Without
+    /// this the gain reaches its target and immediately begins
+    /// releasing -- while the peak that asked for it is still in the
+    /// line, a whole look-ahead away from the output -- and arrives a
+    /// fraction of a decibel too high. Small, but the ceiling is a
+    /// guarantee or it is nothing.
+    hold: usize,
+    /// The deepest reduction since the meter last read it.
+    worst: f32,
+}
+
+impl Limiter {
+    pub fn new(sample_rate: f32) -> Limiter {
+        let mut limiter = Limiter {
+            line: vec![[0.0f32; 2]; LIMITER_MAX_FRAMES].into_boxed_slice(),
+            write: 0,
+            len: 1,
+            rate: 0.0,
+            gain: 1.0,
+            target: 1.0,
+            from: 1.0,
+            attack_left: 0,
+            attack_total: 1,
+            hold: 0,
+            worst: 1.0,
+        };
+        limiter.set_sample_rate(sample_rate);
+        limiter
+    }
+
+    /// Re-window the look-ahead for a new device rate. Cheap and
+    /// allocation-free: the line is already as long as it will ever need
+    /// to be, and only the window inside it moves.
+    pub fn set_sample_rate(&mut self, sample_rate: f32) {
+        if (self.rate - sample_rate).abs() < 0.5 || !(sample_rate > 0.0) {
+            return;
+        }
+        self.rate = sample_rate;
+        self.len = ((LIMITER_LOOKAHEAD_SECS * sample_rate).round() as usize)
+            .clamp(1, LIMITER_MAX_FRAMES - 1);
+    }
+
+    /// Forget what the line was carrying, so one set's peaks cannot duck
+    /// the start of the next.
+    pub fn reset(&mut self) {
+        self.line.iter_mut().for_each(|frame| *frame = [0.0; 2]);
+        self.write = 0;
+        self.gain = 1.0;
+        self.target = 1.0;
+        self.from = 1.0;
+        self.attack_left = 0;
+        self.hold = 0;
+        self.worst = 1.0;
+    }
+
+    /// The deepest gain reduction since this was last called, as a
+    /// multiplier -- one meaning the limiter never had to do anything.
+    /// Reading it clears it, so the meter shows the period it covers.
+    pub fn worst_reduction(&mut self) -> f32 {
+        std::mem::replace(&mut self.worst, 1.0)
+    }
+
+    /// The look-ahead in frames, which is the delay the bus is paying.
+    pub fn latency_frames(&self) -> usize {
+        self.len
+    }
+
+    /// Process one stereo frame, returning the frame from `len` ago with
+    /// whatever gain that frame turned out to need.
+    #[inline]
+    pub fn process(&mut self, frame: [f32; 2]) -> [f32; 2] {
+        self.line[self.write] = frame;
+        let read = (self.write + LIMITER_MAX_FRAMES - self.len) % LIMITER_MAX_FRAMES;
+        let delayed = self.line[read];
+        self.write = (self.write + 1) % LIMITER_MAX_FRAMES;
+
+        // Both channels take one gain: ducking them apart would walk the
+        // stereo image around under a loud passage.
+        let peak = frame[0].abs().max(frame[1].abs());
+        if peak > LIMITER_CEILING {
+            let needed = LIMITER_CEILING / peak;
+            if needed < self.target {
+                // Arrive before the sample that asked for it does.
+                self.from = self.gain;
+                self.target = needed;
+                self.attack_total =
+                    ((self.len as f32 * LIMITER_ATTACK_SHARE) as usize).max(1);
+                self.attack_left = self.attack_total;
+            }
+            // Anything over the ceiling re-arms the hold, so the gain
+            // cannot start climbing while that sample is still in the
+            // line waiting to come out.
+            self.hold = self.len;
+        }
+
+        if self.attack_left > 0 {
+            self.attack_left -= 1;
+            let left = self.attack_left as f32 / self.attack_total as f32;
+            self.gain = self.target + (self.from - self.target) * left;
+        } else if self.hold > 0 {
+            // Landed, and holding until the loudest thing that asked for
+            // this gain has been through the output.
+            self.hold -= 1;
+        } else {
+            // Released rather than attacking: let the target go first, so
+            // the next peak is measured against an honest gain.
+            self.target = 1.0;
+            let coeff = (1.0 / (LIMITER_RELEASE_SECS * self.rate.max(1.0))).min(1.0);
+            self.gain += (1.0 - self.gain) * coeff;
+        }
+        self.worst = self.worst.min(self.gain);
+
+        [delayed[0] * self.gain, delayed[1] * self.gain]
+    }
+}
+
+// ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
 
@@ -6454,6 +6652,141 @@ mod tests {
     /// A clock with nothing measured behind it.
     fn clock_ungridded() -> crate::wave_analysis::DeckClock {
         crate::wave_analysis::DeckClock::default()
+    }
+
+    /// Quiet material comes out exactly as it went in, one look-ahead
+    /// later. A limiter that colours what it never had to touch is a
+    /// limiter nobody can leave switched on.
+    #[test]
+    fn a_limiter_under_its_ceiling_is_a_delay_and_nothing_else() {
+        let rate = 48_000.0f32;
+        let mut lim = Limiter::new(rate);
+        let delay = lim.latency_frames();
+        let mut fed = Vec::new();
+        let mut out = Vec::new();
+        let mut phase = 0.0f32;
+        for _ in 0..8_000 {
+            phase += 2.0 * PI * 220.0 / rate;
+            let x = phase.sin() * 0.5;
+            fed.push(x);
+            out.push(lim.process([x, -x])[0]);
+        }
+        for n in delay..fed.len() {
+            assert_eq!(out[n], fed[n - delay], "sample {n} was altered");
+        }
+        assert_eq!(lim.worst_reduction(), 1.0, "it should not have moved at all");
+    }
+
+    /// The guarantee: whatever goes in, nothing over the ceiling comes
+    /// out. Not "usually" and not "after the attack" -- the look-ahead
+    /// exists so the gain is already there when the peak arrives.
+    #[test]
+    fn nothing_leaves_the_limiter_above_its_ceiling() {
+        let rate = 48_000.0f32;
+        for amplitude in [1.0f32, 2.0, 4.0, 20.0] {
+            let mut lim = Limiter::new(rate);
+            let mut phase = 0.0f32;
+            let mut worst = 0.0f32;
+            for n in 0..48_000usize {
+                phase += 2.0 * PI * 110.0 / rate;
+                // Silence, then a wall, then silence again: the step into
+                // the loud passage is the moment that matters.
+                let x = match (8_000..24_000).contains(&n) {
+                    true => phase.sin() * amplitude,
+                    false => phase.sin() * 0.1,
+                };
+                let out = lim.process([x, x]);
+                worst = worst.max(out[0].abs()).max(out[1].abs());
+            }
+            assert!(
+                worst <= LIMITER_CEILING + 1e-4,
+                "at amplitude {amplitude} it let {worst} through"
+            );
+        }
+    }
+
+    /// A lone sample far over the ceiling is caught too -- the case a
+    /// slow attack would miss entirely and a clamp would flat-top.
+    #[test]
+    fn a_single_spike_is_caught_before_it_lands() {
+        let rate = 48_000.0f32;
+        let mut lim = Limiter::new(rate);
+        let mut worst = 0.0f32;
+        for n in 0..4_000usize {
+            let x = if n == 1_000 { 8.0 } else { 0.2 };
+            let out = lim.process([x, x]);
+            worst = worst.max(out[0].abs());
+        }
+        assert!(worst <= LIMITER_CEILING + 1e-4, "a spike got out at {worst}");
+    }
+
+    /// It gives the gain back, so one loud passage does not duck the
+    /// rest of the set.
+    #[test]
+    fn a_limiter_releases_after_the_loud_passage() {
+        let rate = 48_000.0f32;
+        let mut lim = Limiter::new(rate);
+        let mut phase = 0.0f32;
+        for _ in 0..4_000 {
+            phase += 2.0 * PI * 110.0 / rate;
+            lim.process([phase.sin() * 6.0, phase.sin() * 6.0]);
+        }
+        assert!(lim.worst_reduction() < 0.3, "it should have ducked hard");
+        // A second of quiet is several times the release. This stretch
+        // still STARTS ducked, so what it measures is the release
+        // happening, not the state it ended in.
+        for _ in 0..48_000 {
+            phase += 2.0 * PI * 110.0 / rate;
+            lim.process([phase.sin() * 0.1, phase.sin() * 0.1]);
+        }
+        // Clear that history, then measure a fresh quiet stretch: the
+        // meter reports the worst since it was last read, so it has to
+        // be read before the window that is being asked about.
+        lim.worst_reduction();
+        for _ in 0..4_800 {
+            phase += 2.0 * PI * 110.0 / rate;
+            lim.process([phase.sin() * 0.1, phase.sin() * 0.1]);
+        }
+        let settled = lim.worst_reduction();
+        assert!(settled > 0.99, "the gain never came back: {settled}");
+    }
+
+    /// Both channels duck together: ducking them apart would walk the
+    /// stereo image around under a loud passage.
+    #[test]
+    fn a_limiter_keeps_the_stereo_image_still() {
+        let rate = 48_000.0f32;
+        let mut lim = Limiter::new(rate);
+        let mut phase = 0.0f32;
+        for n in 0..12_000usize {
+            phase += 2.0 * PI * 110.0 / rate;
+            // One channel loud enough to duck, the other quiet: their
+            // ratio has to survive it.
+            let l = phase.sin() * 4.0;
+            let r = phase.sin() * 1.0;
+            let out = lim.process([l, r]);
+            if n > 1_000 && out[1].abs() > 1e-6 {
+                let ratio = out[0] / out[1];
+                assert!((ratio - 4.0).abs() < 1e-3, "the image moved: {ratio}");
+            }
+        }
+    }
+
+    /// A rate change re-windows the look-ahead without allocating and
+    /// without losing the line.
+    #[test]
+    fn a_limiter_rewindows_for_the_device_rate() {
+        let mut lim = Limiter::new(48_000.0);
+        let at_48 = lim.latency_frames();
+        lim.set_sample_rate(96_000.0);
+        let at_96 = lim.latency_frames();
+        assert!(
+            (at_96 as f32 / at_48 as f32 - 2.0).abs() < 0.02,
+            "{at_48} then {at_96}"
+        );
+        // The same look-ahead in SECONDS either way, which is the point.
+        let secs = at_96 as f32 / 96_000.0;
+        assert!((secs - LIMITER_LOOKAHEAD_SECS).abs() < 1e-4, "{secs}");
     }
 
     /// The ladder is the whole set an operator can pick from: free

@@ -26,7 +26,7 @@ use crate::loop_splat::{
 };
 use crate::wave_analysis::{DeckClock, TrackGrid};
 use crate::music_dsp::{
-    LevelMode, SlotLevel,
+    LevelMode, Limiter, SlotLevel,
     audible, knob, knob64,
     Autopan, Bitcrusher, DeckEcho, DeckEq, Distortion, Flanger, FrameSource, Freeze, MotorEnd,
     MoogLadder, ParamRamp, Phaser, PlateReverb, RateReader, ScratchRamp, StereoWidth, Tremolo,
@@ -67,7 +67,6 @@ const LOAD_SWAP_SECS: f32 = 0.040;
 /// can never grow a queue without bound.
 const MAX_SLOT_QUEUE_FRAMES: usize = 96_000;
 /// Master safety clamp.
-const CLAMP: f32 = 1.0;
 /// Width of the crossfade at a deck loop's wrap, seconds. The tail of the
 /// loop blends into the run-up to IN over this window, so the seam is a
 /// mix of two pieces of programme rather than a gain treatment — long
@@ -1795,6 +1794,14 @@ struct MixState {
     curve: FadeCurve,
     sfx: Vec<SfxVoice>,
     master: Ramp,
+    /// The master bus's limiter, in place of the hard clamp the sum used
+    /// to end on.
+    limiter: Limiter,
+    /// The cue bus gets its own, on the same settings. Two instances and
+    /// not one because they carry different signals -- but they must
+    /// behave alike, or the headphones stop telling the truth about what
+    /// the room is getting.
+    cue_limiter: Limiter,
     ended_decks: Vec<DeckId>,
     ended_voices: Vec<VoiceId>,
     rendered_frames: u64,
@@ -1878,6 +1885,8 @@ impl Mixer {
                 curve: FadeCurve::EqualPower,
                 sfx: Vec::new(),
                 master: Ramp::at(0.9),
+                limiter: Limiter::new(0.0),
+                cue_limiter: Limiter::new(0.0),
                 ended_decks: Vec::new(),
                 ended_voices: Vec::new(),
                 rendered_frames: 0,
@@ -3070,6 +3079,17 @@ impl Mixer {
             None => d.chain.freeze_mut().release(),
         }
         self.publish_deck(&s, index);
+    }
+
+    /// How far the master and the cue busses run behind the mix, in
+    /// frames: the limiter's look-ahead, which it spends being already
+    /// ducked when a peak arrives rather than ducking on top of it.
+    ///
+    /// Anything lining the output up against what went into it has to
+    /// allow for this -- the tests below do, and a DAC-referenced
+    /// playhead would have to as well.
+    pub fn output_latency_frames(&self) -> usize {
+        self.state.lock().unwrap().limiter.latency_frames()
     }
 
     /// Whether this deck's FREEZE is sounding right now -- held, or
@@ -4440,23 +4460,28 @@ impl Mixer {
                         }
                     }
                 }
-                self.cue_ring.push(
-                    cue_pos,
-                    cue.0.clamp(-CLAMP, CLAMP),
-                    cue.1.clamp(-CLAMP, CLAMP),
-                );
+                let cue = s.cue_limiter.process([audible(cue.0), audible(cue.1)]);
+                self.cue_ring.push(cue_pos, cue[0], cue[1]);
                 cue_pos = cue_pos.saturating_add(1);
             }
 
             let score = s.score_preview.scratch.get(frame).copied().unwrap_or([0.0; 2]);
             let master = s.master.tick(rate);
-            // `audible` before the clamp, because a clamp passes NaN through
-            // and one non-finite sample would go on to poison the meters and
-            // the phones ring as well as the device buffer.
-            let l = audible((video.0 + deck_out[0].0 + deck_out[1].0 + sfx.0 + score[0]) * master)
-                .clamp(-CLAMP, CLAMP);
-            let r = audible((video.1 + deck_out[0].1 + deck_out[1].1 + sfx.1 + score[1]) * master)
-                .clamp(-CLAMP, CLAMP);
+            s.limiter.set_sample_rate(rate as f32);
+            s.cue_limiter.set_sample_rate(rate as f32);
+            // `audible` before the limiter, because a non-finite sample
+            // would otherwise poison its level meters as well as the
+            // device buffer, and one is enough to duck the bus for good.
+            let summed = [
+                audible((video.0 + deck_out[0].0 + deck_out[1].0 + sfx.0 + score[0]) * master),
+                audible((video.1 + deck_out[0].1 + deck_out[1].1 + sfx.1 + score[1]) * master),
+            ];
+            // The limiter, not a clamp. A clamp is a clipper: pushed past
+            // full scale it flat-tops every sample that got there, which
+            // is grit rather than loudness. Nothing arrives here too loud
+            // any more, because the look-ahead ducked it on the way in.
+            let limited = s.limiter.process(summed);
+            let (l, r) = (limited[0], limited[1]);
             for channel in 0..channels {
                 output.channel_mut(channel)[frame] += if channel == 0 { l } else { r };
             }
@@ -5502,14 +5527,28 @@ mod tests {
             let state = mixer.state.lock().unwrap();
             state.decks[0].pos as usize
         };
-        let out = render(&mixer, 48_000.0, 256);
+        // The master bus runs a look-ahead behind the mix, so the sample
+        // that leaves at index N went in that many frames earlier.
+        let latency = mixer.output_latency_frames();
+        let out = render(&mixer, 48_000.0, 256 + latency);
         for index in 0..200 {
             let want = pcm.frames[start + index][0] as f32 / 32768.0;
-            let got = out.channel(0)[index];
+            let got = out.channel(0)[index + latency];
             assert!(
                 (got - want).abs() < 1e-6,
                 "sample {index}: {got} vs {want} — an untouched deck must be transparent"
             );
+        }
+    }
+
+    /// Render away the master bus's own latency, so what comes back next
+    /// is the audio for what just happened rather than the tail of what
+    /// happened before it. The limiter looks ahead, and looking ahead is
+    /// a delay.
+    fn flush_bus(mixer: &Mixer, rate: f64) {
+        let latency = mixer.output_latency_frames();
+        if latency > 0 {
+            render(mixer, rate, latency);
         }
     }
 
@@ -6304,11 +6343,23 @@ mod tests {
         (best.0, best.1 - centre)
     }
 
+    /// Render and hand back samples whose index IS the source frame.
+    ///
+    /// The master bus runs a look-ahead behind the mix, so what leaves at
+    /// index N went in `latency` frames earlier. One extra block is
+    /// rendered and that many samples dropped off the front, which puts
+    /// the two back in step -- otherwise every test that looks for a
+    /// click at a known time finds it late by exactly the look-ahead.
     fn render_out(mixer: &Mixer, rate: f64, buffers: usize, block: usize) -> Vec<f32> {
-        let mut out = Vec::with_capacity(buffers * block);
-        for _ in 0..buffers {
+        let mut out = Vec::with_capacity((buffers + 1) * block);
+        for _ in 0..=buffers {
             out.extend_from_slice(render(mixer, rate, block).channel(0));
         }
+        // Asked for AFTER rendering, not before: the limiter only learns
+        // the device rate inside the callback, so until one buffer has
+        // been through it its look-ahead is still the one-frame default.
+        let latency = mixer.output_latency_frames();
+        out.drain(..latency.min(out.len()));
         out
     }
 
@@ -7306,6 +7357,7 @@ mod tests {
                 pcm.clone(),
             );
         }
+        flush_bus(&mixer, 48_000.0);
         let out = render(&mixer, 48_000.0, 64);
         // Three overlapping voices sum: 3 × 0.25 × master(1.0).
         assert!((out.channel(0)[32] - 0.75).abs() < 0.02, "{}", out.channel(0)[32]);
@@ -7314,6 +7366,7 @@ mod tests {
         let mut ended = mixer.drain_ended_voices();
         ended.sort();
         assert_eq!(ended, vec![1, 2, 3]);
+        flush_bus(&mixer, 48_000.0);
         let out = render(&mixer, 48_000.0, 64);
         assert!(out.channel(0)[32].abs() < 1e-6);
     }
@@ -7329,11 +7382,13 @@ mod tests {
         assert!(mixer.push_slot_audio(SlotId::A, &samples, 2, 48_000));
         mixer.fade_slots(None, SlotId::A, 0.01);
         render(&mixer, 48_000.0, 4096); // fade settles
+        flush_bus(&mixer, 48_000.0);
         let out = render(&mixer, 48_000.0, 64);
         assert!((out.channel(0)[32] - 0.5).abs() < 0.02, "{}", out.channel(0)[32]);
         // Closing flushes + refuses further pushes.
         mixer.close_slot(SlotId::A);
         assert!(!mixer.push_slot_audio(SlotId::A, &samples, 2, 48_000));
+        flush_bus(&mixer, 48_000.0);
         let out = render(&mixer, 48_000.0, 64);
         assert!(out.channel(0)[32].abs() < 1e-6);
     }
@@ -7445,9 +7500,21 @@ mod tests {
             .schedule_video_transition_at(41, None, SlotId::A, target, 1)
             .unwrap();
 
+        // The transition is scheduled on an exact frame of the MIX; the
+        // bus hands that frame over one look-ahead later, so the sample
+        // it lands on moves with it and the exactness is unchanged.
         let out = render(&mixer, 48_000.0, 12);
-        assert!(out.channel(0)[..5].iter().all(|sample| sample.abs() < 1e-7));
-        assert!((out.channel(0)[5] - 0.5).abs() < 0.02, "transition was not sample exact");
+        let latency = mixer.output_latency_frames();
+        let out = if latency > 0 {
+            let mut all = out.channel(0).to_vec();
+            all.extend_from_slice(render(&mixer, 48_000.0, latency).channel(0));
+            all.drain(..latency);
+            all
+        } else {
+            out.channel(0).to_vec()
+        };
+        assert!(out[..5].iter().all(|sample| sample.abs() < 1e-7));
+        assert!((out[5] - 0.5).abs() < 0.02, "transition was not sample exact");
         let snapshot = mixer.video_transition_snapshot().unwrap();
         assert_eq!(snapshot.id, 41);
         assert_eq!(snapshot.start_frame, Some(target));
@@ -7904,10 +7971,18 @@ mod tests {
         assert!(before.iter().all(|sample| sample.abs() < 1e-7));
         // The equal-power fade begins on source frame 2000. Its first sample
         // has zero incoming gain; the immediately following sample is live.
-        let onset = render_count(&mixer, rate, 2, 64);
-        assert!(onset[0].abs() < 1e-7 && onset[1].abs() > 1e-5);
+        //
+        // Read a look-ahead late, because that is where the bus hands
+        // that pair over -- and take the same number of frames back off
+        // the settle below, so everything after this sees the timeline it
+        // would have seen anyway. The later checks read the splat's own
+        // frame counters, which move with the render and not with the
+        // limiter.
+        let latency = mixer.output_latency_frames();
+        let onset = render_count(&mixer, rate, 2 + latency, 64);
+        assert!(onset[latency].abs() < 1e-7 && onset[latency + 1].abs() > 1e-5);
 
-        render_count(&mixer, rate, 500, 64);
+        render_count(&mixer, rate, 500 - latency, 64);
         mixer.splat_launch(DeckId::A, SplatRow::Drums, 3, SplatPart::WHOLE);
         render_count(&mixer, rate, 1_504, 256);
         {
