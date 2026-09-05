@@ -10,6 +10,8 @@ pub mod badge;
 pub mod basics;
 pub mod foundations;
 pub mod placeholder;
+pub mod button_more;
+pub mod checkbox_more;
 pub mod welcome;
 pub mod button;
 pub mod checkbox;
@@ -79,6 +81,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
     basics::script_mod(vm);
     badge::script_mod(vm);
     placeholder::script_mod(vm);
+    checkbox_more::script_mod(vm);
+    button_more::script_mod(vm);
 }
 
 pub fn tables() -> &'static [&'static [Story]] {
@@ -117,9 +121,11 @@ pub fn tables() -> &'static [&'static [Story]] {
         rotary::STORIES,
         video::STORIES,
         basics::STORIES,
+        badge::STORIES,
+        placeholder::STORIES,
+        checkbox_more::STORIES,
+        button_more::STORIES,
     ]
-    &[welcome::STORIES, crate::coverage::STORIES, basics::STORIES, badge::STORIES]
-    &[welcome::STORIES, crate::coverage::STORIES, basics::STORIES, badge::STORIES, placeholder::STORIES]
 }
 
 static COUNTERS: Mutex<Option<HashMap<LiveId, usize>>> = Mutex::new(None);
