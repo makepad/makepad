@@ -2434,6 +2434,9 @@ script_mod! {
                                         min: 0.0
                                         max: 1.5
                                         default: 1.0
+                                        taper: Audio
+                                        unit: "x"
+                                        precision: 2
                                     }
                                     PanelLabel{text: "choke"}
                                     sfx_choke := DropDown{labels: ["off" "1" "2" "3" "4"]}
@@ -2464,6 +2467,9 @@ script_mod! {
                                         min: 0.0
                                         max: 0.95
                                         default: 0.55
+                                        unit: "%"
+                                        display_scale: 100.0
+                                        precision: 0
                                     }
                                 }
                                 View{
@@ -2482,6 +2488,9 @@ script_mod! {
                                             min: 0.02
                                             max: 8.0
                                             default: 0.25
+                                            taper: Log
+                                            unit: "Hz"
+                                            precision: 2
                                         }
                                     }
                                     sfx_fx_flanger_sync := VjBeatsDrop{width: 40 lfo_rows: true}
@@ -2498,6 +2507,9 @@ script_mod! {
                                             min: 0.0
                                             max: 1.0
                                             default: 0.0
+                                            unit: "%"
+                                            display_scale: 100.0
+                                            precision: 0
                                         }
                                     }
                                 }
@@ -2514,6 +2526,10 @@ script_mod! {
                                         min: 1.0
                                         max: 16.0
                                         default: 8.0
+                                        taper: Stepped
+                                        step: 1.0
+                                        unit: "bits"
+                                        precision: 0
                                     }
                                 }
                                 View{
@@ -2532,6 +2548,9 @@ script_mod! {
                                             min: 0.1
                                             max: 20.0
                                             default: 4.0
+                                            taper: Log
+                                            unit: "Hz"
+                                            precision: 2
                                         }
                                     }
                                     sfx_fx_tremolo_sync := VjBeatsDrop{width: 40 lfo_rows: true}
@@ -2548,6 +2567,9 @@ script_mod! {
                                             min: 0.0
                                             max: 1.0
                                             default: 0.0
+                                            unit: "%"
+                                            display_scale: 100.0
+                                            precision: 0
                                         }
                                     }
                                 }
@@ -2564,6 +2586,9 @@ script_mod! {
                                         min: 1.0
                                         max: 20.0
                                         default: 4.0
+                                        taper: Log
+                                        unit: "x"
+                                        precision: 1
                                     }
                                 }
                                 View{
@@ -2582,6 +2607,9 @@ script_mod! {
                                             min: 0.05
                                             max: 5.0
                                             default: 0.5
+                                            taper: Log
+                                            unit: "Hz"
+                                            precision: 2
                                         }
                                     }
                                     sfx_fx_phaser_feedback := Slider{
@@ -2590,6 +2618,9 @@ script_mod! {
                                         min: 0.0
                                         max: 0.9
                                         default: 0.3
+                                        unit: "%"
+                                        display_scale: 100.0
+                                        precision: 0
                                     }
                                     sfx_fx_phaser_sync := VjBeatsDrop{width: 40 lfo_rows: true}
                                     sfx_fx_phaser_locked := View{
@@ -2605,6 +2636,9 @@ script_mod! {
                                             min: 0.0
                                             max: 1.0
                                             default: 0.0
+                                            unit: "%"
+                                            display_scale: 100.0
+                                            precision: 0
                                         }
                                     }
                                 }
@@ -2624,6 +2658,9 @@ script_mod! {
                                             min: 0.1
                                             max: 20.0
                                             default: 1.0
+                                            taper: Log
+                                            unit: "Hz"
+                                            precision: 2
                                         }
                                     }
                                     sfx_fx_autopan_sync := VjBeatsDrop{width: 40 lfo_rows: true}
@@ -2640,6 +2677,9 @@ script_mod! {
                                             min: 0.0
                                             max: 1.0
                                             default: 0.0
+                                            unit: "%"
+                                            display_scale: 100.0
+                                            precision: 0
                                         }
                                     }
                                 }
@@ -2656,6 +2696,8 @@ script_mod! {
                                         min: 0.0
                                         max: 2.0
                                         default: 1.5
+                                        unit: "x"
+                                        precision: 2
                                     }
                                 }
                                 View{
@@ -2671,6 +2713,9 @@ script_mod! {
                                         min: 0.0
                                         max: 1.0
                                         default: 0.5
+                                        unit: "%"
+                                        display_scale: 100.0
+                                        precision: 0
                                     }
                                 }
                                 View{
@@ -2686,6 +2731,9 @@ script_mod! {
                                         min: 60.0
                                         max: 12000.0
                                         default: 1200.0
+                                        taper: Log
+                                        unit: "Hz"
+                                        precision: 0
                                     }
                                     sfx_fx_moog_ladder_resonance := Slider{
                                         width: 170
@@ -2693,6 +2741,9 @@ script_mod! {
                                         min: 0.0
                                         max: 1.0
                                         default: 0.3
+                                        unit: "%"
+                                        display_scale: 100.0
+                                        precision: 0
                                     }
                                 }
                             }

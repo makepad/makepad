@@ -1636,6 +1636,13 @@ pub struct Slider {
     /// nothing. Typed back with or without it, the number still lands.
     #[live]
     pub unit: String,
+    /// What the readout multiplies the value by before showing it, so a
+    /// parameter the engine keeps as 0..1 can read as 0..100 with a "%"
+    /// beside it. The number typed back is divided by the same factor,
+    /// so the readout and the box agree on what they mean. One by
+    /// default: the value shown is the value held.
+    #[live(1.0)]
+    pub display_scale: f64,
     /// Draw the value arc from the default's position rather than from
     /// the stop, so a cut and a boost point different ways. A material
     /// reads it as `arc_origin` beside `origin_pos`; one that does not
@@ -1692,8 +1699,20 @@ impl Slider {
     }
 
     pub fn update_text_input(&mut self, cx: &mut Cx) {
-        let e = self.to_external();
+        let e = self.to_external() * self.display_scale;
         let text = format_readout(e, self.precision, &self.unit);
+        // A unit is not a number, and the value box filters out
+        // everything that is not one -- `is_numeric_only` resolves to
+        // `InputMode::Decimal`, which strips on `set_text` as well as
+        // on a keystroke. That is why a unit set in the DSL never
+        // reached the screen. A slider carrying one takes the filter
+        // off; typing is still checked, because the Returned handler
+        // strips the unit, and anything that will not parse is
+        // reverted by the next call to this function.
+        let numeric_only = self.unit.is_empty();
+        if self.text_input.is_numeric_only() != numeric_only {
+            self.text_input.set_is_numeric_only(cx, numeric_only);
+        }
         self.text_input.set_text(cx, &text);
         self.text_input.select_all(cx);
     }
@@ -1808,6 +1827,13 @@ impl Widget for Slider {
                         .map(str::trim_end)
                         .unwrap_or(typed);
                     if let Ok(v) = typed.parse::<f64>() {
+                        // Shown scaled, so read back scaled: a percent
+                        // box hands back 0..100 for a 0..1 parameter.
+                        let v = if self.display_scale != 0.0 {
+                            v / self.display_scale
+                        } else {
+                            v
+                        };
                         self.set_internal(v.max(self.min).min(self.max));
                     }
                     self.update_text_input(cx);
