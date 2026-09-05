@@ -24230,8 +24230,18 @@ p2 {}
         // Also from here, not only from the display-cadence pump: that pump
         // stops being scheduled the moment nothing is moving, and a deck
         // left holding a live reference would go on asking for frames
-        // forever, counting a record that has stopped.
+        // forever, counting a record that has stopped. ABOVE the visibility
+        // gate for exactly that reason -- the reference has to be let go
+        // whichever page is up.
         self.push_deck_beats(cx);
+        // Nothing below this line is read by anything but the deck surface,
+        // and the deck surface is not on screen. It was costing two mixer
+        // locks and three widget pushes a frame while the operator was on
+        // another page -- and the audio callback `try_lock`s that same lock
+        // and goes silent when it cannot have it.
+        if self.console_page != live_id!(music_page) {
+            return;
+        }
         let levels = self.mixer.deck_levels();
         for deck in [DeckId::A, DeckId::B] {
             let index = deck.index();
