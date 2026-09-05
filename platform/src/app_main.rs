@@ -287,6 +287,9 @@ macro_rules! _app_main_event_closure {
             if let Event::LiveEdit = event {
                 let mut app_ref = app.borrow_mut();
                 if let Some(app) = app_ref.as_mut() {
+                    // `Reload` when the DSL changed on disk, `Rebake` when
+                    // `script_mod` only re-ran to pick up new heap primitives.
+                    let live_edit_apply = cx.live_edit_apply();
                     cx.with_vm(|vm| {
                         let value = vm.with_reload(|vm| <$app as AppMain>::script_mod(vm));
                         if let Some(obj) = value.as_object() {
@@ -295,7 +298,7 @@ macro_rules! _app_main_event_closure {
                         <$app as $crate::ScriptApply>::script_apply(
                             app,
                             vm,
-                            &$crate::Apply::Reload,
+                            &live_edit_apply,
                             &mut $crate::Scope::empty(),
                             value,
                         );

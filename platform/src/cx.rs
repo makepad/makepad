@@ -145,15 +145,24 @@ pub struct Cx {
     pub pending_script_reapply: bool,
 
     /// When true, the next event-loop iteration will fire `Event::LiveEdit`,
-    /// which re-runs `script_mod` and re-applies with `Apply::Reload`. Use
+    /// which re-runs `script_mod` and re-applies with `Apply::Rebake`. Use
     /// this when a primitive heap value (e.g. `mod.widgets.SAFE_INSET_PAD_TOP`)
     /// has changed and needs to be re-baked into widget definitions that
     /// reference it via expressions like `top: (mod.widgets.SAFE_INSET_PAD_TOP)`
     /// — those expressions are only re-evaluated when `script_mod` re-runs.
-    /// `Apply::Reload` clobbers runtime widget state (animator values, etc.),
-    /// so prefer `pending_script_reapply` whenever the change can be modeled
-    /// as a shared-heap-object mutation instead.
+    /// The re-run is still a full-tree walk, so prefer
+    /// `pending_script_reapply` whenever the change can be modeled as a
+    /// shared-heap-object mutation instead.
     pub pending_live_edit_request: bool,
+
+    /// Which `Apply` variant the pending `Event::LiveEdit` should re-apply
+    /// the freshly re-run `script_mod` value with. A file-change hot reload
+    /// means the DSL actually changed, so the new template wins
+    /// (`Apply::Reload`). A `request_live_edit()` re-bake did not change the
+    /// DSL, so imperative runtime state must survive (`Apply::Rebake`) —
+    /// otherwise every safe-area inset change wipes each `set_text`,
+    /// `set_visible` and animator state in the tree.
+    pub(crate) live_edit_apply: Apply,
 
     /// `WindowGeomChange` events queued up during an event dispatch.
     pub(crate) pending_window_geom_changes: Vec<WindowGeomChangeEvent>,
@@ -525,6 +534,7 @@ impl Cx {
             display_context: Default::default(),
             pending_script_reapply: false,
             pending_live_edit_request: false,
+            live_edit_apply: Apply::Reload,
             pending_window_geom_changes: Default::default(),
             clear_hover_queued: false,
 

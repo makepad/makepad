@@ -39,7 +39,9 @@ pub trait ScriptHook {
             // Widgets that need to differentiate can branch on
             // `apply.is_live_edit_reload()` or `apply.is_script_reapply()`
             // inside the hook.
-            Apply::Reload | Apply::ScriptReapply => self.on_before_reload_scoped(vm, scope),
+            Apply::Reload | Apply::Rebake | Apply::ScriptReapply => {
+                self.on_before_reload_scoped(vm, scope)
+            }
             _ => (),
         }
     }
@@ -62,7 +64,9 @@ pub trait ScriptHook {
     ) {
         match apply {
             Apply::New => self.on_after_new_scoped(vm, scope),
-            Apply::Reload | Apply::ScriptReapply => self.on_after_reload_scoped(vm, scope),
+            Apply::Reload | Apply::Rebake | Apply::ScriptReapply => {
+                self.on_after_reload_scoped(vm, scope)
+            }
             _ => (),
         }
         self.on_alive()
