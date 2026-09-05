@@ -1061,6 +1061,23 @@ pub const EQ_HIGH_HZ_MAX: f32 = 8_000.0;
 /// has something in it. Crossed or touching corners do not make a
 /// three-band EQ with an empty middle, they make an unstable one.
 const EQ_CROSSOVER_MIN_OCTAVES: f32 = 1.0;
+
+/// The pair of corners a request actually lands on: each inside its own
+/// range, and the two at least [`EQ_CROSSOVER_MIN_OCTAVES`] apart.
+///
+/// Public because the control side has to store exactly what the engine
+/// will run. Two clamps that agree today and drift tomorrow is how a
+/// readout starts lying about what is being heard.
+pub fn eq_crossovers_for(low_hz: f32, high_hz: f32) -> Option<(f32, f32)> {
+    let low = knob(low_hz, EQ_LOW_HZ_MIN, EQ_LOW_HZ_MAX)?;
+    let high = knob(high_hz, EQ_HIGH_HZ_MIN, EQ_HIGH_HZ_MAX)?;
+    let gap = 2f32.powf(EQ_CROSSOVER_MIN_OCTAVES);
+    let high = (high.max(low * gap)).min(EQ_HIGH_HZ_MAX);
+    // If the ceiling stopped the push, the lower one gives way instead:
+    // the gap is the invariant, not either corner.
+    let low = low.min(high / gap);
+    Some((low, high))
+}
 /// How much of the remaining distance a crossover closes each block
 /// while it travels.
 ///
@@ -1239,17 +1256,9 @@ impl DeckEq {
     /// pushes the other along rather than leaving the mid band with
     /// nothing in it.
     pub fn set_crossovers(&mut self, low_hz: f32, high_hz: f32) {
-        let Some(low) = knob(low_hz, EQ_LOW_HZ_MIN, EQ_LOW_HZ_MAX) else {
+        let Some((low, high)) = eq_crossovers_for(low_hz, high_hz) else {
             return;
         };
-        let Some(high) = knob(high_hz, EQ_HIGH_HZ_MIN, EQ_HIGH_HZ_MAX) else {
-            return;
-        };
-        let floor = low * 2f32.powf(EQ_CROSSOVER_MIN_OCTAVES);
-        let high = high.max(floor).min(EQ_HIGH_HZ_MAX);
-        // If the ceiling above stopped the push, give way with the lower
-        // one instead: the gap is the invariant, not either corner.
-        let low = low.min(high / 2f32.powf(EQ_CROSSOVER_MIN_OCTAVES));
         self.low_hz = low;
         self.high_hz = high;
     }

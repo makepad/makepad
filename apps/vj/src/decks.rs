@@ -5268,11 +5268,12 @@ impl DeckEngine {
     /// engine clamps, so the stored value and the audible one agree, and
     /// the gap between the corners is the engine's to keep.
     pub fn set_crossovers(&mut self, deck: DeckId, low_hz: f32, high_hz: f32) -> Vec<DeckCmd> {
+        let Some((low, high)) = crate::music_dsp::eq_crossovers_for(low_hz, high_hz) else {
+            return Vec::new();
+        };
         let state = self.deck_mut(deck);
-        state.eq_low_hz = low_hz
-            .clamp(crate::music_dsp::EQ_LOW_HZ_MIN, crate::music_dsp::EQ_LOW_HZ_MAX);
-        state.eq_high_hz = high_hz
-            .clamp(crate::music_dsp::EQ_HIGH_HZ_MIN, crate::music_dsp::EQ_HIGH_HZ_MAX);
+        state.eq_low_hz = low;
+        state.eq_high_hz = high;
         vec![DeckCmd::SetCrossovers {
             deck,
             low_hz: state.eq_low_hz,
@@ -6857,6 +6858,38 @@ mod tests {
             cells: [[None; SPLAT_COLS]; crate::loop_splat::SPLAT_ROWS],
             bars_per_col: [1; SPLAT_COLS],
         })
+    }
+
+    /// The corners an operator SEES are the corners the engine RUNS.
+    /// They go through one rule, so a push that moves the untouched one
+    /// moves it in the stored state too -- a readout that disagreed with
+    /// the audio would be worse than no readout.
+    #[test]
+    fn the_stored_crossovers_are_the_ones_the_engine_keeps() {
+        let mut e = DeckEngine::new();
+        // Pushed together: the state has to show the gap the engine keeps.
+        let cmds = e.set_crossovers(DeckId::A, 800.0, 1_000.0);
+        let state = e.deck(DeckId::A);
+        assert!(
+            state.eq_high_hz / state.eq_low_hz >= 2.0 - 1e-3,
+            "stored {} and {} are too close",
+            state.eq_low_hz,
+            state.eq_high_hz
+        );
+        // And the command carries exactly what was stored.
+        assert_eq!(
+            cmds,
+            vec![DeckCmd::SetCrossovers {
+                deck: DeckId::A,
+                low_hz: state.eq_low_hz,
+                high_hz: state.eq_high_hz,
+            }]
+        );
+        // A value that means nothing moves neither corner.
+        let before = (state.eq_low_hz, state.eq_high_hz);
+        assert!(e.set_crossovers(DeckId::A, f32::NAN, 2_000.0).is_empty());
+        let state = e.deck(DeckId::A);
+        assert_eq!((state.eq_low_hz, state.eq_high_hz), before);
     }
 
     #[test]

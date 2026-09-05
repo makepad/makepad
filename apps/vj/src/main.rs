@@ -2469,6 +2469,34 @@ script_mod! {
                                     flow: Right
                                     spacing: 8
                                     align: Align{x: 0.0, y: 0.5}
+                                    PanelLabel{width: 62 text: "EQ SPLIT"}
+                                    sfx_eq_low_hz := Slider{
+                                        width: 170
+                                        text: "low | mid"
+                                        min: 80.0
+                                        max: 800.0
+                                        default: 250.0
+                                        taper: Log
+                                        unit: "Hz"
+                                        precision: 0
+                                    }
+                                    sfx_eq_high_hz := Slider{
+                                        width: 170
+                                        text: "mid | high"
+                                        min: 1000.0
+                                        max: 8000.0
+                                        default: 2500.0
+                                        taper: Log
+                                        unit: "Hz"
+                                        precision: 0
+                                    }
+                                }
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
                                     sfx_fx_echo := PillButton{width: 62 text: "ECHO"}
                                     sfx_fx_echo_rung := VjBeatsDrop{width: 44 echo_rows: true}
                                     sfx_fx_feedback := Slider{
@@ -14863,6 +14891,7 @@ p2 {}
         let deck_level_default = deck.level_default;
         let lvl_echo = (deck.echo_level_mode, deck.echo_mix as f64, deck.echo_ceiling as f64);
         let (echo_rung, echo_pingpong) = (deck.echo_rung, deck.echo_pingpong);
+        let (eq_low_hz, eq_high_hz) = (deck.eq_low_hz as f64, deck.eq_high_hz as f64);
         let lvl_flanger = (deck.flanger_level_mode, deck.flanger_mix as f64, deck.flanger_ceiling as f64);
         let lvl_bitcrusher = (deck.bitcrusher_level_mode, deck.bitcrusher_mix as f64, deck.bitcrusher_ceiling as f64);
         let lvl_tremolo = (deck.tremolo_level_mode, deck.tremolo_mix as f64, deck.tremolo_ceiling as f64);
@@ -14881,6 +14910,8 @@ p2 {}
             (deck.phaser_sync_units, deck.phaser_beat_offset as f64),
             (deck.autopan_sync_units, deck.autopan_beat_offset as f64),
         ];
+        self.ui.slider(cx, ids!(sfx_eq_low_hz)).set_value(cx, eq_low_hz);
+        self.ui.slider(cx, ids!(sfx_eq_high_hz)).set_value(cx, eq_high_hz);
         self.ui.slider(cx, ids!(sfx_fx_feedback)).set_value(cx, feedback);
         // The echo's rung reads off, 1, 1/2 or 1/4; the chip beside it
         // lights whenever it is on at all.
@@ -30604,6 +30635,33 @@ impl MatchEvent for App {
             };
             self.run_deck_cmds(cx, cmds);
             self.save_fx_levels_settings();
+        }
+        for (which, id) in [(0usize, ids!(sfx_eq_low_hz)), (1usize, ids!(sfx_eq_high_hz))] {
+            let Some(v) = self.ui.slider(cx, id).slided(actions) else {
+                continue;
+            };
+            // Both corners go every time: the engine holds them an octave
+            // apart and may move the one that was not touched, so sending
+            // only the dragged one would let the two disagree.
+            let send = |app: &mut Self, deck: DeckId| -> Vec<DeckCmd> {
+                let state = app.decks.deck(deck);
+                let (low, high) = match which {
+                    0 => (v as f32, state.eq_high_hz),
+                    _ => (state.eq_low_hz, v as f32),
+                };
+                app.decks.set_crossovers(deck, low, high)
+            };
+            let cmds = match self.sfx_fx_target {
+                FxTarget::A => send(self, DeckId::A),
+                FxTarget::B => send(self, DeckId::B),
+                FxTarget::Mix => {
+                    let mut cmds = send(self, DeckId::A);
+                    cmds.extend(send(self, DeckId::B));
+                    cmds
+                }
+            };
+            self.run_deck_cmds(cx, cmds);
+            self.sync_sfx_fx_ui(cx);
         }
         if self.ui.button(cx, ids!(sfx_fx_echo)).clicked(actions) {
             // The chip is the quick on/off the deck strip's E used to be:
