@@ -248,10 +248,10 @@ script_mod! {
 
 const ARROW_SCROLL_PX_PER_SEC: f64 = 280.0;
 
-/// Apple-style popup: selected row stays under the trigger; overflow
+/// Covering popup: selected row stays under the trigger; overflow
 /// clamps to the pass and shows ▲/▼ scroll arrows.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ApplePopupGeom {
+pub struct CoveringPopupGeom {
     pub x: f64,
     pub y: f64,
     pub width: f64,
@@ -266,7 +266,7 @@ pub struct ApplePopupGeom {
     pub pad: f64,
 }
 
-impl ApplePopupGeom {
+impl CoveringPopupGeom {
     pub fn popup_rect(&self) -> Rect {
         Rect {
             pos: dvec2(self.x, self.y),
@@ -320,7 +320,7 @@ impl ApplePopupGeom {
     }
 }
 
-pub fn layout_apple_popup(
+pub fn layout_covering_popup(
     pass: Vec2d,
     trigger: Rect,
     item_count: usize,
@@ -331,7 +331,7 @@ pub fn layout_apple_popup(
     margin: f64,
     arrow_h: f64,
     scroll: Option<f64>,
-) -> ApplePopupGeom {
+) -> CoveringPopupGeom {
     let n = item_count.max(1);
     let selected = selected.min(n.saturating_sub(1));
     let item_h = item_h.max(1.0);
@@ -374,7 +374,7 @@ pub fn layout_apple_popup(
     let aligned = (list_y + selected_center - trigger_center).clamp(0.0, max_scroll);
     let scroll = scroll.unwrap_or(aligned).clamp(0.0, max_scroll);
 
-    ApplePopupGeom {
+    CoveringPopupGeom {
         x,
         y,
         width,
@@ -493,7 +493,7 @@ pub struct DropDown2 {
     #[rust]
     scroll: Option<f64>,
     #[rust]
-    geom: Option<ApplePopupGeom>,
+    geom: Option<CoveringPopupGeom>,
     /// The field's rect as last seen BETWEEN draws (final, aligned). During
     /// a draw the field's own area still sits at its pre-alignment position
     /// when it follows a Fill sibling, so the popup cannot be placed from it.
@@ -623,7 +623,7 @@ impl DropDown2 {
         let pass = cx.current_pass_size();
         let font_px = 9.0;
         let content_w = estimate_label_width(&self.labels, font_px);
-        let mut geom = layout_apple_popup(
+        let mut geom = layout_covering_popup(
             pass,
             trigger,
             self.labels.len(),
@@ -1008,7 +1008,7 @@ mod tests {
 
     #[test]
     fn short_list_stays_on_screen() {
-        let g = layout_apple_popup(
+        let g = layout_covering_popup(
             dvec2(800.0, 600.0),
             trigger(40.0, 40.0, 220.0, 28.0),
             5,
@@ -1028,7 +1028,7 @@ mod tests {
 
     #[test]
     fn long_list_near_top_clamps_and_scrolls() {
-        let g = layout_apple_popup(
+        let g = layout_covering_popup(
             dvec2(800.0, 600.0),
             trigger(40.0, 30.0, 220.0, 28.0),
             46,
@@ -1056,7 +1056,7 @@ mod tests {
 
     #[test]
     fn long_list_near_bottom_clamps_above() {
-        let g = layout_apple_popup(
+        let g = layout_covering_popup(
             dvec2(800.0, 600.0),
             trigger(40.0, 560.0, 220.0, 28.0),
             46,
@@ -1075,7 +1075,7 @@ mod tests {
 
     #[test]
     fn never_taller_than_pass() {
-        let g = layout_apple_popup(
+        let g = layout_covering_popup(
             dvec2(400.0, 300.0),
             trigger(10.0, 150.0, 180.0, 24.0),
             80,

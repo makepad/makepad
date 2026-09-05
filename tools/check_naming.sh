@@ -29,6 +29,7 @@ ds_web_four=$(printf '\155\141\156\164\151\156\145')
 ds_web_five=$(printf '\163\150\141\144\143\156')
 ds_vendor_one=$(printf '\147\157\157\147\154\145')
 ds_vendor_two=$(printf '\155\151\143\162\157\163\157\146\164')
+ds_vendor_three=$(printf '\141\160\160\154\145')
 
 matches=$(mktemp "$repo_root/.naming-check.XXXXXX")
 trap 'rm -f -- "$matches"' EXIT INT TERM
@@ -65,6 +66,14 @@ fi
 if grep -rniIEw --exclude-dir='target*' \
     "$ds_desktop_one|$ds_desktop_two|$ds_web_two|$ds_web_four|$ds_web_five|$ds_vendor_one|$ds_vendor_two" $widget_scope > "$matches"; then
     echo "forbidden design-system or vendor naming found in the widget tree:" >&2
+    cat "$matches" >&2
+    exit 1
+fi
+
+# The third vendor is also a build target: `target_vendor`/`target_os`
+# lines identify a platform, not a design system, and stay allowed.
+if grep -rniIEw --exclude-dir='target*' "$ds_vendor_three" $widget_scope | grep -vE 'target_(vendor|os)' > "$matches"; then
+    echo "forbidden vendor naming found in the widget tree:" >&2
     cat "$matches" >&2
     exit 1
 fi
