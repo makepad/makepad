@@ -978,6 +978,41 @@ impl DeckChain {
         out
     }
 
+    /// Everything this chain wants doing once a device buffer: rebuild
+    /// what depends on the sample rate, and hand the musical clock to
+    /// the stages that follow it.
+    ///
+    /// One method rather than a list at each call site. There are two
+    /// chains now -- a deck's and the mix's -- and two hand-written
+    /// lists of the same calls is how one of them quietly stops getting
+    /// a new effect's preparation.
+    fn prepare_block(
+        &mut self,
+        clock: &crate::wave_analysis::DeckClock,
+        device_rate: f32,
+        buffer_frames: usize,
+    ) {
+        // Filter coefficients are rebuilt once per buffer -- the trig is
+        // the expensive part and a buffer is well under a millisecond.
+        self.eq_mut().set_sample_rate(device_rate);
+        self.eq_mut().prepare_block();
+        // The reverb's tank lines are fixed lengths in FRAMES, not
+        // musical time, so they take the same cheap rate compare.
+        self.plate_reverb_mut().set_sample_rate(device_rate);
+        // Ungridded or stopped, the counted beat -- the same default a
+        // loop or a jump takes with no grid to rule on.
+        let beat_secs = clock.beat_len().unwrap_or(60.0 / crate::decks::COUNTED_BPM);
+        // The echo wants its beat in device FRAMES; the LFOs want the
+        // whole clock, because a locked one has to know WHICH beat it is
+        // on to sit right in a cycle that spans several.
+        self.echo_mut().prepare_block(beat_secs * device_rate as f64);
+        let buffer_secs = buffer_frames as f32 / device_rate;
+        self.tremolo_mut().prepare_block(clock, buffer_secs);
+        self.autopan_mut().prepare_block(clock, buffer_secs);
+        self.flanger_mut().prepare_block(clock, buffer_secs);
+        self.phaser_mut().prepare_block(clock, buffer_secs);
+    }
+
     /// The policy the slots that have not been pinned follow.
     fn set_level_default(&mut self, mode: LevelMode) {
         self.level_default = mode;
@@ -3974,29 +4009,9 @@ impl Mixer {
         // is nominated -- deck A until something asks otherwise.
         {
             let clock = s.decks[s.master_clock_deck.min(1)].clock;
-            let buffer_secs = frames as f32 / rate as f32;
-            let beat_frames = clock.beat_len().unwrap_or(60.0 / crate::decks::COUNTED_BPM)
-                * rate as f64;
-            let chain = &mut s.master_chain;
-            chain.eq_mut().set_sample_rate(rate);
-            chain.eq_mut().prepare_block();
-            chain.plate_reverb_mut().set_sample_rate(rate);
-            chain.echo_mut().prepare_block(beat_frames);
-            chain.tremolo_mut().prepare_block(&clock, buffer_secs);
-            chain.autopan_mut().prepare_block(&clock, buffer_secs);
-            chain.flanger_mut().prepare_block(&clock, buffer_secs);
-            chain.phaser_mut().prepare_block(&clock, buffer_secs);
+            s.master_chain.prepare_block(&clock, rate, frames);
         }
         for voice in s.decks.iter_mut() {
-            // Filter coefficients are rebuilt once per buffer — the trig is
-            // the expensive part and a buffer is well under a millisecond.
-            voice.chain.eq_mut().set_sample_rate(rate);
-            voice.chain.eq_mut().prepare_block();
-            // The reverb's tank lines are fixed lengths in frames, not
-            // musical time, so they get the same once-a-buffer rebuild
-            // trigger as the EQ's crossover coefficients -- both are
-            // cheap to compare against and rare to actually rebuild.
-            voice.chain.plate_reverb_mut().set_sample_rate(rate);
             // The musical clock, once per buffer per deck, from the same
             // platter the snapshot reports. Travel is only promised when
             // the read path will actually read this buffer, and a splat
@@ -4033,29 +4048,8 @@ impl Mixer {
                 _ => pos_secs + travel_secs,
             };
             voice.clock = DeckClock::at(voice.grid.as_ref(), predicted_secs, platter, 0.0);
-            // The echo's tap, retuned from the same clock, once per
-            // buffer: a beat's length in OUTPUT seconds is already what
-            // `beat_len` reports, so device frames is a single multiply.
-            // Ungridded or stopped, it falls back to the counted beat --
-            // the same default a loop or a jump takes with no grid to
-            // rule on.
-            let beat_secs =
-                voice.clock.beat_len().unwrap_or(60.0 / crate::decks::COUNTED_BPM);
-            voice.chain.echo_mut().prepare_block(beat_secs * rate as f64);
-            // The four LFO effects retune from the same clock, in output
-            // seconds this time rather than frames: each divides its own
-            // cycles-per-beat by a beat's length to get the Hz its phase
-            // accumulator wants. Each is a no-op unless that effect is
-            // actually beat-synced.
-            // The LFOs take the whole clock, not a number: a locked one
-            // has to know WHICH beat it is on to sit at the right place
-            // in a cycle that spans several of them.
             let clock = voice.clock;
-            let buffer_secs = frames as f32 / rate as f32;
-            voice.chain.tremolo_mut().prepare_block(&clock, buffer_secs);
-            voice.chain.autopan_mut().prepare_block(&clock, buffer_secs);
-            voice.chain.flanger_mut().prepare_block(&clock, buffer_secs);
-            voice.chain.phaser_mut().prepare_block(&clock, buffer_secs);
+            voice.chain.prepare_block(&clock, rate, frames);
             // The ghost moves here, once per buffer, and not in the frame
             // loop below: its rate is latched so a buffer is one multiply,
             // and the read path has four early exits (no pcm, empty pcm,
