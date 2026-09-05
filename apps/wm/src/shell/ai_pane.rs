@@ -18,7 +18,10 @@
 //! the desk — a Fill sibling in the same row — narrows by exactly that
 //! every frame, so the tiles reflow beside the pane instead of vanishing
 //! under it; the card itself sits right-aligned in the strip, an opaque
-//! ground with a 2 px edge on its RIGHT. Open, the pane takes the pointer
+//! ground with a 2 px edge on its RIGHT. Under a glass material the card
+//! is framed like a tile instead — the desk's ring, the material's
+//! shadow, the child clipped to the same corners (`PaneFrame`) — so the
+//! pane reads as one more window on that desk. Open, the pane takes the pointer
 //! inside its card and the keyboard; closed, the strip is zero and the
 //! card sits just off the desk's left edge, still drawn and ticking (the
 //! child's 8 ms tick, the module's engine), so the assistant — started
@@ -26,9 +29,11 @@
 //! and answering before the pane ever slides in, and a turn in flight
 //! finishes behind a hidden one.
 
-use crate::desk::ease_out_quint;
+use crate::desk::{ease_out_quint, snap_child_rect, snap_to_device, tile_frame, BorderTheme, DrawTileBorder, DrawTilePanel};
 use crate::hub::ClientId;
 use crate::run_view::MpRunView;
+use crate::shell::{DeskTokens, MaterialTokens, ShellTokens};
+use crate::tile::TileHost;
 use makepad_widgets::makepad_script::script_eval;
 use makepad_widgets::makepad_script::trap::NoTrap;
 use makepad_widgets::*;
@@ -46,6 +51,8 @@ script_mod! {
         height: Fill
         draw_card +: { color: mod.wm_theme.background }
         draw_edge +: { color: mod.wm_theme.accent }
+        // The glass frame's ground: the card colour, opaque, rounded.
+        draw_ground +: { color: mod.wm_theme.background alpha: 1.0 }
         run := MpRunView{}
     }
 }
@@ -58,6 +65,33 @@ const SLIDE_OUT: f64 = 0.20;
 const PANE_WIDTH: f64 = 440.0;
 /// The most of the desk the pane may take.
 const PANE_MAX_FRACTION: f64 = 0.4;
+/// The card's frame under a glass material: the numbers a tile gets from
+/// the same desk (`desk::tile_frame`), so the pane and the tiles beside it
+/// share one ring, one radius and one shadow.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaneFrame {
+    /// The ring's thickness: the desk's border size.
+    pub inset: f64,
+    /// The ring's Sdf2d half-radius.
+    pub ring_half: f32,
+    /// The child's clip half-radius, concentric inside the ring.
+    pub child_half: f32,
+    /// Whether the material casts the shadow.
+    pub shadow: bool,
+}
+
+impl PaneFrame {
+    /// `None` under a flat material: the card keeps its docked look, an
+    /// opaque ground with the accent edge on its right.
+    pub fn for_theme(desk: &DeskTokens, material: &MaterialTokens) -> Option<PaneFrame> {
+        if !material.is_glass() {
+            return None;
+        }
+        let (ring_half, child_half, shadow) = tile_frame(desk, material);
+        Some(PaneFrame { inset: desk.border_size, ring_half, child_half, shadow })
+    }
+}
+
 /// The edge on the pane's right.
 const EDGE: f64 = 2.0;
 /// The narrowest the card ever gets.
@@ -103,6 +137,21 @@ pub struct ShellAiPane {
     draw_card: DrawColor,
     #[live]
     draw_edge: DrawColor,
+    /// Under a glass material: the tile ring and the material's shadow.
+    #[live]
+    draw_frame: DrawTileBorder,
+    /// Under a glass material: the rounded ground under the child.
+    #[live]
+    draw_ground: DrawTilePanel,
+    /// The theme's desk and material tokens, as the WM last pushed them.
+    #[rust]
+    desk: DeskTokens,
+    #[rust]
+    material: MaterialTokens,
+    /// The ring's colours: a focused tile's, since an open pane holds
+    /// the keyboard.
+    #[rust]
+    ring: BorderTheme,
     #[rust]
     open: bool,
     /// 0 = fully hidden, 1 = fully shown.
@@ -174,6 +223,53 @@ impl ShellAiPane {
                 false
             }
         }
+    }
+
+    /// A live theme switch (and the startup push): the card, its right
+    /// edge, and the tokens the glass frame is drawn from.
+    pub fn set_theme(&mut self, card: Vec4f, edge: Vec4f, tokens: &ShellTokens, borders: &BorderTheme) {
+        self.draw_card.color = card;
+        self.draw_edge.color = edge;
+        self.draw_ground.color = card;
+        self.desk = tokens.desk;
+        self.material = tokens.material;
+        self.ring = *borders;
+    }
+
+    /// The card as a tile: the rounded ground, the ring with the
+    /// material's shadow, and the child clipped concentrically inside —
+    /// snapped to device pixels the way a tile is, so the ring is whole
+    /// pixels on every side. Returns the child's rect.
+    fn draw_framed_card(&mut self, cx: &mut Cx2d, r: Rect, frame: PaneFrame) -> Rect {
+        let dpi = cx.current_dpi_factor().max(1.0);
+        let inset = frame.inset;
+        let r = snap_to_device(r, dpi, inset);
+        let inner = snap_child_rect(
+            Rect {
+                pos: r.pos + dvec2(inset, inset),
+                size: dvec2((r.size.x - inset * 2.0).max(1.0), (r.size.y - inset * 2.0).max(1.0)),
+            },
+            dpi,
+        );
+        self.draw_ground.radius = frame.child_half;
+        self.draw_ground.draw_abs(cx, inner);
+        let m = self.material;
+        self.draw_frame.color = self.ring.active;
+        self.draw_frame.color_end = self.ring.active_end;
+        self.draw_frame.angle = self.ring.angle;
+        self.draw_frame.border_size = inset as f32;
+        self.draw_frame.corner_radius = frame.ring_half;
+        self.draw_frame.shadow_color = Vec4f { w: if frame.shadow { m.shadow_alpha } else { 0.0 }, ..m.shadow_color };
+        self.draw_frame.shadow_radius = if frame.shadow { m.shadow_radius as f32 } else { 0.0 };
+        self.draw_frame.shadow_offset_y = if frame.shadow { m.shadow_offset_y as f32 } else { 0.0 };
+        self.draw_frame.draw_abs(cx, r);
+        self.set_child_radius(cx, frame.child_half);
+        inner
+    }
+
+    /// The child's clip radius: the frame's under glass, none when flat.
+    fn set_child_radius(&mut self, cx: &mut Cx, radius: f32) {
+        self.with_run_view(cx, |_, view| view.set_corner_radius(radius));
     }
 
     pub fn client(&self) -> Option<ClientId> {
@@ -339,12 +435,18 @@ impl Widget for ShellAiPane {
         // assistant already running, not a "starting…" wash.
         cx.begin_turtle(walk, Layout::default());
         let r = self.card_rect();
-        self.draw_card.draw_abs(cx, r);
-        self.draw_edge.draw_abs(
-            cx,
-            Rect { pos: dvec2(r.pos.x + r.size.x - EDGE, r.pos.y), size: dvec2(EDGE, r.size.y) },
-        );
-        let inner = Rect { pos: r.pos, size: dvec2(r.size.x - EDGE, r.size.y) };
+        let inner = match PaneFrame::for_theme(&self.desk, &self.material) {
+            Some(frame) => self.draw_framed_card(cx, r, frame),
+            None => {
+                self.draw_card.draw_abs(cx, r);
+                self.draw_edge.draw_abs(
+                    cx,
+                    Rect { pos: dvec2(r.pos.x + r.size.x - EDGE, r.pos.y), size: dvec2(EDGE, r.size.y) },
+                );
+                self.set_child_radius(cx, 0.0);
+                Rect { pos: r.pos, size: dvec2(r.size.x - EDGE, r.size.y) }
+            }
+        };
         match self.overlay.clone() {
             Some(overlay) => overlay.draw_walk_all(cx, scope, Walk::abs_rect(inner)),
             None => {
@@ -377,6 +479,27 @@ mod tests {
         assert_eq!(PaneStrip::strip(1.0, 440.0, 10.0), 450.0);
         let mid = PaneStrip::strip(0.5, 440.0, 10.0);
         assert!(mid > 0.0 && mid < 450.0, "{mid}");
+    }
+
+    #[test]
+    fn the_pane_frames_like_a_tile_only_under_glass() {
+        let desk = DeskTokens::default();
+        let flat = MaterialTokens::default();
+        assert_eq!(PaneFrame::for_theme(&desk, &flat), None, "flat keeps the docked card and its edge");
+        let glass = MaterialTokens { glass: 1.0, ..MaterialTokens::default() };
+        let desk = DeskTokens { corner_radius: 12.0, border_size: 1.5, ..DeskTokens::default() };
+        assert_eq!(
+            PaneFrame::for_theme(&desk, &glass),
+            Some(PaneFrame { inset: 1.5, ring_half: 6.0, child_half: 5.25, shadow: true }),
+            "the same numbers a tile gets under this desk"
+        );
+        // A glass material on a square desk: a square ring, no shadow —
+        // the tile rule, so the pane and the tiles never disagree.
+        let square = DeskTokens::default();
+        assert_eq!(
+            PaneFrame::for_theme(&square, &glass),
+            Some(PaneFrame { inset: 2.0, ring_half: 0.0, child_half: 0.0, shadow: false })
+        );
     }
 
     #[test]

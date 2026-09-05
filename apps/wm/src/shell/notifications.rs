@@ -201,6 +201,12 @@ impl ShellNotifications {
         self.redraw(cx);
     }
 
+    /// A live theme switch: new tokens, redraw.
+    pub fn set_tokens(&mut self, cx: &mut Cx, tokens: ShellTokens) {
+        self.tokens = tokens;
+        self.redraw(cx);
+    }
+
     pub fn len(&self) -> usize {
         self.live.len()
     }
@@ -242,7 +248,16 @@ impl ShellNotifications {
         (text_h.max(ICON_SLOT) + v * 2.0 + tok.notifications.surface.border_width * 2.0).ceil()
     }
 
+    /// Draw the whole surface into `screen`. Under glass it draws in its
+    /// own overlay list, claimed every frame, open or not.
     pub fn draw_surface(&mut self, cx: &mut Cx2d, screen: Rect) {
+        let tokens = self.tokens;
+        self.d.begin_surface(cx, &tokens);
+        self.draw_surface_inner(cx, screen);
+        self.d.end_surface(cx);
+    }
+
+    fn draw_surface_inner(&mut self, cx: &mut Cx2d, screen: Rect) {
         self.card_rects.clear();
         self.screen = screen;
         if self.live.is_empty() {

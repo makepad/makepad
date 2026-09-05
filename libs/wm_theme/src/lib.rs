@@ -1,6 +1,12 @@
 //! The Makepad theme bridge: retint the makepad widgets theme from the WM's
-//! theme.splash (see Cargo.toml). Theming LIVES in splash — this crate only
-//! ferries the WM's palette into `mod.theme` so stock widgets follow it.
+//! theme.splash (see Cargo.toml): base black/white, app bg/fg, accent,
+//! selection, text, and the material's corner radius. Theming LIVES in
+//! splash — this crate only ferries the WM's palette into `mod.theme`. The
+//! stock widget types captured `theme.*` when the widgets module was
+//! defined, before this bridge runs, so these assignments reach an app's own
+//! DSL (evaluated after `apply`) and anything reading `mod.theme` later —
+//! not the stock widget prototypes themselves (Window's clear color is
+//! patched directly for that reason).
 
 use makepad_widgets::*;
 use std::collections::HashMap;
@@ -10,6 +16,8 @@ use std::collections::HashMap;
 pub struct Palette {
     pub colors: HashMap<String, String>,
     pub light_mode: bool,
+    /// material.corner_radius, visual px; 0 for every flat theme.
+    pub corner_radius: f64,
 }
 
 impl Palette {
@@ -42,15 +50,33 @@ pub fn scan(source: &str) -> Palette {
             continue;
         };
         let key = key.trim();
-        let value = value.trim().trim_end_matches(',');
+        // As apps/wm's scan_values: a trailing `// comment` is dropped, then
+        // the trailing comma.
+        let value = value.split("//").next().unwrap_or("").trim().trim_end_matches(',').trim();
         if value == "{" {
             if key != "mod.wm_theme =" && !key.starts_with("mod.") {
                 prefix.push(key.to_string());
             }
             continue;
         }
+        if key == "material" && prefix.is_empty() && value.starts_with('{') && value.ends_with('}') {
+            // The one-line block form: `material: { glass: 1.0, corner_radius: 12.0 }`.
+            let inner = &value[1..value.len() - 1];
+            for pair in inner.split(',') {
+                if let Some((k, v)) = pair.split_once(':') {
+                    if k.trim() == "corner_radius" {
+                        palette.corner_radius = radius(v);
+                    }
+                }
+            }
+            continue;
+        }
         if key == "light_mode" {
             palette.light_mode = value == "true";
+            continue;
+        }
+        if key == "corner_radius" && prefix.len() == 1 && prefix[0] == "material" {
+            palette.corner_radius = radius(value);
             continue;
         }
         if value.starts_with('#') {
@@ -63,6 +89,11 @@ pub fn scan(source: &str) -> Palette {
         }
     }
     palette
+}
+
+/// A material radius value: finite and non-negative, else 0.
+fn radius(value: &str) -> f64 {
+    value.trim().parse::<f64>().ok().filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(0.0)
 }
 
 /// The palette wm exported for this process, if any.
@@ -90,6 +121,16 @@ pub fn apply(vm: &mut ScriptVm) {
     let accent = p.hex("accent", "#7aa2f7");
     let selection = p.hex("selection", "#292e42");
     let muted = p.hex("muted", "#414868");
+    // The widgets theme's radius is the Sdf2d.box argument, which renders at
+    // twice its value (stock 2.5 → 5px corners); the material's radius is
+    // visual px, so halve it.
+    let radius = p.corner_radius * 0.5;
+    let corner_radius = format!("{:.1}", radius);
+    // The stock theme derives these two from corner_radius at definition
+    // time; keep mod.theme self-consistent for whatever reads it after this
+    // runs.
+    let container_corner_radius = format!("{:.1}", radius * 2.0);
+    let textselection_corner_radius = format!("{:.1}", radius * 0.5);
 
     // The widgets theme derives its whole ladder from color_b/color_w and
     // the app bg/fg; overriding those (plus the handful of named roles apps
@@ -178,7 +219,9 @@ pub fn apply(vm: &mut ScriptVm) {
          mod.theme.color_ctrl_active = {accent}\n\
          mod.theme.color_ctrl_selected = {accent}\n\
          mod.theme.color_app_caption_bar = {bg_dark}\n\
-         mod.theme.corner_radius = 0.0\n\
+         mod.theme.corner_radius = {corner_radius}\n\
+         mod.theme.container_corner_radius = {container_corner_radius}\n\
+         mod.theme.textselection_corner_radius = {textselection_corner_radius}\n\
          true\n"
     );
     let script_mod_id = ScriptMod {
@@ -201,6 +244,35 @@ pub fn apply(vm: &mut ScriptVm) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use makepad_widgets::makepad_script::{ScriptValue, ScriptVmBase, ScriptVmHost};
+
+    /// A bare VM, built the way apps/wm's theme tests build one.
+    fn test_vm() -> ScriptVm<'static> {
+        let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
+        ScriptVm {
+            host,
+            bx: Box::new(ScriptVmBase::new()),
+        }
+    }
+
+    /// Evaluate `code` in `vm` as the module block `name`.
+    fn eval(vm: &mut ScriptVm, name: &str, code: &str) -> ScriptValue {
+        vm.eval(ScriptMod {
+            cargo_manifest_path: String::new(),
+            module_path: name.to_string(),
+            file: format!("{name}.splash"),
+            line: 0,
+            column: 0,
+            code: code.to_string(),
+            values: vec![],
+        })
+    }
+
+    /// The value of `expr` in `vm`: a probe block whose result expression
+    /// it is.
+    fn read(vm: &mut ScriptVm, expr: &str) -> ScriptValue {
+        eval(vm, "probe", &format!("({expr})\n"))
+    }
 
     #[test]
     fn scans_nested_theme() {
@@ -212,5 +284,50 @@ mod tests {
         assert_eq!(p.get("term.cursor"), Some("#c0caf5"));
         assert!(!p.light_mode);
         assert_eq!(p.hex("missing", "#000000"), "#000000");
+    }
+
+    #[test]
+    fn scans_the_material_radius() {
+        let src = "mod.wm_theme = {\n    accent: #7aa2f7\n    material: {\n        glass: 1.0\n        corner_radius: 12.0\n    }\n}\n";
+        let p = scan(src);
+        assert_eq!(p.corner_radius, 12.0);
+        assert_eq!(p.get("accent"), Some("#7aa2f7"));
+        assert_eq!(scan("mod.wm_theme = {\n    accent: #7aa2f7\n}\n").corner_radius, 0.0);
+        // The one-line block form, a trailing comment, and the value filter.
+        assert_eq!(scan("mod.wm_theme = {\n    material: { glass: 1.0, corner_radius: 12 }\n}\n").corner_radius, 12.0);
+        assert_eq!(scan("mod.wm_theme = {\n    material: {\n        corner_radius: 8.0, // px\n    }\n}\n").corner_radius, 8.0);
+        for bad in ["-1", "inf", "abc"] {
+            let src = format!("mod.wm_theme = {{\n    material: {{\n        corner_radius: {bad}\n    }}\n}}\n");
+            assert_eq!(scan(&src).corner_radius, 0.0, "{bad}");
+        }
+        // Not the desk's, and not the shell's.
+        let other = "mod.wm_theme = {\n    desk: {\n        corner_radius: 12.0\n    }\n}\nmod.wm_theme.shell = {\n    corner_radius: 9.0\n}\n";
+        assert_eq!(scan(other).corner_radius, 0.0);
+    }
+
+    #[test]
+    fn apply_retints_the_radius_from_the_theme_file() {
+        let mut vm = test_vm();
+        // The stock theme and the one widget prototype `apply` patches.
+        eval(
+            &mut vm,
+            "stock",
+            "mod.theme = {\n    corner_radius: 2.5\n}\nmod.widgets = {\n    Window: {\n        pass: {}\n    }\n}\ntrue\n",
+        );
+        assert_eq!(read(&mut vm, "mod.theme.corner_radius").as_f64(), Some(2.5));
+        let path = std::env::temp_dir().join(format!("makepad_wm_theme_{}.splash", std::process::id()));
+        std::fs::write(
+            &path,
+            "mod.wm_theme = {\n    accent: #7aa2f7\n    material: {\n        corner_radius: 12.0\n    }\n}\n",
+        )
+        .unwrap();
+        std::env::set_var("MAKEPAD_WM_THEME_SPLASH", &path);
+        apply(&mut vm);
+        std::env::remove_var("MAKEPAD_WM_THEME_SPLASH");
+        let _ = std::fs::remove_file(&path);
+        // 12 visual px is a 6.0 Sdf2d radius; the derived keys follow it.
+        assert_eq!(read(&mut vm, "mod.theme.corner_radius").as_f64(), Some(6.0));
+        assert_eq!(read(&mut vm, "mod.theme.container_corner_radius").as_f64(), Some(12.0));
+        assert_eq!(read(&mut vm, "mod.theme.textselection_corner_radius").as_f64(), Some(3.0));
     }
 }

@@ -48,6 +48,9 @@ script_mod! {
         osd +: {}
         notes +: {}
         panel +: {}
+        panel_audio +: {}
+        panel_power +: {}
+        panel_monitor +: {}
         bar_panel +: {}
     }
 }
@@ -138,6 +141,14 @@ pub struct ShellGallery {
     notes: ShellNotifications,
     #[live]
     panel: ShellPanel,
+    // One fixture per draw: a surface's kit owns one overlay list, so a
+    // surface may be hoisted once per frame. The panels row's pictures.
+    #[live]
+    panel_audio: ShellPanel,
+    #[live]
+    panel_power: ShellPanel,
+    #[live]
+    panel_monitor: ShellPanel,
     /// A second flyout instance: the one the BAR opens, floating over the
     /// whole gallery like it does over the desktop.
     #[live]
@@ -172,6 +183,12 @@ impl ShellGallery {
         self.keys.open_at(cx, "learn.keybindings", MenuSkin::Menu);
         self.panel.data = PanelData::fixture();
         self.panel.open = Some(PanelKind::Clock);
+        self.panel_audio.data = PanelData::fixture();
+        self.panel_audio.open = Some(PanelKind::Audio);
+        self.panel_power.data = PanelData::fixture();
+        self.panel_power.open = Some(PanelKind::Power);
+        self.panel_monitor.data = PanelData::fixture();
+        self.panel_monitor.open = Some(PanelKind::Monitor);
         self.bar_panel.data = PanelData::fixture();
         self.osd.show = Some(OsdShow::volume(62, false));
         // The gallery's OSD never times out — it is a picture of one.
@@ -187,8 +204,16 @@ impl ShellGallery {
     /// The demo box every section draws its component in.
     fn demo_box(&mut self, cx: &mut Cx2d, r: Rect) {
         let fg = self.tokens.popups.text;
-        self.d
-            .bordered(cx, r, alpha(fg, 0.04), alpha(fg, 0.10), alpha(fg, 0.10), 0.0, 1.0);
+        self.d.bordered(
+            cx,
+            r,
+            alpha(fg, 0.04),
+            alpha(fg, 0.10),
+            alpha(fg, 0.10),
+            0.0,
+            1.0,
+            0.0,
+        );
     }
 
     fn draw_typography(&mut self, cx: &mut Cx2d, r: Rect) {
@@ -351,7 +376,9 @@ impl ShellGallery {
 
     fn draw_panels_row(&mut self, cx: &mut Cx2d, r: Rect) {
         // Two rows of two, each panel anchored to a fake bar module above
-        // it so it lands where it would under the real bar.
+        // it so it lands where it would under the real bar. Audio, Power
+        // and Monitor are pictures, each on its own fixture; the clock is
+        // `panel`, the live one.
         let rows: [[PanelKind; 2]; 2] = [
             [PanelKind::Clock, PanelKind::Audio],
             [PanelKind::Power, PanelKind::Monitor],
@@ -364,16 +391,23 @@ impl ShellGallery {
             for kind in kinds {
                 let w = kind.content_width() + self.tokens.spacing.popup_padding * 2.0 + 20.0;
                 let slot = rect(x, y, w, row_h);
-                if *kind == PanelKind::Clock {
-                    clock_slot = slot;
+                let fixture = match kind {
+                    PanelKind::Audio => Some(&mut self.panel_audio),
+                    PanelKind::Power => Some(&mut self.panel_power),
+                    PanelKind::Monitor => Some(&mut self.panel_monitor),
+                    _ => {
+                        clock_slot = slot;
+                        None
+                    }
+                };
+                if let Some(panel) = fixture {
+                    panel.anchor = rect(slot.pos.x + w * 0.5 - 13.0, slot.pos.y, 27.0, 0.0);
+                    panel.draw_surface(cx, slot);
                 }
-                self.panel.open = Some(*kind);
-                self.panel.anchor = rect(slot.pos.x + w * 0.5 - 13.0, slot.pos.y, 27.0, 0.0);
-                self.panel.draw_surface(cx, slot);
                 x += w + 8.0;
             }
         }
-        // The clock is the live one: draw it last so its hit rects win.
+        // The clock is the live one: draw it last so it sits on top.
         self.panel.open = Some(PanelKind::Clock);
         self.panel.anchor = rect(
             clock_slot.pos.x + clock_slot.size.x * 0.5 - 13.0,
@@ -393,8 +427,14 @@ impl Widget for ShellGallery {
         cx.begin_turtle(walk, self.layout);
         let r = cx.turtle().rect();
         let tok = self.tokens;
+        // The gallery is not a surface (never hoisted), but its own controls
+        // section should show the material's control radius.
+        self.d.material = tok.material;
         let fg = tok.popups.text;
-        self.draw_bg.color = alpha(tok.popups.background, 1.0);
+        // Opaque for the flat look; under glass a scrim, so the surfaces
+        // have the wallpaper to refract.
+        let bg_alpha = if tok.material.is_glass() { 0.35 } else { 1.0 };
+        self.draw_bg.color = alpha(tok.popups.background, bg_alpha);
         self.draw_bg.draw_abs(cx, r);
 
         let pad = tok.spacing.panel_padding;
@@ -598,6 +638,7 @@ impl ShellGallery {
                 ShellPanelAction::SetVolume(v) => {
                     self.bar_panel.data.volume = Some(v);
                     self.panel.data.volume = Some(v);
+                    self.panel_audio.data.volume = Some(v);
                     self.bar.data.volume = Some(v);
                     self.demo_volume = v;
                     self.osd.present(cx, OsdShow::volume(v, self.panel.data.muted));
@@ -606,6 +647,7 @@ impl ShellGallery {
                 ShellPanelAction::ToggleMute => {
                     self.bar_panel.data.muted = !self.panel.data.muted;
                     self.panel.data.muted = !self.panel.data.muted;
+                    self.panel_audio.data.muted = self.panel.data.muted;
                     self.bar.data.muted = self.panel.data.muted;
                     self.demo_toggle = !self.panel.data.muted;
                     self.redraw(cx);
@@ -613,11 +655,14 @@ impl ShellGallery {
                 ShellPanelAction::SetBrightness(v) => {
                     self.bar_panel.data.brightness = Some(v);
                     self.panel.data.brightness = Some(v);
+                    self.panel_monitor.data.brightness = Some(v);
                     self.osd.present(cx, OsdShow::brightness(v));
                     self.redraw(cx);
                 }
                 ShellPanelAction::SetTextSize(px) => {
                     self.panel.data.text_size = px;
+                    self.panel_monitor.data.text_size = px;
+                    self.bar_panel.data.text_size = px;
                     self.redraw(cx);
                 }
                 ShellPanelAction::Close => {
@@ -640,6 +685,23 @@ impl ShellGallery {
                 ShellMenuAction::None => {}
             }
         }
+    }
+
+    /// A live theme switch reaches every fixture surface.
+    pub fn set_tokens(&mut self, cx: &mut Cx, tokens: ShellTokens) {
+        self.tokens = tokens;
+        self.bar.set_tokens(cx, tokens);
+        self.menu.set_tokens(cx, tokens);
+        self.launcher.set_tokens(cx, tokens);
+        self.keys.set_tokens(cx, tokens);
+        self.osd.set_tokens(cx, tokens);
+        self.notes.set_tokens(cx, tokens);
+        self.panel.set_tokens(cx, tokens);
+        self.panel_audio.set_tokens(cx, tokens);
+        self.panel_power.set_tokens(cx, tokens);
+        self.panel_monitor.set_tokens(cx, tokens);
+        self.bar_panel.set_tokens(cx, tokens);
+        self.redraw(cx);
     }
 
     /// `--gallery` present in the command line.
@@ -709,6 +771,15 @@ impl ShellGalleryHost {
         cx.widget_tree_insert_child(self.uid, live_id!(shell_gallery), gallery.clone());
         self.gallery = Some(gallery);
         cx.redraw_all();
+    }
+
+    /// Forwarded to the gallery when one was built.
+    pub fn set_tokens(&mut self, cx: &mut Cx, tokens: ShellTokens) {
+        if let Some(gallery) = self.gallery.clone() {
+            if let Some(mut g) = gallery.borrow_mut::<ShellGallery>() {
+                g.set_tokens(cx, tokens);
+            }
+        }
     }
 }
 

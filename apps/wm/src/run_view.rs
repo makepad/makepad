@@ -60,27 +60,43 @@ script_mod! {
             // shrinking reads as a diagonal slide instead of a soft pop.
             // Premultiplied output, so one multiply fades everything.
             fade: instance(1.0)
+            radius: instance(0.0)
             pixel: fn() {
                 let cpos = self.crop_origin + self.pos * self.crop_span
                 let uv = vec2(cpos.x, cpos.y + self.y_flip - 2.0 * self.y_flip * cpos.y)
+                var out = vec4(0.0, 0.0, 0.0, 0.0)
                 if self.packed_header < 0.5 {
-                    return self.tex.sample(uv * self.tex_scale) * self.fade
+                    out = self.tex.sample(uv * self.tex_scale) * self.fade
+                } else {
+                    let tp1 = self.tex.sample(vec2(0.5 / self.tex_size.x, 0.5 / self.tex_size.y))
+                    let tp2 = self.tex.sample(vec2(1.5 / self.tex_size.x, 0.5 / self.tex_size.y))
+                    let tp = vec2(tp1.r * 65280.0 + tp1.b * 255.0, tp2.r * 65280.0 + tp2.b * 255.0)
+                    if tp.x <= 0.0 || tp.y <= 0.0 {
+                        return #0000
+                    }
+                    // The mapping uses the ORIGINAL rect size (quad / span),
+                    // so texels remain screen-fixed while the quad shrinks.
+                    let counter = ((self.rect_size / self.crop_span) * self.host_dpi_factor) / tp
+                    let tex_scale = tp / self.tex_size
+                    let fb = self.tex.sample(uv * tex_scale * counter)
+                    if fb.r == 1.0 && fb.g == 0.0 && fb.b == 1.0 {
+                        out = #2 * self.fade
+                    } else {
+                        out = fb * self.fade
+                    }
                 }
-                let tp1 = self.tex.sample(vec2(0.5 / self.tex_size.x, 0.5 / self.tex_size.y))
-                let tp2 = self.tex.sample(vec2(1.5 / self.tex_size.x, 0.5 / self.tex_size.y))
-                let tp = vec2(tp1.r * 65280.0 + tp1.b * 255.0, tp2.r * 65280.0 + tp2.b * 255.0)
-                if tp.x <= 0.0 || tp.y <= 0.0 {
-                    return #0000
+                if self.radius < 0.5 {
+                    return out
                 }
-                // The mapping uses the ORIGINAL rect size (quad / span),
-                // so texels remain screen-fixed while the quad shrinks.
-                let counter = ((self.rect_size / self.crop_span) * self.host_dpi_factor) / tp
-                let tex_scale = tp / self.tex_size
-                let fb = self.tex.sample(uv * tex_scale * counter)
-                if fb.r == 1.0 && fb.g == 0.0 && fb.b == 1.0 {
-                    return #2 * self.fade
-                }
-                return fb * self.fade
+                // A rounded tile: the material asked for it. Premultiplied,
+                // so one coverage multiply clips the whole frame. The ramp
+                // is one DEVICE pixel wide (the SDF is in logical px), or
+                // the outermost device row would sit three-quarters
+                // covered at dpi 2 — a hairline of wallpaper all round.
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, self.radius)
+                let cov = clamp(0.5 - sdf.shape * self.host_dpi_factor, 0.0, 1.0)
+                return out * cov
             }
         }
         no_fb_view: RectView {
@@ -201,6 +217,9 @@ pub struct MpRunView {
     /// The popin fade (1.0 = solid); the desk drives it during open/close.
     #[rust(1.0f32)]
     fade: f32,
+    /// The corner clip (Sdf2d half-radius) the desk sets from the theme.
+    #[rust]
+    corner_radius: f32,
     /// When the FIRST frame landed: the content fades in quickly from the
     /// "starting…" panel instead of popping on abruptly.
     #[rust]
@@ -779,6 +798,9 @@ impl Widget for MpRunView {
         // composited straight over the wallpaper so translucent children
         // (Omarchy's 0.985/0.96 window opacity) show it through.
         if self.present_ok_count == 0 {
+            self.draw_bg
+                .draw_vars
+                .set_uniform(cx, live_id!(radius), &[self.corner_radius]);
             self.draw_bg.draw_abs(cx, rect);
         }
 
@@ -843,6 +865,9 @@ impl Widget for MpRunView {
         self.draw_app
             .draw_vars
             .set_dyn_instance(cx, id!(fade), &[self.fade * first_fade]);
+        self.draw_app
+            .draw_vars
+            .set_dyn_instance(cx, id!(radius), &[self.corner_radius]);
         self.draw_app.draw_abs(cx, rect);
 
         if waiting_for_framebuffer {
@@ -1054,5 +1079,13 @@ impl crate::tile::TileHost for MpRunView {
 
     fn set_fade(&mut self, fade: f32) {
         MpRunView::set_fade(self, fade)
+    }
+
+    fn set_corner_radius(&mut self, radius: f32) {
+        self.corner_radius = radius;
+    }
+
+    fn set_ground(&mut self, _color: Vec4f) {
+        // A presented frame composites straight over the wallpaper.
     }
 }

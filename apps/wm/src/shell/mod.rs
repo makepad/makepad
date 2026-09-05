@@ -28,11 +28,14 @@ pub mod menu;
 pub mod notifications;
 pub mod osd;
 pub mod panels;
+pub mod tokens;
 pub mod ui;
 
 /// Register every shell widget. Called from `AppMain::script_mod` AFTER
-/// the theme has been evaluated (the DSL below reads `mod.wm_theme`).
+/// the theme has been evaluated (the DSL below reads `mod.wm_theme`);
+/// `tokens::script_mod` is also re-run on a live switch.
 pub fn script_mod(vm: &mut ScriptVm) {
+    tokens::script_mod(vm);
     ui::script_mod(vm);
     ai_pane::script_mod(vm);
     bar::script_mod(vm);
@@ -404,7 +407,127 @@ impl Default for FontTokens {
     }
 }
 
-/// The whole `mod.wm_theme.shell` object.
+/// `mod.wm_theme.material` — the MATERIAL every shell surface and tile
+/// frame paints with. `glass` 0 is the flat omarchy look (what every
+/// imported theme gets); 1 is Liquid Glass, refracting the window's blur
+/// pyramid (widgets/src/gauss_view.rs). Radii are visual pixels; shaders
+/// that go through `Sdf2d.box` are handed half of them.
+#[derive(Clone, Copy, Debug, Script, ScriptHook)]
+pub struct MaterialTokens {
+    #[live(0.0)]
+    pub glass: f64,
+    /// Card and bar-popup corner radius.
+    #[live(0.0)]
+    pub corner_radius: f64,
+    /// Buttons, toggles, row highlights.
+    #[live(0.0)]
+    pub control_radius: f64,
+    #[live(5.2)]
+    pub blur_level: f64,
+    #[live(0.94)]
+    pub lensing_effect: f64,
+    #[live(28.0)]
+    pub lensing_strength: f64,
+    #[live(20.0)]
+    pub lensing_width: f64,
+    #[live(4.4)]
+    pub diffraction_strength: f64,
+    #[live]
+    pub tint_color: Vec4f,
+    #[live(0.40)]
+    pub tint_alpha: f32,
+    #[live]
+    pub border_color: Vec4f,
+    #[live(0.40)]
+    pub border_alpha: f32,
+    #[live(1.0)]
+    pub border_width: f64,
+    #[live(0.14)]
+    pub specular_strength: f32,
+    #[live(0.004)]
+    pub noise_strength: f32,
+    #[live]
+    pub shadow_color: Vec4f,
+    #[live(0.44)]
+    pub shadow_alpha: f32,
+    #[live(13.0)]
+    pub shadow_radius: f64,
+    #[live(5.0)]
+    pub shadow_offset_y: f64,
+    /// What a glass surface shows on the one frame before the pyramid
+    /// exists, and with MAKEPAD_NO_GAUSS=1.
+    #[live]
+    pub fallback_color: Vec4f,
+}
+
+impl MaterialTokens {
+    /// A theme writes 0.0 or 1.0; anything from 0.5 up reads as glass.
+    pub fn is_glass(&self) -> bool {
+        self.glass >= 0.5
+    }
+}
+
+impl Default for MaterialTokens {
+    fn default() -> Self {
+        Self {
+            glass: 0.0,
+            corner_radius: 0.0,
+            control_radius: 0.0,
+            blur_level: 5.2,
+            lensing_effect: 0.94,
+            lensing_strength: 28.0,
+            lensing_width: 20.0,
+            diffraction_strength: 4.4,
+            tint_color: rgb(0x00, 0x00, 0x00),
+            tint_alpha: 0.40,
+            border_color: rgb(0xff, 0xff, 0xff),
+            border_alpha: 0.40,
+            border_width: 1.0,
+            specular_strength: 0.14,
+            noise_strength: 0.004,
+            shadow_color: rgb(0x00, 0x00, 0x00),
+            shadow_alpha: 0.44,
+            shadow_radius: 13.0,
+            shadow_offset_y: 5.0,
+            fallback_color: rgb(0x33, 0x41, 0x56),
+        }
+    }
+}
+
+/// `mod.wm_theme.desk` — the tile geometry. Defaults are omarchy's
+/// `looknfeel.lua` numbers, the same values `desk.rs` keeps as constants
+/// for the flat look's tests. `corner_radius` is visual pixels.
+#[derive(Clone, Copy, Debug, Script, ScriptHook)]
+pub struct DeskTokens {
+    /// hyprland `general:gaps_in`, on each side of a window: tiles sit
+    /// twice this apart.
+    #[live(5.0)]
+    pub gaps_in: f64,
+    /// hyprland `general:gaps_out`, desk edge to the outermost tile
+    /// (`spacing.gaps_out` is half of this).
+    #[live(10.0)]
+    pub gaps_out: f64,
+    /// The ring's thickness, drawn just inside the window box.
+    #[live(2.0)]
+    pub border_size: f64,
+    /// Visual pixels; 0 is the omarchy square.
+    #[live(0.0)]
+    pub corner_radius: f64,
+}
+
+impl Default for DeskTokens {
+    fn default() -> Self {
+        Self {
+            gaps_in: 5.0,
+            gaps_out: 10.0,
+            border_size: 2.0,
+            corner_radius: 0.0,
+        }
+    }
+}
+
+/// The whole `mod.wm_theme.shell` object, plus the `material` and `desk`
+/// blocks beside it.
 #[derive(Clone, Copy, Debug, Script, ScriptHook)]
 pub struct ShellTokens {
     #[live]
@@ -429,6 +552,12 @@ pub struct ShellTokens {
     /// square corners. Carried so a theme CAN say otherwise one day.
     #[live(0.0)]
     pub corner_radius: f64,
+    /// `mod.wm_theme.material` — flat or glass, and the glass tunables.
+    #[live]
+    pub material: MaterialTokens,
+    /// `mod.wm_theme.desk` — gaps, tile border, tile corner radius.
+    #[live]
+    pub desk: DeskTokens,
 }
 
 impl Default for ShellTokens {
@@ -450,6 +579,8 @@ impl Default for ShellTokens {
             spacing: SpacingTokens::default(),
             font: FontTokens::default(),
             corner_radius: 0.0,
+            material: MaterialTokens::default(),
+            desk: DeskTokens::default(),
         }
     }
 }
@@ -623,5 +754,32 @@ mod tests {
         assert_eq!(c.border_width(CtrlState::Normal), 1.0);
         // Selected drops its border (selected-border-width = 0).
         assert_eq!(c.border_width(CtrlState::Selected), 0.0);
+    }
+
+    #[test]
+    fn material_and_desk_default_to_the_flat_look() {
+        let t = ShellTokens::default();
+        assert!(!t.material.is_glass());
+        assert_eq!(t.material.corner_radius, 0.0);
+        assert_eq!(t.material.control_radius, 0.0);
+        assert_eq!(t.desk.gaps_in, 5.0);
+        assert_eq!(t.desk.gaps_out, 10.0);
+        assert_eq!(t.desk.border_size, 2.0);
+        assert_eq!(t.desk.corner_radius, 0.0);
+        let glass = MaterialTokens {
+            glass: 1.0,
+            ..MaterialTokens::default()
+        };
+        assert!(glass.is_glass());
+        let edge = MaterialTokens {
+            glass: 0.5,
+            ..MaterialTokens::default()
+        };
+        assert!(edge.is_glass());
+        let under = MaterialTokens {
+            glass: 0.49,
+            ..MaterialTokens::default()
+        };
+        assert!(!under.is_glass());
     }
 }

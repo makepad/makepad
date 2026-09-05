@@ -44,9 +44,12 @@ use makepad_wm_api::{WmEvent, WmRequest};
 use preview::PreviewCache;
 use run_view::{MpRunView, MpRunViewAction};
 use makepad_widgets::makepad_micro_serde::*;
-use shell::bar::{BarData, BarModule, SampledStatus, ShellBarAction};
+use shell::bar::{BarData, BarModule, SampledStatus, ShellBar, ShellBarAction};
 use shell::menu::{MenuSkin, ShellMenu, ShellMenuAction};
-use shell::panels::ShellPanelAction;
+use shell::notifications::ShellNotifications;
+use shell::osd::ShellOsd;
+use shell::panels::{ShellPanel, ShellPanelAction};
+use shell::ShellTokens;
 use ai_bus::{AiBus, Route};
 use apps::{AppRegistry, Hosting};
 use makepad_ai_services::wire::{ServiceCall, ServiceDown, ToolResult};
@@ -2338,23 +2341,117 @@ impl App {
     // Theme / background
     // --------------------------------------------------------------
 
+    /// Push the active theme into every live piece of chrome: the shell
+    /// surfaces' tokens, the desk's geometry, material and palette, and
+    /// the colours the DSL baked in at evaluation time. Startup and every
+    /// live switch end here.
+    fn apply_theme_to_chrome(
+        &mut self,
+        cx: &mut Cx,
+        tokens: ShellTokens,
+        palette: theme::PaletteColors,
+    ) {
+        {
+            let state = self.state_mut();
+            state.desk = tokens.desk;
+            state.material = tokens.material;
+            // gaps_in sits on each side of a window, so two tiles are
+            // twice it apart.
+            state.gap = tokens.desk.gaps_in * 2.0;
+            state.gaps_out = tokens.desk.gaps_out;
+            state.palette = palette;
+        }
+        let borders = self.state_mut().borders;
+        if let Some(mut w) = self.ui.widget(cx, ids!(shell_bar)).borrow_mut::<ShellBar>() {
+            w.set_tokens(cx, tokens);
+        }
+        if let Some(mut w) = self.ui.widget(cx, ids!(shell_menu)).borrow_mut::<ShellMenu>() {
+            w.set_tokens(cx, tokens);
+        }
+        if let Some(mut w) = self.ui.widget(cx, ids!(shell_panel)).borrow_mut::<ShellPanel>() {
+            w.set_tokens(cx, tokens);
+        }
+        if let Some(mut w) = self.ui.widget(cx, ids!(shell_notes)).borrow_mut::<ShellNotifications>() {
+            w.set_tokens(cx, tokens);
+        }
+        if let Some(mut w) = self.ui.widget(cx, ids!(shell_osd)).borrow_mut::<ShellOsd>() {
+            w.set_tokens(cx, tokens);
+        }
+        if let Some(mut w) = self
+            .ui
+            .widget(cx, ids!(shell_gallery_host))
+            .borrow_mut::<shell::gallery::ShellGalleryHost>()
+        {
+            w.set_tokens(cx, tokens);
+        }
+        if let Some(mut w) = self.ui.widget(cx, ids!(shell_ai_pane)).borrow_mut::<ShellAiPane>() {
+            w.set_theme(palette.background, palette.accent, &tokens, &borders);
+        }
+        // The colours the DSL read off mod.wm_theme when it was evaluated.
+        // Under glass the bar's own strip is transparent: the material
+        // paints it, and this fill must not sit on top of the wallpaper.
+        let bar_strip = if tokens.material.is_glass() {
+            Vec4f::default()
+        } else {
+            palette.background
+        };
+        let mut bar = self.ui.widget(cx, ids!(bar));
+        script_apply_eval!(cx, bar, {
+            draw_bg +: { color: #(bar_strip) }
+        });
+        let top = palette.darker_background;
+        let bottom = palette.background;
+        let mut bg_fill = self.ui.widget(cx, ids!(bg_fill));
+        script_apply_eval!(cx, bg_fill, {
+            draw_bg +: { color_top: #(top) color_bottom: #(bottom) }
+        });
+        self.redraw_all(cx);
+    }
+
     fn set_theme(&mut self, cx: &mut Cx, name: &str) {
-        let state = self.state_mut();
-        state.theme_name = name.to_string();
-        let source = theme::load_theme_source(name);
-        if let Some(palette) = theme::scan_term_palette(&source) {
-            state.term_env = palette.env_value();
+        let file_source = theme::load_theme_source(name);
+        // The live part: the theme goes back into the VM, the token type
+        // default is rebuilt from it (shell/tokens.rs), and every surface
+        // is handed the result. A running child keeps its look until it
+        // is relaunched.
+        let (tokens, ok) = cx.with_vm(|vm| {
+            let ok = theme::eval_into(vm, &file_source);
+            // The mapping runs under an error sink like the theme blocks
+            // do: a theme that ships its own `shell:` block but omits a
+            // key would otherwise fail silently, one field at a time.
+            let prev = vm.bx.captured_errors.replace(Vec::new());
+            let value = shell::tokens::script_mod(vm);
+            let errors = vm.take_errors();
+            vm.bx.captured_errors = prev;
+            for e in &errors {
+                log!("wm theme: tokens: {}", e);
+            }
+            if value.is_err() {
+                log!("wm theme: tokens: {:?}", value);
+            }
+            (ShellTokens::script_new_with_default(vm), ok)
+        });
+        // The scanners read the same text the VM accepted: the file, or the
+        // bundled default when the file did not evaluate.
+        let source: &str = if ok { &file_source } else { theme::BUNDLED_TOKYO_NIGHT_SPLASH };
+        {
+            let state = self.state_mut();
+            state.theme_name = name.to_string();
+            if let Some(palette) = theme::scan_term_palette(source) {
+                state.term_env = palette.env_value();
+            }
+            if let Some(rgb) = theme::scan_color(source, "accent") {
+                state.accent = rgb;
+            }
+            state.borders = desk::BorderTheme::from_theme_source(source);
         }
-        if let Some(rgb) = scan_theme_color(&source, "accent") {
-            state.accent = rgb;
-        }
-        state.borders = desk::BorderTheme::from_theme_source(&source);
         // Children style themselves from the same file; the choice outlives
         // this run (a state file natively, the desk's storage on the web).
         host::set_child_env("MAKEPAD_WM_THEME_SPLASH", theme::theme_splash_path(name).as_os_str());
         host::persist_theme_choice(cx, name);
-        // Chrome DSL colors refresh fully on restart; borders, terminal
-        // palette and backgrounds apply immediately.
+        let palette = theme::scan_palette(source);
+        self.apply_theme_to_chrome(cx, tokens, palette);
+        self.background_index = 0;
         self.apply_background(cx, 0);
         self.update_bar(cx);
         self.redraw_all(cx);
@@ -2415,13 +2512,33 @@ impl App {
         let name = self.state_mut().theme_name.clone();
         let backgrounds = theme::theme_backgrounds(&name);
         if backgrounds.is_empty() {
+            // No picture: the pushed gradient shows, not the last theme's.
+            self.ui.widget(cx, ids!(bg_image)).set_visible(cx, false);
+            self.redraw_all(cx);
             return;
         }
         let path = &backgrounds[index % backgrounds.len()];
         let image = self.ui.widget(cx, ids!(bg_image));
         let image_ref = self.ui.image(cx, ids!(bg_image));
-        if image_ref.load_image_file_by_path_async(cx, path).is_ok() {
+        // A vector wallpaper (the bundled MakeOS scene) goes through the
+        // vector engine; a picture through the async raster decoder.
+        let is_svg = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("svg"))
+            .unwrap_or(false);
+        let loaded = if is_svg {
+            match std::fs::read(path) {
+                Ok(bytes) => image_ref.load_svg_from_data(cx, &bytes).is_ok(),
+                Err(_) => false,
+            }
+        } else {
+            image_ref.load_image_file_by_path_async(cx, path).is_ok()
+        };
+        if loaded {
             image.set_visible(cx, true);
+        } else {
+            log!("wm: wallpaper {} did not load", path.display());
         }
         self.redraw_all(cx);
     }
@@ -2533,10 +2650,12 @@ impl App {
             let slug = name.replace(' ', "-");
             self.close_shell_menu(cx);
             match theme::import_omarchy_theme(&slug) {
-                Ok(msg) => log!("wm: {}", msg),
+                Ok(msg) => {
+                    log!("wm: {}", msg);
+                    self.set_theme(cx, &slug);
+                }
                 Err(err) => log!("wm: import failed: {}", err),
             }
-            self.set_theme(cx, &slug);
             return;
         }
         if let Some(name) = target.strip_prefix("style.theme.") {
@@ -3615,35 +3734,20 @@ fn super_chord(m: &KeyModifiers) -> bool {
     }
 }
 
-fn scan_theme_color(source: &str, key: &str) -> Option<Vec4f> {
-    for line in source.lines() {
-        let line = line.trim();
-        let Some((k, v)) = line.split_once(':') else {
-            continue;
-        };
-        if k.trim() == key {
-            let rgb = theme::parse_hex(v.trim())?;
-            return Some(Vec4f {
-                x: rgb.r as f32 / 255.0,
-                y: rgb.g as f32 / 255.0,
-                z: rgb.b as f32 / 255.0,
-                w: 1.0,
-            });
-        }
-    }
-    None
-}
-
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         // CLI: --import-theme <name> pulls an omarchy theme and converts
         // it to splash before the desktop appears.
+        let mut imported = false;
         let mut args = std::env::args();
         while let Some(arg) = args.next() {
             if arg == "--import-theme" {
                 if let Some(name) = args.next() {
                     match theme::import_omarchy_theme(&name) {
-                        Ok(msg) => log!("wm: {}", msg),
+                        Ok(msg) => {
+                            log!("wm: {}", msg);
+                            imported = true;
+                        }
                         Err(err) => log!("wm: import failed: {}", err),
                     }
                 }
@@ -3654,17 +3758,24 @@ impl MatchEvent for App {
         // Children inherit the theme file path so every Makepad app styles
         // itself from the same theme.splash.
         host::set_child_env("MAKEPAD_WM_THEME_SPLASH", theme::theme_splash_path(&theme_name).as_os_str());
-        let source = theme::load_theme_source(&theme_name);
-        let term_env = theme::scan_term_palette(&source)
+        // The scanners read the same text the VM took in `script_mod`: the
+        // file, or the bundled default when the file does not evaluate.
+        let file_source = theme::load_theme_source(&theme_name);
+        let source: &str = if theme::evaluates(&file_source) {
+            &file_source
+        } else {
+            theme::BUNDLED_TOKYO_NIGHT_SPLASH
+        };
+        let term_env = theme::scan_term_palette(source)
             .map(|p| p.env_value())
             .unwrap_or_default();
-        let accent = scan_theme_color(&source, "accent").unwrap_or(Vec4f {
+        let accent = theme::scan_color(source, "accent").unwrap_or(Vec4f {
             x: 0.48,
             y: 0.63,
             z: 0.97,
             w: 1.0,
         });
-        let borders = desk::BorderTheme::from_theme_source(&source);
+        let borders = desk::BorderTheme::from_theme_source(source);
 
         // The client hub is the PROCESS host's: a build without processes
         // (the web) never binds one and hosts its linked modules instead.
@@ -3679,6 +3790,7 @@ impl MatchEvent for App {
         }
         self.hub = hub;
 
+        let palette = theme::scan_palette(source);
         self.state = Some(WmState {
             layout: crate::layout::WmLayout::new(),
             clients: std::collections::HashMap::new(),
@@ -3687,6 +3799,9 @@ impl MatchEvent for App {
             term_env,
             accent,
             borders,
+            desk: shell::DeskTokens::default(),
+            material: shell::MaterialTokens::default(),
+            palette,
             // gaps_in 5 sits on each side of a window, so two tiles are
             // 10 apart — the same as gaps_out to the desk edge.
             gap: desk::TILE_GAP,
@@ -3695,6 +3810,17 @@ impl MatchEvent for App {
             drop_hint: None,
             pane_sliding: false,
         });
+        // The theme's tokens, read off the type default the DSL filled in
+        // (shell/tokens.rs), into the desk state and every surface — the
+        // path a live switch takes too, so the two can never disagree. An
+        // import this run landed AFTER script_mod evaluated the theme: that
+        // is a real switch, re-evaluated, pushed and persisted.
+        if imported {
+            self.set_theme(cx, &theme_name);
+        } else {
+            let tokens = cx.with_vm(|vm| ShellTokens::script_new_with_default(vm));
+            self.apply_theme_to_chrome(cx, tokens, palette);
+        }
         self.next_id = 1;
         // The hosting registry: the linked modules, the person's overrides
         // in ~/.makepad/wm/apps.splash, a dev run's `--module <id>` flags.
@@ -3726,6 +3852,7 @@ impl MatchEvent for App {
             }
             self.ui.widget(cx, ids!(gallery_holder)).set_visible(cx, true);
             self.ui.widget(cx, ids!(main_column)).set_visible(cx, false);
+            self.apply_background(cx, 0);
             self.redraw_all(cx);
             return;
         }
@@ -3929,64 +4056,12 @@ impl AppMain for App {
         crate::makepad_widgets::script_mod(vm);
 
         // The theme: evaluated before any module that reads
-        // mod.wm_theme. This IS the theming system — splash.
-        theme::ensure_default_theme();
+        // mod.wm_theme. This IS the theming system — splash. The same
+        // evaluation runs again on a live switch (`set_theme`).
+        theme::ensure_bundled_themes();
         let theme_name = App::theme_name_from_env();
         let source = theme::load_theme_source(&theme_name);
-        let eval_theme = |vm: &mut ScriptVm, name: &str, code: &str| -> bool {
-            let script_mod_id = ScriptMod {
-                cargo_manifest_path: env!("CARGO_MANIFEST_DIR").to_string(),
-                module_path: name.to_string(),
-                file: "theme.splash".to_string(),
-                line: 0,
-                column: 0,
-                code: code.to_string(),
-                values: vec![],
-            };
-            let value = vm.eval(script_mod_id);
-            let errors = vm.take_errors();
-            for e in &errors {
-                log!("wm theme: {}", e);
-            }
-            !value.is_err() && errors.is_empty()
-        };
-        // Leading comment lines shift the runtime parser's span tracking
-        // (the script_mod! gotcha applies to eval bodies too): start the
-        // body at the first real statement.
-        let source: String = {
-            let mut lines = source.lines().peekable();
-            while let Some(line) = lines.peek() {
-                let t = line.trim();
-                if t.is_empty() || t.starts_with("//") {
-                    lines.next();
-                } else {
-                    break;
-                }
-            }
-            let mut s = lines.collect::<Vec<_>>().join("\n");
-            // Parser quirk: the FINAL statement of an eval body is treated
-            // as its result expression — a trailing `mod.x = {...}` never
-            // commits. A benign trailing statement makes the assignment a
-            // real statement. (Same class as the splash auto-close notes.)
-            s.push_str("\ntrue\n");
-            s
-        };
-        if !eval_theme(vm, "wm_theme", &source) {
-            // Fall back to the bundled default so the DSL still evaluates.
-            let mut fallback = theme::BUNDLED_TOKYO_NIGHT_SPLASH.to_string();
-            fallback.push_str("\ntrue\n");
-            eval_theme(vm, "wm_theme_fallback", &fallback);
-        }
-
-        // The shell token object (`mod.wm_theme.shell`): the omarchy
-        // `shell.toml.tpl` contract, resolved from this theme's palette —
-        // unless the theme ships its own `shell: {...}` block, which
-        // replaces it wholesale.
-        if !theme::theme_defines_shell(&source) {
-            let mut block = theme::shell_splash_block(&source);
-            block.push_str("\ntrue\n");
-            eval_theme(vm, "wm_theme_shell", &block);
-        }
+        theme::eval_into(vm, &source);
 
         run_view::script_mod(vm);
         module_view::script_mod(vm);
