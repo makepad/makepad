@@ -182,6 +182,7 @@ script_mod! {
         color_text_disabled: #00000022
         color_text_placeholder: #00000088
         color_text_placeholder_hover: #000000AA
+        color_text_meta: #00000088
 
         color_label_inner: #000000AA
         color_label_inner_down: #000000CC
