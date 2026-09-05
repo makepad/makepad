@@ -1956,6 +1956,18 @@ pub fn decode_audio_clip(
             parse_wav(&bytes, max_frames)
         }
         MediaType::Mp4 => {
+            // Everything unrecognised lands in this arm: the local
+            // extension map falls back to Mp4, and so does the store's
+            // `MediaType`, whose enum has no seat for FLAC at all --
+            // that enum is a wire contract and a local file has no
+            // business widening it. So before handing the file to the
+            // platform, look at what it actually IS. A `.flac` has been
+            // offered by the explorer all along and failed here with
+            // "no video stream", which is the platform decoder being
+            // asked for something it was never given.
+            if let Some(format) = repo_audio_format(&audio_magic(path).unwrap_or_default()) {
+                return decode_repo_audio(path, format, max_frames);
+            }
             // Cache objects are digest-only names; AVURLAsset keys off the
             // extension. Lease a typed hard link the same way video slots do.
             let input = DecoderInput::prepare(path, MediaType::Mp4)?;
@@ -1987,31 +1999,77 @@ pub fn decode_audio_clip(
         }
         // MP3 and Ogg Vorbis go through the repo's own decoders, the same way
         // WAV does: whole file in, interleaved PCM out, no platform codec.
-        MediaType::Mp3 | MediaType::Ogg => {
-            let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-            let format = if matches!(media, MediaType::Mp3) {
-                AudioFormat::Mp3
-            } else {
-                AudioFormat::OggVorbis
-            };
-            let audio = decode_audio_limited(
-                &bytes,
-                format,
-                AudioLimits::with_max_frames(max_frames),
-            )
-            .map_err(|e| e.to_string())?;
-            let channels = audio.channels.max(1) as usize;
-            let mut frames: Vec<[i16; 2]> = Vec::with_capacity(audio.frames());
-            for frame in audio.pcm_interleaved_f32.chunks_exact(channels) {
-                let sample = |v: f32| (v.clamp(-1.0, 1.0) * 32767.0) as i16;
-                frames.push([sample(frame[0]), sample(frame[channels - 1])]);
-            }
-            if frames.is_empty() {
-                return Err(format!("{format:?} decoded to zero frames"));
-            }
-            Ok(TrackPcm { frames, sample_rate: audio.rate.max(1) })
-        }
+        MediaType::Mp3 => decode_repo_audio(path, AudioFormat::Mp3, max_frames),
+        MediaType::Ogg => decode_repo_audio(path, AudioFormat::OggVorbis, max_frames),
         other => Err(format!("unsupported audio media {other:?}")),
+    }
+}
+
+/// Whole file in, interleaved PCM out, no platform codec.
+fn decode_repo_audio(
+    path: &PathBuf,
+    format: AudioFormat,
+    max_frames: usize,
+) -> Result<TrackPcm, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let audio =
+        decode_audio_limited(&bytes, format, AudioLimits::with_max_frames(max_frames))
+            .map_err(|e| e.to_string())?;
+    let channels = audio.channels.max(1) as usize;
+    let mut frames: Vec<[i16; 2]> = Vec::with_capacity(audio.frames());
+    for frame in audio.pcm_interleaved_f32.chunks_exact(channels) {
+        let sample = |v: f32| (v.clamp(-1.0, 1.0) * 32767.0) as i16;
+        frames.push([sample(frame[0]), sample(frame[channels - 1])]);
+    }
+    if frames.is_empty() {
+        return Err(format!("{format:?} decoded to zero frames"));
+    }
+    Ok(TrackPcm { frames, sample_rate: audio.rate.max(1) })
+}
+
+/// The longest ID3v2 block a sniff will read past. Tags carrying cover art
+/// run to a few hundred kilobytes; past this the file is claiming something
+/// silly and can go to the platform, which will make its own mind up.
+const MAX_TAG_SKIP: usize = 4 << 20;
+
+/// Enough of a file's front to name its format.
+///
+/// Four bytes of magic is all a marker needs, but a tagger may have put an
+/// ID3v2 block in front of one -- so the header is read first and what it
+/// says about its own length decides how much more to read. Bounded,
+/// because that length comes out of the file: a corrupt one must not turn
+/// a sniff into a whole-file read of something that was never audio.
+fn audio_magic(path: &PathBuf) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut head = [0u8; 10];
+    file.read_exact(&mut head).ok()?;
+    let skip = makepad_audio_decode::flac::metadata::skip_id3(&head);
+    if skip == 0 {
+        return Some(head.to_vec());
+    }
+    if skip > MAX_TAG_SKIP {
+        return None;
+    }
+    let mut rest = vec![0u8; skip + 4 - head.len()];
+    file.read_exact(&mut rest).ok()?;
+    let mut out = head.to_vec();
+    out.extend_from_slice(&rest);
+    Some(out)
+}
+
+/// Which of the repo's own decoders a file's first bytes call for, if any.
+///
+/// Only the two EXACT markers are honoured. `sniff` also carries a loose
+/// MP3 frame-sync scan, and letting that loose on every file that reached
+/// the fallback would eventually call an MP4 an MP3 -- while a real MP3 is
+/// named as one by its extension or by the store long before it gets here.
+/// So this deliberately answers None to that scan and lets the platform
+/// have the file.
+pub fn repo_audio_format(magic: &[u8]) -> Option<AudioFormat> {
+    match makepad_audio_decode::sniff(magic) {
+        Some(format @ (AudioFormat::Flac | AudioFormat::OggVorbis)) => Some(format),
+        _ => None,
     }
 }
 
@@ -3574,6 +3632,73 @@ impl Drop for DecodePool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An ID3v2 header declaring `size` bytes of tag after it. The length
+    /// is syncsafe -- seven bits per byte -- which is the part worth
+    /// writing out rather than trusting.
+    fn id3_header(size: usize) -> Vec<u8> {
+        let mut out = b"ID3\x04\x00\x00".to_vec();
+        for shift in [21, 14, 7, 0] {
+            out.push(((size >> shift) & 0x7f) as u8);
+        }
+        out
+    }
+
+    #[test]
+    fn a_flac_is_recognised_by_its_marker_tagged_or_not() {
+        assert_eq!(repo_audio_format(b"fLaC\0\0\0\x22"), Some(AudioFormat::Flac));
+        let mut tagged = id3_header(64);
+        tagged.extend(std::iter::repeat_n(0u8, 64));
+        tagged.extend_from_slice(b"fLaC");
+        assert_eq!(repo_audio_format(&tagged), Some(AudioFormat::Flac));
+        assert_eq!(repo_audio_format(b"OggS\0\x02\0\0"), Some(AudioFormat::OggVorbis));
+    }
+
+    #[test]
+    fn the_loose_mp3_scan_is_not_let_loose_on_unrecognised_files() {
+        // A frame sync, which `sniff` would call MP3. Refused here: a real
+        // MP3 is named by its extension or by the store long before it
+        // reaches the fallback, and a scan this loose would eventually
+        // call an MP4 an MP3 and hand it to the wrong decoder.
+        assert_eq!(repo_audio_format(b"\xff\xfb\x90\x00\0\0\0\0"), None);
+        // A tagged MP3: an ID3 block and no `fLaC` behind it.
+        let mut tagged = id3_header(8);
+        tagged.extend(std::iter::repeat_n(0u8, 8));
+        tagged.extend_from_slice(b"\xff\xfb\x90\x00");
+        assert_eq!(repo_audio_format(&tagged), None);
+        // A real MP4, which must go on to the platform decoder.
+        assert_eq!(repo_audio_format(b"\0\0\0\x18ftypmp42"), None);
+        assert_eq!(repo_audio_format(b""), None);
+    }
+
+    #[test]
+    fn the_sniff_reads_past_a_tag_but_not_past_a_silly_one() {
+        let dir = test_dir("audio-magic");
+        std::fs::create_dir_all(&dir).expect("make dir");
+        // A tag far longer than the ten bytes a bare header would give:
+        // reading only a fixed window would miss the marker behind it.
+        let tagged = dir.join("tagged.bin");
+        let mut bytes = id3_header(50_000);
+        bytes.extend(std::iter::repeat_n(0u8, 50_000));
+        bytes.extend_from_slice(b"fLaC");
+        std::fs::write(&tagged, &bytes).expect("write");
+        let magic = audio_magic(&tagged).expect("a magic");
+        assert_eq!(repo_audio_format(&magic), Some(AudioFormat::Flac));
+
+        // A tag claiming more than the cap. The file is not read past the
+        // header and the platform decoder gets to make its own mind up --
+        // the point being that a corrupt length cannot turn a sniff into
+        // a whole-file read of something that was never audio.
+        let silly = dir.join("silly.bin");
+        std::fs::write(&silly, id3_header(MAX_TAG_SKIP + 1)).expect("write");
+        assert!(audio_magic(&silly).is_none());
+
+        // Shorter than a header at all: not audio, and not a panic.
+        let stub = dir.join("stub.bin");
+        std::fs::write(&stub, b"fLa").expect("write");
+        assert!(audio_magic(&stub).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn test_dir(label: &str) -> PathBuf {
         let ticket = DECODER_ALIAS_ID.fetch_add(1, Ordering::Relaxed);

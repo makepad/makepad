@@ -3406,8 +3406,10 @@ pub const LOCAL_AUDIO_EXTENSIONS: [&str; 9] =
     ["wav", "mp3", "ogg", "oga", "m4a", "aac", "flac", "aiff", "mp4"];
 
 /// Decode a local audio file. WAV, MP3 and Ogg Vorbis parse in-process
-/// (`makepad-audio-decode`); everything else goes through the platform media
-/// decoder that already backs the video lane.
+/// (`makepad-audio-decode`); everything else goes to `decode_audio_clip`,
+/// which looks at the file own first bytes before handing it to the
+/// platform decoder. That is how a `.flac` reaches the FLAC decoder this
+/// repo already has: there is no `MediaType` that names one.
 pub fn decode_audio_file(path: &Path) -> Result<TrackPcm, String> {
     let extension = path
         .extension()
