@@ -115,6 +115,11 @@ script_mod! {
     set_type_default() do #(DrawProgressRing::script_shader(vm)){
         ..mod.draw.DrawQuad
     }
+    mod.widgets.DrawGaugeBase = #(DrawGauge::script_component(vm))
+    set_type_default() do #(DrawGauge::script_shader(vm)){
+        ..mod.draw.DrawQuad
+    }
+
     mod.widgets.ProgressBarBase = #(ProgressBar::register_widget(vm))
     /** The flat progress bar: a track and a fill, a percentage or a label
      * beside it, an indeterminate sweep while the value is unknown. */
@@ -469,6 +474,211 @@ script_mod! {
         }
     }
 
+    mod.widgets.GaugeBase = #(Gauge::register_widget(vm))
+    /** A read-only dial: a three-quarter arc coloured by zone (safe, warning,
+     * critical), a needle at the value, the value under the hub and the range
+     * at the ends. */
+    mod.widgets.Gauge = set_type_default() do mod.widgets.GaugeBase{
+        width: 120
+        height: 110
+        /** the reading, in the units of `min`..`max` */
+        value: 0.0
+        /** the reading at the empty end */
+        min: 0.0
+        /** the reading at the full end */
+        max: 100.0
+        /** decimals in the value label 0..4 step 1 */
+        precision: 0
+        /** a suffix on the value label */
+        unit: ""
+        /** a fixed centre label; wins over the value */
+        text: ""
+        /** print the value under the hub 0..1 step 1 */
+        show_value: true
+        /** print min and max at the ends 0..1 step 1 */
+        show_range: true
+        /** the label at the empty end; the number when empty */
+        min_label: ""
+        /** the label at the full end; the number when empty */
+        max_label: ""
+        /** lay the zones out along a bar instead of an arc 0..1 step 1 */
+        linear: false
+        /** seconds a value change takes to arrive 0..2 step 0.05 */
+        ease_secs: theme.motion_medium_1
+        /** greyed and dimmed 0..1 step 1 */
+        disabled: false
+
+        draw_bg +: {
+            value: 0.0
+            opacity: 1.0
+            /** stroke width of the arc or bar 1..24 step 0.5 */
+            thickness: 8.0
+            /** the angle the arc covers, in radians; the opening is centred at the bottom 0.5..6.2 step 0.01 */
+            sweep: 4.712389
+            /** the bar's corner radius, linear only 0..16 step 0.5 */
+            border_radius: uniform(theme.radius_full)
+            /** where the warning zone begins 0..1 step 0.01 */
+            zone_warn: uniform(0.6)
+            /** where the critical zone begins 0..1 step 0.01 */
+            zone_critical: uniform(0.85)
+            /** how wide the blend between zones is 0..0.2 step 0.01 */
+            zone_soft: uniform(0.04)
+            /** how much zone colour the unreached part of the arc shows 0..1 step 0.05 */
+            band: uniform(0.3)
+            /** draw the needle 0..1 step 1 */
+            needle: uniform(1.0)
+            /** lay the zones out along a bar 0..1 step 1 */
+            linear: uniform(0.0)
+            track_color: uniform(theme.color_surface_container_highest)
+            color_safe: uniform(theme.color_success)
+            color_warn: uniform(theme.color_warning)
+            color_critical: uniform(theme.color_error)
+            needle_color: uniform(theme.color_text)
+
+            zone_color: fn(f: float) -> vec4 {
+                let c = mix(self.color_safe, self.color_warn, smoothstep(self.zone_warn - self.zone_soft, self.zone_warn + self.zone_soft, f))
+                return mix(c, self.color_critical, smoothstep(self.zone_critical - self.zone_soft, self.zone_critical + self.zone_soft, f))
+            }
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let v = clamp(self.value, 0.0, 1.0)
+                let th = self.thickness
+                if self.linear > 0.5 {
+                    let w = self.rect_size.x
+                    let h = min(th, self.rect_size.y)
+                    let y0 = (self.rect_size.y - h) * 0.5
+                    let r = min(self.border_radius, h * 0.5)
+                    let zone = self.zone_color(self.pos.x)
+                    sdf.box(0.0, y0, w, h, r)
+                    sdf.fill(mix(self.track_color, zone, self.band))
+                    if v > 0.001 {
+                        sdf.box(0.0, y0, min(max(w * v, h), w), h, r)
+                        sdf.fill(zone)
+                    }
+                    if self.needle > 0.5 {
+                        let nx = clamp(w * v, 1.0, w - 1.0)
+                        sdf.box(nx - 1.0, 0.0, 2.0, self.rect_size.y, 1.0)
+                        sdf.fill(self.needle_color)
+                    }
+                } else {
+                    let center = self.rect_size * 0.5
+                    let radius = min(self.rect_size.x, self.rect_size.y) * 0.5 - th * 0.5
+                    // Screen angle of the start: the opening sits centred
+                    // on the bottom, so the arc begins that far past it.
+                    let phi0 = 1.5 * PI - self.sweep * 0.5
+                    let p = self.pos * self.rect_size - center
+                    let rel = fract((atan2(p.y, p.x) - phi0) / TAU) * TAU
+                    let zone = self.zone_color(clamp(rel / self.sweep, 0.0, 1.0))
+                    // The arc functions take angles a quarter turn behind
+                    // the screen's.
+                    let t0 = phi0 - PI * 0.5
+                    sdf.arc_round_caps(center.x, center.y, radius, t0, t0 + self.sweep, th)
+                    sdf.fill(mix(self.track_color, zone, self.band))
+                    if v > 0.001 {
+                        sdf.arc_round_caps(center.x, center.y, radius, t0, t0 + v * self.sweep, th)
+                        sdf.fill(zone)
+                    }
+                    if self.needle > 0.5 {
+                        let phi = phi0 + v * self.sweep
+                        let dir = vec2(cos(phi), sin(phi))
+                        let tip = center + dir * (radius - th * 0.5 - 2.0)
+                        let tail = center - dir * 6.0
+                        sdf.move_to(tail.x, tail.y)
+                        sdf.line_to(tip.x, tip.y)
+                        sdf.stroke(self.needle_color, 1.0)
+                        sdf.circle(center.x, center.y, 3.0)
+                        sdf.fill(self.needle_color)
+                    }
+                }
+                return sdf.result * self.opacity
+            }
+        }
+        draw_text +: {
+            color: theme.color_text
+            text_style: theme.font_regular{font_size: theme.font_size_p}
+        }
+        draw_range +: {
+            color: theme.color_on_surface_variant
+            text_style: theme.font_regular{font_size: theme.type_label_s_size}
+        }
+    }
+
+    /** The dial laid flat: the same zones along a bar with a tick at the
+     * value and the range printed under the ends. */
+    mod.widgets.GaugeLinear = mod.widgets.Gauge{
+        width: Fill
+        height: 44
+        linear: true
+        draw_bg +: {
+            linear: 1.0
+            thickness: 10.0
+        }
+    }
+
+    mod.widgets.NavigationProgressBase = #(NavigationProgress::register_widget(vm))
+    /** A hairline along the top of a page that starts on demand, trickles
+     * toward the end while a load is in flight and fades once it is done. */
+    mod.widgets.NavigationProgress = set_type_default() do mod.widgets.NavigationProgressBase{
+        width: Fill
+        height: 3
+        /** the colour role of the line */
+        intent: mod.widgets.Intent.Primary
+        /** how fast the trickle closes on the ceiling, per second 0.05..3 step 0.05 */
+        trickle_rate: 0.3
+        /** the trickle never passes this 0.8..0.999 step 0.001 */
+        trickle_cap: 0.994
+        /** seconds the full line stays before it fades 0..2 step 0.1 */
+        fade_delay_secs: 0.3
+        /** seconds a step and the fade take 0..2 step 0.05 */
+        ease_secs: theme.motion_medium_1
+        draw_bg +: {
+            start: 0.0
+            end: 1.0
+            value: 0.0
+            intent: 0.0
+            track: 0.0
+            opacity: 0.0
+            thickness: uniform(3.0)
+            border_radius: uniform(0.0)
+            gap: uniform(0.0)
+            stop_indicator: uniform(0.0)
+            sweep_width: uniform(0.35)
+            sweep_speed: uniform(0.7)
+            gradient: uniform(0.0)
+            gradient_horizontal: uniform(0.0)
+            gradient_shade: uniform(0.65)
+            track_color: uniform(theme.color_u_hidden)
+            color_primary: uniform(theme.color_primary)
+            color_success: uniform(theme.color_success)
+            color_warning: uniform(theme.color_warning)
+            color_error: uniform(theme.color_error)
+            color_info: uniform(theme.color_info)
+            color_disabled: uniform(theme.color_val_disabled)
+            border_color: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+            border_color_2: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+            fill_color: fn() -> vec4 {
+                let mut fill = self.color_primary
+                if self.intent > 0.5 { fill = self.color_success }
+                if self.intent > 1.5 { fill = self.color_warning }
+                if self.intent > 2.5 { fill = self.color_error }
+                if self.intent > 3.5 { fill = self.color_info }
+                if self.intent > 4.5 { fill = self.color_disabled }
+                return fill
+            }
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let w = self.rect_size.x
+                let h = self.rect_size.y
+                let xv = w * clamp(self.value, 0.0, 1.0)
+                if xv > 0.5 {
+                    sdf.box(0.0, 0.0, xv, h, self.border_radius)
+                    sdf.fill(self.fill_color())
+                }
+                return sdf.result * self.opacity
+            }
+        }
+    }
 }
 
 /// The bar's shader. The instances are a piece of a bar: the fraction it
@@ -519,6 +729,23 @@ pub struct DrawProgressRing {
     #[live(5.0)]
     thickness: f32,
     #[live(6.2831853)]
+    sweep: f32,
+}
+
+/// The gauge's shader: one piece, always; the zones are uniforms. The
+/// geometry the labels hang off (`thickness`, `sweep`) rides as instances.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawGauge {
+    #[deref]
+    draw_super: DrawQuad,
+    #[live]
+    value: f32,
+    #[live]
+    opacity: f32,
+    #[live(8.0)]
+    thickness: f32,
+    #[live(4.712389)]
     sweep: f32,
 }
 
@@ -1154,6 +1381,533 @@ impl ProgressRingRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_intent(cx, intent);
         }
+    }
+}
+
+/// A read-only dial (or bar) with safe, warning and critical zones, a
+/// needle at the value and the range printed at the ends.
+#[derive(Script, ScriptHook, Widget)]
+pub struct Gauge {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
+    #[redraw]
+    #[live]
+    draw_bg: DrawGauge,
+    #[live]
+    draw_text: DrawText,
+    #[live]
+    draw_range: DrawText,
+    /// A fixed centre label; wins over the value.
+    #[live]
+    pub text: String,
+    /// The reading, in the units of `min`..`max`.
+    #[live]
+    pub value: f64,
+    #[live]
+    pub min: f64,
+    #[live(100.0)]
+    pub max: f64,
+    #[live]
+    pub precision: usize,
+    #[live]
+    pub unit: String,
+    #[live(true)]
+    pub show_value: bool,
+    #[live(true)]
+    pub show_range: bool,
+    #[live]
+    pub min_label: String,
+    #[live]
+    pub max_label: String,
+    #[live]
+    pub linear: bool,
+    #[live]
+    pub ease_secs: f64,
+    #[live]
+    pub disabled: bool,
+    #[rust]
+    shown: f64,
+    #[rust]
+    target: f64,
+    #[rust]
+    ease: Ease,
+    #[rust]
+    drawn: bool,
+    #[rust]
+    next_frame: NextFrame,
+}
+
+impl Gauge {
+    fn format(&self, value: f64) -> String {
+        format!("{:.*}{}", self.precision, value, self.unit)
+    }
+
+    /// The reading as the fraction of the range it covers.
+    fn fraction(&self, value: f64) -> f64 {
+        let span = self.max - self.min;
+        if span.abs() < f64::EPSILON {
+            0.0
+        } else {
+            ((value - self.min) / span).clamp(0.0, 1.0)
+        }
+    }
+
+    pub fn label_text(&self) -> String {
+        if !self.text.is_empty() {
+            self.text.clone()
+        } else if self.show_value {
+            self.format(self.shown)
+        } else {
+            String::new()
+        }
+    }
+
+    /// Set the reading. Unlike a bar, a gauge is allowed to fall: a reading
+    /// eases in BOTH directions, because a needle that jumps down reads as
+    /// a fault, not a reset.
+    pub fn set_value(&mut self, cx: &mut Cx, value: f64) {
+        self.value = value;
+        self.aim(cx.seconds_since_app_start());
+        if self.ease.running {
+            self.next_frame = cx.new_next_frame();
+        }
+        self.draw_bg.redraw(cx);
+    }
+
+    fn aim(&mut self, now: f64) {
+        self.target = self.value;
+        if !self.drawn || (self.value - self.shown).abs() < f64::EPSILON {
+            self.shown = self.value;
+            self.ease.running = false;
+        } else {
+            self.ease = Ease {
+                from: self.shown,
+                started: now,
+                running: true,
+            };
+        }
+    }
+
+    fn range_labels(&self) -> (String, String) {
+        let lo = if self.min_label.is_empty() {
+            self.format(self.min)
+        } else {
+            self.min_label.clone()
+        };
+        let hi = if self.max_label.is_empty() {
+            self.format(self.max)
+        } else {
+            self.max_label.clone()
+        };
+        (lo, hi)
+    }
+}
+
+impl Widget for Gauge {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.drawn || self.value != self.target {
+            let now = cx.seconds_since_app_start();
+            let first = !self.drawn;
+            self.drawn = true;
+            self.aim(now);
+            if self.ease.running {
+                self.next_frame = cx.new_next_frame();
+            }
+            if first {
+                self.ease.running = false;
+            }
+        }
+        cx.begin_turtle(walk, self.layout);
+        let rect = cx.turtle().rect();
+        self.draw_bg.value = self.fraction(self.shown) as f32;
+        self.draw_bg.opacity = if self.disabled { 0.6 } else { 1.0 };
+        self.draw_bg.draw_abs(cx, rect);
+        let th = self.draw_bg.thickness as f64;
+        let label = self.label_text();
+        let (lo, hi) = self.range_labels();
+        let range_h = 14.0;
+        if self.linear {
+            // The value rides above the bar, the range hangs under its ends.
+            let bar_top = rect.pos.y + (rect.size.y - th) * 0.5;
+            if !label.is_empty() {
+                draw_text_in(
+                    cx,
+                    &mut self.draw_text,
+                    Rect { pos: rect.pos, size: dvec2(rect.size.x, (bar_top - rect.pos.y).max(1.0)) },
+                    Align { x: 0.5, y: 1.0 },
+                    &label,
+                );
+            }
+            if self.show_range {
+                let y = bar_top + th + 1.0;
+                let h = (rect.pos.y + rect.size.y - y).max(1.0);
+                draw_text_in(
+                    cx,
+                    &mut self.draw_range,
+                    Rect { pos: dvec2(rect.pos.x, y), size: dvec2(rect.size.x * 0.5, h) },
+                    Align { x: 0.0, y: 0.0 },
+                    &lo,
+                );
+                draw_text_in(
+                    cx,
+                    &mut self.draw_range,
+                    Rect { pos: dvec2(rect.pos.x + rect.size.x * 0.5, y), size: dvec2(rect.size.x * 0.5, h) },
+                    Align { x: 1.0, y: 0.0 },
+                    &hi,
+                );
+            }
+        } else {
+            let center = rect.pos + rect.size * 0.5;
+            let radius = rect.size.x.min(rect.size.y) * 0.5 - th * 0.5;
+            let sweep = self.draw_bg.sweep as f64;
+            if !label.is_empty() {
+                // Under the hub, inside the opening.
+                let top = center.y + 8.0;
+                draw_text_in(
+                    cx,
+                    &mut self.draw_text,
+                    Rect { pos: dvec2(rect.pos.x, top), size: dvec2(rect.size.x, (rect.pos.y + rect.size.y - top).max(1.0)) },
+                    Align { x: 0.5, y: 0.0 },
+                    &label,
+                );
+            }
+            if self.show_range {
+                let phi0 = 1.5 * std::f64::consts::PI - sweep * 0.5;
+                let phi1 = phi0 + sweep;
+                let w = 48.0;
+                for (phi, text) in [(phi0, lo), (phi1, hi)] {
+                    let cap = center + dvec2(phi.cos(), phi.sin()) * radius;
+                    draw_text_in(
+                        cx,
+                        &mut self.draw_range,
+                        Rect { pos: dvec2(cap.x - w * 0.5, cap.y + th * 0.5 + 2.0), size: dvec2(w, range_h) },
+                        Align { x: 0.5, y: 0.0 },
+                        &text,
+                    );
+                }
+            }
+        }
+        cx.end_turtle();
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if let Some(ne) = self.next_frame.is_event(event) {
+            if let Some(shown) = self.ease.step(ne.time, self.ease_secs, self.target) {
+                self.shown = shown;
+                self.next_frame = cx.new_next_frame();
+            } else {
+                self.shown = self.target;
+            }
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    fn text(&self) -> String {
+        self.label_text()
+    }
+
+    fn set_text(&mut self, cx: &mut Cx, v: &str) {
+        if self.text != v {
+            self.text = v.to_string();
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
+        if self.disabled != disabled {
+            self.disabled = disabled;
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    fn disabled(&self, _cx: &Cx) -> bool {
+        self.disabled
+    }
+
+    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
+        Some(two_decimals(self.value))
+    }
+}
+
+impl GaugeRef {
+    pub fn value(&self) -> f64 {
+        self.borrow().map(|inner| inner.value).unwrap_or(0.0)
+    }
+
+    pub fn set_value(&self, cx: &mut Cx, value: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_value(cx, value);
+        }
+    }
+
+    pub fn set_range(&self, cx: &mut Cx, min: f64, max: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.min = min;
+            inner.max = max;
+            inner.draw_bg.redraw(cx);
+        }
+    }
+}
+
+/// Where the navigation line is in its life.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+enum NavPhase {
+    /// Off screen. Nothing draws (the quad is there at zero opacity so the
+    /// area stays valid for the redraw that `start` asks for).
+    #[default]
+    Idle,
+    /// On screen, creeping toward the ceiling.
+    Trickling,
+    /// `complete` was called: easing to the end.
+    Completing,
+    /// At the end, waiting out `fade_delay_secs`.
+    Holding,
+    /// Fading out over `ease_secs`, then Idle.
+    Fading,
+}
+
+/// A hairline along the top of a page that starts on demand, trickles
+/// toward the end while a load is in flight and fades once it is done.
+#[derive(Script, ScriptHook, Widget)]
+pub struct NavigationProgress {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
+    #[redraw]
+    #[live]
+    draw_bg: DrawProgressBar,
+    #[live(Intent::Primary)]
+    pub intent: Intent,
+    #[live]
+    pub trickle_rate: f64,
+    #[live]
+    pub trickle_cap: f64,
+    #[live]
+    pub fade_delay_secs: f64,
+    #[live]
+    pub ease_secs: f64,
+    #[rust]
+    phase: NavPhase,
+    /// Where the line is being pulled toward.
+    #[rust]
+    target: f64,
+    /// Where the line is drawn.
+    #[rust]
+    shown: f64,
+    #[rust]
+    opacity: f64,
+    #[rust]
+    phase_since: f64,
+    #[rust]
+    last_tick: f64,
+    #[rust]
+    next_frame: NextFrame,
+}
+
+impl NavigationProgress {
+    /// Put the line on screen at a first small step and let it trickle. A
+    /// line already running keeps its place.
+    pub fn start(&mut self, cx: &mut Cx) {
+        let now = cx.seconds_since_app_start();
+        match self.phase {
+            NavPhase::Idle | NavPhase::Holding | NavPhase::Fading => {
+                self.target = 0.08;
+                self.shown = 0.0;
+                self.opacity = 1.0;
+            }
+            NavPhase::Completing => {
+                self.target = self.shown.min(self.trickle_cap);
+            }
+            NavPhase::Trickling => return,
+        }
+        self.phase = NavPhase::Trickling;
+        self.phase_since = now;
+        self.last_tick = now;
+        self.next_frame = cx.new_next_frame();
+        self.draw_bg.redraw(cx);
+    }
+
+    /// Nudge the target forward, never past the ceiling; starts the line if
+    /// it was idle.
+    pub fn increment(&mut self, cx: &mut Cx, amount: f64) {
+        if self.phase != NavPhase::Trickling {
+            self.start(cx);
+        }
+        self.target = (self.target + amount.max(0.0)).min(self.trickle_cap);
+        self.draw_bg.redraw(cx);
+    }
+
+    /// Pin the target, never past the ceiling; starts the line if idle.
+    pub fn set_progress(&mut self, cx: &mut Cx, value: f64) {
+        if self.phase != NavPhase::Trickling {
+            self.start(cx);
+        }
+        self.target = value.clamp(self.target, self.trickle_cap);
+        self.draw_bg.redraw(cx);
+    }
+
+    /// Send the line to the end; it holds, then fades. A line that was
+    /// never started completes invisibly (no flash for a load that was
+    /// instant).
+    pub fn complete(&mut self, cx: &mut Cx) {
+        if self.phase == NavPhase::Idle {
+            return;
+        }
+        let now = cx.seconds_since_app_start();
+        self.target = 1.0;
+        self.phase = NavPhase::Completing;
+        self.phase_since = now;
+        self.last_tick = now;
+        self.next_frame = cx.new_next_frame();
+        self.draw_bg.redraw(cx);
+    }
+
+    /// Take the line off screen at once.
+    pub fn reset(&mut self, cx: &mut Cx) {
+        self.phase = NavPhase::Idle;
+        self.target = 0.0;
+        self.shown = 0.0;
+        self.opacity = 0.0;
+        self.draw_bg.redraw(cx);
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.phase != NavPhase::Idle
+    }
+
+    /// The shown fraction, 0..1, or `None` while the line is off screen.
+    pub fn progress(&self) -> Option<f64> {
+        (self.phase != NavPhase::Idle).then_some(self.shown)
+    }
+
+    /// One frame of the life cycle. Returns whether another is wanted.
+    fn tick(&mut self, cx: &mut Cx, now: f64) -> bool {
+        let dt = (now - self.last_tick).clamp(0.0, 0.25);
+        self.last_tick = now;
+        let ease = self.ease_secs.max(0.001);
+        // The shown value chases the target exponentially, so the same
+        // constant serves a step and the trickle alike.
+        let chase = 1.0 - (-dt / (ease * 0.5)).exp();
+        match self.phase {
+            NavPhase::Idle => return false,
+            NavPhase::Trickling => {
+                let room = self.trickle_cap - self.target;
+                self.target += room * (1.0 - (-self.trickle_rate * dt).exp());
+                self.shown += (self.target - self.shown) * chase;
+            }
+            NavPhase::Completing => {
+                self.shown += (1.0 - self.shown) * chase;
+                if self.shown > 0.998 {
+                    self.shown = 1.0;
+                    self.phase = NavPhase::Holding;
+                    self.phase_since = now;
+                    let uid = self.widget_uid();
+                    cx.widget_action(uid, ProgressAction::Completed);
+                }
+            }
+            NavPhase::Holding => {
+                if now - self.phase_since >= self.fade_delay_secs {
+                    self.phase = NavPhase::Fading;
+                    self.phase_since = now;
+                }
+            }
+            NavPhase::Fading => {
+                self.opacity = 1.0 - ((now - self.phase_since) / ease).clamp(0.0, 1.0);
+                if self.opacity <= 0.0 {
+                    self.reset(cx);
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
+
+impl Widget for NavigationProgress {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        cx.begin_turtle(walk, self.layout);
+        let rect = cx.turtle().rect();
+        self.draw_bg.start = 0.0;
+        self.draw_bg.end = 1.0;
+        self.draw_bg.track = 0.0;
+        self.draw_bg.intent = self.intent.index();
+        self.draw_bg.value = if self.phase == NavPhase::Idle { 0.0 } else { self.shown as f32 };
+        self.draw_bg.opacity = if self.phase == NavPhase::Idle { 0.0 } else { self.opacity as f32 };
+        self.draw_bg.draw_abs(cx, rect);
+        cx.end_turtle();
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if let Some(ne) = self.next_frame.is_event(event) {
+            if self.tick(cx, ne.time) {
+                self.next_frame = cx.new_next_frame();
+            }
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
+        Some(two_decimals(self.progress().unwrap_or(0.0)))
+    }
+}
+
+impl NavigationProgressRef {
+    pub fn completed(&self, actions: &Actions) -> bool {
+        matches!(
+            actions.find_widget_action(self.widget_uid()).map(|a| a.cast()),
+            Some(ProgressAction::Completed)
+        )
+    }
+
+    pub fn start(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.start(cx);
+        }
+    }
+
+    pub fn increment(&self, cx: &mut Cx, amount: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.increment(cx, amount);
+        }
+    }
+
+    pub fn set_progress(&self, cx: &mut Cx, value: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_progress(cx, value);
+        }
+    }
+
+    pub fn complete(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.complete(cx);
+        }
+    }
+
+    pub fn reset(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.reset(cx);
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.borrow().map(|inner| inner.is_active()).unwrap_or(false)
+    }
+
+    pub fn progress(&self) -> Option<f64> {
+        self.borrow().and_then(|inner| inner.progress())
     }
 }
 
