@@ -816,8 +816,8 @@ fn locking_the_tremolo_to_the_beat_while_engaged_is_click_free() {
     mixer.set_deck_playing(DeckId::A, true);
     settle(&mixer, SETTLE);
     let worst = worst_step_across(&mixer, |index| match index {
-        8 => mixer.set_deck_tremolo_beat_sync(DeckId::A, true),
-        24 => mixer.set_deck_tremolo_beat_sync(DeckId::A, false),
+        8 => mixer.set_deck_tremolo_sync_units(DeckId::A, 8),
+        24 => mixer.set_deck_tremolo_sync_units(DeckId::A, 0),
         _ => {}
     });
     assert!(worst < CLICK, "a beat lock must not step the output, biggest step {worst}");
@@ -831,17 +831,17 @@ fn locking_the_other_lfos_to_the_beat_while_engaged_is_click_free() {
         (
             "autopan",
             &Mixer::set_deck_autopan as &dyn Fn(&Mixer, DeckId, bool),
-            &Mixer::set_deck_autopan_beat_sync as &dyn Fn(&Mixer, DeckId, bool),
+            &Mixer::set_deck_autopan_sync_units as &dyn Fn(&Mixer, DeckId, u32),
         ),
         (
             "flanger",
             &Mixer::set_deck_flanger as &dyn Fn(&Mixer, DeckId, bool),
-            &Mixer::set_deck_flanger_beat_sync as &dyn Fn(&Mixer, DeckId, bool),
+            &Mixer::set_deck_flanger_sync_units as &dyn Fn(&Mixer, DeckId, u32),
         ),
         (
             "phaser",
             &Mixer::set_deck_phaser as &dyn Fn(&Mixer, DeckId, bool),
-            &Mixer::set_deck_phaser_beat_sync as &dyn Fn(&Mixer, DeckId, bool),
+            &Mixer::set_deck_phaser_sync_units as &dyn Fn(&Mixer, DeckId, u32),
         ),
     ] {
         let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
@@ -849,31 +849,34 @@ fn locking_the_other_lfos_to_the_beat_while_engaged_is_click_free() {
         mixer.set_deck_playing(DeckId::A, true);
         settle(&mixer, SETTLE);
         let worst = worst_step_across(&mixer, |index| match index {
-            8 => lock(&mixer, DeckId::A, true),
-            24 => lock(&mixer, DeckId::A, false),
+            8 => lock(&mixer, DeckId::A, 8),
+            24 => lock(&mixer, DeckId::A, 0),
             _ => {}
         });
         assert!(worst < CLICK, "locking the {name} stepped the output, biggest step {worst}");
     }
 }
 
-/// A synced LFO retunes every buffer from the deck's tempo, so the
-/// division changing under it is the ordinary case, not a special one:
-/// still only a velocity change, still no step.
+/// A locked LFO retunes every buffer from the deck's tempo, so walking
+/// the ladder under it is the ordinary case, not a special one: still
+/// only a velocity change, still no step. Walked across the whole
+/// range, an eighth of a cycle a beat up to sixty-four of them.
 #[test]
-fn a_division_change_on_a_synced_tremolo_is_click_free() {
+fn walking_the_sync_ladder_under_a_locked_tremolo_is_click_free() {
     let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
     mixer.set_deck_tremolo(DeckId::A, true);
-    mixer.set_deck_tremolo_beat_sync(DeckId::A, true);
-    mixer.set_deck_tremolo_rate(DeckId::A, 1.0);
+    mixer.set_deck_tremolo_sync_units(DeckId::A, 8);
     mixer.set_deck_playing(DeckId::A, true);
     settle(&mixer, SETTLE);
-    let worst = worst_step_across(&mixer, |index| match index {
-        8 => mixer.set_deck_tremolo_rate(DeckId::A, 8.0),
-        24 => mixer.set_deck_tremolo_rate(DeckId::A, 0.5),
-        _ => {}
+    let rungs = [1u32, 512, 4, 128, 2, 64, 8];
+    let worst = worst_step_across(&mixer, |index| {
+        if index >= 4 && (index - 4) % 4 == 0 {
+            if let Some(units) = rungs.get((index - 4) / 4) {
+                mixer.set_deck_tremolo_sync_units(DeckId::A, *units);
+            }
+        }
     });
-    assert!(worst < CLICK, "a division change must not step, biggest step {worst}");
+    assert!(worst < CLICK, "walking the ladder must not step, biggest step {worst}");
 }
 
 /// Engaging a synced LFO jumps its phase to the chosen offset. That
@@ -882,7 +885,7 @@ fn a_division_change_on_a_synced_tremolo_is_click_free() {
 #[test]
 fn engaging_a_synced_tremolo_at_an_offset_is_click_free() {
     let mixer = deck_a(const_pcm(16_384, 480_000, 48_000));
-    mixer.set_deck_tremolo_beat_sync(DeckId::A, true);
+    mixer.set_deck_tremolo_sync_units(DeckId::A, 8);
     mixer.set_deck_tremolo_beat_offset(DeckId::A, 0.75);
     mixer.set_deck_playing(DeckId::A, true);
     settle(&mixer, SETTLE);

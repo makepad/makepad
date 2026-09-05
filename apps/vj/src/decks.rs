@@ -1268,9 +1268,10 @@ pub struct DeckState {
     pub flanger_depth: f32,
     /// How much of the flanger's delayed tap feeds back into its line.
     pub flanger_feedback: f32,
-    /// Whether the flanger sweep's rate is locked to the beat grid, reading
-    /// `flanger_rate` as cycles per beat rather than Hz.
-    pub flanger_beat_sync: bool,
+    /// Which rung of the sync ladder the flanger sweep runs on:
+    /// `LFO_SYNC_FREE` to follow `flanger_rate`'s Hz, or eighths of a
+    /// cycle per beat to follow the grid.
+    pub flanger_sync_units: u32,
     /// Where in the cycle the flanger sweep starts when it engages, 0..1.
     pub flanger_beat_offset: f32,
     /// Whether the bitcrusher is on. Same channel-strip treatment as
@@ -1287,9 +1288,10 @@ pub struct DeckState {
     pub tremolo_rate: f32,
     /// The tremolo LFO's swing, 0..1.
     pub tremolo_depth: f32,
-    /// Whether the tremolo's rate is locked to the beat grid, reading
-    /// `tremolo_rate` as cycles per beat rather than Hz.
-    pub tremolo_beat_sync: bool,
+    /// Which rung of the sync ladder the tremolo runs on:
+    /// `LFO_SYNC_FREE` to follow `tremolo_rate`'s Hz, or eighths of a
+    /// cycle per beat to follow the grid.
+    pub tremolo_sync_units: u32,
     /// Where in the cycle the tremolo starts when it engages, 0..1.
     pub tremolo_beat_offset: f32,
     /// Whether the distortion is on. Same channel-strip treatment as
@@ -1305,9 +1307,10 @@ pub struct DeckState {
     /// How much of the phaser's own output feeds back into its first
     /// stage.
     pub phaser_feedback: f32,
-    /// Whether the phaser sweep's rate is locked to the beat grid, reading
-    /// `phaser_rate` as cycles per beat rather than Hz.
-    pub phaser_beat_sync: bool,
+    /// Which rung of the sync ladder the phaser sweep runs on:
+    /// `LFO_SYNC_FREE` to follow `phaser_rate`'s Hz, or eighths of a
+    /// cycle per beat to follow the grid.
+    pub phaser_sync_units: u32,
     /// Where in the cycle the phaser sweep starts when it engages, 0..1.
     pub phaser_beat_offset: f32,
     /// Whether the autopan is on. Same channel-strip treatment as the
@@ -1315,9 +1318,10 @@ pub struct DeckState {
     pub autopan_on: bool,
     /// The autopan LFO's sweep speed, in Hz.
     pub autopan_rate: f32,
-    /// Whether the autopan swing's rate is locked to the beat grid, reading
-    /// `autopan_rate` as cycles per beat rather than Hz.
-    pub autopan_beat_sync: bool,
+    /// Which rung of the sync ladder the autopan swing runs on:
+    /// `LFO_SYNC_FREE` to follow `autopan_rate`'s Hz, or eighths of a
+    /// cycle per beat to follow the grid.
+    pub autopan_sync_units: u32,
     /// Where in the cycle the autopan swing starts when it engages, 0..1.
     pub autopan_beat_offset: f32,
     /// Whether the stereo width is on. Same channel-strip treatment as
@@ -1410,7 +1414,7 @@ impl Default for DeckState {
             flanger_rate: crate::music_dsp::FLANGER_RATE_DEFAULT,
             flanger_depth: crate::music_dsp::FLANGER_DEPTH_DEFAULT,
             flanger_feedback: crate::music_dsp::FLANGER_FEEDBACK_DEFAULT,
-            flanger_beat_sync: false,
+            flanger_sync_units: crate::music_dsp::LFO_SYNC_FREE,
             flanger_beat_offset: 0.0,
             bitcrusher_on: false,
             bitcrusher_rate: crate::music_dsp::BITCRUSHER_RATE_DEFAULT,
@@ -1418,18 +1422,18 @@ impl Default for DeckState {
             tremolo_on: false,
             tremolo_rate: crate::music_dsp::TREMOLO_RATE_DEFAULT,
             tremolo_depth: crate::music_dsp::TREMOLO_DEPTH_DEFAULT,
-            tremolo_beat_sync: false,
+            tremolo_sync_units: crate::music_dsp::LFO_SYNC_FREE,
             tremolo_beat_offset: 0.0,
             distortion_on: false,
             distortion_drive: crate::music_dsp::DISTORTION_DRIVE_DEFAULT,
             phaser_on: false,
             phaser_rate: crate::music_dsp::PHASER_RATE_DEFAULT,
             phaser_feedback: crate::music_dsp::PHASER_FEEDBACK_DEFAULT,
-            phaser_beat_sync: false,
+            phaser_sync_units: crate::music_dsp::LFO_SYNC_FREE,
             phaser_beat_offset: 0.0,
             autopan_on: false,
             autopan_rate: crate::music_dsp::AUTOPAN_RATE_DEFAULT,
-            autopan_beat_sync: false,
+            autopan_sync_units: crate::music_dsp::LFO_SYNC_FREE,
             autopan_beat_offset: 0.0,
             stereo_width_on: false,
             stereo_width_amount: crate::music_dsp::STEREO_WIDTH_DEFAULT,
@@ -1769,7 +1773,7 @@ pub enum DeckCmd {
     SetFlangerDepth { deck: DeckId, depth: f32 },
     /// How much of the flanger's delayed tap feeds back into its line.
     SetFlangerFeedback { deck: DeckId, feedback: f32 },
-    SetFlangerBeatSync { deck: DeckId, on: bool },
+    SetFlangerSyncUnits { deck: DeckId, units: u32 },
     SetFlangerBeatOffset { deck: DeckId, offset: f32 },
     /// The bitcrusher's on/off switch.
     SetBitcrusher { deck: DeckId, on: bool },
@@ -1783,7 +1787,7 @@ pub enum DeckCmd {
     SetTremoloRate { deck: DeckId, hz: f32 },
     /// The tremolo LFO's swing.
     SetTremoloDepth { deck: DeckId, depth: f32 },
-    SetTremoloBeatSync { deck: DeckId, on: bool },
+    SetTremoloSyncUnits { deck: DeckId, units: u32 },
     SetTremoloBeatOffset { deck: DeckId, offset: f32 },
     /// The distortion's on/off switch.
     SetDistortion { deck: DeckId, on: bool },
@@ -1796,13 +1800,13 @@ pub enum DeckCmd {
     /// How much of the phaser's own output feeds back into its first
     /// stage.
     SetPhaserFeedback { deck: DeckId, feedback: f32 },
-    SetPhaserBeatSync { deck: DeckId, on: bool },
+    SetPhaserSyncUnits { deck: DeckId, units: u32 },
     SetPhaserBeatOffset { deck: DeckId, offset: f32 },
     /// The autopan's on/off switch.
     SetAutopan { deck: DeckId, on: bool },
     /// The autopan LFO's sweep speed, in Hz.
     SetAutopanRate { deck: DeckId, hz: f32 },
-    SetAutopanBeatSync { deck: DeckId, on: bool },
+    SetAutopanSyncUnits { deck: DeckId, units: u32 },
     SetAutopanBeatOffset { deck: DeckId, offset: f32 },
     /// The stereo width's on/off switch.
     SetStereoWidth { deck: DeckId, on: bool },
@@ -2265,7 +2269,7 @@ impl DeckEngine {
             DeckCmd::SetFlangerRate { deck, hz: state.flanger_rate },
             DeckCmd::SetFlangerDepth { deck, depth: state.flanger_depth },
             DeckCmd::SetFlangerFeedback { deck, feedback: state.flanger_feedback },
-            DeckCmd::SetFlangerBeatSync { deck, on: state.flanger_beat_sync },
+            DeckCmd::SetFlangerSyncUnits { deck, units: state.flanger_sync_units },
             DeckCmd::SetFlangerBeatOffset { deck, offset: state.flanger_beat_offset },
             DeckCmd::SetBitcrusher { deck, on: state.bitcrusher_on },
             DeckCmd::SetBitcrusherRate { deck, hz: state.bitcrusher_rate },
@@ -2273,18 +2277,18 @@ impl DeckEngine {
             DeckCmd::SetTremolo { deck, on: state.tremolo_on },
             DeckCmd::SetTremoloRate { deck, hz: state.tremolo_rate },
             DeckCmd::SetTremoloDepth { deck, depth: state.tremolo_depth },
-            DeckCmd::SetTremoloBeatSync { deck, on: state.tremolo_beat_sync },
+            DeckCmd::SetTremoloSyncUnits { deck, units: state.tremolo_sync_units },
             DeckCmd::SetTremoloBeatOffset { deck, offset: state.tremolo_beat_offset },
             DeckCmd::SetDistortion { deck, on: state.distortion_on },
             DeckCmd::SetDistortionDrive { deck, drive: state.distortion_drive },
             DeckCmd::SetPhaser { deck, on: state.phaser_on },
             DeckCmd::SetPhaserRate { deck, hz: state.phaser_rate },
             DeckCmd::SetPhaserFeedback { deck, feedback: state.phaser_feedback },
-            DeckCmd::SetPhaserBeatSync { deck, on: state.phaser_beat_sync },
+            DeckCmd::SetPhaserSyncUnits { deck, units: state.phaser_sync_units },
             DeckCmd::SetPhaserBeatOffset { deck, offset: state.phaser_beat_offset },
             DeckCmd::SetAutopan { deck, on: state.autopan_on },
             DeckCmd::SetAutopanRate { deck, hz: state.autopan_rate },
-            DeckCmd::SetAutopanBeatSync { deck, on: state.autopan_beat_sync },
+            DeckCmd::SetAutopanSyncUnits { deck, units: state.autopan_sync_units },
             DeckCmd::SetAutopanBeatOffset { deck, offset: state.autopan_beat_offset },
             DeckCmd::SetStereoWidth { deck, on: state.stereo_width_on },
             DeckCmd::SetStereoWidthAmount { deck, amount: state.stereo_width_amount },
@@ -5172,20 +5176,14 @@ impl DeckEngine {
         vec![DeckCmd::SetFlangerFeedback { deck, feedback: state.flanger_feedback }]
     }
 
-    /// Lock the flanger sweep's rate to the beat grid, reading its rate as
-    /// cycles per beat rather than Hz.
-    pub fn toggle_flanger_beat_sync(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+    /// Which rung of the sync ladder the flanger sweep runs on. The dropdown
+    /// emits an explicit rung rather than a flip, so unlike the on/off
+    /// gestures beside it this needs no toggling twin: a MIX broadcast
+    /// simply sends the same rung to both decks.
+    pub fn set_flanger_sync_units(&mut self, deck: DeckId, units: u32) -> Vec<DeckCmd> {
         let state = self.deck_mut(deck);
-        state.flanger_beat_sync = !state.flanger_beat_sync;
-        vec![DeckCmd::SetFlangerBeatSync { deck, on: state.flanger_beat_sync }]
-    }
-
-    /// Set the flanger sweep's beat lock to an explicit value rather than
-    /// flipping it -- what a MIX-linked broadcast needs, the same
-    /// reason [`Self::set_flanger`] exists.
-    pub fn set_flanger_beat_sync(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
-        self.deck_mut(deck).flanger_beat_sync = on;
-        vec![DeckCmd::SetFlangerBeatSync { deck, on }]
+        state.flanger_sync_units = units.min(crate::music_dsp::LFO_SYNC_MAX_UNITS);
+        vec![DeckCmd::SetFlangerSyncUnits { deck, units: state.flanger_sync_units }]
     }
 
     /// Where in the cycle the flanger sweep starts when it engages, 0..1.
@@ -5260,20 +5258,14 @@ impl DeckEngine {
         vec![DeckCmd::SetTremoloDepth { deck, depth: state.tremolo_depth }]
     }
 
-    /// Lock the tremolo's rate to the beat grid, reading its rate as
-    /// cycles per beat rather than Hz.
-    pub fn toggle_tremolo_beat_sync(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+    /// Which rung of the sync ladder the tremolo runs on. The dropdown
+    /// emits an explicit rung rather than a flip, so unlike the on/off
+    /// gestures beside it this needs no toggling twin: a MIX broadcast
+    /// simply sends the same rung to both decks.
+    pub fn set_tremolo_sync_units(&mut self, deck: DeckId, units: u32) -> Vec<DeckCmd> {
         let state = self.deck_mut(deck);
-        state.tremolo_beat_sync = !state.tremolo_beat_sync;
-        vec![DeckCmd::SetTremoloBeatSync { deck, on: state.tremolo_beat_sync }]
-    }
-
-    /// Set the tremolo's beat lock to an explicit value rather than
-    /// flipping it -- what a MIX-linked broadcast needs, the same
-    /// reason [`Self::set_tremolo`] exists.
-    pub fn set_tremolo_beat_sync(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
-        self.deck_mut(deck).tremolo_beat_sync = on;
-        vec![DeckCmd::SetTremoloBeatSync { deck, on }]
+        state.tremolo_sync_units = units.min(crate::music_dsp::LFO_SYNC_MAX_UNITS);
+        vec![DeckCmd::SetTremoloSyncUnits { deck, units: state.tremolo_sync_units }]
     }
 
     /// Where in the cycle the tremolo starts when it engages, 0..1.
@@ -5340,20 +5332,14 @@ impl DeckEngine {
         vec![DeckCmd::SetPhaserFeedback { deck, feedback: state.phaser_feedback }]
     }
 
-    /// Lock the phaser sweep's rate to the beat grid, reading its rate as
-    /// cycles per beat rather than Hz.
-    pub fn toggle_phaser_beat_sync(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+    /// Which rung of the sync ladder the phaser sweep runs on. The dropdown
+    /// emits an explicit rung rather than a flip, so unlike the on/off
+    /// gestures beside it this needs no toggling twin: a MIX broadcast
+    /// simply sends the same rung to both decks.
+    pub fn set_phaser_sync_units(&mut self, deck: DeckId, units: u32) -> Vec<DeckCmd> {
         let state = self.deck_mut(deck);
-        state.phaser_beat_sync = !state.phaser_beat_sync;
-        vec![DeckCmd::SetPhaserBeatSync { deck, on: state.phaser_beat_sync }]
-    }
-
-    /// Set the phaser sweep's beat lock to an explicit value rather than
-    /// flipping it -- what a MIX-linked broadcast needs, the same
-    /// reason [`Self::set_phaser`] exists.
-    pub fn set_phaser_beat_sync(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
-        self.deck_mut(deck).phaser_beat_sync = on;
-        vec![DeckCmd::SetPhaserBeatSync { deck, on }]
+        state.phaser_sync_units = units.min(crate::music_dsp::LFO_SYNC_MAX_UNITS);
+        vec![DeckCmd::SetPhaserSyncUnits { deck, units: state.phaser_sync_units }]
     }
 
     /// Where in the cycle the phaser sweep starts when it engages, 0..1.
@@ -5386,20 +5372,14 @@ impl DeckEngine {
         vec![DeckCmd::SetAutopanRate { deck, hz: state.autopan_rate }]
     }
 
-    /// Lock the autopan swing's rate to the beat grid, reading its rate as
-    /// cycles per beat rather than Hz.
-    pub fn toggle_autopan_beat_sync(&mut self, deck: DeckId) -> Vec<DeckCmd> {
+    /// Which rung of the sync ladder the autopan swing runs on. The dropdown
+    /// emits an explicit rung rather than a flip, so unlike the on/off
+    /// gestures beside it this needs no toggling twin: a MIX broadcast
+    /// simply sends the same rung to both decks.
+    pub fn set_autopan_sync_units(&mut self, deck: DeckId, units: u32) -> Vec<DeckCmd> {
         let state = self.deck_mut(deck);
-        state.autopan_beat_sync = !state.autopan_beat_sync;
-        vec![DeckCmd::SetAutopanBeatSync { deck, on: state.autopan_beat_sync }]
-    }
-
-    /// Set the autopan swing's beat lock to an explicit value rather than
-    /// flipping it -- what a MIX-linked broadcast needs, the same
-    /// reason [`Self::set_autopan`] exists.
-    pub fn set_autopan_beat_sync(&mut self, deck: DeckId, on: bool) -> Vec<DeckCmd> {
-        self.deck_mut(deck).autopan_beat_sync = on;
-        vec![DeckCmd::SetAutopanBeatSync { deck, on }]
+        state.autopan_sync_units = units.min(crate::music_dsp::LFO_SYNC_MAX_UNITS);
+        vec![DeckCmd::SetAutopanSyncUnits { deck, units: state.autopan_sync_units }]
     }
 
     /// Where in the cycle the autopan swing starts when it engages, 0..1.

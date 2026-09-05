@@ -2445,6 +2445,10 @@ pub struct VjBeatsDrop {
     /// Serve the loop-length ladder instead of the sweep rows.
     #[live]
     loop_rows: bool,
+    /// Serve an LFO effect's sync ladder: free-running, then the
+    /// divisions either side of one cycle a beat.
+    #[live]
+    lfo_rows: bool,
     #[rust(1u32)]
     value: u32,
     /// Transient display override (the scratch hand's "—").
@@ -2462,7 +2466,9 @@ pub struct VjBeatsDrop {
 
 impl VjBeatsDrop {
     fn rows(&self) -> &'static [(u32, &'static str)] {
-        if self.loop_rows {
+        if self.lfo_rows {
+            &crate::music_dsp::LFO_SYNC_ROWS
+        } else if self.loop_rows {
             loop_rows()
         } else {
             &BEATS_ROWS

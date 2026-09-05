@@ -2041,16 +2041,19 @@ pub struct Flanger {
     /// Nothing to do here: wet is at zero and the fed-back tail has
     /// decayed away. `process` uses this to skip the line entirely.
     quiet: bool,
-    /// When true, `rate`'s target is read as cycles-per-beat (through
-    /// `BEAT_SYNC_LADDER`) instead of Hz, and `active_hz` -- recomputed
-    /// once a buffer in `prepare_block` from the deck's current tempo --
-    /// drives the sweep instead of ticking `rate` directly.
-    beat_sync: bool,
+    /// Which rung of [`LFO_SYNC_ROWS`] the sweep runs on:
+    /// [`LFO_SYNC_FREE`] to follow `rate`'s Hz, or eighths of a cycle
+    /// per beat to follow the deck's grid instead, through `active_hz`
+    /// -- recomputed once a buffer in `prepare_block`. A division is
+    /// deliberately NOT stored in `rate`: that setter clamps to this
+    /// effect's own Hz range, which a division has no reason to fit
+    /// inside.
+    sync_units: u32,
     /// Phase offset within the cycle, 0..1, applied once at the moment
     /// of engage (see `set_wet`), never live.
     beat_offset: f32,
-    /// This buffer's synced rate in Hz; unused (stale) when `beat_sync`
-    /// is false.
+    /// This buffer's locked rate in Hz; unused (stale) on the
+    /// free-running rung.
     active_hz: f32,
 }
 
@@ -2069,7 +2072,7 @@ impl Flanger {
             tail_peak: 0.0,
             period_left: 0,
             quiet: true,
-            beat_sync: false,
+            sync_units: LFO_SYNC_FREE,
             beat_offset: 0.0,
             active_hz: FLANGER_RATE_DEFAULT,
         }
@@ -2092,7 +2095,7 @@ impl Flanger {
     pub fn set_wet(&mut self, wet: f32) {
         if let Some(wet) = knob(wet, 0.0, 1.0) {
             let engaging = wet > 0.0;
-            if engaging && self.wet.target() == 0.0 && self.beat_sync {
+            if engaging && self.wet.target() == 0.0 && self.sync_units > 0 {
                 // Start the sweep at its chosen place in the cycle,
                 // gated on the engage transition so it can never move
                 // the sweep under a sounding deck.
@@ -2105,22 +2108,23 @@ impl Flanger {
         }
     }
 
-    /// The LFO's sweep speed, in Hz when free-running or cycles-per-beat
-    /// when beat-synced (the caller snaps a synced value through
-    /// `nearest_beat_sync_rung` first).
+    /// The LFO's sweep speed, in Hz -- what plays on the free-running
+    /// rung. A locked rung takes its rate from the grid instead and
+    /// leaves this alone.
     pub fn set_rate(&mut self, hz: f32) {
         if let Some(hz) = knob(hz, FLANGER_RATE_MIN, FLANGER_RATE_MAX) {
             self.rate.slew(hz, EQ_ENGAGE_SECS);
         }
     }
 
-    /// Lock the sweep's rate to the beat grid instead of running freely.
-    pub fn set_beat_sync(&mut self, on: bool) {
-        self.beat_sync = on;
+    /// Pick the sweep's rung: [`LFO_SYNC_FREE`] for the Hz slider, or
+    /// eighths of a cycle per beat to follow the grid.
+    pub fn set_sync_units(&mut self, units: u32) {
+        self.sync_units = units.min(LFO_SYNC_MAX_UNITS);
     }
 
-    pub fn beat_sync(&self) -> bool {
-        self.beat_sync
+    pub fn sync_units(&self) -> u32 {
+        self.sync_units
     }
 
     /// Where in the cycle the sweep starts on engage, 0..1.
@@ -2133,8 +2137,9 @@ impl Flanger {
     /// Recompute this buffer's beat-synced rate from the deck's current
     /// tempo; see [`Tremolo::prepare_block`] for the full reasoning.
     pub fn prepare_block(&mut self, beat_secs: f64) {
-        if self.beat_sync {
-            self.active_hz = (self.rate.target() as f64 / beat_secs.max(1e-6)) as f32;
+        if self.sync_units > 0 {
+            self.active_hz =
+                (sync_cycles_per_beat(self.sync_units) / beat_secs.max(1e-6)) as f32;
         }
     }
 
@@ -2196,7 +2201,7 @@ impl Flanger {
             // touched at all, and the frame is the input exactly.
             return frame;
         }
-        let rate_hz = if self.beat_sync {
+        let rate_hz = if self.sync_units > 0 {
             self.active_hz
         } else {
             self.rate.tick(device_rate)
@@ -2437,33 +2442,45 @@ impl Bitcrusher {
     }
 }
 
-/// Musical divisions for locking an LFO effect's rate to the beat grid,
-/// cycles per beat. Below 1.0 one cycle spans multiple beats (a slow
-/// Flanger/Phaser sweep across a bar or two); above 1.0 several cycles
-/// land inside one beat (a fast Tremolo/Autopan wobble). Powers of two,
-/// mirroring `LOOP_LADDER`'s shape (`decks.rs`) but as a plain ratio
-/// rather than 1/32-beat tick counts, since a cycle count has no reason
-/// to be an exact fraction of 32.
-pub const BEAT_SYNC_LADDER: [(f32, &str); 9] = [
-    (0.125, "1/8"),
-    (0.25, "1/4"),
-    (0.5, "1/2"),
-    (1.0, "1"),
-    (2.0, "2"),
-    (4.0, "4"),
-    (8.0, "8"),
-    (16.0, "16"),
-    (32.0, "32"),
+/// An LFO's locked rate is carried as EIGHTHS of a cycle per beat, so
+/// the whole ladder is integers -- the same reason the loop ladder
+/// counts 1/32-beat ticks (`decks.rs`) rather than storing fractions.
+pub(crate) const LFO_SYNC_EIGHTHS: u32 = 8;
+
+/// The free-running rung: not a division at all, but whatever Hz the
+/// rate slider carries. Zero, so `sync_units > 0` reads as "locked".
+pub const LFO_SYNC_FREE: u32 = 0;
+
+/// The rows an LFO effect's sync dropdown serves, in order: free-running
+/// first, then every division from an eighth of a cycle per beat (one
+/// sweep every eight beats -- two bars, the slow flanger/phaser end) up
+/// to sixty-four cycles inside a single beat (the fast tremolo/autopan
+/// end). Powers of two throughout, like the loop ladder's own rungs.
+///
+/// This list is the WHOLE set of rates a locked effect can run at: a
+/// dropdown can only emit a value on it, so nothing has to snap a raw
+/// drag to a rung and nothing can land between two of them.
+pub const LFO_SYNC_ROWS: [(u32, &str); 11] = [
+    (LFO_SYNC_FREE, "Hz"),
+    (1, "1/8"),
+    (2, "1/4"),
+    (4, "1/2"),
+    (8, "1"),
+    (16, "2"),
+    (32, "4"),
+    (64, "8"),
+    (128, "16"),
+    (256, "32"),
+    (512, "64"),
 ];
 
-/// Snap a raw division value to the nearest `BEAT_SYNC_LADDER` rung on a
-/// log2 scale, mirroring `nearest_loop_rung` (`decks.rs`).
-pub fn nearest_beat_sync_rung(value: f32) -> f32 {
-    if !(value > 0.0) || !value.is_finite() {
-        return 1.0;
-    }
-    let rung = value.log2().round().clamp(-3.0, 5.0);
-    2f32.powi(rung as i32)
+/// The top rung, so a setter can clamp to the ladder without walking it.
+pub const LFO_SYNC_MAX_UNITS: u32 = 512;
+
+/// A rung's cycles per beat. Zero units is free-running and has none.
+#[inline]
+fn sync_cycles_per_beat(units: u32) -> f64 {
+    units as f64 / LFO_SYNC_EIGHTHS as f64
 }
 
 pub(crate) const TREMOLO_RATE_MIN: f32 = 0.1;
@@ -2487,18 +2504,20 @@ pub struct Tremolo {
     wet: ParamRamp,
     rate: ParamRamp,
     depth: ParamRamp,
-    /// When true, `rate`'s target is read as cycles-per-beat (through
-    /// `BEAT_SYNC_LADDER`) instead of Hz, and `active_hz` -- recomputed
-    /// once a buffer in `prepare_block` from the deck's current tempo --
-    /// drives the LFO instead of ticking `rate` directly. See the
-    /// beat-locked-lfo-rate plan for the full design.
-    beat_sync: bool,
+    /// Which rung of [`LFO_SYNC_ROWS`] the LFO runs on:
+    /// [`LFO_SYNC_FREE`] to follow `rate`'s Hz, or eighths of a cycle
+    /// per beat to follow the deck's grid instead, through `active_hz`
+    /// -- recomputed once a buffer in `prepare_block`. A division is
+    /// deliberately NOT stored in `rate`: that setter clamps to this
+    /// effect's own Hz range, which a division has no reason to fit
+    /// inside.
+    sync_units: u32,
     /// Phase offset within the cycle, 0..1, applied once at the moment
     /// of engage (see `set_wet`) -- not live while already engaged, so
     /// dragging it has no click surface to cover.
     beat_offset: f32,
-    /// This buffer's synced rate in Hz; unused (stale) when `beat_sync`
-    /// is false, in which case `process` ticks `rate` directly instead.
+    /// This buffer's locked rate in Hz; unused (stale) on the
+    /// free-running rung, where `process` ticks `rate` directly instead.
     active_hz: f32,
 }
 
@@ -2509,7 +2528,7 @@ impl Tremolo {
             wet: ParamRamp::at(0.0),
             rate: ParamRamp::at(TREMOLO_RATE_DEFAULT),
             depth: ParamRamp::at(TREMOLO_DEPTH_DEFAULT),
-            beat_sync: false,
+            sync_units: LFO_SYNC_FREE,
             beat_offset: 0.0,
             active_hz: TREMOLO_RATE_DEFAULT,
         }
@@ -2522,16 +2541,17 @@ impl Tremolo {
     /// click.
     pub fn set_wet(&mut self, wet: f32) {
         if let Some(wet) = knob(wet, 0.0, 1.0) {
-            if wet > 0.0 && self.wet.target() == 0.0 && self.beat_sync {
+            if wet > 0.0 && self.wet.target() == 0.0 && self.sync_units > 0 {
                 self.phase = self.beat_offset * std::f32::consts::TAU;
             }
             self.wet.slew(wet, EQ_ENGAGE_SECS);
         }
     }
 
-    /// The LFO's speed, in Hz when free-running or cycles-per-beat when
-    /// beat-synced (the caller is expected to have already snapped a
-    /// synced value through `nearest_beat_sync_rung`). A hard change
+    /// The LFO's speed, in Hz -- what plays on the free-running rung.
+    /// A locked rung takes its rate from the grid instead and leaves
+    /// this alone, ready for the moment Hz is picked again. A hard
+    /// change
     /// here only shifts the modulation's slope, not the gain's value at
     /// any instant, so a plain ramp is enough -- ramped anyway, for
     /// idiom consistency with every other numeric setter in this file,
@@ -2549,13 +2569,14 @@ impl Tremolo {
         }
     }
 
-    /// Lock the LFO's rate to the beat grid instead of running freely.
-    pub fn set_beat_sync(&mut self, on: bool) {
-        self.beat_sync = on;
+    /// Pick the LFO's rung: [`LFO_SYNC_FREE`] for the Hz slider, or
+    /// eighths of a cycle per beat to follow the grid.
+    pub fn set_sync_units(&mut self, units: u32) {
+        self.sync_units = units.min(LFO_SYNC_MAX_UNITS);
     }
 
-    pub fn beat_sync(&self) -> bool {
-        self.beat_sync
+    pub fn sync_units(&self) -> u32 {
+        self.sync_units
     }
 
     /// Where in the cycle the wobble starts on engage, 0..1.
@@ -2577,8 +2598,9 @@ impl Tremolo {
     /// `beat_secs` is read fresh every buffer. Ordinary long-run phase
     /// drift is accepted, the same as free-Hz mode already has.
     pub fn prepare_block(&mut self, beat_secs: f64) {
-        if self.beat_sync {
-            self.active_hz = (self.rate.target() as f64 / beat_secs.max(1e-6)) as f32;
+        if self.sync_units > 0 {
+            self.active_hz =
+                (sync_cycles_per_beat(self.sync_units) / beat_secs.max(1e-6)) as f32;
         }
     }
 
@@ -2593,7 +2615,7 @@ impl Tremolo {
             // that can still be ringing.
             return frame;
         }
-        let rate_hz = if self.beat_sync {
+        let rate_hz = if self.sync_units > 0 {
             self.active_hz
         } else {
             self.rate.tick(device_rate)
@@ -2749,16 +2771,19 @@ pub struct Phaser {
     wet: ParamRamp,
     rate: ParamRamp,
     feedback: ParamRamp,
-    /// When true, `rate`'s target is read as cycles-per-beat (through
-    /// `BEAT_SYNC_LADDER`) instead of Hz, and `active_hz` -- recomputed
-    /// once a buffer in `prepare_block` from the deck's current tempo --
-    /// drives the sweep instead of ticking `rate` directly.
-    beat_sync: bool,
+    /// Which rung of [`LFO_SYNC_ROWS`] the sweep runs on:
+    /// [`LFO_SYNC_FREE`] to follow `rate`'s Hz, or eighths of a cycle
+    /// per beat to follow the deck's grid instead, through `active_hz`
+    /// -- recomputed once a buffer in `prepare_block`. A division is
+    /// deliberately NOT stored in `rate`: that setter clamps to this
+    /// effect's own Hz range, which a division has no reason to fit
+    /// inside.
+    sync_units: u32,
     /// Phase offset within the cycle, 0..1, applied once at the moment
     /// of engage (see `set_wet`), never live.
     beat_offset: f32,
-    /// This buffer's synced rate in Hz; unused (stale) when `beat_sync`
-    /// is false.
+    /// This buffer's locked rate in Hz; unused (stale) on the
+    /// free-running rung.
     active_hz: f32,
 }
 
@@ -2771,7 +2796,7 @@ impl Phaser {
             wet: ParamRamp::at(0.0),
             rate: ParamRamp::at(PHASER_RATE_DEFAULT),
             feedback: ParamRamp::at(PHASER_FEEDBACK_DEFAULT),
-            beat_sync: false,
+            sync_units: LFO_SYNC_FREE,
             beat_offset: 0.0,
             active_hz: PHASER_RATE_DEFAULT,
         }
@@ -2791,28 +2816,29 @@ impl Phaser {
     /// never move the sweep under a sounding deck.
     pub fn set_wet(&mut self, wet: f32) {
         if let Some(wet) = knob(wet, 0.0, 1.0) {
-            if wet > 0.0 && self.wet.target() == 0.0 && self.beat_sync {
+            if wet > 0.0 && self.wet.target() == 0.0 && self.sync_units > 0 {
                 self.phase = self.beat_offset * std::f32::consts::TAU;
             }
             self.wet.slew(wet, EQ_ENGAGE_SECS);
         }
     }
 
-    /// The LFO's sweep speed, in Hz when free-running or cycles-per-beat
-    /// when beat-synced (the caller snaps a synced value through
-    /// `nearest_beat_sync_rung` first).
+    /// The LFO's sweep speed, in Hz -- what plays on the free-running
+    /// rung. A locked rung takes its rate from the grid instead and
+    /// leaves this alone.
     pub fn set_rate(&mut self, hz: f32) {
         if let Some(hz) = knob(hz, PHASER_RATE_MIN, PHASER_RATE_MAX) {
             self.rate.slew(hz, EQ_ENGAGE_SECS);
         }
     }
-    /// Lock the sweep's rate to the beat grid instead of running freely.
-    pub fn set_beat_sync(&mut self, on: bool) {
-        self.beat_sync = on;
+    /// Pick the sweep's rung: [`LFO_SYNC_FREE`] for the Hz slider, or
+    /// eighths of a cycle per beat to follow the grid.
+    pub fn set_sync_units(&mut self, units: u32) {
+        self.sync_units = units.min(LFO_SYNC_MAX_UNITS);
     }
 
-    pub fn beat_sync(&self) -> bool {
-        self.beat_sync
+    pub fn sync_units(&self) -> u32 {
+        self.sync_units
     }
 
     /// Where in the cycle the sweep starts on engage, 0..1.
@@ -2825,8 +2851,9 @@ impl Phaser {
     /// Recompute this buffer's beat-synced rate from the deck's current
     /// tempo; see [`Tremolo::prepare_block`] for the full reasoning.
     pub fn prepare_block(&mut self, beat_secs: f64) {
-        if self.beat_sync {
-            self.active_hz = (self.rate.target() as f64 / beat_secs.max(1e-6)) as f32;
+        if self.sync_units > 0 {
+            self.active_hz =
+                (sync_cycles_per_beat(self.sync_units) / beat_secs.max(1e-6)) as f32;
         }
     }
 
@@ -2855,7 +2882,7 @@ impl Phaser {
             // biquad state behaves while bypassed.
             return frame;
         }
-        let rate_hz = if self.beat_sync {
+        let rate_hz = if self.sync_units > 0 {
             self.active_hz
         } else {
             self.rate.tick(device_rate)
@@ -2919,16 +2946,19 @@ pub struct Autopan {
     wet: ParamRamp,
     rate: ParamRamp,
     depth: ParamRamp,
-    /// When true, `rate`'s target is read as cycles-per-beat (through
-    /// `BEAT_SYNC_LADDER`) instead of Hz, and `active_hz` -- recomputed
-    /// once a buffer in `prepare_block` from the deck's current tempo --
-    /// drives the sweep instead of ticking `rate` directly.
-    beat_sync: bool,
+    /// Which rung of [`LFO_SYNC_ROWS`] the sweep runs on:
+    /// [`LFO_SYNC_FREE`] to follow `rate`'s Hz, or eighths of a cycle
+    /// per beat to follow the deck's grid instead, through `active_hz`
+    /// -- recomputed once a buffer in `prepare_block`. A division is
+    /// deliberately NOT stored in `rate`: that setter clamps to this
+    /// effect's own Hz range, which a division has no reason to fit
+    /// inside.
+    sync_units: u32,
     /// Phase offset within the cycle, 0..1, applied once at the moment
     /// of engage (see `set_wet`), never live.
     beat_offset: f32,
-    /// This buffer's synced rate in Hz; unused (stale) when `beat_sync`
-    /// is false.
+    /// This buffer's locked rate in Hz; unused (stale) on the
+    /// free-running rung.
     active_hz: f32,
 }
 
@@ -2939,7 +2969,7 @@ impl Autopan {
             wet: ParamRamp::at(0.0),
             rate: ParamRamp::at(AUTOPAN_RATE_DEFAULT),
             depth: ParamRamp::at(AUTOPAN_DEPTH_DEFAULT),
-            beat_sync: false,
+            sync_units: LFO_SYNC_FREE,
             beat_offset: 0.0,
             active_hz: AUTOPAN_RATE_DEFAULT,
         }
@@ -2950,28 +2980,29 @@ impl Autopan {
     /// never move the pan under a sounding deck.
     pub fn set_wet(&mut self, wet: f32) {
         if let Some(wet) = knob(wet, 0.0, 1.0) {
-            if wet > 0.0 && self.wet.target() == 0.0 && self.beat_sync {
+            if wet > 0.0 && self.wet.target() == 0.0 && self.sync_units > 0 {
                 self.phase = self.beat_offset * std::f32::consts::TAU;
             }
             self.wet.slew(wet, EQ_ENGAGE_SECS);
         }
     }
 
-    /// The LFO's sweep speed, in Hz when free-running or cycles-per-beat
-    /// when beat-synced (the caller snaps a synced value through
-    /// `nearest_beat_sync_rung` first).
+    /// The LFO's sweep speed, in Hz -- what plays on the free-running
+    /// rung. A locked rung takes its rate from the grid instead and
+    /// leaves this alone.
     pub fn set_rate(&mut self, hz: f32) {
         if let Some(hz) = knob(hz, AUTOPAN_RATE_MIN, AUTOPAN_RATE_MAX) {
             self.rate.slew(hz, EQ_ENGAGE_SECS);
         }
     }
-    /// Lock the swing's rate to the beat grid instead of running freely.
-    pub fn set_beat_sync(&mut self, on: bool) {
-        self.beat_sync = on;
+    /// Pick the swing's rung: [`LFO_SYNC_FREE`] for the Hz slider, or
+    /// eighths of a cycle per beat to follow the grid.
+    pub fn set_sync_units(&mut self, units: u32) {
+        self.sync_units = units.min(LFO_SYNC_MAX_UNITS);
     }
 
-    pub fn beat_sync(&self) -> bool {
-        self.beat_sync
+    pub fn sync_units(&self) -> u32 {
+        self.sync_units
     }
 
     /// Where in the cycle the swing starts on engage, 0..1.
@@ -2984,8 +3015,9 @@ impl Autopan {
     /// Recompute this buffer's beat-synced rate from the deck's current
     /// tempo; see [`Tremolo::prepare_block`] for the full reasoning.
     pub fn prepare_block(&mut self, beat_secs: f64) {
-        if self.beat_sync {
-            self.active_hz = (self.rate.target() as f64 / beat_secs.max(1e-6)) as f32;
+        if self.sync_units > 0 {
+            self.active_hz =
+                (sync_cycles_per_beat(self.sync_units) / beat_secs.max(1e-6)) as f32;
         }
     }
 
@@ -3013,7 +3045,7 @@ impl Autopan {
             // No line, no tail: off is exactly the input.
             return frame;
         }
-        let rate_hz = if self.beat_sync {
+        let rate_hz = if self.sync_units > 0 {
             self.active_hz
         } else {
             self.rate.tick(device_rate)
@@ -5804,39 +5836,64 @@ mod tests {
         assert_eq!(trem.depth.target(), 0.0);
     }
 
-    /// The ladder snaps to its nearest rung on a log2 scale and clamps
-    /// at both ends, mirroring `nearest_loop_rung`.
+    /// The ladder is the whole set an operator can pick from: free
+    /// first, then powers of two either side of one cycle a beat.
     #[test]
-    fn the_beat_sync_ladder_snaps_to_its_nearest_rung() {
-        assert_eq!(nearest_beat_sync_rung(1.0), 1.0);
-        assert_eq!(nearest_beat_sync_rung(1.9), 2.0);
-        assert_eq!(nearest_beat_sync_rung(0.3), 0.25);
-        assert_eq!(nearest_beat_sync_rung(5.0), 4.0);
-        // Both ends clamp to the ladder rather than running past it.
-        assert_eq!(nearest_beat_sync_rung(0.001), 0.125);
-        assert_eq!(nearest_beat_sync_rung(1_000.0), 32.0);
-        // A value that means nothing lands on the neutral rung.
-        assert_eq!(nearest_beat_sync_rung(0.0), 1.0);
-        assert_eq!(nearest_beat_sync_rung(-4.0), 1.0);
-        assert_eq!(nearest_beat_sync_rung(f32::NAN), 1.0);
-        // Every rung is its own nearest rung.
-        for (value, _) in BEAT_SYNC_LADDER {
-            assert_eq!(nearest_beat_sync_rung(value), value);
+    fn the_sync_ladder_reads_as_its_labels_say() {
+        assert_eq!(LFO_SYNC_ROWS[0], (LFO_SYNC_FREE, "Hz"));
+        assert_eq!(LFO_SYNC_ROWS[LFO_SYNC_ROWS.len() - 1].0, LFO_SYNC_MAX_UNITS);
+        // Every rung past the first is a power of two, and each label
+        // says what its units actually mean in cycles per beat.
+        for (units, label) in LFO_SYNC_ROWS.iter().skip(1) {
+            assert!(units.is_power_of_two(), "{label} is not a power of two");
+            let cycles = sync_cycles_per_beat(*units);
+            let expected = match label.strip_prefix("1/") {
+                Some(divisor) => 1.0 / divisor.parse::<f64>().unwrap(),
+                None => label.parse::<f64>().unwrap(),
+            };
+            assert!((cycles - expected).abs() < 1e-9, "{label} reads as {cycles}");
         }
     }
 
-    /// Synced, the rate is the division divided by a beat's length, so
+    /// Locked, the rate is the division divided by a beat's length, so
     /// two cycles per beat at 120bpm (half a second a beat) is 4Hz.
     #[test]
-    fn a_beat_synced_tremolo_turns_its_division_into_hz() {
+    fn a_locked_tremolo_turns_its_division_into_hz() {
         let mut trem = Tremolo::new();
-        trem.set_beat_sync(true);
-        trem.set_rate(2.0);
+        // Sixteen eighths is two cycles a beat.
+        trem.set_sync_units(16);
         trem.prepare_block(0.5);
         assert!((trem.active_hz - 4.0).abs() < 1e-6, "{}", trem.active_hz);
         // Half the tempo, half the rate -- it tracks, buffer to buffer.
         trem.prepare_block(1.0);
         assert!((trem.active_hz - 2.0).abs() < 1e-6, "{}", trem.active_hz);
+    }
+
+    /// The whole ladder is reachable, including the rungs that sit far
+    /// outside this effect's own Hz range -- the bug the shared rate
+    /// field had, where a division was clamped to a rate limit.
+    #[test]
+    fn every_rung_reaches_the_engine_whatever_the_hz_range_is() {
+        // The phaser's Hz range stops at 5, well under what the top
+        // rungs ask for at any ordinary tempo.
+        for (units, label) in LFO_SYNC_ROWS.iter().skip(1) {
+            let mut ph = Phaser::new();
+            ph.set_sync_units(*units);
+            assert_eq!(ph.sync_units(), *units, "{label} did not survive its setter");
+            ph.prepare_block(0.5);
+            let expected = (sync_cycles_per_beat(*units) / 0.5) as f32;
+            assert!(
+                (ph.active_hz - expected).abs() < 1e-4,
+                "{label} landed on {} not {expected}",
+                ph.active_hz
+            );
+        }
+        // The top rung at a fast tempo is a real audio-rate number, and
+        // it is passed through rather than trimmed.
+        let mut ph = Phaser::new();
+        ph.set_sync_units(LFO_SYNC_MAX_UNITS);
+        ph.prepare_block(0.4);
+        assert!((ph.active_hz - 160.0).abs() < 1e-3, "{}", ph.active_hz);
     }
 
     /// Free-running, `prepare_block` leaves the rate alone: the Hz
@@ -5853,9 +5910,9 @@ mod tests {
     /// The offset lands on the moment of engage, not before and not
     /// live -- so the wobble starts where the operator chose.
     #[test]
-    fn a_beat_synced_offset_lands_on_engage() {
+    fn a_locked_offset_lands_on_engage() {
         let mut trem = Tremolo::new();
-        trem.set_beat_sync(true);
+        trem.set_sync_units(8);
         trem.set_beat_offset(0.25);
         assert_eq!(trem.phase, 0.0, "nothing moves before it engages");
         trem.set_wet(1.0);
@@ -5889,14 +5946,23 @@ mod tests {
         assert_eq!(trem.beat_offset, 0.0, "a bad value moves nothing");
     }
 
-    /// All four LFO effects carry the same beat lock, and each starts
+    /// A rung past the ladder's top is held at the top rather than
+    /// running away with the phase accumulator.
+    #[test]
+    fn a_rung_past_the_ladder_is_held_at_its_top() {
+        let mut trem = Tremolo::new();
+        trem.set_sync_units(u32::MAX);
+        assert_eq!(trem.sync_units(), LFO_SYNC_MAX_UNITS);
+    }
+
+    /// All four LFO effects carry the same lock, and each starts
     /// free-running so nothing an operator already set up changes.
     #[test]
     fn every_lfo_effect_starts_free_running() {
-        assert!(!Tremolo::new().beat_sync());
-        assert!(!Autopan::new().beat_sync());
-        assert!(!Flanger::new().beat_sync());
-        assert!(!Phaser::new().beat_sync());
+        assert_eq!(Tremolo::new().sync_units(), LFO_SYNC_FREE);
+        assert_eq!(Autopan::new().sync_units(), LFO_SYNC_FREE);
+        assert_eq!(Flanger::new().sync_units(), LFO_SYNC_FREE);
+        assert_eq!(Phaser::new().sync_units(), LFO_SYNC_FREE);
     }
 
     /// Off, a fresh unit is exactly its input.

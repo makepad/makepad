@@ -2646,11 +2646,11 @@ impl Mixer {
         s.decks[deck.index()].chain.flanger_mut().set_feedback(feedback);
     }
 
-    /// Lock the flanger sweep's rate to the beat grid, reading its rate as
-    /// cycles per beat instead of Hz.
-    pub fn set_deck_flanger_beat_sync(&self, deck: DeckId, on: bool) {
+    /// Which rung of the sync ladder the flanger sweep runs on: free-running,
+    /// or eighths of a cycle per beat.
+    pub fn set_deck_flanger_sync_units(&self, deck: DeckId, units: u32) {
         let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.flanger_mut().set_beat_sync(on);
+        s.decks[deck.index()].chain.flanger_mut().set_sync_units(units);
     }
 
     /// Where in the cycle the flanger sweep starts when it engages, 0..1.
@@ -2695,11 +2695,11 @@ impl Mixer {
         s.decks[deck.index()].chain.tremolo_mut().set_depth(depth);
     }
 
-    /// Lock the tremolo's rate to the beat grid, reading its rate as
-    /// cycles per beat instead of Hz.
-    pub fn set_deck_tremolo_beat_sync(&self, deck: DeckId, on: bool) {
+    /// Which rung of the sync ladder the tremolo runs on: free-running,
+    /// or eighths of a cycle per beat.
+    pub fn set_deck_tremolo_sync_units(&self, deck: DeckId, units: u32) {
         let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.tremolo_mut().set_beat_sync(on);
+        s.decks[deck.index()].chain.tremolo_mut().set_sync_units(units);
     }
 
     /// Where in the cycle the tremolo starts when it engages, 0..1.
@@ -2739,11 +2739,11 @@ impl Mixer {
         s.decks[deck.index()].chain.phaser_mut().set_feedback(feedback);
     }
 
-    /// Lock the phaser sweep's rate to the beat grid, reading its rate as
-    /// cycles per beat instead of Hz.
-    pub fn set_deck_phaser_beat_sync(&self, deck: DeckId, on: bool) {
+    /// Which rung of the sync ladder the phaser sweep runs on: free-running,
+    /// or eighths of a cycle per beat.
+    pub fn set_deck_phaser_sync_units(&self, deck: DeckId, units: u32) {
         let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.phaser_mut().set_beat_sync(on);
+        s.decks[deck.index()].chain.phaser_mut().set_sync_units(units);
     }
 
     /// Where in the cycle the phaser sweep starts when it engages, 0..1.
@@ -2764,11 +2764,11 @@ impl Mixer {
         s.decks[deck.index()].chain.autopan_mut().set_rate(hz);
     }
 
-    /// Lock the autopan swing's rate to the beat grid, reading its rate as
-    /// cycles per beat instead of Hz.
-    pub fn set_deck_autopan_beat_sync(&self, deck: DeckId, on: bool) {
+    /// Which rung of the sync ladder the autopan swing runs on: free-running,
+    /// or eighths of a cycle per beat.
+    pub fn set_deck_autopan_sync_units(&self, deck: DeckId, units: u32) {
         let mut s = self.state.lock().unwrap();
-        s.decks[deck.index()].chain.autopan_mut().set_beat_sync(on);
+        s.decks[deck.index()].chain.autopan_mut().set_sync_units(units);
     }
 
     /// Where in the cycle the autopan swing starts when it engages, 0..1.
