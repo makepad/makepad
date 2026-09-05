@@ -2747,212 +2747,6 @@ script_mod! {
                                         precision: 0
                                     }
                                 }
-                                sfx_levels_panel := RoundedView{
-                                    visible: false
-                                    width: Fit height: Fit flow: Down spacing: 4
-                                    padding: 10
-                                    draw_bg +: {
-                                        color: #x181c23
-                                        border_color: #xffffff12
-                                        border_size: 1.0
-                                        border_radius: 5.0
-                                    }
-                                    align: Align{x: 0.0, y: 0.0}
-                                    View{
-                                        width: Fit height: Fit flow: Right spacing: 8
-                                        align: Align{x: 0.0, y: 0.5}
-                                        PanelLabel{text: "FX LEVELS"}
-                                        PanelLabel{text: "FOL follows ALL · OFF leaves it alone · MTCH matches the input · CAP holds under the cap"}
-                                    }
-                                    View{
-                                        width: Fit height: Fit flow: Right spacing: 8
-                                        align: Align{x: 0.0, y: 0.5}
-                                        PanelLabel{width: 84 text: "ALL"}
-                                        sfx_lvl_default := VjBeatsDrop{width: 48 level_rows: true}
-                                        PanelLabel{text: "what every effect on FOL does"}
-                                    }
-                                    View{
-                                        width: Fit height: Fit flow: Right spacing: 8
-                                        align: Align{x: 0.0, y: 0.5}
-                                        PanelLabel{width: 84 text: "ECHO"}
-                                        sfx_lvl_echo_mode := VjBeatsDrop{width: 48 level_rows: true}
-                                        sfx_lvl_echo_mix := Slider{
-                                            width: 150
-                                            text: "mix"
-                                            min: 0.0 max: 1.0 default: 1.0
-                                            unit: "%" display_scale: 100.0 precision: 0
-                                        }
-                                        sfx_lvl_echo_ceiling := Slider{
-                                            width: 150
-                                            text: "cap"
-                                            min: 0.01 max: 1.0 default: 1.0
-                                            unit: "%" display_scale: 100.0 precision: 0
-                                        }
-                                    }
-                                    View{
-                                        width: Fit height: Fit flow: Right spacing: 8
-                                        align: Align{x: 0.0, y: 0.5}
-                                        PanelLabel{width: 84 text: "FLANGER"}
-                                        sfx_lvl_flanger_mode := VjBeatsDrop{width: 48 level_rows: true}
-                                        sfx_lvl_flanger_mix := Slider{
-                                            width: 150
-                                            text: "mix"
-                                            min: 0.0 max: 1.0 default: 1.0
-                                            unit: "%" display_scale: 100.0 precision: 0
-                                        }
-                                        sfx_lvl_flanger_ceiling := Slider{
-                                            width: 150
-                                            text: "cap"
-                                            min: 0.01 max: 1.0 default: 1.0
-                                            unit: "%" display_scale: 100.0 precision: 0
-                                        }
-                                    }
-                                    View{
-                                        width: Fit height: Fit flow: Right spacing: 8
-                                        align: Align{x: 0.0, y: 0.5}
-                                        PanelLabel{width: 84 text: "BITCRUSH"}
-                                        sfx_lvl_bitcrusher_mode := VjBeatsDrop{width: 48 level_rows: true}
-                                        sfx_lvl_bitcrusher_mix := Slider{
-                                            width: 150
-                                            text: "mix"
-                                            min: 0.0 max: 1.0 default: 1.0
-                                            unit: "%" display_scale: 100.0 precision: 0
-                                        }
-                                        sfx_lvl_bitcrusher_ceiling := Slider{
-                                            width: 150
-                                            text: "cap"
-                                            min: 0.01 max: 1.0 default: 1.0
-                                            unit: "%" display_scale: 100.0 precision: 0
-                                        }
-                                    }
-                                    View{
-                                        width: Fit height: Fit flow: Right spacing: 8
-                                        align: Align{x: 0.0, y: 0.5}
-                                        PanelLabel{width: 84 text: "TREMOLO"}
-                                        sfx_lvl_tremolo_mode := VjBeatsDrop{width: 48 level_rows: true}
-                                        sfx_lvl_tremolo_mix := Slider{
-                                            width: 150
-                                            text: "mix"
-                                            min: 0.0 max: 1.0 default: 1.0
-                                            unit: "%" display_scale: 100.0 precision: 0
-                                        }
-                                        sfx_lvl_tremolo_ceiling := Slider{
-                                            width: 150
-                                            text: "cap"
-                                            min: 0.01 max: 1.0 default: 1.0
-                                            unit: "%" display_scale: 100.0 precision: 0
-                                        }
-                                    }
-                                    View{
-                                        width: Fit height: Fit flow: Right spacing: 8
-                                        align: Align{x: 0.0, y: 0.5}
-                                        PanelLabel{width: 84 text: "DISTORT"}
-                                        sfx_lvl_distortion_mode := VjBeatsDrop{width: 48 level_rows: true}
-                                        sfx_lvl_distortion_mix := Slider{
-                                            width: 150
-                                            text: "mix"
-                                            min: 0.0 max: 1.0 default: 1.0
-                                            unit: "%" display_scale: 100.0 precision: 0
-                                        }
-                                        sfx_lvl_distortion_ceiling := Slider{
-                                            width: 150
-                                            text: "cap"
-                                            min: 0.01 max: 1.0 default: 1.0
-                                            unit: "%" display_scale: 100.0 precision: 0
-                                        }
-                                    }
-                                    View{
-                                        width: Fit height: Fit flow: Right spacing: 8
-                                        align: Align{x: 0.0, y: 0.5}
-                                        PanelLabel{width: 84 text: "PHASER"}
-                                        sfx_lvl_phaser_mode := VjBeatsDrop{width: 48 level_rows: true}
-                                        sfx_lvl_phaser_mix := Slider{
-                                            width: 150
-                                            text: "mix"
-                                            min: 0.0 max: 1.0 default: 1.0
-                                            unit: "%" display_scale: 100.0 precision: 0
-                                        }
-                                        sfx_lvl_phaser_ceiling := Slider{
-                                            width: 150
-                                            text: "cap"
-                                            min: 0.01 max: 1.0 default: 1.0
-                                            unit: "%" display_scale: 100.0 precision: 0
-                                        }
-                                    }
-                                    View{
-                                        width: Fit height: Fit flow: Right spacing: 8
-                                        align: Align{x: 0.0, y: 0.5}
-                                        PanelLabel{width: 84 text: "AUTOPAN"}
-                                        sfx_lvl_autopan_mode := VjBeatsDrop{width: 48 level_rows: true}
-                                        sfx_lvl_autopan_mix := Slider{
-                                            width: 150
-                                            text: "mix"
-                                            min: 0.0 max: 1.0 default: 1.0
-                                            unit: "%" display_scale: 100.0 precision: 0
-                                        }
-                                        sfx_lvl_autopan_ceiling := Slider{
-                                            width: 150
-                                            text: "cap"
-                                            min: 0.01 max: 1.0 default: 1.0
-                                            unit: "%" display_scale: 100.0 precision: 0
-                                        }
-                                    }
-                                    View{
-                                        width: Fit height: Fit flow: Right spacing: 8
-                                        align: Align{x: 0.0, y: 0.5}
-                                        PanelLabel{width: 84 text: "WIDTH"}
-                                        sfx_lvl_stereo_width_mode := VjBeatsDrop{width: 48 level_rows: true}
-                                        sfx_lvl_stereo_width_mix := Slider{
-                                            width: 150
-                                            text: "mix"
-                                            min: 0.0 max: 1.0 default: 1.0
-                                            unit: "%" display_scale: 100.0 precision: 0
-                                        }
-                                        sfx_lvl_stereo_width_ceiling := Slider{
-                                            width: 150
-                                            text: "cap"
-                                            min: 0.01 max: 1.0 default: 1.0
-                                            unit: "%" display_scale: 100.0 precision: 0
-                                        }
-                                    }
-                                    View{
-                                        width: Fit height: Fit flow: Right spacing: 8
-                                        align: Align{x: 0.0, y: 0.5}
-                                        PanelLabel{width: 84 text: "REVERB"}
-                                        sfx_lvl_plate_reverb_mode := VjBeatsDrop{width: 48 level_rows: true}
-                                        sfx_lvl_plate_reverb_mix := Slider{
-                                            width: 150
-                                            text: "mix"
-                                            min: 0.0 max: 1.0 default: 1.0
-                                            unit: "%" display_scale: 100.0 precision: 0
-                                        }
-                                        sfx_lvl_plate_reverb_ceiling := Slider{
-                                            width: 150
-                                            text: "cap"
-                                            min: 0.01 max: 1.0 default: 1.0
-                                            unit: "%" display_scale: 100.0 precision: 0
-                                        }
-                                    }
-                                    View{
-                                        width: Fit height: Fit flow: Right spacing: 8
-                                        align: Align{x: 0.0, y: 0.5}
-                                        PanelLabel{width: 84 text: "LADDER"}
-                                        sfx_lvl_moog_ladder_mode := VjBeatsDrop{width: 48 level_rows: true}
-                                        sfx_lvl_moog_ladder_mix := Slider{
-                                            width: 150
-                                            text: "mix"
-                                            min: 0.0 max: 1.0 default: 1.0
-                                            unit: "%" display_scale: 100.0 precision: 0
-                                        }
-                                        sfx_lvl_moog_ladder_ceiling := Slider{
-                                            width: 150
-                                            text: "cap"
-                                            min: 0.01 max: 1.0 default: 1.0
-                                            unit: "%" display_scale: 100.0 precision: 0
-                                        }
-                                    }
-                                    sfx_levels_close := PillButton{width: 60 text: "CLOSE"}
-                                }
                             }
 
                             // ============ MESH ============
@@ -3348,6 +3142,218 @@ script_mod! {
                             }
                         }
                     }
+                    }
+                    sfx_levels_modal := Modal{
+                        can_dismiss: true
+                        content +: {
+                        width: Fit
+                        height: Fit
+                            RoundedView{
+                                width: Fit height: Fit flow: Down spacing: 4
+                                padding: 10
+                                draw_bg +: {
+                                    color: #x181c23
+                                    border_color: #xffffff12
+                                    border_size: 1.0
+                                    border_radius: 5.0
+                                }
+                                align: Align{x: 0.0, y: 0.0}
+                                View{
+                                    width: Fit height: Fit flow: Right spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    PanelLabel{text: "FX LEVELS"}
+                                    PanelLabel{text: "FOL follows ALL · OFF leaves it alone · MTCH matches the input · CAP holds under the cap"}
+                                }
+                                View{
+                                    width: Fit height: Fit flow: Right spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    PanelLabel{width: 84 text: "ALL"}
+                                    sfx_lvl_default := VjBeatsDrop{width: 48 level_rows: true}
+                                    PanelLabel{text: "what every effect on FOL does"}
+                                }
+                                View{
+                                    width: Fit height: Fit flow: Right spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    PanelLabel{width: 84 text: "ECHO"}
+                                    sfx_lvl_echo_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                    sfx_lvl_echo_mix := Slider{
+                                        width: 150
+                                        text: "mix"
+                                        min: 0.0 max: 1.0 default: 1.0
+                                        unit: "%" display_scale: 100.0 precision: 0
+                                    }
+                                    sfx_lvl_echo_ceiling := Slider{
+                                        width: 150
+                                        text: "cap"
+                                        min: 0.01 max: 1.0 default: 1.0
+                                        unit: "%" display_scale: 100.0 precision: 0
+                                    }
+                                }
+                                View{
+                                    width: Fit height: Fit flow: Right spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    PanelLabel{width: 84 text: "FLANGER"}
+                                    sfx_lvl_flanger_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                    sfx_lvl_flanger_mix := Slider{
+                                        width: 150
+                                        text: "mix"
+                                        min: 0.0 max: 1.0 default: 1.0
+                                        unit: "%" display_scale: 100.0 precision: 0
+                                    }
+                                    sfx_lvl_flanger_ceiling := Slider{
+                                        width: 150
+                                        text: "cap"
+                                        min: 0.01 max: 1.0 default: 1.0
+                                        unit: "%" display_scale: 100.0 precision: 0
+                                    }
+                                }
+                                View{
+                                    width: Fit height: Fit flow: Right spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    PanelLabel{width: 84 text: "BITCRUSH"}
+                                    sfx_lvl_bitcrusher_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                    sfx_lvl_bitcrusher_mix := Slider{
+                                        width: 150
+                                        text: "mix"
+                                        min: 0.0 max: 1.0 default: 1.0
+                                        unit: "%" display_scale: 100.0 precision: 0
+                                    }
+                                    sfx_lvl_bitcrusher_ceiling := Slider{
+                                        width: 150
+                                        text: "cap"
+                                        min: 0.01 max: 1.0 default: 1.0
+                                        unit: "%" display_scale: 100.0 precision: 0
+                                    }
+                                }
+                                View{
+                                    width: Fit height: Fit flow: Right spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    PanelLabel{width: 84 text: "TREMOLO"}
+                                    sfx_lvl_tremolo_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                    sfx_lvl_tremolo_mix := Slider{
+                                        width: 150
+                                        text: "mix"
+                                        min: 0.0 max: 1.0 default: 1.0
+                                        unit: "%" display_scale: 100.0 precision: 0
+                                    }
+                                    sfx_lvl_tremolo_ceiling := Slider{
+                                        width: 150
+                                        text: "cap"
+                                        min: 0.01 max: 1.0 default: 1.0
+                                        unit: "%" display_scale: 100.0 precision: 0
+                                    }
+                                }
+                                View{
+                                    width: Fit height: Fit flow: Right spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    PanelLabel{width: 84 text: "DISTORT"}
+                                    sfx_lvl_distortion_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                    sfx_lvl_distortion_mix := Slider{
+                                        width: 150
+                                        text: "mix"
+                                        min: 0.0 max: 1.0 default: 1.0
+                                        unit: "%" display_scale: 100.0 precision: 0
+                                    }
+                                    sfx_lvl_distortion_ceiling := Slider{
+                                        width: 150
+                                        text: "cap"
+                                        min: 0.01 max: 1.0 default: 1.0
+                                        unit: "%" display_scale: 100.0 precision: 0
+                                    }
+                                }
+                                View{
+                                    width: Fit height: Fit flow: Right spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    PanelLabel{width: 84 text: "PHASER"}
+                                    sfx_lvl_phaser_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                    sfx_lvl_phaser_mix := Slider{
+                                        width: 150
+                                        text: "mix"
+                                        min: 0.0 max: 1.0 default: 1.0
+                                        unit: "%" display_scale: 100.0 precision: 0
+                                    }
+                                    sfx_lvl_phaser_ceiling := Slider{
+                                        width: 150
+                                        text: "cap"
+                                        min: 0.01 max: 1.0 default: 1.0
+                                        unit: "%" display_scale: 100.0 precision: 0
+                                    }
+                                }
+                                View{
+                                    width: Fit height: Fit flow: Right spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    PanelLabel{width: 84 text: "AUTOPAN"}
+                                    sfx_lvl_autopan_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                    sfx_lvl_autopan_mix := Slider{
+                                        width: 150
+                                        text: "mix"
+                                        min: 0.0 max: 1.0 default: 1.0
+                                        unit: "%" display_scale: 100.0 precision: 0
+                                    }
+                                    sfx_lvl_autopan_ceiling := Slider{
+                                        width: 150
+                                        text: "cap"
+                                        min: 0.01 max: 1.0 default: 1.0
+                                        unit: "%" display_scale: 100.0 precision: 0
+                                    }
+                                }
+                                View{
+                                    width: Fit height: Fit flow: Right spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    PanelLabel{width: 84 text: "WIDTH"}
+                                    sfx_lvl_stereo_width_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                    sfx_lvl_stereo_width_mix := Slider{
+                                        width: 150
+                                        text: "mix"
+                                        min: 0.0 max: 1.0 default: 1.0
+                                        unit: "%" display_scale: 100.0 precision: 0
+                                    }
+                                    sfx_lvl_stereo_width_ceiling := Slider{
+                                        width: 150
+                                        text: "cap"
+                                        min: 0.01 max: 1.0 default: 1.0
+                                        unit: "%" display_scale: 100.0 precision: 0
+                                    }
+                                }
+                                View{
+                                    width: Fit height: Fit flow: Right spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    PanelLabel{width: 84 text: "REVERB"}
+                                    sfx_lvl_plate_reverb_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                    sfx_lvl_plate_reverb_mix := Slider{
+                                        width: 150
+                                        text: "mix"
+                                        min: 0.0 max: 1.0 default: 1.0
+                                        unit: "%" display_scale: 100.0 precision: 0
+                                    }
+                                    sfx_lvl_plate_reverb_ceiling := Slider{
+                                        width: 150
+                                        text: "cap"
+                                        min: 0.01 max: 1.0 default: 1.0
+                                        unit: "%" display_scale: 100.0 precision: 0
+                                    }
+                                }
+                                View{
+                                    width: Fit height: Fit flow: Right spacing: 8
+                                    align: Align{x: 0.0, y: 0.5}
+                                    PanelLabel{width: 84 text: "LADDER"}
+                                    sfx_lvl_moog_ladder_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                    sfx_lvl_moog_ladder_mix := Slider{
+                                        width: 150
+                                        text: "mix"
+                                        min: 0.0 max: 1.0 default: 1.0
+                                        unit: "%" display_scale: 100.0 precision: 0
+                                    }
+                                    sfx_lvl_moog_ladder_ceiling := Slider{
+                                        width: 150
+                                        text: "cap"
+                                        min: 0.01 max: 1.0 default: 1.0
+                                        unit: "%" display_scale: 100.0 precision: 0
+                                    }
+                                }
+                                sfx_levels_close := PillButton{width: 60 text: "CLOSE"}
+                            }
+                        }
                     }
                     // What the hand is carrying. Parked off-screen and
                     // hidden until a drag starts; `App::track_drag_moved`
@@ -20161,6 +20167,196 @@ p2 {}
     /// The phones rig survives restarts: device (by NAME), volume, player
     /// placement, cue signal. The deck cue latches and the active preview
     /// are live monitoring state and deliberately absent.
+
+    fn fx_levels_settings_path() -> std::path::PathBuf {
+        service::session_config_from_env().cache_parent.join("fx-levels.txt")
+    }
+
+    /// Both decks' level policies. Written whenever one changes: the panel
+    /// is a settings surface, and a setting that does not survive the app
+    /// is not a setting.
+    fn save_fx_levels_settings(&self) {
+        let path = Self::fx_levels_settings_path();
+        let mut store = crate::settings::Settings::new();
+        for (tag, id) in [("a", DeckId::A), ("b", DeckId::B)] {
+            let deck = self.decks.deck(id);
+            store.set_usize(
+                &format!("fxlevel.{tag}.all.mode"),
+                deck.level_default.as_row() as usize,
+            );
+        store.set_usize(
+            &format!("fxlevel.{tag}.echo.mode"),
+            deck.echo_level_mode.as_row() as usize,
+        );
+        store.set_f64(&format!("fxlevel.{tag}.echo.mix"), deck.echo_mix as f64);
+        store.set_f64(&format!("fxlevel.{tag}.echo.cap"), deck.echo_ceiling as f64);
+        store.set_usize(
+            &format!("fxlevel.{tag}.flanger.mode"),
+            deck.flanger_level_mode.as_row() as usize,
+        );
+        store.set_f64(&format!("fxlevel.{tag}.flanger.mix"), deck.flanger_mix as f64);
+        store.set_f64(&format!("fxlevel.{tag}.flanger.cap"), deck.flanger_ceiling as f64);
+        store.set_usize(
+            &format!("fxlevel.{tag}.bitcrusher.mode"),
+            deck.bitcrusher_level_mode.as_row() as usize,
+        );
+        store.set_f64(&format!("fxlevel.{tag}.bitcrusher.mix"), deck.bitcrusher_mix as f64);
+        store.set_f64(&format!("fxlevel.{tag}.bitcrusher.cap"), deck.bitcrusher_ceiling as f64);
+        store.set_usize(
+            &format!("fxlevel.{tag}.tremolo.mode"),
+            deck.tremolo_level_mode.as_row() as usize,
+        );
+        store.set_f64(&format!("fxlevel.{tag}.tremolo.mix"), deck.tremolo_mix as f64);
+        store.set_f64(&format!("fxlevel.{tag}.tremolo.cap"), deck.tremolo_ceiling as f64);
+        store.set_usize(
+            &format!("fxlevel.{tag}.distortion.mode"),
+            deck.distortion_level_mode.as_row() as usize,
+        );
+        store.set_f64(&format!("fxlevel.{tag}.distortion.mix"), deck.distortion_mix as f64);
+        store.set_f64(&format!("fxlevel.{tag}.distortion.cap"), deck.distortion_ceiling as f64);
+        store.set_usize(
+            &format!("fxlevel.{tag}.phaser.mode"),
+            deck.phaser_level_mode.as_row() as usize,
+        );
+        store.set_f64(&format!("fxlevel.{tag}.phaser.mix"), deck.phaser_mix as f64);
+        store.set_f64(&format!("fxlevel.{tag}.phaser.cap"), deck.phaser_ceiling as f64);
+        store.set_usize(
+            &format!("fxlevel.{tag}.autopan.mode"),
+            deck.autopan_level_mode.as_row() as usize,
+        );
+        store.set_f64(&format!("fxlevel.{tag}.autopan.mix"), deck.autopan_mix as f64);
+        store.set_f64(&format!("fxlevel.{tag}.autopan.cap"), deck.autopan_ceiling as f64);
+        store.set_usize(
+            &format!("fxlevel.{tag}.stereo_width.mode"),
+            deck.stereo_width_level_mode.as_row() as usize,
+        );
+        store.set_f64(&format!("fxlevel.{tag}.stereo_width.mix"), deck.stereo_width_mix as f64);
+        store.set_f64(&format!("fxlevel.{tag}.stereo_width.cap"), deck.stereo_width_ceiling as f64);
+        store.set_usize(
+            &format!("fxlevel.{tag}.plate_reverb.mode"),
+            deck.plate_reverb_level_mode.as_row() as usize,
+        );
+        store.set_f64(&format!("fxlevel.{tag}.plate_reverb.mix"), deck.plate_reverb_mix as f64);
+        store.set_f64(&format!("fxlevel.{tag}.plate_reverb.cap"), deck.plate_reverb_ceiling as f64);
+        store.set_usize(
+            &format!("fxlevel.{tag}.moog_ladder.mode"),
+            deck.moog_ladder_level_mode.as_row() as usize,
+        );
+        store.set_f64(&format!("fxlevel.{tag}.moog_ladder.mix"), deck.moog_ladder_mix as f64);
+        store.set_f64(&format!("fxlevel.{tag}.moog_ladder.cap"), deck.moog_ladder_ceiling as f64);
+        }
+        let _ = crate::durable::write_file(&path, store.to_text());
+    }
+
+    /// Read them back and push them at the engine. A missing key is the
+    /// default, so a file written by an older build simply carries fewer
+    /// answers rather than failing.
+    fn load_fx_levels_settings(&mut self, cx: &mut Cx) {
+        let Ok(body) = std::fs::read_to_string(Self::fx_levels_settings_path()) else {
+            return;
+        };
+        let store = crate::settings::Settings::from_text(&body);
+        for (tag, deck) in [("a", DeckId::A), ("b", DeckId::B)] {
+            let mut cmds = Vec::new();
+            let all = crate::music_dsp::LevelMode::from_row(store.usize(
+                &format!("fxlevel.{tag}.all.mode"),
+                1,
+            ) as u32);
+            cmds.extend(self.decks.set_level_default(deck, all));
+            let mode = crate::music_dsp::LevelMode::from_row(store.usize(
+                &format!("fxlevel.{tag}.echo.mode"),
+                0,
+            ) as u32);
+            cmds.extend(self.decks.set_echo_level_mode(deck, mode));
+            let mix = store.f64(&format!("fxlevel.{tag}.echo.mix"), 1.0) as f32;
+            cmds.extend(self.decks.set_echo_mix(deck, mix));
+            let cap = store.f64(&format!("fxlevel.{tag}.echo.cap"), 1.0) as f32;
+            cmds.extend(self.decks.set_echo_ceiling(deck, cap));
+            let mode = crate::music_dsp::LevelMode::from_row(store.usize(
+                &format!("fxlevel.{tag}.flanger.mode"),
+                0,
+            ) as u32);
+            cmds.extend(self.decks.set_flanger_level_mode(deck, mode));
+            let mix = store.f64(&format!("fxlevel.{tag}.flanger.mix"), 1.0) as f32;
+            cmds.extend(self.decks.set_flanger_mix(deck, mix));
+            let cap = store.f64(&format!("fxlevel.{tag}.flanger.cap"), 1.0) as f32;
+            cmds.extend(self.decks.set_flanger_ceiling(deck, cap));
+            let mode = crate::music_dsp::LevelMode::from_row(store.usize(
+                &format!("fxlevel.{tag}.bitcrusher.mode"),
+                0,
+            ) as u32);
+            cmds.extend(self.decks.set_bitcrusher_level_mode(deck, mode));
+            let mix = store.f64(&format!("fxlevel.{tag}.bitcrusher.mix"), 1.0) as f32;
+            cmds.extend(self.decks.set_bitcrusher_mix(deck, mix));
+            let cap = store.f64(&format!("fxlevel.{tag}.bitcrusher.cap"), 1.0) as f32;
+            cmds.extend(self.decks.set_bitcrusher_ceiling(deck, cap));
+            let mode = crate::music_dsp::LevelMode::from_row(store.usize(
+                &format!("fxlevel.{tag}.tremolo.mode"),
+                0,
+            ) as u32);
+            cmds.extend(self.decks.set_tremolo_level_mode(deck, mode));
+            let mix = store.f64(&format!("fxlevel.{tag}.tremolo.mix"), 1.0) as f32;
+            cmds.extend(self.decks.set_tremolo_mix(deck, mix));
+            let cap = store.f64(&format!("fxlevel.{tag}.tremolo.cap"), 1.0) as f32;
+            cmds.extend(self.decks.set_tremolo_ceiling(deck, cap));
+            let mode = crate::music_dsp::LevelMode::from_row(store.usize(
+                &format!("fxlevel.{tag}.distortion.mode"),
+                0,
+            ) as u32);
+            cmds.extend(self.decks.set_distortion_level_mode(deck, mode));
+            let mix = store.f64(&format!("fxlevel.{tag}.distortion.mix"), 1.0) as f32;
+            cmds.extend(self.decks.set_distortion_mix(deck, mix));
+            let cap = store.f64(&format!("fxlevel.{tag}.distortion.cap"), 1.0) as f32;
+            cmds.extend(self.decks.set_distortion_ceiling(deck, cap));
+            let mode = crate::music_dsp::LevelMode::from_row(store.usize(
+                &format!("fxlevel.{tag}.phaser.mode"),
+                0,
+            ) as u32);
+            cmds.extend(self.decks.set_phaser_level_mode(deck, mode));
+            let mix = store.f64(&format!("fxlevel.{tag}.phaser.mix"), 1.0) as f32;
+            cmds.extend(self.decks.set_phaser_mix(deck, mix));
+            let cap = store.f64(&format!("fxlevel.{tag}.phaser.cap"), 1.0) as f32;
+            cmds.extend(self.decks.set_phaser_ceiling(deck, cap));
+            let mode = crate::music_dsp::LevelMode::from_row(store.usize(
+                &format!("fxlevel.{tag}.autopan.mode"),
+                0,
+            ) as u32);
+            cmds.extend(self.decks.set_autopan_level_mode(deck, mode));
+            let mix = store.f64(&format!("fxlevel.{tag}.autopan.mix"), 1.0) as f32;
+            cmds.extend(self.decks.set_autopan_mix(deck, mix));
+            let cap = store.f64(&format!("fxlevel.{tag}.autopan.cap"), 1.0) as f32;
+            cmds.extend(self.decks.set_autopan_ceiling(deck, cap));
+            let mode = crate::music_dsp::LevelMode::from_row(store.usize(
+                &format!("fxlevel.{tag}.stereo_width.mode"),
+                0,
+            ) as u32);
+            cmds.extend(self.decks.set_stereo_width_level_mode(deck, mode));
+            let mix = store.f64(&format!("fxlevel.{tag}.stereo_width.mix"), 1.0) as f32;
+            cmds.extend(self.decks.set_stereo_width_mix(deck, mix));
+            let cap = store.f64(&format!("fxlevel.{tag}.stereo_width.cap"), 1.0) as f32;
+            cmds.extend(self.decks.set_stereo_width_ceiling(deck, cap));
+            let mode = crate::music_dsp::LevelMode::from_row(store.usize(
+                &format!("fxlevel.{tag}.plate_reverb.mode"),
+                0,
+            ) as u32);
+            cmds.extend(self.decks.set_plate_reverb_level_mode(deck, mode));
+            let mix = store.f64(&format!("fxlevel.{tag}.plate_reverb.mix"), 1.0) as f32;
+            cmds.extend(self.decks.set_plate_reverb_mix(deck, mix));
+            let cap = store.f64(&format!("fxlevel.{tag}.plate_reverb.cap"), 1.0) as f32;
+            cmds.extend(self.decks.set_plate_reverb_ceiling(deck, cap));
+            let mode = crate::music_dsp::LevelMode::from_row(store.usize(
+                &format!("fxlevel.{tag}.moog_ladder.mode"),
+                0,
+            ) as u32);
+            cmds.extend(self.decks.set_moog_ladder_level_mode(deck, mode));
+            let mix = store.f64(&format!("fxlevel.{tag}.moog_ladder.mix"), 1.0) as f32;
+            cmds.extend(self.decks.set_moog_ladder_mix(deck, mix));
+            let cap = store.f64(&format!("fxlevel.{tag}.moog_ladder.cap"), 1.0) as f32;
+            cmds.extend(self.decks.set_moog_ladder_ceiling(deck, cap));
+            self.run_deck_cmds(cx, cmds);
+        }
+    }
+
     fn save_phones_settings(&self) {
         let path = Self::phones_settings_path();
         let mut store = crate::settings::Settings::new();
@@ -28551,6 +28747,7 @@ impl MatchEvent for App {
         // The phones rig loads before the first devices event, which then
         // resolves the saved name against what the OS actually has.
         self.load_phones_settings();
+        self.load_fx_levels_settings(cx);
         // The clock's own switch, after the ports event has been seen at
         // least once -- and harmless before it, since the sender simply
         // has nowhere to send until one arrives.
@@ -29850,15 +30047,13 @@ impl MatchEvent for App {
             self.run_deck_cmds(cx, cmds);
         }
         if self.ui.button(cx, ids!(sfx_fx_levels)).clicked(actions) {
-            let panel = self.ui.view(cx, ids!(sfx_levels_panel));
-            let open = !panel.visible();
-            panel.set_visible(cx, open);
-            if open {
-                self.sync_sfx_fx_ui(cx);
-            }
+            // Paint it before it is shown: the rows read the deck the FX
+            // target points at, which may have moved since it last opened.
+            self.sync_sfx_fx_ui(cx);
+            self.ui.modal(cx, ids!(sfx_levels_modal)).open(cx);
         }
         if self.ui.button(cx, ids!(sfx_levels_close)).clicked(actions) {
-            self.ui.view(cx, ids!(sfx_levels_panel)).set_visible(cx, false);
+            self.ui.modal(cx, ids!(sfx_levels_modal)).close(cx);
         }
         {
             let uid = self.ui.widget(cx, ids!(sfx_lvl_default)).widget_uid();
@@ -29883,6 +30078,7 @@ impl MatchEvent for App {
                     }
                 };
                 self.run_deck_cmds(cx, cmds);
+                self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
@@ -29909,6 +30105,7 @@ impl MatchEvent for App {
                     }
                 };
                 self.run_deck_cmds(cx, cmds);
+                self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
@@ -29923,6 +30120,7 @@ impl MatchEvent for App {
                 }
             };
             self.run_deck_cmds(cx, cmds);
+            self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_echo_ceiling)).slided(actions) {
             let cmds = match self.sfx_fx_target {
@@ -29935,6 +30133,7 @@ impl MatchEvent for App {
                 }
             };
             self.run_deck_cmds(cx, cmds);
+            self.save_fx_levels_settings();
         }
         {
             let uid = self.ui.widget(cx, ids!(sfx_lvl_flanger_mode)).widget_uid();
@@ -29959,6 +30158,7 @@ impl MatchEvent for App {
                     }
                 };
                 self.run_deck_cmds(cx, cmds);
+                self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
@@ -29973,6 +30173,7 @@ impl MatchEvent for App {
                 }
             };
             self.run_deck_cmds(cx, cmds);
+            self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_flanger_ceiling)).slided(actions) {
             let cmds = match self.sfx_fx_target {
@@ -29985,6 +30186,7 @@ impl MatchEvent for App {
                 }
             };
             self.run_deck_cmds(cx, cmds);
+            self.save_fx_levels_settings();
         }
         {
             let uid = self.ui.widget(cx, ids!(sfx_lvl_bitcrusher_mode)).widget_uid();
@@ -30009,6 +30211,7 @@ impl MatchEvent for App {
                     }
                 };
                 self.run_deck_cmds(cx, cmds);
+                self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
@@ -30023,6 +30226,7 @@ impl MatchEvent for App {
                 }
             };
             self.run_deck_cmds(cx, cmds);
+            self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_bitcrusher_ceiling)).slided(actions) {
             let cmds = match self.sfx_fx_target {
@@ -30035,6 +30239,7 @@ impl MatchEvent for App {
                 }
             };
             self.run_deck_cmds(cx, cmds);
+            self.save_fx_levels_settings();
         }
         {
             let uid = self.ui.widget(cx, ids!(sfx_lvl_tremolo_mode)).widget_uid();
@@ -30059,6 +30264,7 @@ impl MatchEvent for App {
                     }
                 };
                 self.run_deck_cmds(cx, cmds);
+                self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
@@ -30073,6 +30279,7 @@ impl MatchEvent for App {
                 }
             };
             self.run_deck_cmds(cx, cmds);
+            self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_tremolo_ceiling)).slided(actions) {
             let cmds = match self.sfx_fx_target {
@@ -30085,6 +30292,7 @@ impl MatchEvent for App {
                 }
             };
             self.run_deck_cmds(cx, cmds);
+            self.save_fx_levels_settings();
         }
         {
             let uid = self.ui.widget(cx, ids!(sfx_lvl_distortion_mode)).widget_uid();
@@ -30109,6 +30317,7 @@ impl MatchEvent for App {
                     }
                 };
                 self.run_deck_cmds(cx, cmds);
+                self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
@@ -30123,6 +30332,7 @@ impl MatchEvent for App {
                 }
             };
             self.run_deck_cmds(cx, cmds);
+            self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_distortion_ceiling)).slided(actions) {
             let cmds = match self.sfx_fx_target {
@@ -30135,6 +30345,7 @@ impl MatchEvent for App {
                 }
             };
             self.run_deck_cmds(cx, cmds);
+            self.save_fx_levels_settings();
         }
         {
             let uid = self.ui.widget(cx, ids!(sfx_lvl_phaser_mode)).widget_uid();
@@ -30159,6 +30370,7 @@ impl MatchEvent for App {
                     }
                 };
                 self.run_deck_cmds(cx, cmds);
+                self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
@@ -30173,6 +30385,7 @@ impl MatchEvent for App {
                 }
             };
             self.run_deck_cmds(cx, cmds);
+            self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_phaser_ceiling)).slided(actions) {
             let cmds = match self.sfx_fx_target {
@@ -30185,6 +30398,7 @@ impl MatchEvent for App {
                 }
             };
             self.run_deck_cmds(cx, cmds);
+            self.save_fx_levels_settings();
         }
         {
             let uid = self.ui.widget(cx, ids!(sfx_lvl_autopan_mode)).widget_uid();
@@ -30209,6 +30423,7 @@ impl MatchEvent for App {
                     }
                 };
                 self.run_deck_cmds(cx, cmds);
+                self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
@@ -30223,6 +30438,7 @@ impl MatchEvent for App {
                 }
             };
             self.run_deck_cmds(cx, cmds);
+            self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_autopan_ceiling)).slided(actions) {
             let cmds = match self.sfx_fx_target {
@@ -30235,6 +30451,7 @@ impl MatchEvent for App {
                 }
             };
             self.run_deck_cmds(cx, cmds);
+            self.save_fx_levels_settings();
         }
         {
             let uid = self.ui.widget(cx, ids!(sfx_lvl_stereo_width_mode)).widget_uid();
@@ -30259,6 +30476,7 @@ impl MatchEvent for App {
                     }
                 };
                 self.run_deck_cmds(cx, cmds);
+                self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
@@ -30273,6 +30491,7 @@ impl MatchEvent for App {
                 }
             };
             self.run_deck_cmds(cx, cmds);
+            self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_stereo_width_ceiling)).slided(actions) {
             let cmds = match self.sfx_fx_target {
@@ -30285,6 +30504,7 @@ impl MatchEvent for App {
                 }
             };
             self.run_deck_cmds(cx, cmds);
+            self.save_fx_levels_settings();
         }
         {
             let uid = self.ui.widget(cx, ids!(sfx_lvl_plate_reverb_mode)).widget_uid();
@@ -30309,6 +30529,7 @@ impl MatchEvent for App {
                     }
                 };
                 self.run_deck_cmds(cx, cmds);
+                self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
@@ -30323,6 +30544,7 @@ impl MatchEvent for App {
                 }
             };
             self.run_deck_cmds(cx, cmds);
+            self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_plate_reverb_ceiling)).slided(actions) {
             let cmds = match self.sfx_fx_target {
@@ -30335,6 +30557,7 @@ impl MatchEvent for App {
                 }
             };
             self.run_deck_cmds(cx, cmds);
+            self.save_fx_levels_settings();
         }
         {
             let uid = self.ui.widget(cx, ids!(sfx_lvl_moog_ladder_mode)).widget_uid();
@@ -30359,6 +30582,7 @@ impl MatchEvent for App {
                     }
                 };
                 self.run_deck_cmds(cx, cmds);
+                self.save_fx_levels_settings();
                 self.sync_sfx_fx_ui(cx);
             }
         }
@@ -30373,6 +30597,7 @@ impl MatchEvent for App {
                 }
             };
             self.run_deck_cmds(cx, cmds);
+            self.save_fx_levels_settings();
         }
         if let Some(v) = self.ui.slider(cx, ids!(sfx_lvl_moog_ladder_ceiling)).slided(actions) {
             let cmds = match self.sfx_fx_target {
@@ -30385,6 +30610,7 @@ impl MatchEvent for App {
                 }
             };
             self.run_deck_cmds(cx, cmds);
+            self.save_fx_levels_settings();
         }
         if self.ui.button(cx, ids!(sfx_fx_flanger)).clicked(actions) {
             let cmds = match self.sfx_fx_target {
