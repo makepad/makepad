@@ -6,6 +6,7 @@ use crate::registry::Story;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+pub mod badge;
 pub mod basics;
 pub mod foundations;
 pub mod welcome;
@@ -75,6 +76,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     rotary::script_mod(vm);
     video::script_mod(vm);
     basics::script_mod(vm);
+    badge::script_mod(vm);
 }
 
 pub fn tables() -> &'static [&'static [Story]] {
@@ -114,6 +116,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         video::STORIES,
         basics::STORIES,
     ]
+    &[welcome::STORIES, crate::coverage::STORIES, basics::STORIES, badge::STORIES]
 }
 
 static COUNTERS: Mutex<Option<HashMap<LiveId, usize>>> = Mutex::new(None);
