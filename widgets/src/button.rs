@@ -42,6 +42,8 @@ script_mod! {
             focus: instance(0.0)
             /** disabled mix 0..1 step 0.01 */
             disabled: instance(0.0)
+            /** loading mix: fades the label out under the spinner 0..1 step 0.01 */
+            loading: instance(0.0)
 
             // A button face is a box with one line of text in it: center the
             // ink, not the line box, or the label reads as sitting high.
@@ -64,18 +66,21 @@ script_mod! {
                 /** label type size in points 6..32 step 0.5 */
                 font_size: theme.font_size_p
             }
-            /** ink mix order: focus, hover, down, disabled */
+            /** ink mix order: focus, hover, down, disabled; then faded out while loading */
             get_color: fn() {
-                return self.color
+                let ink = self.color
                     .mix(self.color_focus, self.focus)
                     .mix(self.color_hover, self.hover)
                     .mix(self.color_down, self.down)
                     .mix(self.color_disabled, self.disabled)
+                return vec4(ink.rgb, ink.a * (1.0 - self.loading))
             }
         }
 
         /** the icon's box inside the face; draw_icon paints the SVG into it */
         icon_walk: Walk{/** icon width in pixels 8..64 step 1 */ width: 22.0, height: Fit}
+        /** the trailing icon's box after the label; draw_icon_end paints the SVG into it */
+        icon_end_walk: Walk{/** icon width in pixels 8..64 step 1 */ width: 22.0, height: Fit}
 
         /** The button face material: an SDF box with a bevel stroke and an
          * optional two-stop gradient fill, state-mixed by the animator's
@@ -89,6 +94,17 @@ script_mod! {
             down: instance(0.0)
             /** disabled mix 0..1 step 0.01 */
             disabled: instance(0.0)
+            /** loading mix: fades the spinner arc in over the face 0..1 step 0.01 */
+            loading: instance(0.0)
+            /** the spinner's clock, ramped 0..1 once a second by the time track 0..1 step 0.01 */
+            anim_time: instance(0.0)
+
+            /** spinner arc ink while loading */
+            loading_color: uniform(theme.color_label_inner)
+            /** spinner arc thickness in pixels 0.5..6 step 0.25 */
+            loading_stroke: uniform(2.0)
+            /** spinner arc inset from the face edge in pixels 0..12 step 0.5 */
+            loading_inset: uniform(3.0)
 
             /** bevel border thickness in pixels 0..4 step 0.5 */
             border_size: uniform(theme.beveling)
@@ -261,6 +277,16 @@ script_mod! {
 
                 sdf.fill_keep(self.face_fill())
                 sdf.stroke(self.face_stroke(), self.border_size)
+
+                // The wait spinner: a three-quarter arc turning once a second
+                // in the middle of the face, where the label was.
+                if self.loading > 0.0 {
+                    let c = self.rect_size * 0.5
+                    let r = max(min(self.rect_size.x, self.rect_size.y) * 0.5 - self.border_size - self.loading_inset, 1.0)
+                    let a0 = self.anim_time * 2.0 * PI
+                    sdf.arc_round_caps(c.x, c.y, r, a0, a0 + 1.5 * PI, self.loading_stroke)
+                    sdf.fill(vec4(self.loading_color.rgb, self.loading_color.a * self.loading))
+                }
                 return sdf.result
             }
         }
@@ -371,6 +397,26 @@ script_mod! {
                     apply: {
                         draw_bg: {focus: 1.0}
                         draw_text: {focus: 1.0}
+                    }
+                }
+            }
+            /** loading track: swaps the label for the spinner arc */
+            loading: {
+                default: @off
+                /** not loading: 0.15s fade of the arc out and the label back */
+                off: AnimatorState{
+                    from: {all: Forward {duration: 0.15}}
+                    apply: {
+                        draw_bg: {loading: 0.0}
+                        draw_text: {loading: 0.0}
+                    }
+                }
+                /** loading: 0.15s fade of the label out and the arc in */
+                on: AnimatorState{
+                    from: {all: Forward {duration: 0.15}}
+                    apply: {
+                        draw_bg: {loading: 1.0}
+                        draw_text: {loading: 1.0}
                     }
                 }
             }
@@ -712,7 +758,7 @@ pub enum ButtonAction {
 }
 
 /// A clickable button widget that emits actions when pressed, and when either released or clicked.
-#[derive(Script, ScriptHook, Widget, Animator)]
+#[derive(Script, Widget, Animator)]
 pub struct Button {
     #[uid]
     uid: WidgetUid,
@@ -733,10 +779,20 @@ pub struct Button {
     pub draw_icon: DrawSvg,
     #[live]
     icon_walk: Walk,
+    /// The trailing icon, drawn after the label; leave the svg unset for none.
+    #[live]
+    pub draw_icon_end: DrawSvg,
+    #[live]
+    icon_end_walk: Walk,
     #[live]
     label_walk: Walk,
     #[walk]
     walk: Walk,
+
+    /// The button is waiting: the label gives way to a spinner arc and
+    /// clicks are ignored until it is cleared.
+    #[live]
+    pub loading: bool,
 
     #[layout]
     layout: Layout,
@@ -802,6 +858,27 @@ pub struct Button {
     #[action_data]
     #[rust]
     action_data: WidgetActionData,
+}
+
+impl ScriptHook for Button {
+    /// Every apply that is not an animation frame may have set `loading`
+    /// from the script side; bring the animator in line with it. A new or
+    /// reloaded button cuts to the state, an edit animates into it.
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        if apply.is_animate() {
+            return;
+        }
+        let animate = if apply.is_eval() { Animate::Yes } else { Animate::No };
+        vm.with_cx_mut(|cx| {
+            self.sync_loading(cx, animate);
+        });
+    }
 }
 
 impl Widget for Button {
@@ -877,6 +954,8 @@ impl Widget for Button {
         // The button only handles hits when it's visible and enabled.
         // If it's not enabled, we still show the button, but we set
         // the NotAllowed mouse cursor upon hover instead of the Hand cursor.
+        // While loading it takes no presses either, and shows the wait cursor.
+        let takes_input = self.enabled && !self.loading;
         match event.hits(cx, self.draw_bg.area()) {
             Hit::KeyFocus(_) => {
                 self.animator_play(cx, ids!(focus.on));
@@ -885,7 +964,7 @@ impl Widget for Button {
                 self.animator_play(cx, ids!(focus.off));
                 self.draw_bg.redraw(cx);
             }
-            Hit::FingerDown(fe) if self.enabled && fe.is_primary_hit() => {
+            Hit::FingerDown(fe) if takes_input && fe.is_primary_hit() => {
                 if self.grab_key_focus {
                     cx.set_key_focus(self.draw_bg.area());
                 }
@@ -908,9 +987,11 @@ impl Widget for Button {
                 self.set_key_focus(cx);
             }
             Hit::FingerHoverIn(_) => {
-                if self.enabled {
+                if takes_input {
                     cx.set_cursor(MouseCursor::Hand);
                     self.animator_play(cx, ids!(hover.on));
+                } else if self.loading {
+                    cx.set_cursor(MouseCursor::Wait);
                 } else {
                     cx.set_cursor(MouseCursor::NotAllowed);
                 }
@@ -918,10 +999,10 @@ impl Widget for Button {
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, ids!(hover.off));
             }
-            Hit::FingerLongPress(_lp) if self.enabled && self.enable_long_press => {
+            Hit::FingerLongPress(_lp) if takes_input && self.enable_long_press => {
                 cx.widget_action_with_data(&self.action_data, uid, ButtonAction::LongPressed);
             }
-            Hit::FingerUp(fe) if self.enabled && fe.is_primary_hit() => {
+            Hit::FingerUp(fe) if takes_input && fe.is_primary_hit() => {
                 let was_clicked = fe.is_over
                     && if self.enable_long_press {
                         fe.was_tap()
@@ -971,6 +1052,7 @@ impl Widget for Button {
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_label(cx);
+        self.draw_icon_end.draw_walk(cx, self.icon_end_walk);
         self.draw_bg.end(cx);
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
         DrawStep::done()
@@ -1022,6 +1104,39 @@ impl Button {
 
     pub fn enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// Whether the button is waiting: spinner shown, clicks ignored.
+    pub fn loading(&self) -> bool {
+        self.loading
+    }
+
+    /// Starts or ends the wait: the label fades under a turning arc and
+    /// presses are ignored while it lasts.
+    pub fn set_loading(&mut self, cx: &mut Cx, loading: bool) {
+        if self.loading == loading {
+            return;
+        }
+        self.loading = loading;
+        self.sync_loading(cx, Animate::Yes);
+        self.draw_bg.redraw(cx);
+    }
+
+    /// Brings the loading and clock tracks in line with the `loading` prop.
+    /// A button whose animator already agrees is left alone, so the common
+    /// case costs nothing.
+    fn sync_loading(&mut self, cx: &mut Cx, animate: Animate) {
+        let loading = self.loading;
+        if loading == self.animator_in_state(cx, ids!(loading.on)) {
+            return;
+        }
+        self.animator_toggle(cx, loading, animate, ids!(loading.on), ids!(loading.off));
+        // The clock only ever plays: cutting a loop would park it at its end.
+        if loading {
+            self.animator_play(cx, ids!(time.on));
+        } else {
+            self.animator_cut(cx, ids!(time.off));
+        }
     }
 
     /// Returns `true` if this button was clicked.
@@ -1146,6 +1261,18 @@ impl ButtonRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.enabled = enabled;
             inner.redraw(cx);
+        }
+    }
+
+    /// See [`Button::loading()`].
+    pub fn loading(&self) -> bool {
+        self.borrow().is_some_and(|inner| inner.loading())
+    }
+
+    /// See [`Button::set_loading()`].
+    pub fn set_loading(&self, cx: &mut Cx, loading: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_loading(cx, loading);
         }
     }
 
