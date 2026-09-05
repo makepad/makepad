@@ -36,6 +36,7 @@ pub fn script_err_gen(input: TokenStream) -> TokenStream {
         source,
         new,
         live,
+        imperative,
         rust,
         pick,
         splat,

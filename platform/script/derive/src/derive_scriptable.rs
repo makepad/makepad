@@ -140,6 +140,21 @@ fn derive_script_impl_inner(
                 .iter()
                 .any(|a| a.name == "live" || a.name == "apply_default")
             {
+                // A field whose canonical mutation path is an imperative
+                // setter (`#[visible]` → `set_visible`, `#[imperative]` for
+                // the rest) shares its storage with the DSL value, so a
+                // re-walk that carries no authored change must leave it alone.
+                // Otherwise `script_mod` re-runs that exist only to re-bake
+                // heap primitives — every safe-area inset change, i.e. every
+                // Android system-bar hide and every rotation — silently put
+                // the DSL default back over the runtime state.
+                let imperative = field
+                    .attrs
+                    .iter()
+                    .any(|a| a.name == "imperative" || a.name == "visible");
+                if imperative {
+                    tb.add("if !apply.preserves_runtime_state() {");
+                }
                 tb.add("{ let mut __field_value = vm.bx.heap.value_for_apply(value, id!(")
                     .ident(&field.name)
                     .add(").into(), apply);");
@@ -159,6 +174,9 @@ fn derive_script_impl_inner(
                     .add(",vm, apply, scope, v);");
                 tb.add("}");
                 tb.add("}");
+                if imperative {
+                    tb.add("}");
+                }
             }
             if field
                 .attrs
