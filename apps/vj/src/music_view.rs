@@ -4763,13 +4763,31 @@ pub struct WaveLane {
 
 impl WaveLane {
     /// Where the playhead is now: the last sampled position, carried
-    /// forward at the deck's rate.
+    /// forward at the deck's rate, and wrapped through a running loop.
+    ///
+    /// Without the wrap the drawn head walks out past the loop's end and
+    /// is yanked back on the next host sample -- once every time round,
+    /// which at a one-beat loop is several times a second and reads as
+    /// the picture tearing rather than as a loop.
+    ///
+    /// The wrap is gated on the LAST SAMPLED position being inside the
+    /// span, never the predicted one. A head still on its way into a loop
+    /// has not been captured by it yet, and folding it there would
+    /// teleport it forward into a lap it has not run.
     pub fn position_at(&self, now: f64) -> f64 {
         if !self.playing || self.scratching {
             return self.position_secs;
         }
         let elapsed = (now - self.stamp).clamp(0.0, 0.5);
-        (self.position_secs + elapsed * self.rate.max(0.0)).max(0.0)
+        let ahead = (self.position_secs + elapsed * self.rate.max(0.0)).max(0.0);
+        match self.loop_span {
+            Some((start, end))
+                if end > start && self.position_secs >= start && self.position_secs < end =>
+            {
+                start + (ahead - start).rem_euclid(end - start)
+            }
+            _ => ahead,
+        }
     }
 
     /// The tile column under the playhead.
@@ -7978,6 +7996,35 @@ mod tests {
         // And a very stale stamp cannot run the playhead away.
         lane.playing = true;
         assert!(lane.position_at(1_000.0) - 10.0 <= 0.55);
+    }
+
+    #[test]
+    fn a_playhead_inside_a_loop_wraps_instead_of_walking_out_of_it() {
+        let mut lane = lane(120.0, 10.0);
+        lane.stamp = 100.0;
+        lane.playing = true;
+        // A SUB-BEAT loop, which is where this bites: the prediction only
+        // ever runs half a second ahead, so a loop longer than that could
+        // never have walked out of itself in the first place.
+        lane.loop_span = Some((10.0, 10.3));
+        // Inside the lap, nothing to do.
+        assert!((lane.position_at(100.1) - 10.1).abs() < 1e-9);
+        // Past the end: back round, not out the far side. Two-thirds of a
+        // second of prediction is one whole lap and change.
+        assert!((lane.position_at(100.5) - 10.2).abs() < 1e-9);
+        // However stale the stamp, the drawn head stays in the span.
+        let far = lane.position_at(1_000.0);
+        assert!((10.0..10.3).contains(&far), "{far} is inside the loop");
+
+        // A head that has NOT reached the loop yet is left alone: it is on
+        // its way in and the loop has not captured it.
+        lane.position_secs = 9.5;
+        assert!((lane.position_at(100.25) - 9.75).abs() < 1e-9);
+
+        // A degenerate span is not a division: it simply does not fold.
+        lane.position_secs = 10.0;
+        lane.loop_span = Some((10.0, 10.0));
+        assert!((lane.position_at(100.4) - 10.4).abs() < 1e-9);
     }
 
     #[test]
