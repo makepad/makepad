@@ -20,6 +20,7 @@ pub mod button_group;
 pub mod chip;
 pub mod menu;
 pub mod overlay;
+pub mod toast;
 pub mod tip;
 pub mod welcome;
 pub mod button;
@@ -96,6 +97,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     menu::script_mod(vm);
     tip::script_mod(vm);
     overlay::script_mod(vm);
+    toast::script_mod(vm);
     alert::script_mod(vm);
     divider::script_mod(vm);
     progress::script_mod(vm);
@@ -146,6 +148,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         menu::STORIES,
         tip::STORIES,
         overlay::STORIES,
+        toast::STORIES,
         alert::STORIES,
         divider::STORIES,
         progress::STORIES,
