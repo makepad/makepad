@@ -146,10 +146,18 @@ script_mod! {
             /** bevel end stop when disabled */
             border_color_2_disabled: uniform(theme.color_bevel_outset_2_disabled)
 
-            /** the face: rounded SDF box, gradient fill, bevel stroke */
-            pixel: fn() {
-                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+            /** state layer ink laid over the face by hover and press; negative alpha means none */
+            layer_color: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
+            /** state layer opacity under the pointer 0..1 step 0.01 */
+            layer_hover: uniform(theme.state_hover_opacity)
+            /** state layer opacity added while held 0..1 step 0.01 */
+            layer_down: uniform(theme.state_press_opacity)
+            /** dash length of the bevel stroke in pixels; 0 draws it solid 0..16 step 0.5 */
+            border_dash: uniform(0.0)
 
+            /** the face fill for the current state: gradient resolved at
+             * this pixel, state-mixed, then the state layer laid over it */
+            face_fill: fn() -> vec4 {
                 let border_sz_uv = vec2(
                     self.border_size / self.rect_size.x
                     self.border_size / self.rect_size.y
@@ -163,14 +171,6 @@ script_mod! {
                 let scale_factor_fill = vec2(
                     self.rect_size.x / sz_inner_px.x
                     self.rect_size.y / sz_inner_px.y
-                )
-
-                sdf.box(
-                    self.border_size
-                    self.border_size
-                    self.rect_size.x - self.border_size * 2.
-                    self.rect_size.y - self.border_size * 2.
-                    self.border_radius
                 )
 
                 let mut color_fill = self.color
@@ -193,6 +193,25 @@ script_mod! {
                     color_fill_disabled = mix(self.color_disabled, self.color_2_disabled, dir)
                 }
 
+                let mut fill = color_fill
+                    .mix(color_fill_focus, self.focus)
+                    .mix(color_fill_hover, self.hover)
+                    .mix(color_fill_down, self.down)
+                    .mix(color_fill_disabled, self.disabled)
+
+                if self.layer_color.x > -0.5 {
+                    // The state layer composites over the fill with straight
+                    // alpha, so a transparent face still shows the tint.
+                    let layer_a = clamp(self.hover * self.layer_hover + self.down * self.layer_down, 0.0, 1.0) * (1.0 - self.disabled)
+                    let a = fill.a + layer_a * (1.0 - fill.a)
+                    let rgb = (fill.rgb * fill.a * (1.0 - layer_a) + self.layer_color.rgb * layer_a) / max(a, 0.0001)
+                    fill = vec4(rgb, a)
+                }
+                return fill
+            }
+
+            /** the bevel stroke for the current state, dashed when border_dash is set */
+            face_stroke: fn() -> vec4 {
                 let mut color_stroke = self.border_color
                 let mut color_stroke_hover = self.border_color_hover
                 let mut color_stroke_down = self.border_color_down
@@ -213,23 +232,54 @@ script_mod! {
                     color_stroke_disabled = mix(self.border_color_disabled, self.border_color_2_disabled, dir)
                 }
 
-                let fill = color_fill
-                    .mix(color_fill_focus, self.focus)
-                    .mix(color_fill_hover, self.hover)
-                    .mix(color_fill_down, self.down)
-                    .mix(color_fill_disabled, self.disabled)
-
-                let stroke = color_stroke
+                let mut stroke = color_stroke
                     .mix(color_stroke_focus, self.focus)
                     .mix(color_stroke_hover, self.hover)
                     .mix(color_stroke_down, self.down)
                     .mix(color_stroke_disabled, self.disabled)
 
-                sdf.fill_keep(fill)
-                sdf.stroke(stroke, self.border_size)
+                if self.border_dash > 0.0 {
+                    // Dashes along x + y: regular on every straight edge.
+                    let p = self.pos * self.rect_size
+                    let on = step(0.5, fract((p.x + p.y) / (self.border_dash * 2.0)))
+                    stroke = vec4(stroke.rgb, stroke.a * on)
+                }
+                return stroke
+            }
+
+            /** the face: rounded SDF box, gradient fill, bevel stroke */
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+
+                sdf.box(
+                    self.border_size
+                    self.border_size
+                    self.rect_size.x - self.border_size * 2.
+                    self.rect_size.y - self.border_size * 2.
+                    self.border_radius
+                )
+
+                sdf.fill_keep(self.face_fill())
+                sdf.stroke(self.face_stroke(), self.border_size)
                 return sdf.result
             }
         }
+
+        /** The description ink for a compound button: a second, quieter
+         * line under the label. */
+        draw_description +: {
+            /** center the ink, not the line box */
+            ink_centered: true
+            /** description ink */
+            color: theme.color_on_surface_variant
+            /** the description typeface */
+            text_style: theme.font_regular{
+                /** description type size in points 6..32 step 0.5 */
+                font_size: theme.type_label_m_size
+            }
+        }
+        /** the description's box under the label */
+        description_walk: Walk{width: Fit, height: Fit, margin: Inset{top: 1.}}
 
         /** the state machine driving the face and label mixes */
         animator: Animator{
@@ -428,6 +478,212 @@ script_mod! {
         /** icon only: the label is empty */
         text: ""
     }
+
+    /** The filled button for the page's one main action: the primary role
+     * as the face, its on-colour as the ink, a state layer for hover and
+     * press, and a focus ring in the ink. */
+    mod.widgets.ButtonPrimary = mod.widgets.ButtonFlat{
+        draw_bg +: {
+            color: theme.color_primary
+            color_hover: theme.color_primary
+            color_down: theme.color_primary
+            color_focus: theme.color_primary
+            color_disabled: theme.color_outset_disabled
+            border_color: theme.color_primary
+            border_color_hover: theme.color_primary
+            border_color_down: theme.color_primary
+            border_color_focus: theme.color_on_primary
+            border_color_disabled: theme.color_outset_disabled
+            layer_color: theme.color_on_primary
+        }
+        draw_text +: {
+            color: theme.color_on_primary
+            color_hover: theme.color_on_primary
+            color_down: theme.color_on_primary
+            color_focus: theme.color_on_primary
+            color_disabled: theme.color_label_inner_disabled
+        }
+        draw_icon +: {
+            color: theme.color_on_primary
+        }
+    }
+
+    /** The filled button for the second action: the secondary role. */
+    mod.widgets.ButtonSecondary = mod.widgets.ButtonPrimary{
+        draw_bg +: {
+            color: theme.color_secondary
+            color_hover: theme.color_secondary
+            color_down: theme.color_secondary
+            color_focus: theme.color_secondary
+            border_color: theme.color_secondary
+            border_color_hover: theme.color_secondary
+            border_color_down: theme.color_secondary
+            border_color_focus: theme.color_on_secondary
+            layer_color: theme.color_on_secondary
+        }
+        draw_text +: {
+            color: theme.color_on_secondary
+            color_hover: theme.color_on_secondary
+            color_down: theme.color_on_secondary
+            color_focus: theme.color_on_secondary
+        }
+        draw_icon +: {
+            color: theme.color_on_secondary
+        }
+    }
+
+    /** The tonal button: a quieter fill from the tertiary container, for
+     * actions that matter but must not compete with the primary. */
+    mod.widgets.ButtonTertiary = mod.widgets.ButtonPrimary{
+        draw_bg +: {
+            color: theme.color_tertiary_container
+            color_hover: theme.color_tertiary_container
+            color_down: theme.color_tertiary_container
+            color_focus: theme.color_tertiary_container
+            border_color: theme.color_tertiary_container
+            border_color_hover: theme.color_tertiary_container
+            border_color_down: theme.color_tertiary_container
+            border_color_focus: theme.color_on_tertiary_container
+            layer_color: theme.color_on_tertiary_container
+        }
+        draw_text +: {
+            color: theme.color_on_tertiary_container
+            color_hover: theme.color_on_tertiary_container
+            color_down: theme.color_on_tertiary_container
+            color_focus: theme.color_on_tertiary_container
+        }
+        draw_icon +: {
+            color: theme.color_on_tertiary_container
+        }
+    }
+
+    /** The outlined button: no face, a one-pixel outline, primary ink,
+     * and the state layer tinting the inside on hover and press. */
+    mod.widgets.ButtonOutline = mod.widgets.ButtonFlat{
+        draw_bg +: {
+            /** outline thickness in pixels 0..4 step 0.5 */
+            border_size: 1.0
+            color: theme.color_u_hidden
+            color_hover: theme.color_u_hidden
+            color_down: theme.color_u_hidden
+            color_focus: theme.color_u_hidden
+            color_disabled: theme.color_u_hidden
+            border_color: theme.color_outline
+            border_color_hover: theme.color_outline
+            border_color_down: theme.color_outline
+            border_color_focus: theme.color_primary
+            border_color_disabled: theme.color_outline_variant
+            layer_color: theme.color_primary
+        }
+        draw_text +: {
+            color: theme.color_primary
+            color_hover: theme.color_primary
+            color_down: theme.color_primary
+            color_focus: theme.color_primary
+            color_disabled: theme.color_label_inner_disabled
+        }
+        draw_icon +: {
+            color: theme.color_primary
+        }
+    }
+
+    /** The outlined button with a dashed outline: an add-here or drop-here
+     * affordance rather than a firm action. */
+    mod.widgets.ButtonDashed = mod.widgets.ButtonOutline{
+        /** dash length in pixels 0..16 step 0.5 */
+        draw_bg.border_dash: 4.0
+    }
+
+    /** The destructive button: the error role as the face. */
+    mod.widgets.ButtonDanger = mod.widgets.ButtonPrimary{
+        draw_bg +: {
+            color: theme.color_error
+            color_hover: theme.color_error
+            color_down: theme.color_error
+            color_focus: theme.color_error
+            border_color: theme.color_error
+            border_color_hover: theme.color_error
+            border_color_down: theme.color_error
+            border_color_focus: theme.color_on_error
+            layer_color: theme.color_on_error
+        }
+        draw_text +: {
+            color: theme.color_on_error
+            color_hover: theme.color_on_error
+            color_down: theme.color_on_error
+            color_focus: theme.color_on_error
+        }
+        draw_icon +: {
+            color: theme.color_on_error
+        }
+    }
+
+    /** The extra-small button: the shortest rung of the control ladder,
+     * for dense toolbars and table rows. */
+    mod.widgets.ButtonXs = mod.widgets.ButtonFlat{
+        /** fixed face height in pixels 12..64 step 1 */
+        height: theme.size_control_s - theme.space_1
+        padding: theme.mspace_1{top: 0., bottom: 0., left: theme.space_1, right: theme.space_1}
+        draw_text.text_style.font_size: theme.type_label_s_size
+        icon_walk: Walk{width: 12.0, height: Fit}
+    }
+
+    /** The small button: the control ladder's small rung. */
+    mod.widgets.ButtonSm = mod.widgets.ButtonFlat{
+        /** fixed face height in pixels 12..64 step 1 */
+        height: theme.size_control_s
+        padding: theme.mspace_1{top: 0., bottom: 0., left: theme.space_2, right: theme.space_2}
+        draw_text.text_style.font_size: theme.type_label_m_size
+        icon_walk: Walk{width: 16.0, height: Fit}
+    }
+
+    /** The large button: the control ladder's large rung. */
+    mod.widgets.ButtonLg = mod.widgets.ButtonFlat{
+        /** fixed face height in pixels 12..64 step 1 */
+        height: theme.size_control_l
+        padding: theme.mspace_1{top: 0., bottom: 0., left: theme.space_3, right: theme.space_3}
+        draw_text.text_style.font_size: theme.type_title_s_size
+        icon_walk: Walk{width: 24.0, height: Fit}
+    }
+
+    /** The extra-large button: above the ladder, for hero actions. */
+    mod.widgets.ButtonXl = mod.widgets.ButtonFlat{
+        /** fixed face height in pixels 12..64 step 1 */
+        height: theme.size_control_l + theme.space_2
+        padding: theme.mspace_1{top: 0., bottom: 0., left: theme.space_4, right: theme.space_4}
+        draw_text.text_style.font_size: theme.type_title_m_size
+        icon_walk: Walk{width: 28.0, height: Fit}
+    }
+
+    /** The compound button: a label with a quieter description line
+     * under it, the icon beside both. */
+    mod.widgets.ButtonCompound = mod.widgets.ButtonFlat{
+        /** the second line under the label */
+        description: "Description"
+        padding: theme.mspace_1{left: theme.space_3, right: theme.space_3}
+        icon_walk: Walk{width: 28.0, height: Fit}
+    }
+
+    /** The tonal icon button: an icon alone on the tertiary container. */
+    mod.widgets.ButtonTonalIcon = mod.widgets.ButtonTertiary{
+        /** no gap: there is no label to sit beside the icon 0..24 step 1 */
+        spacing: 0.
+        /** icon only: the label is empty */
+        text: ""
+        padding: theme.mspace_1
+    }
+
+    /** The subtle icon button: an icon alone with no face until the
+     * pointer arrives, when the state layer tints it. */
+    mod.widgets.ButtonSubtleIcon = mod.widgets.ButtonFlatterIcon{
+        padding: theme.mspace_1
+        draw_bg +: {
+            layer_color: theme.color_on_surface
+        }
+        draw_icon +: {
+            color: theme.color_on_surface_variant
+        }
+    }
 }
 
 /// Actions emitted by a button widget, including the key modifiers
@@ -484,6 +740,16 @@ pub struct Button {
 
     #[layout]
     layout: Layout,
+
+    /// The quieter second line under the label; empty draws none.
+    #[live]
+    pub description: String,
+    /// The description's ink.
+    #[live]
+    draw_description: DrawText,
+    /// The description's box under the label.
+    #[live]
+    description_walk: Walk,
 
     #[live(true)]
     grab_key_focus: bool,
@@ -704,8 +970,7 @@ impl Widget for Button {
 
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
-        self.draw_text
-            .draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
+        self.draw_label(cx);
         self.draw_bg.end(cx);
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
         DrawStep::done()
@@ -729,6 +994,30 @@ impl Button {
         self.draw_text
             .draw_walk(cx, self.label_walk, Align::default(), label);
         self.draw_bg.end(cx);
+    }
+
+    /// The label, alone or stacked over the description in its own column
+    /// when there is one.
+    fn draw_label(&mut self, cx: &mut Cx2d) {
+        if self.description.is_empty() {
+            self.draw_text
+                .draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
+            return;
+        }
+        cx.begin_turtle(
+            Walk::fit(),
+            Layout {
+                flow: Flow::Down,
+                clip_x: false,
+                clip_y: false,
+                ..Default::default()
+            },
+        );
+        self.draw_text
+            .draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
+        self.draw_description
+            .draw_walk(cx, self.description_walk, Align::default(), &self.description);
+        cx.end_turtle();
     }
 
     pub fn enabled(&self) -> bool {
