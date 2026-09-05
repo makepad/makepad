@@ -1436,6 +1436,11 @@ impl Cx {
                 Some(id) => id,
                 None => continue,
             };
+            if self.geometries.is_id_stale(geometry_id) {
+                // The widget that uploaded this mesh is gone; its slot
+                // belongs to someone else now.
+                continue;
+            }
             let geom = &self.geometries[geometry_id];
             let vertices = &geom.vertices;
             let indices = &geom.indices;

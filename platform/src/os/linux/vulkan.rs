@@ -5586,6 +5586,11 @@ impl CxVulkan {
                 }
             };
 
+            if cx.geometries.is_id_stale(packet.geometry_id) {
+                // The widget that uploaded this mesh is gone; its slot
+                // belongs to someone else now.
+                continue;
+            }
             let geometry = &mut cx.geometries[packet.geometry_id];
             if geometry.indices.is_empty() || geometry.vertices.is_empty() {
                 draw_stats.skipped_empty_geometry += 1;

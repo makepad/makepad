@@ -320,6 +320,11 @@ impl Cx {
                     continue;
                 };
 
+                if self.geometries.is_id_stale(geometry_id) {
+                    // The widget that uploaded this mesh is gone; its slot
+                    // belongs to someone else now.
+                    continue;
+                }
                 let geometry = &mut self.geometries[geometry_id];
 
                 if geometry.dirty_vertices || geometry.os.vertex_buffer.inner.is_none() {
