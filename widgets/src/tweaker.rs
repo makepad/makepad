@@ -590,8 +590,10 @@ pub struct TweakStroke {
     pub widgets: Vec<String>,
 }
 
+/// The tweak session's state. Crate-visible only so the theme edit path can
+/// name its undo sink's type; the fields stay this module's own.
 #[derive(Default)]
-struct TweakSession {
+pub(crate) struct TweakSession {
     /// Guards against N windows toggling N times on one F12 event.
     toggle_event_id: u64,
     /// The pinned selection (click pins; remote applies re-pin by path).
@@ -2416,8 +2418,10 @@ fn is_noise(text: &str) -> bool {
 /// `script_to_value` — the Rust fields serialized back to script — so runtime
 /// applies are visible; the `#[source]` object's own map (what the DSL
 /// explicitly applied) supplies the `set` flag. This is both the sidebar's
-/// data and the before/after capture the diff log works from.
-fn reflect_flat(cx: &mut Cx, widget: &WidgetRef) -> Vec<(String, String, bool)> {
+/// data and the before/after capture the diff log works from. Part of the
+/// [`crate::reflect`] surface: the same read a catalogue app's Docs and
+/// Controls panels build on.
+pub fn reflect_flat(cx: &mut Cx, widget: &WidgetRef) -> Vec<(String, String, bool)> {
     cx.with_vm(|vm| {
         // Serializing a widget back to script trips harmless type-check
         // complaints on fn-ref fields (`on_click` serializes to a value its
@@ -3015,7 +3019,7 @@ fn capture_material_mirror(cx: &Cx, widget: &WidgetRef, area: Area, base: &DrawV
 /// to the same prop merge while the gesture is open (a scrub = one step);
 /// any new user gesture clears the redo branch. Undo/redo replays pass
 /// origin "undo"/"redo" and are not tracked.
-fn track_undo(s: &mut TweakSession, entry: &TweakDiffEntry) {
+pub(crate) fn track_undo(s: &mut TweakSession, entry: &TweakDiffEntry) {
     s.redo.clear();
     if s.undo_open {
         if let Some(UndoStep::Value { path, prop, new, .. }) = s.undo.last_mut() {
@@ -3398,16 +3402,19 @@ fn hook_sync(cx: &mut Cx) {
     cx.post_draw_hook = if live { Some(Box::new(pulse_after_draw)) } else { None };
 }
 
-/// One global theme value: a colour or a number.
-#[derive(Clone, Copy)]
-enum ThemeVal {
+/// One global theme value: a colour (packed `0xrrggbbaa`) or a number.
+/// Part of the [`crate::reflect`] surface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ThemeVal {
     Color(u32),
     Num(f64),
 }
 
 /// The app's theme: every colour and number in `mod.theme`, with the
-/// level (file:line) that defines it. Read from the script cascade.
-fn theme_values(cx: &mut Cx) -> Vec<(String, LiveId, ThemeVal, String)> {
+/// level (file:line) that defines it. Read from the script cascade. Part of
+/// the [`crate::reflect`] surface: a theme panel's rows and the probe behind
+/// `/tweak/op?op=theme&name=`.
+pub fn theme_values(cx: &mut Cx) -> Vec<(String, LiveId, ThemeVal, String)> {
     let mut out: Vec<(String, LiveId, ThemeVal, String)> = Vec::new();
     cx.with_vm(|vm| {
         let theme = vm.module(id!(theme));
@@ -3463,6 +3470,144 @@ fn theme_heap_set(cx: &mut Cx, key: LiveId, value: ScriptValue) -> bool {
         });
     });
     hit
+}
+
+/// One theme value as the text the ledger, the sidebar and the remote op
+/// all show: `#rrggbbaa` for a colour, `fmt_f64` for a number.
+pub(crate) fn theme_val_text(value: ThemeVal) -> String {
+    match value {
+        ThemeVal::Color(c) => hex_of(c),
+        ThemeVal::Num(f) => fmt_f64(f),
+    }
+}
+
+/// The text a theme edit applies. `theme.other` as a value means "what
+/// `other` is right now", so a colour can be pointed at another token
+/// without copying its hex; anything else is taken as written.
+pub(crate) fn theme_edit_text(
+    values: &[(String, LiveId, ThemeVal, String)],
+    text: &str,
+) -> Result<String, String> {
+    match text.strip_prefix("theme.") {
+        Some(other) => values
+            .iter()
+            .find(|(n, _, _, _)| n == other)
+            .map(|(_, _, v, _)| theme_val_text(*v))
+            .ok_or_else(|| format!("no theme value {other:?}")),
+        None => Ok(text.to_string()),
+    }
+}
+
+/// Where a theme edit's undo step goes: the session's own stack
+/// ([`track_undo`]) for a fresh gesture, nothing for an undo/redo replay
+/// that is re-applying a step already on it.
+pub(crate) type UndoSink = fn(&mut TweakSession, &TweakDiffEntry);
+
+/// The ONE way a theme value changes at runtime, shared by the overlay's
+/// sidebar, its reset and undo/redo, the remote `op=theme` and
+/// [`crate::reflect::theme_set_value`]. A colour is retargeted in every
+/// draw-buffer slot that holds it through the pulse's identity ledger
+/// (re-applied after each draw while the edit lives) and written into the
+/// theme object in the script heap so later applies bake it too; a number
+/// only lands in the heap (layouts re-flow when the edit reaches the
+/// source). Every change is ledgered under the token's own definition site
+/// with scope "theme" and, given a sink, pushed as an undo step.
+///
+/// The session is the process global behind [`session`]; it is not a
+/// parameter because the pulse helpers this path calls
+/// (`theme_overrides_sync`, `hook_sync`) address that same global, so
+/// passing another lock in would only pretend to be injection.
+///
+/// Returns the value's kind before the edit and the text applied (with
+/// `theme.x` aliases resolved), or `None` when the value already was what
+/// was asked and nothing was touched.
+pub(crate) fn theme_apply(
+    cx: &mut Cx,
+    name: &str,
+    text: &str,
+    origin: &str,
+    undo: Option<UndoSink>,
+) -> Result<Option<(ThemeVal, String)>, String> {
+    let values = theme_values(cx);
+    let (key, value, loc) = values
+        .iter()
+        .find(|(n, _, _, _)| n == name)
+        .map(|(_, k, v, l)| (*k, *v, l.clone()))
+        .ok_or_else(|| format!("no theme value {name:?}"))?;
+    let text = theme_edit_text(&values, text)?;
+    let old_text = theme_val_text(value);
+    let overridden = session().lock().unwrap().theme_overrides.iter().any(|(n, _)| n == name);
+    if old_text == text && !overridden {
+        return Ok(None);
+    }
+    match value {
+        ThemeVal::Color(current) => {
+            let (rgba, _) = parse_hex(&text).ok_or_else(|| format!("{text:?} is not a colour"))?;
+            let new = packed_of(rgba);
+            // The theme module is immutable to scripts; a design tool
+            // edits the value in place, at the level that defines it.
+            theme_heap_set(cx, key, ScriptValue::from_color(new));
+            let mut s = session().lock().unwrap();
+            match s.theme_overrides.iter().position(|(n, _)| n == name) {
+                Some(i) => {
+                    if new == packed_of(s.theme_overrides[i].1.target) {
+                        // Back at the original: restore and forget.
+                        let (_, st) = s.theme_overrides.remove(i);
+                        drop(s);
+                        pulse_restore(cx, &st);
+                    } else {
+                        s.theme_overrides[i].1.fixed = Some(rgba);
+                        drop(s);
+                    }
+                }
+                None => {
+                    let mut st = PulseState::new(current);
+                    st.fixed = Some(rgba);
+                    s.theme_overrides.push((name.to_string(), st));
+                    drop(s);
+                }
+            }
+            theme_overrides_sync(cx);
+            hook_sync(cx);
+            let overrides = std::mem::take(&mut session().lock().unwrap().theme_overrides);
+            for (_, st) in &overrides {
+                pulse_repaint(cx, st);
+            }
+            session().lock().unwrap().theme_overrides = overrides;
+        }
+        ThemeVal::Num(_) => {
+            let f: f64 = text.parse().map_err(|_| format!("{text:?} is not a number"))?;
+            // Numbers are baked into layouts at apply time: the heap
+            // holds the new value for everything applied from now on
+            // and the ledger carries it to the source; existing layout
+            // re-flows when the edit lands (a live reload cannot
+            // redefine the immutable widget modules today).
+            theme_heap_set(cx, key, ScriptValue::from_f64(f));
+        }
+    }
+    let now = cx.seconds_since_app_start();
+    let mut s = session().lock().unwrap();
+    s.suppress_until = now + SUPPRESS_LINGER;
+    s.apply_gen += 1;
+    s.next_seq += 1;
+    let entry = TweakDiffEntry {
+        seq: s.next_seq,
+        path: "theme".to_string(),
+        prop: name.to_string(),
+        old: old_text,
+        new: text.clone(),
+        origin: loc,
+        siblings: 0,
+        scope: "theme".to_string(),
+    };
+    if let Some(track) = undo {
+        log!("TWEAK {} theme {} {} -> {} ({})", origin, entry.prop, entry.old, entry.new, entry.origin);
+        track(&mut s, &entry);
+    }
+    s.diff.push(entry);
+    drop(s);
+    cx.redraw_all();
+    Ok(Some((value, text)))
 }
 
 fn rgba_of(c: u32) -> [f32; 4] {
@@ -3788,7 +3933,11 @@ fn parse_struct(value: &str) -> (StructKind, Vec<f64>) {
     (StructKind::None, Vec::new())
 }
 
-fn collect_row_docs(cx: &mut Cx, widget: &WidgetRef) -> HashMap<String, String> {
+/// Every `/** */` annotation behind a widget's properties, gathered up its
+/// construction chain: property name (dotted for a sub-object's field, as
+/// [`reflect_flat`] names it) to the doc's text. Part of the
+/// [`crate::reflect`] surface: a Docs panel's third column.
+pub fn collect_row_docs(cx: &mut Cx, widget: &WidgetRef) -> HashMap<String, String> {
     let mut out = HashMap::new();
     let source = widget.script_source();
     if source == ScriptObject::ZERO {
@@ -3995,8 +4144,10 @@ fn readable_segment(name: &str, ty: &str) -> String {
     "Widget".to_string()
 }
 
-/// One widget's readable path. See [`readable_paths`].
-fn indexed_path(cx: &Cx, uid: u64) -> String {
+/// One widget's readable path (`/window/body/Button.2`). See
+/// [`readable_paths`]. Part of the [`crate::reflect`] surface: how an action
+/// log names its sender.
+pub fn indexed_path(cx: &Cx, uid: u64) -> String {
     readable_paths(cx)
         .into_iter()
         .find(|(u, _)| *u == uid)
@@ -4033,7 +4184,10 @@ fn is_anonymous_segment(segment: &str) -> bool {
         || (segment.starts_with('-') && segment.len() > 1 && segment[1..].bytes().all(|b| b.is_ascii_digit()))
 }
 
-fn resolve_widget_by_path(cx: &Cx, path: &str) -> Result<WidgetRef, String> {
+/// The widget a readable path names: an indexed path (`/window/body/Button.2`)
+/// taken as written, else a waypoint search over the named segments. Part
+/// of the [`crate::reflect`] surface: how a story names its subject.
+pub fn resolve_widget_by_path(cx: &Cx, path: &str) -> Result<WidgetRef, String> {
     let tree = cx.widget_tree();
     // An indexed path names one widget and nothing else: take it as written
     // before falling back to the waypoint search below, which drops the
@@ -5028,10 +5182,10 @@ pub fn tweak_callback(
             let value = arg(args, &["value"]).unwrap_or("").to_string();
             if value.is_empty() {
                 // No value: report the theme's current one.
-                let current = theme_values(cx).into_iter().find(|(n, _, _, _)| *n == name).map(|(_, _, v, _)| match v {
-                    ThemeVal::Color(c) => hex_of(c),
-                    ThemeVal::Num(f) => fmt_f64(f),
-                });
+                let current = theme_values(cx)
+                    .into_iter()
+                    .find(|(n, _, _, _)| *n == name)
+                    .map(|(_, _, v, _)| theme_val_text(v));
                 return Ok(format!(
                     "{{\"ok\":1,\"theme\":{},\"value\":{}}}",
                     json_str(&name),
@@ -8075,109 +8229,29 @@ impl Tweaker {
         }
     }
 
-    /// Set one global theme value. A colour: every draw buffer slot
-    /// holding it is retargeted live, app-wide, through the pulse's
-    /// identity ledger (kept in sync after each draw), and the theme
-    /// object in the script heap follows, so widgets applied from now on
-    /// bake the new colour too. A number: the heap value (see below).
-    /// Ledgered at the theme's own definition site with scope "theme";
-    /// undoable.
+    /// Set one global theme value through [`theme_apply`], the path shared
+    /// with the remote op and [`crate::reflect::theme_set_value`]. A colour:
+    /// every draw buffer slot holding it is retargeted live, app-wide,
+    /// through the pulse's identity ledger (kept in sync after each draw),
+    /// and the theme object in the script heap follows, so widgets applied
+    /// from now on bake the new colour too. A number: the heap value (see
+    /// there). Ledgered at the theme's own definition site with scope
+    /// "theme"; undoable, unless origin is an undo/redo replay of a step
+    /// already on the stack. The method's own share is the overlay's state:
+    /// the palette chips after a colour edit, and the sidebar row for the
+    /// value.
     fn theme_set(&mut self, cx: &mut Cx, name: &str, text: &str, origin: &str) -> Result<(), String> {
-        let values = theme_values(cx);
-        let (key, value, loc) = values
-            .iter()
-            .find(|(n, _, _, _)| n == name)
-            .map(|(_, k, v, l)| (*k, *v, l.clone()))
-            .ok_or_else(|| format!("no theme value {name:?}"))?;
-        // `theme.color_y` as a value: that colour's current hex.
-        let text = match text.strip_prefix("theme.") {
-            Some(other) => match values.iter().find(|(n, _, _, _)| n == other).map(|(_, _, v, _)| *v) {
-                Some(ThemeVal::Color(c)) => hex_of(c),
-                Some(ThemeVal::Num(f)) => fmt_f64(f),
-                None => return Err(format!("no theme value {other:?}")),
-            },
-            None => text.to_string(),
-        };
-        let old_text = match value {
-            ThemeVal::Color(c) => hex_of(c),
-            ThemeVal::Num(f) => fmt_f64(f),
-        };
-        let overridden = session().lock().unwrap().theme_overrides.iter().any(|(n, _)| n == name);
-        if old_text == text && !overridden {
+        let undo = (origin != "undo" && origin != "redo").then_some(track_undo as UndoSink);
+        let Some((was, applied)) = theme_apply(cx, name, text, origin, undo)? else {
             return Ok(());
-        }
-        match value {
-            ThemeVal::Color(current) => {
-                let (rgba, _) = parse_hex(&text).ok_or_else(|| format!("{text:?} is not a colour"))?;
-                let new = packed_of(rgba);
-                // The theme module is immutable to scripts; a design tool
-                // edits the value in place, at the level that defines it.
-                theme_heap_set(cx, key, ScriptValue::from_color(new));
-                let mut s = session().lock().unwrap();
-                match s.theme_overrides.iter().position(|(n, _)| n == name) {
-                    Some(i) => {
-                        if new == packed_of(s.theme_overrides[i].1.target) {
-                            // Back at the original: restore and forget.
-                            let (_, st) = s.theme_overrides.remove(i);
-                            drop(s);
-                            pulse_restore(cx, &st);
-                        } else {
-                            s.theme_overrides[i].1.fixed = Some(rgba);
-                            drop(s);
-                        }
-                    }
-                    None => {
-                        let mut st = PulseState::new(current);
-                        st.fixed = Some(rgba);
-                        s.theme_overrides.push((name.to_string(), st));
-                        drop(s);
-                    }
-                }
-                theme_overrides_sync(cx);
-                hook_sync(cx);
-                let overrides = std::mem::take(&mut session().lock().unwrap().theme_overrides);
-                for (_, st) in &overrides {
-                    pulse_repaint(cx, st);
-                }
-                session().lock().unwrap().theme_overrides = overrides;
-                self.theme_colors = theme_palette(cx);
-            }
-            ThemeVal::Num(_) => {
-                let f: f64 = text.parse().map_err(|_| format!("{text:?} is not a number"))?;
-                // Numbers are baked into layouts at apply time: the heap
-                // holds the new value for everything applied from now on
-                // and the ledger carries it to the source; existing layout
-                // re-flows when the edit lands (a live reload cannot
-                // redefine the immutable widget modules today).
-                theme_heap_set(cx, key, ScriptValue::from_f64(f));
-            }
-        }
-        let now = cx.seconds_since_app_start();
-        let mut s = session().lock().unwrap();
-        s.suppress_until = now + SUPPRESS_LINGER;
-        s.apply_gen += 1;
-        s.next_seq += 1;
-        let entry = TweakDiffEntry {
-            seq: s.next_seq,
-            path: "theme".to_string(),
-            prop: name.to_string(),
-            old: old_text,
-            new: text.clone(),
-            origin: loc,
-            siblings: 0,
-            scope: "theme".to_string(),
         };
-        if origin != "undo" && origin != "redo" {
-            log!("TWEAK {} theme {} {} -> {} ({})", origin, entry.prop, entry.old, entry.new, entry.origin);
-            track_undo(&mut s, &entry);
+        if matches!(was, ThemeVal::Color(_)) {
+            self.theme_colors = theme_palette(cx);
         }
-        s.diff.push(entry);
-        drop(s);
         if let Some(row) = self.rows.iter_mut().find(|r| r.prop == name) {
-            row.value = text;
+            row.value = applied;
             row.changed = true;
         }
-        cx.redraw_all();
         Ok(())
     }
 

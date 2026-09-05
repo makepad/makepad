@@ -53,6 +53,7 @@ pub mod gauss_view;
 pub mod keyboard_view;
 pub mod nav_control;
 pub mod tweaker;
+pub mod reflect;
 #[cfg(feature = "voice")]
 pub mod voice_wave;
 pub mod window;
@@ -190,6 +191,7 @@ pub use crate::{
     portal_list::*,
     reorder_list::*,
     radio_button::*,
+    reflect::*,
     root::*,
 
     rubber_view::*,
