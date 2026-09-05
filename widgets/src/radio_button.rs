@@ -403,6 +403,10 @@ impl Widget for RadioButton {
         self.animator_in_state(cx, ids!(disabled.on))
     }
 
+    fn snapshot_checked(&self, cx: &Cx) -> Option<bool> {
+        Some(self.active(cx))
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         let uid = self.widget_uid();
         if self.animator_handle_event(cx, event).must_redraw() {

@@ -1961,6 +1961,16 @@ impl Widget for Slider {
         format!("{}", self.to_external())
     }
 
+    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
+        // The number the readout shows, unit and all, so a test waits on
+        // what a person reads rather than on a raw f64.
+        Some(format_readout(
+            self.to_external() * self.display_scale,
+            self.precision,
+            &self.unit,
+        ))
+    }
+
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
         if let Ok(v) = v.parse::<f64>() {
             self.set_internal(v);

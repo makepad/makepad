@@ -751,6 +751,10 @@ impl Widget for DropDown {
         self.animator_in_state(cx, ids!(disabled.on))
     }
 
+    fn snapshot_selected(&self, _cx: &Cx) -> Option<String> {
+        Some(self.selected_item_label())
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         self.animator_handle_event(cx, event);
         let uid = self.widget_uid();

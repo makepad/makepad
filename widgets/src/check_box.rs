@@ -508,6 +508,10 @@ impl Widget for CheckBox {
         self.animator_in_state(cx, ids!(disabled.on))
     }
 
+    fn snapshot_checked(&self, cx: &Cx) -> Option<bool> {
+        Some(self.active(cx))
+    }
+
     fn script_call(
         &mut self,
         vm: &mut ScriptVm,

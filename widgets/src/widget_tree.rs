@@ -69,6 +69,60 @@ pub(crate) fn widget_type_names(cx: &Cx) -> HashMap<TypeId, LiveId> {
     widget_type_names
 }
 
+/// What a widget reported about itself through the `Widget` snapshot hooks.
+#[derive(Default)]
+struct SnapshotHooks {
+    checked: Option<bool>,
+    value: Option<String>,
+    selected: Option<String>,
+}
+
+/// What the tree can still read from the five widget types it knew before
+/// the hooks existed, plus the widget's plain text.
+#[derive(Default)]
+struct SnapshotFallback {
+    checked: Option<bool>,
+    selected: Option<String>,
+    is_button: bool,
+    is_text_input: bool,
+    text: String,
+}
+
+struct SnapshotState {
+    text: Option<String>,
+    value: Option<String>,
+    checked: Option<bool>,
+    selected: Option<String>,
+}
+
+/// The rules the snapshot has always followed, with the hooks in front:
+/// a text input reports its contents as `value` and no `text`; buttons and
+/// anything with a checked state always report `text`, even empty; any
+/// other widget reports `text` only when it has some; a selection also
+/// becomes the row's `text`.
+fn merge_snapshot_state(hooks: SnapshotHooks, fallback: SnapshotFallback) -> SnapshotState {
+    let checked = hooks.checked.or(fallback.checked);
+    let selected = hooks.selected.or(fallback.selected);
+    let mut value = hooks.value;
+    let mut text = None;
+    if fallback.is_text_input {
+        if value.is_none() {
+            value = Some(fallback.text);
+        }
+    } else if fallback.is_button || checked.is_some() || !fallback.text.is_empty() {
+        text = Some(fallback.text);
+    }
+    if let Some(selected) = &selected {
+        text = Some(selected.clone());
+    }
+    SnapshotState {
+        text,
+        value,
+        checked,
+        selected,
+    }
+}
+
 /// The screen rect a viewer actually sees for `area`, or `None` when the area
 /// is stale or clipped away entirely.
 ///
@@ -2320,6 +2374,10 @@ impl WidgetTree {
             // [0,0,0,0] — one big wheel left 100 of those in the snapshot.
             let node_visible = effective_visible(index) && width > 0 && height > 0;
 
+            // Each downcast in its own statement: `borrow::<T>()` hands back
+            // a `Ref` guard, and a guard born inside a longer expression
+            // lives to the end of that expression, where `widget.text()`
+            // would find the cell already borrowed.
             let is_button = widget.borrow::<Button>().is_some();
             let button_enabled = widget.borrow::<Button>().map(|button| button.enabled());
             let check_box_active = widget
@@ -2332,69 +2390,48 @@ impl WidgetTree {
                 .borrow::<DropDown>()
                 .map(|drop_down| drop_down.selected_item_label());
             let is_text_input = widget.borrow::<TextInput>().is_some();
+            let widget_text = widget.text();
 
-            let mut text = None;
-            let mut value = None;
-            if is_text_input {
-                value = Some(widget.text());
-            } else {
-                let widget_text = widget.text();
-                if is_button
-                    || check_box_active.is_some()
-                    || radio_active.is_some()
-                    || !widget_text.is_empty()
-                {
-                    text = Some(widget_text);
-                }
-            }
-            if let Some(selected) = dropdown_selected.clone() {
-                text = Some(selected.clone());
-                widgets.push(WidgetSnapshot {
-                    id,
-                    widget_type,
-                    window_id: window_context
-                        .as_ref()
-                        .map(|context| context.id.clone())
-                        .unwrap_or_default(),
-                    window_index: window_context
-                        .as_ref()
-                        .map(|context| context.index)
-                        .unwrap_or_default(),
-                    visible: node_visible,
-                    enabled: button_enabled.unwrap_or_else(|| !widget.disabled(cx)),
-                    x,
-                    y,
-                    width,
-                    height,
-                    text,
-                    value,
-                    checked: check_box_active.or(radio_active),
-                    selected: Some(selected),
-                });
-            } else {
-                widgets.push(WidgetSnapshot {
-                    id,
-                    widget_type,
-                    window_id: window_context
-                        .as_ref()
-                        .map(|context| context.id.clone())
-                        .unwrap_or_default(),
-                    window_index: window_context
-                        .as_ref()
-                        .map(|context| context.index)
-                        .unwrap_or_default(),
-                    visible: node_visible,
-                    enabled: button_enabled.unwrap_or_else(|| !widget.disabled(cx)),
-                    x,
-                    y,
-                    width,
-                    height,
-                    text,
-                    value,
-                    checked: check_box_active.or(radio_active),
-                    selected: None,
-                });
-            }
+            // What the widget says about itself comes first; the downcasts
+            // above only answer for the five original types when it says
+            // nothing, so a widget the tree has never heard of can still be
+            // waited on by `wait_checked`/`wait_value`.
+            let hooks = SnapshotHooks {
+                checked: widget.snapshot_checked(cx),
+                value: widget.snapshot_value(cx),
+                selected: widget.snapshot_selected(cx),
+            };
+            let fallback = SnapshotFallback {
+                checked: check_box_active.or(radio_active),
+                selected: dropdown_selected,
+                is_button,
+                is_text_input,
+                text: widget_text,
+            };
+            let state = merge_snapshot_state(hooks, fallback);
+
+            widgets.push(WidgetSnapshot {
+                id,
+                widget_type,
+                window_id: window_context
+                    .as_ref()
+                    .map(|context| context.id.clone())
+                    .unwrap_or_default(),
+                window_index: window_context
+                    .as_ref()
+                    .map(|context| context.index)
+                    .unwrap_or_default(),
+                visible: node_visible,
+                enabled: button_enabled.unwrap_or_else(|| !widget.disabled(cx)),
+                x,
+                y,
+                width,
+                height,
+                text: state.text,
+                value: state.value,
+                checked: state.checked,
+                selected: state.selected,
+            });
 
             let dock_dump = widget.borrow::<Dock>().map(|dock| dock.compact_dump(cx));
             if let Some(dock_dump) = dock_dump {
@@ -4667,5 +4704,94 @@ mod tests {
             new_label_uid,
             "WidgetRef::widget should refresh the same dynamic branch that child_by_path sees"
         );
+    }
+
+    fn plain_fallback(text: &str) -> SnapshotFallback {
+        SnapshotFallback {
+            text: text.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn snapshot_hooks_come_before_the_downcasts() {
+        let state = merge_snapshot_state(
+            SnapshotHooks {
+                checked: Some(false),
+                value: Some("7".into()),
+                selected: Some("B".into()),
+            },
+            SnapshotFallback {
+                checked: Some(true),
+                selected: Some("A".into()),
+                ..plain_fallback("x")
+            },
+        );
+        assert_eq!(state.checked, Some(false));
+        assert_eq!(state.value.as_deref(), Some("7"));
+        assert_eq!(state.selected.as_deref(), Some("B"));
+        assert_eq!(state.text.as_deref(), Some("B"));
+    }
+
+    #[test]
+    fn snapshot_downcasts_still_answer_when_the_hooks_are_silent() {
+        let state = merge_snapshot_state(
+            SnapshotHooks::default(),
+            SnapshotFallback {
+                checked: Some(true),
+                ..plain_fallback("")
+            },
+        );
+        assert_eq!(state.checked, Some(true));
+        assert_eq!(state.text.as_deref(), Some(""));
+        assert_eq!(state.value, None);
+        assert_eq!(state.selected, None);
+    }
+
+    #[test]
+    fn snapshot_text_input_reports_a_value_and_no_text() {
+        let state = merge_snapshot_state(
+            SnapshotHooks::default(),
+            SnapshotFallback {
+                is_text_input: true,
+                ..plain_fallback("typed")
+            },
+        );
+        assert_eq!(state.value.as_deref(), Some("typed"));
+        assert_eq!(state.text, None);
+        let hooked = merge_snapshot_state(
+            SnapshotHooks {
+                value: Some("hooked".into()),
+                ..Default::default()
+            },
+            SnapshotFallback {
+                is_text_input: true,
+                ..plain_fallback("typed")
+            },
+        );
+        assert_eq!(hooked.value.as_deref(), Some("hooked"));
+        assert_eq!(hooked.text, None);
+    }
+
+    #[test]
+    fn snapshot_plain_widgets_report_text_only_when_they_have_some() {
+        assert_eq!(
+            merge_snapshot_state(SnapshotHooks::default(), plain_fallback("")).text,
+            None
+        );
+        assert_eq!(
+            merge_snapshot_state(SnapshotHooks::default(), plain_fallback("hi"))
+                .text
+                .as_deref(),
+            Some("hi")
+        );
+        let button = merge_snapshot_state(
+            SnapshotHooks::default(),
+            SnapshotFallback {
+                is_button: true,
+                ..plain_fallback("")
+            },
+        );
+        assert_eq!(button.text.as_deref(), Some(""));
     }
 }
