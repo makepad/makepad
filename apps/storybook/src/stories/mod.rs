@@ -34,6 +34,7 @@ pub mod portallist;
 pub mod filetree;
 pub mod spinner;
 pub mod rotary;
+pub mod video;
 
 pub fn script_mod(vm: &mut ScriptVm) {
     welcome::script_mod(vm);
@@ -66,6 +67,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     filetree::script_mod(vm);
     spinner::script_mod(vm);
     rotary::script_mod(vm);
+    video::script_mod(vm);
 }
 
 pub fn tables() -> &'static [&'static [Story]] {
@@ -100,5 +102,6 @@ pub fn tables() -> &'static [&'static [Story]] {
         filetree::STORIES,
         spinner::STORIES,
         rotary::STORIES,
+        video::STORIES,
     ]
 }
