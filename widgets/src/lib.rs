@@ -76,6 +76,7 @@ pub mod drop_toggles;
 pub mod overlay_place;
 pub mod tip;
 pub mod popover;
+pub mod overlay_layers;
 pub mod value_input;
 pub mod fab_controls;
 
@@ -179,6 +180,7 @@ pub use crate::{
     drop_toggles::*,
     overlay_place::*,
     popover::*,
+    overlay_layers::*,
     expandable_panel::*,
     file_tree::*,
     flat_list::*,
@@ -662,6 +664,13 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::map::view::script_mod(vm);
     crate::math_view::script_mod(vm);
 
+    // The overlay layer host registers LAST, after every layer it owns
+    // (tip today; menu layer, toaster and dialog host as they land): a
+    // widget deriving from another must register after it, and Window,
+    // which registers far above tip and modal, cannot own these for the
+    // same reason. Keep it the final registration in this function.
+    crate::overlay_layers::script_mod(vm);
+
     // Safe area inset values (in Makepad layout points). Populated from the platform's
     // display_context which is set before Startup on iOS/Android. On desktop
     // platforms these remain 0.0. Updated at runtime on WindowGeomChange events.
@@ -817,5 +826,31 @@ mod popover_registration_tests {
         assert_eq!(popover.matches("set_type_default() do mod.widgets.ConfirmPopoverBase").count(), 1);
         assert!(popover.contains("mod.widgets.InfoLabel = mod.widgets.PopoverHover{"));
         assert!(popover.contains("pub struct FocusTrap"));
+    }
+}
+
+#[cfg(test)]
+mod overlay_layers_registration_tests {
+    /// The layer host registers after the tip layer it owns, and after
+    /// every other widget: no registration follows it in `widgets_mod`.
+    #[test]
+    fn test_overlay_layers_is_registered_last() {
+        let lib = include_str!("lib.rs");
+        let layers = include_str!("overlay_layers.rs");
+        assert!(lib.contains("pub mod overlay_layers;"));
+        assert!(lib.contains("overlay_layers::*"));
+        let call = "crate::overlay_layers::script_mod(vm);";
+        let at = lib.find(call).unwrap();
+        assert!(lib.find("crate::tip::script_mod(vm);").unwrap() < at);
+        assert!(lib.find("crate::modal::script_mod(vm);").unwrap() < at);
+        assert!(lib.find("crate::window::script_mod(vm);").unwrap() < at);
+        // Nothing else registers between the host and the end of widgets_mod.
+        let rest = &lib[at + call.len()..];
+        let end = rest.find("pub fn script_mod(vm: &mut ScriptVm)").unwrap();
+        assert!(!rest[..end].contains("::script_mod(vm);"));
+        assert!(layers.contains("mod.widgets.OverlayLayersBase = #(OverlayLayers::register_widget(vm))"));
+        assert!(layers.contains("mod.widgets.OverlayLayers = set_type_default() do mod.widgets.OverlayLayersBase{"));
+        assert_eq!(layers.matches("set_type_default() do mod.widgets.OverlayLayersBase").count(), 1);
+        assert!(layers.contains("tip_layer := TipLayer{}"));
     }
 }
