@@ -677,8 +677,8 @@ async function run() {
     const command = (method, params = {}) => send(method, params, pageSessionId);
     const consoleText = args => args.map(value => value.value ?? value.unserializableValue ?? value.description ?? '').join(' ');
     const captureMemoryPressure = value => {
-        if (!options.diagnostics || !/MapView: .*memory pressure/i.test(value)
-            || memoryPressureMessages.length >= 16 || memoryPressureMessages.includes(value)) return;
+        if (!options.diagnostics || !/MapView: .*memory pressure|map memory \(/i.test(value)
+            || memoryPressureMessages.length >= 32 || memoryPressureMessages.includes(value)) return;
         memoryPressureMessages.push(value.slice(0, 1_000));
     };
     const captureFetchedReport = request => {

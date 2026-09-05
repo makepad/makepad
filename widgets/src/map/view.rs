@@ -40,8 +40,10 @@ struct MapMemoryBudgets {
 }
 
 const MIB_BYTES: usize = 1024 * 1024;
-const WEB_UPLOAD_MAX_BYTES: usize = 8 * MIB_BYTES;
-const WEB_PENDING_MAX_BYTES: usize = 48 * MIB_BYTES;
+const WEB_DESKTOP_MIN_BUDGET_BYTES: usize = 768 * MIB_BYTES;
+const WEB_UPLOAD_MAX_BYTES: usize = 32 * MIB_BYTES;
+const WEB_PENDING_MAX_BYTES: usize = 64 * MIB_BYTES;
+const WEB_DESKTOP_TILE_CACHE_MAX_BYTES: usize = 384 * MIB_BYTES;
 const WEB_SPACE_WARP_REFINEMENT_MAX_BYTES: usize = 4 * MIB_BYTES;
 const WEB_SPACE_WARP_REFINEMENT_MAX_WORK: usize = 1_000_000;
 const WEB_SOURCE_LOD_MAX: u8 = 3;
@@ -117,7 +119,44 @@ struct MapMemoryPressure {
     last_pressure_frame: u64,
     last_level_change_frame: u64,
     events: u64,
-    deferred: HashMap<TileKey, u64>,
+    deferred: HashMap<TileKey, MemoryDeferral>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TileAdmissionPolicy {
+    render_bucket: u32,
+    source_zoom: u32,
+    style_epoch: u64,
+    buildings_3d: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ExhaustionBlocker {
+    failed_limit: usize,
+    required_bytes: usize,
+    policy: TileAdmissionPolicy,
+}
+
+impl ExhaustionBlocker {
+    fn retry_ready(self, current_limit: Option<usize>, current_policy: TileAdmissionPolicy) -> bool {
+        current_policy != self.policy
+            || current_limit.is_some_and(|limit| {
+                limit > self.failed_limit && limit >= self.required_bytes
+            })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MemoryDeferral {
+    Until(u64),
+    Exhausted(ExhaustionBlocker),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MemoryPressureOutcome {
+    Advanced,
+    RetryLater,
+    Exhausted,
 }
 
 impl MapMemoryBudgets {
@@ -134,11 +173,28 @@ impl MapMemoryBudgets {
             // the allocator cannot return pages, a bake temporarily owns
             // decoded features plus output, and upload briefly has CPU/GPU
             // copies. Keep all transient caps absolute as well as relative.
+            let desktop = total >= WEB_DESKTOP_MIN_BUDGET_BYTES;
             return Self {
-                upload: fraction(1, 64).min(WEB_UPLOAD_MAX_BYTES),
-                pending: fraction(3, 64).min(WEB_PENDING_MAX_BYTES),
-                tile_cache: fraction(3, 16),
-                http_tile_cache: fraction(5, 32),
+                upload: if desktop {
+                    fraction(1, 32).min(WEB_UPLOAD_MAX_BYTES)
+                } else {
+                    fraction(1, 64).min(8 * MIB_BYTES)
+                },
+                pending: if desktop {
+                    fraction(1, 16).min(WEB_PENDING_MAX_BYTES)
+                } else {
+                    fraction(3, 64).min(48 * MIB_BYTES)
+                },
+                tile_cache: if desktop {
+                    fraction(3, 8).min(WEB_DESKTOP_TILE_CACHE_MAX_BYTES)
+                } else {
+                    fraction(3, 16)
+                },
+                http_tile_cache: if desktop {
+                    fraction(3, 8).min(WEB_DESKTOP_TILE_CACHE_MAX_BYTES)
+                } else {
+                    fraction(5, 32)
+                },
                 archive_cache: fraction(1, 16).min(48 * MIB_BYTES),
                 bake_slots: (total / (512 * MIB_BYTES)).clamp(1, 2),
             };
@@ -205,14 +261,13 @@ fn pending_byte_cap<T>(
 fn ready_tile_admission_limit(
     budgets: MapMemoryBudgets,
     resident_budget: usize,
-    visible_tiles: usize,
+    committed_visible_bytes: usize,
     is_web: bool,
 ) -> Option<usize> {
     is_web.then(|| {
         budgets
             .upload
-            .min(resident_budget / visible_tiles.max(1))
-            .max(1)
+            .min(resident_budget.saturating_sub(committed_visible_bytes))
     })
 }
 
@@ -5828,7 +5883,7 @@ impl WidgetMatchEvent for MapView {
         let style_epoch = self.style_epoch;
         let theme_style = self.active_style().clone();
         let bucket = self.render_bucket();
-        let tile_payload_limit = self.tile_payload_limit(cx);
+        let tile_payload_limit = self.tile_upload_limit(cx);
 
         if let Err(error) = self.submit_tile_job(cx, tile_key, move || {
             match build_tile_buffers_from_body(tile_key, &body, &theme_style, bucket) {
@@ -6185,7 +6240,7 @@ impl MapView {
         self.request_to_tile.clear();
         self.local_requested_tiles.clear();
         self.pending_ready_tiles.clear();
-        self.memory_pressure.deferred.clear();
+        self.clear_memory_deferrals();
         self.tiles_generation = self.tiles_generation.wrapping_add(1);
         self.label_cache_valid = false;
     }
@@ -6342,7 +6397,7 @@ impl MapView {
             // refuses a whole pass before allocating, so an early stream
             // cannot leave a later stream with half-refined shared edges.
             let mut refinement_budget = space_warp_refinement_budget(
-                self.tile_payload_limit(cx),
+                self.tile_payload_limit(cx, tile_key),
                 buffers.allocated_byte_size(),
             );
             let (mut fill_indices, mut fill_vertices) =
@@ -6466,9 +6521,20 @@ impl MapView {
             );
         }
 
-        if !admit_final_ready_tile_payload(&mut buffers, self.tile_payload_limit(cx)) {
-            self.note_memory_pressure(cx, "post-growth tile exceeded its admission cap");
-            self.defer_tile_for_memory(tile_key, "post-growth payload could not be bounded");
+        let admission_limit = self.tile_payload_limit(cx, tile_key);
+        if !admit_final_ready_tile_payload(&mut buffers, admission_limit) {
+            let required_bytes = buffers.allocated_byte_size();
+            let failed_limit = admission_limit.expect("uncapped tile admission cannot reject");
+            let outcome =
+                self.note_memory_pressure(cx, "post-growth tile exceeded its admission cap");
+            let outcome = if buffers.render_zoom > self.render_bucket() { MemoryPressureOutcome::RetryLater } else { outcome };
+            self.defer_tile_for_memory_with_outcome(
+                tile_key,
+                "post-growth payload could not be bounded",
+                outcome,
+                failed_limit,
+                required_bytes,
+            );
             return;
         }
 
@@ -6791,44 +6857,82 @@ impl MapView {
         }
     }
 
-    /// Per-result admission cap. Keeping every visible result below its
-    /// equal share makes the web resident limit independent of visible-set
-    /// growth; the upload cap additionally guarantees no one tile bypasses
-    /// the transient budget.
-    fn tile_payload_limit(&self, cx: &Cx) -> Option<usize> {
+    /// Worker-side cap. The UI performs the demand-aware resident admission
+    /// once actual neighboring payload sizes are known.
+    fn tile_upload_limit(&self, cx: &Cx) -> Option<usize> {
         let budgets = MapMemoryBudgets::from_cx(cx);
+        cfg!(target_arch = "wasm32").then_some(budgets.upload)
+    }
+
+    /// Give an incoming visible tile the upload cap or the actual remaining
+    /// resident space, whichever is smaller. Unlike an equal split, sparse
+    /// neighbors leave their unused share available to a legitimately dense
+    /// tile while the visible set as a whole remains bounded.
+    fn tile_payload_limit(&self, cx: &Cx, incoming: TileKey) -> Option<usize> {
+        if !cfg!(target_arch = "wasm32") {
+            return None;
+        }
+        self.tile_payload_limit_for_platform(cx, incoming, true)
+    }
+
+    fn tile_payload_limit_for_platform(
+        &self,
+        cx: &Cx,
+        incoming: TileKey,
+        is_web: bool,
+    ) -> Option<usize> {
+        if !is_web {
+            return None;
+        }
+        let budgets = MapMemoryBudgets::from_total(cx.memory_budget_bytes(), is_web);
+        let committed_visible_bytes = self
+            .tiles
+            .iter()
+            .filter(|(key, _)| **key != incoming && self.visible_tiles.contains(key))
+            .map(|(_, entry)| entry.working_set_bytes())
+            .chain(
+                self.pending_ready_tiles
+                    .iter()
+                    .filter(|(key, _)| *key != incoming && self.visible_tiles.contains(key))
+                    .map(|(_, buffers)| buffers.allocated_byte_size()),
+            )
+            .fold(0usize, usize::saturating_add);
         ready_tile_admission_limit(
             budgets,
             self.resident_tile_budget(budgets),
-            self.visible_tiles.len(),
-            cfg!(target_arch = "wasm32"),
+            committed_visible_bytes,
+            true,
         )
     }
 
-    fn visible_tiles_exceeding_payload_limit(&self, limit: usize) -> Vec<TileKey> {
-        self.visible_tiles
-            .iter()
-            .filter(|key| {
-                self.tiles
-                    .get(key)
-                    .is_some_and(|entry| entry.bytes > limit)
-            })
-            .copied()
-            .collect()
+    fn tile_admission_policy_for_platform(&self, is_web: bool) -> TileAdmissionPolicy {
+        TileAdmissionPolicy {
+            render_bucket: self.render_bucket_for_platform(is_web),
+            source_zoom: self.request_zoom_level_for_platform(is_web),
+            style_epoch: self.style_epoch,
+            buildings_3d: self.buildings_3d && self.tilt > 0.0,
+        }
     }
 
-    fn note_memory_pressure(&mut self, cx: &mut Cx, reason: &str) {
-        self.note_memory_pressure_for_platform(cx, reason, cfg!(target_arch = "wasm32"));
+    fn note_memory_pressure(&mut self, cx: &mut Cx, reason: &str) -> MemoryPressureOutcome {
+        self.note_memory_pressure_for_platform(cx, reason, cfg!(target_arch = "wasm32"))
     }
 
-    fn note_memory_pressure_for_platform(&mut self, cx: &mut Cx, reason: &str, is_web: bool) {
+    fn note_memory_pressure_for_platform(
+        &mut self,
+        cx: &mut Cx,
+        reason: &str,
+        is_web: bool,
+    ) -> MemoryPressureOutcome {
         self.memory_pressure.events = self.memory_pressure.events.saturating_add(1);
         self.memory_pressure.last_pressure_frame = self.frame_counter;
-        if (self.memory_pressure.last_level_change_frame != 0
-            && self.memory_pressure.last_level_change_frame == self.frame_counter)
-            || self.memory_pressure.level >= WEB_SOURCE_LOD_MAX
+        if self.memory_pressure.last_level_change_frame != 0
+            && self.memory_pressure.last_level_change_frame == self.frame_counter
         {
-            return;
+            return MemoryPressureOutcome::RetryLater;
+        }
+        if self.memory_pressure.level >= WEB_SOURCE_LOD_MAX {
+            return MemoryPressureOutcome::Exhausted;
         }
         let old_level = self.memory_pressure.level;
         let old_bucket = self.render_bucket_for_platform(is_web);
@@ -6842,7 +6946,7 @@ impl MapView {
             // compact results in place instead of scheduling identical
             // rebakes forever.
             self.memory_pressure.level = old_level;
-            return;
+            return MemoryPressureOutcome::Exhausted;
         }
         self.memory_pressure.last_level_change_frame = self.frame_counter;
         for entry in self.tiles.values_mut() {
@@ -6856,6 +6960,7 @@ impl MapView {
         );
         self.label_cache_valid = false;
         self.redraw(cx);
+        MemoryPressureOutcome::Advanced
     }
 
     fn maybe_release_memory_pressure(&mut self, cx: &mut Cx) {
@@ -6897,10 +7002,48 @@ impl MapView {
     }
 
     fn defer_tile_for_memory(&mut self, tile_key: TileKey, reason: &str) {
-        let retry_after = self
-            .frame_counter
-            .saturating_add(MEMORY_PRESSURE_RETRY_FRAMES);
-        self.memory_pressure.deferred.insert(tile_key, retry_after);
+        self.defer_tile_for_memory_until(
+            tile_key,
+            reason,
+            self.frame_counter
+                .saturating_add(MEMORY_PRESSURE_RETRY_FRAMES),
+        );
+    }
+
+    fn defer_tile_for_memory_with_outcome(
+        &mut self,
+        tile_key: TileKey,
+        reason: &str,
+        outcome: MemoryPressureOutcome,
+        failed_limit: usize,
+        required_bytes: usize,
+    ) {
+        let deferral = if outcome == MemoryPressureOutcome::Exhausted {
+            MemoryDeferral::Exhausted(ExhaustionBlocker {
+                failed_limit,
+                required_bytes,
+                policy: self.tile_admission_policy_for_platform(true),
+            })
+        } else {
+            MemoryDeferral::Until(
+                self.frame_counter
+                    .saturating_add(MEMORY_PRESSURE_RETRY_FRAMES),
+            )
+        };
+        self.defer_tile_for_memory_with_gate(tile_key, reason, deferral);
+    }
+
+    fn defer_tile_for_memory_until(&mut self, tile_key: TileKey, reason: &str, retry_after: u64) {
+        self.defer_tile_for_memory_with_gate(tile_key, reason, MemoryDeferral::Until(retry_after));
+    }
+
+    fn defer_tile_for_memory_with_gate(
+        &mut self,
+        tile_key: TileKey,
+        reason: &str,
+        deferral: MemoryDeferral,
+    ) {
+        self.memory_pressure.deferred.insert(tile_key, deferral);
         self.local_requested_tiles.remove(&tile_key);
         if self
             .tiles
@@ -6911,6 +7054,10 @@ impl MapView {
         } else if let Some(entry) = self.tiles.get_mut(&tile_key) {
             // A stale drawable result stays on screen and observes the same
             // retry gate as a removed placeholder.
+            let retry_after = match deferral {
+                MemoryDeferral::Until(frame) => frame,
+                MemoryDeferral::Exhausted(_) => u64::MAX,
+            };
             entry.retry_after = entry.retry_after.max(retry_after);
         }
         if cfg!(target_arch = "wasm32") {
@@ -6923,26 +7070,71 @@ impl MapView {
         }
     }
 
-    fn expire_memory_deferrals(&mut self) {
+    fn release_memory_deferral(&mut self, tile_key: TileKey) {
+        if self.memory_pressure.deferred.remove(&tile_key).is_some() {
+            if let Some(entry) = self.tiles.get_mut(&tile_key) {
+                entry.retry_after = 0;
+            }
+        }
+    }
+
+    fn clear_memory_deferrals(&mut self) {
+        for tile_key in self.memory_pressure.deferred.keys() {
+            if let Some(entry) = self.tiles.get_mut(tile_key) {
+                entry.retry_after = 0;
+            }
+        }
+        self.memory_pressure.deferred.clear();
+    }
+
+    fn expire_memory_deferrals(&mut self, cx: &Cx) {
+        if self.memory_pressure.deferred.is_empty() { return; }
         let frame = self.frame_counter;
-        self.memory_pressure
-            .deferred
-            .retain(|_, retry_after| frame < *retry_after);
+        let is_web = cfg!(target_arch = "wasm32");
+        let policy = self.tile_admission_policy_for_platform(is_web);
+        // Move the map out temporarily so the retained allocation is reused
+        // while admission is re-evaluated without a per-frame key vector.
+        let mut deferred = std::mem::take(&mut self.memory_pressure.deferred);
+        deferred.retain(|tile_key, deferral| {
+            let retry_ready = match *deferral {
+                MemoryDeferral::Until(retry_after) => frame >= retry_after,
+                MemoryDeferral::Exhausted(blocker) => blocker.retry_ready(
+                    self.tile_payload_limit_for_platform(cx, *tile_key, is_web),
+                    policy,
+                ),
+            };
+            if retry_ready {
+                if let Some(entry) = self.tiles.get_mut(tile_key) {
+                    entry.retry_after = 0;
+                }
+            }
+            !retry_ready
+        });
+        self.memory_pressure.deferred = deferred;
     }
 
     fn stage_ready_tile(&mut self, cx: &mut Cx, tile_key: TileKey, mut buffers: TileBuffers) {
-        if let Some(limit) = self.tile_payload_limit(cx) {
+        if let Some(limit) = self.tile_payload_limit(cx, tile_key) {
             buffers.degrade_to_memory_limit(limit);
             if buffers.allocated_byte_size() > limit {
-                self.note_memory_pressure(cx, "single tile exceeded its admission cap");
-                self.defer_tile_for_memory(tile_key, "payload could not be bounded");
+                let required_bytes = buffers.allocated_byte_size();
+                let outcome =
+                    self.note_memory_pressure(cx, "single tile exceeded its admission cap");
+                let outcome = if buffers.render_zoom > self.render_bucket() { MemoryPressureOutcome::RetryLater } else { outcome };
+                self.defer_tile_for_memory_with_outcome(
+                    tile_key,
+                    "payload could not be bounded",
+                    outcome,
+                    limit,
+                    required_bytes,
+                );
                 return;
             }
-            if buffers.memory_lod > 0 {
+            if buffers.memory_lod >= 2 {
                 self.note_memory_pressure(cx, "dense tile degraded before upload");
             }
         }
-        self.memory_pressure.deferred.remove(&tile_key);
+        self.release_memory_deferral(tile_key);
         self.pending_ready_tiles.retain(|(key, _)| *key != tile_key);
         self.pending_ready_tiles.push((tile_key, buffers));
         self.sort_pending_ready_tiles();
@@ -7480,7 +7672,7 @@ impl MapView {
         let requested = vec![key];
         let theme_style = self.active_style().clone();
         let bucket = self.render_bucket();
-        let tile_payload_limit = self.tile_payload_limit(cx);
+        let tile_payload_limit = self.tile_upload_limit(cx);
         let buildings_3d = self.buildings_3d && self.tilt > 0.0;
         let want_fringe = self.baked_fringe_mode;
         let build_road_core = !self.tiles.get(&key).is_some_and(|entry| {
@@ -7640,7 +7832,7 @@ impl MapView {
             let buildings_3d = self.buildings_3d && self.tilt > 0.0;
             let want_fringe = self.baked_fringe_mode;
             let theme_style = self.active_style().clone();
-            let tile_payload_limit = self.tile_payload_limit(cx);
+            let tile_payload_limit = self.tile_upload_limit(cx);
             let build_road_core = !self.tiles.get(&key).is_some_and(|entry| {
                 matches!(entry.state, TileLoadState::Ready { .. })
                     && entry.bucket == bucket
@@ -8571,7 +8763,6 @@ impl MapView {
 
     fn ensure_visible_tiles(&mut self, cx: &mut Cx, rect: Rect) {
         self.frame_counter = self.frame_counter.wrapping_add(1);
-        self.expire_memory_deferrals();
         self.maybe_release_memory_pressure(cx);
         if cfg!(target_arch = "wasm32") {
             let budgets = MapMemoryBudgets::from_cx(cx);
@@ -8612,27 +8803,10 @@ impl MapView {
             }
         }
         self.visible_tiles = self.visible_tile_keys(rect);
-        if let Some(per_tile_limit) = self.tile_payload_limit(cx) {
-            let oversized = self.visible_tiles_exceeding_payload_limit(per_tile_limit);
-            if !oversized.is_empty() {
-                self.note_memory_pressure(cx, "visible tiles exceeded their resident shares");
-                // A pressure step may select a coarser, metadata-approved
-                // source zoom. Recompute now so this request pass never
-                // dispatches old-zoom keys under the new policy.
-                self.visible_tiles = self.visible_tile_keys(rect);
-                let per_tile_limit = self.tile_payload_limit(cx).unwrap_or(per_tile_limit);
-                for key in self.visible_tiles.clone() {
-                    if let Some(entry) = self.tiles.get_mut(&key) {
-                        // Keep it drawable; the ordinary stale path produces
-                        // a bounded replacement and cannot reload-loop once
-                        // that replacement meets this same share.
-                        if entry.bytes > per_tile_limit {
-                            entry.bucket = u32::MAX;
-                        }
-                    }
-                }
-            }
-        }
+        // A pan can evict enough neighboring payload to admit a previously
+        // exhausted tile. Recheck after installing this frame's visible set
+        // so the headroom calculation observes that event immediately.
+        self.expire_memory_deferrals(cx);
         let target_zoom = self.request_zoom_level();
         // Keep frames coming briefly after a zoom change so the deferred
         // bucket restyle actually fires once the gesture settles.
@@ -9015,7 +9189,7 @@ impl MapView {
                 let style_epoch = self.style_epoch;
                 let theme_style = self.active_style().clone();
                 let bucket = self.render_bucket();
-                let tile_payload_limit = self.tile_payload_limit(cx);
+                let tile_payload_limit = self.tile_upload_limit(cx);
                 self.tiles.insert(
                     tile_key,
                     TileEntry {
@@ -10935,7 +11109,7 @@ impl MapView {
         }
         self.local_requested_tiles.clear();
         self.pending_ready_tiles.clear();
-        self.memory_pressure.deferred.clear();
+        self.clear_memory_deferrals();
         self.label_cache_valid = false;
         self.redraw(cx);
     }
@@ -10952,7 +11126,7 @@ impl MapView {
             .retain(|_, entry| matches!(entry.state, TileLoadState::Ready { .. }));
         self.local_requested_tiles.clear();
         self.pending_ready_tiles.clear();
-        self.memory_pressure.deferred.clear();
+        self.clear_memory_deferrals();
         self.label_cache_valid = false;
         self.redraw(cx);
     }
@@ -12272,12 +12446,19 @@ mod tests {
         assert_eq!(phone.upload, 5 * MIB);
         assert_eq!(phone.bake_slots, 1);
         let desktop_web = MapMemoryBudgets::from_total(1024 * MIB, true);
-        assert_eq!(desktop_web.upload, 8 * MIB);
-        assert_eq!(desktop_web.pending, 48 * MIB);
-        assert_eq!(desktop_web.tile_cache, 192 * MIB);
-        assert_eq!(desktop_web.http_tile_cache, 160 * MIB);
+        assert_eq!(desktop_web.upload, 32 * MIB);
+        assert_eq!(desktop_web.pending, 64 * MIB);
+        assert_eq!(desktop_web.tile_cache, 384 * MIB);
+        assert_eq!(desktop_web.http_tile_cache, 384 * MIB);
         assert_eq!(desktop_web.archive_cache, 48 * MIB);
         assert_eq!(desktop_web.bake_slots, 2);
+        let large_desktop_web = MapMemoryBudgets::from_total(2048 * MIB, true);
+        assert_eq!(large_desktop_web.upload, 32 * MIB);
+        assert_eq!(large_desktop_web.pending, 64 * MIB);
+        assert_eq!(large_desktop_web.tile_cache, 384 * MIB);
+        assert_eq!(large_desktop_web.http_tile_cache, 384 * MIB);
+        assert_eq!(large_desktop_web.archive_cache, 48 * MIB);
+        assert_eq!(large_desktop_web.bake_slots, 2);
         assert_eq!(baseline.bake_slots, 8);
     }
 
@@ -12344,7 +12525,7 @@ mod tests {
         // is created, leaving a stable admitted result instead of rebaking.
         assert!(admit_final_ready_tile_payload(&mut buffers, Some(limit)));
         assert!(buffers.allocated_byte_size() <= limit);
-        assert_eq!(buffers.memory_lod, 2);
+        assert_eq!(buffers.memory_lod, 1);
         let bounded_bytes = buffers.allocated_byte_size();
         assert!(admit_final_ready_tile_payload(&mut buffers, Some(limit)));
         assert_eq!(buffers.allocated_byte_size(), bounded_bytes);
@@ -12550,22 +12731,23 @@ mod tests {
     }
 
     #[test]
-    fn dense_web_visible_set_divides_a_fixed_resident_budget() {
+    fn web_tile_admission_uses_actual_resident_demand_and_stays_bounded() {
         const MIB: usize = 1024 * 1024;
         let budgets = MapMemoryBudgets::from_total(1024 * MIB, true);
-        for visible in [1usize, 25, 64, 512] {
-            let limit = ready_tile_admission_limit(
-                budgets,
-                budgets.tile_cache,
-                visible,
-                true,
-            )
-            .unwrap();
-            assert!(limit <= 8 * MIB);
-            assert!(limit.saturating_mul(visible) <= budgets.tile_cache);
-        }
         assert_eq!(
-            ready_tile_admission_limit(budgets, budgets.tile_cache, 25, false),
+            ready_tile_admission_limit(budgets, budgets.tile_cache, 0, true),
+            Some(32 * MIB)
+        );
+        assert_eq!(
+            ready_tile_admission_limit(budgets, budgets.tile_cache, 370 * MIB, true),
+            Some(14 * MIB)
+        );
+        assert_eq!(
+            ready_tile_admission_limit(budgets, budgets.tile_cache, 384 * MIB, true),
+            Some(0)
+        );
+        assert_eq!(
+            ready_tile_admission_limit(budgets, budgets.tile_cache, usize::MAX, false),
             None
         );
     }
@@ -12693,18 +12875,14 @@ mod tests {
             map.visible_tiles.len().saturating_mul(budgets.upload) > resident,
             "fixture must exercise the removed hypothetical dense-set trigger"
         );
-        let fair_share = ready_tile_admission_limit(
+        let available = ready_tile_admission_limit(
             budgets,
             resident,
-            map.visible_tiles.len(),
+            0,
             true,
         )
         .unwrap();
-        assert!(fair_share <= budgets.upload);
-        assert!(fair_share.saturating_mul(map.visible_tiles.len()) <= resident);
-        assert!(map
-            .visible_tiles_exceeding_payload_limit(fair_share)
-            .is_empty());
+        assert_eq!(available, budgets.upload);
         assert_eq!(map.memory_pressure.level, 0);
         assert_eq!(map.memory_pressure.events, 0);
     }
@@ -12741,16 +12919,18 @@ mod tests {
         assert!(map.memory_pressure.deferred.contains_key(&key));
 
         map.frame_counter = 10 + MEMORY_PRESSURE_RETRY_FRAMES - 1;
-        map.expire_memory_deferrals();
+        map.expire_memory_deferrals(&cx);
         assert!(map.memory_pressure.deferred.contains_key(&key));
         map.frame_counter += 1;
-        map.expire_memory_deferrals();
+        map.expire_memory_deferrals(&cx);
         assert!(!map.memory_pressure.deferred.contains_key(&key));
 
         // Mode churn is another recovery edge: its old result is obsolete,
         // so it clears the pressure retry gate as well as every Loading
         // placeholder. Repeating the transition remains idempotent.
-        map.memory_pressure.deferred.insert(key, u64::MAX);
+        map.memory_pressure
+            .deferred
+            .insert(key, MemoryDeferral::Until(u64::MAX));
         map.restyle_mode_overlay_keep_stale(&mut cx);
         map.restyle_mode_overlay_keep_stale(&mut cx);
         assert!(map.memory_pressure.deferred.is_empty());
@@ -12758,6 +12938,33 @@ mod tests {
             .tiles
             .values()
             .all(|entry| !matches!(entry.state, TileLoadState::LoadingLocal | TileLoadState::LoadingNetwork)));
+    }
+
+    #[test]
+    fn exhausted_memory_deferral_waits_for_headroom_or_policy_change() {
+        let policy = TileAdmissionPolicy {
+            render_bucket: 14,
+            source_zoom: 13,
+            style_epoch: 7,
+            buildings_3d: true,
+        };
+        let blocker = ExhaustionBlocker {
+            failed_limit: 8 * 1024 * 1024,
+            required_bytes: 12 * 1024 * 1024,
+            policy,
+        };
+
+        // Frame passage and a merely larger-but-still-insufficient limit do
+        // not schedule identical rebakes of the same rejected payload.
+        assert!(!blocker.retry_ready(Some(blocker.failed_limit), policy));
+        assert!(!blocker.retry_ready(Some(blocker.required_bytes - 1), policy));
+        assert!(blocker.retry_ready(Some(blocker.required_bytes), policy));
+
+        let changed_policy = TileAdmissionPolicy {
+            style_epoch: policy.style_epoch + 1,
+            ..policy
+        };
+        assert!(blocker.retry_ready(Some(blocker.failed_limit), changed_policy));
     }
 
     #[test]
