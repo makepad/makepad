@@ -38,6 +38,7 @@ pub mod view_ui;
 
 pub mod animated_image_gif;
 pub mod badge;
+pub mod chip;
 pub mod browser;
 pub mod button;
 pub mod check_box;
@@ -163,6 +164,7 @@ pub use crate::{
     divider::*,
     animated_image_gif::*,
     badge::*,
+    chip::*,
     placeholder::*,
     animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
     // loading_spinner - no public exports
@@ -615,6 +617,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::spinner::script_mod(vm);
     crate::glass_panel::script_mod(vm);
     crate::badge::script_mod(vm);
+    crate::chip::script_mod(vm);
     crate::placeholder::script_mod(vm);
 
     crate::bare_step::script_mod(vm);
@@ -759,6 +762,34 @@ mod progress_registration_tests {
         assert!(progress.contains("mod.widgets.ProgressBarFlat = set_type_default()"));
         assert!(progress.contains("mod.widgets.splat(mod.widgets.Intent)"));
         assert_eq!(progress.matches("set_type_default() do mod.widgets.ProgressBarBase").count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod chip_registration_tests {
+    /// The chip registers after the view, label and button modules whose
+    /// shapes it borrows, and after the badge whose role palette it shares,
+    /// with one type default at the flat rung of the ladder.
+    #[test]
+    fn test_chip_is_registered_after_its_bases() {
+        let lib = include_str!("lib.rs");
+        let chip = include_str!("chip.rs");
+        assert!(lib.contains("pub mod chip;"));
+        assert!(lib.contains("chip::*"));
+        let at = lib.find("crate::chip::script_mod(vm);").expect("chip registered");
+        for base in [
+            "crate::view::script_mod(vm);",
+            "crate::label::script_mod(vm);",
+            "crate::button::script_mod(vm);",
+            "crate::badge::script_mod(vm);",
+        ] {
+            assert!(lib.find(base).expect(base) < at, "{base} must register before chip");
+        }
+        assert!(chip.contains("mod.widgets.ChipBase = #(Chip::register_widget(vm))"));
+        assert!(chip.contains("mod.widgets.ChipFlat = set_type_default()"));
+        assert!(chip.contains("mod.widgets.Chip = mod.widgets.ChipFlat{"));
+        assert!(chip.contains("mod.widgets.Tag = mod.widgets.ChipFlat{"));
+        assert_eq!(chip.matches("set_type_default() do mod.widgets.ChipBase").count(), 1);
     }
 }
 
