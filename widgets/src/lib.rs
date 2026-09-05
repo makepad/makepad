@@ -86,6 +86,7 @@ pub mod fold_header;
 pub mod glass_panel;
 pub mod loading_spinner;
 pub mod progress;
+pub mod spinner;
 
 pub mod bare_step;
 pub mod turtle_step;
@@ -215,6 +216,7 @@ pub use crate::{
     slide_panel::*,
     slider::*,
     slides_view::*,
+    spinner::*,
 
     splitter::*,
 
@@ -605,6 +607,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
 
     crate::loading_spinner::script_mod(vm);
     crate::progress::script_mod(vm);
+    crate::spinner::script_mod(vm);
     crate::glass_panel::script_mod(vm);
     crate::badge::script_mod(vm);
     crate::placeholder::script_mod(vm);
@@ -747,3 +750,30 @@ mod progress_registration_tests {
     }
 }
 
+#[cfg(test)]
+mod spinner_registration_tests {
+    /// The spinner family registers after the button, label, view and
+    /// glass modules it composes, and leaves `loading_spinner` untouched:
+    /// that DSL-only view has shader parameters seven apps override by name.
+    #[test]
+    fn test_spinner_is_registered_after_its_bases() {
+        let lib = include_str!("lib.rs");
+        let spinner = include_str!("spinner.rs");
+        assert!(lib.contains("pub mod spinner;"));
+        assert!(lib.contains("spinner::*"));
+        let at = lib.find("crate::spinner::script_mod(vm);").expect("spinner registered");
+        for base in [
+            "crate::view::script_mod(vm);",
+            "crate::label::script_mod(vm);",
+            "crate::button::script_mod(vm);",
+            "crate::gauss_view::script_mod(vm);",
+            "crate::loading_spinner::script_mod(vm);",
+        ] {
+            assert!(lib.find(base).expect(base) < at, "{base} must register before spinner");
+        }
+        assert!(spinner.contains("mod.widgets.SpinnerBase = #(Spinner::register_widget(vm))"));
+        assert!(spinner.contains("mod.widgets.SpinnerFlat = set_type_default()"));
+        assert_eq!(spinner.matches("set_type_default() do mod.widgets.SpinnerBase").count(), 1);
+        assert!(!spinner.contains("mod.widgets.LoadingSpinner"));
+    }
+}
