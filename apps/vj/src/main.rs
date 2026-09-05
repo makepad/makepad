@@ -24042,6 +24042,7 @@ p2 {}
             stem_pyramid,
             cols,
             position_secs: state.position_secs,
+            duration_secs: state.duration_secs,
             grid: state.grid,
             loop_span: state.loop_span.map(|s| (s.start_secs, s.end_secs)),
             rate: state.rate,

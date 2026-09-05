@@ -77,6 +77,13 @@ fn set_loop_span_uniform(lane: &mut DrawWaveLane, cx: &Cx2d, span: Option<(f64, 
     lane.draw_vars.set_uniform(cx, live_id!(loop_span), &[start, end, 0.0, 0.0]);
 }
 
+/// How hard this lane's end-of-track warning is showing. Pushed EVERY
+/// draw like the spans above: a lane that has stopped warning has to say
+/// so, or the last value sticks to whatever is drawn next.
+fn set_warn_uniform(lane: &mut DrawWaveLane, cx: &Cx2d, warn: f32) {
+    lane.draw_vars.set_uniform(cx, live_id!(warn), &[warn.clamp(0.0, 1.0)]);
+}
+
 /// The drag preview band, same encoding and the same every-draw rule: the
 /// zoomed lanes push zeroes so an overview drag cannot bleed onto them.
 fn set_preview_span_uniform(lane: &mut DrawWaveLane, cx: &Cx2d, span: Option<(f64, f64)>) {
@@ -253,6 +260,11 @@ pub fn stem_color_killed() -> Vec4f {
 }
 
 /// Zoom limits, seconds of audio across the full lane width.
+/// How long before the end of a record the lane starts warning, in
+/// seconds. Half a minute: long enough to find the next track and get it
+/// on a deck without hurrying, short enough that it is not lit through
+/// most of an outro.
+pub const WAVE_WARN_SECS: f64 = 30.0;
 pub const ZOOM_MIN_SECS: f64 = 1.5;
 pub const ZOOM_MAX_SECS: f64 = 10.0;
 pub const ZOOM_DEFAULT_SECS: f64 = 8.0;
@@ -532,6 +544,14 @@ script_mod! {
         // attributes fail the shader compile outright (X4506). Nothing
         // here varies per instance anyway.
         loop_span: uniform(#x00000000)
+        // How hard the end-of-track warning is showing, 0..1. A UNIFORM
+        // for the same reason `loop_span` is one: this lane sits ON the
+        // vs_5_0 limit of 32 vertex inputs, and one more `#[live]` field
+        // is one more per-instance attribute and no waveform at all on
+        // Windows. It varies per LANE rather than per instance, and each
+        // lane is its own draw, so a uniform carries it honestly.
+        warn: uniform(0.0)
+        color_warn: uniform(#xff3b30)
         // A loop drag's would-be landing, same encoding as `loop_span`.
         // Drawn dimmer beside the ghost so the operator sees both where
         // the loop IS and where release will put it.
@@ -739,9 +759,15 @@ script_mod! {
             // to be able to see the band through a loud passage.
             let la = max(self.loop_at(column), self.preview_at(column))
             let banded = ruled.mix(vec4(self.color_loop.x, self.color_loop.y, self.color_loop.z, 1.0), la)
+            // The end-of-track warning, UNDER the playhead so the head
+            // stays crisp, and capped well short of opaque: the last
+            // thirty seconds of a record are exactly when the picture
+            // most needs reading, so this has to be impossible to miss
+            // without painting over the thing being watched.
+            let warned = banded.mix(self.color_warn, self.warn * 0.38)
             let hd = abs(column - self.head_col) / max(self.cols_per_px, 0.0001)
             let ha = (1.0 - smoothstep(0.5, 1.8, hd)) * self.head_on
-            return banded.mix(self.color_head, ha)
+            return warned.mix(self.color_head, ha)
         }
     }
 
@@ -4741,6 +4767,9 @@ pub struct WaveLane {
     pub cols: usize,
     /// Source seconds under the shared playhead.
     pub position_secs: f64,
+    /// How long the record is, in source seconds. Only the warning uses
+    /// it; zero means "not known yet", which never warns.
+    pub duration_secs: f64,
     pub grid: Option<TrackGrid>,
     /// The running loop in source seconds — the tile timebase, so this
     /// converts to columns exactly the way the grid does.
@@ -4788,6 +4817,31 @@ impl WaveLane {
             }
             _ => ahead,
         }
+    }
+
+    /// How hard the end-of-track warning should show, 0..1.
+    ///
+    /// A ramp over the last [`WAVE_WARN_SECS`], times a one-per-second
+    /// pulse that never quite reaches nothing -- a warning that blinked
+    /// fully out would be invisible exactly half the time, and the point
+    /// is to be caught out of the corner of an eye while looking at the
+    /// other deck.
+    ///
+    /// Computed HERE, at draw time, from the same `now` the playhead
+    /// uses. Worked out by the host at pump cadence instead, the pulse
+    /// would judder against a scroll that is smooth.
+    pub fn warn_at(&self, now: f64) -> f32 {
+        if !self.playing || self.duration_secs <= 0.0 {
+            return 0.0;
+        }
+        let left = self.duration_secs - self.position_at(now);
+        if !(0.0..WAVE_WARN_SECS).contains(&left) {
+            return 0.0;
+        }
+        let ramp = (WAVE_WARN_SECS - left) / WAVE_WARN_SECS;
+        let phase = now.rem_euclid(1.0);
+        let pulse = 0.45 + 0.55 * (1.0 - (phase * 2.0 - 1.0).abs());
+        (ramp * pulse).clamp(0.0, 1.0) as f32
     }
 
     /// The tile column under the playhead.
@@ -5367,6 +5421,7 @@ impl Widget for VjWaveScroll {
             self.draw_lane.beat_cols = beat_cols as f32;
             self.draw_lane.beat_phase = phase as f32;
             self.draw_lane.active = if lane.playing { 1.0 } else { 0.55 };
+            set_warn_uniform(&mut self.draw_lane, cx, lane.warn_at(now));
             self.draw_lane.draw_abs(cx, lane_rect);
         }
 
@@ -8025,6 +8080,48 @@ mod tests {
         lane.position_secs = 10.0;
         lane.loop_span = Some((10.0, 10.0));
         assert!((lane.position_at(100.4) - 10.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_lane_warns_over_the_last_half_minute_and_never_blinks_fully_out() {
+        let mut lane = lane(120.0, 0.0);
+        lane.stamp = 100.0;
+        lane.playing = true;
+        lane.duration_secs = 300.0;
+
+        // Nothing to say in the middle of a record.
+        lane.position_secs = 100.0;
+        assert_eq!(lane.warn_at(100.0), 0.0);
+        // Nor with no length known, nor stopped.
+        lane.position_secs = 290.0;
+        lane.duration_secs = 0.0;
+        assert_eq!(lane.warn_at(100.0), 0.0);
+        lane.duration_secs = 300.0;
+        lane.playing = false;
+        assert_eq!(lane.warn_at(100.0), 0.0);
+        lane.playing = true;
+
+        // Inside the window it shows, and it shows harder as the end
+        // comes -- sampled at the same point of the pulse both times, or
+        // the pulse rather than the ramp would be under test.
+        let far = lane.warn_at(100.0);
+        lane.position_secs = 299.0;
+        let near = lane.warn_at(100.0);
+        assert!(far > 0.0, "twenty seconds out is already warning");
+        assert!(near > far, "{near} at one second out beats {far} at ten");
+
+        // Armed, it pulses -- but never all the way to nothing, or it
+        // would be invisible half of every second.
+        let over_a_second: Vec<f32> =
+            (0..10).map(|i| lane.warn_at(100.0 + i as f64 * 0.1)).collect();
+        let low = over_a_second.iter().cloned().fold(f32::MAX, f32::min);
+        let high = over_a_second.iter().cloned().fold(0.0f32, f32::max);
+        assert!(low > 0.0, "never fully out: {low}");
+        assert!(high > low * 1.5, "and visibly moving: {low} to {high}");
+
+        // Past the end there is nothing left to warn about.
+        lane.position_secs = 301.0;
+        assert_eq!(lane.warn_at(100.0), 0.0);
     }
 
     #[test]
