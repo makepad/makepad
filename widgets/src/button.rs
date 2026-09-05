@@ -110,6 +110,14 @@ script_mod! {
             border_size: uniform(theme.beveling)
             /** corner rounding radius 0..24 step 0.5 */
             border_radius: uniform(theme.corner_radius)
+            /** top-left corner; -1 follows border_radius -1..24 step 0.5 */
+            border_radius_tl: uniform(-1.0)
+            /** top-right corner; -1 follows border_radius -1..24 step 0.5 */
+            border_radius_tr: uniform(-1.0)
+            /** bottom-right corner; -1 follows border_radius -1..24 step 0.5 */
+            border_radius_br: uniform(-1.0)
+            /** bottom-left corner; -1 follows border_radius -1..24 step 0.5 */
+            border_radius_bl: uniform(-1.0)
 
             /** dither the gradient fill to hide banding 0..1 step 1 */
             color_dither: uniform(1.0)
@@ -267,12 +275,25 @@ script_mod! {
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
 
-                sdf.box(
+                // Each corner follows border_radius unless it has been given
+                // one of its own. A button group squares the two corners at
+                // each joint this way, so a connected row reads as one
+                // object; every other button leaves all four at -1 and draws
+                // exactly the shape it always did.
+                let r_tl = mix(self.border_radius, self.border_radius_tl, step(0., self.border_radius_tl))
+                let r_tr = mix(self.border_radius, self.border_radius_tr, step(0., self.border_radius_tr))
+                let r_br = mix(self.border_radius, self.border_radius_br, step(0., self.border_radius_br))
+                let r_bl = mix(self.border_radius, self.border_radius_bl, step(0., self.border_radius_bl))
+
+                sdf.box_all(
                     self.border_size
                     self.border_size
                     self.rect_size.x - self.border_size * 2.
                     self.rect_size.y - self.border_size * 2.
-                    self.border_radius
+                    r_tl
+                    r_tr
+                    r_br
+                    r_bl
                 )
 
                 sdf.fill_keep(self.face_fill())
