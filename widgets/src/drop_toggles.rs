@@ -35,7 +35,13 @@
 //! floor, and a bit with no row behind it is never counted, never lights the
 //! chip, and comes back if the labels that own it come back.
 
-use crate::{event::TouchState, makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::{
+    event::TouchState,
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    overlay_place::{place, PlaceRequest, Placement, Side},
+    widget::*,
+};
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub enum DropTogglesAction {
@@ -470,6 +476,23 @@ impl DropToggles {
     fn panel_offset(&self, chip: Rect) -> DVec2 {
         let size = self.panel_size();
         let pass = self.pass_size;
+        // The shared placement rule decides the side (below, or above when
+        // there is room up there and none down) and the x (pulled back
+        // inboard of an EDGE inset, left edge winning). A pass of zero — the
+        // first event after opening, before a draw has measured it — makes
+        // both axes unbounded, so the panel simply hangs below until the
+        // next draw, as it always did.
+        let placed = place(&PlaceRequest {
+            anchor: chip,
+            size,
+            bounds: Rect {
+                pos: dvec2(EDGE, EDGE),
+                size: pass - dvec2(EDGE * 2.0, EDGE * 2.0),
+            },
+            gap: PANEL_GAP,
+            placement: Placement::BOTTOM_START,
+            match_anchor_width: false,
+        });
         // The only two vertical places the panel is ever allowed to be. It is
         // never pinned to the WINDOW instead: a panel pulled back over the
         // chip would take a press as a row toggle and then hand the same
@@ -477,27 +500,14 @@ impl DropToggles {
         // this widget promises cannot happen. Overrunning the window edge is
         // the lesser fault, so in the degenerate case (taller than the window
         // has room for on either side) the panel keeps its edge against the
-        // chip and lets the roomier side show what it can.
-        let below = chip.size.y + PANEL_GAP;
-        let above = -(size.y + PANEL_GAP);
-        let mut offset = dvec2(0.0, below);
-        if pass.x > 0.0 {
-            let right = pass.x - EDGE - size.x;
-            if chip.pos.x > right {
-                offset.x = (right - chip.pos.x).min(0.0);
-            }
-            if chip.pos.x + offset.x < EDGE {
-                offset.x = EDGE - chip.pos.x;
-            }
-        }
-        if pass.y > 0.0 && chip.pos.y + below + size.y > pass.y - EDGE {
-            let room_below = (pass.y - EDGE) - (chip.pos.y + below);
-            let room_above = (chip.pos.y - PANEL_GAP) - EDGE;
-            // Fitting above implies room_above >= size.y > room_below, so the
-            // one comparison covers both the flip and the fallback.
-            offset.y = if room_above > room_below { above } else { below };
-        }
-        offset
+        // chip and lets the roomier side show what it can. That is why only
+        // the SIDE is read off the placement here, not its rect: the helper
+        // shortens a popup to the room, and this panel keeps its full height.
+        let y = match placed.side {
+            Side::Top => -(size.y + PANEL_GAP),
+            _ => chip.size.y + PANEL_GAP,
+        };
+        dvec2(placed.rect.pos.x - chip.pos.x, y)
     }
 
     /// Which row a WINDOW-absolute point lands on. `None` for anything off

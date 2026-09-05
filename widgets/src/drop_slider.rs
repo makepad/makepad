@@ -15,7 +15,12 @@
 //! [`DropSliderAction::Changed`]; hosts push external updates back with
 //! `set_value`.
 
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::{
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    overlay_place::{place, PlaceRequest, Placement},
+    widget::*,
+};
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub enum DropSliderAction {
@@ -148,6 +153,22 @@ impl ScriptHook for DropSlider {
 }
 
 impl DropSlider {
+    /// Where the panel hangs: centred under the chip, PANEL_GAP below it.
+    /// The request is unbounded on purpose — this panel never flipped or
+    /// shifted, and giving it the pass would change where it lands. Both
+    /// the draw and the event side read this one function.
+    fn panel_rect(chip: Rect) -> Rect {
+        place(&PlaceRequest {
+            anchor: chip,
+            size: dvec2(PANEL_W, PANEL_H),
+            bounds: Rect::default(),
+            gap: PANEL_GAP,
+            placement: Placement::BOTTOM_CENTER,
+            match_anchor_width: false,
+        })
+        .rect
+    }
+
     fn readout(&self) -> String {
         format!(
             "{:.*}{}",
@@ -259,7 +280,7 @@ impl Widget for DropSlider {
                 let chip = self.draw_bg.area().rect(cx);
                 cx.end_pass_sized_turtle_with_shift(
                     self.draw_bg.area(),
-                    dvec2((chip.size.x - PANEL_W) * 0.5, chip.size.y + PANEL_GAP),
+                    Self::panel_rect(chip).pos - chip.pos,
                 );
                 draw_list.end(cx);
             }
@@ -275,13 +296,7 @@ impl Widget for DropSlider {
         if self.open {
             // The panel hangs under the chip deterministically.
             let chip = self.draw_bg.area().rect(cx);
-            self.panel_rect = Rect {
-                pos: dvec2(
-                    chip.pos.x + (chip.size.x - PANEL_W) * 0.5,
-                    chip.pos.y + chip.size.y + PANEL_GAP,
-                ),
-                size: dvec2(PANEL_W, PANEL_H),
-            };
+            self.panel_rect = Self::panel_rect(chip);
             match event {
                 Event::MouseDown(me) => {
                     if self.panel_rect.contains(me.abs) {

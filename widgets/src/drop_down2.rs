@@ -3,6 +3,7 @@ use {
         animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
         makepad_derive_widget::*,
         makepad_draw::*,
+        overlay_place::{place, span_inboard, PlaceRequest, Placement},
         widget::*,
     },
 };
@@ -338,19 +339,32 @@ pub fn layout_apple_popup(
     let margin = margin.max(0.0);
     let arrow_h = arrow_h.max(0.0);
     let content_h = pad * 2.0 + n as f64 * item_h;
-    let width = content_w
-        .max(trigger.size.x)
-        .min((pass.x - margin * 2.0).max(40.0))
-        .max(40.0);
-    let x = trigger.pos.x.clamp(margin, (pass.x - margin - width).max(margin));
-
     let trigger_center = trigger.pos.y + trigger.size.y * 0.5;
     let selected_center = pad + (selected as f64 + 0.5) * item_h;
     let ideal_y = trigger_center - selected_center;
     let max_h = (pass.y - margin * 2.0).max(item_h + arrow_h * 2.0);
     let overflow = content_h > max_h + 0.5;
     let height = if overflow { max_h } else { content_h };
-    let y = ideal_y.clamp(margin, (pass.y - margin - height).max(margin));
+    // This popup does not hang off a side of the trigger: it COVERS it so
+    // the selected row sits under it, and its height is its own rule (the
+    // content, or the pass). Only the cross axis is shared with the other
+    // popups — never narrower than the trigger, never wider than the pass,
+    // pulled inboard with the left edge winning — so the request is bounded
+    // in x only and the vertical answer is not read.
+    let placed = place(&PlaceRequest {
+        anchor: trigger,
+        size: dvec2(content_w.max(40.0), height),
+        bounds: Rect {
+            pos: dvec2(margin, 0.0),
+            size: dvec2((pass.x - margin * 2.0).max(40.0), 0.0),
+        },
+        gap: 0.0,
+        placement: Placement::BOTTOM_START,
+        match_anchor_width: true,
+    });
+    let x = placed.rect.pos.x;
+    let width = placed.rect.size.x;
+    let y = span_inboard(ideal_y, height, margin, pass.y - margin * 2.0);
 
     let up_h = if overflow { arrow_h } else { 0.0 };
     let down_h = if overflow { arrow_h } else { 0.0 };

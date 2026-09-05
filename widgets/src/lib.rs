@@ -70,6 +70,7 @@ pub mod slider;
 pub mod text_input;
 pub mod drop_slider;
 pub mod drop_toggles;
+pub mod overlay_place;
 pub mod tip;
 pub mod value_input;
 pub mod fab_controls;
@@ -165,6 +166,7 @@ pub use crate::{
     drop_down::*,
     drop_down2::*,
     drop_toggles::*,
+    overlay_place::*,
     expandable_panel::*,
     file_tree::*,
     flat_list::*,
