@@ -815,9 +815,15 @@ mod tests {
     /// introduced: `radius_ elevation_ motion_ state_ type_ size_ space_[4-9]`
     /// and the `color_` roles.
     fn is_new_prefix(key: &str) -> bool {
-        const PLAIN: &[&str] = &["radius_", "elevation_", "motion_", "state_", "type_", "size_"];
+        const PLAIN: &[&str] = &[
+            "radius_", "elevation_", "motion_", "state_", "type_", "size_", "font_title_", "font_body_",
+            "font_label_",
+        ];
         if PLAIN.iter().any(|p| key.starts_with(p)) {
             return true;
+        }
+        if let Some(rest) = key.strip_prefix("font_size_") {
+            return rest == "5" || rest == "6";
         }
         if let Some(rest) = key.strip_prefix("space_") {
             return rest.starts_with(|c: char| ('4'..='9').contains(&c));
