@@ -492,7 +492,7 @@ impl Widget for TipLayer {
         // Where the bubble landed in the pass. Everything drawn beside it
         // is placed against this, because the pass is shifted into position
         // only at the end.
-        let mut bubble = Rect::default();
+        let bubble;
         if lines > 1.0 {
             // Text wraps only when the turtle it is drawn into says it may,
             // so the bubble is a wrapping row with its own padding and the

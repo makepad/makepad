@@ -41,6 +41,7 @@ pub mod badge;
 pub mod button_group;
 pub mod chip;
 pub mod menu;
+pub mod toast;
 pub mod browser;
 pub mod button;
 pub mod check_box;
@@ -169,6 +170,7 @@ pub use crate::{
     button_group::*,
     chip::*,
     menu::*,
+    toast::*,
     placeholder::*,
     animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
     // loading_spinner - no public exports
@@ -628,6 +630,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     // `MenuPlace`, and a block's `use` only sees what already exists.
     crate::menu::script_mod(vm);
     crate::button_group::script_mod(vm);
+    crate::toast::script_mod(vm);
     crate::placeholder::script_mod(vm);
 
     crate::bare_step::script_mod(vm);

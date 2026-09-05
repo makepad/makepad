@@ -674,7 +674,9 @@ impl Chip {
             self.draw_text.draw_abs(cx, dvec2(x, baseline), &self.text);
             self.draw_text.color = rest_color;
             self.draw_text.text_style.font_size = rest_size;
-            x += text_w + m.gap;
+            // The cross is measured from the trailing edge, so nothing
+            // after the label needs the running x.
+            let _ = text_w;
         }
         self.close_rect = Rect::default();
         if self.removable {
