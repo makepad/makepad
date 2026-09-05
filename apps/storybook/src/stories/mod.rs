@@ -13,6 +13,7 @@ pub mod slider;
 pub mod textinput;
 pub mod radiobutton;
 pub mod view;
+pub mod layout;
 
 pub fn script_mod(vm: &mut ScriptVm) {
     welcome::script_mod(vm);
@@ -24,6 +25,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     textinput::script_mod(vm);
     radiobutton::script_mod(vm);
     view::script_mod(vm);
+    layout::script_mod(vm);
 }
 
 pub fn tables() -> &'static [&'static [Story]] {
@@ -37,5 +39,6 @@ pub fn tables() -> &'static [&'static [Story]] {
         textinput::STORIES,
         radiobutton::STORIES,
         view::STORIES,
+        layout::STORIES,
     ]
 }
