@@ -14,6 +14,7 @@ pub mod button_more;
 pub mod checkbox_more;
 pub mod alert;
 pub mod divider;
+pub mod progress;
 pub mod welcome;
 pub mod button;
 pub mod checkbox;
@@ -87,6 +88,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     button_more::script_mod(vm);
     alert::script_mod(vm);
     divider::script_mod(vm);
+    progress::script_mod(vm);
 }
 
 pub fn tables() -> &'static [&'static [Story]] {
@@ -131,6 +133,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         button_more::STORIES,
         alert::STORIES,
         divider::STORIES,
+        progress::STORIES,
     ]
 }
 
