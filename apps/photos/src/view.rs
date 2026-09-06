@@ -599,8 +599,9 @@ impl Widget for PhotosView {
             let short = size.y < 150.0;
             self.view.widget(cx, ids!(empty_body)).set_visible(cx, !short);
             let icon_size = if short {28.0} else {40.0};
-            let mut icon = self.view.widget(cx, ids!(empty_icon));
-            script_apply_eval!(cx, icon, {width: #(icon_size) height: #(icon_size)});
+            if let Some(mut icon) = self.view.widget(cx, ids!(empty_icon)).borrow_mut::<makepad_widgets::app_icon::AppIcon>() {
+                icon.set_size(cx, icon_size);
+            }
             self.last_size = size;
         }
         self.view.draw_walk(cx, scope, walk)

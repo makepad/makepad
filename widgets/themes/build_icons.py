@@ -37,8 +37,9 @@ def mac_tile(fill):
     shadow = '<g opacity="0.12">' + rect(3,4.5,58,57,'#101521',13) + '</g>'
     return shadow + rect(3,3,58,57,fill,13)
 
-def mac_glint(color='#ffffff'):
-    return rect(3.5,3.5,57,56,'url(#shine)',12.5) + '<g opacity="0.20">' + rect(3.6,3.6,56.8,55.8,'none',12.4,color,.55) + '</g>'
+def mac_glint():
+    # A broad surface reflection, without a hairline around the silhouette.
+    return rect(3.5,3.5,57,56,'url(#shine)',12.5)
 
 def symbol(name):
     white='#ffffff'
@@ -195,13 +196,12 @@ def icon(name, style):
               +path('M2 62 H62 V2',stroke='#555555',width=2)+art)
     elif style=='ios':
         # Current iOS: full-bleed continuous corners, layered color and a
-        # restrained glass rim. Original symbols, never platform app mascots.
+        # soft surface shading. Original symbols, never platform app mascots.
         tile = '#f9fafc' if name in ('photos','route','files') else 'url(#tile)'
         if name=='files':
             art=path('M10 23 V17 H28 L33 23 H54 V49 H10 Z','#ffda66','none')+path('M10 27 H55 L50 49 H9 Z','#ffba08','none')
         outline='M17 1 H47 C59 1 63 5 63 17 V47 C63 59 59 63 47 63 H17 C5 63 1 59 1 47 V17 C1 5 5 1 17 1 Z'
-        body=(path(outline,tile,'none')+art
-              +path(outline,'none',tint(color,.30),.35))
+        body=path(outline,tile,'none')+art
     elif style=='android':
         # Pixel's adaptive circle mask with saturated foreground layers.
         # Keep all artwork inside the mask's safe zone.
