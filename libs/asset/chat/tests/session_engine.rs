@@ -133,6 +133,354 @@ fn tool_line(name: &str, args: Value) -> String {
     )
 }
 
+struct RoundLimited {
+    recorder: Recorder,
+    limit: u32,
+    client: bool,
+}
+impl ToolExecutor for RoundLimited {
+    fn capability_doc(&mut self) -> String { self.recorder.capability_doc() }
+    fn max_tool_rounds(&self) -> u32 { self.limit }
+    fn client_executes(&mut self, _: &ContentToolCall) -> bool { self.client }
+    fn execute(&mut self, call: &ContentToolCall, ctx: &ExecCtx, progress: &mut dyn FnMut(u16, &str), cancel: &CancelFlag) -> ToolOutcome {
+        self.recorder.execute(call, ctx, progress, cancel)
+    }
+}
+fn scripted_call(kind: ProviderKind, index: usize, name: &str, args: Value) -> Vec<ProviderEvent> {
+    if kind.uses_native_tools() {
+        vec![ProviderEvent::FunctionCall { call_id: format!("call_{index}"), name: name.replace('.', "_"), arguments: args.to_json() }]
+    } else {
+        vec![ProviderEvent::Done { text: tool_line(name, args) }]
+    }
+}
+
+/// Real Session continuation with binary tool outputs. Scripted deliberately
+/// retains ChatProvider's default image refusal, on both textual/native lanes.
+struct ImageRecorder {
+    recorder: Recorder,
+    images: Vec<makepad_asset_chat::provider::ToolImage>,
+}
+impl ToolExecutor for ImageRecorder {
+    fn capability_doc(&mut self) -> String { self.recorder.capability_doc() }
+    fn tool_definitions(&mut self) -> Vec<makepad_asset_chat::tools::ToolDef> {
+        makepad_asset_chat::tools::sandbox_definitions().into_iter()
+            .filter(|definition| definition.name == "model.jobs").collect()
+    }
+    fn take_tool_images(&mut self) -> Vec<makepad_asset_chat::provider::ToolImage> {
+        std::mem::take(&mut self.images)
+    }
+    fn execute(&mut self, call: &ContentToolCall, ctx: &ExecCtx, progress: &mut dyn FnMut(u16, &str), cancel: &CancelFlag) -> ToolOutcome {
+        self.recorder.execute(call, ctx, progress, cancel)
+    }
+}
+
+fn review_result() -> Value {
+    json::obj(vec![
+        ("state", json::s("reviewed")),
+        ("job", json::s("review_car")),
+        ("result", json::obj(vec![
+            ("document", json::s("car")),
+            ("checks", json::obj(vec![("triangles", Value::Int(36)), ("manifold", Value::Bool(true)),
+                ("self_intersections", Value::Int(0))])),
+            ("images", Value::Arr(vec![json::obj(vec![("id", json::s("review_front")), ("view", json::s("front"))])])),
+        ])),
+    ])
+}
+
+fn assert_retained_review(outcome: &ToolOutcome) {
+    let ToolOutcome::Ok { value } = outcome else { panic!("successful checks were replaced: {outcome:?}"); };
+    let original = review_result();
+    assert_eq!(value.get("state"), original.get("state"));
+    assert_eq!(value.get("job"), original.get("job"));
+    let nested = value.get("result").unwrap();
+    for key in ["document", "checks", "images"] {
+        assert_eq!(nested.get(key), original.get("result").unwrap().get(key), "lost {key}");
+    }
+    for scope in [value, nested] {
+        assert_eq!(scope.get("images_delivered"), Some(&Value::Bool(false)));
+        assert!(scope.get("image_delivery_error").and_then(Value::as_str).is_some_and(|reason| !reason.is_empty()));
+    }
+}
+
+#[test]
+fn refused_review_images_preserve_checks_in_the_actual_session_continuation() {
+    use makepad_asset_chat::wire::ChatRole;
+    for kind in [ProviderKind::FleetQwen, ProviderKind::OpenAi] {
+        let args = json::obj(vec![("job", json::s("review_car")), ("wait_ms", Value::Int(0))]);
+        let mut provider = Scripted::new(vec![
+            scripted_call(kind, 0, "model.jobs", args),
+            vec![ProviderEvent::Done { text: "The structural checks are available; the images were not delivered.".into() }],
+        ]);
+        provider.kind = kind;
+        let turns = provider.turns.clone();
+        let continuations = provider.continuations.clone();
+        let mut exec = ImageRecorder {
+            recorder: Recorder::new(ToolOutcome::Ok { value: review_result() }),
+            // Default refusal depends only on a nonempty image vector; this
+            // test exercises delivery, not a provider's PNG decoding.
+            images: vec![makepad_asset_chat::provider::ToolImage { label: "front".into(),
+                png: std::sync::Arc::from(&b"binary-review-image-fixture"[..]) }],
+        };
+        let mut session = Session::new("review-image-refusal", Box::new(provider));
+        session.send("check the model geometry and rendered front", &[], &mut exec).unwrap();
+        session.pump(&mut exec);
+        session.pump(&mut exec);
+        assert!(session.is_idle());
+        assert_eq!(exec.recorder.calls.borrow().len(), 1);
+        assert_eq!(exec.recorder.calls.borrow()[0].name(), "model.jobs");
+        assert!(exec.images.is_empty());
+        let events = session.drain_events();
+        let results = events.iter().filter_map(|event| match &event.body {
+            ChatEventBody::ToolResult { outcome, .. } => Some(outcome),
+            ChatEventBody::Error { code, message } => panic!("unexpected {kind:?} error {code}: {message}"),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(results.len(), 1);
+        assert_retained_review(results[0]);
+        let output = if kind.uses_native_tools() {
+            assert_eq!(continuations.borrow().len(), 1);
+            assert_eq!(continuations.borrow()[0].0, "call_0");
+            continuations.borrow()[0].1.clone()
+        } else {
+            assert_eq!(turns.borrow().len(), 2);
+            turns.borrow()[1].messages.iter().find(|message| message.role == ChatRole::Tool).unwrap().text.clone()
+        };
+        assert!(!output.contains("binary-review-image-fixture"), "pixels must stay outside JSON");
+        let value = json::parse(output.as_bytes()).unwrap();
+        let continued = ToolOutcome::decode(&value).unwrap();
+        assert_retained_review(&continued);
+        assert_eq!(&continued, results[0]);
+        let ToolOutcome::Ok { value } = continued else { unreachable!() };
+        assert_eq!(value.get("image_delivery_error").and_then(Value::as_str),
+            Some("this chat provider cannot receive rendered tool images"));
+    }
+}
+
+#[test]
+fn repeated_image_delivery_annotations_are_bounded_and_keep_nested_checks() {
+    let mut outcome = ToolOutcome::Ok { value: review_result() };
+    let reason = "🧶".repeat(1_000);
+    outcome = outcome.image_delivery_failed(&reason);
+    let once = outcome.encode().to_json();
+    for _ in 0..20 { outcome = outcome.image_delivery_failed(&reason); }
+    assert_eq!(outcome.encode().to_json(), once, "repeated failures must replace their annotation");
+    assert_retained_review(&outcome);
+    assert!(once.len() < MAX_TOOL_JSON_BYTES);
+    assert!(outcome.validate().is_ok());
+    let ToolOutcome::Ok { value } = &outcome else { unreachable!() };
+    for scope in [value, value.get("result").unwrap()] {
+        let Value::Obj(fields) = scope else { panic!("review object"); };
+        for key in ["images_delivered", "image_delivery_error"] {
+            assert_eq!(fields.iter().filter(|(name, _)| name == key).count(), 1);
+        }
+        assert!(scope.get("image_delivery_error").unwrap().as_str().unwrap().chars().count() <= 240);
+    }
+    let mut already_delivered = review_result();
+    let Value::Obj(fields) = &mut already_delivered else { unreachable!() };
+    fields.push(("images_delivered".into(), Value::Bool(true)));
+    let Value::Obj(nested) = &mut fields.iter_mut().find(|(key, _)| key == "result").unwrap().1 else { unreachable!() };
+    nested.push(("images_delivered".into(), Value::Bool(true)));
+    assert_retained_review(&ToolOutcome::Ok { value: already_delivered }.image_delivery_failed("review image expired"));
+    let failed = ToolOutcome::Failed { message: "geometry compilation failed".into() };
+    assert_eq!(failed.clone().image_delivery_failed("no image"), failed,
+        "an existing failed result must not be promoted to success");
+}
+
+// Match the current model review shape. Many object diagnostics legitimately
+// approach the response bound; names remain within the 96-byte model name cap.
+fn near_limit_review(headroom: usize, preview_metadata: bool, unknown_field: bool) -> Value {
+    let make = |errors: Vec<Value>| {
+        let head = json::obj(vec![("generation", json::s("1")), ("content", json::s("0".repeat(64)))]);
+        let mut result = vec![
+            ("document", json::s("car")), ("head", head.clone()),
+            ("checks", json::obj(vec![("head", head), ("valid", Value::Bool(false)),
+                ("closed_objects", Value::Int(120)), ("open_objects", Value::Int(0)), ("errors", Value::Arr(errors))])),
+            ("motion_samples", Value::Arr(vec![json::s("steering left")])),
+            ("motion_errors", Value::Arr(vec![json::obj(vec![("sample", json::s("steering right")),
+                ("error", json::s("sample compilation failed"))])])),
+            ("motion_scope", json::s("Sampled poses; not a continuous collision certificate.")),
+            ("wheel_visual", Value::Arr(vec![])),
+        ];
+        if preview_metadata {
+            result.extend([
+                ("views", json::s("rest: front three-quarter,rear,underside,front; motion sheet follows motion_samples, row-major; same exact head, PBR renderer")),
+                ("images_available", Value::Bool(true)),
+            ]);
+        }
+        if unknown_field { result.push(("unrecognized_context", json::s("must preserve ".repeat(40)))); }
+        json::obj(vec![("job", json::s("review_car")), ("state", json::s("reviewed")), ("result", json::obj(result))])
+    };
+    let mut errors = (0..120).map(|index| json::obj(vec![
+        ("object", json::s(format!("part_{index:03}"))),
+        ("orientation_errors", Value::Int(1)), ("intersections", Value::Int(0)),
+    ])).collect::<Vec<_>>();
+    let base = ToolOutcome::Ok { value: make(errors.clone()) }.encode().to_json().len();
+    let target = MAX_TOOL_JSON_BYTES - headroom;
+    let mut remaining = target.checked_sub(base).unwrap();
+    for error in &mut errors {
+        let Value::Obj(fields) = error else { unreachable!() };
+        let Value::Str(name) = &mut fields.iter_mut().find(|(key, _)| key == "object").unwrap().1 else { unreachable!() };
+        let amount = remaining.min(96 - name.len());
+        name.push_str(&"x".repeat(amount)); remaining -= amount;
+    }
+    assert_eq!(remaining, 0, "fixture diagnostic names cannot fill the requested size");
+    let value = make(errors);
+    let outcome = ToolOutcome::Ok { value: value.clone() };
+    assert_eq!(outcome.encode().to_json().len(), target);
+    assert!(outcome.validate().is_ok(), "fixture must be admitted before annotation");
+    value
+}
+
+#[test]
+fn near_limit_review_continuation_compacts_only_declared_image_metadata() {
+    use makepad_asset_chat::wire::ChatRole;
+    for kind in [ProviderKind::FleetQwen, ProviderKind::OpenAi] {
+        let original = near_limit_review(64, true, true);
+        let args = json::obj(vec![("job", json::s("review_car")), ("wait_ms", Value::Int(0))]);
+        let mut provider = Scripted::new(vec![scripted_call(kind, 0, "model.jobs", args),
+            vec![ProviderEvent::Done { text: "The structural checks remain available; image delivery failed.".into() }]]);
+        provider.kind = kind;
+        let turns = provider.turns.clone(); let continuations = provider.continuations.clone();
+        let mut exec = ImageRecorder { recorder: Recorder::new(ToolOutcome::Ok { value: original.clone() }),
+            images: vec![makepad_asset_chat::provider::ToolImage { label: "front".into(),
+                png: std::sync::Arc::from(&b"binary-review-image-fixture"[..]) }] };
+        let mut session = Session::new("near-limit-review", Box::new(provider));
+        session.send("review all model objects", &[], &mut exec).unwrap();
+        session.pump(&mut exec); session.pump(&mut exec);
+        assert!(session.is_idle());
+        let output = if kind.uses_native_tools() { continuations.borrow()[0].1.clone() } else {
+            turns.borrow()[1].messages.iter().find(|message| message.role == ChatRole::Tool).unwrap().text.clone()
+        };
+        assert!(output.len() <= MAX_TOOL_JSON_BYTES);
+        let continued = ToolOutcome::decode(&json::parse(output.as_bytes()).unwrap()).unwrap();
+        let ToolOutcome::Ok { value } = &continued else { panic!("lost review checks: {continued:?}"); };
+        let nested = value.get("result").unwrap();
+        for (key, prior) in match original.get("result").unwrap() { Value::Obj(fields) => fields, _ => unreachable!() } {
+            if ["views", "images_available"].contains(&key.as_str()) { assert!(nested.get(key).is_none()); }
+            else { assert_eq!(nested.get(key), Some(prior), "changed diagnostic or unknown field {key}"); }
+        }
+        assert_eq!(value.get("image_delivery_omitted_fields"), Some(&Value::Arr(vec![json::s("result.views"), json::s("result.images_available")])));
+        for scope in [value, nested] { assert_eq!(scope.get("images_delivered"), Some(&Value::Bool(false))); }
+        assert_eq!(continued.clone().image_delivery_failed("this chat provider cannot receive rendered tool images"), continued,
+            "repeated delivery failure must preserve the bounded omission notice");
+        let mut result_seen = false;
+        for event in session.drain_events() { match event.body {
+            ChatEventBody::ToolResult { outcome, .. } => { assert_eq!(outcome, continued); result_seen = true; },
+            ChatEventBody::Error { code, message } => panic!("{code}: {message}"),
+            _ => {},
+        }}
+        assert!(result_seen);
+    }
+}
+
+#[test]
+fn image_warning_shortens_new_reason_before_metadata_and_never_silently_cuts_checks() {
+    let original = near_limit_review(256, true, true);
+    let result = ToolOutcome::Ok { value: original.clone() }.image_delivery_failed(&"🧶".repeat(1_000));
+    let ToolOutcome::Ok { value } = result else { panic!("short delivery reason should fit"); };
+    assert!(value.get("image_delivery_omitted_fields").is_none());
+    for (key, prior) in match original.get("result").unwrap() { Value::Obj(fields) => fields, _ => unreachable!() } {
+        assert_eq!(value.get("result").unwrap().get(key), Some(prior));
+    }
+    assert_eq!(value.get("image_delivery_error").and_then(Value::as_str), Some("unavailable"));
+    // Even an unfamiliar large field is not expendable. When the remaining
+    // diagnostics plus the explicit warning cannot fit, fail visibly instead
+    // of presenting an incomplete successful review.
+    let result = ToolOutcome::Ok { value: near_limit_review(8, false, true) }.image_delivery_failed("image store expired");
+    assert!(result.validate().is_ok());
+    assert!(matches!(result, ToolOutcome::Failed { message } if message.contains("byte budget") && message.contains("No partial checks")));
+}
+
+#[test]
+fn extended_modeling_rounds_reach_parked_publish_and_spawn_on_both_lanes() {
+    for kind in [ProviderKind::CodexCli, ProviderKind::OpenAi] {
+        let document = || json::obj(vec![("document", json::s("car"))]);
+        let head = || json::obj(vec![("generation", json::s("0")), ("content", json::s("0".repeat(64)))]);
+        let mut calls = ["model.workflow", "model.operations", "model.surface", "model.scene", "model.vehicle"]
+            .into_iter().map(|topic| ("world.api", json::obj(vec![("query", json::s(topic))]))).collect::<Vec<_>>();
+        calls.push(("model.open", document()));
+        for index in 0..6 {
+            calls.push(("model.apply", json::obj(vec![("document", json::s("car")), ("request_id", json::s(format!("part_{index}"))),
+                ("expected", head()), ("operations", Value::Arr(vec![json::obj(vec![("op", json::s("cube")), ("object", json::s(format!("part_{index}"))), ("size", Value::Arr(vec![Value::Int(1); 3]))])]))])));
+            calls.push(("model.jobs", json::obj(vec![("job", json::s(format!("edit_{index}"))), ("wait_ms", Value::Int(10_000))])));
+        }
+        calls.push(("model.publish", json::obj(vec![("document", json::s("car")), ("title", json::s("Original old car")),
+            ("alias", json::s("gen/models/original-old-car")), ("expected", head()), ("expected_alias", json::s("absent"))])));
+        calls.push(("model.jobs", json::obj(vec![("job", json::s("publish_car")), ("wait_ms", Value::Int(10_000))])));
+        calls.push(("world.spawn", json::obj(vec![("model", json::s("gen/models/original-old-car")), ("form", json::s("car"))])));
+        assert!(calls.len() > MAX_TOOL_ROUNDS as usize);
+        let mut scripts = calls.iter().enumerate().map(|(i, (name, args))| scripted_call(kind, i, name, args.clone())).collect::<Vec<_>>();
+        scripts.push(vec![ProviderEvent::Done { text: "The original car is placed.".into() }]);
+        let mut provider = Scripted::new(scripts); provider.kind = kind;
+        let mut exec = RoundLimited { recorder: Recorder::new(ToolOutcome::Ok { value: Value::Null }), limit: 48, client: true };
+        let mut session = Session::new("modeling", Box::new(provider));
+        session.send("model me an old car", &[], &mut exec).unwrap();
+        assert_eq!(session.tool_round_limit(), 48);
+        // Executor changes cannot enlarge/reduce an already admitted turn.
+        exec.limit = 1;
+        let mut observed = Vec::new();
+        let mut published = false;
+        let mut placed = false;
+        for _ in 0..60 {
+            session.pump(&mut exec);
+            for event in session.drain_events() {
+                if let ChatEventBody::ToolCall { id, name, args } = event.body {
+                    assert_eq!(session.awaiting_client_tool(), Some(id.as_str()));
+                    assert_eq!(name, calls[observed.len()].0);
+                    let value = if name == "model.jobs" && args.get("job").and_then(Value::as_str) == Some("publish_car") {
+                        published = true;
+                        json::obj(vec![("state", json::s("published")), ("result", json::obj(vec![("alias", json::s("gen/models/original-old-car")), ("placeable_now", Value::Bool(true))]))])
+                    } else if name == "world.spawn" {
+                        assert!(published, "placement follows installed publication");
+                        placed = true;
+                        json::obj(vec![("committed", Value::Bool(true))])
+                    } else { json::obj(vec![("ok", Value::Bool(true))]) };
+                    observed.push(name);
+                    session.provide_client_outcome(&id, ToolOutcome::Ok { value }, &mut exec).unwrap();
+                } else if let ChatEventBody::Error { code, message } = event.body {
+                    panic!("{kind:?}: {code}: {message}");
+                }
+            }
+            if session.is_idle() { break; }
+        }
+        assert!(session.is_idle() && published && placed);
+        assert_eq!(observed.len(), calls.len());
+        assert_eq!(observed.last().map(String::as_str), Some("world.spawn"));
+    }
+}
+
+#[test]
+fn configurable_round_limit_is_finite_history_bounded_and_fail_closed() {
+    use makepad_asset_chat::wire::{ChatMessage, ChatRole, MAX_MESSAGES, MAX_CONFIGURABLE_TOOL_ROUNDS};
+    for kind in [ProviderKind::CodexCli, ProviderKind::OpenAi] {
+        for (requested, old_rows) in [(48, 0), (u32::MAX, 0), (48, 64), (0, 0)] {
+            let args = json::obj(vec![("document", json::s("car"))]);
+            let scripts = (0..130).map(|i| scripted_call(kind, i, "model.inspect", args.clone())).collect();
+            let mut provider = Scripted::new(scripts); provider.kind = kind;
+            let history = (0..old_rows).map(|_| ChatMessage::new(ChatRole::User, "previous turn")).collect();
+            let mut session = Session::resume(makepad_asset_chat::session::SessionId::generate(), "bounded", Box::new(provider), history, 1, None);
+            let mut exec = RoundLimited { recorder: Recorder::new(ToolOutcome::Ok { value: json::obj(vec![]) }), limit: requested, client: false };
+            session.send("inspect", &[], &mut exec).unwrap();
+            let expected = requested.min(MAX_CONFIGURABLE_TOOL_ROUNDS).min(((MAX_MESSAGES - old_rows - 3) / 2) as u32);
+            assert_eq!(session.tool_round_limit(), expected);
+            let mut last = None;
+            for _ in 0..130 {
+                session.pump(&mut exec);
+                for event in session.drain_events() { last = Some(event.body); }
+                if session.is_idle() { break; }
+            }
+            assert!(session.is_idle());
+            assert_eq!(exec.recorder.calls.borrow().len(), expected as usize);
+            assert!(session.history().len() <= MAX_MESSAGES);
+            if kind.uses_native_tools() || expected == 0 {
+                assert!(matches!(last, Some(ChatEventBody::Error { code, .. }) if code == "tool_budget"));
+            } else {
+                assert!(matches!(last, Some(ChatEventBody::Done)));
+            }
+        }
+    }
+}
+
 /// Serving facts ride out on the delta they describe — and on the LAST
 /// chunk of a split, because they describe the END of that text.
 #[test]
@@ -559,8 +907,9 @@ fn qwen_marker_and_native_prompt_split_with_equivalent_tool_dtos() {
 
     let qwen_system = qwen_turns.borrow()[0].system.clone();
     let native_system = native_turns.borrow()[0].system.clone();
-    assert!(qwen_system.contains("<<tool>>"), "qwen must keep the marker contract");
+    assert!(qwen_system.contains("<<tool>>") || qwen_system.contains("<tool_call>"), "qwen must advertise a supported textual tool contract");
     assert!(!native_system.contains("<<tool>>"), "native prompt must not mention the marker");
+    assert!(!native_system.contains("<tool_call>"), "native prompt must not teach textual tool blocks");
     assert!(native_system.contains("asset_search"));
     assert_eq!(
         encode_calls(&qwen_calls.borrow()),

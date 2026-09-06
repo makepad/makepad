@@ -17,6 +17,24 @@
 
 use crate::chat_wire::{ChatMessage, ProviderAvailability, ProviderKind, ServingFacts};
 
+/// Trusted binary tool output, separate from bounded text/JSON history.
+#[derive(Clone, Debug)]
+pub struct ToolImage {
+    pub label: String,
+    pub png: std::sync::Arc<[u8]>,
+}
+pub fn validate_tool_images(images:&[ToolImage])->Result<(),String>{
+    if images.len()>4{return Err("too many tool images".into());}
+    let mut bytes=0usize;
+    for image in images {
+        bytes=bytes.saturating_add(image.png.len());
+        if image.label.len()>128 || image.png.len()<24 || !image.png.starts_with(b"\x89PNG\r\n\x1a\n") {return Err("invalid tool image".into());}
+        let w=u32::from_be_bytes(image.png[16..20].try_into().unwrap());let h=u32::from_be_bytes(image.png[20..24].try_into().unwrap());
+        if w==0 || h==0 || w>1024 || h>1024 {return Err("tool image dimensions exceed 1024".into());}
+    }
+    if bytes>8*1024*1024{return Err("tool image byte budget exceeded".into());}Ok(())
+}
+
 /// Everything a provider needs for one turn. `system` carries the tool
 /// protocol, live capabilities and attachment bindings; `messages` is the
 /// bounded conversation so far (user/assistant/tool roles).
@@ -98,6 +116,12 @@ pub trait ChatProvider {
 
     /// Abort the in-flight turn, if any.
     fn cancel(&mut self);
+
+    /// Attach trusted rendered images to the next continuation. Unsupported
+    /// providers explicitly refuse rather than pretending text is vision.
+    fn attach_tool_images(&mut self, images: Vec<ToolImage>) -> Result<(), String> {
+        if images.is_empty(){Ok(())}else{Err("this chat provider cannot receive rendered tool images".into())}
+    }
 
     /// Resume after a native function call with the exact provider
     /// `call_id` and the encoded tool outcome. Providers that do not

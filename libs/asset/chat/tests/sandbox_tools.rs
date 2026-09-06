@@ -23,6 +23,47 @@ fn obj(json_text: &str) -> Value {
     json::parse(json_text.as_bytes()).expect("test json")
 }
 
+#[test]
+fn editable_model_tools_preserve_heads_ids_and_separate_publication_preconditions() {
+    use makepad_asset_chat::context::ClientProfile;
+    use makepad_asset_chat::sandbox_effect::SandboxEffect;
+    let head = json::obj(vec![("generation", json::s("18446744073709551615")), ("content", json::s("a".repeat(64)))]);
+    let apply = json::obj(vec![("document", json::s("chair")), ("request_id", json::s("one")), ("expected", head.clone()),
+        ("operations", obj(r#"[{"op":"extrude","object":"seat","face":"9007199254740993","offset":[0,0.5,0]}]"#))]);
+    let call = parse("model.apply", apply.clone()).unwrap();
+    assert_eq!(encode_args(&call), apply);
+    assert!(ClientProfile::Game.client_executes(&call));
+    assert!(!ClientProfile::Gen.client_executes(&call));
+    assert_eq!(call.sandbox_effect(), Some(SandboxEffect::ContentMutation));
+    let publish = json::obj(vec![("document", json::s("chair")), ("title", json::s("Chair")), ("alias", json::s("gen/models/chair")),
+        ("expected", head.clone()), ("expected_alias", json::s("absent")), ("request_id", json::s("publish-one"))]);
+    assert_eq!(encode_args(&parse("model.publish", publish.clone()).unwrap()), publish);
+    let mut missing_alias_guard = publish.clone();
+    if let Value::Obj(fields) = &mut missing_alias_guard { fields.retain(|(key, _)| key != "expected_alias"); }
+    assert!(parse("model.publish", missing_alias_guard).is_err());
+    for invalid in [Value::Int(1), json::s("01"), json::s("18446744073709551616")] {
+        let mut changed = apply.clone();
+        if let Value::Obj(fields) = &mut changed {
+            fields.iter_mut().find(|(key, _)| key == "expected").unwrap().1 = json::obj(vec![("generation", invalid), ("content", json::s("a".repeat(64)))]);
+        }
+        assert!(parse("model.apply", changed).is_err());
+    }
+    assert!(parse("model.close", obj(r#"{"document":"chair"}"#)).is_err());
+    let inspect = parse("model.inspect", obj(r#"{"document":"chair","object":"seat","domain":"corners","offset":0,"limit":128}"#)).unwrap();
+    assert_eq!(inspect.sandbox_effect(), Some(SandboxEffect::Read));
+    assert!(parse("model.inspect", obj(r#"{"document":"chair","object":"seat","domain":"weights","limit":128}"#)).is_ok());
+    assert!(parse("model.inspect", obj(r#"{"document":"chair","limit":129}"#)).is_err());
+    assert!(parse("model.inspect", obj(r#"{"document":"chair","domain":"unknown"}"#)).is_err());
+    for domain in ["objects", "materials", "joints", "clips", "clip_keys"] {
+        let args = json::obj(vec![("document", json::s("chair")), ("domain", json::s(domain)), ("limit", Value::Int(128))]);
+        assert!(parse("model.inspect", args).is_ok());
+    }
+    assert!(parse("model.jobs", obj(r#"{"job":"edit_1","cancel":true}"#)).is_err());
+    let cancel = parse("model.cancel", obj(r#"{"job":"edit_1"}"#)).unwrap();
+    assert_eq!(cancel.sandbox_effect(), Some(SandboxEffect::ContentMutation));
+    assert!(parse("model.cancel", obj(r#"{"job":"edit_1","force":true}"#)).is_err());
+}
+
 // ---------------------------------------------------------------- parsing
 
 #[test]
@@ -391,7 +432,7 @@ fn world_source_tools_roundtrip_and_bound() {
 fn sandbox_definitions_are_consistent_and_disjoint_from_the_base() {
     let base = definitions();
     let extra = sandbox_definitions();
-    assert_eq!(extra.len(), 19);
+    assert_eq!(extra.len(), 30);
     assert!(extra.iter().any(|d| d.name == "world.get_plan"));
     assert!(extra.iter().any(|d| d.name == "world.set_plan"));
     for def in &extra {
@@ -928,6 +969,30 @@ fn world_tools_accept_and_roundtrip_an_explicit_sub_world() {
     assert!(parse("world.list", obj(r#"{"sub":"../escape"}"#)).is_err());
     let def = sandbox_definitions().into_iter().find(|def| def.name == "world.list").unwrap();
     assert!(def.parameters.to_json().contains("\"sub\""));
+}
+
+#[test]
+fn model_review_motion_samples_roundtrip_and_refuse_unbounded_or_unknown_inputs() {
+    let head = format!(r#"{{"generation":"1","content":"{}"}}"#, "0".repeat(64));
+    let args = |motion:&str| obj(&format!(r#"{{"document":"car","request_id":"review","expected":{head},"motion":{motion}}}"#));
+    let motion=r#"[{"kind":"vehicle","steer":0.55,"suspension":0.28},{"kind":"pose","name":"crouch"},{"kind":"clip","name":"walk","time":0.25}]"#;
+    let original=args(motion);
+    let call=parse("model.render",original.clone()).unwrap();
+    assert_eq!(encode_args(&call),original);
+    for motion in [r#"[{"kind":"vehicle","steer":9,"suspension":0}]"#,r#"[{"kind":"clip","name":"walk","time":-1}]"#,r#"[{"kind":"pose","name":"crouch","ignored":true}]"#,r#"[{"kind":"pose","name":"a"},{"kind":"pose","name":"a"},{"kind":"pose","name":"a"},{"kind":"pose","name":"a"},{"kind":"pose","name":"a"}]"#] {
+        assert!(parse("model.render",args(motion)).is_err(),"accepted {motion}");
+    }
+}
+
+#[test]
+fn model_open_preview_scale_is_optional_bounded_and_roundtrips() {
+    let native=obj(r#"{"document":"car"}"#);
+    assert_eq!(encode_args(&parse("model.open",native.clone()).unwrap()),native);
+    let hand=obj(r#"{"document":"car","preview_scale":0.05}"#);
+    assert_eq!(encode_args(&parse("model.open",hand.clone()).unwrap()),hand);
+    for scale in ["0","-1","101","0.0001","\"small\""] {
+        assert!(parse("model.open",obj(&format!(r#"{{"document":"car","preview_scale":{scale}}}"#))).is_err());
+    }
 }
 
 #[test]

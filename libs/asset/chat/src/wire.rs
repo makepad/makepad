@@ -35,6 +35,10 @@ pub const MAX_NOTE_BYTES: usize = 200;
 /// the catalog grew to ~3k models. Fail-closed as before; the session's
 /// history/token budgets remain the real backstop.
 pub const MAX_TOOL_ROUNDS: u32 = 16;
+/// Absolute configurable ceiling: each tool retains two messages, with
+/// room for the user, a final-budget notice and an assistant completion.
+/// A session also clamps this to its actual remaining history capacity.
+pub const MAX_CONFIGURABLE_TOOL_ROUNDS: u32 = ((MAX_MESSAGES - 3) / 2) as u32;
 /// Progress callbacks retained from one tool execution.
 pub const MAX_PROGRESS_EVENTS: usize = 32;
 
@@ -101,6 +105,79 @@ pub enum ToolOutcome {
 }
 
 impl ToolOutcome {
+    /// Image delivery is separate from successful structured checks. Preserve
+    /// those checks on provider refusal or expired image storage, but explicitly
+    /// tell the model that this result does not establish a visual inspection.
+    /// Near the wire limit, shorten the new error first, then explicitly omit
+    /// only known image metadata from review objects. Checks/motion diagnostics
+    /// and unknown fields are never truncated to make a success fit.
+    pub fn image_delivery_failed(mut self, reason: &str) -> Self {
+        fn annotate_object(value: &mut Value, reason: &str) {
+            if let Value::Obj(fields) = value {
+                fields.retain(|(key, _)| key != "images_delivered" && key != "image_delivery_error");
+                fields.push(("images_delivered".into(), Value::Bool(false)));
+                fields.push(("image_delivery_error".into(), json::s(reason)));
+            }
+        }
+        fn annotate(outcome: &mut ToolOutcome, reason: &str) {
+            let ToolOutcome::Ok { value } = outcome else { return; };
+            if let Value::Obj(fields) = value {
+                if let Some((_, result)) = fields.iter_mut().find(|(key, _)| key == "result") {
+                    annotate_object(result, reason);
+                }
+            }
+            annotate_object(value, reason);
+        }
+        fn omit_image_metadata(value: &mut Value, prefix: &str, omitted: &mut Vec<Value>) {
+            // This compaction contract belongs to model review results, not
+            // arbitrary successful tools with similarly named fields.
+            if !value.get("checks").is_some_and(|checks| matches!(checks, Value::Obj(_))) { return; }
+            let Value::Obj(fields) = value else { return; };
+            fields.retain(|(key, value)| {
+                let optional = matches!((key.as_str(), value),
+                    ("images", Value::Arr(_)) | ("views", Value::Str(_)) | ("images_available", Value::Bool(_)));
+                if optional { omitted.push(json::s(format!("{prefix}{key}"))); }
+                !optional
+            });
+        }
+        if !matches!(self, Self::Ok { .. }) { return self; }
+        let reason: String = reason.chars().take(240).collect();
+        annotate(&mut self, if reason.is_empty() { "unavailable" } else { &reason });
+        if self.validate().is_ok() { return self; }
+        // The new diagnostic has lower priority than the original successful
+        // checks. Keep an explicit delivery failure even when its detail cannot
+        // fit; no original payload is removed at this stage.
+        annotate(&mut self, "unavailable");
+        if self.validate().is_ok() { return self; }
+        if let Self::Ok { value } = &mut self {
+            let mut omitted = Vec::new();
+            if let Value::Obj(fields) = value {
+                if let Some((_, result)) = fields.iter_mut().find(|(key, _)| key == "result") {
+                    omit_image_metadata(result, "result.", &mut omitted);
+                }
+            }
+            omit_image_metadata(value, "", &mut omitted);
+            if !omitted.is_empty() {
+                let Value::Obj(fields) = value else { unreachable!() };
+                if let Some((_, notice)) = fields.iter_mut().find(|(key, _)| key == "image_delivery_omitted_fields") {
+                    // Retain an earlier compaction notice on repeated errors;
+                    // never overwrite an unexpected pre-existing payload.
+                    if let Value::Arr(previous) = notice {
+                        for field in omitted { if !previous.contains(&field) { previous.push(field); } }
+                    }
+                    else { return Self::Failed { message: "Image delivery failed; review checks and omission notice exceed the tool result byte budget. Request a smaller review result.".into() }; }
+                } else {
+                    // Keep delivery annotations last, matching repeated calls.
+                    let at = fields.iter().position(|(key, _)| key == "images_delivered").unwrap_or(fields.len());
+                    fields.insert(at, ("image_delivery_omitted_fields".into(), Value::Arr(omitted)));
+                }
+            }
+        }
+        if self.validate().is_ok() { self } else {
+            Self::Failed { message: "Image delivery failed; complete review checks and the delivery warning exceed the tool result byte budget. No partial checks are returned; request a smaller review result.".into() }
+        }
+    }
+
     pub fn encode(&self) -> Value {
         match self {
             ToolOutcome::Ok { value } => {
