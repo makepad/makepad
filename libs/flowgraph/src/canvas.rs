@@ -372,46 +372,48 @@ script_mod! {
 
 /// The dark checkerboard: two greys a few percent apart, cell size and
 /// origin in local units so the pattern scales with the camera.
+/// Public instance fields let other canvases share this renderer.
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawFlowGrid {
     #[deref]
     draw_super: DrawQuad,
     #[live]
-    cell: f32,
+    pub cell: f32,
     #[live]
-    origin: Vec2f,
+    pub origin: Vec2f,
     #[live]
-    color_a: Vec4f,
+    pub color_a: Vec4f,
     #[live]
-    color_b: Vec4f,
+    pub color_b: Vec4f,
 }
 
 /// One card, including its shadow, so the shadow follows the card's exact
 /// transformed rectangle rather than a separately batched vector estimate.
+/// Public instance fields let sibling canvases customize the same node chrome.
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawFlowCard {
     #[deref]
     draw_super: DrawQuad,
     #[live]
-    color: Vec4f,
+    pub color: Vec4f,
     #[live]
-    border_color: Vec4f,
+    pub border_color: Vec4f,
     #[live]
-    border_size: f32,
+    pub border_size: f32,
     #[live]
-    border_radius: f32,
+    pub border_radius: f32,
     #[live]
-    outline_color: Vec4f,
+    pub outline_color: Vec4f,
     #[live]
-    outline_size: f32,
+    pub outline_size: f32,
     #[live]
-    shadow_color: Vec4f,
+    pub shadow_color: Vec4f,
     #[live]
-    shadow_radius: f32,
+    pub shadow_radius: f32,
     #[live]
-    shadow_offset: Vec2f,
+    pub shadow_offset: Vec2f,
 }
 
 #[derive(Clone, Debug)]

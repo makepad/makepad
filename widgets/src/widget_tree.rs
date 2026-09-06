@@ -93,6 +93,45 @@ fn widget_screen_rect(area: &Area, cx: &Cx) -> Option<Rect> {
     Some(rect)
 }
 
+/// Snapshot coordinates follow the rendered 2D draw-list transform. Areas
+/// intentionally retain local coordinates for canvas hosts' inverse-mapped
+/// input, so this conversion must not change `Area` or ordinary hit-testing.
+fn widget_snapshot_rect(area: &Area, cx: &Cx) -> Option<Rect> {
+    let rect = widget_screen_rect(area, cx)?;
+    let draw_list = &cx.draw_lists[area.draw_list_id()?];
+    // This is the final uniform consumed by the shader. Parent transforms are
+    // already assigned to children by set_view_transform, not composed here.
+    let matrix = draw_list.draw_list_uniforms.view_transform;
+    if matrix.v == Mat4f::identity().v {
+        return Some(rect);
+    }
+    if !matrix.v.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+    // Preserve the existing reporting for 3D/perspective lists: projecting
+    // those correctly also needs the pass camera and the widget's draw depth.
+    if matrix.v[3] != 0.0 || matrix.v[7] != 0.0 || matrix.v[11] != 0.0
+        || matrix.v[15] != 1.0 || matrix.v[8] != 0.0 || matrix.v[9] != 0.0
+    {
+        return Some(rect);
+    }
+    let mut min = dvec2(f64::INFINITY, f64::INFINITY);
+    let mut max = dvec2(f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for corner in [rect.pos, rect.pos + dvec2(rect.size.x, 0.0),
+        rect.pos + dvec2(0.0, rect.size.y), rect.pos + rect.size]
+    {
+        let point = dvec2(
+            corner.x * matrix.v[0] as f64 + corner.y * matrix.v[4] as f64 + matrix.v[12] as f64,
+            corner.x * matrix.v[1] as f64 + corner.y * matrix.v[5] as f64 + matrix.v[13] as f64,
+        );
+        if !point.x.is_finite() || !point.y.is_finite() { return None; }
+        min.x = min.x.min(point.x); min.y = min.y.min(point.y);
+        max.x = max.x.max(point.x); max.y = max.y.max(point.y);
+    }
+    let rect = Rect { pos: min, size: max - min };
+    (rect.size.x > 0.0 && rect.size.y > 0.0).then_some(rect)
+}
+
 // ============================================================================
 // WidgetTree: persistent graph + dense query index
 // ============================================================================
@@ -2300,7 +2339,7 @@ impl WidgetTree {
                 // Clipped geometry only — a row a `PortalList` drew past its
                 // viewport edge reports nothing rather than a full-size rect
                 // sitting on top of whatever really is drawn there.
-                match widget_screen_rect(&widget.area(), cx) {
+                match widget_snapshot_rect(&widget.area(), cx) {
                     Some(rect) => (
                         rect.pos.x.round() as i64,
                         rect.pos.y.round() as i64,
@@ -2928,6 +2967,65 @@ mod tests {
     use super::*;
     use crate::widget::{DrawStepApi, WidgetRef, WidgetUid};
     use crate::{DrawStep, Widget, WidgetNode};
+
+    fn snapshot_area(cx: &mut Cx) -> (DrawList, Area) {
+        let list = DrawList::new(cx);
+        let draw_list = &mut cx.draw_lists[list.id()];
+        draw_list.redraw_id = 1;
+        draw_list.rect_areas.push(CxRectArea {
+            rect: Rect { pos: dvec2(32768.0, 32768.0), size: dvec2(200.0, 100.0) },
+            draw_clip: (dvec2(32788.0, 32778.0), dvec2(32928.0, 32848.0)),
+        });
+        let area = Area::Rect(RectArea { draw_list_id: list.id(), rect_id: 0, redraw_id: 1 });
+        (list, area)
+    }
+
+    fn snapshot_camera() -> Mat4f {
+        let mut matrix = Mat4f::identity();
+        matrix.v[0] = 2.0;
+        matrix.v[5] = 2.0;
+        matrix.v[12] = -65000.0;
+        matrix.v[13] = -64900.0;
+        matrix
+    }
+
+    #[test]
+    fn snapshot_rect_applies_zoom_and_translation_after_local_clipping() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (list, area) = snapshot_area(&mut cx);
+        list.set_view_transform_self_only(&mut cx, &snapshot_camera());
+        assert_eq!(widget_snapshot_rect(&area, &cx), Some(Rect {
+            pos: dvec2(576.0, 656.0), size: dvec2(280.0, 140.0),
+        }));
+        // Canvas hit-testing still receives the original local rectangle.
+        assert_eq!(area.clipped_rect(&cx), Rect {
+            pos: dvec2(32788.0, 32778.0), size: dvec2(140.0, 70.0),
+        });
+    }
+
+    #[test]
+    fn snapshot_rect_identity_preserves_clipping_and_stale_visibility() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (list, area) = snapshot_area(&mut cx);
+        assert_eq!(widget_snapshot_rect(&area, &cx), widget_screen_rect(&area, &cx));
+        cx.draw_lists[list.id()].redraw_id = 2;
+        assert_eq!(widget_snapshot_rect(&area, &cx), None);
+    }
+
+    #[test]
+    fn snapshot_rect_uses_final_child_uniform_without_composing_its_parent() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let parent = DrawList::new(&mut cx);
+        let (child, area) = snapshot_area(&mut cx);
+        cx.draw_lists[child.id()].codeflow_parent_id = Some(parent.id());
+        // Draw-list transforms are absolute. Traversing this parent and
+        // multiplying again would send the reported child off the window.
+        parent.set_view_transform_self_only(&mut cx, &snapshot_camera());
+        child.set_view_transform_self_only(&mut cx, &snapshot_camera());
+        assert_eq!(widget_snapshot_rect(&area, &cx), Some(Rect {
+            pos: dvec2(576.0, 656.0), size: dvec2(280.0, 140.0),
+        }));
+    }
 
     // Minimal Widget impl for testing
     struct TestWidget {

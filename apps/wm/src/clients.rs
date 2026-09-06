@@ -162,8 +162,8 @@ fn curated() -> Vec<AppDef> {
             "studio",
             "Studio",
             "makepad-studio",
-            "studio/desktop",
-            "makepad-studio",
+            "apps/studio",
+            "studio",
             OrFocus,
         ),
     ]

@@ -248,16 +248,15 @@ impl ScriptHook for Dock {
         // Collect templates and dock items from the object's vec. Only
         // during template applies (not eval) to avoid storing temporaries.
         //
-        // On `Apply::Reload` we re-collect content templates — that's
-        // the point of reload: pick up freshly-evaluated `mod.widgets.*`
-        // entries. But dock-item entries (Splitter / Tabs / Tab) describe
-        // the *layout*, which at runtime may differ from the DSL defaults
-        // (tabs opened, splitters moved, etc.). Re-inserting from the DSL
-        // would clobber that runtime state and wipe the whole dock. On
-        // reload we therefore only insert dock items for IDs that don't
-        // already exist — allowing LiveEdit to add new default items while
-        // preserving runtime state for existing ones.
+        // Content templates follow both LiveEdit and style reapplication.
+        // Dock items describe the layout, which may no longer contain its
+        // initial panes or tabs. ScriptReapply must not reintroduce those
+        // missing IDs: a merged-away pane would become an orphan containing
+        // duplicate tabs, and a closed tab could reappear. Only a true
+        // LiveEdit reload may add new default layout items; existing runtime
+        // items remain unchanged as before.
         let is_reload = apply.is_reload();
+        let collect_layout = !apply.is_script_reapply();
         if !apply.is_eval() {
             if let Some(obj) = value.as_object() {
                 vm.vec_with(obj, |vm, vec| {
@@ -269,7 +268,9 @@ impl ScriptHook for Dock {
                                     val_obj,
                                     DockItemSplitter::script_type_id_static(),
                                 ) {
-                                    if !is_reload || !self.dock_items.contains_key(&id) {
+                                    if collect_layout
+                                        && (!is_reload || !self.dock_items.contains_key(&id))
+                                    {
                                         let splitter =
                                             DockItemSplitter::script_from_value(vm, kv.value);
                                         self.dock_items.insert(id, splitter.to_dock_item());
@@ -279,7 +280,9 @@ impl ScriptHook for Dock {
                                     .heap
                                     .type_matches_id(val_obj, DockItemTabs::script_type_id_static())
                                 {
-                                    if !is_reload || !self.dock_items.contains_key(&id) {
+                                    if collect_layout
+                                        && (!is_reload || !self.dock_items.contains_key(&id))
+                                    {
                                         let tabs = DockItemTabs::script_from_value(vm, kv.value);
                                         self.dock_items.insert(id, tabs.to_dock_item());
                                     }
@@ -288,7 +291,9 @@ impl ScriptHook for Dock {
                                     .heap
                                     .type_matches_id(val_obj, DockItemTab::script_type_id_static())
                                 {
-                                    if !is_reload || !self.dock_items.contains_key(&id) {
+                                    if collect_layout
+                                        && (!is_reload || !self.dock_items.contains_key(&id))
+                                    {
                                         let tab = DockItemTab::script_from_value(vm, kv.value);
                                         self.dock_items.insert(id, tab.to_dock_item());
                                     }
@@ -1426,80 +1431,112 @@ impl Dock {
     }
 
     fn handle_drop(&mut self, cx: &mut Cx, abs: Vec2d, item: LiveId, is_move: bool) -> bool {
-        if is_move && self.find_tab_bar_of_tab(item).is_none() {
+        let Some(pos) = self.find_drop_position(cx, abs) else {
+            return false;
+        };
+        self.handle_drop_position(cx, pos, item, is_move)
+    }
+
+    fn handle_drop_position(
+        &mut self,
+        cx: &mut Cx,
+        mut pos: DropPosition,
+        item: LiveId,
+        is_move: bool,
+    ) -> bool {
+        if is_move
+            && (!matches!(self.dock_items.get(&item), Some(DockItem::Tab { .. }))
+                || self.find_tab_bar_of_tab(item).is_none())
+        {
             return false;
         }
-        if let Some(mut pos) = self.find_drop_position(cx, abs) {
-            self.needs_save = true;
-            match pos.part {
-                DropPart::Left | DropPart::Right | DropPart::Top | DropPart::Bottom => {
-                    if is_move {
-                        if self.check_drop_is_noop(item, pos.id) {
-                            return false;
-                        }
-                        self.close_tab(cx, item, true);
-                        let Some(remapped_id) = self.remap_drop_tabs_after_move(pos.id) else {
-                            return false;
-                        };
-                        pos.id = remapped_id;
-                    } else if !matches!(self.dock_items.get(&pos.id), Some(DockItem::Tabs { .. })) {
-                        return false;
-                    }
-                    let new_tabs = self.next_internal_id();
-                    self.dock_items.insert(
-                        new_tabs,
-                        DockItem::Tabs {
-                            tabs: vec![item],
-                            closable: true,
-                            hide_tab_bar: false,
-                            selected: 0,
-                        },
-                    );
-                    if !self.split_tabs_container(cx, pos.id, new_tabs, pos.part) {
-                        self.dock_items.remove(&new_tabs);
-                        return false;
-                    }
-
-                    return true;
+        // Validate before detaching the source. A programmatic target need not
+        // have a drawn tab bar, but it must belong to the current layout.
+        match pos.part {
+            DropPart::Tab => {
+                if !matches!(self.dock_items.get(&pos.id), Some(DockItem::Tab { .. }))
+                    || self.find_tab_bar_of_tab(pos.id).is_none()
+                    || (is_move && pos.id == item)
+                {
+                    return false;
                 }
-                DropPart::Center => {
-                    if is_move {
-                        if self.check_drop_is_noop(item, pos.id) {
-                            return false;
-                        }
-                        self.close_tab(cx, item, true);
-                        let Some(remapped_id) = self.remap_drop_tabs_after_move(pos.id) else {
-                            return false;
-                        };
-                        pos.id = remapped_id;
-                    }
-                    return self.push_tab_into_tabs(cx, pos.id, item);
-                }
-                DropPart::TabBar => {
-                    if is_move {
-                        if self.check_drop_is_noop(item, pos.id) {
-                            return false;
-                        }
-                        self.close_tab(cx, item, true);
-                        let Some(remapped_id) = self.remap_drop_tabs_after_move(pos.id) else {
-                            return false;
-                        };
-                        pos.id = remapped_id;
-                    }
-                    return self.push_tab_into_tabs(cx, pos.id, item);
-                }
-                DropPart::Tab => {
-                    if is_move {
-                        if pos.id == item {
-                            return false;
-                        }
-                        self.close_tab(cx, item, true);
-                    }
-                    return self.insert_tab_before_tab(cx, pos.id, item);
+            }
+            _ => {
+                if !matches!(self.dock_items.get(&pos.id), Some(DockItem::Tabs { .. }))
+                    || (is_move && self.check_drop_is_noop(item, pos.id))
+                {
+                    return false;
                 }
             }
         }
-        false
+        self.needs_save = true;
+        match pos.part {
+            DropPart::Left | DropPart::Right | DropPart::Top | DropPart::Bottom => {
+                if is_move {
+                    self.close_tab(cx, item, true);
+                    let Some(remapped_id) = self.remap_drop_tabs_after_move(pos.id) else {
+                        return false;
+                    };
+                    pos.id = remapped_id;
+                }
+                let new_tabs = self.next_internal_id();
+                self.dock_items.insert(
+                    new_tabs,
+                    DockItem::Tabs {
+                        tabs: vec![item],
+                        closable: true,
+                        hide_tab_bar: false,
+                        selected: 0,
+                    },
+                );
+                if !self.split_tabs_container(cx, pos.id, new_tabs, pos.part) {
+                    self.dock_items.remove(&new_tabs);
+                    return false;
+                }
+                true
+            }
+            DropPart::Center | DropPart::TabBar => {
+                if is_move {
+                    self.close_tab(cx, item, true);
+                    let Some(remapped_id) = self.remap_drop_tabs_after_move(pos.id) else {
+                        return false;
+                    };
+                    pos.id = remapped_id;
+                }
+                self.push_tab_into_tabs(cx, pos.id, item)
+            }
+            DropPart::Tab => {
+                if is_move {
+                    self.close_tab(cx, item, true);
+                }
+                self.insert_tab_before_tab(cx, pos.id, item)
+            }
+        }
+    }
+
+    fn move_tab(&mut self, cx: &mut Cx, item: LiveId, target: LiveId, part: DropPart) -> bool {
+        if item == target || !matches!(self.dock_items.get(&target), Some(DockItem::Tab { .. })) {
+            return false;
+        }
+        let Some((target_tabs, _)) = self.find_tab_bar_of_tab(target) else {
+            return false;
+        };
+        let pos = DropPosition {
+            part,
+            id: if part == DropPart::Tab {
+                target
+            } else {
+                target_tabs
+            },
+            rect: Rect::default(),
+        };
+        if !self.handle_drop_position(cx, pos, item, true) {
+            return false;
+        }
+        self.select_tab(cx, target);
+        self.select_tab(cx, item);
+        self.area.redraw(cx);
+        true
     }
 
     fn drop_create(
@@ -2097,6 +2134,15 @@ impl DockRef {
         }
     }
 
+    /// Moves an existing tab relative to another tab without needing drawn
+    /// geometry. Edge parts split the target's pane, Center/TabBar append to
+    /// that pane, and Tab inserts before the target. Live tab bodies are kept.
+    /// Returns false for unknown tabs or a self target without changing layout.
+    pub fn move_tab(&self, cx: &mut Cx, item: LiveId, target: LiveId, part: DropPart) -> bool {
+        self.borrow_mut()
+            .is_some_and(|mut dock| dock.move_tab(cx, item, target, part))
+    }
+
     pub fn drop_create(
         &self,
         cx: &mut Cx,
@@ -2255,6 +2301,237 @@ impl DockRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dock_with_tabs(cx: &mut Cx) -> (DockRef, Vec<(LiveId, WidgetRef)>) {
+        cx.with_vm(crate::script_mod);
+        let dock = cx.with_vm(Dock::script_new);
+        let dock = WidgetRef::new_with_inner(Box::new(dock)).as_dock();
+        let mut bodies = Vec::new();
+        for id in [id!(first), id!(second), id!(third)] {
+            let body = cx.with_vm(crate::label::Label::script_new);
+            bodies.push((id, WidgetRef::new_with_inner(Box::new(body))));
+        }
+        {
+            let mut dock = dock.borrow_mut().unwrap();
+            dock.dock_items.insert(
+                id!(root),
+                DockItem::tabs(bodies.iter().map(|(id, _)| *id).collect(), 0, true),
+            );
+            for (id, body) in &bodies {
+                dock.dock_items.insert(
+                    *id,
+                    DockItem::tab(id.to_string(), id!(TestBody), id!(TestTab)),
+                );
+                dock.items.insert(*id, (id!(TestBody), body.clone()));
+            }
+        }
+        (dock, bodies)
+    }
+
+    fn assert_intact(dock: &DockRef, bodies: &[(LiveId, WidgetRef)], selected_tab: LiveId) {
+        let dock = dock.borrow().unwrap();
+        // Every container and tab remains reachable once; there are no empty
+        // panes left behind by repeatedly moving their final tab away.
+        let mut pending = vec![id!(root)];
+        let mut visited = std::collections::HashSet::new();
+        let mut selected_found = false;
+        while let Some(id) = pending.pop() {
+            assert!(visited.insert(id), "duplicate or cyclic node: {id}");
+            match dock.dock_items.get(&id).unwrap() {
+                DockItem::Splitter { a, b, .. } => pending.extend([*a, *b]),
+                DockItem::Tabs { tabs, selected, .. } => {
+                    assert!(!tabs.is_empty());
+                    assert!(*selected < tabs.len());
+                    selected_found |= tabs[*selected] == selected_tab;
+                    pending.extend(tabs.iter().copied());
+                }
+                DockItem::Tab { .. } => {}
+            }
+        }
+        assert_eq!(visited.len(), dock.dock_items.len());
+        assert!(selected_found);
+        for (id, original) in bodies {
+            let current = dock.item(*id).unwrap();
+            assert!(&current == original, "moving a tab replaced its live body");
+            assert!(current.borrow::<crate::label::Label>().is_some());
+        }
+    }
+
+    #[test]
+    fn identity_moves_repeatedly_split_and_merge_without_replacing_bodies() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (dock, bodies) = dock_with_tabs(&mut cx);
+        // These moves run before any draw, as required by automation tools.
+        for side in [
+            DropPart::Left,
+            DropPart::Right,
+            DropPart::Top,
+            DropPart::Bottom,
+        ] {
+            for merge in [DropPart::Center, DropPart::TabBar, DropPart::Tab] {
+                assert!(dock.move_tab(&mut cx, id!(second), id!(first), side));
+                assert_intact(&dock, &bodies, id!(second));
+                assert!(matches!(
+                    dock.borrow().unwrap().dock_items.get(&id!(root)),
+                    Some(DockItem::Splitter { .. })
+                ));
+                assert!(dock.move_tab(&mut cx, id!(second), id!(first), merge));
+                assert_intact(&dock, &bodies, id!(second));
+                assert_eq!(dock.borrow().unwrap().dock_items.len(), 4);
+                assert!(dock.check_and_clear_need_save());
+            }
+        }
+    }
+
+    #[test]
+    fn moving_the_last_source_tab_remaps_a_target_promoted_to_root() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (dock, bodies) = dock_with_tabs(&mut cx);
+        assert!(dock.move_tab(&mut cx, id!(first), id!(second), DropPart::Left));
+        // Closing the first tab's source collapses the root splitter. The
+        // target pane gets promoted to root before the new split is inserted.
+        assert!(dock.move_tab(&mut cx, id!(first), id!(third), DropPart::Bottom));
+        assert_intact(&dock, &bodies, id!(first));
+        assert!(dock.move_tab(&mut cx, id!(third), id!(first), DropPart::Tab));
+        assert!(dock.move_tab(&mut cx, id!(second), id!(first), DropPart::Center));
+        assert_intact(&dock, &bodies, id!(second));
+        let dock = dock.borrow().unwrap();
+        match dock.dock_items.get(&id!(root)).unwrap() {
+            DockItem::Tabs { tabs, selected, .. } => {
+                assert_eq!(tabs, &[id!(third), id!(first), id!(second)]);
+                assert_eq!(*selected, 2);
+            }
+            _ => panic!("all tabs should have merged back into the root pane"),
+        }
+    }
+
+    #[test]
+    fn invalid_identity_moves_leave_layout_and_dirty_state_unchanged() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (dock, bodies) = dock_with_tabs(&mut cx);
+        let layout = format!("{:?}", dock.borrow().unwrap().dock_items);
+        for part in [
+            DropPart::Left,
+            DropPart::Right,
+            DropPart::Top,
+            DropPart::Bottom,
+            DropPart::Center,
+            DropPart::TabBar,
+            DropPart::Tab,
+        ] {
+            for (item, target) in [
+                (id!(first), id!(first)),
+                (id!(missing), id!(first)),
+                (id!(first), id!(missing)),
+                (id!(root), id!(first)),
+                (id!(first), id!(root)),
+            ] {
+                assert!(!dock.move_tab(&mut cx, item, target, part));
+                assert_eq!(format!("{:?}", dock.borrow().unwrap().dock_items), layout);
+                assert!(!dock.check_and_clear_need_save());
+                assert_intact(&dock, &bodies, id!(first));
+            }
+        }
+    }
+
+    fn initial_style_test_dock(vm: &mut ScriptVm) -> ScriptValue {
+        crate::script_eval!(vm, {
+            use mod.widgets.*
+            Dock{
+                root := DockSplitter{
+                    axis: Horizontal align: SplitterAlign.FromA(216.0)
+                    a: @project_tabs b: @work_tabs
+                }
+                project_tabs := DockTabs{tabs: [@first] selected: 0 closable: true}
+                work_tabs := DockTabs{tabs: [@second @third] selected: 1 closable: true}
+                first := DockTab{name: "first" template: @CloseableTab kind: @Body}
+                second := DockTab{name: "second" template: @CloseableTab kind: @Body}
+                third := DockTab{name: "third" template: @CloseableTab kind: @Body}
+                Body := Label{text: "initial text"}
+            }
+        })
+    }
+
+    fn layout_fingerprint(dock: &DockRef) -> Vec<(u64, String)> {
+        let mut layout: Vec<_> = dock
+            .clone_state()
+            .unwrap()
+            .iter()
+            .map(|(id, item)| (id.0, item.serialize_ron()))
+            .collect();
+        layout.sort_by_key(|(id, _)| *id);
+        layout
+    }
+
+    #[test]
+    fn style_reapply_keeps_removed_default_panes_and_tabs_removed() {
+        use crate::desktop_style::{install, DesktopStyle, StyleSheet};
+
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let dock = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let value = initial_style_test_dock(vm);
+            Dock::script_from_value(vm, value)
+        });
+        let dock = WidgetRef::new_with_inner(Box::new(dock)).as_dock();
+        let first = dock.item(id!(first));
+        first.set_text(&mut cx, "unsaved live content");
+        assert!(dock.move_tab(&mut cx, id!(second), id!(first), DropPart::Center));
+        assert!(dock.move_tab(&mut cx, id!(third), id!(first), DropPart::Center));
+        // The merge removed both initial pane IDs by promoting their content
+        // to root. A closed default tab must not be resurrected either.
+        dock.close_tab(&mut cx, id!(second));
+        let runtime = dock
+            .create_and_select_tab(
+                &mut cx,
+                id!(root),
+                id!(runtime_tab),
+                id!(Body),
+                "runtime".into(),
+                id!(CloseableTab),
+                None,
+            )
+            .unwrap();
+        runtime.set_text(&mut cx, "runtime tab content");
+        assert!(dock.move_tab(&mut cx, id!(runtime_tab), id!(first), DropPart::Right));
+        let bodies = vec![
+            (id!(first), first),
+            (id!(third), dock.item(id!(third))),
+            (id!(runtime_tab), runtime),
+        ];
+        let layout = layout_fingerprint(&dock);
+        assert!(dock.check_and_clear_need_save());
+
+        for (style, dark) in [
+            (DesktopStyle::Windows, false),
+            (DesktopStyle::Macos, true),
+            (DesktopStyle::Macos, false),
+        ] {
+            cx.with_vm(|vm| {
+                install(vm, StyleSheet::load_with_appearance(style, dark));
+                vm.with_reload(crate::script_mod);
+                let value = initial_style_test_dock(vm);
+                dock.borrow_mut().unwrap().script_apply(
+                    vm,
+                    &Apply::ScriptReapply,
+                    &mut Scope::empty(),
+                    value,
+                );
+                assert!(vm.take_errors().is_empty());
+            });
+            assert_eq!(layout_fingerprint(&dock), layout, "{}", style.id());
+            assert_intact(&dock, &bodies, id!(runtime_tab));
+            assert!(!dock.check_and_clear_need_save());
+            assert!(dock.item(id!(second)).is_empty());
+            assert_eq!(dock.item(id!(first)).text(), "unsaved live content");
+            assert_eq!(dock.item(id!(runtime_tab)).text(), "runtime tab content");
+            let dock = dock.borrow().unwrap();
+            assert!(!dock.dock_items.contains_key(&id!(project_tabs)));
+            assert!(!dock.dock_items.contains_key(&id!(work_tabs)));
+            assert!(!dock.dock_items.contains_key(&id!(second)));
+            assert!(dock.templates.contains_key(&id!(Body)));
+        }
+    }
 
     #[test]
     fn preserving_layout_keeps_absent_and_matching_tab_bodies() {

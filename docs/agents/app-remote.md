@@ -54,6 +54,9 @@ and raw grabs are PNG. Errors carry an `err` field.
 | `/close?w=ID` | Close one window normally |
 | `/quit` | Graceful shutdown without a final grab |
 
+`/snap` entries include `window_id` and `enabled`, plus `selected` when the
+widget exposes a selection, alongside the compact `i`/`ty`/`r`/`w` fields.
+
 Query parameters are optional unless needed for the operation. Input routes
 accept `w=ID` to target a window and `wait=1` to answer after the next frame.
 With no window specified, routes generally use the first window.

@@ -54,30 +54,6 @@ let RunRelease = RunItem{
 }
 
 
-let RunStudio = RunItem{
-    on_run: fn(id){
-        hub.run(
-            {"STUDIO_HOST": hub.studio_local_host() "STUDIO_BUILD": id.to_string() "STUDIO_CRATE": self.name},
-            "cargo", 
-            ["run" "-p" "makepad-studio" "--release" "--message-format=json" "--" "--message-format=json"  "--bind=0.0.0.0" "--stdin-loop" "--mounts=makepad:./sub"
-            ],
-        )
-    }
-}
-
-let RunStudioExt = RunItem{
-    on_run: fn(id){
-        hub.run(
-            {"STUDIO_HOST": hub.studio_local_host() "STUDIO_BUILD": id.to_string() "STUDIO_CRATE": self.name},
-    RunStudioRelease{name: "makepad-clock"}
-    RunStudioRelease{name: "makepad-weather"}
-            "cargo", 
-            ["run" "-p" "makepad-studio" "--release" "--message-format=json" "--" "--message-format=json" "--bind=0.0.0.0"],
-        )
-    }    
-} 
-
-
 hub.set_run_items([
     RunStudioRelease{name: "makepad-example-hello-world"}
     RunStudioRelease{name: "makepad-example-aichat"}
@@ -93,6 +69,8 @@ hub.set_run_items([
     RunStudioRelease{name: "makepad-app-route"}
     RunStudioRelease{name: "makepad-app-asset-ui"}
     RunStudioRelease{name: "makepad-vj"}
+    RunStudioRelease{name: "makepad-clock"}
+    RunStudioRelease{name: "makepad-weather"}
     RunStudioRelease{name: "makepad-example-todo"}
     RunStudioRelease{name: "makepad-example-glass"}
     RunStudioRelease{name: "makepad-example-bugfix"}
@@ -100,8 +78,7 @@ hub.set_run_items([
     RunStudioRelease{name: "makepad-example-render-to-texture"}
     RunStudioRelease{name: "makepad-example-raytrace"}
     RunStudioRelease{name: "makepad-example-audio-playback-decode-probe"}
-    RunStudio{name: "makepad-studio"} 
-    RunStudioExt{name: "makepad-studio-ext"} 
+    RunStudioRelease{name: "makepad-studio"}
     RunStudioRelease{name: "makepad-example-xr"}
     RunStudioRelease{name: "makepad-example-cad"}
     RunStudioRelease{name: "makepad-fab"}

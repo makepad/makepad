@@ -13,7 +13,7 @@ use current source for API signatures and working examples.
 - When adding an example crate, update its Cargo workspace and
   `makepad.splash`.
 - Prefer `rg` / `rg --files` for source searches. Check existing patterns in
-  `widgets/src/`, `code_editor/`, and `studio/` before changing Splash syntax.
+  `widgets/src/`, `code_editor/`, and `apps/studio/` before changing Splash syntax.
   The archived `old/` tree is not the reference for current widget APIs.
 
 ## Builds and runtime verification

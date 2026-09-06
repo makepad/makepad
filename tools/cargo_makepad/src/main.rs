@@ -16,8 +16,6 @@ mod open_harmony;
 #[cfg(not(target_arch = "wasm32"))]
 mod server_manager;
 #[cfg(not(target_arch = "wasm32"))]
-mod studio;
-#[cfg(not(target_arch = "wasm32"))]
 mod tunnel;
 #[cfg(not(target_arch = "wasm32"))]
 mod utils;
@@ -43,8 +41,6 @@ pub use makepad_shell;
 pub use makepad_wasm_strip;
 #[cfg(not(target_arch = "wasm32"))]
 use open_harmony::*;
-#[cfg(not(target_arch = "wasm32"))]
-use studio::*;
 #[cfg(not(target_arch = "wasm32"))]
 use tunnel::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -286,18 +282,7 @@ fn show_help() {
         "    tunnel <ip:port> shell <command...>          Run remote shell command (requires --all on server)"
     );
     println!();
-    println!("Studio commands:");
-    println!();
-    println!(
-        "    studio [options]                              Start filtered newline-JSON studio remote websocket"
-    );
-    println!("    [options]:");
-    println!("       --studio=127.0.0.1:8001                   Studio server ip:port");
-    println!(
-        "                                                 (or set STUDIO_HOST=127.0.0.1:8001)"
-    );
-    println!();
-    println!();
+
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -332,7 +317,6 @@ fn main() -> Result<(), Cow<'static, str>> {
         "ohos" => handle_open_harmony(&args[1..]),
         "check" => handle_check(&args[1..]),
         "tunnel" => handle_tunnel(&args[1..]),
-        "studio" => handle_studio(&args[1..]),
         unsupported => {
             show_help();
             Err(format!("unsupported command: '{unsupported}'").into())
