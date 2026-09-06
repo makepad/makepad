@@ -60,12 +60,13 @@ script_mod! {
             let eff = max(want, vec2(1.0, 1.0))
             let cover = (want.x * want.y) / max(eff.x * eff.y, 0.000001)
             let size2 = eff / max(self.cam_scale, 0.000001)
-            let world_xy = self.tile_pos + (self.tile_size - size2) * 0.5 + self.geom.pos * size2
+            let world_xy = self.tile_pos + (self.tile_size - size2) * 0.5
             let scr = self.view_center + (world_xy - self.cam_pos) * self.cam_scale
             self.alpha_v = self.fade * cover
-            self.pos = self.geom.pos
-            self.world = self.draw_list.view_transform * vec4(scr.x, scr.y, self.draw_depth + self.draw_call.zbias, 1.)
-            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * self.world)
+            // Follow DrawQuad's clipping and view-shift path even though the
+            // rectangle comes from our camera. Overscan cells must not paint
+            // over siblings such as the photo search field while zooming.
+            self.vertex_pos = self.clip_and_transform_vertex(scr, eff)
         }
 
         pixel: fn() {
@@ -517,6 +518,15 @@ impl TileGrid {
         self.visible.len()
     }
 
+    /// Keep a preferred picture when it survives the filter, otherwise use
+    /// the first match. A compact presentation must never frame a hidden cell.
+    pub fn visible_item(&self, preferred: Option<ItemId>) -> Option<(ItemId, String)> {
+        let index = self.visible.iter().copied().find(|&i| Some(self.items[i].id) == preferred)
+            .or_else(|| self.visible.first().copied())?;
+        let item = &self.items[index];
+        Some((item.id, item.title.to_string()))
+    }
+
     /// Filter and reorder the wall as the person types: the matches
     /// (best first) are packed afresh and every picture flies from where
     /// it is to where it goes; the others shrink away, and an empty query
@@ -586,6 +596,16 @@ impl TileGrid {
     /// Glide the camera onto one picture so it fills most of the view.
     /// False when the id is not on the grid.
     pub fn show_item(&mut self, cx: &mut Cx, item: ItemId) -> bool {
+        self.frame_item(cx, item, false)
+    }
+
+    /// Fill the viewport with one picture, cropping around its centre.
+    /// Uses the resident wall camera and its existing resolution/LOD path.
+    pub fn cover_item(&mut self, cx: &mut Cx, item: ItemId) -> bool {
+        self.frame_item(cx, item, true)
+    }
+
+    fn frame_item(&mut self, cx: &mut Cx, item: ItemId, cover: bool) -> bool {
         let Some(found) = self.items.iter().find(|i| i.id == item) else {
             return false;
         };
@@ -593,11 +613,12 @@ impl TileGrid {
         if self.view_rect.size.x < 1.0 || self.view_rect.size.y < 1.0 {
             return false;
         }
-        let fit_x = self.view_rect.size.x * 0.7 / size.x.max(0.01) as f64;
-        let fit_y = self.view_rect.size.y * 0.7 / size.y.max(0.01) as f64;
+        let fill = if cover {1.01} else {0.7};
+        let fit_x = self.view_rect.size.x * fill / size.x.max(0.01) as f64;
+        let fit_y = self.view_rect.size.y * fill / size.y.max(0.01) as f64;
         self.zoom_anchor = None;
         self.user_moved = true;
-        self.cam_scale_t = fit_x.min(fit_y).clamp(self.min_scale, 6000.0);
+        self.cam_scale_t = (if cover {fit_x.max(fit_y)} else {fit_x.min(fit_y)}).clamp(self.min_scale, 6000.0);
         self.cam_pos_t = Vec2d { x: (pos.x + size.x * 0.5) as f64, y: (pos.y + size.y * 0.5) as f64 };
         if !self.cam_ready {
             self.cam_pos = self.cam_pos_t;

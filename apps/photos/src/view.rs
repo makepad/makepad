@@ -209,6 +209,7 @@ impl PhotosView {
             return;
         }
         self.mode = mode;
+        if mode == HostedViewMode::Tile {self.select_tile_picture(cx);}
         self.applied = None;
         self.arm_refocus(cx);
         self.view.redraw(cx);
@@ -227,6 +228,14 @@ impl PhotosView {
             cx.stop_timer(old);
         }
         self.refocus = Some(cx.start_timeout(REFOCUS_DELAY));
+    }
+
+    fn select_tile_picture(&mut self, cx: &mut Cx) {
+        let preferred = self.selected.as_ref().map(|s| s.item);
+        self.selected = self.view.widget(cx, ids!(grid)).borrow::<TileGrid>()
+            .and_then(|grid| grid.visible_item(preferred))
+            .map(|(item, title)| Selected {item, title});
+        self.applied = None;
     }
 
     /// Push the current face into the widgets, once per change.
@@ -274,6 +283,10 @@ impl PhotosView {
         if let Some((shown, total, q)) = counts {
             let text = filter_status(shown, total, &q, &self.library_root);
             self.set_status(cx, text);
+        }
+        if self.mode == HostedViewMode::Tile {
+            self.select_tile_picture(cx);
+            self.arm_refocus(cx);
         }
     }
 
@@ -504,7 +517,11 @@ impl Widget for PhotosView {
         if self.refocus.as_ref().is_some_and(|t| t.is_event(event).is_some()) {
             self.refocus = None;
             if let Some(item) = self.selected.as_ref().map(|s| s.item) {
-                self.show(cx, item);
+                if self.mode == HostedViewMode::Tile {
+                    if let Some(mut grid) = self.view.widget(cx, ids!(grid)).borrow_mut::<TileGrid>() {
+                        grid.cover_item(cx, item);
+                    }
+                } else {self.show(cx, item);}
             }
         }
         if matches!(event,Event::BackPressed{..}) && !self.query(cx).is_empty() && event.back_pressed() {
@@ -559,6 +576,10 @@ impl Widget for PhotosView {
                             if let Some(item) = wanted {
                                 self.show(cx, item);
                             }
+                        }
+                        if self.mode == HostedViewMode::Tile {
+                            self.select_tile_picture(cx);
+                            self.arm_refocus(cx);
                         }
                     }
                     TileGridAction::Opened { error: Some(e), .. } => {
