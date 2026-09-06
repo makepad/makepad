@@ -121,6 +121,10 @@ pub struct Browser;
 
 #[cfg(not(any(target_os = "macos", windows)))]
 impl Browser {
+    pub fn set_dark_mode(&mut self, _dark: bool) -> Result<()> {
+        Ok(())
+    }
+
     pub fn new(_url: &str, _width: usize, _height: usize, _scale_factor: f32) -> Result<Self> {
         Err(Error::new(
             "makepad-cef is only wired up for macOS and Windows right now",

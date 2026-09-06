@@ -100,6 +100,8 @@ pub struct WebView {
     suppress_next_paste_shortcut: bool,
     #[rust]
     pump_started: bool,
+    #[rust]
+    page_appearance: Option<(bool, u32)>,
 }
 
 /// Env-gated resize tracing (`MAKEPAD_BROWSER_TRACE=1`): timestamps + sizes on every
@@ -119,6 +121,33 @@ macro_rules! trace {
 
 impl WebView {
     const PUMP_INTERVAL: f64 = 1.0 / 120.0;
+
+    fn sync_page_appearance(&mut self, cx: &mut Cx) {
+        let palette = crate::palette();
+        let wanted = (palette.is_dark(), palette.page_background_argb());
+        if self.page_appearance == Some(wanted) { return; }
+        makepad_cef::set_background_color(wanted.1);
+        let mut applied = false;
+        for tab in &mut self.tabs.tabs {
+            if let Some(browser) = &mut tab.browser {
+                if let Err(error) = browser.set_dark_mode(wanted.0) {
+                    log!("browser: appearance: {error}");
+                    return;
+                }
+                applied = true;
+                if crate::theme::is_new_tab_url(&tab.url) {
+                    let url = palette.new_tab_url();
+                    let _ = browser.set_url(&url);
+                    tab.url = url;
+                }
+            }
+        }
+        if applied {
+            self.page_appearance = Some(wanted);
+            log!("browser: page color scheme {}", if wanted.0 {"dark"} else {"light"});
+            self.redraw(cx);
+        }
+    }
 
     // ------------------------------------------------------------------
     // Tab operations (called by the app from chrome actions / shortcuts)
@@ -302,7 +331,10 @@ impl WebView {
         };
         if tab.browser.is_none() && tab.init_error.is_none() {
             match makepad_cef::Browser::new(&tab.initial_url, width, height, dpi) {
-                Ok(browser) => {
+                Ok(mut browser) => {
+                    if let Err(error) = browser.set_dark_mode(crate::palette().is_dark()) {
+                        log!("browser: initial appearance: {error}");
+                    }
                     tab.browser = Some(browser);
                 }
                 Err(err) => {
@@ -701,6 +733,7 @@ impl WebView {
 
 impl Widget for WebView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        self.sync_page_appearance(cx);
         if let Event::Startup = event {
             if !self.pump_started {
                 self.pump_started = true;

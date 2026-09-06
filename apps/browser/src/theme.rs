@@ -121,6 +121,11 @@ impl Palette {
         parse_argb(&self.darker_background).unwrap_or(0xff20_2124)
     }
 
+    pub fn is_dark(&self) -> bool {
+        let c = parse_hex(&self.background).unwrap_or(vec4(0.0, 0.0, 0.0, 1.0));
+        0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z < 0.5
+    }
+
     /// The new-tab page: a data URL in the theme's colours, so a fresh tab
     /// never flashes white.
     pub fn new_tab_url(&self) -> String {

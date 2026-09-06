@@ -3174,6 +3174,43 @@ impl AppHandler {
 }
 
 impl Browser {
+    /// Select Chromium's native light/dark appearance for this profile.
+    /// Offscreen pages also need their media environment updated: they have
+    /// no native Chrome window to propagate the profile theme to Blink.
+    /// Call on the same UI thread that pumps CEF.
+    pub fn set_dark_mode(&mut self, dark: bool) -> Result<()> {
+        self.with_host(|host| unsafe {
+            let get = (*host).get_request_context
+                .ok_or_else(|| Error::new("CEF request context unavailable"))?;
+            let context = get(host);
+            if context.is_null() {
+                return Err(Error::new("CEF returned a null request context"));
+            }
+            let result = match (*context).set_chrome_color_scheme {
+                Some(set) => {
+                    set(context, if dark {ffi::CEF_COLOR_VARIANT_DARK} else {ffi::CEF_COLOR_VARIANT_LIGHT}, 0);
+                    Ok(())
+                }
+                None => Err(Error::new("CEF color scheme API unavailable")),
+            };
+            release_ref_counted(&mut (*context).base.base as *mut _);
+            result?;
+            let send = (*host).send_dev_tools_message
+                .ok_or_else(|| Error::new("CEF media environment API unavailable"))?;
+            // CEF's in-process protocol transport updates the renderer media
+            // environment. This opens no tools window, enables no debugger and
+            // leaves pages, CSS, navigation history and form state intact.
+            static NEXT_APPEARANCE_ID: AtomicU32 = AtomicU32::new(1);
+            let id = NEXT_APPEARANCE_ID.fetch_add(1, Ordering::Relaxed);
+            let value = if dark {"dark"} else {"light"};
+            let message = format!(r#"{{"id":{id},"method":"Emulation.setEmulatedMedia","params":{{"features":[{{"name":"prefers-color-scheme","value":"{value}"}}]}}}}"#);
+            if send(host, message.as_ptr().cast(), message.len()) == 0 {
+                return Err(Error::new("CEF rejected the page color scheme update"));
+            }
+            Ok(())
+        })
+    }
+
     fn with_host<T>(&self, f: impl FnOnce(*mut ffi::cef_browser_host_t) -> Result<T>) -> Result<T> {
         unsafe {
             let host = (*self.browser)
