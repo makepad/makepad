@@ -640,7 +640,10 @@ script_mod! {
             track: 0.0
             opacity: 0.0
             thickness: uniform(3.0)
-            border_radius: uniform(0.0)
+            /** corner radius; must stay above zero, since sdf.box's interior
+             * distance is twice the radius and a zero-radius box gets no fill
+             * coverage at all: the hairline was never painted 0.5..4 step 0.5 */
+            border_radius: uniform(1.5)
             gap: uniform(0.0)
             stop_indicator: uniform(0.0)
             sweep_width: uniform(0.35)
