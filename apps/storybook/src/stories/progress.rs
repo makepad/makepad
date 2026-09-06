@@ -103,13 +103,16 @@ script_mod! {
 
         StoryHeading{text: "Navigation progress"}
         StoryNote{text: "Start puts the line on screen and it trickles toward the end; Complete finishes and fades it."}
+        // Above the buttons, not below them: as the last child of the page the
+        // hairline sat past the bottom edge, so the one thing this section is
+        // about could not be seen at all.
+        nav := NavigationProgress{}
         StoryRow{
             nav_start := Button{text: "Start"}
             nav_step := Button{text: "Step"}
             nav_done := Button{text: "Complete"}
             nav_reset := Button{text: "Reset"}
         }
-        nav := NavigationProgress{}
     }
 
     mod.stories.ProgressBasic = StoryPage{
