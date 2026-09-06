@@ -4992,6 +4992,22 @@ impl WaveLane {
         self.position_at(now) * ZOOM_COLS_PER_SEC
     }
 
+    /// The zoom for ONE lane, from the shared one.
+    ///
+    /// The tiles are in SOURCE columns, so a record running fast crosses
+    /// more of them per second than a slow one. At a shared zoom that puts
+    /// two tempo-matched decks on screen at different beat widths, sliding
+    /// past each other at different speeds -- which is precisely what two
+    /// decks side by side are being looked at to compare. Scaling each
+    /// lane by what its own platter is turning at cancels the source
+    /// timebase out: a beat is the same number of pixels on both, and they
+    /// scroll together.
+    fn lane_zoom(cols_per_px: f32, rate: f64) -> f32 {
+        // A stopped or reversed deck keeps a readable zoom rather than
+        // collapsing the lane to a single column.
+        (cols_per_px as f64 * rate.abs().max(0.01)) as f32
+    }
+
     /// Beat period in tile columns, and a downbeat column, for the ruling.
     /// The grid is in SOURCE time, which is exactly the tile timebase, so
     /// the rate does not enter here — a tempo-matched deck rules the same
@@ -5531,6 +5547,7 @@ impl Widget for VjWaveScroll {
             let lane_rect = Rect { pos: dvec2(rect.pos.x, y), size: dvec2(rect.size.x, lane_h) };
             self.lane_rects[index] = lane_rect;
             let lane = &self.lanes[index];
+            let lane_cols = WaveLane::lane_zoom(cols_per_px, lane.rate);
             match lane.pyramid.as_ref() {
                 Some(pyramid) => {
                     self.draw_lane.draw_vars.set_texture(0, &pyramid.texture);
@@ -5539,7 +5556,7 @@ impl Widget for VjWaveScroll {
                     // Pick the pyramid levels this zoom needs and hand the
                     // shader their row offsets: the whole zoom is a uniform.
                     let (lo, lo_scale, hi, hi_scale, blend) =
-                        pyramid.levels_for(cols_per_px as f64);
+                        pyramid.levels_for(lane_cols as f64);
                     self.draw_lane.lo_row = lo.base_row as f32;
                     self.draw_lane.lo_cols = lo.cols.max(1) as f32;
                     self.draw_lane.lo_scale = lo_scale as f32;
@@ -5581,14 +5598,14 @@ impl Widget for VjWaveScroll {
             // and user zoom stay untouched while the in-shader head moves
             // through (and wraps inside) the highlighted source span.
             let raw_centre = self.loop_centres[index].filter(|_| moving_heads[index]).unwrap_or(head);
-            let columns_per_pixel = cols_per_px as f64;
+            let columns_per_pixel = lane_cols as f64;
             let centre = if columns_per_pixel > 0.0 {
                 (raw_centre / columns_per_pixel).round() * columns_per_pixel
             } else {
                 raw_centre
             };
             self.draw_lane.centre_col = centre as f32;
-            self.draw_lane.cols_per_px = cols_per_px;
+            self.draw_lane.cols_per_px = lane_cols;
             self.draw_lane.head_col = head as f32;
             self.draw_lane.head_on = if moving_heads[index] { 1.0 } else { 0.0 };
             set_loop_color_uniform(&mut self.draw_lane, cx, deck_accent(if index == 0 { DeckId::A } else { DeckId::B }));
@@ -5606,13 +5623,14 @@ impl Widget for VjWaveScroll {
         // direct-drawn over the same lane; the overlay remains one widget.
         for index in 0..2 {
             let lane = &self.lanes[index];
+            let lane_cols = WaveLane::lane_zoom(cols_per_px, lane.rate);
             let Some(slot) = lane.loop_slot.filter(|_| moving_heads[index]) else { continue };
             let Some((start, end)) = lane.loop_columns() else { continue };
             let centre = self.loop_centres[index].unwrap_or_else(|| lane.head_column_at(now));
             let start_x = rect.pos.x + rect.size.x * 0.5
-                + (start - centre) / cols_per_px.max(1e-4) as f64;
+                + (start - centre) / lane_cols.max(1e-4) as f64;
             let end_x = rect.pos.x + rect.size.x * 0.5
-                + (end - centre) / cols_per_px.max(1e-4) as f64;
+                + (end - centre) / lane_cols.max(1e-4) as f64;
             let lane_rect = self.lane_rects[index];
             if end_x < lane_rect.pos.x || start_x > lane_rect.pos.x + lane_rect.size.x {
                 continue;
@@ -5630,17 +5648,20 @@ impl Widget for VjWaveScroll {
         self.draw_text.color = Vec4f::from_u32(0x8e9aa7ff);
         let ruler = if self.lanes[0].grid.is_some() { 0 } else { 1 };
         let lane = &self.lanes[ruler];
+        let lane_cols = WaveLane::lane_zoom(cols_per_px, lane.rate);
         if let Some((beat_cols, phase)) = lane.grid_columns() {
             let bar_cols = beat_cols * 4.0;
             if bar_cols > 1.0 {
                 let centre = self.loop_centres[ruler]
                     .filter(|_| moving_heads[ruler])
                     .unwrap_or_else(|| lane.head_column_at(now));
-                let half_cols = self.zoom_secs * ZOOM_COLS_PER_SEC * 0.5;
+                // The columns this lane actually shows, which is its own
+                // zoom across the width -- not the shared one.
+                let half_cols = rect.size.x * lane_cols as f64 * 0.5;
                 let first = ((centre - half_cols - phase) / bar_cols).floor();
                 let last = ((centre + half_cols - phase) / bar_cols).ceil();
                 // Thin the labels out when the bars crowd together.
-                let px_per_bar = bar_cols / cols_per_px.max(1e-4) as f64;
+                let px_per_bar = bar_cols / lane_cols.max(1e-4) as f64;
                 let stride = if px_per_bar < 28.0 {
                     (28.0 / px_per_bar).ceil() as i64
                 } else {
@@ -5652,7 +5673,7 @@ impl Widget for VjWaveScroll {
                     if bar >= 0 && bar % stride == 0 {
                         let col = phase + bar as f64 * bar_cols;
                         let x = rect.pos.x + rect.size.x * 0.5
-                            + (col - centre) / cols_per_px.max(1e-4) as f64;
+                            + (col - centre) / lane_cols.max(1e-4) as f64;
                         if x >= rect.pos.x && x <= rect.pos.x + rect.size.x - 12.0 {
                             self.draw_text.draw_abs(
                                 cx,
@@ -8340,6 +8361,45 @@ mod tests {
             "bar phase {} vs {}",
             a_bars.rem_euclid(1.0),
             b_bars.rem_euclid(1.0)
+        );
+    }
+
+    /// The reason the zoom is per lane: two decks matched by ear must
+    /// match on screen too, or the picture contradicts the room.
+    #[test]
+    fn two_synced_decks_draw_their_beats_the_same_width() {
+        // A at 120 played straight; B at 100 played 1.2x, which is 120 to
+        // the ear. B's beat spans 1.2x more SOURCE columns, so only a zoom
+        // scaled by the rate puts them on the same pixels.
+        let a = lane(120.0, 0.0);
+        let b = WaveLane { grid: Some(grid(100.0, 0.0, 0)), rate: 1.2, ..lane(100.0, 0.0) };
+        let shared = 4.0f32;
+        let width = |lane: &WaveLane| {
+            lane.grid_columns().unwrap().0 / WaveLane::lane_zoom(shared, lane.rate) as f64
+        };
+        // A ten-thousandth of a pixel: the zoom reaches the shader as an
+        // f32, so exact equality is not a claim the type can keep, and
+        // anything this small is well under a screen pixel.
+        assert!(
+            (width(&a) - width(&b)).abs() < 1e-4,
+            "a beat is {} px on A and {} px on B",
+            width(&a),
+            width(&b)
+        );
+        // And the same rule makes them scroll together: pixels per second
+        // of AUDIBLE time is the same on both lanes.
+        let scroll = |lane: &WaveLane| {
+            ZOOM_COLS_PER_SEC * lane.rate / WaveLane::lane_zoom(shared, lane.rate) as f64
+        };
+        assert!((scroll(&a) - scroll(&b)).abs() < 1e-4, "{} vs {}", scroll(&a), scroll(&b));
+        // And the control: on ONE shared zoom they do not match at all, so
+        // the agreement above belongs to the scaling and not to the fixture.
+        let unscaled = |lane: &WaveLane| lane.grid_columns().unwrap().0 / shared as f64;
+        assert!(
+            (unscaled(&a) - unscaled(&b)).abs() > 1.0,
+            "shared zoom would draw {} px against {} px",
+            unscaled(&a),
+            unscaled(&b)
         );
     }
 
