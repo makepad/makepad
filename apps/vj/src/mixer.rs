@@ -27,11 +27,16 @@ use crate::decks::{crossfader_gains, DeckId, FadeCurve, ScratchMotion};
 use crate::loop_splat::{
     SplatGrid, SplatPart, SplatRow, SplatSnapshot, SPLAT_COLS, SPLAT_ROWS,
 };
+use crate::decks::SpinMotion;
 use crate::music_dsp::{
-    Autopan, Bitcrusher, Compressor, DeckEcho, DeckEq, Distortion, Flanger, FrameSource, Freeze,
+    knob64, Autopan, Bitcrusher, Compressor, DeckEcho, DeckEq, Distortion, Flanger, FrameSource, Freeze,
     LevelMode, MoogLadder, ParamRamp, Phaser, PlateReverb, RateReader, ScratchRamp, SlotLevel,
     StereoWidth, Stretcher, Tremolo, STEM_COUNT, STRETCH_BYPASS_EPSILON, STRETCH_ENGAGE_EPSILON,
     STRETCH_RATIO_MAX, STRETCH_RATIO_MIN, WSOLA_WINDOW,
+};
+use crate::music_dsp::{
+    MotorEnd, BRAKE_SECS, CENSOR_FLIP_SECS, CENSOR_RATE, CENSOR_RETURN_SECS, SOFT_START_SECS,
+    SPINBACK_FALL_SECS, SPINBACK_PEAK, SPINBACK_THROW_SECS,
 };
 use crate::wave_analysis::{DeckClock, TrackGrid};
 use crate::pads::{PadKey, VoiceAlloc, VoiceId};
@@ -1020,6 +1025,127 @@ impl EffectKind {
     }
 }
 
+/// rate, whatever the real head is doing -- paused, scratched, jumped,
+/// looping or run off the end. Letting slip go lands the deck on it, so
+/// the track carries on as if the detour never happened.
+#[derive(Clone, Copy, Debug)]
+struct Ghost {
+    /// Where it has got to, in source frames.
+    pos: f64,
+    /// Source frames per device frame, latched at arm time: a buffer is one
+    /// multiply, and the ghost does not chase a tempo the hand is moving.
+    step: f64,
+    /// The span the ghost wraps through, if one was running when slip was
+    /// armed. A loop engaged AFTER arming -- the roll being slipped over --
+    /// deliberately does not catch it.
+    span: Option<(f64, f64)>,
+}
+
+/// The ghosts a stack of rolls is keeping, newest last.
+///
+/// Each level latches the span that was running when THAT level engaged,
+/// so releasing level two lands where level one's playback would have
+/// been, and releasing level one lands where the record would have been.
+#[derive(Clone, Copy, Default)]
+struct RollGhosts {
+    ghosts: [Option<Ghost>; ROLL_STACK_CAP],
+    len: usize,
+}
+
+impl RollGhosts {
+    fn push(&mut self, ghost: Ghost) -> bool {
+        if self.len >= ROLL_STACK_CAP {
+            return false;
+        }
+        self.ghosts[self.len] = Some(ghost);
+        self.len += 1;
+        true
+    }
+
+    fn pop(&mut self) -> Option<Ghost> {
+        if self.len == 0 {
+            return None;
+        }
+        self.len -= 1;
+        self.ghosts[self.len].take()
+    }
+
+    fn clear(&mut self) {
+        *self = RollGhosts::default();
+    }
+
+    /// Advance every level. Once per deck per buffer, never per frame.
+    fn advance(&mut self, frames: f64) {
+        for ghost in self.ghosts.iter_mut().take(self.len).flatten() {
+            ghost.pos += ghost.step * frames;
+            if let Some((start, end)) = ghost.span {
+                if ghost.pos >= end {
+                    ghost.pos = wrapped_into_span(ghost.pos, start, end);
+                }
+            }
+        }
+    }
+}
+
+/// Fold a playhead back inside a span, keeping the overshoot.
+///
+/// Modulo rather than a reset to IN: resetting discards up to a step per
+/// lap, so a held loop walks audibly early, and it is also what catches a
+/// playhead stranded past OUT by a live resize -- modulo continues the
+/// subdivision in phase instead of re-triggering the downbeat at IN.
+///
+/// One function because there are three callers now: the render's wrap,
+/// the resize that catches a paused deck, and slip's ghost, which has to
+/// wrap exactly the way the real head does or the two land apart.
+pub(crate) fn wrapped_into_span(pos: f64, start: f64, end: f64) -> f64 {
+    let len = (end - start).max(1.0);
+    start + (pos - start).rem_euclid(len)
+}
+
+/// The source-seconds-per-output-second this voice is turning at right
+/// now: a running splat owns it outright (1.0, whatever the fader says),
+/// a hand or a motor owns it next, the fader otherwise -- and a deck with
+/// nothing to play turns at nothing.
+///
+/// Shared by the render prelude and by every setter that has to answer
+/// the same question between callbacks, so the two can never disagree.
+fn deck_platter(voice: &DeckVoice) -> f64 {
+    if voice.frame_count() == 0 {
+        0.0
+    } else if voice.splat.as_ref().is_some_and(|splat| splat.active) {
+        1.0
+    } else if voice.scratch.active() {
+        voice.scratch.rate() as f64
+    } else {
+        voice.rate.current() as f64
+    }
+}
+
+/// Latch a ghost at the deck's own playhead and rate.
+///
+/// Latched rather than followed: a ghost that chased the tempo fader
+/// would drift away from where the record would actually have been,
+/// which is the one thing it exists to remember. `false` when there is
+/// already one, when there is nothing loaded, or before the first
+/// callback has given us a device rate to latch a step from -- a ghost
+/// that cannot move is worse than none.
+fn arm_ghost(d: &mut DeckVoice, device_rate: f64) -> bool {
+    if d.slip.is_some() {
+        return false;
+    }
+    let Some(pcm) = d.pcm.as_ref() else { return false };
+    if !(device_rate > 0.0) {
+        return false;
+    }
+    let natural = pcm.sample_rate().max(1) as f64 / device_rate;
+    d.slip = Some(Ghost {
+        pos: d.playhead_frames(),
+        step: natural * d.rate.current() as f64,
+        span: d.loop_span,
+    });
+    true
+}
+
 /// Where one rendered buffer's time went. Three phases and not five: the
 /// render is ONE frame loop with no sequential per-source block to time,
 /// and timing sources would mean a clock read per source per SAMPLE,
@@ -1313,6 +1439,32 @@ struct DeckVoice {
     seek_fade: Option<SeekFade>,
     gain: Ramp,
     mute: Ramp,
+    /// Play and pause as a FADE, not a switch. A deck that stopped
+    /// contributing on the instant the flag changed stepped straight to
+    /// zero, which is the loudest click a transport can make.
+    ///
+    /// Separate from `gain` and `mute` because those are the operator's:
+    /// folding a transport fade into either would fight the hand on the
+    /// fader and would be undone by the next thing that touched it.
+    transport: Ramp,
+    /// The slip ghost: where the record WOULD be, advancing at its own
+    /// latched rate whatever the real head is doing. Letting slip go lands
+    /// the deck on it, so the track carries on as if the detour never
+    /// happened.
+    slip: Option<Ghost>,
+    /// The censor armed the ghost, so releasing the censor puts it away
+    /// again. A ghost the operator armed with SLIP outlives the censor.
+    censor_owns_slip: bool,
+    /// The rolls held over one another, newest last.
+    rolls: RollGhosts,
+    /// Where the playhead was when pause was pressed, held until the fade
+    /// reaches silence and then given back.
+    ///
+    /// Fading means reading and reading means advancing, so without this a
+    /// pause leaves the record a few milliseconds past where the button
+    /// went down. A deliberate seek cancels the promise -- see the brake,
+    /// which is the one stop that means to keep the ground it covered.
+    pause_at: Option<f64>,
     ended: bool,
     /// Tempo multiplier from the tempo slider / sync.
     rate: ParamRamp,
@@ -1358,6 +1510,11 @@ impl DeckVoice {
             seek_fade: None,
             gain: Ramp::at(1.0),
             mute: Ramp::at(1.0),
+            transport: Ramp::at(0.0),
+            slip: None,
+            censor_owns_slip: false,
+            rolls: RollGhosts::default(),
+            pause_at: None,
             ended: false,
             rate: ParamRamp::at(1.0),
             key_ratio: ParamRamp::at(1.0),
@@ -2106,6 +2263,15 @@ pub enum MixCmd {
     /// [`EffectParam`] for why they share a variant.
     DeckEffect { deck: DeckId, param: EffectParam },
     SetGrid { deck: DeckId, grid: Option<TrackGrid> },
+    SetSlip { deck: DeckId, on: bool, adopt: bool },
+    SetCensor { deck: DeckId, on: bool },
+    PushRoll { deck: DeckId },
+    PopRoll { deck: DeckId, parent: Option<(f64, f64)>, adopt: bool },
+    Spin { deck: DeckId, motion: SpinMotion },
+    /// Source seconds to hold, or none to let go. The conversion into
+    /// OUTPUT seconds happens on the audio side, where the platter's own
+    /// rate and the device rate both already live.
+    SetFreeze { deck: DeckId, secs: Option<f64> },
     SwapDecks,
     SetCrossfader { position: f32, secs: f32 },
     SetBlendBand { deck: DeckId, band: usize, gain: f32 },
@@ -2336,6 +2502,10 @@ struct DeckShadow {
     streaming: bool,
     rate: f64,
     sync_locked: bool,
+    /// What the UI last asked for, so a read answers now rather than a
+    /// callback later.
+    slipping: bool,
+    roll_depth: usize,
 }
 
 /// The UI-side handle. `Clone`, cheap, and never blocks: every mutation is
@@ -2813,6 +2983,10 @@ impl Mixer {
                 streaming: matches!(pcm, DeckPcm::Stream(_)),
                 rate: ui.deck[deck.index()].rate,
                 sync_locked: ui.deck[deck.index()].sync_locked,
+                // A fresh record inherits no detour: whatever the last one
+                // was slipping or rolling over went with it.
+                slipping: false,
+                roll_depth: 0,
             };
             Self::send_in(&self.shared, ui, MixCmd::InstallDeck { deck, pcm });
         });
@@ -3023,6 +3197,58 @@ impl Mixer {
     /// The grid this record is ruled by. Everything beat-locked reads the
     /// clock it makes, so a track that has just been measured starts
     /// locking without waiting for anything else to happen.
+    /// Slip: the record keeps its own time while the hand takes the deck
+    /// somewhere else. `adopt` keeps where it was left instead of landing
+    /// back on the ghost.
+    pub fn set_deck_slip(&self, deck: DeckId, on: bool, adopt: bool) {
+        self.ui.with(|ui| {
+            ui.deck[deck.index()].slipping = on;
+            Self::send_in(&self.shared, ui, MixCmd::SetSlip { deck, on, adopt });
+        });
+    }
+
+    pub fn deck_slipping(&self, deck: DeckId) -> bool {
+        self.ui.with(|ui| ui.deck[deck.index()].slipping)
+    }
+
+    pub fn set_deck_censor(&self, deck: DeckId, on: bool) {
+        self.run_cmd(MixCmd::SetCensor { deck, on });
+    }
+
+    /// Stack another roll over what is already held. `false` when the
+    /// stack is full -- the caller needs to know at once, so the answer
+    /// comes from the shadow rather than a callback later.
+    pub fn push_deck_roll(&self, deck: DeckId) -> bool {
+        self.ui.with(|ui| {
+            let depth = &mut ui.deck[deck.index()].roll_depth;
+            if *depth >= ROLL_STACK_CAP {
+                return false;
+            }
+            *depth += 1;
+            Self::send_in(&self.shared, ui, MixCmd::PushRoll { deck });
+            true
+        })
+    }
+
+    pub fn pop_deck_roll(&self, deck: DeckId, parent: Option<(f64, f64)>, adopt: bool) {
+        self.ui.with(|ui| {
+            let depth = &mut ui.deck[deck.index()].roll_depth;
+            *depth = if adopt { 0 } else { depth.saturating_sub(1) };
+            Self::send_in(&self.shared, ui, MixCmd::PopRoll { deck, parent, adopt });
+        });
+    }
+
+    /// Brake, spin-back or soft-start: the motors that move the platter
+    /// with no hand on it.
+    pub fn spin_deck(&self, deck: DeckId, motion: SpinMotion) {
+        self.run_cmd(MixCmd::Spin { deck, motion });
+    }
+
+    /// Hold this many SOURCE seconds, or none to let go.
+    pub fn set_deck_freeze(&self, deck: DeckId, secs: Option<f64>) {
+        self.run_cmd(MixCmd::SetFreeze { deck, secs });
+    }
+
     pub fn set_deck_grid(&self, deck: DeckId, grid: Option<TrackGrid>) {
         self.run_cmd(MixCmd::SetGrid { deck, grid });
     }
@@ -4126,7 +4352,9 @@ impl MixEngine {
                     }
                     d.ended = false;
                 }
+                d.pause_at = if playing { None } else { Some(d.playhead_frames()) };
                 d.playing = playing;
+                d.transport.slew(if playing { 1.0 } else { 0.0 }, SLEW_SECS);
             }
             MixCmd::SetSplat { deck, grid, frames } => {
                 let voice = &mut s.decks[deck.index()];
@@ -4262,6 +4490,153 @@ impl MixEngine {
             }
             MixCmd::DeckEffect { deck, param } => {
                 Self::apply_effect(&mut s.decks[deck.index()].chain, param)
+            }
+            MixCmd::SetSlip { deck, on, adopt } => {
+                let device = f64::from_bits(shared.device_rate_bits.load(Ordering::Acquire));
+                let d = &mut s.decks[deck.index()];
+                if on {
+                    arm_ghost(d, device);
+                } else if let Some(ghost) = d.slip.take() {
+                    // ADOPT keeps where the hand left the record; otherwise
+                    // the deck lands on the ghost and the detour never
+                    // happened.
+                    if !adopt {
+                        let from = d.playhead_frames();
+                        d.seek_frames(ghost.pos);
+                        d.pause_at = None;
+                        d.arm_seek_fade(from);
+                    }
+                }
+            }
+            MixCmd::SetCensor { deck, on } => {
+                let device = f64::from_bits(shared.device_rate_bits.load(Ordering::Acquire));
+                let d = &mut s.decks[deck.index()];
+                if on {
+                    // A hand on the record outranks a motor.
+                    if d.scratch.held() {
+                        return;
+                    }
+                    // Armed ONCE: asking twice would arm a ghost and then
+                    // report that it had not, and every hold would leak the
+                    // one it made.
+                    let armed = arm_ghost(d, device);
+                    // With nothing to return to, a reverse hold is just a
+                    // scratch.
+                    if !armed && d.slip.is_none() {
+                        return;
+                    }
+                    d.censor_owns_slip = armed;
+                    let from = d.rate.current();
+                    d.scratch.motor(from, CENSOR_RATE, CENSOR_FLIP_SECS, MotorEnd::Hold);
+                } else {
+                    let to = d.rate.current();
+                    d.scratch.motor(d.scratch.rate(), to, CENSOR_RETURN_SECS, MotorEnd::Retire);
+                    if let Some(ghost) = d.slip.take().filter(|_| d.censor_owns_slip) {
+                        let from = d.playhead_frames();
+                        d.seek_frames(ghost.pos);
+                        d.pause_at = None;
+                        d.arm_seek_fade(from);
+                        d.censor_owns_slip = false;
+                    } else if d.censor_owns_slip {
+                        d.censor_owns_slip = false;
+                    }
+                }
+            }
+            MixCmd::PushRoll { deck } => {
+                let device = f64::from_bits(shared.device_rate_bits.load(Ordering::Acquire));
+                let d = &mut s.decks[deck.index()];
+                let Some(pcm) = d.pcm.as_ref() else { return };
+                if !(device > 0.0) {
+                    return;
+                }
+                let natural = pcm.sample_rate().max(1) as f64 / device;
+                let ghost = Ghost {
+                    pos: d.playhead_frames(),
+                    step: natural * d.rate.current() as f64,
+                    span: d.loop_span,
+                };
+                d.rolls.push(ghost);
+            }
+            MixCmd::PopRoll { deck, parent, adopt } => {
+                let d = &mut s.decks[deck.index()];
+                if adopt {
+                    // The loop now sounding is the deck's: every level under
+                    // it stands down, and nothing goes back.
+                    d.rolls.clear();
+                    return;
+                }
+                let Some(ghost) = d.rolls.pop() else { return };
+                let Some(pcm) = d.pcm.as_ref() else { return };
+                let rate = pcm.sample_rate().max(1) as f64;
+                let frames = d.frame_count() as f64;
+                d.loop_span = parent
+                    .map(|(start, end)| (start.max(0.0) * rate, (end.max(0.0) * rate).min(frames)));
+                let from = d.playhead_frames();
+                d.seek_frames(ghost.pos);
+                d.pause_at = None;
+                d.arm_seek_fade(from);
+            }
+            MixCmd::Spin { deck, motion } => {
+                let d = &mut s.decks[deck.index()];
+                let deck_rate = d.rate.current();
+                match motion {
+                    SpinMotion::Brake | SpinMotion::SpinBack => {
+                        d.playing = false;
+                        // CLEARING THIS IS THE POINT. A stop normally hands
+                        // back the frames its fade sounded, so the playhead
+                        // stays where the button was pressed. A brake is the
+                        // opposite: the record travelled while it wound down,
+                        // and it stays where it stopped.
+                        d.pause_at = None;
+                        d.ended = false;
+                        let (target, secs, end, total) = match motion {
+                            SpinMotion::SpinBack => (
+                                SPINBACK_PEAK,
+                                SPINBACK_THROW_SECS,
+                                MotorEnd::Then(0.0, SPINBACK_FALL_SECS),
+                                SPINBACK_THROW_SECS + SPINBACK_FALL_SECS,
+                            ),
+                            _ => (0.0, BRAKE_SECS, MotorEnd::Retire, BRAKE_SECS),
+                        };
+                        d.scratch.motor(deck_rate, target, secs, end);
+                        // The gain falls as the pitch does, so the record is
+                        // silent exactly when it has stopped rather than
+                        // before it.
+                        d.transport.slew(0.0, total);
+                    }
+                    SpinMotion::SoftStart => {
+                        d.playing = true;
+                        d.ended = false;
+                        d.pause_at = None;
+                        d.scratch.spin_up_from(0.0, deck_rate, SOFT_START_SECS);
+                        d.transport.slew(1.0, SLEW_SECS);
+                    }
+                }
+            }
+            MixCmd::SetFreeze { deck, secs } => {
+                let device = f64::from_bits(shared.device_rate_bits.load(Ordering::Acquire));
+                let d = &mut s.decks[deck.index()];
+                match secs {
+                    Some(source_secs) => {
+                        if d.pcm.is_none() || !d.playing || !(device > 0.0) {
+                            return;
+                        }
+                        // Source seconds become output seconds through the
+                        // platter's OWN rate: under a hand, a motor or a
+                        // reverse hold that is the number that matters, and
+                        // the tempo fader is not it. A stopped platter has no
+                        // beat arriving to be the size of, so it falls back
+                        // to unity rather than dividing by zero.
+                        let platter = d.clock.platter_rate.abs();
+                        let held = match platter > 1e-6 {
+                            true => source_secs / platter,
+                            false => source_secs,
+                        };
+                        let Some(held) = knob64(held, 0.0, 60.0) else { return };
+                        d.chain.freeze_mut().hold((held * device) as usize, device as f32);
+                    }
+                    None => d.chain.freeze_mut().release(),
+                }
             }
             MixCmd::SetGrid { deck, grid } => {
                 let d = &mut s.decks[deck.index()];
@@ -4629,7 +5004,15 @@ impl MixEngine {
                 true => voice.pos / source_rate,
                 false => 0.0,
             };
-            let travel_secs = platter * frames as f64 / device_rate;
+            // Only a voice that will actually READ travels. A parked deck
+            // whose fade has landed goes nowhere, and predicting travel for
+            // it would walk its clock away from its playhead.
+            let reads = voice.scratch.active()
+                || !(voice.transport.current <= 0.0 && (!voice.playing || voice.ended));
+            let travel_secs = match reads {
+                true => platter * frames as f64 / device_rate,
+                false => 0.0,
+            };
             voice.clock = DeckClock::at(voice.grid.as_ref(), pos_secs, platter, travel_secs);
             let clock = voice.clock;
             // One call for the whole chain rather than a list per stage:
@@ -4637,6 +5020,20 @@ impl MixEngine {
             // of the same calls is how one of them quietly stops getting a
             // new effect's preparation.
             voice.chain.prepare_block(&clock, rate, frames);
+            // The ghosts move HERE, once per buffer, and not in the frame
+            // loop below: their rate is latched so a buffer is one
+            // multiply, and the read path has four early exits (no pcm,
+            // empty pcm, splat running, paused and faded) that a ghost must
+            // not be caught by. It runs whatever the record is doing.
+            if let Some(ghost) = voice.slip.as_mut() {
+                ghost.pos += ghost.step * frames as f64;
+                if let Some((start, end)) = ghost.span {
+                    if ghost.pos >= end {
+                        ghost.pos = wrapped_into_span(ghost.pos, start, end);
+                    }
+                }
+            }
+            voice.rolls.advance(frames as f64);
         }
         s.score_preview.render_block(frames, device_rate);
         s.synth.render_block(buffer_start, frames, device_rate);
@@ -4715,7 +5112,16 @@ impl MixEngine {
             let mut deck_out = [(0.0f32, 0.0f32); 2];
             let mut cue = (0.0f32, 0.0f32);
             for (i, d) in s.decks.iter_mut().enumerate() {
-                let gain = d.gain.tick(rate) * d.mute.tick(rate);
+                let transport = d.transport.tick(rate);
+                if transport <= 0.0 {
+                    if let Some(at) = d.pause_at.take() {
+                        // The fade is over and nothing is audible: give back
+                        // the frames it sounded, so pause leaves the
+                        // playhead exactly where it was pressed.
+                        d.seek_frames(at);
+                    }
+                }
+                let gain = d.gain.tick(rate) * d.mute.tick(rate) * transport;
                 let side = if i == 0 { fader.0 } else { fader.1 };
                 let deck_rate = d.rate.tick(rate);
                 let key_ratio = d.key_ratio.tick(rate) as f64;
@@ -4777,8 +5183,11 @@ impl MixEngine {
                     continue;
                 }
                 // A hand on the record plays even a paused deck; that is the
-                // whole point of scrubbing.
-                if !scratching && (!d.playing || d.ended) {
+                // whole point of scrubbing. And a deck whose transport has
+                // not reached silence is still sounding, so it still reads:
+                // that is what makes the fade a fade rather than a shorter
+                // click.
+                if !scratching && transport <= 0.0 && (!d.playing || d.ended) {
                     continue;
                 }
                 let source = DeckSource {
