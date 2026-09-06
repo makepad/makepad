@@ -1121,6 +1121,19 @@ fn deck_platter(voice: &DeckVoice) -> f64 {
     }
 }
 
+/// A load waiting out the outgoing record's fade.
+///
+/// The point is WHICH track fades. Swapping the PCM on the instant the
+/// decode lands ends the old one mid-sample; parking it here and
+/// installing when the transport reaches silence means the track being
+/// replaced is the one the room hears leave.
+struct PendingLoad {
+    pcm: DeckPcm,
+    /// What the operator asked for: keep playing through the swap, or
+    /// take the deck and stop.
+    play: bool,
+}
+
 /// Latch a ghost at the deck's own playhead and rate.
 ///
 /// Latched rather than followed: a ghost that chased the tempo fader
@@ -1204,6 +1217,11 @@ impl AudioHealth {
 /// How many loop rolls can be stacked before the oldest is dropped. A
 /// hand can hold a few at once; past that the stack is a leak.
 pub const ROLL_STACK_CAP: usize = 4;
+
+/// How long a record takes to leave when another is loaded over it.
+/// Forty milliseconds: long enough not to click, short enough that the
+/// deck feels like it took the load immediately.
+const LOAD_SWAP_SECS: f32 = 0.040;
 
 const DECK_CHAIN_SLOTS: usize = 13;
 
@@ -1457,6 +1475,8 @@ struct DeckVoice {
     censor_owns_slip: bool,
     /// The rolls held over one another, newest last.
     rolls: RollGhosts,
+    /// A record waiting for this one to finish leaving.
+    pending: Option<PendingLoad>,
     /// Where the playhead was when pause was pressed, held until the fade
     /// reaches silence and then given back.
     ///
@@ -1514,6 +1534,7 @@ impl DeckVoice {
             slip: None,
             censor_owns_slip: false,
             rolls: RollGhosts::default(),
+            pending: None,
             pause_at: None,
             ended: false,
             rate: ParamRamp::at(1.0),
@@ -2272,6 +2293,8 @@ pub enum MixCmd {
     /// OUTPUT seconds happens on the audio side, where the platter's own
     /// rate and the device rate both already live.
     SetFreeze { deck: DeckId, secs: Option<f64> },
+    InstallOver { deck: DeckId, pcm: DeckPcm, keep_playing: bool },
+    CloneDeck { from: DeckId, to: DeckId },
     SwapDecks,
     SetCrossfader { position: f32, secs: f32 },
     SetBlendBand { deck: DeckId, band: usize, gain: f32 },
@@ -3209,6 +3232,48 @@ impl Mixer {
 
     pub fn deck_slipping(&self, deck: DeckId) -> bool {
         self.ui.with(|ui| ui.deck[deck.index()].slipping)
+    }
+
+    /// Load over a deck that is still sounding. The outgoing record fades
+    /// out first and the new one is seated when it has gone -- a swap on
+    /// the instant the decode lands ends the old track mid-sample.
+    pub fn install_deck_over(&self, deck: DeckId, pcm: Arc<TrackPcm>, keep_playing: bool) {
+        let pcm = DeckPcm::Whole(pcm);
+        self.ui.with(|ui| {
+            ui.deck[deck.index()] = DeckShadow {
+                sample_rate: pcm.sample_rate(),
+                expected_len: pcm.expected_len(),
+                has_pcm: true,
+                streaming: false,
+                rate: ui.deck[deck.index()].rate,
+                sync_locked: ui.deck[deck.index()].sync_locked,
+                slipping: false,
+                roll_depth: 0,
+            };
+            Self::send_in(&self.shared, ui, MixCmd::InstallOver { deck, pcm, keep_playing });
+        });
+    }
+
+    /// The instant double: the same record on the other deck, at the same
+    /// place, reading the same PCM.
+    pub fn clone_deck(&self, from: DeckId, to: DeckId) {
+        if from == to {
+            return;
+        }
+        self.ui.with(|ui| {
+            let src = ui.deck[from.index()];
+            if !src.has_pcm {
+                return;
+            }
+            ui.deck[to.index()] = DeckShadow {
+                slipping: false,
+                roll_depth: 0,
+                rate: ui.deck[to.index()].rate,
+                sync_locked: ui.deck[to.index()].sync_locked,
+                ..src
+            };
+            Self::send_in(&self.shared, ui, MixCmd::CloneDeck { from, to });
+        });
     }
 
     pub fn set_deck_censor(&self, deck: DeckId, on: bool) {
@@ -4182,6 +4247,43 @@ impl MixEngine {
         }
     }
 
+    /// Everything a slot with a line or a tank is still carrying from the
+    /// record BEFORE this one. The units themselves belong to the deck and
+    /// are not copied or reset -- but what is in their delay lines is the
+    /// last record's, and must not bleed into the one that just landed.
+    fn silence_chain_tails(d: &mut DeckVoice) {
+        d.chain.echo_mut().silence();
+        d.chain.freeze_mut().reset();
+        d.chain.flanger_mut().silence();
+        d.chain.bitcrusher_mut().silence();
+        d.chain.phaser_mut().reset();
+        d.chain.plate_reverb_mut().silence();
+        d.chain.moog_ladder_mut().reset();
+    }
+
+    /// Put a record on a silent deck. `keep_playing` is answered by the
+    /// caller: a pending load carries the operator's intent from when they
+    /// asked, not from when the fade happened to land.
+    fn seat_record(shared: &Shared, d: &mut DeckVoice, pcm: DeckPcm, play: bool) {
+        if let Some(old) = d.pcm.replace(pcm) {
+            retire(shared, Retired::Pcm(old));
+        }
+        d.stems = None;
+        d.splat = None;
+        // A fresh record has no grid until its analysis lands.
+        d.grid = None;
+        d.clock = DeckClock::default();
+        d.playing = play;
+        d.pause_at = None;
+        d.ended = false;
+        // A fresh track has nothing to fade out of: cut, not ramp.
+        d.transport = Ramp::at(if play { 1.0 } else { 0.0 });
+        d.seek_frames(0.0);
+        d.chain.eq_mut().reset();
+        Self::silence_chain_tails(d);
+        d.reset_blend();
+    }
+
     fn apply(&mut self, cmd: MixCmd) {
         let shared = &*self.shared;
         let s = &mut self.state;
@@ -4490,6 +4592,68 @@ impl MixEngine {
             }
             MixCmd::DeckEffect { deck, param } => {
                 Self::apply_effect(&mut s.decks[deck.index()].chain, param)
+            }
+            MixCmd::InstallOver { deck, pcm, keep_playing } => {
+                let d = &mut s.decks[deck.index()];
+                // Silent already: nothing is leaving, so nothing has to be
+                // waited for.
+                if d.transport.current <= 0.0 {
+                    Self::seat_record(shared, d, pcm, false);
+                } else {
+                    if let Some(old) = d.pending.take() {
+                        // Latest wins: two loads inside one fade and only
+                        // the second gets its turn.
+                        retire(shared, Retired::Pcm(old.pcm));
+                    }
+                    // The give-back belongs to the track that is leaving,
+                    // and that track is about to be gone.
+                    d.pause_at = None;
+                    // The flag is the operator's intent and can be answered
+                    // now; the read gate keeps a deck sounding while its
+                    // transport is above zero, so a stopping load leaves
+                    // exactly the way a pause does.
+                    d.playing = keep_playing;
+                    d.pending = Some(PendingLoad { pcm, play: keep_playing });
+                    d.transport.slew(0.0, LOAD_SWAP_SECS);
+                }
+            }
+            MixCmd::CloneDeck { from, to } => {
+                if from.index() == to.index() {
+                    return;
+                }
+                let (first, rest) = s.decks.split_at_mut(1);
+                let (src, dst) = match from.index() == 0 {
+                    true => (&first[0], &mut rest[0]),
+                    false => (&rest[0], &mut first[0]),
+                };
+                let Some(pcm) = src.pcm.clone() else { return };
+                let at = src.playhead_frames();
+                dst.pcm = Some(pcm);
+                dst.stems = src.stems.clone();
+                // A splat grid is the other deck's launch state, not the
+                // record.
+                dst.splat = None;
+                // The beat grid IS the record's and comes with it -- a
+                // double onto a deck with no grid would otherwise silence
+                // the double's clock.
+                dst.grid = src.grid;
+                dst.clock = src.clock;
+                dst.loop_span = src.loop_span;
+                dst.slip = None;
+                dst.rolls = RollGhosts::default();
+                dst.pause_at = None;
+                dst.ended = false;
+                dst.playing = src.playing;
+                dst.transport = src.transport;
+                dst.rate = src.rate;
+                dst.key_ratio = src.key_ratio;
+                dst.keylock = src.keylock;
+                dst.seek_fade = None;
+                dst.seek_frames(at);
+                dst.stretch.copy_state_from(&src.stretch);
+                dst.stretching = src.stretching;
+                Self::silence_chain_tails(dst);
+                dst.reset_blend();
             }
             MixCmd::SetSlip { deck, on, adopt } => {
                 let device = f64::from_bits(shared.device_rate_bits.load(Ordering::Acquire));
@@ -5114,6 +5278,11 @@ impl MixEngine {
             for (i, d) in s.decks.iter_mut().enumerate() {
                 let transport = d.transport.tick(rate);
                 if transport <= 0.0 {
+                    // The outgoing record has finished leaving, so the one
+                    // waiting behind it can have the deck.
+                    if let Some(load) = d.pending.take() {
+                        Self::seat_record(shared, d, load.pcm, load.play);
+                    }
                     if let Some(at) = d.pause_at.take() {
                         // The fade is over and nothing is audible: give back
                         // the frames it sounded, so pause leaves the
