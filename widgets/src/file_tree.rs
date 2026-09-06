@@ -64,6 +64,7 @@ script_mod! {
             let dot_blend = match self.status_kind {
                 GitStatusDotKind.New => 1f
                 GitStatusDotKind.Modified => 1f
+                GitStatusDotKind.Deleted => 1f
                 GitStatusDotKind.Mixed => 1f
                 _ => 0f
             }
