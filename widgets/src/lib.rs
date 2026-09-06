@@ -41,6 +41,7 @@ pub mod badge;
 pub mod button_group;
 pub mod chip;
 pub mod menu;
+pub mod select;
 pub mod accordion;
 pub mod dialog;
 pub mod drawer;
@@ -173,6 +174,7 @@ pub use crate::{
     button_group::*,
     chip::*,
     menu::*,
+    select::*,
     accordion::*,
     dialog::*,
     drawer::*,
@@ -637,6 +639,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     // `MenuPlace`, and a block's `use` only sees what already exists.
     crate::menu::script_mod(vm);
     crate::button_group::script_mod(vm);
+    crate::select::script_mod(vm);
     crate::toast::script_mod(vm);
     crate::placeholder::script_mod(vm);
 
