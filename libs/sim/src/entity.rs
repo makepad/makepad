@@ -101,8 +101,35 @@ impl ColorAdjust {
     }
 }
 
+/// An authored clip command travels reliably with entity construction state.
+/// The clock is derived from the replicated simulation tick on every client.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AssetClipPlayback {
+    pub name: String,
+    pub started_tick: u64,
+    pub seek: f64,
+    pub speed: f64,
+    pub looping: bool,
+    pub blend: f64,
+}
+impl AssetClipPlayback {
+    pub fn valid(&self) -> bool {
+        !self.name.is_empty() && self.name.len() <= 96 && !self.name.chars().any(char::is_control)
+            && self.seek.is_finite() && (0.0..=3600.0).contains(&self.seek)
+            && self.speed.is_finite() && (0.0..=8.0).contains(&self.speed)
+            && self.blend.is_finite() && (0.0..=2.0).contains(&self.blend)
+    }
+    pub fn time_at(&self, tick: u64) -> f64 {
+        self.seek + tick.saturating_sub(self.started_tick) as f64 * crate::TICK_DT as f64 * self.speed
+    }
+    pub fn weight_at(&self, tick: u64) -> f64 {
+        if self.blend == 0.0 { 1.0 } else { (tick.saturating_sub(self.started_tick) as f64 * crate::TICK_DT as f64 / self.blend).clamp(0.0, 1.0) }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct Entity {
+    pub authored_clip: Option<AssetClipPlayback>,
     pub id: u64,
     pub kind: BodyKind,
     pub pos: Vec3f,
@@ -200,6 +227,9 @@ pub struct Entity {
     /// shape:"sphere" gets a box3d sphere collider (radius = half.x) so it
     /// rolls — the one place visual and collision shape agree.
     pub shape: Shape,
+    /// Worker-cooked authored collision; shared through snapshots, no UI BVH build.
+    pub prepared_collider: Option<std::sync::Arc<crate::PreparedAssetCollider>>,
+    pub collider_scale: Vec3f,
     /// Full orientation, read back from box3d each tick — Rigid only
     /// (identity for everything else; movers/statics rotate via `yaw`).
     pub orient: Quat,

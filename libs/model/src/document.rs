@@ -14,6 +14,7 @@ pub enum Error {
     Mesh(mesh::MeshError),
     Budget(&'static str),
     Invalid(&'static str),
+    MissingField { field: String, operation: Option<String> },
     Corrupt(&'static str),
     MissingObject(String),
     DuplicateObject(String),
@@ -945,6 +946,9 @@ pub(crate) fn execute(
                 state.scene.lods.remove(object);
                 state.scene.colliders.remove(object);
                 state.surface.vertex_colors.retain(|(name,_),_| name != object);
+                // A replacement with the same name is a new object, even if
+                // its mesh allocator happens to reuse the old element IDs.
+                state.selections.groups.retain(|(name,_),_| name != object);
             }
             Operation::Transform {
                 vertices, matrix, ..

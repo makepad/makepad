@@ -124,6 +124,10 @@ pub struct GameWorld {
     /// entity-derived walkability grid as the only routing answer.
     pub nav_provider: Option<std::sync::Arc<dyn crate::providers::NavProvider>>,
     pub next_id: u64,
+    /// Changes when script content is rebuilt, even when the world allocation
+    /// and simulation tick survive. Presentation workers use this to reject
+    /// state for entity IDs reused by reset_content. Cloned snapshots retain it.
+    pub content_generation: u64,
     pub gravity: f32,
     pub on_tick: Option<CallbackSlot>,
     /// Per-commandable-unit decision hook. Called once per unit per tick,
@@ -505,6 +509,7 @@ impl GameWorld {
     /// a sim concern) and releasing the callback slots this discards (the
     /// slot table lives host-side; see game_view's CallbackTable).
     pub fn reset_content(&mut self) {
+        self.content_generation = self.content_generation.wrapping_add(1);
         self.entities.clear();
         self.parts.clear();
         self.labels.clear();
@@ -768,6 +773,25 @@ mod id_lookup_tests {
             id,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn content_reset_changes_generation_without_rewinding_tick_and_snapshots_keep_it() {
+        let mut world=GameWorld::new();
+        assert_eq!(world.content_generation,0);
+        world.tick=47;world.next_id=8;world.push_entity(ent(8));
+        let before=world.clone();
+        world.reset_content();
+        assert_eq!(world.tick,47);
+        assert_eq!(world.next_id,0);
+        assert!(world.entities.is_empty());
+        assert_eq!(world.content_generation,1);
+        let after=world.clone();
+        world.reset_content();
+        assert_eq!(world.content_generation,2);
+        assert_eq!(before.content_generation,0);
+        assert_eq!(after.content_generation,1);
+        assert_eq!(after.tick,47);
     }
 
     /// The two static revisions are separate on purpose: a repaint reaches

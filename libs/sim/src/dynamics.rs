@@ -150,6 +150,8 @@ struct MirrorEntry {
     entity_id: u64,
     body: BodyId,
     kind: MirrorKind,
+    authored_geometry: usize,
+    authored_scale: Vec3f,
     /// Optional zero-mass shape carrying a rigid's presentation bounds for
     /// capsule walking only. It shares the rigid transform but no solver
     /// category, so chassis mass/inertia and contacts remain untouched.
@@ -797,6 +799,8 @@ fn create_mirror_entry(world: &mut World, e: &Entity, kind: MirrorKind) -> Mirro
         entity_id: e.id,
         body,
         kind,
+        authored_geometry: e.prepared_collider.as_ref().map_or(0,|v|std::sync::Arc::as_ptr(v) as usize),
+        authored_scale: e.collider_scale,
         walk_hurt_shape,
         walk_hurt_box,
         pos: e.pos,
@@ -836,7 +840,7 @@ fn create_mirror_body(world: &mut World, e: &Entity, kind: MirrorKind) -> BodyId
         MirrorKind::Rigid => BodyType::Dynamic,
     };
     body_def.position = b3pos(e.pos.x, e.pos.y, e.pos.z);
-    body_def.rotation = if kind == MirrorKind::Rigid && e.orient != Quat::default() {
+    body_def.rotation = if (kind == MirrorKind::Rigid || e.prepared_collider.is_some()) && e.orient != Quat::default() {
         to_b3_quat(e.orient)
     } else {
         yaw_quat(e.yaw)
@@ -863,6 +867,11 @@ fn create_mirror_body(world: &mut World, e: &Entity, kind: MirrorKind) -> BodyId
         // vehicle crush damage. Contact-hit events are observation only; the
         // solver response and the existing mover-sensor path are unchanged.
         shape_def.enable_hit_events = true;
+    }
+    if let Some(prepared)=&e.prepared_collider {
+        let scale=e.collider_scale;
+        create_mesh_shape(world,body,&shape_def,&prepared.data,b3vec3(scale.x.max(1e-6),scale.y.max(1e-6),scale.z.max(1e-6)));
+        return body;
     }
     match kind {
         // D2: the mover capsule. Radius covers the AABB footprint, clamped by
@@ -1182,7 +1191,7 @@ pub fn reconcile(
                 out.push(create_mirror_entry(&mut dynamics.world, e, kind));
             }
             (Some(mut entry), Some(kind)) => {
-                if entry.kind != kind {
+                if entry.kind != kind || entry.authored_geometry != e.prepared_collider.as_ref().map_or(0,|v|std::sync::Arc::as_ptr(v)as usize) || entry.authored_scale != e.collider_scale {
                     // Kind flips DO happen now: a mover demotes to Decor when
                     // it takes a seat (attached_to) and back on dismount; and
                     // rollback could restore an older entity under a reused
@@ -1221,13 +1230,14 @@ pub fn reconcile(
                         // set_pos/face on placed geometry: teleport the body.
                         // Decor rides the same arm — a carried rider's ghost
                         // box teleports along each tick.
-                        if e.pos != entry.pos || e.yaw != entry.yaw {
+                        if e.pos != entry.pos || e.yaw != entry.yaw || (e.prepared_collider.is_some()&&e.orient!=entry.orient) {
                             body_set_transform(
                                 &mut dynamics.world,
                                 entry.body,
                                 b3pos(e.pos.x, e.pos.y, e.pos.z),
-                                yaw_quat(e.yaw),
+                                if e.prepared_collider.is_some(){to_b3_quat(e.orient)}else{yaw_quat(e.yaw)},
                             );
+                            entry.orient=e.orient;
                             entry.pos = e.pos;
                             entry.yaw = e.yaw;
                         }

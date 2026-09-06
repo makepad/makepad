@@ -7,6 +7,15 @@ mesh vertex IDs are canonical positive decimal strings. A transform is
 identity quaternion, and one. Quaternions must be normalized and scales nonzero.
 All numeric input must be finite. Rotation angles are radians.
 
+- `skeleton {joints:[{name,parent,translation}]}` creates/replaces the skeleton.
+  Exactly one root has parent:null; other parents are earlier joint ordinals.
+  Translation is parent-local XYZ. Preserve weighted joint identities on replacement.
+- `clip {name,channels:[{joint,path,keys:[{time,value}]}]}` creates/replaces a clip.
+  Path is `translation|rotation|scale`; time is increasing seconds. Values always
+  have four lanes: XYZ plus0 for translation/scale, normalized XYZW for rotation.
+  Keys replace local TRS components, so translation keys include the rest offset.
+  Use names `idle` and `walk` for automatic character gait selection.
+- `delete_clip {name}` removes a clip and its attached options.
 - `rig_rest {joint,transform}` sets the joint's full local rest transform.
 - `rig_rename {joint,name}` changes a joint name, retaining its index.
 - `rig_parent {joint,parent}` changes the parent index; null makes a root.

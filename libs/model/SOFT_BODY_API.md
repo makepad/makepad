@@ -42,9 +42,19 @@ change the budget. Other documents keep their own limits.
   A positive locked weight on another joint rejects assignment. Animating
   solver-owned cell/frame joints is refused; animate their children.
 
-The only supported optional preset is `yarn_ball`; the only supported optional
-`cage` is `icosphere_1`. Config accepts partial overrides of current simulator
-defaults: mass, edge_compliance, volume_compliance, pose_compliance, damping,
+The optional `yarn_ball` preset selects a firm wound-textile response:
+`edge_compliance:0.001`, `pose_compliance:0.001`, and `damping:22`. It retains
+small contact/translation-driven motion while keeping the body's silhouette.
+Omitting the preset preserves the generic soft-body defaults (`0.02`, `0.02`,
+and `4` respectively). Config overrides are applied after the preset. The
+volume constraint and numerical displacement guard keep their existing values;
+the guard is not used to fake stiffness or impose a new fixed character size.
+Saved operations and snapshots carry their full resolved config, so changing
+a preset does not silently retune existing published assets. Explicitly unbind
+and rebind to retune an existing asset while preserving its rig and geometry.
+
+The only supported optional `cage` is `icosphere_1`. Config accepts partial
+overrides: mass, edge_compliance, volume_compliance, pose_compliance, damping,
 gravity, contact_radius, friction, substeps, iterations, max_speed, and
 max_displacement. Unknown fields and unsupported values fail before mutation.
 Substeps are 1..8 and iterations 1..16. Full bounds are enforced by the shared

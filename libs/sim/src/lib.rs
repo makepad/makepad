@@ -393,3 +393,6 @@ mod tests {
         assert_eq!(w.tick, 120);
     }
 }
+
+pub mod asset_collision;
+pub use asset_collision::{PreparedAssetCollider,spawn_authored_asset_colliders};

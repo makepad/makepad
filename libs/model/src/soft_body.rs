@@ -62,7 +62,17 @@ impl SoftBodyBind {
             attachments.push(SoftBodyAttachmentRequest{name,objects,pivot:row.get("pivot").map(array).transpose()?});
         }
         if 1+SOFT_BODY_TETRAHEDRA+attachments.len()>limits.max_joints.min(128){return Err(Error::Budget("soft-body joints; use an explicit max_joints=128 document"));}
-        let mut config=settings(physics::SoftBodySettings::default()).to_value();
+        let mut defaults=physics::SoftBodySettings::default();
+        if v.get("preset").and_then(Value::as_str)==Some("yarn_ball") {
+            // A wound textile keeps its silhouette, with restrained secondary
+            // motion. Generic soft defaults remain available without a preset.
+            // max_displacement remains a numerical guard, not a size-dependent
+            // shortcut for stiffness; normal response comes from constraints.
+            defaults.edge_compliance=0.001;
+            defaults.pose_compliance=0.001;
+            defaults.damping=22.;
+        }
+        let mut config=settings(defaults).to_value();
         if let Some(overrides)=v.get("config") {
             let Value::Obj(defaults)=&mut config else{unreachable!()};
             let allowed=defaults.iter().map(|(k,_)|k.as_str()).collect::<Vec<_>>();fields(overrides,&allowed)?;

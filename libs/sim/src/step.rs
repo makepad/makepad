@@ -139,9 +139,10 @@ pub fn step_world(world: &mut GameWorld) {
     // the axis sweeps, so the mirror must exist before the mover loop — the
     // same up-front reconcile CCD needs. Worlds without either (all pre-mix
     // content) skip it and keep their box3d call sequence byte-identical.
+    let authored_surfaces=world_entities.iter().any(|e|e.prepared_collider.is_some()&&e.collide);
     let capsule_active = world_entities
         .iter()
-        .any(|e| e.kind == BodyKind::Mover && e.capsule_collider && e.attached_to == 0);
+        .any(|e| e.kind == BodyKind::Mover && (e.capsule_collider||authored_surfaces) && e.attached_to == 0);
     if ccd_active || capsule_active {
         crate::dynamics::reconcile(
             dynamics,
@@ -207,7 +208,7 @@ pub fn step_world(world: &mut GameWorld) {
         // smooth corners. It reports through the same contract fields
         // (on_floor/floor_id/hit_wall/normals), so everything downstream of
         // the sweep works unchanged. Default-off: the flag is the only gate.
-        if e.capsule_collider {
+        if e.capsule_collider || authored_surfaces {
             crate::dynamics::capsule_mover_step(dynamics, e, &mut sweep_pushes);
             continue;
         }

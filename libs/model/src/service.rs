@@ -411,7 +411,12 @@ pub(crate) fn fields(value:&Value,allowed:&[&str])->Result<()> {
     }
     Ok(())
 }
-pub(crate) fn need<'a>(v:&'a Value,key:&str)->Result<&'a Value> { v.get(key).ok_or(Error::Invalid("required field missing")) }
+pub(crate) fn need<'a>(v:&'a Value,key:&str)->Result<&'a Value> {
+    v.get(key).ok_or_else(|| Error::MissingField {
+        field:key.into(),
+        operation:v.get("op").and_then(Value::as_str).map(|name| name.chars().take(64).collect()),
+    })
+}
 pub(crate) fn text<'a>(v:&'a Value,key:&str)->Result<&'a str> { need(v,key)?.as_str().ok_or(Error::Invalid("expected string")) }
 pub(crate) fn integer(v:&Value)->Result<u32> { v.as_u64().and_then(|v|v.try_into().ok()).ok_or(Error::Invalid("expected u32 integer")) }
 pub(crate) fn stable_id(v:&Value)->Result<u64> {
