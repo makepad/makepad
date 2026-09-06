@@ -34,6 +34,10 @@ script_mod! {
         }
         StoryNote{text: "A tip beside a control turns its pointer a quarter turn, so it still aims at the thing it belongs to."}
         StoryRow{
+            Tip{text: "Short" arrow: true place: BottomStart Button{width: 260. text: "Wider than its own tip"}}
+        }
+        StoryNote{text: "When the control is wider than the tip, the point would sit on a rounded corner, so it stops at the flat part of the edge instead of straddling it."}
+        StoryRow{
             Tip{text: "Aimed from the left" arrow: true place: Left Button{text: "Arrow, left"}}
             Tip{text: "Aimed from the right" arrow: true place: Right Button{text: "Arrow, right"}}
         }
