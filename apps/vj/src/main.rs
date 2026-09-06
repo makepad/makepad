@@ -8590,8 +8590,8 @@ impl App {
     fn start_archive_import(&mut self, cx: &mut Cx) {
         let target = match self.up.as_ref() {
             Some(up) => match up.token.clone() {
-                Some(token) => Some(PublishTarget {
-                    endpoints: up.endpoints,
+                Some(token) => up.native_endpoints().ok().map(|endpoints| PublishTarget {
+                    endpoints,
                     server_id: up.server_id,
                     token,
                     cache: service::session_config_from_env().cache_parent,
@@ -13786,16 +13786,24 @@ p2 {}
                     // transport executes them against the fleet and
                     // publishes the result itself; the store only stores.
                     GenCmd::FetchProfiles { domain } => {
+                        // A static-site session has no socket endpoints to
+                        // connect to; only a native dynamic-server one does.
                         if !self.pipelines.connected() {
-                            self.pipelines.connect(up.endpoints, up.token.clone());
+                            if let Ok(endpoints) = up.native_endpoints() {
+                                self.pipelines.connect(endpoints, up.token.clone());
+                            }
                         }
                         self.pipelines.submit(PipeReq::Profiles {
                             domain: domain.to_string(),
                         });
                     }
                     GenCmd::Enqueue { tag, namespace, kind, body } => {
+                        // A static-site session has no socket endpoints to
+                        // connect to; only a native dynamic-server one does.
                         if !self.pipelines.connected() {
-                            self.pipelines.connect(up.endpoints, up.token.clone());
+                            if let Ok(endpoints) = up.native_endpoints() {
+                                self.pipelines.connect(endpoints, up.token.clone());
+                            }
                         }
                         if !self.pipelines.submit(PipeReq::EnqueueJob {
                             tag,
@@ -13824,8 +13832,12 @@ p2 {}
                     // than to this app. `Pipelines` holds the same verified
                     // endpoints and token on its own thread.
                     GenCmd::CreatePipeline { tag, namespace, title, prompt, stages } => {
+                        // A static-site session has no socket endpoints to
+                        // connect to; only a native dynamic-server one does.
                         if !self.pipelines.connected() {
-                            self.pipelines.connect(up.endpoints, up.token.clone());
+                            if let Ok(endpoints) = up.native_endpoints() {
+                                self.pipelines.connect(endpoints, up.token.clone());
+                            }
                         }
                         // The declaration verbatim — the exact document
                         // going on the wire, so a run can be read back
@@ -16295,7 +16307,12 @@ p2 {}
                     self.video_tile_clicked(cx, asset, as_content);
                 }
             }
-            (CatPurpose::FxSource { asset, revision }, ClientOutput::Blob { path, .. }) => {
+            (CatPurpose::FxSource { asset, revision }, ClientOutput::Blob { content, .. }) => {
+                // The cache hands back either bytes or a verified PATH
+                // depending on the backend it runs on; this lane wants the
+                // file, and a bytes-backed cache simply has none to give.
+                let Some(path) = content.as_path().map(|p| p.to_path_buf()) else { return };
+
                 // The splash text is here: hand the render job to the hidden
                 // offscreen effect host. Small file, read in place.
                 self.fx_source_inflight.remove(&revision);
@@ -16417,8 +16434,13 @@ p2 {}
             }
             (
                 CatPurpose::FxSlotSource { slot, revision, title },
-                ClientOutput::Blob { path, .. },
+                ClientOutput::Blob { content, .. },
             ) => {
+                // The cache hands back either bytes or a verified PATH
+                // depending on the backend it runs on; this lane wants the
+                // file, and a bytes-backed cache simply has none to give.
+                let Some(path) = content.as_path().map(|p| p.to_path_buf()) else { return };
+
                 // The splash text is here: load it into the slot's offscreen
                 // host. A newer click on the same slot supersedes this one.
                 if self.fx_slot_inflight[slot.index()] != Some(revision) {
@@ -16436,7 +16458,12 @@ p2 {}
                     }
                 }
             }
-            (CatPurpose::Thumb { revision }, ClientOutput::Blob { path, .. }) => {
+            (CatPurpose::Thumb { revision }, ClientOutput::Blob { content, .. }) => {
+                // The cache hands back either bytes or a verified PATH
+                // depending on the backend it runs on; this lane wants the
+                // file, and a bytes-backed cache simply has none to give.
+                let Some(path) = content.as_path().map(|p| p.to_path_buf()) else { return };
+
                 self.thumb_stats.fetch_landed += 1;
                 let (mut sum, mut max) =
                     (self.thumb_stats.fetch_wait_ms, self.thumb_stats.fetch_wait_max);
@@ -16562,7 +16589,8 @@ p2 {}
                         let Some(purpose) = self.media_reqs.remove(&(lane, id)) else {
                             continue;
                         };
-                        let ClientOutput::Blob { path, .. } = output else { continue };
+                        let ClientOutput::Blob { content, .. } = output else { continue };
+                        let Some(path) = content.as_path().map(|p| p.to_path_buf()) else { continue };
                         match purpose {
                             MediaPurpose::Cue { gen } => {
                                 // Only the CURRENT plan entry advances the
