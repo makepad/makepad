@@ -19,6 +19,7 @@ pub mod spinner;
 pub mod button_group;
 pub mod chip;
 pub mod menu;
+pub mod accordion;
 pub mod dialog;
 pub mod overlay;
 pub mod toast;
@@ -97,6 +98,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     button_group::script_mod(vm);
     menu::script_mod(vm);
     tip::script_mod(vm);
+    accordion::script_mod(vm);
     dialog::script_mod(vm);
     overlay::script_mod(vm);
     toast::script_mod(vm);
@@ -149,6 +151,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         button_group::STORIES,
         menu::STORIES,
         tip::STORIES,
+        accordion::STORIES,
         dialog::STORIES,
         overlay::STORIES,
         toast::STORIES,
