@@ -291,14 +291,14 @@ impl App {
     }
     pub(super) fn sync_phone_keyboard(&mut self,cx:&mut Cx) {
         if !self.state.as_ref().is_some_and(|s|s.style.target.mobile()) {return;}
-        let client=self.state_mut().phone.client;
+        let client=self.state_mut().phone.foreground();
         if let Some(client)=client.filter(|c|self.module_host.is_module(*c)) {
             self.state_mut().phone.ime.insert(client,cx.hosted_ime_state());
         }
         let phone=&mut self.state_mut().phone;
         let visible=!cfg!(any(target_os="ios",target_os="android"))
-            && phone.screen==PhoneScreen::App
-            && client.and_then(|c|phone.ime.get(&c)).is_some_and(|ime|ime.visible);
+            && ((phone.screen==PhoneScreen::Drawer && phone.search_focused)
+                || client.and_then(|c|phone.ime.get(&c)).is_some_and(|ime|ime.visible));
         let height=if visible {phone.keyboard_height()}else{0.0};
         if height==phone.keyboard_sent_height && (height==0.0 || phone.keyboard_client==client) {return;}
         let old=phone.keyboard_client;
@@ -328,7 +328,12 @@ impl App {
         }
     }
     fn dismiss_phone_keyboard(&mut self,cx:&mut Cx) {
-        if let Some(client)=self.state_mut().phone.client {
+        if self.state_mut().phone.search_focused {
+            if let Some(mut desk)=self.desk(cx).borrow_mut::<WmDesk>() {
+                desk.dismiss_phone_search(cx,&mut self.state_mut().phone,false);
+            }
+        }
+        if let Some(client)=self.state_mut().phone.keyboard_client {
             self.send_phone_keyboard(cx,client,0.0,true);
             if let Some(ime)=self.state_mut().phone.ime.get_mut(&client) {ime.visible=false;}
         }
@@ -355,9 +360,21 @@ impl App {
                 window.resize(cx,dvec2(size.y,size.x));
             }
             PhoneHit::Style=>self.open_style_menu(cx),
-            PhoneHit::Appearance=>self.toggle_desktop_appearance(cx),
+            PhoneHit::Appearance=>{
+                let focused=self.state_mut().phone.search_focused;
+                self.toggle_desktop_appearance(cx);
+                if focused {
+                    if let Some(mut desk)=self.desk(cx).borrow_mut::<WmDesk>() {desk.focus_phone_search(cx,&mut self.state_mut().phone);}
+                }
+            }
             PhoneHit::Desktop=>{let style=self.state_mut().phone.desktop_style;self.set_desktop_style(cx,style);}
             PhoneHit::HideKeyboard=>self.dismiss_phone_keyboard(cx),
+            PhoneHit::ClearSearch=>{
+                if let Some(mut desk)=self.desk(cx).borrow_mut::<WmDesk>() {desk.clear_phone_search(cx,&mut self.state_mut().phone);}
+            }
+            PhoneHit::CancelSearch=>{
+                if let Some(mut desk)=self.desk(cx).borrow_mut::<WmDesk>() {desk.dismiss_phone_search(cx,&mut self.state_mut().phone,true);}
+            }
             PhoneHit::Shift=>{let p=&mut self.state_mut().phone;p.shift=!p.shift;}
             PhoneHit::Symbols=>{let p=&mut self.state_mut().phone;p.symbols=!p.symbols;}
             PhoneHit::Key(key)=>self.type_phone_key(cx,&key),
@@ -387,12 +404,18 @@ impl App {
         }
     }
     fn type_phone_key(&mut self,cx:&mut Cx,key:&str) {
-        let Some(client)=self.state_mut().phone.client else{return};
         let event=match key {
             "backspace"=>Event::KeyDown(KeyEvent{key_code:KeyCode::Backspace,..Default::default()}),
             "return"=>Event::KeyDown(KeyEvent{key_code:KeyCode::ReturnKey,..Default::default()}),
             _=>Event::TextInput(TextInputEvent{input:key.into(),..Default::default()}),
         };
+        if self.state_mut().phone.search_focused {
+            self.phone_search_event(cx,&event);
+            if let Event::KeyDown(key)=event {self.phone_search_event(cx,&Event::KeyUp(key));}
+            if key.chars().count()==1 {self.state_mut().phone.shift=false;}
+            return;
+        }
+        let Some(client)=self.state_mut().phone.foreground() else{return};
         if self.module_host.is_module(client) {
             if let Some((root,vm_id))=self.module_host.get(client).map(|i|(i.root.clone(),i.vm_id)) {
                 let entry=enter_isolate(cx,vm_id);
@@ -414,6 +437,21 @@ impl App {
         if e.key_code==KeyCode::Escape {self.phone_action(cx,PhoneHit::Back);return true;}
         if e.key_code==KeyCode::Tab && e.modifiers.alt {self.phone_action(cx,PhoneHit::Recents);return true;}
         !self.state_mut().phone.accepts_app_input()
+    }
+    pub(super) fn phone_search_event(&mut self,cx:&mut Cx,event:&Event)->bool {
+        let Some(state)=self.state.as_ref() else{return false};
+        if matches!(event,Event::KeyDown(_)|Event::KeyUp(_)|Event::TextInput(_)|Event::TextCopy(_)|Event::TextCut(_))
+            && self.ui.widget(cx,ids!(shell_menu)).borrow::<ShellMenu>().is_some_and(|menu|menu.is_open()) {return false;}
+        let old=(state.phone.search_focused,state.phone.search_query.clone());
+        let handled=if let Some(mut desk)=self.desk(cx).borrow_mut::<WmDesk>() {
+            desk.phone_search_event(cx,event,self.state_mut())
+        }else{false};
+        let phone=&self.state_mut().phone;
+        if old!=(phone.search_focused,phone.search_query.clone()) {
+            self.sync_phone_keyboard(cx);
+            self.animate_phone(cx);
+        }
+        handled
     }
     pub(super) fn phone_pointer(&mut self,cx:&mut Cx,event:&Event)->bool {
         if !self.state_mut().style.target.mobile() {return false;}
@@ -455,7 +493,7 @@ impl App {
                 return true;
             }
         }
-        let hit=self.desk(cx).borrow::<WmDesk>().and_then(|d|d.phone_hit(p));
+        let (hit,search_scroll_max)=self.desk(cx).borrow::<WmDesk>().map(|d|(d.phone_hit(p),d.phone_search_scroll_max())).unwrap_or_default();
         let phone=&self.state_mut().phone;
         let screen=phone.viewport;
         let bottom=p.y>screen.pos.y+screen.size.y-28.0;
@@ -479,6 +517,8 @@ impl App {
                 if g.bottom && delta.y < -8.0 {
                     phone.overview=(-delta.y/(screen.size.y*0.42)).clamp(0.0,1.0);
                     phone.openness=1.0;
+                }else if g.screen==PhoneScreen::Drawer && (phone.search_focused || !phone.search_query.is_empty()) {
+                    phone.search_scroll=(phone.search_scroll.min(search_scroll_max)-last.y).clamp(0.0,search_scroll_max);
                 }else if g.screen==PhoneScreen::Recents {
                     if delta.y.abs()>delta.x.abs()*1.2 {phone.dismiss_y=delta.y.min(0.0);}
                     else {let width=card_rect(screen,0.0,0.0).size.x+22.0;phone.page=(phone.page-last.x/width).clamp(-0.25,phone.order.len().saturating_sub(1)as f64+0.25);}
@@ -509,6 +549,11 @@ impl App {
             }
             PhonePointerPhase::Scroll if self.state_mut().phone.screen==PhoneScreen::Recents=>{
                 let p=&mut self.state_mut().phone;p.page=(p.page+scroll.signum()).clamp(0.0,p.order.len().saturating_sub(1)as f64);
+                self.animate_phone(cx);true
+            }
+            PhonePointerPhase::Scroll if self.state_mut().phone.searching()=>{
+                let phone=&mut self.state_mut().phone;
+                phone.search_scroll=(phone.search_scroll.min(search_scroll_max)+scroll).clamp(0.0,search_scroll_max);
                 self.animate_phone(cx);true
             }
             _=>self.state_mut().phone.screen!=PhoneScreen::App,

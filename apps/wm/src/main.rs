@@ -4166,6 +4166,7 @@ impl AppMain for App {
         {
             return;
         }
+        if self.phone_search_event(cx,event) {return;}
         if self.state.is_some() && self.phone_pointer(cx,event) {return;}
         if self.state.is_some() && self.snap_event(cx,event) {return;}
         if self.state.is_some() && self.desktop_pointer(cx,event) {return;}
