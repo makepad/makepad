@@ -219,6 +219,72 @@ script_mod! {
             }
         }
     }
+
+    let Cell = RoundedView{
+        height: 40.
+        show_bg: true
+        align: Align{x: 0.5 y: 0.5}
+        draw_bg +: {color: theme.color_surface_container_high border_radius: theme.radius_s}
+    }
+    let CellLabel = Label{width: Fit draw_text.color: theme.color_text_meta}
+
+    mod.stories.LayoutResponsive = StoryPage{
+        StoryNote{text: "A row hands its slack to its children by WEIGHT, and a child can refuse to grow past a maximum or to shrink below a minimum. A wrapping row spends the width it has and moves the rest to the next line. Drag the width below and watch each rule answer."}
+
+        StoryRow{
+            frame_width := Slider{
+                width: 300.
+                text: "Frame width"
+                min: 280.0
+                max: 900.0
+                default: 820.0
+                step: 10.0
+            }
+            width_note := Label{text: "820 points, 6 per row"}
+        }
+
+        frame := RoundedView{
+            width: 820.
+            height: Fit
+            flow: Down
+            spacing: theme.space_3
+            padding: theme.mspace_3
+            show_bg: true
+            draw_bg +: {color: theme.color_surface_container_low border_radius: theme.radius_m}
+
+            CellLabel{text: "Weights: the slack is split 1 : 2 : 1, whatever the width"}
+            View{width: Fill height: Fit flow: Right spacing: theme.space_2
+                Cell{width: Fill{weight: 1.0} CellLabel{text: "1"}}
+                Cell{width: Fill{weight: 2.0} CellLabel{text: "2"}}
+                Cell{width: Fill{weight: 1.0} CellLabel{text: "1"}}
+            }
+
+            CellLabel{text: "Clamps: one stops growing at 160, one gives up its share last — until the row itself runs out"}
+            View{width: Fill height: Fit flow: Right spacing: theme.space_2
+                Cell{width: Fill{max: 160.0} CellLabel{text: "max 160"}}
+                Cell{width: Fill CellLabel{text: "the rest"}}
+                Cell{width: Fill{min: 220.0} CellLabel{text: "min 220"}}
+            }
+
+            CellLabel{text: "Wrapping: fixed cells keep their size and the row count answers instead"}
+            View{width: Fill height: Fit flow: Flow.Right{wrap: true} spacing: theme.space_2
+                Cell{width: 120. CellLabel{text: "1"}}
+                Cell{width: 120. CellLabel{text: "2"}}
+                Cell{width: 120. CellLabel{text: "3"}}
+                Cell{width: 120. CellLabel{text: "4"}}
+                Cell{width: 120. CellLabel{text: "5"}}
+                Cell{width: 120. CellLabel{text: "6"}}
+                Cell{width: 120. CellLabel{text: "7"}}
+                Cell{width: 120. CellLabel{text: "8"}}
+            }
+
+            CellLabel{text: "The everyday shell: a side column that caps, and a body that takes the rest"}
+            View{width: Fill height: 72. flow: Right spacing: theme.space_2
+                Cell{width: Fill{max: 220.0} height: Fill CellLabel{text: "side, max 220"}}
+                Cell{width: Fill height: Fill CellLabel{text: "body"}}
+            }
+        }
+    }
 }
 
 pub const STORIES: &[Story] = &[Story {
@@ -234,4 +300,52 @@ pub const STORIES: &[Story] = &[Story {
     feature: None,
     controls: &[],
     on_actions: None,
+}, Story {
+    key: "containers/layout/responsive",
+    category: "Containers",
+    component: "Layout",
+    name: "Responsive",
+    dsl: "LayoutResponsive",
+    added: "2026-09-05",
+    tags: &["new"],
+    doc: "# Responsive layout
+
+Three rules do the work, and the width slider is there so each one can be seen answering.
+
+**Weight** splits the slack. `Fill{weight: 2.0}` takes twice the share of `Fill{weight: 1.0}`, and the proportion holds at every width rather than being a set of numbers that only add up at one size.
+
+**Clamps** say where a share stops. `Fill{max: 160.}` grows with the row until it has 160 and then hands the rest back; `Fill{min: 220.}` gives up its share last, and drag the width to its narrowest to see what happens when even that cannot be honoured: a minimum is a priority, not a guarantee. A side column that caps and a body that takes the rest is the everyday shell, and it is those two rules and nothing else.
+
+**Wrapping** answers with rows instead of size. `flow: Flow.Right{wrap: true}` keeps every cell the width it asked for and moves what does not fit to the next line, which is the grid behaviour a catalogue of cards wants: the cells stay legible and the column count is what changes.
+
+`Fit{min, max}` is the fourth member of the family, for a box that takes its content's size but refuses to get silly about it.",
+    subject: "frame",
+    feature: None,
+    controls: &[],
+    on_actions: Some(responsive_actions),
 }];
+
+
+/// Cells are 120 wide with `space_2` between them inside `mspace_3` padding;
+/// the count is what the wrap rule works out, said in words so the reflow is
+/// readable rather than only visible.
+fn cells_per_row(frame_width: f64) -> usize {
+    const CELL: f64 = 120.0;
+    const GAP: f64 = 8.0;
+    const PAD: f64 = 24.0;
+    let room = frame_width - PAD;
+    if room < CELL {
+        return 1;
+    }
+    (((room + GAP) / (CELL + GAP)).floor() as usize).clamp(1, 8)
+}
+
+fn responsive_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
+    let Some(w) = root.slider(cx, ids!(frame_width)).slided(actions) else {
+        return;
+    };
+    let mut frame = root.widget(cx, ids!(frame));
+    script_apply_eval!(cx, frame, { width: #(w) });
+    let text = format!("{:.0} points, {} per row", w, cells_per_row(w));
+    root.label(cx, ids!(width_note)).set_text(cx, &text);
+}
