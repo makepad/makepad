@@ -28942,10 +28942,16 @@ impl MatchEvent for App {
         self.ui.drop_down(cx, ids!(gen_profile)).set_selected_item(cx, 2);
         if !self.audio_installed {
             self.audio_installed = true;
-            let mixer = self.mixer.clone();
+            // The ENGINE is moved into the callback, not a handle to it:
+            // this thread owns the mix state outright and answers to
+            // nobody, which is the whole point of the command ring. Taken
+            // once -- a second audio_output would find nothing left.
+            let mut engine = self.mixer.take_engine();
             cx.audio_output(0, move |info, output| {
                 output.zero();
-                mixer.render(info.sample_rate, output);
+                if let Some(engine) = engine.as_mut() {
+                    engine.render(info.sample_rate, output);
+                }
             });
             // The headphone cue rides slot 1 unconditionally: with no
             // second device requested the closure simply never runs. It

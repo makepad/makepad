@@ -1989,6 +1989,11 @@ const MAX_SFX_VOICES: usize = 64;
 /// knob. Small and `Copy`, so the ring moves it by value.
 #[derive(Clone, Copy, Debug)]
 pub enum EffectParam {
+    /// The echo's delay as a beat fraction, or none to let it run free.
+    Echo(Option<(u32, u32)>),
+    /// The autopilot's filter overlay, which multiplies the operator's
+    /// sweep rather than moving it.
+    BlendFilter(f32),
     Resonance(f32),
     EchoFeedback(f32),
     EchoPingpong(bool),
@@ -2100,6 +2105,7 @@ pub enum MixCmd {
     /// One knob on one slot of a deck's effect chain. See
     /// [`EffectParam`] for why they share a variant.
     DeckEffect { deck: DeckId, param: EffectParam },
+    SetGrid { deck: DeckId, grid: Option<TrackGrid> },
     SwapDecks,
     SetCrossfader { position: f32, secs: f32 },
     SetBlendBand { deck: DeckId, band: usize, gain: f32 },
@@ -2475,6 +2481,14 @@ impl Mixer {
     /// Once per UI frame: re-send what a full ring refused, and take the
     /// callback's events — ended decks and voices for the next drains,
     /// retired payloads to be dropped here, on this thread.
+    /// What a replaced payload is owed: a drop on the UI thread. The
+    /// audio thread never frees, so it hands what it displaced back
+    /// through the event ring and this is where it dies. Same call as
+    /// [`Mixer::pump`], under the name the deck engine asks for it by.
+    pub fn reap_retired(&self) {
+        self.pump();
+    }
+
     pub fn pump(&self) {
         let mut dropped: Vec<Retired> = Vec::new();
         self.ui.with(|ui| {
@@ -2990,6 +3004,27 @@ impl Mixer {
 
     pub fn set_deck_mute(&self, deck: DeckId, muted: bool) {
         self.run_cmd(MixCmd::SetMute { deck, muted });
+    }
+
+    /// The echo's delay as a beat fraction. A zero either side is not a
+    /// fraction and is refused HERE rather than on the audio thread, which
+    /// has no way to say no.
+    pub fn set_deck_echo(&self, deck: DeckId, fraction: Option<(u32, u32)>) {
+        if fraction.is_some_and(|(num, den)| num == 0 || den == 0) {
+            return;
+        }
+        self.run_cmd(MixCmd::DeckEffect { deck, param: EffectParam::Echo(fraction) });
+    }
+
+    pub fn set_blend_filter(&self, deck: DeckId, offset: f32) {
+        self.run_cmd(MixCmd::DeckEffect { deck, param: EffectParam::BlendFilter(offset) });
+    }
+
+    /// The grid this record is ruled by. Everything beat-locked reads the
+    /// clock it makes, so a track that has just been measured starts
+    /// locking without waiting for anything else to happen.
+    pub fn set_deck_grid(&self, deck: DeckId, grid: Option<TrackGrid>) {
+        self.run_cmd(MixCmd::SetGrid { deck, grid });
     }
 
     pub fn set_deck_resonance(&self, deck: DeckId, lift: f32) {
@@ -3846,6 +3881,8 @@ impl MixEngine {
     /// the old locked setters ran; only the way they arrive has changed.
     fn apply_effect(chain: &mut DeckChain, param: EffectParam) {
         match param {
+            EffectParam::Echo(fraction) => chain.echo_mut().set_fraction(fraction),
+            EffectParam::BlendFilter(offset) => chain.eq_mut().set_blend_filter(offset),
             EffectParam::Resonance(lift) => chain.eq_mut().set_resonance(lift),
             EffectParam::EchoFeedback(feedback) => chain.echo_mut().set_feedback(feedback),
             EffectParam::EchoPingpong(on) => chain.echo_mut().set_pingpong(on),
@@ -4225,6 +4262,27 @@ impl MixEngine {
             }
             MixCmd::DeckEffect { deck, param } => {
                 Self::apply_effect(&mut s.decks[deck.index()].chain, param)
+            }
+            MixCmd::SetGrid { deck, grid } => {
+                let d = &mut s.decks[deck.index()];
+                d.grid = grid;
+                // Re-rule the clock on the spot rather than waiting for the
+                // next buffer: a grid landing mid-phrase should lock the
+                // LFOs to it now, not a callback later.
+                let source_rate =
+                    d.pcm.as_ref().map(|pcm| pcm.sample_rate().max(1) as f64).unwrap_or(0.0);
+                let pos_secs = match source_rate > 0.0 {
+                    true => d.pos / source_rate,
+                    false => 0.0,
+                };
+                let platter = if d.scratch.active() {
+                    d.scratch.rate() as f64
+                } else if d.playing {
+                    d.rate.current() as f64
+                } else {
+                    0.0
+                };
+                d.clock = DeckClock::at(d.grid.as_ref(), pos_secs, platter, 0.0);
             }
             MixCmd::SetEqBand { deck, band, gain } => {
                 s.decks[deck.index()].chain.eq_mut().set_band(band, gain)
