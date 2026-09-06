@@ -486,8 +486,14 @@ impl Toaster {
 impl Widget for Toaster {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, Layout::default());
-        let window = cx.turtle().rect();
+        // The layer's own rect is the origin its overlay pass is shifted FROM,
+        // and nothing else. The room the stack is placed in is the WHOLE PASS:
+        // a toaster declared as the last child of a page gets whatever space is
+        // left at the bottom of it, and pinning the corners to that strip puts
+        // a top-left stack part-way down the screen.
+        let origin = cx.turtle().rect().pos;
         cx.end_turtle_with_area(&mut self.area);
+        let window = Rect { pos: dvec2(0.0, 0.0), size: cx.current_pass_size() };
         self.window = window;
         if self.live.is_empty() {
             return DrawStep::done();
@@ -569,7 +575,7 @@ impl Widget for Toaster {
             self.draw_waiting.draw_abs(cx, dvec2(x + CARD_PAD, ty), &text);
         }
 
-        cx.end_pass_sized_turtle_with_shift(self.area, dvec2(0.0, 0.0) - window.pos);
+        cx.end_pass_sized_turtle_with_shift(self.area, dvec2(0.0, 0.0) - origin);
         self.draw_list.end(cx);
         DrawStep::done()
     }
