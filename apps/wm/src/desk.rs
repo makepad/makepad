@@ -765,7 +765,7 @@ struct TabHit {
 
 #[derive(Script, Widget)]
 pub struct WmDesk {
-    #[live] phone_ui: PhoneSurface,
+    #[find] #[live] phone_ui: PhoneSurface,
     #[live] draw_phone: DrawPhoneApp,
     #[rust] phone_frames: HashMap<ClientId, PhoneFrame>,
     #[rust] desktop_frames: HashMap<ClientId, WindowFrame>,

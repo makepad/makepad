@@ -2,6 +2,7 @@
 use crate::{desktop::DesktopStyle, desk::WmState, mobile::*, mobile_tiles::{self, HomeLayout, TileSlot, TILE_RADIUS}, shell::{alpha, rgb, ui::{rect, HAlign, Ico, ShellDraw}}};
 use makepad_widgets::{app_icon::AppIconDraw, gauss_view::{GaussRoundedView, GaussBlurSnapshot}, *};
 use crate::desktop::DrawDesktopChrome;
+mod search;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -15,6 +16,22 @@ script_mod! {
         android_font: theme.font_regular{font_family: FontFamily{latin := FontMember{res: crate_resource("self:../../widgets/resources/RobotoFlex.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
         android_bold: theme.font_bold{font_family: FontFamily{latin := FontMember{res: crate_resource("self:../../widgets/resources/RobotoFlex.ttf") weight: 600.0 asc: 0.0 desc: 0.0}}}
         chrome +: {}
+        key_shift +: {svg: crate_resource("self:resources/icons/key-shift.svg")}
+        key_backspace +: {svg: crate_resource("self:resources/icons/key-backspace.svg")}
+        search: View {
+            width: Fill height: Fill
+            input := TextInputFlat {
+                width: Fill height: Fill margin: 0
+                padding: Inset{left: 38 right: 32 top: 0 bottom: 0}
+                label_align: Align{y: 0.5}
+                empty_text: "App Library"
+                return_key_type: Search
+                draw_bg +: {pixel: fn() {return vec4(0.0)}}
+                draw_text +: {text_style: theme.font_regular{font_size: 14.0}}
+                draw_cursor +: {color: #007aff}
+                draw_selection +: {color: #007aff40}
+            }
+        }
         glass: GlassPanel {
             draw_bg +: {
                 blur_level: 4.0 corner_radius: 30.0
@@ -87,6 +104,8 @@ pub struct PhoneSurface {
     #[live] android_font: TextStyle,
     #[live] android_bold: TextStyle,
     #[live] chrome: DrawDesktopChrome,
+    #[live] key_shift: DrawSvg,
+    #[live] key_backspace: DrawSvg,
     #[live] glass: GaussRoundedView,
     #[live] keyboard_glass: GaussRoundedView,
     #[live] pub overview_glass: GaussRoundedView,
@@ -94,6 +113,11 @@ pub struct PhoneSurface {
     #[live] wallpaper: DrawQuad,
     #[rust] icons: AppIconDraw,
     #[rust] hits: Vec<(Rect, PhoneHit)>,
+    #[find] #[live] search: WidgetRef,
+    #[rust] search_style: Option<(bool, bool)>,
+    #[rust] search_rect: Rect,
+    #[rust] search_pointer: bool,
+    #[rust] pub search_scroll_max: f64,
     #[rust] pub pad_left: f64,
     #[redraw] #[rust] area: Area,
 }
@@ -261,8 +285,9 @@ impl PhoneSurface {
         let landscape=screen.size.x>screen.size.y;
         self.rounded(cx,screen,0.0,if state.style.dark {rgb(24,22,31)}else{rgb(249,245,255)});
         let ink=if state.style.dark {rgb(255,255,255)}else{rgb(31,27,38)};
-        self.label(cx,rect(screen.pos.x,screen.pos.y+34.0,screen.size.x,32.0),"All apps",22.0,true,ink);
-        let top=screen.pos.y+if landscape {44.0}else{70.0};
+        let pill=self.draw_search(cx,state,screen,ink);
+        if state.phone.searching() {self.draw_search_results(cx,state,screen,pill,ids,ink);return;}
+        let top=pill.pos.y+pill.size.y+18.0;
         let columns=if landscape {7}else{4};
         let cell=(screen.size.x-24.0)/columns as f64;
         let rows=(ids.len()+columns-1)/columns;
@@ -286,11 +311,8 @@ impl PhoneSurface {
         // The library sits on a dimmed wallpaper; the cards are frosted.
         self.rounded(cx,screen,0.0,alpha(if dark {rgb(8,9,16)}else{rgb(228,231,242)},0.86));
         let ink=if dark {rgb(255,255,255)}else{rgb(26,26,32)};
-        let status=if landscape {24.0}else{42.0};
-        let pill=rect(screen.pos.x+20.0,screen.pos.y+status+10.0,screen.size.x-40.0,36.0);
-        self.rounded(cx,pill,18.0,alpha(ink,0.10));
-        self.d.icon_centered(cx,Ico::Search,rect(pill.pos.x+8.0,pill.pos.y,28.0,pill.size.y),15.0,alpha(ink,0.55));
-        self.d.label_elided(cx,rect(pill.pos.x+38.0,pill.pos.y,pill.size.x-46.0,pill.size.y),false,14.0,alpha(ink,0.55),HAlign::Left,"App Library");
+        let pill=self.draw_search(cx,state,screen,ink);
+        if state.phone.searching() {self.draw_search_results(cx,state,screen,pill,ids,ink);return;}
         let names: Vec<&str>=ids.iter().map(|(id,_)|id.as_str()).collect();
         let groups=mobile_tiles::app_library_groups(&names);
         // A card holds three large icons and a 2x2 mini grid: seven apps.
@@ -391,7 +413,7 @@ impl PhoneSurface {
         let hide=rect(r.pos.x+r.size.x-48.0,r.pos.y,44.0,30.0);
         self.d.icon_centered(cx,Ico::ChevronDown,hide,18.0,ink);self.hits.push((hide,PhoneHit::HideKeyboard));
         self.label(cx,rect(r.pos.x+48.0,r.pos.y,r.size.x-96.0,30.0),if phone.symbols {"Numbers & symbols"}else{"English"},12.0,false,alpha(ink,0.6));
-        let mode=phone.client.and_then(|c|phone.ime.get(&c)).map(|i|i.input_mode).unwrap_or_default();
+        let mode=phone.keyboard_client.and_then(|c|phone.ime.get(&c)).map(|i|i.input_mode).unwrap_or_default();
         if matches!(mode,makepad_platform::ime::InputMode::Numeric|makepad_platform::ime::InputMode::Decimal|makepad_platform::ime::InputMode::Tel) {
             let rh=(height-36.0)/4.0;
             let unit=(r.size.x-12.0)/3.0;
@@ -416,7 +438,7 @@ impl PhoneSurface {
         let y=r.pos.y+32.0+rh*3.0;
         self.key(cx,rect(r.pos.x+3.0,y,unit*1.8,rh),if phone.symbols {"ABC"}else{"123"},PhoneHit::Symbols,ios,dark,false);
         self.key(cx,rect(r.pos.x+unit*1.9,y,unit*5.8,rh),"space",PhoneHit::Key(" ".into()),ios,dark,false);
-        let action=phone.client.and_then(|c|phone.ime.get(&c)).map(|i|match i.return_key {makepad_platform::ime::ReturnKeyType::Search=>"search",makepad_platform::ime::ReturnKeyType::Send=>"send",makepad_platform::ime::ReturnKeyType::Go=>"go",_=>"return"}).unwrap_or("return");
+        let action=phone.keyboard_client.and_then(|c|phone.ime.get(&c)).map(|i|match i.return_key {makepad_platform::ime::ReturnKeyType::Search=>"search",makepad_platform::ime::ReturnKeyType::Send=>"send",makepad_platform::ime::ReturnKeyType::Go=>"go",_=>"return"}).unwrap_or(if phone.search_focused {"search"}else{"return"});
         self.key(cx,rect(r.pos.x+unit*7.8,y,unit*2.1,rh),action,PhoneHit::Key("return".into()),ios,dark,true);
     }
     fn key(&mut self, cx: &mut Cx2d, r: Rect, label: &str, hit: PhoneHit, ios: bool, dark: bool, accent: bool) {
@@ -425,7 +447,21 @@ impl PhoneSurface {
         let inside=rect(r.pos.x+3.0,r.pos.y+3.0,(r.size.x-6.0).max(1.0),(r.size.y-8.0).max(1.0));
         self.rounded(cx,rect(inside.pos.x,inside.pos.y+1.0,inside.size.x,inside.size.y),if ios {6.0}else{12.0},alpha(rgb(0,0,0),0.22));
         self.rounded(cx,inside,if ios {6.0}else{12.0},face);
-        self.label(cx,inside,label,if label.chars().count()>1 {13.0}else{21.0},false,if dark || accent {rgb(255,255,255)}else{rgb(22,20,28)});
+        let ink=if dark || accent {rgb(255,255,255)}else{rgb(22,20,28)};
+        // Control keys are icons: mobile text fonts need not contain the
+        // desktop keyboard's Unicode shift/delete symbols.
+        let icon=match &hit {
+            PhoneHit::Shift=>Some(&mut self.key_shift),
+            PhoneHit::Key(key) if key=="backspace"=>Some(&mut self.key_backspace),
+            _=>None,
+        };
+        if let Some(icon)=icon {
+            let size=inside.size.y.min(22.0);
+            icon.color=ink;
+            icon.draw_abs(cx,rect(inside.pos.x+(inside.size.x-size)*0.5,inside.pos.y+(inside.size.y-size)*0.5,size,size));
+        }else{
+            self.label(cx,inside,label,if label.chars().count()>1 {13.0}else{21.0},false,ink);
+        }
         self.hits.push((r,hit));
     }
 }

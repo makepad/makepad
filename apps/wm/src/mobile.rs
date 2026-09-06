@@ -11,6 +11,7 @@ pub enum PhoneScreen { #[default] Home, App, Recents, Drawer }
 pub enum PhoneHit {
     App(String), Card(ClientId), Home, Recents, Drawer, Back,
     Rotate, Style, Appearance, Desktop, Key(String), Shift, Symbols, HideKeyboard,
+    ClearSearch, CancelSearch,
 }
 
 #[derive(Clone)]
@@ -42,6 +43,9 @@ pub struct PhoneState {
     pub keyboard_target: f64,
     pub keyboard_sent_height: f64,
     pub keyboard_client: Option<ClientId>,
+    pub search_query: String,
+    pub search_focused: bool,
+    pub search_scroll: f64,
     pub ime: HashMap<ClientId, makepad_platform::ime::HostedImeState>,
     pub shift: bool,
     pub symbols: bool,
@@ -58,6 +62,7 @@ impl Default for PhoneState {
         Self { clock: "9:41".into(), wallpaper_time: 0.0, screen: PhoneScreen::Home, client: None, order: Vec::new(),
             openness: 0.0, overview: 0.0, page: 0.0, dismiss_y: 0.0, gesture: None, touch: None,
             keyboard: 0.0, keyboard_target: 0.0, keyboard_sent_height: 0.0, keyboard_client: None,
+            search_query: String::new(), search_focused: false, search_scroll: 0.0,
             ime: HashMap::new(), shift: false, symbols: false,
             desktop_size: None, desktop_clients: Vec::new(), desktop_style: DesktopStyle::Omarchy, viewport: Rect::default(),
             tiles: HomeTiles::default() }
@@ -83,6 +88,7 @@ impl PhoneState {
         self.screen != PhoneScreen::App || self.openness < 0.999
     }
     pub fn activate(&mut self, client: ClientId) {
+        self.search_focused = false;
         if self.client != Some(client) { self.keyboard_target = 0.0; }
         self.client = Some(client);
         self.order.retain(|c| *c != client);
@@ -92,6 +98,7 @@ impl PhoneState {
         self.dismiss_y = 0.0;
     }
     pub fn navigate(&mut self, screen: PhoneScreen) {
+        self.search_focused = false;
         self.screen = screen;
         self.keyboard_target = 0.0;
         self.gesture = None;
@@ -127,6 +134,9 @@ impl PhoneState {
     }
     pub fn keyboard_height(&self) -> f64 {
         if self.viewport.size.x > self.viewport.size.y { 184.0 } else { 292.0 }
+    }
+    pub fn searching(&self) -> bool {
+        self.screen == PhoneScreen::Drawer && (self.search_focused || !self.search_query.is_empty())
     }
 }
 

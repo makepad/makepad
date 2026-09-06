@@ -74,6 +74,20 @@ impl WmDesk {
             .is_some_and(|view| view.arrival_fade() < 1.0)
     }
     pub fn phone_hit(&self,p:Vec2d)->Option<PhoneHit> {self.phone_ui.hit(p)}
+    pub fn phone_search_event(&mut self,cx:&mut Cx,event:&Event,state:&mut WmState)->bool {
+        let enabled=state.style.target.mobile() && state.phone.screen==PhoneScreen::Drawer;
+        self.phone_ui.search_event(cx,event,&mut state.phone,enabled)
+    }
+    pub fn dismiss_phone_search(&mut self,cx:&mut Cx,phone:&mut crate::mobile::PhoneState,clear:bool) {
+        self.phone_ui.dismiss_search(cx,phone,clear);
+    }
+    pub fn clear_phone_search(&mut self,cx:&mut Cx,phone:&mut crate::mobile::PhoneState) {
+        self.phone_ui.clear_search(cx,phone);
+    }
+    pub fn focus_phone_search(&mut self,cx:&mut Cx,phone:&mut crate::mobile::PhoneState) {
+        self.phone_ui.focus_search(cx,phone);
+    }
+    pub fn phone_search_scroll_max(&self)->f64 {self.phone_ui.search_scroll_max}
     /// A frame from `client` landed in the given face: that face's capture
     /// re-records on the next draw. A frame that belongs to neither (a stale
     /// size while the client switches faces) is left out of both.
