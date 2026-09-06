@@ -373,6 +373,14 @@ impl Widget for Accordion {
         // A fold header does not report its own toggle: it watches the
         // mark inside it and animates itself. The accordion watches the
         // same mark, so the panel and the header agree about what happened.
+        //
+        // ONLY Opening and Closing are a press. A mark also reports
+        // `Animating` on every frame of every animation it runs — including
+        // the ones this panel starts itself in `apply`, and the ones a mere
+        // hover starts. Counting those as presses makes the panel argue with
+        // itself: it folds a section, the fold animates, the animation reads
+        // as another press, and the panel flips between two states for as
+        // long as it is looked at.
         let sections = self.sections();
         let mut pressed = None;
         for (index, section) in sections.iter().enumerate() {
@@ -383,7 +391,10 @@ impl Widget for Accordion {
             let Some(action) = actions.find_widget_action(button.widget_uid()) else {
                 continue;
             };
-            if !matches!(action.cast::<FoldButtonAction>(), FoldButtonAction::None) {
+            if matches!(
+                action.cast::<FoldButtonAction>(),
+                FoldButtonAction::Opening | FoldButtonAction::Closing
+            ) {
                 pressed = Some(index);
             }
         }
