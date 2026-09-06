@@ -111,6 +111,12 @@ script_mod! {
             let distance=min(tl,br)
             let edge=if distance<1.0 {outer}else{inner}
             let color=mix(base,edge,(1.0-step(2.0,distance))*self.bevel)
+            // Window titles are rectangular content inside the complete
+            // window's compositor mask. A second SDF coverage ramp here
+            // exposes the wallpaper along the join with the app surface.
+            if self.top_only > 0.5 && self.radius == 0.0 {
+                return vec4(color*self.color.w,self.color.w)
+            }
             sdf.fill(vec4(color,self.color.w))
             return sdf.result
         }
