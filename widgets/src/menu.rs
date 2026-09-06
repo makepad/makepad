@@ -175,6 +175,18 @@ pub enum MenuAction {
         anchor: Rect,
         place: MenuPlace,
     },
+    /// Raise a menu that STAYS open when a row is chosen: a set of
+    /// switches is not finished after one press.
+    OpenSet {
+        owner: LiveId,
+        rows: Vec<MenuRow>,
+        anchor: Rect,
+        place: MenuPlace,
+    },
+    /// Replace the rows of the menu `owner` has open, leaving it open and
+    /// leaving the highlight where it is. This is how a set of switches
+    /// shows a mark changing under the pointer.
+    Update { owner: LiveId, rows: Vec<MenuRow> },
     /// A row was chosen. The `Closed` for that menu is in the same pass.
     Picked { owner: LiveId, id: LiveId },
     /// A menu is up for `owner`. When it replaced another, that one's
@@ -641,6 +653,10 @@ pub struct MenuLayer {
     /// The single source of truth for which menu is open.
     #[rust]
     open: OpenMenu,
+    /// Whether the open menu stays up when a row is chosen: a set of
+    /// switches is not finished after one press, a list of commands is.
+    #[rust]
+    stay_open: bool,
 }
 
 impl MenuLayer {
@@ -725,9 +741,48 @@ impl MenuLayer {
         anchor: Rect,
         menu_place: MenuPlace,
     ) {
+        self.open_root_with(cx, owner, rows, anchor, menu_place, false)
+    }
+
+    /// Raise a menu that stays open when a row is chosen, for a set of
+    /// switches rather than a list of commands.
+    pub fn open_set(
+        &mut self,
+        cx: &mut Cx,
+        owner: LiveId,
+        rows: Vec<MenuRow>,
+        anchor: Rect,
+        menu_place: MenuPlace,
+    ) {
+        self.open_root_with(cx, owner, rows, anchor, menu_place, true)
+    }
+
+    /// Replace the rows of the menu that is open for `owner`, keeping it
+    /// open and keeping the highlight where it is.
+    pub fn update_rows(&mut self, cx: &mut Cx, owner: LiveId, rows: Vec<MenuRow>) {
+        let Some(level) = self.levels.first_mut() else {
+            return;
+        };
+        if level.owner != owner || rows.len() != level.rows.len() {
+            return;
+        }
+        level.rows = rows;
+        self.redraw_menus(cx);
+    }
+
+    fn open_root_with(
+        &mut self,
+        cx: &mut Cx,
+        owner: LiveId,
+        rows: Vec<MenuRow>,
+        anchor: Rect,
+        menu_place: MenuPlace,
+        stay_open: bool,
+    ) {
         if rows.is_empty() {
             return;
         }
+        self.stay_open = stay_open;
         let bounds = if self.window.size.x > 1.0 {
             self.window
         } else {
@@ -857,6 +912,15 @@ impl MenuLayer {
             return false;
         }
         let owner = self.owner();
+        if self.stay_open {
+            // A set of switches is not finished after one press: report the
+            // row and leave the menu where it is, so the next one is one
+            // press away and the mark can change under the pointer.
+            self.levels[level].press = None;
+            self.redraw_menus(cx);
+            cx.action(MenuAction::Picked { owner, id: it.id });
+            return true;
+        }
         self.levels.clear();
         self.unlock_input(cx);
         self.redraw_menus(cx);
@@ -1122,15 +1186,30 @@ impl Widget for MenuLayer {
         }
         if let Event::Actions(actions) = event {
             let mut request = None;
+            let mut set_request = None;
+            let mut update = None;
             for a in actions.iter() {
-                if let Some(MenuAction::Open { owner, rows, anchor, place }) =
-                    a.downcast_ref::<MenuAction>()
-                {
-                    request = Some((*owner, rows.clone(), *anchor, *place));
+                match a.downcast_ref::<MenuAction>() {
+                    Some(MenuAction::Open { owner, rows, anchor, place }) => {
+                        request = Some((*owner, rows.clone(), *anchor, *place));
+                    }
+                    Some(MenuAction::OpenSet { owner, rows, anchor, place }) => {
+                        set_request = Some((*owner, rows.clone(), *anchor, *place));
+                    }
+                    Some(MenuAction::Update { owner, rows }) => {
+                        update = Some((*owner, rows.clone()));
+                    }
+                    _ => {}
                 }
             }
             if let Some((owner, rows, anchor, menu_place)) = request {
                 self.open_root(cx, owner, rows, anchor, menu_place);
+            }
+            if let Some((owner, rows, anchor, menu_place)) = set_request {
+                self.open_set(cx, owner, rows, anchor, menu_place);
+            }
+            if let Some((owner, rows)) = update {
+                self.update_rows(cx, owner, rows);
             }
         }
         // The release that belongs to a dismissing press: eat it, then drop
@@ -1223,6 +1302,32 @@ impl MenuLayerRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.open_root(cx, owner, rows, anchor, place);
         }
+    }
+
+    /// Raise a menu that stays open when a row is chosen.
+    pub fn open_set(
+        &self,
+        cx: &mut Cx,
+        owner: LiveId,
+        rows: Vec<MenuRow>,
+        anchor: Rect,
+        place: MenuPlace,
+    ) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.open_set(cx, owner, rows, anchor, place);
+        }
+    }
+
+    /// Replace the rows of the menu open for `owner`, keeping it open.
+    pub fn update_rows(&self, cx: &mut Cx, owner: LiveId, rows: Vec<MenuRow>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.update_rows(cx, owner, rows);
+        }
+    }
+
+    /// Which menu is open, if any.
+    pub fn open_owner(&self) -> Option<LiveId> {
+        self.borrow().and_then(|inner| inner.open.owner())
     }
 
     pub fn close(&self, cx: &mut Cx) {
