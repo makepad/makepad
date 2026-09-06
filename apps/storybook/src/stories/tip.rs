@@ -14,10 +14,10 @@ script_mod! {
         StoryHeading{text: "Where it hangs"}
         StoryNote{text: "Twelve places, through the same helper every anchored popup uses: the wanted side, flipped when there is no room, shifted to stay in the window."}
         StoryRow{
-            Tip{text: "Below, centred" place: Bottom Button{text: "Bottom"}}
-            Tip{text: "Above, centred" place: Top Button{text: "Top"}}
-            Tip{text: "To the left" place: Left Button{text: "Left"}}
-            Tip{text: "To the right" place: Right Button{text: "Right"}}
+            tip_bottom := Tip{text: "Below, centred" place: Bottom Button{text: "Bottom"}}
+            tip_top := Tip{text: "Above, centred" place: Top Button{text: "Top"}}
+            tip_left := Tip{text: "To the left" place: Left Button{text: "Left"}}
+            tip_right := Tip{text: "To the right" place: Right Button{text: "Right"}}
         }
         StoryRow{
             Tip{text: "Below, left edges" place: BottomStart Button{text: "BottomStart"}}
@@ -75,7 +75,7 @@ pub const STORIES: &[Story] = &[Story {
     added: "2026-09-05",
     tags: &["new"],
     doc: "# Tooltip\n\nA tooltip is declared by wrapping, not by writing code at the call site: put a `Tip` around a control, give it text, and the window's one `TipLayer` owns the rest.\n\nThe wrapper reports the control's final drawn rect and how the tip should look; the layer owns the dwell, the grace window that makes a row of tipped controls follow instantly, the placement and the chrome. `place` picks one of twelve positions and the shared placement helper flips and shifts it to stay in the window. `arrow` puts a pointer on the bubble's anchor-facing edge, aimed at the control even after a flip. `wrap_width` turns a phrase into a paragraph. `delay_secs` overrides the dwell for one tip, and `intent` gives it a role colour.\n\nA tip also appears when its control takes the keyboard focus, and Escape takes it down: a tip only the pointer can reach is a tip half the people using the app never see.",
-    subject: "",
+    subject: "tip_left",
     feature: None,
     controls: &[],
     on_actions: None,
