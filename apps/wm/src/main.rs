@@ -577,6 +577,7 @@ impl App {
         let state = self.state_mut();
         match spawn_client(
             &pool,
+            &cx.thread_spawner(),
             app,
             id,
             hub_port,
@@ -752,6 +753,7 @@ impl App {
         let pool = cx.task_pool();
         match spawn_client(
             &pool,
+            &cx.thread_spawner(),
             &app,
             id,
             hub_port,
@@ -1060,7 +1062,7 @@ impl App {
         self.next_id += 1;
         let lines = self.line_sender();
         let pool = cx.task_pool();
-        let slot = match preview::spawn_for_request(&pool, &req, id, hub_port, lines) {
+        let slot = match preview::spawn_for_request(&pool, &cx.thread_spawner(), &req, id, hub_port, lines) {
             Ok(slot) => slot,
             Err(err) => {
                 log!("wm: open request failed: {}", err);
@@ -1186,7 +1188,7 @@ impl App {
         self.next_id += 1;
         let lines = self.line_sender();
         let pool = cx.task_pool();
-        let slot = match preview::spawn_for_request(&pool, &open, id, hub_port, lines) {
+        let slot = match preview::spawn_for_request(&pool, &cx.thread_spawner(), &open, id, hub_port, lines) {
             Ok(mut slot) => {
                 slot.is_preview = true;
                 slot.takes_focus = false;
@@ -1685,7 +1687,7 @@ impl App {
         self.next_id += 1;
         let lines = self.line_sender();
         let pool = cx.task_pool();
-        match spawn_client(&pool, &app, id, hub_port, None, None, &[], false, lines) {
+        match spawn_client(&pool, &cx.thread_spawner(), &app, id, hub_port, None, None, &[], false, lines) {
             Ok(mut slot) => {
                 slot.pane = true;
                 self.state_mut().clients.insert(id, slot);
