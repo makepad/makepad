@@ -8450,6 +8450,7 @@ impl App {
             stream: crate::archive_stream::StreamSwatch::open_as(
                 url,
                 crate::archive_stream::FrameFormat::Nv12,
+                cx.thread_spawner(),
             ),
             title,
             failed: false,
@@ -15811,7 +15812,8 @@ p2 {}
                     // process's.
                     {
                         let up = self.up.as_ref().unwrap();
-                        let (endpoints, token) = (up.endpoints, up.token.clone());
+                        let Ok(endpoints) = up.native_endpoints() else { return };
+                        let token = up.token.clone();
                         self.pipelines.connect(endpoints, token);
                     }
                     // Seed the bundled vjeffect preset library into the local
@@ -15820,7 +15822,11 @@ p2 {}
                     // detached — the UI never waits on it.
                     if !self.fx_presets_seeded {
                         self.fx_presets_seeded = true;
-                        let endpoints = self.up.as_ref().unwrap().endpoints;
+                        let Some(endpoints) =
+                            self.up.as_ref().and_then(|up| up.native_endpoints().ok())
+                        else {
+                            return;
+                        };
                         let token = self.up.as_ref().unwrap().token.clone();
                         let cache = service::session_config_from_env()
                             .cache_parent
@@ -15954,7 +15960,9 @@ p2 {}
                 let cache = service::session_config_from_env()
                     .cache_parent
                     .join("cache-chat");
-                self.chat.connect(up.endpoints, up.token.clone(), cache);
+                if let Ok(endpoints) = up.native_endpoints() {
+                    self.chat.connect(endpoints, up.token.clone(), cache, cx.thread_spawner());
+                }
                 // The pane says "waiting for the asset server" until
                 // something redraws it, and the feed only marks itself
                 // dirty once a turn runs — so the line would sit there
@@ -16852,7 +16860,13 @@ p2 {}
             self.sync_import_ui(cx);
             return;
         };
-        let endpoints = up.endpoints;
+        // A static-site session cannot publish: there is no server to
+        // publish to. Say so rather than failing further in.
+        let Ok(endpoints) = up.native_endpoints() else {
+            self.import.status = "this session has no asset server".to_string();
+            self.sync_import_ui(cx);
+            return;
+        };
         let server_id = up.server_id;
         let token = up.token.clone();
         let cache = service::session_config_from_env().cache_parent;
@@ -16884,7 +16898,12 @@ p2 {}
             self.set_music_import_status(cx, "no asset server session yet");
             return;
         };
-        let (endpoints, server_id, token) = (up.endpoints, up.server_id, up.token.clone());
+        // A static-site session has no server to publish to.
+        let Ok(endpoints) = up.native_endpoints() else {
+            self.set_music_import_status(cx, "this session has no asset server");
+            return;
+        };
+        let (server_id, token) = (up.server_id, up.token.clone());
         let cache = service::session_config_from_env().cache_parent;
         if let Err(error) =
             self.music_import_run.start(paths, endpoints, server_id, token, cache)
@@ -24080,6 +24099,9 @@ p2 {}
             cols,
             position_secs: state.position_secs,
             duration_secs: state.duration_secs,
+            // The number shown at the overlay's corner belongs to a SAVED
+            // slot; a hand-set loop has no number to show.
+            loop_slot: None,
             grid: state.grid,
             loop_span: state.loop_span.map(|s| (s.start_secs, s.end_secs)),
             rate: state.rate,
@@ -24617,7 +24639,7 @@ p2 {}
             if let Some(mut scroll) = self.music_refs.waves.borrow_mut::<VjWaveScroll>() {
                 scroll.set_position(cx, deck, position, playing, scratching);
                 scroll.set_grid(cx, deck, grid, rate);
-                scroll.set_loop_span(cx, deck, loop_span);
+                scroll.set_loop_span(cx, deck, loop_span, None);
                 scroll.set_stem_gain(cx, deck, stem_gains);
             };
             if let Some(mut strip) =
@@ -25115,6 +25137,7 @@ p2 {}
                     .and_then(|revision| self.track_side_channels.get(&revision));
                 TrackRowEntry {
                     key,
+                    license: String::new(),
                     title,
                     artist,
                     album,
@@ -25385,6 +25408,7 @@ p2 {}
                         .unwrap_or_default();
                     TrackRowEntry {
                         key,
+                        license: String::new(),
                         title,
                         artist,
                         album,
@@ -25453,6 +25477,7 @@ p2 {}
                 let (artist, album, genre, year, bitrate) = self.row_metadata(&key);
                 TrackRowEntry {
                     key,
+                    license: String::new(),
                     title,
                     artist,
                     album,
@@ -26368,13 +26393,12 @@ p2 {}
                         if ahead_cut {
                             continue;
                         }
-                        if let (Some(service), Some(start)) =
-                            (self.rife_service[i].as_ref(), self.app_start_instant)
-                        {
+                        if let Some(service) = self.rife_service[i].as_ref() {
                             let (pw, ph) = rife_proxy_dims(width, height);
-                            let deadline = start + std::time::Duration::from_secs_f64(
-                                (now + depth as f64 / step.pace).max(0.0),
-                            );
+                            // App SECONDS, not an instant: the service runs
+                            // on the web too, where there is no monotonic
+                            // clock to hand one across.
+                            let deadline = (now + depth as f64 / step.pace).max(0.0);
                             let _ = service.offer_next(flow_tween::RifeJob {
                                 generation,
                                 a: ahead.a,

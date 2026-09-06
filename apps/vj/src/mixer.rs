@@ -583,6 +583,10 @@ pub struct DeckSnapshot {
     pub duration_secs: f64,
     pub playing: bool,
     pub scratching: bool,
+    /// What the platter is turning at; see [`DeckSnap::platter_rate`]. A
+    /// deck with no track publishes 0.0, which is also what the default
+    /// gives before the first buffer: nothing is turning either way.
+    pub platter_rate: f64,
     pub splat: Option<SplatSnapshot>,
 }
 
@@ -2277,7 +2281,12 @@ pub enum MixCmd {
     SetEqBand { deck: DeckId, band: usize, gain: f32 },
     SetFilter { deck: DeckId, position: f32 },
     SetStemGain { deck: DeckId, stem: usize, gain: f32 },
-    SetLoopSpan { deck: DeckId, span: Option<(f64, f64)> },
+    SetLoopSpan {
+        deck: DeckId,
+        span: Option<(f64, f64)>,
+        /// What the change MEANT for the playhead. See [`crate::decks::LoopSeek`].
+        seek: crate::decks::LoopSeek,
+    },
     SetMute { deck: DeckId, muted: bool },
     SetGain { deck: DeckId, gain: f32 },
     /// One knob on one slot of a deck's effect chain. See
@@ -2364,6 +2373,12 @@ pub struct DeckSnap {
     pub scratching: bool,
     pub ended: bool,
     pub rate_current: f32,
+    /// What the PLATTER is turning at, as a multiple of the track's own
+    /// tempo: the deck's rate normally, the scratch ramp's own settled
+    /// output while a hand or a motor owns the record -- negative under a
+    /// reverse hold, zero at the bottom of a brake. Not the tempo fader,
+    /// which is what a motor gesture is measured AGAINST rather than by.
+    pub platter_rate: f64,
     pub splat: Option<SplatSnapshot>,
 }
 
@@ -3195,8 +3210,13 @@ impl Mixer {
 
     /// The deck's loop in source SECONDS; the callback converts against the
     /// track's own rate so the render path only ever deals in frames.
-    pub fn set_deck_loop_span(&self, deck: DeckId, span: Option<(f64, f64)>) {
-        self.run_cmd(MixCmd::SetLoopSpan { deck, span });
+    pub fn set_deck_loop_span(
+        &self,
+        deck: DeckId,
+        span: Option<(f64, f64)>,
+        seek: crate::decks::LoopSeek,
+    ) {
+        self.run_cmd(MixCmd::SetLoopSpan { deck, span, seek });
     }
 
     pub fn set_deck_mute(&self, deck: DeckId, muted: bool) {
@@ -3890,6 +3910,7 @@ impl Mixer {
                 duration_secs: 0.0,
                 playing: false,
                 scratching: snap.scratching,
+                platter_rate: 0.0,
                 splat: None,
             };
         }
@@ -3899,6 +3920,7 @@ impl Mixer {
             duration_secs: shadow.expected_len as f64 / rate,
             playing: snap.playing,
             scratching: snap.scratching,
+            platter_rate: snap.platter_rate,
             splat: snap.splat,
         }
     }
@@ -4832,7 +4854,7 @@ impl MixEngine {
             MixCmd::SetStemGain { deck, stem, gain } => {
                 s.decks[deck.index()].stem_gain[stem].slew(gain, SLEW_SECS * 2.0);
             }
-            MixCmd::SetLoopSpan { deck, span } => {
+            MixCmd::SetLoopSpan { deck, span, seek } => {
                 let d = &mut s.decks[deck.index()];
                 let Some(pcm) = d.pcm.as_ref() else {
                     d.loop_span = None;
@@ -4846,6 +4868,8 @@ impl MixEngine {
                 // is the expected length: a span past the decoded edge
                 // waits there like any other read.)
                 let frames = pcm.expected_len() as f64;
+                // The span the head belonged to, taken before it is replaced.
+                let was = d.loop_span;
                 d.loop_span = span.map(|(start, end)| {
                     (start.max(0.0) * rate, (end.max(0.0) * rate).min(frames))
                 });
@@ -4855,11 +4879,18 @@ impl MixEngine {
                 // a resize on a paused deck parks the playhead outside the
                 // span until play is pressed.
                 if let Some((start, end)) = d.loop_span {
-                    let len = (end - start).max(1.0);
-                    if d.playhead_frames() >= end {
-                        let from = d.playhead_frames();
-                        let over = (from - start).rem_euclid(len);
-                        d.seek_frames(start + over);
+                    let from = d.playhead_frames();
+                    // Behind IN is folded FORWARD only when the head
+                    // belonged to the span that just changed. A head
+                    // sitting behind a loop it was never in is playing its
+                    // way into it, deliberately and audibly, and folding it
+                    // would teleport it over the run-up.
+                    let belonged = matches!(seek, crate::decks::LoopSeek::Changed)
+                        && was.is_some_and(|(was_start, was_end)| {
+                            from >= was_start && from < was_end
+                        });
+                    if from >= end || (belonged && from < start) {
+                        d.seek_frames(wrapped_into_span(from, start, end));
                         // A live resize yanking a playing playhead is a
                         // jump like any other and gets the same blend.
                         d.arm_seek_fade(from);
@@ -5047,6 +5078,7 @@ impl MixEngine {
                 scratching: d.scratch.active(),
                 ended: d.ended,
                 rate_current: d.rate.current(),
+                platter_rate: deck_platter(d),
                 splat: d.splat.as_ref().map(SplatState::snapshot),
             };
         }
