@@ -8,6 +8,7 @@ pub struct DesktopWindow {
     pub rect: LRect,
     pub minimized: bool,
     pub maximized: bool,
+    pub snap: Option<crate::snap::Zone>,
 }
 #[derive(Clone, Debug, Default)]
 pub struct DesktopWindows {
@@ -28,6 +29,7 @@ impl DesktopWindows {
             rect,
             minimized: false,
             maximized: false,
+            snap: None,
         });
     }
     pub fn get(&self, client: ClientId) -> Option<&DesktopWindow> {
@@ -50,7 +52,7 @@ impl DesktopWindows {
             .iter()
             .filter(|w| clients.contains(&w.client) && !w.minimized)
             .map(|w| {
-                let r = if w.maximized { area } else { fit(w.rect, area) };
+                let r = if w.maximized { area } else if let Some(zone)=w.snap {zone.bounds(area)} else { fit(w.rect, area) };
                 (w.client, r)
             })
             .collect()
@@ -97,5 +99,19 @@ mod tests {
             ),
             LRect::new(230.0, 212.0, 300.0, 200.0)
         );
+    }
+    #[test]
+    fn snapping_keeps_restore_size_and_tracks_a_resized_workarea() {
+        let area=LRect::new(10.,42.,1380.,794.);
+        let mut d=DesktopWindows::default();
+        d.ensure(1,area);
+        let restore=d.get(1).unwrap().rect;
+        d.get_mut(1).unwrap().snap=Some(crate::snap::Zone::BottomRight);
+        assert_eq!(d.rects(&[1],area)[0].1,LRect::new(700.,439.,690.,397.));
+        let small=LRect::new(10.,42.,800.,600.);
+        assert_eq!(d.rects(&[1],small)[0].1,LRect::new(410.,342.,400.,300.));
+        assert_eq!(d.get(1).unwrap().rect,restore);
+        d.get_mut(1).unwrap().snap=None;
+        assert_eq!(d.rects(&[1],area)[0].1,restore);
     }
 }

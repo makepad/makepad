@@ -76,7 +76,13 @@ script_mod! {
                 // so texels remain screen-fixed while the quad shrinks.
                 let counter = ((self.rect_size / self.crop_span) * self.host_dpi_factor) / tp
                 let tex_scale = tp / self.tex_size
-                let fb = self.tex.sample(uv * tex_scale * counter)
+                // Row zero carries the child's size tracking pixels. Never
+                // blend that transport metadata (or unused swapchain space)
+                // into the visible window edge.
+                let sample_uv = clamp(uv * tex_scale * counter,
+                    vec2(0.5, 1.5) / self.tex_size,
+                    max(tp - vec2(0.5), vec2(0.5, 1.5)) / self.tex_size)
+                let fb = self.tex.sample(sample_uv)
                 if fb.r == 1.0 && fb.g == 0.0 && fb.b == 1.0 {
                     return #2 * self.fade
                 }

@@ -1216,7 +1216,7 @@ impl WmLayout {
     }
 
     pub fn set_float_rect(&mut self, client: ClientId, rect: LRect) {
-        if self.desktop.enabled { if let Some(w) = self.desktop.get_mut(client) { w.rect = rect; w.maximized = false; return; } }
+        if self.desktop.enabled { if let Some(w) = self.desktop.get_mut(client) { w.rect = rect; w.maximized = false; w.snap = None; return; } }
         if let Some(f) = self.floats.iter_mut().find(|f| f.client == client) {
             f.rect = rect;
         }

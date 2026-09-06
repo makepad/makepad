@@ -61,6 +61,14 @@ pub(super) struct PhoneFrame {
 }
 
 impl WmDesk {
+    pub(super) fn draw_window_surface(&mut self, cx: &mut Cx2d, frame: &WindowFrame, rect: Rect, radius: f32) {
+        self.draw_phone.draw_vars.set_texture(0, frame.texture());
+        self.draw_phone.opacity = 1.0;
+        // Sdf2d.box uses half the visible corner radius.
+        self.draw_phone.radius = radius * 0.5;
+        self.draw_phone.y_flip = if matches!(cx.os_type(), OsType::Android(_)) {1.0} else {0.0};
+        self.draw_phone.draw_abs(cx, rect);
+    }
     fn client_arriving(&self, client: ClientId) -> bool {
         self.items.get(&client).and_then(|item| item.borrow::<MpRunView>())
             .is_some_and(|view| view.arrival_fade() < 1.0)

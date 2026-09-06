@@ -29,7 +29,12 @@ script_mod! {
             let aa = max(length(vec2(dFdx(u), dFdy(u))), 0.00001)
             let edge = smoothstep(0.0, aa, u) * smoothstep(0.0, aa, 1.0-u)
             let uv = vec2(u, mix(v, 1.0-v, self.y_flip))
-            return self.image.sample(uv) * edge * (1.0 - smoothstep(0.94, 1.0, self.progress))
+            // Match the desktop surface's 14pt macOS corners throughout
+            // the warp, including its first and final restored frame.
+            let sdf = Sdf2d.viewport(vec2(u, v) * self.source.zw)
+            sdf.box(0.0, 0.0, self.source.z, self.source.w, 7.0)
+            sdf.fill(self.image.sample(uv) * edge * (1.0 - smoothstep(0.94, 1.0, self.progress)))
+            return sdf.result
         }
     }
 }
