@@ -23,6 +23,7 @@ pub mod heading;
 pub mod hud;
 pub mod landform;
 pub mod level_solid;
+pub mod light;
 pub mod meshfloor;
 pub mod nav;
 pub mod particles;
@@ -43,6 +44,7 @@ pub use deck::*;
 pub use dynamics::*;
 pub use entity::*;
 pub use heading::*;
+pub use light::*;
 pub use level_solid::{
     wheeled_max_step, LevelSolid, LevelSolidRef, LEVEL_CONTACT_UP_SPEED_MAX,
     WHEELED_STEP_MIN,

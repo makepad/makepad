@@ -131,6 +131,9 @@ impl AssetClipPlayback {
 pub struct Entity {
     pub authored_clip: Option<AssetClipPlayback>,
     pub id: u64,
+    /// Entity-owned authored lights; motion uses this entity's pose, never
+    /// per-frame script writes. Cloned and removed with the owner.
+    pub lights: Vec<crate::light::EntityLight>,
     pub kind: BodyKind,
     pub pos: Vec3f,
     pub vel: Vec3f,
